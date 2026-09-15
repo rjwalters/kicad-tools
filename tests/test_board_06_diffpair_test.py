@@ -1109,16 +1109,36 @@ class TestOffAngleChordReroute:
 
 
 class TestDefaultNetStatusOnCommittedArtifact:
-    """The DEFAULT ``NetStatusAnalyzer`` path reports 0 opens on board 06.
+    """The DEFAULT ``NetStatusAnalyzer`` path matches native DRC on board 06.
 
     Issue #4557: the legacy endpoint-proximity model (0.01mm radius against
     pad *centers*) false-flagged 16 open pads on the committed routed
     artifact (``GND`` 14, ``+1V2`` 1, ``VBUS_USB`` 1) because the router
     lands trace endpoints inside pad copper but away from pad centers
-    (e.g. ``+1V2`` pad U2.C3 entered 0.125mm off-center).  ``kicad-cli pcb
-    drc`` and strict mode both report 0.  The analyzer default is now
-    ``strict=True``; these tests pin the *default* code path -- no
-    ``strict`` argument may appear anywhere in them.
+    (e.g. ``+1V2`` pad U2.C3 entered 0.125mm off-center).  Those three nets
+    are genuinely connected and the default (``strict=True``) model must
+    keep reporting them complete -- that is #4557's contract, pinned by
+    ``test_previously_false_open_nets_complete`` below.
+
+    The artifact is **not** open-free, though, and #5362 corrected the
+    expectation that it was.  It declares ``(version 20260206)`` and its
+    zones omit ``filled_areas_thickness``, which from KiCad's ``20250210``
+    boundary onward means the stored ``filled_polygon`` outlines are already
+    solid copper -- so two fill fragments of one zone are not bonded to each
+    other by adjacency.  Native ``kicad-cli pcb drc`` 10.0.5 on these exact
+    bytes (no ``--refill-zones``, hash unchanged) reports::
+
+        Found 2 unconnected items
+          Track [+3V3] on B.Cu, length 3.4400 mm
+            <-> Track [+3V3] on F.Cu, length 0.5500 mm
+          Track [+1V8] on F.Cu, length 0.6500 mm
+            <-> Track [+1V8] on F.Cu, length 0.6500 mm
+
+    one missing connection each on ``+3V3`` and ``+1V8``, which is exactly
+    what the default path reports below.
+
+    These tests pin the *default* code path -- no ``strict`` argument may
+    appear anywhere in them.
     """
 
     @pytest.fixture(scope="class")
@@ -1136,17 +1156,35 @@ class TestDefaultNetStatusOnCommittedArtifact:
         # Default construction -- the path every no-kwargs consumer hits.
         return NetStatusAnalyzer(routed_pcb_path).analyze()
 
-    def test_default_path_reports_zero_open_pads(self, default_result) -> None:
-        incomplete = [n.net_name for n in default_result.incomplete]
+    def test_default_path_matches_native_open_connections(self, default_result) -> None:
+        """The default path reproduces native DRC's two missing connections.
+
+        Asserted as *open connections* (``island_count - 1`` per net), which
+        is the quantity native reports as ``unconnected_items`` -- not the
+        pad count, which counts every pad outside a net's largest island and
+        so is not comparable to the native number.
+        """
+        incomplete = sorted(n.net_name for n in default_result.incomplete)
         unrouted = [n.net_name for n in default_result.unrouted]
-        assert incomplete == [] and unrouted == [], (
-            f"Default (strict) connectivity must report 0 incomplete / 0 "
-            f"unrouted nets on the committed board-06 artifact (kicad-cli "
-            f"agrees); got incomplete={incomplete}, unrouted={unrouted}. "
-            f"A regression here means the default connectivity model "
-            f"diverged from real copper geometry again (issue #4557)."
+        assert incomplete == ["+1V8", "+3V3"] and unrouted == [], (
+            f"Default (strict) connectivity must report exactly the two nets "
+            f"native kicad-cli reports unconnected_items on (+1V8, +3V3) and "
+            f"no unrouted nets; got incomplete={incomplete}, "
+            f"unrouted={unrouted}. A regression here means the default "
+            f"connectivity model diverged from real copper geometry again "
+            f"(issue #4557 / #5362)."
         )
-        assert default_result.total_unconnected_pads == 0
+        per_net = {
+            n.net_name: (n.island_count, n.open_connections) for n in default_result.incomplete
+        }
+        assert per_net == {"+1V8": (2, 1), "+3V3": (2, 1)}, (
+            f"each net must split into exactly 2 copper islands / 1 missing "
+            f"connection, matching native's one unconnected_items row per "
+            f"net; got {per_net}"
+        )
+        assert sum(n.open_connections for n in default_result.nets) == 2, (
+            "total missing connections must equal native's 2 unconnected_items"
+        )
 
     @pytest.mark.parametrize("net_name", ["GND", "+1V2", "VBUS_USB"])
     def test_previously_false_open_nets_complete(self, default_result, net_name: str) -> None:
@@ -1177,19 +1215,34 @@ class TestDefaultNetStatusOnCommittedArtifact:
         identity, which incidentally papered over that legacy-mode gap.
         Removing that blanket union (the whole point of #5031, since it
         also hid genuinely disjoint islands) exposes the legacy heuristic's
-        pre-existing inaccuracy more fully here; the *default* (strict)
-        model -- the path issue #4557 actually cares about -- still reports
-        0 opens on this artifact (see ``test_default_path_reports_zero_open_pads``),
-        matching ``kicad-cli pcb drc``.
+        pre-existing inaccuracy more fully here.
+
+        ``+1V8`` (1) and ``+3V3`` (4) joined the pin under Issue #5362:
+        this artifact is ``(version 20260206)`` with no
+        ``filled_areas_thickness`` token, so its fills are stored solid and
+        same-zone fragments are not bonded by adjacency.  Those two are
+        **not** legacy-model artefacts -- native ``kicad-cli pcb drc``
+        reports one unconnected connection on each of those nets, and the
+        *default* (strict) model reports exactly the same (see
+        ``test_default_path_matches_native_open_connections``).  The three
+        nets #4557 is about -- GND, +1V2, VBUS_USB -- remain false opens of
+        the legacy path only.
         """
         from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
         result = NetStatusAnalyzer(routed_pcb_path, strict=False).analyze()
         opens_by_net = {n.net_name: n.unconnected_count for n in result.incomplete}
-        assert opens_by_net == {"GND": 21, "+1V2": 1, "VBUS_USB": 1}, (
+        assert opens_by_net == {
+            "GND": 21,
+            "+1V2": 1,
+            "VBUS_USB": 1,
+            "+1V8": 1,
+            "+3V3": 4,
+        }, (
             f"Legacy proximity model characterization drifted: expected the "
-            f"historical 23 false opens (GND 21, +1V2 1, VBUS_USB 1); got "
-            f"{opens_by_net}."
+            f"historical 23 false opens (GND 21, +1V2 1, VBUS_USB 1) plus the "
+            f"two real solid-fill opens native also reports (+1V8 1, +3V3 4); "
+            f"got {opens_by_net}."
         )
 
     def test_default_path_deterministic(self, routed_pcb_path: Path, default_result) -> None:

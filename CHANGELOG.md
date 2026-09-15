@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve narrow via-annulus contacts between copper-fill fragments in net-status analysis without bridging drill holes or unrelated layers (#5382).
 - Correct the historical Board07 HDMI track widths to match their sidecar while preserving measured connectivity, known opens, and angle geometry; add a reproducible native-validated width repair (#5126).
 
 - **Imported copper arcs no longer cause false opens or under-reported

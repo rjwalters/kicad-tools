@@ -1191,19 +1191,11 @@ class NetStatusAnalyzer:
                 if poly is not None:
                     pad_polys[pad_id] = poly
 
-        # Copper-circle geometry per via.  Two variants:
-        #  * ``via_geom`` (eroded, ``POUR_PAD_ERODE`` inset) is used for the
-        #    fill-*penetration* test so a via merely grazing the pour edge does
-        #    not spuriously bond -- matching ``ConnectivityValidator``.
-        #  * ``via_raw`` (un-eroded, real copper radius) is used only to bond a
-        #    *same-net* pad to a via that already penetrates the pour.  The
-        #    erosion inset on both the pad box and the via disc otherwise opens
-        #    a sub-``2*POUR_PAD_ERODE`` false gap between a stitching via and an
-        #    adjacent same-net pad whose copper genuinely overlaps it (the
-        #    board-06 U1.32 case, Issue #4229).  Using the raw radius here is
-        #    safe: the group is single-net, so a looser pad<->via bond can only
-        #    unify pads that are already the same net -- it can never manufacture
-        #    a cross-net short (that is what the eroded penetration test guards).
+        # Fill contact uses the physical annulus, matching ConnectivityValidator.
+        # Eroding the outer radius loses real narrow contacts; a solid disc
+        # would instead invent contact through the drill hole (Issue #5382).
+        # Keep the existing eroded geometry for via/trace contact guards and
+        # the raw disc for the existing same-net pad/via overlap policy.
         from shapely.geometry import Point as _ShapelyPoint  # type: ignore[import-untyped]
 
         via_geoms = []
@@ -1211,7 +1203,8 @@ class NetStatusAnalyzer:
             radius = max(getattr(via, "size", 0.0) or 0.0, 0.0) / 2.0
             eroded = cv._via_copper_geom(via.position, radius)
             raw = _ShapelyPoint(*via.position).buffer(radius) if radius > 0 else None
-            via_geoms.append((via, eroded, raw))
+            annulus = cv._physical_via_annulus(via)
+            via_geoms.append((via, eroded, raw, annulus))
 
         # Unify segment components that share a via into "extended chains"
         # (Issue #4229).  ``_build_segment_components`` chains segments only
@@ -1278,21 +1271,36 @@ class NetStatusAnalyzer:
                 if ra != rb:
                     _parent[ra] = rb
 
-            # 1. Fragments that are themselves geometrically continuous
-            #    (touching/overlapping solid regions on the SAME copper
-            #    layer) are one physical pour that KiCad happened to
-            #    fracture into multiple ``filled_polygon`` entries (thermal
+            # 1. Fragments that are one physical pour KiCad happened to
+            #    fracture into several ``filled_polygon`` entries (thermal
             #    relief spokes / clearance moats) -- merge them.
-            for i in range(n_fragments):
-                region_i = regions[i]
-                if region_i is None:
-                    continue
-                for j in range(i + 1, n_fragments):
-                    region_j = regions[j]
-                    if region_j is None or fill_layers[i] != fill_layers[j]:
-                        continue
-                    if region_i.intersects(region_j):
-                        _union(i, j)
+            #
+            #    Whether two fragments are continuous depends on the fill
+            #    ENCODING, not on whether their stored outlines touch (Issue
+            #    #5362).  On a STROKED fill (:meth:`Zone.is_stroked_fill` --
+            #    the token absent or explicitly ``yes`` on a file below
+            #    KiCad's ``20250210`` boundary; an explicit ``yes`` is a
+            #    parser no-op that never overrides that boundary, Issue
+            #    #5382) each outline is the centre-line of
+            #    ``min_thickness``-wide copper, so real metal reaches
+            #    ``min_thickness / 2`` past the stored boundary and fragments
+            #    within ``min_thickness`` are continuous.  On a SOLID fill --
+            #    an explicit ``no`` at any version, or the token absent/``yes``
+            #    from ``20250210`` onward -- the stored outline IS the copper
+            #    and native KiCad bonds no two fill outlines of one zone
+            #    directly at all.
+            #
+            #    The previous ``region_i.intersects(region_j)`` test matched
+            #    neither encoding: it split stroke-encoded fragments that
+            #    native calls connected (any positive gap, however small) and
+            #    merged solid-encoded fragments that native calls open
+            #    (shared corner, shared edge, overlapping band).  Measured
+            #    against kicad-cli 10.0.5 on identical saved bytes; see
+            #    ``tests/test_fill_fragment_bonding_5362.py``.
+            inflation = zone.fill_inflation()
+            if inflation > 0.0:
+                for i, j in self._adjacent_fill_pairs(regions, fill_layers, 2.0 * inflation):
+                    _union(i, j)
 
             # 2. A single via whose copper penetrates more than one fragment
             #    of this zone is a REAL physical bridge between them (a
@@ -1300,14 +1308,14 @@ class NetStatusAnalyzer:
             #    merge those fragments too.  This is what keeps a clean,
             #    fully-stitched board reading connected once the blanket
             #    same-zone union above is removed.
-            for via, via_geom, _via_raw in via_geoms:
+            for via, _via_geom, _via_raw, annulus in via_geoms:
                 touched: list[int] = []
                 for i in range(n_fragments):
                     region_i = regions[i]
                     if (
                         region_i is not None
                         and self._via_spans_layer(via.layers, fill_layers[i])
-                        and region_i.intersects(via_geom)
+                        and region_i.intersects(annulus)
                     ):
                         touched.append(i)
                 for other in touched[1:]:
@@ -1319,8 +1327,8 @@ class NetStatusAnalyzer:
             #    real connection between islands on the opposite layer.
             for chain in chain_seg_indices:
                 chain_vias = [
-                    (via, via_geom)
-                    for via, via_geom, _via_raw in via_geoms
+                    (via, annulus)
+                    for via, via_geom, _via_raw, annulus in via_geoms
                     if any(
                         self._via_spans_layer(via.layers, segments[s].layer)
                         and self._segment_touches_via(segments[s], via, via_geom)
@@ -1338,8 +1346,8 @@ class NetStatusAnalyzer:
                         for s in chain
                     ) or any(
                         self._via_spans_layer(via.layers, fill_layers[i])
-                        and region_i.intersects(via_geom)
-                        for via, via_geom in chain_vias
+                        and region_i.intersects(annulus)
+                        for via, annulus in chain_vias
                     ):
                         touched.append(i)
                 for other in touched[1:]:
@@ -1369,10 +1377,10 @@ class NetStatusAnalyzer:
                 # the pads reached through it (directly, through a same-net pad
                 # whose copper overlaps the via, or via a segment chain ending
                 # at the via) into the same island.
-                for via, via_geom, via_raw in via_geoms:
+                for via, via_geom, via_raw, annulus in via_geoms:
                     if not self._via_spans_layer(via.layers, fill_layer):
                         continue
-                    if not region.intersects(via_geom):
+                    if not region.intersects(annulus):
                         continue
                     bonded.update(self._find_pads_at_point(via.position, pad_positions))
                     # Same-net pad whose real copper overlaps this pour-bonded
@@ -1416,6 +1424,37 @@ class NetStatusAnalyzer:
                 if bonded:
                     groups.append(bonded)
         return groups
+
+    @staticmethod
+    def _adjacent_fill_pairs(
+        regions: list[Any | None],
+        fill_layers: list[str],
+        reach: float,
+    ) -> list[tuple[int, int]]:
+        """Index pairs of same-layer fill fragments within ``reach`` of each other.
+
+        ``reach`` is the summed stroke half-width the two stored outlines are
+        inflated by to recover real copper (Issue #5362).  Uses an ``STRtree``
+        ``dwithin`` query so a zone fractured into hundreds of
+        ``filled_polygon`` entries costs O(n log n) rather than O(n^2)
+        pairwise ``distance`` calls.
+        """
+        from shapely.strtree import STRtree  # type: ignore[import-untyped]
+
+        indices = [i for i, region in enumerate(regions) if region is not None]
+        if len(indices) < 2:
+            return []
+        tree = STRtree([regions[i] for i in indices])
+        pairs: list[tuple[int, int]] = []
+        for position, i in enumerate(indices):
+            for candidate in tree.query(regions[i], predicate="dwithin", distance=reach):
+                other = int(candidate)
+                if other <= position:
+                    continue
+                j = indices[other]
+                if fill_layers[i] == fill_layers[j]:
+                    pairs.append((i, j))
+        return pairs
 
     def _merge_chains_via_vias(
         self,
