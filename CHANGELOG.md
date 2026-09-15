@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add transactional physical power stitching (`kct stitch --complete`), retaining
+  native refill evidence and rejecting incomplete nets, broken pad bonds, or new
+  native findings; use the shared stage in Board05's active recipe (#5388).
+
 - Add bounded +/-90-degree endpoint-orientation (`rotate_align`) placement-delta
   candidates for a stuck net whose two endpoints present a pad-row/pad-column
   mismatch, respecting fixed/locked placement and connector-access
