@@ -1540,28 +1540,40 @@ class LatticePathfinder:
                             # through forbidden layers.
                             continue
                         nstate = (key, nl)
-                        nok = node_ok.get(nstate)
+                        # A tapered goal reached by a via emits only its neck
+                        # and the via on this layer, not a body-width segment.
+                        # Keep this legality separate from the body-node cache:
+                        # any later planar expansion must still clear at half.
+                        tapered_goal = nstate in goal and width_b < body_w
+                        landing_half = (
+                            max(width_b, self.rules.via_diameter) / 2.0 if tapered_goal else half
+                        )
+                        landing_extra = max(0.0, landing_half + clr - self._agent_radius)
+                        nok = None if tapered_goal else node_ok.get(nstate)
                         if nok is None:
                             kpt = lattice.node_point(key)
-                            ko_hit = ko is not None and ko.segment_blocked(kpt, kpt, nl, net, half)
+                            ko_hit = ko is not None and ko.segment_blocked(
+                                kpt, kpt, nl, net, landing_half
+                            )
                             if ko_hit:
                                 ko_pruned = True
                             nok = (
                                 not ko_hit
                                 and not obstacles.node_blocked(key, nl, net)
                                 and not (
-                                    extra > 0.0
-                                    and obstacles.segment_blocked(kpt, kpt, nl, net, extra)
+                                    landing_extra > 0.0
+                                    and obstacles.segment_blocked(kpt, kpt, nl, net, landing_extra)
                                 )
                                 and not (
                                     pw is not None
                                     and obstacles.pairwise_pad_blocked(
-                                        kpt, kpt, nl, net, half, extra, pw
+                                        kpt, kpt, nl, net, landing_half, landing_extra, pw
                                     )
                                 )
-                                and committed.node_clear(kpt, nl, net, half, clr)
+                                and committed.node_clear(kpt, nl, net, landing_half, clr)
                             )
-                            node_ok[nstate] = nok
+                            if not tapered_goal:
+                                node_ok[nstate] = nok
                         if not nok:
                             continue
                         step = self.via_cost + present * history.get(("v", key), 0.0)
