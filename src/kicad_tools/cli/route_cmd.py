@@ -3393,6 +3393,18 @@ def _resolve_placement_feedback_anchors(pcb, args, quiet: bool = False) -> set[s
     anchors = _auto_detect_anchored_refs(pcb)
     anchors |= requested_anchor
     anchors -= requested_no_anchor
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None:
+        # Fixed copper cannot follow a placement move. Protect both the
+        # invalid footprint and every terminal of its preserved nets, even
+        # when the caller removes an ordinary mechanical anchor.
+        anchors |= disposition.invalid_references
+        anchors.update(
+            ref
+            for ref, _pad, authored, effective in disposition.pad_net_identities
+            if authored in disposition.preserve_copper_nets
+            or effective in disposition.preserve_copper_nets
+        )
     return anchors
 
 
@@ -3737,6 +3749,9 @@ def _run_placement_delta_feedback(
     excluded_nets = frozenset(
         n.strip() for n in (getattr(args, "skip_nets", None) or "").split(",") if n.strip()
     )
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None:
+        excluded_nets |= disposition.invalid_nets
 
     delta_path = _placement_delta_path(args, pcb_path)
     with contextlib.suppress(OSError):
@@ -4721,6 +4736,11 @@ def _resolve_net_class_map_domains(
     resolution = resolve_net_class_map_keys(user_keys, routable_names)
 
     preserved_names = _preserved_net_names(router, set(routable_names))
+    disposition = getattr(router, "placement_disposition", None)
+    if disposition is not None:
+        preserved_names = sorted(
+            (set(preserved_names) | disposition.preserve_copper_nets) - set(routable_names)
+        )
     if preserved_names and resolution.unmatched:
         secondary = resolve_net_class_map_keys(resolution.unmatched, preserved_names)
         resolution = NetClassMapResolution(
@@ -4811,6 +4831,31 @@ def _apply_net_class_map_sidecar(router: "Autorouter", args, quiet: bool = False
         # ``self.net_class_map.get(net_name)`` finds them at routing time.
         for board_net, user_key in resolution.resolved.items():
             router.net_class_map[board_net] = loaded[user_key]
+
+        if getattr(router, "placement_disposition", None) is not None:
+            from dataclasses import replace
+
+            from kicad_tools.router.fixed_copper import FixedFillObstacles
+
+            # Neutral obstacle ownership must not erase the authored class.
+            # Reinstall so native grid and exact-geometry engines see the same
+            # gap after this post-load sidecar merge, including on trial reset.
+            router.grid.install_fixed_fills(
+                FixedFillObstacles(
+                    tuple(
+                        replace(
+                            fill,
+                            clearance=max(
+                                fill.clearance,
+                                router.net_class_map[fill.source_net].clearance,
+                            ),
+                        )
+                        if fill.source_net in router.net_class_map
+                        else fill
+                        for fill in router.grid.fixed_fills.fills
+                    )
+                )
+            )
 
         _warn_unresolved_net_class_map(resolution, diagnostic_net_names, nearest_net_names)
 
@@ -7590,7 +7635,11 @@ def route_with_layer_escalation(
             last_power_stall_nets = []
 
         # Report attempt result
-        status = "SUCCESS" if result.success else "INSUFFICIENT - escalating"
+        status = (
+            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else "SUCCESS")
+            if result.success
+            else "INSUFFICIENT - escalating"
+        )
         if not quiet:
             flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
             flush_print(f"  Status: {status}")
@@ -8447,7 +8496,11 @@ def route_with_rule_relaxation(
             _interrupt_state["best_completed_attempt"] = True
 
         # Report attempt result
-        status = "SUCCESS" if result.success else "INSUFFICIENT - relaxing rules"
+        status = (
+            ("ELIGIBLE ROUTING COMPLETE" if _placement_blocked(args) else "SUCCESS")
+            if result.success
+            else "INSUFFICIENT - relaxing rules"
+        )
         if not quiet:
             flush_print(f"\n  Routed: {nets_routed}/{nets_to_route} nets ({completion * 100:.0f}%)")
             flush_print(f"  Status: {status}")
@@ -14715,9 +14768,23 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    from .route_deadline import CONTROL_ENV, TIMEOUT_EXIT, RouteDeadlineExpired
     from .route_placement import finish
 
-    result = _run_main_impl(args, parser, argv)
+    try:
+        result = _run_main_impl(args, parser, argv)
+    except DRCConstraintPropagationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return finish(args, 1)
+    except RouteDeadlineExpired:
+        # Supervised timeouts are finalized after the parent retires output.
+        # In-process timeouts must not count an unchecked checkpoint as complete.
+        if not os.environ.get(CONTROL_ENV):
+            output = getattr(args, "_placement_output", None)
+            if output is not None:
+                args._placement_output_before = output.stat() if output.exists() else None
+            finish(args, TIMEOUT_EXIT)
+        raise
     return finish(args, result)
 
 

@@ -79,15 +79,28 @@ def fill_around_fixed_copper(
     expected = set()
     net_names = parse_net_names(source)
     for start, end, zone in reversed(zones):
-        identity = str(uuid.uuid4())
-        identities[identity] = (start, end, zone)
         parsed = parse_string(zone)
+        identifier = parsed.find("uuid") or parsed.find("tstamp")
+        authored = str(identifier.children[0].value) if identifier and identifier.children else None
+        # Preserve native identities: group membership and custom rule context
+        # may refer to them. Only legacy/missing identifiers need a staging tag.
+        try:
+            if authored and re.fullmatch(r"[0-9a-fA-F]{8}", authored):
+                # KiCad's KIID expands legacy 32-bit timestamps this way.
+                identity = str(uuid.UUID(int=int(authored, 16)))
+            else:
+                identity = str(uuid.UUID(authored)) if authored else str(uuid.uuid4())
+        except ValueError:
+            identity = str(uuid.uuid4())
+        if identity in identities:
+            raise ValueError("Cannot selectively fill zones with duplicate identities")
+        identities[identity] = (start, end, zone)
         net = parsed.find("net")
         token = net.children[0].value if net is not None and net.children else 0
         name = net_names.get(token, "") if isinstance(token, int) else str(token)
         if name not in protected_nets and parsed.find("keepout") is None:
             expected.add(identity)
-        # Tag every temporary zone independently of legacy timestamp syntax.
+        # Normalize legacy timestamp syntax without changing modern identity.
         tagged = re.sub(r"\((?:uuid|tstamp)\s+[^)]+\)", "", zone)
         tagged = tagged.replace("(zone", f'(zone (uuid "{identity}")', 1)
         staged = staged[:start] + tagged + staged[end:]

@@ -192,7 +192,14 @@ def test_affected_arc_is_retained_as_physical_copper(board):
     assert router.placement_preserved_arcs
     assert router.grid.fixed_fills
     assert not router.grid.fixed_fills.segment_clear((106, 104), (106, 104), 0, 0.1, 0.2)
-    assert router.grid.fixed_fills.segment_clear((106, 103), (106, 103), 0, 0.1, 0.2)
+    from kicad_tools.router.fixed_copper import FixedFillObstacles
+
+    arcs = FixedFillObstacles(
+        tuple(fill for fill in router.grid.fixed_fills.fills if fill.source_kind == "arc")
+    )
+    # The arc leaves its interior open; the source's via at this point is
+    # independently preserved by the complete fixed-copper obstacle set.
+    assert arcs.segment_clear((106, 103), (106, 103), 0, 0.1, 0.2)
 
 
 def test_export_handoff_retains_authored_blocks_exactly_once(board):

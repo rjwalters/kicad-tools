@@ -100,6 +100,7 @@ def test_partial_placement_cli_preserves_and_reports(
         assert result.returncode == (2 if selection in {"mixed", "coupled", "complete_noop"} else 0)
     if selection in {"mixed", "coupled", "complete_noop", "complete_partial"}:
         assert "SUCCESS:" not in result.stdout
+        assert "Status: SUCCESS" not in result.stdout
         assert "Design routed successfully" not in result.stdout
         assert "Minimum viable configuration found" not in result.stdout
     parsed = PCB.load(output)

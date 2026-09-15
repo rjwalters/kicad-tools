@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from shapely.geometry import Polygon
+from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
 from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
@@ -15,7 +15,10 @@ NATIVE_PYTHON = find_kicad_python()
 
 
 @pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
-@pytest.mark.parametrize("project_clearance", [None, 0.8, "custom", "zone_pair"])
+@pytest.mark.parametrize(
+    "project_clearance",
+    [None, 0.8, "custom", "zone_pair", "group", "protected_group", "legacy_group"],
+)
 @pytest.mark.parametrize("multilayer", [False, True])
 @pytest.mark.parametrize("name_only", [False, True])
 def test_native_eligible_fill_clears_and_preserves_fixed_zone(
@@ -42,12 +45,26 @@ def test_native_eligible_fill_clears_and_preserves_fixed_zone(
     if name_only:
         zone = zone.replace("(net 1)", '(net "BAD")')
         eligible = eligible.replace("(net 2)", '(net "GOOD")')
-    source = board_text(name_only=name_only).rstrip()[:-1] + zone + eligible + ")"
+    group = ""
+    if project_clearance in {"group", "protected_group", "legacy_group"}:
+        identity = "00000000-0000-4000-8000-000000000789"
+        if project_clearance == "legacy_group":
+            identity = "00000000-0000-0000-0000-00001234abcd"
+            eligible = eligible.replace("(zone", "(zone (tstamp 1234abcd)", 1)
+        elif project_clearance == "protected_group":
+            zone = zone.replace("(zone", f'(zone (uuid "{identity}")', 1)
+        else:
+            eligible = eligible.replace("(zone", f'(zone (uuid "{identity}")', 1)
+        group = f'''(group "WideCopper" (id "00000000-0000-4000-8000-000000000790")
+          (members "{identity}"))'''
+    source = board_text(name_only=name_only).rstrip()[:-1] + zone + eligible + group + ")"
     board = tmp_path / "mixed.kicad_pcb"
     board.write_text(source)
     if isinstance(project_clearance, str):
         condition = (
-            "(condition \"A.Type == 'Zone' && B.Type == 'Zone'\")"
+            "(condition \"A.memberOf('WideCopper') || B.memberOf('WideCopper')\")"
+            if project_clearance in {"group", "protected_group", "legacy_group"}
+            else "(condition \"A.Type == 'Zone' && B.Type == 'Zone'\")"
             if project_clearance == "zone_pair"
             else ""
         )
@@ -111,6 +128,40 @@ def test_protected_only_zones_need_no_native_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(placement_fill, "find_kicad_python", lambda: None)
     fill_around_fixed_copper(board, frozenset({"BAD"}))
     assert board.read_text() == source
+
+
+@pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
+@pytest.mark.parametrize("filled", [False, True], ids=["empty", "hole"])
+def test_native_fill_preserves_empty_space_in_protected_zone(tmp_path, filled):
+    # The weakly-simple contour is KiCad's bridged representation of a hole.
+    copper = (
+        """(filled_polygon (layer "F.Cu")
+      (pts (xy 103 101) (xy 118 101) (xy 118 111) (xy 103 111) (xy 103 101)
+           (xy 112 103) (xy 112 108) (xy 116 108) (xy 116 103) (xy 112 103)
+           (xy 103 101)))"""
+        if filled
+        else ""
+    )
+    fixed = f"""(zone (net 1) (net_name "BAD") (layer "F.Cu")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
+      (filled_areas_thickness no)
+      (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon (pts (xy 102 101) (xy 118 101) (xy 118 111) (xy 102 111)))
+      {copper})"""
+    eligible = """(zone (net 2) (net_name "GOOD") (layer "F.Cu")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
+      (fill yes (island_removal_mode 0) (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon (pts (xy 101 101) (xy 119 101) (xy 119 111) (xy 101 111))))"""
+    board = tmp_path / "mixed.kicad_pcb"
+    board.write_text(board_text().rstrip()[:-1] + fixed + eligible + ")")
+    fill_around_fixed_copper(board, frozenset({"BAD"}), python=NATIVE_PYTHON)
+    assert board.read_text().count(fixed) == 1
+    zone = next(z for z in PCB.load(board).zones if z.net_name == "GOOD")
+    shape = unary_union([Polygon(p).buffer(0) for p in zone.filled_polygons])
+    # Schema coordinates are normalized to the board outline origin (100, 100).
+    assert shape.contains(Point(14, 5))
+    if filled:
+        assert not shape.contains(Point(10, 5))
 
 
 def test_unavailable_native_runtime_preserves_partial_board(tmp_path, monkeypatch):

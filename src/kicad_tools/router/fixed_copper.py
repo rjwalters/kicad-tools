@@ -282,7 +282,7 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
         return FixedFillObstacles()
     from shapely.affinity import translate
 
-    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.schema.pcb import PCB, Segment, Via
     from kicad_tools.validate.rules.clearance import _collect_zone_fills
 
     from .layers import Layer
@@ -290,6 +290,7 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
     pcb = PCB.load(pcb_path)
     ox, oy = pcb._board_origin
     result = []
+    selected_layers = {layer.name: layer.index for layer in grid.layer_stack.layers}
     zones = list(pcb.zones)
     source_zones = list(pcb._sexp.find_all("zone"))
     version_node = pcb._sexp.find("version")
@@ -303,7 +304,9 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
         return zones[index].min_thickness / 2 if stroked else 0.0
 
     for layer_name, fills in _collect_zone_fills(pcb).items():
-        layer = grid.layer_to_index(Layer.from_kicad_name(layer_name).value)
+        if layer_name not in selected_layers:
+            continue
+        layer = selected_layers[layer_name]
         for fill in fills:
             if fill.net_name not in names:
                 continue
@@ -337,7 +340,12 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
             pcb.nets[zone.net_number].name if zone.net_number in pcb.nets else ""
         )
         legacy = source_zones[index].find("fill_segments")
-        if name not in names or legacy is None or zone.filled_polygons:
+        if (
+            name not in names
+            or legacy is None
+            or zone.filled_polygons
+            or zone.layer not in selected_layers
+        ):
             continue
         if zone.min_thickness <= 0:
             raise ValueError("Legacy fill_segments requires positive min_thickness")
@@ -358,7 +366,7 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
             FixedFill(
                 source_net=name,
                 source_net_id=zone.net_number,
-                layer=grid.layer_to_index(Layer.from_kicad_name(zone.layer).value),
+                layer=selected_layers[zone.layer],
                 clearance=max(
                     grid.rules.trace_clearance, zone.clearance, klass.clearance if klass else 0
                 ),
@@ -374,7 +382,7 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
 
     for arc in pcb.arcs:
         name = arc.net_name or (pcb.nets[arc.net_number].name if arc.net_number in pcb.nets else "")
-        if name not in names:
+        if name not in names or arc.layer not in selected_layers:
             continue
         net_class = net_class_map.get(name)
         clearance = max(grid.rules.trace_clearance, net_class.clearance if net_class else 0.0)
@@ -387,11 +395,62 @@ def load_fixed_fills(pcb_path, names, grid, net_class_map) -> FixedFillObstacles
             FixedFill(
                 source_net=name,
                 source_net_id=arc.net_number,
-                layer=grid.layer_to_index(Layer.from_kicad_name(arc.layer).value),
+                layer=selected_layers[arc.layer],
                 clearance=clearance,
                 geometry=translate(geometry, ox, oy),
                 source_kind="arc",
                 source_object_id=arc.uuid,
             )
         )
+    # Placement-excluded tracks/vias have neutral ownership in existing_routes
+    # so no eligible net may reuse their copper. Their class clearance must
+    # survive separately: resolving the class from neutral net 0 loses it,
+    # and several excluded nets may have different clearance requirements.
+    # Retain source identity here so a later CLI sidecar can grow the gap.
+    from shapely.geometry import Point
+
+    fixed_items: list[Segment | Via] = [*pcb.segments, *pcb.vias]
+    for item in fixed_items:
+        name = item.net_name or (
+            pcb.nets[item.net_number].name if item.net_number in pcb.nets else ""
+        )
+        net_class = net_class_map.get(name)
+        if name not in names:
+            continue
+        clearance = max(grid.rules.trace_clearance, net_class.clearance if net_class else 0.0)
+        if isinstance(item, Segment):
+            geometry = LineString((item.start, item.end)).buffer(
+                item.width / 2 * _ROUND_OUT, quad_segs=64
+            )
+            authored_layer = Layer.from_kicad_name(item.layer)
+            indices = [
+                layer.index
+                for layer in grid.layer_stack.layers
+                if layer.layer_enum == authored_layer
+            ]
+            kind = "segment"
+        else:
+            geometry = Point(item.position).buffer(item.size / 2 * _ROUND_OUT, quad_segs=64)
+            # Via endpoints describe the physical span, independently of
+            # which layers this routing trial selected. A through via still
+            # blocks F.Cu during a front-only trial with no B.Cu grid index.
+            lo, hi = sorted(Layer.from_kicad_name(layer).value for layer in item.layers)
+            indices = [
+                layer.index
+                for layer in grid.layer_stack.layers
+                if lo <= layer.layer_enum.value <= hi
+            ]
+            kind = "via"
+        for layer in indices:
+            result.append(
+                FixedFill(
+                    source_net=name,
+                    source_net_id=item.net_number,
+                    layer=layer,
+                    clearance=clearance,
+                    geometry=translate(geometry, ox, oy),
+                    source_kind=kind,
+                    source_object_id=item.uuid,
+                )
+            )
     return FixedFillObstacles(tuple(result))

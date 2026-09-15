@@ -264,7 +264,7 @@ def run(argv: list[str] | None = None) -> int:
 def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
     """Return metadata from this invocation, including a supervised worker."""
     from .route_cmd import _in_process_main, _route_parser
-    from .route_placement import capture_disposition, disposition_from_control
+    from .route_placement import capture_disposition, disposition_from_control, finish
 
     argv = list(sys.argv[1:] if argv is None else argv)
     probe = argparse.ArgumentParser(add_help=False)
@@ -289,8 +289,24 @@ def run_attempt(argv: list[str] | None = None) -> RouteAttemptResult:
         # Bind output before launching: even startup timeout cannot leave a
         # previous canonical result masquerading as this invocation's output.
         control.write_text(json.dumps(dict(state, stage="startup")))
+        # Capture report identities before the worker can replace stale files.
+        for option, attribute in (
+            ("complete_report", "_placement_report_before"),
+            ("export_failed_nets", "_placement_failed_before"),
+        ):
+            value = getattr(parsed, option, None)
+            path = Path(value) if value else None
+            setattr(parsed, attribute, path.stat() if path and path.exists() else None)
         code = _supervise([sys.executable, "-m", __name__, *argv], budget, control)
-        return RouteAttemptResult(code, disposition_from_control(_read_control(control)))
+        disposition = disposition_from_control(_read_control(control))
+        if code == TIMEOUT_EXIT and disposition is not None:
+            parsed._placement_disposition = disposition
+            parsed._placement_output = Path(state["output"])
+            output = parsed._placement_output
+            # Even a checkpoint written before unwinding is unverified.
+            parsed._placement_output_before = output.stat() if output.exists() else None
+            finish(parsed, code)
+        return RouteAttemptResult(code, disposition)
 
 
 def _worker() -> int:
