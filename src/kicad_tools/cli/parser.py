@@ -4220,11 +4220,10 @@ def _add_route_parser(subparsers) -> None:
         action="store_true",
         default=False,
         help=(
-            "Skip the off-board placement preflight. By default kct route "
-            "aborts (exit 2) when any footprint's courtyard falls outside the "
-            "Edge.Cuts outline, since routing an off-board net always fails. "
-            "Use this to proceed anyway (e.g. intentional staging/reference "
-            "footprints)."
+            "Route placement-invalid nets too. By default their whole nets "
+            "are excluded while independent valid nets are routed; their "
+            "existing copper remains an obstacle. Requested blocked nets "
+            "cause a nonzero exit even when useful partial copper is saved."
         ),
     )
     # Issue #4799: pre-route crossing-tail census advisory.  Mirror of the

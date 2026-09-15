@@ -8,9 +8,12 @@ from pathlib import Path
 
 def main():
     import pcbnew  # type: ignore[import-not-found]  # Supplied by KiCad Python.
-    import wx  # type: ignore[import-not-found]  # Supplied by KiCad Python.
 
-    _app = wx.App(False)
+    # Linux native filling works without a GUI; wx.App requires an X display.
+    if sys.platform != "linux":
+        import wx  # type: ignore[import-not-found]  # Supplied by KiCad Python.
+
+        _app = wx.App(False)
     project = Path(sys.argv[1]).with_suffix(".kicad_pro")
     if project.exists():
         pcbnew.GetSettingsManager().LoadProject(str(project))

@@ -12960,10 +12960,12 @@ def _route_parser() -> argparse.ArgumentParser:
             exit codes:
               0  all nets routed (or meets --min-completion), DRC clean
               1  fatal failure -- no nets routed
-              2  partial routing -- below --min-completion threshold
-              3  routing meets threshold but the copper is clearance-dirty:
+              2  partial routing -- below threshold or requested placement-blocked nets
+              3  post-route validation or processing failed:
                  DRC violations remain, --auto-fix rolled back (issue #2852),
-                 or the --voltage-map HV pairwise audit failed (issue #4588)
+                 the --voltage-map HV pairwise audit failed (issue #4588),
+                 selective zone filling failed, or staged repair could not
+                 preserve fixed copper and net membership
               4  partial routing AND segment-segment or HV pairwise
                  clearance violations (issues #1666, #4588)
               5  interrupted by SIGINT with partial results saved
@@ -13956,21 +13958,16 @@ def _route_parser() -> argparse.ArgumentParser:
             "(default: auto-discover from project.kct or sibling file)."
         ),
     )
-    # Issue #4156: hard off-board preflight.  Unlike the advisory drift banner,
-    # a footprint placed outside the Edge.Cuts outline makes routing pointless
-    # (its nets can never complete), so kct route aborts by default before any
-    # router work.  --allow-offboard is the explicit escape hatch for boards
-    # that intentionally stage footprints outside the outline.
+    # Explicit override for the default whole-net placement exclusion policy.
     parser.add_argument(
         "--allow-offboard",
         action="store_true",
         default=False,
         help=(
-            "Skip the off-board placement preflight. By default kct route "
-            "aborts (exit 2) when any footprint's courtyard falls outside the "
-            "Edge.Cuts outline, since routing an off-board net always fails. "
-            "Use this to proceed anyway (e.g. intentional staging/reference "
-            "footprints)."
+            "Route placement-invalid nets too. By default their whole nets "
+            "are excluded while independent valid nets are routed; their "
+            "existing copper remains an obstacle. Requested blocked nets "
+            "cause a nonzero exit even when useful partial copper is saved."
         ),
     )
     # Issue #4799: replay a previous run's crossing-tail census as a pre-route
@@ -15058,14 +15055,6 @@ def _run_main_impl(args, parser, argv) -> int:
             # Drift detection is advisory; never let it block routing.
             pass
 
-    # Issue #4156: hard off-board placement preflight.  A footprint whose
-    # courtyard falls outside the Edge.Cuts outline can never route (its nets
-    # fail outright), and the failure signature is indistinguishable from
-    # congestion — which is exactly what cost multiple wasted routing passes in
-    # the field.  Abort before any router/component loading unless the user
-    # opted out with --allow-offboard.  The check is O(footprints), computed
-    # once, and reuses the same get_board_outline()-based analysis as
-    # 'kct placement check'.
     # Net-wide placement exclusions were resolved before complete/region selection.
 
     # Issue #4799: crossing-tail census replay.  Runs after the hard gates

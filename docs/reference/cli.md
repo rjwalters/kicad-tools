@@ -807,6 +807,29 @@ Common flags (the full surface lives in `kct route --help`):
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
 
+#### Routing around invalid placement
+
+By default, routing excludes each whole net incident to a placement-invalid
+footprint, including that net's on-board terminals and coupled partners. Other
+requested nets are routed normally. Excluded footprints, pad/net identities and
+existing copper remain fixed obstacles; the input file stays unchanged when
+writing a separate output file.
+
+A useful partial board is saved before a nonzero exit when requested nets remain
+placement-blocked. `--min-completion` cannot turn that result into success.
+`--nets` and `--skip-nets` control which invalid nets are requested; selecting
+only valid nets can proceed while retaining the excluded-net diagnostics.
+All-invalid requests stop before routing. Warning-only courtyard overhangs do
+not exclude nets. `--allow-offboard` explicitly bypasses placement exclusions.
+
+For boards with placement-invalid nets, `--format json` includes
+`placement_disposition` in the final attempt summary.
+`--complete-report PATH` also records this metadata for these boards,
+including ordinary routing and early exits. `--export-failed-nets PATH` marks
+blocked nets as `placement-invalid, not attempted`, separately from congestion.
+See [fixed-copper preservation](../routing-fixed-copper.md) for native refill and
+repair behavior.
+
 #### Declared branch current paths (`--current-paths`)
 
 A net's copper is not always electrically homogeneous. `/AC_NEUTRAL` can
@@ -980,7 +1003,7 @@ coerced to `basic` with a printed notice). It is mutually exclusive with
 |--------|-------------|
 | `--complete` | Route only the unconnected links; all other copper is a fixed obstacle |
 | `--complete-exclude-nets NAMES` | Comma-separated nets `--complete` must not route even when reported unconnected — for pour/plane-carried nets (`GND`, `+3V3`, phase nets) whose connectivity comes from a filled zone. Ignored without `--complete`. |
-| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Only written when links remain unroutable; a human-readable summary always prints. Ignored without `--complete`. |
+| `--complete-report PATH` | Write the structured unroutable-link report (net, link pad endpoints, elapsed vs the per-link deadline, blocking copper) as JSON. Link details are written when links remain unroutable. For boards with placement-invalid nets, also records attempt disposition during ordinary routing and early exits. |
 | `--via-in-pad-last-resort` | On the lattice engine, stage a same-net via-in-pad attach as a last resort instead of an opportunistic one: the search first tries an in-layer route or an off-pad via layer change, and only retries with the pad-site via admitted when no such route exists (and only on a fab tier that supports via-in-pad). |
 
 Each link gets a bounded per-link deadline, so a single pathological net cannot
@@ -1583,8 +1606,8 @@ expanded by the `# Exit codes:` comment block — both live in `_main_impl`
 |------|---------|
 | 0 | All nets routed (or meets `--min-completion`), DRC clean |
 | 1 | Fatal failure — no nets routed |
-| 2 | Partial routing — below `--min-completion` threshold |
-| 3 | Routing meets threshold **but** the copper is clearance-dirty. Three meanings share this code by design: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); or the post-route board-level HV pairwise-clearance audit under `--voltage-map` found violations the engine's search let through (issue #4588). In every case "routing succeeded, but the resulting copper cannot be trusted". |
+| 2 | Partial routing — below `--min-completion`, or requested nets are placement-blocked |
+| 3 | Post-route validation or processing failed: DRC violations remain; `--auto-fix` rolled back on a connectivity regression (issue #2852); the `--voltage-map` HV pairwise audit found violations (issue #4588); selective zone filling failed, including unavailable native capability; or staged repair could not verify preservation of fixed copper and net membership. This code alone does not establish routing completion or a clearance violation. |
 | 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |

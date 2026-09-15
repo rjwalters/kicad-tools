@@ -47,7 +47,9 @@ def find_kicad_python() -> Path | None:
                 [
                     str(candidate),
                     "-c",
-                    "import pcbnew, wx; assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
+                    "import sys, pcbnew; "
+                    "__import__('wx') if sys.platform != 'linux' else None; "
+                    "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
                 ],
                 capture_output=True,
                 text=True,
