@@ -107,7 +107,7 @@ def test_python_refinement_checks_swept_step():
     x, y = grid.grid_to_world(55, 56)
     route = Route(net=2, net_name="N2")
     route.vias.append(
-        Via(x + grid.resolution / 2, y + 0.474, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "N2")
+        Via(x + grid.resolution / 2, y + 0.574, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "N2")
     )
     grid.mark_route(route)
     assert not router._is_trace_blocked(55, 56, 2, 1, False, radius=2)
@@ -128,3 +128,22 @@ def test_python_overlap_checks_hidden_owner_and_ripup_removes_only_its_geometry(
     grid.unmark_route(overlapping)
     assert grid._route_halo.complete
     assert not router._is_via_blocked(55, 56, 2, 1, False, radius=4)
+
+
+@pytest.mark.parametrize("sharing", [False, True])
+def test_python_trace_halo_preserves_larger_via_clearance(sharing):
+    _, router = _context()
+    router.rules.via_clearance = 0.15
+    assert not router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
+    router.rules.via_clearance = 0.2
+    assert router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
+
+
+def test_python_trace_via_clearance_expands_geometry_lookup_across_bins():
+    from kicad_tools.router.primitives import Segment
+
+    grid, router = _context()
+    _, y = grid.grid_to_world(60, 60)
+    router.rules.via_clearance = 2.0
+    segment = Segment(5.5, y, 5.5, y + 0.1, 0.2, Layer.F_CU, 1)
+    assert not grid._route_halo.clear(segment, router)

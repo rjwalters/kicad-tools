@@ -280,7 +280,7 @@ public:
     bool route_geometry_complete() const;
     bool route_cell_has_geometry(int x, int y, int layer) const;
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
-                                    int partner_net, float partner_clearance) const;
+                                    int partner_net, float partner_clearance, float via_clearance) const;
     bool route_via_geometry_clear(const Via& via, float clearance,
                                   float hole_clearance, float same_net_drill_clearance) const;
     // Broad-phase candidates whose copper bounding boxes share two-mm bins

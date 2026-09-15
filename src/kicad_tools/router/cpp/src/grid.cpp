@@ -876,8 +876,8 @@ inline std::pair<float, float> closest_gap_midpoint(
 }  // namespace
 
 bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
-                                       int partner_net, float partner_clearance) const {
-    const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
+                                       int partner_net, float partner_clearance, float via_clearance) const {
+    const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance_});
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
@@ -903,7 +903,7 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
         const auto cp = closest_point_on_segment(other.x, other.y, s.x1, s.y1, s.x2, s.y2);
         const float gap = std::hypot(other.x - cp.first, other.y - cp.second)
             - (s.width + other.diameter) / 2;
-        if (gap < required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2})
+        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}))
                   - CLEARANCE_EPSILON_MM) return false;
     }
     return true;

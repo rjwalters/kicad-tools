@@ -218,8 +218,8 @@ def test_dynamic_refinement_uses_authored_partner_gap():
     segment.x1, segment.y1 = grid.grid_to_world(55, 56)
     segment.x2, segment.y2 = grid.grid_to_world(54, 57)
     segment.width, segment.layer, segment.net = 0.15, 2, 1
-    assert native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.1)
-    assert not native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.6)
+    assert native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.1, 0.2)
+    assert not native._impl.route_trace_geometry_clear(segment, 0.15, 2, 0.6, 0.2)
     pathfinder._impl.set_search_partner_clearance(2, 0.6)
     assert pathfinder._impl.is_trace_blocked(55, 56, 2, 1, False, 2, 2, 6)
 
@@ -229,13 +229,13 @@ def test_trace_refinement_checks_swept_step_not_only_endpoints():
     native._impl.unmark_via(60, 60, 2, 6)
     native._impl.clear_stored_routes()
     x, y = grid.grid_to_world(55, 56)
-    vx, vy = x + grid.resolution / 2, y + 0.474
+    vx, vy = x + grid.resolution / 2, y + 0.574
     gx, gy = grid.world_to_grid(vx, vy)
     native._impl.add_stored_via(vx, vy, 0.3, 0.6, 2)
     native._impl.mark_via(gx, gy, 2, 6)
     pathfinder._impl.set_search_pair_widths(0.075, 0.3)
     pathfinder._impl.set_search_fill_clearances(0.1, 0.2)
-    # Both endpoints clear the 0.475 mm centerline limit. The interior doesn't.
+    # Both endpoints clear the 0.575 mm centerline limit. The interior doesn't.
     assert not pathfinder._impl.is_trace_blocked(55, 56, 2, 1, False, 2)
     assert not pathfinder._impl.is_trace_blocked(56, 56, 2, 1, False, 2)
     assert pathfinder._impl.is_trace_blocked(56, 56, 2, 1, False, 2, -1, 0, 55, 56)
@@ -391,3 +391,26 @@ def test_stored_geometry_uses_the_python_mark_coordinates_at_half_cells(kind):
     assert not native._impl.route_geometry_complete()
     router._sync_stored_routes(grid)
     assert native._impl.route_geometry_complete()
+
+
+@pytest.mark.parametrize("sharing", [False, True])
+def test_trace_halo_preserves_larger_via_clearance(sharing):
+    # 0.168 mm copper gap clears the trace rule (0.15), but not the via
+    # rule (0.20). Board02 produced this class of segment-to-via violation.
+    _, _, pathfinder = _context()
+    pathfinder._impl.set_search_fill_clearances(0.15, 0.15)
+    assert not pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
+    pathfinder._impl.set_search_fill_clearances(0.15, 0.2)
+    assert pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
+
+
+def test_trace_via_clearance_expands_geometry_lookup_across_bins():
+    from kicad_tools.router import router_cpp
+
+    grid, native, _ = _context()
+    _, y = grid.grid_to_world(60, 60)
+    segment = router_cpp.Segment()
+    segment.x1 = segment.x2 = 5.5
+    segment.y1, segment.y2 = y, y + 0.1
+    segment.width, segment.layer, segment.net = 0.2, 2, 1
+    assert not native._impl.route_trace_geometry_clear(segment, 0.15, -1, -1, 2.0)

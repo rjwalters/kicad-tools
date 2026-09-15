@@ -199,7 +199,8 @@ bool Pathfinder::trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1
     segment.layer = layer; segment.net = net;
     const float clearance = search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance;
     return grid_.route_trace_geometry_clear(segment, clearance,
-                                            physical_partner_net_, physical_partner_clearance_);
+                                            physical_partner_net_, physical_partner_clearance_,
+                                            search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance);
 }
 
 bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {

@@ -160,6 +160,7 @@ class RouteHaloGeometry:
         radius = max(half, getattr(candidate, "drill", 0) / 2)
         margin = radius + max(
             scalar,
+            router.rules.via_clearance,
             partner_clearance or 0,
             widen,
             router.rules.min_hole_to_hole,
@@ -218,6 +219,8 @@ class RouteHaloGeometry:
                         shared_layer,
                     ):
                         required = pair
+            if is_trace and not other_trace:
+                required = max(required, router.rules.via_clearance)
             other_half = other.width / 2 if other_trace else other.diameter / 2
             if distance - half - other_half < required - 1e-4:
                 return False
