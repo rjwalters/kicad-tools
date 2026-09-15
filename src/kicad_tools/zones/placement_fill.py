@@ -18,7 +18,8 @@ from kicad_tools.sexp import parse_string
 def fill_around_fixed_copper(board: Path, protected_nets: frozenset[str], *, python: Path) -> None:
     """Fill eligible zones, publishing only their polygons into original source bytes.
 
-    Native copper shapes model protected filled zones during the fill. The
+    Temporary higher-priority zones model the exact protected fill polygons.
+    Keeping them as zones preserves zone-specific clearance rule matching. The
     temporary board and proxies are discarded; source pad settings, tracks,
     arcs, vias and protected zone definitions are never replaced by native output.
     """

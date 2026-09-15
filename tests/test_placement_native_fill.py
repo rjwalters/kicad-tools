@@ -18,7 +18,7 @@ NATIVE_PYTHON = Path(
 
 
 @pytest.mark.skipif(not NATIVE_PYTHON.exists(), reason="KiCad Python runtime unavailable")
-@pytest.mark.parametrize("project_clearance", [None, 0.8])
+@pytest.mark.parametrize("project_clearance", [None, 0.8, "custom", "zone_pair"])
 def test_native_eligible_fill_clears_and_preserves_fixed_zone(tmp_path, project_clearance):
     zone = """(zone (net 1) (net_name "BAD") (layer "F.Cu")
       (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
@@ -32,7 +32,17 @@ def test_native_eligible_fill_clears_and_preserves_fixed_zone(tmp_path, project_
     source = board_text().rstrip()[:-1] + zone + eligible + ")"
     board = tmp_path / "mixed.kicad_pcb"
     board.write_text(source)
-    if project_clearance is not None:
+    if isinstance(project_clearance, str):
+        condition = (
+            "(condition \"A.Type == 'Zone' && B.Type == 'Zone'\")"
+            if project_clearance == "zone_pair"
+            else ""
+        )
+        board.with_suffix(".kicad_pro").write_text("{}")
+        board.with_suffix(".kicad_dru").write_text(
+            f'(version 1)\n(rule "Wide" {condition} (constraint clearance (min 0.8mm)))\n'
+        )
+    elif project_clearance is not None:
         board.with_suffix(".kicad_pro").write_text(
             json.dumps(
                 {
@@ -59,5 +69,5 @@ def test_native_eligible_fill_clears_and_preserves_fixed_zone(tmp_path, project_
     shape = unary_union([Polygon(p) for p in filled.filled_polygons])
     assert shape.area > 100
     assert shape.intersection(fixed_shape).area == 0
-    assert shape.distance(fixed_shape) >= (project_clearance or 0.3) - 0.001
+    assert shape.distance(fixed_shape) >= (0.8 if project_clearance else 0.3) - 0.001
     assert filled.fill_inflation() == 0
