@@ -1588,16 +1588,29 @@ class Zone:
     def is_stroked_fill(self) -> bool:
         """Whether ``filled_polygons`` are centre-lines rather than final copper.
 
-        Mirrors KiCad's own parser: ``pcb_io_kicad_sexpr_parser.cpp``
-        initialises ``isStrokedFill`` to ``m_requiredVersion < 20250210`` and
-        then overwrites it from an explicit ``(filled_areas_thickness ...)``
-        token, applying the stroke-to-solid conversion only when it ends up
-        true.  So an **absent** token means "stroked" on a legacy file and
-        "already solid" from ``20250210`` onward -- the distinction this
-        method exists to preserve (Issue #5362).
+        Mirrors KiCad's own parser (``pcb_io_kicad_sexpr_parser.cpp``,
+        verified against the KiCad 10.0 source): it initialises
+        ``isStrokedFill = m_requiredVersion < 20250210`` and then, for the
+        token handler, does exactly::
+
+            case T_filled_areas_thickness:
+                if( !parseBool() )
+                    isStrokedFill = false;
+
+        ``parseBool()`` is ``true`` for an explicit ``yes`` and ``false`` for
+        an explicit ``no``.  So the token can only ever **clear** the flag
+        (an explicit ``no`` forces solid) -- there is no branch that *sets*
+        it, so an explicit ``yes`` is a no-op that leaves the version-derived
+        default untouched.  Confirmed against native ``kicad-cli`` 10.0.6: an
+        explicit ``(filled_areas_thickness yes)`` two-fragment zone at
+        ``(version 20250210)`` still reports ``unconnected`` even at a
+        zero-gap shared edge, identically to the token being absent --
+        treating an explicit ``yes`` as force-stroked (as an earlier revision
+        of this method did) would have kept such a board false-clean on a
+        combination #5362's own matrix never exercised (Issue #5382).
         """
-        if self.filled_areas_thickness is not None:
-            return self.filled_areas_thickness
+        if self.filled_areas_thickness is False:
+            return False
         return 0 < self.file_version <= STROKED_FILL_LAST_VERSION
 
     def fill_inflation(self) -> float:
@@ -1619,8 +1632,15 @@ class Zone:
         =========================  ===============  ==================
         absent                      <= 20250209      gap <= min_thickness
         absent                      >= 20250210      never
-        ``no``                      any              never
+        ``yes``                     <= 20250209      gap <= min_thickness
+        ``yes``                     >= 20250210      never
+        ``no``                      any               never
         =========================  ===============  ==================
+
+        An explicit ``yes`` measures identically to the token being absent at
+        every version (see :meth:`is_stroked_fill`) -- confirmed against
+        native ``kicad-cli`` 10.0.6 on the ``>= 20250210`` rows, which an
+        earlier revision of this method got backwards (Issue #5382).
 
         A conductor (pad / via / track) reaching into both fragments bonds
         them in every row; that path is handled by the callers, not here.

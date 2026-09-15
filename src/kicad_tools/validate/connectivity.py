@@ -2095,15 +2095,16 @@ class ConnectivityValidator:
         Two fill fragments **of one zone** are a special case (Issue #5362):
         whether they are continuous depends on the fill *encoding*, not on
         whether their stored outlines happen to touch.  When the fill is
-        stroked (:meth:`Zone.is_stroked_fill` -- an explicit
-        ``(filled_areas_thickness yes)``, or the token absent on a file below
-        KiCad's ``20250210`` version boundary) each outline is the centre-line
-        of ``min_thickness``-wide copper, so real metal reaches
+        stroked (:meth:`Zone.is_stroked_fill` -- the token absent or
+        explicitly ``yes`` on a file below KiCad's ``20250210`` version
+        boundary; an explicit ``yes`` is a parser no-op that never overrides
+        that boundary, Issue #5382) each outline is the centre-line of
+        ``min_thickness``-wide copper, so real metal reaches
         ``min_thickness / 2`` past the stored boundary and fragments within
         ``min_thickness`` are one piece.  When it is solid -- an explicit
-        ``no``, or the token absent from ``20250210`` onward -- the stored
-        outline *is* the copper and native KiCad bonds no two fill outlines of
-        one zone directly.
+        ``no`` at any version, or the token absent/``yes`` from ``20250210``
+        onward -- the stored outline *is* the copper and native KiCad bonds
+        no two fill outlines of one zone directly.
 
         Measured with ``kicad-cli pcb drc`` 10.0.5 on identical saved bytes
         (no ``--refill-zones``, hash unchanged), a pad on each of two
