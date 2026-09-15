@@ -151,8 +151,9 @@ def _primitive_polygon(node, reference: str, pad_number: str):
         raise _refuse(reference, pad_number, "gr_poly needs at least three complete points")
     polygon = Polygon(points)
     if not polygon.is_valid:
-        # KiCad simplifies self-intersecting primitive outlines before use.
-        polygon = polygon.buffer(0)
+        # GEOS repair is not KiCad topology: buffer(0) can discard an entire
+        # bow-tie lobe and incorrectly clear a route through real copper.
+        raise _refuse(reference, pad_number, "invalid or self-intersecting gr_poly")
     if polygon.is_empty or polygon.geom_type not in ("Polygon", "MultiPolygon"):
         raise _refuse(reference, pad_number, "gr_poly encloses no copper")
     return polygon

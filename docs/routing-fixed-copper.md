@@ -67,9 +67,10 @@ The supported surface is deliberately narrow, and everything outside it refuses
 rather than approximating:
 
 - anchors: `rect`, or `circle` with equal size;
-- primitives: filled `gr_poly` with zero stroke width;
+- primitives: valid, simple filled `gr_poly` with zero stroke width;
 - refused: any other primitive (`gr_circle`, `gr_line`, `gr_arc`, `gr_curve`,
-  `gr_rect`), unfilled or unrecognized fills, non-zero stroke widths,
+  `gr_rect`), invalid or self-intersecting polygons, unfilled or unrecognized
+  fills, non-zero stroke widths,
   layer-specific padstacks, non-positive sizes, pads with no copper layer, and a
   copper layer absent from the routing stack.
 

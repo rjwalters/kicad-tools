@@ -292,6 +292,52 @@ def test_unsupported_fixed_geometry_is_refused(tmp_path, pad, message):
     assert path.read_bytes() == original
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_self_intersecting_primitive_refused_without_dropping_native_lobe(tmp_path, reverse):
+    """KiCad 10.0.6 retains both bow-tie lobes (18.08 mm² with anchor).
+
+    buffer(0) kept only one lobe (9.12 mm²) and incorrectly cleared the
+    segment (107.8, 110)..(108.2, 110), inside native copper. Until native
+    topology is represented, refuse this primitive before building obstacles.
+    """
+    points = [(-3, -3), (3, 3), (-3, 3), (3, -3)]
+    if reverse:
+        points.reverse()
+    pts = " ".join(f"(xy {x} {y})" for x, y in points)
+    primitive = f"(gr_poly (pts {pts}) (width 0) (fill yes))"
+    path = write_board(tmp_path, pad=custom_pad(primitives=[primitive]))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match=r"U6\.9: invalid or self-intersecting gr_poly"):
+        load_board(path)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_valid_concave_and_disconnected_primitives_keep_physical_clearance(tmp_path, native):
+    # One valid concave L and one disjoint rectangle: rejecting malformed
+    # outlines must not reject valid concavity or flatten disconnected copper.
+    primitive = (
+        "(gr_poly (pts (xy -3 -3) (xy 3 -3) (xy 3 -2) "
+        "(xy -2 -2) (xy -2 3) (xy -3 3)) (width 0) (fill yes))"
+    )
+    path = write_board(tmp_path, pad=custom_pad(primitives=[primitive, poly((2, 1, 3, 2))]))
+    router, _ = load_board(path, native=native)
+    obstacles = router.grid.fixed_fills
+    assert not obstacles.segment_clear((106, 105.5), (110, 105.5), 0, 0.1, 0.127)
+    assert not obstacles.segment_clear((110.2, 109.5), (110.8, 109.5), 0, 0.1, 0.127)
+    assert obstacles.segment_clear((106.5, 109), (109, 109), 0, 0.1, 0.127)
+    if native:
+        from kicad_tools.router.cpp_backend import CppPathfinder
+
+        assert isinstance(router.router, CppPathfinder)
+        grid = router.grid._cpp_grid
+        assert grid is not None
+        grid = grid._impl
+        assert not grid.fixed_fill_clear(106, 105.5, 110, 105.5, 0, 0.1, 0.127)
+        assert not grid.fixed_fill_clear(110.2, 109.5, 110.8, 109.5, 0, 0.1, 0.127)
+        assert grid.fixed_fill_clear(106.5, 109, 109, 109, 0, 0.1, 0.127)
+
+
 @pytest.mark.parametrize("width", [-0.2, "nan", "inf", "-inf"])
 def test_nonzero_or_nonfinite_primitive_stroke_is_refused(tmp_path, width):
     path = write_board(tmp_path, pad=custom_pad(primitives=(poly(UPPER_WALL, width=width),)))
