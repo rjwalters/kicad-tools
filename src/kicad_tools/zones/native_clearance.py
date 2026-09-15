@@ -58,6 +58,34 @@ def write_native_zone_clearance_rules(pcb_path: Path) -> None:
             targets[key] = max(targets.get(key, 0.0), clearance + thickness / 2)
 
     rules = []
+
+    def preserve(value: object) -> None:
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError("Existing clearance must be a finite nonnegative mm value")
+        if any(value > target for target in targets.values()):
+            raise ValueError("Native zone clearance would override a stronger existing contract")
+
+    project_path = pcb_path.with_suffix(".kicad_pro")
+    if not project_path.is_file():
+        raise ValueError("Native zone clearance requires a saved project with explicit net classes")
+    project = json.loads(project_path.read_text())
+    classes = project.get("net_settings", {}).get("classes", [])
+    if not any(item.get("name") == "Default" and "clearance" in item for item in classes):
+        raise ValueError("Native zone clearance requires an explicit Default net-class clearance")
+    for item in classes:
+        if "clearance" in item:
+            preserve(item["clearance"])
+    settings = project.get("board", {}).get("design_settings", {})
+    if "min_clearance" in settings.get("rules", {}):
+        preserve(settings["rules"]["min_clearance"])
+    if "clearance_min" in settings.get("defaults", {}):
+        preserve(settings["defaults"]["clearance_min"])
+    for footprint in doc.find_all("footprint"):
+        for item in [footprint, *footprint.find_all("pad")]:
+            local = item.find("clearance")
+            if local is not None:
+                preserve(local.get_float(0))
+
     for (layer, net), distance in sorted(targets.items()):
         condition = (
             f"(A.Type == 'Zone' && A.NetName == '{net}') || "
@@ -90,7 +118,6 @@ def write_native_zone_clearance_rules(pcb_path: Path) -> None:
         if token is None or not token.endswith("mm"):
             raise ValueError("Existing native clearance must have an explicit mm minimum")
         value = float(token[:-2])
-        if not math.isfinite(value) or any(value > target for target in targets.values()):
-            raise ValueError("Native zone clearance would override a stronger existing rule")
+        preserve(value)
     block = _BEGIN + "".join(rules) + _END
     path.write_text(previous.rstrip() + "\n\n" + block)

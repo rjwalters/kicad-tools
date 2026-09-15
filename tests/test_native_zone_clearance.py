@@ -65,3 +65,45 @@ def test_native_clearance_never_overrides_a_stronger_rule(tmp_path):
     with pytest.raises(ValueError, match="stronger"):
         write_native_zone_clearance_rules(pcb)
     assert dru.read_text() == original
+
+
+@pytest.fixture(autouse=True)
+def explicit_project(tmp_path):
+    import json
+
+    (tmp_path / "board.kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]},
+            }
+        )
+    )
+
+
+def test_native_clearance_preserves_stronger_net_class(tmp_path):
+    import json
+
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD)
+    pcb.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "net_settings": {"classes": [{"name": "Default", "clearance": 0.6}]},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="stronger"):
+        write_native_zone_clearance_rules(pcb)
+    assert not pcb.with_suffix(".kicad_dru").exists()
+
+
+def test_native_clearance_preserves_stronger_pad_clearance(tmp_path):
+    from kicad_tools.zones.native_clearance import write_native_zone_clearance_rules
+
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text(BOARD[:-1] + '\n(footprint "Probe" (pad "1" smd rect (clearance 0.6))))')
+    with pytest.raises(ValueError, match="stronger"):
+        write_native_zone_clearance_rules(pcb)
+    assert not pcb.with_suffix(".kicad_dru").exists()
