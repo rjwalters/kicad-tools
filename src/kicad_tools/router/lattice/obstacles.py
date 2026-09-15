@@ -706,20 +706,15 @@ class CommittedCopper:
                         return False
         return True
 
-    def via_clear(self, point: Pt, net: int) -> bool:
+    def via_clear(self, point: Pt, net: int, clearance: float | None = None) -> bool:
         """True if a through-via at ``point`` clears committed copper (ALL
         layers) and committed vias (cross-net body gap, same-net hole gap).
 
-        The via-to-trace gap honors each stored segment's TRUE half-width
-        and class clearance (#4271): ``via_radius + stored_half +
-        max(global_clearance, stored_clearance)``.
-
-        Issue #4597 (one-sided): the cross-net via-to-via gap also grows to the
-        STORED via's class clearance.  This method takes no querying-net
-        clearance argument at all, so the querying via's own class clearance is
-        still not applied to via-to-via pairs -- a pre-existing #4271 residual
-        that is deliberately NOT widened here.
+        The via-to-trace and cross-net via-to-via gaps use the maximum of
+        the querying class, stored class and board-global clearances. Same-net
+        vias retain their drill-spacing floor regardless of class clearance.
         """
+        own_clr = self.clearance if clearance is None else max(self.clearance, clearance)
         # Issue #4602: a through-via is copper on EVERY layer, so its pair
         # requirement against foreign copper applies on all of them.  The
         # query window inflates by the net's pairwise reach (see ``seg_clear``).
@@ -732,23 +727,27 @@ class CommittedCopper:
             point,
             tuple(range(self.num_layers)),
             self.via_radius,
-            self.fixed_fill_via_clearance,
+            (
+                self.fixed_fill_via_clearance
+                if clearance is None
+                else max(self.fixed_fill_via_clearance, own_clr)
+            ),
         ):
             return False
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
-        pad = self.via_radius + self.clearance + self.trace_half + 2.0 + pw_reach
+        pad = self.via_radius + own_clr + self.trace_half + 2.0 + pw_reach
         for layer in range(self.num_layers):
             for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
                 if cnet == net:
                     continue
-                gap = self.via_radius + hw + max(self.clearance, iclr)
+                gap = self.via_radius + hw + max(own_clr, iclr)
                 d_cc = seg_pt_dist(c, d, point)
                 if d_cc < gap - 1e-9:
                     return False
                 if pw is not None:
                     req = pw.required(net, cnet)
-                    if req > max(self.clearance, iclr):
+                    if req > max(own_clr, iclr):
                         if d_cc < self.via_radius + hw + req - 1e-9 and not pw.exempt_seg_pt(
                             c, d, point, net, cnet, layer
                         ):
@@ -762,12 +761,15 @@ class CommittedCopper:
             # 0.5mm floor (issue #4291: 16 hole_to_hole DRC warnings on the
             # softstart P4 run of record).
             if vnet != net:
-                # ``2 * via_radius + vclr`` re-derives the copper gap at the
-                # STORED via's class clearance (``via_via_gap`` itself is
-                # ``via_diameter + global_clearance``), so a preserved HV via
-                # keeps its class gap.  ``max`` never shrinks the gap: a via
-                # stored at the global floor is byte-identical (#4597).
-                gap = max(self.via_via_gap, 2.0 * self.via_radius + vclr, self.same_net_via_gap)
+                # Derive the copper gap from the larger of the querying
+                # and stored class clearances. Keep
+                # the original global copper gap and drill floor as lower
+                # bounds, including when either class is unspecified.
+                gap = max(
+                    self.via_via_gap,
+                    2.0 * self.via_radius + max(own_clr, vclr),
+                    self.same_net_via_gap,
+                )
             else:
                 gap = self.same_net_via_gap
             d_vv = dist(point, vpt)
