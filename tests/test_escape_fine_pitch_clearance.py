@@ -92,7 +92,7 @@ class TestAutoDeriveClearance:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
         package_info = escape_router.analyze_package(pads)
 
@@ -127,7 +127,7 @@ class TestAutoDeriveClearance:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
@@ -153,7 +153,7 @@ class TestAutoDeriveClearance:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
         package_info = escape_router.analyze_package(pads)
 
@@ -182,7 +182,7 @@ class TestAutoDeriveClearance:
             origin_y=-10.0,
         )
 
-        escape_router_strict = EscapeRouter(grid_strict, rules_strict)
+        escape_router_strict = EscapeRouter(grid_strict, rules_strict, component_holes=())
         escapes_strict = escape_router_strict.generate_escapes(package_info)
 
         # With 0.25mm clearance and 0.65mm pitch, escapes should still work
@@ -217,7 +217,7 @@ class TestNeighborCheckAllPads:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         # Create a row of pads where a lateral escape from pad[0] might
         # extend far enough to reach pad[2]
@@ -291,7 +291,7 @@ class TestZeroEscapeWarning:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
         package_info = escape_router.analyze_package(pads)
 

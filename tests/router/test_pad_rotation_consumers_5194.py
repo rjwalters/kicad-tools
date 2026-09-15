@@ -259,6 +259,8 @@ def test_lateral_search_budget_reaches_rotated_long_axis(monkeypatch):
 
     router = object.__new__(EscapeRouter)
     router.via_in_pad_supported = True
+    # This isolated SMT-only fixture has a verified empty physical-hole census.
+    router._component_holes = ()
     router._mfr_limits = None
     router.rules = DesignRules(via_diameter=0.6, via_drill=0.3)
     probed = []

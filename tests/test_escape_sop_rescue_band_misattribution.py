@@ -104,7 +104,7 @@ def _make_router() -> EscapeRouter:
         origin_x=-15.0,
         origin_y=-15.0,
     )
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 class TestRescueBandNotAttempted:
@@ -203,7 +203,7 @@ class TestGenuineClearanceFailureStillWarns:
             origin_y=-10.0,
         )
 
-        router = EscapeRouter(grid, rules)
+        router = EscapeRouter(grid, rules, component_holes=())
 
         # SSOP-20 fixture: two rows of 10 at 0.65mm pitch -> classified SSOP.
         pins_per_row = 10

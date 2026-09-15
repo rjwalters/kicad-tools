@@ -1,7 +1,7 @@
 """A foreign-pad repair must not trade its violation for new copper shorts."""
 
 from kicad_tools.router.core import Autorouter
-from kicad_tools.router.drc_nudge import drc_verify_and_nudge
+from kicad_tools.router.drc_nudge import _via_pad_contacts, drc_verify_and_nudge
 from kicad_tools.router.io import validate_routes
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment, Via
@@ -38,15 +38,18 @@ def _pad(router, ref, x, y, size, net):
     )
 
 
-def test_foreign_pad_destination_is_rejected_without_mutation():
+def test_foreign_pad_destination_uses_clear_alternate():
     router, via = _scene()
     _pad(router, "B", 3.8, 5.0, 0.2, 3)
     before = validate_routes(router)
     assert {v.obstacle_net for v in before} == {2}
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (4.5, 5.0)
-    assert validate_routes(router) == before
-    assert result.skipped.get("via_pad_destination_blocked") == 1
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
+    assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
 
 
 def test_legal_move_preserves_unrelated_existing_violation():
@@ -93,19 +96,22 @@ def test_snapped_chain_short_rolls_back_via_and_all_endpoints():
     assert result.skipped.get("via_pad_destination_blocked") == 1
 
 
-def test_destination_foreign_via_is_rejected():
+def test_destination_avoids_foreign_via():
     router, via = _scene()
     other = Via(x=3.7, y=5.0, diameter=0.2, drill=0.1, layers=(Layer.F_CU, Layer.B_CU), net=3)
     router.routes.append(Route(net=3, net_name="OTHER", vias=[other]))
     before = validate_routes(router)
     assert {v.obstacle_type for v in before} == {"pad"}
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (4.5, 5.0)
-    assert validate_routes(router) == before
-    assert result.skipped.get("via_pad_destination_blocked") == 1
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
+    assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
 
 
-def test_destination_foreign_track_is_rejected():
+def test_destination_avoids_foreign_track():
     router, via = _scene()
     router.routes.append(
         Route(
@@ -116,10 +122,13 @@ def test_destination_foreign_track_is_rejected():
     )
     before = validate_routes(router)
     assert {v.obstacle_type for v in before} == {"pad"}
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (4.5, 5.0)
-    assert validate_routes(router) == before
-    assert result.skipped.get("via_pad_destination_blocked") == 1
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
+    assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
 
 
 def test_same_net_hole_spacing_is_not_exempt():
@@ -127,18 +136,29 @@ def test_same_net_hole_spacing_is_not_exempt():
     router.rules.min_drill_clearance = 0.3
     other = Via(x=3.5, y=5.0, diameter=0.6, drill=0.3, layers=(Layer.F_CU, Layer.B_CU), net=1)
     router.routes[0].vias.append(other)
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (4.5, 5.0)
-    assert result.skipped.get("via_pad_destination_blocked") == 1
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
+    assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
+    assert ((via.x - other.x) ** 2 + (via.y - other.y) ** 2) ** 0.5 - (
+        via.drill + other.drill
+    ) / 2 >= 0.3
 
 
-def test_move_into_unsupported_same_net_smd_pad_is_rejected():
+def test_destination_avoids_unsupported_same_net_smd_pad():
     router, via = _scene()
     router.rules.manufacturer = "jlcpcb"
     _pad(router, "B", 3.98, 5.0, 0.4, 1)
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (4.5, 5.0)
-    assert result.skipped.get("via_pad_destination_blocked") == 1
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
+    assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
 
 
 def test_move_cannot_cross_board_edge():
@@ -245,9 +265,13 @@ def test_legal_move_retains_off_center_pad_contact():
             }
         ],
     )
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (3.98, 5.0)
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
     assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
 
 
 def test_residual_rotation_does_not_create_false_rectangular_contact():
@@ -270,9 +294,13 @@ def test_residual_rotation_does_not_create_false_rectangular_contact():
     # Current primitives have no rotation field. Exercise a richer caller's
     # optional residual angle without changing the router metadata model.
     router.pads[("B", "1")].rotation = 45.0
+    contacts = _via_pad_contacts(via, router)
     result = drc_verify_and_nudge(router, max_passes=1)
-    assert (via.x, via.y) == (3.98, 5.0)
+    # A safe alternate is permitted; the original blocked destination is not.
+    assert (via.x, via.y) != (4.5, 5.0)
+    assert validate_routes(router) == []
     assert result.remaining_violations == 0
+    assert not contacts - _via_pad_contacts(via, router)
 
 
 def test_rotated_pad_contact_disappears_after_via_leaves_actual_copper():

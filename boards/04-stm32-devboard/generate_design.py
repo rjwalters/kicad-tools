@@ -1145,87 +1145,15 @@ def create_stm32_pcb(output_dir: Path) -> Path:
 
 
 def route_pcb(input_path: Path, output_path: Path) -> bool:
-    """
-    Route the PCB using the `kct route` CLI.
+    """Route the reviewed two-layer, paid mechanical-drilling construction.
 
-    Uses the empirically-verified flag recipe that PR #2982 (closes #2974)
-    confirmed reaches 9/9 signal nets across 5/5 runs (3 default seeds plus
-    seed 1 and seed 42): --mfr jlcpcb-tier1, --auto-fix, --auto-layers,
-    --auto-mfr-tier, --placement-feedback, --timeout 600. The CLI invocation
-    (as opposed to the in-script router) picks up post-#2824/#2825/#2826/
-    #2829/#2830 router fixes that are required to escape the LQFP-48 west
-    edge (OSC_IN/OSC_OUT/NRST). The --auto-mfr-tier flag is required to
-    close the NRST gap on the default recipe (issue #2988).
-
-    Note (Issue #3266, 2026-06-06): The post-#3128 clearance-tightening
-    cluster (#3225/#3227 foreign-pad clearance, #3232/#3248 Chebyshev ->
-    Euclidean disc kernel, #3250 sub-cell pad-metal margin) correctly
-    closes a ~0.125mm pad-clearance corridor between U2.7 (NRST) and
-    U2.8 (GND) that the prior committed PCB exploited.  Re-running this
-    recipe now lands 8/9 signal nets routed (NRST stranded at J1.5).
-    The dropped net is the U2.7 -> J1.5 reset path; the router
-    correctly refuses to thread through the U2.7/U2.8 channel under
-    the tightened clearance kernel.  Per the issue analysis the prior
-    committed PCB was a marginal-clearance artifact (~0.125mm vs
-    jlcpcb-tier1 minimum 0.127mm).  The CI gate accepts the new state
-    as advisory connectivity (see ``.github/routed-drc-tolerance.yml``;
-    floor 1 -> 0 since the new PCB has 0 blocking errors).  Functional
-    implication: SWD hardware reset is unavailable; software-mediated
-    reset through the SWD probe is unaffected.  Recovery options
-    documented in the tolerance YAML.
-
-    Note (Issue #3765, 2026-06-17): this recipe's schematic<->PCB net
-    drift was reconciled in #3765 -- ``create_stm32_schematic`` now
-    matches the PCB's canonical 12-net ``NETS`` table pad-for-pad
-    (``+3.3V`` rail spelling, named ``BOOT0``/``LED_K`` nets, and the
-    PCB-order U1/J1 pinouts), so ``compare_netlists(sch, routed_pcb)`` is
-    clean (0 mismatches).
-
-    On the routing leg: the **committed**
-    ``output/stm32_devboard_routed.kicad_pcb`` is a known-good pinned
-    artifact that **routes NRST cleanly** (NRST 2/2 connected; U2.7 ->
-    J1.5 reset path landed) with **0 blocking DRC errors** -- only the
-    GND U2.23 LQFP-48 corner-pad stitch residual remains as a non-blocking
-    ``connectivity`` advisory (the documented #2834/#3033 OSC_OUT-escape
-    case).  #3765 deliberately **preserves this committed routed PCB**
-    rather than re-routing, because a fresh end-to-end regen on current
-    main hits a *separate* regression -- the zone filler emits ``+3.3V`` /
-    ``+5V`` F.Cu pours that are not cleared around the router's GND
-    tracks/vias, producing ~30 ``clearance_segment_zone`` /
-    ``clearance_via_zone`` shorts (reproducible from pristine main with
-    the PCB net table unchanged, i.e. independent of the #3765 schematic
-    fix).  That zone-fill regression is tracked in **#3773**; until it
-    lands, the committed routed PCB (net-consistent with the reconciled
-    schematic, NRST routed, 0 blocking) is the artifact board-04 ships.
-    ``blocking_errors`` stays 0 and the tolerance floor stays 0; no
-    clearance violation is committed.
-
-    Issue #3039: pins ``--seed 42`` so the routed PCB is byte-identical
-    across runs.  The board's ``--seed 42`` reference run is the
-    regression baseline (9/9 signal nets, ~6 DRC errors).
-
-    Note on ``--strict-in-pad-clearance``: PR #3063 added the lateral
-    via-escape recovery (see ``_try_lateral_via_escape`` in
-    ``src/kicad_tools/router/escape.py``) plus an ``_can_place_via``
-    grid-origin bug fix.  Issue #3073 confirmed that this board is
-    geometrically the wrong customer for strict mode: at LQFP-48 0.5 mm
-    pitch with 0.6 mm vias, the SMALLEST lateral offset that satisfies
-    same-row neighbour-pad clearance is ~1.05 mm -- past the adjacent
-    pin row's escape lane.  The lateral via inevitably blocks the
-    neighbour pin's escape path, dropping NRST in negotiated rip-up.
-    PR for #3073 narrows the helper's surface-stub width to the
-    manufacturer-minimum trace when the dispatcher-supplied width
-    would violate inter-pad channel clearance (fixes the pad-segment
-    DRC errors), but does not enable strict mode on this board:
-    converging the post-lateral routing requires negotiated-loop
-    re-validation against foreign vias (tracked as issue #3077, a
-    #3002 analogue at the main-router commit-time gate).  A different
-    in-tree customer (e.g. a board with QFN-32 0.65 mm or LQFP-32
-    0.8 mm pitch) is the right next step once #3077 lands.  The
-    helper itself is exercised by the synthetic-fixture tests in
-    ``tests/test_escape_lateral_recovery.py``.
-
-    Returns True if `kct route` exits successfully (>= --min-completion).
+    Use an explicit grid to execute the dense-package escape pre-pass.
+    Keep the physical layer contract and the selected 0.15 mm through-drill
+    / 0.30 mm land instead of escalating to an unrelated four-layer POFV
+    process. The generic CLI profile does not encode this paid drilling
+    option: its DRC-only exit is accepted only after independent signal
+    connectivity and the selected process's DRC checks pass. The later
+    manufacturing step still validates all SMT-land gaps and order options.
     """
     print("\n" + "=" * 60)
     print("Routing PCB (kct route)...")
@@ -1242,18 +1170,17 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--mfr",
         "jlcpcb-tier1",
         "--auto-fix",
-        "--auto-layers",
-        "--auto-mfr-tier",
+        "--no-auto-layers",
+        "--layers",
+        "2",
+        "--grid",
+        "0.05",
+        "--via-drill",
+        "0.15",
+        "--via-diameter",
+        "0.30",
         "--placement-feedback",
-        # Issue #3118: enable the micro-via in-pad fallback so the OSC_OUT
-        # cluster at U2.5/U2.7 (LQFP-48 0.5 mm pitch, where the standard
-        # 0.6 mm jlcpcb-tier1 via cannot fit) drops a 0.3 / 0.15 micro-via
-        # instead of committing the clearance violation.  jlcpcb-tier1's
-        # Capability+ process supports the 0.3 / 0.15 micro-via natively
-        # (the same tier that already supplies via-in-pad for the escape
-        # router); the emitted via is tagged is_micro_via so the
-        # dimensions DRC exemption applies.
-        "--micro-via-in-pad-fallback",
+        "--no-cache",
         # Issue #3039: pin --seed 42 so the routed PCB is byte-identical
         # across runs and PR #3063 measurements are reproducible.
         "--seed",
@@ -1288,6 +1215,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # Echo router output (last ~80 lines is plenty for the summary)
         for line in result.stdout.strip().split("\n"):
             print(f"   {line}")
+    if result.returncode == 3 and paid_process_route_is_complete(output_path):
+        print("\n   SUCCESS: signal routing passes the selected paid drilling rules")
+        return True
     if result.returncode != 0:
         if result.stderr:
             print(f"\n   Router stderr:\n{result.stderr}")
@@ -1296,6 +1226,35 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
 
     print("\n   SUCCESS: kct route completed")
     return True
+
+
+def paid_process_route_is_complete(pcb_path: Path) -> bool:
+    """Verify a generic-profile DRC exit against this board's actual process."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    if not pcb_path.is_file():
+        return False
+    process = runpy.run_path(str(Path(__file__).with_name("manufacturing_process.py")))
+    if process["physical_fingerprint"](pcb_path) != process["PHYSICAL_SHA256"]:
+        return False
+    pcb = PCB.load(pcb_path)
+    groups: dict[str, set[str]] = {}
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if pad.net_name:
+                groups.setdefault(pad.net_name, set()).add(f"{footprint.reference}.{pad.number}")
+    partition = ConnectivityValidator(pcb_path).extract_pad_partition()
+    # These three pours are deliberately stitched/filled after signal routing.
+    # They remain subject to the complete final copper-LVS and native gates.
+    for net, pads in groups.items():
+        if net not in {"GND", "+3.3V", "+5V"} and len(pads) > 1:
+            if partition.count(frozenset(pads)) != 1:
+                return False
+    checker = DRCChecker(pcb, "jlcpcb-tier1", layers=2, warn_on_inactive_skew_rules=False)
+    checker.design_rules = process["process_rules"]()
+    return not any(v.severity == "error" for v in checker.check_all().violations)
 
 
 # --- OSC_OUT escape-stub short fix (issue #3797) ---------------------------
@@ -1369,9 +1328,10 @@ def fix_osc_escape(routed_path: Path) -> bool:
 
     The edit is exact-match on deterministic pad-centre coordinates, so it is
     idempotent: a second pass finds no offending hop and no-ops.  It asserts the
-    offending hop is present (unless already re-aimed) so a future router change
-    that relocates the OSC_OUT escape fails loudly instead of silently leaving
-    the short.
+    offending hop is present unless already re-aimed or both oscillator
+    circuits are physically connected to exactly their expected terminals.
+    A lateral escape outside the pad can therefore pass unchanged; missing
+    connections and connections to foreign terminals still fail closed.
 
     Returns True on success.
     """
@@ -1402,6 +1362,25 @@ def fix_osc_escape(routed_path: Path) -> bool:
         return True
 
     count = text.count(offending_hop)
+    if count == 0:
+        # Process-aware routing may escape laterally to a via outside the
+        # SMT pad, so the historical in-pad short needs no surgery. Prove
+        # both complete oscillator circuits using physical copper, not net
+        # labels or the mere absence of the old offending hop. Exact pad
+        # sets also reject a connection to any foreign-net terminal. Power
+        # pours are still unfilled at this stage and are checked downstream.
+        from kicad_tools.validate.connectivity import ConnectivityValidator
+
+        expected = (
+            frozenset({"U2.5", "Y1.1", "C10.1"}),
+            frozenset({"U2.6", "Y1.2", "C11.1"}),
+        )
+        partition = ConnectivityValidator(routed_path).extract_pad_partition()
+        if all(partition.count(component) == 1 for component in expected):
+            print("   Both oscillator circuits already connected and isolated (no-op)")
+            print("\n   SUCCESS: fix_osc_escape completed")
+            return True
+
     assert count == 1, (
         f"fix_osc_escape: expected exactly 1 OSC_OUT escape hop "
         f"({via_x},{via_y})->({pad_x},{pad_y}); found {count}. "

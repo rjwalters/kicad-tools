@@ -139,6 +139,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exits 1 before any routing work); an auto-discovered one degrades to a
   warning; the authored input file is never overwritten (a collision diverts
   the derived sidecar to `current_paths.effective.json`, the #4428 rule).
+- **Via-in-pad process-eligibility model** (#5009) — `via_in_pad_supported`
+  on `MfrLimits`/`DesignRules` was a bare capability boolean that silenced
+  the entire `via_in_pad` DRC rule without validating drill range, layer
+  count, annular ring, filled-and-capped construction, or minimum
+  component-hole distance against a manufacturer's real published process
+  (e.g. JLCPCB's Plated-Over Filled Via/POFV requires 4+ copper layers and
+  a 0.2-0.5 mm drill, even though Capability Plus's `via_in_pad_supported`
+  flag is `True` on its 2-layer configs too). Adds
+  `kicad_tools.manufacturers.fabrication_process.FabricationProcess`, a
+  specific orderable process (layer-count floor, drill range, annular-ring
+  floor, `requires_filled_and_capped`, minimum component-hole distance,
+  source citation) attached to a manufacturer profile config via a new
+  `DesignRules.via_in_pad_process_id` field (`jlcpcb-tier1`'s 4+ layer
+  configs and every `pcbway` config now carry one; `jlcpcb-tier1`'s
+  2-layer configs deliberately do not). `ViaInPadRule` now fails closed
+  in three distinct cases: no capability (`via_in_pad`, original #2635
+  behavior), capability present but no eligible process declared
+  (`via_in_pad_process_missing`), and a declared process whose
+  requirements the via's actual geometry does not meet
+  (`via_in_pad_process_ineligible`) — a bare capability flag with no
+  process selection no longer suppresses a finding. `kct check` and
+  `kct export`'s manufacturing bundle (`manifest.json` + `README.txt`)
+  now bind the resolved process's machine-readable requirements and
+  human-derived ordering instructions into their output when a board's
+  layer/copper configuration carries one.
 - **`kct analyze component-stress` — operating-state MOSFET VDS/VGS gate**
   (#5039) — a new advisory analyzer
   (`kicad_tools.analysis.component_stress.ComponentStressAnalyzer`) that asks
@@ -1426,6 +1451,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frame), and all in-pad nodes are shorted through the pad. This is a *false*
   fail-closed being removed, not a relaxation — copper outside the pad extent
   still never attaches, so genuinely moved/removed pads still fail closed.
+- **`kct route` left in-pad vias on boards whose fab tier has no orderable
+  via-in-pad process** (#5009) — the router's same-net via-in-pad repair
+  sweep (`router/drc_nudge.py::_scan_and_repair_via_in_pad`, #3112) no-oped
+  whenever `MfrLimits.via_in_pad_supported` was `True`, so a 2-layer board
+  routed at `jlcpcb-tier1` kept escape vias drilled into SMT lands even
+  though JLCPCB's POFV process requires 4+ layers and cannot actually build
+  them. The sweep is now gated on process *eligibility* (the same predicate
+  the `via_in_pad` DRC rule applies) rather than the bare capability flag,
+  and its detector was corrected from full drill *containment* to the
+  drill/land *overlap* test the DRC rule uses — a drill that merely clips a
+  land edge is still a via-in-pad defect, and board 02's offending vias
+  were of exactly that shape, so the old predicate matched none of them.
+  The relocation itself is validated against the rest of the board before
+  it is committed: a candidate exit that would put the via inside another
+  land, within copper clearance of a foreign-net pad/via/track, or closer
+  than the fab hole-to-hole floor to any other drill is rejected, and the
+  nearest *surviving* candidate (cardinal, edge-slide or 45° corner escape)
+  is taken instead — with the move refused outright, and the original
+  `via_in_pad` finding left for DRC, when no legal destination exists.
+  Without that gate the exit was chosen purely to minimise displacement
+  from the offending pad and committed unchecked, which on board 02 put a
+  relocated via 0.073 mm from a foreign-net track (0.127 mm required) and
+  cost the board a net (11-of-12 reach, 2 `kicad-cli pcb drc` errors); an
+  0805 land pair likewise put the exit 0.035 mm from its neighbouring land
+  with 0.185 mm hole-to-hole against a 0.250 mm floor. The sweep also
+  visits vias in a canonical `(net, x, y)` order rather than
+  negotiated-routing order, so the relocations (each of which becomes an
+  obstacle for the next) are a pure function of the pre-nudge geometry
+  rather than of `--seed`. Board 02 (`charlieplex_3x3`) routes 0-error at
+  `jlcpcb-tier1` with unchanged 22 routes / 24 vias / 8-of-8 reach (total
+  length re-baselined 327.93 → 329.23 mm for the relocated vias), and its
+  full recipe regeneration at the plain `jlcpcb` profile is clean under
+  the native `kicad-cli pcb drc` gate: 12/12 nets, 0 violations, 0
+  unconnected items, label- and copper-LVS PASS.
+- **The escape router's opportunistic in-pad via placement still read only
+  the bare `MfrLimits.via_in_pad_supported` capability boolean, out of step
+  with the DRC-side process-eligibility model #5009 landed** (#5201) — the
+  auto-fix repair sweep (`drc_nudge.py::_scan_and_repair_via_in_pad`)
+  already resolved the board's actual layer count against the selected
+  fabrication process, but `EscapeRouter` (`router/escape.py`) still
+  routed a 2-layer `jlcpcb-tier1` board exactly like a 4-layer one and
+  deliberately drilled vias dead-centre into SMT lands that tier's POFV
+  process cannot legalize below 4 layers — the router placed the very
+  copper the next `kct check` pass would reject. Both decision points now
+  share `kicad_tools.router.via_in_pad_eligibility`
+  (`resolve_process`/`via_geometry_eligible`), which delegates to the same
+  `FabricationProcess.eligibility_reasons` predicate
+  `ViaInPadRule` applies, so router and validator can never disagree about
+  which vias are legal: `resolve_process` fails closed on any unresolved
+  manufacturer, profile, or board layer count (never silently eligible),
+  and `via_geometry_eligible` additionally checks each *specific* candidate
+  via's drill/annular-ring/component-hole geometry against the resolved
+  process's published envelope — board-level eligibility no longer
+  certifies every via that happens to sit on a pad. When no eligible
+  process is selected the escape router now falls back to its pre-existing
+  non-in-pad strategy for that pad/pitch (the pin stays deferred to the
+  main router) instead of placing an unmanufacturable via, and the repair
+  sweep individually re-validates every DETECTED in-pad via against the
+  same resolved process rather than trusting a board-level "process
+  exists" gate alone. Board 02 (`charlieplex_3x3`, 2-layer, `jlcpcb-tier1`)
+  stays DRC-clean with its `MAX_DRC_ERRORS` ceiling unchanged at 0 and no
+  new grandfathered allowance; boards 03/04 (both 4-layer) and the
+  fine-pitch SSOP/TSSOP in-pad escape regression fixtures (#2605) are
+  unaffected.
 - **Router emitted partial-stack via spans for ordinary multilayer
   transitions, without an HDI process ever being selected** (#5013,
   router counterpart of stitch issue #5001) — `CppPathfinder._convert_result_to_route`

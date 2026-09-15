@@ -52,7 +52,7 @@ def _make_router() -> EscapeRouter:
         origin_x=-20.0,
         origin_y=-20.0,
     )
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 def _make_tqfp32_pads(

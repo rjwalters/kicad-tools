@@ -174,3 +174,139 @@ def test_obsolete_back_escape_trim_requires_free_endpoint(process, repaired, bon
         for v in DanglingCopperRule().check(after, process.process_rules()).violations
     )
     assert process.trim_obsolete_nrst_tail(repaired) == 0
+
+
+def test_c10_drill_repair_keeps_both_layer_connections(process, repaired):
+    import math
+
+    from kicad_tools.sexp import parse_string
+
+    doc = parse_file(repaired)
+    doc.add(
+        parse_string(
+            '(via (at 136.45 82.70) (size 0.6) (drill 0.15) (layers "F.Cu" "B.Cu") '
+            '(tenting (front yes) (back yes)) (net "OSC_IN"))'
+        )
+    )
+    for layer in ("F.Cu", "B.Cu"):
+        doc.add(
+            parse_string(
+                f"(segment (start 136.45 82.70) (end 136.45 83.0) "
+                f'(width 0.2) (layer "{layer}") (net "OSC_IN"))'
+            )
+        )
+    repaired.write_text(serialize_sexp(doc))
+    with pytest.raises(ValueError, match="Via drill too close"):
+        process.validate_process(repaired, check_native=False)
+    assert process.repair(repaired) == 1
+    pcb = process.validate_process(repaired, check_native=False)
+    tails = [
+        s
+        for s in pcb.segments
+        if math.dist(s.start, (17.95, 15.20)) < 1e-6 and math.dist(s.end, (17.95, 15.15)) < 1e-6
+    ]
+    assert {s.layer for s in tails} == {"F.Cu", "B.Cu"}
+    assert process.repair(repaired) == 0
+
+
+@pytest.mark.parametrize("alternative", [False, True])
+def test_ground_stitch_trim_preserves_required_connections(process, tmp_path, alternative):
+    # Exact bad stitch geometry, with two named ground terminals. Removing
+    # the stitch is permitted only when an independent copper path exists.
+    text = """(kicad_pcb (version 20240108) (generator "test")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal)) (net 1 "GND")
+      (footprint "test" (layer "F.Cu") (at 33.25 26.16)
+        (property "Reference" "U2")
+        (pad "23" smd circle (at 0 0) (size 0.2 0.2) (layers "F.Cu") (net 1 "GND")))
+      (footprint "test" (layer "B.Cu") (at 32.01 26.16)
+        (property "Reference" "J1")
+        (pad "1" smd circle (at 0 0) (size 0.2 0.2) (layers "B.Cu") (net 1 "GND")))
+      (via (at 32.01 26.16) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+        (net 1 "GND") (uuid "10000000-0000-4000-8000-000000000001"))
+      (segment (start 33.25 26.16) (end 32.01 26.16) (width 0.2) (layer "F.Cu")
+        (net 1 "GND") (uuid "10000000-0000-4000-8000-000000000002"))
+    """
+    if alternative:
+        text += """
+          (via (at 33.25 27.5) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu")
+            (net 1 "GND") (uuid "10000000-0000-4000-8000-000000000003"))
+          (segment (start 33.25 26.16) (end 33.25 27.5) (width 0.2)
+            (layer "F.Cu") (net 1 "GND"))
+          (segment (start 33.25 27.5) (end 32.01 26.16) (width 0.2)
+            (layer "B.Cu") (net 1 "GND"))
+        """
+    path = tmp_path / "ground.kicad_pcb"
+    path.write_text(text + ")")
+    before = path.read_bytes()
+    if alternative:
+        assert process.trim_redundant_gnd_stitch(path) == 1
+        assert process.trim_redundant_gnd_stitch(path) == 0
+        assert "10000000-0000-4000-8000-000000000003" in path.read_text()
+    else:
+        with pytest.raises(ValueError, match="required for pad connectivity"):
+            process.trim_redundant_gnd_stitch(path)
+        assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_changed_escape_requires_complete_physical_net(process, repaired, disconnect):
+    doc = parse_file(repaired)
+    old = (146.45, 89.25)  # Reviewed U2.6 outside-pad via in sheet coordinates.
+    new = (146.50, 89.25)
+    moved = 0
+    for via in doc.find_children("via"):
+        at = via.find_child("at")
+        if abs(at.get_float(0) - old[0]) < 1e-6 and abs(at.get_float(1) - old[1]) < 1e-6:
+            at.set_atom(0, new[0])
+            moved += 1
+    assert moved == 1
+    for segment in doc.find_children("segment"):
+        for key in ("start", "end"):
+            point = segment.find_child(key)
+            if abs(point.get_float(0) - old[0]) < 1e-6 and abs(point.get_float(1) - old[1]) < 1e-6:
+                point.set_atom(0, new[0])
+    if disconnect:
+        doc.children = [
+            n
+            for n in doc.children
+            if not (
+                n.name == "segment"
+                and n.find_child("net")
+                and n.find_child("net").get_string(0) == "OSC_OUT"
+            )
+        ]
+    repaired.write_text(serialize_sexp(doc))
+    before = repaired.read_bytes()
+    if disconnect:
+        with pytest.raises(ValueError, match="Missing reviewed escape U2.6"):
+            process.repair(repaired)
+        assert repaired.read_bytes() == before
+    else:
+        assert process.repair(repaired) == 0
+        process.validate_process(repaired, check_native=False)
+
+
+@pytest.mark.parametrize("fault", [None, "open", "wrong_stack", "undersized_drill"])
+def test_paid_route_gate_checks_actual_copper_and_process(repaired, fault):
+    spec = importlib.util.spec_from_file_location("board04_recipe", BOARD / "generate_design.py")
+    recipe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recipe)
+    doc = parse_file(repaired)
+    if fault == "open":
+        doc.children = [
+            n
+            for n in doc.children
+            if not (
+                n.name == "segment"
+                and n.find_child("net")
+                and n.find_child("net").get_string(0) == "OSC_OUT"
+            )
+        ]
+    elif fault == "wrong_stack":
+        from kicad_tools.sexp import parse_string
+
+        doc.find_child("layers").add(parse_string('(2 "In1.Cu" signal)'))
+    elif fault == "undersized_drill":
+        doc.find_children("via")[0].find_child("drill").set_atom(0, 0.10)
+    repaired.write_text(serialize_sexp(doc))
+    assert recipe.paid_process_route_is_complete(repaired) is (fault is None)
