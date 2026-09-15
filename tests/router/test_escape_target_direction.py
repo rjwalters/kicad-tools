@@ -54,7 +54,7 @@ ANCHOR_X = 0.0
 ANCHOR_Y = 0.0
 
 
-def _make_rules(manufacturer: str | None = "jlcpcb-tier1") -> DesignRules:
+def _make_rules(manufacturer: str | None = "pcbway") -> DesignRules:
     # trace_width 0.2: narrow enough that the perpendicular (even-index)
     # surface escapes in the dispatcher fixture stay clearance-clean at
     # 0.5 mm pitch (a 0.5 mm-wide escape would violate against the
@@ -62,6 +62,13 @@ def _make_rules(manufacturer: str | None = "jlcpcb-tier1") -> DesignRules:
     # the violation-triggered rescue and hiding the pocket trigger).
     # The necking unit test passes escape_width=0.5 explicitly, so it is
     # unaffected by this value.
+    #
+    # Issue #5201: this file's fixtures use a 2-layer grid.  ``pcbway``
+    # (unlike ``jlcpcb-tier1``, whose POFV process requires >= 4 layers)
+    # publishes via-in-pad at any layer count, so it stays eligible here
+    # -- and its ``min_trace`` (0.127mm) matches the value
+    # ``test_target_aware_stub_is_necked_to_mfr_min_trace`` pins, so the
+    # necking assertion is unchanged.
     return DesignRules(
         trace_width=0.2,
         trace_clearance=0.127,
@@ -85,11 +92,11 @@ def _make_grid(rules: DesignRules) -> RoutingGrid:
 
 def _make_router(
     net_target_positions: dict[int, list[tuple[float, float, str]]] | None = None,
-    manufacturer: str | None = "jlcpcb-tier1",
+    manufacturer: str | None = "pcbway",
 ) -> EscapeRouter:
     rules = _make_rules(manufacturer=manufacturer)
     grid = _make_grid(rules)
-    return EscapeRouter(grid, rules, net_target_positions=net_target_positions)
+    return EscapeRouter(grid, rules, net_target_positions=net_target_positions, component_holes=())
 
 
 def _west_edge_pad(net: int = 7, x: float = ANCHOR_X, y: float = ANCHOR_Y) -> Pad:
@@ -391,7 +398,7 @@ class TestTryInPadEscapeTargetDirection:
         precedent for lateral stubs)."""
         redirected = self._rescue(EscapeDirection.SOUTH)
         assert redirected is not None
-        # jlcpcb-tier1 min_trace is 0.127 mm.
+        # pcbway min_trace is 0.127 mm.
         assert redirected.segments[0].width == pytest.approx(0.127)
 
 

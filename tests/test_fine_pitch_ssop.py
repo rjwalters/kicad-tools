@@ -275,7 +275,7 @@ class TestFinePitchEscapeRouting:
     @pytest.fixture
     def escape_router(self, grid, rules):
         """Create escape router."""
-        return EscapeRouter(grid, rules)
+        return EscapeRouter(grid, rules, component_holes=())
 
     def test_ssop_generates_escape_routes(self, escape_router, ssop_pads):
         """SSOP should generate escape routes for all pins."""
@@ -451,7 +451,7 @@ class TestI2SSignalPins:
             origin_x=-10.0,
             origin_y=-10.0,
         )
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         # Analyze and generate escapes
         package_info = escape_router.analyze_package(pads)

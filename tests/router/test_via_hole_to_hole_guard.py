@@ -115,7 +115,7 @@ def _escape_router() -> EscapeRouter:
         origin_y=-15.0,
         layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
     )
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 class TestEscapeCanPlaceViaHoleToHole:

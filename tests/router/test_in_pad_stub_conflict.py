@@ -120,7 +120,7 @@ class TestInPadStubConflictDetection:
 
     def test_overlapping_foreign_stub_detected(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         # Foreign stub runs WEST->EAST through the probe area.
         foreign = _foreign_escape_with_inner_stub(-1.0, 0.0, -0.2, 0.0)
         assert (
@@ -140,7 +140,7 @@ class TestInPadStubConflictDetection:
 
     def test_same_net_stub_is_not_a_conflict(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         same_net = _foreign_escape_with_inner_stub(-1.0, 0.0, -0.2, 0.0, net=1)
         assert (
             er._in_pad_stub_conflicts(
@@ -159,7 +159,7 @@ class TestInPadStubConflictDetection:
 
     def test_different_layer_stub_is_not_a_conflict(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         foreign = _foreign_escape_with_inner_stub(-1.0, 0.0, -0.2, 0.0)
         # Same XY corridor but probing on F.Cu -- segments don't collide.
         # (The foreign In1 via barrel is >0.4mm clear of the probe stub.)
@@ -180,7 +180,7 @@ class TestInPadStubConflictDetection:
 
     def test_clear_geometry_is_not_a_conflict(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         foreign = _foreign_escape_with_inner_stub(-5.0, 5.0, -4.0, 5.0)
         assert (
             er._in_pad_stub_conflicts(
@@ -215,7 +215,7 @@ class TestInPadStubDirectionRetry:
         """The board-05 pin31/pin33 shape: a WEST-pointing stub would
         overlap the foreign EAST-pointing stub; the fix flips it EAST."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         if not er.via_in_pad_supported:
             import pytest
 
@@ -251,7 +251,7 @@ class TestInPadStubDirectionRetry:
         """``existing_escapes=None`` preserves the legacy WEST stub
         byte-for-byte (no behaviour change for existing call sites)."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         if not er.via_in_pad_supported:
             import pytest
 
@@ -272,7 +272,7 @@ class TestInPadStubDirectionRetry:
         """When the primary direction has no conflict, it is kept even
         with existing_escapes supplied."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         if not er.via_in_pad_supported:
             import pytest
 

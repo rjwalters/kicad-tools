@@ -193,7 +193,7 @@ class TestLqfp48InPadEscape:
         """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)
@@ -218,7 +218,7 @@ class TestLqfp48InPadEscape:
         """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)
@@ -251,7 +251,7 @@ class TestLqfp48InPadEscape:
         capability+ tier."""
         rules = _make_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)
@@ -267,7 +267,7 @@ class TestLqfp48InPadEscape:
         """With manufacturer=None (the default), no in-pad escapes."""
         rules = _make_rules(manufacturer=None)
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)
@@ -282,7 +282,7 @@ class TestLqfp48InPadEscape:
         """
         rules = _make_rules(manufacturer="pcbway")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)
@@ -300,7 +300,7 @@ class TestLqfp48InPadEscape:
         already and would just pay an unnecessary via cost."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         # 0.65mm pitch -- above the 0.55mm rescue threshold.
         pads = _make_lqfp48_0p5mm(pitch=0.65)
 
@@ -318,10 +318,17 @@ class TestLqfp48InPadEscape:
 
     def test_in_pad_escape_on_2layer_board(self):
         """On a 2-layer board with via-in-pad enabled, in-pad vias land on
-        B.Cu (the only available alternate signal layer)."""
-        rules = _make_rules(manufacturer="jlcpcb-tier1")
+        B.Cu (the only available alternate signal layer).
+
+        Issue #5201: ``jlcpcb-tier1``'s via-in-pad-specific POFV process
+        requires >= 4 copper layers, so a 2-layer board at that tier has
+        no eligible process.  ``pcbway`` publishes via-in-pad at any
+        layer count, so it keeps this specifically a 2-layer
+        via-in-pad-eligible fixture.
+        """
+        rules = _make_rules(manufacturer="pcbway")
         grid = _make_grid(rules, layer_stack=LayerStack.two_layer())
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)
@@ -340,7 +347,7 @@ class TestLqfp48InPadEscape:
         gracefully and leave the pin deferred (no in-pad via emitted)."""
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         # Both axes below the required dim for a 0.3mm drill + annular.
         pads = _make_lqfp48_0p5mm(pad_short=0.20, pad_long=0.30)
 
@@ -365,7 +372,7 @@ class TestLqfp48InPadEscape:
         """
         rules = _make_rules(manufacturer="jlcpcb-tier1")
         grid = _make_grid(rules)
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = _make_lqfp48_0p5mm()
 
         package_info = escape_router.analyze_package(pads)

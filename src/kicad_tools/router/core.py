@@ -762,6 +762,9 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
         router.pads[key] = pad
         router.grid.add_pad(pad)
 
+    # A missing legacy payload is unknown, not a verified empty census.
+    router._loaded_component_holes = config.get("component_holes")
+
     # Restore nets and net_names
     router.nets = {int(k): v for k, v in config["nets"].items()}
     router.net_names = {int(k): v for k, v in config["net_names"].items()}
@@ -1152,6 +1155,8 @@ class Autorouter:
     The physics module calculates appropriate trace widths for target
     impedances on each layer.
     """
+
+    _loaded_component_holes: list[Pad] | None
 
     def __init__(
         self,
@@ -15064,6 +15069,8 @@ class Autorouter:
         """
         from dataclasses import asdict
 
+        from .via_in_pad_eligibility import component_holes_for_router
+
         # Serialize pads data
         pads_data = []
         for (ref, num), pad in self.pads.items():
@@ -15104,6 +15111,7 @@ class Autorouter:
             "rules_dict": rules_dict,
             "net_class_map": self.net_class_map,
             "pads_data": pads_data,
+            "component_holes": component_holes_for_router(self),
             "nets": {str(k): v for k, v in self.nets.items()},
             "net_names": {str(k): v for k, v in self.net_names.items()},
             "pour_nets_without_zones": list(self._pour_nets_without_zones),
@@ -17440,6 +17448,8 @@ class Autorouter:
     @property
     def _escape(self) -> EscapeRouter:
         """Lazy-initialize escape router."""
+        from .via_in_pad_eligibility import component_holes_for_router
+
         if self._escape_router is None:
             # Issue #3419: board-wide net -> pad positions map so the
             # paired-escape pre-pass can aim the launch direction toward
@@ -17502,7 +17512,16 @@ class Autorouter:
                 # derived along-edge direction (board 04 OSC_OUT stub
                 # blocking NRST's via slot, Issue #3411).
                 net_target_positions=self._build_net_target_positions(),
+                # Issue #5201 (reopened): the COMPLETE physical hole census
+                # (every pad, duplicate (ref, pin) holes included -- see
+                # ``self.all_pads``'s own docstring above) so the in-pad
+                # rescue's process-eligibility check can resolve a real
+                # candidate-to-nearest-other-hole distance instead of
+                # omitting the check entirely. Refresh below on every access
+                # so pads added after initialization are observed as well.
+                component_holes=component_holes_for_router(self),
             )
+        self._escape_router._component_holes = component_holes_for_router(self)
         return self._escape_router
 
     def _build_net_target_positions(self) -> dict[int, list[tuple[float, float, str]]]:

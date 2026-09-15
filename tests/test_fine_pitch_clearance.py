@@ -495,7 +495,7 @@ class TestFinePitchEscapeWidth:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
 
         # Create SSOP-20 pads
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
@@ -534,7 +534,7 @@ class TestFinePitchEscapeWidth:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
@@ -564,7 +564,7 @@ class TestFinePitchEscapeWidth:
             origin_y=-10.0,
         )
 
-        escape_router = EscapeRouter(grid, rules)
+        escape_router = EscapeRouter(grid, rules, component_holes=())
         pads = make_dual_row_ssop(pin_count=20, pitch=0.65)
         package_info = escape_router.analyze_package(pads)
         escapes = escape_router.generate_escapes(package_info)
