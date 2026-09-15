@@ -9,11 +9,56 @@ from typing import TYPE_CHECKING, Any
 from shapely.geometry import LineString, MultiLineString, Point  # type: ignore[import-untyped]
 from shapely.ops import polygonize  # type: ignore[import-untyped]
 
-from .primitives import Pad, Route
+from .primitives import Pad, Route, Segment
 from .quantize import is_45_aligned
 
 if TYPE_CHECKING:
     from .diffpair_routing import CoupledPathfinder, DiffPairRouter
+
+
+def parallel_copper_overlap_issue(
+    segments: list[Segment],
+    *,
+    protected_points: list[tuple[float, float]] | None = None,
+    deadline: float = math.inf,
+) -> str | None:
+    """Reject parallel copper foldbacks before they bypass measured path length."""
+    # Nonadjacent parallel runs must not overlap in copper; such a
+    # foldback shortens the electrical path even if centerlines stay simple.
+    from .optimizer.consolidate import consolidate_segments
+
+    segments, _ = consolidate_segments(
+        segments, protected_points=protected_points or (), tolerance=1e-9
+    )
+    for i, segment in enumerate(segments):
+        if time.monotonic() >= deadline:
+            return "deadline"
+        ux, uy = segment.x2 - segment.x1, segment.y2 - segment.y1
+        length = math.hypot(ux, uy)
+        for other in segments[:i]:
+            if segment.layer != other.layer or any(
+                math.dist(a, b) < 1e-8
+                for a in (segment.start, segment.end)
+                for b in (other.start, other.end)
+            ):
+                continue
+            vx, vy = other.x2 - other.x1, other.y2 - other.y1
+            if abs(ux * vy - uy * vx) > 1e-9:
+                continue
+            first = sorted((x * ux + y * uy) / length for x, y in (segment.start, segment.end))
+            second = sorted((x * ux + y * uy) / length for x, y in (other.start, other.end))
+            if min(first[1], second[1]) - max(first[0], second[0]) < max(
+                segment.width, other.width
+            ):
+                continue
+            if (
+                LineString([segment.start, segment.end]).distance(
+                    LineString([other.start, other.end])
+                )
+                < (segment.width + other.width) / 2 - 1e-9
+            ):
+                return "self_overlap"
+    return None
 
 
 def route_topology_issue(route: Route, start: Pad, end: Pad, *, deadline: float) -> str | None:
@@ -57,41 +102,11 @@ def route_topology_issue(route: Route, start: Pad, end: Pad, *, deadline: float)
         lines = [LineString([s.start, s.end]) for s in route.segments if s.layer == layer]
         if not MultiLineString(lines).is_simple or any(p.area > 1e-9 for p in polygonize(lines)):
             return "self_intersection"
-    # Nonadjacent parallel runs must not overlap in copper; such a
-    # foldback shortens the electrical path even if centerlines stay simple.
-    from .optimizer.consolidate import consolidate_segments
-
-    segments, _ = consolidate_segments(
-        route.segments, protected_points=[(v.x, v.y) for v in route.vias], tolerance=1e-9
+    overlap = parallel_copper_overlap_issue(
+        route.segments, protected_points=[(v.x, v.y) for v in route.vias], deadline=deadline
     )
-    for i, segment in enumerate(segments):
-        if time.monotonic() >= deadline:
-            return "deadline"
-        ux, uy = segment.x2 - segment.x1, segment.y2 - segment.y1
-        length = math.hypot(ux, uy)
-        for other in segments[:i]:
-            if segment.layer != other.layer or any(
-                math.dist(a, b) < 1e-8
-                for a in (segment.start, segment.end)
-                for b in (other.start, other.end)
-            ):
-                continue
-            vx, vy = other.x2 - other.x1, other.y2 - other.y1
-            if abs(ux * vy - uy * vx) > 1e-9:
-                continue
-            first = sorted((x * ux + y * uy) / length for x, y in (segment.start, segment.end))
-            second = sorted((x * ux + y * uy) / length for x, y in (other.start, other.end))
-            if min(first[1], second[1]) - max(first[0], second[0]) < max(
-                segment.width, other.width
-            ):
-                continue
-            if (
-                LineString([segment.start, segment.end]).distance(
-                    LineString([other.start, other.end])
-                )
-                < (segment.width + other.width) / 2 - 1e-9
-            ):
-                return "self_overlap"
+    if overlap is not None:
+        return overlap
     # Every copper object must belong to the endpoint-connected component;
     # a disconnected island must not contribute to measured route length.
     root = len(objects)

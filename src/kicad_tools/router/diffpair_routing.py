@@ -5555,6 +5555,14 @@ class DiffPairRouter:
                             net_name=head.net_name,
                         )
                     )
+                if preceding_segments:
+                    from .construction_validation import parallel_copper_overlap_issue
+
+                    # Centerline simplicity alone permits close parallel runs
+                    # whose copper folds back onto the body. Reject that losing
+                    # candidate here, while later legal tails are still available.
+                    if parallel_copper_overlap_issue(preceding_segments + route.segments):
+                        continue
                 # Preserve even tiny endpoint legs: virtual tail heads may
                 # be via centers, not pads whose copper covers a dropped span.
                 # Reject a broken candidate rather than shipping a gap.
