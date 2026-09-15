@@ -257,3 +257,84 @@ def test_coverage_rejects_a_changed_cell_owner():
     assert native._impl.route_cell_has_geometry(55, 56, 2)
     native._impl.at(55, 56, 2).net = 99
     assert not native._impl.route_cell_has_geometry(55, 56, 2)
+
+
+@pytest.mark.parametrize("backend", ["cpp", "python"])
+def test_captured_board07_dq3_via_with_original_pad_geometry(backend):
+    """Reduced real #5393 witness; full project/refill evidence lives in #5410.
+
+    Keep the captured grid alignment, DQ3 pads, DQS_N copper and effective
+    routing rules. This isolates the legal via predicate, not whole-board reach.
+    """
+    from kicad_tools.router.pathfinder import Router
+    from kicad_tools.router.primitives import Layer, Pad, Route, Via
+    from kicad_tools.router.rules import NetClassRouting
+
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.15,
+        via_diameter=0.6,
+        via_drill=0.3,
+        via_clearance=0.2,
+        min_hole_to_hole=0.5,
+        grid_resolution=0.127,
+    )
+    grid = RoutingGrid(
+        width=65,
+        height=50,
+        origin_x=100.089,
+        origin_y=100.051,
+        rules=rules,
+        layer_stack=LayerStack.four_layer_all_signal(),
+    )
+    for x, y, ref, pin in [(125.0, 127.0, "U1", "28"), (145.0, 123.0, "U2", "4")]:
+        grid.add_pad(
+            Pad(
+                x=x,
+                y=y,
+                width=0.7,
+                height=0.3,
+                net=7,
+                net_name="DQ3",
+                layer=Layer.F_CU,
+                ref=ref,
+                pin=pin,
+            )
+        )
+    native = CppGrid.from_routing_grid(grid)
+    prior = Via(143.7769928, 123.8000031, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 14, "DQS_N")
+    route = Route(net=14, net_name="DQS_N", vias=[prior])
+    grid.mark_route(route)
+    gx, gy = grid.world_to_grid(143.142, 123.292)
+    assert (gx, gy) == (339, 183)
+    assert grid.grid_to_world(gx, gy) == pytest.approx((143.142, 123.292))
+    copper_gap = math.hypot(prior.x - 143.142, prior.y - 123.292) - 0.6
+    assert 0.213 < copper_gap < 0.214
+    assert copper_gap + 0.3 > rules.min_hole_to_hole
+    if backend == "cpp":
+        vx, vy = grid.world_to_grid(prior.x, prior.y)
+        native._impl.mark_via(vx, vy, 14, 6)
+        native._impl.add_stored_via(prior.x, prior.y, prior.drill, prior.diameter, 14)
+        router = CppPathfinder(native, rules)
+        router._impl.set_search_pair_widths(0.075, 0.3)
+        router._impl.set_search_fill_clearances(0.1, 0.2)
+        assert native._impl.route_cell_has_geometry(gx, gy, 2)
+        assert not router._impl.is_via_blocked(gx, gy, 7, False, 4)
+        assert router._impl.is_via_blocked(gx + 1, gy, 7, False, 4)
+    else:
+        router = Router(
+            grid,
+            rules,
+            {
+                "DQ3": NetClassRouting(
+                    name="DDR_DATA_BYTE_0",
+                    trace_width=0.15,
+                    clearance=0.1,
+                    via_size=0.6,
+                )
+            },
+        )
+        router.set_net_name_to_id({"DQ3": 7, "DQS_N": 14})
+        assert grid._route_halo.cell_known(gx, gy, 2)
+        assert not router._is_via_blocked(gx, gy, 2, 7, False, radius=4)
+        assert router._is_via_blocked(gx + 1, gy, 2, 7, False, radius=4)
