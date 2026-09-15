@@ -303,6 +303,17 @@ class RoutingOrchestrator:
             return None
         return None
 
+    def _build_component_hole_census(self) -> list[Pad] | None:
+        """Use the physical census before any routing-destination filtering."""
+        from .via_in_pad_eligibility import (
+            component_holes_for_router,
+            component_holes_from_document,
+        )
+
+        if hasattr(self.pcb, "all_pads"):
+            return component_holes_for_router(self.pcb)
+        return component_holes_from_document(self.pcb)
+
     def route_net(
         self,
         net: str | int,
@@ -970,6 +981,13 @@ class RoutingOrchestrator:
                     # (``kct route-auto``) is an independent code path and
                     # fixing only one is a known foot-gun in this codebase.
                     net_target_positions=self._build_net_target_positions(),
+                    # Issue #5201 (reopened): the COMPLETE physical hole
+                    # census -- see ``_build_component_hole_census``.
+                    # ``None`` (neither PCB shape usable) fails closed:
+                    # the in-pad rescue refuses eligibility rather than
+                    # silently granting it, exactly like every other
+                    # missing-context path in this module.
+                    component_holes=self._build_component_hole_census(),
                 )
 
         if self._escape is not None:
@@ -1627,6 +1645,9 @@ class RoutingOrchestrator:
                     # Issue #3428: same target-aware in-pad stub wiring
                     # as the escape_then_global ctor site above.
                     net_target_positions=self._build_net_target_positions(),
+                    # Issue #5201 (reopened): same component-hole census
+                    # wiring as the escape_then_global ctor site above.
+                    component_holes=self._build_component_hole_census(),
                 )
         return self._escape
 

@@ -141,7 +141,7 @@ def _sibling_escape(
 class TestLateralViaSiblingConflictPredicate:
     def test_sub_pitch_in_pad_sibling_conflicts(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         sibling = _sibling_escape(0.0, 0.0, net=99, in_pad=True)
         # 0.5 mm away: required 0.727 mm > 0.5 mm -> conflict.
         assert (
@@ -161,7 +161,7 @@ class TestLateralViaSiblingConflictPredicate:
         this is the difference from ``_adjacent_in_pad_via_conflict``,
         which only checks in-pad siblings."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         sibling = _sibling_escape(0.0, 0.0, net=99, in_pad=False)
         assert (
             er._lateral_via_sibling_conflict(
@@ -177,7 +177,7 @@ class TestLateralViaSiblingConflictPredicate:
 
     def test_coarse_spacing_does_not_conflict(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         sibling = _sibling_escape(0.0, 0.0, net=99, in_pad=True)
         # 0.8 mm away >= 0.727 mm required -> clears.
         assert (
@@ -194,7 +194,7 @@ class TestLateralViaSiblingConflictPredicate:
 
     def test_same_net_sibling_ignored(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         sibling = _sibling_escape(0.0, 0.0, net=1, in_pad=True)
         assert (
             er._lateral_via_sibling_conflict(
@@ -210,7 +210,7 @@ class TestLateralViaSiblingConflictPredicate:
 
     def test_none_existing_escapes_is_no_op(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         assert (
             er._lateral_via_sibling_conflict(
                 x=0.0,
@@ -227,7 +227,7 @@ class TestLateralViaSiblingConflictPredicate:
         """A sibling escape with no via (pure surface escape) is not a
         barrel conflict."""
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         surface = EscapeRoute(
             pad=_make_pad(0.0, 0.0, net=99, name="NET_99"),
             direction=EscapeDirection.WEST,
@@ -259,7 +259,7 @@ class TestLateralViaSiblingConflictPredicate:
 class TestTryLateralViaEscapeSiblingAware:
     def _router(self) -> EscapeRouter:
         rules = _make_rules()
-        return EscapeRouter(_make_grid(rules), rules)
+        return EscapeRouter(_make_grid(rules), rules, component_holes=())
 
     def test_lateral_via_offset_past_sibling(self):
         """The victim pin escapes via an OFF-pad lateral via, placed far
@@ -358,5 +358,5 @@ class TestTryLateralViaEscapeSiblingAware:
 class TestForcedLateralCounterExists:
     def test_counter_initialises_to_zero(self):
         rules = _make_rules()
-        er = EscapeRouter(_make_grid(rules), rules)
+        er = EscapeRouter(_make_grid(rules), rules, component_holes=())
         assert er.forced_lateral_via_fallbacks == 0

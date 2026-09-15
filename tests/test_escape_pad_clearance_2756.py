@@ -44,7 +44,7 @@ from kicad_tools.router.escape import (
     PackageType,
 )
 from kicad_tools.router.grid import RoutingGrid
-from kicad_tools.router.layers import Layer
+from kicad_tools.router.layers import Layer, LayerStack
 from kicad_tools.router.primitives import Pad
 from kicad_tools.router.rules import DesignRules
 
@@ -178,7 +178,7 @@ def _make_router(rules: DesignRules | None = None) -> EscapeRouter:
         origin_x=-20.0,
         origin_y=-20.0,
     )
-    return EscapeRouter(grid, rules)
+    return EscapeRouter(grid, rules, component_holes=())
 
 
 # ----------------------------------------------------------------------------
@@ -653,7 +653,14 @@ class TestInPadFallbackPreserved:
     def test_lqfp48_jlcpcb_tier1_emits_in_pad_vias(self):
         """LQFP-48 on jlcpcb-tier1 (via-in-pad supported) should still
         produce in-pad vias for inner pins that would otherwise fail
-        surface clearance."""
+        surface clearance.
+
+        Issue #5201: ``jlcpcb-tier1``'s via-in-pad-specific POFV process
+        requires >= 4 copper layers, so this fixture must use a 4-layer
+        stack to stay via-in-pad-eligible (a bare-default 2-layer grid
+        would make ``via_in_pad_supported`` False regardless of the
+        manufacturer's general capability flag).
+        """
         rules = _jlcpcb_rules()
         grid = RoutingGrid(
             width=40.0,
@@ -661,8 +668,9 @@ class TestInPadFallbackPreserved:
             rules=rules,
             origin_x=-20.0,
             origin_y=-20.0,
+            layer_stack=LayerStack.four_layer_sig_sig_gnd_pwr(),
         )
-        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1")
+        router = EscapeRouter(grid, rules, manufacturer="jlcpcb-tier1", component_holes=())
         assert router.via_in_pad_supported, (
             "Test precondition: jlcpcb-tier1 must report via-in-pad supported"
         )

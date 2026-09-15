@@ -4217,6 +4217,17 @@ def load_pcb_for_routing(
     # phase closes.
     _install_fine_pitch_regions_from_components(router, components)
 
+    # Preserve physical drills before routing-reference/type filters. Hole
+    # records are separate from grid copper, especially for unplated holes.
+    from kicad_tools.schema.pcb import PCB as DocumentPCB
+    from kicad_tools.sexp import parse_string
+
+    from .via_in_pad_eligibility import component_holes_from_document
+
+    router._loaded_component_holes = component_holes_from_document(
+        DocumentPCB(parse_string(pcb_text)), world_coordinates=True
+    )
+
     # Add all components
     for comp in components:
         # Pads already have absolute positions

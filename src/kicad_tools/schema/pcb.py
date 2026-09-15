@@ -368,6 +368,8 @@ class Pad:
     # -- the #3902 defect class.  ``compare=False`` keeps dataclass equality
     # value-based (as the existing pad round-trip tests expect).
     _sexp_node: SExp | None = field(default=None, repr=False, compare=False)
+    drill_size: tuple[float, float] | None = None
+    drill_offset: tuple[float, float] = (0.0, 0.0)
 
     def __setattr__(self, name: str, value: object) -> None:
         # Store the Python value first via the default mechanism.
@@ -477,6 +479,15 @@ class Pad:
         # Drill
         if drill := sexp.find("drill"):
             pad.drill = drill.get_float(0) or 0.0
+            if drill.get_string(0) == "oval":
+                # Retain both dimensions; the legacy scalar stays unknown.
+                pad.drill_size = (drill.get_float(1) or 0.0, drill.get_float(2) or 0.0)
+            if offset := drill.find("offset"):
+                offset_x, offset_y = offset.get_float(0), offset.get_float(1)
+                pad.drill_offset = (
+                    offset_x if offset_x is not None else float("nan"),
+                    offset_y if offset_y is not None else float("nan"),
+                )
 
         # Solder mask margin (per-pad override)
         if mask_margin := sexp.find("solder_mask_margin"):
