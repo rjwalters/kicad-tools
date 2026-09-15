@@ -1,6 +1,7 @@
 """Tests for the parts module."""
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +17,31 @@ from kicad_tools.parts.models import (
     PartPrice,
     SearchResult,
 )
+
+
+@pytest.fixture
+def lcsc_retry_clock(monkeypatch):
+    """Advance only the LCSC client's clock, retaining its real retry policy."""
+    import kicad_tools.parts.lcsc as lcsc
+
+    class Clock:
+        now = 100.0
+
+        def __init__(self):
+            self.sleeps = []
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            assert seconds >= 0
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    clock = Clock()
+    monkeypatch.setattr(lcsc, "time", clock)
+    monkeypatch.setattr(lcsc, "random", SimpleNamespace(random=lambda: 0.5))
+    return clock
 
 
 class TestPartPrice:
@@ -813,7 +839,7 @@ class TestLCSCClientExtended:
             assert "C456" in calls
             assert "C789" in calls
 
-    def test_search_error_handling(self, tmp_path):
+    def test_search_error_handling(self, tmp_path, lcsc_retry_clock):
         """Test search error handling.
 
         A generic RequestException with no offline catalog reports unavailable. ``use_local_catalog=False`` keeps this deterministic
@@ -828,9 +854,14 @@ class TestLCSCClientExtended:
 
             cache = PartsCache(db_path=tmp_path / "cache.db")
             client = LCSCClient(cache=cache, use_local_catalog=False)
+            client._rate_limiter._last_request_time = lcsc_retry_clock.monotonic()
 
             with pytest.raises(LCSCUnavailableError):
                 client.search("test")
+
+            assert mock_session.return_value.post.call_count == 4
+            assert lcsc_retry_clock.sleeps == [3.0, 2.0, 4.0, 8.0]
+            assert client._rate_limiter._last_request_time == 103.0
 
     def test_search_api_error_code(self, tmp_path):
         """Test search with non-200 API response."""
@@ -1101,7 +1132,7 @@ class TestLCSCClientAdditional:
             with pytest.raises(LCSCUnavailableError):
                 client._fetch_part("C123456")
 
-    def test_fetch_part_request_exception(self, tmp_path):
+    def test_fetch_part_request_exception(self, tmp_path, lcsc_retry_clock):
         """Test _fetch_part with request exception."""
         with patch("kicad_tools.parts.lcsc.LCSCClient._get_session") as mock_session:
             import requests
@@ -1111,8 +1142,13 @@ class TestLCSCClientAdditional:
             from kicad_tools.parts import LCSCClient
 
             client = LCSCClient(use_cache=False)
+            client._rate_limiter._last_request_time = lcsc_retry_clock.monotonic()
             with pytest.raises(requests.RequestException):
                 client._fetch_part("C123456")
+
+            assert mock_session.return_value.post.call_count == 4
+            assert lcsc_retry_clock.sleeps == [3.0, 2.0, 4.0, 8.0]
+            assert client._rate_limiter._last_request_time == 103.0
 
     def test_lookup_caches_result(self, tmp_path):
         """Test that lookup stores result in cache."""

@@ -56,6 +56,34 @@ from kicad_tools.schema import Schematic
 # across all 150+ libraries cannot blow up into reading tens of thousands of
 # .kicad_mod files.
 _MAX_SCANNED_FOOTPRINTS = 5000
+# Hold two full scans so a small filtered scan cannot evict every shared entry.
+_MAX_CACHED_PAD_COUNTS = 2 * _MAX_SCANNED_FOOTPRINTS
+
+
+class _FootprintPadCounts:
+    """Bounded pad counts shared by symbol searches within one command."""
+
+    def __init__(self) -> None:
+        self._counts: dict[Path, tuple[tuple[int, ...], int]] = {}
+
+    @staticmethod
+    def _signature(path: Path) -> tuple[int, ...]:
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def count(self, path: Path) -> int:
+        before = self._signature(path)
+        cached = self._counts.get(path)
+        if cached is not None and cached[0] == before:
+            return cached[1]
+        self._counts.pop(path, None)
+        count = _count_pads(load_footprint(path))
+        # Do not retain a result if the file changed while it was parsed.
+        if self._signature(path) == before:
+            if len(self._counts) >= _MAX_CACHED_PAD_COUNTS:
+                self._counts.pop(next(iter(self._counts)))
+            self._counts[path] = (before, count)
+        return count
 
 
 def _resolve_target_pin_count(sch: Schematic, sym: Any) -> int | None:
@@ -215,6 +243,7 @@ def find_footprint_candidates(
     schematic_path: Path | None = None,
     *,
     use_project_table: bool = True,
+    pad_counts: _FootprintPadCounts | None = None,
 ) -> list[dict[str, Any]]:
     """Find footprints whose pad count matches *target_pins*.
 
@@ -234,6 +263,7 @@ def find_footprint_candidates(
             project's ``fp-lib-table`` entries (in addition to globals).
         use_project_table: When ``False``, the project table is not
             consulted (CI / reproducibility opt-out).
+        pad_counts: Optional command-scoped cache of unchanged footprint pad counts.
 
     Returns:
         Ranked list of dicts with ``library``, ``footprint``, ``pads``,
@@ -259,8 +289,11 @@ def find_footprint_candidates(
                 continue
             scanned += 1
             try:
-                sexp = load_footprint(mod_file)
-                pad_count = _count_pads(sexp)
+                pad_count = (
+                    pad_counts.count(mod_file)
+                    if pad_counts is not None
+                    else _count_pads(load_footprint(mod_file))
+                )
             except Exception:
                 continue
             if target_pins is not None and pad_count != target_pins:

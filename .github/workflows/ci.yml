@@ -278,6 +278,26 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      - name: Run native zone acceptance
+        # Issue #5452: native zone refills were OOM-killed in the 12 GiB
+        # Test cgroup while competing with other pytest workers. Retain
+        # every test and timeout, but run these modules without that pool.
+        run: |
+          mkdir -p "$RUNNER_TEMP/zone-native"
+          uv run pytest tests/test_zones_cmd.py tests/test_zones_hv_keepout.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+            --basetemp "$RUNNER_TEMP/zone-native/pytest" \
+            --junitxml "$RUNNER_TEMP/zone-native/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/zone-native/pytest.log"
+
+      - name: Retain native zone diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: zone-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/zone-native/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run tests
         # Issue #3436: continue-on-error was removed from this step. It
         # made the job green regardless of pytest's exit code, hiding 162
@@ -291,7 +311,7 @@ jobs:
         env:
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
         run: |
-          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py)
+          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py --ignore=tests/test_zones_cmd.py --ignore=tests/test_zones_hv_keepout.py)
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi

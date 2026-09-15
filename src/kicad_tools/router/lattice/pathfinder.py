@@ -289,7 +289,7 @@ class LatticePathfinder:
         # composition silently spaced new copper at the DRU floor from an HV
         # net the net-class map put at 2.0-3.2 mm.
         self._fixed_runs: list[tuple[int, Pt, Pt, int, float, float]] = []
-        self._fixed_vias: list[tuple[Pt, int, float]] = []
+        self._fixed_vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         # Issue #4602: optional net-id-space HV pairwise projection
         # (:class:`.pairwise.LatticePairwise`), resolved by the CALLER from
         # ``rules.pairwise_clearance`` + the #4506 attach zones -- the
@@ -491,8 +491,8 @@ class LatticePathfinder:
         """
         for layer_idx, a, b, net, half, clr in self._fixed_runs:
             committed.add_run(layer_idx, [a, b], net, half, clr)
-        for point, net, clr in self._fixed_vias:
-            committed.add_via(point, net, clr)
+        for point, net, clr, radius, layers in self._fixed_vias:
+            committed.add_via(point, net, clr, radius=radius, layers=layers)
 
     def _fixed_clearance_for(self, net: int, clearances: dict[int, float] | None) -> float:
         """Seed clearance for preserved net ``net`` (issue #4597).
@@ -523,7 +523,7 @@ class LatticePathfinder:
         geometry-only and never sees net names or net classes.
         """
         runs: list[tuple[int, Pt, Pt, int, float, float]] = []
-        vias: list[tuple[Pt, int, float]] = []
+        vias: list[tuple[Pt, int, float, float, tuple[int, ...]]] = []
         for route in routes or []:
             for seg in getattr(route, "segments", []):
                 try:
@@ -543,8 +543,23 @@ class LatticePathfinder:
                     (layer_idx, a, b, seg.net, half, self._fixed_clearance_for(seg.net, clearances))
                 )
             for via in getattr(route, "vias", []):
+                # A routing stack may select only part of the physical board
+                # (for example F.Cu only). Imported through-via endpoints need
+                # not themselves be present in that selected stack.
+                first, last = sorted(layer.value for layer in via.layers)
+                occupied_layers = tuple(
+                    layer.index
+                    for layer in self.layer_stack.layers
+                    if first <= layer.layer_enum.value <= last
+                )
                 vias.append(
-                    ((via.x, via.y), via.net, self._fixed_clearance_for(via.net, clearances))
+                    (
+                        (via.x, via.y),
+                        via.net,
+                        self._fixed_clearance_for(via.net, clearances),
+                        via.diameter / 2,
+                        occupied_layers,
+                    )
                 )
         self._fixed_runs = runs
         self._fixed_vias = vias
@@ -1010,6 +1025,7 @@ class LatticePathfinder:
         committed: CommittedCopper,
         *,
         via_in_pad_override: bool | None = None,
+        clearance: float | None = None,
     ) -> bool:
         """Through-via legality at a lattice node.
 
@@ -1024,6 +1040,10 @@ class LatticePathfinder:
         only when the fab tier supports it (:attr:`_via_in_pad_allowed`).
         Dynamic part: committed copper on all layers + committed vias
         (:meth:`CommittedCopper.via_clear`).
+
+        ``clearance`` carries the effective net-class gap through the entire
+        barrel span, including layers the trace search skips. ``None`` keeps
+        the board-global trace and separate fixed-fill via defaults.
 
         ``via_in_pad_override`` (issue #4475, epic #4465 Phase 3) lets a
         caller bypass the tier gate for the SAME-net window hit: ``None``
@@ -1040,7 +1060,12 @@ class LatticePathfinder:
         obstacles = self.obstacles
         point = lattice.node_point(key)
         via_radius = self.rules.via_diameter / 2.0
-        grow = max(self._via_pad_grow, 0.0)
+        own_clr = (
+            self.rules.trace_clearance
+            if clearance is None
+            else max(self.rules.trace_clearance, clearance)
+        )
+        grow = max(via_radius + own_clr - self._agent_radius, 0.0)
         # The query window must cover the farthest centre distance any check
         # below can reject at.  The hole-to-hole floor against the board's
         # largest drill needs via_drill/2 + max_drill/2 + min_hole_to_hole
@@ -1094,7 +1119,7 @@ class LatticePathfinder:
             None,
             net,
             self.rules.via_diameter / 2.0,
-            max(self._via_pad_grow, 0.0),
+            grow,
             self._pairwise,
         ):
             return False
@@ -1103,7 +1128,7 @@ class LatticePathfinder:
         # of the area's layers (the barrel spans the whole stack).
         if self._keepouts is not None and self._keepouts.via_blocked(point, net, via_radius):
             return False
-        return committed.via_clear(point, net)
+        return committed.via_clear(point, net, clearance)
 
     # -- the route contract ------------------------------------------------------
 
@@ -1125,6 +1150,57 @@ class LatticePathfinder:
         return result.route if result is not None else None
 
     def _route_impl(
+        self,
+        start: Pad,
+        end: Pad,
+        net_class: object | None,
+        *,
+        committed: CommittedCopper,
+        history: dict[Resource, float],
+        present: float,
+        allow_vias: bool = True,
+        extra_clearance: float = 0.0,
+        partner_net: int | None = None,
+        stub_layers: tuple[int, ...] | None = None,
+        stubs_override: tuple[list, list] | None = None,
+        exempt_pads: frozenset[int] | None = None,
+    ) -> tuple[_RouteResult | None, str]:
+        """Apply physical Kelvin isolation throughout every search stage."""
+        from ..kelvin import detect_kelvin_topology
+
+        pads = [pad for pad in self.pads if pad.net == start.net]
+        # Topology operates on electrical terminals, while obstacle geometry
+        # keeps every physical pad occurrence (including same-number arrays).
+        terminals = list({pad.key: pad for pad in pads}.values())
+        topology = detect_kelvin_topology(terminals)
+        previous = committed.kelvin_guard
+        if topology is not None:
+            from .kelvin import KelvinBranchGuard
+
+            root = terminals[topology.root_index]
+            target = end if start.key == root.key else start
+            committed.kelvin_guard = KelvinBranchGuard(
+                committed, pads, root, target, self._pad_layer_indices
+            )
+        try:
+            return self._route_staged(
+                start,
+                end,
+                net_class,
+                committed=committed,
+                history=history,
+                present=present,
+                allow_vias=allow_vias,
+                extra_clearance=extra_clearance,
+                partner_net=partner_net,
+                stub_layers=stub_layers,
+                stubs_override=stubs_override,
+                exempt_pads=exempt_pads,
+            )
+        finally:
+            committed.kelvin_guard = previous
+
+    def _route_staged(
         self,
         start: Pad,
         end: Pad,
@@ -1504,7 +1580,13 @@ class LatticePathfinder:
             if allow_vias and self.num_layers > 1:
                 vok = via_ok.get(key)
                 if vok is None:
-                    vok = self._via_ok(key, net, committed, via_in_pad_override=via_in_pad_override)
+                    vok = self._via_ok(
+                        key,
+                        net,
+                        committed,
+                        via_in_pad_override=via_in_pad_override,
+                        clearance=clr if net_class is not None else None,
+                    )
                     via_ok[key] = vok
                 if vok:
                     # Via edges join matching nodes on ADJACENT layers only
@@ -2342,7 +2424,7 @@ class LatticePathfinder:
                         layer_idx, points, start.net, [w / 2.0 for w in widths], clr
                     )
                 for via_pt in result.via_points:
-                    committed.add_via(via_pt, start.net)
+                    committed.add_via(via_pt, start.net, clr)
 
             if routed_items > best_count:
                 best_count = routed_items
