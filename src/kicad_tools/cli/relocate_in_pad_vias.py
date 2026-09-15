@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -477,6 +478,7 @@ def _first_offpad_signal_candidate(
     min_hole_clearance: float | None = None,
     *,
     search_alternatives: bool = False,
+    candidate_predicate: Callable[[tuple[float, float]], bool] | None = None,
 ) -> tuple[float, float] | None:
     """Find the first clearance-safe off-pad location for a **signal** via.
 
@@ -491,6 +493,8 @@ def _first_offpad_signal_candidate(
     clearance or hole-to-hole violation (:func:`_check_clearance`).  Returns
     ``None`` when every candidate is boxed in -- the caller then reports the via
     as ``unresolvable`` and leaves it in place (safety invariant preserved).
+    An optional candidate predicate adds caller-specific constraints to every
+    rung; rejecting one candidate continues the search instead of ending it.
     """
     pad_cx = (bbox[0] + bbox[2]) / 2.0
     pad_cy = (bbox[1] + bbox[3]) / 2.0
@@ -553,6 +557,8 @@ def _first_offpad_signal_candidate(
                 )
                 is not None
             ):
+                continue
+            if candidate_predicate is not None and not candidate_predicate((nx, ny)):
                 continue
             return (nx, ny)
 
