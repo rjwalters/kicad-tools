@@ -772,6 +772,20 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     # Restore pour-net overrides so _is_pour_net() returns correct results
     router._pour_nets_without_zones = set(config.get("pour_nets_without_zones", []))
 
+    # Issue #5374: reinstall the board-edge keepout on the worker's own
+    # grid.  The parent's ``_edge_segments`` / ``_edge_clearance`` never
+    # cross the ProcessPoolExecutor boundary automatically -- they only
+    # reach this worker via ``_serialize_for_parallel``'s "edge_segments" /
+    # "edge_clearance" keys.  Store them back on the router too so
+    # ``validate_routes`` (invoked by ``_evaluate_solution`` below) can
+    # still flag edge violations, matching parent-process behaviour.
+    edge_segments = config.get("edge_segments")
+    edge_clearance = config.get("edge_clearance")
+    if edge_segments and edge_clearance:
+        router._edge_segments = edge_segments
+        router._edge_clearance = edge_clearance
+        router.grid.add_edge_keepout(edge_segments, edge_clearance)
+
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
         net_order = base_order.copy()
@@ -14987,6 +15001,17 @@ class Autorouter:
 
         self.grid.install_fixed_fills(fixed_fills)
 
+        # Issue #5374: ``_create_grid_and_routers`` above builds a brand-new
+        # RoutingGrid, so any board-edge keepout previously installed via
+        # ``add_edge_keepout`` (on the grid instance this method just
+        # discarded) is gone -- the blocked cells lived on that old grid's
+        # occupancy arrays, not on ``self``.  Reinstall it from the
+        # persisted ``_edge_segments`` / ``_edge_clearance`` so a Monte
+        # Carlo / evolutionary trial reset does not silently reopen the
+        # board-edge exclusion zone for the next search.
+        if self._edge_segments and self._edge_clearance:
+            self.grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
+
         # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
         pitches = self.component_pitches
         for pad in self.pads.values():
@@ -15090,6 +15115,18 @@ class Autorouter:
             "nets": {str(k): v for k, v in self.nets.items()},
             "net_names": {str(k): v for k, v in self.net_names.items()},
             "pour_nets_without_zones": list(self._pour_nets_without_zones),
+            # Issue #5374: board-edge keepout geometry + configured
+            # clearance.  Without these, a worker process building its own
+            # Autorouter from this dict (``_run_monte_carlo_trial`` /
+            # ``_run_evolutionary_trial``) never reinstalls the board-edge
+            # exclusion zone, so its A* search can route straight through
+            # cells the parent process would have blocked.
+            # Keep certified outline metadata (including approximation
+            # bounds) while isolating the snapshot from later parent edits.
+            "edge_segments": copy.deepcopy(self._edge_segments)
+            if self._edge_segments is not None
+            else [],
+            "edge_clearance": self._edge_clearance,
         }
 
     def route_all_monte_carlo(
@@ -19367,6 +19404,14 @@ class Autorouter:
         )
 
         fine_grid.install_fixed_fills(self.grid.fixed_fills)
+        # Issue #5374: reinstall the board-edge keepout on the fresh fine
+        # grid.  ``add_edge_keepout`` resolves world coordinates through
+        # the target grid's own ``world_to_grid`` (origin + resolution),
+        # so the same board-frame ``_edge_segments`` correctly re-project
+        # onto this cropped, shifted-origin, finer-resolution grid --
+        # cells outside the fine grid's bounding box are simply skipped.
+        if self._edge_segments and self._edge_clearance:
+            fine_grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
         # Mark already-routed and preserved copper as obstacles on fine grid
         for route in [*self.existing_routes, *self.routes]:
             fine_grid.mark_route(route)
