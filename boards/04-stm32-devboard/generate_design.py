@@ -2037,8 +2037,9 @@ def main() -> int:
         # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
         # the load-independent per-net ``--deterministic-budget`` iteration
         # cap, so on a loaded machine that outer deadline can fire before every
-        # signal net lands and ``route_pcb`` returns ``False``.  This gate must
-        # land HERE -- immediately after route_pcb and before the five
+        # signal net lands and ``route_pcb`` returns ``False``. Blocked paths
+        # and stagnation can also return False without reaching that deadline.
+        # This gate must land HERE -- immediately after route_pcb and before the five
         # copper-mutating steps below (fix_osc_escape / stitch_pcb /
         # tie_power_pads / quantize_escapes / fill_zones) -- so none of them
         # ever touch a partially-routed board and the downstream
@@ -2052,14 +2053,13 @@ def main() -> int:
         # N/M signal nets" line is already printed above by ``route_pcb``.
         if not route_success:
             raise RuntimeError(
-                "partial route -- likely wall-clock budget exhaustion under "
-                "load (the --timeout safety backstop fired before every "
-                "signal net landed; see the 'PARTIAL: Routed N/M signal nets' "
-                "line above for the exact count). This is NOT a copper-LVS / "
-                "GND-stitching failure -- the pipeline stopped before the LVS "
-                "gate. Re-run boards/04-stm32-devboard/generate_design.py in "
-                "isolation on a quiet machine, or raise the --timeout in "
-                "route_pcb() if this recurs on an unloaded host."
+                "partial route -- not all signal pads are connected. See the "
+                "'PARTIAL: Routed N/M signal nets' summary and failed-net "
+                "diagnostics above. Incomplete routing can result from blocked "
+                "paths, stagnation, or exhausted search budgets; this result "
+                "alone does not establish a timeout. The pipeline stopped "
+                "before copper repair and LVS. Investigate the reported "
+                "termination reason before changing routing budgets."
             )
 
         # Step 5.5: Fix the OSC_OUT escape-stub short (#3797) -- the fresh
