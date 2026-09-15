@@ -291,10 +291,11 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     # straight through cells the parent process would have blocked.
     edge_segments = config.get("edge_segments")
     edge_clearance = config.get("edge_clearance")
-    if edge_segments and edge_clearance:
+    if edge_segments is not None:
         router._edge_segments = edge_segments
         router._edge_clearance = edge_clearance
-        router.grid.add_edge_keepout(edge_segments, edge_clearance)
+        if edge_segments and edge_clearance:
+            router.grid.add_edge_keepout(edge_segments, edge_clearance)
 
     # Route using the chromosome's net order
     routes = router.route_all(net_order)

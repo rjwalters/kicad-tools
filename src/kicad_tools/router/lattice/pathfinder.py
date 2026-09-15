@@ -310,6 +310,15 @@ class LatticePathfinder:
         from ..fixed_copper import FixedFillObstacles
 
         self.fixed_fills = FixedFillObstacles()
+        self.set_escape_boundary(None, 0.0)
+
+    def set_escape_boundary(self, edges: list[tuple[Pt, Pt]] | None, clearance: float) -> None:
+        """Install actual Edge.Cuts and its floor for copper-overlap attachments."""
+        from .escape_boundary import EscapeBoundary
+
+        if edges is None:
+            edges = list(zip(self.outline, self.outline[1:] + self.outline[:1], strict=True))
+        self._escape_boundary = EscapeBoundary(edges, clearance)
 
     def set_pairwise(self, pairwise: LatticePairwise | None) -> None:
         """Install (or clear) the id-space HV pairwise projection (#4602).
@@ -905,6 +914,42 @@ class LatticePathfinder:
                             break
                     if neck_stubs:
                         break
+                if not neck_stubs:
+                    # The trace's round cap may bond the pad even when its
+                    # centerline endpoint is outside it. Overlap the guaranteed
+                    # inscribed disc by half its radius, never by a tangency.
+                    radius = neck_half + diameter / 4.0
+                    for angle in range(0, 360, 45):
+                        theta = math.radians(angle)
+                        attachment = replace(
+                            pad,
+                            x=pad.x + radius * math.cos(theta),
+                            y=pad.y + radius * math.sin(theta),
+                        )
+                        candidates = self._scan_stubs(
+                            attachment,
+                            net,
+                            committed,
+                            neck_half,
+                            clr,
+                            kmax=_OVERSIZE_STUB_KMAX,
+                            search_radius=grown_sr,
+                            layers=layers,
+                            exempt_pads=exempt_pads,
+                        )
+                        neck_stubs = [
+                            stub
+                            for stub in candidates
+                            if self._escape_boundary.segment_clear(
+                                stub[2][-1], stub[2][-1], full_half
+                            )
+                            and all(
+                                self._escape_boundary.segment_clear(a, b, neck_half)
+                                for a, b in zip(stub[2], stub[2][1:], strict=False)
+                            )
+                        ]
+                        if neck_stubs:
+                            break
         return neck_stubs, neck_w
 
     def _keepout_escape_reason(

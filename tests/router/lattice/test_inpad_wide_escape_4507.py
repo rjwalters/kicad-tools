@@ -182,3 +182,84 @@ def test_unproved_pad_shapes_do_not_get_interior_attachment_fallback(shape):
     root.shape = shape
     stubs, width = escape(pf, root, nc)
     assert not stubs and width == 2.0
+
+
+def copper_contact_route(*, cutout=False):
+    root = Pad(8, 6, 1.325, 0.6, 1, "AC", ref="U3", pin="4", shape="roundrect")
+    sibling = Pad(8, 5.05, 1.325, 0.6, 2, "REF", ref="U3", pin="5", shape="roundrect")
+    target = Pad(8, 12, 2, 2, 1, "AC", ref="J1", pin="1")
+    pf = LatticePathfinder(
+        [(0, 0), (16, 0), (16, 16), (0, 16)],
+        [root, sibling, target],
+        DesignRules(trace_width=0.2, trace_clearance=0.15),
+        LayerStack.two_layer(),
+    )
+    if cutout:
+
+        def ring(points):
+            return list(zip(points, points[1:] + points[:1], strict=True))
+
+        pf.set_escape_boundary(
+            ring([(0, 0), (16, 0), (16, 16), (0, 16)])
+            + ring([(6, 6.9), (10, 6.9), (10, 10), (6, 10)]),
+            0.3,
+        )
+    nc = NetClassRouting(name="AC", trace_width=2.6, neck_trace_width=2.0, clearance=0.5)
+    return pf.route(root, target, nc)
+
+
+def test_wide_neck_can_connect_by_copper_overlap_without_centerline_inside_pad():
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+
+    route = copper_contact_route()
+    assert route is not None
+    copper = unary_union([segment_copper_polygon(s.start, s.end, s.width) for s in route.segments])
+    # An inscribed disc is inside the actual rounded pad, independent of rotation.
+    assert copper.intersection(Point(8, 6).buffer(0.3)).area > 0
+    assert copper.intersection(box(7, 11, 9, 13)).area > 0
+    assert copper.distance(box(7.3375, 4.75, 8.6625, 5.35)) >= 0.5 - 1e-9
+    assert copper.geom_type == "Polygon"
+    assert {round(s.width, 4) for s in route.segments} == {2.0, 2.6}
+
+
+def test_copper_contact_declines_when_cutout_blocks_attachment():
+    assert copper_contact_route(cutout=True) is None
+
+
+def test_native_emitted_copper_contact_and_disconnected_control(tmp_path):
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("Native KiCad CLI is not installed")
+    route = copper_contact_route()
+    assert route is not None
+    template = (Path(__file__).parents[2] / "fixtures/u3_wide_copper_contact.kicad_pcb").read_text()
+    prefix = template.rsplit("\n(segment", 1)[0]
+    cases = {
+        "emitted": "\n".join(s.to_sexp() for s in route.segments),
+        "disconnected": '(segment (start 8 7.5) (end 8 12) (width 2) (layer "F.Cu") (net 1))',
+    }
+    for name, segments in cases.items():
+        board = tmp_path / f"{name}.kicad_pcb"
+        board.write_text(prefix + "\n" + segments + ")\n")
+        board.with_suffix(".kicad_dru").write_text(
+            '(version 1)\n(rule "Trace gap" '
+            "(condition \"A.Type == 'Track' || B.Type == 'Track'\") "
+            "(constraint clearance (min 0.5mm)))\n"
+        )
+        report = tmp_path / f"{name}.json"
+        subprocess.run(
+            [str(cli), "pcb", "drc", "--format", "json", "-o", str(report), str(board)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        data = json.loads(report.read_text())
+        assert bool(data["unconnected_items"]) == (name == "disconnected")
+        assert not [v for v in data["violations"] if v["type"] in {"clearance", "shorting_items"}]
