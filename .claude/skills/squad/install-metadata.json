@@ -1,0 +1,30 @@
+{
+  "package": "@rjwalters/squad",
+  "version": "0.15.2",
+  "commit": "ad70e09",
+  "layout_version": 2,
+  "artifacts": {
+    ".claude/skills/squad/SKILL.md": "1cd155d29e8a09c4b25971fdca53d3b2fb27e8c9c529914e28c98e2571042be7",
+    ".claude/skills/squad/references/card.md": "5867b93f1331a33177f3e79ad989417aafb178be2b66f0fb0d7182275c32ae0e",
+    ".claude/skills/squad/references/clear.md": "46895b138c2031ee56a833f4c8fc8d61863feb01f85f26480e45371f6da8e31c",
+    ".claude/skills/squad/references/conventions.md": "5c8b3a61bb43d92d47462148dd018bd1a3b7844c8e686849c9e24eab50b46eb2",
+    ".claude/skills/squad/references/fanout.md": "967a1d913b5ed0b67873149e1744175b2f1f20e9e234f92b5217fdc5a1cae82d",
+    ".claude/skills/squad/references/goals.md": "59427f524c5b085fc295ac410858679e1900f97cd0a4bbfc5e617189a7d4387b",
+    ".claude/skills/squad/references/join.md": "a04636a39058aae9f3f3eb64c97c0023ac2e0a6c69c7dc2effec4994b1a8b6ec",
+    ".claude/skills/squad/references/steward.md": "5a6dc3436186d51d059b0cf3deeb62fa3a1f804d268384dad4f82fc5e7fea434",
+    ".agents/skills/squad/SKILL.md": "1cd155d29e8a09c4b25971fdca53d3b2fb27e8c9c529914e28c98e2571042be7",
+    ".agents/skills/squad/references/card.md": "5867b93f1331a33177f3e79ad989417aafb178be2b66f0fb0d7182275c32ae0e",
+    ".agents/skills/squad/references/clear.md": "46895b138c2031ee56a833f4c8fc8d61863feb01f85f26480e45371f6da8e31c",
+    ".agents/skills/squad/references/conventions.md": "5c8b3a61bb43d92d47462148dd018bd1a3b7844c8e686849c9e24eab50b46eb2",
+    ".agents/skills/squad/references/fanout.md": "967a1d913b5ed0b67873149e1744175b2f1f20e9e234f92b5217fdc5a1cae82d",
+    ".agents/skills/squad/references/goals.md": "59427f524c5b085fc295ac410858679e1900f97cd0a4bbfc5e617189a7d4387b",
+    ".agents/skills/squad/references/join.md": "a04636a39058aae9f3f3eb64c97c0023ac2e0a6c69c7dc2effec4994b1a8b6ec",
+    ".agents/skills/squad/references/steward.md": "5a6dc3436186d51d059b0cf3deeb62fa3a1f804d268384dad4f82fc5e7fea434",
+    ".claude/commands/squad/join.md": "ced5575296c980b78e5435b5b2f0fe576f7523b5e822b6c7c3e27382329438a1",
+    ".claude/commands/squad/goals.md": "7f9cf4eb3b963d5d0f27ae82003e46ef85223bb9f20853b849954914a17fec44",
+    ".claude/commands/squad/card.md": "dec766a9e5a1b89c77d8c6b8bc2476471969599744b55c80f799c70dc667d6ea",
+    ".claude/commands/squad/clear.md": "a9643aeae95fb5759c959ebd02d11a80321c24e593a2a6a71d4405aee1b45365",
+    ".claude/commands/squad/fanout.md": "fe8ef105dabfc71e0a3227a10b29fa537e401f9a2ded26b7027238777539cb39",
+    ".claude/commands/squad/steward.md": "ef73c37e4d707f7455cb1cb5b8a0bb7c577dfe5d0d29baedc260a8afefc0edcb"
+  }
+}
