@@ -7,6 +7,19 @@ must pass the router's authored skew/coupling and exact geometry gates.
 
 MIPI_DAT1 exercises conservative departure halo resolution. TMDS_D1/D2
 exercise completion of saved native corridor bodies with surface-layer tails.
+
+HOST-DEPENDENT (#5333): the qualification COUNT here is not a
+machine-independent property, even under ``--deterministic-budget``. The
+coupled phase keeps a per-pair wall cutoff (#3089/#3321) and an aggregate
+coupled-phase cutoff (#3439) that the flag does not disable, so a slow or
+loaded host qualifies fewer pairs for reasons that have nothing to do with
+the implementation under test. Measured on this exact fixture with identical
+source, argv and seed 42 on one loaded host (load avg ~29): the derived 60 s
+per-pair wall qualified 3/7 on one run and 4/7 on the very next, while
+``--diffpair-per-pair-timeout 300`` qualified 6/7. Every failure message
+therefore quotes the run's own budget lines (:func:`_budget_context`) so a
+wall-clock budget exit is never mistaken for a regression -- and so a passing
+run is never quoted as a machine-independent qualification.
 """
 
 from __future__ import annotations
@@ -143,8 +156,43 @@ def board07_live_diffpair_log(tmp_path_factory: pytest.TempPathFactory) -> str:
 
 def _pair_report_line(log: str, pair: str) -> str:
     match = re.search(rf"\[coupled-pair-report\] pair={re.escape(pair)} .*", log)
-    assert match is not None, f"no [coupled-pair-report] line for pair={pair} in:\n{log}"
+    assert match is not None, (
+        f"no [coupled-pair-report] line for pair={pair}{_budget_context(log)}\n\n"
+        f"full output:\n{log}"
+    )
     return match.group(0)
+
+
+def _budget_context(log: str) -> str:
+    """Wall-budget context to append to any qualification failure (#5333).
+
+    This module's qualification count is NOT a machine-independent property.
+    The coupled phase applies a per-pair wall cutoff (#3089/#3321) and an
+    aggregate coupled-phase cutoff (#3439); ``--deterministic-budget``
+    disables neither.  Measured on this fixture with identical source, argv
+    and seed on one loaded host: the derived 60 s per-pair wall qualified 3/7
+    pairs on one run and 4/7 on the next, while ``--diffpair-per-pair-timeout
+    300`` qualified 6/7.  A failure here is therefore ambiguous between "the
+    implementation regressed" and "this host was too slow for the wall
+    budget", and the run's own budget lines are what tells them apart -- so
+    quote them in the failure instead of making the reader re-run it.
+    """
+    lines = [
+        line.strip()
+        for line in log.splitlines()
+        if "DIFFPAIR_NONDETERMINISTIC_BUDGET" in line
+        or "DIFFPAIR_BUDGET_EXIT_FALLBACK" in line
+        or "DIFFPAIR_AGGREGATE_BUDGET_EXCEEDED" in line
+        or "budget exceeded" in line
+    ]
+    if not lines:
+        return " (no budget-exit lines in the run -- this is NOT a budget exit)"
+    joined = "\n  ".join(lines)
+    return (
+        "\n\nBUDGET CONTEXT (#5333) -- a wall-clock budget exit here is "
+        "host-speed dependent, not necessarily an implementation regression:"
+        f"\n  {joined}"
+    )
 
 
 def _construction_line_before(log: str, report_line: str) -> str | None:
@@ -161,10 +209,15 @@ def _construction_line_before(log: str, report_line: str) -> str | None:
 def test_previously_qualified_pairs_remain_coupled_ok(
     board07_live_diffpair_log: str, pair: str
 ) -> None:
-    """Every actual native pair must pass the unchanged qualification gates."""
+    """Every actual native pair must pass the unchanged qualification gates.
+
+    The gates themselves are unchanged and unwaived.  What is NOT asserted is
+    that this count is machine-independent -- see :func:`_budget_context`.
+    """
     line = _pair_report_line(board07_live_diffpair_log, pair)
-    assert f"pair={pair} class=coupled-ok" in line, line
-    assert "coupled=True" in line, line
+    context = _budget_context(board07_live_diffpair_log)
+    assert f"pair={pair} class=coupled-ok" in line, f"{line}{context}"
+    assert "coupled=True" in line, f"{line}{context}"
 
 
 def test_tmds_d1_corridor_stage_is_invoked_in_a_live_search(board07_live_diffpair_log: str) -> None:
