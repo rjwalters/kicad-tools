@@ -3499,6 +3499,10 @@ class CppPathfinder:
                     seg.width,
                     layer_idx,
                     seg.net,
+                    (
+                        *py_grid.world_to_grid(seg.x1, seg.y1),
+                        *py_grid.world_to_grid(seg.x2, seg.y2),
+                    ),
                 )
             for via in route.vias:
                 self._grid._impl.add_stored_via(
@@ -3507,6 +3511,7 @@ class CppPathfinder:
                     via.drill,
                     via.diameter,
                     via.net,
+                    py_grid.world_to_grid(via.x, via.y),
                 )
 
         self._grid._synced_route_count = current_count

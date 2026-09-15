@@ -236,12 +236,14 @@ namespace router {
 // enforce that resolved value as a hard floor instead of skipping.
 // v26: reject foreign physical copper when seeding source-pad cells in
 // both one-shot and resumable A*. Clearance halos remain valid exits.
-// v27: dynamic-route geometry coverage/refinement and cross-net drill floor.
-// Landed concurrently with v26 on a separate branch, so both changes are on
-// the binding surface at this version -- v27 is the first build that carries
-// BOTH the v26 source-pad seeding rule and the dynamic-route geometry work,
-// and the bump is what forces `kct build-native` to discard a stale .so built
-// from either prior v26 state.
+// v27 (Issue #5410): dynamic-route geometry coverage/refinement, the
+// cross-net drill floor, and exact mark-coordinate preservation across the
+// native geometry sync.  This work was developed in parallel with v26 and
+// originally carried its own "v26" bump on the branch; both are real,
+// DISTINCT binding-surface changes, so the rebase resolves to a single v27
+// that is the first build carrying BOTH.  The bump is what forces
+// ``kct build-native`` to discard a stale ``.so`` compiled from either prior
+// v26 state (main's source-pad seeding build, or the branch's own).
 constexpr int ROUTER_CPP_BUILD_VERSION = 27;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

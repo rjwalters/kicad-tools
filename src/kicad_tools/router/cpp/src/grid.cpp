@@ -638,23 +638,28 @@ std::pair<std::vector<size_t>, std::vector<size_t>> Grid3D::route_geometry_candi
 }
 
 void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
-                                float width, int layer_idx, int net) {
+                                float width, int layer_idx, int net,
+                                std::optional<std::tuple<int, int, int, int>> grid_endpoints) {
     index_route_geometry(route_segment_bins_, stored_segments_.size(),
                          std::min(x1, x2) - width / 2, std::min(y1, y2) - width / 2,
                          std::max(x1, x2) + width / 2, std::max(y1, y2) + width / 2);
     stored_segments_.push_back({x1, y1, x2, y2, width, layer_idx, net});
-    const auto [gx1, gy1] = world_to_grid(x1, y1);
-    const auto [gx2, gy2] = world_to_grid(x2, y2);
+    auto [gx1, gy1] = world_to_grid(x1, y1);
+    auto [gx2, gy2] = world_to_grid(x2, y2);
+    // Python marking uses double precision and ties-to-even rounding. Keep
+    // its exact raster coordinates when supplied with the physical copper.
+    if (grid_endpoints) std::tie(gx1, gy1, gx2, gy2) = *grid_endpoints;
     registered_route_geometry_.insert(segment_mark_key(gx1, gy1, gx2, gy2, layer_idx, net));
     route_coverage_dirty_ = true;
 }
 
-void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net) {
+void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net,
+                           std::optional<std::pair<int, int>> grid_center) {
     const float radius = std::max(drill, diameter) / 2;
     index_route_geometry(route_via_bins_, stored_vias_.size(),
                          x - radius, y - radius, x + radius, y + radius);
     stored_vias_.push_back({x, y, drill, diameter, net});
-    const auto [gx, gy] = world_to_grid(x, y);
+    const auto [gx, gy] = grid_center.value_or(world_to_grid(x, y));
     registered_route_geometry_.insert(via_mark_key(gx, gy, net));
     route_coverage_dirty_ = true;
 }

@@ -354,3 +354,40 @@ def test_native_overlap_checks_hidden_owner_and_rebuild_drops_ripped_geometry():
     native._impl.add_stored_via(x, y, 0.3, 0.6, 2)
     assert native._impl.route_geometry_complete()
     assert not router._impl.is_via_blocked(55, 56, 1, False, 4)
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+def test_stored_geometry_uses_the_python_mark_coordinates_at_half_cells(kind):
+    """Board06's real neck-down endpoint rounds to352 in Python,353 in C++."""
+    from kicad_tools.router.primitives import Layer, Route, Segment, Via
+
+    rules = DesignRules(grid_resolution=0.05)
+    grid = RoutingGrid(
+        width=65,
+        height=50,
+        origin_x=98.5,
+        origin_y=47.5,
+        rules=rules,
+        layer_stack=LayerStack.four_layer_all_signal(),
+    )
+    native = CppGrid.from_routing_grid(grid)
+    x1, y1, x2, y2 = 112.30000305175781, 65.0999984741211, 112.30000305175781, 65.125
+    assert grid.world_to_grid(x2, y2) == (276, 352)
+    assert native._impl.world_to_grid(x2, y2) == (276, 353)
+    route = Route(net=7, net_name="USB2_D-")
+    if kind == "segment":
+        route.segments.append(Segment(x1, y1, x2, y2, 0.23145000000078977, Layer.F_CU, 7))
+        native._impl.mark_segment(*grid.world_to_grid(x1, y1), *grid.world_to_grid(x2, y2), 0, 7, 6)
+    else:
+        route.vias.append(Via(x2, y2, 0.25, 0.6, (Layer.F_CU, Layer.B_CU), 7))
+        native._impl.mark_via(*grid.world_to_grid(x2, y2), 7, 6)
+    grid.mark_route(route)
+    router = CppPathfinder(native, rules)
+    assert not native._impl.route_geometry_complete()
+    router._sync_stored_routes(grid)
+    assert native._impl.route_geometry_complete()
+    assert native._impl.route_cell_has_geometry(276, 352, 0)
+    native.invalidate_stored_routes()
+    assert not native._impl.route_geometry_complete()
+    router._sync_stored_routes(grid)
+    assert native._impl.route_geometry_complete()

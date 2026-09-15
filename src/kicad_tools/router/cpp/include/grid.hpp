@@ -15,6 +15,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <optional>
 
 namespace router {
 
@@ -266,10 +267,12 @@ public:
 
     // Register a completed route's segments for clearance validation.
     void add_stored_segment(float x1, float y1, float x2, float y2,
-                            float width, int layer_idx, int net);
+                            float width, int layer_idx, int net,
+                            std::optional<std::tuple<int, int, int, int>> grid_endpoints = std::nullopt);
 
     // Register a completed route's via for clearance validation.
-    void add_stored_via(float x, float y, float drill, float diameter, int net);
+    void add_stored_via(float x, float y, float drill, float diameter, int net,
+                        std::optional<std::pair<int, int>> grid_center = std::nullopt);
 
     // A dynamic mark may be refined only after every active mark has its
     // physical primitive registered. Counts retain overlapping/repeated marks;

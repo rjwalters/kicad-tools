@@ -285,9 +285,9 @@ NB_MODULE(router_cpp, m) {
              "index"_a, "clearance"_a, "carveout_eligible"_a)
         .def("add_stored_segment", &Grid3D::add_stored_segment,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a,
-             "width"_a, "layer_idx"_a, "net"_a)
+             "width"_a, "layer_idx"_a, "net"_a, "grid_endpoints"_a = nb::none())
         .def("add_stored_via", &Grid3D::add_stored_via,
-             "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a)
+             "x"_a, "y"_a, "drill"_a, "diameter"_a, "net"_a, "grid_center"_a = nb::none())
         .def("clear_validation_data", &Grid3D::clear_validation_data)
         .def("clear_stored_routes", &Grid3D::clear_stored_routes,
              "Issue #2481: Drop only stored route data (segments + vias), "
