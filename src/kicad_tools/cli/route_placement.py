@@ -242,6 +242,26 @@ def finish(args, exit_code: int) -> int:
         report["auto_fix_status"] = "rejected"
         report["auto_fix_error"] = repair_error
         report["clean_success"] = False
+    if (fill_error or repair_error) and exit_code == 0:
+        exit_code = 3
+    if disposition.requested_invalid_nets and exit_code == 0:
+        exit_code = 2
+    if exit_code != 0:
+        report["clean_success"] = False
+    if getattr(args, "format", None) == "json":
+        # The normal diagnostics branch is bypassed by placement-only partials
+        # and early all-invalid exits. Publish an attempt summary on every such
+        # path, including --quiet and runs without --complete-report.
+        print(
+            json.dumps(
+                {
+                    "exit_code": exit_code,
+                    "output_written": fresh,
+                    "placement_disposition": report,
+                },
+                indent=2,
+            )
+        )
     report_path = getattr(args, "complete_report", None)
     if report_path:
         from kicad_tools.core.atomic_write import atomic_write_text
@@ -254,8 +274,4 @@ def finish(args, exit_code: int) -> int:
             payload = json.loads(path.read_text())
         payload["placement_disposition"] = report
         atomic_write_text(Path(report_path), json.dumps(payload, indent=2) + "\n")
-    if (fill_error or repair_error) and exit_code == 0:
-        return 3
-    if disposition.requested_invalid_nets and exit_code == 0:
-        return 2
     return exit_code

@@ -189,9 +189,86 @@ def test_all_invalid_export_replaces_stale_attempt(tmp_path, suffix):
         pytest.param(["--no-auto-layers", "--adaptive-rules"], id="adaptive-rules"),
         pytest.param(["--adaptive-rules"], id="combined"),
         pytest.param(["--region", "0,0,20,12"], id="region"),
+        pytest.param(["--auto-pcb-size"], id="size"),
+        pytest.param(["--auto-mfr-tier"], id="manufacturer"),
     ],
 )
 def test_partial_placement_route_modes(tmp_path, options):
     test_partial_placement_cli_preserves_and_reports(
         tmp_path, "outer", True, "mixed", extra_options=options
     )
+
+
+@pytest.mark.parametrize("name_only", [False, True])
+def test_escaped_invalid_net_survives_actual_cli_and_failed_export(tmp_path, name_only):
+    from kicad_tools.cli.route_cmd import main
+
+    invalid = 'BAD\\return"pin'
+    source = tmp_path / "escaped.kicad_pcb"
+    source.write_text(board_text(name_only=name_only).replace('"BAD"', json.dumps(invalid)))
+    original = source.read_bytes()
+    output = tmp_path / "output.kicad_pcb"
+    report = tmp_path / "report.json"
+    failed = tmp_path / "failed.json"
+    rc = main(
+        [
+            str(source),
+            "-o",
+            str(output),
+            "--complete-report",
+            str(report),
+            "--export-failed-nets",
+            str(failed),
+        ]
+    )
+    assert rc in {2, 3}
+    assert source.read_bytes() == original
+    assert json.loads(report.read_text())["placement_disposition"]["requested_blocked_nets"] == [
+        invalid
+    ]
+    blocked = [r for r in json.loads(failed.read_text()) if r["net"] == invalid]
+    assert len(blocked) == 1 and blocked[0]["attempted"] is False
+    before, after = PCB.load(source), PCB.load(output)
+    assert any(s.net_name == "GOOD" for s in after.segments)
+    assert sorted(
+        (f.reference, p.number, p.net_name) for f in before.footprints for p in f.pads
+    ) == sorted((f.reference, p.number, p.net_name) for f in after.footprints for p in f.pads)
+    assert [
+        (s.start, s.end, s.width, s.layer) for s in before.segments if s.net_name == invalid
+    ] == [(s.start, s.end, s.width, s.layer) for s in after.segments if s.net_name == invalid]
+
+
+@pytest.mark.parametrize("entry", ["inner", "outer"])
+@pytest.mark.parametrize("selection", ["mixed", "all_invalid", "valid_only"])
+@pytest.mark.parametrize("finite", [False, True])
+def test_json_attempt_summary_includes_placement_on_all_outcomes(
+    tmp_path, capfd, entry, selection, finite
+):
+    from kicad_tools.cli import main as outer_main
+    from kicad_tools.cli.route_cmd import main as inner_main
+
+    source = tmp_path / "source.kicad_pcb"
+    source.write_text(board_text())
+    output = tmp_path / "output.kicad_pcb"
+    argv = [str(source), "-o", str(output), "--quiet", "--format", "json"]
+    if finite:
+        argv += ["--timeout", "30"]
+    if selection != "mixed":
+        argv += ["--nets", "BAD" if selection == "all_invalid" else "GOOD"]
+    rc = outer_main(["route", *argv]) if entry == "outer" else inner_main(argv)
+    stdout = capfd.readouterr().out
+    # Existing progress output can precede JSON. The final object is the
+    # attempt summary, not an inferred success from a prior routing diagnostic.
+    start = stdout.rfind("\n{") + 1 if "\n{" in stdout else 0
+    summary = json.loads(stdout[start:])
+    assert summary["exit_code"] == rc
+    assert summary["output_written"] is (selection != "all_invalid")
+    placement = summary["placement_disposition"]
+    assert placement["direct_invalid_nets"] == ["BAD"]
+    assert placement["requested_blocked_nets"] == ([] if selection == "valid_only" else ["BAD"])
+    if selection != "valid_only":
+        assert rc != 0 and placement["clean_success"] is False
+    if selection == "all_invalid":
+        assert placement["completed_nets"] == []
+    else:
+        assert any(s.net_name == "GOOD" for s in PCB.load(output).segments)

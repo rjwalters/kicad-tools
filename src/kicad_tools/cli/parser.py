@@ -3518,6 +3518,12 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument("pcb", help="Path to .kicad_pcb file")
     route_parser.add_argument("-o", "--output", help="Output file path")
     route_parser.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Routing diagnostics format, including placement disposition",
+    )
+    route_parser.add_argument(
         "--strategy",
         choices=["basic", "negotiated", "monte-carlo", "evolutionary"],
         default="negotiated",
