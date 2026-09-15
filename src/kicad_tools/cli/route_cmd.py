@@ -11112,6 +11112,10 @@ def _build_diffpair_config(args):
         # Issue #3275: forward the optional per-pair wall-clock budget so the
         # CoupledPathfinder's per-pair coupled A* search can be bounded.
         per_pair_timeout=getattr(args, "diffpair_per_pair_timeout", None),
+        # Issue #5333: report-only -- lets the coupled phase warn that its own
+        # wall-clock cutoffs survive a flag whose banner promises a
+        # machine-independent route.  Changes no budget.
+        deterministic_budget=bool(getattr(args, "deterministic_budget", False)),
     )
 
 
@@ -15904,6 +15908,10 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # main strategy.  Default ``None`` preserves the
             # unbounded behaviour the rest of the CLI relies on.
             per_pair_timeout=getattr(args, "diffpair_per_pair_timeout", None),
+            # Issue #5333: report-only -- lets the coupled phase warn that
+            # its own wall-clock cutoffs survive a flag whose banner
+            # promises a machine-independent route.  Changes no budget.
+            deterministic_budget=bool(getattr(args, "deterministic_budget", False)),
         )
 
         # Show detected differential pairs

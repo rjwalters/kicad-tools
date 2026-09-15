@@ -12851,6 +12851,46 @@ class DiffPairRouter:
         coupled_phase_deadline: float | None = None
         if effective_aggregate_timeout is not None and effective_aggregate_timeout > 0:
             coupled_phase_deadline = time.monotonic() + float(effective_aggregate_timeout)
+        # Issue #5333: ``--deterministic-budget`` prints "per-net wall-clock
+        # cutoff DISABLED ... routed output is reproducible across machines"
+        # (issue #3538/#3881) -- but that contract was only ever implemented
+        # for the SINGLE-ENDED per-net A*.  This phase's two wall-clock
+        # cutoffs are untouched by the flag, so under it the set of pairs
+        # that qualify as coupled remains a function of machine speed and
+        # load while the banner says otherwise.  Measured on Board07's
+        # committed regression fixture (seed 42, native ABI 31, identical
+        # source and argv, one loaded host): the derived 60 s per-pair wall
+        # qualified 3/7 pairs on one run and 4/7 on the very next, while
+        # ``--diffpair-per-pair-timeout 300`` qualified 6/7.  Only the wall
+        # allowance differed -- those were budget exits, not physical
+        # rejections -- so a "7/7 qualified" measurement taken on a fast idle
+        # host does not transfer to a busy one, and a qualification claim
+        # that does not mention the wall budget it ran under is unfalsifiable.
+        #
+        # This is instrumentation ONLY: no budget, iteration ledger or
+        # routing decision changes here.  Retiring the cutoffs in favour of
+        # the phase's existing deterministic ledgers needs a measured
+        # full-recipe cost comparison first, because the hard total the
+        # recipe grants the whole board is shared with the single-ended
+        # remainder.
+        _wall_governed = (
+            effective_per_pair_timeout is not None and effective_per_pair_timeout > 0
+        ) or coupled_phase_deadline is not None
+        if getattr(diffpair_config, "deterministic_budget", False) and _wall_governed:
+            logger.warning(
+                "DIFFPAIR_NONDETERMINISTIC_BUDGET: --deterministic-budget is "
+                "set, but the coupled diff-pair phase still applies wall-clock "
+                "cutoffs (per-pair %s; aggregate %s). Which pairs qualify as "
+                "coupled therefore depends on machine speed and load -- treat "
+                "any pair-qualification count from this run as valid only for "
+                "these wall budgets on this host (issue #5333).",
+                f"{float(effective_per_pair_timeout):.1f}s"
+                if effective_per_pair_timeout
+                else "none",
+                f"{float(effective_aggregate_timeout):.1f}s"
+                if effective_aggregate_timeout
+                else "none",
+            )
         aggregate_deferred_pairs = 0
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
