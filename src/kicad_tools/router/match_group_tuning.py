@@ -3133,21 +3133,72 @@ def _tune_match_group_of_pairs(
                 break
 
             # --- Step 6: paired DRC self-check.
+            drc_context = {
+                "candidate_p_id": p_id,
+                "candidate_n_id": n_id,
+                "group_net_ids": group_net_ids,
+                "routes_by_net": routes_by_net,
+                "intra_group_clearance_mm": intra_group_clearance_mm,
+                "intra_pair_clearance_mm": intra_pair_clearance_mm,
+                "via_clearance_mm": via_clearance_mm,
+                "pads_by_net": pads_by_net,
+                "pad_clearance_mm": pad_clearance_mm,
+            }
             pair_drc_detail = _post_insertion_clearance_detail_pair_group(
                 new_p_segments=p_serp_result.new_segments,
                 new_n_segments=new_n_segments,
-                candidate_p_id=p_id,
-                candidate_n_id=n_id,
-                group_net_ids=group_net_ids,
-                routes_by_net=routes_by_net,
-                intra_group_clearance_mm=intra_group_clearance_mm,
-                intra_pair_clearance_mm=intra_pair_clearance_mm,
-                via_clearance_mm=via_clearance_mm,
-                pads_by_net=pads_by_net,
-                pad_clearance_mm=pad_clearance_mm,
                 candidate_p_route=candidate_p_route,
                 candidate_n_route=candidate_n_route,
+                **drc_context,
             )
+            if pair_drc_detail is not None and preserve_pair_spacing:
+                # A coordinated loop can bulge toward either side while
+                # preserving both added lengths and the physical pair gap.
+                # Try the opposite side once before rolling back the pair.
+                # This is still ONE insertion, with the same fixed hosts,
+                # target length, cascade cap and full paired clearance gate.
+                opposite = coordinated_pair_loop(
+                    n_insertion_segment,
+                    p_insertion_segment,
+                    added_length=length_needed,
+                    window_start=(span - window) / 2,
+                    window_end=(span + window) / 2,
+                )
+                if opposite is not None:
+                    opposite_n, opposite_p = opposite
+                    opposite_p_route = replace(
+                        current_p,
+                        segments=current_p.segments[:_p_seg_idx]
+                        + opposite_p
+                        + current_p.segments[_p_seg_idx + 1 :],
+                    )
+                    opposite_n_route = _splice_mirrored_n_route(
+                        current_n,
+                        n_insertion_seg_index=n_insertion_seg_idx,
+                        mirrored_segments=opposite_n,
+                    )
+                    if opposite_n_route is not None:
+                        opposite_detail = _post_insertion_clearance_detail_pair_group(
+                            new_p_segments=opposite_p,
+                            new_n_segments=opposite_n,
+                            candidate_p_route=opposite_p_route,
+                            candidate_n_route=opposite_n_route,
+                            **drc_context,
+                        )
+                        if opposite_detail is None:
+                            candidate_p_route, candidate_n_route = (
+                                opposite_p_route,
+                                opposite_n_route,
+                            )
+                            new_n_segments = opposite_n
+                            p_serp_result = replace(
+                                p_serp_result,
+                                new_segments=opposite_p,
+                                message="Added one coordinated pair loop on the opposite side",
+                            )
+                            per_pair_result_p.serpentine_results[-1] = p_serp_result
+                            per_pair_result_n.serpentine_results[-1] = p_serp_result
+                            pair_drc_detail = None
             if pair_drc_detail is not None:
                 # Rollback BOTH halves atomically -- the drift-prevention
                 # invariant that Phase 2F AC #4 tests.
