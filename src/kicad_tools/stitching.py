@@ -263,7 +263,7 @@ def _context_files(source: Path) -> list[Path]:
                 if not resource.is_dir() or resource.suffix != ".pretty":
                     raise StitchRejected(f"Unsupported project-local footprint library: {raw}")
                 files.update(path for path in resource.rglob("*") if path.is_file())
-            elif not Path(raw).is_absolute() and "${" not in raw:
+            elif not Path(expanded).is_absolute() or "${KIPRJMOD}" in raw:
                 # Moving ../ or variable-relative resources would change the
                 # selected project's native context. Refuse instead of defaulting.
                 raise StitchRejected(f"Cannot preserve relative footprint library: {raw}")

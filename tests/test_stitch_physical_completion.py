@@ -359,11 +359,17 @@ def test_project_local_library_context_is_retained(tmp_path, native_cli):
         assert (folder / constraints.name).read_bytes() == constraints.read_bytes()
 
 
-def test_unpreservable_project_relative_library_fails_with_evidence(tmp_path):
+@pytest.mark.parametrize("variable", [False, True])
+def test_unpreservable_project_relative_library_fails_with_evidence(tmp_path, variable):
     board = fixture_board(tmp_path)
     original = board.read_bytes()
+    uri = "${SHARED}" if variable else "../shared.pretty"
+    if variable:
+        board.with_suffix(".kicad_pro").write_text(
+            json.dumps({"text_variables": {"SHARED": "../shared.pretty"}})
+        )
     (tmp_path / "fp-lib-table").write_text(
-        '(fp_lib_table (lib (name "Local") (type "KiCad") (uri "../shared.pretty") (options "") (descr "")))'
+        f'(fp_lib_table (lib (name "Local") (type "KiCad") (uri "{uri}") (options "") (descr "")))'
     )
     with pytest.raises(StitchRejected, match="Cannot preserve relative footprint library"):
         complete_power_connections(board, ["GNDA"], evidence_dir=tmp_path / "evidence")
