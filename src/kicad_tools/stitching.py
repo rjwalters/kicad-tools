@@ -320,13 +320,14 @@ def complete_power_connections(
     release approval.
     """
     from kicad_tools.cli.stitch_cmd import find_all_plane_nets, run_stitch
-    from kicad_tools.core.sexp_file import load_pcb
+    from kicad_tools.sexp import parse_string
 
     source = Path(pcb_path).resolve()
     check_kicad_lock(source)
     if not source.is_file():
         raise StitchRejected(f"Missing PCB: {source}")
-    targets = sorted(set(net_names or find_all_plane_nets(load_pcb(source))))
+    original = source.read_bytes()
+    targets = sorted(set(net_names or find_all_plane_nets(parse_string(original.decode("utf-8")))))
     if not targets:
         raise StitchRejected("No target power nets")
     evidence = (
@@ -336,7 +337,6 @@ def complete_power_connections(
     )
     if evidence_dir:
         evidence.mkdir(parents=True, exist_ok=False)
-    original = source.read_bytes()
     record: dict[str, Any] = {
         "implementation_sha256": _sha(Path(__file__)),
         "native_cli": str(shutil.which(kicad_cli) or kicad_cli),
@@ -348,9 +348,9 @@ def complete_power_connections(
     }
     try:
         sidecars = _context_files(source)
-        hashes = {str(path): _sha(path) for path in [source, *sidecars]}
+        hashes = {str(path): _sha(path) for path in sidecars}
+        hashes[str(source)] = hashlib.sha256(original).hexdigest()
         record["inputs"] = hashes
-        saved = _snapshot(source)
         stages = {}
         for label in ("saved", "before", "candidate"):
             folder = evidence / label
@@ -362,6 +362,10 @@ def complete_power_connections(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(sidecar, destination)
             stages[label] = board
+        saved = _snapshot(stages["saved"])
+        record["saved"] = saved
+        if _sha(source) != hashes[str(source)]:
+            raise StitchRejected("Source changed concurrently during input capture")
         saved_report = _native_refill(stages["saved"], kicad_cli, refill=False)
         record["saved"] = {**saved, "native": saved_report}
         before_report = _native_refill(stages["before"], kicad_cli)

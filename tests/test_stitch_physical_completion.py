@@ -562,3 +562,37 @@ def test_failed_atomic_promotion_preserves_input_and_records_rejection(
     assert json.loads((evidence / "evidence.json").read_text())["status"] == "rejected"
     assert not list(tmp_path.glob("*.stitch-tmp"))
     assert not list(tmp_path.glob("*.stitch.lock"))
+
+
+def test_edit_during_initial_context_capture_cannot_rebind_original_bytes(tmp_path, monkeypatch):
+    import hashlib
+
+    import kicad_tools.stitching as stitching
+
+    board = fixture_board(tmp_path)
+    original = board.read_bytes()
+    evidence = tmp_path / "evidence"
+    actual_context = stitching._context_files
+    edited = (
+        original.rstrip()[:-1]
+        + b'(gr_text "KEEP MY EDIT" (at 111 111) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15)))))\n'
+    )
+    calls = 0
+
+    def edit_during_census(source):
+        nonlocal calls
+        result = actual_context(source)
+        calls += 1
+        if calls == 1:
+            source.write_bytes(edited)
+        return result
+
+    monkeypatch.setattr(stitching, "_context_files", edit_during_census)
+    with pytest.raises(StitchRejected, match="changed concurrently during input capture"):
+        complete_power_connections(board, ["GNDA"], evidence_dir=evidence, kicad_cli="/not-reached")
+    assert board.read_bytes() == edited
+    record = json.loads((evidence / "evidence.json").read_text())
+    original_hash = hashlib.sha256(original).hexdigest()
+    assert record["inputs"][str(board.resolve())] == record["saved"]["sha256"] == original_hash
+    assert (evidence / "saved" / board.name).read_bytes() == original
+    assert record["status"] == "rejected"
