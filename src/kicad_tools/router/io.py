@@ -4237,9 +4237,9 @@ def load_pcb_for_routing(
     # (Issue #2039).  The bbox derived from actual edge cuts is more
     # accurate than grid origin/dimensions for OOB filtering.
     if edge_segments:
-        all_xs = [p[0] for seg in edge_segments for p in seg]
-        all_ys = [p[1] for seg in edge_segments for p in seg]
-        router._board_bbox = (min(all_xs), min(all_ys), max(all_xs), max(all_ys))
+        # Use the same bounds as the grid and schema. Retained zero-area
+        # graphics are clearance obstacles, not additional board extent.
+        router._board_bbox = bounds
         # Store the raw outline segments for post-route edge-clearance
         # validation in drc_nudge / validate_routes (Issue #2743).
         router._edge_segments = edge_segments

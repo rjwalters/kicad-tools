@@ -139,6 +139,29 @@ def _arc_points(start: Point, mid: Point, end: Point) -> list[Point]:
     return points
 
 
+def is_degenerate_closed_curve(points: list[Point]) -> bool:
+    """Whether a cubic closes along one exact line, enclosing no board area.
+
+    No distance or area tolerance is used: arbitrarily small real loops and
+    open straight curves remain geometry. Keep these graphics as clearance
+    obstacles; only board bounds and contour assembly can ignore them.
+    """
+    if len(points) != 4 or points[0] != points[-1]:
+        return False
+    if len(set(points)) <= 2:
+        return True
+    from fractions import Fraction
+
+    # Exact arithmetic on the represented coordinates avoids cancellation
+    # falsely classifying a narrow loop as collinear far from the origin.
+    origin, first, second = points[:3]
+    ax = Fraction(first[0]) - Fraction(origin[0])
+    ay = Fraction(first[1]) - Fraction(origin[1])
+    bx = Fraction(second[0]) - Fraction(origin[0])
+    by = Fraction(second[1]) - Fraction(origin[1])
+    return ax * by == ay * bx
+
+
 def _curve_points(points: list[Point]) -> list[Point]:
     if len(points) != 4:
         raise ValueError("Malformed Edge.Cuts gr_curve: expected four cubic control points")
@@ -392,7 +415,9 @@ def board_outline_segments(root: SExp) -> OutlineSegments:
 def board_outline_bounds(root: SExp) -> Bounds | None:
     """Return sheet-absolute bounds, ignoring non-outline and nested graphics.
 
-    Bounds describe the geometry, excluding stroke width. Missing geometry
+    Bounds exclude stroke width and closed collinear cubics, which cannot
+    enclose board area. Their graphics remain available as obstacles.
+    Missing geometry
     returns None; malformed or unsupported Edge.Cuts graphics raise ValueError.
     This does not validate outline closure or topology.
     """
@@ -432,6 +457,8 @@ def board_outline_bounds(root: SExp) -> Bounds | None:
                     chain.append(_coordinate(xy, f"{node.tag} xy"))
             if len(chain) < 3:
                 raise ValueError(f"Malformed Edge.Cuts {node.tag}: missing points")
+            if node.tag == "gr_curve" and is_degenerate_closed_curve(chain):
+                continue
             points.extend(_curve_points(chain) if node.tag == "gr_curve" else chain)
         else:
             raise ValueError(f"Unsupported Edge.Cuts geometry: {node.tag}")
