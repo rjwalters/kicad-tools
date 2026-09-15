@@ -451,3 +451,41 @@ def test_endpoint_waiver_corner_routes_without_native_retry_fallback(force_pytho
     # New route copper contacts both the committed stub and the target pad.
     assert copper.intersects(LineString([seg.start, seg.end]).buffer(seg.width / 2))
     assert copper.intersects(Point(15, 15).buffer(0.4))
+
+
+@pytest.mark.parametrize("force_python", [True, False])
+def test_fine_pitch_escape_keeps_conductor_seeds_without_disabling_pad_inset(force_python):
+    """Board 04: pad-tail erosion must not erase a committed escape endpoint."""
+    if not force_python and not get_backend_info()["available"]:
+        pytest.skip("C++ extension unavailable")
+    rules = DesignRules(trace_width=0.2, grid_resolution=0.05, strict_pad_clearance=True)
+    router = Autorouter(20, 20, rules=rules, force_python=force_python, physics_enabled=False)
+    physical = Pad(8, 10, 0.3, 1.55, NET, NET_NAME, ref="U2", pin="5")
+    stub = Segment(8, 10, 10.025, 10.025, 0.2, Layer.F_CU, NET, NET_NAME)
+    escape = EscapeRoute(physical, EscapeDirection.EAST, stub.end, Layer.F_CU, segments=[stub])
+    terminal = router._build_escape_endpoint_pad(physical, escape)
+
+    def bounds(pad, width):
+        if force_python:
+            return router.router._get_pad_metal_bounds(pad, width)
+        b = router.router._compute_pad_bounds(pad, width)
+        return b.metal_gx1, b.metal_gy1, b.metal_gx2, b.metal_gy2
+
+    x1, y1, x2, y2 = bounds(terminal, rules.trace_width)
+    assert x1 <= x2 and y1 <= y2, "real escape copper contains legal grid seeds"
+    for gx in range(x1, x2 + 1):
+        for gy in range(y1, y2 + 1):
+            x, y = router.grid.grid_to_world(gx, gy)
+            assert math.hypot(x - terminal.x, y - terminal.y) <= stub.width / 2
+
+    # Real-pad tails still need the strict trace-width inset.
+    raw = bounds(physical, None)
+    inset = bounds(physical, rules.trace_width)
+    assert inset[0] >= raw[0] and inset[1] >= raw[1]
+    assert inset[2] <= raw[2] and inset[3] <= raw[3]
+    assert inset != raw
+
+    unmoved = EscapeRoute(physical, EscapeDirection.EAST, (physical.x, physical.y), physical.layer)
+    authored = router._build_escape_endpoint_pad(physical, unmoved)
+    assert not authored.escape_terminal
+    assert bounds(authored, rules.trace_width) == inset

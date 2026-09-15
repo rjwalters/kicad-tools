@@ -1835,13 +1835,16 @@ class CppPathfinder:
         threshold = self._rules.fine_pitch_threshold
         if (
             trace_width is not None
+            and not pad.escape_terminal
             and (
                 self._rules.strict_pad_clearance
                 or (pitch is not None and threshold is not None and pitch < threshold)
             )
             and not self._same_component_carveout_eligible(py_grid, pad.ref)
         ):
-            # Pad-center tails emit the configured local neck-down width.
+            # Physical pad-center tails emit the local neck-down width.
+            # Escape terminals already bound committed conductor copper;
+            # shrinking them again can erase every seed (Board 04, #5398).
             # Eroding by the wider trunk can erase every legal narrow-pad seed.
             seed_width = trace_width
             if self._rules.should_apply_neck_down(pad.ref, pitch):

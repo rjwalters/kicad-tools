@@ -354,7 +354,7 @@ def escape_endpoint_pad(
         drill=pad.drill if unchanged and extent is None else 0.0,
         rotation=rotation,
         shape=shape,
-        escape_terminal=True,
+        escape_terminal=not (unchanged and extent is None),
     )
 
 
