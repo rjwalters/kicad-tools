@@ -5165,8 +5165,6 @@ class Autorouter:
         if not specs:
             return False
 
-        import re
-
         for _nid, net_name in self.net_names.items():
             if not net_name:
                 continue
@@ -5179,7 +5177,7 @@ class Autorouter:
                 continue
 
             for spec in specs:
-                if not re.match(spec.net_pattern, net_name, re.IGNORECASE):
+                if not spec.matches(net_name):
                     continue
                 if spec.target_z0 is not None or spec.target_zdiff is not None:
                     return True
@@ -5261,7 +5259,6 @@ class Autorouter:
             return
 
         import dataclasses
-        import re
 
         synthesized_count = 0
         for nid, net_name in self.net_names.items():
@@ -5281,7 +5278,7 @@ class Autorouter:
             # Find the first regex default that matches this net name.
             matched_spec = None
             for spec in specs:
-                if re.match(spec.net_pattern, net_name, re.IGNORECASE):
+                if spec.matches(net_name):
                     matched_spec = spec
                     break
 

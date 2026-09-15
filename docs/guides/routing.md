@@ -71,6 +71,11 @@ With multiple resistor candidates, the router chooses the candidate with the
 smallest total Manhattan distance to the other terminals. Check this choice
 against the circuit's intended shunt before relying on automatic recognition.
 
+Current-sense polarity suffixes such as `ISENSE_A+` and `VSNS_N` do not by
+themselves select a 100-ohm differential impedance target. Their existing
+trace width and clearance remain in force. Explicit impedance specifications
+and net-class targets still apply.
+
 Recognized nets use separate branches from the shunt pad. Previously routed
 branches and other terminals become temporary physical obstacles during each
 search. This applies to Python and C++ grid routing, including negotiated
