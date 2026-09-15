@@ -10,9 +10,9 @@ pads (channel = 0.2 mm, required = 0.381 mm).
 
 The fix (#2880) forces ``_try_in_pad_escape`` whenever a signal pin
 is plane-sandwiched on a fine-pitch QFP AND ``via_in_pad_supported``
-is True.  When ``via_in_pad_supported`` is False, the router emits a
-clear error message that names the unfixable constraint instead of
-silently producing a routed PCB with documented DRC violations.
+is True. When that process is unavailable, an ordinary off-pad lateral
+escape may still succeed. The error diagnostic remains required when neither
+rescue can safely run (including an unknown physical-hole census).
 
 Test plan:
 1. Plane-sandwich predicate fires on the correct signal pins.
@@ -20,8 +20,9 @@ Test plan:
    produces an in-pad via for at least one plane-sandwiched pin
    (we cannot assert the exact pin set because the dispatcher's
    own violation check ALSO triggers rescue on many pins).
-3. With ``via_in_pad_supported=False`` (jlcpcb), the router emits an
-   ERROR-level log naming the plane-sandwich condition.
+3. With in-pad and ordinary lateral rescue unavailable, retain the ERROR
+   diagnostic and its escalation-time DEBUG demotion. A legal ordinary
+   lateral rescue instead succeeds without that error.
 4. Plane-sandwich detection is correctly narrow: corner pins,
    non-sandwiched pins, and plane pads themselves all return False.
 """
@@ -29,6 +30,8 @@ Test plan:
 from __future__ import annotations
 
 import logging
+
+import pytest
 
 from kicad_tools.router.escape import EscapeRouter, PackageType
 from kicad_tools.router.grid import RoutingGrid
@@ -624,7 +627,9 @@ class TestNoViaInPadErrorPath:
         unfixable geometric constraint."""
         rules = _make_rules(manufacturer="jlcpcb")
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules, component_holes=())
+        # Unknown physical holes make the ordinary lateral fallback unsafe.
+        # Unsupported via-in-pad alone no longer implies no legal escape.
+        router = EscapeRouter(grid, rules, component_holes=None)
         assert not router.via_in_pad_supported, (
             "Fixture sanity: plain jlcpcb should not support via-in-pad"
         )
@@ -690,7 +695,9 @@ class TestAutoMfrTierLogSuppression:
         rules = _make_rules(manufacturer="jlcpcb")
         rules.auto_mfr_tier_in_progress = True
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules, component_holes=())
+        # Unknown physical holes make the ordinary lateral fallback unsafe.
+        # Unsupported via-in-pad alone no longer implies no legal escape.
+        router = EscapeRouter(grid, rules, component_holes=None)
         assert not router.via_in_pad_supported, (
             "Fixture sanity: plain jlcpcb should not support via-in-pad"
         )
@@ -730,7 +737,9 @@ class TestAutoMfrTierLogSuppression:
         # Explicitly cleared (matches the FINAL-tier code path).
         rules.auto_mfr_tier_in_progress = False
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules, component_holes=())
+        # Unknown physical holes make the ordinary lateral fallback unsafe.
+        # Unsupported via-in-pad alone no longer implies no legal escape.
+        router = EscapeRouter(grid, rules, component_holes=None)
         assert not router.via_in_pad_supported
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
@@ -758,7 +767,9 @@ class TestAutoMfrTierLogSuppression:
         # are unaffected by #2891.
         assert rules.auto_mfr_tier_in_progress is False
         grid = _make_grid(rules)
-        router = EscapeRouter(grid, rules, component_holes=())
+        # Unknown physical holes make the ordinary lateral fallback unsafe.
+        # Unsupported via-in-pad alone no longer implies no legal escape.
+        router = EscapeRouter(grid, rules, component_holes=None)
         pads = _make_lqfp48_along_edge_sandwich()
         package = router.analyze_package(pads)
 
@@ -772,3 +783,42 @@ class TestAutoMfrTierLogSuppression:
             "Non-escalation callers must still see the #2880 ERROR "
             f"(pre-#2891 non-regression); got: {[r.getMessage() for r in caplog.records]}"
         )
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_ordinary_lateral_rescue_controls_process_error(caplog, blocked):
+    """A legal off-pad escape avoids an error; real drill obstacles preserve it."""
+    rules = _make_rules(manufacturer="jlcpcb")
+    # A synthetic large NPTH hole covers every candidate in this tiny package.
+    # It is valid, known geometry; the negative does not depend on a mock.
+    holes = (
+        [Pad(x=0, y=0, width=30, height=30, net=0, net_name="", through_hole=True, drill=30)]
+        if blocked
+        else []
+    )
+    router = EscapeRouter(_make_grid(rules), rules, component_holes=holes)
+    assert not router.via_in_pad_supported
+    package = router.analyze_package(_make_lqfp48_along_edge_sandwich())
+    with caplog.at_level(logging.INFO, logger="kicad_tools.router.escape"):
+        escapes = router.generate_escapes(package)
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR and "#2880" in r.getMessage()]
+    assert bool(errors) is blocked
+    assert (router.forced_lateral_via_fallbacks > 0) is (not blocked)
+    if not blocked:
+        from kicad_tools.router.pad_geometry import pad_point_distance
+
+        off_pad = [
+            escape
+            for escape in escapes
+            if escape.via_pos and escape.via is not None and not escape.via.in_pad
+        ]
+        assert off_pad
+        for escape in off_pad:
+            assert (
+                min(
+                    pad_point_distance(p, *escape.via_pos)
+                    for p in package.pads
+                    if not p.through_hole
+                )
+                >= escape.via.diameter / 2 + rules.trace_clearance - 1e-6
+            )

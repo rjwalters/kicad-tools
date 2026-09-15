@@ -231,7 +231,7 @@ class TestPerPadEscapeWidth:
                 f"(HighSpeed), not 0.5mm (Power from pads[0])."
             )
 
-    def test_lateral_offset_preserves_row_max_geometry(self):
+    def test_lateral_offset_preserves_row_max_geometry(self, monkeypatch):
         """AC#2 / curator's "trap" guard: switching to per-pad width MUST
         NOT collapse ``lateral_offset`` for the narrow-class pins.
 
@@ -240,6 +240,10 @@ class TestPerPadEscapeWidth:
         width baseline -- this is what proves the lateral offset still
         uses the worst-case row width, NOT each pad's own width.
         """
+        # This regression pins normal row emissions, before optional rescue.
+        # Rescue has a separate legal offset and clearance-driven neck width,
+        # checked by test_lateral_rescue_necks_only_the_surface_stub below.
+        monkeypatch.setattr(EscapeRouter, "_try_lateral_via_escape", lambda *a, **kw: None)
         pads = _make_mixed_class_usb_c_pads()
         rules = _make_rules()
         grid = _make_grid(rules)
@@ -322,11 +326,15 @@ class TestUniformNetClassUnchanged:
     to the single common width.
     """
 
-    def test_uniform_row_geometry_unchanged(self):
+    def test_uniform_row_geometry_unchanged(self, monkeypatch):
         """Even though we split the width into row_max + per-pad, a row
         where every pad shares a net class still emits segments of the
         single common width (no regression on the SSOP/TSSOP/QFN
         homogeneous-class case the issue spec calls out)."""
+        # This regression pins normal row emissions, before optional rescue.
+        # Rescue has a separate legal offset and clearance-driven neck width,
+        # checked by test_lateral_rescue_necks_only_the_surface_stub below.
+        monkeypatch.setattr(EscapeRouter, "_try_lateral_via_escape", lambda *a, **kw: None)
         pads = _make_mixed_class_usb_c_pads()
         rules = _make_rules()
         grid = _make_grid(rules)
@@ -359,3 +367,45 @@ class TestUniformNetClassUnchanged:
 
 if __name__ == "__main__":  # pragma: no cover - test-runner convenience
     pytest.main([__file__, "-v"])
+
+
+def test_lateral_rescue_necks_only_the_surface_stub():
+    from kicad_tools.router.pad_geometry import pad_point_distance, pad_segment_distance
+
+    pads = _make_mixed_class_usb_c_pads()
+    rules = _make_rules()
+    router = EscapeRouter(
+        _make_grid(rules),
+        rules,
+        net_class_map=_make_uniform_fat_net_map(),
+        component_holes=[p for p in pads if p.through_hole],
+    )
+    package = router.analyze_package(pads)
+    escapes = router.generate_escapes(package)
+    rescued = [e for e in escapes if e.pad.pin == "B7"]
+    assert len(rescued) == 1
+    escape = rescued[0]
+    assert escape.via_pos is not None
+    assert escape.via is not None and not escape.via.in_pad
+    assert router._get_trace_width_for_net(escape.pad.net_name) == 0.5
+    surface = [s for s in escape.segments if s.layer == Layer.F_CU]
+    assert surface
+    assert all(s.width == pytest.approx(0.127) for s in surface)
+    inner = [s for s in escape.segments if s.layer != Layer.F_CU]
+    assert inner and all(s.width == pytest.approx(0.5) for s in inner)
+    assert (
+        min(pad_point_distance(p, *escape.via_pos) for p in pads if not p.through_hole)
+        >= escape.via.diameter / 2 + rules.trace_clearance - 1e-6
+    )
+
+    # The preserved 0.5 mm class is physically too wide for this surface
+    # corridor: 0.125 mm clearance < 0.127 mm. Necking clears the same
+    # foreign pads; the inner-layer continuation retains its class width.
+    for segment in surface:
+        distance = min(
+            pad_segment_distance(p, segment.x1, segment.y1, segment.x2, segment.y2)
+            for p in pads
+            if p.net != escape.pad.net
+        )
+        assert distance - 0.5 / 2 < rules.trace_clearance
+        assert distance - segment.width / 2 >= rules.trace_clearance
