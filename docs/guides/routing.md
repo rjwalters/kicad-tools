@@ -990,6 +990,8 @@ hashes and sizes of the saved PCB and its effective sibling `.kicad_pro` and
 `.kicad_dru`. Missing optional sidecars are recorded explicitly. Authored source
 sidecars are retained for renamed outputs, including completion no-op and
 `--skip-drc` paths that do not generate new factory rules.
+Conflicting existing destination sidecars that were not propagated from this
+invocation's source cause a nonzero exit and no receipt; their bytes are retained.
 
 The receipt also accompanies useful partial outputs. A stale output, staging
 copy, or fatal constraint-propagation failure does not receive a current receipt.

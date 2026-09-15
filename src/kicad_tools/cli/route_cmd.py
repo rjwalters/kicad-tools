@@ -2850,6 +2850,9 @@ def _write_drc_constraint_sidecars(
         if not quiet:
             print(f"  Warning: could not write DRC-constraint sidecars: {e}")
         return
+    from .route_receipt import record_constraint_publication
+
+    record_constraint_publication(output_path, source_pcb_path)
     if not quiet and written:
         print(f"  DRC-constraint sidecars: {', '.join(str(p) for p in written)}")
 

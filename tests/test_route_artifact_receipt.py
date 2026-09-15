@@ -178,3 +178,44 @@ def test_real_partial_route_binds_saved_copper(tmp_path, monkeypatch):
         output.with_suffix(".kicad_dru").read_bytes()
         == source.with_suffix(".kicad_dru").read_bytes()
     )
+
+
+@pytest.mark.parametrize("mode", ["skip_drc", "complete_noop"])
+@pytest.mark.parametrize("suffix", [".kicad_pro", ".kicad_dru"])
+def test_actual_route_rejects_stale_destination_constraints(tmp_path, mode, suffix):
+    source = source_board(tmp_path)
+    source.with_suffix(".kicad_pro").write_text('{"text_variables":{"AUTHORED":"keep"}}')
+    if mode == "complete_noop":
+        source.write_text(
+            source.read_text()[:-1]
+            + '(segment (start 10 10) (end 13 10) (width .2) (layer "F.Cu") (net 1)))'
+        )
+    originals = {p: p.read_bytes() for p in tmp_path.iterdir()}
+    output = tmp_path / "renamed.kicad_pcb"
+    stale = output.with_suffix(suffix)
+    stale.write_text(
+        '{"text_variables":{"STALE":"other board"}}'
+        if suffix == ".kicad_pro"
+        else '(version 1)\n(rule "STALE OTHER BOARD" (constraint clearance (min .2mm)))\n'
+    )
+    before = stale.read_bytes()
+    options = ["--skip-drc"] if mode == "skip_drc" else ["--complete", "--route-engine", "grid"]
+    rc = route_cmd.main(
+        [
+            str(source),
+            "-o",
+            str(output),
+            "--backend",
+            "python",
+            "--no-auto-layers",
+            "--strategy",
+            "basic",
+            "--no-optimize",
+            *options,
+        ]
+    )
+    assert rc == 1
+    assert PCB.load(output).segments
+    assert not output.with_suffix(".route.json").exists()
+    assert stale.read_bytes() == before
+    assert all(p.read_bytes() == data for p, data in originals.items())

@@ -43,6 +43,7 @@ class _Invocation:
     outputs: dict[Path, tuple[int, int, int, int] | None]
     authored: dict[str, bytes]
     published: set[Path] = field(default_factory=set)
+    propagated: set[Path] = field(default_factory=set)
 
 
 _current: ContextVar[_Invocation | None] = ContextVar("route_artifact_receipt", default=None)
@@ -53,6 +54,14 @@ def record_publication(board: Path) -> None:
     invocation = _current.get()
     if invocation is not None:
         invocation.published.add(Path(board).absolute())
+
+
+def record_constraint_publication(board: Path, source: Path | None) -> None:
+    """Only validated source propagation establishes fresh effective rules."""
+    invocation = _current.get()
+    if invocation is not None and source is not None:
+        if Path(source).resolve() == invocation.source.resolve():
+            invocation.propagated.add(Path(board).absolute())
 
 
 def configure(args: Any) -> None:
@@ -97,9 +106,22 @@ def _finish(invocation: _Invocation, exit_code: int) -> None:
             continue
         # Complete no-op and explicitly skipped DRC do not generate sidecars.
         # Retain authored bytes in those paths without inventing new fab floors.
-        for suffix, data in invocation.authored.items():
-            destination = board.with_suffix(suffix)
-            if not destination.exists():
+        copies = []
+        if board in invocation.propagated:
+            if not all(board.with_suffix(s).is_file() for s in (".kicad_pro", ".kicad_dru")):
+                raise ValueError("Effective routing constraints disappeared after propagation")
+        else:
+            # Merely changing an output's mtime (e.g. native load/save) does not
+            # establish source propagation. Reject unrelated pre-existing rules
+            # rather than bind stale sidecars or overwrite another author's work.
+            for suffix, data in invocation.authored.items():
+                destination = board.with_suffix(suffix)
+                if destination.exists():
+                    if destination.read_bytes() != data:
+                        raise ValueError(f"Source constraint conflict at {destination}")
+                else:
+                    copies.append((destination, data))
+            for destination, data in copies:
                 destination.write_bytes(data)
         files = {
             role: _record(board if role == "board" else board.with_suffix(suffix))
