@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from ..primitives import Pad, pad_half_extents
@@ -71,46 +72,83 @@ def seg_body_crosses_pt(a: Pt, b: Pt, p: Pt, eps: float = _COLOCATION_EPSILON_MM
     return dist(a, p) >= eps and dist(b, p) >= eps
 
 
-def closest_point_on_rect_to_segment(a: Pt, b: Pt, inflated_rect: Rect, agent_radius: float) -> Pt:
-    """Closest point on a pad's RAW copper rect to segment ``a-b`` (issue #4507).
+def pad_waiver_probe_point(a: Pt, b: Pt, pad: Pad, own_half: float) -> Pt | None:
+    """Use the audit's copper midpoint, or decline an inexact pad model.
 
-    ``inflated_rect`` is a :attr:`LatticeObstacleModel.pad_rects` entry, i.e. the
-    pad's true half-extents already grown by ``agent_radius``; that inflation is
-    removed here so the probe lands on the pad's own copper boundary -- the same
-    place the #4588 gate's shapely ``shortest_line`` lands.
-
-    Two alternating projections (segment -> rect -> segment) are enough for the
-    axis-aligned case: project the segment's closest point to the rect centre,
-    clamp that onto the rect, then re-project.  When the segment passes through
-    the rect the clamp is a no-op and the result is the entry point, which is
-    also what the gate measures (a zero gap).  Degenerate ``a == b`` (a node
-    probe) collapses to a plain clamp.
+    Router pads retain rect/circle/oval dimensions and residual rotation, but
+    not the authored roundrect radius. A containing AABB bounds distance; it
+    does not conservatively bound membership in an arbitrary waiver zone.
     """
-    x0 = inflated_rect[0] + agent_radius
-    y0 = inflated_rect[1] + agent_radius
-    x1 = inflated_rect[2] - agent_radius
-    y1 = inflated_rect[3] - agent_radius
-    if x1 < x0:
-        x0 = x1 = (x0 + x1) / 2.0
-    if y1 < y0:
-        y0 = y1 = (y0 + y1) / 2.0
+    from kicad_tools.geometry.copper import segment_copper_polygon
+    from kicad_tools.router.pairwise_clearance import _shapely_gap_and_midpoint
 
-    def on_segment(p: Pt) -> Pt:
-        ax, ay = a
-        dx, dy = b[0] - ax, b[1] - ay
-        length2 = dx * dx + dy * dy
-        if length2 <= 1e-18:
-            return (ax, ay)
-        t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / length2
-        t = max(0.0, min(1.0, t))
-        return (ax + t * dx, ay + t * dy)
+    polygon = _pad_waiver_polygon(pad.x, pad.y, pad.width, pad.height, pad.shape, pad.rotation)
+    if polygon is None:
+        return None
+    copper = segment_copper_polygon(a, b, own_half * 2)
+    if copper is None:
+        return None
+    _, x, y = _shapely_gap_and_midpoint(copper, polygon)
+    return x, y
 
-    def on_rect(p: Pt) -> Pt:
-        return (max(x0, min(x1, p[0])), max(y0, min(y1, p[1])))
 
-    centre = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
-    point = on_rect(on_segment(centre))
-    return on_rect(on_segment(point))
+@lru_cache(maxsize=4096)
+def _pad_waiver_polygon(x: float, y: float, w: float, h: float, shape: str, rotation: float):
+    """Cache static pad copper, using the same primitives as the audit."""
+    from shapely.affinity import rotate, translate  # type: ignore[import-untyped]
+    from shapely.geometry import Point, box  # type: ignore[import-untyped]
+
+    if w <= 0 or h <= 0 or shape == "roundrect":
+        return None
+    if shape == "circle" or (shape == "oval" and abs(w - h) < 1e-6):
+        return Point(x, y).buffer(min(w, h) / 2)
+    if shape == "rect":
+        polygon = box(-w / 2, -h / 2, w / 2, h / 2)
+    elif shape == "oval":
+        radius = min(w, h) / 2
+        core = (
+            box(-(w / 2 - radius), 0, w / 2 - radius, 0)
+            if w >= h
+            else box(0, -(h / 2 - radius), 0, h / 2 - radius)
+        )
+        polygon = core.buffer(radius)
+    else:
+        return None
+    return translate(rotate(polygon, -rotation, origin=(0, 0)), x, y)
+
+
+def _pad_midpoint_envelope_exempt(
+    a: Pt,
+    b: Pt,
+    pad: Pad,
+    own_half: float,
+    net: int,
+    layer: int | None,
+    pairwise: LatticePairwise,
+) -> bool:
+    """Waive missing corner metadata only when every possible midpoint is rated.
+
+    Each endpoint of the true shortest line lies inside its copper's AABB.
+    Their componentwise average therefore lies inside this envelope. Require
+    ONE applicable zone to contain the whole envelope, not separate zones at
+    its corners. This may reject an otherwise valid narrow waiver.
+    """
+    hw, hh = pad_half_extents(pad)
+    x0 = (min(a[0], b[0]) - own_half + pad.x - hw) / 2
+    y0 = (min(a[1], b[1]) - own_half + pad.y - hh) / 2
+    x1 = (max(a[0], b[0]) + own_half + pad.x + hw) / 2
+    y1 = (max(a[1], b[1]) + own_half + pad.y + hh) / 2
+    for zx0, zy0, zx1, zy1, ids, layers in pairwise.zones:
+        if not (
+            zx0 <= x0 <= x1 <= zx1 and zy0 <= y0 <= y1 <= zy1 and net in ids and pad.net in ids
+        ):
+            continue
+        if layer is None or not layers:
+            return True
+        a_layers, b_layers = layers.get(net), layers.get(pad.net)
+        if (a_layers is None or layer in a_layers) and (b_layers is None or layer in b_layers):
+            return True
+    return False
 
 
 class LatticeObstacleModel:
@@ -270,21 +308,16 @@ class LatticeObstacleModel:
             grown = (rect[0] - extra_pw, rect[1] - extra_pw, rect[2] + extra_pw, rect[3] + extra_pw)
             if not seg_rect_intersect(a, b, grown):
                 continue
-            # Issue #4507: probe the #4506 waiver at the pair's CLOSEST-GAP
-            # point on the pad's own copper, never at the pad CENTRE.  The
-            # #4588 gate probes the closest-gap midpoint between the two
-            # copper polygons (``_copper_vs_pad_violation`` ->
-            # ``_shapely_gap_and_midpoint``); a centre-based probe sits up to
-            # half a pad-width further INTO the rated footprint -- i.e.
-            # systematically deeper inside the attach zone -- so the search
-            # waived proximity the gate then reported.  Measured live on the
-            # softstart rev-C T4 fixture: three net pairs, every one of them a
-            # gate finding the search had allowed through this exact
-            # discrepancy.  Probing the pad's closest copper point makes the
-            # two agree by construction, which is the discipline
-            # ``exempt_seg_seg`` already follows for trace-vs-trace.
-            probe = closest_point_on_rect_to_segment(a, b, self.pad_rects[idx], self.agent_radius)
-            if not pairwise.exempt_seg_pt(a, b, probe, net, pad.net, layer):
+            # Match the actual copper gate, including width, caps and pad
+            # rotation. Missing corner metadata cannot justify a point waiver.
+            if not any(net in ids and pad.net in ids for *_, ids, _layers in pairwise.zones):
+                return True
+            probe = pad_waiver_probe_point(a, b, pad, own_half)
+            if probe is None:
+                waived = _pad_midpoint_envelope_exempt(a, b, pad, own_half, net, layer, pairwise)
+            else:
+                waived = pairwise.exempt(probe[0], probe[1], net, pad.net, layer)
+            if not waived:
                 return True
         return False
 

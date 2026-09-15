@@ -1223,7 +1223,11 @@ class Autorouter:
         # ``_pairwise_pad_geometry`` helper, which applies the same
         # board-origin shift as the attach zones).  ``None`` = not yet
         # resolved; pads are static, so one resolve per run suffices.
-        self._pairwise_pad_geometry_cache: tuple[Any, ...] | None = None
+        # A ``str`` here is a memoised UNAVAILABILITY reason, not geometry: an
+        # empty tuple means "read the board, it has no connected pads" while
+        # unavailable means the audit cannot vouch for pad copper at all, and
+        # the gate must not treat the two alike (see ``_pairwise_pad_geometry``).
+        self._pairwise_pad_geometry_cache: tuple[Any, ...] | str | None = None
         # Issue #4699: the preserved routes the CLI's ``_finalize_routes``
         # actually re-emitted into the output board.  ``None`` = finalize has
         # not run yet; the #4588 post-route pairwise gate audits this copper

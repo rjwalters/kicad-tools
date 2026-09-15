@@ -137,9 +137,18 @@ pads but is never given any is the same shape of silent false pass #4588 and
 #4699 each closed in turn.
 
 Fixed by `_pairwise_pad_geometry(router)` — the pad-shaped companion to
-`_pairwise_attach_zones`, memoised on the router, degrading to the pre-#4507
-trace/via scope with a stderr warning rather than failing a run whose board
-cannot be read. The end-to-end regression test
+`_pairwise_attach_zones`, memoised on the router. It distinguishes **verified
+empty** (`()`: the board was read and has no connected pads) from
+**unavailable** (`None`: the read raised, or no source board path was ever
+recorded), and the audit turns `None` into a reported finding rather than a
+clean list. Degrading silently to the pre-#4507 trace/via scope would restore
+the very false pass this widening removes — PR #5392's review demonstrated a
+run printing SUCCESS and returning 0 over the 0.5 mm shortfall below with only
+a stderr warning to show for it. `_pairwise_attach_zones` can safely return
+`()` in the same situation because *its* degradation is conservative (fewer
+waivers ⇒ stricter gate); losing pad geometry removes checks, so the two
+helpers deliberately do not share that convention. The end-to-end regression
+test
 (`tests/test_route_pairwise_pad_audit_4507.py`) demonstrates the consequence
 directly: **before this change, a board carrying 300 V copper 0.5 mm from a
 foreign LV pad routed to a clean SUCCESS and exit 0.**
@@ -263,10 +272,23 @@ confirm the fix explained `/LED_A_NEG`↔`/SCAP_POS` specifically. It did not:
 **this probe mismatch is what that residual was**, now measured rather than
 inferred.
 
-Fixed by `closest_point_on_rect_to_segment` in `lattice/obstacles.py` (strips
-the `agent_radius` inflation back off a `pad_rects` entry to recover the pad's
-own copper boundary, then alternates segment→rect→segment projections), pinned
-by `tests/router/lattice/test_pairwise_pad_probe_4507.py`.
+Fixed by `pad_waiver_probe_point` in `lattice/obstacles.py`, using the
+production copper-gap midpoint helper for the moving trace (including its
+half-width and round caps) and the pad's oriented rect/circle/oval polygon.
+The review's rectangular boundary case now agrees with the gate at 7.55 mm,
+rather than the centerline-derived 7.50 mm.
+
+An AABB is conservative for distance but **not** for waiver-zone membership.
+The router does not retain authored roundrect radius metadata. For those
+pads, a waiver requires one applicable zone to contain the entire possible
+midpoint envelope derived from both copper bounding boxes. This preserves
+broad rated-zone waivers but can reject valid narrow waivers; exact rounded
+metadata transport remains outside this increment. Unknown/inexact geometry
+must not be waived using an assumed point.
+
+Pinned by `tests/router/lattice/test_pairwise_pad_probe_4507.py`, using the
+production gate helper on actual polygons, the original review counterexample,
+orientation/shape boundary controls and conservative-envelope controls.
 
 ### Where T4 stands after this pass
 

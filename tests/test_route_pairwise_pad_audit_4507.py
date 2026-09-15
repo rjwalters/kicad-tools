@@ -249,18 +249,37 @@ class TestPadGeometryResolver:
         board.unlink()
         assert _pairwise_pad_geometry(router) is first
 
-    def test_no_source_board_degrades_to_the_trace_only_scope(self, table):
-        assert _pairwise_pad_geometry(_router(None, table, [])) == ()
+    def test_no_source_board_is_UNAVAILABLE_not_verified_empty(self, table):
+        """``None``, never ``()`` -- see the resolver's own docstring.
 
-    def test_unreadable_board_warns_on_stderr_instead_of_failing(self, tmp_path, table, capsys):
+        ``()`` would mean "this board was read and has no connected pads", a
+        complete answer the audit may act on.  A stand-in router that never
+        loaded a board has not established that.
+        """
+        assert _pairwise_pad_geometry(_router(None, table, [])) is None
+
+    def test_unreadable_board_is_UNAVAILABLE_and_says_so_on_stderr(self, tmp_path, table, capsys):
         broken = tmp_path / "broken.kicad_pcb"
         broken.write_text("(kicad_pcb (this is not a board")
         router = _router(broken, table, [])
 
         pads = _pairwise_pad_geometry(router)
 
-        assert pads == ()
+        assert pads is None
         assert "could not read pad geometry" in capsys.readouterr().err
+
+    def test_a_board_with_no_connected_pads_is_verified_empty(self, tmp_path, table):
+        """The other side of the distinction: a real read that finds nothing."""
+        empty = tmp_path / "empty.kicad_pcb"
+        empty.write_text(
+            '(kicad_pcb (version 20240108) (generator "test")\n'
+            '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
+            '  (net 0 "")\n'
+            "  (gr_rect (start 0 0) (end 10 10) (stroke (width 0.1) (type default))"
+            ' (fill none) (layer "Edge.Cuts"))\n)\n'
+        )
+
+        assert _pairwise_pad_geometry(_router(empty, table, [])) == ()
 
     @pytest.mark.parametrize("origin", ORIGINS)
     def test_pads_are_in_the_board_files_own_sheet_absolute_frame(self, tmp_path, table, origin):
@@ -337,3 +356,92 @@ class TestEndToEnd:
         )
 
         assert rc == 0, capsys.readouterr().out
+
+
+class TestIncompleteAuditIsNotSuccess:
+    """PR #5392 review, counterexample 1 — reproduced as a regression test.
+
+    The first revision of this change swallowed any pad-geometry resolution
+    failure and cached ``()``, i.e. it made an audit that had checked NO pad
+    copper indistinguishable from one that had checked all of it and found
+    nothing.  The review's counterexample: inject a ``board_pad_geometry``
+    failure into the pad-only fixture below and ``kct route`` prints SUCCESS
+    and returns 0 over a 0.5 mm gap at 300 V, with only a stderr warning.
+
+    An HV gate whose contract is "SUCCESS means the written board is clean"
+    must not report success when it could not perform the scan.  Note the
+    no-``--voltage-map`` case stays a strict no-op: the gate is not enabled
+    there, so there is nothing incomplete about it.
+    """
+
+    def _run(self, tmp_path, *, voltage_map: bool):
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        pcb = tmp_path / "pad_only.kicad_pcb"
+        pcb.write_text(_pad_only_board(100.0, 100.0))
+        args = [
+            str(pcb),
+            "-o",
+            str(tmp_path / "out.kicad_pcb"),
+            "--route-engine",
+            "lattice",
+            "--strategy",
+            "basic",
+            "--skip-drc",
+            "--preserve-existing",
+        ]
+        if voltage_map:
+            vmap = tmp_path / "vmap.json"
+            vmap.write_text(json.dumps({"/HV_LINE": HV_VOLTS, "/LV_SENSE": 0.0}))
+            args += [
+                "--voltage-map",
+                str(vmap),
+                "--creepage-standard",
+                "iec60664",
+                "--pollution-degree",
+                "2",
+                "--material-group",
+                "IIIa",
+            ]
+        return route_main(args)
+
+    def test_unavailable_pad_geometry_fails_the_run_end_to_end(self, tmp_path, capsys):
+        from unittest.mock import patch
+
+        with patch(
+            "kicad_tools.router.pairwise_clearance.board_pad_geometry",
+            side_effect=RuntimeError("geometry unavailable"),
+        ):
+            rc = self._run(tmp_path, voltage_map=True)
+
+        captured = capsys.readouterr()
+        assert rc != 0, f"incomplete HV audit reported SUCCESS:\n{captured.out}"
+        # The run's own verdict names the incompleteness, and the operator is
+        # told WHY, not merely that something went wrong.  (An intermediate
+        # "LAYER ESCALATION SUMMARY ... Status: SUCCESS" line may still appear:
+        # that reports the escalation attempt, not the run's verdict.)
+        assert "HV audit INCOMPLETE -- pad copper was NOT checked" in captured.out
+        assert "geometry unavailable" in captured.out + captured.err
+
+    def test_without_a_voltage_map_the_same_failure_is_still_a_noop(self, tmp_path, capsys):
+        """The gate is not enabled, so there is nothing incomplete about it."""
+        from unittest.mock import patch
+
+        with patch(
+            "kicad_tools.router.pairwise_clearance.board_pad_geometry",
+            side_effect=RuntimeError("geometry unavailable"),
+        ):
+            rc = self._run(tmp_path, voltage_map=False)
+
+        assert rc == 0, capsys.readouterr().out
+
+    def test_the_audit_helper_reports_the_sentinel_rather_than_a_clean_list(self, tmp_path, table):
+        from kicad_tools.cli.route_cmd import PAD_AUDIT_INCOMPLETE, _audit_pairwise_clearance
+
+        # A stand-in router with no source board: pad geometry is unavailable.
+        router = _router(None, table, [_hv_trace_route(0.0, 0.0)])
+
+        violations = _audit_pairwise_clearance(router, SimpleNamespace(_pairwise_required={}))
+
+        assert len(violations) == 1
+        assert violations[0].net_a == PAD_AUDIT_INCOMPLETE
