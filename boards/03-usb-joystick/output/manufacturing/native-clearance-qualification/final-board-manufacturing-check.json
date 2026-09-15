@@ -1,5 +1,5 @@
 {
-  "file": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5044/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/tmp/5380-publication-board/output/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
@@ -7,7 +7,7 @@
     "warnings": 0,
     "infos": 6,
     "waived": 0,
-    "rules_checked": 51,
+    "rules_checked": 54,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -29,25 +29,6 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
-      "location": [
-        123.5,
-        99.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": 7.4,
-      "required_value": null,
-      "items": [
-        "J2"
-      ],
-      "nets": [],
-      "status": "info",
-      "waived": false
-    },
-    {
-      "rule_id": "connector_edge_distance",
-      "type": "unknown",
-      "severity": "info",
       "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
       "location": [
         149.475,
@@ -58,6 +39,25 @@
       "required_value": null,
       "items": [
         "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
+      "location": [
+        123.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 7.4,
+      "required_value": null,
+      "items": [
+        "J2"
       ],
       "nets": [],
       "status": "info",
@@ -101,23 +101,6 @@
       "rule_id": "diffpair_routing_continuity",
       "type": "diffpair_routing_continuity",
       "severity": "info",
-      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 73.0% of its length (>= 70.0% required)",
-      "location": null,
-      "layer": null,
-      "actual_value": 0.7296,
-      "required_value": 0.7,
-      "items": [],
-      "nets": [
-        "USB_MCU_D+",
-        "USB_MCU_D-"
-      ],
-      "status": "info",
-      "waived": false
-    },
-    {
-      "rule_id": "diffpair_routing_continuity",
-      "type": "diffpair_routing_continuity",
-      "severity": "info",
       "message": "Engaged differential pair USB_D+/USB_D- coupled 34.2% of its length (>= 25.0% required)",
       "location": null,
       "layer": null,
@@ -130,8 +113,26 @@
       ],
       "status": "info",
       "waived": false
+    },
+    {
+      "rule_id": "diffpair_routing_continuity",
+      "type": "diffpair_routing_continuity",
+      "severity": "info",
+      "message": "Engaged differential pair USB_MCU_D+/USB_MCU_D- coupled 73.0% of its length (>= 70.0% required)",
+      "location": null,
+      "layer": null,
+      "actual_value": 0.7296,
+      "required_value": 0.7,
+      "items": [],
+      "nets": [
+        "USB_MCU_D+",
+        "USB_MCU_D-"
+      ],
+      "status": "info",
+      "waived": false
     }
   ],
+  "mask_copper_assessments": [],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
@@ -152,7 +153,7 @@
     },
     "manifest": {
       "status": "PASSED",
-      "detail": "manifest.json mtime within tolerance of routed PCB mtime"
+      "detail": "bundle SHA-256 hashes verified; archived PCB matches current content"
     },
     "overall": "PASSED",
     "schematic_missing": false
@@ -160,7 +161,7 @@
   "fabrication_overrides": {
     "min_hole_to_hole_mm": 0.45,
     "source": "https://jlcpcb.com/capabilities/pcb-capabilities/",
-    "reason": "Published pad-hole minimum; native project has the same explicit floor",
+    "reason": "Published pad-hole minimum; matches reviewed geometry (GCT USB4085-GF-A stock 0.40mm PTH contacts on 0.85mm pitch, actual hole-edge spacing 0.45mm). Native KiCad DRC at this floor reports zero hole_to_hole findings on the routed board.",
     "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5006",
     "suppressed_findings": 0
   },

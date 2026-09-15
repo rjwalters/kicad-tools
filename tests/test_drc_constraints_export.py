@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,20 @@ from kicad_tools.manufacturers.project_generator import (
     _NON_BLOCKING_SEVERITIES,
     merge_project_rules,
 )
+
+
+def _legacy_design_rules():
+    # Pre-managed-block sidecars predate the explicit object rules (#5059).
+    # Keep legacy detection narrow: never expand its destructive grammar to
+    # classify new, potentially hand-authored rules as historical output.
+    return replace(
+        get_profile("jlcpcb").get_design_rules(layers=2),
+        min_silk_to_pad_clearance_mm=None,
+        min_smd_pad_clearance_mm=None,
+        min_pth_hole_to_track_mm=None,
+        min_inner_pth_hole_to_copper_mm=None,
+    )
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
@@ -462,9 +477,7 @@ class TestDruManagedBlockMerge:
 
         board = tmp_path / "demo.kicad_pcb"
         board.write_text("(kicad_pcb)")
-        legacy = generate_dru(
-            get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_name="jlcpcb"
-        )
+        legacy = generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb")
         assert DRU_FLOORS_BLOCK_BEGIN not in legacy
         dru = board.with_suffix(".kicad_dru")
         dru.write_text(legacy, encoding="utf-8")
@@ -501,9 +514,7 @@ class TestDruManagedBlockMerge:
             get_profile("jlcpcb-tier1").get_design_rules(layers=4),
             manufacturer_name="jlcpcb-tier1",
         )
-        legacy = generate_dru(
-            get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_name="jlcpcb"
-        )
+        legacy = generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb")
         dru_path = tmp_path / "demo.kicad_dru"
 
         # Legacy branch with a path: exactly one stderr line naming the file.
@@ -546,9 +557,7 @@ class TestDruManagedBlockMerge:
         board.write_text("(kicad_pcb)")
         dru = board.with_suffix(".kicad_dru")
         dru.write_text(
-            generate_dru(
-                get_profile("jlcpcb").get_design_rules(layers=2), manufacturer_name="jlcpcb"
-            ),
+            generate_dru(_legacy_design_rules(), manufacturer_name="jlcpcb"),
             encoding="utf-8",
         )
 

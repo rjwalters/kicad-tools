@@ -176,6 +176,25 @@ class TestRotationCorrectionMatching:
     def test_led_match(self, corrections):
         assert match_rotation_correction("LED_0603_1608Metric", corrections) == 180.0
 
+    @pytest.mark.parametrize("package", ["D_SMA", "D_SMB"])
+    def test_qualified_diode_export_preserves_profile_correction(self, package):
+        corrections = load_rotation_corrections("jlcpcb")
+        formatter = JLCPCBPnPFormatter(rotation_corrections=corrections)
+        for footprint in (package, f"Diode_SMD:{package}"):
+            placement = PlacementData("D1", "diode", footprint, 23.0, 8.0, 0.0, "F.Cu")
+            import csv
+            import io
+
+            row = next(csv.DictReader(io.StringIO(formatter.format([placement]))))
+            assert float(row["Rotation"]) == 180.0
+
+    @pytest.mark.parametrize("override", [0.0, 90.0])
+    def test_qualified_override_precedes_bare_package_fallback(self, override):
+        corrections = {"D_SMA*": 180.0, "CustomLibrary:D_SMA*": override}
+        assert match_rotation_correction("CustomLibrary:D_SMA", corrections) == override
+        assert match_rotation_correction("Diode_SMD:D_SMA", corrections) == 180.0
+        assert match_rotation_correction("Resistor_SMD:R_0805", corrections) == 0.0
+
 
 # ---------------------------------------------------------------------------
 # PnP formatter integration with rotation corrections

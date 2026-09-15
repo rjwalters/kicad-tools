@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb-tier1"
+date: "Rev 1 | 2026-09-15 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -13,6 +13,12 @@ header-includes:
   - \usepackage{float}
 ---
 
+## Candidate Qualification
+
+The native-consumed clearance repair removes the prior saved/refilled copper divergence and 12 native sliver warnings. Exact recipe source: `bd992dc7572cf7af93be092ded9e259c721ab3e9`, based on factory-rule parent `581087a5`. Saved PCB SHA256: `17d3fc83cb535fcd0ccac2e7b1a6036e272ec5d15a7936400217900b84e20a53`.
+
+This is digital candidate evidence, not supplier approval or physical bring-up. Independent combined-head review and main-target CI remain required before parent integration. Bundled `native-clearance-qualification/provenance.json` identifies the separate recipe, factory checker and corrected readiness verifier.
+
 ## Board Summary
 
 | Property | Value |
@@ -20,8 +26,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 38 (37 SMD, 1 THT, 0 other) |
 | Nets | 27 |
-| Traces | 2048 segments |
-| Vias | 151 |
+| Traces | 2050 segments |
+| Vias | 153 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Stackup
@@ -53,10 +59,6 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | SPI | ISP_MISO, ISP_MOSI, ISP_SCK |
 | USB | USB_D+, USB_D-, VBUS |
 
-### Power Architecture
-
-**Power Rails**: PWR_FLAG
-
 ## Assembly Notes
 
 1 fine-pitch component
@@ -73,13 +75,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## ERC Status
 
-| Metric | Count |
-|--------|-------|
-| Errors | 0 |
-| Warnings | 0 |
-
-**Status**: PASS — independent native ERC: zero errors and warnings; see native-erc.json.
-
+Fresh exact-source recipe native ERC: **0 errors, 0 warnings**. Retained evidence: `native-erc.json`. Exact-source board manufacturing checker independently reports ERC PASSED.
 
 \newpage
 
@@ -157,45 +153,23 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## DRC Status
 
-| Metric | Count |
-|--------|-------|
-| Errors | 0 |
-| Warnings | 14 |
-| Blocking | 0 |
+Pinned native KiCad 10.0.5: **0 errors, 0 warnings, 0 unconnected items**, both on saved copper without refill and on a separate independent native-refilled copy. Exact recipe-source Python factory check: **54 rules, 0 errors, 0 warnings, 0 waived findings**. Strict connectivity covers 27 complete nets; copper LVS is clean over 129 bound pads. Evidence is in `native-clearance-qualification/`.
 
-**Status**: PASS
-### Violations by Type
-
-| Violation Type | Count |
-|----------------|-------|
-| hole_to_hole_clearance | 14 |
-
+The earlier export collector reported 14 hole-spacing warnings and optional fill suggestions. Those diagnostics omitted the final scoped factory context; they are superseded by the retained exact-source factory receipt and independent native receipts. No severity, tolerance or allowance was changed. The existing fabrication sidecar and explicit tier remain binding. Optional path-ampacity analysis has no declared current-path sidecar and is not a claimed qualification.
 
 \newpage
 
-## Reviewed Factory Verification
-
-The generic report above uses a conservative 0.50 mm pad-hole floor and reports
-14 hole-spacing warnings. The selected factory process explicitly permits
-0.45 mm; native project rules and the reviewed checker use that same floor.
-No findings are suppressed. Fresh check-report.json records 51 evaluated rules,
-zero errors/warnings, and label plus copper LVS with 129 bound pads and zero
-mismatches. Independent native DRC/refill and ERC report zero violations and
-zero opens. Per-net, per-layer filled copper matches the independent refill
-exactly (fill-consistency.json). All 23 repaired off-angle segments are now
-45-degree aligned; the USB branch skew is 0.165685 mm, within the reviewed bound.
-
 ## Manufacturing Readiness
 
-**Verdict**: READY for the specified fabrication and assembly process.
+**Physical candidate gates: PASSED. Release review: PENDING.**
 
-Order the reviewed four-layer construction and Epoxy-filled & Capped POFV/VIPPO
-option in manufacturing-requirements.json. The exact supplier BOM covers 37 SMT
-placements; J1 is a separate through-hole assembly operation in manual-assembly-bom.csv.
-The editable project includes the custom ISP footprint library and native rules.
-Unchanged compiled firmware and its source are supplied with programming instructions.
-Physical bring-up, USB electrical qualification, and first-article inspection
-remain unperformed; this is not a USB certification claim.
+- Saved versus independently refilled copper has **0 mm² symmetric difference on all four layers** (full polygon comparison, not area equality alone).
+- Native saved and refilled DRC: **0 findings and 0 opens**. The previous 12 copper slivers are absent.
+- The conservative zone-to-foreign-copper target is an explicit native `0.3mm` rule, preserving stronger authored rules by refusal. A valid `2.0mm` negative rule on unchanged `0.3mm`-filled saved copper produces 506 clearance errors; false-condition controls demonstrate rule reachability.
+- Factory/process constraints, circuit connectivity, and the immutable historical witness remain preserved. Use the exact four-layer Epoxy-filled & Capped POFV/VIPPO process in the supplied manufacturing requirements.
+- Independent exact combined-head review and main-target CI remain required. Supplier approval, assembly inspection, and physical USB qualification remain outstanding.
+
+The readiness verifier's final machine-readable receipt is authoritative for its package checks. It is identified separately from the exact recipe-source factory checker; passing generic main checks cannot substitute for the stronger factory-rule parent.
 
 \newpage
 

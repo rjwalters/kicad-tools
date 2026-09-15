@@ -353,9 +353,13 @@ class TestDRUFiles:
             assert version is not None, f"{dru_file} missing version"
             assert version.values[0] == 1, f"{dru_file} has wrong version"
 
-            # JLC has a separate plated-component-pad ring floor.
+            # JLC has a separate plated-component-pad ring floor, plus the
+            # three object-specific factory rules (#5059): Silk to Pad,
+            # PTH Hole to Track and Inner PTH Hole to Copper.  Only the JLC
+            # profiles declare those optional floors, so the other fabs stay
+            # at the 9 base rules.
             rules = sexp.find_children("rule")
-            expected = 10 if dru_file.startswith("jlcpcb-") else 9
+            expected = 13 if dru_file.startswith("jlcpcb-") else 9
             assert len(rules) == expected
 
 
@@ -841,7 +845,14 @@ class TestDruGenerator:
         assert "(rule" in content
 
     def test_generate_dru_has_all_jlc_rules(self):
-        """JLC includes the base rules plus its separate PTH ring floor."""
+        """JLC: base rules + its PTH ring floor + the object-specific rules.
+
+        The object-specific factory rules (#5059) add three: ``Silk to Pad``,
+        ``PTH Hole to Track`` and ``Inner PTH Hole to Copper``.  The
+        different-net SMD pad floor is deliberately NOT among them -- KiCad's
+        rule language cannot express "different footprint", so it is enforced
+        Python-side only (see ``tests/test_factory_object_clearance.py``).
+        """
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
         profile = get_profile("jlcpcb")
@@ -849,7 +860,11 @@ class TestDruGenerator:
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
         rule_count = content.count("(rule ")
-        assert rule_count == 10, f"Expected 10 rules, got {rule_count}"
+        assert rule_count == 13, f"Expected 13 rules, got {rule_count}"
+        assert 'rule "Silk to Pad - JLCPCB"' in content
+        assert 'rule "PTH Hole to Track - JLCPCB"' in content
+        assert 'rule "Inner PTH Hole to Copper - JLCPCB"' in content
+        assert "SMD Pad Clearance" not in content
 
     def test_generate_dru_has_condition_expressions(self):
         """Test that generated DRU includes condition expressions."""
@@ -941,7 +956,19 @@ class TestDruGenerator:
             rules = profile.get_design_rules(layers=2, copper_oz=1.0)
             content = generate_dru(rules, manufacturer_name=profile.name)
             assert "(version 1)" in content, f"Failed for {mfr_id}"
-            expected = 9 + (rules.min_pth_annular_ring_mm is not None)
+            # 9 base rules, plus one per OPTIONAL floor the profile declares.
+            # ``min_smd_pad_clearance_mm`` is intentionally excluded: it has no
+            # native rule (no "same footprint" predicate in KiCad's rule
+            # language) and is enforced Python-side only (#5059).
+            expected = 9 + sum(
+                value is not None
+                for value in (
+                    rules.min_pth_annular_ring_mm,
+                    rules.min_silk_to_pad_clearance_mm,
+                    rules.min_pth_hole_to_track_mm,
+                    rules.min_inner_pth_hole_to_copper_mm,
+                )
+            )
             assert content.count("(rule ") == expected, f"Wrong rule count for {mfr_id}"
 
     def test_static_dru_files_match_dynamic_generation(self):

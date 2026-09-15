@@ -92,6 +92,9 @@ def match_rotation_correction(
 
     Patterns are matched using :func:`fnmatch.fnmatch` so that entries
     like ``SOT-23*`` match ``SOT-23``, ``SOT-23-3``, etc.
+    Match the full identifier first so library-specific overrides retain
+    precedence. If none matches, try the package name after the library
+    separator, allowing the same preset to handle KiCad-qualified names.
 
     Args:
         footprint: Footprint name to match (e.g. ``SOT-23-3``)
@@ -103,6 +106,11 @@ def match_rotation_correction(
     for pattern, offset in corrections.items():
         if fnmatch.fnmatch(footprint, pattern):
             return float(offset)
+    if ":" in footprint:
+        package = footprint.split(":", 1)[1]
+        for pattern, offset in corrections.items():
+            if fnmatch.fnmatch(package, pattern):
+                return float(offset)
     return 0.0
 
 
@@ -140,6 +148,12 @@ class DesignRules:
     # Solder mask
     min_solder_mask_dam_mm: float = 0.1
     min_solder_mask_clearance_mm: float = 0.05
+
+    # Optional process-specific clearances; None preserves legacy profiles.
+    min_silk_to_pad_clearance_mm: float | None = None
+    min_smd_pad_clearance_mm: float | None = None
+    min_pth_hole_to_track_mm: float | None = None
+    min_inner_pth_hole_to_copper_mm: float | None = None
 
     # Pad constraints
     min_pad_size_mm: float = 0.25
@@ -221,6 +235,10 @@ class DesignRules:
             "min_solder_mask_dam_mm": self.min_solder_mask_dam_mm,
             "min_solder_mask_clearance_mm": self.min_solder_mask_clearance_mm,
             "min_pad_size_mm": self.min_pad_size_mm,
+            "min_silk_to_pad_clearance_mm": self.min_silk_to_pad_clearance_mm,
+            "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
+            "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
+            "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
             "inner_copper_oz": self.inner_copper_oz,
