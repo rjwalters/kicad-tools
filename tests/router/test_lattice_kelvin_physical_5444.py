@@ -171,3 +171,28 @@ def test_preserved_buried_via_keeps_actual_diameter_and_span():
         for layer in (1, 2):
             assert not guard.clear((12.7, 3), (12.7, 3), layer, 0.1)
     assert preserved.vias == [via]
+
+
+@pytest.mark.parametrize("through", [False, True])
+def test_imported_via_span_is_projected_onto_selected_routing_layers(through):
+    from kicad_tools.router.lattice.kelvin import KelvinBranchGuard
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.layers import LayerDefinition, LayerStack, LayerType
+    from kicad_tools.router.primitives import Pad, Route, Via
+
+    stack = LayerStack([LayerDefinition("F.Cu", 0, LayerType.SIGNAL, True)])
+    root = Pad(3, 3, 1, 1, 1, "ISENSE_A+", layer=Layer.F_CU, ref="R1", pin="1")
+    target = Pad(8, 3, 1, 1, 1, "ISENSE_A+", layer=Layer.F_CU, ref="U1", pin="1")
+    pf = LatticePathfinder([(0, 0), (20, 0), (20, 20), (0, 20)], [root, target], layer_stack=stack)
+    via = Via(
+        x=12,
+        y=3,
+        diameter=1.6,
+        drill=0.3,
+        net=1,
+        layers=(Layer.F_CU if through else Layer.IN1_CU, Layer.B_CU),
+    )
+    pf._set_fixed_copper([Route(net=1, net_name="ISENSE_A+", vias=[via])])
+    committed = pf._fresh_committed()
+    guard = KelvinBranchGuard(committed, [root, target], root, target, pf._pad_layer_indices)
+    assert guard.clear((12.7, 3), (12.7, 3), 0, 0.1) is (not through)

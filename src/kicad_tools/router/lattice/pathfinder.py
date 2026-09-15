@@ -543,8 +543,14 @@ class LatticePathfinder:
                     (layer_idx, a, b, seg.net, half, self._fixed_clearance_for(seg.net, clearances))
                 )
             for via in getattr(route, "vias", []):
-                first, last = sorted(
-                    self.layer_stack.layer_enum_to_index(layer) for layer in via.layers
+                # A routing stack may select only part of the physical board
+                # (for example F.Cu only). Imported through-via endpoints need
+                # not themselves be present in that selected stack.
+                first, last = sorted(layer.value for layer in via.layers)
+                occupied_layers = tuple(
+                    layer.index
+                    for layer in self.layer_stack.layers
+                    if first <= layer.layer_enum.value <= last
                 )
                 vias.append(
                     (
@@ -552,7 +558,7 @@ class LatticePathfinder:
                         via.net,
                         self._fixed_clearance_for(via.net, clearances),
                         via.diameter / 2,
-                        tuple(range(first, last + 1)),
+                        occupied_layers,
                     )
                 )
         self._fixed_runs = runs
