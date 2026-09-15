@@ -27,7 +27,9 @@ def _pad_outline(pad: Pad, *, contact: bool = False):
         shape = LineString(ends).buffer(radius)
     else:
         shape = box(-w / 2, -h / 2, w / 2, h / 2)
-    return affinity.translate(affinity.rotate(shape, pad.rotation), pad.x, pad.y)
+    # KiCad pad angles rotate clockwise in board coordinates; Shapely
+    # positive angles rotate counterclockwise in this coordinate plane.
+    return affinity.translate(affinity.rotate(shape, -pad.rotation), pad.x, pad.y)
 
 
 @contextmanager
@@ -74,9 +76,10 @@ def isolate_kelvin_branch(
 
     cells: set[tuple[int, int, int]] = set()
     for layer, shape in objects:
-        # Mark every cell touched by copper, including a thin off-grid edge
-        # whose interior contains no cell center. Keep the shunt contact open.
-        shape = shape.buffer(grid.resolution / math.sqrt(2)).difference(contact)
+        # Keep the moving trace centerline outside existing copper expanded
+        # by its own radius, then cover cells touching that exclusion area.
+        # The inset shunt contact is the only allowed shared-copper region.
+        shape = shape.buffer(width / 2 + grid.resolution / math.sqrt(2)).difference(contact)
         if shape.is_empty:
             continue
         xmin, ymin, xmax, ymax = shape.bounds
