@@ -163,6 +163,7 @@ from .diffpair_length_tuning import (
     MAX_INSERTS_PER_PAIR,
     _closest_point_on_segment,
 )
+from .diffpair_routing import _segments_within
 from .optimizer.serpentine import (
     SerpentineConfig,
     SerpentineGenerator,
@@ -1755,6 +1756,13 @@ def _post_insertion_clearance_detail_group(
             for pseg in other_route.segments:
                 if pseg.layer != new_seg.layer:
                     continue
+                # Expand centerline bounds by both half-widths and the clearance floor.
+                if not _segments_within(
+                    new_seg,
+                    pseg,
+                    intra_group_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
+                ):
+                    continue
                 clearance = segment_clearance(
                     new_seg.x1,
                     new_seg.y1,
@@ -1783,6 +1791,13 @@ def _post_insertion_clearance_detail_group(
         for new_seg in new_segments:
             for oseg in other_route.segments:
                 if oseg.layer != new_seg.layer:
+                    continue
+                # Expand centerline bounds by both half-widths and the clearance floor.
+                if not _segments_within(
+                    new_seg,
+                    oseg,
+                    intra_group_clearance_mm + new_seg.width / 2 + oseg.width / 2 + 1e-9,
+                ):
                     continue
                 clearance = segment_clearance(
                     new_seg.x1,
@@ -1850,6 +1865,13 @@ def _post_insertion_clearance_detail_group(
                 for new_seg in new_segments:
                     for pseg in partner_route.segments:
                         if pseg.layer != new_seg.layer:
+                            continue
+                        # Expand centerline bounds by both half-widths and the clearance floor.
+                        if not _segments_within(
+                            new_seg,
+                            pseg,
+                            intra_pair_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
+                        ):
                             continue
                         clearance = segment_clearance(
                             new_seg.x1,
@@ -2444,6 +2466,11 @@ def _post_insertion_clearance_detail_pair_group(
     for new_p in new_p_segments:
         for new_n in new_n_segments:
             if new_p.layer != new_n.layer:
+                continue
+            # Expand centerline bounds by both half-widths and the clearance floor.
+            if not _segments_within(
+                new_p, new_n, intra_pair_clearance_mm + new_p.width / 2 + new_n.width / 2 + 1e-9
+            ):
                 continue
             clearance = segment_clearance(
                 new_p.x1,
