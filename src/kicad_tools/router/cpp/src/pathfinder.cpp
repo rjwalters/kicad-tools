@@ -876,9 +876,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                 if (!cell.blocked) {
                     continue;
                 }
-                if (cell.net != net && grid_.route_cell_has_geometry(cx, cy, layer)) {
+                if (grid_.route_cell_has_geometry(cx, cy, layer)) {
                     if (!geometry_clear()) return true;
-                    continue;
+                    if (cell.net != net) continue;
                 }
 
                 if (allow_sharing) {
@@ -946,9 +946,9 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     if (!cell.blocked) {
                         continue;
                     }
-                    if (cell.net != net && grid_.route_cell_has_geometry(cx, cy, layer)) {
+                    if (grid_.route_cell_has_geometry(cx, cy, layer)) {
                         if (!geometry_clear()) return true;
-                        continue;
+                        if (cell.net != net) continue;
                     }
 
                     if (allow_sharing) {

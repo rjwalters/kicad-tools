@@ -2082,16 +2082,12 @@ class Router:
         known_cells = [
             (cx, cy)
             for cx, cy in blocked_cells
-            if (
-                halo is not None
-                and grid._net[layer, cy, cx] != net
-                and halo.cell_known(cx, cy, layer)
-            )
+            if (halo is not None and halo.cell_known(cx, cy, layer))
         ]
         if known_cells and not geometry_complete:
             if not self._via_halo_clear(known_cells, layer, gx, gy, net):
                 return True
-        known_set = set(known_cells)
+        known_set = {(cx, cy) for cx, cy in known_cells if grid._net[layer, cy, cx] != net}
         blocked_cells = [cell for cell in blocked_cells if cell not in known_set]
         # Fast path: if no cells are blocked, via is not blocked
         if not blocked_cells:

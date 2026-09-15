@@ -21,6 +21,7 @@ def context(request):
         via_drill=0.3,
         via_clearance=0.2,
         min_hole_to_hole=0.5,
+        min_drill_clearance=0.5,
         grid_resolution=0.127,
     )
     grid = RoutingGrid(
@@ -206,3 +207,20 @@ def test_repeated_unknown_mark_requires_all_unmarks(context):
     unknown(context, 60, 60, add=False)
     assert known(context)
     assert not blocked(context, "trace")
+
+
+@pytest.mark.parametrize("sharing", [False, True])
+@pytest.mark.parametrize("radius", [None, 4])
+def test_partial_coverage_preserves_same_net_drill_spacing(context, sharing, radius):
+    _, native, router = context
+
+    def via_blocked(x, y):
+        if native:
+            return router._impl.is_via_blocked(x, y, 2, sharing, radius or 0)
+        return router._is_via_blocked(x, y, 2, 2, sharing, radius=radius)
+
+    assert via_blocked(56, 56)
+    assert not via_blocked(55, 55)
+    unknown(context, 120, 120)
+    assert via_blocked(56, 56)
+    assert not via_blocked(55, 55)
