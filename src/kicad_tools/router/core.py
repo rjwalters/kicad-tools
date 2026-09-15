@@ -781,10 +781,11 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     # still flag edge violations, matching parent-process behaviour.
     edge_segments = config.get("edge_segments")
     edge_clearance = config.get("edge_clearance")
-    if edge_segments and edge_clearance:
+    if edge_segments is not None:
         router._edge_segments = edge_segments
         router._edge_clearance = edge_clearance
-        router.grid.add_edge_keepout(edge_segments, edge_clearance)
+        if edge_segments and edge_clearance:
+            router.grid.add_edge_keepout(edge_segments, edge_clearance)
 
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
@@ -2915,6 +2916,10 @@ class Autorouter:
                 layer_stack=self.layer_stack,
             )
         self._lattice_pathfinder.fixed_fills = self.grid.fixed_fills
+        if hasattr(self._lattice_pathfinder, "set_escape_boundary"):
+            self._lattice_pathfinder.set_escape_boundary(
+                self._edge_segments, self._edge_clearance or 0.0
+            )
         return self._lattice_pathfinder
 
     def _lattice_pairwise_projection(self) -> Any:
