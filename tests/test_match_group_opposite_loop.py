@@ -27,7 +27,9 @@ def fixture(*, both_sides=False, angle=0):
     }
     routes[99] = Route(net=99, net_name="wall", segments=[segment(99, 0, -1, 10, -1)])
     if both_sides:
-        routes[98] = Route(net=98, net_name="other wall", segments=[segment(98, 0, 1.5, 10, 1.5)])
+        # Block even the bounded shallow-loop alternatives, with legal baseline clearance.
+        routes[99].segments = [segment(99, 0, -0.5, 10, -0.5)]
+        routes[98] = Route(net=98, net_name="other wall", segments=[segment(98, 0, 1, 10, 1)])
     group = MatchGroup("lanes", [], pair_ids=[(1, 2), (3, 4)], tolerance=0.05)
     return group, routes
 
@@ -58,7 +60,9 @@ def test_opposite_clear_side_matches_both_halves_with_one_insertion(angle):
         assert LengthTracker.calculate_route_length(route) == pytest.approx(14)
         assert route.segments[0].start == originals[net].segments[0].start
         assert route.segments[-1].end == originals[net].segments[-1].end
-        assert all(a.end == b.start for a, b in zip(route.segments[:-1], route.segments[1:], strict=True))
+        assert all(
+            a.end == b.start for a, b in zip(route.segments[:-1], route.segments[1:], strict=True)
+        )
         assert originals[net].segments == original_segments[net]
     assert result[3][0] is originals[3] and result[4][0] is originals[4]
     assert routes[99] is originals[99]

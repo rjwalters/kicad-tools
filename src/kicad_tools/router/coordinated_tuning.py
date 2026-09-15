@@ -11,6 +11,8 @@ from dataclasses import replace
 
 from .primitives import Segment
 
+MAX_COORDINATED_LOOPS = 3
+
 
 def coordinated_pair_loop(
     p_host: Segment,
@@ -19,15 +21,24 @@ def coordinated_pair_loop(
     added_length: float,
     window_start: float,
     window_end: float,
+    num_loops: int = 1,
 ) -> tuple[list[Segment], list[Segment]] | None:
     """Propose a U-loop on parallel hosts, maintaining their separation.
 
     Window distances are measured along P from its first endpoint. N's
     turns are inset by the host separation, so both paths gain exactly
     ``added_length`` even though the inner horizontal leg is shorter.
+    Up to three shallow loops may share the window, with equal total added
+    length and space between neighboring bends. This is one proposed insertion.
     Either N orientation is supported. Endpoints and segment metadata stay
     intact; the input hosts are never modified. No board clearance is implied.
     """
+    if (
+        isinstance(num_loops, bool)
+        or not isinstance(num_loops, int)
+        or not 1 <= num_loops <= MAX_COORDINATED_LOOPS
+    ):
+        return None
     values = (
         p_host.x1,
         p_host.y1,
@@ -66,35 +77,39 @@ def coordinated_pair_loop(
     spacing = abs(offset)
     n_start = (n_host.x1 - p_host.x1) * ux + (n_host.y1 - p_host.y1) * uy
     n_end = (n_host.x2 - p_host.x1) * ux + (n_host.y2 - p_host.y1) * uy
-    inner_start, inner_end = window_start + spacing, window_end - spacing
+    gap = spacing + max(p_host.width, n_host.width)
+    loop_width = (window_end - window_start - (num_loops - 1) * gap) / num_loops
+    inner_start, inner_end = window_start + spacing, window_start + loop_width - spacing
     if not (0 < window_start < window_end < length):
         return None
     if inner_end - inner_start <= max(p_host.width, n_host.width):
         return None
-    if not (min(n_start, n_end) < inner_start < inner_end < max(n_start, n_end)):
+    if not (min(n_start, n_end) < inner_start < window_end - spacing < max(n_start, n_end)):
         return None
-    amplitude = added_length / 2
+    amplitude = added_length / (2 * num_loops)
 
     def point(along: float, normal: float) -> tuple[float, float]:
         return (p_host.x1 + along * ux + normal * vx, p_host.y1 + along * uy + normal * vy)
 
-    p_points = [
-        p_host.start,
-        point(window_start, 0),
-        point(window_start, amplitude),
-        point(window_end, amplitude),
-        point(window_end, 0),
-        p_host.end,
-    ]
     n_first, n_last = (n_host.start, n_host.end) if n_start < n_end else (n_host.end, n_host.start)
-    n_points = [
-        n_first,
-        point(inner_start, -spacing),
-        point(inner_start, amplitude - spacing),
-        point(inner_end, amplitude - spacing),
-        point(inner_end, -spacing),
-        n_last,
-    ]
+    p_points = [p_host.start]
+    n_points = [n_first]
+    for i in range(num_loops):
+        start = window_start + i * (loop_width + gap)
+        end = start + loop_width
+        p_points.extend(
+            [point(start, 0), point(start, amplitude), point(end, amplitude), point(end, 0)]
+        )
+        n_points.extend(
+            [
+                point(start + spacing, -spacing),
+                point(start + spacing, amplitude - spacing),
+                point(end - spacing, amplitude - spacing),
+                point(end - spacing, -spacing),
+            ]
+        )
+    p_points.append(p_host.end)
+    n_points.append(n_last)
     if n_start > n_end:
         n_points.reverse()
 

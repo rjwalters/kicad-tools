@@ -13,7 +13,8 @@ from kicad_tools.router.primitives import Segment
 
 @pytest.mark.parametrize("angle", [0, math.pi / 4, math.pi / 2, math.pi])
 @pytest.mark.parametrize("reverse", [False, True])
-def test_equal_length_and_spacing_with_exact_connection_anchors(angle, reverse):
+@pytest.mark.parametrize("num_loops", [1, 2, 3])
+def test_equal_length_and_spacing_with_exact_connection_anchors(angle, reverse, num_loops):
     def transform(x, y):
         return (
             100.089 + x * math.cos(angle) - y * math.sin(angle),
@@ -28,7 +29,9 @@ def test_equal_length_and_spacing_with_exact_connection_anchors(angle, reverse):
     if reverse:
         n = replace(n, x1=n.x2, y1=n.y2, x2=n.x1, y2=n.y1)
     originals = replace(p), replace(n)
-    result = coordinated_pair_loop(p, n, added_length=7.387495865, window_start=3, window_end=7)
+    result = coordinated_pair_loop(
+        p, n, added_length=7.387495865, window_start=3, window_end=9, num_loops=num_loops
+    )
     assert result is not None
     for old, chain in zip((p, n), result, strict=True):
         assert chain[0].start == old.start and chain[-1].end == old.end
@@ -67,3 +70,13 @@ def test_invalid_hosts_or_windows_are_rejected(bad):
     if bad == "nonfinite":
         kwargs["added_length"] = math.inf
     assert coordinated_pair_loop(p, n, **kwargs) is None
+
+
+@pytest.mark.parametrize("count", [0, -1, 4, 1.5, True])
+def test_invalid_or_unbounded_loop_count_is_rejected(count):
+    p = Segment(0, 0, 12, 0, 0.15, Layer.F_CU, net=1)
+    n = Segment(0, 0.381, 12, 0.381, 0.15, Layer.F_CU, net=2)
+    assert (
+        coordinated_pair_loop(p, n, added_length=4, window_start=3, window_end=7, num_loops=count)
+        is None
+    )

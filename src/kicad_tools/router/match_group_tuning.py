@@ -3023,8 +3023,15 @@ def _tune_match_group_of_pairs(
                     r.message = "No shared mutable host for pair tuning."
                 current_p, current_n = original_p_route, original_n_route
                 break
+            from .coordinated_tuning import MAX_COORDINATED_LOOPS
+
             host_accepted = False
-            for proposed_p, _p_seg_idx, proposed_n, n_insertion_seg_idx in host_candidates:
+            # Preserve the existing single-loop host order, then retry shallower
+            # shapes within the same host/window and insertion budget.
+            loop_counts = range(1, MAX_COORDINATED_LOOPS + 1) if pair_preserves_spacing else (1,)
+            for (proposed_p, _p_seg_idx, proposed_n, n_insertion_seg_idx), loop_count in (
+                (host, count) for count in loop_counts for host in host_candidates
+            ):
                 p_insertion_segment = proposed_p.segments[_p_seg_idx]
                 n_insertion_segment = proposed_n.segments[n_insertion_seg_idx]
                 # --- Step 3: pair centerline midpoint + outer-normal hint.
@@ -3101,19 +3108,21 @@ def _tune_match_group_of_pairs(
                         added_length=length_needed,
                         window_start=(span - window) / 2,
                         window_end=(span + window) / 2,
+                        num_loops=loop_count,
                     )
                     if coordinated is None:
                         for r in (per_pair_result_p, per_pair_result_n):
-                            r.reason = "no_suitable_segment"
-                            r.message = "No shared window for a spacing-preserving pair loop."
+                            if r.reason != "post_insertion_drc_violation":
+                                r.reason = "no_suitable_segment"
+                                r.message = "No shared window for a spacing-preserving pair loop."
                         continue
                     new_p_segments, new_n_segments = coordinated
                     p_serp_result = replace(
                         p_serp_result,
                         new_segments=new_p_segments,
                         length_added=length_needed,
-                        num_loops=1,
-                        message="Added one coordinated pair loop",
+                        num_loops=loop_count,
+                        message=f"Added {loop_count} coordinated pair loop(s)",
                     )
                     per_pair_result_p.serpentine_results[-1] = p_serp_result
                     per_pair_result_n.serpentine_results[-1] = p_serp_result
@@ -3175,6 +3184,7 @@ def _tune_match_group_of_pairs(
                         added_length=length_needed,
                         window_start=(span - window) / 2,
                         window_end=(span + window) / 2,
+                        num_loops=loop_count,
                     )
                     if opposite is not None:
                         opposite_n, opposite_p = opposite
@@ -3214,7 +3224,7 @@ def _tune_match_group_of_pairs(
                                 p_serp_result = replace(
                                     p_serp_result,
                                     new_segments=opposite_p,
-                                    message="Added one coordinated pair loop on the opposite side",
+                                    message=f"Added {loop_count} coordinated pair loop(s) on the opposite side",
                                 )
                                 per_pair_result_p.serpentine_results[-1] = p_serp_result
                                 per_pair_result_n.serpentine_results[-1] = p_serp_result
