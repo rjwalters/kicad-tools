@@ -875,27 +875,34 @@ class LatticePathfinder:
             # without reducing the class neck width or clearance (#4507).
             # Every supported convex pad shape contains the centered disc of
             # radius min(width, height)/2, regardless of rotation/rounding.
-            # Half that radius keeps each attachment strictly inside copper.
-            radius = min(pad.width, pad.height) / 4.0
-            if math.isfinite(radius) and radius > 0.0:
-                for angle in range(0, 360, 45):
-                    theta = math.radians(angle)
-                    attachment = replace(
-                        pad,
-                        x=pad.x + radius * math.cos(theta),
-                        y=pad.y + radius * math.sin(theta),
-                    )
-                    neck_stubs = self._scan_stubs(
-                        attachment,
-                        net,
-                        committed,
-                        neck_half,
-                        clr,
-                        kmax=_OVERSIZE_STUB_KMAX,
-                        search_radius=grown_sr,
-                        layers=layers,
-                        exempt_pads=exempt_pads,
-                    )
+            # Keep the original inner fan first, then try near the edge of
+            # that disc. A wide neck may need more offset than the inner fan
+            # provides (#4507's R58). Both fans stay strictly inside copper;
+            # every stub still passes the unchanged width/clearance checks.
+            diameter = min(pad.width, pad.height)
+            if math.isfinite(diameter) and diameter > 0.0:
+                for fraction in (0.25, 0.45):
+                    radius = diameter * fraction
+                    for angle in range(0, 360, 45):
+                        theta = math.radians(angle)
+                        attachment = replace(
+                            pad,
+                            x=pad.x + radius * math.cos(theta),
+                            y=pad.y + radius * math.sin(theta),
+                        )
+                        neck_stubs = self._scan_stubs(
+                            attachment,
+                            net,
+                            committed,
+                            neck_half,
+                            clr,
+                            kmax=_OVERSIZE_STUB_KMAX,
+                            search_radius=grown_sr,
+                            layers=layers,
+                            exempt_pads=exempt_pads,
+                        )
+                        if neck_stubs:
+                            break
                     if neck_stubs:
                         break
         return neck_stubs, neck_w
