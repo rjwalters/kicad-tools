@@ -1143,6 +1143,9 @@ def _write_routed_pcb(
     with open(tmp_path, "rb") as f:
         os.fsync(f.fileno())
     os.replace(tmp_path, output_path)
+    from .route_receipt import record_publication
+
+    record_publication(output_path)
 
     return output_path
 
@@ -2078,6 +2081,9 @@ def _save_partial_results() -> bool:
             with open(tmp_path, "rb") as f:
                 os.fsync(f.fileno())
             os.replace(tmp_path, save_path)
+            from .route_receipt import record_publication
+
+            record_publication(save_path)
 
             if not quiet:
                 stats = router.get_statistics()
@@ -2844,6 +2850,9 @@ def _write_drc_constraint_sidecars(
         if not quiet:
             print(f"  Warning: could not write DRC-constraint sidecars: {e}")
         return
+    from .route_receipt import record_constraint_publication
+
+    record_constraint_publication(output_path, source_pcb_path)
     if not quiet and written:
         print(f"  DRC-constraint sidecars: {', '.join(str(p) for p in written)}")
 
@@ -12674,6 +12683,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _in_process_main(argv: list[str] | None = None) -> int:
+    from .route_receipt import run
+
+    return run(lambda: _in_process_main_impl(argv))
+
+
+def _in_process_main_impl(argv: list[str] | None = None) -> int:
     """Entry point for the route command.
 
     Thin wrapper (issue #4559): ``_process_state_guard`` restores the
@@ -14527,10 +14542,12 @@ def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
     from .route_deadline import configure_output
+    from .route_receipt import configure as configure_receipt
 
     try:
         configure_output(args)
-    except ValueError as exc:
+        configure_receipt(args)
+    except (ValueError, OSError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
