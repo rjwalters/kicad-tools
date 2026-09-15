@@ -155,20 +155,60 @@ def test_diffpair_virtual_pad_copies_shape(shape):
     assert (copied.shape, copied.rotation, copied.width, copied.height) == (shape, 45, 2, 2)
 
 
-@pytest.mark.parametrize("method", ["generate_escape_routes", "_apply_in_pad_escape_rescues"])
-@pytest.mark.parametrize("shape", ["circle", "rect"])
-def test_escape_virtual_pad_copies_shape(monkeypatch, method, shape):
-    router = Autorouter(20, 20, force_python=True)
-    pad = Pad(5, 5, 2, 2, 1, "SIGNAL", ref="J1", pin="1", rotation=45, shape=shape)
-    router.pads[("J1", "1")] = pad
-    escape = SimpleNamespace(pad=pad, escape_point=(8, 9), escape_layer=Layer.B_CU)
-    package = SimpleNamespace(ref="J1", package_type=SimpleNamespace(name="TEST"))
+def _install_escape(monkeypatch, router, escape):
     monkeypatch.setattr(router._escape, "generate_escapes", lambda package: [escape])
     monkeypatch.setattr(
         router._escape, "generate_in_pad_rescues_only", lambda package, pin_filter: [escape]
     )
     monkeypatch.setattr(router._escape, "apply_escape_routes", lambda escapes: [])
+    return SimpleNamespace(ref="J1", package_type=SimpleNamespace(name="TEST"))
+
+
+@pytest.mark.parametrize("method", ["generate_escape_routes", "_apply_in_pad_escape_rescues"])
+@pytest.mark.parametrize("shape", ["circle", "rect"])
+def test_escape_virtual_pad_keeps_authored_shape_on_pad_copper(monkeypatch, method, shape):
+    """An endpoint still standing on the pad's own copper keeps its geometry.
+
+    Issue #5229 transport case: when the escape does not move the terminal
+    off the pad, the authored shape/rotation/size describe real metal and
+    must survive the copy.
+    """
+    router = Autorouter(20, 20, force_python=True)
+    pad = Pad(5, 5, 2, 2, 1, "SIGNAL", ref="J1", pin="1", rotation=45, shape=shape)
+    router.pads[("J1", "1")] = pad
+    escape = SimpleNamespace(pad=pad, escape_point=(5, 5), escape_layer=Layer.F_CU)
+    package = _install_escape(monkeypatch, router, escape)
+    getattr(router, method)([package])
+    copied = router._escape_pad_overrides[("J1", "1")]
+    assert (copied.x, copied.y, copied.layer) == (5, 5, Layer.F_CU)
+    assert (copied.shape, copied.rotation, copied.width, copied.height) == (shape, 45, 2, 2)
+
+
+@pytest.mark.parametrize("method", ["generate_escape_routes", "_apply_in_pad_escape_rescues"])
+@pytest.mark.parametrize("shape", ["circle", "rect"])
+def test_escape_virtual_pad_sizes_moved_endpoint_to_conductor(monkeypatch, method, shape):
+    """A moved endpoint is sized to the escape conductor, not the pad outline.
+
+    Issue #5398: copying a 2 x 2 mm pad outline to an endpoint 3 mm away
+    synthesized pad metal over bare board, and both A* backends waive
+    blocked/clearance checks inside a terminal's metal area.
+    """
+    router = Autorouter(20, 20, force_python=True)
+    pad = Pad(5, 5, 2, 2, 1, "SIGNAL", ref="J1", pin="1", rotation=45, shape=shape)
+    router.pads[("J1", "1")] = pad
+    stub = Segment(5, 5, 8, 9, 0.25, Layer.B_CU, 1, "SIGNAL")
+    escape = SimpleNamespace(
+        pad=pad,
+        escape_point=(8, 9),
+        escape_layer=Layer.B_CU,
+        segments=[stub],
+        via=None,
+    )
+    package = _install_escape(monkeypatch, router, escape)
     getattr(router, method)([package])
     copied = router._escape_pad_overrides[("J1", "1")]
     assert (copied.x, copied.y, copied.layer) == (8, 9, Layer.B_CU)
-    assert (copied.shape, copied.rotation, copied.width, copied.height) == (shape, 45, 2, 2)
+    assert (copied.shape, copied.rotation) == ("rect", 0.0)
+    assert (copied.width, copied.height) == pytest.approx((0.25 / math.sqrt(2),) * 2)
+    # Identity still resolves back to the physical pad.
+    assert (copied.ref, copied.pin, copied.net) == ("J1", "1", 1)

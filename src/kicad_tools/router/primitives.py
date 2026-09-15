@@ -519,6 +519,7 @@ class Pad:
     drill_size: tuple[float, float] | None = None
     drill_rotation: float = 0.0
     component_id: str = ""
+    escape_terminal: bool = False  # Metal bounds must stay within committed escape copper
 
     @property
     def component_key(self) -> str:
