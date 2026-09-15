@@ -1880,6 +1880,11 @@ def _finalize_routes(
                         f"{preserved_vias} vias ({len(emitted)} routes)"
                     )
 
+    placement_copper = getattr(router, "placement_preserved_copper", "")
+    if placement_copper and not preserve_existing:
+        route_sexp = f"{route_sexp}\n\t{placement_copper}" if route_sexp else placement_copper
+        _emitted_preserved.extend(getattr(router, "placement_preserved_routes", ()))
+
     # Issue #4699: hand the gate the exact preserved set that was written.
     with contextlib.suppress(AttributeError):  # exotic router stand-ins
         router._emitted_preserved_routes = _emitted_preserved
@@ -7797,6 +7802,8 @@ def route_with_layer_escalation(
             # Issue #4588: this run would have printed a SUCCESS banner while
             # its own copper violates the --voltage-map creepage requirement.
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
             print(f"SUCCESS: Design requires minimum {final_result.layer_count} layers")
         else:
@@ -8638,6 +8645,8 @@ def route_with_rule_relaxation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
             print("SUCCESS: Routing complete with adaptive rules")
             if final_result.tier > 0:
@@ -10985,6 +10994,8 @@ def route_with_combined_escalation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
             print(
                 f"SUCCESS: Minimum viable config = {final_result.layer_count} layers + "
@@ -11485,6 +11496,11 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
             "inside (implies --preserve-existing)."
         )
     return 0
+
+
+def _placement_blocked(args) -> bool:
+    disposition = getattr(args, "_placement_disposition", None)
+    return bool(disposition is not None and disposition.requested_invalid_nets)
 
 
 def _offboard_preflight(pcb_path: Path) -> int:
@@ -14529,6 +14545,13 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    from .route_placement import finish
+
+    result = _run_main_impl(args, parser, argv)
+    return finish(args, result)
+
+
+def _run_main_impl(args, parser, argv) -> int:
     from .route_deadline import configure_output
 
     try:
@@ -14622,6 +14645,15 @@ def _main_impl(argv: list[str] | None = None) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    from .route_placement import prepare
+
+    prepare(args, pcb_path)
+    if (
+        args._placement_disposition.requested_invalid_nets
+        and not args._placement_disposition.eligible_nets
+    ):
+        return 2
+
     # Issue #4471 (epic #4465): resolve --complete BEFORE --nets.  Auto-detects
     # the currently-unconnected signal nets and stamps ``args.nets`` with
     # exactly those, so the #4322 route-only machinery below inverts them into
@@ -14710,10 +14742,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
     # opted out with --allow-offboard.  The check is O(footprints), computed
     # once, and reuses the same get_board_outline()-based analysis as
     # 'kct placement check'.
-    if not getattr(args, "allow_offboard", False):
-        rc = _offboard_preflight(pcb_path)
-        if rc != 0:
-            return rc
+    # Net-wide placement exclusions were resolved before complete/region selection.
 
     # Issue #4799: crossing-tail census replay.  Runs after the hard gates
     # (there is no point predicting congestion for a board that is not going to
@@ -17383,6 +17412,8 @@ def _main_impl(argv: list[str] | None = None) -> int:
             # pass, so the pairwise failure banner replaces it outright --
             # SUCCESS must be unreachable while non-exempt violations exist.
             _print_pairwise_failure_banner(pairwise_violations, args, output_path)
+        elif _placement_blocked(args):
+            print("PARTIAL: requested placement-invalid nets were not attempted")
         elif all_nets_routed and drc_passed:
             if drc_ran and drc_errors == 0:
                 print(f"SUCCESS: All signal nets routed, DRC passed!{summary_suffix}")

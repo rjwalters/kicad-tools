@@ -55,6 +55,8 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     assert board.read_bytes() == original
     assert output.is_file(), result.stdout + result.stderr
     assert result.returncode == (2 if selection in {"mixed", "complete_noop"} else 0)
+    if selection in {"mixed", "complete_noop"}:
+        assert "SUCCESS:" not in result.stdout
     parsed = PCB.load(output)
     assert any(segment.net_name == "GOOD" for segment in parsed.segments)
     before = PCB.load(board)
