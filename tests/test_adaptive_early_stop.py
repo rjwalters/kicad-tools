@@ -27,6 +27,8 @@ def _make_fake_router(nets_routed: int, nets_total: int = 20, segments: int = 0,
     router.nets = {i: [1, 2] for i in range(1, nets_total + 1)}
     router.grid = MagicMock(width=50, height=50)
     router.routes = []
+    # These tier-loop fixtures model routers without placement exclusions.
+    router.placement_disposition = None
     router._pour_nets_without_zones = set()
     # Issue #3942 (Bug B): _routable_multi_pad_nets calls _is_pour_net to
     # drop pour-served nets from the denominator.  A bare MagicMock returns

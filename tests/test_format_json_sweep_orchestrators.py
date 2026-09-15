@@ -171,11 +171,11 @@ class TestOuterSurface:
     def test_no_actionable_prose_only_leaves_remain(self, leaves):
         """#4674's backlog is empty: only the documented exemptions are left.
 
-        The four exemptions and the deferred ``route`` are listed in
+        The four exemptions are listed in
         ``docs/reference/machine-output.md``; anything else appearing here is
         a new prose-only leaf that skipped the canonical idiom.
         """
-        allowed = {"footprint generate", "interactive", "mcp serve", "route", "run"}
+        allowed = {"footprint generate", "interactive", "mcp serve", "run"}
         prose_only = set()
         for command, leaf in leaves.items():
             opts = {opt for action in leaf._actions for opt in action.option_strings}
