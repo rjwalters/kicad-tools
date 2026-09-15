@@ -1313,8 +1313,13 @@ ValidationResult Grid3D::validate_route(
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
-                result.violation_x = (seg.x1 + seg.x2 + other.x1 + other.x2) / 4.0f;
-                result.violation_y = (seg.y1 + seg.y2 + other.y1 + other.y2) / 4.0f;
+                // Resumable search boosts avoidance at this location. A long
+                // obstacle's midpoint can be far from the actual conflict.
+                const auto conflict = closest_gap_midpoint(
+                    seg.x1, seg.y1, seg.x2, seg.y2,
+                    other.x1, other.y1, other.x2, other.y2);
+                result.violation_x = conflict.first;
+                result.violation_y = conflict.second;
                 result.violation_type = 2;  // seg-seg
                 return result;
             }
