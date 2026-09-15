@@ -13,12 +13,16 @@ The series answers one question: when are two ``filled_polygon`` fragments of a
 (this repo's pre-#5362 behaviour, which unioned every fragment of a zone by
 zone identity) nor "when they touch" — it depends on the fill *encoding*:
 
-* ``filled_areas_thickness`` absent (the KiCad format default, ``yes``): the
-  stored outline is the centre-line of ``min_thickness``-wide copper, so two
-  fragments bond exactly when their outlines are within ``min_thickness``.
-* ``(filled_areas_thickness no)``: the stored outline *is* the copper, and two
-  fill outlines of one zone never bond to each other — not at a shared corner,
-  a shared edge, or across an overlapping band.
+KiCad initializes the fill mode from the file version: versions before
+``20250210`` use stroked outlines; versions at or after it use solid outlines.
+An explicit ``(filled_areas_thickness no)`` clears the stroked state, while
+explicit ``yes`` is a no-op. An absent token preserves the version default.
+
+* Stroked mode: the stored outline is the centre-line of
+  ``min_thickness``-wide copper, so fragments bond when their outlines are
+  within ``min_thickness``.
+* Solid mode: the stored outline is the copper, and fill outlines of one zone
+  do not bond directly at a shared corner, shared edge, or overlapping band.
 
 In both encodings a real conductor (pad, via, track) reaching into two
 fragments bonds them.
