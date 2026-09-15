@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any, cast
 from kicad_tools.core.kicad_lock import check_kicad_lock
 
 from .route_deadline import record_stage, restore_stage
+from .route_placement import for_attempt, select_result
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -7050,7 +7051,7 @@ def route_with_layer_escalation(
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
-                    placement_disposition=getattr(args, "_placement_disposition", None),
+                    placement_disposition=for_attempt(args, attempt_skip_nets),
                     skip_nets=attempt_skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
@@ -7542,6 +7543,7 @@ def route_with_layer_escalation(
 
     if successful_result:
         final_result = successful_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Design routed successfully on {final_result.layer_count} layers "
@@ -7549,6 +7551,7 @@ def route_with_layer_escalation(
             )
     elif best_result:
         final_result = best_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Best result on {final_result.layer_count} layers "
@@ -8132,7 +8135,7 @@ def route_with_rule_relaxation(
             with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
-                    placement_disposition=getattr(args, "_placement_disposition", None),
+                    placement_disposition=for_attempt(args, skip_nets),
                     skip_nets=skip_nets,
                     rules=rules,
                     edge_clearance=args.edge_clearance,
@@ -8395,6 +8398,7 @@ def route_with_rule_relaxation(
 
     if successful_result:
         final_result = successful_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Design routed successfully with relaxed rules "
@@ -8410,6 +8414,7 @@ def route_with_rule_relaxation(
                 print(f"\n  Note: Rules were relaxed ({final_result.tier_description})")
     elif best_result:
         final_result = best_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Best result at tier {final_result.tier} "
@@ -10439,7 +10444,7 @@ def route_with_combined_escalation(
                 with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
                     router, net_map = load_pcb_for_routing(
                         str(pcb_path),
-                        placement_disposition=getattr(args, "_placement_disposition", None),
+                        placement_disposition=for_attempt(args, skip_nets),
                         skip_nets=skip_nets,
                         rules=rules,
                         edge_clearance=args.edge_clearance,
@@ -10746,6 +10751,7 @@ def route_with_combined_escalation(
 
     if successful_result:
         final_result = successful_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Minimum viable configuration found\n"
@@ -10758,6 +10764,7 @@ def route_with_combined_escalation(
             print(f"  Clearance:   {final_result.clearance:.3f}mm")
     elif best_result:
         final_result = best_result
+        select_result(args, final_result.router)
         if not quiet:
             print(
                 f"Result: Best result at {final_result.layer_count} layers, "
@@ -15583,7 +15590,7 @@ def _run_main_impl(args, parser, argv) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             router, net_map = load_pcb_for_routing(
                 str(pcb_path),
-                placement_disposition=getattr(args, "_placement_disposition", None),
+                placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,
@@ -15658,7 +15665,7 @@ def _run_main_impl(args, parser, argv) -> int:
         def _order_router_factory() -> "Autorouter":
             fresh, _ = load_pcb_for_routing(
                 str(pcb_path),
-                placement_disposition=getattr(args, "_placement_disposition", None),
+                placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
                 edge_clearance=args.edge_clearance,

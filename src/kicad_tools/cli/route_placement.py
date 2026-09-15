@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 from kicad_tools.placement.routing import RoutingPlacementDisposition, analyze_routing_placement
@@ -81,6 +81,7 @@ def prepare(args, source: Path) -> None:
             allow_offboard=getattr(args, "allow_offboard", False),
             coupled_groups=[(p.positive.net_name, p.negative.net_name) for p in pairs],
         )
+    args._initial_placement_disposition = disposition
     args._placement_disposition = disposition
     publish_disposition(disposition)
     output = Path(args.output) if args.output else source.with_stem(source.stem + "_routed")
@@ -92,6 +93,33 @@ def prepare(args, source: Path) -> None:
     )
     if disposition.invalid_nets and not args.quiet:
         print("Placement-invalid, not attempted: " + ", ".join(sorted(disposition.invalid_nets)))
+
+
+def for_attempt(args, skip_nets) -> RoutingPlacementDisposition | None:
+    """Derive plane intent from this trial without changing the initial selection."""
+    initial = getattr(args, "_initial_placement_disposition", None)
+    if initial is None:
+        return None
+    plane = (
+        frozenset(skip_nets or ())
+        & initial.all_nets - initial.user_excluded_nets - initial.unrequested_nets
+    )
+    disposition = replace(
+        initial,
+        plane_excluded_nets=plane,
+        requested_nets=initial.requested_nets - plane,
+    )
+    args._placement_disposition = disposition
+    publish_disposition(disposition)
+    return disposition
+
+
+def select_result(args, router) -> None:
+    """Publish the selected router's policy after an escalation compares trials."""
+    disposition = getattr(router, "placement_disposition", None)
+    if disposition is not None:
+        args._placement_disposition = disposition
+        publish_disposition(disposition)
 
 
 def finish(args, exit_code: int) -> int:
