@@ -469,3 +469,38 @@ def test_alternative_repair_is_idempotent_before_refill(
     first = repaired.read_bytes()
     assert process.repair(repaired) == 0
     assert repaired.read_bytes() == first
+
+
+def test_offpad_search_continues_after_first_alternative_keepout(process, isolated_offpad_geometry):
+    from kicad_tools.schema.pcb import Segment, Zone, ZoneKeepout
+
+    pcb, via = isolated_offpad_geometry
+    preferred = (36.55, 19.75)
+    foreign = next(number for number, net in pcb.nets.items() if net.name == "SWCLK")
+    pcb.segments.append(
+        Segment(
+            start=(36.15, 19.55), end=(36.95, 19.55), width=0.2, layer="B.Cu", net_number=foreign
+        )
+    )
+    first = process.select_offpad_position(pcb, via, "U2.35", preferred, ["F.Cu"])
+    x, y = first
+    pcb.zones.append(
+        Zone(
+            net_number=0,
+            net_name="",
+            layer="B.Cu",
+            polygon=[
+                (x - 0.02, y - 0.02),
+                (x + 0.02, y - 0.02),
+                (x + 0.02, y + 0.02),
+                (x - 0.02, y + 0.02),
+            ],
+            keepout=ZoneKeepout(vias_allowed=False),
+        )
+    )
+    # A later rung remains legal under the identical complete predicate.
+    later = (33.9345, 19.75)
+    assert process.select_offpad_position(pcb, via, "U2.35", later, ["F.Cu"]) == later
+    chosen = process.select_offpad_position(pcb, via, "U2.35", preferred, ["F.Cu"])
+    assert chosen != first
+    assert chosen == pytest.approx(later)

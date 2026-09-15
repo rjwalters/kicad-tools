@@ -194,6 +194,7 @@ def select_offpad_position(pcb, via, ref, preferred, layers):
         0.15,
         0.10,
         search_alternatives=True,
+        candidate_predicate=safe,
     )
     if target is None or not safe(target):
         raise ValueError(f"No clearance-safe off-pad bond for {ref}")
