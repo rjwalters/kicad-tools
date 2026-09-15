@@ -7610,7 +7610,8 @@ def route_with_layer_escalation(
         select_result(args, final_result.router)
         if not quiet:
             print(
-                f"Result: Design routed successfully on {final_result.layer_count} layers "
+                f"Result: {'Eligible routing completed' if _placement_blocked(args) else 'Design routed successfully'} "
+                f"on {final_result.layer_count} layers "
                 f"({final_result.completion * 100:.0f}% completion)"
             )
     elif best_result:
@@ -8474,7 +8475,8 @@ def route_with_rule_relaxation(
         select_result(args, final_result.router)
         if not quiet:
             print(
-                f"Result: Design routed successfully with relaxed rules "
+                f"Result: {'Eligible routing completed' if _placement_blocked(args) else 'Design routed successfully'} "
+                f"with relaxed rules "
                 f"({final_result.completion * 100:.0f}% completion)"
             )
             print("\nFinal design rules:")
@@ -10836,8 +10838,13 @@ def route_with_combined_escalation(
         select_result(args, final_result.router)
         if not quiet:
             print(
-                f"Result: Minimum viable configuration found\n"
-                f"  Layers: {final_result.layer_count}\n"
+                "Result: "
+                + (
+                    "Configuration meets eligible routing threshold; requested nets remain placement-invalid\n"
+                    if _placement_blocked(args)
+                    else "Minimum viable configuration found\n"
+                )
+                + f"  Layers: {final_result.layer_count}\n"
                 f"  Tier: {final_result.tier} ({final_result.tier_description})\n"
                 f"  Completion: {final_result.completion * 100:.0f}%"
             )
@@ -11520,6 +11527,11 @@ def _parse_and_apply_region(args, pcb_path: Path, region_arg: str) -> int:
     skip = set()
     if getattr(args, "skip_nets", None):
         skip = {n.strip() for n in args.skip_nets.split(",")}
+    # Placement-invalid nets are already excluded net-wide. Their outside
+    # terminals must not abort useful work on independent in-region nets.
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None:
+        skip.update(disposition.invalid_nets)
 
     # Collect board-relative pad positions per net.
     net_pads: dict[str, list[tuple[float, float]]] = {}

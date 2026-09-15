@@ -3884,9 +3884,9 @@ def load_pcb_for_routing(
         ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
         if not ref_match:
             ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
-        if not ref_match:
-            continue
-        ref = ref_match.group(1)
+        # Reference text is optional in a footprint. Keep its pads and their
+        # authored empty reference, matching PCB.load and placement analysis.
+        ref = ref_match.group(1) if ref_match else ""
 
         # Parse pads - extract complete (pad ...) blocks
         # KiCad 7+ uses multi-line pad definitions, so we need to extract

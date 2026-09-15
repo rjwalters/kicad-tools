@@ -26,7 +26,9 @@ from tests.test_routing_placement_disposition import board_text
         "complete_excluded_noop",
     ],
 )
-def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, selection):
+def test_partial_placement_cli_preserves_and_reports(
+    tmp_path, entry, finite, selection, extra_options=()
+):
     board = tmp_path / "mixed.kicad_pcb"
     text = board_text()
     if selection.startswith("complete_"):
@@ -71,6 +73,7 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
         "--export-failed-nets",
         str(failed),
         *options,
+        *extra_options,
     ]
     if finite:
         argv += ["--timeout", "30"]
@@ -89,7 +92,7 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     )
     assert board.read_bytes() == original
     assert output.is_file(), result.stdout + result.stderr
-    if selection == "complete_partial":
+    if selection == "complete_partial" or (extra_options and selection == "mixed"):
         # The retained off-board trace can also trigger the DRC exit (3).
         # Placement must preserve that stronger failure, never turn it into success.
         assert result.returncode in {2, 3}
@@ -97,6 +100,8 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
         assert result.returncode == (2 if selection in {"mixed", "coupled", "complete_noop"} else 0)
     if selection in {"mixed", "coupled", "complete_noop", "complete_partial"}:
         assert "SUCCESS:" not in result.stdout
+        assert "Design routed successfully" not in result.stdout
+        assert "Minimum viable configuration found" not in result.stdout
     parsed = PCB.load(output)
     assert any(segment.net_name == "GOOD" for segment in parsed.segments)
     before = PCB.load(board)
@@ -167,3 +172,26 @@ def test_all_invalid_export_replaces_stale_attempt(tmp_path, suffix):
         ]
     else:
         assert target.read_text() == "# placement-invalid, not attempted\nBAD\n"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param(["--no-auto-layers", "--strategy", "basic"], id="basic"),
+        pytest.param(["--no-auto-layers", "--strategy", "monte-carlo"], id="monte-carlo"),
+        pytest.param(["--no-auto-layers", "--strategy", "evolutionary"], id="evolutionary"),
+        pytest.param(
+            ["--no-auto-layers", "--strategy", "basic", "--route-engine", "mesh"], id="mesh"
+        ),
+        pytest.param(
+            ["--no-auto-layers", "--strategy", "basic", "--route-engine", "lattice"], id="lattice"
+        ),
+        pytest.param(["--no-auto-layers", "--adaptive-rules"], id="adaptive-rules"),
+        pytest.param(["--adaptive-rules"], id="combined"),
+        pytest.param(["--region", "0,0,20,12"], id="region"),
+    ],
+)
+def test_partial_placement_route_modes(tmp_path, options):
+    test_partial_placement_cli_preserves_and_reports(
+        tmp_path, "outer", True, "mixed", extra_options=options
+    )

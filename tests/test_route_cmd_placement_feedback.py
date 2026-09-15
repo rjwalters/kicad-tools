@@ -1025,6 +1025,7 @@ class TestInnerParserPlacementFeedbackFlags:
         stub_pcb.footprints = []
 
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = []
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=0,
@@ -1103,6 +1104,7 @@ class TestPlacementFeedbackEscalationHook:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.routes = object() if routes == "__default__" else routes
         router.get_failed_nets.return_value = list(failed_nets)
         router.nets = {1: [object(), object()], 2: [object(), object()]}
@@ -1314,6 +1316,7 @@ class TestPlacementFeedbackVerboseGating:
 
         args = _pf_args(verbose=verbose)
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = [1]
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=1,
@@ -1372,6 +1375,7 @@ class TestDeterministicBudgetSentinelNormalization:
 
         args = _pf_args(per_net_timeout=0.0)
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = [1]
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=1,
@@ -1405,6 +1409,7 @@ class TestDeterministicBudgetSentinelNormalization:
 
         args = _pf_args(per_net_timeout=4.0)
         router = MagicMock()
+        router.placement_disposition = None
         router.get_failed_nets.return_value = [1]
         router.route_with_placement_feedback.return_value = MagicMock(
             iterations=1,
@@ -1441,6 +1446,7 @@ class TestDeterministicBudgetSentinelNormalization:
             skip_nets=None,
         )
         router = MagicMock()
+        router.placement_disposition = None
         router.route_with_placement_delta_feedback.return_value = MagicMock(
             iterations=1,
             exit_reason="pdf_converged",

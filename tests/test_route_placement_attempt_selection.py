@@ -76,3 +76,20 @@ def test_automatic_plane_skip_cannot_hide_requested_invalid_placement(tmp_path):
     result = route_placement.for_attempt(args, ["BAD", "PLANE"])
     assert result.requested_invalid_nets == frozenset({"BAD"})
     assert result.plane_excluded_nets == frozenset({"PLANE"})
+
+
+def test_footprint_without_reference_keeps_pads_in_loader(tmp_path):
+    from tests.test_route_cmd_input_preservation import _make_pcb_with_pour_candidates
+
+    source = tmp_path / "anonymous.kicad_pcb"
+    source.write_text(_make_pcb_with_pour_candidates())
+    args = route_cmd._route_parser().parse_args([str(source)])
+    route_placement.prepare(args, source)
+    router, net_map = load_pcb_for_routing(
+        str(source), placement_disposition=args._placement_disposition, force_python=True
+    )
+    assert len(router.pads) == 4
+    assert {pad.ref for pad in router.pads.values()} == {""}
+    assert {pad.net for pad in router.pads.values()} == {
+        net_map[name] for name in ("GND", "VCC", "SDA", "SCL")
+    }
