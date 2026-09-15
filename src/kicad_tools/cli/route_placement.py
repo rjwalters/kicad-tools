@@ -155,7 +155,11 @@ def for_attempt(args, skip_nets) -> RoutingPlacementDisposition | None:
     )
     plane = initial.plane_excluded_nets | (
         frozenset(skip_nets or ())
-        & initial.all_nets - initial.user_excluded_nets - initial.unrequested_nets - selection_skips
+        & initial.all_nets
+        - initial.user_excluded_nets
+        - initial.unrequested_nets
+        - selection_skips
+        - initial.invalid_nets
     )
     disposition = replace(
         initial,
@@ -228,6 +232,11 @@ def finish(args, exit_code: int) -> int:
         result = NetStatusAnalyzer(output, strict=True).analyze()
         completed = frozenset(net.net_name for net in result.complete)
     report = RoutingPlacementReport(disposition, completed).to_dict()
+    fill_error = getattr(args, "_placement_fill_error", None)
+    if fill_error:
+        report["zone_fill_status"] = "failed"
+        report["zone_fill_error"] = fill_error
+        report["clean_success"] = False
     report_path = getattr(args, "complete_report", None)
     if report_path:
         from kicad_tools.core.atomic_write import atomic_write_text
@@ -240,6 +249,8 @@ def finish(args, exit_code: int) -> int:
             payload = json.loads(path.read_text())
         payload["placement_disposition"] = report
         atomic_write_text(Path(report_path), json.dumps(payload, indent=2) + "\n")
+    if fill_error and exit_code == 0:
+        return 3
     if disposition.requested_invalid_nets and exit_code == 0:
         return 2
     return exit_code

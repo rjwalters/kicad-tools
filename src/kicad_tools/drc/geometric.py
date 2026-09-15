@@ -93,6 +93,7 @@ def run_geometric_drc(
     *,
     timeout: int = 120,
     kicad_cli: Path | None = None,
+    refill_zones: bool = True,
 ) -> GeometricDRCResult:
     """Run ``kicad-cli pcb drc`` and summarize findings by severity.
 
@@ -123,6 +124,9 @@ def run_geometric_drc(
         pcb_path: Path to the ``.kicad_pcb`` file to check.
         timeout: Seconds before the kicad-cli invocation is abandoned.
         kicad_cli: Explicit kicad-cli path (auto-detected when ``None``).
+        refill_zones: Recompute zones before checking by default. False checks
+            the saved copper exactly, for deliberately preserved fixed fills.
+            This does not attest to what a later full refill would produce.
 
     Returns:
         A :class:`GeometricDRCResult` summarizing the run.
@@ -145,11 +149,7 @@ def run_geometric_drc(
             str(kicad_cli),
             "pcb",
             "drc",
-            # Issue #3969: refill zones before evaluating so clearance is
-            # judged against a fresh fill (as the fab / the acceptance
-            # command does), not the stale persisted pour polygons that
-            # can carry a sub-micron rounding phantom.
-            "--refill-zones",
+            *(["--refill-zones"] if refill_zones else []),
             "--format",
             "json",
             # Request all severities so warning-only native checks such as

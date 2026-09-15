@@ -66,3 +66,13 @@ def test_disabled_coupled_class_does_not_exclude_suffix_partner(tmp_path):
     route_placement.prepare(args, source)
     assert not args._placement_disposition.coupled_invalid_nets
     assert "USB_D-" in args._placement_disposition.eligible_nets
+
+
+def test_automatic_plane_skip_cannot_hide_requested_invalid_placement(tmp_path):
+    source = tmp_path / "mixed.kicad_pcb"
+    source.write_text(board_text())
+    args = route_cmd._route_parser().parse_args([str(source)])
+    route_placement.prepare(args, source)
+    result = route_placement.for_attempt(args, ["BAD", "PLANE"])
+    assert result.requested_invalid_nets == frozenset({"BAD"})
+    assert result.plane_excluded_nets == frozenset({"PLANE"})

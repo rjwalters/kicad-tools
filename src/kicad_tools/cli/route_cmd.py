@@ -2912,6 +2912,7 @@ def run_post_route_drc(
     source_pcb_path: Path | None = None,
     current_path_specs: "Sequence[CurrentPathSpec] | None" = None,
     current_paths_input_path: Path | None = None,
+    preserve_filled_copper: bool = False,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -2960,6 +2961,8 @@ def run_post_route_drc(
             later ``kct check`` audits against identical declarations.
             ``None``/empty leaves ``path_ampacity`` inactive exactly as
             before.
+        preserve_filled_copper: Judge saved fills without refilling fixed
+            placement-excluded copper in memory before checking it.
         current_paths_input_path: The resolved ``--current-paths`` INPUT
             path.  Threaded to the sidecar writer so the derived sidecar
             never overwrites the user's authored file (Issue #4428's
@@ -3051,7 +3054,10 @@ def run_post_route_drc(
         # via the shared run_geometric_drc helper (issue #3803).
         from kicad_tools.drc import run_geometric_drc
 
-        geo = run_geometric_drc(output_path)
+        if preserve_filled_copper:
+            geo = run_geometric_drc(output_path, refill_zones=False)
+        else:
+            geo = run_geometric_drc(output_path)
 
         if geo.ran and geo.error_count > 0:
             # Native DRC found blocking geometric violations -- fold them into
@@ -3878,7 +3884,9 @@ def _maybe_run_placement_feedback_escalation(
         )
 
 
-def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
+def _fill_zones_after_route(
+    output_path: Path, quiet: bool = False, *, router=None, args=None
+) -> None:
     """Fill copper-pour zones after routing completes.
 
     Routing produces traces; copper pour zones must be filled *after* the
@@ -3906,6 +3914,34 @@ def _fill_zones_after_route(output_path: Path, quiet: bool = False) -> None:
         quiet: Suppress informational output.
     """
     record_stage("native-zone-fill")
+    disposition = getattr(router, "placement_disposition", None)
+    if disposition is not None and disposition.preserve_copper_nets:
+        from kicad_tools.zones.placement_fill import fill_around_fixed_copper
+
+        args._placement_fill_error = None
+        try:
+            text = output_path.read_text()
+            if not re.search(r"\(zone\s", text):
+                return
+            # Use the same propagated source/fabrication constraints as DRC,
+            # before native filling can bake a weaker default into the output.
+            _write_drc_constraint_sidecars(
+                output_path,
+                args.manufacturer,
+                router.layer_stack.num_layers,
+                copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+                quiet=quiet,
+                source_pcb_path=Path(args.pcb),
+            )
+            fill_around_fixed_copper(output_path, disposition.preserve_copper_nets)
+            if not quiet:
+                print("  Zone fill: complete; placement-excluded copper preserved")
+        except Exception as exc:
+            # The selective helper stages all native mutations. Preserve the
+            # saved routing result and report failure instead of filling all zones.
+            args._placement_fill_error = str(exc)
+            print(f"  Zone fill failed; saved partial copper retained: {exc}", file=sys.stderr)
+        return
     from kicad_tools.cli.runner import (
         find_kicad_cli,
         run_fill_zones,
@@ -7779,13 +7815,17 @@ def route_with_layer_escalation(
     # zone outlines and does not flag zone-to-trace clearance against
     # unfilled polygons.
     if final_result.nets_routed > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
@@ -7849,6 +7889,8 @@ def route_with_layer_escalation(
             # Issue #4588: this run would have printed a SUCCESS banner while
             # its own copper violates the --voltage-map creepage requirement.
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
@@ -8625,13 +8667,17 @@ def route_with_rule_relaxation(
 
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
@@ -8693,6 +8739,8 @@ def route_with_rule_relaxation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
@@ -10975,13 +11023,17 @@ def route_with_combined_escalation(
 
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
     if not args.skip_drc and final_result.nets_routed > 0:
         drc_errors, _ = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=final_result.layer_count,
@@ -11043,6 +11095,8 @@ def route_with_combined_escalation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
@@ -17342,7 +17396,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # are in place (issue #2516).  Must run BEFORE DRC so the DRC sees
     # filled zones rather than bare zone outlines.
     if not args.dry_run and stats["nets_routed"] > 0:
-        _fill_zones_after_route(output_path, quiet=quiet)
+        _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
 
     _rss.mark("post-fill-zones")
 
@@ -17356,6 +17410,10 @@ def _run_main_impl(args, parser, argv) -> int:
         drc_ran = True
         drc_errors, drc_warnings = run_post_route_drc(
             output_path=output_path,
+            preserve_filled_copper=bool(
+                getattr(args, "_placement_disposition", None)
+                and args._placement_disposition.preserve_copper_nets
+            ),
             source_pcb_path=Path(args.pcb),
             manufacturer=args.manufacturer,
             layers=layer_stack.num_layers,
@@ -17477,6 +17535,8 @@ def _run_main_impl(args, parser, argv) -> int:
             # pass, so the pairwise failure banner replaces it outright --
             # SUCCESS must be unreachable while non-exempt violations exist.
             _print_pairwise_failure_banner(pairwise_violations, args, output_path)
+        elif getattr(args, "_placement_fill_error", None):
+            print("PARTIAL: zone fill failed; saved routing copper retained")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif all_nets_routed and drc_passed:

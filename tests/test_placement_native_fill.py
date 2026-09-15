@@ -123,3 +123,62 @@ def test_unavailable_native_runtime_preserves_partial_board(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match="selective zone-fill support is unavailable"):
         fill_around_fixed_copper(board, frozenset({"BAD"}))
     assert board.read_text() == source
+
+
+@pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
+def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path):
+    from kicad_tools.cli.route_cmd import main
+
+    fixed = """(zone (net 1) (net_name "BAD") (layer "F.Cu")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
+      (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon (pts (xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110)))
+      (filled_polygon (layer "F.Cu") (pts (xy 104 102) (xy 109 102) (xy 109 104) (xy 104 104))))"""
+    plane = """(zone (net 4) (net_name "PLANE") (layer "F.Cu")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
+      (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon (pts (xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110))))"""
+    source = tmp_path / "source.kicad_pcb"
+    original = board_text()[:-1] + fixed + plane + ")"
+    source.write_text(original)
+    output = tmp_path / "routed.kicad_pcb"
+    report = tmp_path / "report.json"
+    result = main([str(source), "-o", str(output), "--complete-report", str(report)])
+    assert result in {2, 3}
+    assert source.read_text() == original
+    assert output.read_text().count(fixed) == 1
+    pcb = PCB.load(output)
+    assert any(s.net_name == "GOOD" for s in pcb.segments)
+    assert any(z.net_name == "PLANE" and z.filled_polygons for z in pcb.zones)
+    disposition = json.loads(report.read_text())["placement_disposition"]
+    assert disposition["requested_blocked_nets"] == ["BAD"]
+    assert disposition.get("zone_fill_status") != "failed"
+
+
+def test_cli_fill_failure_retains_routes_and_cannot_report_success(tmp_path, monkeypatch, capsys):
+    from kicad_tools.cli.route_cmd import main
+    from kicad_tools.zones import placement_fill
+
+    source = tmp_path / "mixed.kicad_pcb"
+    original = (
+        board_text()[:-1]
+        + """(zone (net 4) (net_name "PLANE") (layer "F.Cu")
+      (hatch edge 0.5) (connect_pads yes (clearance 0.3)) (min_thickness 0.2)
+      (fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3))
+      (polygon (pts (xy 102 101) (xy 118 101) (xy 118 110) (xy 102 110)))))"""
+    )
+    source.write_text(original)
+    output = tmp_path / "routed.kicad_pcb"
+    report = tmp_path / "report.json"
+    monkeypatch.setattr(placement_fill, "find_kicad_python", lambda: None)
+    result = main(
+        [str(source), "-o", str(output), "--nets", "GOOD", "--complete-report", str(report)]
+    )
+    assert result != 0
+    assert source.read_text() == original
+    assert any(s.net_name == "GOOD" for s in PCB.load(output).segments)
+    disposition = json.loads(report.read_text())["placement_disposition"]
+    assert disposition["requested_blocked_nets"] == []
+    assert disposition["zone_fill_status"] == "failed"
+    assert disposition["clean_success"] is False
+    assert "SUCCESS:" not in capsys.readouterr().out

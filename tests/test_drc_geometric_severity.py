@@ -3,10 +3,13 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kicad_tools.drc.geometric import run_geometric_drc
 
 
-def test_run_geometric_drc_preserves_error_gate_and_counts_warnings(monkeypatch):
+@pytest.mark.parametrize("refill", [True, False])
+def test_run_geometric_drc_preserves_error_gate_and_counts_warnings(monkeypatch, refill):
     """Warnings are exposed without changing the existing error-only fields."""
     import kicad_tools.drc as drc_package
     import kicad_tools.drc.geometric as geometric
@@ -26,8 +29,11 @@ def test_run_geometric_drc_preserves_error_gate_and_counts_warnings(monkeypatch)
         lambda _path: SimpleNamespace(violations=[warning, error]),
     )
 
-    result = run_geometric_drc(Path("board.kicad_pcb"), kicad_cli=Path("/usr/bin/kicad-cli"))
+    result = run_geometric_drc(
+        Path("board.kicad_pcb"), kicad_cli=Path("/usr/bin/kicad-cli"), refill_zones=refill
+    )
 
+    assert ("--refill-zones" in captured["cmd"]) is refill
     assert "--severity-all" in captured["cmd"]
     assert "--severity-error" not in captured["cmd"]
     assert result.ran
