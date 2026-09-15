@@ -13,6 +13,12 @@ header-includes:
   - \usepackage{float}
 ---
 
+## Release Status: BLOCKED
+
+This candidate is not qualified for manufacture. The saved copper has 12 native copper-sliver warnings and does not match independent bare native refill. The passing recipe replay and factory checks below do not clear these release blockers. See Manufacturing Readiness and the bundled `native-refill-comparison.json` for the measured discrepancy.
+
+This report's release evidence was corrected against PR #5386 source `aa1fa691f545866a7754e28e1baf773e8cae31a8`. Measurements are retained KiCad 10.0.5 observations, not a new physical run. Board imagery, geometry and recipe remain unchanged.
+
 ## Board Summary
 
 | Property | Value |
@@ -69,12 +75,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## ERC Status
 
-| Metric | Count |
-|--------|-------|
-| Errors | 0 |
-| Warnings | 0 |
-
-**Status**: SKIPPED -- ERC skipped by user request
+Retained native KiCad 10.0.5 report dated 2026-09-15T00:37:00 on the shipped schematic: **0 errors, 0 warnings**. Evidence: `native-erc.json`; schematic UUID `/546c89fe-5075-48a6-a97e-bef2a1207261`. This supersedes the earlier export-stage ERC-skipped summary. No new ERC run was performed for this report correction.
 
 
 \newpage
@@ -151,33 +152,50 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 \newpage
 
-## DRC Status
+## DRC Status: Saved Copper
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
-| Warnings | 14 |
-| Blocking | 0 |
+| Native errors | 0 |
+| Native warnings | 12 |
+| Unconnected items | 0 |
+| Copper-sliver warnings | 12 |
 
-**Status**: PASS
-### Violations by Type
+**Native release gate: FAILED**. The zero-error/zero-warning gate is not satisfied. Evidence: bundled `native-drc.json`, measured on the canonical saved board with full project, rules and custom footprint context, without refill.
 
-| Violation Type | Count |
-|----------------|-------|
-| hole_to_hole_clearance | 14 |
+The separately scoped retained Python factory check in `check-report.json` passed (0 errors/warnings, 54 checked rules). Its pass does not replace native readiness checks. The former 14 hole-to-hole warning summary was an earlier export-stage diagnostic; it is superseded here and is not the current native warning census.
+
+Native version: KiCad 10.0.5. Container image ID: `sha256:182c8005cb775a2c448a4c18681d489f1ff472a761885eba3e08b07e3c0564de`.
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: WARNING
+**Verdict: BLOCKED**
 
-### Action Items
+### Required Actions
 
-- **[OPTIONAL]** Verify zone fill in KiCad: 12 nets appear incomplete but may be connected via zone fills
-- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
-- **[OPTIONAL]** Review 14 DRC warnings
+- **[REQUIRED]** Resolve the same-copper compatibility failure between the preserved recipe-filled release and bare native refill. Do not discard the clearance carve or substitute different refilled copper to claim success.
+- **[REQUIRED]** Resolve the 12 native copper-sliver warnings on the actual shipped geometry and rerun the required zero-error/zero-warning gates.
+- **[REQUIRED]** Verify the final candidate and its release bindings after repair. The generic producer correction in #5391 alone does not resolve this physical qualification gap; #5380 remains incomplete.
+
+### Independent Native-Fill Comparison
+
+| Layer | Refilled minus saved copper area (mm²) |
+|-------|---------------------------------------|
+| F.Cu | 947.873802 |
+| B.Cu | 406.966144 |
+| In1.Cu | 217.304656 |
+| In2.Cu | 463.102399 |
+
+Saved PCB SHA256: `e7bdf5b80a3685f4ebd7e380fdade7d9e6218168a15f0cfecea6166b69645270`.
+
+Separate native-refilled PCB SHA256: `81de0e491ad82a68cfe375737dbf898969d45e35febb5a2737649e2378bd8e5a`.
+
+The refilled measurement has zero native violations/opens but describes different copper and is not the shipped board. Evidence: `native-refill-comparison.json` and `native-refilled-drc.json`.
+
+The retained recipe-fill replay reports zero area delta for its own native-fill/remediation/carve engine. That passing recipe-stability result is distinct from bare-native equivalence. Neither it nor passing factory/connectivity checks establishes overall release readiness.
 
 
 \newpage
