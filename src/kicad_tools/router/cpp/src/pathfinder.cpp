@@ -803,7 +803,12 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                                     rules_.min_hole_to_hole)) return true;
 
     const bool geometry_complete = grid_.route_geometry_complete();
-    if (geometry_complete && !via_route_geometry_clear(x, y, net)) return true;
+    int physical_clear = -1;
+    auto geometry_clear = [&]() {
+        if (physical_clear < 0) physical_clear = via_route_geometry_clear(x, y, net) ? 1 : 0;
+        return physical_clear != 0;
+    };
+    if (geometry_complete && !geometry_clear()) return true;
 
     if (grid_.has_fixed_fills()) {
         auto [wx, wy] = grid_.grid_to_world(x, y);
@@ -871,7 +876,10 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                 if (!cell.blocked) {
                     continue;
                 }
-                if (cell.net != net && geometry_complete && grid_.route_cell_has_geometry(cx, cy, layer)) continue;
+                if (cell.net != net && grid_.route_cell_has_geometry(cx, cy, layer)) {
+                    if (!geometry_clear()) return true;
+                    continue;
+                }
 
                 if (allow_sharing) {
                     // Negotiated mode: mirror Python
@@ -938,7 +946,10 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     if (!cell.blocked) {
                         continue;
                     }
-                    if (cell.net != net && geometry_complete && grid_.route_cell_has_geometry(cx, cy, layer)) continue;
+                    if (cell.net != net && grid_.route_cell_has_geometry(cx, cy, layer)) {
+                        if (!geometry_clear()) return true;
+                        continue;
+                    }
 
                     if (allow_sharing) {
                         if (cell.is_obstacle && cell.net != net) {

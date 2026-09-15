@@ -557,24 +557,25 @@ void Grid3D::record_route_mark(const RouteMarkKey& key, bool add) {
 bool Grid3D::route_geometry_complete() const {
     if (!route_coverage_dirty_) return route_coverage_complete_;
     route_coverage_complete_ = !active_route_marks_.empty();
-    for (const auto& [key, count] : active_route_marks_) {
-        auto geometry_key = key;
-        std::get<7>(geometry_key) = 0;
-        if (registered_route_geometry_.find(geometry_key) == registered_route_geometry_.end()) {
-            route_coverage_complete_ = false;
-            break;
-        }
-    }
-    if (route_coverage_complete_) {
+    {
         route_geometry_cells_.assign(cells_.size(), 0);
         for (const auto& [key, count] : active_route_marks_) {
+            auto geometry_key = key;
+            std::get<7>(geometry_key) = 0;
+            const bool known = registered_route_geometry_.count(geometry_key) != 0;
+            if (!known) route_coverage_complete_ = false;
             const auto [kind, net, layer, x1, y1, x2, y2, radius] = key;
             auto mark = [&](int x, int y, int l) {
                 for (int dy = -radius; dy <= radius; ++dy) {
                     for (int dx = -radius; dx <= radius; ++dx) {
                         const int cx = x + dx, cy = y + dy;
-                        if (is_valid(cx, cy, l) && at(cx, cy, l).net == net)
-                            route_geometry_cells_[index(cx, cy, l)] = net;
+                        if (!is_valid(cx, cy, l)) continue;
+                        auto& coverage = route_geometry_cells_[index(cx, cy, l)];
+                        // Unknown overlap remains hard regardless of mark order
+                        // or which net currently owns the cell.
+                        if (!known) coverage = -1;
+                        else if (coverage != -1 && at(cx, cy, l).net == net)
+                            coverage = net;
                     }
                 }
             };
@@ -604,7 +605,8 @@ bool Grid3D::route_cell_has_geometry(int x, int y, int layer) const {
     const auto& cell = at(x, y, layer);
     if (!cell.blocked || cell.net <= 0 || cell.static_blocked || cell.pad_blocked ||
         cell.is_obstacle || cell.reserved_count > 0) return false;
-    return route_geometry_complete() && route_geometry_cells_[index(x, y, layer)] == cell.net;
+    route_geometry_complete();  // Refresh local coverage, including unknown marks.
+    return route_geometry_cells_[index(x, y, layer)] == cell.net;
 }
 
 void Grid3D::index_route_geometry(GeometryBins& bins, size_t index,

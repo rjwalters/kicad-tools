@@ -21,8 +21,9 @@ class RouteHaloGeometry:
     """A conservative mark is refinable only when its actual copper is known.
 
     Marks are counted independently of the grid's single owner field. Missing
-    geometry disables refinement; clearing/ripping up geometry cannot leave a
-    stale authorization. Two-mm bins limit exact comparisons to nearby copper.
+    geometry disables refinement in its footprint; clearing/ripping up geometry
+    cannot leave a stale authorization. Two-mm bins limit exact comparisons to
+    nearby copper.
     """
 
     def __init__(self, grid: RoutingGrid):
@@ -78,8 +79,6 @@ class RouteHaloGeometry:
                 registered.add(self.via_key(via))
                 self._objects.append((via, Point(via.x, via.y), max(via.diameter, via.drill) / 2))
         self._complete = bool(self.marks) and all(key in registered for key, _ in self.marks)
-        if not self._complete:
-            return
         self._cells = np.zeros(
             (self.grid.num_layers, self.grid.rows, self.grid.cols), dtype=np.int32
         )
@@ -89,6 +88,7 @@ class RouteHaloGeometry:
                 self._bins[bucket].add(index)
         net_plane = to_numpy(self.grid._net)
         for key, radius in self.marks:
+            known = key in registered
             kind, net, layer, x1, y1, x2, y2, *_ = key
             x, y = x1, y1
             dx, dy = abs(x2 - x1), abs(y2 - y1)
@@ -102,7 +102,11 @@ class RouteHaloGeometry:
                     if ax >= bx or ay >= by:
                         continue
                     region = self._cells[plane, ay:by, ax:bx]
-                    region[net_plane[plane, ay:by, ax:bx] == net] = net
+                    if not known:
+                        # Do not let a later known mark hide an unknown overlap.
+                        region[:] = -1
+                    else:
+                        region[(region != -1) & (net_plane[plane, ay:by, ax:bx] == net)] = net
                 if (x, y) == (x2, y2):
                     break
                 twice = 2 * err
@@ -130,15 +134,19 @@ class RouteHaloGeometry:
         if (layer, y, x) in grid._reserved_for_nets:
             return False
         self._refresh()
-        return self._complete and bool(self._cells[layer, y, x] == cell.net)
+        return bool(self._cells[layer, y, x] == cell.net)
 
     def clear(self, candidate, router, *, partner_net=None, partner_clearance=None) -> bool:
-        """Check candidate copper and drills using the effective routing rules."""
+        """Check known copper and drills using the effective routing rules.
+
+        This physical check does not authorize bypassing unknown occupancy.
+        Callers must check cell_known for every blocked cell they refine.
+        """
         from .pairwise_clearance import _attach_zone_exempts
         from .primitives import Segment
 
         self._refresh()
-        if not self._complete:
+        if not self.marks or not self._objects:
             return False
         is_trace = isinstance(candidate, Segment)
         if is_trace:

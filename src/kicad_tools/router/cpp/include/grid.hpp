@@ -280,9 +280,10 @@ public:
     void add_stored_via(float x, float y, float drill, float diameter, int net,
                         std::optional<std::pair<int, int>> grid_center = std::nullopt);
 
-    // A dynamic mark may be refined only after every active mark has its
-    // physical primitive registered. Counts retain overlapping/repeated marks;
-    // clearing validation geometry invalidates coverage immediately.
+    // Global completeness is diagnostic. A cell is refinable only when all
+    // active marks covering it have registered physical geometry. Unknown
+    // overlaps remain hard even when another mark owns the visible cell.
+    // Clearing validation geometry invalidates coverage immediately.
     bool route_geometry_complete() const;
     bool route_cell_has_geometry(int x, int y, int layer) const;
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
