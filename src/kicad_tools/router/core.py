@@ -5175,6 +5175,13 @@ class Autorouter:
         except Exception:  # pragma: no cover - defensive
             return
 
+    def _net_has_kelvin_root(self, net_id: int) -> bool:
+        """Use actual net pads to qualify the sense-name impedance exemption."""
+        from kicad_tools.router.kelvin import find_kelvin_root
+
+        pads = [self.pads[key] for key in self.nets.get(net_id, []) if key in self.pads]
+        return find_kelvin_root(pads) is not None
+
     def _has_synthesis_candidates(self) -> bool:
         """Return True if at least one net would gain a target via
         validator-regex synthesis.
@@ -5231,8 +5238,9 @@ class Autorouter:
             ):
                 continue
 
+            has_kelvin_root = self._net_has_kelvin_root(_nid)
             for spec in specs:
-                if not spec.matches(net_name):
+                if not spec.matches(net_name, has_kelvin_root=has_kelvin_root):
                     continue
                 if spec.target_z0 is not None or spec.target_zdiff is not None:
                     return True
@@ -5332,8 +5340,9 @@ class Autorouter:
 
             # Find the first regex default that matches this net name.
             matched_spec = None
+            has_kelvin_root = self._net_has_kelvin_root(nid)
             for spec in specs:
-                if spec.matches(net_name):
+                if spec.matches(net_name, has_kelvin_root=has_kelvin_root):
                     matched_spec = spec
                     break
 
