@@ -202,7 +202,15 @@ class MSTRouter:
 
                 isolation = (
                     isolate_kelvin_branch(
-                        self.grid, pad_objs, pad_objs[kelvin.root_index], target_pad
+                        self.grid,
+                        pad_objs,
+                        pad_objs[kelvin.root_index],
+                        target_pad,
+                        trace_width=(
+                            self.net_class_map[source_pad.net_name].trace_width
+                            if source_pad.net_name in self.net_class_map
+                            else self.rules.trace_width
+                        ),
                     )
                     if kelvin is not None
                     else nullcontext()

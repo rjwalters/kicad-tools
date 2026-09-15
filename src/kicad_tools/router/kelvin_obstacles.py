@@ -31,14 +31,19 @@ def _pad_outline(pad: Pad, *, contact: bool = False):
 
 
 @contextmanager
-def isolate_kelvin_branch(grid: RoutingGrid, pads: list[Pad], root: Pad, target: Pad):
+def isolate_kelvin_branch(
+    grid: RoutingGrid, pads: list[Pad], root: Pad, target: Pad, *, trace_width: float | None = None
+):
     """Block previous branches and nonterminal pads only during one search.
 
     Work is bounded by individual conductor bounding boxes. Existing grid state
     is restored before the caller commits the newly found route, including when
     search raises. The electrical net identifiers of emitted copper never change.
     """
-    contact = _pad_outline(root, contact=True)
+    width = grid.rules.trace_width if trace_width is None else trace_width
+    # A centerline on the pad boundary can put overlapping trace caps outside
+    # the pad. Restrict shared centerline access to the inset metal instead.
+    contact = _pad_outline(root, contact=True).buffer(-width / 2)
     objects = []
     for route in grid.routes:
         if route.net != root.net:
@@ -64,7 +69,9 @@ def isolate_kelvin_branch(grid: RoutingGrid, pads: list[Pad], root: Pad, target:
 
     cells: set[tuple[int, int, int]] = set()
     for layer, shape in objects:
-        shape = shape.difference(contact)
+        # Mark every cell touched by copper, including a thin off-grid edge
+        # whose interior contains no cell center. Keep the shunt contact open.
+        shape = shape.buffer(grid.resolution / math.sqrt(2)).difference(contact)
         if shape.is_empty:
             continue
         xmin, ymin, xmax, ymax = shape.bounds

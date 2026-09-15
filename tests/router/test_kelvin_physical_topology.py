@@ -2,7 +2,8 @@
 
 import numpy as np
 import pytest
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, box
+from shapely.ops import unary_union
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.cpp_backend import CppPathfinder, get_backend_info
@@ -42,22 +43,25 @@ def test_kelvin_branches_do_not_share_copper_away_from_shunt(sense_positions, fo
     if not force_python:
         assert router.router.fallback_stats["fallback_count"] == 0
     assert len(routes) == 3, "All three shunt-to-terminal connections must route"
-    # Allow common copper at the shunt pad and its immediate escape only.
-    shunt_contact = Point(4, 10).buffer(0.7)
+    shunt_contact = box(3.6, 9.6, 4.4, 10.4)
     for index, branch in enumerate(routes):
         for other in routes[index + 1 :]:
-            for segment in branch.segments:
-                for other_segment in other.segments:
-                    if segment.layer != other_segment.layer:
-                        continue
-                    shared = (
-                        LineString([segment.start, segment.end])
-                        .intersection(LineString([other_segment.start, other_segment.end]))
-                        .difference(shunt_contact)
+            for layer in (0, 5):
+
+                def metal(route):
+                    return unary_union(
+                        [
+                            LineString([segment.start, segment.end]).buffer(segment.width / 2)
+                            for segment in route.segments
+                            if segment.layer.value == layer
+                        ]
+                        + [Point(via.x, via.y).buffer(via.diameter / 2) for via in route.vias]
                     )
-                    assert shared.length < 1e-9, (
-                        f"Kelvin branches share {shared.length:.6f} mm away from the shunt"
-                    )
+
+                shared = metal(branch).intersection(metal(other)).difference(shunt_contact)
+                assert shared.area < 1e-9, (
+                    f"Kelvin branches share {shared.area:.6f} mm² away from the shunt"
+                )
 
 
 @pytest.mark.parametrize("force_python", [True, False])

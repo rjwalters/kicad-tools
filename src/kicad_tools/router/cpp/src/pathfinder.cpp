@@ -1191,6 +1191,9 @@ RouteResult Pathfinder::route(
         for (int sgy = sp.metal_gy1; sgy <= sp.metal_gy2; ++sgy) {
             if (!grid_.is_valid(sgx, sgy, 0)) continue;
             for (int sl : valid_start_layers) {
+                const auto& seed_cell = grid_.at(sgx, sgy, sl);
+                if (seed_cell.blocked && seed_cell.is_obstacle &&
+                    seed_cell.pad_blocked && seed_cell.net != net) continue;
                 float h = heuristic(sgx, sgy, sl, end_gx, end_gy, valid_end_layers[0]);
                 AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
                                      seq_counter++};
@@ -1727,6 +1730,9 @@ RouteResult Pathfinder::route_resumable(
             if (!grid_.is_valid(sgx, sgy, 0)) continue;
             for (int sl : search_valid_start_layers_) {
                 if (!grid_.is_valid(sgx, sgy, sl)) continue;
+                const auto& seed_cell = grid_.at(sgx, sgy, sl);
+                if (seed_cell.blocked && seed_cell.is_obstacle &&
+                    seed_cell.pad_blocked && seed_cell.net != net) continue;
                 float h = heuristic(sgx, sgy, sl, end_gx, end_gy,
                                     search_valid_end_layers_[0]);
                 AStarNode start_node{h, 0.0f, sgx, sgy, sl, -1, false, 0, 0,
