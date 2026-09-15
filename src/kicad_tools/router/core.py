@@ -9632,8 +9632,8 @@ class Autorouter:
                     width=old_grid.width,
                     height=old_grid.height,
                     rules=old_grid.rules,
-                    origin_x=old_grid.origin_x,
-                    origin_y=old_grid.origin_y,
+                    origin_x=old_grid.origin_x - old_grid.grid_origin_offset[0],
+                    origin_y=old_grid.origin_y - old_grid.grid_origin_offset[1],
                     layer_stack=old_grid.layer_stack,
                     expanded_obstacles=old_grid.expanded_obstacles,
                     resolution_override=old_grid.resolution,
@@ -14959,7 +14959,8 @@ class Autorouter:
     def _reset_for_new_trial(self):
         """Reset the router to initial state for a new trial."""
         width, height = self.grid.width, self.grid.height
-        origin_x, origin_y = self.grid.origin_x, self.grid.origin_y
+        origin_x = self.grid.origin_x - self.grid.grid_origin_offset[0]
+        origin_y = self.grid.origin_y - self.grid.grid_origin_offset[1]
 
         # Recreate grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
@@ -15056,8 +15057,8 @@ class Autorouter:
         return {
             "width": self.grid.width,
             "height": self.grid.height,
-            "origin_x": self.grid.origin_x,
-            "origin_y": self.grid.origin_y,
+            "origin_x": self.grid.origin_x - self.grid.grid_origin_offset[0],
+            "origin_y": self.grid.origin_y - self.grid.grid_origin_offset[1],
             "rules_dict": rules_dict,
             "net_class_map": self.net_class_map,
             "pads_data": pads_data,

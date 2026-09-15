@@ -813,6 +813,8 @@ def _count_off_grid_with_offset(
     resolution: float,
     x_offset: float = 0.0,
     y_offset: float = 0.0,
+    *,
+    board_origin: tuple[float, float] = (0.0, 0.0),
 ) -> int:
     """Count pads that are off-grid at the given resolution and offset.
 
@@ -827,8 +829,8 @@ def _count_off_grid_with_offset(
     """
     off_grid = 0
     for pad in pad_list:
-        x_on = _is_on_grid_with_offset(pad.x, resolution, x_offset)
-        y_on = _is_on_grid_with_offset(pad.y, resolution, y_offset)
+        x_on = _is_on_grid_with_offset(pad.x - board_origin[0], resolution, x_offset)
+        y_on = _is_on_grid_with_offset(pad.y - board_origin[1], resolution, y_offset)
         if not (x_on and y_on):
             off_grid += 1
     return off_grid
@@ -837,6 +839,8 @@ def _count_off_grid_with_offset(
 def _find_optimal_origin_offset(
     pad_list: list,
     resolution: float,
+    *,
+    board_origin: tuple[float, float] = (0.0, 0.0),
 ) -> tuple[float, float]:
     """Find the grid origin offset that maximizes on-grid pad count.
 
@@ -856,6 +860,7 @@ def _find_optimal_origin_offset(
     Args:
         pad_list: List of pad objects with x, y attributes.
         resolution: Grid resolution in mm.
+        board_origin: Board minimum corner; returned offsets are relative to it.
 
     Returns:
         (x_offset, y_offset) in mm that maximizes on-grid pad count.
@@ -894,8 +899,8 @@ def _find_optimal_origin_offset(
 
         return best_offset
 
-    x_coords = [p.x for p in pad_list]
-    y_coords = [p.y for p in pad_list]
+    x_coords = [p.x - board_origin[0] for p in pad_list]
+    y_coords = [p.y - board_origin[1] for p in pad_list]
 
     x_off = best_offset_for_axis(x_coords)
     y_off = best_offset_for_axis(y_coords)
@@ -1103,6 +1108,8 @@ def auto_select_grid_resolution(
     max_cells: int = 500_000,
     candidates: list[float] | None = None,
     engine: str = "grid",
+    *,
+    board_origin: tuple[float, float] = (0.0, 0.0),
 ) -> GridAutoSelection:
     """Automatically select optimal grid resolution based on pad positions.
 
@@ -1114,6 +1121,8 @@ def auto_select_grid_resolution(
         clearance: Required trace clearance in mm (for DRC compliance)
         board_width: Board width in mm (for memory constraint check)
         board_height: Board height in mm (for memory constraint check)
+        board_origin: Board minimum corner in world coordinates. The selected
+            phase is relative to this origin, matching RoutingGrid construction.
         max_cells: Maximum grid cells to allow (default: 500k for performance)
         candidates: Optional list of candidate resolutions to try.
                    Default: [0.5, 0.25, 0.127, 0.1, 0.065, 0.0635, 0.05, 0.0508]
@@ -1237,13 +1246,15 @@ def auto_select_grid_resolution(
         cached = _off_grid_cache.get(resolution)
         if cached is not None:
             return cached
-        off_no_offset = _count_off_grid_with_offset(pad_list, resolution, 0.0, 0.0)
+        off_no_offset = _count_off_grid_with_offset(
+            pad_list, resolution, 0.0, 0.0, board_origin=board_origin
+        )
         if off_no_offset == 0:
             result = (0, (0.0, 0.0))
         else:
-            offset = _find_optimal_origin_offset(pad_list, resolution)
+            offset = _find_optimal_origin_offset(pad_list, resolution, board_origin=board_origin)
             off_with_offset = _count_off_grid_with_offset(
-                pad_list, resolution, offset[0], offset[1]
+                pad_list, resolution, offset[0], offset[1], board_origin=board_origin
             )
             # Keep zero offset if it's equal or better (simpler)
             if off_no_offset <= off_with_offset:
@@ -1585,6 +1596,8 @@ def compute_multi_resolution_plan(
     min_off_grid_pads_to_escalate: int = 2,
     min_escalation_fine_resolution: float = 0.005,
     engine: str = "grid",
+    *,
+    board_origin: tuple[float, float] = (0.0, 0.0),
 ) -> MultiResolutionGridPlan | None:
     """Compute a multi-resolution grid plan for adaptive routing.
 
@@ -1601,6 +1614,8 @@ def compute_multi_resolution_plan(
         clearance: Required trace clearance in mm
         board_width: Board width in mm
         board_height: Board height in mm
+        board_origin: Coarse-grid board origin. Fine-zone offsets retain their
+            world-coordinate convention.
         max_cells: Maximum total cell budget across all zones
         zone_padding: Padding around component bbox for fine zones (mm)
         min_fine_resolution: Minimum fine grid resolution floor (mm) for
@@ -1657,6 +1672,7 @@ def compute_multi_resolution_plan(
         # Issue #4690: forward the route engine so the memory-cap advisory is
         # not emitted for engines that never route on the grid.
         engine=engine,
+        board_origin=board_origin,
     )
     coarse_resolution = uniform_result.resolution
 
@@ -1697,8 +1713,8 @@ def compute_multi_resolution_plan(
             ref = getattr(pad, "ref", None)
             if not ref:
                 continue
-            x_on = _is_on_grid_with_offset(pad.x, coarse_resolution, offset[0])
-            y_on = _is_on_grid_with_offset(pad.y, coarse_resolution, offset[1])
+            x_on = _is_on_grid_with_offset(pad.x - board_origin[0], coarse_resolution, offset[0])
+            y_on = _is_on_grid_with_offset(pad.y - board_origin[1], coarse_resolution, offset[1])
             if not (x_on and y_on):
                 if ref not in off_grid_refs:
                     off_grid_refs[ref] = []
@@ -1791,12 +1807,13 @@ def compute_multi_resolution_plan(
         else:
             fine_res = max(fine_res, min_fine_resolution)
 
-        # Per-zone origin offset.  If the escalation branch produced a
-        # pad-position-aware (resolution, offset) tuple, use it.  Otherwise
-        # default to (0, 0) which matches the legacy behaviour for plain
-        # fine-pitch components whose pad positions already align to a
-        # zero-origin fine grid (TSSOP, SOIC, etc.).
-        x_off, y_off = pad_position_offsets.get(ref, (0.0, 0.0))
+        # Fine zones use world-coordinate phases, independently of the coarse
+        # grid's board-relative phase. Even a plain fine-pitch component can
+        # have a nonzero world phase after translating the board.
+        if ref in pad_position_offsets:
+            x_off, y_off = pad_position_offsets[ref]
+        else:
+            x_off, y_off = _find_optimal_origin_offset(comp_pads, fine_res)
 
         fine_zones.append(
             FineZone(

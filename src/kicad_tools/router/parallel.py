@@ -370,8 +370,8 @@ class ParallelRouter:
                 width=old_grid.width,
                 height=old_grid.height,
                 rules=old_grid.rules,
-                origin_x=old_grid.origin_x,
-                origin_y=old_grid.origin_y,
+                origin_x=old_grid.origin_x - old_grid.grid_origin_offset[0],
+                origin_y=old_grid.origin_y - old_grid.grid_origin_offset[1],
                 layer_stack=old_grid.layer_stack,
                 thread_safe=True,
             )

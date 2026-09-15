@@ -12466,6 +12466,7 @@ def compute_dry_run_grid_plan(
     from kicad_tools.router.io import (
         auto_select_grid_resolution,
         extract_board_dimensions,
+        extract_board_origin,
         extract_pad_positions,
     )
 
@@ -12486,6 +12487,7 @@ def compute_dry_run_grid_plan(
         board_height=board_height,
         max_cells=max_cells,
         engine=engine,
+        board_origin=extract_board_origin(pcb_path) or (0.0, 0.0),
     )
 
     # Off-grid counts keyed by resolution, from the selector's candidate trials.
@@ -14930,6 +14932,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             auto_select_grid_resolution,
             compute_multi_resolution_plan,
             extract_board_dimensions,
+            extract_board_origin,
             extract_pad_positions,
         )
 
@@ -14937,6 +14940,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             print("\n--- Auto-selecting grid resolution ---")
         pad_positions = extract_pad_positions(pcb_path)
         board_dims = extract_board_dimensions(pcb_path)
+        board_origin = extract_board_origin(pcb_path) or (0.0, 0.0)
         board_width = board_dims[0] if board_dims else None
         board_height = board_dims[1] if board_dims else None
         max_cells = getattr(args, "max_cells", 500_000)
@@ -14953,6 +14957,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
             board_height=board_height,
             max_cells=max_cells,
             engine=_route_engine,
+            board_origin=board_origin,
         )
 
         # When grid_strategy is adaptive (default), attempt multi-resolution
@@ -14971,6 +14976,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     board_height=board_height,
                     max_cells=max_cells,
                     engine=_route_engine,
+                    board_origin=board_origin,
                 )
             except Exception:
                 # Fall back: try with pad positions (won't have ref info)
@@ -14981,6 +14987,7 @@ def _main_impl(argv: list[str] | None = None) -> int:
                     board_height=board_height,
                     max_cells=max_cells,
                     engine=_route_engine,
+                    board_origin=board_origin,
                 )
 
         if multi_res_plan is not None and multi_res_plan.is_multi_resolution:
