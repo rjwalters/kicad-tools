@@ -741,6 +741,39 @@ def _load_net_class_map(path_str: str | None, pcb_path: Path | None = None):
         return None, f"invalid net-class-map structure: {e}"
 
 
+def _copy_keepout_constraints(source: Path, output: Path) -> None:
+    """Carry exact native constraints to a renamed board before refill.
+
+    Validate both destinations before writing either. A board with no source
+    sidecar must not silently inherit unrelated destination constraints.
+    """
+    from kicad_tools.core.atomic_write import atomic_write_text
+
+    if source.parent.resolve() == output.parent.resolve() and source.name == output.name:
+        return
+    if source.resolve() == output.resolve():
+        raise ValueError(f"DRC sidecar conflict: output board {output} aliases source {source}")
+    pending = []
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        authored, destination = source.with_suffix(suffix), output.with_suffix(suffix)
+        content = authored.read_bytes() if authored.exists() else None
+        if destination.exists() or destination.is_symlink():
+            if (
+                content is None
+                or destination.is_symlink()
+                or destination.samefile(authored)
+                or destination.read_bytes() != content
+            ):
+                raise ValueError(
+                    f"DRC sidecar conflict: {destination} does not preserve {authored}"
+                )
+        elif content is not None:
+            pending.append((destination, content.decode("utf-8")))
+    for destination, text in pending:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(destination, text, newline="")
+
+
 def _run_hv_keepout(args) -> int:
     """Generate plane pour-keepouts so inner pours clear HV nets (issue #4372).
 
@@ -884,6 +917,7 @@ def _run_hv_keepout(args) -> int:
     try:
         from kicad_tools.core.sexp_file import save_pcb
 
+        _copy_keepout_constraints(pcb_path, output_path)
         save_pcb(doc, output_path)
     except Exception as e:
         return _fail(args, f"Error: Write failed: {e}")
