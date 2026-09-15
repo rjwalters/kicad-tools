@@ -3149,7 +3149,7 @@ class Router:
         """Check if a cell is part of a zone (copper pour)."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return False
-        return self.grid.cell_at(layer, gy, gx).is_zone
+        return bool(self.grid._is_zone[layer, gy, gx])
 
     def _get_zone_net(self, gx: int, gy: int, layer: int) -> int:
         """Get the net number of a zone cell, or 0 if not a zone."""
