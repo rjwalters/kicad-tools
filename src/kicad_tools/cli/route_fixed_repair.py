@@ -11,7 +11,7 @@ from pathlib import Path
 from kicad_tools.core.atomic_write import atomic_write_text
 from kicad_tools.placement.routing import RoutingPlacementDisposition
 from kicad_tools.router.optimizer.pcb import parse_net_names
-from kicad_tools.schema.pcb import PCB
+from kicad_tools.schema.pcb import PCB, Footprint
 from kicad_tools.sexp import parse_string
 
 
@@ -29,11 +29,9 @@ def _fixed_snapshot(path: Path, disposition: RoutingPlacementDisposition) -> tup
     for node in document.children:
         protected = False
         if node.name in {"footprint", "module"}:
-            for field in node.children:
-                if field.name in {"property", "fp_text"} and len(field.children) >= 2:
-                    if field.children[0].value in {"Reference", "reference"}:
-                        protected = field.children[1].value in fixed_refs
-                        break
+            # Match placement analysis, including absent/empty reference text
+            # and the schema's precedence between legacy text and properties.
+            protected = Footprint.from_sexp(node).reference in fixed_refs
         elif node.name in {"segment", "via", "arc", "zone"}:
             net = node.find("net")
             token = net.children[0].value if net is not None and net.children else 0

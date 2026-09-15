@@ -73,3 +73,50 @@ def test_auto_fix_dispatch_rejects_fixed_copper_change(tmp_path, monkeypatch):
     assert args._placement_repair_error
     assert board.read_text() == original
     assert route_placement.finish(args, 0) == 3
+
+
+@pytest.mark.parametrize(
+    "reference_style", ["absent", "empty_property", "empty_legacy", "shadowed_legacy"]
+)
+@pytest.mark.parametrize("change", ["position", "pad_geometry", "valid_copper"])
+def test_anonymous_fixed_footprint_repair_guard(tmp_path, reference_style, change):
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "partial.kicad_pcb"
+    reference = '(property "Reference" "X1" (at 0 0) (layer "F.SilkS"))'
+    replacement = {
+        "absent": "",
+        "empty_property": reference.replace('"X1"', '""'),
+        "empty_legacy": '(fp_text reference "" (at 0 0) (layer "F.SilkS"))',
+        "shadowed_legacy": (
+            '(fp_text reference "STALE" (at 0 0) (layer "F.SilkS"))'
+            + reference.replace('"X1"', '""')
+        ),
+    }[reference_style]
+    original = board_text().replace(reference, replacement)
+    board.write_text(original)
+    disposition = analyze_routing_placement(board)
+    assert disposition.invalid_references == frozenset({""})
+    assert disposition.direct_invalid_nets == frozenset({"BAD"})
+
+    def repair(candidate):
+        text = candidate.read_text()
+        if change == "position":
+            text = text.replace("(at 125 105)", "(at 124 105)")
+        elif change == "pad_geometry":
+            text = text.replace("(size 0.6 0.6)", "(size 0.8 0.6)", 1)
+        else:
+            text = (
+                text[:-1]
+                + '(segment (start 105 107) (end 110 107) (width 0.2) (layer "F.Cu") (net 2)))'
+            )
+        candidate.write_text(text)
+        return 0
+
+    code, error = repair_fixed_copper(board, disposition, repair)
+    if change == "valid_copper":
+        assert code == 0 and error is None
+        assert any(segment.net_name == "GOOD" for segment in PCB.load(board).segments)
+    else:
+        assert code == 3 and error
+        assert board.read_text() == original
