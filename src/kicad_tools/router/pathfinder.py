@@ -4893,6 +4893,15 @@ class Router:
         Returns:
             True if route passes clearance validation, False otherwise.
         """
+        # Final emitted geometry may differ from the search candidate after
+        # reconstruction or legalization. Component holes are physical on
+        # every net/layer; copper-sharing exceptions cannot waive their floor.
+        for via in route.vias:
+            if not self.grid._component_hole_index.clear(
+                via.x, via.y, via.drill, self.rules.min_hole_to_hole
+            ):
+                return False
+
         for seg in route.segments:
             is_valid, _clearance, _location = self.grid.validate_segment_clearance(
                 seg,

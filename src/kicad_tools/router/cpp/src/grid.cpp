@@ -988,7 +988,8 @@ ValidationResult Grid3D::validate_route(
     float min_drill_clearance,
     int partner_net,
     float intra_pair_clearance,
-    const std::vector<uint32_t>& clamp_ref_hashes) const
+    const std::vector<uint32_t>& clamp_ref_hashes,
+    float min_hole_clearance) const
 {
     ValidationResult result;
     result.valid = true;
@@ -1005,6 +1006,19 @@ ValidationResult Grid3D::validate_route(
         }
     }
     for (const auto& via : vias) {
+        // Physical component drills are independent of copper/net exemptions.
+        // Keep the older raw-call API usable, while wrapper calls supply the
+        // distinct manufacturer component-hole floor explicitly.
+        const float hole_floor = min_hole_clearance >= 0
+            ? min_hole_clearance : min_drill_clearance;
+        if (!component_holes_clear(via.x, via.y, via.drill, hole_floor)) {
+            result.valid = false;
+            result.min_clearance = 0;
+            result.violation_x = via.x;
+            result.violation_y = via.y;
+            return result;
+        }
+
         for (int layer = std::min(via.layer_from, via.layer_to);
              layer <= std::max(via.layer_from, via.layer_to); ++layer) {
             if (!fixed_fill_clear(via.x, via.y, via.x, via.y, layer,

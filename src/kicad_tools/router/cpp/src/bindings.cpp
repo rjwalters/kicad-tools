@@ -304,6 +304,7 @@ NB_MODULE(router_cpp, m) {
              "partner_net"_a = -1,
              "intra_pair_clearance"_a = 0.0f,
              "clamp_ref_hashes"_a = std::vector<uint32_t>{},
+             "min_hole_clearance"_a = -1.0f,
              "Validate a candidate route against stored geometry.  Issue #2559 "
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
              "comparisons against partner_net use intra_pair_clearance instead "

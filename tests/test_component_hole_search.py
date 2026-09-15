@@ -167,3 +167,59 @@ def test_duplicate_reference_pin_never_moves_another_footprints_hole():
         assert not grid._component_hole_index.clear(x, 115, 0.3, 0.5)
         if native:
             assert not native._impl.component_holes_clear(x, 115, 0.3, 0.5)
+
+
+def final_route_valid(grid, rules, via, backend):
+    from kicad_tools.router.primitives import Route
+
+    route = Route(via.net, "VCC", [], [via])
+    if backend == "python":
+        return Router(grid, rules)._validate_route_clearance(route, via.net)
+    if not is_cpp_available():
+        pytest.skip("native router required")
+    router = CppPathfinder(CppGrid.from_routing_grid(grid), rules)
+    terminal = Pad(165, 115, 1, 1, via.net, "VCC")
+    return router._validate_route_clearance(route, terminal, terminal, 2) is None
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+@pytest.mark.parametrize("net", [8, 9])
+@pytest.mark.parametrize("x,legal", [(169.7, False), (169.8, True)])
+def test_final_route_validates_component_holes_on_every_net(backend, net, x, legal):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Via
+
+    grid, rules, pad = context()
+    # Physical-only census isolates the hole test from copper-net exemptions.
+    grid.add_component_hole(pad)
+    via = Via(x, 121.6, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), net, "VCC")
+    assert final_route_valid(grid, rules, via, backend) == legal
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+@pytest.mark.parametrize("angle", [0, 45, 90])
+def test_final_route_uses_emitted_drill_and_authored_slot(backend, angle):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Via
+
+    grid, rules, pad = context()
+    pad.x, pad.y = 166, 116
+    pad.drill_size, pad.drill_rotation = (4, 1), angle
+    grid.add_component_hole(pad)
+    a = math.radians(angle)
+    x, y = pad.x + 2.75 * math.cos(a), pad.y - 2.75 * math.sin(a)
+    small = Via(x, y, 0.3, 0.8, (Layer.F_CU, Layer.B_CU), 8, "VCC")
+    large = Via(x, y, 0.6, 0.8, (Layer.F_CU, Layer.B_CU), 8, "VCC")
+    assert final_route_valid(grid, rules, small, backend)
+    assert not final_route_valid(grid, rules, large, backend)
+
+
+@pytest.mark.parametrize("backend", ["python", "cpp"])
+def test_final_route_rejects_unknown_physical_hole_census(backend):
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Via
+
+    grid, rules, _ = context()
+    grid.install_component_hole_census(None)
+    via = Via(169, 119, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 8, "VCC")
+    assert not final_route_valid(grid, rules, via, backend)

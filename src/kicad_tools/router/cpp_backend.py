@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 29
+_REQUIRED_CPP_BUILD_VERSION = 30
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -3010,6 +3010,7 @@ class CppPathfinder:
             partner_net_id,
             intra_pair_clearance,
             clamp_ref_hashes,
+            self._rules.min_hole_to_hole,
         )
 
         if not vresult.valid:

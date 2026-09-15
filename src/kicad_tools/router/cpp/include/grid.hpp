@@ -365,6 +365,8 @@ public:
     // keyed on the layer the compared copper shares (via-vs-via, where no
     // single layer applies, stays layer-agnostic; the segment-vs-pad branch
     // keys on the pad's own layer, so a through-hole pad stays agnostic too).
+    // min_hole_clearance is the component-hole floor, independent of the
+    // same-net via merge floor; negative retains the legacy caller fallback.
     ValidationResult validate_route(
         const std::vector<Segment>& segments,
         const std::vector<Via>& vias,
@@ -375,7 +377,8 @@ public:
         float min_drill_clearance,
         int partner_net = -1,
         float intra_pair_clearance = 0.0f,
-        const std::vector<uint32_t>& clamp_ref_hashes = {}) const;
+        const std::vector<uint32_t>& clamp_ref_hashes = {},
+        float min_hole_clearance = -1.0f) const;
 
     // -----------------------------------------------------------------------
     // Pairwise (HV-isolation) domain clearance -- Issue #4510, Phase 2a of

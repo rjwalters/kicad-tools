@@ -246,7 +246,8 @@ namespace router {
 // v26 state (main's source-pad seeding build, or the branch's own).
 // v28: trace-halo refinement preserves the separate via clearance floor.
 // v29: indexed physical component-hole clearance during via search.
-constexpr int ROUTER_CPP_BUILD_VERSION = 29;
+// v30: final route validation accepts the separate physical component-hole floor.
+constexpr int ROUTER_CPP_BUILD_VERSION = 30;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
