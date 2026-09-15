@@ -3234,7 +3234,21 @@ def _run_auto_fix(
     if quiet:
         fix_argv.append("--quiet")
 
-    result = fix_drc_main(fix_argv)
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None and disposition.preserve_copper_nets:
+        from .route_fixed_repair import repair_fixed_copper
+
+        result, error = repair_fixed_copper(
+            output_path,
+            disposition,
+            lambda candidate: fix_drc_main([str(candidate), *fix_argv[1:]]),
+        )
+        args._placement_repair_error = error
+        if error:
+            print(f"  Auto-fix not published; saved partial retained: {error}", file=sys.stderr)
+            return result
+    else:
+        result = fix_drc_main(fix_argv)
 
     if not quiet:
         # Exit-code contract from fix_drc_cmd.main (see fix_drc_cmd.py:375-390):
@@ -3914,6 +3928,8 @@ def _fill_zones_after_route(
         quiet: Suppress informational output.
     """
     record_stage("native-zone-fill")
+    if args is not None:
+        args._placement_repair_error = None
     disposition = getattr(router, "placement_disposition", None)
     if disposition is not None and disposition.preserve_copper_nets:
         from kicad_tools.zones.placement_fill import fill_around_fixed_copper
@@ -7891,6 +7907,8 @@ def route_with_layer_escalation(
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
@@ -8741,6 +8759,8 @@ def route_with_rule_relaxation(
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
@@ -11097,6 +11117,8 @@ def route_with_combined_escalation(
             _print_pairwise_failure_banner(_pairwise, args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif final_result.success:
@@ -17537,6 +17559,8 @@ def _run_main_impl(args, parser, argv) -> int:
             _print_pairwise_failure_banner(pairwise_violations, args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
+        elif getattr(args, "_placement_repair_error", None):
+            print("PARTIAL: staged auto-fix was not published")
         elif _placement_blocked(args):
             print("PARTIAL: requested placement-invalid nets were not attempted")
         elif all_nets_routed and drc_passed:

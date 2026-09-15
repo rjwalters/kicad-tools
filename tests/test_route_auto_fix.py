@@ -640,6 +640,7 @@ def _make_routing_args(**overrides):
 def _make_success_router(nets_routed: int = 3, nets_to_route: int = 3):
     """Mock router that reports a 100% successful routing run."""
     router = MagicMock()
+    router.placement_disposition = None
     router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
     router.grid.width = 50.0
     router.grid.height = 40.0

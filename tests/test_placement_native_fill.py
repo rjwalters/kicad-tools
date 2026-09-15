@@ -126,7 +126,8 @@ def test_unavailable_native_runtime_preserves_partial_board(tmp_path, monkeypatc
 
 
 @pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
-def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path):
+@pytest.mark.parametrize("auto_fix", [False, True])
+def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path, auto_fix, capsys):
     from kicad_tools.cli.route_cmd import main
 
     fixed = """(zone (net 1) (net_name "BAD") (layer "F.Cu")
@@ -143,8 +144,11 @@ def test_real_cli_routes_and_fills_without_changing_excluded_zone(tmp_path):
     source.write_text(original)
     output = tmp_path / "routed.kicad_pcb"
     report = tmp_path / "report.json"
-    result = main([str(source), "-o", str(output), "--complete-report", str(report)])
+    options = ["--auto-fix"] if auto_fix else []
+    result = main([str(source), "-o", str(output), "--complete-report", str(report), *options])
     assert result in {2, 3}
+    if auto_fix:
+        assert "Auto-Fix DRC Violations" in capsys.readouterr().out
     assert source.read_text() == original
     assert output.read_text().count(fixed) == 1
     pcb = PCB.load(output)

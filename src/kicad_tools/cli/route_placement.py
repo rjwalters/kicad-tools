@@ -237,6 +237,11 @@ def finish(args, exit_code: int) -> int:
         report["zone_fill_status"] = "failed"
         report["zone_fill_error"] = fill_error
         report["clean_success"] = False
+    repair_error = getattr(args, "_placement_repair_error", None)
+    if repair_error:
+        report["auto_fix_status"] = "rejected"
+        report["auto_fix_error"] = repair_error
+        report["clean_success"] = False
     report_path = getattr(args, "complete_report", None)
     if report_path:
         from kicad_tools.core.atomic_write import atomic_write_text
@@ -249,7 +254,7 @@ def finish(args, exit_code: int) -> int:
             payload = json.loads(path.read_text())
         payload["placement_disposition"] = report
         atomic_write_text(Path(report_path), json.dumps(payload, indent=2) + "\n")
-    if fill_error and exit_code == 0:
+    if (fill_error or repair_error) and exit_code == 0:
         return 3
     if disposition.requested_invalid_nets and exit_code == 0:
         return 2
