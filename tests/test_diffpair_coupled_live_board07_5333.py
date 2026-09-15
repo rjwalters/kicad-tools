@@ -192,6 +192,9 @@ def _pair_report_line(log: str, pair: str) -> str:
 def _construction_line_before(log: str, report_line: str) -> str | None:
     """The ``[coupled-construction]`` diagnostic immediately preceding a pair's report line."""
     prefix = log[: log.index(report_line)]
+    # Construction logs are emitted before their own pair report. Stop at
+    # the prior report so a missing target diagnostic cannot borrow its work.
+    prefix = prefix.rsplit("[coupled-pair-report]", 1)[-1]
     matches = re.findall(r"\[coupled-construction\] .*", prefix)
     return matches[-1] if matches else None
 
