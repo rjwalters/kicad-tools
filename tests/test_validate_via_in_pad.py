@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
 
 # ---------------------------------------------------------------------------
@@ -454,3 +456,94 @@ def test_drill_overlap_uses_absolute_pad_angle():
     )
     result = ViaInPadRule().check(pcb, _StubDesignRules())
     assert [v.items[0] for v in result.violations] == ["Via-overlap"]
+
+
+class TestPhysicalHoleCensus:
+    """Final manufacturing eligibility must agree with the router's census."""
+
+    @staticmethod
+    def board(hole_type="np_thru_hole", drill=0.3, position=(10.65, 10.0)):
+        from kicad_tools.schema.pcb import Footprint, Pad
+
+        land = Pad("1", "smd", "rect", (0, 0), (1, 0.5), ["F.Cu"], net_number=1)
+        hole = Pad("", hole_type, "circle", (0, 0), (0.3, 0.3), ["*.Cu"], drill=drill)
+        return _StubPCB(
+            footprints=[
+                Footprint("test", "F.Cu", (10, 10), 0, "U1", "test", pads=[land]),
+                Footprint("hole", "F.Cu", position, 0, "", "hole", pads=[hole]),
+            ],
+            vias=[_StubVia(drill=0.2, size=0.45)],
+            copper_layers=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+        )
+
+    @staticmethod
+    def check(pcb):
+        return ViaInPadRule().check(
+            pcb,
+            _StubDesignRules(
+                via_in_pad_supported=True, via_in_pad_process_id="jlcpcb-tier1-pofv-4l"
+            ),
+        )
+
+    def test_anonymous_npth_with_insufficient_process_gap_is_rejected(self):
+        result = self.check(self.board())
+        assert [v.rule_id for v in result.violations] == ["via_in_pad_process_ineligible"]
+        assert "0.400mm" in result.violations[0].message
+
+    def test_unknown_drilled_geometry_fails_closed(self):
+        for kind in ("thru_hole", "np_thru_hole"):
+            for drill in (None, 0, -0.3, float("nan"), float("inf"), "bad"):
+                result = self.check(self.board(hole_type=kind, drill=drill))
+                assert [v.rule_id for v in result.violations] == [
+                    "via_in_pad_process_ineligible"
+                ], (kind, drill)
+                assert "unknown" in result.violations[0].message
+
+    def test_unknown_hole_position_fails_closed(self):
+        for coordinate in (float("nan"), float("inf")):
+            result = self.check(self.board(position=(coordinate, 10)))
+            assert [v.rule_id for v in result.violations] == ["via_in_pad_process_ineligible"]
+            assert "unknown" in result.violations[0].message
+
+    def test_distant_and_empty_censuses_remain_eligible(self):
+        for kind in ("thru_hole", "np_thru_hole"):
+            assert not self.check(self.board(hole_type=kind, position=(12, 10))).violations
+        pcb = self.board()
+        pcb.footprints.pop()
+        assert not self.check(pcb).violations
+
+
+@pytest.mark.parametrize("kind", ["thru_hole", "np_thru_hole"])
+@pytest.mark.parametrize(
+    "drill,offset,eligible",
+    [
+        (0.3, 0.65, False),
+        (0.3, 2.0, True),
+        (0.0, 2.0, False),
+        (float("nan"), 2.0, False),
+        (float("inf"), 2.0, False),
+        (-0.3, 2.0, False),
+        ("invalid", 2.0, False),
+    ],
+)
+def test_final_rule_uses_complete_physical_hole_census(kind, drill, offset, eligible):
+    """Imported anonymous holes must obey the same contract as routed holes."""
+    from types import SimpleNamespace
+
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import Footprint, Pad
+
+    land = Pad("1", "smd", "rect", (0, 0), (1, 0.5), ["F.Cu"], net_number=1)
+    hole = Pad("", kind, "circle", (0, 0), (0.3, 0.3), ["*.Cu"], drill=drill)
+    pcb = SimpleNamespace(
+        footprints=[
+            Footprint("test", "F.Cu", (10, 10), 0, "U1", "test", pads=[land]),
+            Footprint("hole", "F.Cu", (10 + offset, 10), 0, "", "hole", pads=[hole]),
+        ],
+        vias=[_StubVia(position=(10, 10), size=0.45, drill=0.2, net_number=1)],
+        copper_layers=["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"],
+    )
+    findings = (
+        ViaInPadRule().check(pcb, get_profile("jlcpcb-tier1").get_design_rules(layers=4)).violations
+    )
+    assert [v.rule_id for v in findings] == ([] if eligible else ["via_in_pad_process_ineligible"])

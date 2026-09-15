@@ -59,12 +59,16 @@ check lives entirely in pure-Python ``DRCChecker.check_via_in_pad``.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 from kicad_tools.manufacturers.fabrication_process import (
     FabricationProcess,
     get_fabrication_process,
+)
+from kicad_tools.router.via_in_pad_eligibility import (
+    ComponentHoleContext,
+    component_holes_from_document,
+    resolve_component_hole_context,
 )
 
 from ..violations import DRCResults, DRCViolation
@@ -155,16 +159,11 @@ class ViaInPadRule(DRCRule):
         # and is intentionally excluded -- vias near unconnected pads
         # are caught by the clearance rule.
         pads_by_net: dict[int, list[tuple[Footprint, Pad, tuple[float, float, float, float]]]] = {}
-        # Through-hole pads (component drilled holes), used for the
-        # process's min_component_hole_distance_mm check below.
-        pth_holes: list[tuple[float, float, float]] = []
+        # Share the router's complete physical census: anonymous NPTH holes
+        # count too, and malformed drilled geometry must fail closed.
+        component_holes = component_holes_from_document(pcb)
         for fp in pcb.footprints:
             for pad in fp.pads:
-                if getattr(pad, "type", "smd") == "thru_hole" and getattr(pad, "drill", 0.0) > 0:
-                    bbox = _pad_absolute_bbox(pad, fp)
-                    pth_holes.append(
-                        ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0, pad.drill / 2.0)
-                    )
                 if not _is_smd_pad(pad):
                     continue
                 if pad.net_number == 0:
@@ -191,7 +190,12 @@ class ViaInPadRule(DRCRule):
                     results.add(self._make_process_missing_violation(via, fp, pad, process_id))
                     continue
                 reasons = self._check_process_eligibility(
-                    via, process, layer_count=layer_count, pth_holes=pth_holes
+                    via,
+                    process,
+                    layer_count=layer_count,
+                    hole_context=resolve_component_hole_context(
+                        *via.position, via.drill, all_pads=component_holes
+                    ),
                 )
                 if reasons:
                     results.add(
@@ -206,7 +210,7 @@ class ViaInPadRule(DRCRule):
         process: FabricationProcess,
         *,
         layer_count: int | None,
-        pth_holes: list[tuple[float, float, float]],
+        hole_context: ComponentHoleContext,
     ) -> list[str]:
         """Return a list of human-readable reasons ``via`` fails ``process``.
 
@@ -222,19 +226,14 @@ class ViaInPadRule(DRCRule):
         size = getattr(via, "size", None)
         annular_ring_mm = (size - drill) / 2.0 if size is not None else None
 
-        nearest_other_hole_distance_mm: float | None = None
-        if pth_holes:
-            vx, vy = via.position
-            via_r = drill / 2.0
-            nearest_other_hole_distance_mm = min(
-                math.hypot(px - vx, py - vy) - via_r - hole_r for px, py, hole_r in pth_holes
-            )
+        if not hole_context.known:
+            return ["component-hole census has unknown or invalid drilled geometry"]
 
         return process.eligibility_reasons(
             layer_count=layer_count,
             drill_mm=drill,
             annular_ring_mm=annular_ring_mm,
-            nearest_other_hole_distance_mm=nearest_other_hole_distance_mm,
+            nearest_other_hole_distance_mm=hole_context.nearest_distance_mm,
             tolerance_mm=DRC_TOLERANCE,
         )
 
