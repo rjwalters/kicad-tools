@@ -1,0 +1,6003 @@
+{
+  "board_sha256": "2294577a513f0711dbd13ad10071fa51aafbcd4c5cc6dc165aef2f2e977b8e97",
+  "board_origin": [
+    68.5,
+    55.0
+  ],
+  "primitive_unions_equal_census_geometry": true,
+  "attach_zones": [
+    {
+      "index": 0,
+      "bbox_relative": [
+        119.825,
+        48.25,
+        124.175,
+        51.75
+      ],
+      "nets": [
+        "BOOST_B_NEG",
+        "GATE_DRV_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_DRV_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q12"
+      ]
+    },
+    {
+      "index": 1,
+      "bbox_relative": [
+        130.5475,
+        86.5,
+        138.5325,
+        89.5
+      ],
+      "nets": [
+        "GATE_RTN_NEG",
+        "RTN_COM_NEG",
+        "SCAP_NEG_RTN"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_NEG_RTN",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q4A"
+      ]
+    },
+    {
+      "index": 2,
+      "bbox_relative": [
+        116.74,
+        31.19,
+        119.26,
+        32.81
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C1"
+      ]
+    },
+    {
+      "index": 3,
+      "bbox_relative": [
+        114.825,
+        48.25,
+        119.175,
+        51.75
+      ],
+      "nets": [
+        "BOOST_B_NEG",
+        "GATE_DRV_NEG",
+        "V_RSV_NEG"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_DRV_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q10"
+      ]
+    },
+    {
+      "index": 4,
+      "bbox_relative": [
+        6.2,
+        49.120000000000005,
+        9.8,
+        57.8
+      ],
+      "nets": [
+        "AC_NEUTRAL",
+        "FUSED_LINE"
+      ],
+      "net_layers": [
+        [
+          "AC_NEUTRAL",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "J2"
+      ]
+    },
+    {
+      "index": 5,
+      "bbox_relative": [
+        132.07500000000002,
+        50.8,
+        135.92499999999998,
+        53.2
+      ],
+      "nets": [
+        "STATUS_LED",
+        "STATUS_LED_A"
+      ],
+      "net_layers": [
+        [
+          "STATUS_LED",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "STATUS_LED_A",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R12"
+      ]
+    },
+    {
+      "index": 6,
+      "bbox_relative": [
+        62.074999999999996,
+        6.8,
+        65.925,
+        9.2
+      ],
+      "nets": [
+        "AC_LINE",
+        "ZC_LINE_MID"
+      ],
+      "net_layers": [
+        [
+          "AC_LINE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ZC_LINE_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R3"
+      ]
+    },
+    {
+      "index": 7,
+      "bbox_relative": [
+        23.7,
+        72.25,
+        28.3,
+        75.75
+      ],
+      "nets": [
+        "+3.3V",
+        "AC_NEUTRAL",
+        "GND",
+        "I_SENSE_RAW",
+        "PGND",
+        "REF_1V65"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "AC_NEUTRAL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "I_SENSE_RAW",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PGND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "REF_1V65",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U3"
+      ]
+    },
+    {
+      "index": 8,
+      "bbox_relative": [
+        132.25,
+        78.6,
+        139.75,
+        81.4
+      ],
+      "nets": [
+        "GATE_RTN_NEG",
+        "RTN_COM_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D_TVS4"
+      ]
+    },
+    {
+      "index": 9,
+      "bbox_relative": [
+        138.075,
+        50.8,
+        141.925,
+        53.2
+      ],
+      "nets": [
+        "GND",
+        "STATUS_LED_A"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "STATUS_LED_A",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D2"
+      ]
+    },
+    {
+      "index": 10,
+      "bbox_relative": [
+        108.075,
+        22.8,
+        111.925,
+        25.2
+      ],
+      "nets": [
+        "3.3V_RF",
+        "ESP_IO8"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_IO8",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R71"
+      ]
+    },
+    {
+      "index": 11,
+      "bbox_relative": [
+        44.074999999999996,
+        68.8,
+        47.925000000000004,
+        71.2
+      ],
+      "nets": [
+        "+3.3V",
+        "V_TH_HI"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_TH_HI",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R54"
+      ]
+    },
+    {
+      "index": 12,
+      "bbox_relative": [
+        84.075,
+        12.8,
+        87.925,
+        15.2
+      ],
+      "nets": [
+        "GND",
+        "V_AC_SENSE_RAW"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_AC_SENSE_RAW",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R2"
+      ]
+    },
+    {
+      "index": 13,
+      "bbox_relative": [
+        90.5475,
+        86.5,
+        98.5325,
+        89.5
+      ],
+      "nets": [
+        "GATE_RTN_POS",
+        "PGND",
+        "RTN_COM_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "PGND",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_POS",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q3B"
+      ]
+    },
+    {
+      "index": 14,
+      "bbox_relative": [
+        74.25,
+        54.6,
+        81.75,
+        57.4
+      ],
+      "nets": [
+        "TRK_POS",
+        "V_RSV_POS"
+      ],
+      "net_layers": [
+        [
+          "TRK_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D5"
+      ]
+    },
+    {
+      "index": 15,
+      "bbox_relative": [
+        92.075,
+        64.8,
+        95.925,
+        67.2
+      ],
+      "nets": [
+        "+12V",
+        "V_GATE_SENSE"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_GATE_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R62"
+      ]
+    },
+    {
+      "index": 16,
+      "bbox_relative": [
+        108.075,
+        78.8,
+        111.925,
+        81.2
+      ],
+      "nets": [
+        "GATE_BUS_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R_GB3"
+      ]
+    },
+    {
+      "index": 17,
+      "bbox_relative": [
+        128.07500000000002,
+        78.8,
+        131.92499999999998,
+        81.2
+      ],
+      "nets": [
+        "GATE_RTN_NEG",
+        "RTN_COM_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R_GB4"
+      ]
+    },
+    {
+      "index": 18,
+      "bbox_relative": [
+        129.825,
+        64.25,
+        134.175,
+        67.75
+      ],
+      "nets": [
+        "PGND",
+        "PRECHARGE_NEG",
+        "PRE_D_NEG"
+      ],
+      "net_layers": [
+        [
+          "PGND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRECHARGE_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRE_D_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q6"
+      ]
+    },
+    {
+      "index": 19,
+      "bbox_relative": [
+        13.924999999999999,
+        71.825,
+        22.075,
+        76.175
+      ],
+      "nets": [
+        "AC_NEUTRAL",
+        "PGND"
+      ],
+      "net_layers": [
+        [
+          "AC_NEUTRAL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PGND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R9"
+      ]
+    },
+    {
+      "index": 20,
+      "bbox_relative": [
+        78.5475,
+        86.5,
+        86.5325,
+        89.5
+      ],
+      "nets": [
+        "GATE_RTN_POS",
+        "RTN_COM_POS",
+        "SCAP_POS_RTN"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS_RTN",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q3A"
+      ]
+    },
+    {
+      "index": 21,
+      "bbox_relative": [
+        112.25,
+        78.6,
+        119.75,
+        81.4
+      ],
+      "nets": [
+        "GATE_BUS_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D_TVS3"
+      ]
+    },
+    {
+      "index": 22,
+      "bbox_relative": [
+        114.05,
+        54.775,
+        117.95,
+        57.225
+      ],
+      "nets": [
+        "SRC_NEG",
+        "V_RSV_NEG"
+      ],
+      "net_layers": [
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C21"
+      ]
+    },
+    {
+      "index": 23,
+      "bbox_relative": [
+        142.5475,
+        86.5,
+        150.5325,
+        89.5
+      ],
+      "nets": [
+        "GATE_RTN_NEG",
+        "PGND",
+        "RTN_COM_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "PGND",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_NEG",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q4B"
+      ]
+    },
+    {
+      "index": 24,
+      "bbox_relative": [
+        94.075,
+        12.8,
+        97.925,
+        15.2
+      ],
+      "nets": [
+        "ESP_TX",
+        "UART_G031_RX"
+      ],
+      "net_layers": [
+        [
+          "ESP_TX",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "UART_G031_RX",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R67"
+      ]
+    },
+    {
+      "index": 25,
+      "bbox_relative": [
+        105.5,
+        48.565000000000005,
+        114.5,
+        51.434999999999995
+      ],
+      "nets": [
+        "BOOST_B_NEG",
+        "LED_A_NEG",
+        "LED_K_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "LED_A_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "LED_K_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U11"
+      ]
+    },
+    {
+      "index": 26,
+      "bbox_relative": [
+        64.05,
+        54.775,
+        67.95,
+        57.225
+      ],
+      "nets": [
+        "SRC_POS",
+        "V_RSV_POS"
+      ],
+      "net_layers": [
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C20"
+      ]
+    },
+    {
+      "index": 27,
+      "bbox_relative": [
+        6.2,
+        3.12,
+        9.8,
+        11.8
+      ],
+      "nets": [
+        "AC_LINE",
+        "AC_NEUTRAL"
+      ],
+      "net_layers": [
+        [
+          "AC_LINE",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "AC_NEUTRAL",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "J1"
+      ]
+    },
+    {
+      "index": 28,
+      "bbox_relative": [
+        58.074999999999996,
+        78.8,
+        61.925000000000004,
+        81.2
+      ],
+      "nets": [
+        "GATE_BUS_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R_GB1"
+      ]
+    },
+    {
+      "index": 29,
+      "bbox_relative": [
+        36.05,
+        75.295,
+        43.95,
+        80.705
+      ],
+      "nets": [
+        "+3.3V",
+        "GND",
+        "I_SENSE_OUT",
+        "OC_TRIP_N",
+        "V_TH_HI",
+        "V_TH_LO"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "I_SENSE_OUT",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "OC_TRIP_N",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_TH_HI",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_TH_LO",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U7"
+      ]
+    },
+    {
+      "index": 30,
+      "bbox_relative": [
+        25.05,
+        60.775,
+        28.95,
+        63.225
+      ],
+      "nets": [
+        "+12V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C41"
+      ]
+    },
+    {
+      "index": 31,
+      "bbox_relative": [
+        31.35,
+        58.45,
+        40.65,
+        65.55
+      ],
+      "nets": [
+        "+12V",
+        "+3.3V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U12"
+      ]
+    },
+    {
+      "index": 32,
+      "bbox_relative": [
+        62.3,
+        72.3,
+        91.10000000000001,
+        75.7
+      ],
+      "nets": [
+        "PRE_D_POS",
+        "SCAP_POS_RTN"
+      ],
+      "net_layers": [
+        [
+          "PRE_D_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS_RTN",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R20"
+      ]
+    },
+    {
+      "index": 33,
+      "bbox_relative": [
+        106.65,
+        2.65,
+        109.35,
+        18.05
+      ],
+      "nets": [
+        "3.3V_RF",
+        "ESP_EN",
+        "ESP_IO9",
+        "ESP_U0RXD",
+        "ESP_U0TXD",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ESP_EN",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ESP_IO9",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ESP_U0RXD",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ESP_U0TXD",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "J6"
+      ]
+    },
+    {
+      "index": 34,
+      "bbox_relative": [
+        44.074999999999996,
+        74.8,
+        47.925000000000004,
+        77.2
+      ],
+      "nets": [
+        "V_TH_HI",
+        "V_TH_LO"
+      ],
+      "net_layers": [
+        [
+          "V_TH_HI",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_TH_LO",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R55"
+      ]
+    },
+    {
+      "index": 35,
+      "bbox_relative": [
+        120.575,
+        28.575,
+        131.425,
+        39.425
+      ],
+      "nets": [
+        "+3.3V",
+        "ADC_SPARE",
+        "GATE_NEG_A",
+        "GATE_NEG_B",
+        "GATE_POS_A",
+        "GATE_POS_B",
+        "GND",
+        "I_SENSE_OUT",
+        "NRST",
+        "NTC_SENSE",
+        "OC_TRIP_N",
+        "PRECHARGE_NEG",
+        "PRECHARGE_POS",
+        "RF_EN",
+        "STATUS_LED",
+        "SWCLK",
+        "SWDIO",
+        "UART_G031_RX",
+        "UART_G031_TX",
+        "V_12V_SENSE",
+        "V_AC_SENSE",
+        "V_BANK_NEG_SENSE",
+        "V_BANK_POS_SENSE",
+        "V_BUS_DVDT",
+        "V_GATE_SENSE",
+        "ZC_DETECT",
+        "unconnected-(U1-NC{slash}PA10-Pad21)",
+        "unconnected-(U1-NC{slash}PA9-Pad19)",
+        "unconnected-(U1-PB9-Pad1)",
+        "unconnected-(U1-PC14-Pad2)",
+        "unconnected-(U1-PC15-Pad3)",
+        "unconnected-(U1-PC6-Pad20)"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ADC_SPARE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_NEG_A",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_NEG_B",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_POS_A",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_POS_B",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "I_SENSE_OUT",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NRST",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NTC_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "OC_TRIP_N",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRECHARGE_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRECHARGE_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RF_EN",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "STATUS_LED",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SWCLK",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SWDIO",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "UART_G031_RX",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "UART_G031_TX",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_12V_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_AC_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_NEG_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_POS_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BUS_DVDT",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_GATE_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ZC_DETECT",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U1-NC{slash}PA10-Pad21)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U1-NC{slash}PA9-Pad19)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U1-PB9-Pad1)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U1-PC14-Pad2)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U1-PC15-Pad3)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U1-PC6-Pad20)",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U1"
+      ]
+    },
+    {
+      "index": 36,
+      "bbox_relative": [
+        114.075,
+        22.8,
+        117.925,
+        25.2
+      ],
+      "nets": [
+        "3.3V_RF",
+        "ESP_IO9"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_IO9",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R72"
+      ]
+    },
+    {
+      "index": 37,
+      "bbox_relative": [
+        97.075,
+        90.8,
+        100.925,
+        93.2
+      ],
+      "nets": [
+        "GND",
+        "NTC_SENSE"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NTC_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "TH1"
+      ]
+    },
+    {
+      "index": 38,
+      "bbox_relative": [
+        124.25,
+        54.6,
+        131.75,
+        57.4
+      ],
+      "nets": [
+        "TRK_NEG",
+        "V_RSV_NEG"
+      ],
+      "net_layers": [
+        [
+          "TRK_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D6"
+      ]
+    },
+    {
+      "index": 39,
+      "bbox_relative": [
+        94.075,
+        6.8,
+        97.925,
+        9.2
+      ],
+      "nets": [
+        "ESP_RX",
+        "UART_G031_TX"
+      ],
+      "net_layers": [
+        [
+          "ESP_RX",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "UART_G031_TX",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R66"
+      ]
+    },
+    {
+      "index": 40,
+      "bbox_relative": [
+        62.074999999999996,
+        2.8,
+        65.925,
+        5.2
+      ],
+      "nets": [
+        "ZC_LINE_LIM",
+        "ZC_LINE_MID"
+      ],
+      "net_layers": [
+        [
+          "ZC_LINE_LIM",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ZC_LINE_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R76"
+      ]
+    },
+    {
+      "index": 41,
+      "bbox_relative": [
+        116.05,
+        42.775,
+        119.95,
+        45.225
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C4"
+      ]
+    },
+    {
+      "index": 42,
+      "bbox_relative": [
+        64.825,
+        48.25,
+        69.175,
+        51.75
+      ],
+      "nets": [
+        "BOOST_B_POS",
+        "GATE_DRV_POS",
+        "V_RSV_POS"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_DRV_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q9"
+      ]
+    },
+    {
+      "index": 43,
+      "bbox_relative": [
+        89.7,
+        9.25,
+        94.3,
+        12.75
+      ],
+      "nets": [
+        "+3.3V",
+        "GND",
+        "V_AC_SENSE",
+        "V_AC_SENSE_RAW"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_AC_SENSE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_AC_SENSE_RAW",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U8"
+      ]
+    },
+    {
+      "index": 44,
+      "bbox_relative": [
+        142.65,
+        28.65,
+        158.04999999999998,
+        31.35
+      ],
+      "nets": [
+        "+3.3V",
+        "GND",
+        "NRST",
+        "SWCLK",
+        "SWDIO"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "NRST",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SWCLK",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SWDIO",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "J5"
+      ]
+    },
+    {
+      "index": 45,
+      "bbox_relative": [
+        70.7,
+        10.7,
+        80.92,
+        18.38
+      ],
+      "nets": [
+        "GND",
+        "ZC_DETECT",
+        "ZC_LINE_LIM",
+        "ZC_NEUT_LIM",
+        "unconnected-(U2-NC-Pad3)",
+        "unconnected-(U2-Pad6)"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ZC_DETECT",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ZC_LINE_LIM",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "ZC_NEUT_LIM",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U2-NC-Pad3)",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U2-Pad6)",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U2"
+      ]
+    },
+    {
+      "index": 46,
+      "bbox_relative": [
+        112.075,
+        18.8,
+        115.925,
+        21.2
+      ],
+      "nets": [
+        "GND",
+        "RF_EN"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RF_EN",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R74"
+      ]
+    },
+    {
+      "index": 47,
+      "bbox_relative": [
+        32.6,
+        30.6,
+        42.9,
+        34.8
+      ],
+      "nets": [
+        "AC_NEUTRAL",
+        "FUSED_LINE"
+      ],
+      "net_layers": [
+        [
+          "AC_NEUTRAL",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "RV1"
+      ]
+    },
+    {
+      "index": 48,
+      "bbox_relative": [
+        123.5,
+        5.65,
+        128.5,
+        10.35
+      ],
+      "nets": [
+        "3.3V_RF",
+        "SW_RF"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SW_RF",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "L1"
+      ]
+    },
+    {
+      "index": 49,
+      "bbox_relative": [
+        108.075,
+        34.8,
+        111.925,
+        37.2
+      ],
+      "nets": [
+        "+3.3V",
+        "V_BANK_NEG_SENSE"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_NEG_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R28"
+      ]
+    },
+    {
+      "index": 50,
+      "bbox_relative": [
+        117.7,
+        6.25,
+        122.3,
+        9.75
+      ],
+      "nets": [
+        "+12V",
+        "3.3V_RF",
+        "BST_RF",
+        "GND",
+        "RF_EN",
+        "SW_RF"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "BST_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RF_EN",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SW_RF",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U13"
+      ]
+    },
+    {
+      "index": 51,
+      "bbox_relative": [
+        93.825,
+        18.25,
+        98.175,
+        21.75
+      ],
+      "nets": [
+        "G031_RST_CTL",
+        "GND",
+        "NRST"
+      ],
+      "net_layers": [
+        [
+          "G031_RST_CTL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NRST",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q13"
+      ]
+    },
+    {
+      "index": 52,
+      "bbox_relative": [
+        98.74,
+        57.19,
+        101.26,
+        58.81
+      ],
+      "nets": [
+        "+12V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C22"
+      ]
+    },
+    {
+      "index": 53,
+      "bbox_relative": [
+        86.075,
+        64.8,
+        89.925,
+        67.2
+      ],
+      "nets": [
+        "GND",
+        "PRECHARGE_POS"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRECHARGE_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R52"
+      ]
+    },
+    {
+      "index": 54,
+      "bbox_relative": [
+        146.07500000000002,
+        36.8,
+        149.92499999999998,
+        39.2
+      ],
+      "nets": [
+        "GND",
+        "SWCLK"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SWCLK",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R11"
+      ]
+    },
+    {
+      "index": 55,
+      "bbox_relative": [
+        92.075,
+        72.8,
+        95.925,
+        75.2
+      ],
+      "nets": [
+        "GND",
+        "V_GATE_SENSE"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_GATE_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R63"
+      ]
+    },
+    {
+      "index": 56,
+      "bbox_relative": [
+        94.075,
+        24.8,
+        97.925,
+        27.2
+      ],
+      "nets": [
+        "G031_RST_CTL",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "G031_RST_CTL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R68"
+      ]
+    },
+    {
+      "index": 57,
+      "bbox_relative": [
+        84.74,
+        19.19,
+        87.26,
+        20.81
+      ],
+      "nets": [
+        "V_AC_SENSE_RAW",
+        "V_BUS_DVDT"
+      ],
+      "net_layers": [
+        [
+          "V_AC_SENSE_RAW",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BUS_DVDT",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C31"
+      ]
+    },
+    {
+      "index": 58,
+      "bbox_relative": [
+        90.075,
+        18.8,
+        93.925,
+        21.2
+      ],
+      "nets": [
+        "GND",
+        "V_BUS_DVDT"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BUS_DVDT",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R29"
+      ]
+    },
+    {
+      "index": 59,
+      "bbox_relative": [
+        8.275,
+        67.025,
+        11.725,
+        68.975
+      ],
+      "nets": [
+        "AC_NEUTRAL",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "AC_NEUTRAL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R58"
+      ]
+    },
+    {
+      "index": 60,
+      "bbox_relative": [
+        112.27499999999999,
+        7.025,
+        115.72500000000001,
+        8.975
+      ],
+      "nets": [
+        "ESP_EN",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "ESP_EN",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C42"
+      ]
+    },
+    {
+      "index": 61,
+      "bbox_relative": [
+        30.74,
+        67.19,
+        33.26,
+        68.81
+      ],
+      "nets": [
+        "GND",
+        "I_SENSE_OUT"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "I_SENSE_OUT",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C14"
+      ]
+    },
+    {
+      "index": 62,
+      "bbox_relative": [
+        84.075,
+        6.8,
+        87.925,
+        9.2
+      ],
+      "nets": [
+        "AC_LINE",
+        "V_AC_SENSE_MID"
+      ],
+      "net_layers": [
+        [
+          "AC_LINE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_AC_SENSE_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R1"
+      ]
+    },
+    {
+      "index": 63,
+      "bbox_relative": [
+        66.5475,
+        86.5,
+        74.5325,
+        89.5
+      ],
+      "nets": [
+        "FUSED_LINE",
+        "GATE_BUS_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "GATE_BUS_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q1B"
+      ]
+    },
+    {
+      "index": 64,
+      "bbox_relative": [
+        46.5,
+        30.5,
+        54.58,
+        33.51
+      ],
+      "nets": [
+        "FUSED_LINE",
+        "PM12_L"
+      ],
+      "net_layers": [
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "PM12_L",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "F2"
+      ]
+    },
+    {
+      "index": 65,
+      "bbox_relative": [
+        62.925,
+        59.825,
+        71.075,
+        64.175
+      ],
+      "nets": [
+        "LED_A_POS",
+        "SCAP_POS"
+      ],
+      "net_layers": [
+        [
+          "LED_A_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R40"
+      ]
+    },
+    {
+      "index": 66,
+      "bbox_relative": [
+        118.74,
+        13.19,
+        121.26,
+        14.81
+      ],
+      "nets": [
+        "BST_RF",
+        "SW_RF"
+      ],
+      "net_layers": [
+        [
+          "BST_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SW_RF",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C46"
+      ]
+    },
+    {
+      "index": 67,
+      "bbox_relative": [
+        52.2,
+        66.2,
+        60.879999999999995,
+        69.8
+      ],
+      "nets": [
+        "SCAP_POS",
+        "SCAP_POS_RTN"
+      ],
+      "net_layers": [
+        [
+          "SCAP_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS_RTN",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "J3"
+      ]
+    },
+    {
+      "index": 68,
+      "bbox_relative": [
+        118.39999999999999,
+        54.9,
+        123.60000000000001,
+        57.1
+      ],
+      "nets": [
+        "SRC_NEG",
+        "V_RSV_NEG"
+      ],
+      "net_layers": [
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Z2"
+      ]
+    },
+    {
+      "index": 69,
+      "bbox_relative": [
+        71.825,
+        60.25,
+        76.175,
+        63.75
+      ],
+      "nets": [
+        "GATE_POS_A",
+        "GND",
+        "LED_K_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_POS_A",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "LED_K_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q7"
+      ]
+    },
+    {
+      "index": 70,
+      "bbox_relative": [
+        150.07500000000002,
+        44.8,
+        153.92499999999998,
+        47.2
+      ],
+      "nets": [
+        "ADC_SPARE",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "ADC_SPARE",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R65"
+      ]
+    },
+    {
+      "index": 71,
+      "bbox_relative": [
+        78.075,
+        78.8,
+        81.925,
+        81.2
+      ],
+      "nets": [
+        "GATE_RTN_POS",
+        "RTN_COM_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R_GB2"
+      ]
+    },
+    {
+      "index": 72,
+      "bbox_relative": [
+        106.5475,
+        86.5,
+        114.5325,
+        89.5
+      ],
+      "nets": [
+        "GATE_BUS_NEG",
+        "SCAP_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q2A"
+      ]
+    },
+    {
+      "index": 73,
+      "bbox_relative": [
+        82.25,
+        78.6,
+        89.75,
+        81.4
+      ],
+      "nets": [
+        "GATE_RTN_POS",
+        "RTN_COM_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_RTN_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "RTN_COM_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D_TVS2"
+      ]
+    },
+    {
+      "index": 74,
+      "bbox_relative": [
+        40.449999999999996,
+        64.6,
+        45.550000000000004,
+        67.4
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C10"
+      ]
+    },
+    {
+      "index": 75,
+      "bbox_relative": [
+        68.075,
+        26.8,
+        71.925,
+        29.2
+      ],
+      "nets": [
+        "GND",
+        "V_12V_SENSE"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_12V_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R61"
+      ]
+    },
+    {
+      "index": 76,
+      "bbox_relative": [
+        102.075,
+        22.8,
+        105.925,
+        25.2
+      ],
+      "nets": [
+        "3.3V_RF",
+        "ESP_IO2"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_IO2",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R70"
+      ]
+    },
+    {
+      "index": 77,
+      "bbox_relative": [
+        44.074999999999996,
+        80.8,
+        47.925000000000004,
+        83.2
+      ],
+      "nets": [
+        "GND",
+        "V_TH_LO"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_TH_LO",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R56"
+      ]
+    },
+    {
+      "index": 78,
+      "bbox_relative": [
+        125.075,
+        48.8,
+        128.92499999999998,
+        51.2
+      ],
+      "nets": [
+        "GATE_BUS_NEG",
+        "GATE_DRV_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_DRV_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R45"
+      ]
+    },
+    {
+      "index": 79,
+      "bbox_relative": [
+        123.45,
+        18.6,
+        128.54999999999998,
+        21.4
+      ],
+      "nets": [
+        "3.3V_RF",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C48"
+      ]
+    },
+    {
+      "index": 80,
+      "bbox_relative": [
+        79.825,
+        64.25,
+        84.175,
+        67.75
+      ],
+      "nets": [
+        "PGND",
+        "PRECHARGE_POS",
+        "PRE_D_POS"
+      ],
+      "net_layers": [
+        [
+          "PGND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRECHARGE_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRE_D_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q5"
+      ]
+    },
+    {
+      "index": 81,
+      "bbox_relative": [
+        92.74,
+        77.19,
+        95.26,
+        78.81
+      ],
+      "nets": [
+        "GND",
+        "V_GATE_SENSE"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_GATE_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C16"
+      ]
+    },
+    {
+      "index": 82,
+      "bbox_relative": [
+        69.825,
+        48.25,
+        74.175,
+        51.75
+      ],
+      "nets": [
+        "BOOST_B_POS",
+        "GATE_DRV_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_DRV_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q11"
+      ]
+    },
+    {
+      "index": 83,
+      "bbox_relative": [
+        122.075,
+        42.8,
+        125.925,
+        45.2
+      ],
+      "nets": [
+        "+3.3V",
+        "NRST"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NRST",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R10"
+      ]
+    },
+    {
+      "index": 84,
+      "bbox_relative": [
+        42.85,
+        47.85,
+        53.15,
+        52.15
+      ],
+      "nets": [
+        "CHG",
+        "SCAP_POS"
+      ],
+      "net_layers": [
+        [
+          "CHG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D3"
+      ]
+    },
+    {
+      "index": 85,
+      "bbox_relative": [
+        84.075,
+        2.8,
+        87.925,
+        5.2
+      ],
+      "nets": [
+        "V_AC_SENSE_MID",
+        "V_AC_SENSE_RAW"
+      ],
+      "net_layers": [
+        [
+          "V_AC_SENSE_MID",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_AC_SENSE_RAW",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R75"
+      ]
+    },
+    {
+      "index": 86,
+      "bbox_relative": [
+        54.5475,
+        86.5,
+        62.5325,
+        89.5
+      ],
+      "nets": [
+        "GATE_BUS_POS",
+        "SCAP_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q1A"
+      ]
+    },
+    {
+      "index": 87,
+      "bbox_relative": [
+        62.25,
+        78.6,
+        69.75,
+        81.4
+      ],
+      "nets": [
+        "GATE_BUS_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D_TVS1"
+      ]
+    },
+    {
+      "index": 88,
+      "bbox_relative": [
+        38.074999999999996,
+        68.8,
+        41.925000000000004,
+        71.2
+      ],
+      "nets": [
+        "+3.3V",
+        "OC_TRIP_N"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "OC_TRIP_N",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R24"
+      ]
+    },
+    {
+      "index": 89,
+      "bbox_relative": [
+        78.075,
+        6.8,
+        81.925,
+        9.2
+      ],
+      "nets": [
+        "+3.3V",
+        "ZC_DETECT"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ZC_DETECT",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R5"
+      ]
+    },
+    {
+      "index": 90,
+      "bbox_relative": [
+        18.0,
+        27.5,
+        22.0,
+        54.0
+      ],
+      "nets": [
+        "AC_LINE",
+        "FUSED_LINE"
+      ],
+      "net_layers": [
+        [
+          "AC_LINE",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "F1"
+      ]
+    },
+    {
+      "index": 91,
+      "bbox_relative": [
+        102.075,
+        28.8,
+        105.925,
+        31.2
+      ],
+      "nets": [
+        "SCAP_POS",
+        "V_BANK_POS_MID"
+      ],
+      "net_layers": [
+        [
+          "SCAP_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_POS_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R25"
+      ]
+    },
+    {
+      "index": 92,
+      "bbox_relative": [
+        135.0,
+        9.05,
+        155.0,
+        22.95
+      ],
+      "nets": [
+        "3.3V_RF",
+        "ESP_EN",
+        "ESP_IO2",
+        "ESP_IO8",
+        "ESP_IO9",
+        "ESP_RX",
+        "ESP_TX",
+        "ESP_U0RXD",
+        "ESP_U0TXD",
+        "G031_RST_CTL",
+        "GND",
+        "unconnected-(U14-IO0-Pad18)",
+        "unconnected-(U14-IO1-Pad17)",
+        "unconnected-(U14-IO10-Pad10)",
+        "unconnected-(U14-IO18-Pad13)",
+        "unconnected-(U14-IO19-Pad14)",
+        "unconnected-(U14-IO3-Pad15)",
+        "unconnected-(U14-IO7-Pad6)"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_EN",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_IO2",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_IO8",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_IO9",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_RX",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_TX",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_U0RXD",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_U0TXD",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "G031_RST_CTL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "*.Cu",
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO0-Pad18)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO1-Pad17)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO10-Pad10)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO18-Pad13)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO19-Pad14)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO3-Pad15)",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "unconnected-(U14-IO7-Pad6)",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U14"
+      ]
+    },
+    {
+      "index": 93,
+      "bbox_relative": [
+        62.074999999999996,
+        12.8,
+        65.925,
+        15.2
+      ],
+      "nets": [
+        "AC_NEUTRAL",
+        "ZC_NEUT_MID"
+      ],
+      "net_layers": [
+        [
+          "AC_NEUTRAL",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ZC_NEUT_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R4"
+      ]
+    },
+    {
+      "index": 94,
+      "bbox_relative": [
+        120.05,
+        24.775,
+        123.95,
+        27.225
+      ],
+      "nets": [
+        "3.3V_RF",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C43"
+      ]
+    },
+    {
+      "index": 95,
+      "bbox_relative": [
+        122.075,
+        60.8,
+        125.925,
+        63.2
+      ],
+      "nets": [
+        "GATE_NEG_A",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "GATE_NEG_A",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R51"
+      ]
+    },
+    {
+      "index": 96,
+      "bbox_relative": [
+        78.075,
+        60.8,
+        81.925,
+        63.2
+      ],
+      "nets": [
+        "GATE_POS_A",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "GATE_POS_A",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R50"
+      ]
+    },
+    {
+      "index": 97,
+      "bbox_relative": [
+        116.74,
+        37.19,
+        119.26,
+        38.81
+      ],
+      "nets": [
+        "+3.3V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C2"
+      ]
+    },
+    {
+      "index": 98,
+      "bbox_relative": [
+        150.2,
+        59.120000000000005,
+        153.8,
+        67.8
+      ],
+      "nets": [
+        "SCAP_NEG",
+        "SCAP_NEG_RTN"
+      ],
+      "net_layers": [
+        [
+          "SCAP_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_NEG_RTN",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "J4"
+      ]
+    },
+    {
+      "index": 99,
+      "bbox_relative": [
+        131.575,
+        55.474999999999994,
+        138.425,
+        59.125
+      ],
+      "nets": [
+        "SCAP_POS",
+        "TRK_NEG"
+      ],
+      "net_layers": [
+        [
+          "SCAP_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "TRK_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R43"
+      ]
+    },
+    {
+      "index": 100,
+      "bbox_relative": [
+        54.3,
+        40.3,
+        83.10000000000001,
+        43.7
+      ],
+      "nets": [
+        "CHG",
+        "FUSED_LINE"
+      ],
+      "net_layers": [
+        [
+          "CHG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R6"
+      ]
+    },
+    {
+      "index": 101,
+      "bbox_relative": [
+        24.075,
+        66.8,
+        27.925,
+        69.2
+      ],
+      "nets": [
+        "I_SENSE_OUT",
+        "I_SENSE_RAW"
+      ],
+      "net_layers": [
+        [
+          "I_SENSE_OUT",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "I_SENSE_RAW",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R57"
+      ]
+    },
+    {
+      "index": 102,
+      "bbox_relative": [
+        96.05000000000001,
+        63.295,
+        103.94999999999999,
+        68.705
+      ],
+      "nets": [
+        "+12V",
+        "GATE_NEG_B",
+        "GATE_POS_B",
+        "GATE_RTN_NEG",
+        "GATE_RTN_POS",
+        "GND",
+        "OC_TRIP_N"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_NEG_B",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_POS_B",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_RTN_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_RTN_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "OC_TRIP_N",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U5"
+      ]
+    },
+    {
+      "index": 103,
+      "bbox_relative": [
+        112.05,
+        12.775,
+        115.95,
+        15.225
+      ],
+      "nets": [
+        "+12V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C45"
+      ]
+    },
+    {
+      "index": 104,
+      "bbox_relative": [
+        102.075,
+        34.8,
+        105.925,
+        37.2
+      ],
+      "nets": [
+        "GND",
+        "V_BANK_POS_SENSE"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_POS_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R26"
+      ]
+    },
+    {
+      "index": 105,
+      "bbox_relative": [
+        22.65,
+        3.5,
+        54.43,
+        21.5
+      ],
+      "nets": [
+        "+12V",
+        "AC_NEUTRAL",
+        "GND",
+        "PM12_L"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "AC_NEUTRAL",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "PM12_L",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "PS1"
+      ]
+    },
+    {
+      "index": 106,
+      "bbox_relative": [
+        30.075,
+        82.8,
+        33.925000000000004,
+        85.2
+      ],
+      "nets": [
+        "GND",
+        "REF_1V65"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "REF_1V65",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R23"
+      ]
+    },
+    {
+      "index": 107,
+      "bbox_relative": [
+        117.45,
+        18.6,
+        122.55,
+        21.4
+      ],
+      "nets": [
+        "3.3V_RF",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C47"
+      ]
+    },
+    {
+      "index": 108,
+      "bbox_relative": [
+        115.825,
+        60.25,
+        120.175,
+        63.75
+      ],
+      "nets": [
+        "GATE_NEG_A",
+        "GND",
+        "LED_K_NEG"
+      ],
+      "net_layers": [
+        [
+          "GATE_NEG_A",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "LED_K_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q8"
+      ]
+    },
+    {
+      "index": 109,
+      "bbox_relative": [
+        106.3,
+        72.3,
+        135.1,
+        75.7
+      ],
+      "nets": [
+        "PRE_D_NEG",
+        "SCAP_NEG_RTN"
+      ],
+      "net_layers": [
+        [
+          "PRE_D_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SCAP_NEG_RTN",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R21"
+      ]
+    },
+    {
+      "index": 110,
+      "bbox_relative": [
+        106.925,
+        59.825,
+        115.075,
+        64.175
+      ],
+      "nets": [
+        "LED_A_NEG",
+        "SCAP_POS"
+      ],
+      "net_layers": [
+        [
+          "LED_A_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SCAP_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R41"
+      ]
+    },
+    {
+      "index": 111,
+      "bbox_relative": [
+        81.575,
+        54.175,
+        88.425,
+        57.825
+      ],
+      "nets": [
+        "SCAP_POS",
+        "TRK_POS"
+      ],
+      "net_layers": [
+        [
+          "SCAP_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "TRK_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R42"
+      ]
+    },
+    {
+      "index": 112,
+      "bbox_relative": [
+        42.85,
+        55.85,
+        53.15,
+        60.15
+      ],
+      "nets": [
+        "CHG",
+        "SCAP_NEG"
+      ],
+      "net_layers": [
+        [
+          "CHG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SCAP_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "D4"
+      ]
+    },
+    {
+      "index": 113,
+      "bbox_relative": [
+        108.075,
+        28.8,
+        111.925,
+        31.2
+      ],
+      "nets": [
+        "SCAP_NEG",
+        "V_BANK_NEG_MID"
+      ],
+      "net_layers": [
+        [
+          "SCAP_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_NEG_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R27"
+      ]
+    },
+    {
+      "index": 114,
+      "bbox_relative": [
+        136.07500000000002,
+        64.8,
+        139.92499999999998,
+        67.2
+      ],
+      "nets": [
+        "GND",
+        "PRECHARGE_NEG"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "PRECHARGE_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R53"
+      ]
+    },
+    {
+      "index": 115,
+      "bbox_relative": [
+        94.075,
+        30.8,
+        97.925,
+        33.2
+      ],
+      "nets": [
+        "3.3V_RF",
+        "ESP_EN"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ESP_EN",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R73"
+      ]
+    },
+    {
+      "index": 116,
+      "bbox_relative": [
+        75.075,
+        48.8,
+        78.925,
+        51.2
+      ],
+      "nets": [
+        "GATE_BUS_POS",
+        "GATE_DRV_POS"
+      ],
+      "net_layers": [
+        [
+          "GATE_BUS_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GATE_DRV_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R44"
+      ]
+    },
+    {
+      "index": 117,
+      "bbox_relative": [
+        109.075,
+        54.8,
+        112.925,
+        57.2
+      ],
+      "nets": [
+        "BOOST_B_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_NEG",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R47"
+      ]
+    },
+    {
+      "index": 118,
+      "bbox_relative": [
+        59.449999999999996,
+        18.6,
+        64.55,
+        21.4
+      ],
+      "nets": [
+        "+12V",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C9"
+      ]
+    },
+    {
+      "index": 119,
+      "bbox_relative": [
+        68.075,
+        2.8,
+        71.925,
+        5.2
+      ],
+      "nets": [
+        "ZC_NEUT_LIM",
+        "ZC_NEUT_MID"
+      ],
+      "net_layers": [
+        [
+          "ZC_NEUT_LIM",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "ZC_NEUT_MID",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R77"
+      ]
+    },
+    {
+      "index": 120,
+      "bbox_relative": [
+        59.074999999999996,
+        54.8,
+        62.925000000000004,
+        57.2
+      ],
+      "nets": [
+        "BOOST_B_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R46"
+      ]
+    },
+    {
+      "index": 121,
+      "bbox_relative": [
+        108.075,
+        40.8,
+        111.925,
+        43.2
+      ],
+      "nets": [
+        "V_BANK_NEG_MID",
+        "V_BANK_NEG_SENSE"
+      ],
+      "net_layers": [
+        [
+          "V_BANK_NEG_MID",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_NEG_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R79"
+      ]
+    },
+    {
+      "index": 122,
+      "bbox_relative": [
+        97.075,
+        78.8,
+        100.925,
+        81.2
+      ],
+      "nets": [
+        "+3.3V",
+        "NTC_SENSE"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NTC_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R64"
+      ]
+    },
+    {
+      "index": 123,
+      "bbox_relative": [
+        24.74,
+        83.19,
+        27.26,
+        84.81
+      ],
+      "nets": [
+        "GND",
+        "REF_1V65"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "REF_1V65",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C13"
+      ]
+    },
+    {
+      "index": 124,
+      "bbox_relative": [
+        128.74,
+        43.19,
+        131.26,
+        44.81
+      ],
+      "nets": [
+        "GND",
+        "NRST"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "NRST",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C5"
+      ]
+    },
+    {
+      "index": 125,
+      "bbox_relative": [
+        118.5475,
+        86.5,
+        126.5325,
+        89.5
+      ],
+      "nets": [
+        "FUSED_LINE",
+        "GATE_BUS_NEG",
+        "SRC_NEG"
+      ],
+      "net_layers": [
+        [
+          "FUSED_LINE",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "GATE_BUS_NEG",
+          [
+            "*.Cu"
+          ]
+        ],
+        [
+          "SRC_NEG",
+          [
+            "*.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Q2B"
+      ]
+    },
+    {
+      "index": 126,
+      "bbox_relative": [
+        68.39999999999999,
+        54.9,
+        73.60000000000001,
+        57.1
+      ],
+      "nets": [
+        "SRC_POS",
+        "V_RSV_POS"
+      ],
+      "net_layers": [
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_RSV_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "Z1"
+      ]
+    },
+    {
+      "index": 127,
+      "bbox_relative": [
+        62.74,
+        33.19,
+        65.26,
+        34.81
+      ],
+      "nets": [
+        "GND",
+        "V_12V_SENSE"
+      ],
+      "net_layers": [
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_12V_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C15"
+      ]
+    },
+    {
+      "index": 128,
+      "bbox_relative": [
+        92.075,
+        60.8,
+        95.925,
+        63.2
+      ],
+      "nets": [
+        "GATE_NEG_B",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "GATE_NEG_B",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R49"
+      ]
+    },
+    {
+      "index": 129,
+      "bbox_relative": [
+        102.075,
+        40.8,
+        105.925,
+        43.2
+      ],
+      "nets": [
+        "V_BANK_POS_MID",
+        "V_BANK_POS_SENSE"
+      ],
+      "net_layers": [
+        [
+          "V_BANK_POS_MID",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_BANK_POS_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R78"
+      ]
+    },
+    {
+      "index": 130,
+      "bbox_relative": [
+        62.074999999999996,
+        26.8,
+        65.925,
+        29.2
+      ],
+      "nets": [
+        "+12V",
+        "V_12V_SENSE"
+      ],
+      "net_layers": [
+        [
+          "+12V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "V_12V_SENSE",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R59"
+      ]
+    },
+    {
+      "index": 131,
+      "bbox_relative": [
+        92.075,
+        56.8,
+        95.925,
+        59.2
+      ],
+      "nets": [
+        "GATE_POS_B",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "GATE_POS_B",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R48"
+      ]
+    },
+    {
+      "index": 132,
+      "bbox_relative": [
+        55.5,
+        48.565000000000005,
+        64.5,
+        51.434999999999995
+      ],
+      "nets": [
+        "BOOST_B_POS",
+        "LED_A_POS",
+        "LED_K_POS",
+        "SRC_POS"
+      ],
+      "net_layers": [
+        [
+          "BOOST_B_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "LED_A_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "LED_K_POS",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "SRC_POS",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "U10"
+      ]
+    },
+    {
+      "index": 133,
+      "bbox_relative": [
+        125.74,
+        25.19,
+        128.26,
+        26.81
+      ],
+      "nets": [
+        "3.3V_RF",
+        "GND"
+      ],
+      "net_layers": [
+        [
+          "3.3V_RF",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "GND",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "C44"
+      ]
+    },
+    {
+      "index": 134,
+      "bbox_relative": [
+        30.075,
+        76.8,
+        33.925000000000004,
+        79.2
+      ],
+      "nets": [
+        "+3.3V",
+        "REF_1V65"
+      ],
+      "net_layers": [
+        [
+          "+3.3V",
+          [
+            "F.Cu"
+          ]
+        ],
+        [
+          "REF_1V65",
+          [
+            "F.Cu"
+          ]
+        ]
+      ],
+      "footprint_references": [
+        "R22"
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "net_a": "/AC_LINE",
+      "net_b": "/V_AC_SENSE_MID",
+      "layer": "F.Cu",
+      "delta_v": 75.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.3,
+      "census_clearance_mm": 0.65,
+      "exact_clearance_mm": 0.6499999999999915,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R1",
+              "number": "1"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1853,
+              "start": [
+                86.80000000000001,
+                8.0
+              ],
+              "end": [
+                86.4,
+                7.600000000000001
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.6499999999999915,
+          "nearest_relative": [
+            [
+              85.60000000000001,
+              7.600000000000002
+            ],
+            [
+              86.25,
+              7.600000000000002
+            ]
+          ],
+          "midpoint_absolute": [
+            154.425,
+            62.6
+          ],
+          "exempting_zone_indices": [
+            62
+          ]
+        },
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R1",
+              "number": "1"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1854,
+              "start": [
+                86.4,
+                7.600000000000001
+              ],
+              "end": [
+                86.4,
+                6.799999999999997
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.6499999999999915,
+          "nearest_relative": [
+            [
+              85.60000000000001,
+              7.600000000000001
+            ],
+            [
+              86.25,
+              7.600000000000001
+            ]
+          ],
+          "midpoint_absolute": [
+            154.425,
+            62.6
+          ],
+          "exempting_zone_indices": [
+            62
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/AC_LINE",
+      "net_b": "/ZC_LINE_MID",
+      "layer": "F.Cu",
+      "delta_v": 35.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.1,
+      "census_clearance_mm": 0.4536,
+      "exact_clearance_mm": 0.4535699783195062,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 214,
+              "start": [
+                62.90629999999999,
+                8.181199999999997
+              ],
+              "end": [
+                62.48750000000001,
+                8.600000000000001
+              ],
+              "width": 2.0
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1887,
+              "start": [
+                64.4,
+                7.600000000000001
+              ],
+              "end": [
+                64.4,
+                6.799999999999997
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.4535699783195062,
+          "nearest_relative": [
+            [
+              63.8343619488914,
+              7.810205638353957
+            ],
+            [
+              64.26141807012331,
+              7.657402514854765
+            ]
+          ],
+          "midpoint_absolute": [
+            132.54789000950734,
+            62.73380407660436
+          ],
+          "exempting_zone_indices": [
+            6
+          ]
+        },
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 214,
+              "start": [
+                62.90629999999999,
+                8.181199999999997
+              ],
+              "end": [
+                62.48750000000001,
+                8.600000000000001
+              ],
+              "width": 2.0
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1888,
+              "start": [
+                64.80000000000001,
+                8.0
+              ],
+              "end": [
+                64.4,
+                7.600000000000001
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.4535699783195059,
+          "nearest_relative": [
+            [
+              63.8343619488914,
+              7.810205638353958
+            ],
+            [
+              64.26141807012331,
+              7.657402514854766
+            ]
+          ],
+          "midpoint_absolute": [
+            132.54789000950734,
+            62.733804076604365
+          ],
+          "exempting_zone_indices": [
+            6
+          ]
+        },
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 230,
+              "start": [
+                62.90629999999999,
+                8.181199999999997
+              ],
+              "end": [
+                62.21879999999999,
+                8.181199999999997
+              ],
+              "width": 2.0
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1887,
+              "start": [
+                64.4,
+                7.600000000000001
+              ],
+              "end": [
+                64.4,
+                6.799999999999997
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.45356997831950446,
+          "nearest_relative": [
+            [
+              63.83436194889139,
+              7.810205638353926
+            ],
+            [
+              64.26141807012331,
+              7.657402514854765
+            ]
+          ],
+          "midpoint_absolute": [
+            132.54789000950734,
+            62.73380407660434
+          ],
+          "exempting_zone_indices": [
+            6
+          ]
+        },
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 230,
+              "start": [
+                62.90629999999999,
+                8.181199999999997
+              ],
+              "end": [
+                62.21879999999999,
+                8.181199999999997
+              ],
+              "width": 2.0
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1888,
+              "start": [
+                64.80000000000001,
+                8.0
+              ],
+              "end": [
+                64.4,
+                7.600000000000001
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.45356997831950413,
+          "nearest_relative": [
+            [
+              63.83436194889139,
+              7.810205638353927
+            ],
+            [
+              64.26141807012331,
+              7.657402514854766
+            ]
+          ],
+          "midpoint_absolute": [
+            132.54789000950734,
+            62.73380407660434
+          ],
+          "exempting_zone_indices": [
+            6
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/AC_NEUTRAL",
+      "net_b": "/FUSED_LINE",
+      "layer": "B.Cu",
+      "delta_v": 150.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.6,
+      "census_clearance_mm": 0.6,
+      "exact_clearance_mm": 0.6000000000000014,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "J2",
+              "number": "2"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 46,
+              "start": [
+                11.200000000000003,
+                54.400000000000006
+              ],
+              "end": [
+                11.200000000000003,
+                46.400000000000006
+              ],
+              "width": 2.6
+            }
+          },
+          "distance": 0.6000000000000014,
+          "nearest_relative": [
+            [
+              9.3,
+              50.92
+            ],
+            [
+              9.900000000000002,
+              50.92
+            ]
+          ],
+          "midpoint_absolute": [
+            78.1,
+            105.92
+          ],
+          "exempting_zone_indices": [
+            4
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/AC_NEUTRAL",
+      "net_b": "/ZC_NEUT_MID",
+      "layer": "F.Cu",
+      "delta_v": 40.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.1,
+      "census_clearance_mm": 0.5687,
+      "exact_clearance_mm": 0.5686999999999927,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 256,
+              "start": [
+                61.19999999999999,
+                14.0
+              ],
+              "end": [
+                62.8313,
+                14.0
+              ],
+              "width": 2.0
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R4",
+              "number": "2"
+            }
+          },
+          "distance": 0.5686999999999927,
+          "nearest_relative": [
+            [
+              63.8313,
+              14.0
+            ],
+            [
+              64.39999999999999,
+              14.0
+            ]
+          ],
+          "midpoint_absolute": [
+            132.61565,
+            69.0
+          ],
+          "exempting_zone_indices": [
+            93
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/GATE_BUS_NEG",
+      "net_b": "/SCAP_NEG",
+      "layer": "F.Cu",
+      "delta_v": 60.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.25,
+      "census_clearance_mm": 0.5,
+      "exact_clearance_mm": 0.5,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q2A",
+              "number": "1"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1253,
+              "start": [
+                109.6,
+                89.6
+              ],
+              "end": [
+                106.80000000000001,
+                89.6
+              ],
+              "width": 0.2
+            }
+          },
+          "distance": 0.5,
+          "nearest_relative": [
+            [
+              108.9525,
+              89.0
+            ],
+            [
+              108.9525,
+              89.5
+            ]
+          ],
+          "midpoint_absolute": [
+            177.4525,
+            144.25
+          ],
+          "exempting_zone_indices": [
+            72
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/LED_K_NEG",
+      "net_b": "/GATE_NEG_A",
+      "layer": "F.Cu",
+      "delta_v": 93.3,
+      "below_threshold": false,
+      "required_creepage_mm": 1.4,
+      "census_clearance_mm": 0.35,
+      "exact_clearance_mm": 0.3500000000000085,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "via",
+            "identity": {
+              "index": 73,
+              "position": [
+                117.6,
+                62.0
+              ],
+              "size": 0.6
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q8",
+              "number": "1"
+            }
+          },
+          "distance": 0.3500000000000085,
+          "nearest_relative": [
+            [
+              117.6,
+              61.7
+            ],
+            [
+              117.6,
+              61.349999999999994
+            ]
+          ],
+          "midpoint_absolute": [
+            186.1,
+            116.525
+          ],
+          "exempting_zone_indices": [
+            108
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/LED_K_NEG",
+      "net_b": "GND",
+      "layer": "F.Cu",
+      "delta_v": 90.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.4,
+      "census_clearance_mm": 0.35,
+      "exact_clearance_mm": 0.3500000000000085,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "via",
+            "identity": {
+              "index": 73,
+              "position": [
+                117.6,
+                62.0
+              ],
+              "size": 0.6
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q8",
+              "number": "2"
+            }
+          },
+          "distance": 0.3500000000000085,
+          "nearest_relative": [
+            [
+              117.6,
+              62.3
+            ],
+            [
+              117.6,
+              62.650000000000006
+            ]
+          ],
+          "midpoint_absolute": [
+            186.1,
+            117.475
+          ],
+          "exempting_zone_indices": [
+            108
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/LED_K_POS",
+      "net_b": "/GATE_POS_A",
+      "layer": "F.Cu",
+      "delta_v": 86.7,
+      "below_threshold": false,
+      "required_creepage_mm": 1.4,
+      "census_clearance_mm": 0.35,
+      "exact_clearance_mm": 0.3500000000000085,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "via",
+            "identity": {
+              "index": 75,
+              "position": [
+                73.6,
+                62.0
+              ],
+              "size": 0.6
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q7",
+              "number": "1"
+            }
+          },
+          "distance": 0.3500000000000085,
+          "nearest_relative": [
+            [
+              73.6,
+              61.7
+            ],
+            [
+              73.6,
+              61.349999999999994
+            ]
+          ],
+          "midpoint_absolute": [
+            142.1,
+            116.525
+          ],
+          "exempting_zone_indices": [
+            69
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/LED_K_POS",
+      "net_b": "GND",
+      "layer": "F.Cu",
+      "delta_v": 90.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.4,
+      "census_clearance_mm": 0.35,
+      "exact_clearance_mm": 0.3500000000000085,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "via",
+            "identity": {
+              "index": 75,
+              "position": [
+                73.6,
+                62.0
+              ],
+              "size": 0.6
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q7",
+              "number": "2"
+            }
+          },
+          "distance": 0.3500000000000085,
+          "nearest_relative": [
+            [
+              73.6,
+              62.3
+            ],
+            [
+              73.6,
+              62.650000000000006
+            ]
+          ],
+          "midpoint_absolute": [
+            142.1,
+            117.475
+          ],
+          "exempting_zone_indices": [
+            69
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/PGND",
+      "net_b": "/REF_1V65",
+      "layer": "F.Cu",
+      "delta_v": 1.65,
+      "below_threshold": true,
+      "required_creepage_mm": 0.4,
+      "census_clearance_mm": 0.375,
+      "exact_clearance_mm": 0.37499999999999645,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "U3",
+              "number": "3"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1187,
+              "start": [
+                26.0,
+                74.4
+              ],
+              "end": [
+                26.0,
+                76.4
+              ],
+              "width": 0.2
+            }
+          },
+          "distance": 0.37499999999999645,
+          "nearest_relative": [
+            [
+              25.525000000000002,
+              75.10000000000001
+            ],
+            [
+              25.9,
+              75.10000000000001
+            ]
+          ],
+          "midpoint_absolute": [
+            94.2125,
+            130.10000000000002
+          ],
+          "exempting_zone_indices": [
+            7
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/PRE_D_NEG",
+      "net_b": "/PRECHARGE_NEG",
+      "layer": "F.Cu",
+      "delta_v": 18.3,
+      "below_threshold": true,
+      "required_creepage_mm": 0.48,
+      "census_clearance_mm": 0.4,
+      "exact_clearance_mm": 0.40000000000000574,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q6",
+              "number": "3"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1127,
+              "start": [
+                131.2,
+                65.2
+              ],
+              "end": [
+                135.6,
+                65.2
+              ],
+              "width": 0.2
+            }
+          },
+          "distance": 0.40000000000000574,
+          "nearest_relative": [
+            [
+              133.525,
+              65.7
+            ],
+            [
+              133.525,
+              65.3
+            ]
+          ],
+          "midpoint_absolute": [
+            202.025,
+            120.5
+          ],
+          "exempting_zone_indices": [
+            18
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/RTN_COM_NEG",
+      "net_b": "/GATE_RTN_NEG",
+      "layer": "F.Cu",
+      "delta_v": 27.0,
+      "below_threshold": true,
+      "required_creepage_mm": 0.53,
+      "census_clearance_mm": 0.5,
+      "exact_clearance_mm": 0.5,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1212,
+              "start": [
+                142.4,
+                86.4
+              ],
+              "end": [
+                148.0,
+                86.4
+              ],
+              "width": 0.2
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "Q4B",
+              "number": "1"
+            }
+          },
+          "distance": 0.5,
+          "nearest_relative": [
+            [
+              144.9525,
+              86.5
+            ],
+            [
+              144.9525,
+              87.0
+            ]
+          ],
+          "midpoint_absolute": [
+            213.4525,
+            141.75
+          ],
+          "exempting_zone_indices": [
+            23
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/SCAP_NEG_RTN",
+      "net_b": "/GATE_RTN_NEG",
+      "layer": "F.Cu",
+      "delta_v": 27.0,
+      "below_threshold": true,
+      "required_creepage_mm": 0.53,
+      "census_clearance_mm": 0.3,
+      "exact_clearance_mm": 0.29999999999999716,
+      "all_closest_ties_attach_exempt": false,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R21",
+              "number": "1"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 804,
+              "start": [
+                109.6,
+                75.6
+              ],
+              "end": [
+                109.6,
+                72.4
+              ],
+              "width": 0.2
+            }
+          },
+          "distance": 0.29999999999999716,
+          "nearest_relative": [
+            [
+              109.2,
+              74.0
+            ],
+            [
+              109.5,
+              74.0
+            ]
+          ],
+          "midpoint_absolute": [
+            177.85,
+            129.0
+          ],
+          "exempting_zone_indices": []
+        }
+      ]
+    },
+    {
+      "net_a": "/SCAP_POS",
+      "net_b": "/SCAP_POS_RTN",
+      "layer": "F.Cu",
+      "delta_v": 75.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.3,
+      "census_clearance_mm": 0.6,
+      "exact_clearance_mm": 0.6000000000000085,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1349,
+              "start": [
+                59.599999999999994,
+                66.0
+              ],
+              "end": [
+                57.2,
+                66.0
+              ],
+              "width": 0.2
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "J3",
+              "number": "2"
+            }
+          },
+          "distance": 0.6000000000000085,
+          "nearest_relative": [
+            [
+              59.08,
+              66.1
+            ],
+            [
+              59.08,
+              66.7
+            ]
+          ],
+          "midpoint_absolute": [
+            127.58,
+            121.4
+          ],
+          "exempting_zone_indices": [
+            67
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/SCAP_POS_RTN",
+      "net_b": "/OC_TRIP_N",
+      "layer": "In1.Cu",
+      "delta_v": 11.7,
+      "below_threshold": true,
+      "required_creepage_mm": 0.42,
+      "census_clearance_mm": 0.2125,
+      "exact_clearance_mm": 0.21249999999999147,
+      "all_closest_ties_attach_exempt": false,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R20",
+              "number": "1"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 283,
+              "start": [
+                62.400000000000006,
+                75.6
+              ],
+              "end": [
+                65.6,
+                75.6
+              ],
+              "width": 0.375
+            }
+          },
+          "distance": 0.21249999999999147,
+          "nearest_relative": [
+            [
+              64.0,
+              75.2
+            ],
+            [
+              64.0,
+              75.4125
+            ]
+          ],
+          "midpoint_absolute": [
+            132.5,
+            130.30625
+          ],
+          "exempting_zone_indices": []
+        },
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R20",
+              "number": "1"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 290,
+              "start": [
+                62.400000000000006,
+                75.6
+              ],
+              "end": [
+                65.6,
+                75.6
+              ],
+              "width": 0.375
+            }
+          },
+          "distance": 0.21249999999999147,
+          "nearest_relative": [
+            [
+              64.0,
+              75.2
+            ],
+            [
+              64.0,
+              75.4125
+            ]
+          ],
+          "midpoint_absolute": [
+            132.5,
+            130.30625
+          ],
+          "exempting_zone_indices": []
+        }
+      ]
+    },
+    {
+      "net_a": "/V_AC_SENSE_MID",
+      "net_b": "/V_AC_SENSE_RAW",
+      "layer": "F.Cu",
+      "delta_v": 73.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.3,
+      "census_clearance_mm": 0.707,
+      "exact_clearance_mm": 0.7070291600090474,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1849,
+              "start": [
+                85.6,
+                5.200000000000003
+              ],
+              "end": [
+                85.6,
+                4.799999999999997
+              ],
+              "width": 0.3
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R75",
+              "number": "2"
+            }
+          },
+          "distance": 0.7070291600090474,
+          "nearest_relative": [
+            [
+              85.74354105035982,
+              4.756457298411828
+            ],
+            [
+              86.4107648966901,
+              4.522571488685511
+            ]
+          ],
+          "midpoint_absolute": [
+            154.57715297352496,
+            59.639514393548666
+          ],
+          "exempting_zone_indices": [
+            85
+          ]
+        },
+        {
+          "a": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1852,
+              "start": [
+                85.6,
+                4.799999999999997
+              ],
+              "end": [
+                85.19999999999999,
+                4.399999999999999
+              ],
+              "width": 0.3
+            }
+          },
+          "b": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R75",
+              "number": "2"
+            }
+          },
+          "distance": 0.7070291600090471,
+          "nearest_relative": [
+            [
+              85.74354105035982,
+              4.756457298411827
+            ],
+            [
+              86.4107648966901,
+              4.522571488685511
+            ]
+          ],
+          "midpoint_absolute": [
+            154.57715297352496,
+            59.639514393548666
+          ],
+          "exempting_zone_indices": [
+            85
+          ]
+        }
+      ]
+    },
+    {
+      "net_a": "/ZC_LINE_LIM",
+      "net_b": "/ZC_LINE_MID",
+      "layer": "F.Cu",
+      "delta_v": 40.0,
+      "below_threshold": false,
+      "required_creepage_mm": 1.1,
+      "census_clearance_mm": 0.707,
+      "exact_clearance_mm": 0.7070291600090471,
+      "all_closest_ties_attach_exempt": true,
+      "closest_ties": [
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R76",
+              "number": "2"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1882,
+              "start": [
+                63.599999999999994,
+                4.799999999999997
+              ],
+              "end": [
+                63.19999999999999,
+                4.399999999999999
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.7070291600090471,
+          "nearest_relative": [
+            [
+              64.4107648966901,
+              4.522571488685511
+            ],
+            [
+              63.74354105035982,
+              4.756457298411827
+            ]
+          ],
+          "midpoint_absolute": [
+            132.57715297352496,
+            59.639514393548666
+          ],
+          "exempting_zone_indices": [
+            40
+          ]
+        },
+        {
+          "a": {
+            "kind": "pad",
+            "identity": {
+              "reference": "R76",
+              "number": "2"
+            }
+          },
+          "b": {
+            "kind": "segment",
+            "identity": {
+              "index_on_layer": 1885,
+              "start": [
+                63.599999999999994,
+                5.200000000000003
+              ],
+              "end": [
+                63.599999999999994,
+                4.799999999999997
+              ],
+              "width": 0.3
+            }
+          },
+          "distance": 0.7070291600090474,
+          "nearest_relative": [
+            [
+              64.4107648966901,
+              4.522571488685511
+            ],
+            [
+              63.74354105035982,
+              4.756457298411828
+            ]
+          ],
+          "midpoint_absolute": [
+            132.57715297352496,
+            59.639514393548666
+          ],
+          "exempting_zone_indices": [
+            40
+          ]
+        }
+      ]
+    }
+  ],
+  "scope": "Closest primitive-pair attribution; uses the same immutable-source geometry functions and attach-zone contract as existing tools, not independent standards certification"
+}

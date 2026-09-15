@@ -1,7 +1,113 @@
-# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-09-14)
+# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-09-15)
 
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
+
+## 2026-09-15: available rev-C fixture, terminal af6b integration and residual attribution
+
+This diagnostic run uses newly captured work-in-progress fixture bytes. It is not
+an update to the old fixture's numerical baseline or fabrication approval. The
+source circuit remains DO_NOT_FAB. Router source: `af6b301478ca1416f59f0cc7f111b1eb10e95456`.
+Input PCB SHA256: `bad824faa370307225ec4f45256de8e649afe60ee43b55483e3631555ea190d4`.
+
+### Producer result and limitations
+
+The original robb-pro run completed its three recorded stages with exit codes
+2, 1 and 0. Stage 1 connected 5/7 selected nets. Stage 2 took 55.0 minutes and
+reported 73/78 newly routed nets connected, with `/AC_LINE`, `/AC_NEUTRAL`,
+`/FUSED_LINE`, `/OC_TRIP_N` and `/SCAP_NEG` still partial. It saved copper but
+failed source-DRC propagation because the preseeded destination project differed
+from the stage-1 source project and its rendered rules. Its requested completion
+report is absent. The supervisor proceeded to stage 3 on PCB existence; its
+keepout/refill success does not supersede stage 2's failure.
+
+A saved-output control reproduces the sidecar conflict using the captured
+preseeded project. Supplying the actual predecessor sidecars or no destination
+sidecars both succeeds with identical generated sidecars. Original inputs and all
+PCB bytes remain unchanged. The failure belongs to the diagnostic supervisor
+preseeding, not a reason to weaken source-DRC preservation. This control does not
+rerun completion or retroactively generate its missing report.
+
+The stage-2 and stage-3 outputs preserve the same 3,280 trace/via/arc items,
+footprints and net definitions (ignoring UUID/tstamp metadata). Stage 3's zone
+changes therefore account for the changed census without changing routed copper.
+
+| Artifact | SHA256 |
+|---|---|
+| Stage 2 PCB | `45ff4cd1c9e58c95a599e14f0124d00d53fa7e1551c8b50225a9b6979541f5d8` |
+| Stage 3 PCB | `2294577a513f0711dbd13ad10071fa51aafbcd4c5cc6dc165aef2f2e977b8e97` |
+| Retained local terminal archive | `e55399d1c8dc192e00002a6c2a58f0ab7e4b22043bdb77b6c331c2f19cd5a178` |
+
+### Independent saved-board scores
+
+The scorer uses immutable af6b source; 912 shared source files match the producer
+manifest. With the producer's logged 0.150 mm DRU floor, 30 V threshold and
+attach-zone exemptions, the router's full trace/via/pad pairwise replay finds
+zero violations across 84 mapped nets and 1,922 cross-pairs. Disabling only
+attach-zone exemptions yields 107 findings across 20 net pairs. The initial
+0.200 mm probe is retained separately and is not the exact-floor result.
+
+The documented creepage census evaluates 2,997 pairs with 31 waived findings.
+Stage 2 has 33 non-waived failures; stage 3 has 17. Both census commands return
+failure. Five remaining pairs are below the unchanged 30 V policy threshold.
+For all twelve above-threshold pairs, every primitive pair tied for the closest
+gap falls inside a net- and layer-applicable attach zone. This establishes the
+geometry attribution, rather than inferring it from matching net-pair names.
+
+The attribution script reconstructs segment, pad, via and fill primitives with
+the census's existing geometry functions and asserts that their unions equal the
+census geometry. All 17 exact minimum distances reproduce the rounded census
+values within 0.000051 mm. Geometry and attach zones use the same board-relative
+frame; recorded sheet coordinates add the measured board origin. Closest ties
+are retained within 0.0000001 mm. This is a check of the implemented policy/model,
+not independent certification of its electrical assumptions.
+
+| Residual pair | ΔV (V) | Gap / required (mm) | Closest geometry | Router-policy attribution |
+|---|---:|---:|---|---|
+| /AC_LINE ↔ /V_AC_SENSE_MID | 75 | 0.6500 / 1.3 | pad/segment | Attach zone: R1 |
+| /AC_LINE ↔ /ZC_LINE_MID | 35 | 0.4536 / 1.1 | segment/segment | Attach zone: R3 |
+| /AC_NEUTRAL ↔ /FUSED_LINE | 150 | 0.6000 / 1.6 | pad/segment | Attach zone: J2 |
+| /AC_NEUTRAL ↔ /ZC_NEUT_MID | 40 | 0.5687 / 1.1 | segment/pad | Attach zone: R4 |
+| /GATE_BUS_NEG ↔ /SCAP_NEG | 60 | 0.5000 / 1.25 | pad/segment | Attach zone: Q2A |
+| /LED_K_NEG ↔ /GATE_NEG_A | 93.3 | 0.3500 / 1.4 | via/pad | Attach zone: Q8 |
+| /LED_K_NEG ↔ GND | 90 | 0.3500 / 1.4 | via/pad | Attach zone: Q8 |
+| /LED_K_POS ↔ /GATE_POS_A | 86.7 | 0.3500 / 1.4 | via/pad | Attach zone: Q7 |
+| /LED_K_POS ↔ GND | 90 | 0.3500 / 1.4 | via/pad | Attach zone: Q7 |
+| /PGND ↔ /REF_1V65 | 1.65 | 0.3750 / 0.4 | pad/segment | Below 30 V |
+| /PRE_D_NEG ↔ /PRECHARGE_NEG | 18.3 | 0.4000 / 0.48 | pad/segment | Below 30 V |
+| /RTN_COM_NEG ↔ /GATE_RTN_NEG | 27 | 0.5000 / 0.53 | segment/pad | Below 30 V |
+| /SCAP_NEG_RTN ↔ /GATE_RTN_NEG | 27 | 0.3000 / 0.53 | pad/segment | Below 30 V |
+| /SCAP_POS ↔ /SCAP_POS_RTN | 75 | 0.6000 / 1.3 | segment/pad | Attach zone: J3 |
+| /SCAP_POS_RTN ↔ /OC_TRIP_N | 11.7 | 0.2125 / 0.42 | pad/segment | Below 30 V |
+| /V_AC_SENSE_MID ↔ /V_AC_SENSE_RAW | 73 | 0.7070 / 1.3 | segment/pad | Attach zone: R75 |
+| /ZC_LINE_LIM ↔ /ZC_LINE_MID | 40 | 0.7070 / 1.1 | pad/segment | Attach zone: R76 |
+
+### Evidence and remaining work
+
+The [retained diagnostic package](diagnostics/issue-4507/2026-09-15/README.md)
+contains the complete closest-geometry attribution, all non-waived census failure
+excerpts, controlled pairwise scores, sidecar results and captured scripts. The
+manifest binds every shipped file. Full-report hashes bind the unabridged local
+census outputs.
+
+
+The local-only fixture and full logs remain under robb-pro
+`/tmp/4507-integration-af6b-20260915`. The collected archive, input/source receipts,
+independent scores and complete geometry attribution are retained in
+`.loom/sweep-checkpoint/evidence/issue-4507/af6b-terminal/`. Raw fixture files are
+not promoted into the repository's manufacturing outputs. The run's exact
+commands are retained in its process records; the two census commands use the
+existing voltage/class maps, IEC60664, pollution degree 2, material group IIIa,
+250 V fallback and `--waive-same-footprint` without threshold changes.
+
+This run finds no above-threshold routed-copper leak outside the existing attach
+exemptions. It does not establish a completed route, clean board-level census,
+valid completion report, or fabrication readiness. Source-sidecar pipeline
+handling and five incomplete nets remain explicit; this proof record needs
+independent review and the issue's remaining acceptance checks before closure.
+
+## Earlier record (retained)
+
 
 ## 2026-09-15 bounded follow-up: interior-pad wide escape
 
