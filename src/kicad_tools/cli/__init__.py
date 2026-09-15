@@ -586,6 +586,14 @@ def _run_stitch_command(args) -> int:
         sub_argv.append("--dry-run")
     if hasattr(args, "stitch_output") and args.stitch_output:
         sub_argv.extend(["-o", args.stitch_output])
+    if getattr(args, "stitch_complete", False):
+        sub_argv.append("--complete")
+    if getattr(args, "stitch_evidence_dir", None):
+        sub_argv.extend(["--evidence-dir", str(args.stitch_evidence_dir)])
+    if getattr(args, "stitch_kicad_cli", None):
+        sub_argv.extend(["--kicad-cli", str(args.stitch_kicad_cli)])
+    if getattr(args, "stitch_drc_strict", False):
+        sub_argv.append("--drc-strict")
     if hasattr(args, "stitch_drc") and args.stitch_drc:
         sub_argv.append("--drc")
     if hasattr(args, "stitch_mfr") and args.stitch_mfr is not None:

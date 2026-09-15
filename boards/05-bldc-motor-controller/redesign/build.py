@@ -41,6 +41,14 @@ def build(output):
         stdout=subprocess.DEVNULL,
         check=False,
     )
+    # The shared stage proves every plane net on actual refilled copper.
+    # A failed or dangling stitch never replaces the staged input, and its
+    # complete candidate/evidence directory survives outside recipe staging.
+    from kicad_tools.stitching import complete_power_connections
+
+    stitch_evidence = Path(tempfile.mkdtemp(prefix="bldc-power-stitch-")) / "evidence"
+    complete_power_connections(routed, evidence_dir=stitch_evidence)
+    shutil.copytree(stitch_evidence, evidence / "stitch")
     subprocess.run(
         [
             "kicad-cli",
