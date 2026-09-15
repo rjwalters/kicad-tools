@@ -338,6 +338,27 @@ fi
 
 **Why this matters**: Duplicate issues waste Builder cycles and create confusion. Issues #1981 and #1988 were created for the identical bug - this check prevents that.
 
+### Verify References (CRITICAL, #7658)
+
+**BEFORE creating any issue, run `verify-proposal-refs.sh` on the drafted body.** Hermit proposals go straight to Champion — they never pass through Curator, the only other role with a cited-path existence check (`curator.md` → "Verify against build base"). A false citation (a path from a sibling repo, a nonexistent file, a line range that runs into unrelated code, a false "N tracked files" count) has already cost two Champion evaluations plus an operator escalation per incident.
+
+```bash
+cat > /tmp/proposal-body.md <<'EOF'
+[drafted proposal body]
+EOF
+
+if ./.loom/scripts/verify-proposal-refs.sh /tmp/proposal-body.md; then
+    ./.loom/scripts/create-issue.sh --title "$TITLE" --body-file /tmp/proposal-body.md --label "loom:hermit" ...
+else
+    echo "Reference verification failed — fix the misses before filing (see below)"
+fi
+```
+
+**Any miss blocks filing** — do not file with a failing reference check. Fix what the script reports, then re-run it:
+- **Missing file**: correct the path, or if the code genuinely does not exist in this repo (e.g. it was in a sibling repo you also had open), rewrite the claim as "not present in this repo" instead of citing a path.
+- **Bad line range**: re-derive the line numbers against current `origin/main`, or drop the specific range and describe the region in prose.
+- **False tracked claim**: re-run the count against `git ls-files` and use the real number, or drop the claim.
+
 ### Brief Issue Template
 
 ```bash

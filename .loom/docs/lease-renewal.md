@@ -1,4 +1,4 @@
-# Sweep-Owned Lease Renewal (Epic #6165, Phase 1: #6180)
+# Sweep-Owned Lease Renewal (Epic #6165, Phase 1: #6180; dispatch-time start: #7672)
 
 Epic #6165 gives the `loom:building` claim a liveness dimension — a "lease".
 Issue #6179 (a sibling Phase 1 issue) defines the write-only lease record
@@ -43,6 +43,39 @@ Renewal must therefore be driven by the process actually doing the work:
 sweep alive → lease renewed and fresh; sweep dead → renewal stops → lease
 expires on its own → a reclaim by another host (Phase 2) is then justified
 by positive evidence, not inference from a missing broadcast.
+
+### …but the daemon *starts* the loop on its own dispatch path (#7672)
+
+"The sweep renews" is a statement about **who the loop watches**, not about
+which process typed the `start` command. Those were the same thing until
+#7672, because `sweep.md`'s Step 1a asked the spawned session to run `start`
+itself — and a step that only happens when a model remembers a sentence is
+not a mechanism. One session skipping it produced ~25 claim/yield cycles
+over 2.5 h across four hosts and a near-miss where a second Builder's claim
+went live while the first was still working in the shared
+`.loom/worktrees/issue-N` directory (the downstream incident cited in #7672):
+the lease aged out, a peer's reclamation gate (#6286) correctly judged the
+claim dead, and it reclaimed live work.
+
+So for a daemon-dispatched `--claim-owned` sweep, `loom-daemon` now issues
+the one-shot `start` itself, once per dispatch, from
+`SweepRegistry::finish_issue_dispatch` — see "Where it is wired in" below.
+The #6129 constraint above is untouched, because the *only* thing that moved
+is the invocation:
+
+- `start` forks one loop, `disown`s it, and returns. The loop is not a child
+  the daemon supervises; nothing in the registry tracks, ticks or waits on
+  it, and it is placed in its own process group so a process-group-targeted
+  teardown of the daemon cannot reach it either.
+- The daemon passes `--watch-pid <the sweep child's own pid>`, so the loop's
+  lifetime is pinned to the **sweep**, exactly as when the session started
+  it. It stops when the sweep stops — never when the daemon stops or
+  restarts.
+
+A daemon restart one second after dispatch therefore leaves the loop running
+untouched. What the daemon must *never* acquire is ongoing responsibility —
+no tick-loop renewal, no "re-arm the renewal for every live sweep on
+startup" — because that is precisely what a restart would drop.
 
 ## Mechanism
 
@@ -96,40 +129,105 @@ by `defaults/scripts/tests/test-sweep-lease-renew.sh`, whose `gh` stub now
 reproduces gh's own per-flag semantics instead of reading stdin regardless
 of the flag.
 
-### When `--host` / `--sweep-id` are needed
+### Always pass `--host` / `--sweep-id`
 
-`sweep.md`'s "Step 1a — daemon self-claim check" invokes `start` without
-them, and that is safe there: Step 1a fires only for the ONE issue
-`SweepRegistry::dispatch` told this session it owns (`--claim-owned N` /
-`LOOM_SWEEP_CLAIM_OWNED=N`), and by construction the newest lease comment on
-that issue at that point in pre-flight IS this session's own — the daemon
-wrote it immediately before spawning this exact child process, so "most
-recent lease comment" and "my own lease comment" coincide.
+Both callers below pass them, and both must: without the pair, `renew-once`
+falls back to "newest lease wins" and can spend the whole sweep PATCHing a
+*peer* dispatcher's more-recently-posted lease comment while this claim's own
+`updated_at` never advances (#6470/#6485 — a live, correctly-working renewal
+loop keeping the wrong claim alive). The daemon knows both values exactly (it
+published them itself in `write_lease_comment`); `sweep-lease-publish.sh
+publish` prints the resolved `<host> <sweep-id>` on stdout precisely so the
+in-session caller can thread them into `start` too.
 
-**The in-session path (Step 1b, #6320) must pass both.** There, the sweep
-published its own record at pre-flight and a *peer* daemon may publish a
-newer one for the same issue moments later. Under "newest wins" the sweep
-would then faithfully renew the peer's lease while its own aged out — the
-exact inversion of what renewal is for. `sweep-lease-publish.sh publish`
-prints the resolved `<host> <sweep-id>` on stdout precisely so the caller can
-thread them into `start`.
+`start` also auto-resolves the pair from `$LOOM_TERMINAL_ID` /
+`resolve_published_host` when a caller passes neither (#6485), which is what
+keeps an older installed `sweep.md` correct. Explicit flags always win.
 
 ## Where it is wired in
 
-`defaults/.claude/commands/loom/sweep.md`, "1. Per-issue pre-flight" → "Step
-1a — daemon self-claim check": immediately after confirming this session
-owns the daemon's claim on issue `N`, before falling through to step 2,
-```bash
-./.loom/scripts/sweep-lease-renew.sh start "$N" > /dev/null 2>&1 || true
-```
-Fire-and-forget, best-effort, non-blocking — mirrors #6179's own
-write-on-dispatch contract: a failure here changes nothing about whether the
-sweep runs.
+**Daemon-dispatched `--claim-owned` sweeps — `loom-daemon` starts the loop
+(#7672).** `SweepRegistry::finish_issue_dispatch`
+(`loom-daemon/src/sweep_registry/dispatch.rs`) calls
+`start_lease_renewal_loop`, which runs the equivalent of:
 
-For any sweep with no daemon-dispatched claim on this run (manual
-invocation, GH Actions cron, `--no-daemon`), Step 1a's self-claim signal is
-never true, so that line never executes — those candidates instead publish
-their own record and start renewal at **Step 1b** (#6320,
+```bash
+.loom/scripts/sweep-lease-renew.sh start "$N" \
+  --watch-pid "$CHILD_PID" --host "$PUBLISHED_HOST" --sweep-id "$SWEEP_ID"
+```
+
+- **Once per dispatch**, inside the same `dispatch()` call that spawned the
+  child — not from a tick, a timer, or any later daemon-driven step a restart
+  could lose.
+- **Off the registry lock.** `finish_issue_dispatch` runs holding the global
+  `Arc<Mutex<SweepRegistry>>` (on a tokio worker thread, for the IPC and
+  work-finder dispatch paths), so `start_lease_renewal_loop` reads what it
+  needs out of the registry and hands the `start` handshake — the subprocess
+  spawn plus its 10 s `LEASE_RENEW_START_TIMEOUT` wait — to a detached
+  thread. The handshake is sub-millisecond in the normal case, but a
+  pathological helper (a wedged filesystem, a `bash` that never execs) must
+  not be able to pin that mutex and starve `list_sweeps` / `cancel` /
+  concurrent dispatches behind it. Same reasoning, and same shape, as the
+  #6592/#7307 split that moved the account-selection poll out from under the
+  lock.
+- **After** the #4689 immediate-preflight-death check, deliberately: that
+  branch unwinds the whole claim (label, claim lock, peer-claim ad) for a
+  child that is already dead, and a loop must never be left watching a pid
+  that has already exited. The cost is a bounded gap — the
+  account-selection poll, ≤ `TOKEN_NAME_CAPTURE_TIMEOUT` — during which the
+  lease comment is seconds old and nowhere near any reclamation TTL.
+- **Best-effort**, exactly like #6179's write-on-dispatch contract: a
+  missing `.loom/scripts/sweep-lease-renew.sh`, a non-zero `start`, or a
+  spawn error only logs. Dispatch proceeds; the lease then ages out just as
+  it did before this hand-off existed, with `loom:building` still the
+  authoritative claim.
+- The helper's **stderr goes to the sweep's own log file**, not `/dev/null`,
+  so the mid-sweep renewal failures #6541 made visible still land where an
+  operator already looks. It must be a file, never a pipe — the detached
+  loop holds its inherited copy (fd 9) open for the sweep's whole lifetime.
+
+### The prompt's fallback, and why the withdrawal is conditional
+
+`sweep.md`'s Step 1a no longer runs `start` unconditionally — but it does not
+simply *stop* either. The dispatch also exports a capability marker into the
+child:
+
+```
+LOOM_SWEEP_LEASE_RENEW_DISPATCHED=<N>
+```
+
+set for every `Issue` dispatch (never for a `PrSet`, which claims no issue and
+holds no lease), and Step 1a runs `start` itself exactly when that marker does
+not name the issue it is pre-flighting.
+
+The marker exists because **the installed prompt and the daemon binary do not
+roll together**. `.claude/commands/loom/sweep.md` is refreshed by an ordinary
+`git pull` / `resync-installed.sh` pass; the `loom-daemon` binary is only
+rebuilt by `loom update`. "New prompt, pre-#7672 daemon" is therefore a real,
+reachable state — and under an unconditional withdrawal every sweep dispatched
+during that skew would have no renewal loop from *either* side, which is
+precisely the stale-lease reclamation this change exists to prevent, applied
+fleet-wide. Gating on the marker makes all three combinations safe:
+
+| Prompt | Daemon | Outcome |
+|---|---|---|
+| new | ≥ #7672 (marker set) | session skips — the daemon already started it |
+| new | pre-#7672 (no marker) | session starts it itself: pre-#7672 behavior, unchanged |
+| old | ≥ #7672 | session also starts one — a duplicate loop, harmless (an idempotent PATCH of the same comment, one extra call per interval) |
+
+The marker is a **capability** signal, not a success receipt: it is set at
+spawn time, before `start` has run, and `start` is best-effort even when it
+does. So a marker-present dispatch whose `start` failed leaves no loop — the
+daemon logs it, and the lease ages out exactly as it did before this hand-off
+existed. Step 1a deliberately does not try to compensate for that: forking a
+duplicate loop on every healthy dispatch to cover a rare, already-logged case
+is a bad trade.
+
+**In-session paths — the sweep still starts its own loop.** For any sweep
+with no daemon-dispatched claim on this run (manual invocation, GH Actions
+cron, `--no-daemon`) there is no dispatch code to do it mechanically, so
+Step 1a's self-claim signal is never true and those candidates instead
+publish their own record and start renewal at **Step 1b** (#6320,
 `sweep-lease-publish.sh`), pinned to that record's `--host`/`--sweep-id`:
 
 ```bash

@@ -138,6 +138,7 @@ test-loom-dispatcher.sh
 test-loom-status.sh
 test-mcp-config.sh
 test-mcp-pnpm-selfrepair.sh
+test-memory-budget.sh
 test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
@@ -149,6 +150,7 @@ test-merge-pr-dirty-worktree-guard.sh
 test-merge-pr-head-mismatch.sh
 test-merge-pr-help.sh
 test-merge-pr-local-branch-cleanup.sh
+test-merge-pr-loom-pr-label-guard.sh
 test-merge-pr-merge-ordering-guard.sh
 test-merge-pr-partial-increment.sh
 test-merge-pr-primary-checkout-advice.sh
@@ -177,6 +179,7 @@ test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
 test-resolve-tier-model.sh
 test-resync-installed.sh
+test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
 test-run-ci-suites-failure-excerpt.sh
 test-run-ci-suites-serial-lane.sh
@@ -200,6 +203,7 @@ test-sync-labels-repo-flag.sh
 test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
+test-verify-proposal-refs.sh
 test-version-check-gate-callsites.sh
 test-version-check-gate.sh
 test-warn-operator-gated.sh

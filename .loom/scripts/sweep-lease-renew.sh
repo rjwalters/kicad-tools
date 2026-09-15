@@ -22,9 +22,35 @@
 # would let a live sweep's lease expire, and a peer host could reclaim work
 # that was never actually abandoned — reproducing the exact bug this epic
 # exists to fix, from a different direction. Renewal must therefore be driven
-# by the process actually doing the work: this script is invoked FROM WITHIN
-# the sweep's own execution (`defaults/.claude/commands/loom/sweep.md`,
-# "Step 1a — daemon self-claim check"), never from `loom-daemon`.
+# by the process actually doing the work.
+#
+# ## Who may invoke `start` (amended by loom#7672)
+#
+# The rule above constrains **which process the loop watches**, not which
+# process typed `start`. `loom-daemon` MAY invoke `start` — and does, once,
+# in `SweepRegistry::finish_issue_dispatch`, immediately after spawning a
+# `--claim-owned` sweep child, passing `--watch-pid <that child's pid>`
+# (plus the `--host`/`--sweep-id` pair it published in the lease comment).
+# That is a one-shot invocation, not ownership: `cmd_start` forks the loop,
+# `disown`s it, and returns, so the daemon holds no handle and runs no tick;
+# the loop's lifetime is pinned to the SWEEP's pid and a daemon restart
+# leaves it running untouched. The hand-off exists because the previous
+# arrangement — prose in sweep.md Step 1a asking the spawned LLM session to
+# run `start` itself — failed exactly once in production and cost ~2.5h of
+# fleet-wide claim/yield thrash plus a near-miss double-claim on a shared
+# worktree (the downstream incident cited in loom#7672).
+#
+# What `loom-daemon` still must NEVER do is own ONGOING renewal — no
+# tick-loop `renew-once`, no "re-arm every live sweep's renewal on startup".
+# That, and only that, is what loom#6129 forbids.
+#
+# In-session callers (operator `/loom:sweep`, `--no-daemon`, GH Actions cron)
+# have no dispatch code to do this for them and still invoke `start`
+# themselves from `defaults/.claude/commands/loom/sweep.md` — Step 1b
+# unconditionally, and Step 1a as a fallback when the dispatch's
+# `LOOM_SWEEP_LEASE_RENEW_DISPATCHED` capability marker is absent (a
+# pre-#7672 daemon binary, which rolls on a different cadence than the
+# installed prompt).
 #
 # ## Marker format (coordinated with #6179)
 #

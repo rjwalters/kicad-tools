@@ -85,6 +85,28 @@ trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 cat > "$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
+
+# --- #7647 formal-review reconciliation gate reads -------------------------
+# post-verdict.sh runs check-review-feedback.sh on every `approved` verdict.
+# This suite is about the verdict-sha marker, not about review reconciliation
+# (that lives in test-review-feedback-reconciliation.sh), so answer those reads
+# with a clean, complete, EMPTY review state -> the gate reports CLEAR and the
+# marker assertions below exercise exactly what they did before.
+if [[ "$1" == "api" ]]; then
+  if [[ "$2" == "graphql" ]]; then
+    printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}\n'
+    exit 0
+  fi
+  # A paginated list endpoint with a server-side --jq filter over an empty
+  # array produces no output at all.
+  printf ''
+  exit 0
+fi
+if [[ "$1" == "repo" && "$2" == "view" ]]; then
+  echo "owner/repo"
+  exit 0
+fi
+
 if [[ "$1" == "pr" && "$2" == "comment" ]]; then
   pr_num="$3"
   body=""

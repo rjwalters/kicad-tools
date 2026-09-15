@@ -816,6 +816,9 @@ if [[ "${1:-}" == "release" && "${2:-}" == "view" ]]; then
     case "$fields" in
         tagName) echo "$TAG_VAL"; exit 0 ;;
         assets)  ls "$ASSETS_DIR" 2>/dev/null; exit 0 ;;
+        # --resolve-json (#7609) asks for the release's publish timestamp so
+        # the daemon can surface `artifact_available.published_at`.
+        publishedAt) echo "2026-09-13T12:00:00Z"; exit 0 ;;
         *) exit 1 ;;
     esac
 fi
@@ -5922,6 +5925,238 @@ else
     echo -e "${RED}✗${NC} the redirected-target build was actually PROVISIONED to LOOM_DAEMON_BIN, not silently dropped (#6160)"
     echo "  installed commit: ${installed_commit80:-<none>}, expected: $HEAD80"
     echo "  output: $out80"
+fi
+
+# ============================================================
+# 81. --resolve-json (#7609): READ-ONLY artifact resolution for the daemon's
+#     artifact-first auto_update tick. Must print exactly one JSON object on
+#     stdout (every other line on stderr), report the release AND the
+#     installed binary (version + sha256, which is what lets the daemon
+#     detect "same version, different bytes"), and must not fetch the binary,
+#     build, provision, restart, or touch the git checkout.
+# ============================================================
+W81="$BASE_WORKDIR/w81"
+new_fixture "$W81"
+INSTALLED81="$W81/installed/loom-daemon"
+mkdir -p "$W81/installed"
+write_fake_artifact_daemon "$INSTALLED81" "0.19.21" "deadbee"
+echo "0.19.30" > "$W81/VERSION"
+
+W81_ASSETS="$W81/gh-assets"
+mkdir -p "$W81_ASSETS"
+write_fake_artifact_daemon "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu" "0.19.24" "cafe123"
+sha256_of "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu" \
+    > "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu.sha256"
+ASSET_SHA81="$(awk 'NR==1{print $1}' "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu.sha256")"
+
+W81_FAKEBIN="$W81/fakebin"
+mkdir -p "$W81_FAKEBIN"
+write_fake_gh "$W81_FAKEBIN/gh" "v0.19.24" "$W81_ASSETS"
+write_fake_cargo "$W81_FAKEBIN/cargo"
+
+W81_STDERR="$W81/resolve.stderr"
+out81=$( cd "$W81" && PATH="$W81_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$INSTALLED81" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
+    bash "$UPDATE_SCRIPT" --resolve-json 2>"$W81_STDERR" )
+rc81=$?
+assert_eq "0" "$rc81" "--resolve-json: exits 0 when a release artifact resolves"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$(printf '%s' "$out81" | wc -l | tr -d ' ')" == "0" ]] && [[ "$out81" == \{*\} ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --resolve-json: stdout is exactly one JSON object (everything else went to stderr)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --resolve-json: stdout is exactly one JSON object (everything else went to stderr)"
+    echo "  stdout: $out81"
+fi
+
+# Field-by-field, parsed the same way the daemon parses it (a real JSON
+# parser when python3 is available; a grep fallback otherwise so the suite
+# still runs on a host without it).
+json81_field() {
+    local key="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$out81" | python3 -c "import json,sys; v=json.load(sys.stdin).get('$key'); print('' if v is None else v)" 2>/dev/null
+    else
+        printf '%s' "$out81" | grep -oE "\"$key\":\"[^\"]*\"" | head -n1 | sed -E "s/\"$key\":\"(.*)\"/\1/"
+    fi
+}
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out81" | grep -q '"ok":true'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --resolve-json: ok is true when a release resolves"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --resolve-json: ok is true when a release resolves"
+    echo "  stdout: $out81"
+fi
+assert_eq "0.19.24" "$(json81_field version)" "--resolve-json: reports the resolved release version"
+assert_eq "v0.19.24" "$(json81_field tag)" "--resolve-json: reports the resolved release tag"
+assert_eq "0.19.21" "$(json81_field installed_version)" "--resolve-json: reports the INSTALLED version"
+assert_eq "$ASSET_SHA81" "$(json81_field asset_sha256)" "--resolve-json: reports the release's published sha256 (from the .sha256 asset)"
+assert_eq "$(sha256_of "$INSTALLED81" | awk '{print $1}')" "$(json81_field installed_sha256)" "--resolve-json: reports the installed binary's own sha256"
+assert_eq "0.19.30" "$(json81_field source_version)" "--resolve-json: reports the source tree's VERSION"
+assert_eq "x86_64-unknown-linux-gnu" "$(json81_field target)" "--resolve-json: reports the resolved target triple"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+installed81_after="$("$INSTALLED81" --version 2>/dev/null)"
+if echo "$installed81_after" | grep -q "0.19.21" \
+    && ! grep -q 'Rebuilding loom-daemon (cargo build' "$W81_STDERR" \
+    && ! grep -q 'Downloading loom-daemon-' "$W81_STDERR"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --resolve-json: nothing was built, downloaded, or provisioned (read-only)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --resolve-json: nothing was built, downloaded, or provisioned (read-only)"
+    echo "  installed --version after: $installed81_after"
+    echo "  stderr: $(cat "$W81_STDERR")"
+fi
+
+# ============================================================
+# 82. --resolve-json with NO resolvable release (unreachable/rate-limited
+#     GitHub API): still prints the JSON object, with ok=false and a reason,
+#     and exits 1 — the daemon reads `.ok`/`.reason` and falls back to its
+#     source-staleness path rather than treating this as a fault.
+# ============================================================
+W82="$BASE_WORKDIR/w82"
+new_fixture "$W82"
+INSTALLED82="$W82/installed/loom-daemon"
+mkdir -p "$W82/installed"
+write_fake_artifact_daemon "$INSTALLED82" "0.19.21" "deadbee"
+
+W82_FAKEBIN="$W82/fakebin"
+mkdir -p "$W82_FAKEBIN"
+write_fake_gh_unreachable "$W82_FAKEBIN/gh"
+write_fake_cargo "$W82_FAKEBIN/cargo"
+
+out82=$( cd "$W82" && PATH="$W82_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$INSTALLED82" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
+    bash "$UPDATE_SCRIPT" --resolve-json 2>/dev/null )
+rc82=$?
+assert_eq "1" "$rc82" "--resolve-json: exits 1 when no release artifact resolves"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$out82" == \{*\} ]] && echo "$out82" | grep -q '"ok":false' && echo "$out82" | grep -q '"reason":"[^"]'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --resolve-json: an unresolvable release still yields JSON with ok=false + a reason"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --resolve-json: an unresolvable release still yields JSON with ok=false + a reason"
+    echo "  stdout: $out82"
+fi
+
+# ============================================================
+# 83. --resolve-json honors --no-fetch / LOOM_DAEMON_UPDATE_FETCH=0: a host
+#     that has opted out of the artifact path reports ok=false with that as
+#     the reason, which is what keeps the daemon's artifact-first tick on its
+#     source path there.
+# ============================================================
+out83=$( cd "$W81" && PATH="$W81_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$INSTALLED81" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
+    LOOM_DAEMON_UPDATE_FETCH=0 \
+    bash "$UPDATE_SCRIPT" --resolve-json 2>/dev/null )
+rc83=$?
+assert_eq "1" "$rc83" "--resolve-json: exits 1 when artifact-fetch is disabled on the host"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out83" | grep -q '"ok":false' && echo "$out83" | grep -qi 'disabled'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --resolve-json: --no-fetch/LOOM_DAEMON_UPDATE_FETCH=0 is reported as the reason"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --resolve-json: --no-fetch/LOOM_DAEMON_UPDATE_FETCH=0 is reported as the reason"
+    echo "  stdout: $out83"
+fi
+
+# ============================================================
+# 84. (#7609) A forced --fetch is NOT blocked by local-checkout state. Test 38
+#     above proves the default (source-build) path hard-aborts exit 1 on a
+#     diverged local commit. --fetch installs a published artifact and never
+#     compiles anything, so the same checkout must NOT block it: this is the
+#     mode the daemon's artifact-first auto_update tick rolls with, and letting
+#     a dirty/diverged/behind checkout veto it would reintroduce exactly the
+#     fleet-wide stall #7609 exists to end, one level down.
+# ============================================================
+W84="$BASE_WORKDIR/w84"
+BARE84="$BASE_WORKDIR/w84-origin.git"
+new_fixture_with_origin "$W84" "$BARE84"
+# Advance origin/main with real content...
+TMPCLONE84="$(mktemp -d)"
+git clone -q "$BARE84" "$TMPCLONE84"
+echo "origin-value" > "$TMPCLONE84/origin-only-file.txt"
+( cd "$TMPCLONE84" && git add origin-only-file.txt \
+    && git -c user.email=test@test -c user.name=test commit -q -m "origin real change" \
+    && git push -q origin HEAD:refs/heads/main )
+rm -rf "$TMPCLONE84"
+# ...and diverge locally with DIFFERENT real content, so `git merge --ff-only`
+# genuinely refuses (the test-38 hard-abort shape), plus an untracked stray of
+# the kind that shut the gate on two fleet hosts.
+echo "local-value" > "$W84/local-only-file.txt"
+( cd "$W84" && git add local-only-file.txt \
+    && git -c user.email=test@test -c user.name=test commit -q -m "local diverged commit (real content)" )
+echo "" > "$W84/pnpm-lock.yaml"
+HEAD_BEFORE84="$(cd "$W84" && git rev-parse --short HEAD)"
+
+INSTALLED84="$W84/installed-loom-daemon"
+write_fake_artifact_daemon "$INSTALLED84" "0.19.21" "deadbee"
+W84_ASSETS="$W84/gh-assets"
+mkdir -p "$W84_ASSETS"
+W84_BIN_NAME="loom-daemon-x86_64-unknown-linux-gnu"
+write_fake_artifact_daemon "$W84_ASSETS/$W84_BIN_NAME" "0.19.24" "cafe123"
+sha256_of "$W84_ASSETS/$W84_BIN_NAME" > "$W84_ASSETS/$W84_BIN_NAME.sha256"
+
+W84_FAKEBIN="$W84/fakebin"
+mkdir -p "$W84_FAKEBIN"
+write_fake_gh "$W84_FAKEBIN/gh" "v0.19.24" "$W84_ASSETS"
+write_fake_cargo "$W84_FAKEBIN/cargo"
+
+out84=$( cd "$W84" && PATH="$W84_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$INSTALLED84" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
+    bash "$UPDATE_SCRIPT" --no-restart --fetch 2>&1; echo "EXIT=$?" )
+rc84=$(echo "$out84" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
+assert_eq "0" "$rc84" "--fetch (#7609): a diverged/dirty/behind checkout does NOT block an artifact roll (exit 0)"
+
+installed84_version="$("$INSTALLED84" --version 2>/dev/null)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$installed84_version" | grep -q "0.19.24"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --fetch (#7609): the release artifact was actually provisioned over the stale binary"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --fetch (#7609): the release artifact was actually provisioned over the stale binary"
+    echo "  --version: $installed84_version"
+    echo "  output: $out84"
+fi
+
+HEAD_AFTER84="$(cd "$W84" && git rev-parse --short HEAD)"
+assert_eq "$HEAD_BEFORE84" "$HEAD_AFTER84" "--fetch (#7609): leaves the local checkout's HEAD completely untouched (no ff-sync side effect)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out84" | grep -q 'never builds from this checkout'; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --fetch (#7609): says why the behind-origin checkout was not fast-forwarded"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --fetch (#7609): says why the behind-origin checkout was not fast-forwarded"
+    echo "  output: $out84"
+fi
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if echo "$out84" | grep -q 'Rebuilding loom-daemon (cargo build'; then
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} --fetch (#7609): never compiles on the artifact path"
+    echo "  output: $out84"
+else
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} --fetch (#7609): never compiles on the artifact path"
 fi
 
 # ============================================================

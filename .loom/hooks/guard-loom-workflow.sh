@@ -76,6 +76,27 @@ log_hook_error() {
 # first (#3898). Best-effort: any failure falls back to the raw command.
 strip_literal_text() {
     printf '%s' "$1" | awk '
+    # Same live-vs-escaped substitution scan as mask_data_flag_values() below
+    # (issue #7495) -- an escaped backtick or `\$(` is a literal character, not
+    # a command substitution, so a `\`code span\`` in a --body value must not
+    # veto redaction and leave a raw secret in the decision log. Duplicated
+    # rather than shared because each function is its own awk program.
+    function has_live_subst(str,    i, c, bs) {
+        bs = 0
+        for (i = 1; i <= length(str); i++) {
+            c = substr(str, i, 1)
+            if (c == "\\") {
+                bs++
+                continue
+            }
+            if (bs % 2 == 0) {
+                if (c == "`") return 1
+                if (c == "$" && substr(str, i + 1, 1) == "(") return 1
+            }
+            bs = 0
+        }
+        return 0
+    }
     BEGIN {
         SQ = sprintf("%c", 39)   # single quote
         DQ = sprintf("%c", 34)   # double quote
@@ -99,7 +120,7 @@ strip_literal_text() {
             head  = substr(matched, 1, qpos)
             qchar = substr(matched, qpos, 1)
             inner = substr(matched, qpos + 1, length(matched) - qpos - 1)
-            if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+            if (!has_live_subst(inner)) {
                 gsub(/./, "X", inner)
             }
             out = out pre head inner qchar
@@ -630,10 +651,10 @@ mask_var_assigned_heredoc_bodies() {
 # --search. A near-duplicate of strip_literal_text() above (which is used
 # only for decision-log redaction) with --search added, kept as a SEPARATE
 # function so this decision-time masking can never change what
-# strip_literal_text() logs. Same conservative floor as strip_literal_text():
-# a span that still contains an unmasked `$(`/backtick (e.g. real command
-# substitution, not yet neutralized by the heredoc pass above) is left
-# completely untouched.
+# strip_literal_text() logs. Same conservative floor as strip_literal_text()
+# (both share an identical copy of has_live_subst(), #7495): a span that still
+# contains a LIVE, unescaped `$(`/backtick (e.g. real command substitution,
+# not yet neutralized by the heredoc pass above) is left completely untouched.
 #
 # Also recognizes `gh api ... -f <field>=<value>` for known text-bearing
 # fields (issue #5172): `gh api`'s field syntax is `-f key=value`, a
@@ -641,6 +662,30 @@ mask_var_assigned_heredoc_bodies() {
 # so it needs its own alternative in the same regex.
 mask_data_flag_values() {
     printf '%s' "$1" | awk '
+    # Return 1 iff `inner` contains a LIVE (unescaped) backtick or `$(`
+    # command-substitution opener. A backtick or `$(` immediately preceded
+    # by an ODD number of backslashes is escaped -- a literal character with
+    # zero execution risk inside a double-quoted string (e.g. the `\`foo()\``
+    # markdown code-span idiom every automated PR/issue comment uses) -- and
+    # must NOT trip this check (issue #7495, third recurrence of the
+    # #5109/#6464/#6866 false-positive class). An EVEN number of preceding
+    # backslashes (including zero) leaves the character live.
+    function has_live_subst(str,    i, c, bs) {
+        bs = 0
+        for (i = 1; i <= length(str); i++) {
+            c = substr(str, i, 1)
+            if (c == "\\") {
+                bs++
+                continue
+            }
+            if (bs % 2 == 0) {
+                if (c == "`") return 1
+                if (c == "$" && substr(str, i + 1, 1) == "(") return 1
+            }
+            bs = 0
+        }
+        return 0
+    }
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
@@ -664,7 +709,7 @@ mask_data_flag_values() {
             head  = substr(matched, 1, qpos)
             qchar = substr(matched, qpos, 1)
             inner = substr(matched, qpos + 1, length(matched) - qpos - 1)
-            if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+            if (!has_live_subst(inner)) {
                 gsub(/./, "X", inner)
             }
             out = out pre head inner qchar

@@ -475,6 +475,55 @@ never held one). #4980 closes that by persisting the group:
 pre-#4980 daemon still deserializes — failing to parse it would be read
 everywhere as "no owner" and would drop a *live* sweep's lock.
 
+#### Lease renewal is started at dispatch, but never owned by the daemon (#7672)
+
+A dispatch that successfully flips `loom:issue → loom:building` also writes a
+**lease record** on the issue (`<!-- loom:lease host=… sweep=… -->`, #6179) —
+the liveness evidence a peer host's reclamation gate (#6286), the dispatch-time
+ordering check (#6287) and the sweep-side pre-push fence (#6309) all read. A
+lease only means anything while something keeps re-touching it.
+
+Since #7672 the daemon starts that renewal loop itself, in
+`finish_issue_dispatch`, immediately after the child is spawned and past the
+#4689 preflight-death check:
+
+```
+.loom/scripts/sweep-lease-renew.sh start <N> \
+  --watch-pid <child pid> --host <published host> --sweep-id <sweep id>
+```
+
+It supersedes a prose instruction in `sweep.md`'s Step 1a that asked the spawned
+session to run the command itself — one session skipping it cost ~2.5 h of
+fleet-wide claim/yield thrash and a near-miss double-claim on a shared worktree.
+Every `Issue` dispatch also exports `LOOM_SWEEP_LEASE_RENEW_DISPATCHED=<N>` so
+Step 1a can tell whether *this* daemon does the hand-off, and still start the
+loop itself against a pre-#7672 binary — the prompt and the binary roll on
+different cadences (`git pull` vs. `loom update`).
+
+**This is a one-shot invocation, not ownership.** `start` forks a loop,
+`disown`s it and returns; the daemon retains no handle, no tick, and no
+restart-time re-arm. The loop watches the **sweep child's** pid
+(`--watch-pid`), runs in its own process group, and self-terminates when the
+sweep exits or its own lease yields — so a daemon restart one second later
+leaves it running. Daemon-*owned* renewal is explicitly forbidden: role agents
+outlive the daemon that spawned them (#6129), so a restart would expire a live
+sweep's lease and invite exactly the reclamation this mechanism exists to
+prevent. It is also best-effort — no helper script, a non-zero `start`, or a
+spawn failure only logs, and the lease then ages out as it did before.
+
+The `start` handshake itself (the subprocess spawn plus its bounded wait for
+the loop pid) runs on a **detached thread**, never inline:
+`finish_issue_dispatch` holds the global registry mutex — on a tokio worker
+thread for both the IPC and work-finder dispatch paths — and a pathological
+helper must not be able to pin it for up to 10 s per `Issue` dispatch and
+starve `list_sweeps` / `cancel` / concurrent dispatches. Same hazard, and same
+shape of fix, as the #6592/#7307 split that moved the account-selection poll
+out from under the lock.
+
+Manual / `--no-daemon` / GH Actions sweeps have no dispatch code to do this, so
+they still publish and start their own loop at Step 1b (#6320). Full mechanism:
+[`lease-renewal.md`](lease-renewal.md) · [`lease-record.md`](lease-record.md).
+
 ### `list_sweeps` (Phase A)
 
 Return all tracked sweeps, optionally filtered by lifecycle state.
@@ -3870,6 +3919,11 @@ knobs not yet audited here.
 | *(host-local tiers only — see below)* | `LOOM_ROLE_RUNNER_SHARD_INDEX` | *(unset)* | **This host's** 0-based role-runner shard index (#6374). Must **differ** per host, so it belongs in the service unit next to `LOOM_ROLE_RUNNER`, never in the tracked `.loom/config.json` — a committed `autonomous.roleRunner.shardIndex` gives every host the same index and leaves every other slice with zero owners fleet-wide, so the daemon **refuses** it (logs `error!`, falls back to unsharded). Requires `shardCount`; out-of-range/malformed → unsharded. See [Role-runner host sharding](#role-runner-host-sharding-6374) |
 | `autonomous.roleRunner.shardCount` | `LOOM_ROLE_RUNNER_SHARD_COUNT` | *(unset)* | Fleet-wide number of role-runner shards (#6374) — must be **identical** on every host, which is why the tracked config is a fine home for it. `0`/`1`/malformed → unsharded (every host rotates every workspace, the pre-#6374 behavior). Requires `shardIndex` |
 | `autonomous.roleRunner.shardKey` | *(config only)* | `owner/repo` from `origin`, else the root's basename | Explicit cross-host-stable key hashed to pick a workspace's owning shard (#6374). Must be identical fleet-wide. Set it when the derived key would diverge between hosts — the basename fallback does exactly that if two hosts cloned the same repo into differently-named directories. `status` reports the resolved key and its tier so two hosts can be diffed |
+| `autonomous.roleRunner.roster.enabled` | `LOOM_ROLE_RUNNER_ROSTER` | `false` | Opt-in publish of this host's roster comment (Issue #7690, Phase A of #6704). Off ⇒ zero extra forge calls, `status` byte-identical to pre-#7690. **Observational only** — does not affect `role_shard::decide()`'s verdict; see [Role-runner host roster](#role-runner-host-roster-7690-phase-a-of-6704) |
+| `autonomous.roleRunner.roster.issue` | `LOOM_ROLE_RUNNER_ROSTER_ISSUE` | *(unset)* | `owner/repo#N` of the designated roster issue. Fleet-wide, so the tracked config is a fine home (same argument as `shardCount`). `enabled: true` with this unset/invalid ⇒ one `error!` and no roster (never a panic) |
+| `autonomous.roleRunner.roster.heartbeatSecs` | `LOOM_ROLE_RUNNER_ROSTER_HEARTBEAT_SECS` | `300` | This host's roster-comment refresh cadence |
+| `autonomous.roleRunner.roster.ttlSecs` | `LOOM_ROLE_RUNNER_ROSTER_TTL_SECS` | `900` | Liveness TTL — floored at 3x `heartbeatSecs` regardless of a smaller configured value, so a single missed round-trip can never look like a death |
+| `autonomous.roleRunner.roster.settleSecs` | `LOOM_ROLE_RUNNER_ROSTER_SETTLE_SECS` | `900` | Quiet period a new ring must survive before anyone acts under it. Unused in Phase A (no ring consumes the roster yet); reserved for Phase B's fencing rule |
 | `autonomous.idleExit.enabled` | `LOOM_AUTONOMOUS_IDLE_EXIT_ENABLED` | `false` | End the daemon cleanly after the idle window so a host guard can take over. Independent of Work Finder; never invokes a power command |
 | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` | `60` | Continuous idle/starvation window. Zero/invalid → default |
 | `autonomous.idleExit.onTokenStarvation` | `LOOM_AUTONOMOUS_IDLE_EXIT_ON_TOKEN_STARVATION` | `true` | Also exit after zero healthy accounts for the full window with no sweep in flight, even if roles keep cycling |
@@ -4963,13 +5017,68 @@ line naming the owning shard, the key, and the key's tier. Unconfigured
 single-host installs print neither. `--json` carries the same under
 `role_runner_shard` (report-level) and `per_repo[].role_runner_shard`.
 
-**Static, not roster-driven (deferred).** The assignment comes from
-`(shardIndex, shardCount)`, not from a live host roster. Killing a host does
-**not** automatically reassign its slice — those workspaces stop rotating until
-an operator lowers `shardCount` or points a survivor at the vacated index.
-Automatic reassignment needs a liveness protocol whose failure modes are exactly
-the zero-or-two-owner races this static scheme rules out arithmetically, so it is
-deliberately a follow-up (#6704) rather than part of the same change.
+**Still static in this phase.** The assignment consumed by `decide()` /
+`owns()` above still comes from `(shardIndex, shardCount)`, never from the
+roster below — see the next section for what has actually shipped.
+
+### Role-runner host roster (#7690, Phase A of #6704)
+
+The design record — [`role-runner-roster.md`](role-runner-roster.md) — picked
+a **forge-backed roster** (one marker comment per host on a designated roster
+issue, liveness from the comment's forge-assigned `updated_at`, as with lease
+records) plus a **generation-fenced ring** for a *future* phase to consume.
+Phase A, described here, ships only the write side and `status` rendering:
+**it does not change `decide()`'s verdict at all.** Killing a host still does
+**not** reassign its slice automatically — that is Phase B, gated entirely
+behind `roster.enabled` staying off by default (see the config table above,
+`autonomous.roleRunner.roster.*`).
+
+**What Phase A does.** With `roster.enabled: true` and a valid `roster.issue`
+(`owner/repo#N`), each daemon runs ONE per-daemon (not per-workspace)
+heartbeat loop that:
+
+1. Reads back every roster comment on the issue (REST — `gh api
+   repos/{owner}/{repo}/issues/{n}/comments`, never GraphQL, #5047).
+2. Locates this host's own comment (by its opaque id — the same
+   `opaque_host_id(host_identity())` lease records publish, #6322) — or, on a
+   fleet host's very first cycle, has none to find.
+3. `PATCH`es it (or `POST`s a new one) with a fresh body advertising the
+   `fnv1a64` digest of every currently-registered, role-runner-enabled
+   workspace's shard key, sorted ascending. The body is regenerated wholesale
+   every cycle (there is no user prose to preserve), so its own trailing
+   timestamp guarantees the "PATCH must change something" contract
+   (`lease-renewal.md`) on every call, `serves` change or not.
+
+At the default 300s cadence that is ~24 REST calls/hour/host, budgeted in the
+design record. With `roster.enabled: false` (the default) the loop never
+spawns and the daemon makes zero extra forge calls.
+
+**Membership and generation are pure functions of `(comment set, instant)`** —
+`role_shard::roster::members`/`ring`/`generation` — exactly as the design
+record specifies, and are the basis for Phase B's fencing rule. Nothing in the
+daemon calls them for ownership yet; `status` is their only consumer so far
+(next paragraph).
+
+**Visibility.** `loom-daemon status` extends the `Role runner (sharding): …`
+header (when the roster has completed at least one heartbeat cycle) with a
+roster block naming the issue, live/seen member counts, the current
+generation and how long it has been settled, and one line per member:
+
+```
+Role runner (sharding): shard 1 of 3 (index from env, count from config)
+  Roster: issue owner/repo#1234 · 3 live / 4 seen · gen 2026-09-15T09:41:07Z (settled 22m)
+    host-a3f9c1d2   fresh   (last beat 41s ago)   serves 27
+    host-d9142cf3   fresh   (last beat 2m ago)    serves 27   ← this host
+    host-e1d4c843   EXPIRED (last beat 31m ago)   serves 27
+```
+
+An EXPIRED member is always rendered, never dropped — silence about a dead
+host is exactly how the pre-#6374 `LOOM_ROLE_RUNNER=0` mitigation became
+invisible. `status` never triggers its own forge read for this: it renders
+only whatever the heartbeat task's own last successful read cached, so a
+roster that has never completed a cycle (including the always-off default)
+renders nothing. `--json` carries the identical section under
+`role_runner_shard.roster`.
 
 ### Completion narration → public fleet feed (#4426)
 
@@ -8006,6 +8115,7 @@ manually rebuilt the Rust binary, reprovisioned it, and restarted the process.
 ./.loom/scripts/cli/loom-daemon-update.sh --restart-now # systemd only, Issue #5138: opt OUT of the drain-by-default below, restart immediately
 ./.loom/scripts/cli/loom-daemon-update.sh --fetch        # REQUIRE a verified release artifact (never silently fall back to a source build); exit 1 if none resolves
 ./.loom/scripts/cli/loom-daemon-update.sh --no-fetch     # never consider release artifacts; always build from local source (pre-#5020 behavior)
+./.loom/scripts/cli/loom-daemon-update.sh --resolve-json # READ-ONLY (#7609): print ONE JSON object describing the latest release artifact + the installed binary, then exit -- no fetch, no git fetch, no build, no provision, no restart
 ```
 
 **One-shot drain roll (Issue #5138).** Before this, a drained roll needed the
@@ -8195,13 +8305,41 @@ seams):
 | `LOOM_DAEMON_UPDATE_COSIGN_OIDC_ISSUER` | Expected keyless certificate issuer (default `https://token.actions.githubusercontent.com`) |
 
 **No new daemon config keys.** The autonomous self-update loop
-(`autonomous.autoUpdate.*`) needs no change and passes no fetch flag: it invokes
-`loom-daemon-update.sh --no-restart` and inherits the `auto` default, which is
-exactly the unattended behavior it wants (prefer an artifact, degrade to a
-rebuild). It deliberately does **not** pass `--fetch`, since that would turn a
-transient GitHub API hiccup into a failed roll. The existing exit-code contract is
-unchanged: a checksum/signature failure maps to exit `1` (retryable, same bucket
-as a failed `cargo build`), so `classify_exit` needs no new cases.
+(`autonomous.autoUpdate.*`) needs no new knobs. Since Issue #7609 it drives its
+*decision* from a read-only `--resolve-json` query and then rolls with an
+explicit `--fetch` on the artifact path (see
+[Artifact-first auto-update ticks](#artifact-first-auto-update-ticks-7609)
+below) or a plain `--no-restart` (inheriting the `auto` default) on the source
+fallback path — the "transient GitHub API hiccup turns a roll into a failure"
+concern that kept `--fetch` off the unattended path is handled one level up
+instead: a failed resolution is not an artifact-path roll at all, it *is* the
+fallback to source. The existing exit-code contract is unchanged: a
+checksum/signature failure maps to exit `1` (retryable, same bucket as a failed
+`cargo build`), so `classify_exit` needs no new cases.
+
+#### `--resolve-json`: read-only artifact resolution (#7609)
+
+`--resolve-json` wraps the same `fetch_resolve_latest` resolution the fetch path
+uses, but stops before any download, `git fetch`, build, provision, or restart,
+and prints exactly one JSON object on stdout (every other line the script emits
+goes to stderr in this mode):
+
+```json
+{"ok":true,"reason":null,"repo":"rjwalters/loom","target":"aarch64-apple-darwin",
+ "tag":"v0.19.24","version":"0.19.24","published_at":"2026-09-13T12:00:00Z",
+ "asset_sha256":"…","installed_bin":"/Users/you/.local/bin/loom-daemon",
+ "installed_version":"0.19.21","installed_commit":"…","installed_sha256":"…",
+ "source_version":"0.19.26","source_commit":"…"}
+```
+
+No field is ever omitted (an undeterminable value is `null`, never a
+plausible-looking empty string). Exit `0` when a release artifact resolved, `1`
+when it did not — but **the JSON is the contract, not the exit status**: a
+`--no-fetch` host, a fork with no Releases, an unreachable/rate-limited API, and
+an unbuilt platform all print `{"ok":false,"reason":"…"}` and exit `1`, which
+are ordinary expected outcomes rather than faults. `asset_sha256` is read from
+the release's own `<bin>.sha256` asset (~65 bytes); the binary itself is never
+downloaded.
 
 **Reused by `fleet add-worker`'s initial provisioning (epic #4990 Phase 4,
 #5067).** `fleet add-worker`'s `machine-layout` step (see the `fleet add-worker`
@@ -8365,11 +8503,15 @@ started — so it necessarily continues to report the ON-DISK build only; use
 ### Autonomous self-update loop (#4055)
 
 Phase 3 of #4017 closes the self-repair cycle end to end: when enabled, the
-daemon **rebuilds and restarts itself** onto a fresher binary without operator
+daemon **installs and restarts itself** onto a fresher binary without operator
 action, instead of only surfacing the read-only "update available" hint above.
 It is the *deciding + sequencing* layer — it reuses `loom-daemon-update.sh`
-(driven with `--no-restart`) for the rebuild/provision and the #4090 drain
-primitive for the restart, reimplementing neither.
+(driven with `--no-restart`, plus `--fetch` on the artifact path) for the
+fetch-or-rebuild/provision and the #4090 drain primitive for the restart,
+reimplementing neither. Since Issue #7609 a published Release artifact is what
+drives a roll, and the source checkout is only the fallback — see
+[Artifact-first auto-update ticks](#artifact-first-auto-update-ticks-7609)
+below.
 
 **Opt-in, default OFF** (it has side effects on the running process). Enable via
 `autonomous.autoUpdate.enabled` / `LOOM_AUTO_UPDATE=1`; tune the cadence, settle
@@ -8385,7 +8527,63 @@ race N `cargo build`s in one tree and N restarts of one process. Config is read
 from the daemon's default workspace; the in-flight count (gate 4) is inherently
 cross-root.
 
-Each tick (surfaced in `loom-daemon status` — human and `--json` — as
+#### Artifact-first auto-update ticks (#7609)
+
+**The published Release artifact drives the loop; the source checkout is only a
+fallback.** Each tick first asks `loom-daemon-update.sh --resolve-json` (above)
+what the latest release artifact for this host's platform is, and decides from
+that alone — **source-checkout presence, cleanliness, and staleness are not
+consulted on this path at all**:
+
+| Observation | Decision | Tick log line |
+|---|---|---|
+| artifact version **>** installed version | fetch the artifact (never `cargo build`) | `artifact 0.19.24 > installed 0.19.21 → fetching` |
+| artifact version **==** installed, published sha256 **≠** installed binary's | fetch the artifact (converge onto the released bytes) | `artifact 0.19.24 == installed 0.19.24 but sha differs (published … vs installed …) → fetching` |
+| artifact version **==** installed, sha matches | nothing to do | `artifact 0.19.24: artifact == installed, sha matches → up to date` |
+| latest release is **older** than installed | nothing to do | `artifact 0.19.20: latest release … is OLDER than the installed … → up to date` |
+| **no** artifact resolves at all | fall through to the source path below, unchanged | `no artifact (<reason>) → source path: <source reason>` |
+
+Why: on a four-host fleet on 2026-09-13 the source gate was shut on *every*
+host — two for "no source checkout / staleness undecidable" (a
+`CARGO_MANIFEST_DIR` that no longer resolves, or a binary provisioned from a
+release by hand), one for a dirty tree (two untracked stray files), one silent —
+so four hosts ran four different daemon versions, one three weeks stale, while
+signed release artifacts sat unconsumed. None of those four conditions says
+anything about whether a newer signed binary exists.
+
+- **Never a `cargo build` on the artifact path.** The roll runs the update
+  script with `--fetch`, i.e. the source-rebuild fallback **disabled**, so a
+  resolution failure at fetch time is a plain retryable failure rather than a
+  silent downgrade to a source build the daemon cannot see. The clean-tree gate
+  is likewise not applied here: it exists because an unattended
+  `cargo build --release` would compile uncommitted work into the running
+  daemon, and a checksum-verified fetch reads nothing from the working tree.
+- **Same-version convergence is attempted once, not every tick.** Provisioning
+  can legitimately rewrite the installed bytes after a fetch (on macOS
+  `provision-daemon.sh` ad-hoc-signs a binary that carries no
+  certificate-backed signature), which would otherwise look like "sha still
+  differs" forever and fetch+restart on every tick. The `(version, published
+  sha256)` pair of each successful artifact roll is persisted to
+  `~/.loom/auto-update-artifact-roll.json` (override the directory with
+  `LOOM_AUTO_UPDATE_STATE_DIR`) so it survives the restart the roll performs; a
+  still-differing local sha afterwards is reported and left alone. If **either**
+  checksum is unknown, the tick treats the artifact as converged rather than
+  guessing — a wrong "differs" is far more costly than a missed convergence.
+- **Every gate below applies to an artifact roll exactly as to a rebuild** —
+  settle window (including the #6261 ceiling), the in-flight-sweep stampede
+  gate and its defer deadline, exponential backoff, and terminal state. The
+  settle window tracks an `artifact:<version>:<sha>` identity on this path in
+  place of the source commit, so a host that switches paths mid-streak (a
+  release appears) restarts its settle window exactly as it would for a new
+  commit.
+- **Reported, not just logged.** `loom-daemon status` (human and `--json`) and
+  `loom-daemon health` report `artifact_available` (`version`, `published_at`;
+  `null` when none resolved) next to the installed version, so fleet-wide
+  version drift is visible without shelling into each host. The tick logs one
+  line per decision naming which path it took and why (the table above).
+
+Each tick's SOURCE path (reached only when no artifact resolves) is unchanged
+from #4055/#6261 (surfaced in `loom-daemon status` — human and `--json` — as
 `auto_update` last-check / last-roll / backoff / terminal fields, all
 `#[serde(default)]` wire-compatible):
 

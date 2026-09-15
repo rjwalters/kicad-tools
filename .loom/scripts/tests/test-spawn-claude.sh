@@ -1913,7 +1913,7 @@ i=0
 [[ "\${args[i]:-}" == "--rm" ]] && i=\$((i + 1))
 while true; do
     case "\${args[i]:-}" in
-        -v | --label) i=\$((i + 2)) ;;
+        -v | --label | --cpus | --memory) i=\$((i + 2)) ;;
         -w) i=\$((i + 2)) ;;
         -e)
             # Real \`docker run -e KEY=VALUE\` seeds the container's initial
@@ -1972,6 +1972,15 @@ assert_contains "$CONTAIN_WS/.loom/scripts/spawn-claude.sh" "$docker_log" \
     "containerized dispatch: re-execs spawn-claude.sh itself as the containerized command (#7429)"
 assert_contains "stub-claude ran, args=-p ping" "$output" \
     "containerized dispatch: the recursed invocation still reaches the claude stub with args intact (#7429)"
+# Issue #7430: with no explicit cpus/memory config, `--cpus` is omitted
+# (LOOM_SWEEP_CPU_QUOTA=0 above means no host CPU budget was computed) but
+# `--memory` is ALWAYS applied by default, computed from host memory.
+assert_contains "--memory" "$docker_log" \
+    "containerized dispatch: --memory is applied by default even with no config (#7430)"
+assert_contains "# LOOM_DISPATCH_MODE mode=container" "$output" \
+    "containerized dispatch: the canonical LOOM_DISPATCH_MODE marker names mode=container (#7430)"
+assert_contains "cpus=none" "$output" \
+    "containerized dispatch: the marker reports cpus=none when no CPU budget was computed (#7430)"
 
 # Test: LOOM_SWEEP_CONTAINERIZED=0 env override wins over config true.
 : > "$DOCKER_LOG"
@@ -1989,6 +1998,116 @@ output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTA
 docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
 assert_contains "ghcr.io/example/custom-worker:1.2.3" "$docker_log" \
     "LOOM_SWEEP_CONTAINER_IMAGE overrides the containerized image (#7429)"
+
+# ============================================================
+# Section 7f: per-sweep container resource limits + observability markers
+# (issue #7430, epic #6896 Phase 3 — the resource-limits/observability
+# follow-up to #7429's dispatch mode)
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh containerized resource limits (#7430)..."
+
+# Test: LOOM_SWEEP_CONTAINER_CPUS / LOOM_SWEEP_CONTAINER_MEMORY env
+# overrides apply exact `--cpus`/`--memory` docker flags and are reflected
+# in both the observability labels and the LOOM_DISPATCH_MODE marker.
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CONTAINER_CPUS="3" LOOM_SWEEP_CONTAINER_MEMORY="2g" LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "--cpus 3" "$docker_log" \
+    "LOOM_SWEEP_CONTAINER_CPUS applies an explicit --cpus docker flag (#7430)"
+assert_contains "--memory 2g" "$docker_log" \
+    "LOOM_SWEEP_CONTAINER_MEMORY applies an explicit --memory docker flag (#7430)"
+assert_contains "--label loom.dispatch.cpus=3" "$docker_log" \
+    "the applied CPU limit is surfaced as a docker label for observability (#7430)"
+assert_contains "--label loom.dispatch.memory=2g" "$docker_log" \
+    "the applied memory limit is surfaced as a docker label for observability (#7430)"
+assert_contains "# LOOM_DISPATCH_MODE mode=container image=ghcr.io/rjwalters/loom-worker:latest cpus=3 memory=2g" "$output" \
+    "the LOOM_DISPATCH_MODE marker names the exact applied cpus/memory values (#7430)"
+assert_contains "stub-claude ran, args=-p ping" "$output" \
+    "the recursed invocation still reaches the claude stub with explicit resource limits applied (#7430)"
+
+# Test: runtimes.containment.cpus / runtimes.containment.memory config
+# knobs are honored when no env override is set.
+echo '{"runtimes": {"containment": {"enabled": true, "cpus": "1.5", "memory": "512m"}}}' \
+    > "$CONTAIN_WS/.loom/config.json"
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "--cpus 1.5" "$docker_log" \
+    "runtimes.containment.cpus config knob applies --cpus (#7430)"
+assert_contains "--memory 512m" "$docker_log" \
+    "runtimes.containment.memory config knob applies --memory (#7430)"
+
+# Test: LOOM_SWEEP_CONTAINER_CPUS env override wins over the config value.
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CONTAINER_CPUS="4" LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "--cpus 4" "$docker_log" \
+    "LOOM_SWEEP_CONTAINER_CPUS env wins over runtimes.containment.cpus config (#7430)"
+assert_contains "--memory 512m" "$docker_log" \
+    "the memory config knob is unaffected by the cpus env override (#7430)"
+
+rm -f "$CONTAIN_WS/.loom/config.json"
+
+# Test: with the CPU-quota mechanism actually enabled (not disabled via
+# LOOM_SWEEP_CPU_QUOTA=0), a containerized dispatch's --cpus defaults to the
+# SAME host-wide CPU budget bare-metal dispatch would have computed
+# (LOOM_SWEEP_CPU_BUDGET_CORES, issues #5111/#5979) — a containerized sweep
+# never gets an independent, unbounded CPU claim by default.
+echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
+cat > "$CONTAIN_STUB_DIR/nproc" <<'STUB'
+#!/usr/bin/env bash
+echo 8
+STUB
+chmod +x "$CONTAIN_STUB_DIR/nproc"
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_RESERVED_CORES=2 LOOM_SWEEP_SHARED_CPU_BUDGET=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "--cpus 6" "$docker_log" \
+    "containerized --cpus defaults to the same host-wide CPU budget as bare-metal dispatch: 8 - 2 reserved = 6 (#7430)"
+assert_contains "cpus=6" "$output" \
+    "the LOOM_DISPATCH_MODE marker reports the computed default cpus budget, not 'none' (#7430)"
+rm -f "$CONTAIN_STUB_DIR/nproc"
+rm -f "$CONTAIN_WS/.loom/config.json"
+
+# Test: bare-metal dispatch (containment disabled) logs the symmetric
+# LOOM_DISPATCH_MODE mode=bare-metal marker, so a status/health reader can
+# positively distinguish "ran bare-metal" from "predates this marker".
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    env -u LOOM_SWEEP_CONTAINERIZED LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "# LOOM_DISPATCH_MODE mode=bare-metal" "$output" \
+    "bare-metal dispatch logs the symmetric LOOM_DISPATCH_MODE mode=bare-metal marker (#7430)"
+
+# Saturated-host regression (#7430's own acceptance criterion, mirroring the
+# #5979 CPU-sharing regression check in Section 7c): N concurrent
+# containerized sweeps' declared --cpus caps are DIVIDED across the in-flight
+# count, exactly like bare-metal dispatch already divides
+# LOOM_SWEEP_CPU_BUDGET_CORES — never each independently claiming the whole
+# host (the #5979 load-133.87 incident class, extended to containment).
+echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
+cat > "$CONTAIN_STUB_DIR/nproc" <<'STUB'
+#!/usr/bin/env bash
+echo 8
+STUB
+chmod +x "$CONTAIN_STUB_DIR/nproc"
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_RESERVED_CORES=2 LOOM_SWEEP_INFLIGHT_SWEEPS=4 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "--cpus 1" "$docker_log" \
+    "saturated-host regression: 4 concurrent containerized sweeps on an 8-core host (6 usable) each get 1 core, summing to 4 <= 6, never 4x the unbounded 6 (#7430/#5979)"
+rm -f "$CONTAIN_STUB_DIR/nproc"
 
 rm -f "$CONTAIN_WS/.loom/config.json"
 rm -rf "$CONTAIN_WS" "$CONTAIN_STUB_DIR"

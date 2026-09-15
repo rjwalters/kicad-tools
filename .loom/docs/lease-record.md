@@ -345,10 +345,12 @@ did the work.
 
 **Root cause, more precisely than "the loser kept renewing its own lease".**
 Reading `loom-daemon/src/sweep_registry/dispatch.rs`'s dispatch flow shows a
-losing tie-break dispatcher returns *before* spawning a builder or entering
-`sweep.md`'s Step 1a (where `sweep-lease-renew.sh start` is invoked) — so in
-the ordinary single-dispatch-attempt path, a yielded dispatcher never starts
-a renewal loop of its own at all. What was actually happening in the
+losing tie-break dispatcher returns *before* spawning a builder — and so
+before either place `sweep-lease-renew.sh start` can be invoked from: the
+daemon's own post-spawn call in `finish_issue_dispatch` (#7672, the
+`--claim-owned` path) and, historically, `sweep.md`'s Step 1a. In the
+ordinary single-dispatch-attempt path a yielded dispatcher therefore never
+starts a renewal loop of its own at all. What was actually happening in the
 #6470 incident: `sweep-lease-renew.sh start`, invoked with no
 `--host`/`--sweep-id`, uses `renew-once`'s "newest wins" fallback — it
 PATCHes whichever lease comment on the issue currently has the highest

@@ -251,12 +251,10 @@ To minimize conflicts in the first place:
 
 3. **Communicate**: If working on shared areas, coordinate with other builders
 
-4. **Rebase before PR**: Always rebase onto latest main before creating PR
-   ```bash
-   git fetch origin main
-   git rebase origin/main
-   git push --force-with-lease
-   ```
+4. **Rebase before PR**: this is a required gate, not just an ounce-of-prevention
+   habit — see `builder-pr.md` § "Pre-Push Rebase: Sync with `origin/main`" for
+   the mandatory step (with conflict-handling instructions) that runs
+   immediately before `git push` / opening the PR (#7668).
 
 ## Claiming Workflow (Parallel Mode)
 

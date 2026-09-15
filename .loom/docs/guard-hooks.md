@@ -506,6 +506,47 @@ attempt to catch every conceivable write vector (an interpreter one-liner like
 fallback an agent reaches for after an Edit/Write denial, not building a full
 security boundary.
 
+**Worktrees git knows about, but Loom did not create (issue #7415).** The
+`.loom-managed` sentinel is written only by `worktree.sh`, so a worktree
+created with a plain `git worktree add` carries none. That is harmless while
+it sits *outside* the main checkout (the containment test lets it through),
+but a worktree **nested under** the main checkout —
+`<main>/.claude/worktrees/<name>`, the layout some repos document — matched
+the main-root prefix test and was denied, with a message pointing at
+`.loom/worktrees/issue-<N>`, a directory that workflow does not even have.
+Both guards therefore also consult `git worktree list --porcelain` and treat a
+target inside any **registered worktree other than the main one** as "not the
+main checkout" (git itself considers such a directory a separate working tree,
+sharing nothing with the main checkout's index or tracked files). The main
+worktree entry is excluded in both its physical and logical spelling, so this
+can never become an allow for the checkout #4007/#4178 protect, and the `git`
+call only runs for a write that is otherwise about to be denied.
+
+*Trust-boundary note*: this widens recognition from "worktrees Loom created" to
+"worktrees git knows about" — a stray or deliberate `git worktree add`
+elsewhere in the repo now gains the same treatment. That is accepted
+knowingly. The sentinel was never an authentication boundary (the deny message
+itself says the check "cannot verify it belongs to the acting session", #4245,
+and a `touch .loom-managed` — not a write form these guards even scan —
+already forges it), while the false positive it caused blocked a documented,
+legitimate workflow. Consistent with the paragraph above: the goal is removing
+the easy fallback an agent reaches for after a denial, not building a security
+boundary.
+
+**`LOOM_WORKTREE_PATH` parity for Bash writes (issue #7415).**
+`guard-worktree-paths.sh` has always honored `LOOM_WORKTREE_PATH` as a "this
+session is pinned to exactly this worktree" declaration; the Bash-side check
+had no equivalent, so the same target could be accepted through Edit/Write and
+denied through `cp`/`mv`/`tee`/redirection. The Bash check now mirrors the
+**allow** half. Two deliberate differences, both narrowing: it is *allow-only*
+(this check has never confined Bash writes outside the repo at all — `/tmp`
+scratch, `~/.cache`, build outputs — so importing the sibling's "everything
+outside the pin is denied" half would be an unrelated behavior change), and a
+pin resolving **at the main checkout root** is ignored, so one inherited env
+var cannot switch the whole confinement off. The supported opt-out remains
+`guards.worktreeIsolation:false`. The unresolvable-`$…` rules below are
+unaffected — they stay fail-closed regardless of the pin.
+
 **Unresolvable `$…` targets fail closed, in every cwd (issue #4921).** The
 tokenizer never expands variables, so a target it cannot resolve is emitted as
 the raw token (`$A/evil`) and the resolution then cwd-prefixes it as if it
