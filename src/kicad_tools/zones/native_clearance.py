@@ -86,7 +86,10 @@ def write_native_zone_clearance_rules(pcb_path: Path) -> None:
             if local is not None:
                 preserve(local.get_float(0))
 
-    for (layer, net), distance in sorted(targets.items()):
+    # Both zone rules match a pair of unlike-net zones. KiCad selects the
+    # last matching custom rule, so emit stronger targets last regardless
+    # of net names. Retain deterministic layer/net order for equal targets.
+    for (layer, net), distance in sorted(targets.items(), key=lambda item: (item[1], item[0])):
         condition = (
             f"(A.Type == 'Zone' && A.NetName == '{net}') || "
             f"(B.Type == 'Zone' && B.NetName == '{net}')"
