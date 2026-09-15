@@ -1,0 +1,23 @@
+{
+  "candidate": {
+    "footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
+    "fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
+    "usb_joystick_routed.kicad_dru": "882d71a24846b255a89ccbe86b2e6bd3b612e324b462d1c7c42d64a97935a1fa",
+    "usb_joystick_routed.kicad_pcb": "f0827696f49e0469d9300dce5f713008380e47908f6ec2d96bac730f1fe7cd07",
+    "usb_joystick_routed.kicad_pro": "811c7ad8225b72a8a53183fb459acb77155050bd4b3a0fc13dd82e5978205efd"
+  },
+  "negative": {
+    "footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
+    "fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
+    "usb_joystick_routed.kicad_dru": "992093715bcb0186bd4d116eee19dae24c107269532dcb5dd5caddf60b4d04f8",
+    "usb_joystick_routed.kicad_pcb": "f0827696f49e0469d9300dce5f713008380e47908f6ec2d96bac730f1fe7cd07",
+    "usb_joystick_routed.kicad_pro": "811c7ad8225b72a8a53183fb459acb77155050bd4b3a0fc13dd82e5978205efd"
+  },
+  "false-condition": {
+    "footprints/Joystick.pretty/Samtec_TSM-103-01-T-DV.kicad_mod": "492671cda5112d330aaf0cf514ce2188b589834eb10d493769ad0dd6bc5f9b86",
+    "fp-lib-table": "d5eea395214efa8406e88c8e54435a0cbf9cf83b69ee3ed4d2519e109ce76c02",
+    "usb_joystick_routed.kicad_dru": "c0704f96811b9499263bb43ce4cb1c2d144f8ba63535daf9f92f6ec37841cd37",
+    "usb_joystick_routed.kicad_pcb": "f1bb69a239ec938b53ed22db2fa6cf56ea19bfb8fc7959b9acad7edd82d0977d",
+    "usb_joystick_routed.kicad_pro": "811c7ad8225b72a8a53183fb459acb77155050bd4b3a0fc13dd82e5978205efd"
+  }
+}

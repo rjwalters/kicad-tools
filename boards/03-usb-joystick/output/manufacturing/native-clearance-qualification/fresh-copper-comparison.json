@@ -1,0 +1,22 @@
+{
+  "F.Cu": {
+    "saved_area": 4022.8418494551015,
+    "refilled_area": 4022.8418494551015,
+    "symmetric_difference": 0.0
+  },
+  "B.Cu": {
+    "saved_area": 4348.531238140254,
+    "refilled_area": 4348.531238140254,
+    "symmetric_difference": 0.0
+  },
+  "In1.Cu": {
+    "saved_area": 4480.431452060073,
+    "refilled_area": 4480.431452060073,
+    "symmetric_difference": 0.0
+  },
+  "In2.Cu": {
+    "saved_area": 4328.399269593358,
+    "refilled_area": 4328.399269593358,
+    "symmetric_difference": 0.0
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "file": "/home/ubuntu/loom-workspaces/kicad-tools/.loom/worktrees/issue-5380/boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
+  "file": "/tmp/5380-native-rule/final-bd992dc-recipe/usb_joystick_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
   "layers": 4,
   "summary": {
@@ -27,25 +27,6 @@
       "rule_id": "connector_edge_distance",
       "type": "unknown",
       "severity": "info",
-      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
-      "location": [
-        123.5,
-        99.5
-      ],
-      "layer": "F.Cu",
-      "actual_value": 7.4,
-      "required_value": null,
-      "items": [
-        "J2"
-      ],
-      "nets": [],
-      "status": "info",
-      "waived": false
-    },
-    {
-      "rule_id": "connector_edge_distance",
-      "type": "unknown",
-      "severity": "info",
       "message": "J1 (Connector_USB:USB_C_Receptacle_GCT_USB4085): 0.00mm from nearest board edge",
       "location": [
         149.475,
@@ -56,6 +37,25 @@
       "required_value": null,
       "items": [
         "J1"
+      ],
+      "nets": [],
+      "status": "info",
+      "waived": false
+    },
+    {
+      "rule_id": "connector_edge_distance",
+      "type": "unknown",
+      "severity": "info",
+      "message": "J2 (Connector_JST:JST_PH_S5B-PH-SM4-TB_1x05-1MP_P2.00mm_Horizontal): 7.40mm from nearest board edge",
+      "location": [
+        123.5,
+        99.5
+      ],
+      "layer": "F.Cu",
+      "actual_value": 7.4,
+      "required_value": null,
+      "items": [
+        "J2"
       ],
       "nets": [],
       "status": "info",
