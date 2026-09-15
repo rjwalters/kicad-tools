@@ -62,6 +62,60 @@ print(f"Vias used: {result.via_count}")
 router.save("routed.kicad_pcb")
 ```
 
+### Kelvin Current-Sense Branches
+
+For grid routing, a net with at least three terminals is recognized as Kelvin
+when its name matches a current-sense convention (for example `ISENSE_A`,
+`SHUNT`, or `KELVIN`) and a resistor pad can be identified as the shunt tap.
+With multiple resistor candidates, the router chooses the candidate with the
+smallest total Manhattan distance to the other terminals. Check this choice
+against the circuit's intended shunt before relying on automatic recognition.
+
+Current-sense polarity suffixes such as `ISENSE_A+` and `VSNS_N` do not by
+themselves select a 100-ohm differential impedance target. Their existing
+trace width and clearance remain in force. Explicit impedance specifications
+and net-class targets still apply.
+
+Recognized nets use separate branches from the shunt pad. Previously routed
+branches and other terminals become temporary physical obstacles during each
+search. This applies to Python and C++ grid routing, including negotiated
+routing, and avoids joining nearby pins of the same IC before routing the star.
+An existing shunt escape does not move the tap to its outer endpoint.
+
+This standalone example constructs an adversarial four-terminal net: the force
+terminal lies directly between the shunt and a sense terminal.
+
+```python
+from kicad_tools.router.core import Autorouter
+
+router = Autorouter(22, 22, force_python=True, physics_enabled=False)
+for ref, x, y in [("R1", 4, 10), ("Q1", 12, 10), ("U1", 16, 10), ("U2", 16, 12)]:
+    router.add_component(
+        ref,
+        [
+            {
+                "number": "1",
+                "x": x,
+                "y": y,
+                "width": 0.8,
+                "height": 0.8,
+                "net": 1,
+                "net_name": "ISENSE_TEST",
+            }
+        ],
+    )
+branches = router.route_net(1)
+assert len(branches) == 3
+```
+
+The physical-isolation implementation described here covers the grid engine;
+mesh and lattice routing have separate implementations. It does not repair
+pre-existing copper that already joins sense and force branches away from the
+shunt. Small shunt pads or dense obstacles may still prevent completion. Check
+the emitted copper and native saved/refilled connectivity: an electrical
+same-net connectivity result alone does not prove the intended Kelvin tap.
+Dense-board completion remains tracked in [issue #5398](https://github.com/rjwalters/kicad-tools/issues/5398).
+
 ### Custom Design Rules
 
 ```python

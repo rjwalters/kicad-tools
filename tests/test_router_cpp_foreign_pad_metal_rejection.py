@@ -466,3 +466,27 @@ class TestAStarRejectsForeignPadMetal:
                 f"{len(result.vias)} vias."
             )
         pathfinder.clear_search_state()
+
+
+@requires_cpp
+@pytest.mark.parametrize("method", ["route", "route_resumable"])
+@pytest.mark.parametrize("physical_metal", [False, True])
+def test_source_seed_rejects_foreign_metal_but_allows_halo(method, physical_metal):
+    """A source overlapped by metal cannot escape by starting inside it."""
+    grid = router_cpp.Grid3D(30, 30, 1, 0.1, 0.0, 0.0)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    grid.mark_blocked(5, 15, 0, 2, True, physical_metal)
+    pathfinder = router_cpp.Pathfinder(grid, rules, True)
+    pathfinder.set_routable_layers([0])
+    result = getattr(pathfinder, method)(
+        start_x=0.5,
+        start_y=1.5,
+        start_layer=0,
+        end_x=2.5,
+        end_y=1.5,
+        end_layer=0,
+        net=1,
+    )
+    assert result.success is (not physical_metal)
+    pathfinder.clear_search_state()

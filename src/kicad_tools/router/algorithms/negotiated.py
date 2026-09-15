@@ -17,6 +17,9 @@ import random
 import time
 from typing import TYPE_CHECKING, Callable
 
+from ..kelvin import detect_kelvin_topology
+from ..kelvin_obstacles import isolate_kelvin_branch
+
 if TYPE_CHECKING:
     from ..congestion_estimator import CongestionEstimator
     from ..grid import RoutingGrid
@@ -1181,9 +1184,13 @@ class NegotiatedRouter:
                     gx, gy = relocate_blocked_point(gx, gy, _point_blocked)
                 return self.grid.grid_to_world(gx, gy)
 
-            pad_objs, rsmt_edges = build_rsmt(
-                pad_objs, congestion_fn=congestion_fn, snap_fn=_snap_to_grid
-            )
+            kelvin = detect_kelvin_topology(pad_objs)
+            if kelvin is not None:
+                rsmt_edges = kelvin.edges
+            else:
+                pad_objs, rsmt_edges = build_rsmt(
+                    pad_objs, congestion_fn=congestion_fn, snap_fn=_snap_to_grid
+                )
 
             # Issue #2306: Incremental Steiner target-set expansion.
             # After routing each RSMT edge, collect the grid cells along
@@ -1246,15 +1253,35 @@ class NegotiatedRouter:
                 # source is connected, route to the exact new target rather
                 # than reversing native A* or returning to the source tree.
                 # An established target component still offers safe shortcuts.
-                goal_cells = tree_cells.get(target_root) if source_root != target_root else None
-                route = self.router.route(
-                    search_start,
-                    search_end,
-                    negotiated_mode=True,
-                    present_cost_factor=present_cost_factor,
-                    per_net_timeout=edge_timeout,
-                    extra_goal_cells=goal_cells,
+                goal_cells = (
+                    tree_cells.get(target_root)
+                    if source_root != target_root and kelvin is None
+                    else None
                 )
+                isolation = (
+                    isolate_kelvin_branch(
+                        self.grid,
+                        pad_objs,
+                        pad_objs[kelvin.root_index],
+                        target_pad,
+                        trace_width=(
+                            self.net_class_map[source_pad.net_name].trace_width
+                            if source_pad.net_name in self.net_class_map
+                            else self.rules.trace_width
+                        ),
+                    )
+                    if kelvin is not None
+                    else contextlib.nullcontext()
+                )
+                with isolation:
+                    route = self.router.route(
+                        search_start,
+                        search_end,
+                        negotiated_mode=True,
+                        present_cost_factor=present_cost_factor,
+                        per_net_timeout=edge_timeout,
+                        extra_goal_cells=goal_cells,
+                    )
                 # Issue #2934: ``Route`` is a dataclass and therefore always
                 # truthy regardless of segment count.  Defensive check for
                 # an empty Route here in addition to the upstream rejection

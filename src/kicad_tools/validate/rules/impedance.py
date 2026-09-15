@@ -45,15 +45,22 @@ class NetImpedanceSpec:
         target_z0: Target characteristic impedance (single-ended)
         target_zdiff: Target differential impedance (for diff pairs)
         tolerance_percent: Allowed deviation from target (default 10%)
+        exclude_current_sense: Suppress polarity-only heuristics on sense nets.
     """
 
     net_pattern: str
     target_z0: float | None = None
     target_zdiff: float | None = None
     tolerance_percent: float = 10.0
+    exclude_current_sense: bool = False
 
     def matches(self, net_name: str) -> bool:
         """Check if this spec matches a net name."""
+        if self.exclude_current_sense:
+            from kicad_tools.router.kelvin import is_sense_net_name
+
+            if is_sense_net_name(net_name):
+                return False
         return bool(re.match(self.net_pattern, net_name, re.IGNORECASE))
 
 
@@ -181,8 +188,10 @@ class ImpedanceRule(DRCRule):
             # Generic diff-pair suffix conventions - 100Ω differential.
             # NOTE: these must come BEFORE the single-ended ``.*CLK$``
             # spec so e.g. ``MIPI_CLK+`` resolves to diff, not 50Ω SE.
-            NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0),
-            NetImpedanceSpec(r".*[+\-]$", target_zdiff=100.0),
+            # A shunt's polarity labels do not imply controlled impedance.
+            # Explicit specs keep their default exclusion=False.
+            NetImpedanceSpec(r".*_[PN]$", target_zdiff=100.0, exclude_current_sense=True),
+            NetImpedanceSpec(r".*[+\-]$", target_zdiff=100.0, exclude_current_sense=True),
             # High-speed single-ended - 50Ω.  ``.*CLK$`` (anchored) so
             # ``MIPI_CLK+`` does NOT mis-match as single-ended.  These
             # are SUPPRESSED in check() by default (Issue #3157).
