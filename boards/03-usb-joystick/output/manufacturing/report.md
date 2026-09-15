@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb-tier1"
+date: "Rev 1 | 2026-09-14 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,8 +20,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 38 (37 SMD, 1 THT, 0 other) |
 | Nets | 27 |
-| Traces | 2048 segments |
-| Vias | 151 |
+| Traces | 2050 segments |
+| Vias | 153 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Stackup
@@ -53,10 +53,6 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | SPI | ISP_MISO, ISP_MOSI, ISP_SCK |
 | USB | USB_D+, USB_D-, VBUS |
 
-### Power Architecture
-
-**Power Rails**: PWR_FLAG
-
 ## Assembly Notes
 
 1 fine-pitch component
@@ -78,7 +74,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 | Errors | 0 |
 | Warnings | 0 |
 
-**Status**: PASS — independent native ERC: zero errors and warnings; see native-erc.json.
+**Status**: SKIPPED -- ERC skipped by user request
 
 
 \newpage
@@ -173,29 +169,16 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 \newpage
 
-## Reviewed Factory Verification
-
-The generic report above uses a conservative 0.50 mm pad-hole floor and reports
-14 hole-spacing warnings. The selected factory process explicitly permits
-0.45 mm; native project rules and the reviewed checker use that same floor.
-No findings are suppressed. Fresh check-report.json records 51 evaluated rules,
-zero errors/warnings, and label plus copper LVS with 129 bound pads and zero
-mismatches. Independent native DRC/refill and ERC report zero violations and
-zero opens. Per-net, per-layer filled copper matches the independent refill
-exactly (fill-consistency.json). All 23 repaired off-angle segments are now
-45-degree aligned; the USB branch skew is 0.165685 mm, within the reviewed bound.
-
 ## Manufacturing Readiness
 
-**Verdict**: READY for the specified fabrication and assembly process.
+**Verdict**: WARNING
 
-Order the reviewed four-layer construction and Epoxy-filled & Capped POFV/VIPPO
-option in manufacturing-requirements.json. The exact supplier BOM covers 37 SMT
-placements; J1 is a separate through-hole assembly operation in manual-assembly-bom.csv.
-The editable project includes the custom ISP footprint library and native rules.
-Unchanged compiled firmware and its source are supplied with programming instructions.
-Physical bring-up, USB electrical qualification, and first-article inspection
-remain unperformed; this is not a USB certification claim.
+### Action Items
+
+- **[OPTIONAL]** Verify zone fill in KiCad: 12 nets appear incomplete but may be connected via zone fills
+- **[OPTIONAL]** Verify zone fill in KiCad for 2 zone-connected nets
+- **[OPTIONAL]** Review 14 DRC warnings
+
 
 \newpage
 

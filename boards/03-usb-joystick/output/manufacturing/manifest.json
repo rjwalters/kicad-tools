@@ -1,7 +1,7 @@
 {
   "version": "1.0",
   "kicad_tools_version": "0.20.0",
-  "generated_at": "2026-09-10T18:44:00.840097+00:00",
+  "generated_at": "2026-09-14T22:45:40.367659+00:00",
   "manufacturer": "jlcpcb-tier1",
   "files": {
     "DESIGN_REVIEW.md": {
@@ -33,8 +33,8 @@
       "size": 4819
     },
     "cpl_jlcpcb.csv": {
-      "sha256": "a2685952c4a28521fe6ad5df90bb1d252928fc1774014c4dc78bbbda57fd8de8",
-      "size": 2682
+      "sha256": "8b435e9347774c7f26e3536b35136d1cf2fc0c9ba3c1de5803fcfd2ab6086b5d",
+      "size": 2681
     },
     "design-source/DESIGN_REVIEW.md": {
       "sha256": "2d571857bdd8edcc223c93e8ba8ae5dfd50553599a85ce65fbbdf59e9b7e48c4",
@@ -177,48 +177,48 @@
       "size": 2192
     },
     "gerbers/gerbers.zip": {
-      "sha256": "af4f2ac7ba2e858c39d45533cef5de7580539d29d011ffb84bad3d8add1cd2c0",
-      "size": 210880
+      "sha256": "6356ef2e71b1955d8bf2c03da6a53b175807c24c90459e08e76da4ad957f1a22",
+      "size": 331981
     },
     "images/assembly.png": {
-      "sha256": "e81ce4ef7f4c0117a3a92464c4062fd63735cbd510c6dd1ef97acd79da016244",
-      "size": 449871
+      "sha256": "4f517667683070f18d715f72c16b8fe182dfa429066cfd6f37272883ffc14354",
+      "size": 482556
     },
     "images/layer_B_Cu.png": {
-      "sha256": "270b5858e625a8b2bab24e6e0ac56dfda0f3e49b2b7f9ea04eddc9f60ec3db7c",
-      "size": 313442
+      "sha256": "5c7c2217959752a531f2d2a8461f7e5a49a200fa2605a420138fbb1bc6435479",
+      "size": 314154
     },
     "images/layer_F_Cu.png": {
-      "sha256": "d8190e24996212bd2c9b83c461bea886d1ceb34e20dccb587eac77414de1e30c",
-      "size": 369662
+      "sha256": "e0e4be7237a1adb6928ebe43161771c59d85f355b3f25f3ed180391ba3ea8f6d",
+      "size": 337240
     },
     "images/layer_In1_Cu.png": {
-      "sha256": "525d00f6a04736f46c969098fc6afb39fd66f384ae6c385251a84d5147c8fd6c",
-      "size": 255155
+      "sha256": "913363d31510b9fe52e2b1c642cbe2f2bc5e3214335f891026fffe7659570a58",
+      "size": 277990
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "dd1a6a7de80ec2d760c2987f656ea364099eab2816de60494be41e9d2d1f68d2",
-      "size": 307771
+      "sha256": "23b20b87052fb895f1df2e4dc045f29857c4a2a3e078fb2153d0fbb2d331550f",
+      "size": 319948
     },
     "images/pcb_back.png": {
-      "sha256": "4688ceb3258456eaddfaa5c78b85f19dabc3cab54ec3acea58216040edeb84ef",
-      "size": 316336
+      "sha256": "91cf7e02ff2dca86921ba219af9c090cfb6dcf18642e218bf8ff18d9766d79bd",
+      "size": 319804
     },
     "images/pcb_copper.png": {
-      "sha256": "c374d64dbbffd43db2279a180312fa4849ad803599a7b092227d2373f5346605",
-      "size": 360014
+      "sha256": "500f7fa4cbb1532d8482173e519deff7636fc8c0ab47d38ae56d52c3512827d1",
+      "size": 392283
     },
     "images/pcb_front.png": {
-      "sha256": "142aa4f974ee21690f5c623e0524092696883e5cbc19d6d686934f84554dc2ec",
-      "size": 471567
+      "sha256": "02c3e4ed86b1a3583be4d324afedaa1ee95c73a96cb70c1b4a102cbfd848b1ee",
+      "size": 442552
     },
     "images/schematic_usb_joystick.png": {
-      "sha256": "2d6b7e8086fa4e9f0d3b16a697bd10c45b0182f98666c8522a6de4f28b385c14",
-      "size": 486477
+      "sha256": "280cd14f3e38b8ee0d7494113bdd72bae08e75561aa78723bf7c44f65c26f9d3",
+      "size": 486452
     },
     "kicad_project.zip": {
-      "sha256": "700d3f73d57d29beee85248f9153d102a7d636436f7d79f456d9353e7bdb2067",
-      "size": 307241
+      "sha256": "fc94250cdacf2d07c1793954a9b72a4ae33834c526eaf57f1137978faaad39f0",
+      "size": 410547
     },
     "manual-assembly-bom.csv": {
       "sha256": "f51fef1b581623d69c00b1b3604f0a1b193c29e29134a3931e0853ab13030ef7",
@@ -241,12 +241,12 @@
       "size": 2354
     },
     "report.md": {
-      "sha256": "fc09862a99c49a3be590184460358301eb2b77a519c2396ac99b58d3e8deea86",
-      "size": 6143
+      "sha256": "0b4ba87e5e91ee22a2b992d6a42639b9638bbe45c5f957d85a9630864a889a59",
+      "size": 4948
     },
     "report.pdf": {
-      "sha256": "602b215babfb3b9df6c9af4cd9083dc5d205a74cd7dffd0be25022082d94a453",
-      "size": 3390741
+      "sha256": "376127b107c302ac789a843621d72271d42f923d32d09f26cb2e574f3f384a1d",
+      "size": 3594888
     }
   },
   "board": {
@@ -288,7 +288,7 @@
     {
       "name": "drill_holes",
       "status": "OK",
-      "message": "Drill holes present (151 vias, 20 TH pads)"
+      "message": "Drill holes present (153 vias, 20 TH pads)"
     },
     {
       "name": "tht_in_cpl",
@@ -319,12 +319,12 @@
     {
       "name": "drc",
       "status": "WARN",
-      "message": "DRC passed with 20 warning(s)"
+      "message": "DRC passed with 6 warning(s)"
     },
     {
       "name": "erc",
-      "status": "WARN",
-      "message": "ERC passed with 3 warning(s)"
+      "status": "OK",
+      "message": "ERC: 0 errors, 0 warnings"
     }
   ]
 }
