@@ -45,6 +45,7 @@ def _make_mock_grid(
     grid.resolution = resolution
     grid.rules = MagicMock()
     grid.rules.trace_clearance = trace_clearance
+    grid.rules.via_clearance = trace_clearance
 
     # Default: F.Cu is layer index 0
     grid.layer_to_index = MagicMock(return_value=0)
@@ -237,6 +238,7 @@ def _make_mock_grid_with_pad_cell(
     grid.resolution = 0.1
     grid.rules = MagicMock()
     grid.rules.trace_clearance = 0.15
+    grid.rules.via_clearance = 0.15
     grid.layer_to_index = MagicMock(return_value=0)
     grid.world_to_grid = MagicMock(side_effect=lambda x, y: (int(x / 0.1), int(y / 0.1)))
     grid._seg_rtree = {}
@@ -605,3 +607,20 @@ class TestVectorCollisionCheckerForeignVia:
             exclude_net=1,
         )
         assert b_result is False
+
+
+def test_optimizer_preserves_separate_via_clearance_floor():
+    # Board02's optimizer created this diagonal beside the VCC via.
+    via = _make_via(133.9, 118.2, net=8, diameter=0.8)
+    grid = _make_mock_grid(routes=[_make_route_with_via(8, via)], cols=2000, rows=2000)
+    grid.rules.via_clearance = 0.2
+    grid._seg_rtree = {0: MagicMock()}
+    grid._seg_rtree[0].intersection.return_value = []
+    grid._seg_rtree_items = {0: {}}
+    checker = VectorCollisionChecker(grid)
+    for indexed in (False, True):
+        if indexed:
+            grid._via_rtree = MagicMock()
+            grid._via_rtree.intersection.return_value = [0]
+            grid._via_rtree_items = {0: via}
+        assert not checker.path_is_clear(131.45, 119.5, 134.1, 116.85, Layer.F_CU, 0.5, 4)

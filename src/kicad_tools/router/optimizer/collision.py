@@ -463,20 +463,22 @@ class VectorCollisionChecker:
         # of false-positive rejections on multi-layer boards with
         # blind/buried vias, which kicad-tools does not currently
         # emit).
+        via_clearance = max(min_clearance, self.grid.rules.via_clearance)
+        via_search_radius = half_width + via_clearance
         via_rtree = getattr(self.grid, "_via_rtree", None)
         via_items: dict[int, Any] = getattr(self.grid, "_via_rtree_items", {})
         if via_rtree is not None and via_items:
             # Broad-phase query envelope: path AABB inflated by
-            # half_width + min_clearance.  Each indexed via envelope is
+            # half_width + via_clearance.  Each indexed via envelope is
             # already inflated by ``via_radius + max_clearance + max_trace_half_width``
             # (see ``RoutingGrid._compute_via_rtree_inflation``), so the
             # union of the two envelopes is a conservative superset of
             # the actual clearance check region for any via.
             query_envelope = (
-                min(x1, x2) - search_radius,
-                min(y1, y2) - search_radius,
-                max(x1, x2) + search_radius,
-                max(y1, y2) + search_radius,
+                min(x1, x2) - via_search_radius,
+                min(y1, y2) - via_search_radius,
+                max(x1, x2) + via_search_radius,
+                max(y1, y2) + via_search_radius,
             )
             for via_id in via_rtree.intersection(query_envelope):
                 via = via_items.get(via_id)
@@ -491,7 +493,7 @@ class VectorCollisionChecker:
                 via_radius = via.diameter / 2
                 dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
                 clearance = dist - half_width - via_radius
-                if clearance < min_clearance:
+                if clearance < via_clearance:
                     return False
         else:
             # Fallback: index not built (e.g. mock grids in unit tests,
@@ -506,7 +508,7 @@ class VectorCollisionChecker:
                     via_radius = via.diameter / 2
                     dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
                     clearance = dist - half_width - via_radius
-                    if clearance < min_clearance:
+                    if clearance < via_clearance:
                         return False
 
         # Also check hard obstacles (pads, keepouts) via the grid
