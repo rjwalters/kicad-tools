@@ -560,6 +560,73 @@ def test_corridor_fallback_is_skipped_when_its_own_allowance_is_zero(monkeypatch
     assert finder.calls == []
 
 
+def test_corridor_is_disabled_when_departures_come_from_the_geometric_fallback(monkeypatch):
+    """#5333 follow-up (2026-09-15): characterizes an existing, previously-
+    UNTESTED code path -- not a behavior change.
+
+    When native ``validated_departures`` finds nothing, ``construct_pair_
+    routes`` falls back to ``geometric_departure.geometric_departures`` (an
+    exactly-validated, non-native proposal). That branch unconditionally
+    sets ``corridor = None`` (see its own comment: "The native corridor
+    would reject the same conservative halo again"), so even a caller that
+    supplied a real corridor mask and a nonzero ``corridor_iterations_
+    remaining`` never reaches ``_corridor_guided_departures`` -- the ledger
+    reports ``corridor_attempts=0`` with ``departure_reasons=
+    {'exact_geometry_departure': N}``.
+
+    This matters because a live Board07 TMDS_D1 run can ALSO report
+    ``corridor_attempts=0`` for a completely different reason -- the
+    construction phase starts with too little of the shared per-pair wall
+    left for the corridor stage to get a turn at all (see the live
+    ``[coupled-construction]`` line quoted next to
+    ``CORRIDOR_WALL_RESERVE_FRACTION`` in ``pair_construction.py``, where
+    ``departure_reasons`` instead shows native ``stalled_at_step_*`` tokens,
+    proving the fallback below did NOT fire that time). The two failure
+    modes are indistinguishable from ``corridor_attempts`` alone; this test
+    pins the ``departure_reasons`` field that tells them apart so a future
+    session does not have to re-derive it.
+    """
+    from kicad_tools.router import geometric_departure
+
+    fallback_departure = _departure((1, 0), 3, prefix=((1, 2, 3, 4, 5, 6),))
+
+    def fake_validated_native(finder, pads, budget):
+        # Native validation finds nothing at all.
+        return iter(())
+
+    def fake_geometric_departures(router, finder, pads, *, deadline, reserved_routes):
+        yield fallback_departure
+
+    monkeypatch.setattr(pair_construction, "validated_departures", fake_validated_native)
+    monkeypatch.setattr(geometric_departure, "geometric_departures", fake_geometric_departures)
+    monkeypatch.setattr(pair_construction, "landing_proposals", lambda *a, **kw: iter(()))
+    finder = _FakeFinder(result=("should", "not-be-called"))
+    budget = ConstructionBudget(
+        deadline=time.monotonic() + 5.0,
+        iterations_remaining=256,
+        bodies_remaining=400,
+        corridor_iterations_remaining=600_000,
+    )
+    result = construct_pair_routes(
+        None,
+        finder,
+        None,
+        (1, 2, 3, 4),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=4,
+        corridor=frozenset({(0, 0)}),
+    )
+    assert result is None
+    assert finder.calls == [], "the corridor-guided native search must never be reached"
+    assert budget.corridor_attempts == 0
+    assert budget.corridor_iterations_used == 0
+    # The FULL corridor allowance is untouched -- it was never spent, not
+    # exhausted -- distinguishing this from a starved-but-attempted corridor.
+    assert budget.corridor_iterations_remaining == 600_000
+    assert budget.departure_reasons == {"exact_geometry_departure": 1}
+
+
 def test_corridor_fallback_names_why_each_attempt_failed(monkeypatch):
     _stub(
         monkeypatch,

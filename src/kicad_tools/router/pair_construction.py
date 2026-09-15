@@ -74,6 +74,56 @@ CORRIDOR_WALL_RESERVE_FRACTION: float = float(
 if not math.isfinite(CORRIDOR_WALL_RESERVE_FRACTION):
     raise ValueError("KCT_CONSTRUCTION_CORRIDOR_WALL_RESERVE must be finite")
 
+# Issue #5333 follow-up (2026-09-15 session): the reserve above is correct
+# and unit-verified (``test_a_failing_lattice_cannot_spend_the_whole_window_
+# before_the_corridor_runs``) for what it controls -- how ``construct_pair_
+# routes``'s OWN two internal stages split whatever window they are handed.
+# Re-measuring TMDS_D1 live on real Board07 (seed 42, native ABI 31,
+# ``test_tmds_d1_corridor_stage_is_invoked_in_a_live_search``, derived 60s
+# per-pair wall) still shows ``corridor_attempts=0``, but the shape is
+# DIFFERENT from the original b4c764ef measurement quoted above -- this is
+# NOT the same code path re-starving:
+#
+#   [coupled-construction] success=False native_iters=220 proposals=15
+#   departures=6 landings=1 bodies=2 built=2 geom_rejected=1 completions=2
+#   completion_reasons={'no_tail': 3, 'deadline': 1}
+#   departure_directions={'away_from_goal': '6/7', 'toward_goal': '0/8'}
+#   corridor_attempts=0 corridor_iters=0 corridor_reasons={} widen_spent=4
+#
+# ``departures=6`` (native-validated, NOT the ``exact_geometry_departure``
+# fallback -- that fallback unconditionally sets ``corridor=None``, a
+# SEPARATE, previously-untested code path confirmed reachable this session,
+# see ``test_corridor_is_disabled_when_departures_come_from_the_geometric_
+# fallback`` in ``tests/test_pair_construction.py``; it is NOT what fired
+# here). ``landings=1`` and a single ``deadline`` completion reason means
+# the lattice stage hit its OWN sub-deadline after barely a single landing
+# -- i.e. ``construct_pair_routes`` was handed only a sliver of wall-clock
+# time in the first place, not that the reserve failed to split it fairly.
+#
+# That sliver is a consequence of what happens BEFORE ``construct_pair_
+# routes`` is ever called: ``DiffPairRouter._route_pair`` (diffpair_
+# routing.py) runs a corridor-guided ``pathfinder.route_coupled`` probe
+# (up to ~half of ``per_pair_timeout``), then, if that fails, an "open"
+# fallback ``pathfinder.route_coupled`` with NO corridor that is deliberately
+# sized to spend the REST of ``per_pair_timeout`` (``remaining_budget =
+# per_pair_timeout - elapsed``) before construction gets a turn at all --
+# and ``construction_deadline`` is the SAME absolute instant those two
+# stages were already targeting, not a fresh window.  On a fast/idle host
+# the open fallback can exit well before its own deadline (native iteration
+# budget exhausted first) and leave construction a real window; on a loaded
+# host it runs closer to the wall, and construction inherits whatever is
+# left -- which can be small enough that ONE landing consumes it before the
+# already-fair 50/50 split ever gets to apply.  This is the SAME class of
+# host-speed dependence already named for the two wall-clock cutoffs this
+# issue's instructions forbid changing without a full-recipe cost study
+# (#3089/#3321 per-pair, #3439 aggregate) -- it is not a new, independently
+# fixable defect in this module, and no budget, deadline or allowance here
+# was changed to make this note.  Next full-recipe budget-reconciliation
+# session: the corridor-probe / open-fallback / construction split is a
+# THIRD, currently sequential ("whatever's left") consumer of the same
+# ``per_pair_timeout``, so any up-front reallocation across those three
+# needs to preserve their combined total the way #5333's own scope requires.
+
 
 @dataclass
 class ConstructionBudget:
