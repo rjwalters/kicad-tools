@@ -16,6 +16,7 @@ assembled-geometry, physical-skew and authored-coupling gates.
 from __future__ import annotations
 
 import itertools
+import math
 import os
 import time
 from collections import Counter
@@ -69,6 +70,8 @@ _CORRIDOR_DEBUG: bool = os.environ.get("KCT_CORRIDOR_CONSTRUCTION_DEBUG", "0") =
 CORRIDOR_WALL_RESERVE_FRACTION: float = float(
     os.environ.get("KCT_CONSTRUCTION_CORRIDOR_WALL_RESERVE", "0.5")
 )
+if not math.isfinite(CORRIDOR_WALL_RESERVE_FRACTION):
+    raise ValueError("KCT_CONSTRUCTION_CORRIDOR_WALL_RESERVE must be finite")
 
 
 @dataclass
@@ -217,8 +220,9 @@ def construct_pair_routes(
     departure escape -- only once the fixed geometric shape lattice has been
     tried for every escape direction and still returned nothing.  A pair that
     already succeeds through the geometric lattice never reaches it, so
-    supplying a corridor cannot change the outcome for a pair that already
-    routes.
+    supplying a corridor may cut short a lattice search that would otherwise
+    succeed later in the full window; the reserved time lets the corridor
+    stage try a different construction instead.
 
     When a corridor IS supplied, the lattice is additionally bounded by a
     SUB-deadline -- see :data:`CORRIDOR_WALL_RESERVE_FRACTION` -- so that a
