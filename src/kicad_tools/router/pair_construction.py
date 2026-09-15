@@ -23,9 +23,10 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from .body_planning import PairBody
 from .body_search import BodySearchBudget, complete_departures
 from .departure_planning import DepartureBudget, validated_departures
-from .pair_completion import WidenBudget, qualify_constructed_pair
+from .pair_completion import WidenBudget, complete_pair_body, qualify_constructed_pair
 from .terminal_planning import landing_proposals
 
 if TYPE_CHECKING:
@@ -264,20 +265,32 @@ def construct_pair_routes(
     budget.departures_found = len(departures)
     if not departures:
         return None
-    result = _geometric_body_search(
-        router,
-        finder,
-        pair,
-        pads,
-        departures,
-        budget,
-        board_thickness_mm=board_thickness_mm,
-        num_copper_layers=num_copper_layers,
-        reserved_routes=reserved_routes,
-        max_landings=max_landings,
-        max_bodies_per_departure=max_bodies_per_departure,
-        deadline=_lattice_deadline(budget, corridor),
+    # Keep one existing body allowance per native departure for completion
+    # of its saved corridor path. This partitions the original cap; it never
+    # grants fresh body attempts after a failed shape lattice.
+    reserve = (
+        min(len(departures), budget.bodies_remaining)
+        if corridor is not None and budget.corridor_iterations_remaining > 0
+        else 0
     )
+    budget.bodies_remaining -= reserve
+    try:
+        result = _geometric_body_search(
+            router,
+            finder,
+            pair,
+            pads,
+            departures,
+            budget,
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            reserved_routes=reserved_routes,
+            max_landings=max_landings,
+            max_bodies_per_departure=max_bodies_per_departure,
+            deadline=_lattice_deadline(budget, corridor),
+        )
+    finally:
+        budget.bodies_remaining += reserve
     if result is not None:
         return result
     if corridor is not None:
@@ -525,9 +538,88 @@ def _corridor_guided_departures(
                 return None
             continue
         budget.corridor_reasons[_corridor_stall_reason(finder)] += 1
+        # A failed joint search can already have a physical body underneath
+        # the destination pads but lack the terminal layer returns. Complete
+        # that actual native geometry with the existing two-tail constructor.
+        # Give each remaining departure a fair share of the same deadline.
+        completion_deadline = time.monotonic() + max(
+            0.0, (budget.deadline - time.monotonic()) / (departures_remaining + 1)
+        )
+        completed = _complete_corridor_partial(
+            router,
+            finder,
+            pair,
+            pads,
+            budget,
+            deadline=min(budget.deadline, completion_deadline),
+            board_thickness_mm=board_thickness_mm,
+            num_copper_layers=num_copper_layers,
+            reserved_routes=reserved_routes,
+        )
+        if completed is not None:
+            return completed
         if _CORRIDOR_DEBUG:
             print(f"    [corridor-construction-debug] {dict(finder.last_rejections)}", flush=True)
     return None
+
+
+def _complete_corridor_partial(
+    router,
+    finder,
+    pair,
+    pads,
+    budget,
+    *,
+    deadline,
+    board_thickness_mm,
+    num_copper_layers,
+    reserved_routes=(),
+):
+    """Complete only this attempt's saved native body, charging shared ledgers."""
+    deadline = min(deadline, budget.deadline)
+    path = getattr(finder, "last_best_cpp_path", ())
+    if not path or budget.bodies_remaining <= 0 or time.monotonic() >= deadline:
+        return None
+    if getattr(finder, "_cpp_reconstruct_pads", None) != pads:
+        return None
+    grid = finder.grid
+    root = (
+        *grid.world_to_grid(pads[0].x, pads[0].y),
+        grid.layer_to_index(pads[0].layer.value),
+        *grid.world_to_grid(pads[2].x, pads[2].y),
+        grid.layer_to_index(pads[2].layer.value),
+    )
+    if tuple(path[0][:6]) != root:
+        return None
+    # Charge before reconstruction/completion, including exceptions and
+    # rejected candidates. Never recycle a failed attempt's body allowance.
+    budget.bodies_remaining -= 1
+    budget.bodies_used += 1
+    routes = finder._reconstruct_coupled_routes_from_cpp_path(path, partial=True)
+    end = path[-1]
+    if any(
+        not route.segments or grid.layer_to_index(route.segments[-1].layer.value) != end[offset + 2]
+        for route, offset in zip(routes, (0, 3), strict=True)
+    ):
+        budget.corridor_reasons["partial_head_layer"] += 1
+        return None
+    budget.bodies_built += 1
+    budget.completions_tried += 1
+    result = complete_pair_body(
+        router,
+        finder,
+        pair,
+        pads,
+        PairBody(*routes, tuple(end[:2]), tuple(end[3:5])),
+        deadline=min(deadline, budget.deadline),
+        board_thickness_mm=board_thickness_mm,
+        num_copper_layers=num_copper_layers,
+        reserved_routes=reserved_routes,
+        reasons=budget.completion_reasons,
+        widen_budget=budget.widen_budget,
+    )
+    budget.corridor_reasons["partial_completed" if result else "partial_rejected"] += 1
+    return result
 
 
 def _lattice_deadline(

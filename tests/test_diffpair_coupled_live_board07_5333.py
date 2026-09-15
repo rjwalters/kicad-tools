@@ -1,47 +1,12 @@
-"""Live end-to-end control for issue #5333's corridor-starvation fix.
+"""Live native Board07 control for all seven coupled construction paths.
 
-``test_pair_construction.py`` encodes the ``b4c764ef`` fix
-(``_lattice_deadline`` reserving a fair share of the per-pair construction
-window for the corridor-guided stage) against SYNTHETIC numbers lifted from
-one captured production log -- it proves the arithmetic is correct, not that
-the fix actually engages the corridor stage when driven by a real, live
-``kct route --differential-pairs`` invocation against real board geometry.
-That gap was explicitly named as outstanding in the #5333 progress comment
-that shipped ``b4c764ef``: "confirm this fix actually resolves TMDS_D1
-end-to-end in a live coupled search rather than just satisfying the
-unit-level replay."
+The committed fixture runs with seed42 and the recipe's unchanged search
+parameters. Singles and pours are skipped to isolate the differential pre-pass;
+this is not full-recipe manufacturing or match-group acceptance. Every pair
+must pass the router's authored skew/coupling and exact geometry gates.
 
-This module closes that gap with a real (not mocked, not replayed)
-``kct route`` subprocess invocation against the committed Board07 regression
-fixture (``boards/07-matchgroup-test/regression-fixture/matchgroup_test.kicad_pcb``),
-using the SAME seed/timeout/search-timeout/net-class-map/length-match-groups
-parameters the board's own recipe (``generate_design.py``) uses for its
-negotiated route step, plus ``--differential-pairs`` (the one flag the issue
-adds on top of the recipe per its curator boundaries).  The 17 non-diff-pair
-singles (DQ0-7, DM0, A0-7) and the 3 pour nets are passed via ``--skip-nets``
-purely to keep the invocation fast (diff pairs are routed FIRST by
-``route_all_with_diffpairs``, before any single-ended net, so this changes
-nothing about how the seven pairs are searched) -- this is a measurement
-convenience, not a weakened check: every diff-pair net remains present, live,
-and subject to the full authored net-class/coupling/skew gates.
-
-Measured wall-clock on the reference host: ~75s (dominated by TMDS_D1's and
-TMDS_D2's joint-A* fallback search after their corridor-guided construction
-attempt is rejected).  Marked ``slow`` accordingly -- excluded from the
-default ``-m "not slow"`` CI run, picked up by the nightly slow-tests
-workflow (1200s per-test budget).
-
-Per-pair outcome counts (bodies/iterations) vary a few percent run-to-run
-because ``_lattice_deadline``'s reserve is wall-clock-based (machine-speed
-sensitive); this module intentionally asserts only the STABLE, semantic
-facts a regression should not be allowed to silently change:
-
-- which pairs classify ``coupled-ok`` vs. remain open (never asserting exact
-  iteration/body counts, which are not reproducible across hosts)
-- that TMDS_D1's corridor-guided construction stage is actually INVOKED
-  (``corridor_attempts`` > 0) -- the literal, live confirmation of the
-  ``b4c764ef`` fix; a regression back to the pre-fix starvation bug would
-  make this fail with ``corridor_attempts=0``
+MIPI_DAT1 exercises conservative departure halo resolution. TMDS_D1/D2
+exercise completion of saved native corridor bodies with surface-layer tails.
 """
 
 from __future__ import annotations
@@ -96,22 +61,15 @@ _NON_DIFFPAIR_NETS = [
     "A7",
 ]
 
-# The pairs the pre-b4c764ef #5333 investigation and the ninth-commit
-# progress comment established as qualified (coupled-ok) independent of the
-# corridor-starvation fix -- MIPI_CLK/MIPI_DAT0/TMDS_D0 resolve through the
-# geometric lattice or an already-working corridor path, and DQS resolves
-# through native partial-recovery.  A regression in any of these is a
-# DIFFERENT defect than the one this module targets.
-_EXPECTED_QUALIFIED_PAIRS = ("DQS", "MIPI_CLK", "MIPI_DAT0", "MIPI_DAT1", "TMDS_D0")
-
-# TMDS_D1/TMDS_D2 are the two pairs #5333 has not yet resolved
-# MIPI_DAT1 now qualifies through exact departure geometry after a native
-# conservative-halo rejection. See ``_corridor_guided_departures`` for
-# the current, still-accurate diagnosis of each).  This module does not
-# require them to stay unresolved forever -- a future fix legitimately
-# qualifying one is a welcome change to this list -- it only pins that they
-# are not SILENTLY reported qualified by a quality-gate bypass.
-_EXPECTED_STILL_OPEN_PAIRS = ("TMDS_D1", "TMDS_D2")
+_EXPECTED_QUALIFIED_PAIRS = (
+    "DQS",
+    "MIPI_CLK",
+    "MIPI_DAT0",
+    "MIPI_DAT1",
+    "TMDS_D0",
+    "TMDS_D1",
+    "TMDS_D2",
+)
 
 
 @pytest.fixture(scope="module")
@@ -174,10 +132,9 @@ def board07_live_diffpair_log(tmp_path_factory: pytest.TempPathFactory) -> str:
         timeout=600,
     )
     log = result.stdout + result.stderr
-    # Partial (exit 3) is EXPECTED: three of the seven pairs remain
-    # unresolved by design (see _EXPECTED_STILL_OPEN_PAIRS) and fall back to
-    # the negotiated main strategy. A crash (anything other than 0 or the
-    # documented partial-routing exit) is still a hard failure.
+    # Exit 3 remains allowed because singles/pours were deliberately skipped.
+    # Every differential pair must independently qualify below; no unrelated
+    # open net can excuse a missing coupled pair.
     assert result.returncode in (0, 3), (
         f"unexpected kct route exit code {result.returncode}; full output:\n{log}"
     )
@@ -204,29 +161,10 @@ def _construction_line_before(log: str, report_line: str) -> str | None:
 def test_previously_qualified_pairs_remain_coupled_ok(
     board07_live_diffpair_log: str, pair: str
 ) -> None:
-    """DQS/MIPI_CLK/MIPI_DAT0/TMDS_D0 stay qualified (#5333 item 3: re-verify unaffected)."""
+    """Every actual native pair must pass the unchanged qualification gates."""
     line = _pair_report_line(board07_live_diffpair_log, pair)
     assert f"pair={pair} class=coupled-ok" in line, line
     assert "coupled=True" in line, line
-
-
-@pytest.mark.parametrize("pair", _EXPECTED_STILL_OPEN_PAIRS)
-def test_still_open_pairs_are_not_silently_promoted(
-    board07_live_diffpair_log: str, pair: str
-) -> None:
-    """MIPI_DAT1/TMDS_D1/TMDS_D2 must never report qualified via a quality-gate bypass.
-
-    This intentionally does NOT pin the exact classification string (a
-    legitimate future fix changing ``landing-stall`` to ``joint-A*-plateau``,
-    for instance, is not a regression) -- only that ``coupled=True`` never
-    appears for these three without every other assertion in this module
-    (particularly the corridor-engagement one below) also being re-examined.
-    """
-    line = _pair_report_line(board07_live_diffpair_log, pair)
-    assert "coupled=False" in line, (
-        f"pair={pair} unexpectedly reports coupled=True -- if this is a genuine fix, "
-        f"update _EXPECTED_QUALIFIED_PAIRS / _EXPECTED_STILL_OPEN_PAIRS accordingly: {line}"
-    )
 
 
 def test_tmds_d1_corridor_stage_is_invoked_in_a_live_search(board07_live_diffpair_log: str) -> None:

@@ -1611,7 +1611,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
       test on the same date showed the ``CoupledPathfinder`` pre-pass
       hangs CPU-bound for >40 minutes on this board (well past the
       ``--timeout 600`` budget, which the pre-pass does not honour).
-      This recipe therefore continues to omit ``--differential-pairs``.
+      The recipe omitted ``--differential-pairs`` at that revision;
+      the #5333 construction update below supersedes this decision.
       Net yield is 28/31 (matching the PR #3276 baseline: DQ3,
       MIPI_CLK_N, MIPI_DAT0_N remain stranded per #3275) and routed-DRC
       stays under the per-board allowlist (currently 25; measured 23
@@ -1952,7 +1953,8 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # ``--differential-pairs`` is now SAFE to enable (bounded, reach-
     # preserving) but is not yet a quality win: no pair survives to a
     # committed coupled route until #3438 (MIPI reach) and #3320
-    # (DQS swap overlap) land.  The recipe therefore still omits it.
+    # (DQS swap overlap) land. That historical omission is superseded
+    # by the bounded #5333 construction update below.
     #
     # Issue #3441 addendum (2026-06-10): the "--grid 0.1: WORSE"
     # entry above was a router bug, not a grid property.  Waypoint
@@ -2018,6 +2020,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--net-class-map",
         str(sidecar_path),
         "--length-match-groups",
+        # #5333: native departures plus exact halo resolution and guarded
+        # completion of saved corridor bodies qualify all seven pairs.
+        # Keep the authored pair/group gates and all existing budgets.
+        "--differential-pairs",
     ]
 
     # Issue #4468 (epic #3438 Phase 3): classifier-driven placement-delta

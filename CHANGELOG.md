@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Complete saved native differential-pair corridor bodies with validated terminal layer returns, sharing the existing body/time/tuning budgets (#5333).
+
 - Resolve conservative differential-pair departure halos against exact live copper geometry, preserving unknown-obstacle rejection and final skew/coupling gates (#5333).
 
 - **Imported copper arcs no longer cause false opens or under-reported

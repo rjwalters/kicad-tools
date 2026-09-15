@@ -818,3 +818,33 @@ def test_constructs_a_qualified_pair_where_the_joint_search_cannot():
     # Construction commits nothing: the caller decides.
     assert (auto.routes, auto.grid.routes) == before
     assert budget.iterations_used <= 256 and budget.bodies_used <= 400
+
+
+@pytest.mark.parametrize("corridor_iterations,expected_lattice", [(0, 10), (10, 9)])
+def test_body_reserve_only_partitions_an_available_corridor(
+    monkeypatch, corridor_iterations, expected_lattice
+):
+    calls = _stub(monkeypatch, departures=[_departure((1, 0), 3)], landings=["landing"], clock=[0])
+    finder = _FakeFinder(result=None, iterations=1)
+    budget = ConstructionBudget(
+        deadline=1,
+        iterations_remaining=64,
+        bodies_remaining=10,
+        corridor_iterations_remaining=corridor_iterations,
+    )
+    assert (
+        construct_pair_routes(
+            None,
+            finder,
+            None,
+            (1, 2, 3, 4),
+            budget,
+            board_thickness_mm=1.6,
+            num_copper_layers=4,
+            corridor=frozenset({(0, 0)}),
+        )
+        is None
+    )
+    assert calls["bodies"] == [(1, expected_lattice)]
+    assert budget.bodies_used == expected_lattice
+    assert budget.bodies_used + budget.bodies_remaining == 10
