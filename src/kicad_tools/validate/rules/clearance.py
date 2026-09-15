@@ -7,7 +7,9 @@ on the same layer but different nets.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import product
 from typing import TYPE_CHECKING
 
 from kicad_tools._shapely import require_shapely
@@ -432,16 +434,45 @@ def _pair_is_geometrically_coupled(pcb: PCB, net_a: int, net_b: int) -> bool:
                 segs_b.append(seg)
         if not segs_a or not segs_b:
             continue
-        for sa in segs_a:
-            for sb in segs_b:
-                coupled_len += _segments_are_coupled(
-                    sa,
-                    sb,
-                    _COUPLING_MAX_GAP_MM,
-                    _COUPLING_ANGLE_TOL_DEG,
-                )
-                if coupled_len >= _COUPLING_MIN_PARALLEL_LEN_MM:
-                    return True
+        segments = segs_a + segs_b
+        bounds = [
+            (
+                math.nextafter(min(seg.start[0], seg.end[0]) - seg.width / 2, -math.inf),
+                math.nextafter(min(seg.start[1], seg.end[1]) - seg.width / 2, -math.inf),
+                math.nextafter(max(seg.start[0], seg.end[0]) + seg.width / 2, math.inf),
+                math.nextafter(max(seg.start[1], seg.end[1]) + seg.width / 2, math.inf),
+            )
+            for seg in segments
+        ]
+        pairs: Iterable[tuple[Segment, Segment]]
+        if any(
+            seg.width < 0
+            or not all(math.isfinite(value) for value in (*seg.start, *seg.end, seg.width))
+            for seg in segments
+        ) or any(not math.isfinite(value) for bound in bounds for value in bound):
+            # Keep the existing exact behavior for malformed geometry that
+            # cannot be represented by a finite spatial-index envelope.
+            pairs = product(segs_a, segs_b)
+        else:
+            # Full copper bounds include each half-width. Expand by the
+            # unchanged gap limit, then retain only opposite-net candidates.
+            # The shared broad phase preserves the exhaustive A/B order;
+            # only guaranteed zero contributions disappear from the sum.
+            split = len(segs_a)
+            pairs = (
+                (segments[i], segments[j])
+                for i, j in candidate_pairs(bounds, math.nextafter(_COUPLING_MAX_GAP_MM, math.inf))
+                if i < split <= j
+            )
+        for sa, sb in pairs:
+            coupled_len += _segments_are_coupled(
+                sa,
+                sb,
+                _COUPLING_MAX_GAP_MM,
+                _COUPLING_ANGLE_TOL_DEG,
+            )
+            if coupled_len >= _COUPLING_MIN_PARALLEL_LEN_MM:
+                return True
     return False
 
 
