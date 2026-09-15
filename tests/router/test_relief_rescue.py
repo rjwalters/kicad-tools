@@ -1014,3 +1014,93 @@ class TestReliefRescueProportionalBound:
         inert = router._relief_txn_bound_line(None)
         assert inert.startswith("  Relief-rescue transaction bound: none")
         assert "#4781" in inert
+
+
+@pytest.mark.parametrize("victim_fails", [False, True])
+def test_final_probe_reverses_without_adding_rounds_and_preserves_transaction(victim_fails):
+    router = _make_simple_router(4)
+    originals = {net: Route(net=net, net_name=f"N{net}") for net in (2, 3, 4)}
+    net_routes = {1: [], **{net: [route] for net, route in originals.items()}}
+    router.routes.extend(originals.values())
+    probe = Route(net=1, net_name="N1")
+    calls = []
+    reroutes = []
+
+    def probe_call(net, factor, per_net_timeout=None, reverse_search=False):
+        calls.append((reverse_search, per_net_timeout))
+        if len(calls) <= 3:
+            return [probe], {len(calls) + 1}
+        # The bounded forward search cannot find the final path.
+        return ([probe], set()) if reverse_search else ([], set())
+
+    def route_call(net, factor, per_net_timeout=None, reverse_search=False):
+        reroutes.append((net, reverse_search))
+        if net == 1 or (victim_fails and net == 4):
+            return []
+        return [originals[net]]
+
+    neg = NegotiatedRouter(router.grid, router.router, router.rules, router.net_class_map)
+    with (
+        patch.object(router, "_relief_probe", side_effect=probe_call),
+        patch.object(router, "_route_net_negotiated", side_effect=route_call),
+    ):
+        result = router._relief_rescue(
+            1,
+            neg,
+            net_routes,
+            {net: [router.pads[key] for key in keys] for net, keys in router.nets.items()},
+            1.0,
+            5.0,
+            lambda *_: None,
+            lambda: "0s",
+            depth=1,
+        )
+    assert calls == [(False, 5.0)] * 3 + [(True, 5.0)]
+    assert reroutes[0] == (1, True)
+    assert all(not reverse for net, reverse in reroutes if net != 1)
+    assert result is not victim_fails
+    if victim_fails:
+        assert net_routes[1] == []
+        for net, route in originals.items():
+            assert net_routes[net] == [route]
+            assert route in router.routes
+    else:
+        assert net_routes[1] == [probe]
+        assert all(net_routes[net] for net in originals)
+
+
+@pytest.mark.parametrize("terminal_count", [2, 3])
+def test_reverse_search_changes_only_two_terminal_order(terminal_count):
+    router = _make_simple_router(1)
+    if terminal_count == 3:
+        router.add_component(
+            "J2",
+            [
+                {
+                    "number": "1",
+                    "x": 20.0,
+                    "y": 15.0,
+                    "width": 0.5,
+                    "height": 0.5,
+                    "net": 1,
+                    "net_name": "N1",
+                }
+            ],
+        )
+    expected = [router.pads[key] for key in router.nets[1]]
+    seen = []
+
+    def negotiate(_self, pads, *_args, **_kwargs):
+        seen.append(list(pads))
+        return []
+
+    with (
+        patch.object(router, "_create_intra_ic_routes", return_value=([], set())),
+        patch.object(router, "_create_block_internal_routes", return_value=([], set())),
+        patch.object(NegotiatedRouter, "route_net_negotiated", negotiate),
+    ):
+        router._route_net_negotiated(1, 1.0, reverse_search=True)
+        router._route_net_negotiated(1, 1.0)
+    assert seen[0] == (list(reversed(expected)) if terminal_count == 2 else expected)
+    assert seen[1] == expected
+    assert [router.pads[key] for key in router.nets[1]] == expected
