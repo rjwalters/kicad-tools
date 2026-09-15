@@ -1443,7 +1443,8 @@ class RoutingGrid:
         """Get congestion level [0, 1] for a grid cell's region."""
         cx = min(gx // self.congestion_size, self.congestion_cols - 1)
         cy = min(gy // self.congestion_size, self.congestion_rows - 1)
-        count = self._congestion[layer, cy, cx]
+        # Keep scalar congestion and downstream heuristic arithmetic in Python.
+        count = float(self._congestion[layer, cy, cx])
         max_cells = self.congestion_size * self.congestion_size
         return min(1.0, count / max_cells)
 
