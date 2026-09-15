@@ -45,7 +45,7 @@ class NetImpedanceSpec:
         target_z0: Target characteristic impedance (single-ended)
         target_zdiff: Target differential impedance (for diff pairs)
         tolerance_percent: Allowed deviation from target (default 10%)
-        exclude_current_sense: Suppress polarity-only heuristics on sense nets.
+        exclude_current_sense: Suppress polarity-only heuristics on confirmed sense nets.
     """
 
     net_pattern: str
@@ -54,9 +54,9 @@ class NetImpedanceSpec:
     tolerance_percent: float = 10.0
     exclude_current_sense: bool = False
 
-    def matches(self, net_name: str) -> bool:
-        """Check if this spec matches a net name."""
-        if self.exclude_current_sense:
+    def matches(self, net_name: str, *, has_kelvin_root: bool = False) -> bool:
+        """Match a name, excluding sense nets only with resistor-pad evidence."""
+        if self.exclude_current_sense and has_kelvin_root:
             from kicad_tools.router.kelvin import is_sense_net_name
 
             if is_sense_net_name(net_name):
@@ -359,9 +359,13 @@ class ImpedanceRule(DRCRule):
         # Collect all traces from PCB
         trace_data = self._collect_traces(pcb)
 
+        current_sense_nets = self._collect_current_sense_nets(pcb)
+
         # Check each net against matching specs
         for net_name, traces in trace_data.items():
-            spec = self._find_matching_spec(net_name)
+            spec = self._find_matching_spec(
+                net_name, has_kelvin_root=net_name in current_sense_nets
+            )
             if spec is None:
                 continue
 
@@ -482,17 +486,51 @@ class ImpedanceRule(DRCRule):
 
         return trace_data
 
-    def _find_matching_spec(self, net_name: str) -> NetImpedanceSpec | None:
+    @staticmethod
+    def _collect_current_sense_nets(pcb: PCB) -> set[str]:
+        """Find sense nets with an actual resistor pad, using the router's gate.
+
+        Schema pads store their component identity on the parent footprint.
+        Adapt each candidate to a router pad; only root existence matters here,
+        so there is no need to select the most central pad of a full net.
+        Recompute per board check so reused rules cannot retain stale topology.
+        """
+        from kicad_tools.router.kelvin import find_kelvin_root, is_sense_net_name
+        from kicad_tools.router.primitives import Pad
+
+        names: set[str] = set()
+        for footprint in getattr(pcb, "footprints", []):
+            for pad in footprint.pads:
+                if pad.net_name in names or not is_sense_net_name(pad.net_name):
+                    continue
+                candidate = Pad(
+                    x=pad.position[0],
+                    y=pad.position[1],
+                    width=pad.size[0],
+                    height=pad.size[1],
+                    net=pad.net_number,
+                    net_name=pad.net_name,
+                    ref=footprint.reference,
+                    footprint_name=footprint.name,
+                )
+                if find_kelvin_root([candidate]) is not None:
+                    names.add(pad.net_name)
+        return names
+
+    def _find_matching_spec(
+        self, net_name: str, *, has_kelvin_root: bool = False
+    ) -> NetImpedanceSpec | None:
         """Find the first matching impedance spec for a net name.
 
         Args:
             net_name: Net name to match
+            has_kelvin_root: Whether an actual resistor pad exists on this net
 
         Returns:
             Matching spec or None
         """
         for spec in self.specs:
-            if spec.matches(net_name):
+            if spec.matches(net_name, has_kelvin_root=has_kelvin_root):
                 return spec
         return None
 
