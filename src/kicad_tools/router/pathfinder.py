@@ -1870,10 +1870,11 @@ class Router:
             if not (0 <= cx < self.grid.cols and 0 <= cy < self.grid.rows):
                 return True  # Out of bounds = blocked
 
-            cell = self.grid.cell_at(layer, cy, cx)
-
-            if cell.blocked:
-                if allow_sharing and not cell.is_obstacle:
+            # This hot predicate only reads occupancy. Index the scalar
+            # planes directly instead of allocating a _CellView per neighbor.
+            if self.grid._blocked[layer, cy, cx]:
+                cell_net = int(self.grid._net[layer, cy, cx])
+                if allow_sharing and not self.grid._is_obstacle[layer, cy, cx]:
                     # Issue #3566 / #3545: statically blocked foreign
                     # cells (pad clearance halos, keepouts) are
                     # non-negotiable regardless of usage_count -- a pad
@@ -1887,28 +1888,28 @@ class Router:
                     if (
                         grid_static is not None
                         and grid_static[layer, cy, cx]
-                        and cell.net != net
+                        and cell_net != net
                         and not self.relief_mode
                     ):
                         return True
                     # In negotiated mode, non-obstacle cells can be shared
-                    # No-net pads (cell.net == 0) must always block other nets
+                    # No-net pads (cell_net == 0) must always block other nets
                     # See issue #317: routes incorrectly allowed through no-net pads
-                    if cell.net == 0:
-                        if cell.usage_count == 0:
+                    if cell_net == 0:
+                        if int(self.grid._usage_count[layer, cy, cx]) == 0:
                             return True  # Static no-net obstacle (pad) - block
-                    elif cell.net != net:
+                    elif cell_net != net:
                         # Only allow sharing if this cell has been used by routes
                         # (usage_count > 0). Cells with usage_count == 0 are static
                         # obstacles like pads that should never be shared.
                         # See issue #174: pad clearance zones must block other nets.
-                        if cell.usage_count == 0:
+                        if int(self.grid._usage_count[layer, cy, cx]) == 0:
                             return True  # Static obstacle (pad) - block
                         continue  # Allow with cost penalty (routed cell)
                 else:
                     # Standard mode (same logic as _is_trace_blocked)
                     # Issue #864: Same-net cells are passable, different nets block
-                    if cell.net == net:
+                    if cell_net == net:
                         pass  # Same net - passable
                     else:
                         return True  # Different net or obstacle - blocked
