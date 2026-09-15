@@ -1099,8 +1099,8 @@ class Router:
         self._fine_pitch_pad_positions = []
         component_pitches = self.component_pitches
         for pad in unrouted_pads:
-            ref = pad.ref
-            if ref and ref in component_pitches:
+            ref = pad.component_key
+            if ref in component_pitches:
                 pitch = component_pitches[ref]
                 if pitch < self.rules.fine_pitch_threshold:
                     self._fine_pitch_pad_positions.append((pad.x, pad.y, ref))
@@ -1499,7 +1499,7 @@ class Router:
             effective_width = pad.width
             effective_height = pad.height
 
-        pitch = self.component_pitches.get(pad.ref)
+        pitch = self.component_pitches.get(pad.component_key)
         required_clearance = self.rules.get_clearance_for_component(pad.ref, pitch)
         # Dense fine-pitch pad-edge seeds can reconstruct a tail that grazes
         # a foreign pad. Inset those unexempted seeds and all strict-mode pads;
@@ -1510,10 +1510,13 @@ class Router:
             and not pad.escape_terminal
             and (
                 self.rules.strict_pad_clearance
-                or self.grid._component_is_fine_pitch(pad.ref, self.component_pitches)
+                or self.grid._component_is_fine_pitch(pad.component_key, self.component_pitches)
             )
             and not self.grid._same_component_carveout_active(
-                pad.ref, required_clearance, self.rules.trace_clearance, self.component_pitches
+                pad.component_key,
+                required_clearance,
+                self.rules.trace_clearance,
+                self.component_pitches,
             )
         ):
             # Physical pad-center tails emit the local neck-down width.
@@ -4507,8 +4510,12 @@ class Router:
         current_direction: tuple[float, float] | None = None  # (dx_normalized, dy_normalized)
 
         # Issue #1018: Get pin pitches for neck-down calculation
-        start_pitch = self.component_pitches.get(start_pad.ref) if start_pad.ref else None
-        end_pitch = self.component_pitches.get(end_pad.ref) if end_pad.ref else None
+        start_pitch = (
+            self.component_pitches.get(start_pad.component_key) if start_pad.component_key else None
+        )
+        end_pitch = (
+            self.component_pitches.get(end_pad.component_key) if end_pad.component_key else None
+        )
 
         # Determine if neck-down applies for each pad
         start_needs_neckdown = self.rules.should_apply_neck_down(start_pad.ref, start_pitch)
@@ -4975,10 +4982,10 @@ class Router:
         # clearance checks. Adjacent pads (especially net=0 unconnected pads) on the
         # same component should not block routing to their neighbors.
         exclude_refs: set[str] = set()
-        if start_pad.ref:
-            exclude_refs.add(start_pad.ref)
-        if end_pad.ref:
-            exclude_refs.add(end_pad.ref)
+        if start_pad.component_key:
+            exclude_refs.add(start_pad.component_key)
+        if end_pad.component_key:
+            exclude_refs.add(end_pad.component_key)
         # Issue #3438: relief PROBES deliberately cross foreign copper/
         # halos -- geometric validation would reject every probe path.
         # Probe routes are never committed, so skip validation.
@@ -5841,10 +5848,10 @@ class Router:
         # Geometric clearance validation (Issue #1016: per-component clearance support)
         # Issue #1764: Exclude pads on start/end component from clearance checks
         bidir_exclude_refs: set[str] = set()
-        if start_pad.ref:
-            bidir_exclude_refs.add(start_pad.ref)
-        if end_pad.ref:
-            bidir_exclude_refs.add(end_pad.ref)
+        if start_pad.component_key:
+            bidir_exclude_refs.add(start_pad.component_key)
+        if end_pad.component_key:
+            bidir_exclude_refs.add(end_pad.component_key)
         if not self._validate_route_clearance(
             route,
             start_pad.net,

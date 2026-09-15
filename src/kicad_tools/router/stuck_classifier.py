@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.router.failure_analysis import FailureCause
+from kicad_tools.schema.physical_identity import footprint_keys
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
@@ -515,17 +516,15 @@ def _find_blocking_strict_nets_from_pcb(
 
 
 def _iter_board_pads(pcb: PCB):
-    """Yield ``(reference, net_number, (x, y), (w, h))`` for every real pad.
+    """Yield ``(physical_key, net_number, (x, y), (w, h))`` for every real pad.
 
     Positions are in the board frame.  Mirrors the footprint->board transform
     used by :class:`kicad_tools.analysis.net_status.NetStatusAnalyzer` (KiCad
     negates the footprint orientation vs standard CCW math, issue #3739).  The
-    leading footprint reference lets the facing-row resolver (#4286) group a
+    leading physical footprint key lets the facing-row resolver (#4286) group a
     bundle's pads by component.
     """
-    for fp in pcb.footprints:
-        if not fp.reference or fp.reference.startswith("#"):
-            continue
+    for fp, component_id in zip(pcb.footprints, footprint_keys(pcb.footprints), strict=True):
         fp_x, fp_y = fp.position
         angle = math.radians(-fp.rotation)
         cos_a = math.cos(angle)
@@ -534,7 +533,7 @@ def _iter_board_pads(pcb: PCB):
             px, py = pad.position
             bx = fp_x + (px * cos_a - py * sin_a)
             by = fp_y + (px * sin_a + py * cos_a)
-            yield fp.reference, pad.net_number, (bx, by), pad.size
+            yield component_id, pad.net_number, (bx, by), pad.size
 
 
 def _foreign_obstructions(

@@ -489,3 +489,40 @@ def test_fine_pitch_escape_keeps_conductor_seeds_without_disabling_pad_inset(for
     authored = router._build_escape_endpoint_pad(physical, unmoved)
     assert not authored.escape_terminal
     assert bounds(authored, rules.trace_width) == inset
+
+
+@pytest.mark.parametrize("reference", ["DUP", ""])
+@pytest.mark.parametrize("shifted", [False, True])
+def test_escape_terminal_preserves_physical_identity(reference, shifted):
+    physical = Pad(
+        x=5,
+        y=5,
+        width=1,
+        height=1,
+        net=1,
+        net_name="SIGNAL",
+        layer=Layer.F_CU,
+        ref=reference,
+        pin="1",
+        component_id="physical-A",
+    )
+    other = replace(physical, component_id="physical-B")
+    stub = Segment(5, 5, 6, 5, 0.2, Layer.F_CU, net=1)
+    endpoint = (6, 5) if shifted else (5, 5)
+    escape = EscapeRoute(
+        physical,
+        EscapeDirection.EAST,
+        endpoint,
+        Layer.F_CU,
+        segments=[stub] if shifted else [],
+    )
+    router = Autorouter(12, 12, force_python=True, physics_enabled=False)
+    virtual = router._build_escape_endpoint_pad(physical, escape)
+    assert virtual.key == physical.key
+    assert virtual.key != other.key
+    assert (virtual.ref, virtual.pin, virtual.net) == (reference, "1", 1)
+    assert virtual.escape_terminal is shifted
+    if shifted:
+        assert virtual.width == pytest.approx(stub.width / math.sqrt(2))
+    else:
+        assert (virtual.width, virtual.height) == (physical.width, physical.height)

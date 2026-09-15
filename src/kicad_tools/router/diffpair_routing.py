@@ -4492,6 +4492,7 @@ class DiffPairRouter:
             net_name=template.net_name,
             layer=Layer(grid.index_to_layer(layer_idx)),
             ref=template.ref,
+            component_id=template.component_id,
             pin=template.pin,
             # The virtual pad copies the template's copper shape, so it must
             # copy its rotation too or the shape is silently un-rotated
@@ -10976,7 +10977,7 @@ class DiffPairRouter:
         # net) and other nets' pads in the bounding box (must be
         # blocked).
         pitches = self.autorouter.component_pitches
-        pad_refs_in_pair = {(p.ref, p.pin) for p in p_pads + n_pads}
+        pad_refs_in_pair = {p.key for p in p_pads + n_pads}
         # Add the pair's own pads first so net ownership is correct.
         for pad in p_pads + n_pads:
             fine_grid.add_pad(pad, pin_pitch=pitches.get(pad.ref))

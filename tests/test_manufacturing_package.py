@@ -16,6 +16,7 @@ from kicad_tools.export.manufacturing import (
     _build_manifest,
     _create_project_zip,
     _sha256_file,
+    verify_manifest,
 )
 from kicad_tools.export.preflight import PreflightChecker, PreflightConfig, PreflightResult
 
@@ -56,6 +57,44 @@ class TestSha256File:
 
 class TestCreateProjectZip:
     """Tests for _create_project_zip."""
+
+    def test_routed_rules_survive_relocation_and_are_hash_bound(self, tmp_path):
+        project = tmp_path / "source"
+        project.mkdir()
+        pcb = project / "board_routed.kicad_pcb"
+        pcb.write_text("(kicad_pcb)")
+        pcb.with_suffix(".kicad_pro").write_text("{}")
+        rules = b'(version 1)\n(rule "Authored HV" (constraint clearance (min 2mm)))\n'
+        pcb.with_suffix(".kicad_dru").write_bytes(rules)
+        (project / "board.kicad_dru").write_text("unrouted rules")
+        (project / "other.kicad_dru").write_text("unrelated rules")
+        source_bytes = {p.name: p.read_bytes() for p in project.iterdir()}
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        archive = _create_project_zip(pcb, bundle)
+        result = ManufacturingResult(output_dir=bundle, project_zip_path=archive)
+        manifest = bundle / "manifest.json"
+        manifest.write_text(json.dumps(_build_manifest(result, pcb, "jlcpcb")))
+        assert {p.name: p.read_bytes() for p in project.iterdir()} == source_bytes
+
+        relocated = tmp_path / "recipient"
+        shutil.copytree(bundle, relocated)
+        shutil.rmtree(project)
+        shutil.rmtree(bundle)
+        with zipfile.ZipFile(relocated / archive.name) as zf:
+            members = {name: zf.read(name) for name in zf.namelist()}
+        assert members["board_routed.kicad_dru"] == rules
+        assert "board.kicad_dru" not in members
+        assert "other.kicad_dru" not in members
+        assert verify_manifest(relocated / manifest.name) == []
+
+        members["board_routed.kicad_dru"] = rules.replace(b"2mm", b"1mm")
+        with zipfile.ZipFile(relocated / archive.name, "w") as zf:
+            for name, contents in members.items():
+                zf.writestr(name, contents)
+        assert any(
+            "sha256 mismatch" in error for error in verify_manifest(relocated / manifest.name)
+        )
 
     def test_creates_zip_with_kicad_files(self, tmp_path):
         project_dir = tmp_path / "project"
@@ -668,6 +707,8 @@ class TestManufacturingPackageExport:
         """Test that project ZIP and manifest are generated correctly."""
         # Create a minimal project directory
         pcb = local_symbol_project
+        custom_rule = '(rule "Authored HV" (constraint clearance (min 2mm)))'
+        pcb.with_suffix(".kicad_dru").write_text(f"(version 1)\n{custom_rule}\n")
 
         out_dir = tmp_path / "output"
 
@@ -712,6 +753,10 @@ class TestManufacturingPackageExport:
             assert "board.kicad_pcb" in zf.namelist()
             assert "board.kicad_sch" in zf.namelist()
             assert "board.kicad_pro" in zf.namelist()
+            packaged_rules = zf.read("board.kicad_dru")
+            assert custom_rule.encode() in packaged_rules
+            assert b"Silk" in packaged_rules
+            assert packaged_rules == pcb.with_suffix(".kicad_dru").read_bytes()
             assert "sym-lib-table" in zf.namelist()
             assert "kicad_tools_pwr.kicad_sym" in zf.namelist()
 

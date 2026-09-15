@@ -236,8 +236,11 @@ class PlacementAnalyzer:
         """
         self._components = []
 
-        for fp in pcb.footprints:
+        from kicad_tools.schema.physical_identity import footprint_keys
+
+        for fp, physical_id in zip(pcb.footprints, footprint_keys(pcb.footprints), strict=True):
             comp = self._footprint_to_component(fp, courtyard_margin)
+            comp.physical_id = physical_id
             self._components.append(comp)
 
         # Try to extract board edge from segments on Edge.Cuts layer
@@ -449,7 +452,9 @@ class PlacementAnalyzer:
             type=ConflictType.COURTYARD_OVERLAP,
             severity=ConflictSeverity.WARNING,
             component1=c1.reference,
+            component1_id=c1.physical_id,
             component2=c2.reference,
+            component2_id=c2.physical_id,
             message=(
                 f"courtyards overlap by {overlap_amount:.3f}mm "
                 "(pad-bbox fallback — no F.CrtYd artwork)"
@@ -489,7 +494,9 @@ class PlacementAnalyzer:
             type=ConflictType.COURTYARD_OVERLAP,
             severity=ConflictSeverity.WARNING,
             component1=c1.reference,
+            component1_id=c1.physical_id,
             component2=c2.reference,
+            component2_id=c2.physical_id,
             message=f"courtyards overlap by {inter.area:.3f}mm^2",
             location=Point(centroid.x, centroid.y),
             overlap_amount=overlap_amount,
@@ -527,7 +534,9 @@ class PlacementAnalyzer:
                         type=ConflictType.PAD_CLEARANCE,
                         severity=severity,
                         component1=c1.reference,
+                        component1_id=c1.physical_id,
                         component2=c2.reference,
+                        component2_id=c2.physical_id,
                         message=f"pad clearance {clearance:.3f}mm (min {min_clearance:.3f}mm)",
                         location=mid,
                         actual_clearance=clearance,
@@ -586,7 +595,9 @@ class PlacementAnalyzer:
                         type=ConflictType.HOLE_TO_HOLE,
                         severity=severity,
                         component1=c1.reference,
+                        component1_id=c1.physical_id,
                         component2=c2.reference,
+                        component2_id=c2.physical_id,
                         message=f"holes {edge_dist:.3f}mm apart (min {min_distance:.3f}mm)",
                         location=mid,
                         actual_clearance=edge_dist,
@@ -687,6 +698,7 @@ class PlacementAnalyzer:
                     type=ConflictType.OFF_BOARD,
                     severity=ConflictSeverity.WARNING,
                     component1=comp.reference,
+                    component1_id=comp.physical_id,
                     component2="board_outline",
                     message=(
                         f"courtyard overhangs Edge.Cuts outline ({overhang_txt}; "
@@ -703,6 +715,7 @@ class PlacementAnalyzer:
                 type=ConflictType.OFF_BOARD,
                 severity=ConflictSeverity.ERROR,
                 component1=comp.reference,
+                component1_id=comp.physical_id,
                 component2="board_outline",
                 message=(
                     f"courtyard {descriptor} Edge.Cuts outline "

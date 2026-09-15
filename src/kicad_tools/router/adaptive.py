@@ -123,7 +123,12 @@ class AdaptiveAutorouter:
         """
         self.width = width
         self.height = height
-        self.components = components
+        from kicad_tools.schema.physical_identity import component_keys
+
+        self.components = [
+            {**comp, "component_id": key}
+            for comp, key in zip(components, component_keys(components), strict=True)
+        ]
         self.net_map = net_map.copy()
         self.rules = rules or DesignRules()
         self.origin_x = origin_x
@@ -211,7 +216,7 @@ class AdaptiveAutorouter:
             )
 
         if pads:
-            router.add_component(ref, pads)
+            router.add_component(ref, pads, component_id=comp.get("component_id"))
 
     def _check_convergence(self, router: Autorouter, overflow: int) -> bool:
         """Check if routing has converged.

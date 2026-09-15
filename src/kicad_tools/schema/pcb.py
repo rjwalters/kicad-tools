@@ -3241,6 +3241,11 @@ class PCB:
                     x, y = xy.get_float(0), xy.get_float(1)
                     if x is not None and y is not None:
                         chain.append((x, y))
+            if child.tag == "gr_curve":
+                from kicad_tools.core.board_outline import is_degenerate_closed_curve
+
+                if is_degenerate_closed_curve(chain):
+                    continue
             if chain:
                 chains.append(chain)
         return chains

@@ -956,11 +956,14 @@ class TestRunConsolidationPassGating:
 
         from kicad_tools.cli import route_cmd
 
+        # The public entry now wraps placement/deadline finalization; keep
+        # its delegation checked as well as each implementation call site.
+        assert "_run_main_impl(args, parser, argv)" in inspect.getsource(route_cmd._main_impl)
         for fn in (
             route_cmd.route_with_layer_escalation,
             route_cmd.route_with_rule_relaxation,
             route_cmd.route_with_combined_escalation,
-            route_cmd._main_impl,
+            route_cmd._run_main_impl,
         ):
             assert "_run_consolidation_pass(" in inspect.getsource(fn), fn.__name__
 

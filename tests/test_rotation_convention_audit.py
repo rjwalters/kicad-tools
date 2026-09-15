@@ -228,7 +228,9 @@ class TestRouteNetRotation:
 
         captured: dict[str, list[dict]] = {}
 
-        def fake_add_component(self, ref: str, pads: list[dict]) -> None:  # noqa: ANN001
+        def fake_add_component(
+            self, ref: str, pads: list[dict], *, component_id: str | None = None
+        ) -> None:  # noqa: ANN001
             captured[ref] = list(pads)
 
         monkeypatch.setattr(
@@ -334,7 +336,9 @@ class TestEstimateRoutabilityRotation:
 
         captured: dict[str, list[dict]] = {}
 
-        def fake_add_component(self, ref: str, pads: list[dict]) -> None:  # noqa: ANN001
+        def fake_add_component(
+            self, ref: str, pads: list[dict], *, component_id: str | None = None
+        ) -> None:  # noqa: ANN001
             captured[ref] = list(pads)
 
         monkeypatch.setattr(
@@ -438,7 +442,9 @@ class TestRoutePcbRotation:
     ) -> None:
         captured: dict[str, list[dict]] = {}
 
-        def fake_add_component(self, ref: str, pads: list[dict]) -> None:  # noqa: ANN001
+        def fake_add_component(
+            self, ref: str, pads: list[dict], *, component_id: str | None = None
+        ) -> None:  # noqa: ANN001
             captured[ref] = list(pads)
 
         monkeypatch.setattr(
@@ -575,7 +581,9 @@ class TestAdaptiveRouterRotation:
         captured: dict[str, list[dict]] = {}
 
         class _FakeRouter:
-            def add_component(self, ref: str, pads: list[dict]) -> None:
+            def add_component(
+                self, ref: str, pads: list[dict], *, component_id: str | None = None
+            ) -> None:
                 captured[ref] = list(pads)
 
         adaptive._add_component_to_router(_FakeRouter(), components[0])
@@ -620,7 +628,9 @@ class TestPlaceRouteOptimizerLoadRotation:
         captured: dict[str, list[dict]] = {}
 
         class _FakeRouter:
-            def add_component(self, ref: str, pads: list[dict]) -> None:
+            def add_component(
+                self, ref: str, pads: list[dict], *, component_id: str | None = None
+            ) -> None:
                 captured[ref] = list(pads)
 
         PlaceRouteOptimizer._load_components_into_router(_FakeRouter(), pcb)

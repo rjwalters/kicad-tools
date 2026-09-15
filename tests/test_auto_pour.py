@@ -1175,3 +1175,33 @@ class TestAutoSkipPourNetsPublicAPI:
         assert "GND" not in auto_skip
         assert skip_nets.count("GND") == 1
         assert no_zone == []
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_protected_net_is_neither_created_nor_reinset(tmp_path, existing):
+    from kicad_tools.router.auto_pour import auto_pour_if_missing
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    zone = (
+        '(zone (net 1) (net_name "GND") (layer "B.Cu") (hatch edge 0.5) '
+        "(connect_pads (clearance 0.25)) "
+        "(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5)) "
+        "(polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50))))"
+    )
+    path = tmp_path / "protected.kicad_pcb"
+    names = [(1, "GND"), (2, "SDA"), (3, "VCC")]
+    path.write_text(_make_pcb(names, names, zones=[zone] if existing else []))
+    count, created = auto_pour_if_missing(
+        path, edge_clearance=0.3, protected_nets=frozenset({"GND"}), force_pour_nets=["GND"]
+    )
+    assert count > 0 and "VCC" in created
+    assert "GND" not in created
+    ground = [z for z in PCB.load(path).zones if z.net_name == "GND"]
+    assert len(ground) == int(existing)
+    if existing:
+        roots = parse_string(path.read_text()).find_children("zone")
+        kept = next(z for z in roots if z.find_child("net_name").get_string(0) == "GND")
+        assert kept.to_string(compact=True, preserve_source=False) == parse_string(zone).to_string(
+            compact=True, preserve_source=False
+        )

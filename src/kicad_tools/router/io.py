@@ -1697,8 +1697,8 @@ def compute_multi_resolution_plan(
         off_grid_refs: dict[str, list] = {}
         offset = uniform_result.origin_offset
         for pad in pad_list:
-            ref = getattr(pad, "ref", None)
-            if not ref:
+            ref = getattr(pad, "component_key", getattr(pad, "ref", None))
+            if ref is None:
                 continue
             x_on = _is_on_grid_with_offset(pad.x, coarse_resolution, offset[0])
             y_on = _is_on_grid_with_offset(pad.y, coarse_resolution, offset[1])
@@ -1763,8 +1763,8 @@ def compute_multi_resolution_plan(
     # Group pads by component reference
     by_ref: dict[str, list] = {}
     for pad in pad_list:
-        ref = getattr(pad, "ref", None)
-        if ref and ref in fine_components:
+        ref = getattr(pad, "component_key", getattr(pad, "ref", None))
+        if ref is not None and ref in fine_components:
             if ref not in by_ref:
                 by_ref[ref] = []
             by_ref[ref].append(pad)
@@ -2019,6 +2019,42 @@ def extract_pad_positions(pcb_path_or_text: str | Path) -> list[PadPosition]:
 _NET_TOKEN = re.compile(r'(?P<comment>[#;][^\n]*)|"(?:\\.|[^"\\])*"|[()]|[^\s()]+')
 
 
+def _footprint_reference(section: str) -> str:
+    """Read direct reference fields with the same precedence as PCB.load.
+
+    Modern properties override legacy text even when empty; the last field
+    of each kind wins. Token boundaries preserve escaped names and prevent
+    text contents or nested fields from masquerading as reference properties.
+    """
+    from kicad_tools.sexp import parse_string
+
+    depth = 0
+    field: list[str] = []
+    modern: str | None = None
+    legacy = ""
+    for match in _NET_TOKEN.finditer(section):
+        if match.group("comment"):
+            continue
+        token = match.group()
+        if token == "(":
+            if depth == 1:
+                field = []
+            depth += 1
+        elif token == ")":
+            if depth == 2 and len(field) >= 3 and field[0] in {"property", "fp_text"}:
+                node = parse_string(f"({field[0]} {field[1]} {field[2]})")
+                if field[0] == "property" and node.get_string(0) == "Reference":
+                    modern = node.get_string(1) or ""
+                elif field[0] == "fp_text" and node.get_string(0) == "reference":
+                    legacy = node.get_string(1) or ""
+            depth -= 1
+            if depth == 0:
+                break
+        elif depth == 2:
+            field.append(token)
+    return modern if modern is not None else legacy
+
+
 def _iter_net_references(text: str) -> Iterator[tuple[int | None, str]]:
     """Read numeric/name, name-only and numeric-only references consistently."""
     from kicad_tools.sexp import parse_string
@@ -2133,24 +2169,23 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
     net_name_to_num = _build_net_number_map(pcb_text)
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+    from kicad_tools.schema.pcb import PCB as IdentityPCB
+    from kicad_tools.schema.physical_identity import footprint_keys
+    from kicad_tools.sexp import parse_string as parse_identity_document
 
-    for section in footprint_sections:
-        if not section.startswith("(footprint") and not section.startswith("(module"):
-            continue
-
+    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    source_keys = footprint_keys(identity_document.footprints)
+    footprint_sections = [
+        section
+        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+        if section.startswith("(footprint") or section.startswith("(module")
+    ]
+    for section, component_id in zip(footprint_sections, source_keys, strict=True):
         # Get footprint library name (e.g. "Package_QFP:TQFP-32_7x7mm_P0.8mm")
         footprint_name_match = re.search(r'\(footprint\s+"([^"]*)"', section)
         footprint_name = footprint_name_match.group(1) if footprint_name_match else ""
 
-        # Get footprint reference. KiCad 7+ writes it as
-        # (property "Reference" "U1" ...); the (fp_text reference U1 ...)
-        # spelling is legacy (pre-KiCad-7). Try the modern property form
-        # first, then fall back -- same precedence load_pcb_for_routing uses.
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
-        if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
-        ref = ref_match.group(1) if ref_match else ""
+        ref = _footprint_reference(section)
 
         # Get footprint position and rotation
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
@@ -2219,6 +2254,7 @@ def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
                     net=net_num,
                     net_name=net_name,
                     ref=ref,
+                    component_id=component_id,
                     pin=pin,
                     layer=layer,
                     through_hole=is_thru,
@@ -3312,8 +3348,10 @@ def route_pcb(
         rules=rules,
     )
 
-    # Add all component pads
-    for comp in components:
+    from kicad_tools.schema.physical_identity import component_keys
+
+    # Assign identities from the full population before skipping any net pads.
+    for comp, component_id in zip(components, component_keys(components), strict=True):
         ref = comp["ref"]
         cx, cy = comp["x"], comp["y"]
         rotation = comp.get("rotation", 0)
@@ -3358,7 +3396,7 @@ def route_pcb(
             )
 
         if pads:
-            router.add_component(ref, pads)
+            router.add_component(ref, pads, component_id=component_id)
 
     # Get all nets that need routing (exclude plane nets)
     nets_to_route: list[int] = []
@@ -3604,6 +3642,7 @@ def _install_fine_pitch_regions_from_components(
                         net_name=str(pad_info.get("net_name", "")),
                         layer=pad_info.get("layer", Layer.F_CU),
                         ref=ref,
+                        component_id=comp.get("component_id", ref),
                         pin=str(pad_info.get("number", "")),
                         through_hole=bool(pad_info.get("through_hole", False)),
                         drill=float(pad_info.get("drill", 0.0)),
@@ -3858,12 +3897,19 @@ def load_pcb_for_routing(
     placement_fixed_pads: list[FixedPadCopper] = []
 
     # Split by footprint for easier parsing
-    footprint_sections = re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+    from kicad_tools.schema.pcb import PCB as IdentityPCB
+    from kicad_tools.schema.physical_identity import footprint_keys, validate_netlist_selectors
+    from kicad_tools.sexp import parse_string as parse_identity_document
 
-    for section in footprint_sections:
-        if not section.startswith("(footprint") and not section.startswith("(module"):
-            continue
-
+    identity_document = IdentityPCB(parse_identity_document(pcb_text))
+    source_keys = footprint_keys(identity_document.footprints)
+    validate_netlist_selectors(identity_document.footprints, netlist or {})
+    footprint_sections = [
+        section
+        for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
+        if section.startswith("(footprint") or section.startswith("(module")
+    ]
+    for section, component_id in zip(footprint_sections, source_keys, strict=True):
         # Get footprint position
         # Note: coordinates can be negative (footprints outside board origin)
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
@@ -3874,19 +3920,7 @@ def load_pcb_for_routing(
         fp_y = float(at_match.group(2))
         fp_rot = float(at_match.group(3)) if at_match.group(3) else 0
 
-        # Get reference - try KiCad 9 property format first, then old fp_text format.
-        # The fp_text fallback accepts an optional quote (same pattern as
-        # load_pads_for_analysis above): pre-KiCad-6 (module ...) boards write
-        # this value unquoted (e.g. "(fp_text reference R1 ...)"), and a
-        # quote-only regex would silently drop the whole footprint here,
-        # leaving load_pcb_for_routing with zero pads on a legacy board even
-        # after the (module ...) container itself is recognized (issue #4891).
-        ref_match = re.search(r'\(property\s+"Reference"\s+"([^"]+)"', section)
-        if not ref_match:
-            ref_match = re.search(r'\(fp_text\s+reference\s+"?([^"\s)]+)"?', section)
-        if not ref_match:
-            continue
-        ref = ref_match.group(1)
+        ref = _footprint_reference(section)
 
         # Parse pads - extract complete (pad ...) blocks
         # KiCad 7+ uses multi-line pad definitions, so we need to extract
@@ -4045,6 +4079,7 @@ def load_pcb_for_routing(
             components.append(
                 {
                     "ref": ref,
+                    "component_id": component_id,
                     "x": fp_x,
                     "y": fp_y,
                     "rotation": fp_rot,
@@ -4102,6 +4137,25 @@ def load_pcb_for_routing(
             warn=_has_fine_pitch and strategy == "grid",
             strict=strict_drc,
         )
+
+    if placement_disposition is not None and placement_disposition.physical_pad_net_identities:
+        physical_pad_nets = tuple(
+            sorted(
+                (
+                    key,
+                    fp.reference,
+                    pad.number,
+                    pad.net_name,
+                    (netlist or {}).get(f"{fp.reference}.{pad.number}", pad.net_name),
+                )
+                for fp, key in zip(identity_document.footprints, source_keys, strict=True)
+                for pad in fp.pads
+            )
+        )
+        if physical_pad_nets != placement_disposition.physical_pad_net_identities:
+            raise ValueError(
+                "Placement disposition pad/net identities do not match this board (physical terminals)"
+            )
 
     if (
         placement_disposition is not None
@@ -4231,15 +4285,15 @@ def load_pcb_for_routing(
     # Add all components
     for comp in components:
         # Pads already have absolute positions
-        router.add_component(comp["ref"], comp["pads"])
+        router.add_component(comp["ref"], comp["pads"], component_id=comp["component_id"])
 
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
     # accurate than grid origin/dimensions for OOB filtering.
     if edge_segments:
-        all_xs = [p[0] for seg in edge_segments for p in seg]
-        all_ys = [p[1] for seg in edge_segments for p in seg]
-        router._board_bbox = (min(all_xs), min(all_ys), max(all_xs), max(all_ys))
+        # Use the same bounds as the grid and schema. Retained zero-area
+        # graphics are clearance obstacles, not additional board extent.
+        router._board_bbox = bounds
         # Store the raw outline segments for post-route edge-clearance
         # validation in drc_nudge / validate_routes (Issue #2743).
         router._edge_segments = edge_segments
@@ -4354,6 +4408,7 @@ def load_pcb_for_routing(
         # Collect all net names across segments and vias
         all_net_names = set(existing_segments.keys()) | set(existing_vias.keys())
 
+        router.placement_neutral_routes = ()
         route_count = 0
         for net_name in sorted(all_net_names) if preserve_placement else all_net_names:
             if not load_existing_routes and net_name not in preserve_placement:
@@ -4397,6 +4452,8 @@ def load_pcb_for_routing(
                     segments=[replace(seg, net=0, net_name="") for seg in route.segments],
                     vias=[replace(via, net=0, net_name="") for via in route.vias],
                 )
+            if net_name in preserve_placement:
+                router.placement_neutral_routes += (route,)
             router.grid.mark_route(route)
             router.existing_routes.append(route)
             route_count += 1

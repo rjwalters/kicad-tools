@@ -889,6 +889,7 @@ class TestEarlyTermination:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
         router.grid.width = 50.0
         router.grid.height = 40.0
@@ -1414,6 +1415,7 @@ class TestRegressionEarlyExit:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
         router.grid.width = 50.0
         router.grid.height = 40.0
@@ -1813,6 +1815,7 @@ class TestFailureCauseHistogram:
         from kicad_tools.router.failure_analysis import FailureCause
 
         router = MagicMock()
+        router.placement_disposition = None
         f1 = MagicMock()
         f1.failure_cause = FailureCause.BLOCKED_PATH
         f2 = MagicMock()
@@ -1835,6 +1838,7 @@ class TestFailureCauseHistogram:
         from kicad_tools.cli.route_cmd import _log_failure_cause_histogram
 
         router = MagicMock()
+        router.placement_disposition = None
         router.routing_failures = []
         _log_failure_cause_histogram(router, quiet=False)
         captured = capsys.readouterr()
@@ -1848,6 +1852,7 @@ class TestFailureCauseHistogram:
         from kicad_tools.router.failure_analysis import FailureCause
 
         router = MagicMock()
+        router.placement_disposition = None
         f = MagicMock()
         f.failure_cause = FailureCause.CONGESTION
         router.routing_failures = [f]
@@ -1944,6 +1949,7 @@ class TestCleanupBeforeStatistics:
         def mock_load(*args, **kwargs):
             nonlocal attempt
             router = MagicMock()
+            router.placement_disposition = None
             router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, 6)}
             router.grid.width = 50.0
             router.grid.height = 40.0
@@ -2082,6 +2088,7 @@ class TestPlacementFeedbackOnPartial:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
         router.grid.width = 50.0
         router.grid.height = 40.0
@@ -2892,6 +2899,7 @@ class TestStartingLayersEndToEnd:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
         router.grid.width = 50.0
         router.grid.height = 40.0
@@ -3069,6 +3077,7 @@ class TestLatticeDeadlineIsPerAttempt:
         from unittest.mock import MagicMock
 
         router = MagicMock()
+        router.placement_disposition = None
         router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
         router.grid.width = 50.0
         router.grid.height = 40.0

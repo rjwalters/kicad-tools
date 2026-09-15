@@ -610,3 +610,40 @@ def test_circle_sagitta_matches_the_closed_form(segments):
     # Cancellation costs the naive form roughly one digit per decade of n.
     tolerance = 1e-12 * segments
     assert circle_sagitta(radius, segments) == pytest.approx(naive, rel=tolerance, abs=1e-18)
+
+
+@pytest.mark.parametrize(
+    "coords",
+    [
+        "(xy 1500 100) (xy 1500 100) (xy 1500 100) (xy 1500 100)",
+        "(xy 1500 100) (xy 1500 101) (xy 1500 102) (xy 1500 100)",
+        "(xy 1500 100) (xy 1501 101) (xy 1502 102) (xy 1500 100)",
+    ],
+)
+def test_closed_collinear_curve_does_not_expand_board(tmp_path, coords):
+    marker = f'(gr_curve (pts {coords}) (layer "Edge.Cuts"))'
+    text = _board('(gr_rect (start 68.5 55) (end 88.5 75) (layer "Edge.Cuts"))' + marker)
+    path = tmp_path / "markers.kicad_pcb"
+    path.write_text(text)
+    assert extract_board_dimensions(path) == (20, 20)
+    pcb = PCB.load(path)
+    assert pcb.board_size == (20, 20)
+    outline = pcb.get_board_outline()
+    assert max(x for x, _ in outline) <= 20
+    # The source graphic and its physical obstacle segments are retained.
+    assert path.read_text() == text
+    assert any(a[0] >= 1500 for a, _ in board_outline_segments(parse_string(text)))
+    router, _ = load_pcb_for_routing(path, force_python=True, validate_drc=False)
+    assert router._board_bbox == (68.5, 55, 88.5, 75)
+
+
+@pytest.mark.parametrize(
+    "coords",
+    [
+        "(xy 1500 100) (xy 1500 101) (xy 1500.000001 101) (xy 1500 100)",
+        "(xy 1500 100) (xy 1500 101) (xy 1500 102) (xy 1500 103)",
+    ],
+)
+def test_small_closed_and_open_collinear_curves_keep_bounds(coords):
+    root = parse_string(f'(kicad_pcb (gr_curve (pts {coords}) (layer "Edge.Cuts")))')
+    assert board_outline_bounds(root) is not None

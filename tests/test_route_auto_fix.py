@@ -88,6 +88,19 @@ class TestRunAutoFix:
         assert "--quiet" in call_args
 
     @patch("kicad_tools.cli.fix_drc_cmd.main")
+    def test_run_auto_fix_uses_selected_manufacturer_and_layers(self, mock_fix_drc):
+        """Repair uses the selected stack even when the request was automatic."""
+        from pathlib import Path
+
+        mock_fix_drc.return_value = 0
+        args = SimpleNamespace(manufacturer="pcbway", layers="auto", max_layers=8)
+        _run_auto_fix(Path("/tmp/board.kicad_pcb"), args=args, layers=4, quiet=True)
+
+        argv = mock_fix_drc.call_args.args[0]
+        assert argv[argv.index("--mfr") + 1] == "pcbway"
+        assert argv[argv.index("--layers") + 1] == "4"
+
+    @patch("kicad_tools.cli.fix_drc_cmd.main")
     def test_run_auto_fix_passes_max_passes(self, mock_fix_drc):
         """_run_auto_fix forwards max_passes to fix_drc_cmd."""
         from pathlib import Path
@@ -640,6 +653,7 @@ def _make_routing_args(**overrides):
 def _make_success_router(nets_routed: int = 3, nets_to_route: int = 3):
     """Mock router that reports a 100% successful routing run."""
     router = MagicMock()
+    router.placement_disposition = None
     router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
     router.grid.width = 50.0
     router.grid.height = 40.0
@@ -1076,7 +1090,7 @@ class TestAutoFixSkippedExitCode:
             # args._auto_fix_status as "skipped_deadline".  We model
             # this by patching the helper to a function that preserves
             # the pre-set status field.
-            def _mock_skipped(output_path, max_passes, quiet, args=None):
+            def _mock_skipped(output_path, max_passes, quiet, args=None, *, layers=None):
                 # Simulate the real _run_auto_fix skip path.
                 return 1
 

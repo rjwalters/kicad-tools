@@ -981,3 +981,31 @@ retrying. Identical repeated exports are accepted. If a source sidecar is
 absent, an existing destination sidecar retains the usual preserve-and-merge
 behavior. This propagation belongs to post-route DRC; `--skip-drc` does not
 perform it.
+
+### Verifying saved route artifacts
+
+Routing writes `<output-stem>.route.json` after the final board save and
+postprocessing. The versioned receipt records the route exit code and SHA-256
+hashes and sizes of the saved PCB and its effective sibling `.kicad_pro` and
+`.kicad_dru`. Missing optional sidecars are recorded explicitly. Authored source
+sidecars are retained for renamed outputs, including completion no-op and
+`--skip-drc` paths that do not generate new factory rules.
+Conflicting existing destination sidecars that were not propagated from this
+invocation's source cause a nonzero exit and no receipt; their bytes are retained.
+
+The receipt also accompanies useful partial outputs. A stale output, staging
+copy, or fatal constraint-propagation failure does not receive a current receipt.
+Keep the receipt and its named files together when moving them. Verify them with:
+
+```python
+from kicad_tools.cli.route_receipt import verify_route_receipt
+
+problems = verify_route_receipt("output_routed.route.json")
+if problems:
+    raise ValueError("; ".join(problems))
+```
+
+An empty problem list confirms matching artifact bytes and optional-file absence.
+It does not certify electrical connectivity, native DRC, or factory DFM, and does
+not authenticate who created the receipt. Later board or rule edits invalidate
+the binding. Manufacturing packages retain their separate archive manifest.

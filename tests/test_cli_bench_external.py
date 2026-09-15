@@ -9,7 +9,7 @@ network access or a real (slow) router pass:
   is ever made.
 * The router itself is replaced with an injectable stub: both
   ``_run_one_board`` and (via ``monkeypatch`` on
-  ``kicad_tools.cli.route_cmd.main``) the full CLI path never invoke the
+  ``kicad_tools.cli.route_cmd.main_with_result``) the full CLI path never invoke the
   real negotiated router, which would take minutes on anything but a
   trivial fixture.
 
@@ -799,7 +799,7 @@ class TestRunBenchExternalCli:
     def test_end_to_end_via_cli(self, tmp_path, monkeypatch):
         from kicad_tools.cli import route_cmd
 
-        monkeypatch.setattr(route_cmd, "main", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
 
         cache_dir = tmp_path / "cache"
         manifest_path = _write_manifest(tmp_path, cache_dir)
@@ -902,7 +902,7 @@ license = "MIT"
     def test_json_format_emits_single_document(self, tmp_path, monkeypatch, capsys):
         from kicad_tools.cli import route_cmd
 
-        monkeypatch.setattr(route_cmd, "main", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
 
         cache_dir = tmp_path / "cache"
         manifest_path = _write_manifest(tmp_path, cache_dir)
@@ -939,7 +939,7 @@ license = "MIT"
     def test_default_boards_run_every_manifest_entry(self, tmp_path, monkeypatch):
         from kicad_tools.cli import route_cmd
 
-        monkeypatch.setattr(route_cmd, "main", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
 
         cache_dir = tmp_path / "cache"
         manifest_path = tmp_path / "boards.toml"
@@ -1002,7 +1002,7 @@ class TestTunedProtocolCli:
         """
         from kicad_tools.cli import route_cmd
 
-        monkeypatch.setattr(route_cmd, "main", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
+        monkeypatch.setattr(route_cmd, "main_with_result", _make_stub_route(ROUTED_OUTPUT_FIXTURE))
 
         cache_dir = tmp_path / "cache"
         manifest_path = _write_manifest(tmp_path, cache_dir)
@@ -1047,7 +1047,9 @@ class TestTunedProtocolCli:
 
         captured: list[list[str]] = []
         monkeypatch.setattr(
-            route_cmd, "main", _make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured)
+            route_cmd,
+            "main_with_result",
+            _make_capturing_stub_route(ROUTED_OUTPUT_FIXTURE, captured),
         )
 
         tuned_rules = bench_cmd._load_tuned_rules()

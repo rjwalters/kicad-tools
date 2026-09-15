@@ -301,8 +301,8 @@ def _create_project_zip(
 ) -> Path:
     """Create a ZIP containing the KiCad project files.
 
-    Includes only the specific PCB being exported, plus .kicad_sch and
-    .kicad_pro files and project-local symbol-table dependencies.
+    Includes only the specific PCB being exported and its sibling .kicad_dru,
+    plus .kicad_sch and .kicad_pro files and project-local symbol-table dependencies.
     Other .kicad_pcb variants (intermediate builds,
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
@@ -314,6 +314,12 @@ def _create_project_zip(
     project_files: list[Path] = []
     if pcb_path.exists():
         project_files.append(pcb_path)
+        # Keep the rules KiCad loads for this exact (possibly renamed) board.
+        # Their bytes are bound by the project ZIP's manufacturing manifest hash;
+        # source-side paths must not become nonportable manifest entries.
+        dru_path = pcb_path.with_suffix(".kicad_dru")
+        if dru_path.is_file():
+            project_files.append(dru_path)
 
     # Include schematics and project files (not PCBs — only the exported one)
     sch_pro_extensions = {".kicad_sch", ".kicad_pro"}
