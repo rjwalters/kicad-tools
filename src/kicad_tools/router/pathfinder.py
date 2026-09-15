@@ -2004,7 +2004,8 @@ class Router:
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
         halo = getattr(self.grid, "_route_halo", None)
-        if halo is not None and halo.complete and not self._via_halo_clear([], layer, gx, gy, net):
+        geometry_complete = halo is not None and halo.complete
+        if geometry_complete and not self._via_halo_clear([], layer, gx, gy, net):
             return True
         if self.grid.fixed_fills:
             name = next(
@@ -2067,8 +2068,9 @@ class Router:
             (cx, cy)
             for cx, cy in blocked_cells
             if not (
-                grid._net[layer, cy, cx] != net
-                and self._via_halo_clear([(cx, cy)], layer, gx, gy, net)
+                geometry_complete
+                and grid._net[layer, cy, cx] != net
+                and halo.cell_known(cx, cy, layer)
             )
         ]
         # Fast path: if no cells are blocked, via is not blocked
