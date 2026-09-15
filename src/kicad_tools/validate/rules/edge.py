@@ -258,6 +258,10 @@ class EdgeClearanceRule(DRCRule):
         del origin  # board-relative invariant: no per-call translation needed
 
         for zone in pcb.zones:
+            # Rule areas prohibit copper; their boundary is not copper, even
+            # when it extends to (or beyond) the board edge.
+            if getattr(zone, "keepout", None) is not None:
+                continue
             # Check filled polygons (actual copper) rather than boundary
             polygons_to_check = zone.filled_polygons if zone.filled_polygons else [zone.polygon]
 
