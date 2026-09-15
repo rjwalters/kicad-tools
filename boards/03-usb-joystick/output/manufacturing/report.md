@@ -2,7 +2,7 @@
 title: "usb_joystick_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.20.0"
-date: "Rev 1 | 2026-09-10 | jlcpcb-tier1"
+date: "Rev 1 | 2026-09-14 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -13,6 +13,12 @@ header-includes:
   - \usepackage{float}
 ---
 
+## Release Status: BLOCKED
+
+This candidate is not qualified for manufacture. The saved copper has 12 native copper-sliver warnings and does not match independent bare native refill. The passing recipe replay and factory checks below do not clear these release blockers. See Manufacturing Readiness and the bundled `native-refill-comparison.json` for the measured discrepancy.
+
+This report's release evidence was corrected against PR #5386 source `aa1fa691f545866a7754e28e1baf773e8cae31a8`. Measurements are retained KiCad 10.0.5 observations, not a new physical run. Board imagery, geometry and recipe remain unchanged.
+
 ## Board Summary
 
 | Property | Value |
@@ -20,8 +26,8 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 38 (37 SMD, 1 THT, 0 other) |
 | Nets | 27 |
-| Traces | 2048 segments |
-| Vias | 151 |
+| Traces | 2050 segments |
+| Vias | 153 |
 | Board Size | 80.0 x 60.0 mm |
 
 ## Stackup
@@ -53,10 +59,6 @@ GPIO and ADC map is fixed to Microchip TQFP-44 pinout
 | SPI | ISP_MISO, ISP_MOSI, ISP_SCK |
 | USB | USB_D+, USB_D-, VBUS |
 
-### Power Architecture
-
-**Power Rails**: PWR_FLAG
-
 ## Assembly Notes
 
 1 fine-pitch component
@@ -73,12 +75,7 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 ## ERC Status
 
-| Metric | Count |
-|--------|-------|
-| Errors | 0 |
-| Warnings | 0 |
-
-**Status**: PASS — independent native ERC: zero errors and warnings; see native-erc.json.
+Retained native KiCad 10.0.5 report dated 2026-09-15T00:37:00 on the shipped schematic: **0 errors, 0 warnings**. Evidence: `native-erc.json`; schematic UUID `/546c89fe-5075-48a6-a97e-bef2a1207261`. This supersedes the earlier export-stage ERC-skipped summary. No new ERC run was performed for this report correction.
 
 
 \newpage
@@ -155,47 +152,51 @@ The following 1 through-hole component is **excluded from the SMT pick-and-place
 
 \newpage
 
-## DRC Status
+## DRC Status: Saved Copper
 
 | Metric | Count |
 |--------|-------|
-| Errors | 0 |
-| Warnings | 14 |
-| Blocking | 0 |
+| Native errors | 0 |
+| Native warnings | 12 |
+| Unconnected items | 0 |
+| Copper-sliver warnings | 12 |
 
-**Status**: PASS
-### Violations by Type
+**Native release gate: FAILED**. The zero-error/zero-warning gate is not satisfied. Evidence: bundled `native-drc.json`, measured on the canonical saved board with full project, rules and custom footprint context, without refill.
 
-| Violation Type | Count |
-|----------------|-------|
-| hole_to_hole_clearance | 14 |
+The separately scoped retained Python factory check in `check-report.json` passed (0 errors/warnings, 54 checked rules). Its pass does not replace native readiness checks. The former 14 hole-to-hole warning summary was an earlier export-stage diagnostic; it is superseded here and is not the current native warning census.
+
+Native version: KiCad 10.0.5. Container image ID: `sha256:182c8005cb775a2c448a4c18681d489f1ff472a761885eba3e08b07e3c0564de`.
 
 
 \newpage
 
-## Reviewed Factory Verification
-
-The generic report above uses a conservative 0.50 mm pad-hole floor and reports
-14 hole-spacing warnings. The selected factory process explicitly permits
-0.45 mm; native project rules and the reviewed checker use that same floor.
-No findings are suppressed. Fresh check-report.json records 51 evaluated rules,
-zero errors/warnings, and label plus copper LVS with 129 bound pads and zero
-mismatches. Independent native DRC/refill and ERC report zero violations and
-zero opens. Per-net, per-layer filled copper matches the independent refill
-exactly (fill-consistency.json). All 23 repaired off-angle segments are now
-45-degree aligned; the USB branch skew is 0.165685 mm, within the reviewed bound.
-
 ## Manufacturing Readiness
 
-**Verdict**: READY for the specified fabrication and assembly process.
+**Verdict: BLOCKED**
 
-Order the reviewed four-layer construction and Epoxy-filled & Capped POFV/VIPPO
-option in manufacturing-requirements.json. The exact supplier BOM covers 37 SMT
-placements; J1 is a separate through-hole assembly operation in manual-assembly-bom.csv.
-The editable project includes the custom ISP footprint library and native rules.
-Unchanged compiled firmware and its source are supplied with programming instructions.
-Physical bring-up, USB electrical qualification, and first-article inspection
-remain unperformed; this is not a USB certification claim.
+### Required Actions
+
+- **[REQUIRED]** Resolve the same-copper compatibility failure between the preserved recipe-filled release and bare native refill. Do not discard the clearance carve or substitute different refilled copper to claim success.
+- **[REQUIRED]** Resolve the 12 native copper-sliver warnings on the actual shipped geometry and rerun the required zero-error/zero-warning gates.
+- **[REQUIRED]** Verify the final candidate and its release bindings after repair. The generic producer correction in #5391 alone does not resolve this physical qualification gap; #5380 remains incomplete.
+
+### Independent Native-Fill Comparison
+
+| Layer | Refilled minus saved copper area (mm²) |
+|-------|---------------------------------------|
+| F.Cu | 947.873802 |
+| B.Cu | 406.966144 |
+| In1.Cu | 217.304656 |
+| In2.Cu | 463.102399 |
+
+Saved PCB SHA256: `e7bdf5b80a3685f4ebd7e380fdade7d9e6218168a15f0cfecea6166b69645270`.
+
+Separate native-refilled PCB SHA256: `81de0e491ad82a68cfe375737dbf898969d45e35febb5a2737649e2378bd8e5a`.
+
+The refilled measurement has zero native violations/opens but describes different copper and is not the shipped board. Evidence: `native-refill-comparison.json` and `native-refilled-drc.json`.
+
+The retained recipe-fill replay reports zero area delta for its own native-fill/remediation/carve engine. That passing recipe-stability result is distinct from bare-native equivalence. Neither it nor passing factory/connectivity checks establishes overall release readiness.
+
 
 \newpage
 
