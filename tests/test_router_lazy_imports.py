@@ -55,3 +55,19 @@ def test_unknown_export_raises_attribute_error():
     with pytest.raises(AttributeError, match="no attribute 'not_a_router_export'"):
         name = "not_a_router_export"
         getattr(router, name)
+
+
+def test_native_backend_reload_preserves_usable_types():
+    from kicad_tools.router.cpp_backend import is_cpp_available
+
+    if not is_cpp_available():
+        pytest.skip("requires the native router extension")
+    fresh("""
+from kicad_tools.router import cpp_backend
+original = cpp_backend.router_cpp
+rules_type = original.DesignRules
+assert cpp_backend._reload_cpp_backend()
+assert cpp_backend.router_cpp is original
+assert cpp_backend.router_cpp.DesignRules is rules_type
+assert isinstance(cpp_backend.router_cpp.DesignRules(), rules_type)
+""")

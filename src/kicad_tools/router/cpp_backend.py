@@ -61,7 +61,12 @@ _CPP_IMPORT_ERROR: str | None = None
 _CPP_BUILD_VERSION: int | None = None
 _CPP_EXTENSION_PATH: str | None = None
 try:
-    import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
+    if TYPE_CHECKING:
+        import kicad_tools.router.router_cpp as router_cpp  # type: ignore[import-not-found]
+    else:
+        # Preserve the package-cached native module during backend reloads.
+        # Reinitializing nanobind after sys.modules eviction loses its types.
+        from . import router_cpp
 
     _CPP_AVAILABLE = True
     _CPP_BUILD_VERSION = getattr(router_cpp, "BUILD_VERSION", None)
