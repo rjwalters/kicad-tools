@@ -79,6 +79,36 @@ def bridge_endpoint_candidates(
     ]
 
 
+def edge_clear_centerline_bounds(
+    outline: tuple[float, float, float, float],
+    *,
+    width: float,
+    edge_clearance: float,
+) -> tuple[float, float, float, float]:
+    """Legal CENTERLINE window for copper of ``width`` inside a rectangular outline.
+
+    ``outline`` is the raw ``(min_x, min_y, max_x, max_y)`` of the board edge --
+    NOT a pour inset. A trace is copper ``width / 2`` either side of its
+    centerline, so the centerline itself must stay ``edge_clearance + width / 2``
+    inside the outline for the copper to clear the edge.
+
+    Issue #5333: the Board07 pour-repair emitter approximated this with a fixed
+    ``inset - 0.35`` slack around the 0.5 mm ZONE inset, which resolves to
+    0.2 mm of centerline margin -- 0.1 mm of copper-to-edge once the 0.2 mm
+    bridge width is counted, against a 0.3 mm fab floor. Two ``+1V2`` bridges
+    on ``In2.Cu`` shipped at 0.153 mm and were reported by KiCad's native
+    refill as blocking ``copper_edge_clearance`` findings. Deriving the window
+    from the real width and the real floor removes the guess.
+
+    Returns a window that may be EMPTY (``min > max``) when the board is too
+    narrow for the requested copper; callers must treat that as "no legal
+    position" rather than clamping.
+    """
+    margin = edge_clearance + width / 2.0
+    min_x, min_y, max_x, max_y = outline
+    return (min_x + margin, min_y + margin, max_x - margin, max_y - margin)
+
+
 def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     """Extract escape minima from a *pure* kct fab-floors ``.kicad_dru``.
 

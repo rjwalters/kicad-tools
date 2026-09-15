@@ -39,6 +39,7 @@ from pathlib import Path
 
 __all__ = [
     "ANGLE_TOL_DEG",
+    "SEGMENT_BLOCK_RE",
     "SERIALIZE_QUANTUM_MM",
     "off_angle_degrees",
     "is_45_aligned",
@@ -407,6 +408,14 @@ _SEGMENT_BLOCK_RE = re.compile(
     r"[ \t]*\)",
     re.MULTILINE,
 )
+
+#: Public alias of the segment-block pattern.  Issue #5333's
+#: :mod:`kicad_tools.router.quantize_planning` must see EXACTLY the blocks
+#: :func:`quantize_pcb_file` will rewrite -- and key them the same way -- or
+#: its ``axis_first_uuids`` / ``skip_uuids`` decisions would silently miss
+#: their targets.  Sharing the compiled pattern makes that agreement
+#: structural rather than a duplicated regex the two passes could drift on.
+SEGMENT_BLOCK_RE = _SEGMENT_BLOCK_RE
 
 
 def _fmt_decimal(value: Decimal) -> str:
