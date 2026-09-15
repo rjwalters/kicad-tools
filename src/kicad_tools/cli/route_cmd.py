@@ -14697,6 +14697,83 @@ def _run_main_impl(args, parser, argv) -> int:
     if pcb_path.suffix != ".kicad_pcb":
         print(f"Warning: Expected .kicad_pcb file, got {pcb_path.suffix}")
 
+    # Issue #2996: Validate and load the optional --net-class-map sidecar
+    # early -- before dispatching to any of the route_with_* sub-flows --
+    # so the error paths (missing file / malformed JSON / invalid structure)
+    # short-circuit with exit 1 and a clear message regardless of which
+    # routing path the args select.  The loaded map is stashed on
+    # ``args._loaded_net_class_map`` for downstream consumers (each
+    # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
+    args._loaded_net_class_map = None
+    args._spatial_keepouts = None
+    if getattr(args, "net_class_map", None) is not None:
+        import json as _ncm_json
+
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        ncm_path = Path(args.net_class_map).resolve()
+        if not ncm_path.exists():
+            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
+            return 1
+        try:
+            _ncm_data = _ncm_json.loads(ncm_path.read_text())
+        except _ncm_json.JSONDecodeError as e:
+            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
+            return 1
+        # Issue #4587: resolve the board's layer stack HERE so a sidecar that
+        # spells ``preferred_layers`` / ``avoid_layers`` as KiCad layer names
+        # ("In1.Cu") is normalized to grid indices at preload -- before any
+        # engine touches the map.  Without this, an ampacity-bearing class
+        # crashed detailed routing with int('In1.Cu') after the escape/global
+        # phases had already burned minutes, and the soft layer-preference
+        # bias silently never matched.  Stack selection mirrors the
+        # ``--layers`` handling used by the routing sub-flows; ``B.Cu`` is only
+        # resolvable against the actual copper layer count (index 3 on a
+        # 4-layer board, NOT CopperLayer.B_CU == 5).
+        from kicad_tools.router import LayerStack as _NcmLayerStack
+        from kicad_tools.router.io import detect_layer_stack as _ncm_detect_layer_stack
+
+        _ncm_layers_arg = getattr(args, "layers", "auto")
+        _ncm_layer_stack = None
+        try:
+            if _ncm_layers_arg == "auto":
+                _ncm_layer_stack = _ncm_detect_layer_stack(pcb_path.read_text())
+            else:
+                _ncm_layer_stack = {
+                    "2": _NcmLayerStack.two_layer,
+                    "4": _NcmLayerStack.four_layer_sig_gnd_pwr_sig,
+                    "4-sig": _NcmLayerStack.four_layer_sig_sig_gnd_pwr,
+                    "4-all": _NcmLayerStack.four_layer_all_signal,
+                    "6": _NcmLayerStack.six_layer_sig_gnd_sig_sig_pwr_sig,
+                }[_ncm_layers_arg]()
+        except (KeyError, OSError, ValueError):
+            # Stack detection is best-effort: without it the stack-independent
+            # names ("F.Cu", "In<k>.Cu") still resolve and "B.Cu" fails loud
+            # below with an actionable message rather than a silent wrong index.
+            _ncm_layer_stack = None
+        try:
+            # Canonical loader (issue #4683): shared with kct check / creepage /
+            # zones / audit so one sidecar is valid for every consumer.  The
+            # stack resolved from --layers above wins; JSON validity was
+            # already established by the _ncm_data parse.
+            args._loaded_net_class_map = net_class_map_from_path(
+                ncm_path, layer_stack=_ncm_layer_stack
+            )
+        except (TypeError, ValueError) as e:
+            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
+            return 1
+        # Issue #4605: the optional ``spatial_keepouts`` block -- per-rule-area
+        # net-class filters for KiCad keepout rule areas (lattice engine).
+        # Structure is validated HERE so a malformed block short-circuits with
+        # exit 1 before any routing work; the class NAMES are validated later,
+        # once the router's merged net-class map exists
+        # (``_apply_net_class_map_sidecar``).
+        _sk_err = _validate_spatial_keepouts_block(_ncm_data.get("spatial_keepouts"))
+        if _sk_err is not None:
+            print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
+            return 1
+        args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
+
     from .route_placement import prepare
 
     prepare(args, pcb_path)
@@ -14821,83 +14898,6 @@ def _run_main_impl(args, parser, argv) -> int:
     # first route of a new board.  Runs in the same pre-router window and is
     # advisory in every case (no return value is consulted).
     _capacity_forecast_preflight(pcb_path, args)
-
-    # Issue #2996: Validate and load the optional --net-class-map sidecar
-    # early -- before dispatching to any of the route_with_* sub-flows --
-    # so the error paths (missing file / malformed JSON / invalid structure)
-    # short-circuit with exit 1 and a clear message regardless of which
-    # routing path the args select.  The loaded map is stashed on
-    # ``args._loaded_net_class_map`` for downstream consumers (each
-    # ``load_pcb_for_routing`` site merges it into ``router.net_class_map``).
-    args._loaded_net_class_map = None
-    args._spatial_keepouts = None
-    if getattr(args, "net_class_map", None) is not None:
-        import json as _ncm_json
-
-        from kicad_tools.router.rules import net_class_map_from_path
-
-        ncm_path = Path(args.net_class_map).resolve()
-        if not ncm_path.exists():
-            print(f"Error: net-class-map file not found: {ncm_path}", file=sys.stderr)
-            return 1
-        try:
-            _ncm_data = _ncm_json.loads(ncm_path.read_text())
-        except _ncm_json.JSONDecodeError as e:
-            print(f"Error parsing net-class-map JSON: {e}", file=sys.stderr)
-            return 1
-        # Issue #4587: resolve the board's layer stack HERE so a sidecar that
-        # spells ``preferred_layers`` / ``avoid_layers`` as KiCad layer names
-        # ("In1.Cu") is normalized to grid indices at preload -- before any
-        # engine touches the map.  Without this, an ampacity-bearing class
-        # crashed detailed routing with int('In1.Cu') after the escape/global
-        # phases had already burned minutes, and the soft layer-preference
-        # bias silently never matched.  Stack selection mirrors the
-        # ``--layers`` handling used by the routing sub-flows; ``B.Cu`` is only
-        # resolvable against the actual copper layer count (index 3 on a
-        # 4-layer board, NOT CopperLayer.B_CU == 5).
-        from kicad_tools.router import LayerStack as _NcmLayerStack
-        from kicad_tools.router.io import detect_layer_stack as _ncm_detect_layer_stack
-
-        _ncm_layers_arg = getattr(args, "layers", "auto")
-        _ncm_layer_stack = None
-        try:
-            if _ncm_layers_arg == "auto":
-                _ncm_layer_stack = _ncm_detect_layer_stack(pcb_path.read_text())
-            else:
-                _ncm_layer_stack = {
-                    "2": _NcmLayerStack.two_layer,
-                    "4": _NcmLayerStack.four_layer_sig_gnd_pwr_sig,
-                    "4-sig": _NcmLayerStack.four_layer_sig_sig_gnd_pwr,
-                    "4-all": _NcmLayerStack.four_layer_all_signal,
-                    "6": _NcmLayerStack.six_layer_sig_gnd_sig_sig_pwr_sig,
-                }[_ncm_layers_arg]()
-        except (KeyError, OSError, ValueError):
-            # Stack detection is best-effort: without it the stack-independent
-            # names ("F.Cu", "In<k>.Cu") still resolve and "B.Cu" fails loud
-            # below with an actionable message rather than a silent wrong index.
-            _ncm_layer_stack = None
-        try:
-            # Canonical loader (issue #4683): shared with kct check / creepage /
-            # zones / audit so one sidecar is valid for every consumer.  The
-            # stack resolved from --layers above wins; JSON validity was
-            # already established by the _ncm_data parse.
-            args._loaded_net_class_map = net_class_map_from_path(
-                ncm_path, layer_stack=_ncm_layer_stack
-            )
-        except (TypeError, ValueError) as e:
-            print(f"Error: invalid net-class-map structure: {e}", file=sys.stderr)
-            return 1
-        # Issue #4605: the optional ``spatial_keepouts`` block -- per-rule-area
-        # net-class filters for KiCad keepout rule areas (lattice engine).
-        # Structure is validated HERE so a malformed block short-circuits with
-        # exit 1 before any routing work; the class NAMES are validated later,
-        # once the router's merged net-class map exists
-        # (``_apply_net_class_map_sidecar``).
-        _sk_err = _validate_spatial_keepouts_block(_ncm_data.get("spatial_keepouts"))
-        if _sk_err is not None:
-            print(f"Error: invalid spatial_keepouts block: {_sk_err}", file=sys.stderr)
-            return 1
-        args._spatial_keepouts = _ncm_data.get("spatial_keepouts")
 
     # Issue #4980: validate and load the optional --current-paths sidecar in
     # the same pre-dispatch window as --net-class-map above, so every routing

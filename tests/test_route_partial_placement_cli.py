@@ -18,6 +18,7 @@ from tests.test_routing_placement_disposition import board_text
     "selection",
     [
         "mixed",
+        "coupled",
         "valid_only",
         "skip_invalid",
         "complete_noop",
@@ -45,8 +46,15 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     original = board.read_bytes()
     output = tmp_path / "routed.kicad_pcb"
     report = tmp_path / "complete.json"
+    sidecar = tmp_path / "classes.json"
+    sidecar.write_text(
+        json.dumps(
+            {"BAD": {"name": "Pair", "coupled_routing": True, "diffpair_partner": "PARTNER"}}
+        )
+    )
     options = {
         "mixed": [],
+        "coupled": ["--net-class-map", str(sidecar)],
         "valid_only": ["--nets", "GOOD"],
         "skip_invalid": ["--skip-nets", "BAD"],
         "complete_noop": ["--complete"],
@@ -76,8 +84,8 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
         # Placement must preserve that stronger failure, never turn it into success.
         assert result.returncode in {2, 3}
     else:
-        assert result.returncode == (2 if selection in {"mixed", "complete_noop"} else 0)
-    if selection in {"mixed", "complete_noop", "complete_partial"}:
+        assert result.returncode == (2 if selection in {"mixed", "coupled", "complete_noop"} else 0)
+    if selection in {"mixed", "coupled", "complete_noop", "complete_partial"}:
         assert "SUCCESS:" not in result.stdout
     parsed = PCB.load(output)
     assert any(segment.net_name == "GOOD" for segment in parsed.segments)
@@ -97,7 +105,11 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     disposition = json.loads(report.read_text())["placement_disposition"]
     assert disposition["direct_invalid_nets"] == ["BAD"]
     assert disposition["requested_blocked_nets"] == (
-        ["BAD"] if selection in {"mixed", "complete_noop", "complete_partial"} else []
+        ["BAD", "PARTNER"]
+        if selection == "coupled"
+        else ["BAD"]
+        if selection in {"mixed", "complete_noop", "complete_partial"}
+        else []
     )
     assert "GOOD" in disposition["completed_nets"]
 
@@ -106,3 +118,7 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
         assert "PARTNER" in disposition["completed_nets"]
     if selection == "complete_excluded_noop":
         assert disposition["plane_excluded_nets"] == ["BAD", "PLANE"]
+
+    if selection == "coupled":
+        assert disposition["coupled_invalid_nets"] == ["PARTNER"]
+        assert not any(s.net_name == "PARTNER" for s in parsed.segments)

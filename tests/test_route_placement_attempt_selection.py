@@ -34,3 +34,35 @@ def test_route_only_inverted_skips_are_not_plane_intent(tmp_path):
     assert not result.user_excluded_nets
     assert result.unrequested_nets == frozenset({"BAD", "PARTNER", "PLANE"})
     assert result.requested_nets == result.eligible_nets == frozenset({"GOOD"})
+
+
+def test_explicit_coupled_class_blocks_partner_before_filtering(tmp_path):
+    from kicad_tools.router.rules import NetClassRouting
+
+    source = tmp_path / "mixed.kicad_pcb"
+    source.write_text(board_text())
+    args = route_cmd._route_parser().parse_args([str(source), "--nets", "PARTNER"])
+    args._loaded_net_class_map = {
+        "BAD": NetClassRouting(name="Pair", diffpair_partner="PARTNER", coupled_routing=True)
+    }
+    route_placement.prepare(args, source)
+    result = args._placement_disposition
+    assert result.coupled_invalid_nets == frozenset({"PARTNER"})
+    assert result.requested_invalid_nets == frozenset({"PARTNER"})
+    assert not result.eligible_nets
+    router, _ = load_pcb_for_routing(str(source), placement_disposition=result, force_python=True)
+    assert all(p.net == 0 for p in router.pads.values() if p.ref in {"P1", "P2"})
+
+
+def test_disabled_coupled_class_does_not_exclude_suffix_partner(tmp_path):
+    from kicad_tools.router.rules import NetClassRouting
+
+    source = tmp_path / "mixed.kicad_pcb"
+    source.write_text(board_text().replace('"BAD"', '"USB_D+"').replace('"PARTNER"', '"USB_D-"'))
+    args = route_cmd._route_parser().parse_args([str(source), "--differential-pairs"])
+    args._loaded_net_class_map = {
+        name: NetClassRouting(name="Scalar", coupled_routing=False) for name in ("USB_D+", "USB_D-")
+    }
+    route_placement.prepare(args, source)
+    assert not args._placement_disposition.coupled_invalid_nets
+    assert "USB_D-" in args._placement_disposition.eligible_nets

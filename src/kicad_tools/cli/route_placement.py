@@ -60,6 +60,37 @@ def disposition_from_control(state: dict) -> RoutingPlacementDisposition | None:
     return RoutingPlacementDisposition(**values)
 
 
+def _active_coupled_groups(args, names: frozenset[str]) -> list[tuple[str, str]]:
+    """Resolve coupling on the whole board before exclusions remove either half."""
+    from kicad_tools.router.diffpair import should_engage_coupled
+    from kicad_tools.router.diffpair_detection import detect_diff_pairs
+    from kicad_tools.router.net_class import classify_and_apply_rules
+    from kicad_tools.router.net_names import resolve_net_class_map_keys
+    from kicad_tools.router.rules import DEFAULT_NET_CLASS_MAP
+
+    net_names = dict(enumerate(sorted(names), 1))
+    classes = dict(DEFAULT_NET_CLASS_MAP)
+    for name, auto_routing in classify_and_apply_rules(net_names).items():
+        classes.setdefault(name, auto_routing)
+    loaded = getattr(args, "_loaded_net_class_map", None)
+    if loaded:
+        resolution = resolve_net_class_map_keys(loaded.keys(), names)
+        for name, key in resolution.resolved.items():
+            classes[name] = loaded[key]
+    # Match DifferentialPairRouter's net-name/class-name detection context.
+    routing = dict(classes)
+    net_to_class = {}
+    for name, cls in classes.items():
+        net_to_class[name] = cls.name
+        routing.setdefault(cls.name, cls)
+    detected = detect_diff_pairs(net_names, net_class_routing=routing, net_to_class=net_to_class)
+    return [
+        (item.pair.positive.net_name, item.pair.negative.net_name)
+        for item in detected
+        if should_engage_coupled(item.pair, routing, net_to_class)[0]
+    ]
+
+
 def prepare(args, source: Path) -> None:
     """Resolve whole-board invalid nets before complete/region can hide terminals."""
     requested = [n.strip() for n in args.nets.split(",") if n.strip()] if args.nets else None
@@ -80,17 +111,15 @@ def prepare(args, source: Path) -> None:
         plane_excluded_nets=plane,
         allow_offboard=getattr(args, "allow_offboard", False),
     )
-    if getattr(args, "differential_pairs", False):
-        from kicad_tools.router.diffpair import detect_differential_pairs
-
-        pairs = detect_differential_pairs(dict(enumerate(sorted(disposition.all_nets), 1)))
+    groups = _active_coupled_groups(args, disposition.all_nets)
+    if groups:
         disposition = analyze_routing_placement(
             source,
             requested_nets=requested,
             user_excluded_nets=skipped,
             plane_excluded_nets=plane,
             allow_offboard=getattr(args, "allow_offboard", False),
-            coupled_groups=[(p.positive.net_name, p.negative.net_name) for p in pairs],
+            coupled_groups=groups,
         )
     args._initial_placement_disposition = disposition
     args._placement_disposition = disposition
