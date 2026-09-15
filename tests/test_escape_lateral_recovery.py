@@ -251,19 +251,11 @@ class TestLateralRecoverySucceeds:
         )
 
     def test_lateral_recovery_picks_smallest_valid_offset(self):
-        """The search starts at step=0.05mm and walks outward; the
-        returned via should be at the SMALLEST offset that passes,
-        not an arbitrary one further away.
+        """The smallest candidate must clear its own pad as well as neighbours.
 
-        Geometry note: the neighbour is at primary.y + PITCH (0.50 mm),
-        with pad height 0.30 mm (so its south edge is at
-        primary.y + 0.35 mm).  A SOUTH-direction via at offset 0.05 mm
-        sits at via_y = primary.y - 0.05 mm; its rect-distance to the
-        neighbour pad is then 0.40 mm, which is below the
-        ``via_radius (0.30) + clearance (0.15) = 0.45`` mm required gap.
-        Offset 0.10 mm yields rect-distance 0.45 mm exactly, the first
-        offset that passes.  This pinning catches regressions in the
-        step size, search order, or clearance arithmetic.
+        The primary pad extends 0.15 mm south from its centre. A 0.60 mm
+        via plus 0.15 mm clearance needs a 0.60 mm offset, not the old
+        0.10 mm offset that left the drill inside its own SMT land.
         """
         router = _build_router(strict=True)
         package = _make_translated_package()
@@ -279,8 +271,8 @@ class TestLateralRecoverySucceeds:
         assert route is not None
         assert route.via is not None
         observed_offset = primary.y - route.via.y
-        assert observed_offset == pytest.approx(0.10, abs=1e-9), (
-            f"Expected smallest-valid offset of 0.10 mm (see geometry note "
+        assert observed_offset == pytest.approx(0.60, abs=1e-9), (
+            f"Expected smallest-valid offset of 0.60 mm (see geometry note "
             f"in docstring); got {observed_offset:.4f} mm"
         )
 
@@ -428,12 +420,8 @@ class TestLateralRecoveryFailsGracefully:
             "committing a violating via."
         )
 
-    def test_via_in_pad_unsupported_manufacturer_returns_none(self):
-        """When the manufacturer doesn't support via-in-pad processing,
-        the lateral helper short-circuits to None -- it can't ship a
-        lateral via on a fine-pitch pad without filled-and-plated
-        processing either.  This mirrors ``_try_in_pad_escape``.
-        """
+    def test_ordinary_lateral_via_needs_no_via_in_pad_process(self):
+        """An outside-pad through via is valid without filled-and-capped processing."""
         rules = make_rules(manufacturer="jlcpcb")  # no via-in-pad support
         grid = _make_grid_origin_zero(rules)
         router = EscapeRouter(grid, rules, component_holes=())
@@ -450,9 +438,12 @@ class TestLateralRecoveryFailsGracefully:
             escape_width=0.2,
             package=package,
         )
-        assert route is None, (
-            "Without via-in-pad support the lateral helper must defer "
-            "(same outcome as the in-pad helper); got a route."
+        from kicad_tools.router.pad_geometry import pad_point_distance
+
+        assert route is not None and route.via is not None
+        assert not route.via.in_pad
+        assert pad_point_distance(primary, route.via.x, route.via.y) >= (
+            route.via.diameter / 2 + CLEARANCE - 1e-6
         )
 
     def test_via_down_direction_returns_none(self):
@@ -771,3 +762,48 @@ class TestQfpDispatcherWiring:
             "reaches default callers (board 04 stitching depends on it). "
             "Got zero calls."
         )
+
+
+@pytest.mark.parametrize("manufacturer", ["jlcpcb", "jlcpcb-tier1"])
+@pytest.mark.parametrize("holes", ["empty", "unknown", "near", "far"])
+def test_ordinary_two_layer_lateral_escape(manufacturer, holes):
+    from kicad_tools.router.pad_geometry import pad_point_distance
+
+    rules = make_rules(manufacturer=manufacturer)
+    grid = RoutingGrid(width=10, height=10, rules=rules, layer_stack=LayerStack.two_layer())
+    p = _make_translated_package()
+    pad = p.pads[0]
+    census = () if holes == "empty" else None
+    if holes in ("near", "far"):
+        census = (
+            Pad(
+                x=5,
+                y=4.4 if holes == "near" else 1,
+                width=0.6,
+                height=0.6,
+                net=99,
+                net_name="HOLE",
+                ref="H1",
+                pin="1",
+                layer=Layer.F_CU,
+                through_hole=True,
+                drill=0.3,
+            ),
+        )
+    router = EscapeRouter(grid, rules, component_holes=census)
+    assert not router.via_in_pad_supported
+    route = router._try_lateral_via_escape(
+        pad=pad,
+        direction=EscapeDirection.SOUTH,
+        effective_clearance=CLEARANCE,
+        escape_width=0.2,
+        package=p,
+    )
+    if holes in ("unknown", "near"):
+        assert route is None
+    else:
+        assert route is not None
+        v = route.via
+        assert v is not None and not v.in_pad and not v.is_micro
+        assert pad_point_distance(pad, v.x, v.y) >= v.diameter / 2 + CLEARANCE - 1e-6
+        assert v.layers == (Layer.F_CU, Layer.B_CU)

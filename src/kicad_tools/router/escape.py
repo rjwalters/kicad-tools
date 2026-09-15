@@ -3600,10 +3600,9 @@ class EscapeRouter:
         # clearance -- a footprint-pitch geometric ceiling that no router
         # tuning can resolve.  Default off so all existing callers see
         # the original gate exactly.
-        try_in_pad_fallback = (
-            (package.pin_pitch <= 0.55)
-            or (self.extended_pitch_in_pad_fallback and package.pin_pitch <= 0.8)
-        ) and self.via_in_pad_supported
+        try_in_pad_fallback = (package.pin_pitch <= 0.55) or (
+            self.extended_pitch_in_pad_fallback and package.pin_pitch <= 0.8
+        )
 
         # Issue #2881: Track whether this package is a "would-have-rescued"
         # candidate -- fine-pitch enough to need via-in-pad rescue, but the
@@ -8282,16 +8281,8 @@ class EscapeRouter:
             or ``None`` when every candidate inside the search budget
             is rejected.
         """
-        if not self.via_in_pad_supported:
-            # Mirror ``_try_in_pad_escape`` -- without a via-in-pad-capable
-            # manufacturer the lateral re-attempt cannot ship either
-            # (the resulting via would land on a fine-pitch pad neighbour
-            # without filled/plated processing).  Returning None here
-            # preserves the existing "defer to main router" behaviour
-            # for manufacturers that never supported the in-pad path
-            # to begin with.
-            return None
-
+        # A lateral escape uses an ordinary via outside SMT copper. It
+        # does not require a filled-and-capped via-in-pad process.
         # Pull manufacturer-effective via geometry, mirroring the
         # in-pad helper above so the lateral and in-pad rescues use
         # geometrically-consistent vias.
@@ -8358,6 +8349,29 @@ class EscapeRouter:
             offset = i * step_mm
             cand_x = pad.x + dx * offset
             cand_y = pad.y + dy * offset
+
+            from .pad_geometry import pad_point_distance
+
+            # Do not merely mark the via off-pad: prove its copper is clear
+            # of every SMT land in the package, including its own net.
+            pads = package.pads if package is not None else [pad]
+            if any(
+                not p.through_hole
+                and pad_point_distance(p, cand_x, cand_y)
+                < via_diameter / 2 + effective_clearance - 1e-6
+                for p in pads
+            ):
+                continue
+            holes = resolve_component_hole_context(
+                cand_x, cand_y, via_drill, all_pads=self._component_holes
+            )
+            if (
+                not holes.known
+                or holes.nearest_distance_mm is None
+                or holes.nearest_distance_mm
+                < max(self.rules.min_hole_to_hole, self.rules.min_drill_clearance)
+            ):
+                continue
 
             if self._can_place_via(
                 x=cand_x,
