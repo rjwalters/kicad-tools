@@ -64,10 +64,20 @@ def prepare(args, source: Path) -> None:
     """Resolve whole-board invalid nets before complete/region can hide terminals."""
     requested = [n.strip() for n in args.nets.split(",") if n.strip()] if args.nets else None
     skipped = [n.strip() for n in args.skip_nets.split(",") if n.strip()] if args.skip_nets else []
+    plane = (
+        [
+            n.strip()
+            for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
+            if n.strip()
+        ]
+        if getattr(args, "complete", False)
+        else []
+    )
     disposition = analyze_routing_placement(
         source,
         requested_nets=requested,
         user_excluded_nets=skipped,
+        plane_excluded_nets=plane,
         allow_offboard=getattr(args, "allow_offboard", False),
     )
     if getattr(args, "differential_pairs", False):
@@ -78,6 +88,7 @@ def prepare(args, source: Path) -> None:
             source,
             requested_nets=requested,
             user_excluded_nets=skipped,
+            plane_excluded_nets=plane,
             allow_offboard=getattr(args, "allow_offboard", False),
             coupled_groups=[(p.positive.net_name, p.negative.net_name) for p in pairs],
         )
@@ -97,12 +108,21 @@ def prepare(args, source: Path) -> None:
 
 def for_attempt(args, skip_nets) -> RoutingPlacementDisposition | None:
     """Derive plane intent from this trial without changing the initial selection."""
-    initial = getattr(args, "_initial_placement_disposition", None)
+    initial: RoutingPlacementDisposition | None = getattr(
+        args, "_initial_placement_disposition", None
+    )
     if initial is None:
         return None
-    plane = (
+    selected = getattr(args, "_route_only_nets", None)
+    # --complete synthesizes a route-only selection after the whole-board
+    # placement check. Already-connected nets stay in the completion request;
+    # their absence from this trial is not evidence of a copper-pour plan.
+    selection_skips = (
+        initial.all_nets - frozenset(selected) if selected is not None else frozenset()
+    )
+    plane = initial.plane_excluded_nets | (
         frozenset(skip_nets or ())
-        & initial.all_nets - initial.user_excluded_nets - initial.unrequested_nets
+        & initial.all_nets - initial.user_excluded_nets - initial.unrequested_nets - selection_skips
     )
     disposition = replace(
         initial,
@@ -127,7 +147,7 @@ def finish(args, exit_code: int) -> int:
     disposition = getattr(args, "_placement_disposition", None)
     if disposition is None or not disposition.invalid_nets:
         return exit_code
-    completed = frozenset()
+    completed: frozenset[str] = frozenset()
     output = args._placement_output
     fresh = output.exists() and output.stat() != args._placement_output_before
     if fresh:

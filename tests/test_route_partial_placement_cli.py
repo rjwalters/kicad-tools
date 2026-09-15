@@ -14,17 +14,32 @@ from tests.test_routing_placement_disposition import board_text
 
 @pytest.mark.parametrize("entry", ["inner", "outer"])
 @pytest.mark.parametrize("finite", [False, True])
-@pytest.mark.parametrize("selection", ["mixed", "valid_only", "skip_invalid", "complete_noop"])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "mixed",
+        "valid_only",
+        "skip_invalid",
+        "complete_noop",
+        "complete_partial",
+        "complete_excluded_noop",
+    ],
+)
 def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, selection):
     board = tmp_path / "mixed.kicad_pcb"
     text = board_text()
-    if selection == "complete_noop":
+    if selection.startswith("complete_"):
         additions = """
         (segment (start 106 103) (end 108 103) (width 0.2) (layer "F.Cu") (net 1))
         (segment (start 108 103) (end 125 105) (width 0.2) (layer "F.Cu") (net 1))
         (segment (start 105 107) (end 110 107) (width 0.2) (layer "F.Cu") (net 2))
         (segment (start 105 109) (end 110 109) (width 0.2) (layer "F.Cu") (net 3))
         """
+        if selection == "complete_partial":
+            additions = additions.replace(
+                '(segment (start 105 107) (end 110 107) (width 0.2) (layer "F.Cu") (net 2))',
+                "",
+            )
         text = text.rstrip()[:-1] + additions + ")"
     board.write_text(text)
     original = board.read_bytes()
@@ -35,6 +50,8 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
         "valid_only": ["--nets", "GOOD"],
         "skip_invalid": ["--skip-nets", "BAD"],
         "complete_noop": ["--complete"],
+        "complete_partial": ["--complete"],
+        "complete_excluded_noop": ["--complete", "--complete-exclude-nets", "BAD,PLANE"],
     }[selection]
     argv = [str(board), "-o", str(output), "--complete-report", str(report), *options]
     if finite:
@@ -54,8 +71,13 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     )
     assert board.read_bytes() == original
     assert output.is_file(), result.stdout + result.stderr
-    assert result.returncode == (2 if selection in {"mixed", "complete_noop"} else 0)
-    if selection in {"mixed", "complete_noop"}:
+    if selection == "complete_partial":
+        # The retained off-board trace can also trigger the DRC exit (3).
+        # Placement must preserve that stronger failure, never turn it into success.
+        assert result.returncode in {2, 3}
+    else:
+        assert result.returncode == (2 if selection in {"mixed", "complete_noop"} else 0)
+    if selection in {"mixed", "complete_noop", "complete_partial"}:
         assert "SUCCESS:" not in result.stdout
     parsed = PCB.load(output)
     assert any(segment.net_name == "GOOD" for segment in parsed.segments)
@@ -75,6 +97,12 @@ def test_partial_placement_cli_preserves_and_reports(tmp_path, entry, finite, se
     disposition = json.loads(report.read_text())["placement_disposition"]
     assert disposition["direct_invalid_nets"] == ["BAD"]
     assert disposition["requested_blocked_nets"] == (
-        ["BAD"] if selection in {"mixed", "complete_noop"} else []
+        ["BAD"] if selection in {"mixed", "complete_noop", "complete_partial"} else []
     )
     assert "GOOD" in disposition["completed_nets"]
+
+    if selection == "complete_partial":
+        assert disposition["plane_excluded_nets"] == []
+        assert "PARTNER" in disposition["completed_nets"]
+    if selection == "complete_excluded_noop":
+        assert disposition["plane_excluded_nets"] == ["BAD", "PLANE"]

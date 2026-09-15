@@ -14704,6 +14704,16 @@ def _run_main_impl(args, parser, argv) -> int:
         args._placement_disposition.requested_invalid_nets
         and not args._placement_disposition.eligible_nets
     ):
+        refs = sorted(args._placement_disposition.invalid_references)
+        print(
+            f"ERROR: {len(refs)} footprint(s) outside Edge.Cuts — placement invalid",
+            file=sys.stderr,
+        )
+        print(f"       Off-board: {', '.join(refs)}", file=sys.stderr)
+        print(
+            "       Run `kct placement check` for details, or `--allow-offboard` to route anyway.",
+            file=sys.stderr,
+        )
         return 2
 
     # Issue #4471 (epic #4465): resolve --complete BEFORE --nets.  Auto-detects
