@@ -3821,6 +3821,30 @@ class Router:
             )
             batch_turn_costs = self._batch_turn_costs(current.direction)
 
+            # Issue #990 (hoisted): whether CURRENT node sits within a pad's
+            # metal area, so the search still allows the first step outward
+            # when every metal-area cell is blocked by adjacent nets'
+            # clearance zones. These two flags depend only on ``current``
+            # (x/y/layer), never on the per-neighbor ``nx``/``ny``/``nlayer``
+            # this loop iterates over -- ``self.neighbors_2d`` only changes
+            # (dx, dy) within the same layer (``nlayer`` below is always
+            # ``current.layer``), so re-deriving them inside the neighbor
+            # loop recomputed the identical result on every one of the 4-8
+            # neighbor iterations. Computing them once per popped node
+            # (profiled as part of this A* loop's largest single self-time
+            # cost, Issue #5240) preserves the exact same boolean value at
+            # every use site below.
+            is_exiting_start_pad = (
+                start_metal_gx1 <= current.x <= start_metal_gx2
+                and start_metal_gy1 <= current.y <= start_metal_gy2
+                and current.layer in start_layers
+            )
+            is_exiting_end_pad = (
+                end_metal_gx1 <= current.x <= end_metal_gx2
+                and end_metal_gy1 <= current.y <= end_metal_gy2
+                and current.layer in end_layers
+            )
+
             # Explore neighbors
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
@@ -3849,22 +3873,6 @@ class Router:
                     end_approach_gx1 <= nx <= end_approach_gx2
                     and end_approach_gy1 <= ny <= end_approach_gy2
                     and nlayer in end_layers
-                )
-
-                # Issue #990: Check if CURRENT node is within a pad's metal area
-                # When the entire metal area is blocked by other nets' clearance zones,
-                # we still need to allow the first step outward from the pad.
-                # This enables routing to start even when all metal area cells would
-                # normally be blocked by adjacent components' clearance zones.
-                is_exiting_start_pad = (
-                    start_metal_gx1 <= current.x <= start_metal_gx2
-                    and start_metal_gy1 <= current.y <= start_metal_gy2
-                    and current.layer in start_layers
-                )
-                is_exiting_end_pad = (
-                    end_metal_gx1 <= current.x <= end_metal_gx2
-                    and end_metal_gy1 <= current.y <= end_metal_gy2
-                    and current.layer in end_layers
                 )
 
                 # Check grid bounds first
