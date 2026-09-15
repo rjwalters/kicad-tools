@@ -428,3 +428,137 @@ def test_completion_refuses_output_copy_before_touching_either_file(tmp_path, ca
     assert json.loads(capsys.readouterr().out)["success"] is False
     assert board.read_bytes() == original
     assert output.read_bytes() == b"previous output"
+
+
+@pytest.mark.parametrize("case", ["complete", "split", "strict", "missing_cli", "output"])
+def test_public_cli_physical_completion(tmp_path, native_cli, case):
+    import os
+    import sys
+
+    board = fixture_board(tmp_path, "split" if case == "split" else "continuous")
+    original = board.read_bytes()
+    evidence = tmp_path / "evidence"
+    command = [
+        sys.executable,
+        "-m",
+        "kicad_tools.cli",
+        "stitch",
+        str(board),
+        "--net",
+        "GNDA",
+        "--complete",
+        "--evidence-dir",
+        str(evidence),
+        "--kicad-cli",
+        "/no/such/kicad-cli" if case == "missing_cli" else native_cli,
+        "--via-size",
+        "0.6",
+        "--drill",
+        "0.3",
+        "--format",
+        "json",
+    ]
+    if case == "strict":
+        command.append("--drc-strict")
+    output = tmp_path / "existing.kicad_pcb"
+    if case == "output":
+        output.write_bytes(b"prior output")
+        command.extend(["--output", str(output)])
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+    document = json.loads(result.stdout)
+    assert result.returncode == document["exit_code"] == (0 if case == "complete" else 1)
+    assert document["success"] is (case == "complete")
+    if case == "complete":
+        assert document["success_scope"] == "physical_power_connections"
+        assert _snapshot(board)["components"] == [["C1.1", "C2.1", "C3.1"]]
+        assert (evidence / "evidence.json").is_file()
+    else:
+        assert board.read_bytes() == original
+    if case == "strict":
+        assert "Strict native DRC" in document["error"]
+    if case == "output":
+        assert output.read_bytes() == b"prior output"
+
+
+@pytest.mark.parametrize("changed", ["pcb", "new_rules"])
+def test_edit_after_accepted_evidence_is_preserved(tmp_path, native_cli, monkeypatch, changed):
+    import kicad_tools.stitching as stitching
+
+    board = fixture_board(tmp_path)
+    original = board.read_bytes()
+    evidence = tmp_path / "evidence"
+    actual_write = stitching.atomic_write_text
+    edited = original + b"\n; concurrent edit\n"
+    rules = board.with_suffix(".kicad_dru")
+
+    def interleave(path, text, *args, **kwargs):
+        result = actual_write(path, text, *args, **kwargs)
+        if Path(path) == evidence / "evidence.json" and json.loads(text)["status"] == "accepted":
+            if changed == "pcb":
+                board.write_bytes(edited)
+            else:
+                rules.write_text(
+                    '(version 1) (rule "new process" (constraint hole_size (min 1mm)))'
+                )
+        return result
+
+    monkeypatch.setattr(stitching, "atomic_write_text", interleave)
+    with pytest.raises(StitchRejected, match="changed concurrently"):
+        complete_power_connections(board, ["GNDA"], evidence_dir=evidence, kicad_cli=native_cli)
+    assert board.read_bytes() == (edited if changed == "pcb" else original)
+    if changed == "new_rules":
+        assert "new process" in rules.read_text()
+    assert json.loads((evidence / "evidence.json").read_text())["status"] == "rejected"
+    assert not list(tmp_path.glob("*.stitch-tmp"))
+    assert not list(tmp_path.glob("*.stitch.lock"))
+
+
+def test_cooperating_publisher_lock_and_unique_staging(tmp_path, native_cli):
+    from kicad_tools.stitching import _publisher_lock
+
+    board = fixture_board(tmp_path)
+    original = board.read_bytes()
+    with _publisher_lock(board):
+        with pytest.raises(StitchRejected, match="publisher lock exists"):
+            complete_power_connections(
+                board, ["GNDA"], evidence_dir=tmp_path / "busy", kicad_cli=native_cli
+            )
+    assert board.read_bytes() == original
+    other_temporary = board.with_suffix(".kicad_pcb.tmp")
+    other_temporary.write_bytes(b"another writer's staging file")
+    result = complete_power_connections(
+        board, ["GNDA"], evidence_dir=tmp_path / "free", kicad_cli=native_cli
+    )
+    assert result["status"] == "complete"
+    assert other_temporary.read_bytes() == b"another writer's staging file"
+
+
+def test_failed_atomic_promotion_preserves_input_and_records_rejection(
+    tmp_path, native_cli, monkeypatch
+):
+    import kicad_tools.stitching as stitching
+
+    board = fixture_board(tmp_path)
+    original = board.read_bytes()
+    evidence = tmp_path / "evidence"
+    replace = stitching.os.replace
+
+    def fail_commit(source, destination, *args, **kwargs):
+        if Path(destination) == board.resolve():
+            raise OSError("injected PCB promotion failure")
+        return replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(stitching.os, "replace", fail_commit)
+    with pytest.raises(StitchRejected, match="PCB promotion failure"):
+        complete_power_connections(board, ["GNDA"], evidence_dir=evidence, kicad_cli=native_cli)
+    assert board.read_bytes() == original
+    assert json.loads((evidence / "evidence.json").read_text())["status"] == "rejected"
+    assert not list(tmp_path.glob("*.stitch-tmp"))
+    assert not list(tmp_path.glob("*.stitch.lock"))

@@ -316,7 +316,7 @@ an improvement or an enforceable rule set from it: `optimize-placement`,
 
 ### Physical power completion
 
-`kct stitch board.kicad_pcb --net GND --complete --format json` uses the shared
+`kct stitch board.kicad_pcb --net GND --complete --via-size 0.6 --drill 0.3 --format json` uses the shared
 `kicad_tools.stitching.complete_power_connections` transaction. Omit `--net` to
 select the board's plane nets. It requires Shapely and native KiCad 10; choose the
 CLI with `--kicad-cli` and a new evidence directory with `--evidence-dir`.
@@ -338,7 +338,14 @@ and proposal diagnostics. A refill-only success promotes the measured filled
 bytes even if it adds no via. Reusing an evidence directory is refused. Acceptance evidence is persisted before
 PCB promotion. If only the final status update fails after promotion, success
 includes `evidence_finalization_error`; the retained `accepted` record still
-identifies the validated candidate and output hash.
+identifies the validated candidate and output hash. Unique staging and a sibling
+commit lock serialize cooperating stitch publishers. Source bytes and context
+are checked again after evidence persistence, immediately before promotion;
+a detected concurrent edit is preserved and causes rejection. KiCad lock
+checks are advisory, so this is not an atomic comparison against arbitrary
+noncooperating editors. A retained `.stitch.lock` requires inspection before
+manual removal; lock-cleanup failures after a successful commit are reported
+as `publisher_lock_cleanup_error`.
 
 Run completion in the original project directory: `--output`, dry runs, blanket,
 thermal and micro-via modes are not supported by this transaction. Native

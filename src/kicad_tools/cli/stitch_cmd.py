@@ -6378,15 +6378,14 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
             "output_sha256": physical["output_sha256"],
             "evidence_dir": physical["evidence_dir"],
         }
-        if physical.get("evidence_finalization_error"):
-            physical_document["evidence_finalization_error"] = physical[
-                "evidence_finalization_error"
-            ]
-            if not as_json:
-                print(
-                    f"Accepted evidence retained; final status update failed: {physical['evidence_finalization_error']}",
-                    file=sys.stderr,
-                )
+        for diagnostic in ("evidence_finalization_error", "publisher_lock_cleanup_error"):
+            if physical.get(diagnostic):
+                physical_document[diagnostic] = physical[diagnostic]
+                if not as_json:
+                    print(
+                        f"Committed completion diagnostic ({diagnostic}): {physical[diagnostic]}",
+                        file=sys.stderr,
+                    )
         if not as_json:
             print(f"Physically complete power nets: {', '.join(physical['target_nets'])}")
             print(f"Native refill and candidate evidence: {physical['evidence_dir']}")

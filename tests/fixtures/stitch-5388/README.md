@@ -36,7 +36,7 @@ Each native test retains its temporary-stage boards, native report JSON and
 command logs under pytest's temporary directory. For an individual user board:
 
 ```sh
-kct stitch board.kicad_pcb --net GND --complete --evidence-dir new-stitch-evidence
+kct stitch board.kicad_pcb --net GND --complete --via-size 0.6 --drill 0.3 --evidence-dir new-stitch-evidence
 ```
 
 The input remains in its original project context. The public API returns only

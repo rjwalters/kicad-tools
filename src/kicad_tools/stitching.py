@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -270,6 +271,25 @@ def _context_files(source: Path) -> list[Path]:
     return sorted(files)
 
 
+@contextmanager
+def _publisher_lock(source: Path):
+    """Serialize cooperating stitch commits; never infer stale-lock ownership."""
+    marker = source.with_name(f".{source.name}.stitch.lock")
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as error:
+        raise StitchRejected(f"Stitch publisher lock exists: {marker}") from error
+    state: dict[str, str] = {}
+    try:
+        os.close(fd)
+        yield state
+    finally:
+        try:
+            marker.unlink()
+        except OSError as error:
+            state["publisher_lock_cleanup_error"] = str(error)
+
+
 def complete_power_connections(
     pcb_path: str | Path,
     net_names: list[str] | None = None,
@@ -290,7 +310,9 @@ def complete_power_connections(
     Both before and after receive a real native refill. Existing signal opens
     may remain, but every selected power net must be complete and no existing
     connection or native finding may regress. Raises :class:`StitchRejected`
-    on failure; evidence survives and the original bytes remain unchanged.
+    on failure; evidence survives and this stage does not promote its candidate.
+    Cooperating commits are serialized and late source/context edits are
+    rechecked before rename; external editors do not participate in that lock.
 
     A native KiCad 10 CLI and Shapely are required. Use the selected process's
     project/rules beside the PCB, and run its complete manufacturing signoff
@@ -389,20 +411,40 @@ def complete_power_connections(
         if any(_sha(Path(path)) != digest for path, digest in hashes.items()):
             raise StitchRejected("Source or authored constraints changed concurrently")
         check_kicad_lock(source)
-        # Persist accepted bytes/hash before touching the input. A disk failure
-        # here is a rejection and cannot leave a promoted board without evidence.
-        record.update(
-            status="accepted",
-            vias_added=vias_added,
-            output_sha256=_sha(stages["candidate"]),
-        )
-        atomic_write_text(
-            evidence / "evidence.json", json.dumps(record, indent=2, default=str) + "\n"
-        )
-        # The promoted bytes must be the ones native actually measured, even
-        # when filling alone completes the net and no new via was needed.
-        if stages["candidate"].read_bytes() != original:
-            atomic_write_text(source, stages["candidate"].read_text())
+        # Stage bytes under a unique name and serialize cooperating publishers.
+        # Evidence persistence/fsync happens before the final source/context
+        # comparison, leaving only the atomic rename after that comparison.
+        with _publisher_lock(source) as lock_state:
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{source.name}.", suffix=".stitch-tmp", dir=source.parent
+            )
+            temporary: Path | None = Path(temporary_name)
+            try:
+                candidate_bytes = stages["candidate"].read_bytes()
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(candidate_bytes)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                record.update(
+                    status="accepted",
+                    vias_added=vias_added,
+                    output_sha256=_sha(stages["candidate"]),
+                )
+                atomic_write_text(
+                    evidence / "evidence.json", json.dumps(record, indent=2, default=str) + "\n"
+                )
+                check_kicad_lock(source)
+                if _context_files(source) != sidecars or any(
+                    _sha(Path(path)) != digest for path, digest in hashes.items()
+                ):
+                    raise StitchRejected("Source or authored constraints changed concurrently")
+                if candidate_bytes != original:
+                    os.replace(temporary_name, source)
+                    temporary = None
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        record.update(lock_state)
     except Exception as error:
         record.update(status="rejected", reason=str(error), output_sha256=_sha(source))
         try:
