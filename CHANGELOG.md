@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve through-hole via clearance on every copper layer during trace optimization, even when search transitions stop on inner layers; retain explicit microvia spans (#5333).
+
 - Retry a coordinated match-group loop on its opposite side when the first insertion hits copper, retaining paired clearance checks and atomic rollback (#5333).
 
 - Complete saved native differential-pair corridor bodies with validated terminal layer returns, sharing the existing body/time/tuning budgets (#5333).
