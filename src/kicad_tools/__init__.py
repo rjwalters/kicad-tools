@@ -85,13 +85,6 @@ from kicad_tools.query import (
     SymbolList,
     SymbolQuery,
 )
-
-# Reasoning - LLM-driven PCB layout
-from kicad_tools.reasoning import (
-    CommandInterpreter,
-    PCBReasoningAgent,
-    PCBState,
-)
 from kicad_tools.schema.bom import BOM, BOMItem, extract_bom
 from kicad_tools.schema.pcb import PCB
 
@@ -143,3 +136,35 @@ __all__ = [
     "null_progress",
     "report_progress",
 ]
+
+# Issue #5240: ``kicad_tools.reasoning`` (the LLM-driven layout agent) is by
+# far the most expensive part of importing this package -- measured
+# locally, ``from kicad_tools.reasoning import agent`` alone accounts for
+# ~4.5s of this module's ~5.3s total import cost (its own transitive chain
+# pulls in ``drc``/``validate``/``analysis``), yet nothing in this repo's
+# src/tests/boards/scripts imports ``PCBReasoningAgent``, ``PCBState``, or
+# ``CommandInterpreter`` from the top-level ``kicad_tools`` package -- only
+# ``kicad_tools.reasoning`` directly (the ``kct reason`` command path).
+# Every OTHER ``kct <command>`` and every test/recipe that merely does
+# ``import kicad_tools`` (or ``from kicad_tools import Schematic, PCB,
+# ...``) was paying this cost regardless of whether it ever touches
+# reasoning.  Resolve these three names lazily (:pep:`562`) instead: the
+# first actual access still imports ``kicad_tools.reasoning`` exactly as
+# before (nothing loses functionality -- ``from kicad_tools import
+# PCBReasoningAgent`` keeps working), but the cost is no longer paid by
+# every other import of this package.
+_LAZY_REASONING_ATTRS = frozenset({"PCBReasoningAgent", "PCBState", "CommandInterpreter"})
+
+
+def __getattr__(name: str):
+    if name in _LAZY_REASONING_ATTRS:
+        from kicad_tools import reasoning as _reasoning
+
+        value = getattr(_reasoning, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | _LAZY_REASONING_ATTRS)

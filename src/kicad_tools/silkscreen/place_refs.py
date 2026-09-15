@@ -48,8 +48,20 @@ from kicad_tools.core.sexp_file import save_pcb
 from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform, _side_has_geometry
 from kicad_tools.schema.pcb import PCB, _is_footprint_tag
 from kicad_tools.sexp.parser import SExp, parse_file
-from kicad_tools.validate.rules.silkscreen import (
+
+# Issue #5240: the numeric defaults live in the dependency-free
+# ``_silk_defaults`` leaf module (single source of truth) so
+# ``kicad_tools.cli.parser`` can read them for ``--help`` output without
+# importing this module's ``kicad_tools.validate.rules.silkscreen``
+# dependency (and that package's own heavy transitive chain).
+# Re-exported here unchanged for existing callers.
+from kicad_tools.silkscreen._silk_defaults import (
+    DEFAULT_CLEARANCE_MM,
+    DEFAULT_MAX_OFFSET_MM,
+    DEFAULT_STEP_MM,
     SILK_EDGE_CLEARANCE_MM,
+)
+from kicad_tools.validate.rules.silkscreen import (
     _iter_pad_apertures,
     _iter_via_apertures,
     _silk_side,
@@ -59,22 +71,6 @@ from kicad_tools.validate.rules.silkscreen import (
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import Footprint
-
-# Default silk-to-obstacle clearance (mm).  This is deliberately a
-# *dedicated* solver parameter, distinct from
-# ``DesignRules.min_solder_mask_clearance_mm`` (used only to size pad mask
-# apertures, matching ``validate.rules.silkscreen``) -- it is the
-# "how far apart do labels need to be to stay legible" knob a fab-specific
-# silkscreen policy tightens or loosens.  0.15mm matches the tightened
-# value from the concrete Chorus v25 result this module targets.
-DEFAULT_CLEARANCE_MM = 0.15
-
-# Search geometry defaults.  A candidate ring step of 0.25mm across an 8mm
-# radius (32 rings x 8 points = 256 candidates/reference, worst case) is
-# comfortably fast for real boards while covering "just outside this
-# 0402's courtyard" through "clear across a dense connector row".
-DEFAULT_MAX_OFFSET_MM = 8.0
-DEFAULT_STEP_MM = 0.25
 
 # Floating-point tolerance, matching ``validate.rules.silkscreen``.
 _EPSILON_MM = 1e-4

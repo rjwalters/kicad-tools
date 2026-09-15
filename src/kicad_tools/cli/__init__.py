@@ -47,55 +47,6 @@ from kicad_tools.config import Config
 from kicad_tools.exceptions import KiCadToolsError
 from kicad_tools.units import get_unit_formatter, set_current_formatter
 
-from .commands import (
-    run_analyze_command,
-    run_audit_command,
-    run_bench_command,
-    run_benchmark_command,
-    run_board_metrics_command,
-    run_build_command,
-    run_build_native_command,
-    run_check_command,
-    run_clean_command,
-    run_config_command,
-    run_constraints_command,
-    run_create_pcb_command,
-    run_creepage_command,
-    run_creepage_export_rules_command,
-    run_datasheet_command,
-    run_decisions_command,
-    run_doctor_command,
-    run_estimate_command,
-    run_fix_footprints_command,
-    run_fleet_command,
-    run_footprint_command,
-    run_impedance_command,
-    run_init_command,
-    run_interactive_command,
-    run_ipc_command,
-    run_lib_command,
-    run_mcp_command,
-    run_mfr_command,
-    run_optimize_command,
-    run_optimize_placement_command,
-    run_panel_command,
-    run_parts_command,
-    run_pcb_command,
-    run_pipeline_command,
-    run_placement_command,
-    run_readiness_command,
-    run_reason_command,
-    run_route_auto_command,
-    run_route_command,
-    run_run_command,
-    run_sch_command,
-    run_spec_command,
-    run_suggest_command,
-    run_sync_command,
-    run_validate_command,
-    run_validate_footprints_command,
-    run_zones_command,
-)
 from .parser import create_parser
 from .utils import format_error, print_error
 
@@ -295,135 +246,199 @@ def _dispatch_command(args) -> int:
         return bom_cmd(sub_argv)
 
     elif args.command == "check":
+        from .commands.validation import run_check_command
+
         return run_check_command(args)
 
     elif args.command == "creepage":
+        from .commands.creepage import run_creepage_command
+
         return run_creepage_command(args)
 
     elif args.command == "creepage-export-rules":
+        from .commands.creepage_export_rules import run_creepage_export_rules_command
+
         return run_creepage_export_rules_command(args)
 
     elif args.command == "sch":
+        from .commands.schematic import run_sch_command
+
         return run_sch_command(args)
 
     elif args.command == "pcb":
+        from .commands.pcb import run_pcb_command
+
         return run_pcb_command(args)
 
     elif args.command == "lib":
+        from .commands.library import run_lib_command
+
         return run_lib_command(args)
 
     elif args.command == "footprint":
+        from .commands.footprint import run_footprint_command
+
         return run_footprint_command(args)
 
     elif args.command == "mfr":
+        from .commands.manufacturer import run_mfr_command
+
         return run_mfr_command(args)
 
     elif args.command == "parts":
+        from .commands.parts import run_parts_command
+
         return run_parts_command(args)
 
     elif args.command == "datasheet":
+        from .commands.datasheet import run_datasheet_command
+
         return run_datasheet_command(args)
 
     elif args.command == "decisions":
+        from .commands.decisions import run_decisions_command
+
         return run_decisions_command(args)
 
     elif args.command == "zones":
+        from .commands.routing import run_zones_command
+
         return run_zones_command(args)
 
     elif args.command == "stitch":
         return _run_stitch_command(args)
 
     elif args.command == "route":
+        from .commands.routing import run_route_command
+
         return run_route_command(args)
 
     elif args.command == "route-auto":
+        from .commands.routing import run_route_auto_command
+
         return run_route_auto_command(args)
 
     elif args.command == "reason":
+        from .commands.reasoning import run_reason_command
+
         return run_reason_command(args)
 
     elif args.command == "placement":
+        from .commands.placement import run_placement_command
+
         return run_placement_command(args)
 
     elif args.command == "optimize-placement":
+        from .commands.optimize_placement import run_optimize_placement_command
+
         return run_optimize_placement_command(args)
 
     elif args.command == "optimize-traces":
+        from .commands.routing import run_optimize_command
+
         return run_optimize_command(args)
 
     elif args.command == "validate-footprints":
+        from .commands.validation import run_validate_footprints_command
+
         return run_validate_footprints_command(args)
 
     elif args.command == "fix-footprints":
+        from .commands.validation import run_fix_footprints_command
+
         return run_fix_footprints_command(args)
 
     elif args.command == "fix-vias":
-        from .commands import run_fix_vias_command
+        from .commands.validation import run_fix_vias_command
 
         return run_fix_vias_command(args)
 
     elif args.command == "fix-silkscreen":
-        from .commands import run_fix_silkscreen_command
+        from .commands.validation import run_fix_silkscreen_command
 
         return run_fix_silkscreen_command(args)
 
     elif args.command == "place-silk-refs":
-        from .commands import run_place_silk_refs_command
+        from .commands.validation import run_place_silk_refs_command
 
         return run_place_silk_refs_command(args)
 
     elif args.command == "repair-clearance":
-        from .commands import run_repair_clearance_command
+        from .commands.validation import run_repair_clearance_command
 
         return run_repair_clearance_command(args)
 
     elif args.command == "fix-drc":
-        from .commands import run_fix_drc_command
+        from .commands.validation import run_fix_drc_command
 
         return run_fix_drc_command(args)
 
     elif args.command == "fix-erc":
-        from .commands import run_fix_erc_command
+        from .commands.validation import run_fix_erc_command
 
         return run_fix_erc_command(args)
 
     elif args.command == "config":
+        from .commands.config import run_config_command
+
         return run_config_command(args)
 
     elif args.command == "interactive":
+        from .commands.config import run_interactive_command
+
         return run_interactive_command(args)
 
     elif args.command == "validate":
+        from .commands.validation import run_validate_command
+
         return run_validate_command(args)
 
     elif args.command == "analyze":
+        from .commands.analyze import run_analyze_command
+
         return run_analyze_command(args)
 
     elif args.command == "constraints":
+        from .commands.validation import run_constraints_command
+
         return run_constraints_command(args)
 
     elif args.command == "estimate":
+        from .commands.estimate import run_estimate_command
+
         return run_estimate_command(args)
 
     elif args.command == "audit":
+        from .commands.validation import run_audit_command
+
         return run_audit_command(args)
 
     elif args.command == "suggest":
+        from .commands.suggest import run_suggest_command
+
         return run_suggest_command(args)
 
     elif args.command == "sync":
+        from .commands.sync import run_sync_command
+
         return run_sync_command(args)
 
     elif args.command == "fleet":
+        from .commands.fleet import run_fleet_command
+
         return run_fleet_command(args)
 
     elif args.command == "render":
         return _run_render_command(args)
 
     elif args.command == "board-metrics":
+        from .commands.board_metrics import run_board_metrics_command
+
         return run_board_metrics_command(args)
 
     elif args.command == "readiness":
+        from .commands.readiness import run_readiness_command
+
         return run_readiness_command(args)
 
     elif args.command == "net-status":
@@ -449,48 +464,78 @@ def _dispatch_command(args) -> int:
         return net_status_cmd(sub_argv)
 
     elif args.command == "clean":
+        from .commands.project import run_clean_command
+
         return run_clean_command(args)
 
     elif args.command == "impedance":
+        from .commands.impedance import run_impedance_command
+
         return run_impedance_command(args)
 
     elif args.command == "mcp":
+        from .commands.mcp import run_mcp_command
+
         return run_mcp_command(args)
 
     elif args.command == "ipc":
+        from .commands.ipc import run_ipc_command
+
         return run_ipc_command(args)
 
     elif args.command == "init":
+        from .commands.project import run_init_command
+
         return run_init_command(args)
 
     elif args.command == "panel":
+        from .commands.panel import run_panel_command
+
         return run_panel_command(args)
 
     elif args.command == "pipeline":
+        from .commands.pipeline import run_pipeline_command
+
         return run_pipeline_command(args)
 
     elif args.command == "create-pcb":
+        from .commands.create_pcb import run_create_pcb_command
+
         return run_create_pcb_command(args)
 
     elif args.command == "build":
+        from .commands.build import run_build_command
+
         return run_build_command(args)
 
     elif args.command == "build-native":
+        from .commands.native import run_build_native_command
+
         return run_build_native_command(args)
 
     elif args.command == "doctor":
+        from .commands.doctor import run_doctor_command
+
         return run_doctor_command(args)
 
     elif args.command == "spec":
+        from .commands.spec import run_spec_command
+
         return run_spec_command(args)
 
     elif args.command == "benchmark":
+        from .commands.benchmark import run_benchmark_command
+
         return run_benchmark_command(args)
 
     elif args.command == "bench":
+        from .commands.bench import run_bench_command
+
         return run_bench_command(args)
 
     elif args.command == "run":
+        from .commands.run import run_run_command
+
         return run_run_command(args)
 
     elif args.command == "explain":
