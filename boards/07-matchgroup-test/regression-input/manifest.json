@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 5059,
+  "pcbs": {
+    "matchgroup_test.kicad_pcb": {
+      "archived_sha256": "a4b3e4cd05ba68737d1cee346a0bd166503b99c14cbdab3c29a8258d1aa2cee2",
+      "successor_sha256": "127d3b90c46b61ea4acf85c86092f32c386d12f078d3161360fb7f877053141c"
+    }
+  }
+}
