@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -15,7 +16,53 @@ from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks, parse_net
 from kicad_tools.sexp import parse_string
 
 
-def fill_around_fixed_copper(board: Path, protected_nets: frozenset[str], *, python: Path) -> None:
+def find_kicad_python() -> Path | None:
+    """Find an interpreter with the native APIs this selective fill needs."""
+    candidates = [Path(sys.executable)]
+    if sys.platform == "darwin":
+        candidates.append(
+            Path(
+                "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
+            )
+        )
+    elif sys.platform == "win32":
+        import os
+
+        for location in (os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)")):
+            if location:
+                candidates.extend(
+                    sorted(Path(location).glob("KiCad/*/bin/python.exe"), reverse=True)
+                )
+    candidates.append(Path("/usr/bin/python3"))
+    located = shutil.which("python3")
+    if located:
+        candidates.append(Path(located))
+    seen = set()
+    for candidate in candidates:
+        if not candidate.is_file() or candidate.resolve() in seen:
+            continue
+        seen.add(candidate.resolve())
+        try:
+            result = subprocess.run(
+                [
+                    str(candidate),
+                    "-c",
+                    "import pcbnew, wx; assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            return candidate
+    return None
+
+
+def fill_around_fixed_copper(
+    board: Path, protected_nets: frozenset[str], *, python: Path | None = None
+) -> None:
     """Fill eligible zones, publishing only their polygons into original source bytes.
 
     Temporary higher-priority zones model the exact protected fill polygons.
@@ -44,6 +91,12 @@ def fill_around_fixed_copper(board: Path, protected_nets: frozenset[str], *, pyt
         tagged = re.sub(r"\((?:uuid|tstamp)\s+[^)]+\)", "", zone)
         tagged = tagged.replace("(zone", f'(zone (uuid "{identity}")', 1)
         staged = staged[:start] + tagged + staged[end:]
+    if not expected:
+        return
+    if python is None:
+        python = find_kicad_python()
+    if python is None:
+        raise RuntimeError("KiCad Python with selective zone-fill support is unavailable")
     with tempfile.TemporaryDirectory(prefix="kct-fixed-fill-") as directory:
         stage = Path(directory) / board.name
         output = Path(directory) / "filled.kicad_pcb"

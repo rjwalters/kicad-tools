@@ -1,7 +1,6 @@
 """Real native fills must respect fixed copper, not just restore it afterwards."""
 
 import json
-from pathlib import Path
 
 import pytest
 from shapely.geometry import Polygon
@@ -9,15 +8,13 @@ from shapely.ops import unary_union
 
 from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
 from kicad_tools.schema.pcb import PCB
-from kicad_tools.zones.placement_fill import fill_around_fixed_copper
+from kicad_tools.zones.placement_fill import fill_around_fixed_copper, find_kicad_python
 from tests.test_routing_placement_disposition import board_text
 
-NATIVE_PYTHON = Path(
-    "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3"
-)
+NATIVE_PYTHON = find_kicad_python()
 
 
-@pytest.mark.skipif(not NATIVE_PYTHON.exists(), reason="KiCad Python runtime unavailable")
+@pytest.mark.skipif(NATIVE_PYTHON is None, reason="KiCad Python runtime unavailable")
 @pytest.mark.parametrize("project_clearance", [None, 0.8, "custom", "zone_pair"])
 @pytest.mark.parametrize("multilayer", [False, True])
 @pytest.mark.parametrize("name_only", [False, True])
@@ -103,3 +100,26 @@ def test_native_eligible_fill_clears_and_preserves_fixed_zone(
         assert shape.intersection(fixed_shape).area == 0
         assert shape.distance(fixed_shape) >= (0.8 if project_clearance else 0.3) - 0.001
     assert filled.fill_inflation() == 0
+
+
+def test_protected_only_zones_need_no_native_runtime(tmp_path, monkeypatch):
+    from kicad_tools.zones import placement_fill
+
+    board = tmp_path / "fixed.kicad_pcb"
+    source = '(kicad_pcb (net 1 "BAD") (zone (net 1) (layer "F.Cu")))'
+    board.write_text(source)
+    monkeypatch.setattr(placement_fill, "find_kicad_python", lambda: None)
+    fill_around_fixed_copper(board, frozenset({"BAD"}))
+    assert board.read_text() == source
+
+
+def test_unavailable_native_runtime_preserves_partial_board(tmp_path, monkeypatch):
+    from kicad_tools.zones import placement_fill
+
+    board = tmp_path / "partial.kicad_pcb"
+    source = board_text()[:-1] + '(zone (net 2) (layer "F.Cu")))'
+    board.write_text(source)
+    monkeypatch.setattr(placement_fill, "find_kicad_python", lambda: None)
+    with pytest.raises(RuntimeError, match="selective zone-fill support is unavailable"):
+        fill_around_fixed_copper(board, frozenset({"BAD"}))
+    assert board.read_text() == source
