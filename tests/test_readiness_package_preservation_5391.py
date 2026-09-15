@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from kicad_tools.cli import readiness_cmd as cmd
 from tests.test_kct_readiness_cmd import FakeEngines, make_board
 
@@ -181,3 +183,120 @@ def test_manual_and_smt_bom_overlap_is_rejected(tmp_path):
     assert any("manual assembly parts also occur" in message for message in report["blockers"])
     for name, data in before.items():
         assert (board / name).read_bytes() == data
+
+
+@pytest.mark.parametrize("atomic_replacement", [False, True])
+def test_edit_to_later_file_survives_publication_conflict(
+    tmp_path, monkeypatch, atomic_replacement
+):
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    for name in ("a", "b"):
+        (old / name).write_text("old " + name)
+        (new / name).write_text("new " + name)
+    real_replace = cmd.os.replace
+    injected = False
+
+    def concurrent_edit(source, destination):
+        nonlocal injected
+        real_replace(source, destination)
+        if not injected:
+            injected = True
+            if atomic_replacement:
+                # Same bytes, different actual file: identity must still detect it.
+                other = tmp_path / "editor-save"
+                other.write_text("old b")
+                real_replace(other, old / "b")
+            else:
+                (old / "b").write_text("human edit")
+
+    monkeypatch.setattr(cmd.os, "replace", concurrent_edit)
+    with pytest.raises(RuntimeError, match="Concurrent edit"):
+        cmd._publish_candidate(new, old, cmd._snapshot_inventory(old))
+    assert (old / "a").read_text() == "old a"
+    assert (old / "b").read_text() == ("old b" if atomic_replacement else "human edit")
+    assert not list(old.glob(".readiness-*"))
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_rollback_preserves_editor_change_to_published_file(tmp_path, monkeypatch, deleted):
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    for name in ("a", "b"):
+        (old / name).write_text("old " + name)
+        (new / name).write_text("new " + name)
+    real_replace = cmd.os.replace
+    calls = 0
+
+    def edit_then_fail(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected second replacement failure")
+        real_replace(source, destination)
+        if calls == 1:
+            if deleted:
+                (old / "a").unlink()
+            else:
+                (old / "a").write_text("human edit")
+
+    monkeypatch.setattr(cmd.os, "replace", edit_then_fail)
+    with pytest.raises(RuntimeError, match="rollback preserved concurrent edits"):
+        cmd._publish_candidate(new, old, cmd._snapshot_inventory(old))
+    if deleted:
+        assert not (old / "a").exists()
+    else:
+        assert (old / "a").read_text() == "human edit"
+    assert (old / "b").read_text() == "old b"
+    assert not list(old.glob(".readiness-*"))
+
+
+def test_publishers_for_same_release_are_serialized(tmp_path, monkeypatch):
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / "a").write_text("old")
+    (new / "a").write_text("new")
+    before = cmd._snapshot_inventory(old)
+    real_replace = cmd.os.replace
+
+    nested = False
+
+    def second_publisher(source, destination):
+        nonlocal nested
+        if nested:
+            real_replace(source, destination)
+            return
+        nested = True
+        with pytest.raises(RuntimeError, match="publisher holds the release lock"):
+            cmd._publish_candidate(new, old, before)
+        assert (old / "a").read_text() == "old"
+        real_replace(source, destination)
+
+    monkeypatch.setattr(cmd.os, "replace", second_publisher)
+    cmd._publish_candidate(new, old, before)
+    assert (old / "a").read_text() == "new"
+    assert not (tmp_path / ".old.readiness-publish.lock").exists()
+
+
+def test_edit_after_inventory_does_not_become_expected_state(tmp_path, monkeypatch):
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / "a").write_text("old")
+    (new / "a").write_text("candidate")
+    before = cmd._snapshot_inventory(old)
+    real_inventory = cmd._snapshot_inventory
+
+    def edit_after_inventory(root):
+        result = real_inventory(root)
+        if root == old:
+            (old / "a").write_text("human edit")
+        return result
+
+    monkeypatch.setattr(cmd, "_snapshot_inventory", edit_after_inventory)
+    with pytest.raises(RuntimeError, match="Concurrent edit while identifying"):
+        cmd._publish_candidate(new, old, before)
+    assert (old / "a").read_text() == "human edit"

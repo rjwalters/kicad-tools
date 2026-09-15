@@ -1820,8 +1820,44 @@ def _snapshot_inventory(root: Path) -> dict[str, str]:
     }
 
 
+def _publication_identity(path: Path) -> tuple[Any, ...] | None:
+    """Identify the actual file, including same-content inode replacements."""
+    try:
+        stat = path.lstat()
+    except FileNotFoundError:
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Publication target is not a regular file: {path}")
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_mode,
+        stat.st_size,
+        stat.st_mtime_ns,
+        _sha256_file(path),
+    )
+
+
 def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str]) -> None:
-    """Publish changed files with rollback, after checking for concurrent edits."""
+    """Serialize cooperating publishers and preserve observed external edits.
+
+    A sibling lock avoids adding files to the release inventory. An abandoned
+    lock fails closed; it must not be removed while another publisher is live.
+    Per-file checks narrow external-editor races, but do not promise atomicity
+    against writers that ignore this lock.
+    """
+    lock = destination.parent / f".{destination.name}.readiness-publish.lock"
+    try:
+        lock.mkdir()
+    except FileExistsError as exc:
+        raise RuntimeError("Another readiness publisher holds the release lock") from exc
+    try:
+        _publish_candidate_locked(candidate, destination, before)
+    finally:
+        lock.rmdir()
+
+
+def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[str, str]) -> None:
     if _snapshot_inventory(destination) != before:
         raise RuntimeError(
             "Release changed during verification; refusing to overwrite concurrent work"
@@ -1830,35 +1866,75 @@ def _publish_candidate(candidate: Path, destination: Path, before: dict[str, str
     changed = sorted(
         name for name in set(before) | set(after) if before.get(name) != after.get(name)
     )
+    expected = {name: _publication_identity(destination / name) for name in changed}
+    for name, identity in expected.items():
+        digest = identity[-1] if identity is not None else None
+        if digest != before.get(name):
+            raise RuntimeError(f"Concurrent edit while identifying publication target: {name}")
     with tempfile.TemporaryDirectory(prefix="kct-release-backup-") as temporary:
         backup = Path(temporary)
-        touched: list[str] = []
+        installed: dict[str, tuple[Any, ...] | None] = {}
         try:
             for name in changed:
                 target = destination / name
-                if target.exists():
+                if _publication_identity(target) != expected[name]:
+                    raise RuntimeError(f"Concurrent edit before publication: {name}")
+                if name in before:
                     copy = backup / name
                     copy.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target, copy)
-                touched.append(name)
                 if name not in after:
+                    if _publication_identity(target) != expected[name]:
+                        raise RuntimeError(f"Concurrent edit before deletion: {name}")
                     target.unlink()
+                    installed[name] = None
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
                 os.close(fd)
+                staged = Path(staged_name)
                 try:
-                    shutil.copy2(candidate / name, staged_name)
-                    os.replace(staged_name, target)
+                    shutil.copy2(candidate / name, staged)
+                    identity = _publication_identity(staged)
+                    if _publication_identity(target) != expected[name]:
+                        raise RuntimeError(f"Concurrent edit before replacement: {name}")
+                    os.replace(staged, target)
+                    # Capture our staged identity, not whatever an editor may
+                    # have written to the destination immediately afterwards.
+                    installed[name] = identity
                 finally:
-                    Path(staged_name).unlink(missing_ok=True)
-        except Exception:
-            for name in reversed(touched):
+                    staged.unlink(missing_ok=True)
+            if _snapshot_inventory(destination) != after:
+                raise RuntimeError("Concurrent edit during publication")
+        except Exception as exc:
+            conflicts = []
+            for name, identity in reversed(installed.items()):
                 target = destination / name
-                if name in before:
-                    shutil.copy2(backup / name, target)
-                else:
-                    target.unlink(missing_ok=True)
+                try:
+                    if _publication_identity(target) != identity:
+                        conflicts.append(name)
+                        continue
+                    if name in before:
+                        fd, staged_name = tempfile.mkstemp(prefix=".readiness-", dir=target.parent)
+                        os.close(fd)
+                        staged = Path(staged_name)
+                        try:
+                            shutil.copy2(backup / name, staged)
+                            if _publication_identity(target) != identity:
+                                conflicts.append(name)
+                                continue
+                            os.replace(staged, target)
+                        finally:
+                            staged.unlink(missing_ok=True)
+                    else:
+                        target.unlink(missing_ok=True)
+                except Exception:
+                    conflicts.append(name)
+            if conflicts:
+                raise RuntimeError(
+                    f"{exc}; rollback preserved concurrent edits or could not restore: "
+                    + ", ".join(conflicts)
+                ) from exc
             raise
 
 
