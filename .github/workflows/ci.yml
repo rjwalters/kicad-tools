@@ -39,12 +39,32 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
     steps:
+      # Issue #5366: a single combined `!(a|b|c|...)` extglob only excludes
+      # one path segment below each alternative (picomatch/extglob
+      # semantics) -- nested paths like `.loom/docs/lease-record.md` fell
+      # through and were misclassified as `code`, incorrectly triggering
+      # the full suite (observed live on PR #5365). dorny/paths-filter's own
+      # README documents the fix: `predicate-quantifier: every` plus one
+      # negated (`!pattern`) list item per exclusion, so EVERY pattern must
+      # independently agree the file isn't excluded. Do not collapse this
+      # back into one combined extglob -- see
+      # scripts/ci/verify_changes_filter.mjs (run in the `lint` job) for the
+      # regression coverage this depends on.
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          predicate-quantifier: every
           filters: |
             code:
-              - '!(docs/**|site/**|.claude/**|.loom/**|.github/ISSUE_TEMPLATE/**|**/*.md|LICENSE|.gitignore|.gitattributes)'
+              - '!docs/**'
+              - '!site/**'
+              - '!.claude/**'
+              - '!.loom/**'
+              - '!.github/ISSUE_TEMPLATE/**'
+              - '!**/*.md'
+              - '!LICENSE'
+              - '!.gitignore'
+              - '!.gitattributes'
 
   lint:
     name: Lint & Format
@@ -86,6 +106,20 @@ jobs:
 
       - name: Check documentation and agent-content contracts
         run: bash scripts/ci/check-content-contracts.sh
+
+      # Issue #5366: gate the `changes` job's filter the same way ruff/mypy
+      # gate lint/typecheck -- ubuntu-latest ships Node, so no setup-node
+      # step is needed. picomatch@2.3.1 / js-yaml@4.1.0 are the exact
+      # versions dorny/paths-filter@v4 (pinned to
+      # ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d) bundles per its own
+      # package-lock.json -- installed ephemerally (--no-save
+      # --no-package-lock; node_modules/ is gitignored) rather than adding a
+      # standing Node dependency surface to the repo.
+      - name: Install changes-filter verification deps
+        run: npm install --no-save --no-package-lock --no-audit --no-fund picomatch@2.3.1 js-yaml@4.1.0
+
+      - name: Verify Detect Changes filter (issue #5366)
+        run: node scripts/ci/verify_changes_filter.mjs
 
   typecheck:
     name: Type Check

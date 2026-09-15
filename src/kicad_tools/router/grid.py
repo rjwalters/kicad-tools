@@ -6404,6 +6404,15 @@ class RoutingGrid:
 
         Thread-safe when thread_safe=True.
 
+        When ``edge_segments`` carries a certified outline-approximation
+        error (``core.board_outline.OutlineSegments.max_error_mm``, non-zero
+        only when a curved Edge.Cuts element such as ``gr_circle`` had to be
+        tessellated into chords), the keepout is widened by that bound so
+        the painted region still contains the true-outline keepout no matter
+        which side of the chords the real boundary falls on.  A plain
+        ``list`` certifies nothing and is treated as exact straight
+        geometry (error 0), preserving the historical behaviour.
+
         Args:
             edge_segments: List of (start, end) tuples defining edge line segments.
                           Each segment is ((x1, y1), (x2, y2)) in world coordinates.
@@ -6416,8 +6425,9 @@ class RoutingGrid:
             if clearance <= 0 or not edge_segments:
                 return 0
 
+            outline_error = float(getattr(edge_segments, "max_error_mm", 0.0) or 0.0)
             blocked_count = 0
-            clearance_cells = int(clearance / self.resolution) + 1
+            clearance_cells = int((clearance + outline_error) / self.resolution) + 1
 
             # Get all routable layer indices
             layer_indices = self.get_routable_indices()
