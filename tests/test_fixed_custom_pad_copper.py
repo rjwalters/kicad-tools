@@ -384,9 +384,9 @@ def test_pinned_board_custom_pad_is_fixed_copper():
         uv run python benchmarks/external/normalize.py --board beagleconnect_freedom
 
     This is the actual loader acceptance gate: retain the full outline and
-    unmodified placement identities. Until #5367/#5372 support the pinned
-    outline, this test fails at that existing guard when the fixture is present.
-    That failure is an unresolved prerequisite, not custom-pad acceptance.
+    unmodified placement identities. Outline prerequisites #5367/#5372 are
+    integrated; the unchanged pinned board now passes this loader check.
+    Full default routing and artifact/report acceptance remain #5348/#4946.
     """
     import hashlib
     import math

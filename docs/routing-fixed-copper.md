@@ -83,10 +83,12 @@ is not custom-pad target routing.
 On the pinned BeagleConnect Freedom input, custom pad U6.9 (B.Cu, GND, rect
 anchor, 270-degree pad rotation, one filled zero-width `gr_poly`) is now
 preserved as its real transformed copper, 0.115 mm^2 of which lies outside the
-nominal `(size 0.2 1)` box in isolated geometry diagnostics. This does not
-establish acceptance through the full pinned loader. The empty pad-number
-identity fix (#5368) is incorporated, but circular and curved/arc Edge.Cuts
-support (#5367/#5372) still blocks the unchanged board before pad loading.
-The pinned acceptance test preserves the complete outline and actual placement
-identities and remains failing at that guard when the fixture is available.
-Full loader acceptance remains unresolved until those prerequisites land.
+nominal `(size 0.2 1)` box. The empty pad-number identity fix (#5368) and
+circular/curved Edge.Cuts support (#5367/#5372) are integrated. The actual pinned
+loader test passes with the complete outline, shared placement disposition,
+and unchanged input SHA256
+`9747958c13a5c625ddd15df7afb3a5a100b6877c134e63c861a2a4c351312d9d`.
+It verifies SH1/GND exclusion and independently transformed U6.9 copper using
+the native backend. This completes the pinned loader prerequisite in #5357;
+default CLI routing and final routed/exported artifact and report acceptance
+remain separate work in #5348 and parent #4946.
