@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from itertools import product
 from typing import TYPE_CHECKING
 
-from kicad_tools._shapely import require_shapely
+from kicad_tools._shapely import has_shapely, require_shapely
 from kicad_tools.core.geometry import (
     point_to_segment_distance as _point_to_segment_distance,
 )
@@ -435,21 +435,30 @@ def _pair_is_geometrically_coupled(pcb: PCB, net_a: int, net_b: int) -> bool:
         if not segs_a or not segs_b:
             continue
         segments = segs_a + segs_b
-        bounds = [
-            (
-                math.nextafter(min(seg.start[0], seg.end[0]) - seg.width / 2, -math.inf),
-                math.nextafter(min(seg.start[1], seg.end[1]) - seg.width / 2, -math.inf),
-                math.nextafter(max(seg.start[0], seg.end[0]) + seg.width / 2, math.inf),
-                math.nextafter(max(seg.start[1], seg.end[1]) + seg.width / 2, math.inf),
-            )
-            for seg in segments
-        ]
+        use_spatial = has_shapely()
+        bounds = (
+            [
+                (
+                    math.nextafter(min(seg.start[0], seg.end[0]) - seg.width / 2, -math.inf),
+                    math.nextafter(min(seg.start[1], seg.end[1]) - seg.width / 2, -math.inf),
+                    math.nextafter(max(seg.start[0], seg.end[0]) + seg.width / 2, math.inf),
+                    math.nextafter(max(seg.start[1], seg.end[1]) + seg.width / 2, math.inf),
+                )
+                for seg in segments
+            ]
+            if use_spatial
+            else []
+        )
         pairs: Iterable[tuple[Segment, Segment]]
-        if any(
-            seg.width < 0
-            or not all(math.isfinite(value) for value in (*seg.start, *seg.end, seg.width))
-            for seg in segments
-        ) or any(not math.isfinite(value) for bound in bounds for value in bound):
+        if (
+            not use_spatial
+            or any(
+                seg.width < 0
+                or not all(math.isfinite(value) for value in (*seg.start, *seg.end, seg.width))
+                for seg in segments
+            )
+            or any(not math.isfinite(value) for bound in bounds for value in bound)
+        ):
             # Keep the existing exact behavior for malformed geometry that
             # cannot be represented by a finite spatial-index envelope.
             pairs = product(segs_a, segs_b)

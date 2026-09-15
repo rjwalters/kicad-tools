@@ -155,9 +155,15 @@ def test_finite_geometry_with_overflowing_bounds_retains_exact_check(monkeypatch
     assert calls == [(segments[0], segments[1])]
 
 
-def test_no_shapely_fallback_retains_coupling(monkeypatch):
-    from kicad_tools.validate import spatial
+@pytest.mark.parametrize("coupled", [False, True])
+def test_no_shapely_unbalanced_fallback_retains_exhaustive_work(coupled, monkeypatch):
+    monkeypatch.setattr(rule, "has_shapely", lambda: False)
 
-    monkeypatch.setattr(spatial, "has_shapely", lambda: False)
-    pcb = board([segment(1, (0, 0), (2, 0)), segment(2, (0, 0.3), (2, 0.3))])
-    assert rule._pair_is_geometrically_coupled(pcb, 1, 2) == exhaustive(pcb)
+    def unexpected_candidates(*_):
+        pytest.fail("Fallback must avoid combined-list pair enumeration")
+
+    monkeypatch.setattr(rule, "candidate_pairs", unexpected_candidates)
+    segments = [segment(1, (i * 10, 0), (i * 10 + 2, 0)) for i in range(100)]
+    segments.append(segment(2, (0, 0.3 if coupled else 100), (2, 0.3 if coupled else 100)))
+    pcb = board(segments)
+    assert rule._pair_is_geometrically_coupled(pcb, 1, 2) == exhaustive(pcb) == coupled
