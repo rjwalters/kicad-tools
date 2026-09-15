@@ -12883,6 +12883,7 @@ class Autorouter:
         net: int,
         present_cost_factor: float,
         per_net_timeout: float | None = None,
+        reverse_search: bool = False,
     ) -> tuple[list[Route], set[int]]:
         """Run a relief PROBE for a zero-overflow hard failure (Issue #3438).
 
@@ -12900,6 +12901,10 @@ class Autorouter:
         caller must either commit them (a conflict-free probe is a
         legitimate route) or roll them back via ``grid.unmark_route``.
 
+        ``reverse_search`` reverses the connection order for two-terminal
+        nets, within the same search budget. Multi-terminal trees retain
+        their existing topology and order.
+
         Returns:
             ``(probe_routes, conflict_nets)`` -- empty list when no
             relief path exists (genuine geometric infeasibility) or when
@@ -12912,7 +12917,10 @@ class Autorouter:
         setter(True)
         try:
             probe_routes = self._route_net_negotiated(
-                net, present_cost_factor, per_net_timeout=per_net_timeout
+                net,
+                present_cost_factor,
+                per_net_timeout=per_net_timeout,
+                **({"reverse_search": True} if reverse_search else {}),
             )
         finally:
             setter(False)
@@ -13407,8 +13415,13 @@ class Autorouter:
                 )
                 _rollback()
                 return False
+            # Spend the final existing probe in the opposite direction.
+            # A bounded A* can exhaust its frontier budget approaching a
+            # tight terminal while escaping that terminal succeeds. This
+            # changes search order, not the number or size of the budgets.
+            direction = {"reverse_search": True} if round_idx == max_rounds - 1 else {}
             probe_routes, victims = self._relief_probe(
-                failed_net, present_factor, per_net_timeout=probe_timeout
+                failed_net, present_factor, per_net_timeout=probe_timeout, **direction
             )
             if not probe_routes:
                 flush_print_fn(
@@ -13429,7 +13442,7 @@ class Autorouter:
                 for route in probe_routes:
                     self.grid.unmark_route(route)
                 normal_routes = self._route_net_negotiated(
-                    failed_net, present_factor, per_net_timeout=per_net_timeout
+                    failed_net, present_factor, per_net_timeout=per_net_timeout, **direction
                 )
                 if normal_routes:
                     committed_routes = normal_routes
@@ -13591,6 +13604,7 @@ class Autorouter:
         net: int,
         present_cost_factor: float,
         per_net_timeout: float | None = None,
+        reverse_search: bool = False,
     ) -> list[Route]:
         """Route a single net in negotiated mode.
 
@@ -13599,6 +13613,8 @@ class Autorouter:
             present_cost_factor: Congestion cost factor
             per_net_timeout: Optional wall-clock timeout in seconds for each
                 A* search within this net (Issue #1605)
+            reverse_search: Reverse a two-terminal connection's search
+                direction, without adding a search or changing its budget.
         """
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals are additive
         # per-net targets on the negotiated per-net chokepoint too.
@@ -13651,6 +13667,10 @@ class Autorouter:
         # Issue #4170: merge in the route-scoped stub-terminal target pads.
         pad_objs = [self._escape_pad_overrides.get(p, self.pads[p]) for p in pads_for_routing]
         pad_objs.extend(stub_targets)
+        # Two terminals describe the same connection in either direction.
+        # Do not reorder a multi-terminal tree or Kelvin branch topology.
+        if reverse_search and len(pad_objs) == 2:
+            pad_objs.reverse()
         if kelvin is not None and kelvin.root_index < len(pads_for_routing):
             # An escape endpoint is not the shunt tap. Sharing its stub
             # would put force-current copper into every sense branch.
