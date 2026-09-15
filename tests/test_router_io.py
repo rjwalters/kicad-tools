@@ -3327,6 +3327,37 @@ class TestExtractEdgeSegments:
         assert (15, 15) in all_points
         assert (0, 15) in all_points
 
+    def test_extract_gr_circle_edge(self):
+        """Issue #5367: gr_circle Edge.Cuts tessellates instead of raising."""
+        pcb_text = """(kicad_pcb
+  (gr_circle (center 50 50) (end 70 50) (layer "Edge.Cuts"))
+)"""
+
+        segments = _extract_edge_segments(pcb_text)
+
+        # A circle tessellates into a closed chain of many short chords,
+        # not the 4-segment rectangle/line approximation used elsewhere.
+        assert len(segments) >= 12
+
+        # All vertices lie on the circle (radius 20 centred at (50, 50)).
+        import math
+
+        for (x1, y1), (x2, y2) in segments:
+            assert math.isclose(math.hypot(x1 - 50, y1 - 50), 20, abs_tol=1e-9)
+            assert math.isclose(math.hypot(x2 - 50, y2 - 50), 20, abs_tol=1e-9)
+
+        # Chain closure: each segment's end is the next segment's start,
+        # and the chain wraps back to its own first point.
+        for (_, end), (start, _) in zip(segments, segments[1:] + segments[:1], strict=True):
+            assert end == start
+
+    def test_extract_gr_circle_zero_radius_rejected(self):
+        pcb_text = """(kicad_pcb
+  (gr_circle (center 50 50) (end 50 50) (layer "Edge.Cuts"))
+)"""
+        with pytest.raises(ValueError, match="zero-radius"):
+            _extract_edge_segments(pcb_text)
+
     def test_extract_gr_line_with_stroke_attributes(self):
         """Test extracting edge from gr_line with KiCad 7/8 stroke attributes.
 

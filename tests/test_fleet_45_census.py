@@ -235,12 +235,14 @@ def _artifact_id(path: Path) -> str:
 
 # The redesign archives this synthetic match-group defect witness explicitly
 # (see its README). Rewriting it to satisfy a release policy would erase the
-# geometry used by regression tests. Pin its bytes instead; no active output
+# geometry used by regression tests. The reviewed #5126 width-only correction
+# preserves centerlines, components, opens and the (841, 12) census; its new
+# hash pins that explicit exception. No active output
 # or future archive path is excluded from the angle census. Issue #5044.
 HISTORICAL_WITNESS = (
     REPO_ROOT / "boards/07-matchgroup-test/regression-fixture/matchgroup_test_routed.kicad_pcb"
 )
-HISTORICAL_WITNESS_SHA256 = "ab3a2c2d4aea466f828e540189ac851ddb8c41505c8185be65924ec5ff92a9a6"
+HISTORICAL_WITNESS_SHA256 = "fb58581eba53bb9f1dfe33a278fb896b2f08b5f4fc2e82211124d8586ba7aaf0"
 
 # Board09's routed development checkpoint (issue #5084): discovered by
 # _committed_routed_artifacts() now that discovery no longer relies solely
