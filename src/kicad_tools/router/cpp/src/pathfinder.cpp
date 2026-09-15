@@ -1622,12 +1622,11 @@ RouteResult Pathfinder::route(
         result.failure_reason = FAILURE_NO_PATH;
     }
     if (via_block_count > 0 && last_blocking_net != 0) {
-        // At least one via expansion was refused by stored-via geometry.
-        // Surface this regardless of why the open set ultimately drained --
-        // a Python caller can then choose to rip up the blocking net.
-        // Note: VIA_VIA_BLOCKED takes precedence over TIMEOUT/ITERATION_LIMIT
-        // because the geometric blocker is the most actionable signal.
-        result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        // Preserve budget exhaustion so callers do not retry an exhausted
+        // search in Python. Retain the blocker as additional diagnostics.
+        if (result.failure_reason == FAILURE_NO_PATH) {
+            result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        }
         result.blocking_via_net = last_blocking_net;
         result.failure_x = last_block_world_x;
         result.failure_y = last_block_world_y;
@@ -2235,9 +2234,11 @@ RouteResult Pathfinder::run_astar_loop() {
         result.failure_reason = FAILURE_NO_PATH;
     }
     if (search_via_block_count_ > 0 && search_last_blocking_net_ != 0) {
-        // VIA_VIA_BLOCKED takes precedence over TIMEOUT/ITERATION_LIMIT
-        // because the geometric blocker is the most actionable signal.
-        result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        // Preserve budget exhaustion so callers do not retry an exhausted
+        // search in Python. Retain the blocker as additional diagnostics.
+        if (result.failure_reason == FAILURE_NO_PATH) {
+            result.failure_reason = FAILURE_VIA_VIA_BLOCKED;
+        }
         result.blocking_via_net = search_last_blocking_net_;
         result.failure_x = search_last_block_world_x_;
         result.failure_y = search_last_block_world_y_;
