@@ -3656,23 +3656,26 @@ class RoutingGrid:
         """Enforce mandatory net minima independently of raster/escape relief."""
         x_min, x_max = sorted((seg.x1, seg.x2))
         y_min, y_max = sorted((seg.y1, seg.y2))
+        # Compute a conservative bound once per segment instead of resolving
+        # a net pair for every remote pad on every A* edge. Read live floors
+        # each time so edits after loading the board remain visible.
+        floor_bound = max(self.rules.net_clearance_floors.values(), default=0.0)
         for pad in self._pads if pads is None else pads:
-            required = self.rules.clearance_for_nets(seg.net, pad.net, 0.0)
-            if required <= 0:
-                continue
             if not pad.through_hole and pad.layer != seg.layer:
                 continue
-            # This square encloses every rotation of the pad (and the
-            # circular-pad radius). Expand by the actual pair's authored
-            # clearance and trace radius before rejecting a distant pad.
-            # No cache: late pad/rule changes remain immediately visible.
-            reach = (pad.width + pad.height + seg.width) / 2 + required
+            # This square encloses every rotation and the circular-pad radius.
+            # The global bound only rejects distant pads; nearby pads still
+            # use their actual pair requirement, without policy widening.
+            reach = (pad.width + pad.height + seg.width) / 2 + floor_bound
             if (
                 pad.x + reach < x_min
                 or pad.x - reach > x_max
                 or pad.y + reach < y_min
                 or pad.y - reach > y_max
             ):
+                continue
+            required = self.rules.clearance_for_nets(seg.net, pad.net, 0.0)
+            if required <= 0:
                 continue
             if pad.shape == "circle":
                 distance = (

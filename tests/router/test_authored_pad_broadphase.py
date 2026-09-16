@@ -44,3 +44,15 @@ def test_broadphase_matches_exact_geometry_near_rotated_pad(rotation, shape):
             )
         expected = distance - seg.width / 2 >= rules.clearance_for_nets(1, 2, 0) - 1e-9
         assert grid.authored_segment_pads_clear(seg, [pad]) == expected
+
+
+def test_bound_tracks_late_floor_changes_without_widening_other_pairs():
+    rules = DesignRules(net_clearance_floors={1: 0.2, 2: 0.2, 99: 8.0})
+    grid = RoutingGrid(10, 10, rules)
+    pad = Pad(5, 5, 1, 1, 2, "foreign")
+    segment = Segment(3, 4, 3, 6, 0.2, Layer.F_CU, 1)
+    assert grid.authored_segment_pads_clear(segment, [pad])
+    rules.net_clearance_floors[2] = 2.0
+    assert not grid.authored_segment_pads_clear(segment, [pad])
+    rules.net_clearance_floors.clear()
+    assert grid.authored_segment_pads_clear(segment, [pad])
