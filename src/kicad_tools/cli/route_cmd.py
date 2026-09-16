@@ -1311,6 +1311,34 @@ def _resolve_route_engine(args: argparse.Namespace) -> str:
     return getattr(args, "route_engine", "grid") or "grid"
 
 
+def _diffpair_optimizer_skip_nets(router: Any) -> set[int]:
+    """Protect detected pair geometry from length-changing optimization.
+
+    Include independently routed pairs, whose length tuning is equally
+    vulnerable to staircase/zigzag removal. If detection fails, preserve all
+    routed nets because their pair membership is unknown.
+    """
+    net_names = getattr(router, "net_names", None)
+    if not net_names:
+        return set()
+    try:
+        partner_by_name = router.get_diff_pair_map()
+    except Exception as exc:
+        # Unknown pair membership cannot license a length-changing pass.
+        # Preserve every routed net, including IDs missing from net_names;
+        # a verified empty partner map below still permits normal optimization.
+        logger.warning("Preserving route geometry: differential-pair detection failed: %s", exc)
+        return set(net_names) | {
+            route.net
+            for source in ("routes", "existing_routes")
+            for route in getattr(router, source, ()) or ()
+        }
+    if not partner_by_name:
+        return set()
+    name_to_id = {name: net_id for net_id, name in net_names.items()}
+    return {name_to_id[name] for name in partner_by_name if name in name_to_id}
+
+
 def _run_consolidation_pass(
     router: Any,
     args: argparse.Namespace,
@@ -7875,7 +7903,11 @@ def route_with_layer_escalation(
             # Issue #3507: grid-transactional optimize -- each mutated
             # route's old copper is unmarked and the new copper marked so
             # the grid never goes stale across the pass.
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -8749,7 +8781,11 @@ def route_with_rule_relaxation(
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -11124,7 +11160,11 @@ def route_with_combined_escalation(
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(final_result.router, optimizer)
+            optimize_routes_grid_synced(
+                final_result.router,
+                optimizer,
+                skip_nets=_diffpair_optimizer_skip_nets(final_result.router),
+            )
 
         _enforce_connectivity_invariant_or_exit(
             final_result.router,
@@ -17143,7 +17183,9 @@ def _run_main_impl(args, parser, argv) -> int:
         with spinner("Optimizing traces...", quiet=quiet):
             # Issue #3507: grid-transactional optimize (see
             # optimize_routes_grid_synced).
-            optimize_routes_grid_synced(router, optimizer)
+            optimize_routes_grid_synced(
+                router, optimizer, skip_nets=_diffpair_optimizer_skip_nets(router)
+            )
 
         _enforce_connectivity_invariant_or_exit(
             router,
