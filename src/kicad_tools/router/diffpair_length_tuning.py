@@ -565,6 +565,31 @@ def _closest_point_on_segment(
 # ---------------------------------------------------------------------------
 
 
+def _segments_within(a: Segment, b: Segment, margin: float) -> bool:
+    """Cheap axis-aligned-bounding-box overlap test with ``margin``.
+
+    Mirrors ``diffpair_routing._segments_within`` (issue #4460): when the two
+    segments' AABBs do not come within ``margin`` of each other, no point of
+    ``a`` can be within ``margin`` of ``b``, so the expensive
+    ``segment_clearance`` distance computation can be skipped entirely.
+    Never rejects a genuinely-close pair (the AABB is a superset of the
+    segment), so this is a pure pre-filter -- it cannot change the result of
+    :func:`_post_insertion_clearance_ok`, only how many segment pairs pay for
+    the full geometric distance calculation.  Duplicated locally (rather than
+    imported from ``diffpair_routing``) to avoid a module-load-time import
+    cycle -- ``diffpair_routing`` already imports from this module.
+    """
+    if min(a.x1, a.x2) - margin > max(b.x1, b.x2):
+        return False
+    if max(a.x1, a.x2) + margin < min(b.x1, b.x2):
+        return False
+    if min(a.y1, a.y2) - margin > max(b.y1, b.y2):
+        return False
+    if max(a.y1, a.y2) + margin < min(b.y1, b.y2):
+        return False
+    return True
+
+
 def _post_insertion_clearance_ok(
     *,
     new_segments: list[Segment],
@@ -592,6 +617,14 @@ def _post_insertion_clearance_ok(
        so that bulging into a neighbor is rejected at least as
        aggressively as bulging into the partner.
 
+    Both checks pre-filter each segment pair with a cheap AABB overlap test
+    (:func:`_segments_within`, mirroring the ``diffpair_routing`` pattern
+    from issue #4460) before paying for the full ``segment_clearance``
+    distance computation -- on a board with many routed nets this loop is
+    otherwise O(new_segments x total_other_segments) full geometric
+    distance calls per insertion attempt, most of which are nowhere near
+    the candidate trombone (issue #5240).
+
     Args:
         new_segments: The trombone segments produced by
             :meth:`SerpentineGenerator.generate_trombone`.
@@ -612,6 +645,14 @@ def _post_insertion_clearance_ok(
         for new_seg in new_segments:
             for pseg in partner.segments:
                 if pseg.layer != new_seg.layer:
+                    continue
+                # Margin must cover both trace half-widths in addition to the
+                # clearance floor -- segment_clearance compares CENTER-line
+                # distance minus both half-widths against the floor, so a
+                # centerline-only margin could wrongly skip a pair the exact
+                # check would have flagged.
+                margin = intra_pair_clearance_mm + new_seg.width / 2 + pseg.width / 2
+                if not _segments_within(new_seg, pseg, margin):
                     continue
                 clearance = segment_clearance(
                     new_seg.x1,
@@ -635,6 +676,9 @@ def _post_insertion_clearance_ok(
         for new_seg in new_segments:
             for oseg in other_route.segments:
                 if oseg.layer != new_seg.layer:
+                    continue
+                margin = intra_pair_clearance_mm + new_seg.width / 2 + oseg.width / 2
+                if not _segments_within(new_seg, oseg, margin):
                     continue
                 clearance = segment_clearance(
                     new_seg.x1,
