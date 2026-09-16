@@ -1414,6 +1414,7 @@ RouteResult Pathfinder::route(
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
                 edge.layer = nlayer; edge.net = net;
+                if (!grid_.authored_trace_geometry_clear(edge)) continue;
                 if (!grid_.trace_stored_vias_clear(edge,
                         std::max(search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
                                  search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
@@ -2036,6 +2037,7 @@ RouteResult Pathfinder::run_astar_loop() {
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
                 edge.layer = nlayer; edge.net = search_net_;
+                if (!grid_.authored_trace_geometry_clear(edge)) continue;
                 if (!grid_.trace_stored_vias_clear(edge,
                         std::max(search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
                                  search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),

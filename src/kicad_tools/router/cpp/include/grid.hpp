@@ -290,6 +290,8 @@ public:
     bool route_cell_has_geometry(int x, int y, int layer) const;
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
                                     int partner_net, float partner_clearance, float via_clearance) const;
+    // Authored floors are hard even without matching raster coverage.
+    bool authored_trace_geometry_clear(const Segment& segment) const;
     // Hard constraint for negotiated traces; foreign trace copper remains soft.
     bool trace_stored_vias_clear(const Segment& segment, float clearance,
                                  int partner_net, float partner_clearance) const;

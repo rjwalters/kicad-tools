@@ -953,6 +953,25 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
     return true;
 }
 
+bool Grid3D::authored_trace_geometry_clear(const Segment& s) const {
+    if (max_net_clearance_floor_ <= 0.0f) return true;
+    const float margin = s.width / 2 + max_net_clearance_floor_;
+    const auto candidates = route_geometry_candidates(
+        std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
+        std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
+    for (size_t i : candidates.first) {
+        const auto& other = stored_segments_[i];
+        if (other.net == s.net || other.layer_idx != s.layer) continue;
+        const float required = net_clearance_floor(s.net, other.net);
+        // Preserve legacy negotiated crossings for pairs without authored rules.
+        if (required <= 0.0f) continue;
+        const float gap = segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2,
+            other.x1, other.y1, other.x2, other.y2) - (s.width + other.width) / 2;
+        if (gap < required - CLEARANCE_EPSILON_MM) return false;
+    }
+    return true;
+}
+
 bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
                                        int partner_net, float partner_clearance, float via_clearance) const {
     const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance()});

@@ -257,7 +257,7 @@ namespace router {
 // v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
 // v38: integrate the stored-via guard with current occupancy and indexed frontier.
 // Trace/via search and commit gates share the physical clearance floor.
-constexpr int ROUTER_CPP_BUILD_VERSION = 48;
+constexpr int ROUTER_CPP_BUILD_VERSION = 49;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
