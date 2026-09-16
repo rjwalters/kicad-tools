@@ -3,7 +3,6 @@
 import json
 import os
 import sys
-import uuid
 from pathlib import Path
 
 
@@ -33,7 +32,8 @@ def extract(board, pcbnew):
             polygons = zone.GetFill(layer)
             for index in range(polygons.OutlineCount()):
                 single = polygons.UnitSet(index)
-                key = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{identity(zone)}:{layer}:{index}"))
+                proxy = pcbnew.Cast_to_ZONE(zone.Duplicate(False))
+                key = identity(proxy)
                 if key in occupied:
                     raise ValueError("Duplicate island identity")
                 occupied.add(key)
@@ -44,7 +44,11 @@ def extract(board, pcbnew):
                     ]
 
                 geometry = pcbnew.SHAPE_POLY_SET(single)
-                geometry.Unfracture()
+                # Native Unfracture restores bridged-ring holes but discards
+                # already-explicit holes. Preserve that valid representation;
+                # mixed/invalid rings will be refused by the parent geometry check.
+                if geometry.HoleCount(0) == 0:
+                    geometry.Unfracture()
                 if geometry.OutlineCount() != 1:
                     raise ValueError("Native island decomposition changed component count")
                 islands[key] = {
@@ -53,13 +57,11 @@ def extract(board, pcbnew):
                     "outer": points(geometry.COutline(0)),
                     "holes": [points(geometry.CHole(0, h)) for h in range(geometry.HoleCount(0))],
                 }
-                proxy = pcbnew.ZONE(zone)
                 layers = pcbnew.LSET()
                 layers.AddLayer(layer)
                 proxy.SetLayerSetAndRemoveUnusedFills(layers)
                 proxy.SetFilledPolysList(layer, single)
                 proxy.SetIsFilled(True)
-                proxy.SetUuid(pcbnew.KIID(key))
                 proxies.append(proxy)
     for zone in originals:
         board.Remove(zone)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -114,8 +115,13 @@ def prove_components(
     results = []
     for board in (baseline, candidate):
         output = board.with_suffix(".components.json")
+        command = [str(python), str(worker), str(board.resolve()), str(output.resolve())]
+        if sys.platform == "darwin":
+            # Per-process AppKit option: avoid a crash-history restore modal;
+            # do not change the user's persistent application preferences.
+            command.extend(["-ApplePersistenceIgnoreState", "YES"])
         completed = subprocess.run(
-            [str(python), str(worker), str(board.resolve()), str(output.resolve())],
+            command,
             capture_output=True,
             text=True,
             timeout=180,
