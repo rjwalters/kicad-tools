@@ -212,7 +212,9 @@ def relocate_in_pad_vias_with_refill(
     published. Every pre-publication failure leaves the source files untouched.
     Physical pad partitions are compared between independently refilled baseline
     and candidate, without consulting net labels. Native report identities and
-    their multiplicities must not regress, including unconnected items.
+    their multiplicities must not regress. Alternate unconnected-item witnesses
+    additionally require unchanged complete native copper components (including
+    individual zone islands), never merely unchanged counts or pad partitions.
     """
     # Project context belongs to the supplied path, including a symlink's
     # adjacent sidecars. Publish through the link without replacing the link.
@@ -250,7 +252,27 @@ def relocate_in_pad_vias_with_refill(
         candidate_report = _native_refill(candidate_path, executable)
         new = _violation_identities(candidate_report) - _violation_identities(baseline_report)
         if new:
-            raise RuntimeError(f"Relocation introduced native violation identities: {dict(new)}")
+            if any(kind != "unconnected_items" for kind, _ in new) or len(
+                candidate_report["unconnected_items"]
+            ) > len(baseline_report["unconnected_items"]):
+                raise RuntimeError(
+                    f"Relocation introduced native violation identities: {dict(new)}"
+                )
+            # Native ratsnest endpoints can change while complete physical
+            # components remain identical. Counts or pad partitions alone do
+            # not prove this: retain padless copper and individual zone islands.
+            from kicad_tools.cli.relocation_components import prove_components
+
+            try:
+                prove_components(
+                    baseline_path,
+                    candidate_path,
+                    executable,
+                    {move.uuid for move in result.moved},
+                    (baseline_report, candidate_report),
+                )
+            except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+                raise RuntimeError("Cannot prove equivalent native copper components") from exc
         # Project floors come from the supplied sidecars, even if native tools
         # happen to rewrite their staged copies while loading the project.
         for path, data in snapshots.items():

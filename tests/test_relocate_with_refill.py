@@ -299,3 +299,58 @@ def test_native_refill_requests_all_track_errors(tmp_path, monkeypatch):
 
     monkeypatch.setattr(repair.subprocess, "run", native)
     assert repair._native_refill(board, Path("fake")) == _empty()
+
+
+@pytest.mark.parametrize("proof_passes", [False, True])
+def test_alternate_airwire_requires_complete_component_proof(board, monkeypatch, proof_passes):
+    from kicad_tools.cli import relocation_components
+
+    original = _bytes(board)
+    calls = []
+
+    def native(path, executable):
+        return {
+            "violations": [],
+            "unconnected_items": [_violation(path.parent.name, "unconnected_items")],
+        }
+
+    def proof(baseline, candidate, executable, moved, reports):
+        calls.append((baseline.parent.name, candidate.parent.name))
+        assert moved and len(reports) == 2
+        assert _bytes(board) == original
+        if not proof_passes:
+            raise ValueError("component split")
+
+    monkeypatch.setattr(repair, "_native_refill", native)
+    monkeypatch.setattr(relocation_components, "prove_components", proof)
+    if proof_passes:
+        repair.relocate_in_pad_vias_with_refill(board, _rules(), kicad_cli=Path("fake"))
+        assert board.read_bytes() != original[".kicad_pcb"]
+    else:
+        with pytest.raises(RuntimeError, match="equivalent native copper"):
+            repair.relocate_in_pad_vias_with_refill(board, _rules(), kicad_cli=Path("fake"))
+        assert _bytes(board) == original
+    assert calls == [("baseline", "candidate")]
+
+
+def test_increased_airwire_count_never_uses_alternate_witness_proof(board, monkeypatch):
+    from kicad_tools.cli import relocation_components
+
+    original = _bytes(board)
+
+    def native(path, executable):
+        return {
+            "violations": [],
+            "unconnected_items": []
+            if path.parent.name == "baseline"
+            else [_violation("new", "unconnected_items")],
+        }
+
+    def forbidden(*args):
+        pytest.fail("Increased disconnections must not enter alternate-witness proof")
+
+    monkeypatch.setattr(repair, "_native_refill", native)
+    monkeypatch.setattr(relocation_components, "prove_components", forbidden)
+    with pytest.raises(RuntimeError, match="native violation identities"):
+        repair.relocate_in_pad_vias_with_refill(board, _rules(), kicad_cli=Path("fake"))
+    assert _bytes(board) == original
