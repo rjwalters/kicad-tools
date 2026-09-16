@@ -169,6 +169,10 @@ jobs:
       # -n auto reads the container's 8-core cpuset on the runner; keep the
       # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
       PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      # Explicit diagnostic opt-in only; PR body is evaluated, never passed
+      # into shell or retained. Pushes/absent markers leave the wrapper inert.
+      KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
+      KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
     timeout-minutes: 45
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
@@ -239,15 +243,18 @@ jobs:
         run: uv run kct build-native
 
       - name: Run Board05 manufacturing regression
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
         # The redesigned board has over 8,000 segments. Run its single full
         # DRC report without competing xdist workers, retaining the test's
         # 120-second subprocess cap and every manufacturing assertion.
-        run: uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow"
+        run: python3 scripts/ci/run_observed.py board05 -- uv run pytest tests/test_board_05_drc_allowlist.py -o addopts= --benchmark-disable --timeout=60 -m "not slow"
 
       - name: Run native mask-to-copper gate
         env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
           KCT_MASK_NATIVE_PYTHON: '["/usr/bin/python3"]'
-        run: uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts "$RUNNER_TEMP/mask-copper-native"
+        run: python3 scripts/ci/run_observed.py mask-copper -- uv run --frozen python scripts/ci/check_mask_copper_native.py --artifacts "$RUNNER_TEMP/mask-copper-native"
 
       - name: Retain native mask diagnostics
         if: ${{ failure() }}
@@ -259,12 +266,14 @@ jobs:
           retention-days: 7
 
       - name: Run native physical-stitch acceptance
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
         # Issue #5417: four concurrent KiCad refills exhausted the Test
         # container's 12 GiB cgroup. Keep every physical assertion and the
         # existing timeout, but run this module without competing workers.
         run: |
           mkdir -p "$RUNNER_TEMP/stitch-physical-native"
-          uv run pytest tests/test_stitch_physical_completion.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+          python3 scripts/ci/run_observed.py stitch -- uv run pytest tests/test_stitch_physical_completion.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
             --basetemp "$RUNNER_TEMP/stitch-physical-native/pytest" \
             --junitxml "$RUNNER_TEMP/stitch-physical-native/junit.xml" \
             2>&1 | tee "$RUNNER_TEMP/stitch-physical-native/pytest.log"
@@ -279,12 +288,14 @@ jobs:
           retention-days: 7
 
       - name: Run native zone acceptance
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
         # Issue #5452: native zone refills were OOM-killed in the 12 GiB
         # Test cgroup while competing with other pytest workers. Retain
         # every test and timeout, but run these modules without that pool.
         run: |
           mkdir -p "$RUNNER_TEMP/zone-native"
-          uv run pytest tests/test_zones_cmd.py tests/test_zones_hv_keepout.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+          python3 scripts/ci/run_observed.py zones -- uv run pytest tests/test_zones_cmd.py tests/test_zones_hv_keepout.py -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
             --basetemp "$RUNNER_TEMP/zone-native/pytest" \
             --junitxml "$RUNNER_TEMP/zone-native/junit.xml" \
             2>&1 | tee "$RUNNER_TEMP/zone-native/pytest.log"
@@ -309,13 +320,23 @@ jobs:
         # Match the temporary Board 07 job suspension (#5097, #5160).
         # Its tests remain runnable locally; the same variable restores them.
         env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
         run: |
           test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py --ignore=tests/test_zones_cmd.py --ignore=tests/test_zones_hv_keepout.py)
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi
-          uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" "${test_args[@]}"
+          python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" "${test_args[@]}"
+
+      - name: Retain native workload observations
+        if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-workload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-observer/
+          if-no-files-found: warn
+          retention-days: 7
 
   cpp-build-check:
     # Issue #2501: catch source/.so drift by rebuilding the C++ extension
