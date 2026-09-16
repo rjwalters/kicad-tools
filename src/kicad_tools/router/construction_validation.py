@@ -189,7 +189,7 @@ def constructed_pair_geometry_issue(
         key = (layer, y, x)
         if key in grid._reserved_for_nets and key not in grid._soft_reservations:
             return False
-        if not (cell.blocked or cell.pad_blocked) or key in pad_cells:
+        if not (cell.blocked or cell.pad_blocked or cell.is_obstacle) or key in pad_cells:
             return True
         sources = route_cells.get(key)
         return bool(sources and sources <= available)

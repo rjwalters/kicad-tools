@@ -5204,7 +5204,7 @@ class DiffPairRouter:
                     # geometry exception cannot waive a hard access contract.
                     if key in grid._reserved_for_nets and key not in grid._soft_reservations:
                         return False
-                    if (cell.blocked or cell.pad_blocked) and key not in proven:
+                    if (cell.blocked or cell.pad_blocked or cell.is_obstacle) and key not in proven:
                         sources = routed.get(key)
                         if not sources or not sources <= available:
                             return False

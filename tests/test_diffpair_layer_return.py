@@ -673,3 +673,40 @@ def test_unknown_cell_writes_revoke_recorded_geometry(field, value, source):
     assert router._via_has_only_geometry_blockers(finder, gx, gy)
     setattr(grid.cell_at(layer, y, x), field, value)
     assert not router._via_has_only_geometry_blockers(finder, gx, gy)
+
+
+@pytest.mark.parametrize("field", ["pad_blocked", "is_obstacle"])
+@pytest.mark.parametrize("source", ["pad", "route"])
+def test_unknown_metadata_before_geometry_never_acquires_provenance(field, source):
+    router, finder, *_ = _case()
+    grid = router.autorouter.grid
+    layer = 0 if source == "pad" else 3
+    x, y = grid.world_to_grid(3.5 if source == "pad" else 3.8, 2.7)
+    cell = grid.cell_at(layer, y, x)
+    assert not cell.blocked
+    setattr(cell, field, True)
+    if source == "pad":
+        for px in (3.15, 4.45):
+            for py in (2.35, 3.65):
+                grid.add_pad(
+                    Pad(
+                        x=px,
+                        y=py,
+                        width=0.45,
+                        height=0.45,
+                        net=3,
+                        net_name="foreign",
+                        layer=Layer.F_CU,
+                    )
+                )
+    else:
+        route = Route(
+            net=4,
+            net_name="other",
+            segments=[Segment(x1=3, y1=2.3, x2=4.5, y2=2.3, width=0.2, layer=Layer.B_CU, net=4)],
+        )
+        grid.mark_route(route)
+    assert getattr(cell, field)
+    assert (layer, y, x) not in grid._pad_geometry_cells
+    assert (layer, y, x) not in grid._route_geometry_cells
+    assert not router._via_has_only_geometry_blockers(finder, *grid.world_to_grid(3.8, 3))

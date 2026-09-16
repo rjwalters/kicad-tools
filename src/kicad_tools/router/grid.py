@@ -648,7 +648,7 @@ class _CellView:
         active_route = getattr(self._grid, "_active_geometry_route", None)
         previous_routes = route_geometry.get(key) if route_geometry is not None else None
         known_geometry = (
-            not self.blocked
+            not (self.blocked or self.pad_blocked or self.is_obstacle)
             or key in getattr(self._grid, "_pad_geometry_cells", ())
             or previous_routes is not None
         )
@@ -2099,7 +2099,10 @@ class RoutingGrid:
                         cell = self.cell_at(layer_idx, gy, gx)
                         key = (layer_idx, gy, gx)
                         halo_only = plane_pad and (not cell.blocked or key in self._pad_halo_cells)
-                        geometry_only = not cell.blocked or key in self._pad_geometry_cells
+                        geometry_only = (
+                            not (cell.blocked or cell.pad_blocked or cell.is_obstacle)
+                            or key in self._pad_geometry_cells
+                        )
                         cell.blocked = True
                         if halo_only:
                             self._pad_halo_cells.add(key)
