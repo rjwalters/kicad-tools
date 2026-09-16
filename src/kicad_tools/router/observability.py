@@ -84,7 +84,8 @@ def validate_net_connectivity(
 
     For every net that has routes **and** pad information, this builds a
     union-find over segment endpoints, then checks how many pads belong to the
-    same connected component.
+    same connected component. Nets with physical land IDs instead require
+    layer-aware copper contact, including pad overlap without routed segments.
 
     Args:
         routes: All routed ``Route`` objects.
@@ -124,6 +125,28 @@ def validate_net_connectivity(
             continue
 
         net_routes = routes_by_net.get(net_id, [])
+        if any(pad.terminal_id for pad in pads):
+            # Duplicate authored numbers represent independent physical lands.
+            # XY-only endpoint proximity can hide a missing opposite-layer or
+            # nearby land, so require real layer-aware copper contact here.
+            from .terminal_connectivity import physical_pad_components
+
+            components = physical_pad_components(pads, net_routes)
+            counts: dict[int, int] = {}
+            for component in components:
+                counts[component] = counts.get(component, 0) + 1
+            largest = max(counts, key=counts.__getitem__)
+            result[net_id] = {
+                "total_pads": len(pads),
+                "connected_pads": counts[largest],
+                "connected": counts[largest] == len(pads),
+                "stranded_pads": [
+                    _pad_identity(pad)
+                    for pad, component in zip(pads, components, strict=True)
+                    if component != largest
+                ],
+            }
+            continue
         if not net_routes:
             # No routes at all for this net — every pad is stranded
             result[net_id] = {

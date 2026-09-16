@@ -350,6 +350,7 @@ def escape_endpoint_pad(
         layer=escape.escape_layer,
         ref=pad.ref,
         component_id=pad.component_id,
+        terminal_id=pad.terminal_id,
         pin=pad.pin,
         through_hole=pad.through_hole if unchanged and extent is None else False,
         drill=pad.drill if unchanged and extent is None else 0.0,

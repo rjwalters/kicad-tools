@@ -533,3 +533,64 @@ def test_escape_terminal_preserves_physical_identity(reference, shifted):
         assert virtual.width == pytest.approx(stub.width / math.sqrt(2))
     else:
         assert (virtual.width, virtual.height) == (physical.width, physical.height)
+
+
+@pytest.mark.parametrize("endpoint", ["shifted", "unchanged", "via"])
+def test_escape_endpoints_preserve_distinct_same_number_physical_lands(endpoint):
+    """Escape overrides must resolve both authored same-number lands independently."""
+    router = Autorouter(width=30, height=30, force_python=True)
+    router.add_component(
+        "J1",
+        [
+            {
+                "number": "SH",
+                "x": x,
+                "y": 10,
+                "width": 1,
+                "height": 2,
+                "net": NET,
+                "net_name": NET_NAME,
+                "layer": Layer.F_CU,
+            }
+            for x in (10, 20)
+        ],
+        component_id="physical-j1",
+    )
+    physical = list(router.pads.values())
+    assert len(physical) == 2
+    assert len({pad.key for pad in physical}) == 2
+    terminals = {}
+    for pad in physical:
+        point = (pad.x, pad.y + 2) if endpoint == "shifted" else (pad.x, pad.y)
+        segments = (
+            [Segment(pad.x, pad.y, *point, 0.2, Layer.F_CU, NET, NET_NAME)]
+            if endpoint == "shifted"
+            else []
+        )
+        barrel = (
+            Via(pad.x, pad.y, 0.2, 0.6, (Layer.F_CU, Layer.B_CU), NET)
+            if endpoint == "via"
+            else None
+        )
+        escape = EscapeRoute(
+            pad=pad,
+            direction=EscapeDirection.NORTH,
+            escape_point=point,
+            escape_layer=Layer.B_CU if endpoint == "via" else Layer.F_CU,
+            segments=segments,
+            via=barrel,
+        )
+        terminal = router._build_escape_endpoint_pad(pad, escape)
+        assert terminal.key == pad.key
+        assert terminal.terminal_id == pad.terminal_id
+        assert (terminal.ref, terminal.pin, terminal.component_id) == ("J1", "SH", "physical-j1")
+        assert terminal.escape_terminal == (endpoint != "unchanged")
+        expected = (
+            (pad.width, pad.height)
+            if endpoint == "unchanged"
+            else ((0.6 if endpoint == "via" else 0.2) / math.sqrt(2),) * 2
+        )
+        assert (terminal.width, terminal.height) == pytest.approx(expected)
+        terminals[terminal.key] = terminal
+    assert terminals.keys() == router.pads.keys()
+    assert len(terminals) == 2

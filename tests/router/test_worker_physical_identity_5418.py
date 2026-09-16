@@ -60,8 +60,10 @@ def test_worker_keeps_physical_array_and_distinct_component_topology(monkeypatch
         seen.append(worker)
         assert len(worker.all_pads) == len(worker.grid._pads) == 3
         assert [asdict(p) for p in worker.all_pads] == [asdict(p) for p in parent.all_pads]
-        assert set(worker.pads) == {("physical:first", pin), ("physical:second", pin)}
-        assert worker.nets == {1: [("physical:first", pin)], 2: [("physical:second", pin)]}
+        assert set(worker.pads) == set(parent.pads)
+        assert len(worker.pads) == 3
+        assert worker.nets == parent.nets
+        assert len(worker.nets[1]) == 2
         for net, keys in worker.nets.items():
             assert all(worker.pads[key].net == net for key in keys)
         # Each same-pin physical shape remains a foreign-copper obstacle.

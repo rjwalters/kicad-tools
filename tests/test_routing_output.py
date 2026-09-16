@@ -806,6 +806,7 @@ class TestPartialRouteHeadline:
         class _Pad:
             x: float
             y: float
+            terminal_id: str = ""
 
         # Net 1: 2 pads at (0,0) and (10,0).  A route segment at
         # (0,0)-(2,0) covers only pad 1 — pad 2 is far away, so the
@@ -873,6 +874,7 @@ class TestPartialRouteHeadline:
         class _Pad:
             x: float
             y: float
+            terminal_id: str = ""
 
         def _seg(x1, y1, x2, y2, net):
             seg = MagicMock()
