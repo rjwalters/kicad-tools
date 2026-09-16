@@ -77,3 +77,25 @@ def test_threshold_is_strict():
     grid, pad = grid_and_pad()
     grid.add_pad(pad, pin_pitch=grid.rules.fine_pitch_threshold)
     assert not grid._pad_halo_cells
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("soft", [False, True])
+def test_reserved_route_overlap_revokes_exported_provenance(kind, soft):
+    from kicad_tools.router.primitives import Segment, Via
+
+    grid, pad = grid_and_pad()
+    grid.add_pad(pad, pin_pitch=1.27)
+    x, y = grid.world_to_grid(5.4, 5)
+    key = (0, y, x)
+    assert key in grid._pad_halo_cells
+    grid.reserve_corridor_cells(0, {(x, y)}, {1}, soft=soft)
+    before = int(grid._net[key])
+    if kind == "segment":
+        grid._mark_segment(Segment(5.4, 5, 5.4, 5, 0.2, Layer.F_CU, 3))
+    else:
+        grid._mark_via(Via(5.4, 5, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 3))
+    assert key not in grid._pad_halo_cells
+    assert grid._blocked[key]
+    assert int(grid._net[key]) == before
+    assert grid._reserved_for_nets[key] == frozenset({1})

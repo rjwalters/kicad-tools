@@ -4722,6 +4722,10 @@ class RoutingGrid:
                 for dx in range(-clearance_cells, clearance_cells + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        # Even a skipped occupancy write overlaps physical
+                        # route copper. Do not export stale pad-only relief
+                        # on a later native bulk copy or incremental sync.
+                        self._pad_halo_cells.discard((layer_idx, ny, nx))
                         # Issue #4079: skip cells HARD-reserved for a net set
                         # that excludes seg.net (lateral-trace keep-out,
                         # mirrors _mark_via + C++ ``is_reserved_excluding``).
@@ -4833,6 +4837,10 @@ class RoutingGrid:
                 for dx in range(-radius, radius + 1):
                     nx, ny = gx + dx, gy + dy
                     if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                        # Even a skipped occupancy write overlaps physical
+                        # route copper. Do not export stale pad-only relief
+                        # on a later native bulk copy or incremental sync.
+                        self._pad_halo_cells.discard((layer_idx, ny, nx))
                         # Issue #2677: Skip cells HARD-reserved for a different
                         # net (or net set that excludes via.net).  Issue #4079:
                         # a SOFT reservation (attractor-only) does NOT fence

@@ -145,3 +145,63 @@ def test_native_route_marks_revoke_padding_in_both_trace_kernels(
         grid.unmark_via(22, 20, route_net, 0)
     assert grid.at(22, 20, 0).blocked
     assert not grid.at(22, 20, 0).pad_halo_only
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("radius", [0, 3])
+@pytest.mark.parametrize("soft", [False, True])
+def test_reserved_route_overlap_cannot_retain_padding_relief(kind, radius, soft):
+    grid = router_cpp.Grid3D(40, 40, 2, 0.1)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    rules.trace_width = 0.2
+    rules.trace_clearance = 0.2
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    # A hard reservation permits its owner (query net1); a foreign soft
+    # reservation permits lateral queries too. Route net3 owns neither.
+    owner = 9 if soft else 1
+    grid.reserve_cell(22, 20, 0, [owner], soft)
+    assert not finder.is_trace_blocked(20, 20, 0, 1, False, radius)
+    before = grid.at(22, 20, 0)
+    original = (before.net, before.original_net, before.reserved_count, before.reserved_soft)
+    if kind == "segment":
+        grid.mark_segment(22, 20, 22, 20, 0, 3, 0)
+        grid.add_stored_segment(2.2, 2.0, 2.2, 2.0, 0.5, 0, 3)
+    else:
+        grid.mark_via(22, 20, 3, 0)
+        grid.add_stored_via(2.2, 2.0, 0.3, 0.6, 3)
+    cell = grid.at(22, 20, 0)
+    assert (cell.net, cell.original_net, cell.reserved_count, cell.reserved_soft) == original
+    assert cell.blocked and cell.static_blocked
+    assert cell.usage_count == 0
+    assert not cell.pad_halo_only
+    assert finder.is_trace_blocked(20, 20, 0, 1, False, radius)
+    assert finder.is_trace_blocked(20, 20, 0, 1, True, radius)
+    # Replay of the static pad cannot resurrect relief after a skipped mark.
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    assert not grid.at(22, 20, 0).pad_halo_only
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("soft", [False, True])
+def test_bulk_reconstruction_does_not_restore_reserved_route_halo(kind, soft):
+    from kicad_tools.router.primitives import Segment, Via
+
+    rules = DesignRules(grid_resolution=0.1)
+    grid = RoutingGrid(width=10, height=10, rules=rules, layer_stack=LayerStack.two_layer())
+    grid.add_pad(
+        Pad(x=5, y=5, width=0.45, height=0.45, net=0, net_name="GND", layer=Layer.F_CU),
+        pin_pitch=1.27,
+    )
+    x, y = grid.world_to_grid(5.4, 5)
+    assert (0, y, x) in grid._pad_halo_cells
+    grid.reserve_corridor_cells(0, {(x, y)}, {1}, soft=soft)
+    if kind == "segment":
+        grid._mark_segment(Segment(5.4, 5, 5.4, 5, 0.2, Layer.F_CU, 3))
+    else:
+        grid._mark_via(Via(5.4, 5, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 3))
+    cpp = CppGrid.from_routing_grid(grid)
+    cell = cpp._impl.at(x, y, 0)
+    assert cell.blocked and not cell.pad_halo_only
+    assert cell.reserved_count == 1 and cell.reserved_soft == soft

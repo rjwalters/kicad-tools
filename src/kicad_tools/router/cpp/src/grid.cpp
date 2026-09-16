@@ -162,6 +162,11 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
             for (int dx = -clearance_cells; dx <= clearance_cells; ++dx) {
                 int nx = gx + dx, ny = gy + dy;
                 if (is_valid(nx, ny, layer)) {
+                    auto& cell = at(nx, ny, layer);
+                    // A physical route overlaps this cell even if reservation
+                    // ownership prevents its occupancy write. Owners (or soft
+                    // reservations) may still query it: revoke padding relief.
+                    cell.pad_halo_only = false;
                     // Issue #4079: skip cells reserved for a net set that
                     // EXCLUDES ``net`` (lateral-trace keep-out, mirrors
                     // Python ``_mark_segment`` and the ``mark_via`` skip).
@@ -169,7 +174,6 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                         is_reserved_excluding(nx, ny, layer, net)) {
                         continue;
                     }
-                    auto& cell = at(nx, ny, layer);
                     if (!cell.blocked) {
                         cell.net = net;
                         if (!cell.congestion_counted) {
@@ -177,10 +181,6 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                             cell.congestion_counted = true;
                         }
                     }
-                    // Routed occupancy invalidates padding provenance even
-                    // on an already-blocked halo cell (usage_count can be 0).
-                    // Rip-up deliberately does not resurrect this exemption.
-                    cell.pad_halo_only = false;
                     cell.blocked = true;
                 }
             }
@@ -240,6 +240,10 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
                 int nx = x + dx, ny = y + dy;
                 if (is_valid(nx, ny, layer)) {
                     auto& cell = at(nx, ny, layer);
+                    // Metadata revocation precedes the reservation skip; keep
+                    // the existing occupancy/net/owner semantics unchanged.
+                    // Rip-up does not resurrect the padding exemption.
+                    cell.pad_halo_only = false;
                     // Issue #4071: skip cells reserved for a net set that
                     // excludes ``net`` (matches Python ``_mark_via``).
                     if (check_reservations && cell.reserved_count > 0) {
@@ -259,10 +263,6 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
                         }
                         cell.net = net;
                     }
-                    // Routed occupancy invalidates padding provenance even
-                    // on an already-blocked halo cell (usage_count can be 0).
-                    // Rip-up deliberately does not resurrect this exemption.
-                    cell.pad_halo_only = false;
                     cell.blocked = true;
                 }
             }
