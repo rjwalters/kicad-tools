@@ -118,6 +118,17 @@ COUPLED_FLAGOFF_MAX_ITERATIONS: int = int(os.environ.get("KCT_COUPLED_FLAGOFF_MA
 # so the coupled-length fraction stays >> every continuity threshold.
 NEAR_MISS_RESCUE_CELLS: int = int(os.environ.get("KCT_COUPLED_RESCUE_CELLS", "60"))
 
+# Published construction ledgers from the coupled-construction branch. These
+# bound work after ordinary search inside the same per-pair wall deadline;
+# they do not renew that deadline or relax any physical/quality gate.
+CONSTRUCTION_DEPARTURE_ITERATIONS: int = int(
+    os.environ.get("KCT_CONSTRUCTION_DEPARTURE_ITERS", "256")
+)
+CONSTRUCTION_BODY_ATTEMPTS: int = int(os.environ.get("KCT_CONSTRUCTION_BODY_ATTEMPTS", "400"))
+CONSTRUCTION_CORRIDOR_ITERATIONS: int = int(
+    os.environ.get("KCT_CONSTRUCTION_CORRIDOR_ITERS", "600000")
+)
+
 # Issue #3508: maximum length (mm) the shadow constructor may trim from
 # EACH end of the offset polyline before tail-connecting to the pads.
 # Endpoint zones are always contested by neighbour-pad clearance halos
@@ -4264,6 +4275,26 @@ class DiffPairRouter:
         """Analyze net names for differential pairs."""
         return analyze_differential_pairs(self.autorouter.net_names)
 
+    def _apply_authored_skew_limit(self, pair: DifferentialPair) -> None:
+        """Keep routing and length correction within both nets' authored limits."""
+        if pair.rules is None:
+            return
+        classes, membership, _ = self._resolve_detection_inputs()
+        if not classes:
+            return
+        limit = pair.rules.max_length_delta
+        for signal in (pair.positive, pair.negative):
+            net_class = classes.get(signal.net_name)
+            if net_class is None and membership:
+                net_class = classes.get(membership.get(signal.net_name))
+            authored = getattr(net_class, "skew_tolerance_mm", None)
+            if authored is not None:
+                limit = min(limit, authored)
+        if limit != pair.rules.max_length_delta:
+            # Pair-type/config rules can be shared by multiple pairs. Tighten
+            # this pair without changing unrelated pairs or caller defaults.
+            pair.rules = replace(pair.rules, max_length_delta=limit)
+
     def _resolve_engagement(self, pair: DifferentialPair) -> tuple[bool, str]:
         """Resolve whether ``pair`` should engage CoupledPathfinder.
 
@@ -4666,6 +4697,25 @@ class DiffPairRouter:
             clearance_cells += 1
             grid._mark_segment(seg, clearance_cells=clearance_cells)
         self.autorouter._mark_route_on_cpp_grid(route)
+
+    def _through_via_board_thickness(self) -> float | None:
+        """Board thickness when ordinary through vias are the only via kind.
+
+        Issue #5333: geometric construction measures physical route length
+        including the drilled barrel, which is only well defined for the
+        ordinary through-via policy the length tuner and the match-group
+        checker already assume.  Return ``None`` when the manufacturer
+        publishes no thickness, or when blind/buried vias are enabled, so the
+        caller declines to construct rather than measuring the wrong span.
+        """
+        manufacturer = self.autorouter._build_manufacturer_design_rules()
+        thickness = getattr(manufacturer, "board_thickness_mm", None)
+        via_rules = getattr(self.autorouter, "via_rules", None)
+        if getattr(via_rules, "allow_blind", False) or getattr(via_rules, "allow_buried", False):
+            return None
+        if thickness is None or not math.isfinite(thickness) or thickness <= 0:
+            return None
+        return float(thickness)
 
     def _virtual_pad_at(self, template: Pad, wx: float, wy: float, layer_idx: int) -> Pad:
         """Virtual pad at an arbitrary board position (issue #3508).
@@ -10109,6 +10159,8 @@ class DiffPairRouter:
         if pair.rules is None:
             return [], None
 
+        self._apply_authored_skew_limit(pair)
+
         if spacing is None:
             spacing = pair.rules.spacing
 
@@ -10384,6 +10436,21 @@ class DiffPairRouter:
             # the open fallback gets the REMAINDER (not a fresh full
             # budget -- the 4000+4000 double-spend on board 06).
             corridor_iterations_used = 0
+            # Issue #5333 (2026-09-15 session): per-stage WALL-CLOCK spend,
+            # diagnostic only -- no budget, deadline or routing decision
+            # reads these.  The prior sessions' TMDS_D1 finding (construction
+            # entered with "almost no window left") was inferred from
+            # secondary signals (``widen_spent``, ``landings``,
+            # ``completion_reasons``); this records the actual seconds each
+            # of the three sequential ``per_pair_timeout`` consumers spent,
+            # so the next full-recipe budget-reallocation session (needs the
+            # pinned Linux worker per #5333's own item 4) has exact
+            # stage-by-stage numbers instead of re-deriving them from
+            # iteration counters. ``None`` means the stage never ran for
+            # this pair.
+            corridor_search_elapsed: float | None = None
+            open_fallback_elapsed: float | None = None
+            construction_entry_window_s: float | None = None
 
             # Issue #3473: bound the probe.  It is only a guide route;
             # give it a small slice of the corridor half-budget (an
@@ -10453,6 +10520,13 @@ class DiffPairRouter:
             # both normal attempts fail) without displacing a working attempt
             # or spending its per-pair budget.
             n_guide: Route | None = None
+            # Issue #5333: layer-agnostic corridor mask around the P guide,
+            # built below only when the corridor-search branch runs.  Kept
+            # in scope (rather than a local of that branch) so the
+            # construction stage further down can hand it to
+            # ``pair_construction``'s corridor-guided fallback (#5333,
+            # MIPI_DAT0/TMDS_D2) without rebuilding it.
+            corridor: frozenset[tuple[int, int]] | None = None
             p_overlap_sites: list[tuple[float, float]] = []
             n_overlap_sites: list[tuple[float, float]] = []
             if self.enable_shadow_construction and guide_route is not None and guide_route.segments:
@@ -10657,6 +10731,7 @@ class DiffPairRouter:
                 corridor_iteration_budget: int | None = None
                 if per_pair_max_iterations is not None and per_pair_max_iterations > 0:
                     corridor_iteration_budget = max(1, per_pair_max_iterations // 2)
+                _corridor_call_t0 = time.monotonic()
                 result = pathfinder.route_coupled(
                     spec.p_start,
                     spec.p_end,
@@ -10666,6 +10741,7 @@ class DiffPairRouter:
                     max_iterations_budget=corridor_iteration_budget,
                     corridor=corridor,
                 )
+                corridor_search_elapsed = time.monotonic() - _corridor_call_t0
                 corridor_iterations_used = pathfinder.last_iterations
                 if result is not None:
                     coupled_phase = "corridor"
@@ -10689,6 +10765,7 @@ class DiffPairRouter:
                     remaining_iterations = max(
                         1, per_pair_max_iterations - corridor_iterations_used
                     )
+                _open_call_t0 = time.monotonic()
                 result = pathfinder.route_coupled(
                     spec.p_start,
                     spec.p_end,
@@ -10697,6 +10774,7 @@ class DiffPairRouter:
                     timeout_seconds=remaining_budget,
                     max_iterations_budget=remaining_iterations,
                 )
+                open_fallback_elapsed = time.monotonic() - _open_call_t0
 
             if (
                 result is None
@@ -10732,6 +10810,77 @@ class DiffPairRouter:
                         )
                         if result is not None:
                             coupled_phase = "partial-recovery"
+
+            if (
+                result is None
+                and not shadow_fail_fast
+                and per_pair_timeout is not None
+                and getattr(pathfinder, "last_coupled_backend", None) == "cpp"
+            ):
+                # Issue #5333: the joint search cannot change layers while the
+                # pair is narrower than the mutual barrel pitch -- a via move
+                # places BOTH barrels at the pair's current separation, and
+                # planar moves pin that separation to the coupled target +-1
+                # outside the endpoint relaxation radii.  Measured on an empty
+                # four-layer board with a single F.Cu barrier that makes a
+                # layer change mandatory: 20,000 iterations, every explored
+                # state on the start layer, ``via_pair_pitch`` dominant, no
+                # route -- unchanged at 10x the budget.  So when the searches
+                # have exited, construct the pair from pad geometry instead:
+                # a natively validated fan-out + paired via escape, a coupled
+                # body, and guarded terminal returns onto mutually clear
+                # barrels.  Every step passes the ordinary native guards and
+                # the assembled pair must still satisfy the authored skew and
+                # coupling gates, so this adds a construction path, not an
+                # exemption.  It runs INSIDE the pair's existing wall-clock
+                # window and spends its own small, explicit ledgers.
+                construction_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                # Issue #5333 (2026-09-15 session): record the WALL-CLOCK
+                # window actually left for construction at the moment it is
+                # entered -- this is the number the prior session's finding
+                # ("construction inherits whatever sliver is left") was
+                # stated qualitatively about; diagnostic only, feeds the
+                # ``[coupled-timing]`` line below, does not affect
+                # ``construction_deadline`` itself.
+                construction_entry_window_s = construction_deadline - time.monotonic()
+                thickness = self._through_via_board_thickness()
+                if thickness is not None and time.monotonic() < construction_deadline:
+                    from .pair_construction import ConstructionBudget, construct_pair_routes
+
+                    budget = ConstructionBudget(
+                        construction_deadline,
+                        CONSTRUCTION_DEPARTURE_ITERATIONS,
+                        CONSTRUCTION_BODY_ATTEMPTS,
+                        corridor_iterations_remaining=(
+                            CONSTRUCTION_CORRIDOR_ITERATIONS if corridor is not None else 0
+                        ),
+                    )
+                    result = construct_pair_routes(
+                        self,
+                        pathfinder,
+                        pair,
+                        (spec.p_start, spec.p_end, spec.n_start, spec.n_end),
+                        budget,
+                        board_thickness_mm=thickness,
+                        num_copper_layers=self.autorouter.grid.num_layers,
+                        corridor=corridor,
+                    )
+                    # Issue #5333: report the STAGE tally, not just the total
+                    # spend.  ``bodies=0`` alone cannot distinguish "no escape
+                    # validated natively" from "no mutually clear landing",
+                    # and an exhausted ledger cannot distinguish "the shape
+                    # lattice ran out" from "every body collided with copper
+                    # committed by an earlier pair".  Those are different
+                    # defects with different fixes, so the per-pair line has to
+                    # name which one fired.
+                    print(
+                        "    [coupled-construction] "
+                        f"success={result is not None} "
+                        f"native_iters={budget.iterations_used} "
+                        f"{budget.stage_summary()}"
+                    )
+                    if result is not None:
+                        coupled_phase = "construction"
 
             # Issue #4635: deliberately NOT census-adjusted.  The deadlines
             # above credit the census's cost back so census-on and census-off
@@ -10769,6 +10918,15 @@ class DiffPairRouter:
             else:
                 best_state_repr = str(best_state)
             dominant = dominant_rejection(pathfinder.last_rejections)
+
+            def _fmt_stage_s(value: float | None) -> str:
+                # Issue #5333: "n/a" means the stage never ran for this pair
+                # (e.g. a pair that qualified via ``shadow`` or ``corridor``
+                # never reaches the open fallback or construction), not zero
+                # cost -- distinguish the two so a reader cannot mistake a
+                # skipped stage for a free one.
+                return "n/a" if value is None else f"{value:.2f}s"
+
             print(
                 f"    [coupled-timing] phase={coupled_phase} "
                 f"backend={backend} "
@@ -10779,7 +10937,10 @@ class DiffPairRouter:
                 f"best_state={best_state_repr} "
                 f"dominant_rejection={dominant} "
                 f"rejections={dict(pathfinder.last_rejections)} "
-                f"success={result is not None}"
+                f"success={result is not None} "
+                f"corridor_search_s={_fmt_stage_s(corridor_search_elapsed)} "
+                f"open_fallback_s={_fmt_stage_s(open_fallback_elapsed)} "
+                f"construction_entry_window_s={_fmt_stage_s(construction_entry_window_s)}"
             )
 
             # Issue #4459: structured per-pair ground-truth report.  Classify
@@ -11335,6 +11496,8 @@ class DiffPairRouter:
         """
         if pair.rules is None:
             return [], None
+
+        self._apply_authored_skew_limit(pair)
 
         if spacing is None:
             spacing = pair.rules.spacing
@@ -12721,6 +12884,46 @@ class DiffPairRouter:
         coupled_phase_deadline: float | None = None
         if effective_aggregate_timeout is not None and effective_aggregate_timeout > 0:
             coupled_phase_deadline = time.monotonic() + float(effective_aggregate_timeout)
+        # Issue #5333: ``--deterministic-budget`` prints "per-net wall-clock
+        # cutoff DISABLED ... routed output is reproducible across machines"
+        # (issue #3538/#3881) -- but that contract was only ever implemented
+        # for the SINGLE-ENDED per-net A*.  This phase's two wall-clock
+        # cutoffs are untouched by the flag, so under it the set of pairs
+        # that qualify as coupled remains a function of machine speed and
+        # load while the banner says otherwise.  Measured on Board07's
+        # committed regression fixture (seed 42, native ABI 31, identical
+        # source and argv, one loaded host): the derived 60 s per-pair wall
+        # qualified 3/7 pairs on one run and 4/7 on the very next, while
+        # ``--diffpair-per-pair-timeout 300`` qualified 6/7.  Only the wall
+        # allowance differed -- those were budget exits, not physical
+        # rejections -- so a "7/7 qualified" measurement taken on a fast idle
+        # host does not transfer to a busy one, and a qualification claim
+        # that does not mention the wall budget it ran under is unfalsifiable.
+        #
+        # This is instrumentation ONLY: no budget, iteration ledger or
+        # routing decision changes here.  Retiring the cutoffs in favour of
+        # the phase's existing deterministic ledgers needs a measured
+        # full-recipe cost comparison first, because the hard total the
+        # recipe grants the whole board is shared with the single-ended
+        # remainder.
+        _wall_governed = (
+            effective_per_pair_timeout is not None and effective_per_pair_timeout > 0
+        ) or coupled_phase_deadline is not None
+        if getattr(diffpair_config, "deterministic_budget", False) and _wall_governed:
+            logger.warning(
+                "DIFFPAIR_NONDETERMINISTIC_BUDGET: --deterministic-budget is "
+                "set, but the coupled diff-pair phase still applies wall-clock "
+                "cutoffs (per-pair %s; aggregate %s). Which pairs qualify as "
+                "coupled therefore depends on machine speed and load -- treat "
+                "any pair-qualification count from this run as valid only for "
+                "these wall budgets on this host (issue #5333).",
+                f"{float(effective_per_pair_timeout):.1f}s"
+                if effective_per_pair_timeout
+                else "none",
+                f"{float(effective_aggregate_timeout):.1f}s"
+                if effective_aggregate_timeout
+                else "none",
+            )
         aggregate_deferred_pairs = 0
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
