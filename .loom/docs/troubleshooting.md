@@ -2190,7 +2190,13 @@ cd <main checkout>                              # NOT .loom/worktrees/issue-N (#
 git merge --ff-only origin/main                 # bring defaults/ current
 ./.loom/scripts/resync-installed.sh --dry-run   # preview what would change (exits 2 on drift)
 ./.loom/scripts/resync-installed.sh             # apply
+./.loom/scripts/land-resync-commit.sh           # commit + land it (never rebases/bypass-pushes, #6646)
 ```
+
+The last step is what actually commits and pushes the refreshed surfaces onto
+the primary clone's default branch — see "Landing a resync commit on the
+primary clone (#6646)" below for exactly what it will and will not do on its
+own.
 
 `--dry-run` makes no changes and exits `2` when drift is detected (so it doubles
 as a check). To pin an intentional per-repo customization so resync never
@@ -2242,3 +2248,148 @@ The same list also declares a file **repo-owned**, so the installer's reinstall
 clean sweep never deletes it — see
 [`repo-owned-files.md`](repo-owned-files.md) for the full ownership rule that
 governs files living inside `.loom/hooks/` and the other managed directories.
+
+### Landing a resync commit on the primary clone (#6646)
+
+**`resync-installed.sh` itself never commits or pushes anything** (see its own
+header) — it only refreshes the installed copies and, when that leaves the
+tree dirty with nothing but resync output, PRINTS a suggested `git add && git
+commit` command. **Actually landing that commit onto the primary clone's
+default branch — including pushing it — is a sweep/agent action, not a config
+toggle or an operator-approval gate**: any sweep or role that finds the
+primary checkout dirty with only resync-managed output may commit and push it
+directly, no human sign-off required. This is deliberate — keeping the
+installed surfaces current is routine maintenance, and gating every one behind
+a human would defeat the point of automating it.
+
+The **landing** step itself always goes through
+`./.loom/scripts/land-resync-commit.sh` (never a hand-rolled `git commit && git
+push`), which is intentionally conservative about how far it will go on its
+own:
+
+- It only ever commits paths inside the known resync-managed surfaces
+  (`.loom/hooks|scripts|roles|docs|bin|runtimes/`, `.claude/commands/loom/`,
+  and the handful of single-file targets `resync-installed.sh` itself
+  resyncs). If the tree is dirty with anything else alongside that output, it
+  refuses to commit **anything** — an unrelated (possibly in-progress
+  operator) change is never swept into a "chore: resync" commit.
+- **It never rebases the primary clone's default branch, and it never
+  force- or bypass-pushes to reconcile with a diverged `origin`.** This is
+  the direct fix for the incident that motivated this script: an operator
+  had just fast-forward-landed a not-yet-pushed local commit in the primary
+  clone when a sweep committed its own resync change on top, rebased local
+  `main` onto `origin/main` (which had gained several merged PRs in the
+  meantime — silently re-creating the operator's commit under a new SHA),
+  and bypass-pushed the result past the branch's required status checks.
+  Nothing was actually lost (the recreated commit had identical content),
+  but the operator's recorded SHA vanished from `git log`, a
+  branch-protection bypass push happened from automation with no
+  announcement, and establishing that this was benign took a reflog read.
+- Concretely: if the primary checkout's default branch is already ahead of
+  `origin` by one or more commits **not authored by the checkout's own
+  configured git identity** (`git config user.email` — presumed to be an
+  operator's own in-flight, not-yet-pushed work), the script commits the
+  resync change locally and **stops** — nothing is pushed, nothing is
+  rebased, nothing is forced. The operator's commit SHA is left exactly as
+  they made it. A human has to push or reconcile by hand before the next
+  resync can land (exit code `3`; the script's own stderr names the commit(s)
+  it stopped for).
+- Otherwise — every commit ahead of `origin` is this checkout's own
+  automation — it first asks the forge whether the default branch is
+  **protected** (GitHub only: an active `pull_request` /
+  `required_status_checks` ruleset rule via
+  `gh api repos/{owner}/{repo}/rules/branches/<default>`, or legacy branch
+  protection). This pre-check exists because "branch protection rejects a
+  plain push" is only true for an identity *without* bypass rights: the
+  #6646 incident was **not** a `--force` push — it was a plain push that
+  GitHub *accepted* from a bypass-capable identity (the operator's own
+  account / the fleet App, admin on the repo) and merely reported on stderr
+  as `remote: Bypassed rule violations for refs/heads/main:`. So on a
+  protected branch the direct push is skipped outright, regardless of
+  whether this identity could bypass. The pre-check fails **closed** on a
+  GitHub API *error*: a non-zero exit from the rules call (rate limit, 5xx,
+  DNS, a token without rulesets read) or an unparseable answer is treated as
+  "protected" and routed to the branch + PR path, because a transient REST
+  failure must never turn into a bypass push from a bypass-capable identity.
+  It fails **open** only when there is no `gh` on PATH or the forge is Gitea
+  (`LOOM_FORGE_TYPE=gitea`), so an offline/non-GitHub host still works —
+  which is why there is a second line of defense: a plain push's stderr is
+  inspected *even on success*, and a `Bypassed rule violations` warning
+  turns the run into a loud failure (exit code `4`, naming the commit and
+  quoting the forge). The commit *is* on origin at that point — this script
+  never force-pushes, so it does not undo it — but the run is reported as
+  failed so a bypass push can never happen silently again; fix the pushing
+  identity / ruleset bypass list (or whatever made the pre-check fail open:
+  no `gh`, a Gitea forge) before the next resync lands.
+- When the branch is unprotected, a plain `git push` is attempted — ordinary
+  git semantics make it fast-forward-only by construction. If it is
+  rejected (`origin` advanced with commits this checkout doesn't have yet),
+  or the pre-check said "protected", it does **not** retry with a rebase or
+  a forced push: it lands the commit via a short-lived side branch + PR —
+  the same path (`create-pr.sh`) other automated commits already use — then
+  resets the primary checkout's default branch back to `origin`'s current
+  tip so it never sits diverged waiting on that PR to merge. The side branch
+  name is the **stable** `chore/resync-installed` (no timestamp): after that
+  reset the next `resync-installed.sh` re-dirties the tree identically, so a
+  host whose plain push is refused every time (a non-bypass identity on a
+  protected branch — the very population the fallback exists for) would
+  otherwise open a fresh PR per sweep. With one name, `create-pr.sh`'s
+  adopt-existing check converges every re-run on the single open PR, and the
+  side branch is pushed with `--force-with-lease` to move that PR's head to
+  the fresh commit (forcing a throwaway side branch is fine; only the
+  default branch is sacred). The PR is opened with `loom:review-requested`
+  so it enters the normal Judge queue rather than waiting for someone to
+  notice it. No local side branch is created or left behind.
+- **Re-running it is idempotent.** If a run commits the resync and then
+  fails before landing it (fetch failure, side-branch push failure — exit
+  `1`), the commit stays on the local default branch. The next run finds a
+  clean tree but does **not** stop at "nothing to land": it still fetches and
+  evaluates `origin/<default>..HEAD`, and if every commit ahead is
+  Loom-authored it lands them (same SHA, no rebase). A clean tree whose only
+  commits ahead are an operator's is left exactly as it is (exit `0`,
+  nothing pushed); a stranded resync commit sitting *behind* an operator
+  commit stops with exit `3` as above.
+- **A note on the identity heuristic's honesty.** "Not authored by this
+  checkout's configured `user.email`" is how the script recognizes operator
+  work. On a host where the operator's own git identity *is* the automation
+  identity (this repo on the operator's workstation, for example), an
+  operator's unpushed commit is indistinguishable from Loom's and will be
+  plain-pushed along with the resync commit. That is a fast-forward of the
+  operator's own commit under its original SHA — never a rewrite — so it
+  cannot reproduce the incident; but do not expect the exit-`3` stop to fire
+  for your own work on such a host.
+
+**How to tell "expected" from "something rewrote my branch".** Since this
+script never rebases, a commit already on the default branch — yours or
+anyone else's — keeps its original SHA forever; a resync landing never
+recreates it. If you ever see the primary clone's default branch move in a
+way you didn't expect (a SHA you just recorded is no longer in `git log`, or
+`git status` reports it's diverged from `origin` after you left the checkout
+untouched), the reflog is the fastest way to establish whether it's benign:
+
+```bash
+git reflog show <default-branch>   # every ref update this local checkout has seen, newest first
+```
+
+The script leaves exactly two signatures on the default branch's reflog, and
+nothing else:
+
+- **Direct push**: a single `commit: chore: resync installed Loom surfaces`
+  entry (a fresh commit; the branch then matches `origin`).
+- **Branch + PR fallback**: `commit: chore: resync installed Loom surfaces`
+  immediately followed by `reset: moving to origin/<default>` — the reset is
+  the script putting the default branch back on `origin`'s tip after pushing
+  the commit to the side branch. The commit it moved away from is on
+  `origin/chore/resync-installed` (with an open PR for it) — `git log
+  origin/chore/resync-installed -1` shows it — so it is not lost.
+
+Anything else is not this script. An entry reading `pull --ff-only` /
+`merge <sha>: Fast-forward` is an ordinary fast-forward picking up someone
+else's merged PR (also benign). A `rebase (finish):` entry — or a `reset:`
+that is *not* immediately preceded by that `commit:` entry, or one moving to
+anything other than `origin/<default>` — is the signature this script is
+specifically designed never to produce: if you see one, it did **not** come
+from `land-resync-commit.sh`; track down what did. If a commit's SHA
+legitimately changed for some other reason, `git diff <old-sha> <new-sha>`
+being empty confirms the content is identical (the #6646 incident's actual
+outcome) even though the identity changed.

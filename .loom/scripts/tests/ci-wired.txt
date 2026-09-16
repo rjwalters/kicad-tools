@@ -40,6 +40,7 @@ test-cargo-test-daemon-guard.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh
 test-champion-epic-phase-marker-normalization.sh
+test-champion-epic-verdict-marker-scope.sh
 test-champion-held-pr-health-pass.sh
 test-champion-standing-authorization.sh
 test-check-ci-status.sh
@@ -126,6 +127,7 @@ test-install-sync-labels.sh
 test-judge-fallback-cap.sh
 test-judge-fanout-experiment.sh
 test-label-preflight.sh
+test-land-resync-commit.sh
 test-live-state-sandbox.sh
 test-locate-daemon-bin.sh
 test-loom-daemon-launchd-plist.sh
@@ -133,6 +135,7 @@ test-loom-daemon-quiesce.sh
 test-loom-daemon-start.sh
 test-loom-daemon-stop.sh
 test-loom-daemon-update.sh
+test-loom-daemon-watchdog-dedup.sh
 test-loom-daemon-watchdog.sh
 test-loom-dispatcher.sh
 test-loom-status.sh

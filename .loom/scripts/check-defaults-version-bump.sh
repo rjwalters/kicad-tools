@@ -46,7 +46,45 @@
 #                     Also settable via the VERSION_BUMP_WATCH_PATHS
 #                     environment variable (a whitespace-separated list),
 #                     which --paths overrides when both are given.
+#     --forbid-bump   Inverted mode (#7743): FAIL if this PR's own commits
+#                     change the extracted version VALUE of any version-bearing file
+#                     (package.json, mcp-loom/package.json, Cargo.toml,
+#                     CLAUDE.md, VERSION -- the same set scripts/version.sh
+#                     manages); PASS otherwise, regardless of --paths /
+#                     VERSION_BUMP_WATCH_PATHS (this mode does not gate on a
+#                     watched path at all -- it gates on the version value
+#                     itself, which is a property of the diff alone). Off by
+#                     default so every existing caller -- Loom's own
+#                     historical usage and every #6480 consumer-repo reuse --
+#                     is byte-for-byte unchanged; only Loom's own
+#                     `defaults-version-bump-check` CI job (.github/workflows/
+#                     ci.yml) passes it. See "Inverted mode" below for why:
+#                     version bumps now happen exactly once, automatically,
+#                     in .github/workflows/version-bump-on-merge.yml -- a PR
+#                     that hand-edits a version value is either duplicating
+#                     that (harmless but pointless) or racing it (actively
+#                     wrong, since the PR's value is stale the moment another
+#                     defaults/-touching PR merges first).
 #   check-defaults-version-bump.sh --help
+#
+# Inverted mode (--forbid-bump, #7743): the original mode above answers "did
+# this PR bump VERSION", which #7743 documents as unsound in both directions
+# (a bump anywhere in base..head satisfies it even when unrelated to this
+# PR; a downgrade satisfies it too, since it only checks that VERSION
+# *changed*, never that it increased) AND expensive even when sound --every
+# concurrent defaults/-touching PR had to carry the same mechanical N-file
+# diff and re-cut it whenever `main` moved. --forbid-bump asks a different,
+# decidable-from-the-diff-alone question instead: "does this diff change a
+# version-bearing file's VALUE at all" -- comparing each file's *extracted*
+# version value between merge-base(--base, --head) and --head (not "did the
+# raw file change", and NOT against --base directly: see the BASE_REF block
+# in that code path for why base-branch drift would otherwise false-FAIL),
+# so an unrelated CLAUDE.md prose edit that never touches the
+# `**Loom Version**:` line still passes even though CLAUDE.md itself is in
+# the diff. This mirrors scripts/version.sh's own get_version_from_file()
+# extraction rules per file type rather than importing that script, so this
+# file stays a single self-contained script (its own #6480 header contract
+# is "reuse this exact script" -- not "reuse this script plus a sibling").
 #
 # No-surface-change marker: a PR whose body OR whose HEAD-reachable commit
 # messages (between --base and --head) contain the literal string
@@ -84,19 +122,39 @@
 #     commit message from the start, which the commit-message path (once
 #     the caller fetches sufficient history, as above) picks up reliably.
 #
-# Exit codes:
+# Exit codes (default mode):
 #   0 - nothing under the watched paths changed in the diff, OR VERSION was
 #       also changed, OR the no-surface-change marker is present.
 #   1 - a watched path changed, VERSION was not, and no marker is present.
-#   2 - bad usage (missing/invalid --base or --head).
+#   2 - bad usage (missing/invalid --base or --head, or an unknown argument).
+#
+# Exit codes (--forbid-bump mode):
+#   0 - no version-bearing file's extracted value differs between
+#       merge-base(--base, --head) and --head.
+#   1 - at least one version-bearing file's extracted value differs.
+#   2 - bad usage (same as above).
 
 set -euo pipefail
 
 MARKER='<!-- loom:no-surface-change -->'
 
+# The version-bearing files --forbid-bump extracts and compares values for.
+# Intentionally the same set scripts/version.sh's VERSION_FILES manages
+# (#7743) -- kept as a literal duplicate here, not sourced from that script,
+# so this file remains a single self-contained script per its own #6480
+# consumer-reuse header contract.
+FORBID_BUMP_VALUE_FILES=(
+  "package.json"
+  "mcp-loom/package.json"
+  "Cargo.toml"
+  "CLAUDE.md"
+  "VERSION"
+)
+
 BASE=""
 HEAD="HEAD"
 WATCH_PATHS=()
+FORBID_BUMP=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -115,8 +173,12 @@ while [[ $# -gt 0 ]]; do
         shift
       done
       ;;
+    --forbid-bump)
+      FORBID_BUMP=true
+      shift
+      ;;
     --help|-h)
-      sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,135p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -139,6 +201,94 @@ fi
 if ! git rev-parse --verify --quiet "${HEAD}^{commit}" >/dev/null; then
   echo "check-defaults-version-bump: head ref '$HEAD' not found." >&2
   exit 2
+fi
+
+# --- --forbid-bump mode (#7743) ---------------------------------------------
+#
+# A separate code path, not a modifier on the default logic below: it asks a
+# different question ("does this diff change a version-bearing file's VALUE
+# at all", independent of --paths/VERSION_BUMP_WATCH_PATHS) rather than the
+# default mode's ("did a watched path change without VERSION also changing").
+if $FORBID_BUMP; then
+  # Compare against merge-base($BASE, $HEAD), not $BASE itself (#7823 review).
+  # CI wires --base to `github.event.pull_request.base.sha` -- the live tip of
+  # the base branch at trigger time, NOT the point this branch diverged from
+  # it. Those differ the moment ANY sibling PR merges after this branch was
+  # cut, and under #7743 every defaults/-touching merge bumps the version, so
+  # a raw $BASE..$HEAD value comparison reports a version DOWNGRADE (base's
+  # new value -> head's older, untouched one) for a PR whose own commits never
+  # touched a version-bearing file at all. That is a false FAIL caused purely
+  # by base-branch drift -- the same "gate that is unsound" symptom class
+  # #7743 set out to eliminate, and it fired on #7743's own PR (#7823).
+  #
+  # The merge-base is the last commit this branch and the base branch agree
+  # on, so BASE_REF..$HEAD contains exactly this PR's own commits: base drift
+  # becomes invisible, while a genuine hand-edit (which lives inside that
+  # range) still fails. Idempotent when the caller already passes a merge-base
+  # (builder-pr.md's local pre-flight does), since merge-base(mb, head) == mb.
+  #
+  # Falls back to the raw $BASE when no merge-base is resolvable -- a shallow
+  # CI checkout whose two histories do not share enough depth (the same
+  # ancestry caveat the default mode's direct two-ref diff documents below).
+  # Callers that need this narrowing must therefore check out with enough
+  # history (`fetch-depth: 0`), as .github/workflows/ci.yml's
+  # defaults-version-bump-check job does.
+  BASE_REF="$BASE"
+  if MERGE_BASE="$(git merge-base "$BASE" "$HEAD" 2>/dev/null)" && [[ -n "$MERGE_BASE" ]]; then
+    BASE_REF="$MERGE_BASE"
+  fi
+
+  # Extracts file:path's version VALUE at git ref:ref, or prints nothing if
+  # the file doesn't exist at that ref (so a file added/removed between base
+  # and head is treated as "no value" on the missing side, not an error) or
+  # its content doesn't parse (e.g. a malformed/non-JSON package.json --
+  # this check only cares about VALUE changes, not validating file shape).
+  # Mirrors scripts/version.sh's get_version_from_file() case-by-case, kept
+  # as a literal duplicate per the header comment above FORBID_BUMP_VALUE_FILES.
+  extract_version_value() {
+    local ref="$1" file="$2" content
+    content="$(git show "${ref}:${file}" 2>/dev/null || true)"
+    [[ -z "$content" ]] && return 0
+    case "$file" in
+      *.json)
+        jq -r '.version // empty' <<<"$content" 2>/dev/null || true
+        ;;
+      *.toml)
+        grep -m1 '^version' <<<"$content" | sed 's/version = "\(.*\)"/\1/' || true
+        ;;
+      CLAUDE.md)
+        grep -o 'Loom Version\*\*: [0-9]*\.[0-9]*\.[0-9]*' <<<"$content" | grep -o '[0-9]*\.[0-9]*\.[0-9]*' || true
+        ;;
+      VERSION)
+        tr -d '[:space:]' <<<"$content"
+        ;;
+    esac
+  }
+
+  CHANGED_VALUES=""
+  for vf in "${FORBID_BUMP_VALUE_FILES[@]}"; do
+    base_val="$(extract_version_value "$BASE_REF" "$vf")"
+    head_val="$(extract_version_value "$HEAD" "$vf")"
+    if [[ "$base_val" != "$head_val" ]]; then
+      CHANGED_VALUES+="  $vf: '$base_val' -> '$head_val'"$'\n'
+    fi
+  done
+
+  if [[ -z "$CHANGED_VALUES" ]]; then
+    echo "check-defaults-version-bump: OK — no version-bearing file's value changed in this diff (compared against $BASE_REF)."
+    exit 0
+  fi
+
+  echo "check-defaults-version-bump: FAIL — this diff hand-edits a version-bearing file's value" >&2
+  echo "(comparing $BASE_REF..$HEAD, i.e. this PR's own commits):" >&2
+  echo "" >&2
+  printf '%s' "$CHANGED_VALUES" >&2
+  echo "" >&2
+  echo "Version bumps now happen exactly once, automatically, in" >&2
+  echo ".github/workflows/version-bump-on-merge.yml after this PR merges (#7743)." >&2
+  echo "A feature PR must not touch a version-bearing file's value -- revert the" >&2
+  echo "change(s) above (the rest of your diff is unaffected)." >&2
+  exit 1
 fi
 
 # --paths on the command line wins; otherwise fall back to the

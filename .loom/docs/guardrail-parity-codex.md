@@ -29,12 +29,12 @@ Read this before dispatching a Codex worker at anything you care about.
 - [Tier status](#tier-status)
 - [The enforcement mechanisms Codex actually has (0.146.0)](#the-enforcement-mechanisms-codex-actually-has-01460)
 - [Loom guard intent → Codex mechanism](#loom-guard-intent--codex-mechanism)
-- [Managed `pre_tool_use` hook bridge (issue #4495)](#managed-pretooluse-hook-bridge-issue-4495)
+- [Managed `pre_tool_use` hook bridge (issue #4495)](#managed-pre_tool_use-hook-bridge-issue-4495)
 - [Sandbox-mode mapping (what the adapter emits)](#sandbox-mode-mapping-what-the-adapter-emits)
 - [Residual gaps](#residual-gaps)
 - [Admission checklist (contract point 5/6)](#admission-checklist-contract-point-56)
 - [Promotion gate (`hooks` / `worktreeIsolation`)](#promotion-gate-hooks--worktreeisolation)
-- [CODEX_HOME profile layout, refresh, and security posture](#codexhome-profile-layout-refresh-and-security-posture)
+- [CODEX_HOME profile layout, refresh, and security posture](#codex_home-profile-layout-refresh-and-security-posture)
 - [References](#references)
 <!-- toc:end -->
 
