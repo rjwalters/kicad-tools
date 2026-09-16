@@ -13,12 +13,42 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SWEEP_MD="$SCRIPT_DIR/../../../defaults/.claude/commands/loom/sweep.md"
+SWEEP_SKILL_DIR="$SCRIPT_DIR/../../../defaults/.claude/commands/loom"
 
-if [[ ! -f "$SWEEP_MD" ]]; then
-    echo "FAIL: skill file not found at $SWEEP_MD" >&2
+if [[ ! -d "$SWEEP_SKILL_DIR" ]]; then
+    echo "FAIL: skill directory not found at $SWEEP_SKILL_DIR" >&2
     exit 1
 fi
+
+# The /loom:sweep skill in document order (#7726 split the monolithic
+# sweep.md into a dispatcher + 11 sibling reference files). Concatenate them
+# into one file so every assertion below finds its content wherever it now
+# lives — mirrors SWEEP_SKILL_FILES in
+# loom-daemon/tests/sweep_md_doc_lint.rs.
+SWEEP_SKILL_FILES=(
+    sweep.md
+    sweep-arguments.md
+    sweep-examples.md
+    sweep-execution-model.md
+    sweep-backend-detection.md
+    sweep-scheduling-signals.md
+    sweep-dry-run.md
+    sweep-mode-c-lifecycle.md
+    sweep-wave-lifecycle.md
+    sweep-summary-output.md
+    sweep-run-hygiene.md
+    sweep-reference.md
+)
+SWEEP_MD="$(mktemp)"
+trap 'rm -f "$SWEEP_MD"' EXIT
+for f in "${SWEEP_SKILL_FILES[@]}"; do
+    path="$SWEEP_SKILL_DIR/$f"
+    if [[ ! -f "$path" ]]; then
+        echo "FAIL: skill sibling file not found at $path" >&2
+        exit 1
+    fi
+    cat "$path" >> "$SWEEP_MD"
+done
 
 PASS=0
 FAIL=0

@@ -144,6 +144,29 @@ else
     echo -e "  ${GREEN}PASS${NC}: forge_auto_merge (GitHub) omits expectedHeadOid= when EXPECTED_HEAD_SHA is not supplied"
 fi
 
+# --- forge_auto_merge: MERGE_METHOD threading (#7754) ---
+: > "$GH_ARGS_FILE"
+GH_ARGS_FILE="$GH_ARGS_FILE" PATH="$STUB_DIR:$PATH" \
+  forge_auto_merge "owner/repo" "42" "" "rebase" >/dev/null
+if grep -q -- "mergeMethod=REBASE" "$GH_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_auto_merge (GitHub) uppercases an explicit non-squash MERGE_METHOD for the GraphQL enum"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_auto_merge (GitHub) did not send mergeMethod=REBASE (argv: $(cat "$GH_ARGS_FILE"))"
+fi
+
+: > "$GH_ARGS_FILE"
+GH_ARGS_FILE="$GH_ARGS_FILE" PATH="$STUB_DIR:$PATH" \
+  forge_auto_merge "owner/repo" "42" >/dev/null
+if grep -q -- "mergeMethod=SQUASH" "$GH_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_auto_merge (GitHub) still defaults to SQUASH when no method is supplied (backward compatible)"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_auto_merge (GitHub) default-method behavior regressed (argv: $(cat "$GH_ARGS_FILE"))"
+fi
+
 # --- forge_merge_pr / forge_auto_merge: Gitea ---
 echo ""
 echo "Testing Gitea head_commit_id threading..."
@@ -192,6 +215,16 @@ if grep -q '"head_commit_id":"gitea-sha-2"' "$CURL_ARGS_FILE"; then
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: forge_auto_merge (Gitea) missing head_commit_id (body: $(tr '\n' ' ' < "$CURL_ARGS_FILE"))"
+fi
+
+CURL_ARGS_FILE="$CURL_ARGS_FILE" PATH="$STUB_DIR:$PATH" \
+  forge_auto_merge "owner/repo" "42" "" "merge" >/dev/null
+if grep -q '"Do":"merge"' "$CURL_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_auto_merge (Gitea) sends Do:merge when explicitly requested (#7754)"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_auto_merge (Gitea) did not send Do:merge (body: $(tr '\n' ' ' < "$CURL_ARGS_FILE"))"
 fi
 
 rm -f "$CURL_ARGS_FILE"
@@ -394,7 +427,7 @@ echo ""
 echo "Testing native loom-daemon forge auto-merge wiring (#5589)..."
 
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q 'loom-daemon forge auto-merge "\$PR_NUMBER" --method squash --expected-head-sha "\$MERGE_PRECONDITION_SHA"' "$MERGE_PR_SRC"; then
+if grep -q 'loom-daemon forge auto-merge "\$PR_NUMBER" --method "\$REPO_MERGE_METHOD" --expected-head-sha "\$MERGE_PRECONDITION_SHA"' "$MERGE_PR_SRC"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: merge-pr.sh passes --expected-head-sha \$MERGE_PRECONDITION_SHA to the native loom-daemon forge auto-merge call"
 else

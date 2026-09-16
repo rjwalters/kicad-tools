@@ -501,6 +501,131 @@ fi
 
 rm -rf "$SHIM_DIR" "$CURL_ARGS_FILE"
 
+# --- Test forge_detect_merge_method / forge_merge_pr respect a non-squash
+# repo (#7754) -- the original #1258 bug was a hardcoded merge_method=squash
+# / Do:"squash" breaking any repo that has squash-merge disabled.
+echo ""
+echo "Testing forge_detect_merge_method / forge_merge_pr honor the target repo's allowed strategies (#7754)..."
+
+FORGE_TYPE="github"
+
+# --- GitHub: repo allows only merge-commit (squash and rebase disabled) ---
+GH_MM_STUB_DIR=$(mktemp -d)
+cat > "$GH_MM_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "api" && "$2" == repos/* && "$*" != *"-X PUT"* ]]; then
+  printf '{"allow_squash_merge":false,"allow_merge_commit":true,"allow_rebase_merge":false}\n'
+  exit 0
+fi
+exit 1
+STUB
+chmod +x "$GH_MM_STUB_DIR/gh"
+
+gh_mm_result=$(PATH="$GH_MM_STUB_DIR:$PATH" forge_detect_merge_method "owner/repo" "$GH_MM_STUB_DIR/gh")
+assert_eq "merge" "$gh_mm_result" "forge_detect_merge_method (GitHub) selects 'merge' when only allow_merge_commit is true"
+
+# --- GitHub: repo allows only rebase ---
+cat > "$GH_MM_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "api" && "$2" == repos/* ]]; then
+  printf '{"allow_squash_merge":false,"allow_merge_commit":false,"allow_rebase_merge":true}\n'
+  exit 0
+fi
+exit 1
+STUB
+chmod +x "$GH_MM_STUB_DIR/gh"
+
+gh_mm_result=$(PATH="$GH_MM_STUB_DIR:$PATH" forge_detect_merge_method "owner/repo" "$GH_MM_STUB_DIR/gh")
+assert_eq "rebase" "$gh_mm_result" "forge_detect_merge_method (GitHub) selects 'rebase' when only allow_rebase_merge is true"
+
+# --- GitHub: probe failure fails open to "squash" (pre-#7754 behavior) ---
+cat > "$GH_MM_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$GH_MM_STUB_DIR/gh"
+
+gh_mm_result=$(PATH="$GH_MM_STUB_DIR:$PATH" forge_detect_merge_method "owner/repo" "$GH_MM_STUB_DIR/gh")
+assert_eq "squash" "$gh_mm_result" "forge_detect_merge_method (GitHub) fails open to 'squash' on a probe failure"
+
+rm -rf "$GH_MM_STUB_DIR"
+
+# --- GitHub: forge_merge_pr sends the CALLER-SUPPLIED method, not a
+# hardcoded squash -- this is the actual fix for the original #1258
+# "Squash merges are not allowed on this repository" failure.
+GH_MERGE_STUB_DIR=$(mktemp -d)
+GH_MERGE_ARGS_FILE=$(mktemp)
+cat > "$GH_MERGE_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_MERGE_ARGS_FILE"
+echo '{"merged":true}'
+exit 0
+STUB
+chmod +x "$GH_MERGE_STUB_DIR/gh"
+
+: > "$GH_MERGE_ARGS_FILE"
+GH_MERGE_ARGS_FILE="$GH_MERGE_ARGS_FILE" PATH="$GH_MERGE_STUB_DIR:$PATH" \
+  forge_merge_pr "owner/repo" "42" "" "rebase" >/dev/null
+if grep -q -- "-f merge_method=rebase" "$GH_MERGE_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_merge_pr (GitHub) sends merge_method=rebase when explicitly requested"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_merge_pr (GitHub) did not send merge_method=rebase (argv: $(cat "$GH_MERGE_ARGS_FILE"))"
+fi
+
+: > "$GH_MERGE_ARGS_FILE"
+GH_MERGE_ARGS_FILE="$GH_MERGE_ARGS_FILE" PATH="$GH_MERGE_STUB_DIR:$PATH" \
+  forge_merge_pr "owner/repo" "42" >/dev/null
+if grep -q -- "-f merge_method=squash" "$GH_MERGE_ARGS_FILE"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_merge_pr (GitHub) still defaults to squash when no method is supplied (backward compatible)"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_merge_pr (GitHub) default-method behavior regressed (argv: $(cat "$GH_MERGE_ARGS_FILE"))"
+fi
+
+rm -rf "$GH_MERGE_STUB_DIR"; rm -f "$GH_MERGE_ARGS_FILE"
+
+# --- Gitea: repo allows only rebase (squash disabled) ---
+FORGE_TYPE="gitea"
+GITEA_MM_SHIM_DIR=$(mktemp -d)
+cat > "$GITEA_MM_SHIM_DIR/curl" <<'SHIM'
+#!/usr/bin/env bash
+printf '{"allow_squash_merge":false,"allow_merge_commits":false,"allow_rebase_merge":true}\n200\n'
+SHIM
+chmod +x "$GITEA_MM_SHIM_DIR/curl"
+
+_GITEA_BASE_URL="https://gitea.example.com"
+_GITEA_TOKEN="tok-abc"
+_GITEA_USERNAME=""
+gitea_mm_result=$(PATH="$GITEA_MM_SHIM_DIR:$PATH" forge_detect_merge_method "owner/repo")
+assert_eq "rebase" "$gitea_mm_result" "forge_detect_merge_method (Gitea) selects 'rebase' when only allow_rebase_merge is true"
+
+# --- Gitea: forge_merge_pr sends the CALLER-SUPPLIED "Do" value ---
+GITEA_MERGE_CURL_ARGS=$(mktemp)
+export GITEA_MERGE_CURL_ARGS
+cat > "$GITEA_MM_SHIM_DIR/curl" <<'SHIM'
+#!/usr/bin/env bash
+: > "$GITEA_MERGE_CURL_ARGS"
+for a in "$@"; do
+  printf '%s\n' "$a" >> "$GITEA_MERGE_CURL_ARGS"
+done
+printf '{"merged":true}\n200\n'
+SHIM
+chmod +x "$GITEA_MM_SHIM_DIR/curl"
+
+PATH="$GITEA_MM_SHIM_DIR:$PATH" forge_merge_pr "owner/repo" "42" "" "rebase" >/dev/null
+if grep -q '"Do":"rebase"' "$GITEA_MERGE_CURL_ARGS"; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: forge_merge_pr (Gitea) sends Do:rebase when explicitly requested"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: forge_merge_pr (Gitea) did not send Do:rebase (curl -d args: $(cat "$GITEA_MERGE_CURL_ARGS"))"
+fi
+
+rm -rf "$GITEA_MM_SHIM_DIR"; rm -f "$GITEA_MERGE_CURL_ARGS"
+
 # --- Summary ---
 echo ""
 echo "────────────────────────────────"

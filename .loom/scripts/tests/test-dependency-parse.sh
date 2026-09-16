@@ -52,9 +52,33 @@ else
     PROMPT_DIR="$(cd "$SCRIPTS_DIR/../.claude/commands/loom" && pwd)"
 fi
 GUIDE_MD="$PROMPT_DIR/guide.md"
-SWEEP_MD="$PROMPT_DIR/sweep.md"
 CHAMPION_MD="$PROMPT_DIR/champion-pr-merge.md"
 CHAMPION_COMMON_MD="$PROMPT_DIR/champion-common.md"
+
+# The /loom:sweep skill in document order (#7726 split the monolithic
+# sweep.md into a dispatcher + 11 sibling reference files). Concatenate them
+# into one file so the --auto-stack detection pattern is found wherever it
+# now lives — mirrors SWEEP_SKILL_FILES in
+# loom-daemon/tests/sweep_md_doc_lint.rs.
+SWEEP_SKILL_FILES=(
+    sweep.md
+    sweep-arguments.md
+    sweep-examples.md
+    sweep-execution-model.md
+    sweep-backend-detection.md
+    sweep-scheduling-signals.md
+    sweep-dry-run.md
+    sweep-mode-c-lifecycle.md
+    sweep-wave-lifecycle.md
+    sweep-summary-output.md
+    sweep-run-hygiene.md
+    sweep-reference.md
+)
+SWEEP_MD="$(mktemp)"
+trap 'rm -f "$SWEEP_MD"' EXIT
+for f in "${SWEEP_SKILL_FILES[@]}"; do
+    cat "$PROMPT_DIR/$f" >> "$SWEEP_MD"
+done
 
 # Source warn-out-of-set-deps.sh's real parse_out_of_set_deps BEFORE defining
 # our own RED/GREEN/NC below — the script's own `[[ -t 2 ]]` color block
