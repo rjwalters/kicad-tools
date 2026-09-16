@@ -2852,6 +2852,38 @@ def _finalize_signal_copper(
         raise
 
 
+def _prepare_plane_access_context(input_path: Path, output_path: Path):
+    """Bind fresh and staged Board06 routes to explicit output rule sidecars.
+
+    Validate existing contexts before writing. Existing project and DRU bytes
+    remain authored inputs; only missing output sidecars are created. The
+    source project supplies fresh output settings and factory rules supply
+    the native constraints absent from a newly generated board.
+    """
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+    from kicad_tools.zones.pour_escape import EscapeRules
+
+    source_project = input_path.with_suffix(".kicad_pro")
+    output_project = output_path.with_suffix(".kicad_pro")
+    output_dru = output_path.with_suffix(".kicad_dru")
+    if not source_project.is_file():
+        raise ValueError("Board06 plane access requires its input project context")
+    if any(path.is_symlink() for path in (output_project, output_dru)):
+        raise ValueError("Board06 output rule sidecars must not be symlinks")
+    EscapeRules.from_projects(source_project, output_project)
+    pending = {}
+    if not output_project.exists():
+        pending[output_project] = source_project.read_bytes()
+    if not output_dru.exists():
+        factory = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+        pending[output_dru] = merge_dru_floors(None, generate_dru(factory, "jlcpcb")).encode()
+    for path, content in pending.items():
+        with path.open("xb") as stream:
+            stream.write(content)
+    return EscapeRules.from_projects(source_project, output_project)
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB with per-protocol net-class engagement.
 
@@ -2945,15 +2977,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # below), so the seed-42 route is reproducible regardless of runner load
     # -- removing the load-dependence that flaked the board-06 re-route gate.
     from kicad_tools.router.plane_access import PlaneAccessPolicy, PlaneAccessTarget
-    from kicad_tools.zones.pour_escape import EscapeRules
 
     # The later GND pour covers In1.Cu. Protect small SMD-pad off-pad access
     # before coupled, escape, and ordinary signal routing consume that space.
     access_policy = PlaneAccessPolicy(
         (PlaneAccessTarget("GND", "In1.Cu"),),
-        EscapeRules.from_projects(
-            input_path.with_suffix(".kicad_pro"), output_path.with_suffix(".kicad_pro")
-        ),
+        _prepare_plane_access_context(input_path, output_path),
     )
     router, net_map = load_pcb_for_routing(
         str(input_path),
