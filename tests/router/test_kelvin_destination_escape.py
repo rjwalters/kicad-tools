@@ -120,3 +120,49 @@ def test_destination_exemption_preserves_other_terminal_and_layer_barriers(
             )
             assert router.grid._cpp_grid._impl.at(x, y, back).net == 0
     assert (router.grid._net[:, y, x] == before).all()
+
+
+@pytest.mark.parametrize("force_python", [True, False])
+@pytest.mark.parametrize("shared_copper", [True, False])
+def test_destination_ownership_uses_component_identity(force_python, shared_copper):
+    from kicad_tools.router.kelvin_obstacles import isolate_kelvin_branch
+
+    if not force_python and not get_backend_info()["available"]:
+        pytest.skip("C++ extension unavailable")
+    router = Autorouter(22, 22, force_python=force_python, physics_enabled=False)
+    # Repeated display references occur in distinct hierarchical instances.
+    for ref, identity, x, y in [
+        ("R1", "root", 2, 2),
+        ("U1", "other", 14, 10 if shared_copper else 14),
+        ("U1", "destination", 10, 10),
+    ]:
+        router.add_component(
+            ref,
+            [
+                {
+                    "number": "1",
+                    "x": x,
+                    "y": y,
+                    "width": 1,
+                    "height": 1,
+                    "net": 1,
+                    "net_name": "ISENSE",
+                }
+            ],
+            component_id=identity,
+        )
+    route = Route(1, "ISENSE", [Segment(10, 10, 14, 10, 0.2, Layer.F_CU, 1)])
+    router._mark_route(route)
+    router.routes.append(route)
+    root = router.pads[("root", "1")]
+    other = router.pads[("other", "1")]
+    target = replace(router.pads[("destination", "1")], x=12, width=0.2, height=0.2)
+    x, y = router.grid.world_to_grid(12, 10)
+    front = router.grid.layer_to_index(Layer.F_CU.value)
+    before = router.grid._net[:, y, x].copy()
+    with isolate_kelvin_branch(router.grid, [root, other, target], root, target):
+        expected = 0 if shared_copper else 1
+        assert router.grid._net[front, y, x] == expected
+        if not force_python:
+            assert router.grid._cpp_grid._impl.at(x, y, front).net == expected
+    assert (router.grid._net[:, y, x] == before).all()

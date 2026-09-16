@@ -41,8 +41,8 @@ def _destination_component(
     bridges: list[list[int]],
 ) -> set[int]:
     """Identify an isolated escape conductor owned only by the destination."""
-    physical = {(pad.ref, pad.pin): pad for pad in grid._pads if pad.ref and pad.pin}
-    destination = physical.get((target.ref, target.pin))
+    physical = {pad.key: pad for pad in grid._pads if pad.key[0] and pad.pin}
+    destination = physical.get(target.key)
     if destination is None or (destination.x, destination.y, destination.layer) == (
         target.x,
         target.y,
@@ -85,9 +85,9 @@ def _destination_component(
     # A conductor already shared with another terminal is not a private escape.
     # Keep it blocked instead of blessing an invalid pre-existing Kelvin branch.
     for pad in pads:
-        if (pad.ref, pad.pin) == (target.ref, target.pin):
+        if pad.key == target.key:
             continue
-        pad = physical.get((pad.ref, pad.pin), pad)
+        pad = physical.get(pad.key, pad)
         layers = (
             set(range(grid.num_layers))
             if pad.through_hole
@@ -136,11 +136,11 @@ def isolate_kelvin_branch(
     # Escape endpoints carry terminal identities but are not the physical
     # pads. Other branches must avoid the original metal as well as the
     # escape trace already collected above.
-    physical_pads = {(pad.ref, pad.pin): pad for pad in grid._pads if pad.ref and pad.pin}
+    physical_pads = {pad.key: pad for pad in grid._pads if pad.key[0] and pad.pin}
     for pad in pads:
         if pad is root or pad is target:
             continue
-        pad = physical_pads.get((pad.ref, pad.pin), pad)
+        pad = physical_pads.get(pad.key, pad)
         layers = (
             range(grid.num_layers) if pad.through_hole else [grid.layer_to_index(pad.layer.value)]
         )
