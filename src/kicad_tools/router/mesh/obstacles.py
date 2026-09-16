@@ -106,6 +106,8 @@ class ObstacleModel:
         layer: int = 0,
         half: float = 0.0,
         clearance: float = 0.0,
+        net: int | None = None,
+        net_clearance_floors: dict[int, float] | None = None,
     ) -> None:
         self.outline = outline
         self.keepouts = keepouts
@@ -114,6 +116,8 @@ class ObstacleModel:
         self.layer = layer
         self.half = half
         self.clearance = clearance
+        self.net = net
+        self.net_clearance_floors = net_clearance_floors
 
     def is_clear(self, a: Pt, b: Pt) -> bool:
         """True if straight leg ``a-b`` is inside the board and clears keep-outs.
@@ -127,6 +131,8 @@ class ObstacleModel:
             self.layer,
             self.half,
             self.clearance,
+            net=self.net,
+            net_clearance_floors=self.net_clearance_floors,
         ):
             return False
         if self.outline and not (

@@ -114,3 +114,37 @@ def test_native_search_routes_outside_authored_fill_gap(method, strict_net):
             polygon
         )
         assert distance - segment.width / 2 >= 0.4 - 1e-4
+
+
+@pytest.mark.parametrize("kind", ["trace", "via"])
+@pytest.mark.parametrize("strict_net", [1, 2])
+@pytest.mark.parametrize("floor,valid", [(0.3, True), (0.4, False)])
+def test_mesh_fill_consumers_keep_authored_floors(kind, strict_net, floor, valid):
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.mesh.obstacles import ObstacleModel
+    from kicad_tools.router.mesh.pathfinder import MeshPathfinder
+
+    rules = DesignRules(
+        trace_clearance=0.1,
+        via_clearance=0.1,
+        via_diameter=0.2,
+        net_clearance_floors={strict_net: floor, 3: 4.0},
+    )
+    outline = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    fills = FixedFillObstacles((FixedFill("foreign", 2, 0, 0.1, box(4, 4, 6, 6)),))
+    if kind == "trace":
+        model = ObstacleModel(
+            outline,
+            [],
+            fixed_fills=fills,
+            layer=0,
+            half=0.1,
+            clearance=0.1,
+            net=1,
+            net_clearance_floors=rules.net_clearance_floors,
+        )
+        assert model.is_clear((3, 6.45), (7, 6.45)) is valid
+    else:
+        pf = MeshPathfinder(outline, [], rules, layer_stack=LayerStack.two_layer())
+        pf.fixed_fills = fills
+        assert pf._via_allowed_at((5, 6.45), 1, 0.2, (0, 1), {}) is valid

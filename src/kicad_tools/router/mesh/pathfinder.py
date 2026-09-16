@@ -300,7 +300,7 @@ class MeshPathfinder:
         # rebuild (rect + polygon lists, no triangulation).  This is the model
         # the octilinear fit validates each leg against -- a route that cannot
         # clear it is declined (None).
-        keepouts = self._keepouts(net, agent_radius)
+        keepouts = self._keepouts(net, agent_radius, trace_half=trace_w / 2)
         pour_obstacles = self.pours + (committed or [])
         obstacles = ObstacleModel(
             self.outline,
@@ -310,6 +310,8 @@ class MeshPathfinder:
             layer=self._layer_index(start.layer) or 0,
             half=trace_w / 2,
             clearance=clearance,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         )
 
         cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
@@ -537,7 +539,9 @@ class MeshPathfinder:
 
     # -- helpers ----------------------------------------------------------
 
-    def _keepouts(self, net: int, agent_radius: float) -> list[Rect]:
+    def _keepouts(
+        self, net: int, agent_radius: float, *, trace_half: float | None = None
+    ) -> list[Rect]:
         """Inflated keep-out rects for every OTHER-net pad, clamped + merged."""
         from .obstacles import merge_overlapping
 
@@ -549,8 +553,10 @@ class MeshPathfinder:
             if pad.net == net:
                 continue  # same-net copper is not an obstacle
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
+            half = self.rules.trace_width / 2 if trace_half is None else trace_half
+            radius = max(agent_radius, half + self.rules.clearance_for_nets(net, pad.net, 0.0))
+            hx = half_w + radius
+            hy = half_h + radius
             r = (pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy)
             r = (
                 max(r[0], bx0 + margin),
@@ -593,7 +599,9 @@ class MeshPathfinder:
         except Exception:
             return None
 
-    def _keepouts_layer(self, net: int, agent_radius: float, layer_idx: int) -> list[Rect]:
+    def _keepouts_layer(
+        self, net: int, agent_radius: float, layer_idx: int, *, trace_half: float | None = None
+    ) -> list[Rect]:
         """Per-layer inflated pad keep-outs (issue #4276 section 3).
 
         An SMD pad blocks only its own copper layer; a through-hole pad blocks
@@ -617,8 +625,10 @@ class MeshPathfinder:
             if not pad.through_hole and layer_enum is not None and pad.layer != layer_enum:
                 continue
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
+            half = self.rules.trace_width / 2 if trace_half is None else trace_half
+            radius = max(agent_radius, half + self.rules.clearance_for_nets(net, pad.net, 0.0))
+            hx = half_w + radius
+            hy = half_h + radius
             r = (
                 max(pad.x - hx, bx0 + margin),
                 max(pad.y - hy, by0 + margin),
@@ -653,8 +663,16 @@ class MeshPathfinder:
         """
         for pad in self.pads:
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + via_radius
-            hy = half_h + via_radius
+            radius = (
+                max(
+                    via_radius,
+                    self.rules.via_diameter / 2 + self.rules.clearance_for_nets(net, pad.net, 0.0),
+                )
+                if pad.net != net
+                else via_radius
+            )
+            hx = half_w + radius
+            hy = half_h + radius
             if abs(site[0] - pad.x) <= hx and abs(site[1] - pad.y) <= hy:
                 if pad.net == net:
                     if not self._via_in_pad_allowed:
@@ -666,6 +684,8 @@ class MeshPathfinder:
             tuple(range(self.layer_stack.num_layers)),
             self.rules.via_diameter / 2,
             self.rules.via_clearance,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         ):
             return False
         # A through-via spans every copper layer, so its body must clear
@@ -718,7 +738,7 @@ class MeshPathfinder:
         # Per-layer obstacle model for the authoritative octilinear fit.
         obstacles_by_layer: dict[int, ObstacleModel] = {}
         for lidx in range(num_layers):
-            keepouts = self._keepouts_layer(net, agent_radius, lidx)
+            keepouts = self._keepouts_layer(net, agent_radius, lidx, trace_half=trace_w / 2)
             pour_obstacles = self.pours + committed_by_layer.get(lidx, [])
             obstacles_by_layer[lidx] = ObstacleModel(
                 self.outline,
@@ -728,6 +748,8 @@ class MeshPathfinder:
                 layer=lidx,
                 half=trace_w / 2,
                 clearance=clearance,
+                net=net,
+                net_clearance_floors=self.rules.net_clearance_floors,
             )
 
         # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
