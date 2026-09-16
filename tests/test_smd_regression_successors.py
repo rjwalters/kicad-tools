@@ -127,7 +127,7 @@ def test_staging_uses_only_hash_bound_successor(tmp_path, tamper):
 
 @pytest.mark.parametrize("board,stem,functions", CASES)
 def test_staged_rule_context_matches_factory_and_preserves_archive(
-    tmp_path, board, stem, functions
+    tmp_path, monkeypatch, board, stem, functions
 ):
     import sys
 
@@ -154,7 +154,7 @@ def test_staged_rule_context_matches_factory_and_preserves_archive(
         "staged_escape", ROOT / "boards/06-diffpair-test/pour_escape.py"
     )
     escape = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = escape
+    monkeypatch.setitem(sys.modules, spec.name, escape)
     spec.loader.exec_module(escape)
     with pytest.raises(ValueError, match="custom DRC"):
         escape.EscapeRules.from_project(
@@ -223,7 +223,7 @@ def test_successor_sidecar_name_scope(tmp_path, name):
 
 @pytest.mark.parametrize("board,stem,functions", CASES)
 def test_staged_native_rules_effective_without_regeneration(tmp_path, board, stem, functions):
-    """Legacy invalid mask rule silently disables native coverage; staged rules must load."""
+    """Staged rules enforce the SMD floor absent from the archived rule file."""
     cli = find_kicad_cli()
     if cli is None:
         pytest.skip("Native KiCad CLI is not installed")
@@ -293,7 +293,7 @@ def test_valid_archived_scalars_are_not_weakened():
         assert profile.min_solder_mask_dam_mm == 0.1
 
 
-def test_stronger_authored_project_minima_survive_staging(tmp_path):
+def test_stronger_authored_project_minima_survive_staging(tmp_path, monkeypatch):
     import sys
 
     base = ROOT / "boards/06-diffpair-test"
@@ -312,7 +312,7 @@ def test_stronger_authored_project_minima_survive_staging(tmp_path):
         "stronger_escape", ROOT / "boards/06-diffpair-test/pour_escape.py"
     )
     escape = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = escape
+    monkeypatch.setitem(sys.modules, spec.name, escape)
     spec.loader.exec_module(escape)
     rules = escape.EscapeRules.from_project(output / project.name)
     assert rules.clearance == 0.4
