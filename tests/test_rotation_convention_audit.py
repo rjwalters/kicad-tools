@@ -229,7 +229,12 @@ class TestRouteNetRotation:
         captured: dict[str, list[dict]] = {}
 
         def fake_add_component(
-            self, ref: str, pads: list[dict], *, component_id: str | None = None
+            self,
+            ref: str,
+            pads: list[dict],
+            *,
+            component_id: str | None = None,
+            duplicate_pad_numbers_are_jumpers: bool = False,
         ) -> None:  # noqa: ANN001
             captured[ref] = list(pads)
 
@@ -337,7 +342,12 @@ class TestEstimateRoutabilityRotation:
         captured: dict[str, list[dict]] = {}
 
         def fake_add_component(
-            self, ref: str, pads: list[dict], *, component_id: str | None = None
+            self,
+            ref: str,
+            pads: list[dict],
+            *,
+            component_id: str | None = None,
+            duplicate_pad_numbers_are_jumpers: bool = False,
         ) -> None:  # noqa: ANN001
             captured[ref] = list(pads)
 
@@ -443,7 +453,12 @@ class TestRoutePcbRotation:
         captured: dict[str, list[dict]] = {}
 
         def fake_add_component(
-            self, ref: str, pads: list[dict], *, component_id: str | None = None
+            self,
+            ref: str,
+            pads: list[dict],
+            *,
+            component_id: str | None = None,
+            duplicate_pad_numbers_are_jumpers: bool = False,
         ) -> None:  # noqa: ANN001
             captured[ref] = list(pads)
 
@@ -582,7 +597,12 @@ class TestAdaptiveRouterRotation:
 
         class _FakeRouter:
             def add_component(
-                self, ref: str, pads: list[dict], *, component_id: str | None = None
+                self,
+                ref: str,
+                pads: list[dict],
+                *,
+                component_id: str | None = None,
+                duplicate_pad_numbers_are_jumpers: bool = False,
             ) -> None:
                 captured[ref] = list(pads)
 
@@ -629,7 +649,12 @@ class TestPlaceRouteOptimizerLoadRotation:
 
         class _FakeRouter:
             def add_component(
-                self, ref: str, pads: list[dict], *, component_id: str | None = None
+                self,
+                ref: str,
+                pads: list[dict],
+                *,
+                component_id: str | None = None,
+                duplicate_pad_numbers_are_jumpers: bool = False,
             ) -> None:
                 captured[ref] = list(pads)
 
