@@ -76,6 +76,14 @@ SUPPORTS_STEP_ROUTE = True
 # the canonical number).
 # =============================================================================
 POUR_NETS: list[str] = ["GND", "VBUS_USB", "+3V3", "+1V8", "+1V2"]
+POUR_ASSIGNMENTS = [
+    ("GND", "In1.Cu", 1),
+    ("VBUS_USB", "In2.Cu", 1),
+    ("+1V2", "In2.Cu", 2),
+    ("+1V8", "B.Cu", 2),
+    ("+3V3", "B.Cu", 1),
+]
+
 REQUIRED_SIGNAL_REACH: int = 21
 
 # Issue #3509: pour-connectivity contract.  When True, the CI gate runs
@@ -2852,6 +2860,21 @@ def _finalize_signal_copper(
         raise
 
 
+def _plane_access_targets(pcb_path: Path):
+    """Use the actual later split-pour regions for every deferred plane net."""
+    from shapely.geometry import Polygon
+
+    from kicad_tools.router.plane_access import PlaneAccessTarget
+    from kicad_tools.zones.generator import ZoneGenerator, _compute_pour_outlines
+
+    generator = ZoneGenerator.from_pcb(pcb_path, edge_clearance=0.5)
+    outlines = _compute_pour_outlines(generator.pcb, POUR_ASSIGNMENTS, generator.board_outline)
+    return tuple(
+        PlaneAccessTarget(name, layer, Polygon(outlines[name] or generator.board_outline))
+        for name, layer, _priority in POUR_ASSIGNMENTS
+    )
+
+
 def _prepare_plane_access_context(input_path: Path, output_path: Path):
     """Bind fresh and staged Board06 routes to explicit output rule sidecars.
 
@@ -2976,12 +2999,12 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # ``per_net_timeout`` (set to 0.0 in _negotiated_non_diffpair_strategy
     # below), so the seed-42 route is reproducible regardless of runner load
     # -- removing the load-dependence that flaked the board-06 re-route gate.
-    from kicad_tools.router.plane_access import PlaneAccessPolicy, PlaneAccessTarget
+    from kicad_tools.router.plane_access import PlaneAccessPolicy
 
-    # The later GND pour covers In1.Cu. Protect small SMD-pad off-pad access
-    # before coupled, escape, and ordinary signal routing consume that space.
+    # Protect access to each actual split-pour region before signal routing.
+    # Power pads need the same off-pad access guarantee as ground pads.
     access_policy = PlaneAccessPolicy(
-        (PlaneAccessTarget("GND", "In1.Cu"),),
+        _plane_access_targets(input_path),
         _prepare_plane_access_context(input_path, output_path),
     )
     router, net_map = load_pcb_for_routing(
@@ -3697,13 +3720,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
             _compute_pour_outlines,
         )
 
-        zone_assignments: list[tuple[str, str, int]] = [
-            ("GND", "In1.Cu", 1),
-            ("VBUS_USB", "In2.Cu", 1),
-            ("+1V2", "In2.Cu", 2),
-            ("+1V8", "B.Cu", 2),
-            ("+3V3", "B.Cu", 1),
-        ]
+        zone_assignments = POUR_ASSIGNMENTS
         # JLCPCB minimum mask-to-copper clearance is ~0.2mm; inset by
         # 0.5mm for a conservative margin.
         zone_gen = ZoneGenerator.from_pcb(output_path, edge_clearance=0.5)
