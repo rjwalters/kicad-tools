@@ -1058,8 +1058,9 @@ def _tune_match_group_single_ended(
 
         # Each iteration: rank candidate segments, then for each (best
         # first) compute the outer-normal hint, attempt one trombone,
-        # run the self-check.  Commit the FIRST candidate that passes
-        # DRC.  If all candidates fail, declare
+        # run the self-check. Prefer a legal candidate that meets the target,
+        # otherwise commit the greatest legal progress within the existing fan.
+        # If all candidates fail, declare
         # ``post_insertion_drc_violation`` for the whole member.
         #
         # Issue #3274 change: previously a single DRC failure on the
@@ -1139,11 +1140,14 @@ def _tune_match_group_single_ended(
                 if other_id != net_id and other_id in routes_by_net
             }
 
-            # Try the candidates in rank order.  Commit the first one
-            # whose trombone passes the post-insertion DRC self-check.
+            # Try the existing bounded candidate/amplitude fan in rank order.
+            # A small legal insert must not consume the last insertion budget
+            # before a later host with enough legal capacity is considered.
             # Track the LAST failure reason so we can surface a
             # diagnostic if every candidate fails.
             committed_this_attempt = False
+            best_candidate = None
+            best_skew = current_skew
             last_failure_reason = ""
             last_failure_message = ""
 
@@ -1275,22 +1279,25 @@ def _tune_match_group_single_ended(
                         )
                         continue  # try the next (smaller) amplitude
 
-                    # Commit this candidate.
-                    current_route = candidate_route
-                    per_member_result.inserts_applied += 1
-                    total_inserts_committed += 1
-                    committed_this_attempt = True
+                    candidate_skew = abs(target_length - _measure(candidate_route))
+                    if candidate_skew < best_skew:
+                        best_candidate = candidate_route
+                        best_skew = candidate_skew
+                    if best_skew <= tolerance_mm:
+                        break  # A full fit needs no further candidate search.
 
-                    new_length = _measure(current_route)
-                    current_skew = abs(target_length - new_length)
+                if best_skew <= tolerance_mm:
+                    break
 
-                    if current_skew <= tolerance_mm:
-                        per_member_result.success = True
-                        per_member_result.reason = "tuned"
-                    break  # exit amplitude ladder on successful commit
-
-                if committed_this_attempt:
-                    break  # exit candidate loop on successful commit
+            if best_candidate is not None:
+                current_route = best_candidate
+                current_skew = best_skew
+                per_member_result.inserts_applied += 1
+                total_inserts_committed += 1
+                committed_this_attempt = True
+                if current_skew <= tolerance_mm:
+                    per_member_result.success = True
+                    per_member_result.reason = "tuned"
 
             if not committed_this_attempt:
                 # Every candidate in this attempt failed.  Surface the
