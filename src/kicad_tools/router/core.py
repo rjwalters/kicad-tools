@@ -15223,7 +15223,7 @@ class Autorouter:
         pitches = self.component_pitches
         for pad in self.all_pads or self.pads.values():
             self.grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
-        if self.placement_disposition is not None or getattr(self, "_plane_access_routes", ()):
+        if self.placement_disposition is not None or bool(getattr(self, "_plane_access_routes", ())):
             for route in self.existing_routes:
                 self._mark_route(route)
         self.routes = []

@@ -9,9 +9,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from shapely.geometry import LineString, Point
-from shapely.ops import unary_union
-from shapely.prepared import prep
+from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
+from shapely.ops import unary_union  # type: ignore[import-untyped]
+from shapely.prepared import prep  # type: ignore[import-untyped]
 
 from kicad_tools.manufacturers.dru_generator import (
     DRU_FLOORS_BLOCK_BEGIN,
@@ -341,7 +341,7 @@ def find_escape(
 
     pending = [(estimate(point(origin)), 0, 0.0, origin)]
     sequence = 0
-    previous = {origin: None}
+    previous: dict[tuple[int, int], tuple[int, int] | None] = {origin: None}
     costs = {origin: 0.0}
     estimates = {origin: pending[0][0]}
     moves = ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
@@ -361,9 +361,10 @@ def find_escape(
         )
         if on_front or on_via:
             nodes = []
-            while current is not None:
-                nodes.append(point(current))
-                current = previous[current]
+            cursor: tuple[int, int] | None = current
+            while cursor is not None:
+                nodes.append(point(cursor))
+                cursor = previous[cursor]
             nodes.reverse()
             corners = [nodes[0]]
             for a, b, c in zip(nodes, nodes[1:], nodes[2:], strict=False):

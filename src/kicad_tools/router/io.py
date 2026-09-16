@@ -4339,7 +4339,9 @@ def load_pcb_for_routing(
 
     # Keep real pad IDs in obstacle geometry but remove plane routing targets.
     for name in access_nets:
-        router.nets.pop(net_map.get(name), None)
+        access_net_number = net_map.get(name)
+        if access_net_number is not None:
+            router.nets.pop(access_net_number, None)
 
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more

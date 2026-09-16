@@ -52,7 +52,7 @@ def reuse_same_net_vias(
             continue
         _, other = min(eligible, key=lambda item: item[0])
         other_lo, other_hi = _physical_span(other)
-        widths = {}
+        widths: dict[Layer, float] = {}
         ambiguous_contact = False
         for segment in route.segments:
             if any(

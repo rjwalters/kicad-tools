@@ -10,9 +10,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from shapely.affinity import translate
-from shapely.geometry import LineString, Point
+from shapely.affinity import translate  # type: ignore[import-untyped]
+from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
 
 from kicad_tools.pcb.board_geometry import BoardGeometry
 from kicad_tools.schema.pcb import PCB
@@ -22,6 +23,9 @@ from .fixed_copper import FixedFill, FixedFillObstacles
 from .layers import Layer
 from .primitives import Route, Segment, Via
 
+if TYPE_CHECKING:
+    from shapely.geometry.base import BaseGeometry  # type: ignore[import-untyped]
+
 
 @dataclass(frozen=True)
 class PlaneAccessTarget:
@@ -29,7 +33,7 @@ class PlaneAccessTarget:
 
     net_name: str
     layer: str
-    region: object | None = None
+    region: BaseGeometry | None = None
 
 
 @dataclass(frozen=True)
@@ -76,8 +80,8 @@ def install_plane_access(router, pcb_path, net_map, policy: PlaneAccessPolicy) -
     for target in policy.targets:
         if net_map.get(target.net_name, 0) <= 0:
             raise ValueError(f"Unknown plane access net: {target.net_name}")
-        target_layer = Layer.from_kicad_name(target.layer)
-        if target_layer not in {layer.layer_enum for layer in router.grid.layer_stack.layers}:
+        target_layer_enum = Layer.from_kicad_name(target.layer)
+        if target_layer_enum not in {layer.layer_enum for layer in router.grid.layer_stack.layers}:
             raise ValueError(f"Plane access layer absent from routing stack: {target.layer}")
         region = world if target.region is None else target.region.intersection(world)
         if region.is_empty:
@@ -123,7 +127,9 @@ def install_plane_access(router, pcb_path, net_map, policy: PlaneAccessPolicy) -
                         (fp.reference, index, center, pad.net_name, layer, region, target.layer)
                     )
 
-    segments, vias, planned = [], [], []
+    segments: list[tuple[BaseGeometry, str, str]] = []
+    vias: list[tuple[Point, str, float, float]] = []
+    planned: list[Route] = []
     for ref, index, start, name, layer, region, target_layer in candidates:
         escape = find_escape(
             start,
@@ -147,7 +153,16 @@ def install_plane_access(router, pcb_path, net_map, policy: PlaneAccessPolicy) -
         route = Route(net=number, net_name=name, is_escape=True)
         for a, b in zip(escape.points, escape.points[1:], strict=False):
             route.segments.append(
-                Segment(*a, *b, rules.width, Layer.from_kicad_name(layer), number, name)
+                Segment(
+                    x1=a[0],
+                    y1=a[1],
+                    x2=b[0],
+                    y2=b[1],
+                    width=rules.width,
+                    layer=Layer.from_kicad_name(layer),
+                    net=number,
+                    net_name=name,
+                )
             )
             segments.append((LineString([a, b]).buffer(rules.width / 2), name, layer))
         x, y = escape.points[-1]

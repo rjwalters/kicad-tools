@@ -2999,9 +2999,9 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
-        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
-        self.last_validated_departure_path: list[tuple[int, int, int, int, int, int, bool]] = []
-        self.last_departure_prefix_progress: int = 0
+        self.last_best_cpp_path = []
+        self.last_validated_departure_path = []
+        self.last_departure_prefix_progress = 0
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The
