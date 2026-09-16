@@ -16129,12 +16129,13 @@ class Autorouter:
         """
         if not skip_cleanup:
             self.cleanup_artifacts()
-        access = ()
+        output = "\n\t".join(route.to_sexp(name_only=name_only) for route in self.routes)
         if getattr(self, "_plane_access_routes", ()):
-            from .plane_access import export_plane_access
+            from .plane_access import export_plane_access, serialize_plane_access
 
-            access = export_plane_access(self)
-        return "\n\t".join(route.to_sexp(name_only=name_only) for route in [*self.routes, *access])
+            access = serialize_plane_access(export_plane_access(self), name_only=name_only)
+            output = "\n\t".join(part for part in (output, access) if part)
+        return output
 
     def get_statistics(self, nets_to_route_ids: set[int] | None = None) -> dict:
         """Get routing statistics including congestion metrics.

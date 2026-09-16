@@ -105,7 +105,7 @@ def test_partial_and_replanning_requests_fail_closed(board):
     board.write_text(
         board.read_text().rstrip().removesuffix(")") + router.to_sexp(skip_cleanup=True) + ")"
     )
-    with pytest.raises(ValueError, match="unrouted board"):
+    with pytest.raises(ValueError, match="fixed plane access metadata"):
         load(board)
 
 
@@ -197,3 +197,13 @@ def test_absent_plane_layer_rejected(board):
                 (PlaneAccessTarget("GND", "In3.Cu"),), EscapeRules()
             ),
         )
+
+
+@pytest.mark.parametrize("load_existing", [False, True])
+def test_serialized_reload_cannot_drop_access_policy(board, load_existing):
+    router, _ = load(board)
+    emitted = router.to_sexp(skip_cleanup=True)
+    board.write_text(board.read_text().rstrip().removesuffix(")") + emitted + ")")
+    assert '(group "kct:fixed-plane-access:v1"' in board.read_text()
+    with pytest.raises(ValueError, match="fixed plane access metadata"):
+        load_pcb_for_routing(str(board), load_existing_routes=load_existing, force_python=True)

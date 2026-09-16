@@ -3872,6 +3872,11 @@ def load_pcb_for_routing(
         ...     load_existing_routes=True)
     """
     pcb_text = Path(pcb_path).read_text()
+    if re.search(r'\(group\s+"kct:fixed-plane-access:', pcb_text):
+        raise ValueError(
+            "Cannot continue routing a board with fixed plane access metadata; "
+            "reload the original unrouted board with its PlaneAccessPolicy"
+        )
     skip_nets = skip_nets or []
     # Access copper requires authored physical identities, complete board geometry,
     # and an unrouted source. Unsupported partial/override contexts fail closed.

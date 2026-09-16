@@ -291,3 +291,21 @@ def _validate_access_clearances(access, signal_routes, rules):
                     )
                     if line.distance(Point(via.x, via.y)) < required - 1e-4:
                         raise ValueError("Via violates fixed plane access stub clearance")
+
+
+def serialize_plane_access(routes, *, name_only=False):
+    """Tag access copper so reload cannot silently discard its stronger policy.
+
+    KiCad preserves this ordinary named group across native save/refill. The
+    loader refuses continuation until it can reconstruct the full policy; the
+    original unrouted source remains the supported entry point for a reroute.
+    """
+    import re
+    import uuid
+
+    if not routes:
+        return ""
+    copper = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+    members = " ".join(f'"{value}"' for value in re.findall(r'\(uuid "([^"]+)"\)', copper))
+    group = f'(group "kct:fixed-plane-access:v1" (uuid "{uuid.uuid4()}") (members {members}))'
+    return copper + "\n\t" + group
