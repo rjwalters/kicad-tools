@@ -51,7 +51,8 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 27
+_REQUIRED_CPP_BUILD_VERSION = 39
+
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -831,6 +832,7 @@ class CppGrid:
         # Initialize layer mappings (identity by default, overridden by from_routing_grid)
         self._index_to_layer: dict[int, int] = {i: i for i in range(layers)}
         self._layer_to_index: dict[int, int] = {i: i for i in range(layers)}
+        self._off_grid_stored_segments: list = []
         # Routable layer indices (all layers by default, refined by from_routing_grid)
         self._routable_layers: list[int] = list(range(layers))
         # Reference to original Python grid (set by from_routing_grid for
@@ -1072,6 +1074,10 @@ class CppGrid:
                 pad.shape == "circle",
             )
 
+        cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
+        for hole in grid._component_hole_index.holes:
+            cpp_grid._impl.add_component_hole(*hole)
+
         from .grid import _sync_pad_via_policies
 
         _sync_pad_via_policies(grid, cpp_grid)
@@ -1174,6 +1180,7 @@ class CppGrid:
         """
         self._impl.clear_stored_routes()
         self._synced_route_count = 0
+        self._off_grid_stored_segments.clear()
 
 
 class CppPathfinder:
@@ -1257,6 +1264,8 @@ class CppPathfinder:
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.min_drill_clearance = rules.min_drill_clearance
+        cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -1513,6 +1522,14 @@ class CppPathfinder:
                 Pass ``None`` or ``[]`` to clear.
         """
         self._pad_channel_budgets = list(budgets) if budgets else []
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Mirror changed physical drills before the next native via query."""
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is not None:
+            py_grid.refresh_component_holes()
+        if self._py_router is not None:
+            self._py_router.clear_via_cache()
 
     def enable_per_call_timing(self, enabled: bool = True) -> None:
         """Enable or disable per-A*-call wall-clock instrumentation.
@@ -1840,13 +1857,16 @@ class CppPathfinder:
         threshold = self._rules.fine_pitch_threshold
         if (
             trace_width is not None
+            and not pad.escape_terminal
             and (
                 self._rules.strict_pad_clearance
                 or (pitch is not None and threshold is not None and pitch < threshold)
             )
             and not self._same_component_carveout_eligible(py_grid, pad.component_key)
         ):
-            # Pad-center tails emit the configured local neck-down width.
+            # Physical pad-center tails emit the local neck-down width.
+            # Escape terminals already bound committed conductor copper;
+            # shrinking them again can erase every seed (Board 04, #5398).
             # Eroding by the wider trunk can erase every legal narrow-pad seed.
             seed_width = trace_width
             if self._rules.should_apply_neck_down(pad.ref, pitch):
@@ -1881,10 +1901,14 @@ class CppPathfinder:
         # branch points) lost every Steiner-incident edge this way, on
         # every route of the board.  Clamp empty spans to the nearest
         # grid cell so a degenerate pad always seeds exactly one cell.
-        if gx1 > gx2:
+        # Escape terminals describe actual conductor copper, unlike virtual
+        # Steiner points. Empty bounds must remain empty: the native search
+        # can fail immediately and use the Python off-grid waypoint fallback,
+        # without granting a clearance waiver at a nearby bare-board cell.
+        if gx1 > gx2 and not pad.escape_terminal:
             gc = int(round((pad.x - origin_x) / resolution))
             gx1 = gx2 = max(0, min(self._grid.cols - 1, gc))
-        if gy1 > gy2:
+        if gy1 > gy2 and not pad.escape_terminal:
             gc = int(round((pad.y - origin_y) / resolution))
             gy1 = gy2 = max(0, min(self._grid.rows - 1, gc))
 
@@ -2217,6 +2241,15 @@ class CppPathfinder:
             self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
         if hasattr(self._impl, "set_search_fill_clearances"):
             self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
+
+        if self._grid._py_grid is not None:
+            self._sync_stored_routes(self._grid._py_grid)
+        self._impl.set_search_partner_clearance(
+            partner_net_id,
+            net_class.effective_intra_pair_clearance()
+            if net_class and partner_net_id >= 0
+            else -1.0,
+        )
 
         try:
             result = self._impl.route_resumable(
@@ -2933,14 +2966,14 @@ class CppPathfinder:
 
         cpp_vias: list[router_cpp.Via] = []
         for via in route.vias:
-            cv = router_cpp.Via()
-            cv.x, cv.y = via.x, via.y
-            cv.drill = via.drill
-            cv.diameter = via.diameter
-            cv.layer_from = self._grid.layer_to_index(via.layers[0].value)
-            cv.layer_to = self._grid.layer_to_index(via.layers[1].value)
-            cv.net = via.net
-            cpp_vias.append(cv)
+            for layer_from, layer_to in self._project_via_spans(via.layers):
+                cv = router_cpp.Via()
+                cv.x, cv.y = via.x, via.y
+                cv.drill = via.drill
+                cv.diameter = via.diameter
+                cv.layer_from, cv.layer_to = layer_from, layer_to
+                cv.net = via.net
+                cpp_vias.append(cv)
 
         # Issue #2587 / Phase 1C-cont: Resolve partner net id for the source
         # net so the C++ validator does not reject within-pair edges of a
@@ -2993,10 +3026,28 @@ class CppPathfinder:
             partner_net_id,
             intra_pair_clearance,
             clamp_ref_hashes,
+            self._rules.min_hole_to_hole,
         )
 
         if not vresult.valid:
             return (vresult.violation_x, vresult.violation_y)
+
+        # A selected-layer grid has no native planar slot for omitted copper.
+        # A physical via can still cross that copper between its endpoints.
+        # Retain the scalar guard in physical layer space for those segments;
+        # full-stack grids keep the native path alone. Pairwise widening below
+        # continues to cover the same complete Python route collection.
+        if route.vias and self._grid._off_grid_stored_segments:
+            from .via_clearance import via_clears_foreign_segment
+
+            for segment in self._grid._off_grid_stored_segments:
+                if segment.net == start.net:
+                    continue
+                for via in route.vias:
+                    if not via_clears_foreign_segment(
+                        via, segment, trace_clearance=self._rules.via_clearance
+                    ):
+                        return (via.x, via.y)
 
         # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
         # post-check.  ``validate_route`` already walks the C++ side's
@@ -3471,6 +3522,34 @@ class CppPathfinder:
         """Number of nodes explored in last route."""
         return self._impl.nodes_explored
 
+    def _project_via_spans(self, layers) -> list[tuple[int, int]]:
+        """Project physical copper onto contiguous runs of selected grid indices.
+
+        CopperLayer values are in physical stack order (F through inner to B),
+        unlike the dense indices of a selected-layer grid. Reordered stacks
+        may require multiple runs: an intervening grid index is not necessarily
+        an intervening physical layer. Keep an off-grid sentinel when no layer
+        is selected; native global via/drill spacing still needs that hole.
+        """
+        lo, hi = sorted(layer.value for layer in layers)
+        indices = sorted(
+            index for value, index in self._grid._layer_to_index.items() if lo <= value <= hi
+        )
+        if not indices:
+            return [(self._grid.num_layers, self._grid.num_layers)]
+        spans = []
+        start = previous = indices[0]
+        for index in indices[1:]:
+            if index != previous + 1:
+                spans.append((start, previous))
+                start = index
+            previous = index
+        spans.append((start, previous))
+        # Preserve the original endpoint order on ordinary full-stack calls.
+        if layers[0].value > layers[1].value:
+            spans = [(end, start) for start, end in reversed(spans)]
+        return spans
+
     def _sync_stored_routes(self, py_grid: RoutingGrid) -> None:
         """Sync stored segments and vias from completed routes to C++.
 
@@ -3485,7 +3564,12 @@ class CppPathfinder:
         # Add segments/vias from newly completed routes
         for route in py_grid.routes[self._grid._synced_route_count :]:
             for seg in route.segments:
-                layer_idx = py_grid.layer_to_index(seg.layer.value)
+                layer_idx = self._grid._layer_to_index.get(seg.layer.value)
+                if layer_idx is None:
+                    # No planar copper on an active layer. Candidate vias
+                    # still check this physical segment in final validation.
+                    self._grid._off_grid_stored_segments.append(seg)
+                    continue
                 self._grid._impl.add_stored_segment(
                     seg.x1,
                     seg.y1,
@@ -3494,15 +3578,22 @@ class CppPathfinder:
                     seg.width,
                     layer_idx,
                     seg.net,
+                    (
+                        *py_grid.world_to_grid(seg.x1, seg.y1),
+                        *py_grid.world_to_grid(seg.x2, seg.y2),
+                    ),
                 )
             for via in route.vias:
-                self._grid._impl.add_stored_via(
-                    via.x,
-                    via.y,
-                    via.drill,
-                    via.diameter,
-                    via.net,
-                )
+                for span in self._project_via_spans(via.layers):
+                    self._grid._impl.add_stored_via(
+                        via.x,
+                        via.y,
+                        via.drill,
+                        via.diameter,
+                        via.net,
+                        py_grid.world_to_grid(via.x, via.y),
+                        *span,
+                    )
 
         self._grid._synced_route_count = current_count
 
@@ -3864,6 +3955,8 @@ class CppCoupledPathfinder:
         cpp_rules.via_drill = float(rules.via_drill)
         cpp_rules.via_diameter = float(rules.via_diameter)
         cpp_rules.via_clearance = float(rules.via_clearance)
+        cpp_rules.min_drill_clearance = float(rules.min_drill_clearance)
+        cpp_rules.min_hole_to_hole = float(rules.min_hole_to_hole)
         cpp_rules.grid_resolution = float(rules.grid_resolution)
         cpp_rules.cost_straight = float(rules.cost_straight)
         cpp_rules.cost_turn = float(rules.cost_turn)

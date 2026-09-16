@@ -209,3 +209,134 @@ def test_invalid_project_dimensions_fail_closed(tmp_path, value):
     p.write_text(json.dumps({"board": {"design_settings": {"rules": {"min_clearance": value}}}}))
     with pytest.raises(ValueError, match="finite nonnegative"):
         escape.EscapeRules.from_project(p)
+
+
+@pytest.fixture
+def pour_recipe(monkeypatch):
+    root = Path(__file__).resolve().parents[1] / "boards/06-diffpair-test"
+    # Board scripts use sibling imports; isolate them from other recipe tests.
+    for name in ("generate_pcb", "generate_schematic", "generate_design", "pour_escape"):
+        module_spec = importlib.util.spec_from_file_location(name, root / f"{name}.py")
+        module = importlib.util.module_from_spec(module_spec)
+        monkeypatch.setitem(sys.modules, name, module)
+        module_spec.loader.exec_module(module)
+    return sys.modules["generate_design"]
+
+
+def _write_isolated_via_board(path):
+    """Two power islands separated by a foreign trace on every copper layer."""
+    lines = [
+        '(kicad_pcb (version 20240108) (generator "test")',
+        "  (general (thickness 1.6))",
+        '  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))',
+        '  (net 0 "") (net 1 "+3V3") (net 2 "barrier")',
+        "  (gr_rect (start 98.5 47.5) (end 198.5 127.5) "
+        '(stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))',
+    ]
+    # Primary has two pads; the stranded pad already has a legal via and
+    # a small B.Cu fill island. Every fixed straight bridge hits the barrier.
+    for ref, x, layer in (("U1", 110, "F.Cu"), ("J1", 120.5, "B.Cu"), ("J2", 121.5, "B.Cu")):
+        lines.append(
+            f'  (footprint "test:pad" (layer "{layer}") (at {x} 70) '
+            f'(property "Reference" "{ref}" (at 0 0) (layer "F.SilkS")) '
+            f'(pad "1" smd circle (at 0 0) (size 0.3 0.3) '
+            f'(layers "{layer}") (net 1 "+3V3")))'
+        )
+    lines += [
+        "  (segment (start 110 70) (end 110.7 70) (width 0.2) "
+        '(layer "F.Cu") (net 1) (uuid "existing-stub"))',
+        "  (via (at 110.7 70) (size 0.5) (drill 0.3) "
+        '(layers "F.Cu" "B.Cu") (net 1) (uuid "existing-via"))',
+    ]
+    for layer in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+        lines.append(
+            f"  (segment (start 115 67) (end 115 73) (width 0.4) "
+            f'(layer "{layer}") (net 2) (uuid "barrier-{layer}"))'
+        )
+    for x1, y1, x2, y2 in ((109.8, 69.6, 111.1, 70.4), (120, 69, 122, 71)):
+        pts = f"(pts (xy {x1} {y1}) (xy {x2} {y1}) (xy {x2} {y2}) (xy {x1} {y2}))"
+        lines.append(
+            '  (zone (net 1) (net_name "+3V3") (layer "B.Cu") '
+            f'(fill yes) (polygon {pts}) (filled_polygon (layer "B.Cu") {pts}))'
+        )
+    path.write_text("\n".join(lines) + "\n)\n")
+    path.with_suffix(".kicad_pro").write_text(
+        json.dumps(
+            {
+                "board": {
+                    "design_settings": {
+                        "rules": {
+                            "min_clearance": 0.2,
+                            "min_track_width": 0.2,
+                            "min_through_hole_diameter": 0.3,
+                            "min_via_annular_width": 0.1,
+                            "min_hole_to_hole": 0.5,
+                        }
+                    }
+                }
+            }
+        )
+    )
+
+
+def test_repair_escapes_pad_with_existing_via_on_isolated_fill(tmp_path, pour_recipe, capsys):
+    from shapely.ops import unary_union
+
+    board = tmp_path / "island.kicad_pcb"
+    _write_isolated_via_board(board)
+    before_text = board.read_text()
+    project = board.with_suffix(".kicad_pro")
+    before_rules = project.read_bytes()
+    rules = escape.EscapeRules.from_project(project)
+    _, before_segments, before_vias = pour_recipe._parse_copper(before_text)
+    before = pour_recipe._audit_pour_nets(board, ["+3V3"])["+3V3"]
+    assert not before["connected"] and len(before["pad_groups"]) == 2
+    assert len(before_vias) == 1
+
+    placed_vias, bridges = pour_recipe._repair_pour_connectivity(board, ["+3V3"])
+
+    assert placed_vias == 1 and bridges == 1
+    assert "Grid escape: +3V3 U1.1" in capsys.readouterr().out
+    assert pour_recipe._audit_pour_nets(board, ["+3V3"])["+3V3"]["connected"]
+    after_text = board.read_text()
+    _, segments, vias = pour_recipe._parse_copper(after_text)
+    added_segments = segments[len(before_segments) :]
+    added_vias = vias[len(before_vias) :]
+    assert len(added_segments) > 1 and len(added_vias) == 1
+    assert all(seg["net"] == "+3V3" and seg["layer"] == "F.Cu" for seg in added_segments)
+    assert all(seg["w"] == pytest.approx(rules.width) for seg in added_segments)
+    via = added_vias[0]
+    assert via["size"] == pytest.approx(rules.diameter)
+    assert via["drill"] == pytest.approx(rules.drill)
+    assert (via["size"] - via["drill"]) / 2 == pytest.approx(rules.annulus)
+
+    # Independently check the committed copper forms a complete path from
+    # U1 to the new via, which actually contacts the primary B.Cu fill.
+    copper = unary_union(
+        [
+            LineString([(seg["x1"], seg["y1"]), (seg["x2"], seg["y2"])]).buffer(seg["w"] / 2)
+            for seg in added_segments
+        ]
+    )
+    via_point = Point(via["x"], via["y"])
+    assert copper.geom_type == "Polygon"
+    assert copper.intersects(Point(110, 70)) and copper.intersects(via_point)
+    assert via_point.buffer(via["size"] / 2).intersects(box(120, 69, 122, 71))
+    barrier = LineString([(115, 67), (115, 73)]).buffer(0.2)
+    assert copper.distance(barrier) >= rules.clearance - 1e-6
+    assert via_point.buffer(via["size"] / 2).distance(barrier) >= rules.clearance
+    old_via = before_vias[0]
+    assert (
+        via_point.distance(Point(old_via["x"], old_via["y"]))
+        - (via["drill"] + old_via["drill"]) / 2
+        >= rules.hole_gap
+    )
+    for x in (110, 120.5, 121.5):
+        assert not via_point.buffer(via["size"] / 2).intersects(Point(x, 70).buffer(0.15))
+
+    # Existing authored geometry and constraints are preserved byte-for-byte.
+    for kind in ("footprint", "segment", "via", "zone"):
+        assert all(
+            block in after_text for block in pour_recipe._find_sexp_blocks(before_text, f"({kind}")
+        )
+    assert project.read_bytes() == before_rules

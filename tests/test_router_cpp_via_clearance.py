@@ -119,11 +119,9 @@ class TestViaViaClearanceRegression:
         assert pathfinder._impl.is_via_blocked(gx, gy, 1, True, 0)
 
     def test_stored_via_does_not_block_candidate_at_safe_distance(self):
-        """A candidate via at exactly ``via_diameter + via_clearance``
-        from a stored via must NOT be refused (boundary case).
+        """A candidate satisfying copper AND drill spacing must be accepted.
 
-        The post-route validator accepts this distance -- the search
-        must not refuse it either.
+        Copper clearance alone does not waive the independent hole floor.
         """
         grid, rules = _make_grid_and_rules()
         cpp_grid = CppGrid.from_routing_grid(grid)
@@ -138,7 +136,17 @@ class TestViaViaClearanceRegression:
         # ``via_clearance``.  Add a small epsilon in mm so that grid
         # quantisation (resolution = 0.1mm) does not nudge us inside the
         # keepout.
-        sep_mm = rules.via_diameter + rules.via_clearance + 0.05
+        # The 0.35mm candidate drill and 0.3mm stored drill require
+        # 0.825mm centre separation under the independent 0.5mm hole floor.
+        # The old copper-only location rounds to 0.8mm and is correctly
+        # rejected by the known-geometry hole check.
+        copper_sep = rules.via_diameter + rules.via_clearance
+        hole_sep = (rules.via_drill + 0.3) / 2 + max(
+            rules.min_hole_to_hole, rules.min_drill_clearance
+        )
+        copper_gx, copper_gy = grid.world_to_grid(5.0 + copper_sep + 0.05, 5.0)
+        assert pathfinder._impl.is_via_blocked(copper_gx, copper_gy, 1, False, 0)
+        sep_mm = max(copper_sep, hole_sep) + 0.05
         gx, gy = grid.world_to_grid(5.0 + sep_mm, 5.0)
 
         # Cells must be empty (no surrounding obstacles) for the geometric

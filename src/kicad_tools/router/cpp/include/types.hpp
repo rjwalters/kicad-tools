@@ -236,9 +236,28 @@ namespace router {
 // enforce that resolved value as a hard floor instead of skipping.
 // v26: reject foreign physical copper when seeding source-pad cells in
 // both one-shot and resumable A*. Clearance halos remain valid exits.
-// v27: tighter differential partner search radii never bypass authored
-// static, pad, or obstacle occupancy (#5482).
-constexpr int ROUTER_CPP_BUILD_VERSION = 27;
+// v27 (Issue #5410): dynamic-route geometry coverage/refinement, the
+// cross-net drill floor, and exact mark-coordinate preservation across the
+// native geometry sync.  This work was developed in parallel with v26 and
+// originally carried its own "v26" bump on the branch; both are real,
+// DISTINCT binding-surface changes, so the rebase resolves to a single v27
+// that is the first build carrying BOTH.  The bump is what forces
+// ``kct build-native`` to discard a stale ``.so`` compiled from either prior
+// v26 state (main's source-pad seeding build, or the branch's own).
+// v28: trace-halo refinement preserves the separate via clearance floor.
+// v29: indexed physical component-hole clearance during via search.
+// v30: final route validation accepts the separate physical component-hole floor.
+// v32: combine physical halo/component-hole refinement with the static
+// differential partner-pad guard (#5482). Version 31 is already used by
+// separate held stored-via/coupled-routing builds; do not accept their binaries.
+// v33: add swept-edge rejection of foreign stored-via copper, retaining
+// the v32 partner-pad and physical halo/component-hole safeguards.
+// v35: combine v33 with the v34 known-geometry via veto for partial coverage.
+// v36: track current counted route occupancy through rip-up.
+// v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
+// v38: integrate the stored-via guard with current occupancy and indexed frontier.
+constexpr int ROUTER_CPP_BUILD_VERSION = 39;
+
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -269,6 +288,9 @@ struct GridCell {
     // ``mark_blocked``.  Route marking never sets this; rip-up uses it
     // to restore static blockage instead of freeing the cell.
     bool static_blocked = false;
+    // True only when this route cell contributes to coarse congestion.
+    // Imported/static cells were never counted and must not decrement it.
+    bool congestion_counted = false;
     // Issue #4071: corridor-reservation owner set (mirrors the Python
     // ``RoutingGrid._reserved_for_nets`` per-cell ``frozenset[int]``).
     // ``reserved_count == 0`` means "not reserved" (fast path).  A
@@ -576,6 +598,7 @@ struct DesignRules {
     float cost_congestion = 5.0f;
     float congestion_threshold = 0.5f;
     float min_drill_clearance = 0.102f;
+    float min_hole_to_hole = 0.5f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the
@@ -625,6 +648,8 @@ struct StoredVia {
     float drill;
     float diameter;
     int net;
+    int layer_from = 0;
+    int layer_to = std::numeric_limits<int>::max();
 };
 
 // Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).

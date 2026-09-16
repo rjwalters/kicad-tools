@@ -13,6 +13,7 @@
 
 #include "types.hpp"
 #include "grid.hpp"
+#include "indexed_astar_queue.hpp"
 #include <vector>
 #include <queue>
 #include <unordered_set>
@@ -242,6 +243,11 @@ public:
         search_via_half_diam_mm_ = via_half_diam_mm;
     }
 
+    void set_search_partner_clearance(int net, float clearance) {
+        physical_partner_pending_ = true;
+        physical_partner_net_ = net;
+        physical_partner_clearance_ = clearance;
+    }
     void set_search_fill_clearances(float trace, float via) {
         search_fill_trace_clearance_ = trace;
         search_fill_via_clearance_ = via;
@@ -335,7 +341,7 @@ public:
     bool is_trace_blocked(int x, int y, int layer, int net, bool allow_sharing,
                           int radius_override = 0,
                           int partner_net = -1,
-                          int partner_radius = 0) const;
+                          int partner_radius = 0, int from_x = -1, int from_y = -1) const;
 
 private:
     // Heuristic: Manhattan distance with layer change cost
@@ -393,6 +399,19 @@ private:
     // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) for
     // the search-time pairwise widening.  See ``set_search_pair_widths``.  0.0
     // => fall back to the global ``rules_`` widths.
+    bool physical_partner_pending_ = false;
+    void begin_route_geometry_context(int partner) {
+        if (!physical_partner_pending_ || physical_partner_net_ != partner) {
+            physical_partner_net_ = -1;
+            physical_partner_clearance_ = -1;
+        }
+        physical_partner_pending_ = false;
+    }
+    int physical_partner_net_ = -1;
+    float physical_partner_clearance_ = -1.0f;
+    bool trace_halo_cell_clear(int cx, int cy, int layer, int x1, int y1,
+                               int x2, int y2, int net, int partner = -1) const;
+    bool via_route_geometry_clear(int x, int y, int net) const;
     float search_trace_half_width_mm_ = 0.0f;
     float search_via_half_diam_mm_ = 0.0f;
     float search_fill_trace_clearance_ = -1.0f;
@@ -507,7 +526,7 @@ private:
     int last_nodes_explored_ = 0;
 
     // --- Resumable A* search state (promoted from route() locals) ---
-    using PQ = std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>>;
+    using PQ = IndexedAStarQueue<GridPosHash>;
     PQ search_open_set_;
     // Issue #3309: Per-net A* hot loop replaced the
     // ``std::unordered_set<tuple<int,int,int>, GridPosHash>`` /

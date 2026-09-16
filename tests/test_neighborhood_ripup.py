@@ -25,6 +25,8 @@ class TestRoutedNetsUnblocker:
     def test_saves_and_restores_blocked_array(self):
         """Context manager should save blocked state on entry and restore on exit."""
         grid = MagicMock()
+        grid._congestion = np.zeros((1, 1, 1), dtype=np.int32)
+        grid._congestion_counted = None
         grid._blocked = np.array([[[True, False, True]]], dtype=np.bool_)
         grid._pad_blocked = np.array([[[False, False, True]]], dtype=np.bool_)
         grid._net = np.array([[[5, 0, 0]]], dtype=np.int32)
@@ -50,6 +52,8 @@ class TestRoutedNetsUnblocker:
     def test_preserves_static_obstacles(self):
         """Pad-blocked cells should remain blocked even when they have a net."""
         grid = MagicMock()
+        grid._congestion = np.zeros((1, 1, 1), dtype=np.int32)
+        grid._congestion_counted = None
         # Cell with pad_blocked=True should never be unblocked
         grid._blocked = np.array([[[True]]], dtype=np.bool_)
         grid._pad_blocked = np.array([[[True]]], dtype=np.bool_)
@@ -62,6 +66,8 @@ class TestRoutedNetsUnblocker:
     def test_unblocks_only_routed_net_cells(self):
         """Only cells with blocked=True, pad_blocked=False, net!=0 should be unblocked."""
         grid = MagicMock()
+        grid._congestion = np.zeros((1, 1, 1), dtype=np.int32)
+        grid._congestion_counted = None
         grid._blocked = np.array([[[True, True, False, True]]], dtype=np.bool_)
         grid._pad_blocked = np.array([[[False, True, False, False]]], dtype=np.bool_)
         grid._net = np.array([[[2, 3, 0, 0]]], dtype=np.int32)

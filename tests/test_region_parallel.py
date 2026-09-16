@@ -413,6 +413,12 @@ class TestRouteAllNegotiatedWithRegionParallel:
         # Initially thread safety should be off
         assert not router_with_nets.grid.thread_safe
 
+        from kicad_tools.router.primitives import Pad
+
+        # Physical-only holes are absent from _pads and must survive the clone.
+        hole = Pad(50, 50, 1, 1, 0, "", through_hole=True, drill=1)
+        router_with_nets.grid.add_component_hole(hole)
+
         # After routing with region_parallel, grid should have thread safety.
         # Disable the Issue #3100 auto-gate so the parallel path actually runs
         # on the 4-net fixture.
@@ -425,6 +431,7 @@ class TestRouteAllNegotiatedWithRegionParallel:
         )
 
         assert router_with_nets.grid.thread_safe
+        assert not router_with_nets.grid._component_hole_index.clear(50.7, 50, 0.3, 0.5)
 
 
 class TestRegionParallelAutoGate:

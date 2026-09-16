@@ -9,10 +9,14 @@
 #pragma once
 
 #include "types.hpp"
+#include <array>
 #include <vector>
 #include <cmath>
 #include <algorithm>
 #include <map>
+#include <set>
+#include <tuple>
+#include <optional>
 
 namespace router {
 
@@ -260,14 +264,40 @@ public:
                  bool is_plane_net = false, float rotation = 0.0f,
                  bool is_circular = false);
 
+    void set_component_holes_known(bool known) { component_holes_known_ = known; }
+    void clear_component_holes();
+    void add_component_hole(float x1, float y1, float x2, float y2, float radius);
+    bool component_holes_clear(float x, float y, float drill, float clearance) const;
+
     void set_pad_via_policy(size_t index, float clearance, bool carveout_eligible);
 
     // Register a completed route's segments for clearance validation.
     void add_stored_segment(float x1, float y1, float x2, float y2,
-                            float width, int layer_idx, int net);
+                            float width, int layer_idx, int net,
+                            std::optional<std::tuple<int, int, int, int>> grid_endpoints = std::nullopt);
 
     // Register a completed route's via for clearance validation.
-    void add_stored_via(float x, float y, float drill, float diameter, int net);
+    void add_stored_via(float x, float y, float drill, float diameter, int net,
+                        std::optional<std::pair<int, int>> grid_center = std::nullopt,
+                        int layer_from = 0, int layer_to = -1);
+
+    // Global completeness is diagnostic. A cell is refinable only when all
+    // active marks covering it have registered physical geometry. Unknown
+    // overlaps remain hard even when another mark owns the visible cell.
+    // Clearing validation geometry invalidates coverage immediately.
+    bool route_geometry_complete() const;
+    bool route_cell_has_geometry(int x, int y, int layer) const;
+    bool route_trace_geometry_clear(const Segment& segment, float clearance,
+                                    int partner_net, float partner_clearance, float via_clearance) const;
+    // Hard constraint for negotiated traces; foreign trace copper remains soft.
+    bool trace_stored_vias_clear(const Segment& segment, float clearance,
+                                 int partner_net, float partner_clearance) const;
+    bool route_via_geometry_clear(const Via& via, float clearance,
+                                  float hole_clearance, float same_net_drill_clearance) const;
+    // Broad-phase candidates whose copper bounding boxes share two-mm bins
+    // with the supplied world-coordinate box. Exact geometry remains required.
+    std::pair<std::vector<size_t>, std::vector<size_t>> route_geometry_candidates(
+        float minx, float miny, float maxx, float maxy) const;
 
     // Clear all stored validation data (pads, segments, vias).
     void clear_validation_data();
@@ -340,6 +370,8 @@ public:
     // keyed on the layer the compared copper shares (via-vs-via, where no
     // single layer applies, stays layer-agnostic; the segment-vs-pad branch
     // keys on the pad's own layer, so a through-hole pad stays agnostic too).
+    // min_hole_clearance is the component-hole floor, independent of the
+    // same-net via merge floor; negative retains the legacy caller fallback.
     ValidationResult validate_route(
         const std::vector<Segment>& segments,
         const std::vector<Via>& vias,
@@ -350,7 +382,8 @@ public:
         float min_drill_clearance,
         int partner_net = -1,
         float intra_pair_clearance = 0.0f,
-        const std::vector<uint32_t>& clamp_ref_hashes = {}) const;
+        const std::vector<uint32_t>& clamp_ref_hashes = {},
+        float min_hole_clearance = -1.0f) const;
 
     // -----------------------------------------------------------------------
     // Pairwise (HV-isolation) domain clearance -- Issue #4510, Phase 2a of
@@ -455,6 +488,26 @@ private:
     std::vector<int> congestion_;
     int congestion_cols_, congestion_rows_;
     int congestion_size_ = 8;  // Cells per congestion region
+
+    using RouteMarkKey = std::tuple<int, int, int, int, int, int, int, int>;
+    static RouteMarkKey segment_mark_key(int x1, int y1, int x2, int y2,
+                                         int layer, int net, int radius = 0);
+    static RouteMarkKey via_mark_key(int x, int y, int net, int radius = 0);
+    std::map<RouteMarkKey, size_t> active_route_marks_;
+    std::set<RouteMarkKey> registered_route_geometry_;
+    mutable bool route_coverage_dirty_ = true;
+    mutable bool route_coverage_complete_ = false;
+    mutable std::vector<int32_t> route_geometry_cells_;
+    void record_route_mark(const RouteMarkKey& key, bool add);
+
+    using GeometryBins = std::map<std::pair<int, int>, std::vector<size_t>>;
+    bool component_holes_known_ = true;
+    GeometryBins component_hole_bins_;
+    std::vector<std::array<float, 5>> component_holes_;
+    GeometryBins route_segment_bins_;
+    GeometryBins route_via_bins_;
+    static void index_route_geometry(GeometryBins& bins, size_t index,
+                                     float minx, float miny, float maxx, float maxy);
 
     // Geometric validation storage (Issue #2439)
     std::vector<PadInfo> pads_;

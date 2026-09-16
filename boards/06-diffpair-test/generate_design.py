@@ -393,6 +393,69 @@ def _generate_uuid() -> str:
             return identity
 
 
+def _pour_fill_components(pcb, net_names: list[str]) -> tuple[dict, dict]:
+    """World-coordinate fill solids with canonical zone/encoding provenance.
+
+    A solid same-zone outline contact is not a native saved-file electrical
+    bond (#5362/#5382), even when two outlines overlap. Retain zone identity
+    and the version-aware stroke inflation so audit and repair agree with
+    ConnectivityValidator instead of treating every intersection as copper.
+    """
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    fills = {net: [] for net in net_names}
+    zero_fills = dict.fromkeys(net_names, 0)
+    ox, oy = pcb.board_origin
+    for zone_id, zone in enumerate(pcb.zones):
+        if zone.net_name not in fills:
+            continue
+        if zone.is_filled and not zone.filled_polygons:
+            zero_fills[zone.net_name] += 1
+        for index, points in enumerate(zone.filled_polygons):
+            region = ConnectivityValidator._fill_solid_region([(x + ox, y + oy) for x, y in points])
+            if region is None:
+                continue
+            solids = region.geoms if region.geom_type == "MultiPolygon" else [region]
+            for solid in solids:
+                fills[zone.net_name].append(
+                    (
+                        solid,
+                        frozenset({zone.filled_polygon_layer(index)}),
+                        zone_id,
+                        zone.fill_inflation(),
+                    )
+                )
+    return fills, zero_fills
+
+
+def _pour_connected_pairs(elements: list, fills: list):
+    """Physical edges; fill records correspond to the first elements."""
+    from shapely.strtree import STRtree
+
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    geoms = [elem[0] for elem in elements]
+    if geoms:
+        left, right = STRtree(geoms).query(geoms, predicate="intersects")
+        for i, j in zip(left.tolist(), right.tolist(), strict=True):
+            if i >= j or not elements[i][1] & elements[j][1]:
+                continue
+            if i < len(fills) and j < len(fills) and fills[i][2] == fills[j][2]:
+                continue  # Same-zone adjacency depends on the stored fill encoding.
+            yield i, j
+    zones: dict[int, list[int]] = {}
+    for i, (_, _, zone_id, inflation) in enumerate(fills):
+        if inflation > 0:
+            zones.setdefault(zone_id, []).append(i)
+    for indices in zones.values():
+        for a, b in ConnectivityValidator._adjacent_fill_pairs(
+            [fills[i][0] for i in indices],
+            [next(iter(fills[i][1])) for i in indices],
+            2 * fills[indices[0]][3],
+        ):
+            yield indices[a], indices[b]
+
+
 def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     """Geometric per-net copper-connectivity audit (PR #3481 pattern).
 
@@ -428,8 +491,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     import math
     import re
 
-    from shapely.geometry import LineString, Point, Polygon
-    from shapely.strtree import STRtree
+    from shapely.geometry import LineString, Point
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -468,27 +530,8 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         lo, hi = min(indices), max(indices)
         return frozenset(copper_layer_order[lo : hi + 1])
 
-    # Zone fills per net (+ zero-fill bookkeeping for the explicit gate).
-    fills: dict[str, list] = {n: [] for n in net_names}
-    zero_fill_zones: dict[str, int] = dict.fromkeys(net_names, 0)
-    for zone in _find_sexp_blocks(text, "\n\t(zone") + _find_sexp_blocks(text, "\n  (zone"):
-        # The zone's net is serialized as ``(net "NAME")`` by the
-        # ``zones fill`` round-trip writer and as ``(net N)`` +
-        # ``(net_name "NAME")`` by KiCad itself -- accept both.
-        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(r'\(net "([^"]*)"\)', zone)
-        if not m or m.group(1) not in fills:
-            continue
-        net = m.group(1)
-        polys = _find_sexp_blocks(zone, "(filled_polygon")
-        if "(fill yes" in zone and not polys:
-            zero_fill_zones[net] += 1
-        for block in polys:
-            lay = re.search(r'\(layer "([^"]*)"\)', block).group(1)
-            pts = re.findall(r"\(xy ([\d.-]+) ([\d.-]+)\)", block)
-            poly = Polygon([(float(a), float(b)) for a, b in pts])
-            if not poly.is_valid:
-                poly = poly.buffer(0)
-            fills[net].append((poly, frozenset({lay})))
+    analyzer = NetStatusAnalyzer(pcb_path)
+    fills, zero_fill_zones = _pour_fill_components(analyzer.pcb, net_names)
 
     # Segments (actual width) and via barrels per net.
     net_ids = dict(re.findall(r'\(net (\d+) "([^"]*)"\)', text))
@@ -525,7 +568,6 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         )
 
     # Pads (absolute sheet coordinates via the analyzer's PCB model).
-    analyzer = NetStatusAnalyzer(pcb_path)
     origin_x, origin_y = analyzer.pcb.board_origin
     pads: dict[str, list] = {n: [] for n in net_names}
     for fp in analyzer.pcb.footprints:
@@ -554,7 +596,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
 
     results: dict[str, dict] = {}
     for net in net_names:
-        elems: list[tuple] = list(fills[net]) + segs[net] + vias[net]
+        elems: list[tuple] = [fill[:2] for fill in fills[net]] + segs[net] + vias[net]
         n_fills = len(fills[net])
         pad_indices: list[tuple[int, str, bool]] = []
         for name, geom, layers, is_th in pads[net]:
@@ -586,12 +628,8 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
         # (the bulk self-join returns each unordered pair twice, plus every
         # element trivially paired with itself), matching the original
         # loop's ``range(i + 1, len(elems))`` bound.
-        if len(elems) > 1:
-            geoms = [g for g, _ in elems]
-            query_idx, tree_idx = STRtree(geoms).query(geoms, predicate="intersects")
-            for i, j in zip(query_idx.tolist(), tree_idx.tolist(), strict=True):
-                if i < j and (elems[i][1] & elems[j][1]):
-                    parent[_find(i)] = _find(j)
+        for i, j in _pour_connected_pairs(elems, fills[net]):
+            parent[_find(i)] = _find(j)
 
         groups: dict[int, list[tuple[str, bool]]] = {}
         for idx, name, is_th in pad_indices:
@@ -671,7 +709,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     import math
     import re
 
-    from shapely.geometry import LineString, Point, Polygon
+    from shapely.geometry import LineString, Point
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
@@ -754,19 +792,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             (Point(float(at.group(1)), float(at.group(2))), id_to_name.get(nid, ""), radius, drill)
         )
 
-    # Zone fills: net -> [(poly, layer)]
-    fills_by_net: dict[str, list] = {n: [] for n in net_names}
-    for zone in _find_sexp_blocks(text, "\n\t(zone") + _find_sexp_blocks(text, "\n  (zone"):
-        m = re.search(r'\(net_name "([^"]*)"\)', zone) or re.search(r'\(net "([^"]*)"\)', zone)
-        if not m or m.group(1) not in fills_by_net:
-            continue
-        for block in _find_sexp_blocks(zone, "(filled_polygon"):
-            lay = re.search(r'\(layer "([^"]*)"\)', block).group(1)
-            pts = re.findall(r"\(xy ([\d.-]+) ([\d.-]+)\)", block)
-            poly = Polygon([(float(a), float(b)) for a, b in pts])
-            if not poly.is_valid:
-                poly = poly.buffer(0)
-            fills_by_net[m.group(1)].append((poly, lay))
+    fills_by_net, _ = _pour_fill_components(analyzer.pcb, net_names)
 
     # Board outline (inset 0.5 mm) from generate_pcb constants.
     min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
@@ -894,8 +920,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     for net in net_names:
         # Own elements: (geom, layerset, label).  Pads carry their name.
         own: list[tuple] = []
-        for poly, lay in fills_by_net.get(net, []):
-            own.append((poly, frozenset({lay}), "fill"))
+        for poly, layers, _zone, _inflation in fills_by_net[net]:
+            own.append((poly, layers, "fill"))
         for geom, snet, lay in seg_index:
             if snet == net:
                 own.append((geom, frozenset({lay}), "seg"))
@@ -922,12 +948,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 i = parent[i]
             return i
 
-        for i in range(len(own)):
-            gi, li, _ = own[i]
-            for j in range(i + 1, len(own)):
-                gj, lj, _ = own[j]
-                if (li & lj) and gi.intersects(gj):
-                    parent[_find(i)] = _find(j)
+        for i, j in _pour_connected_pairs(own, fills_by_net[net]):
+            parent[_find(i)] = _find(j)
 
         def _append_own(elem: tuple) -> None:
             """Append a new element and union it against all others."""
@@ -1056,13 +1078,36 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 for d, i, j, lay in pairs[:24]:
                     gi, gj = own[i][0], own[j][0]
                     pa, pb = nearest_points(gi, gj)
-                    # Overshoot 0.35 mm into each geometry so the bridge
-                    # endpoint survives fill re-quantisation.
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
-                    p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
+                    if d == 0 and own[i][2] == own[j][2] == "fill":
+                        # Separate solid-fill fragments can share a boundary.
+                        # Their nearest points then coincide: a zero-length
+                        # "bridge" cannot establish a real conductor bond.
+                        # Pick interior endpoints, keeping the same clearance
+                        # guard below. Tiny solids use an interior point.
+                        inner_a, inner_b = gi.buffer(-0.35), gj.buffer(-0.35)
+                        inner_a = gi.representative_point() if inner_a.is_empty else inner_a
+                        inner_b = gj.representative_point() if inner_b.is_empty else inner_b
+                        pa, pb = nearest_points(inner_a, inner_b)
+                        if pa.equals(pb):
+                            pa, pb = gi.representative_point(), gj.representative_point()
+                        p0, p1 = (pa.x, pa.y), (pb.x, pb.y)
+                        # Validate the actual rounded coordinates emitted.
+                        p0 = tuple(round(v, 3) for v in p0)
+                        p1 = tuple(round(v, 3) for v in p1)
+                        if (
+                            p0 == p1
+                            or not all(math.isfinite(v) for v in (*p0, *p1))
+                            or not gi.contains(Point(p0))
+                            or not gj.contains(Point(p1))
+                        ):
+                            continue
+                    else:
+                        # Overshoot into each geometry to survive re-fill.
+                        vec = (pb.x - pa.x, pb.y - pa.y)
+                        norm = math.hypot(*vec) or 1.0
+                        ux, uy = vec[0] / norm, vec[1] / norm
+                        p0 = (pa.x - ux * 0.35, pa.y - uy * 0.35)
+                        p1 = (pb.x + ux * 0.35, pb.y + uy * 0.35)
                     if not _path_ok(net, p0, p1, lay, BRIDGE_W):
                         continue
                     _emit_seg(net, p0, p1, lay, BRIDGE_W)
@@ -1187,10 +1232,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     if done:
                         break
 
-            # The fixed rays cannot follow a narrow corridor to a distant
-            # legal via. Only after the established repairs fail, search a
-            # bounded physical path without changing any authored geometry.
-            if not merged and comp_pads and not comp_has_via:
+            # The fixed rays cannot follow a narrow corridor to primary
+            # copper. An existing via may itself be on an isolated island,
+            # so it does not remove the need for this bounded physical search.
+            # Keep the same rules and commit only a complete escape.
+            if not merged and comp_pads:
                 from pour_escape import EscapeRules, find_escape
 
                 project = pcb_path.with_suffix(".kicad_pro")

@@ -35,7 +35,7 @@ import logging
 import math
 import threading
 from contextlib import contextmanager, suppress
-from typing import TYPE_CHECKING, Any, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 import numpy as np
 
@@ -75,6 +75,8 @@ CarveoutMode = Literal["none", "skip", "clamp"]
 if TYPE_CHECKING:
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
+
+    from .cpp_backend import CppGrid
 
 from kicad_tools.acceleration import (
     BackendType,
@@ -563,15 +565,30 @@ class RoutedNetsUnblocker:
         self._grid = grid
         self._saved_blocked: np.ndarray | None = None
         self._saved_net: np.ndarray | None = None
+        self._saved_congestion: np.ndarray | None = None
+        self._saved_congestion_counted: np.ndarray | None = None
 
     def __enter__(self) -> RoutedNetsUnblocker:
         # Save full copies of the blocked and net arrays
         self._saved_blocked = self._grid._blocked.copy()
         self._saved_net = self._grid._net.copy()
+        self._saved_congestion = self._grid._congestion.copy()
+        counted = self._grid._congestion_counted
+        self._saved_congestion_counted = None if counted is None else counted.copy()
 
         # Build mask: cells that are blocked by routed nets (not by pads/obstacles)
         # A routed-net cell has: blocked=True, pad_blocked=False, net != 0
         routed_mask = self._grid._blocked & ~self._grid._pad_blocked & (self._grid._net != 0)
+
+        # This bulk rollback path already copies full occupancy planes. Update
+        # only the removed cells' coarse bins; normal mark/unmark stays local.
+        if counted is not None:
+            removed = counted & to_numpy(routed_mask)
+            layers, ys, xs = np.nonzero(removed)
+            cy = np.minimum(ys // self._grid.congestion_size, self._grid.congestion_rows - 1)
+            cx = np.minimum(xs // self._grid.congestion_size, self._grid.congestion_cols - 1)
+            np.add.at(self._grid._congestion, (layers, cy, cx), -1)
+            counted[removed] = False
 
         # Clear those cells
         self._grid._blocked[routed_mask] = False
@@ -586,6 +603,9 @@ class RoutedNetsUnblocker:
             np.copyto(self._grid._blocked, self._saved_blocked)
         if self._saved_net is not None:
             np.copyto(self._grid._net, self._saved_net)
+        if self._saved_congestion is not None:
+            np.copyto(self._grid._congestion, self._saved_congestion)
+        self._grid._congestion_counted = self._saved_congestion_counted
         # Issue #4794: the restore is itself an occupancy change (the grid
         # inside the ``with`` body was NOT the grid outside it).
         self._grid.bump_occupancy_generation()
@@ -861,6 +881,12 @@ class RoutingGrid:
             (self.num_layers, self.congestion_rows, self.congestion_cols), dtype=np.int32
         )
 
+        # A cell contributes once only when route marking first blocks it.
+        # Keep this separate from blocked/static/usage state: manually supplied
+        # raster and pad obstacles have never contributed to route density.
+        # Allocate lazily so geometry-only engines pay no dense-memory cost.
+        self._congestion_counted: np.ndarray | None = None
+
         # Track placed routes for net assignment
         self.routes: list[Route] = []
 
@@ -872,6 +898,9 @@ class RoutingGrid:
         # attribute is loosely typed (``Any``) so this module does not
         # need to import the optional cpp backend.
         self._cpp_grid: object | None = None
+        from .component_hole_index import ComponentHoleIndex
+
+        self._component_hole_index = ComponentHoleIndex()
 
         # Alias for backward compatibility
         self.layers = self.num_layers
@@ -1127,6 +1156,9 @@ class RoutingGrid:
         # grid object (a consumer that stamped a cache with the pre-realloc
         # value can never see its stamp again).
         self._occupancy_generation: int = getattr(self, "_occupancy_generation", 0) + 1
+        from .route_halo_geometry import RouteHaloGeometry
+
+        self._route_halo = RouteHaloGeometry(self)
 
     @property
     def occupancy_generation(self) -> int:
@@ -1251,6 +1283,7 @@ class RoutingGrid:
         self._static_blocked = None
         # Congestion planes + cached clearance stamps.
         self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
+        self._congestion_counted = None
         self._clearance_masks = {}
         # Spatial indices (only populated on dense boards).
         self._seg_rtree = {}
@@ -1434,7 +1467,21 @@ class RoutingGrid:
         return self.layer_stack.is_plane_layer(index)
 
     def _update_congestion(self, gx: int, gy: int, layer: int, delta: int = 1) -> None:
-        """Update congestion count for the region containing (gx, gy)."""
+        """Track one route-occupied cell, independently of negotiation history.
+
+        Unmark may visit a cell repeatedly or free a manually supplied raster
+        cell that was never counted. The ledger prevents negative counts and
+        double subtraction while preserving existing ownership decisions.
+        """
+        counted = self._congestion_counted
+        if counted is None:
+            if delta <= 0:
+                return
+            counted = self._congestion_counted = np.zeros(self._blocked.shape, dtype=np.bool_)
+        occupied = delta > 0
+        if bool(counted[layer, gy, gx]) == occupied:
+            return
+        counted[layer, gy, gx] = occupied
         cx = min(gx // self.congestion_size, self.congestion_cols - 1)
         cy = min(gy // self.congestion_size, self.congestion_rows - 1)
         self._congestion[layer, cy, cx] += delta
@@ -1758,6 +1805,32 @@ class RoutingGrid:
                 return float(region.escape_clearance)
         return None
 
+    def install_component_hole_census(self, holes: list[Pad] | None) -> None:
+        """Install an authoritative census; None denotes unverified drills."""
+        if holes is None:
+            self._component_hole_index.known = False
+            if self._cpp_grid is not None:
+                cast("CppGrid", self._cpp_grid)._impl.set_component_holes_known(False)
+            return
+        for hole in holes:
+            self.add_component_hole(hole)
+
+    def refresh_component_holes(self) -> None:
+        """Reindex registered physical drills after pad geometry changes."""
+        self._component_hole_index = self._component_hole_index.refreshed()
+        if self._cpp_grid is not None:
+            impl = cast("CppGrid", self._cpp_grid)._impl
+            impl.clear_component_holes()
+            impl.set_component_holes_known(self._component_hole_index.known)
+            for hole in self._component_hole_index.holes:
+                impl.add_component_hole(*hole)
+
+    def add_component_hole(self, pad: Pad, *, physical: bool = True) -> None:
+        """Register a physical drill without adding copper or filtering its net."""
+        hole = self._component_hole_index.add(pad, physical=physical)
+        if hole is not None and self._cpp_grid is not None:
+            cast("CppGrid", self._cpp_grid)._impl.add_component_hole(*hole)
+
     def add_pad(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Add a pad as an obstacle (except for its own net).
 
@@ -1777,6 +1850,7 @@ class RoutingGrid:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
+        self.add_component_hole(pad, physical=False)
 
         # Issue #2908: Sync the pad to the paired C++ grid (if present) so the
         # C++ ``validate_route`` segment-vs-pad clearance check has up-to-date
@@ -4617,6 +4691,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, True)
         marked_cells: set[tuple[int, int]] = set()
 
         # Issue #4079: fast-path when no reservations exist (byte-identical).
@@ -4727,6 +4802,7 @@ class RoutingGrid:
         # clearance violations between traces and vias (mirrors the +1
         # applied in mark_route() for segments, see Issue #1666).
         radius += 1
+        self._route_halo.record(self._route_halo.via_key(via), radius, True)
 
         # Issue #2677: Fast-path when no reservations exist (preserves
         # byte-identical behaviour to pre-fix).
@@ -5054,6 +5130,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, False)
         static_blocked = self._static_blocked
 
         def unmark_with_clearance(gx: int, gy: int) -> None:
@@ -5065,6 +5142,7 @@ class RoutingGrid:
                         if cell.pad_blocked:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
+                            self._update_congestion(nx, ny, layer_idx, delta=-1)
                         elif cell.net == seg.net:
                             # Issue #3545: STATICALLY blocked cells (pad
                             # clearance halos, keepouts) must survive
@@ -5077,9 +5155,11 @@ class RoutingGrid:
                             # static owner instead of freeing.
                             if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
                                 cell.net = cell.original_net
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
                             else:
                                 cell.blocked = False
                                 cell.net = 0
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
 
         if gx1 == gx2:
             for gy in range(min(gy1, gy2), max(gy1, gy2) + 1):
@@ -5122,6 +5202,7 @@ class RoutingGrid:
         # Issue #1797: Must match _mark_via safety margin so the same
         # cells are cleared during rip-up.
         radius += 1
+        self._route_halo.record(self._route_halo.via_key(via), radius, False)
 
         static_blocked = self._static_blocked
         for layer_idx in range(self.num_layers):
@@ -5133,15 +5214,18 @@ class RoutingGrid:
                         if cell.pad_blocked:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
+                            self._update_congestion(nx, ny, layer_idx, delta=-1)
                         elif cell.net == via.net:
                             # Issue #3545: restore static halo / keepout
                             # cells instead of freeing them (see
                             # ``_unmark_segment`` for rationale).
                             if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
                                 cell.net = cell.original_net
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
                             else:
                                 cell.blocked = False
                                 cell.net = 0
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
 
     def find_relief_conflict_nets(self, route: Route, net: int) -> set[int]:
         """Owner nets of foreign static cells conflicting with ``route``.
@@ -5576,6 +5660,8 @@ class RoutingGrid:
             static = xp.asarray(self._static_blocked)
             self._blocked[...] = static
             self._net[...] = xp.where(static, self._original_net, 0)
+            self._congestion.fill(0)
+            self._congestion_counted = None
             self.bump_occupancy_generation()
         return True
 
