@@ -33,9 +33,9 @@ def test_next_connection_starts_without_prior_clearance_penalties(timing, outcom
     for _ in range(2):
         if outcome == "exception":
             with pytest.raises(RuntimeError, match="search failed"):
-                CppPathfinder.route(finder, pad, pad)
+                CppPathfinder.route(finder, pad, pad, clear_avoidance_after_connection=True)
         else:
-            result = CppPathfinder.route(finder, pad, pad)
+            result = CppPathfinder.route(finder, pad, pad, clear_avoidance_after_connection=True)
             assert result is (completed if outcome == "success" else None)
         assert state["penalty"] == 0
     assert len(finder._per_call_timings) == (2 if timing else 0)
@@ -80,9 +80,9 @@ def test_connection_cleanup_clears_native_grid(monkeypatch, timing, outcome):
     for _ in range(2):
         if outcome == "exception":
             with pytest.raises(RuntimeError, match="search failed"):
-                finder.route(pad, pad, **forwarded)
+                finder.route(pad, pad, clear_avoidance_after_connection=True, **forwarded)
         else:
-            assert finder.route(pad, pad, **forwarded) is (
+            assert finder.route(pad, pad, clear_avoidance_after_connection=True, **forwarded) is (
                 completed if outcome == "success" else None
             )
         assert all(grid._impl.at(10, 10, layer).avoidance_cost == 0 for layer in range(2))
@@ -91,3 +91,32 @@ def test_connection_cleanup_clears_native_grid(monkeypatch, timing, outcome):
     for record in records:
         assert record["succeeded"] is (outcome == "success")
         assert record["per_net_timeout"] == 1.0
+
+
+@pytest.mark.parametrize("timing", [False, True])
+def test_default_preserves_penalties_until_caller_finishes_net(monkeypatch, timing):
+    from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
+    from kicad_tools.router.rules import DesignRules
+
+    if not is_cpp_available():
+        pytest.skip("C++ backend not available")
+    grid = CppGrid(cols=20, rows=20, layers=2, resolution=0.127)
+    finder = CppPathfinder(grid, DesignRules())
+    finder.enable_per_call_timing(timing)
+    observed = []
+    pad = SimpleNamespace(net=6, net_name="SENSE")
+
+    def search(*args, **kwargs):
+        observed.append(grid._impl.at(10, 10, 0).avoidance_cost)
+        grid._impl.boost_region_cost(10, 10, 0, 2, 100.0)
+        return None
+
+    monkeypatch.setattr(finder, "_route_impl", search)
+    finder.route(pad, pad)
+    finder.route(pad, pad)
+    assert observed[0] == 0
+    assert observed[1] > 0
+    assert grid._impl.at(10, 10, 0).avoidance_cost > 0
+    # Autorouter retains ownership of net-end cleanup on the default path.
+    finder.clear_avoidance_costs()
+    assert grid._impl.at(10, 10, 0).avoidance_cost == 0

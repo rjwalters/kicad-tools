@@ -1937,6 +1937,8 @@ class CppPathfinder:
         end_layers: list[int] | None = None,
         per_net_timeout: float | None = None,
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
+        *,
+        clear_avoidance_after_connection: bool = False,
     ) -> Route | None:
         """Route between two pads.
 
@@ -1959,6 +1961,10 @@ class CppPathfinder:
             extra_goal_cells: Additional goal cells for early termination
                 (accepted for API compatibility but not yet used by C++ backend)
 
+            clear_avoidance_after_connection: Opt in to clearing retry penalties
+                when this connection exits. Defaults to False, preserving caller
+                cleanup at net end until default-on qualification (#5504).
+
         Returns:
             Route object if successful, None if no path found
         """
@@ -1977,7 +1983,8 @@ class CppPathfinder:
                     extra_goal_cells=extra_goal_cells,
                 )
             finally:
-                self.clear_avoidance_costs()
+                if clear_avoidance_after_connection:
+                    self.clear_avoidance_costs()
 
         t0 = time.monotonic()
         succeeded = False
@@ -1997,7 +2004,8 @@ class CppPathfinder:
             succeeded = result is not None
             return result
         finally:
-            self.clear_avoidance_costs()
+            if clear_avoidance_after_connection:
+                self.clear_avoidance_costs()
             elapsed = time.monotonic() - t0
             # 1.2x slack matches the Issue #2929 acceptance criterion: the
             # C++ deadline check fires every 1024 iterations, plus the
