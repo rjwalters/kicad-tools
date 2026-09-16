@@ -18,31 +18,57 @@ from kicad_tools.manufacturers.dru_generator import (
     DRU_FLOORS_BLOCK_END,
 )
 
-# Rule-name families the fab-floors generator (Issue #4600) can emit that
-# this escape search knows how to fold into its physical minima.
-_KNOWN_FLOOR_FAMILY_FIELDS = {
-    "Trace Width": "width",
-    "Clearance": "clearance",
-    "Via Drill": "drill",
-    "Via Diameter": "diameter",
-    "Annular Ring": "annulus",
-}
-# Families the generator can also emit that this recipe never routes near
-# (board edge, silkscreen, solder mask, ampacity, pad-only annular ring) --
-# recognized and safely ignored rather than folded in.
-_IGNORED_FLOOR_FAMILIES = {
-    "PTH Annular Ring",
-    "Copper to Edge",
-    "Hole to Edge",
-    "Silkscreen Width",
-    "Silkscreen Height",
-    "Solder Mask Clearance",
-    "Solder Mask Dam",
+# Exact factory scopes, not a rule-name whitelist. A changed condition or
+# constraint can alter which new copper is affected, so reject it explicitly.
+# None fields concern immutable pads/noncopper, or the existing edge policy.
+_FLOOR_SCOPES = {
+    "Trace Width": ("track_width", "A.Type == 'track'", None, "width"),
+    "Clearance": ("clearance", None, None, "clearance"),
+    "Via Drill": ("hole_size", "A.Type == 'via' && A.Via_Type != 'Micro'", None, "drill"),
+    "Via Diameter": ("via_diameter", "A.Type == 'via' && A.Via_Type != 'Micro'", None, "diameter"),
+    "Annular Ring": ("annular_width", "A.Via_Type != 'Micro'", None, "annulus"),
+    "PTH Annular Ring": ("annular_width", "A.Type == 'pad'", None, None),
+    "Copper to Edge": ("edge_clearance", None, None, None),
+    "Hole to Edge": (
+        "physical_hole_clearance",
+        "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'",
+        None,
+        None,
+    ),
+    "Silkscreen Width": (
+        "text_thickness",
+        "A.Type == 'text' && A.Layer == 'F.Silkscreen'",
+        None,
+        None,
+    ),
+    "Silkscreen Height": (
+        "text_height",
+        "A.Type == 'text' && A.Layer == 'F.Silkscreen'",
+        None,
+        None,
+    ),
+    # The search creates neither silk nor pads; these exact pair scopes cannot
+    # be changed by its emitted tracks/vias. They are not general clearances.
+    "Silk to Pad": ("silk_clearance", "A.Type == 'Pad' || B.Type == 'Pad'", None, None),
+    "SMD Pad Clearance": ("clearance", "A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'", None, None),
+    "PTH Hole to Track": (
+        "hole_clearance",
+        "(A.Pad_Type == 'Through-hole' && B.Type == 'Track') || (B.Pad_Type == 'Through-hole' && A.Type == 'Track')",
+        None,
+        "pth_hole_track",
+    ),
+    "Inner PTH Hole to Copper": (
+        "hole_clearance",
+        "A.Pad_Type == 'Through-hole' || B.Pad_Type == 'Through-hole'",
+        "inner",
+        "inner_pth_hole_copper",
+    ),
 }
 _DRU_RULE_RE = re.compile(
-    r'\(rule "(?P<name>[^"]+)"\n'
-    r'(?:\s*\(condition "[^"]*"\)\n)?'
-    r"\s*\(constraint \w+ \(min (?P<value>[0-9.]+)mm\)\)\)"
+    r'\(rule "(?P<name>[^\"]+)"\n'
+    r"(?:\s*\(layer (?P<layer>\w+)\)\n)?"
+    r'(?:\s*\(condition "(?P<condition>[^\"]*)"\)\n)?'
+    r"\s*\(constraint (?P<constraint>\w+) \(min (?P<value>[0-9.]+)mm\)\)\)"
 )
 
 
@@ -57,11 +83,9 @@ def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
     safe to fold in even though it "exists": every rule family it can
     contain is enumerated above, so nothing is silently ignored.
     """
-    body_lines = [
-        line
-        for line in dru_text.splitlines()
-        if line.strip() and not line.strip().startswith("(version")
-    ]
+    body_lines = [line for line in dru_text.splitlines() if line.strip()]
+    if not body_lines or body_lines.pop(0).strip() != "(version 1)":
+        return None
     body = "\n".join(body_lines).strip()
     if not (body.startswith(DRU_FLOORS_BLOCK_BEGIN) and body.endswith(DRU_FLOORS_BLOCK_END)):
         return None
@@ -74,11 +98,18 @@ def _kct_managed_floor_minima(dru_text: str) -> dict[str, float] | None:
         if match is None:
             return None  # hand-edited or unrecognized stanza -- fail closed
         family = match.group("name").split(" - ")[0]
-        field = _KNOWN_FLOOR_FAMILY_FIELDS.get(family)
+        scope = _FLOOR_SCOPES.get(family)
+        if scope is None or (match["constraint"], match["condition"], match["layer"]) != scope[:3]:
+            return None
+        try:
+            value = float(match["value"])
+        except ValueError:
+            return None
+        if not math.isfinite(value) or value < 0:
+            return None
+        field = scope[3]
         if field is not None:
-            minima[field] = max(minima.get(field, 0.0), float(match.group("value")))
-        elif family not in _IGNORED_FLOOR_FAMILIES:
-            return None  # unrecognized rule family -- fail closed
+            minima[field] = max(minima.get(field, 0.0), value)
     return minima
 
 
@@ -93,6 +124,8 @@ class EscapeRules:
     annulus: float = 0.1
     hole_gap: float = 0.5  # Preserve this recipe's stronger drill-spacing floor.
     hole_copper: float = 0.25
+    pth_hole_track: float = 0.0
+    inner_pth_hole_copper: float = 0.0
 
     @classmethod
     def from_project(cls, path: Path) -> EscapeRules:
@@ -132,6 +165,8 @@ class EscapeRules:
             "annulus": ("min_via_annular_width",),
             "hole_gap": ("min_hole_to_hole",),
             "hole_copper": ("hole_clearance",),
+            "pth_hole_track": (),
+            "inner_pth_hole_copper": (),
         }
         values = {
             name: max(
@@ -195,18 +230,36 @@ def find_escape(
             trace_blocks.append(geom)
         via_blocks.append(geom.buffer(radius + (rules.clearance if pnet != net else 0) + guard))
         if hole_radius:
+            # Legacy tuples have no pad type, and the recipe's is_th flag
+            # denotes wildcard layers (also possible for NPTH). Apply PTH
+            # floors conservatively to drilled pads: NPTH may be overblocked,
+            # but ambiguous metadata never weakens a required hole clearance.
             via_blocks.append(
                 Point(center).buffer(drill_radius + hole_radius + rules.hole_gap + guard)
             )
             if pnet != net:
+                # Candidate vias span all four copper layers. The factory's
+                # inner-PTH rule applies to their copper at an existing PTH
+                # hole, but does not strengthen outer-layer traces or vias'
+                # own drill-to-copper rule against unrelated SMD geometry.
+                inner_floor = (
+                    rules.inner_pth_hole_copper
+                    if any(lay not in {"F.Cu", "B.Cu"} for lay in layers)
+                    else 0.0
+                )
                 via_blocks.append(
-                    Point(center).buffer(hole_radius + radius + rules.hole_copper + guard)
+                    Point(center).buffer(
+                        hole_radius + radius + max(rules.hole_copper, inner_floor) + guard
+                    )
                 )
                 if layer in layers:
+                    hole_floor = max(
+                        rules.hole_copper,
+                        rules.pth_hole_track,
+                        inner_floor if layer not in {"F.Cu", "B.Cu"} else 0.0,
+                    )
                     trace_blocks.append(
-                        Point(center).buffer(
-                            hole_radius + max(0, rules.hole_copper - rules.clearance)
-                        )
+                        Point(center).buffer(hole_radius + max(0, hole_floor - rules.clearance))
                     )
         if pnet != net:
             via_blocks.append(geom.buffer(drill_radius + rules.hole_copper + guard))
