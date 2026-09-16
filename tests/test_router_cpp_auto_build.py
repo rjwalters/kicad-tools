@@ -598,6 +598,7 @@ class TestAutoBuildUsesSharedProbe:
         assert bool(cpp_backend.AutoBuildOutcome(False, True)) is False
 
 
+@pytest.mark.usefixtures("preserve_cpp_import_state")
 class TestReloadCppBackend:
     """Issue #2594: ``_reload_cpp_backend()`` must flush import caches.
 

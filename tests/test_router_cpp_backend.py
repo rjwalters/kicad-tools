@@ -4,6 +4,7 @@ import glob
 import importlib
 import pathlib
 import sys
+from contextlib import nullcontext
 
 import pytest
 
@@ -13,6 +14,41 @@ from kicad_tools.router.cpp_backend import (
     get_backend_info,
     is_cpp_available,
 )
+
+
+@pytest.mark.parametrize("exit_path", ["normal", "failure", "skip"])
+def test_import_state_restores_classes_after_in_place_reload(exit_path):
+    from tests.conftest import preserved_cpp_import_state
+
+    backend = importlib.import_module("kicad_tools.router.cpp_backend")
+    package = importlib.import_module("kicad_tools.router")
+    classes = {
+        name: getattr(backend, name) for name in ("CppGrid", "CppPathfinder", "AutoBuildOutcome")
+    }
+    missing = object()
+    caches = {
+        name: (
+            sys.modules.get(f"kicad_tools.router.{name}", missing),
+            getattr(package, name, missing),
+        )
+        for name in ("cpp_backend", "router_cpp")
+    }
+    expected = {"failure": RuntimeError, "skip": pytest.skip.Exception}.get(exit_path)
+    with pytest.raises(expected) if expected else nullcontext():
+        with preserved_cpp_import_state():
+            assert backend._reload_cpp_backend() is backend.is_cpp_available()
+            assert backend.CppGrid is not classes["CppGrid"]
+            if exit_path == "failure":
+                raise RuntimeError("intentional cleanup control")
+            if exit_path == "skip":
+                pytest.skip("intentional cleanup control")
+    assert all(getattr(backend, name) is original for name, original in classes.items())
+    for name, (module, attribute) in caches.items():
+        assert sys.modules.get(f"kicad_tools.router.{name}", missing) is module
+        assert getattr(package, name, missing) is attribute
+    if backend.is_cpp_available():
+        assert backend.router_cpp.Grid3D is not None
+        assert backend.router_cpp.Pathfinder is not None
 
 
 class TestCppBackendFallback:
@@ -123,7 +159,9 @@ class TestCppBackendDiagnosticMessages:
     conditions to verify each branch produces an actionable message.
     """
 
-    def test_unavailable_reason_is_actionable_when_so_missing(self, monkeypatch):
+    def test_unavailable_reason_is_actionable_when_so_missing(
+        self, monkeypatch, preserve_cpp_import_state
+    ):
         """Re-import ``cpp_backend`` from a location with no ``.so`` and
         verify the diagnostic mentions ``kct build-native`` and does NOT
         blame a circular import.
@@ -172,6 +210,19 @@ class TestCppBackendDiagnosticMessages:
                 sys.modules[cpp_backend_name] = original_module
             else:
                 sys.modules.pop(cpp_backend_name, None)
+
+    def test_native_import_retains_types_after_diagnostic(self):
+        """A skipped missing-extension probe must not break later native imports."""
+        if not is_cpp_available():
+            pytest.skip("C++ backend not available")
+        native = importlib.import_module("kicad_tools.router.router_cpp")
+        assert native.Grid3D is not None
+        assert native.Pathfinder is not None
+        package = importlib.import_module("kicad_tools.router")
+        backend = importlib.import_module("kicad_tools.router.cpp_backend")
+        assert package.router_cpp is native
+        assert package.cpp_backend is backend
+        assert backend.router_cpp is native
 
     def test_get_backend_info_python_fallback_has_clear_hint(self):
         """When backend is unavailable, ``get_backend_info`` must include
@@ -1447,7 +1498,9 @@ class TestCppBuildVersionGuard:
         actual = getattr(cpp_backend.router_cpp, "BUILD_VERSION", None)
         assert actual == cpp_backend._REQUIRED_CPP_BUILD_VERSION
 
-    def test_stale_so_disables_cpp_with_actionable_error(self, monkeypatch):
+    def test_stale_so_disables_cpp_with_actionable_error(
+        self, monkeypatch, preserve_cpp_import_state
+    ):
         """A mismatched BUILD_VERSION on a fresh import disables the C++ backend.
 
         Simulates the failure mode from Issue #2501: the .so loads cleanly but
@@ -1495,7 +1548,7 @@ class TestCppBuildVersionGuard:
             # captured references valid for the rest of the test session.
             sys.modules["kicad_tools.router.cpp_backend"] = original
 
-    def test_missing_build_version_attr_disables_cpp(self, monkeypatch):
+    def test_missing_build_version_attr_disables_cpp(self, monkeypatch, preserve_cpp_import_state):
         """If router_cpp lacks BUILD_VERSION (very old .so) the guard fires."""
         import sys
 
