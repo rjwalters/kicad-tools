@@ -57,6 +57,8 @@ def test_loader_resolves_original_project_without_mutating_caller(tmp_path, name
     bad = router.pads[("X2", "1")].net
     plane = router.pads[("G1", "1")].net
     assert bad != plane and bad not in nets.values() and plane not in nets.values()
+    assert router.pads[("X2", "1")].obstacle_only
+    assert router.pads[("G1", "1")].obstacle_only
     assert bad not in router.nets and plane not in router.nets
     assert nets["BAD"] not in router.nets and nets["PLANE"] not in router.nets
     assert router.rules.clearance_for_nets(nets["GOOD"], bad, 0.15) == 0.6

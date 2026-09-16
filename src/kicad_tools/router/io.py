@@ -4148,6 +4148,7 @@ def load_pcb_for_routing(
             for pad in comp["pads"]:
                 if pad["net"] == 0 and pad["net_name"] in neutral_ids:
                     pad["net"] = neutral_ids[pad["net_name"]]
+                    pad["obstacle_only"] = True
         rules = replace(rules, net_clearance_floors=floors)
 
     # Auto-adjust grid resolution if enabled

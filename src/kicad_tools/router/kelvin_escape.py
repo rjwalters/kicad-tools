@@ -199,7 +199,8 @@ def recover_kelvin_escapes(
     for index, escape in enumerate(result):
         pad = escape.pad
         if (
-            pad.net not in kelvin_nets
+            pad.obstacle_only
+            or pad.net not in kelvin_nets
             or escape.via is not None
             or pad.through_hole
             or escape.escape_layer != pad.layer

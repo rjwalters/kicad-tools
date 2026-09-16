@@ -523,6 +523,9 @@ class Pad:
     terminal_id: str = ""
     """Internal physical land identity; ``pin`` keeps its authored display name."""
 
+    obstacle_only: bool = False
+    """Retain copper and clearance identity, but never generate routing copper."""
+
     @property
     def component_key(self) -> str:
         """Physical component key used for grouping and geometric exemptions."""

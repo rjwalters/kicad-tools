@@ -2172,6 +2172,7 @@ class Autorouter:
                 width=pad_info.get("width", 0.5),
                 height=pad_info.get("height", 0.5),
                 net=pad_info.get("net", 0),
+                obstacle_only=pad_info.get("obstacle_only", False),
                 net_name=pad_info.get("net_name", ""),
                 layer=pad_info.get("layer", Layer.F_CU),
                 ref=ref,

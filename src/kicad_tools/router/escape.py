@@ -711,7 +711,7 @@ def _is_column_aligned_connector(smt_pads: list[Pad], tol: float = 0.05) -> bool
     # records the set of nets and the pad count it carries.
     columns: dict[int, tuple[set[int], int]] = {}
     for p in smt_pads:
-        if not p.net or p.net <= 0:
+        if p.obstacle_only or not p.net or p.net <= 0:
             continue
         coord = p.x if horizontal else p.y
         key = round(coord / tol) if tol > 0 else 0
@@ -2098,7 +2098,7 @@ class EscapeRouter:
         # unique-per-net so this is the correct degenerate behaviour.
         net_to_pad: dict[str, Pad] = {}
         for pad in package.pads:
-            if pad.net_name and pad.net_name not in net_to_pad:
+            if not pad.obstacle_only and pad.net_name and pad.net_name not in net_to_pad:
                 net_to_pad[pad.net_name] = pad
 
         # Track already-paired net names so we don't emit two paired
@@ -2119,12 +2119,16 @@ class EscapeRouter:
             return self.rules.trace_clearance
 
         for pad in package.pads:
-            if pad.net_name in already_paired:
+            if pad.obstacle_only or pad.net_name in already_paired:
                 continue
             partner_name = self.diff_pair_map.get(pad.net_name)
             if not partner_name:
                 continue
             partner_pad = net_to_pad.get(partner_name)
+            if partner_pad is None and any(
+                p.obstacle_only and p.net_name == partner_name for p in package.pads
+            ):
+                continue
             if partner_pad is None:
                 # Partner net does not appear on this package.  The leg
                 # defers to the per-package dispatcher (single-ended
@@ -3448,7 +3452,7 @@ class EscapeRouter:
         # via escapes.  Generating escapes for them wastes the BGA perimeter
         # channel that the signal nets need -- mirrors the equivalent filter
         # in ``_escape_qfp_alternating`` (Issue #2513).
-        routable_pads = [p for p in package.pads if p.net != 0]
+        routable_pads = [p for p in package.pads if not p.obstacle_only and p.net != 0]
 
         # Group pads by ring (distance from center)
         rings = self._group_pads_by_ring(routable_pads, center_x, center_y)
@@ -3678,7 +3682,7 @@ class EscapeRouter:
             # routing space (a TQFP-32 MCU may have 19/32 pins on plane nets;
             # without this filter the escape phase blocks the perimeter for
             # the actual signal nets that need to escape).
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
 
             if abs(pad.y - max_y) < edge_margin:
@@ -3778,6 +3782,8 @@ class EscapeRouter:
             (west_pads, EscapeDirection.WEST, EscapeDirection.NORTH, EscapeDirection.SOUTH),
         ]:
             for i, pad in enumerate(pads):
+                if pad.obstacle_only:
+                    continue
                 if use_perpendicular_only or i % 2 == 0:
                     direction = primary_dir
                 else:
@@ -4252,7 +4258,7 @@ class EscapeRouter:
             if abs(pad.x - center_x) < edge_margin and abs(pad.y - center_y) < edge_margin:
                 continue
             # Skip plane-net pads -- they don't escape, they connect via plane stitching
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
 
             if abs(pad.y - max_y) < edge_margin:
@@ -4332,6 +4338,8 @@ class EscapeRouter:
                 edge_with_plane.sort(key=lambda p: p.y)
 
             for i, pad in enumerate(pads):
+                if pad.obstacle_only:
+                    continue
                 if use_perpendicular_only or i % 2 == 0:
                     direction = primary_dir
                 else:
@@ -4349,9 +4357,17 @@ class EscapeRouter:
                     for idx, p in enumerate(edge_with_plane):
                         if p.key != pad_key:
                             continue
-                        if idx > 0 and edge_with_plane[idx - 1].net != 0:
+                        if (
+                            idx > 0
+                            and not edge_with_plane[idx - 1].obstacle_only
+                            and edge_with_plane[idx - 1].net != 0
+                        ):
                             neighbour_signal = True
-                        if idx < len(edge_with_plane) - 1 and edge_with_plane[idx + 1].net != 0:
+                        if (
+                            idx < len(edge_with_plane) - 1
+                            and not edge_with_plane[idx + 1].obstacle_only
+                            and edge_with_plane[idx + 1].net != 0
+                        ):
                             neighbour_signal = True
                         break
 
@@ -4979,6 +4995,8 @@ class EscapeRouter:
         skipped_count = 0
 
         for i, pad in enumerate(pads):
+            if pad.obstacle_only:
+                continue
             # Issue #3278: per-pad escape width, sized for THIS pad's
             # own net class.  Only the geometry that must remain a
             # row-scope constant (``lateral_offset``) uses
@@ -5852,7 +5870,7 @@ class EscapeRouter:
         # Steps 1-4: collect far-consumer candidates.
         candidates: list[tuple[float, int, Pad]] = []
         for i, pad in enumerate(pads):
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
             positions = self.net_target_positions.get(pad.net) or []
             off_package = [(x, y) for x, y, ref in positions if ref != package.ref]
@@ -6180,6 +6198,8 @@ class EscapeRouter:
         stagger_offset = self.via_spacing / 2
 
         for i, pad in enumerate(pads):
+            if pad.obstacle_only:
+                continue
             # Stagger: odd pins get extra offset (two via rows)
             is_odd = i % 2 == 1
             escape_dist = base_escape_dist + (stagger_offset if is_odd else 0)
@@ -6487,6 +6507,8 @@ class EscapeRouter:
             dx, dy = self._direction_to_vector(direction)
 
             for i, pad in enumerate(row_pads):
+                if pad.obstacle_only:
+                    continue
                 trace_width = self._get_trace_width_for_net(pad.net_name)
 
                 if is_outer:
@@ -6788,7 +6810,7 @@ class EscapeRouter:
         for pad in package.pads:
             # Issue #2513: Skip plane-net pads (net=0) -- they are stitched
             # via planes, not routed via escapes.
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
 
             direction = self._get_quadrant_direction(pad.x, pad.y, center_x, center_y)
@@ -6913,6 +6935,8 @@ class EscapeRouter:
 
         for row_idx, row in enumerate(rows):
             for col_idx, pad in enumerate(row):
+                if pad.obstacle_only:
+                    continue
                 # Offset based on row and column parity
                 offset_x = (col_idx % 2) * stagger
                 offset_y = (row_idx % 2) * stagger
@@ -7831,6 +7855,8 @@ class EscapeRouter:
             infeasible, or (when ``skip_on_clearance_violation=True``)
             the rescue would introduce a foreign-pad clearance violation.
         """
+        if pad.obstacle_only:
+            return None
         if not self.via_in_pad_supported:
             return None
 
@@ -8918,6 +8944,7 @@ class EscapeRouter:
             the main router picks up the pad cleanly from the original
             pad position rather than from a clipped escape endpoint.
         """
+        escapes[:] = [escape for escape in escapes if not escape.pad.obstacle_only]
         routes: list[Route] = []
 
         # Issue #2998: trace_clearance used for the segment-vs-foreign-via
