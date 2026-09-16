@@ -1,7 +1,89 @@
-# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-09-15)
+# HV pairwise avoidance: softstart rev-C proof runs (2026-08-15 → 2026-09-16)
 
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
+
+## 2026-09-16: planner-run residuals, copper origins and policy attribution
+
+This is a new analysis of the retained planner run, **not a new routing run or
+passing qualification**. The captured rev-C input remains DO_NOT_FAB. Planner
+source is `2fb4ebdc8ed9ef0d9f4890c71b5cb38b110ecc02`; the producer separately
+installed `zones_cmd.py` from `6b381f353ef3a599292a2e9d48f8f401ec322f02`.
+It is a recorded composite, not an assertion that the entire producer is one
+commit. The [evidence package](diagnostics/issue-4507/2026-09-16/README.md)
+binds source, stages, commands and the analyses below.
+
+### Terminal result
+
+Stage exits were **2, 8, 0**. Completion did not converge. The read-only stage-2
+and stage-3 connectivity audits both found 93 of 99 nets complete, six incomplete;
+unconnected pad counts were 77 and 72. Strict non-waived creepage failures fell
+from 31 to 13 after stage 3, while the pairwise replay reported zero at both stages.
+These are different checks, not contradictory pass/fail results.
+
+Native KiCad 10.0.6 all-track DRC on a refilled copy of stage 3 exited 5, with
+**71 unconnected items, zero non-connectivity errors and 18 warnings**. It used
+the produced project/rules; those differ from the original input sidecars, as
+recorded in the acceptance audit. This result does not certify preservation of
+the original rule context or replace the strict creepage census. Original
+artifacts and copied sidecars remained unchanged.
+
+| Artifact | SHA256 |
+|---|---|
+| Input PCB | `bad824faa370307225ec4f45256de8e649afe60ee43b55483e3631555ea190d4` |
+| Stage 1 PCB | `8c3dfe8507d8ca3e4f1b8f1b92098bfad9040047ce9deba49504804e18a7481f` |
+| Stage 2 PCB | `0541f21cf6f079a7d52daa0583c831a16563366a7693624cae477f74bcf25c39` |
+| Stage 3 PCB | `98a73b55d89b3109178671d613f39aa4747631b366b9d16c134cec606c0f8c36` |
+
+### All thirteen governing witnesses
+
+The exact nearest-point witnesses divide into nine matrix-covered pairs and four
+below the unchanged 30 V threshold. Every matrix-covered witness midpoint is
+inside a net- and layer-applicable rated-footprint attach zone. The matrix and
+census agree on the required clearance for those nine pairs. This attributes the
+selected governing witnesses; it does not certify every primitive pair or the
+electrical validity of the attachment policy.
+
+| Residual pair | Layer | Gap / census requirement (mm) | Router-policy attribution |
+|---|---|---:|---|
+| /AC_LINE ↔ /V_AC_SENSE_MID | F.Cu | 0.4937 / 1.3 | Attach zone: R1 |
+| /AC_LINE ↔ /ZC_LINE_MID | F.Cu | 0.4536 / 1.1 | Attach zone: R3 |
+| /AC_NEUTRAL ↔ /FUSED_LINE | B.Cu | 0.6000 / 1.6 | Attach zone: J2 |
+| /AC_NEUTRAL ↔ /ZC_NEUT_MID | F.Cu | 0.5687 / 1.1 | Attach zone: R4 |
+| /GATE_BUS_NEG ↔ /SCAP_NEG | In1.Cu | 0.5000 / 1.25 | Attach zone: Q2A |
+| /PRE_D_NEG ↔ /PRECHARGE_NEG | F.Cu | 0.4000 / 0.48 | Below 30 V threshold |
+| /RTN_COM_NEG ↔ /GATE_RTN_NEG | F.Cu | 0.4500 / 0.53 | Below 30 V threshold |
+| /SCAP_NEG ↔ /SRC_NEG | In2.Cu | 0.5000 / 1.25 | Attach zone: Q2A |
+| /SCAP_NEG_RTN ↔ /GATE_RTN_NEG | In1.Cu | 0.3000 / 0.53 | Below 30 V threshold |
+| /SCAP_POS ↔ /SCAP_POS_RTN | F.Cu | 0.6000 / 1.3 | Attach zone: J3 |
+| /SCAP_POS_RTN ↔ /OC_TRIP_N | In2.Cu | 0.3925 / 0.42 | Below 30 V threshold |
+| /V_AC_SENSE_MID ↔ /V_AC_SENSE_RAW | F.Cu | 0.7070 / 1.3 | Attach zone: R75 |
+| /ZC_LINE_LIM ↔ /ZC_LINE_MID | F.Cu | 0.7070 / 1.1 | Attach zone: R76 |
+
+With the same board, source, voltage map and original 0.15 mm scalar floor,
+disabling only attachment exemptions produces **96 violations across 20 net
+pairs**, including all nine matrix-covered census pairs. The ordinary replay
+with exemptions reports zero. A diagnostic positive threshold of 1e-12 V also
+recovers the census requirements for all thirteen pairs; it is not a proposed
+policy change. The separate equal-potential/zero-threshold crash is tracked by
+#5484. Neither control authorizes removing exemptions or lowering census limits.
+
+### Conductor origins and remaining acceptance
+
+The thirteen witnesses contain thirteen tracks and one via. Every conductor's
+exact emitted geometry first appears in completion stage 2. All thirteen tracks
+have zero same-net track-copper overlap with the original input. Twelve also have
+zero overlap with stage 1; the AC_NEUTRAL track near R4.2 overlaps stage-1 copper
+by 94.79%. Thus it would be incorrect to call that entire track newly introduced.
+Exact geometry matching cannot reconstruct split/coalesced mutation ancestry.
+
+The routing/open-terminal cause remains separate: #5480 tracks omitted physical
+lands with repeated pad numbers. Its correction requires a fresh original-recipe
+qualification; the retained run predates that fix. The four subthreshold pairs
+remain outside this issue's policy scope. The nine attachment-exempt witnesses
+remain failures of the strict census, not newly waived acceptance results.
+**#4507 remains open** for full convergence, verified rule context and the
+remaining T4 requirements. Earlier runs below are preserved as historical records.
 
 ## 2026-09-15: available rev-C fixture, terminal af6b integration and residual attribution
 

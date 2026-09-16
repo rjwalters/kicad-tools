@@ -1,0 +1,33 @@
+{
+  "version": "10.0.6",
+  "argv": [
+    "kicad-cli",
+    "pcb",
+    "drc",
+    "--format",
+    "json",
+    "--all-track-errors",
+    "--severity-all",
+    "--refill-zones",
+    "--save-board",
+    "--exit-code-violations",
+    "-o",
+    "/Users/rwalters/GitHub/kicad-tools/.loom/sweep-checkpoint/evidence/issue-4507/planner-full/native-stage3/drc.json",
+    "/Users/rwalters/GitHub/kicad-tools/.loom/sweep-checkpoint/evidence/issue-4507/planner-full/native-stage3/step3.kicad_pcb"
+  ],
+  "original_hashes": {
+    ".kicad_pcb": "98a73b55d89b3109178671d613f39aa4747631b366b9d16c134cec606c0f8c36",
+    ".kicad_pro": "0c01aee0b1b030f220a1767423dabe8f369ac2dd86aa7a0cf398c0aa2fcfc706",
+    ".kicad_dru": "2ceed4fc04784a911a3c3310e067afb324f249003943276766b92f3f5a3ce076"
+  },
+  "started": 1789519427.052043,
+  "pid": 71137,
+  "exit": 5,
+  "ended": 1789519432.428868,
+  "refilled_board_sha256": "0f0faaf3833c5e0c27f2fb1ba111cc9f862791e26b91f28f448c3664223cd8b1",
+  "non_connectivity_errors": 0,
+  "warnings": 18,
+  "unconnected_items": 71,
+  "originals_unchanged": true,
+  "copied_sidecars_unchanged": true
+}
