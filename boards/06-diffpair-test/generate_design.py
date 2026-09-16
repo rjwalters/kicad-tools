@@ -429,6 +429,7 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     import re
 
     from shapely.geometry import LineString, Point, Polygon
+    from shapely.strtree import STRtree
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -568,11 +569,28 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
                 i = parent[i]
             return i
 
-        for i in range(len(elems)):
-            gi, li = elems[i]
-            for j in range(i + 1, len(elems)):
-                gj, lj = elems[j]
-                if (li & lj) and gi.intersects(gj):
+        # Issue #5240: this used to be a naive O(n^2) all-pairs scan calling
+        # ``gi.intersects(gj)`` for every element pair on a shared copper
+        # layer -- on GND (the largest pour net: ~205 segments + ~103 vias
+        # + 2 fills + 122 pads = ~432 elements on the committed board-06
+        # regression fixture) that is ~93k individual shapely calls, and
+        # ``_run_pour_audit`` invokes this function up to
+        # ``MAX_POUR_REPAIR_ROUNDS + 1`` (7) times per re-route as each
+        # repair round adds MORE GND copper (offset vias + bridge stubs),
+        # so the cost compounds round-over-round.  An ``STRtree`` bulk
+        # self-join runs the *exact same* ``"intersects"`` predicate
+        # (still real GEOS geometry tests, not an approximation) but
+        # spatially prunes the candidate pairs via the tree's bounding-box
+        # index first, so well-separated copper elements never pay a GEOS
+        # call at all.  ``i < j`` keeps exactly one direction per pair
+        # (the bulk self-join returns each unordered pair twice, plus every
+        # element trivially paired with itself), matching the original
+        # loop's ``range(i + 1, len(elems))`` bound.
+        if len(elems) > 1:
+            geoms = [g for g, _ in elems]
+            query_idx, tree_idx = STRtree(geoms).query(geoms, predicate="intersects")
+            for i, j in zip(query_idx.tolist(), tree_idx.tolist(), strict=True):
+                if i < j and (elems[i][1] & elems[j][1]):
                     parent[_find(i)] = _find(j)
 
         groups: dict[int, list[tuple[str, bool]]] = {}
