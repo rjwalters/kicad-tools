@@ -1,0 +1,84 @@
+{
+  "candidate": {
+    "commit": "9dfbbdb59cc89ef490274d22cd7d862a0ca9e7b0",
+    "archive_sha256": "6f358baf0feb84fd7bb9d6582380714187459aeea34729e8d838577efbb0de25",
+    "cpp_tree": "9870ce99ba9f08847355c6adbb93157edf4145aa",
+    "native": {
+      "native_sha256": "0c876a647ada9b01ca32f0bd60e6fe43382ef732477cbf3a6398c6344256f31b",
+      "native_path": "/private/tmp/4507-current-main-20260916/source/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
+      "native_available": true,
+      "required_version": 27,
+      "import_path": "/private/tmp/4507-current-main-20260916/source/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
+      "python": "3.12.11 (main, Oct  7 2025, 15:53:48) [Clang 20.1.4 ]",
+      "nanobind": "3.0.1",
+      "cmake": "4.4.2",
+      "kicad_cli": "10.0.1"
+    },
+    "kct": "/private/tmp/4507-main-a901-full/source/.venv/bin/kct",
+    "native_build_commit": "6c20e7f317fbb1a44e0c98c535d029a51a9822b1",
+    "native_reuse_basis": "identical C++ tree; required version and import verified before launch"
+  },
+  "stages": {
+    "2": {
+      "board_sha256": "384e24faa80e4a2adc2a5b15789f30cc98f6339a51bee313993e663da214ff53",
+      "exact_sidecars": {
+        ".kicad_pro": false,
+        ".kicad_dru": false
+      },
+      "checks": {
+        "pairwise": {
+          "exit": 0,
+          "json_valid": true,
+          "violation_count": 0
+        },
+        "creepage": {
+          "exit": 1,
+          "json_valid": true,
+          "unwaived_fail_count": 30
+        },
+        "connectivity": {
+          "exit": 2,
+          "json_valid": true,
+          "summary": {
+            "total_nets": 99,
+            "complete": 96,
+            "incomplete": 3,
+            "unrouted": 0,
+            "total_unconnected_pads": 71
+          }
+        }
+      }
+    },
+    "3": {
+      "board_sha256": "49fe9bac2e5fc86a61738d266ea6fbbc7a0c22304ac4967bb8fa02b9c783b83b",
+      "exact_sidecars": {
+        ".kicad_pro": false,
+        ".kicad_dru": false
+      },
+      "checks": {
+        "pairwise": {
+          "exit": 0,
+          "json_valid": true,
+          "violation_count": 0
+        },
+        "creepage": {
+          "exit": 1,
+          "json_valid": true,
+          "unwaived_fail_count": 15
+        },
+        "connectivity": {
+          "exit": 2,
+          "json_valid": true,
+          "summary": {
+            "total_nets": 99,
+            "complete": 96,
+            "incomplete": 3,
+            "unrouted": 0,
+            "total_unconnected_pads": 69
+          }
+        }
+      }
+    }
+  },
+  "scope": "Read-only geometry evidence; native DRC and per-residual attribution still required. No automatic acceptance or issue closure."
+}
