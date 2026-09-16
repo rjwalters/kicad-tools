@@ -362,26 +362,50 @@ _extract_refs() {
 # soak observation window has started yet" -- "prerequisite" explains why the
 # soak hasn't started, it does not cite #7430 as a blocker of THIS proposal.
 #
-# Every genuine dependency phrase above is grammatically followed immediately
-# by the thing it names ("blocked by #N", "depends on #N", "requires #N",
-# "cannot start until #N", "must wait for #N") -- so in addition to the two
-# bullet-wide checks, require a reference to appear shortly (within
-# $_DEP_REF_WINDOW chars) AFTER a phrase match, not merely somewhere in the
-# bullet. This preserves every existing true positive (the reference
-# immediately or near-immediately follows the phrase in all of them) while
-# rejecting prose where the phrase word and the reference are structurally
-# unrelated.
+# So in addition to the two bullet-wide checks, require the reference to sit in
+# a WINDOW next to a phrase match, not merely somewhere in the bullet. Which
+# side of the phrase that window is on depends on the phrase family (#7784):
+#
+#   (a) Prepositional family ("blocked by", "depends on", "dependent on",
+#       "dependenc(y|ies) on|of", "requires", "prerequisite", "waiting on",
+#       "waits on", "cannot ... until", "not ...able until", "must wait
+#       for|until") -- these are grammatically followed immediately by the
+#       thing they name ("blocked by #N", "depends on #N", "requires #N"), so
+#       the reference must appear within $_DEP_REF_WINDOW chars AFTER the
+#       phrase. This is the #7756 rule, unchanged: it is what keeps the #7431
+#       shape ("#7430 (... a prerequisite for any meaningful soak) merged
+#       ...") classified on the merits.
+#
+#   (b) Bare verb/noun family ("blocks", "blocking", "blocker") -- these are
+#       the exception the (a) reasoning does not cover. Their idiomatic word
+#       order puts the reference BEFORE the phrase ("#N blocks this proposal",
+#       "#N is the blocker here", "#N is still blocking this work") just as
+#       often as after it ("this blocks on #N", "blocking dependency: #N"), so
+#       for these three -- and ONLY these three -- a reference within
+#       $_DEP_REF_LEAD_WINDOW chars BEFORE the phrase also counts.
+#
+# The leading window is deliberately much narrower than the trailing one: a
+# reference far upstream of a bare "blocking" is narrative co-occurrence (the
+# #7756 failure mode), not a citation. It is NOT applied to family (a), so
+# widening it can never reopen the #7431 false positive that motivated #7756.
 _DEP_REF_WINDOW=60
+_DEP_REF_LEAD_WINDOW=30
 is_dependency_finding() {
     local bullet="$1"
     local phrase_re='(blocked by|blocker|blocking|blocks|depends on|dependent on|dependenc(y|ies) (on|of)|requires|prerequisite|waiting on|waits on|cannot (start|proceed|begin)( work)? until|not (start|begin)able until|must wait (for|until))'
+    local bare_phrase_re='(blocker|blocking|blocks)'
     local ref_re='([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+|https?://[^[:space:]),]+/(issues|pull)/[0-9]+'
     local windows
 
     printf '%s' "$bullet" | grep -qiE "$phrase_re" || return 1
     printf '%s' "$bullet" | grep -qE "$ref_re" || return 1
 
-    windows="$(printf '%s' "$bullet" | grep -oiE "${phrase_re}.{0,${_DEP_REF_WINDOW}}")" || return 1
+    # (a) reference AFTER any phrase (both families).
+    windows="$(printf '%s' "$bullet" | grep -oiE "${phrase_re}.{0,${_DEP_REF_WINDOW}}")" || windows=""
+    printf '%s' "$windows" | grep -qE "$ref_re" && return 0
+
+    # (b) reference BEFORE a bare verb/noun phrase only.
+    windows="$(printf '%s' "$bullet" | grep -oiE ".{0,${_DEP_REF_LEAD_WINDOW}}${bare_phrase_re}")" || windows=""
     printf '%s' "$windows" | grep -qE "$ref_re"
 }
 

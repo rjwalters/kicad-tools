@@ -1712,7 +1712,25 @@ if echo "$GH_PR_MERGE_SCAN_TEXT" | grep -qE 'gh\s+pr\s+merge'; then
             MERGE_SCRIPT="$REPO_ROOT/defaults/scripts/merge-pr.sh"
         fi
     fi
-    deny "Use $MERGE_SCRIPT <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors." "loom:gh-pr-merge-redirect"
+
+    # Issue #7773: mask_cat_heredoc_bodies() only neutralizes a cat-heredoc
+    # CAPTURED by a text-data-consuming command (the `-m "$(cat <<EOF ...)"`
+    # idiom) -- a heredoc redirected straight to a FILE (`cat > FILE
+    # <<'DELIM'`) is deliberately left unmasked, because #5122 showed a later
+    # command on the same line can execute that file. That is still the right
+    # call ("masking only ever narrows what this ONE check can see; it never
+    # widens what it misses" -- see the block comment above
+    # mask_cat_heredoc_bodies()), but it means writing prose that merely
+    # quotes the phrase to a file this way denies with no hint that the
+    # trigger was inert documentation, not a live invocation. When that shape
+    # is present, name it explicitly so the false-positive case (an agent
+    # documenting this very rule) isn't left guessing why an apparently-inert
+    # command was denied.
+    HEREDOC_TO_FILE_NOTE=""
+    if echo "$COMMAND" | grep -qE 'cat[[:space:]]*>>?[[:space:]]*[^<[:space:]]+[[:space:]]*<<'; then
+        HEREDOC_TO_FILE_NOTE=" If this matched inside a heredoc body being written to a file rather than executed (e.g. documenting this rule), write the file with a non-Bash tool (Write/Edit) instead -- a file-bound heredoc is deliberately left visible to this check (#7773)."
+    fi
+    deny "Use $MERGE_SCRIPT <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors.${HEREDOC_TO_FILE_NOTE}" "loom:gh-pr-merge-redirect"
 fi
 
 # =============================================================================

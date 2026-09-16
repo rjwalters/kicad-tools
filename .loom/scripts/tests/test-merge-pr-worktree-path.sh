@@ -127,12 +127,12 @@ assert_grep "Preserving Judge/Doctor review worktree at" "$MERGE_PR" \
     "co-existing pr-<N> preserved-worktree case logs a clear reason (#6264)"
 
 # --- Test 2d: never-closing-issue worktree/branch cleanup (#6694) source surface ---
-assert_grep "_worktree_branch_fully_captured" "$MERGE_PR" \
-    "merge-pr.sh defines the branch-fully-captured-by-the-merge helper (#6694)"
-assert_grep '_worktree_branch_fully_captured "\$branch" "\$expected_head_sha"' "$MERGE_PR" \
-    "_maybe_delete_local_branch delegates its tip-match safety check to the shared helper (#6694)"
-assert_grep '_worktree_branch_fully_captured "\$PR_BRANCH" "\$PR_HEAD_SHA"' "$MERGE_PR" \
-    "the worktree-preserve decision reuses the shared helper at every call site (#6694)"
+assert_grep 'source "\$SCRIPT_DIR/lib/branch-landed.sh"' "$MERGE_PR" \
+    "merge-pr.sh sources the shared branch-landed primitive (#7812)"
+assert_grep 'branch_landed "\$branch" "\${DEFAULT_BRANCH_NAME:-}" "\$expected_head_sha"' "$MERGE_PR" \
+    "_maybe_delete_local_branch delegates its safety check to the shared primitive (#6694/#7812)"
+assert_grep 'branch_has_landed "\$PR_BRANCH" "\$DEFAULT_BRANCH_NAME" "\$PR_HEAD_SHA"' "$MERGE_PR" \
+    "the worktree-preserve decision reuses the shared primitive at every call site (#6694/#7812)"
 assert_grep "holds nothing unmerged; removing it \\(#6694\\)" "$MERGE_PR" \
     "a fully-captured branch is cleaned up even when the issue-close gate says preserve (#6694)"
 assert_grep "designed never to close \\(#6694\\), that retry never fires: remove manually" "$MERGE_PR" \
@@ -190,8 +190,8 @@ simulate_cleanup() {
     #   $10 issue_state        ("OPEN" / "CLOSED" / "", default "") # live
     #      forge_get_issue_state result; "" models a lookup failure
     #   $11 branch_fully_captured ("true" / "false", default "false") # #6694:
-    #      does the local branch's tip equal the merged PR's head SHA (i.e.
-    #      _worktree_branch_fully_captured)? Only consulted when the issue
+    #      has the local branch landed on the default branch (i.e.
+    #      `branch_has_landed`, #7812)? Only consulted when the issue
     #      gate itself says "preserve" — a never-closing programme issue
     #      never satisfies _gate_allows_removal, so without this the
     #      worktree/branch would preserve forever.

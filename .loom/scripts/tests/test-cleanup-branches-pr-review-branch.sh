@@ -79,11 +79,11 @@ else
 fi
 # The refusal path inside _maybe_delete_local_branch calls these (#4171); if
 # they are not extracted too the script dies with "command not found" (#4405).
-# `_worktree_branch_fully_captured` (#6694) is on the same footing: the
-# `-d` → `-D` tip-match upgrade delegates to it, so it must be extracted
-# alongside the others or the force-delete path crashes identically.
-for dep_fn in _primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch \
-              _worktree_branch_fully_captured; do
+# The `-d` → `-D` upgrade's safety predicate is NOT on that list since #7812:
+# it is `branch_landed` from lib/branch-landed.sh, a real shared library the
+# script sources (asserted separately below) rather than a function body to
+# extract.
+for dep_fn in _primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch; do
     if grep -qF "$dep_fn" "$CLEANUP_SCRIPT"; then
         pass "extracts _maybe_delete_local_branch's transitive helper $dep_fn"
     else
@@ -97,6 +97,13 @@ for dep_fn in _primary_worktree_path _is_primary_worktree_path _find_worktree_by
 done
 assert_grep '_maybe_delete_local_branch "\$branch" "\$pr_head_sha"' "$CLEANUP_SCRIPT" \
     "invokes the extracted helper with the PR's head SHA for the tip-match safety check"
+assert_grep 'source "\$SCRIPT_DIR/lib/branch-landed.sh"' "$CLEANUP_SCRIPT" \
+    "sources the shared branch-landed primitive the delete safety check needs (#7812)"
+if grep -qF 'branch_landed()' "$CLEANUP_SCRIPT"; then
+    pass "carries a fail-closed 'unknown' shim for a partially-resynced .loom/ (#7812)"
+else
+    fail "carries a fail-closed 'unknown' shim for a partially-resynced .loom/ (#7812)"
+fi
 assert_grep 'pr view "\$pr_num" --json state,headRefOid' "$CLEANUP_SCRIPT" \
     "resolves PR state + head SHA via \$FORGE/gh pr view"
 assert_grep 'pr_state" == "OPEN"' "$CLEANUP_SCRIPT" \

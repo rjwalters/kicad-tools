@@ -55,7 +55,7 @@
 #      is not a close target of this PR, and never will be (every merge to it
 #      is `Part of #N` by design), so the issue-close cleanup gate can never
 #      flip true and the pre-#6694 worktree/branch preserve was permanent:
-#      (k) the shared `_worktree_branch_fully_captured` predicate the
+#      (k) the shared `branch_landed` predicate (#7812) the
 #          worktree-preserve decision and the `-d` -> `-D` upgrade now BOTH
 #          key on, exercised directly: true only for an exact tip match; false
 #          for local commits beyond the merged head, a missing branch, and an
@@ -153,10 +153,14 @@ error()   { echo "ERROR: $*" >&2; return 1; }
 eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
 eval "$(extract_fn _is_primary_worktree_path "$MERGE_PR")"
 eval "$(extract_fn _find_worktree_by_branch "$MERGE_PR")"
-# #6694: _maybe_delete_local_branch's tip-match check now delegates to this
-# shared helper (also reused by the worktree-preserve decision) — extract it
-# too so the real code path (not a stub) drives the tip-match assertions.
-eval "$(extract_fn _worktree_branch_fully_captured "$MERGE_PR")"
+# #7812: the `-d` -> `-D` safety check is the shared `branch_landed`
+# primitive (also reused by the worktree-preserve decision) — a real library,
+# SOURCED here rather than extracted, so the real code path drives the
+# assertions below. Offline: this suite is about merge-pr.sh's local branch
+# logic, not the forge rung, and must stay hermetic.
+export LOOM_BRANCH_LANDED_OFFLINE=1
+# shellcheck source=../lib/branch-landed.sh
+source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
 eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/loom-merge-local-branch.XXXXXX")"
@@ -240,10 +244,14 @@ git -C "$REPO" branch -D feature/issue-300 >/dev/null 2>&1 || true
 # REPO here IS the primary checkout, so with _is_primary_worktree_path /
 # _find_worktree_by_branch now extracted (needed by the #5015 auto-cleanup
 # tests below), this correctly gets the primary-checkout-specific message
-# rather than the generic one — no expected_head_sha means delete_flag stays
-# "-d", so the #5015 auto-cleanup gate (which requires "-D") never fires and
-# the branch is preserved either way. ---
+# rather than the generic one. The branch carries an unlanded commit (#7812):
+# the delete_flag is keyed on whether the work has landed, not on whether a
+# head SHA was passed, so a branch parked at main's tip would be landed and
+# the #5015 auto-cleanup gate would legitimately fire — the case under test
+# here is the one where real work would be lost. ---
 git -C "$REPO" checkout -q -b feature/issue-301
+echo "unlanded work" >> "$REPO/README.md"
+git -C "$REPO" commit -q -am "issue 301 work that never reached main"
 out_c2="$(_maybe_delete_local_branch "feature/issue-301" "" 2>&1)"
 if [[ "$out_c2" == *"checked out in the primary repository checkout"* ]] \
    && git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-301; then
@@ -274,7 +282,12 @@ else
     fail "(e) expected quiet info no-op; got: $out_e"
 fi
 
-# --- (f) no expected_head_sha (pre-#4100 caller shape) -> plain -d behaviour ---
+# --- (f) no expected_head_sha (pre-#4100 caller shape). The branch was merged
+# with a real merge commit, so since #7812 the shared primitive proves it
+# landed by ancestry alone and the delete is attributed accordingly — the
+# caller no longer has to hand over a head SHA for a merged branch to be
+# cleaned up. The outcome (deleted, exit 0) is what the pre-#7812 `-d` path
+# produced here too. ---
 git -C "$REPO" checkout -q -b feature/issue-400
 echo "clean work" >> "$REPO/README.md"
 git -C "$REPO" commit -q -am "clean, mergeable"
@@ -283,12 +296,30 @@ git -C "$REPO" merge -q --no-ff feature/issue-400 -m "merge for -d test"
 
 out_f="$(_maybe_delete_local_branch "feature/issue-400" 2>&1)"
 if [[ "$out_f" == *"OK: Local branch 'feature/issue-400' deleted"* ]] \
-   && [[ "$out_f" != *"safe force-delete"* ]] \
+   && [[ "$out_f" == *"ancestor"* ]] \
    && ! git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-400; then
-    pass "(f) omitting expected_head_sha preserves the original plain -d behaviour"
+    pass "(f) omitting expected_head_sha still deletes a genuinely merged branch, by ancestry"
 else
-    fail "(f) expected plain -d delete with no safety-note; got: $out_f"
+    fail "(f) expected an ancestry-attributed delete; got: $out_f"
 fi
+
+# --- (f2) the conservative refusal is what an UNLANDED branch still gets,
+# with or without a head SHA (#7812: `not-landed` and `unknown` both keep the
+# plain `-d`, and git's own safety net then refuses). ---
+git -C "$REPO" checkout -q -b feature/issue-401
+echo "never merged" >> "$REPO/README.md"
+git -C "$REPO" commit -q -am "unlanded work"
+git -C "$REPO" checkout -q main
+
+out_f2="$(_maybe_delete_local_branch "feature/issue-401" 2>&1)"
+if [[ "$out_f2" == *"WARN:"* ]] \
+   && [[ "$out_f2" != *"safe force-delete"* ]] \
+   && git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-401; then
+    pass "(f2) an unlanded branch is still refused, never force-deleted"
+else
+    fail "(f2) expected an unlanded branch to survive; got: $out_f2"
+fi
+git -C "$REPO" branch -D feature/issue-401 >/dev/null 2>&1 || true
 
 # --- (g) checked out in the PRIMARY checkout, clean tree, tip matches head SHA
 #     -> auto-cleanup: checkout the default branch, then force-delete (#5015) ---
@@ -393,19 +424,21 @@ git -C "$REPO" branch -D feature/issue-800 >/dev/null 2>&1 || true
 echo ""
 echo "Test 4: never-closing programme issue — branch/worktree cleanup (#6694)"
 
-# --- (k) _worktree_branch_fully_captured predicate, exercised directly.
+# --- (k) the shared landed predicate, exercised directly (#7812).
 # The worktree-preserve decision keys on this and NOTHING about the issue, so
-# it must be true exactly when the branch tip is the merged PR's head SHA. ---
+# it must be true exactly when the default branch already contains everything
+# the branch has — a tip matching the merged PR head SHA being the cheapest
+# such proof. ---
 git -C "$REPO" checkout -q -b feature/issue-900
 echo "captured work" >> "$REPO/README.md"
 git -C "$REPO" commit -q -am "issue 900 work (merged as this PR's head)"
 CAPTURED_SHA="$(git -C "$REPO" rev-parse feature/issue-900)"
 git -C "$REPO" checkout -q main
 
-if _worktree_branch_fully_captured "feature/issue-900" "$CAPTURED_SHA"; then
-    pass "(k1) tip == merged PR head SHA is reported fully captured"
+if branch_has_landed "feature/issue-900" "main" "$CAPTURED_SHA"; then
+    pass "(k1) tip == merged PR head SHA is reported landed"
 else
-    fail "(k1) expected fully-captured for a tip matching the merged PR head SHA"
+    fail "(k1) expected landed for a tip matching the merged PR head SHA"
 fi
 
 git -C "$REPO" checkout -q feature/issue-900
@@ -413,22 +446,25 @@ echo "unpushed follow-up" >> "$REPO/README.md"
 git -C "$REPO" commit -q -am "local work beyond the merged head"
 git -C "$REPO" checkout -q main
 
-if _worktree_branch_fully_captured "feature/issue-900" "$CAPTURED_SHA"; then
-    fail "(k2) a branch carrying local commits beyond the merged head must NOT be fully captured"
+if branch_has_landed "feature/issue-900" "main" "$CAPTURED_SHA"; then
+    fail "(k2) a branch carrying local commits beyond the merged head must NOT be landed"
 else
-    pass "(k2) local commits beyond the merged head are not fully captured (preserve stays correct)"
+    pass "(k2) local commits beyond the merged head are not landed (preserve stays correct)"
 fi
 
-if _worktree_branch_fully_captured "feature/issue-901-nonexistent" "$CAPTURED_SHA"; then
-    fail "(k3) a nonexistent local branch must not be reported fully captured"
+if branch_has_landed "feature/issue-901-nonexistent" "main" "$CAPTURED_SHA"; then
+    fail "(k3) a nonexistent local branch must not be reported landed"
 else
-    pass "(k3) nonexistent local branch is not fully captured"
+    pass "(k3) nonexistent local branch is not landed"
 fi
 
-if _worktree_branch_fully_captured "feature/issue-900" ""; then
-    fail "(k4) an empty expected head SHA must not be reported fully captured"
+# With no head-SHA hint the primitive falls through to its own rungs, which
+# (offline, with unlanded content on the branch) still answer "not landed" —
+# an absent hint must never read as a blanket yes.
+if branch_has_landed "feature/issue-900" "main" ""; then
+    fail "(k4) an absent expected head SHA must not be reported landed"
 else
-    pass "(k4) empty expected head SHA is not fully captured (no accidental blanket removal)"
+    pass "(k4) absent expected head SHA is not landed (no accidental blanket removal)"
 fi
 git -C "$REPO" branch -D feature/issue-900 >/dev/null 2>&1 || true
 
@@ -454,12 +490,12 @@ else
     fail "(l1) expected checked-out refusal while the worktree exists; got: $out_l1"
 fi
 
-# The branch really is fully captured — this is exactly the predicate #6694
-# has merge-pr.sh consult to remove the worktree despite the open issue.
-if _worktree_branch_fully_captured "feature/issue-902" "$NEVER_CLOSING_SHA"; then
-    pass "(l2) the never-closing issue's branch is fully captured, so the worktree is removable"
+# The branch really has landed — this is exactly the predicate #6694 has
+# merge-pr.sh consult to remove the worktree despite the open issue.
+if branch_has_landed "feature/issue-902" "main" "$NEVER_CLOSING_SHA"; then
+    pass "(l2) the never-closing issue's branch has landed, so the worktree is removable"
 else
-    fail "(l2) expected the never-closing issue's branch to be fully captured"
+    fail "(l2) expected the never-closing issue's branch to have landed"
 fi
 
 git -C "$REPO" worktree remove "$WT_NEVER_CLOSING" --force >/dev/null 2>&1 || true

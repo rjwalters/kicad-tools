@@ -1127,11 +1127,11 @@ gh issue list --label="loom:issue" --state=open --json number,title,labels \
 For additional PR quality guidelines, see **builder-pr.md**.
 
 **Before creating the PR:**
-- **Verify ALL acceptance criteria** from the issue (checkboxes, numbered items, "must"/"should" statements)
-- Verify each criterion explicitly with concrete checks (not "I think it works")
-- Run the project's check command (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`) before creating PR
-- **Run the project's formatter + linter on your changed files before committing** — discover the commands from repo convention (`buildGate.command`, `CONTRIBUTING.md`, CI workflow, or the language's standard tool, e.g. `ruff format`/`ruff check` for Python, `cargo fmt`/`cargo clippy` for Rust). A format-only CI failure is a **guaranteed Judge rejection** that costs a full Doctor cycle for a one-command fix — see **builder-pr.md § "Format and Lint Changed Files"**
+- **Verify ALL acceptance criteria** from the issue, explicitly, with concrete checks — not "I think it works"
+- Run the project's check command (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command) before creating PR
+- **Run the project's formatter + linter on your changed files before committing** — discover the commands from repo convention (`buildGate.command`, `CONTRIBUTING.md`, CI workflow, or the language's standard tool). A format-only CI failure is a **guaranteed Judge rejection** that costs a Doctor cycle — see **builder-pr.md § "Format and Lint Changed Files"**
 - **Test-first discipline, for behavior changes**: write the failing test (or bug-reproducing test) before the fix, confirm it fails for the right reason, then implement to green. Record a `TDD:` line in the PR's Test Plan section — Judge re-verifies it against the diff, not just your say-so. Full requirement, format, and advisory/blocking rules: **builder-pr.md § "Test-First Discipline (TDD line)"** (ADR-0015).
+- **If you touched an already-large file, run `scripts/check-file-size-budget.sh` before pushing.** On failure, extract into a sibling file first — see `.loom/docs/file-size-policy.md`.
 
 ### Live Verification You Cannot Perform: Say So, Don't Claim It
 

@@ -262,6 +262,44 @@ assert_true is_dependency_finding '- Technical Feasibility: this work has a hard
 assert_true is_dependency_finding '- Scope: this is a hard prerequisite blocked by #3' \
     "'prerequisite' bullet with the reference immediately after a dependency word still classifies as a dependency finding"
 
+# #7784: the bare verb/noun family ("blocks"/"blocking"/"blocker") is the one
+# part of the phrase list whose natural word order puts the reference BEFORE
+# the phrase ("#N blocks this", "#N is the blocker"), so #7756's
+# after-phrase-only window silently dropped those shapes. Both word orders must
+# classify as dependency findings; the narrow leading window must NOT reopen
+# the #7431 false positive (guarded again immediately below and in the
+# --check-defer regression block further down).
+assert_true is_dependency_finding '- #7430 blocks this proposal' \
+    "ref-first 'blocks' is a dependency finding (#7784)"
+assert_true is_dependency_finding '- #7430 is the blocker here' \
+    "ref-first 'blocker' is a dependency finding (#7784)"
+assert_true is_dependency_finding '- #7430 is still blocking this work' \
+    "ref-first 'blocking' is a dependency finding (#7784)"
+assert_true is_dependency_finding '- Scope: private/repo#88 blocks this proposal' \
+    "ref-first 'blocks' with a cross-repo reference is a dependency finding (#7784)"
+# The ref-after word orders that already worked under #7756 must keep working.
+assert_true is_dependency_finding '- This blocks on #7430' \
+    "ref-after 'blocks' still classifies as a dependency finding (#7784)"
+assert_true is_dependency_finding '- Blocking dependency: #7430' \
+    "ref-after 'blocking' still classifies as a dependency finding (#7784)"
+assert_true is_dependency_finding '- The open blocker is tracked at #7430' \
+    "ref-after 'blocker' still classifies as a dependency finding (#7784)"
+# The leading window is deliberately narrow: a reference far upstream of a
+# bare-verb/noun phrase is narrative co-occurrence, not a citation.
+if is_dependency_finding '- Scope: #7430 merged minutes before this evaluation and there is nothing blocking here'; then
+    fail "a reference far upstream of 'blocking' is a merits finding, not a dependency wait (#7784)"
+else
+    pass "a reference far upstream of 'blocking' is a merits finding, not a dependency wait (#7784)"
+fi
+# Narrowest-possible regression restatement of #7756: the #7431 bullet is
+# unaffected by the leading window (it uses "prerequisite", a prepositional-
+# family phrase, which keeps after-phrase-only directionality).
+if is_dependency_finding "$FINDING_7431"; then
+    fail "the #7431 bullet stays a merits finding after the #7784 leading-window fix"
+else
+    pass "the #7431 bullet stays a merits finding after the #7784 leading-window fix"
+fi
+
 echo
 echo "--- findings_are_dependency_only: one merits finding disqualifies the set ---"
 

@@ -113,15 +113,18 @@ where the *same* branch name `feature/issue-N` is deliberately reused across
 an issue's slices, so a squash-merged prior slice's branch can still be
 sitting on `origin` when the next slice's worktree is created.
 
-`worktree.sh` now checks the remote branch's tip against the forge (reusing
-the same `_worktree_merged_pr_head_sha` helper already used by the worktree
-**removal** path, #4889) before reusing it: if the tip matches an
-already-merged PR's head, it creates a fresh branch from the base ref instead
-and prints which PR made the old branch stale. If the forge lookup is
-unavailable (network/auth failure), it fails open to the pre-existing reuse
-behavior — a forge outage never blocks worktree creation. The #4823 in-flight
-case (remote branch exists, not yet merged, possibly diverged from base) is
-unaffected and still reused exactly as before.
+`worktree.sh` now asks the shared `branch_landed` primitive
+(`lib/branch-landed.sh`, #7812 — the same one the worktree **removal** path and
+`merge-pr.sh` use) before reusing it: if the branch has already landed, it
+creates a fresh branch from the base ref instead and prints which PR (or which
+evidence) made the old branch stale. Because that primitive checks the forge's
+PR state, plain ancestry, *and* `git merge-tree --write-tree` tree equality, it
+is correct under a squash merge, a rebase merge (SHAs rewritten) and a merge
+commit alike. If nothing can answer — forge unreachable *and* no usable tree
+comparison — the verdict is `unknown` and it fails open to the pre-existing
+reuse behavior: a forge outage never blocks worktree creation. The #4823
+in-flight case (remote branch exists, not yet merged, possibly diverged from
+base) is unaffected and still reused exactly as before.
 
 ### `git push --force-with-lease` prints a rejection for a ref update that landed (#6695)
 

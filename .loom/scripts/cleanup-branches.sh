@@ -154,6 +154,23 @@ if [[ -n "$pr_branches" ]]; then
     # uses to test it.
     MERGE_PR_SCRIPT="$SCRIPT_DIR/merge-pr.sh"
 
+    # The landed check `_maybe_delete_local_branch` delegates its `-d` → `-D`
+    # upgrade to (#7812). Sourced, not extracted — it is a real shared library.
+    # Fail-closed `unknown` shim when a partially-resynced .loom/ lacks it, so
+    # this pass degrades to the conservative `git branch -d`, never crashes.
+    if [[ -f "$SCRIPT_DIR/lib/branch-landed.sh" ]]; then
+        # shellcheck source=lib/branch-landed.sh
+        source "$SCRIPT_DIR/lib/branch-landed.sh"
+    else
+        # shellcheck disable=SC2034  # side-channel globals read by callers
+        branch_landed() {
+            BRANCH_LANDED_VERDICT="unknown"; BRANCH_LANDED_EVIDENCE="inconclusive"
+            BRANCH_LANDED_PR_NUMBER=""; BRANCH_LANDED_PR_HEAD_SHA=""
+            BRANCH_LANDED_FORGE_STATUS="unavailable"
+            printf 'unknown\n'
+        }
+    fi
+
     # Extract one top-level function definition verbatim from a shell script.
     # merge-pr.sh defines every function at column 0 with its closing brace
     # also at column 0, so "first `^}` after the opening line" is exact.
@@ -174,11 +191,10 @@ if [[ -n "$pr_branches" ]]; then
     # branch is still checked out in a live review worktree (exactly the
     # population this pass targets) aborts the whole script with
     # `_find_worktree_by_branch: command not found` under `set -e` (#4405).
-    # `_worktree_branch_fully_captured` is the tip-match safety predicate the
-    # `-d` → `-D` upgrade delegates to since #6694 — extracted for the same
-    # reason: without it the force-delete path dies with "command not found".
-    _MAYBE_DELETE_DEPS=(_primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch
-                        _worktree_branch_fully_captured)
+    # The `-d` → `-D` upgrade's safety predicate is NOT in this list since
+    # #7812: it is `branch_landed` from lib/branch-landed.sh, a real shared
+    # library sourced below, so there is no function body to extract.
+    _MAYBE_DELETE_DEPS=(_primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch)
     _MAYBE_DELETE_DEP_FNS=""
     if [[ -f "$MERGE_PR_SCRIPT" ]]; then
         _MAYBE_DELETE_FN="$(_extract_shell_fn _maybe_delete_local_branch "$MERGE_PR_SCRIPT")"
@@ -190,11 +206,10 @@ if [[ -n "$pr_branches" ]]; then
                 # Upstream renamed/removed the helper: degrade to the generic
                 # "checked out somewhere" warning instead of crashing. All
                 # shims are safe under `set -e` — the path shims print nothing
-                # and succeed, and the predicates are only used as `if` tests
-                # (a `return 1` for `_worktree_branch_fully_captured` means
-                # "not provably captured", keeping the conservative `-d`).
+                # and succeed, and `_is_primary_worktree_path` is only ever
+                # used as an `if` test.
                 case "$_dep_fn" in
-                    _is_primary_worktree_path|_worktree_branch_fully_captured)
+                    _is_primary_worktree_path)
                         _MAYBE_DELETE_DEP_FNS+="$_dep_fn() { return 1; }"$'\n' ;;
                     *)  _MAYBE_DELETE_DEP_FNS+="$_dep_fn() { :; }"$'\n' ;;
                 esac

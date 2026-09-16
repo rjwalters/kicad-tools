@@ -83,6 +83,27 @@ else
     loom_reclaim_worktree_target_dir() { printf 'inside\t%s\tcargo-target-dir.sh lib unavailable\n' "$3"; }
 fi
 
+# Shared "has this branch landed?" primitive (#7812): forge PR state first,
+# then `git merge-tree --write-tree` tree equality, answering landed /
+# not-landed / unknown. Replaces this script's two private squash heuristics
+# (the deleted `_worktree_merged_pr_head_sha` and merge-pr.sh's
+# `_worktree_branch_fully_captured`). Sourced defensively with a fail-closed
+# `unknown` fallback for the same reason as the ledger/target-dir libs above:
+# a partially-resynced .loom/ must degrade to "cannot tell, keep the branch",
+# never to a `source` failure that breaks worktree creation and removal.
+if [[ -f "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/branch-landed.sh" ]]; then
+    # shellcheck source=lib/branch-landed.sh
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/branch-landed.sh"
+else
+    # shellcheck disable=SC2034  # side-channel globals read by callers
+    branch_landed() {
+        BRANCH_LANDED_VERDICT="unknown"; BRANCH_LANDED_EVIDENCE="inconclusive"
+        BRANCH_LANDED_PR_NUMBER=""; BRANCH_LANDED_PR_HEAD_SHA=""
+        BRANCH_LANDED_FORGE_STATUS="unavailable"
+        printf 'unknown\n'
+    }
+fi
+
 # Race-safe reset helper (#6334). The "stale worktree" reset path below can
 # otherwise discard foreign work that appears in the window between the
 # staleness check and the reset itself — see the lib file for the full
@@ -517,13 +538,17 @@ _worktree_dirty_lines() {
 # repo squash-merges (`merge-pr.sh --squash`), so `worktree.sh remove`
 # could never clean up the branch it had just detached.
 #
-# merge-pr.sh already solved this (#4100): its private
-# `_maybe_delete_local_branch` compares the local branch tip against the
-# merged PR's `head.sha` and only upgrades to `git branch -D` when they
-# match — every commit on the branch was verifiably part of the merged PR,
-# so force-delete is safe even though `--merged` disagrees. A tip that does
-# NOT match (unpushed local work) still falls back to plain `-d`, preserving
-# the conservative refusal.
+# merge-pr.sh already solved this (#4100): its `_maybe_delete_local_branch`
+# only upgrades to `git branch -D` when the branch has provably LANDED, so
+# force-delete is safe even though `--merged` disagrees. Anything short of
+# that (unpushed local work, or an inconclusive `unknown`) falls back to
+# plain `-d`, preserving the conservative refusal.
+#
+# Since #7812 that "has it landed?" question is answered by the shared
+# `branch_landed` primitive (lib/branch-landed.sh, sourced above) rather than
+# by a tip-vs-merged-head comparison private to merge-pr.sh — so it is also
+# correct under a rebase merge, which rewrites SHAs and defeats a tip match
+# just as thoroughly as a squash defeats ancestry.
 #
 # Rather than reimplement that comparison a second time with different
 # strictness, extract the real function body verbatim from the live
@@ -545,16 +570,21 @@ _wt_extract_shell_fn() {
     ' "$src"
 }
 
-# Load `_maybe_delete_local_branch` (+ its four dependencies: the three
-# worktree-introspection helpers `_primary_worktree_path`,
-# `_is_primary_worktree_path`, `_find_worktree_by_branch`, and the tip-match
-# safety predicate `_worktree_branch_fully_captured` its `-d` → `-D` upgrade
-# delegates to, #6694) from the live merge-pr.sh source into this
+# Load `_maybe_delete_local_branch` (+ its three worktree-introspection
+# dependencies `_primary_worktree_path`, `_is_primary_worktree_path`,
+# `_find_worktree_by_branch`) from the live merge-pr.sh source into this
 # process. The loaded body reads globals `$REPO_ROOT` / `$DEFAULT_BRANCH_NAME`
 # and calls `info`/`warning`/`success` — the caller must set/define all five
 # before invoking `_maybe_delete_local_branch`. Returns 1 (never hard-fails)
 # if merge-pr.sh is missing or the helper was renamed/removed upstream, so
 # the caller can fall back to a plain `git branch -d`.
+#
+# The `-d` → `-D` upgrade's safety predicate is NOT extracted (#7812): since
+# this issue it is `branch_landed` from lib/branch-landed.sh, a real shared
+# library both scripts `source` normally, so that one rule has exactly one
+# implementation rather than an eval-extracted copy per consumer. Only
+# `_maybe_delete_local_branch` itself (which still reads merge-pr.sh-private
+# globals such as CLEANUP_PRIMARY_CHECKOUT) is still extracted this way.
 _wt_load_branch_safety_helper() {
     local merge_pr_script
     merge_pr_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/merge-pr.sh"
@@ -565,20 +595,17 @@ _wt_load_branch_safety_helper() {
     [[ -n "$fn_src" ]] || return 1
 
     local dep_fn dep_src dep_fns=""
-    for dep_fn in _primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch \
-                  _worktree_branch_fully_captured; do
+    for dep_fn in _primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch; do
         dep_src="$(_wt_extract_shell_fn "$dep_fn" "$merge_pr_script")"
         if [[ -n "$dep_src" ]]; then
             dep_fns+="$dep_src"$'\n'
         else
             # Upstream renamed/removed the helper: degrade to the generic
-            # "checked out somewhere" warning path instead of aborting. The
-            # two predicates shim to `return 1` — for
-            # `_worktree_branch_fully_captured` that means "not provably
-            # captured", which keeps the conservative `git branch -d`.
+            # "checked out somewhere" warning path instead of aborting.
+            # `_is_primary_worktree_path` shims to `return 1` (it is only ever
+            # used as an `if` test); the path helpers shim to a silent no-op.
             case "$dep_fn" in
-                _is_primary_worktree_path|_worktree_branch_fully_captured)
-                    dep_fns+="$dep_fn() { return 1; }"$'\n' ;;
+                _is_primary_worktree_path) dep_fns+="$dep_fn() { return 1; }"$'\n' ;;
                 *)  dep_fns+="$dep_fn() { :; }"$'\n' ;;
             esac
         fi
@@ -586,55 +613,6 @@ _wt_load_branch_safety_helper() {
 
     eval "$dep_fns"
     eval "$fn_src"
-}
-
-# Look up the head SHA of a MERGED pull request whose head branch matches
-# <branch>, via the forge (`loom-daemon forge` when present for Gitea
-# passthrough, else `gh` directly — same convention as cleanup-branches.sh's
-# $FORGE). MUST be called as a plain statement, never inside `$(...)` — it
-# sets three globals rather than printing, because a command-substitution
-# subshell would silently discard the global side effect:
-#   _WT_PR_LOOKUP_SHA    - the resolved head SHA, or empty if none found
-#   _WT_PR_LOOKUP_NUMBER - the resolved PR number, or empty if none found
-#   _WT_PR_LOOKUP_STATUS - one of:
-#     found       - a merged PR head SHA was resolved (see _WT_PR_LOOKUP_SHA)
-#     not_found   - the forge was reachable but no merged PR matches this branch
-#     unavailable - no forge tool / no jq / the query itself failed (network,
-#                   auth, rate limit, ...) — the safety check could not even
-#                   be attempted, distinct from "checked, and it's unmerged"
-# Never fails the caller — always returns 0.
-_worktree_merged_pr_head_sha() {
-    local branch="$1"
-    _WT_PR_LOOKUP_SHA=""
-    _WT_PR_LOOKUP_NUMBER=""
-    _WT_PR_LOOKUP_STATUS="unavailable"
-    if [[ -z "$branch" ]]; then
-        return 0
-    fi
-    if ! command -v jq >/dev/null 2>&1; then
-        return 0
-    fi
-    local forge_cmd
-    if command -v loom-daemon >/dev/null 2>&1; then
-        forge_cmd="loom-daemon forge"
-    elif command -v gh >/dev/null 2>&1; then
-        forge_cmd="gh"
-    else
-        return 0
-    fi
-    local pr_json
-    pr_json="$($forge_cmd pr list --head "$branch" --state merged --json headRefOid,number --limit 1 2>/dev/null)" || return 0
-    local sha number
-    sha="$(echo "$pr_json" | jq -r '.[0].headRefOid // empty' 2>/dev/null || echo "")"
-    number="$(echo "$pr_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")"
-    if [[ -n "$sha" ]]; then
-        _WT_PR_LOOKUP_STATUS="found"
-        _WT_PR_LOOKUP_SHA="$sha"
-        _WT_PR_LOOKUP_NUMBER="$number"
-    else
-        _WT_PR_LOOKUP_STATUS="not_found"
-    fi
-    return 0
 }
 
 # remove_worktree_command [--keep-branch] [--force] [--dry-run] [--json] <issue-number>
@@ -903,16 +881,13 @@ remove_worktree_command() {
             # shellcheck disable=SC2034  # read inside the evaluated _maybe_delete_local_branch body
             DEFAULT_BRANCH_NAME="$(cd "$repo_root" 2>/dev/null && loom_default_branch 2>/dev/null || true)"
 
-            # Plain statement, NOT `$(...)` — command substitution runs in a
-            # subshell, which would silently discard the global side effects
-            # (_WT_PR_LOOKUP_SHA / _WT_PR_LOOKUP_STATUS) this sets.
-            _worktree_merged_pr_head_sha "$attached_branch"
-            if [[ "$_WT_PR_LOOKUP_STATUS" == "unavailable" ]]; then
-                _rm_info "Could not query the forge for a merged PR on '$attached_branch' — falling back to git's plain merge check"
-            fi
-
+            # #7812: the landed decision (and its "forge unavailable" /
+            # "could not determine" notes) now lives inside
+            # `_maybe_delete_local_branch`, which consults the shared
+            # `branch_landed` primitive — no merged-PR head SHA to pre-resolve
+            # and hand over from here any more.
             if _wt_load_branch_safety_helper; then
-                _maybe_delete_local_branch "$attached_branch" "$_WT_PR_LOOKUP_SHA"
+                _maybe_delete_local_branch "$attached_branch"
             else
                 _rm_warning "Could not load the branch-delete safety helper from merge-pr.sh — falling back to plain 'git branch -d'"
                 if git -C "$repo_root" branch -d "$attached_branch" >/dev/null 2>&1; then
@@ -2511,33 +2486,41 @@ else
     git fetch origin "$BRANCH_NAME" 2>/dev/null || true
     _WT_REUSE_REMOTE_BRANCH=false
     if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH_NAME"; then
-        # #5657: before reusing the remote branch, check whether its current
-        # tip is already the head of an already-MERGED PR (e.g. a
-        # partial-increment slice whose branch name — feature/issue-N — gets
-        # reused by the next slice, and the forge left the ref on origin
-        # because auto-delete-head-branches is off). Reusing a
-        # squash-merged branch produces a worktree whose history conflicts
-        # with main and a PR with zero real diff, not the in-flight-cycle
-        # case #4823 was written to protect.
+        # #5657: before reusing the remote branch, check whether it has
+        # already LANDED on the default branch (e.g. a partial-increment
+        # slice whose branch name — feature/issue-N — gets reused by the next
+        # slice, and the forge left the ref on origin because
+        # auto-delete-head-branches is off). Reusing an already-merged branch
+        # produces a worktree whose history conflicts with main and a PR with
+        # zero real diff, not the in-flight-cycle case #4823 was written to
+        # protect.
+        #
+        # #7812: asked via the shared `branch_landed` primitive, so this is
+        # now correct for a squash merge (forge PR state), a rebase merge
+        # (SHAs rewritten — tree equality), and a merge commit (ancestry)
+        # alike. `unknown` fails closed to REUSE: a forge outage must never
+        # block worktree creation, and reuse is the pre-#5657 behaviour.
         #
         # Plain statement, NOT `$(...)` — command substitution runs in a
-        # subshell, which would silently discard the global side effects
-        # (_WT_PR_LOOKUP_SHA / _WT_PR_LOOKUP_NUMBER / _WT_PR_LOOKUP_STATUS)
+        # subshell, which would silently discard the BRANCH_LANDED_* globals
         # this sets.
-        _worktree_merged_pr_head_sha "$BRANCH_NAME"
-        if [[ "$_WT_PR_LOOKUP_STATUS" == "found" ]]; then
-            remote_tip_sha="$(git rev-parse "refs/remotes/origin/$BRANCH_NAME" 2>/dev/null || true)"
-            if [[ -n "$remote_tip_sha" && "$remote_tip_sha" == "$_WT_PR_LOOKUP_SHA" ]]; then
-                if [[ "$JSON_OUTPUT" != "true" ]]; then
-                    print_info "origin/$BRANCH_NAME is the head of already-merged PR #${_WT_PR_LOOKUP_NUMBER:-?} - creating a fresh branch from $BASE_DISPLAY instead"
+        # No LOCAL branch of this name exists here (that is this `else` arm's
+        # whole premise), so `branch_landed`'s resolution ladder lands on
+        # refs/remotes/origin/$BRANCH_NAME — the ref actually under question.
+        branch_landed "$BRANCH_NAME" "$DEFAULT_BRANCH" >/dev/null
+        if [[ "$BRANCH_LANDED_VERDICT" == "landed" ]]; then
+            if [[ "$JSON_OUTPUT" != "true" ]]; then
+                if [[ -n "$BRANCH_LANDED_PR_NUMBER" ]]; then
+                    print_info "origin/$BRANCH_NAME is the head of already-merged PR #${BRANCH_LANDED_PR_NUMBER} - creating a fresh branch from $BASE_DISPLAY instead"
+                else
+                    print_info "origin/$BRANCH_NAME has already landed on $BASE_DISPLAY (${BRANCH_LANDED_EVIDENCE}) - creating a fresh branch from $BASE_DISPLAY instead"
                 fi
-            else
-                _WT_REUSE_REMOTE_BRANCH=true
             fi
         else
-            # not_found (checked, unmerged) or unavailable (forge
-            # unreachable — fail open, never block worktree creation on a
-            # forge outage): preserve today's reuse behavior exactly.
+            # not-landed (checked, still live) or unknown (forge unreachable
+            # AND the tree comparison unavailable — fail open, never block
+            # worktree creation on an outage): preserve today's reuse
+            # behavior exactly.
             _WT_REUSE_REMOTE_BRANCH=true
         fi
     fi

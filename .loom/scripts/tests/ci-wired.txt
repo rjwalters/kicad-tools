@@ -30,6 +30,7 @@ test-agent-destroy.sh
 test-app-permission-fallback.sh
 test-archive-transcripts.sh
 test-blame-issue.sh
+test-branch-landed.sh
 test-body-repo-affinity.sh
 test-bounded-run.sh
 test-build-gate-timeout.sh
