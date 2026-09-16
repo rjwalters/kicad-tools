@@ -94,6 +94,16 @@ class FakeTransport:
         return self._next()
 
 
+@pytest.fixture(autouse=True)
+def prohibit_network(monkeypatch):
+    import requests
+
+    def blocked(*args, **kwargs):
+        pytest.fail("Test attempted a real HTTP send")
+
+    monkeypatch.setattr(requests.sessions.Session, "send", blocked)
+
+
 @pytest.fixture
 def handoff(tmp_path):
     """A published plan + valid review record, ready to upload."""
@@ -1312,9 +1322,8 @@ def test_preview_without_payload_has_no_result(handoff, data):
 
 def test_relabeling_requests_transport_does_not_bypass_gate(handoff):
     transport = ju.RequestsUploadTransport()
-    transport.identity = ju.TransportIdentity("not-a-verification", False)
-    with pytest.raises(ju.UploadGateError, match="protocol"):
-        upload(handoff, transport)
+    with pytest.raises(AttributeError):
+        transport.identity = ju.TransportIdentity("not-a-verification", False)
     assert not handoff["ledger"].events()
 
 
@@ -1326,3 +1335,198 @@ def test_contradictory_success_status_is_uncertain(handoff, status):
     with pytest.raises(ju.UploadBlockedError):
         upload(handoff, transport)
     assert len(transport.multipart_calls) == 1
+
+
+class CapturingSession:
+    """Offline send boundary; responses are synthetic, never factory evidence."""
+
+    def __init__(self, handoff, replies=None, error=None):
+        import requests
+
+        self.adapter = requests.adapters.HTTPAdapter(max_retries=0)
+        self.handoff = handoff
+        self.replies = list(replies or [response(200, {"code": 200, "data": "sdk-key"})])
+        self.error = error
+        self.calls = []
+        self.closed = False
+
+    def get_adapter(self, url):
+        return self.adapter
+
+    def send(self, prepared, **kwargs):
+        # The complete upload intent is on disk before even the send boundary.
+        events = self.handoff["ledger"].events()
+        assert events and events[0]["kind"] == "intent"
+        self.calls.append((prepared, kwargs))
+        if self.error:
+            raise self.error
+        return self.replies.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+def test_sdk_envelope_without_success_is_accepted(handoff):
+    receipt = upload(
+        handoff, FakeTransport(responses=[response(200, {"code": 200, "data": "sdk-key"})])
+    )
+    assert receipt.file_key == "sdk-key"
+    assert not receipt.is_factory_receipt
+
+
+def test_requests_encoder_send_and_preview_are_bound_offline(handoff):
+    session = CapturingSession(
+        handoff,
+        [
+            response(200, {"code": 200, "data": "sdk-key"}),
+            response(200, {"code": 200, "data": {"status": 1}}),
+        ],
+    )
+    with ju.RequestsUploadTransport(session=session, timeout=7) as transport:
+        receipt = upload(handoff, transport)
+        assert not receipt.is_factory_receipt
+        assert receipt.evidence == "mock-protocol-only"
+        prepared, options = session.calls[0]
+        assert prepared.method == "POST"
+        assert handoff["gerber"] in prepared.body
+        assert b'name="meta"\r\n\r\n{}' in prepared.body
+        assert "boundary=" in prepared.headers["Content-Type"]
+        assert prepared.headers["Content-MD5"] == hashlib.md5(handoff["gerber"]).hexdigest()
+        _, fields = auth_fields(prepared.headers)
+        assert fields["signature"] == jlcpcb_api._sign(
+            FAKE_SECRET_KEY,
+            jlcpcb_api._string_to_sign(
+                "POST", ju.UPLOAD_GERBER_PATH, fields["timestamp"], fields["nonce"], "{}"
+            ),
+        )
+        assert options == {"timeout": 7, "allow_redirects": False, "verify": True, "proxies": {}}
+        preview = ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-09-16T00:00:00Z",
+        )
+        assert preview.data == {"status": 1}
+        assert session.calls[1][0].body == b'{"key":"sdk-key"}'
+    assert session.closed
+
+
+@pytest.mark.parametrize("failure", ["timeout", "disconnect", "redirect"])
+def test_requests_uncertainty_blocks_duplicate_send(handoff, failure):
+    import requests
+
+    error = {
+        "timeout": requests.Timeout("secret material"),
+        "disconnect": requests.ConnectionError("secret material"),
+    }.get(failure)
+    session = CapturingSession(
+        handoff, [response(302, {}, {"Location": "https://other.invalid"})], error
+    )
+    transport = ju.RequestsUploadTransport(session=session)
+    with pytest.raises(ju.UploadUncertainError) as exc:
+        upload(handoff, transport)
+    assert "secret material" not in str(exc.value)
+    with pytest.raises(ju.UploadBlockedError):
+        upload(handoff, transport)
+    assert len(session.calls) == 1
+
+
+def test_requests_retry_adapter_is_refused_without_send(handoff):
+    import requests
+
+    session = CapturingSession(handoff)
+    session.adapter = requests.adapters.HTTPAdapter(max_retries=3)
+    with pytest.raises(ju.UploadError):
+        upload(handoff, ju.RequestsUploadTransport(session=session))
+    assert not session.calls
+
+
+def test_sdk_business_error_without_success_is_rejection(handoff):
+    with pytest.raises(ju.UploadRejectedError):
+        upload(
+            handoff,
+            FakeTransport(
+                responses=[response(200, {"code": 4001, "message": "gerber parse failed"})]
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://open.jlcpcb.com",
+        "https://user@open.jlcpcb.com",
+        "https://open.jlcpcb.com:443",
+        "https://open.jlcpcb.com.attacker.invalid",
+        "https://open.jlcpcb.com?x=1",
+        "https://open.jlcpcb.com/path",
+    ],
+)
+def test_requests_destination_is_rejected_before_intent(handoff, url):
+    session = CapturingSession(handoff)
+    with pytest.raises(ju.UploadGateError):
+        upload(handoff, ju.RequestsUploadTransport(session=session), base_url=url)
+    assert not session.calls
+    assert not handoff["ledger"].events()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan"), True, "120"])
+def test_requests_rejects_invalid_timeout(timeout):
+    with pytest.raises(ju.UploadGateError):
+        ju.RequestsUploadTransport(timeout=timeout)
+
+
+def test_requests_closed_transport_never_sends_or_reopens(handoff):
+    session = CapturingSession(handoff)
+    transport = ju.RequestsUploadTransport(session=session)
+    transport.close()
+    with pytest.raises(ju.UploadRejectedError):
+        upload(handoff, transport)
+    assert session.closed
+    assert not session.calls
+
+
+def test_injected_requests_identity_cannot_be_promoted(handoff):
+    transport = ju.RequestsUploadTransport(session=CapturingSession(handoff))
+    with pytest.raises(AttributeError):
+        transport.identity = ju.TransportIdentity("fake-live", True)
+    assert not transport.identity.live
+
+
+@pytest.mark.parametrize("data", [True, 3, [], "not-an-object"])
+def test_preview_sdk_object_type_is_required(handoff, data):
+    transport = FakeTransport(
+        responses=[response(200, ok_body()), response(200, {"code": 200, "data": data})]
+    )
+    receipt = upload(handoff, transport)
+    before = handoff["ledger"].path.read_bytes()
+    with pytest.raises(ju.UploadRejectedError):
+        ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-09-16T00:00:00Z",
+        )
+    assert handoff["ledger"].path.read_bytes() == before
+
+
+def test_live_transport_cannot_reuse_or_preview_mock_receipt(handoff, monkeypatch):
+    import requests
+
+    receipt = upload(handoff, FakeTransport(responses=[response(200, ok_body())]))
+    monkeypatch.setattr(requests, "Session", lambda: pytest.fail("created production session"))
+    transport = ju.RequestsUploadTransport()
+    before = handoff["ledger"].path.read_bytes()
+    with pytest.raises(ju.UploadGateError):
+        upload(handoff, transport)
+    with pytest.raises(ju.UploadGateError):
+        ju.fetch_preview(
+            receipt,
+            ledger=handoff["ledger"],
+            transport=transport,
+            credentials=fake_credentials(),
+            requested_at="2026-09-16T00:00:00Z",
+        )
+    assert handoff["ledger"].path.read_bytes() == before

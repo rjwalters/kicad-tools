@@ -380,14 +380,21 @@ cleanup_partial_worktree_state() {
     local wt_path
     wt_path="$(loom_worktree_root "$repo_root")/issue-$issue"
     if [[ -d "$wt_path" ]]; then
-        # `git worktree list --porcelain` emits absolute paths on the
-        # `worktree ` line; compare against the resolved absolute path.
+        # `git worktree list --porcelain` emits absolute, symlink-RESOLVED
+        # paths on the `worktree ` line, so resolve with `pwd -P` (not logical
+        # `pwd`) before comparing — otherwise a symlinked path (macOS
+        # /var -> /private/var) never matches. The `worktree ` path itself
+        # (prefix = 9 chars) may contain spaces, so parse it with
+        # substr($0, 10) rather than $2, which truncates at the first space
+        # (#7849 — same class as #3717; both mismatches make grep -Fxq miss
+        # and get a LIVE, registered worktree rm -rf'd below). Mirrors
+        # _worktree_attached_branch() further down this file.
         local abs_wt
-        abs_wt=$(cd "$wt_path" 2>/dev/null && pwd) || abs_wt=""
+        abs_wt=$(cd "$wt_path" 2>/dev/null && pwd -P) || abs_wt=""
         local registered=0
         if [[ -n "$abs_wt" ]]; then
             if git worktree list --porcelain 2>/dev/null \
-                | awk '/^worktree / {print $2}' \
+                | awk '/^worktree / {print substr($0, 10)}' \
                 | grep -Fxq "$abs_wt"; then
                 registered=1
             fi

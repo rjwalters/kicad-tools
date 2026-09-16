@@ -252,6 +252,86 @@ closed at the installer level.**
   `ensure_project_hook_wiring` (re-run the installer) or `loom migrate` to drop
   the copies entirely.
 
+### An ABSENT or non-executable hook is no longer a silent allow (#7761)
+
+The integrity assessment above is about hook **registration**. #7761 is the
+adjacent question: given a registered hook, what happens when the script it
+names is not there? Before #7761 every project-level entry ended in `|| exit 0`
+— ALLOW — so **all** of the following allowed the tool call silently, with no
+stderr, no log line, and nothing to distinguish them from a guard that ran and
+decided to allow:
+
+- `git rev-parse --git-common-dir` failed. `cd "$(git rev-parse …)/.."` with an
+  empty substitution is `cd "/.."`, which **succeeds** and resolves to `/` — so
+  the root came back as the filesystem root rather than empty, and the
+  executability test ran against `/.loom/hooks/<name>`, which can never exist.
+- The hook script was missing.
+- The hook script was present but had lost its executable bit (an archive
+  round-trip, a `cp` under a restrictive umask, a bad resync).
+
+Failing open in a repo that does not use Loom is correct and is unchanged — a
+hard failure there would break every tool call for someone who never opted in.
+The bug was that the two cases are distinguishable and were not distinguished: a
+workspace carrying per-repo `.loom/hooks/` copies is asserting that it expects
+those hooks, and Loom agents run with `--dangerously-skip-permissions`, which is
+exactly the configuration where the hook is the only thing between an agent and
+a destructive command.
+
+**Every wiring now routes through `defaults/hooks/hook-wiring.sh`**, which
+resolves the hook down a strict ladder — the first rung that can actually RUN it
+wins:
+
+| Rung | State | Behaviour |
+|---|---|---|
+| 1 | `.loom/hooks/<name>` is executable | exec it (unchanged fast path) |
+| 2 | Not a Loom workspace | exit 0, **silently** (unchanged) |
+| 3 | Present but **not executable** | run it via `bash <path>` (which needs only read permission) and report — **zero lost coverage** |
+| 4 | No per-repo copy, machine-level copy available | run the machine copy, or stand down quietly if the user-scope entry already wires it (never both — no double-reporting) |
+| 5 | Nothing anywhere | `PreToolUse` → **DENY**; other events → report loudly and allow (they have no deny channel) |
+
+**Rung 5 is fail-closed, and that was a deliberate choice.** Three reasons:
+ADR-0016 already states the principle for this surface ("'I don't understand
+this command' never falls through to an allow"), and "I have no guard to ask" is
+strictly weaker evidence than "I asked and could not classify"; the usual
+objection — fail-closed can wedge a workspace — is answered by rungs 3 and 4,
+which remove both recoverable breakages (a lost `+x`, a migrated copy-free repo)
+from the deny path entirely, leaving only a genuinely absent guard; and a silent
+allow is unfalsifiable where a deny is self-reporting, naming the missing path
+and the repair command.
+
+Escape hatch: **`LOOM_GUARD_WIRING_FAILOPEN=1`** in the session's environment
+downgrades rung 5's deny to the same loud warn-and-allow. It is deliberately an
+environment variable and **not** a `guards.*` config key — a config key lives in
+a committed file, so one PR could restore the silent-allow hole for everyone,
+which is the exact failure this closes. Setting an env var on the session's own
+process is an operator act, not a repository change.
+
+Both channels always fire together in rungs 3-5: stderr (a human watching the
+session sees it immediately) **and** `.loom/logs/hook-errors.log` (a headless
+sweep leaves evidence behind). "No signal at all" was the bug; one channel would
+not be a fix.
+
+The wiring in `.claude/settings.json` keeps a compact inline fallback for the
+case where the launcher **itself** has not been installed yet — it execs the
+hook directly (and via `bash` if the executable bit is missing), so a host whose
+`.loom/hooks/` lags this change keeps working exactly as before rather than
+bricking. Only when neither the launcher nor the hook is present, in a repo that
+does carry a `.loom/hooks/` directory, does the inline fallback emit the deny.
+
+**Check it before an agent runs, not after:**
+
+```bash
+.loom/scripts/check-guards-installed.sh          # exit 0 = every wired hook is runnable
+.loom/scripts/check-guards-installed.sh --fix    # restore a lost executable bit
+```
+
+Exit `2` means a wired hook is MISSING or NOT EXECUTABLE (each offender named,
+with its repair); a hook running from the machine-level checkout is reported as
+`degraded`, not a failure, because coverage is intact. `resync-installed.sh`
+runs this automatically after every sync (with `--fix` on a real run) and exits
+`75` when it cannot be repaired — the surface sync itself still succeeded, but
+the run is not a clean bill of health.
+
 ## Custom Guard Hooks
 
 Loom ships with several built-in `PreToolUse` guard hooks, registered independently under the `Bash` or `Edit|Write` matcher as noted below:
