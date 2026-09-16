@@ -519,6 +519,8 @@ class Pad:
     drill_size: tuple[float, float] | None = None
     drill_rotation: float = 0.0
     component_id: str = ""
+    terminal_id: str = ""
+    """Internal physical land identity; ``pin`` keeps its authored display name."""
 
     @property
     def component_key(self) -> str:
@@ -528,7 +530,7 @@ class Pad:
     @property
     def key(self) -> tuple[str, str]:
         """Internal terminal key; ``ref`` remains the authored display label."""
-        return (self.component_key, self.pin)
+        return (self.component_key, self.terminal_id or self.pin)
 
     def __post_init__(self) -> None:
         if self.shape not in {"circle", "rect", "oval", "roundrect"}:
