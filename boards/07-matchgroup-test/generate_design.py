@@ -751,6 +751,20 @@ def _extend_blocked_power_stubs(pcb, rules, result) -> int:
     return fixed
 
 
+def _load_pour_escape():
+    """Load the reviewed sibling helper without changing import search paths.
+
+    run_path gives its dataclasses a temporary module during construction,
+    then returns their namespace without retaining a global module alias.
+    Both board recipes therefore execute the same helper source.
+    """
+    import runpy
+
+    helper = Path(__file__).resolve().parents[1] / "06-diffpair-test" / "pour_escape.py"
+    namespace = runpy.run_path(str(helper))
+    return namespace["EscapeRules"], namespace["find_escape"]
+
+
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
     """Repair pour-net connectivity: offset vias + stubs + island bridges.
 
@@ -875,11 +889,25 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     fills_by_net, _ = _pour_fill_components(pcb, net_names)
 
-    # Board outline (inset 0.5 mm) from generate_pcb constants.
-    min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
-    min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
-    max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
-    max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
+    # Saved/refilled boards can be translated from generation coordinates.
+    # The shared reader returns sheet-absolute Edge.Cuts bounds, like our
+    # copper index. Keep the old bounds only for outline-less legacy inputs;
+    # the new fallback requires an actual outline and project context.
+    outline_bounds = pcb._edge_cuts_bbox_sexp()
+    if outline_bounds is None:
+        outline_bounds_for_legacy = (
+            generate_pcb.BOARD_ORIGIN_X,
+            generate_pcb.BOARD_ORIGIN_Y,
+            generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH,
+            generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT,
+        )
+    else:
+        outline_bounds_for_legacy = outline_bounds
+    x0, y0, x1, y1 = outline_bounds_for_legacy
+    min_x, min_y, max_x, max_y = x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5
+
+    escape_api = None
+    escape_rules = None
 
     VIA_R = 0.225  # 0.45 mm via
     VIA_DRILL_R = 0.125  # 0.25 mm drill on every repair via
@@ -956,14 +984,16 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     bridges_placed = 0
     failed: list[str] = []
 
-    def _emit_via(net: str, vx: float, vy: float) -> None:
+    def _emit_via(
+        net: str, vx: float, vy: float, diameter: float = 0.45, drill: float = 0.25
+    ) -> None:
         nonlocal vias_placed
         net_ref = _net_reference(net)
         via_lines.append(
-            f"  (via (at {vx:.3f} {vy:.3f}) (size 0.45) (drill 0.25) "
+            f"  (via (at {vx:.3f} {vy:.3f}) (size {diameter}) (drill {drill}) "
             f'(layers "F.Cu" "B.Cu") {net_ref} (uuid "{_generate_uuid()}"))'
         )
-        via_index.append((Point(vx, vy), net, VIA_R, VIA_DRILL_R, all_layers))
+        via_index.append((Point(vx, vy), net, diameter / 2, drill / 2, all_layers))
         vias_placed += 1
 
     def _emit_seg(
@@ -1317,6 +1347,63 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         if done:
                             break
                     if done:
+                        break
+
+            # Final fallback: use the reviewed bounded physical search only
+            # after the existing Stage A-D candidates fail. Do not synthesize
+            # rule defaults or board bounds when this artifact lacks context.
+            if not merged and comp_pads and outline_bounds is not None:
+                project = pcb_path.with_suffix(".kicad_pro")
+                if not project.exists():
+                    if project.with_suffix(".kicad_dru").exists():
+                        raise ValueError(
+                            "Escape project missing beside artifact-specific DRC rules"
+                        )
+                    project = pcb_path.parent / "matchgroup_test.kicad_pro"
+                if project.exists():
+                    if escape_api is None:
+                        escape_api = _load_pour_escape()
+                        escape_rules = escape_api[0].from_project(project)
+                    find_escape = escape_api[1]
+                    for pad_name in comp_pads:
+                        escape = find_escape(
+                            pad_center[pad_name],
+                            net,
+                            "F.Cu",
+                            pad_index,
+                            seg_index,
+                            # Board07 stores drill radius and physical span;
+                            # the helper expects four fields, drill diameter.
+                            [
+                                (pt, vn, radius, 2 * drill_r)
+                                for pt, vn, radius, drill_r, _layers in via_index
+                            ],
+                            [own[i] for i in primary],
+                            (min_x, min_y, max_x, max_y),
+                            escape_rules,
+                        )
+                        if escape is None:
+                            continue
+                        if escape.via:
+                            vx, vy = escape.points[-1]
+                            _emit_via(net, vx, vy, escape_rules.diameter, escape_rules.drill)
+                            _append_own(
+                                (Point(vx, vy).buffer(escape_rules.diameter / 2), all_layers, "via")
+                            )
+                        for p0, p1 in zip(escape.points, escape.points[1:], strict=False):
+                            _emit_seg(net, p0, p1, "F.Cu", escape_rules.width)
+                            _append_own(
+                                (
+                                    LineString([p0, p1]).buffer(escape_rules.width / 2),
+                                    frozenset({"F.Cu"}),
+                                    "seg",
+                                )
+                            )
+                        bridges_placed += 1
+                        merged = True
+                        print(
+                            f"   Grid escape: {net} {pad_name}, {len(escape.points) - 1} segment(s)"
+                        )
                         break
 
             if not merged:
