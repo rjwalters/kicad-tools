@@ -832,6 +832,7 @@ class CppGrid:
         # Initialize layer mappings (identity by default, overridden by from_routing_grid)
         self._index_to_layer: dict[int, int] = {i: i for i in range(layers)}
         self._layer_to_index: dict[int, int] = {i: i for i in range(layers)}
+        self._off_grid_stored_segments: list = []
         # Routable layer indices (all layers by default, refined by from_routing_grid)
         self._routable_layers: list[int] = list(range(layers))
         # Reference to original Python grid (set by from_routing_grid for
@@ -1179,6 +1180,7 @@ class CppGrid:
         """
         self._impl.clear_stored_routes()
         self._synced_route_count = 0
+        self._off_grid_stored_segments.clear()
 
 
 class CppPathfinder:
@@ -2964,14 +2966,14 @@ class CppPathfinder:
 
         cpp_vias: list[router_cpp.Via] = []
         for via in route.vias:
-            cv = router_cpp.Via()
-            cv.x, cv.y = via.x, via.y
-            cv.drill = via.drill
-            cv.diameter = via.diameter
-            cv.layer_from = self._grid.layer_to_index(via.layers[0].value)
-            cv.layer_to = self._grid.layer_to_index(via.layers[1].value)
-            cv.net = via.net
-            cpp_vias.append(cv)
+            for layer_from, layer_to in self._project_via_spans(via.layers):
+                cv = router_cpp.Via()
+                cv.x, cv.y = via.x, via.y
+                cv.drill = via.drill
+                cv.diameter = via.diameter
+                cv.layer_from, cv.layer_to = layer_from, layer_to
+                cv.net = via.net
+                cpp_vias.append(cv)
 
         # Issue #2587 / Phase 1C-cont: Resolve partner net id for the source
         # net so the C++ validator does not reject within-pair edges of a
@@ -3029,6 +3031,23 @@ class CppPathfinder:
 
         if not vresult.valid:
             return (vresult.violation_x, vresult.violation_y)
+
+        # A selected-layer grid has no native planar slot for omitted copper.
+        # A physical via can still cross that copper between its endpoints.
+        # Retain the scalar guard in physical layer space for those segments;
+        # full-stack grids keep the native path alone. Pairwise widening below
+        # continues to cover the same complete Python route collection.
+        if route.vias and self._grid._off_grid_stored_segments:
+            from .via_clearance import via_clears_foreign_segment
+
+            for segment in self._grid._off_grid_stored_segments:
+                if segment.net == start.net:
+                    continue
+                for via in route.vias:
+                    if not via_clears_foreign_segment(
+                        via, segment, trace_clearance=self._rules.via_clearance
+                    ):
+                        return (via.x, via.y)
 
         # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
         # post-check.  ``validate_route`` already walks the C++ side's
@@ -3503,6 +3522,34 @@ class CppPathfinder:
         """Number of nodes explored in last route."""
         return self._impl.nodes_explored
 
+    def _project_via_spans(self, layers) -> list[tuple[int, int]]:
+        """Project physical copper onto contiguous runs of selected grid indices.
+
+        CopperLayer values are in physical stack order (F through inner to B),
+        unlike the dense indices of a selected-layer grid. Reordered stacks
+        may require multiple runs: an intervening grid index is not necessarily
+        an intervening physical layer. Keep an off-grid sentinel when no layer
+        is selected; native global via/drill spacing still needs that hole.
+        """
+        lo, hi = sorted(layer.value for layer in layers)
+        indices = sorted(
+            index for value, index in self._grid._layer_to_index.items() if lo <= value <= hi
+        )
+        if not indices:
+            return [(self._grid.num_layers, self._grid.num_layers)]
+        spans = []
+        start = previous = indices[0]
+        for index in indices[1:]:
+            if index != previous + 1:
+                spans.append((start, previous))
+                start = index
+            previous = index
+        spans.append((start, previous))
+        # Preserve the original endpoint order on ordinary full-stack calls.
+        if layers[0].value > layers[1].value:
+            spans = [(end, start) for start, end in reversed(spans)]
+        return spans
+
     def _sync_stored_routes(self, py_grid: RoutingGrid) -> None:
         """Sync stored segments and vias from completed routes to C++.
 
@@ -3517,7 +3564,12 @@ class CppPathfinder:
         # Add segments/vias from newly completed routes
         for route in py_grid.routes[self._grid._synced_route_count :]:
             for seg in route.segments:
-                layer_idx = py_grid.layer_to_index(seg.layer.value)
+                layer_idx = self._grid._layer_to_index.get(seg.layer.value)
+                if layer_idx is None:
+                    # No planar copper on an active layer. Candidate vias
+                    # still check this physical segment in final validation.
+                    self._grid._off_grid_stored_segments.append(seg)
+                    continue
                 self._grid._impl.add_stored_segment(
                     seg.x1,
                     seg.y1,
@@ -3532,16 +3584,16 @@ class CppPathfinder:
                     ),
                 )
             for via in route.vias:
-                self._grid._impl.add_stored_via(
-                    via.x,
-                    via.y,
-                    via.drill,
-                    via.diameter,
-                    via.net,
-                    py_grid.world_to_grid(via.x, via.y),
-                    py_grid.layer_to_index(via.layers[0].value),
-                    py_grid.layer_to_index(via.layers[1].value),
-                )
+                for span in self._project_via_spans(via.layers):
+                    self._grid._impl.add_stored_via(
+                        via.x,
+                        via.y,
+                        via.drill,
+                        via.diameter,
+                        via.net,
+                        py_grid.world_to_grid(via.x, via.y),
+                        *span,
+                    )
 
         self._grid._synced_route_count = current_count
 
