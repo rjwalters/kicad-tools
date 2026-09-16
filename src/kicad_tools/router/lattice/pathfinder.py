@@ -2002,6 +2002,10 @@ class LatticePathfinder:
         net_n = pc.pad_n_a.net
         pair_nets = {net_p, net_n}
         half_pitch = pc.pitch / 2.0
+        trace_width = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
+        authored_gap = self.rules.clearance_for_nets(net_p, net_n, 0.0)
+        if pc.pitch < trace_width + authored_gap - 1e-9:
+            return None, "pair-authored-clearance"
 
         layer_sets = [
             set(self._pad_layer_indices(p))

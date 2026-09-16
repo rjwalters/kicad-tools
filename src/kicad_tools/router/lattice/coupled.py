@@ -197,18 +197,35 @@ def committed_seg_clear_grown(
         layer,
         committed.trace_half + extra,
         committed.clearance,
+        net=max(nets, key=lambda net: committed.net_clearance_floors.get(net, 0.0), default=None),
+        net_clearance_floors=committed.net_clearance_floors,
     ):
         return False
-    pad = committed.trace_half + committed.clearance + extra + 0.5
+    own_floor = max((committed.net_clearance_floors.get(net, 0.0) for net in nets), default=0.0)
+    reach = max(committed.net_clearance_floors.values(), default=0.0)
+    pad = committed.trace_half + max(committed.clearance, reach) + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(a, b, pad=pad):
-        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
+        gap = (
+            committed.trace_half
+            + hw
+            + max(
+                committed.clearance, iclr, own_floor, committed.net_clearance_floors.get(cnet, 0.0)
+            )
+            + extra
+        )
         if cnet not in nets and seg_seg_dist(a, b, c, d) < gap - _EPS:
             return False
     # Issue #4597: honor the stored via's class clearance, mirroring the
     # ``max(clearance, iclr)`` the copper loop above already applies.
     base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
     for point, vnet, vclr in committed.vias:
-        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
+        vgap = (
+            base_vgap
+            - committed.clearance
+            + max(
+                committed.clearance, vclr, own_floor, committed.net_clearance_floors.get(vnet, 0.0)
+            )
+        )
         if vnet not in nets and seg_pt_dist(a, b, point) < vgap - _EPS:
             return False
     return True
@@ -228,18 +245,35 @@ def committed_point_clear_grown(
         layer,
         committed.trace_half + extra,
         committed.clearance,
+        net=max(nets, key=lambda net: committed.net_clearance_floors.get(net, 0.0), default=None),
+        net_clearance_floors=committed.net_clearance_floors,
     ):
         return False
-    pad = committed.trace_half + committed.clearance + extra + 0.5
+    own_floor = max((committed.net_clearance_floors.get(net, 0.0) for net in nets), default=0.0)
+    reach = max(committed.net_clearance_floors.values(), default=0.0)
+    pad = committed.trace_half + max(committed.clearance, reach) + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(point, point, pad=pad):
-        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
+        gap = (
+            committed.trace_half
+            + hw
+            + max(
+                committed.clearance, iclr, own_floor, committed.net_clearance_floors.get(cnet, 0.0)
+            )
+            + extra
+        )
         if cnet not in nets and seg_pt_dist(c, d, point) < gap - _EPS:
             return False
     # Issue #4597: honor the stored via's class clearance (see
     # ``committed_seg_clear_grown``).
     base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
     for vpt, vnet, vclr in committed.vias:
-        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
+        vgap = (
+            base_vgap
+            - committed.clearance
+            + max(
+                committed.clearance, vclr, own_floor, committed.net_clearance_floors.get(vnet, 0.0)
+            )
+        )
         if vnet not in nets and dist(point, vpt) < vgap - _EPS:
             return False
     return True

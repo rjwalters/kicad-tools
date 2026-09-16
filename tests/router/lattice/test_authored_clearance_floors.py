@@ -154,3 +154,57 @@ def test_trace_route_keeps_authored_pad_floor_at_emitted_width(strict_net, width
     for seg in route.segments:
         gap = LineString([seg.start, seg.end]).distance(obstacle) - seg.width / 2
         assert gap >= 0.8 - 1e-9
+
+
+@pytest.mark.parametrize("strict_net", [1, 2])
+def test_coupled_pitch_cannot_waive_authored_floor(strict_net):
+    from dataclasses import replace
+
+    from tests.router.lattice.test_coupled_pairs import _pair_board
+
+    pf, pc = _pair_board()
+    pf.rules = replace(pf.rules, net_clearance_floors={strict_net: 0.2})
+    result, reason = pf._route_pair_impl(
+        pc, committed=pf._fresh_committed(), history={}, present=1.0
+    )
+    assert result is None
+    assert reason == "pair-authored-clearance"
+
+
+@pytest.mark.parametrize("query", ["segment", "point"])
+@pytest.mark.parametrize("obstacle", ["trace", "via", "fill"])
+@pytest.mark.parametrize("strict_net", [1, 2, 3])
+@pytest.mark.parametrize("floor,valid", [(0.3, True), (0.5, False)])
+def test_coupled_envelope_retains_either_rail_and_obstacle_floor(
+    query, obstacle, strict_net, floor, valid
+):
+    from shapely.geometry import box
+
+    from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
+    from kicad_tools.router.lattice.coupled import (
+        committed_point_clear_grown,
+        committed_seg_clear_grown,
+    )
+
+    model = CommittedCopper(
+        2,
+        trace_half=0.1,
+        clearance=0.1,
+        via_radius=0.1,
+        via_via_gap=0.3,
+        same_net_via_gap=0.2,
+        net_clearance_floors={strict_net: floor, 4: 3.0},
+    )
+    if obstacle == "trace":
+        model.add_run(0, [(4, 5), (8, 5)], 3, 0.1)
+    elif obstacle == "via":
+        model.add_via((6, 5), 3)
+    else:
+        model.fixed_fills = FixedFillObstacles(
+            (FixedFill("foreign", 3, 0, 0.1, box(4, 4, 8, 5.1)),)
+        )
+    if query == "segment":
+        actual = committed_seg_clear_grown(model, (4, 5.8), (8, 5.8), 0, {1, 2}, 0.2)
+    else:
+        actual = committed_point_clear_grown(model, (6, 5.8), 0, {1, 2}, 0.2)
+    assert actual is valid
