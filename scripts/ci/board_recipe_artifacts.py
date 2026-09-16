@@ -12,39 +12,58 @@ def recipe_output_dir(board_dir: Path, *, prepare: bool = False) -> Path:
         return board_dir / "output"
     output = board_dir / "regression-output"
     if prepare:
-        output.mkdir(parents=True, exist_ok=True)
-        for source in fixture.iterdir():
-            if source.is_file() and source.suffix in {
-                ".kicad_pcb",
-                ".kicad_pro",
-                ".kicad_dru",
-                ".kicad_sch",
-                ".kicad_sym",
-                ".json",
-            }:
-                shutil.copy2(source, output / source.name)
-        # Explicit, hash-bound successors preserve the archived witness.
-        # Never overlay a routed result: existing recipe gates must build it.
+        # Validate every replacement before writing any staged artifact.
+        # An invalid sidecar must not leave a mixed old/new rule context.
+        copies = {
+            source.name: source
+            for source in fixture.iterdir()
+            if source.is_file()
+            and source.suffix
+            in {".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_sch", ".kicad_sym", ".json"}
+        }
         successor = board_dir / "regression-input"
         if successor.is_dir():
             manifest = json.loads((successor / "manifest.json").read_text())
-            if manifest.get("schema_version") != 1:
+            version = manifest.get("schema_version")
+            if version not in (1, 2):
                 raise ValueError("Unsupported regression successor manifest")
-            for name, binding in manifest["pcbs"].items():
+            pcbs = manifest["pcbs"]
+            allowed_sidecars = set()
+            for name in pcbs:
                 if (
                     Path(name).name != name
+                    or "\\" in name
                     or not name.endswith(".kicad_pcb")
                     or name.endswith("_routed.kicad_pcb")
                 ):
                     raise ValueError(f"Regression successor must name an unrouted PCB: {name}")
+                stem = Path(name).stem
+                allowed_sidecars.update({f"{stem}.kicad_dru", f"{stem}_routed.kicad_dru"})
+            sidecars = manifest["sidecars"] if version == 2 else {}
+            if version == 2 and not sidecars:
+                raise ValueError("Regression successor rule context is missing")
+            for name in sidecars:
+                if name not in allowed_sidecars:
+                    raise ValueError(f"Unsafe regression successor sidecar: {name}")
+            for name, binding in {**pcbs, **sidecars}.items():
                 source = successor / name
                 for path, expected in [
                     (fixture / name, binding["archived_sha256"]),
                     (source, binding["successor_sha256"]),
                 ]:
+                    if path.is_symlink() or not path.is_file():
+                        raise ValueError(f"Regression successor requires a regular file: {path}")
                     if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
                         raise ValueError(f"Regression successor hash mismatch: {path}")
-                shutil.copy2(source, output / name)
+                copies[name] = source
+        if output.is_symlink():
+            raise ValueError(f"Unsafe regression output directory: {output}")
+        for name, source in copies.items():
+            if source.is_symlink() or (output / name).is_symlink():
+                raise ValueError(f"Unsafe regression staging symlink: {name}")
+        output.mkdir(parents=True, exist_ok=True)
+        for name, source in copies.items():
+            shutil.copy2(source, output / name)
     return output if output.is_dir() else fixture
 
 
