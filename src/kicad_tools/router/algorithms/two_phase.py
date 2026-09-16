@@ -28,6 +28,7 @@ from .negotiated import (
 if TYPE_CHECKING:
     from kicad_tools.progress import ProgressCallback
 
+    from ..core import IterationMetrics
     from ..grid import RoutingGrid
     from ..pathfinder import Router
     from ..primitives import Pad, Route
@@ -163,6 +164,17 @@ class TwoPhaseRouter:
                 tracked_ids.add(id(r))
         return [r for r in self.routes if id(r) not in tracked_ids]
 
+    def _emit_checkpoint(self, callback, iteration: int = 0) -> None:
+        """Publish committed copper only, outside rip-up transactions."""
+        if callback is None:
+            return
+        from ..core import _emit_route_checkpoint
+
+        # self.routes contains fixed escapes and committed main routes. The
+        # grid's index may still contain a discarded iteration during restore;
+        # it is not a snapshot authority.
+        _emit_route_checkpoint(callback, self.routes, self.grid.get_total_overflow, iteration)
+
     def route_all(
         self,
         use_negotiated: bool = True,
@@ -174,6 +186,7 @@ class TwoPhaseRouter:
         initial_routes: list[Route] | None = None,
         max_iterations: int = 20,
         patience: int = 2,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -424,6 +437,7 @@ class TwoPhaseRouter:
                 initial_routes=initial_routes,
                 max_iterations=max_iterations,
                 patience=patience,
+                checkpoint_callback=checkpoint_callback,
             )
         else:
             detailed_routes = self._detailed_standard(
@@ -431,6 +445,7 @@ class TwoPhaseRouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
                 start_time=start_time,
+                checkpoint_callback=checkpoint_callback,
             )
 
         # Clear corridor preferences (not needed after routing)
@@ -504,6 +519,7 @@ class TwoPhaseRouter:
         initial_routes: list[Route] | None = None,
         max_iterations: int = 20,
         patience: int = 2,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> list[Route]:
         """Detailed routing phase using negotiated congestion routing.
 
@@ -588,6 +604,7 @@ class TwoPhaseRouter:
                 for route in routes:
                     self.grid.mark_route_usage(route)
                     self.routes.append(route)
+                self._emit_checkpoint(checkpoint_callback)
 
         # Issue #3452: budget-cliff grace pass.  Net order is
         # difficulty-agnostic, so a block of pathological searches early
@@ -632,6 +649,7 @@ class TwoPhaseRouter:
                 for route in routes:
                     self.grid.mark_route_usage(route)
                     self.routes.append(route)
+                self._emit_checkpoint(checkpoint_callback)
 
             graced, attempted, skipped = run_initial_pass_grace(
                 grace_nets,
@@ -850,6 +868,7 @@ class TwoPhaseRouter:
         best_routes: list[Route] = copy.deepcopy(list(self.routes))
         best_net_routes: dict[int, list[Route]] = copy.deepcopy(net_routes)
         best_iteration = 0  # 0 = initial pass
+        self._emit_checkpoint(checkpoint_callback)
 
         # Rip-up and reroute iterations if needed.
         # Issue #2518: skip the entire iteration loop if the initial pass
@@ -1121,6 +1140,7 @@ class TwoPhaseRouter:
                     best_routes = copy.deepcopy(list(self.routes))
                     best_net_routes = copy.deepcopy(net_routes)
                     best_iteration = iteration
+                    self._emit_checkpoint(checkpoint_callback, iteration)
 
                 if overflow == 0:
                     flush_print(f"  Converged at iteration {iteration}!")
@@ -1313,6 +1333,7 @@ class TwoPhaseRouter:
         progress_callback: ProgressCallback | None,
         timeout: float | None,
         start_time: float,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> list[Route]:
         """Detailed routing phase using standard routing (no negotiation)."""
 
@@ -1337,5 +1358,6 @@ class TwoPhaseRouter:
 
             routes = self._route_net(net)
             all_routes.extend(routes)
+            self._emit_checkpoint(checkpoint_callback)
 
         return all_routes

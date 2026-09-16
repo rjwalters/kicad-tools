@@ -12054,6 +12054,8 @@ class DiffPairRouter:
         self._census_records = []
 
         if diffpair_config is None or not diffpair_config.enabled:
+            if callable(non_diffpair_strategy):
+                return non_diffpair_strategy(), []
             return self.autorouter.route_all(net_order), []
 
         print("\n=== Differential Pair Routing ===")
@@ -12073,6 +12075,8 @@ class DiffPairRouter:
                 diff_net_ids.add(n_id)
         else:
             print("  No differential pairs detected")
+            if callable(non_diffpair_strategy):
+                return non_diffpair_strategy(), []
             return self.autorouter.route_all(net_order), []
 
         for pair in diff_pairs:
