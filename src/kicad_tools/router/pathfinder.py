@@ -1511,6 +1511,7 @@ class Router:
         # validator so unrelated negotiated route choices remain stable.
         if (
             trace_width is not None
+            and not pad.escape_terminal
             and (
                 self.rules.strict_pad_clearance
                 or self.grid._component_is_fine_pitch(pad.component_key, self.component_pitches)
@@ -1522,7 +1523,9 @@ class Router:
                 self.component_pitches,
             )
         ):
-            # Pad-center tails emit the configured local neck-down width.
+            # Physical pad-center tails emit the local neck-down width.
+            # Escape terminals already bound committed conductor copper;
+            # shrinking them again can erase every seed (Board 04, #5398).
             # Eroding by the wider trunk can erase every legal narrow-pad seed.
             seed_width = trace_width
             if self.rules.should_apply_neck_down(pad.ref, pitch):

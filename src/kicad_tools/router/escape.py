@@ -232,6 +232,133 @@ class EscapeRoute:
     ring_index: int = 0
 
 
+def escape_endpoint_copper_extent(escape: EscapeRoute) -> float | None:
+    """Width (mm) of the copper that actually exists at an escape endpoint.
+
+    Issue #5398: an escape endpoint is the open end of the escape
+    conductor -- a trace of ``Segment.width`` (KiCad renders a track with
+    round end caps, so the copper at the very end is a disc of that
+    diameter) and, for a via-in-pad rescue, the via's annular ring.  It is
+    NOT a copy of the escaped pad's metal: the pad sits at the *other* end
+    of the escape stub.
+
+    Returns:
+        The largest conductor width/diameter incident on
+        :attr:`EscapeRoute.escape_point`, or ``None`` when the escape
+        carries no committed geometry there (the caller then has to fall
+        back to the pad's own copper).
+    """
+    ex, ey = escape.escape_point
+    extent = 0.0
+    for seg in getattr(escape, "segments", None) or ():
+        if seg.layer != escape.escape_layer:
+            continue
+        for sx, sy in ((seg.x1, seg.y1), (seg.x2, seg.y2)):
+            # Only the disc contained in the real round end cap is metal.
+            extent = max(extent, float(seg.width) - 2 * math.hypot(sx - ex, sy - ey))
+    via = getattr(escape, "via", None)
+    if via is not None and (
+        min(layer.value for layer in via.layers)
+        <= escape.escape_layer.value
+        <= max(layer.value for layer in via.layers)
+    ):
+        extent = max(extent, float(via.diameter) - 2 * math.hypot(via.x - ex, via.y - ey))
+    return extent if extent > 0.0 else None
+
+
+def escape_endpoint_pad(
+    pad: Pad,
+    escape: EscapeRoute,
+    *,
+    fallback_width: float,
+    min_extent: float = 0.0,
+) -> Pad:
+    """Build the virtual routing terminal that stands in for an escaped pad.
+
+    The main router routes to/from an escape endpoint instead of the
+    original pad center (Issue #2401 / #3183).  The virtual pad therefore
+    has to describe *the copper at that endpoint*, because both pathfinder
+    backends derive their pad-metal and pad-approach regions straight from
+    ``width``/``height`` around ``x``/``y``
+    (:meth:`~kicad_tools.router.pathfinder.AStarPathfinder._get_pad_metal_bounds`,
+    :meth:`~kicad_tools.router.cpp_backend.CppPathfinder._compute_pad_bounds`),
+    and inside those regions the A* search waives the blocked-cell and
+    clearance-only checks ("allow entry into own pad's metal area").
+
+    Issue #5398: copying the escaped pad's full ``width``/``height`` to the
+    shifted endpoint synthesized a pad-sized slab of metal where only a
+    trace end exists -- on board 05's DRV8301 sense cluster a 0.3 x 1.55 mm
+    pad copied to an endpoint 0.7 mm away claimed 0.7 mm of phantom copper,
+    and the A* used that waiver to place ISENSE_B- copper 0.1 mm from a
+    foreign GATE_BL via against a 0.15 mm rule.  The exact post-route
+    validator then rejected the candidate, the net burned all five resume
+    attempts and fell back to the (much slower) Python search.
+
+    Known conductor geometry bounds the terminal independently of routing
+    resolution. Without a conductor, only an unchanged endpoint on the
+    physical pad's layer keeps authored geometry. Shifted endpoints use an
+    inscribed disc, represented by its inscribed square for the rectangular
+    pathfinder waiver API; endpoints without copper are rejected. Off-grid
+    connectivity belongs to pathfinder waypoints, not a larger metal waiver.
+
+    ``fallback_width`` and ``min_extent`` remain accepted for compatibility,
+    but neither proves committed copper and neither enlarges metal.
+    """
+    ex, ey = escape.escape_point
+    extent = escape_endpoint_copper_extent(escape)
+    on_layer = pad.through_hole or escape.escape_layer == pad.layer
+    unchanged = ex == pad.x and ey == pad.y and on_layer
+    if extent is None and unchanged:
+        width, height = pad.width, pad.height
+        shape, rotation = pad.shape, pad.rotation
+    else:
+        if extent is None:
+            radius = 0.0
+            if on_layer:
+                # Transform clockwise board rotation into pad-local coordinates.
+                theta = math.radians(pad.rotation)
+                dx, dy = ex - pad.x, ey - pad.y
+                x = abs(dx * math.cos(theta) - dy * math.sin(theta))
+                y = abs(dx * math.sin(theta) + dy * math.cos(theta))
+                hw, hh = pad.width / 2, pad.height / 2
+                if pad.shape == "rect":
+                    radius = min(hw - x, hh - y)
+                elif pad.shape == "circle":
+                    radius = min(hw, hh) - math.hypot(x, y)
+                elif pad.shape in ("oval", "roundrect"):
+                    # This capsule is contained in every rounded rectangle
+                    # with these dimensions, even with unknown corner radii.
+                    r = min(hw, hh)
+                    radius = r - math.hypot(max(0.0, x - (hw - r)), max(0.0, y - (hh - r)))
+            extent = 2 * max(0.0, radius)
+        if extent <= 0:
+            raise ValueError("Escape endpoint has no committed copper on its routing layer")
+        # Both pathfinders consume rectangular metal bounds, even for a
+        # circle-shaped terminal. The largest axis-aligned square inside
+        # the known copper disc has diagonal equal to its diameter. Using
+        # the diameter as width would waive clearance at bare-board corners.
+        width = height = extent / math.sqrt(2)
+        shape, rotation = "rect", 0.0
+
+    return Pad(
+        x=ex,
+        y=ey,
+        width=width,
+        height=height,
+        net=pad.net,
+        net_name=pad.net_name,
+        layer=escape.escape_layer,
+        ref=pad.ref,
+        component_id=pad.component_id,
+        pin=pad.pin,
+        through_hole=pad.through_hole if unchanged and extent is None else False,
+        drill=pad.drill if unchanged and extent is None else 0.0,
+        rotation=rotation,
+        shape=shape,
+        escape_terminal=not (unchanged and extent is None),
+    )
+
+
 @dataclass
 class PackageInfo:
     """Information about a detected package.
