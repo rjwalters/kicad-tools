@@ -3078,21 +3078,28 @@ class CppPathfinder:
         # mirroring the predicate consumed by the Python pathfinder at
         # ``pathfinder.py:_validate_route_clearance``.
         if self._foreign_vias:
-            from .via_clearance import segment_clears_foreign_via
+            from .via_clearance import segment_via_deficit
 
             for seg in route.segments:
                 for via in self._foreign_vias:
                     if via.net == start.net:
                         continue  # Same-net via -- skipped by convention.
-                    if not segment_clears_foreign_via(
-                        seg,
-                        via,
-                        trace_clearance=self._rules.clearance_for_nets(
-                            start.net,
-                            via.net,
-                            max(self._rules.trace_clearance, self._rules.via_clearance),
-                        ),
-                        hard_intersection_only=False,
+                    # Native results carry float32 coordinates. Match the
+                    # existing 1e-4 mm grid.cpp validation epsilon so merely
+                    # supplying a via through supplemental context cannot
+                    # reject a route the same native geometry accepts.
+                    if (
+                        segment_via_deficit(
+                            seg,
+                            via,
+                            trace_clearance=self._rules.clearance_for_nets(
+                                start.net,
+                                via.net,
+                                max(self._rules.trace_clearance, self._rules.via_clearance),
+                            ),
+                            hard_intersection_only=False,
+                        )
+                        > 1e-4
                     ):
                         return (via.x, via.y)
 
