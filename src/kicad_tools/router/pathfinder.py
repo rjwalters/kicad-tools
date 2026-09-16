@@ -1599,7 +1599,7 @@ class Router:
         gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
         return halo.clear(segment, self, partner_net=partner, partner_clearance=gap)
 
-    def _via_halo_clear(self, cells, layer, gx, gy, net):
+    def _via_halo_clear(self, cells, layer, gx, gy, net, *, require_geometry=True):
         halo = getattr(self.grid, "_route_halo", None)
         if halo is None:
             return False
@@ -1621,7 +1621,7 @@ class Router:
             net,
             name,
         )
-        return halo.clear(via, self)
+        return halo.clear(via, self, require_geometry=require_geometry)
 
     def _is_trace_blocked(
         self,
@@ -2023,7 +2023,10 @@ class Router:
             return True
         halo = getattr(self.grid, "_route_halo", None)
         geometry_complete = halo is not None and halo.complete
-        if geometry_complete and not self._via_halo_clear([], layer, gx, gy, net):
+        # Partial raster coverage cannot waive clearance to known copper.
+        if halo is not None and not self._via_halo_clear(
+            [], layer, gx, gy, net, require_geometry=False
+        ):
             return True
         if self.grid.fixed_fills:
             name = next(

@@ -136,17 +136,21 @@ class RouteHaloGeometry:
         self._refresh()
         return bool(self._cells[layer, y, x] == cell.net)
 
-    def clear(self, candidate, router, *, partner_net=None, partner_clearance=None) -> bool:
+    def clear(
+        self, candidate, router, *, partner_net=None, partner_clearance=None, require_geometry=True
+    ) -> bool:
         """Check known copper and drills using the effective routing rules.
 
         This physical check does not authorize bypassing unknown occupancy.
         Callers must check cell_known for every blocked cell they refine.
+        With require_geometry=False, absent geometry is clear; use that mode
+        only to reject known conflicts, never to authorize raster relaxation.
         """
         from .pairwise_clearance import _attach_zone_exempts
         from .primitives import Segment
 
         self._refresh()
-        if not self.marks or not self._objects:
+        if require_geometry and (not self.marks or not self._objects):
             return False
         is_trace = isinstance(candidate, Segment)
         if is_trace:

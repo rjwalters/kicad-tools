@@ -224,3 +224,34 @@ def test_partial_coverage_preserves_same_net_drill_spacing(context, sharing, rad
     unknown(context, 120, 120)
     assert via_blocked(56, 56)
     assert not via_blocked(55, 55)
+
+
+@pytest.mark.parametrize("sharing", [False, True])
+@pytest.mark.parametrize("case", ["foreign_close", "foreign_clear", "same_net"])
+def test_known_trace_still_blocks_via_with_incomplete_raster(context, sharing, case):
+    """Known copper stays authoritative when another route mark lacks geometry."""
+    from kicad_tools.router.primitives import Route, Segment
+
+    grid, native, router = context
+    unknown(context, 120, 120)
+    net = 99 if case == "same_net" else 24
+    x1, y = grid.grid_to_world(90, 90)
+    x2, _ = grid.grid_to_world(110, 90)
+    if native:
+        # Stored geometry can be present without a matching raster mark while
+        # imported or incrementally synchronized routes have partial coverage.
+        native._impl.add_stored_segment(x1, y, x2, y, 0.375, 1, net, (90, 90, 110, 90))
+        assert not native._impl.route_geometry_complete()
+    else:
+        segment = Segment(x1, y, x2, y, 0.375, Layer.IN1_CU, net)
+        grid.routes.append(Route(net=net, net_name=f"N{net}", segments=[segment]))
+        grid.bump_occupancy_generation()
+        assert not grid._route_halo.complete
+    cy = 98 if case == "foreign_clear" else 94
+    # Close gap is 4*0.127 - 0.3 - 0.1875 = 0.0205mm, below the
+    # 0.2mm via floor. The other-layer trace must constrain a through via.
+    if native:
+        actual = router._impl.is_via_blocked(100, cy, 99, sharing, 4)
+    else:
+        actual = router._is_via_blocked(100, cy, 0, 99, sharing, radius=4)
+    assert actual == (case == "foreign_close")

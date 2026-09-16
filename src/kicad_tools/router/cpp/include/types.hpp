@@ -252,7 +252,8 @@ namespace router {
 // separate held stored-via/coupled-routing builds; do not accept their binaries.
 // v33: add swept-edge rejection of foreign stored-via copper, retaining
 // the v32 partner-pad and physical halo/component-hole safeguards.
-constexpr int ROUTER_CPP_BUILD_VERSION = 33;
+// v35: combine v33 with the v34 known-geometry via veto for partial coverage.
+constexpr int ROUTER_CPP_BUILD_VERSION = 35;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
