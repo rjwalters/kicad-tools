@@ -34,7 +34,7 @@ import base64
 import logging
 import math
 import threading
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 import numpy as np
@@ -4092,15 +4092,14 @@ class RoutingGrid:
             min_clearance = self.rules.via_clearance
 
         via_radius = via.diameter / 2
+        # Via endpoints describe an inclusive physical barrel span, including
+        # inner copper layers between them (also for blind/buried vias).
+        endpoints = [self.layer_to_index(layer.value) for layer in via.layers]
+        via_layer_indices = tuple(range(min(endpoints), max(endpoints) + 1))
         if not self.fixed_fills.via_clear(
             (via.x, via.y),
-            tuple(
-                range(
-                    min(self.layer_to_index(layer.value) for layer in via.layers),
-                    max(self.layer_to_index(layer.value) for layer in via.layers) + 1,
-                )
-            ),
-            via.diameter / 2,
+            via_layer_indices,
+            via_radius,
             min_clearance,
         ):
             return False, 0.0, (via.x, via.y)
@@ -4108,12 +4107,6 @@ class RoutingGrid:
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
         has_violation = False
-
-        # Determine which layer indices the via spans
-        via_layer_indices: set[int] = set()
-        for layer in via.layers:
-            with suppress(KeyError, ValueError):
-                via_layer_indices.add(self.layer_to_index(layer.value))
 
         # Check against segments from existing routes
         for route in self.routes:
