@@ -5025,20 +5025,23 @@ class DiffPairRouter:
         DRC checks at the full board minimum because its diff-pair exemption
         covers segment-to-SEGMENT edges only.
 
+        Ordinary vias span the full stack even when their routing endpoints
+        name a shorter transition. Only microvias use a restricted span.
+        Foreign-net endpoint contact is a short and is never exempted.
+
         Returns ``(0.0, None)`` when the gate is disarmed.
         """
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
-        clearance = self.autorouter.rules.trace_clearance
+        clearance = self.autorouter.rules.via_clearance
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
         for via in universe.vias:
             if via.net == seg.net:
                 continue  # own-net copper may touch (a tail lands on it)
-            if self._seg_via_colocated(seg, via):
-                continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            physical_via = via if via.is_micro else replace(via, layers=(Layer.F_CU, Layer.B_CU))
+            deficit = segment_via_deficit(seg, physical_via, clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         return worst, worst_loc
@@ -5105,9 +5108,8 @@ class DiffPairRouter:
         for seg in universe.segments:
             if seg.net == via.net:
                 continue
-            if self._seg_via_colocated(seg, via):
-                continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            physical_via = via if via.is_micro else replace(via, layers=(Layer.F_CU, Layer.B_CU))
+            deficit = segment_via_deficit(seg, physical_via, clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         v_lo = min(via.layers[0].value, via.layers[1].value)
@@ -5117,7 +5119,7 @@ class DiffPairRouter:
                 continue
             o_lo = min(other.layers[0].value, other.layers[1].value)
             o_hi = max(other.layers[0].value, other.layers[1].value)
-            if o_hi < v_lo or o_lo > v_hi:
+            if via.is_micro and other.is_micro and (o_hi < v_lo or o_lo > v_hi):
                 continue  # barrels never share a layer
             dist = math.hypot(via.x - other.x, via.y - other.y)
             deficit = via.diameter / 2 + other.diameter / 2 + clearance - dist
