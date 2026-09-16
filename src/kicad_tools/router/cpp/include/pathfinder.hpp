@@ -13,6 +13,7 @@
 
 #include "types.hpp"
 #include "grid.hpp"
+#include "indexed_astar_queue.hpp"
 #include <vector>
 #include <queue>
 #include <unordered_set>
@@ -525,7 +526,7 @@ private:
     int last_nodes_explored_ = 0;
 
     // --- Resumable A* search state (promoted from route() locals) ---
-    using PQ = std::priority_queue<AStarNode, std::vector<AStarNode>, std::greater<AStarNode>>;
+    using PQ = IndexedAStarQueue<GridPosHash>;
     PQ search_open_set_;
     // Issue #3309: Per-net A* hot loop replaced the
     // ``std::unordered_set<tuple<int,int,int>, GridPosHash>`` /

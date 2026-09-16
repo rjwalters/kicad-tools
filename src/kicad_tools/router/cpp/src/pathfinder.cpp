@@ -2346,7 +2346,7 @@ RouteResult Pathfinder::run_astar_loop() {
 
 void Pathfinder::clear_search_state() {
     // Clear all A* member state to release memory
-    search_open_set_ = PQ();  // priority_queue has no clear(); swap with empty
+    search_open_set_ = PQ();  // Release both the frontier and its sparse index.
     // Issue #3309: The flat g_score / closed-gen arrays are reused across
     // searches; reset by bumping ``search_current_gen_`` in
     // ``ensure_search_arrays_sized()`` on the next call.  We do NOT

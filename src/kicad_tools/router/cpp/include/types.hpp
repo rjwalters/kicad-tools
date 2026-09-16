@@ -250,7 +250,7 @@ namespace router {
 // v32: combine physical halo/component-hole refinement with the static
 // differential partner-pad guard (#5482). Version 31 is already used by
 // separate held stored-via/coupled-routing builds; do not accept their binaries.
-constexpr int ROUTER_CPP_BUILD_VERSION = 36;
+constexpr int ROUTER_CPP_BUILD_VERSION = 37;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
