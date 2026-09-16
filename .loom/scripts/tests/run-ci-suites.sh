@@ -275,7 +275,12 @@ elif command -v gtimeout >/dev/null 2>&1; then
     timeout_cmd="gtimeout"
 fi
 
-mapfile -t suites < <(sed -E 's/#.*$//' "$WIRED_MANIFEST" | awk 'NF { print $1 }')
+# `mapfile` is bash 4+; macOS ships 3.2 and this runs on developer machines
+# too (#7751). Empty lines are already filtered by the awk NF test.
+suites=()
+while IFS= read -r _suite; do
+    suites+=("$_suite")
+done < <(sed -E 's/#.*$//' "$WIRED_MANIFEST" | awk 'NF { print $1 }')
 
 passed=0
 failed=0
@@ -363,6 +368,7 @@ fi
 # that suite is ever dispatched — never batched or revisited after the fact
 # (#6386's hazard is a suite actually starting, not how the report is
 # printed).
+_RUN_PIDS=()
 running=0
 for suite in "${suites[@]}"; do
     if suite_is_daemon_guarded "$suite"; then
@@ -372,9 +378,24 @@ for suite in "${suites[@]}"; do
         continue
     fi
     run_suite "$suite" &
+    # `wait -n` is bash 4.3+. Stock macOS ships 3.2, where it fails with
+    # "wait: -n: invalid option" -- and this script is `set -uo pipefail`
+    # WITHOUT `-e`, so it did not abort: `running` decremented anyway and the
+    # parallelism bound silently stopped bounding (#7802 Class 1).
+    #
+    # Waiting on the OLDEST pid instead of any pid needs no new machinery and
+    # preserves the bound exactly, which is the contract that matters here. A
+    # slow oldest job can hold a slot a little longer than `wait -n` would; that
+    # is a scheduling nuance, not a correctness one, and it is a far better
+    # trade than hand-rolling job-polling in shell.
+    _RUN_PIDS+=($!)
     running=$((running + 1))
     if [[ "$running" -ge "$PARALLELISM" ]]; then
-        wait -n
+        wait "${_RUN_PIDS[0]}" 2>/dev/null || true
+        # Quoted: SC2206. Safe under `set -u` on bash 3.2 because an array
+        # SLICE of an empty/exhausted array expands to nothing rather than
+        # tripping the unbound-variable error that bare "${arr[@]}" does there.
+        _RUN_PIDS=("${_RUN_PIDS[@]:1}")
         running=$((running - 1))
     fi
 done

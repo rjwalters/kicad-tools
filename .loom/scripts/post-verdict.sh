@@ -256,7 +256,12 @@ if [[ "$VERDICT" == "approved" && "${GATE_SKIPPED:-false}" != "true" ]]; then
   # `read -ra` both trims and collapses whitespace, so two empty inputs collapse
   # to a genuinely empty string rather than a single stray space.
   read -ra _gate_all_ids <<< "$GATE_BLOCKING_IDS $GATE_INLINE_BLOCKING_IDS"
-  GATE_ALL_BLOCKING_IDS="${_gate_all_ids[*]}"
+  # `${arr[*]+...}` rather than a bare `"${_gate_all_ids[*]}"`: under `set -u`,
+  # bash < 4.4 calls an EMPTY array's expansion an unbound variable and aborts.
+  # macOS ships 3.2.57 and will not ship newer. Both id strings are empty exactly
+  # when nothing is blocking -- the CLEAR path -- so the unguarded form failed on
+  # the common case and worked only when the PR had problems (#7783).
+  GATE_ALL_BLOCKING_IDS="${_gate_all_ids[*]+${_gate_all_ids[*]}}"
 
   if [[ "$GATE_STATE" == "CLEAR" ]]; then
     RECONCILIATION_MARKER="<!-- loom:review-reconciliation state=clear reviews=${GATE_REVIEWS:-0} blocking_current=0 blocking_older=0 inline_unresolved=0 source=${GATE_SOURCE:-none} reconciled=n/a -->"

@@ -125,7 +125,15 @@ _remove_building_label_rest() {
 # Every closed issue currently labelled loom:building. `gh issue list` caps at
 # 30 by default; --limit is set generously high since this is a small,
 # infrequent audit, not a hot-path query.
-mapfile -t stale_numbers < <(
+# `mapfile` is bash 4+; macOS ships 3.2 (#7751). Skipping empty lines matters
+# here: the `|| true` means a failed gh call yields no output, and an empty
+# read must leave stale_numbers empty rather than holding one blank entry --
+# `total` below is computed from its length and drives the early-exit path.
+stale_numbers=()
+while IFS= read -r _num; do
+  [[ -n "$_num" ]] || continue
+  stale_numbers+=("$_num")
+done < <(
   gh issue list --repo "$REPO_NWO" --state closed --label "loom:building" \
     --limit 1000 --json number --jq '.[].number' 2>/dev/null || true
 )

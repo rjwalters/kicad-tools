@@ -84,9 +84,14 @@ CHECKED_CLAIMS=0
 # This still filters out ordinary prose that merely contains a slash
 # ("and/or", "his/her", "3/4", date-like "2026/09/14") because those first
 # segments match neither list.
-declare -A TOP_LEVEL
+# A newline-delimited string, not `declare -A` (bash 4+; macOS ships 3.2 --
+# #7751). This is a pure SET whose only consumer is the whole-word membership
+# test in is_recognized_top() below, so a leading/trailing-newline-delimited
+# string plus a bash `case` glob is an exact substitute -- and it spawns no
+# subprocess per lookup, unlike a `grep -qxF` over the same data.
+TOP_LEVEL_NL=$'\n'
 while IFS= read -r entry; do
-    [[ -n "$entry" ]] && TOP_LEVEL["$entry"]=1
+    [[ -n "$entry" ]] && TOP_LEVEL_NL="${TOP_LEVEL_NL}${entry}"$'\n'
 done < <(git -C "$WORKSPACE" ls-tree --name-only origin/main)
 
 for generic in \
@@ -107,12 +112,16 @@ for generic in \
     hardware layout verification sim rtl tb firmware fw benches hdl \
     .github .loom .claude .gitea
 do
-    TOP_LEVEL["$generic"]=1
+    TOP_LEVEL_NL="${TOP_LEVEL_NL}${generic}"$'\n'
 done
 
 is_recognized_top() {
     local first="${1%%/*}"
-    [[ -n "${TOP_LEVEL[$first]:-}" ]]
+    # Anchored on both delimiters so "doc" never matches inside "docs".
+    case "$TOP_LEVEL_NL" in
+        *$'\n'"$first"$'\n'*) return 0 ;;
+    esac
+    return 1
 }
 
 # --- Extract path / path:L / path:L1-L2 references (backticked or bare).
@@ -129,9 +138,13 @@ full_tree() {
     printf '%s' "$FULL_TREE_CACHE"
 }
 
-mapfile -t CANDIDATES < <(grep -oE "$PATH_RE" "$BODY_FILE" | sort -u)
+CANDIDATES=()
+while IFS= read -r _cand; do
+    [[ -n "$_cand" ]] || continue
+    CANDIDATES+=("$_cand")
+done < <(grep -oE "$PATH_RE" "$BODY_FILE" | sort -u)
 
-for raw_candidate in "${CANDIDATES[@]}"; do
+for raw_candidate in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
     # Strip trailing sentence punctuation the character class can't exclude
     # (e.g. "...pdk.py:185." at the end of a sentence).
     candidate="$raw_candidate"
@@ -166,10 +179,18 @@ for raw_candidate in "${CANDIDATES[@]}"; do
 done
 
 # --- "<N> tracked `<pattern>` files" claims, e.g. "six tracked `.pyc` files".
-declare -A NUM_WORDS=(
-    [one]=1 [two]=2 [three]=3 [four]=4 [five]=5
-    [six]=6 [seven]=7 [eight]=8 [nine]=9 [ten]=10
-)
+# A `case`, not `declare -A` (bash 4+; #7751). For a fixed literal word->number
+# table this is arguably clearer than either array form, and it keeps the
+# "unknown word yields empty" contract the caller already relies on.
+num_word() {
+    case "$1" in
+        one) printf '1' ;;   two) printf '2' ;;   three) printf '3' ;;
+        four) printf '4' ;;  five) printf '5' ;;  six) printf '6' ;;
+        seven) printf '7' ;; eight) printf '8' ;; nine) printf '9' ;;
+        ten) printf '10' ;;
+        *) : ;;
+    esac
+}
 
 TRACKED_RE='([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten)[[:space:]]+tracked[[:space:]]+`([^`]+)`[[:space:]]+files?'
 
@@ -181,7 +202,7 @@ while IFS= read -r line; do
         if [[ "$count_raw" =~ ^[0-9]+$ ]]; then
             claimed="$count_raw"
         else
-            claimed="${NUM_WORDS[$count_raw]:-}"
+            claimed="$(num_word "$count_raw")"
         fi
         [[ -z "$claimed" ]] && continue
 
