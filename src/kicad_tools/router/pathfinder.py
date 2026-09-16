@@ -3042,6 +3042,10 @@ class Router:
         cost_congestion = self.rules.cost_congestion
 
         costs = [0.0] * len(self.neighbors_2d)
+        # Adjacent fine-grid neighbors often share a coarse congestion region.
+        # Reuse only within this batch so later calls observe grid/rule updates.
+        last_cx = last_cy = -1
+        last_cost = 0.0
         for i, (dx, dy, _dlayer, _cost_mult) in enumerate(self.neighbors_2d):
             nx = current_x + dx
             ny = current_y + dy
@@ -3050,10 +3054,15 @@ class Router:
 
             cx = min(nx // congestion_size, congestion_cols - 1)
             cy = min(ny // congestion_size, congestion_rows - 1)
+            if cx == last_cx and cy == last_cy:
+                costs[i] = last_cost
+                continue
+            last_cx, last_cy = cx, cy
             congestion_level = min(1.0, float(congestion_arr[layer, cy, cx]) / max_cells)
             if congestion_level > threshold:
                 excess = congestion_level - threshold
                 costs[i] = cost_congestion * (1.0 + excess * 2.0)
+            last_cost = costs[i]
 
         return costs
 
