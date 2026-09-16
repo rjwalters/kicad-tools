@@ -266,6 +266,7 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
             layer=pad_layer,
             ref=ref,
             component_id=pad_data.get("component_id", ref),
+            terminal_id=pad_data.get("terminal_id", ""),
             pin=pin,
             through_hole=pad_data.get("through_hole", False),
             drill=pad_data.get("drill", 0.0),

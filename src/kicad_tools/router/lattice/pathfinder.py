@@ -1999,6 +1999,7 @@ class LatticePathfinder:
             layer=pc.pad_p_a.layer,
             ref=pc.pad_p_a.ref,
             component_id=pc.pad_p_a.component_id,
+            terminal_id=pc.pad_p_a.terminal_id,
             pin=pc.pad_p_a.pin,
         )
         v_b = Pad(
@@ -2011,6 +2012,7 @@ class LatticePathfinder:
             layer=pc.pad_p_b.layer,
             ref=pc.pad_p_b.ref,
             component_id=pc.pad_p_b.component_id,
+            terminal_id=pc.pad_p_b.terminal_id,
             pin=pc.pad_p_b.pin,
         )
 
