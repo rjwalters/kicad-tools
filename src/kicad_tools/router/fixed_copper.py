@@ -57,6 +57,9 @@ class FixedFillObstacles:
         layer: int,
         half: float,
         clearance: float,
+        *,
+        net: int | None = None,
+        net_clearance_floors: dict[int, float] | None = None,
     ) -> bool:
         if not self.fills:
             return True
@@ -66,7 +69,13 @@ class FixedFillObstacles:
         for fill in self.fills:
             if fill.layer != layer:
                 continue
-            required = half + max(clearance, fill.clearance)
+            floors = net_clearance_floors or {}
+            required = half + max(
+                clearance,
+                fill.clearance,
+                floors.get(fill.source_net_id, 0.0),
+                floors.get(net, 0.0) if net is not None else 0.0,
+            )
             x0, y0, x1, y1 = fill.geometry.bounds
             if (
                 max(a[0], b[0]) + required < x0
@@ -86,8 +95,22 @@ class FixedFillObstacles:
         layers: tuple[int, ...],
         radius: float,
         clearance: float,
+        *,
+        net: int | None = None,
+        net_clearance_floors: dict[int, float] | None = None,
     ) -> bool:
-        return all(self.segment_clear(point, point, layer, radius, clearance) for layer in layers)
+        return all(
+            self.segment_clear(
+                point,
+                point,
+                layer,
+                radius,
+                clearance,
+                net=net,
+                net_clearance_floors=net_clearance_floors,
+            )
+            for layer in layers
+        )
 
     def native_polygons(self):
         """Simple polygons with holes; preserve every lobe of a multipolygon."""

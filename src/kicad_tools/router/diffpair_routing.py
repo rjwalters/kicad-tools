@@ -3214,6 +3214,8 @@ class CoupledPathfinder:
                                 tuple(range(self.grid.num_layers)),
                                 self.rules.via_diameter / 2,
                                 self.rules.via_clearance,
+                                net=pad.net,
+                                net_clearance_floors=self.rules.net_clearance_floors,
                             )
                         else:
                             valid = valid and self.grid.fixed_fills.segment_clear(
@@ -3224,6 +3226,8 @@ class CoupledPathfinder:
                                 self.net_class_map[pad.net_name].clearance
                                 if pad.net_name in self.net_class_map
                                 else self.rules.trace_clearance,
+                                net=pad.net,
+                                net_clearance_floors=self.rules.net_clearance_floors,
                             )
                     if not valid:
                         continue

@@ -638,7 +638,15 @@ class CommittedCopper:
         own_half, own_clr = self._own(half, clearance)
         if self.kelvin_guard is not None and not self.kelvin_guard.clear(a, b, layer, own_half):
             return False
-        if not self.fixed_fills.segment_clear(a, b, layer, own_half, own_clr):
+        if not self.fixed_fills.segment_clear(
+            a,
+            b,
+            layer,
+            own_half,
+            own_clr,
+            net=net,
+            net_clearance_floors=self.net_clearance_floors,
+        ):
             return False
         # Issue #4602: an active pairwise projection inflates the spatial query
         # window to the widest requirement THIS net participates in (the #4511
@@ -715,7 +723,15 @@ class CommittedCopper:
             point, point, layer, own_half
         ):
             return False
-        if not self.fixed_fills.segment_clear(point, point, layer, own_half, own_clr):
+        if not self.fixed_fills.segment_clear(
+            point,
+            point,
+            layer,
+            own_half,
+            own_clr,
+            net=net,
+            net_clearance_floors=self.net_clearance_floors,
+        ):
             return False
         # Issue #4602: inflate the query window to the pairwise reach (see
         # ``seg_clear``); dormant/unmapped nets keep the scalar window.
@@ -783,6 +799,8 @@ class CommittedCopper:
                 if clearance is None
                 else max(self.fixed_fill_via_clearance, own_clr)
             ),
+            net=net,
+            net_clearance_floors=self.net_clearance_floors,
         ):
             return False
         pw = self.pairwise

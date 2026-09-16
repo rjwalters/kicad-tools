@@ -3023,6 +3023,8 @@ class CppPathfinder:
                     layer,
                     segment.width / 2,
                     fill_clearance,
+                    net=start.net,
+                    net_clearance_floors=self._rules.net_clearance_floors,
                 ):
                     return (segment.x1, segment.y1)
 

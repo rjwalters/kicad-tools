@@ -3681,6 +3681,8 @@ class RoutingGrid:
             self.layer_to_index(seg.layer.value),
             seg.width / 2,
             min_clearance,
+            net=exclude_net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         ):
             return False, 0.0, (seg.x1, seg.y1)
 
@@ -4134,6 +4136,8 @@ class RoutingGrid:
             via_layer_indices,
             via_radius,
             min_clearance,
+            net=exclude_net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         ):
             return False, 0.0, (via.x, via.y)
 

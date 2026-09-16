@@ -1553,7 +1553,7 @@ class Router:
 
         return (gx1, gy1, gx2, gy2)
 
-    def _fixed_step_clear(self, current, nx, ny, layer, net_name):
+    def _fixed_step_clear(self, current, nx, ny, layer, net_name, net):
         if not self.grid.fixed_fills:
             return True
         net_class = self._get_net_class(net_name)
@@ -1565,6 +1565,8 @@ class Router:
             layer,
             half,
             clearance,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         )
 
     def _halo_net_class(self, net: int) -> NetClassRouting | None:
@@ -2039,6 +2041,8 @@ class Router:
                 tuple(range(self.grid.num_layers)),
                 half,
                 self.rules.via_clearance,
+                net=net,
+                net_clearance_floors=self.rules.net_clearance_floors,
             ):
                 return True
 
@@ -3963,7 +3967,7 @@ class Router:
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
-                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name):
+                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name, start.net):
                     continue
 
                 # Check bounds and obstacles - account for trace width
@@ -5660,7 +5664,9 @@ class Router:
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
             nlayer = current.layer
-            if not self._fixed_step_clear(current, nx, ny, nlayer, source_pad.net_name):
+            if not self._fixed_step_clear(
+                current, nx, ny, nlayer, source_pad.net_name, source_pad.net
+            ):
                 continue
 
             # Check bounds
