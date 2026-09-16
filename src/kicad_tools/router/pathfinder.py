@@ -3139,6 +3139,10 @@ class Router:
         cost_congestion = self.rules.cost_congestion
 
         costs = [0.0] * len(self.neighbors_2d)
+        # Adjacent fine-grid neighbors often share a coarse congestion region.
+        # Reuse only within this batch so later calls observe grid/rule updates.
+        last_cx = last_cy = -1
+        last_cost = 0.0
         for i, (dx, dy, _dlayer, _cost_mult) in enumerate(self.neighbors_2d):
             nx = current_x + dx
             ny = current_y + dy
@@ -3147,10 +3151,15 @@ class Router:
 
             cx = min(nx // congestion_size, congestion_cols - 1)
             cy = min(ny // congestion_size, congestion_rows - 1)
+            if cx == last_cx and cy == last_cy:
+                costs[i] = last_cost
+                continue
+            last_cx, last_cy = cx, cy
             congestion_level = min(1.0, float(congestion_arr[layer, cy, cx]) / max_cells)
             if congestion_level > threshold:
                 excess = congestion_level - threshold
                 costs[i] = cost_congestion * (1.0 + excess * 2.0)
+            last_cost = costs[i]
 
         return costs
 
@@ -3246,7 +3255,7 @@ class Router:
         """Check if a cell is part of a zone (copper pour)."""
         if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
             return False
-        return self.grid.cell_at(layer, gy, gx).is_zone
+        return bool(self.grid._is_zone[layer, gy, gx])
 
     def _get_zone_net(self, gx: int, gy: int, layer: int) -> int:
         """Get the net number of a zone cell, or 0 if not a zone."""
@@ -3920,6 +3929,30 @@ class Router:
             )
             batch_turn_costs = self._batch_turn_costs(current.direction)
 
+            # Issue #990 (hoisted): whether CURRENT node sits within a pad's
+            # metal area, so the search still allows the first step outward
+            # when every metal-area cell is blocked by adjacent nets'
+            # clearance zones. These two flags depend only on ``current``
+            # (x/y/layer), never on the per-neighbor ``nx``/``ny``/``nlayer``
+            # this loop iterates over -- ``self.neighbors_2d`` only changes
+            # (dx, dy) within the same layer (``nlayer`` below is always
+            # ``current.layer``), so re-deriving them inside the neighbor
+            # loop recomputed the identical result on every one of the 4-8
+            # neighbor iterations. Computing them once per popped node
+            # (profiled as part of this A* loop's largest single self-time
+            # cost, Issue #5240) preserves the exact same boolean value at
+            # every use site below.
+            is_exiting_start_pad = (
+                start_metal_gx1 <= current.x <= start_metal_gx2
+                and start_metal_gy1 <= current.y <= start_metal_gy2
+                and current.layer in start_layers
+            )
+            is_exiting_end_pad = (
+                end_metal_gx1 <= current.x <= end_metal_gx2
+                and end_metal_gy1 <= current.y <= end_metal_gy2
+                and current.layer in end_layers
+            )
+
             # Explore neighbors
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
@@ -3948,22 +3981,6 @@ class Router:
                     end_approach_gx1 <= nx <= end_approach_gx2
                     and end_approach_gy1 <= ny <= end_approach_gy2
                     and nlayer in end_layers
-                )
-
-                # Issue #990: Check if CURRENT node is within a pad's metal area
-                # When the entire metal area is blocked by other nets' clearance zones,
-                # we still need to allow the first step outward from the pad.
-                # This enables routing to start even when all metal area cells would
-                # normally be blocked by adjacent components' clearance zones.
-                is_exiting_start_pad = (
-                    start_metal_gx1 <= current.x <= start_metal_gx2
-                    and start_metal_gy1 <= current.y <= start_metal_gy2
-                    and current.layer in start_layers
-                )
-                is_exiting_end_pad = (
-                    end_metal_gx1 <= current.x <= end_metal_gx2
-                    and end_metal_gy1 <= current.y <= end_metal_gy2
-                    and current.layer in end_layers
                 )
 
                 # Check grid bounds first

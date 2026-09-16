@@ -179,3 +179,23 @@ def test_batch_congestion_costs_all_out_of_bounds() -> None:
     router = _make_router(diagonal_routing=True)
     costs = router._batch_congestion_costs(-1000, -1000, 0)
     assert costs == [0.0] * len(router.neighbors_2d)
+
+
+@pytest.mark.parametrize("diagonal_routing", [True, False])
+def test_batch_congestion_observes_grid_and_rule_updates(diagonal_routing: bool) -> None:
+    router = _make_router(diagonal_routing)
+    assert not any(router._batch_congestion_costs(5, 5, 0))
+
+    router.grid._congestion[0, :, :] = router.grid.congestion_size**2
+    crowded = router._batch_congestion_costs(5, 5, 0)
+    assert all(cost > 0 for cost in crowded)
+    assert not any(router._batch_congestion_costs(5, 5, 1))
+
+    router.rules.cost_congestion *= 2
+    assert router._batch_congestion_costs(5, 5, 0) == [2 * cost for cost in crowded]
+    router.rules.congestion_threshold = 1.0
+    assert not any(router._batch_congestion_costs(5, 5, 0))
+
+    router.rules.congestion_threshold = 0.0
+    router.grid._congestion.fill(0)
+    assert not any(router._batch_congestion_costs(5, 5, 0))

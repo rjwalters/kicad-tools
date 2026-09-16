@@ -319,6 +319,70 @@ assert_eq "0" "$nocache_hits" "CI-status helpers never pass the wrapper-only --n
 
 rm -rf "$CI_STUB_DIR"
 
+# --- Test forge_get_pr_reviews pagination + fail-closed contract (#7647) ---
+# The pre-#7647 helper made ONE unpaginated request, emitted `.[].body` only,
+# and swallowed every error as empty output. All three are now failures by
+# contract: reviews paginate, records are complete (id/state/commit/timestamp),
+# and a read error exits non-zero instead of looking like "no reviews".
+echo ""
+echo "Testing forge_get_pr_reviews pagination and fail-closed behavior (#7647)..."
+
+REV_STUB_DIR=$(mktemp -d)
+cat > "$REV_STUB_DIR/gh" <<'STUB'
+#!/usr/bin/env bash
+# Emulates `gh api <endpoint> --paginate --jq FILTER`: applies the caller's own
+# jq filter to each page in turn, exactly as gh streams them.
+if [[ -n "${REV_STUB_FAIL:-}" ]]; then
+  echo "stub gh: simulated API failure" >&2
+  exit 1
+fi
+shift  # drop "api"
+shift  # drop the endpoint
+jq_filter=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --jq) jq_filter="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+for page in "$REV_STUB_DIR_ENV"/page-*.json; do
+  [[ -f "$page" ]] || continue
+  jq -r "$jq_filter" "$page" || exit 1
+done
+exit 0
+STUB
+chmod +x "$REV_STUB_DIR/gh"
+
+cat > "$REV_STUB_DIR/page-1.json" <<'JSON'
+[{"id":11,"state":"COMMENTED","commit_id":"aaa","submitted_at":"2026-09-14T20:00:00Z","user":{"login":"carol"},"body":"note"}]
+JSON
+cat > "$REV_STUB_DIR/page-2.json" <<'JSON'
+[{"id":12,"state":"CHANGES_REQUESTED","commit_id":"bbb","submitted_at":"2026-09-14T21:10:12Z","user":{"login":"alice"},"body":"needs coverage"}]
+JSON
+
+FORGE_TYPE="github"
+rev_out=$(REV_STUB_DIR_ENV="$REV_STUB_DIR" forge_get_pr_reviews "owner/repo" "5369" "$REV_STUB_DIR/gh" 2>/dev/null)
+assert_eq "2" "$(printf '%s\n' "$rev_out" | grep -c '^{')" "forge_get_pr_reviews returns reviews from BOTH pages"
+assert_eq "CHANGES_REQUESTED" "$(printf '%s\n' "$rev_out" | jq -r 'select(.id == 12) | .state')" "review state is retained (not just the body)"
+assert_eq "bbb" "$(printf '%s\n' "$rev_out" | jq -r 'select(.id == 12) | .commit_id')" "review commit/head association is retained"
+assert_eq "2026-09-14T21:10:12Z" "$(printf '%s\n' "$rev_out" | jq -r 'select(.id == 12) | .submitted_at')" "review submission timestamp is retained"
+
+set +e
+REV_STUB_FAIL=1 REV_STUB_DIR_ENV="$REV_STUB_DIR" \
+  forge_get_pr_reviews "owner/repo" "5369" "$REV_STUB_DIR/gh" > /dev/null 2>&1
+rev_fail_rc=$?
+set -e
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$rev_fail_rc" -ne 0 ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: a failed review read exits non-zero (fail closed, never silent empty output)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: a failed review read exited 0 — the #7647 'errors look like no reviews' bug is back"
+fi
+
+rm -rf "$REV_STUB_DIR"
+
 # --- Test gitea_api auth-mode selection (issue #3297) ---
 # Use a `curl` shim on PATH that records its argv and returns a fake 200.
 echo ""

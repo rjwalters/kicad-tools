@@ -44,6 +44,7 @@ fi
 CHAMPION_PROMO_MD="$PROMPT_DIR/champion-issue-promo.md"
 CHAMPION_MD="$PROMPT_DIR/champion.md"
 CHAMPION_REF_MD="$PROMPT_DIR/champion-reference.md"
+CURATOR_MD="$PROMPT_DIR/curator.md"
 
 # Source for the pure helpers BEFORE defining our own colors (the sourced chain
 # defines RED/YELLOW/BLUE/NC itself).
@@ -221,6 +222,29 @@ assert_true is_dependency_finding '- Technical Feasibility: hard dependency on p
 assert_true is_dependency_finding '- Technical Feasibility: this has a dependency of the RTL work on #3' \
     "'dependency of' + #N still classifies as a dependency finding"
 
+# #7652: "cannot start until #N" describes the same sequential-ordering
+# relationship as "blocked by #N" but used none of the previously recognized
+# keywords, so it misclassified as a merits finding and defeated the #5664
+# self-clearing-timing-block protection. Verbatim wording from the real #7431
+# escalation comment that exposed the gap.
+assert_true is_dependency_finding '- Scope: this issue is explicitly sequential (3 of 3, final) and cannot start until #7430 closes.' \
+    "'cannot start until' + #N is a dependency finding (#7652, verbatim #7431 wording)"
+assert_true is_dependency_finding '- Scope: this work cannot proceed until private/repo#88 lands' \
+    "'cannot proceed until' + #N is a dependency finding (#7652)"
+assert_true is_dependency_finding '- Scope: implementation cannot begin work until #12 merges' \
+    "'cannot begin work until' + #N is a dependency finding (#7652)"
+assert_true is_dependency_finding '- Scope: this is not startable until #9 is resolved' \
+    "'not startable until' + #N is a dependency finding (#7652)"
+assert_true is_dependency_finding '- Scope: we must wait until #14 before touching this' \
+    "'must wait until' + #N is a dependency finding (#7652)"
+assert_true is_dependency_finding '- Scope: we must wait for #14 before touching this' \
+    "'must wait for' + #N is a dependency finding (#7652)"
+if is_dependency_finding '- Scope: this work cannot start soon given the current backlog'; then
+    fail "'cannot start' with no 'until' and no reference is a merits finding (#7652)"
+else
+    pass "'cannot start' with no 'until' and no reference is a merits finding (#7652)"
+fi
+
 echo
 echo "--- findings_are_dependency_only: one merits finding disqualifies the set ---"
 
@@ -246,6 +270,24 @@ assert_eq "o/x#56" "$(_extract_refs 'blocked by https://github.com/o/x/issues/56
     "issue URL normalizes to owner/repo#N"
 assert_eq "o/x#7" "$(_extract_refs 'blocked by https://github.com/o/x/pull/7' 'o/r')" \
     "pull-request URL normalizes too (a blocker may be a PR)"
+
+echo
+echo "--- BODY_HASH (#7650 Test Plan): an appended ## Revision section changes champion-issue-promo.md's hash ---"
+# Reproduces champion-issue-promo.md's own BODY_HASH formula exactly
+# (printf '%s\n%s' "$title" "$body" | _sha256 | ...) rather than assuming it
+# holds -- the Test Plan explicitly calls this out as something to verify,
+# not take on faith.
+ORIG_TITLE='Fix the stale toolchain pin'
+ORIG_BODY='A proposal with a stale toolchain pin.'
+ORIG_HASH="$(printf '%s\n%s' "$ORIG_TITLE" "$ORIG_BODY" | _sha256 | awk '{print substr($1, 1, 16)}')"
+# shellcheck disable=SC2016  # literal backtick/marker text, not an expansion
+REVISED_BODY="$(printf '%s\n\n## Revision (2026-09-14)\n\nCurator re-verified every objection Champion cited against `deadbeef` and found all of them resolved.\n\n<!-- curator:fact-revision:fact-abc123 -->' "$ORIG_BODY")"
+REVISED_HASH="$(printf '%s\n%s' "$ORIG_TITLE" "$REVISED_BODY" | _sha256 | awk '{print substr($1, 1, 16)}')"
+if [[ "$ORIG_HASH" != "$REVISED_HASH" ]]; then
+    pass "appending a ## Revision section changes BODY_HASH -- Champion's VERDICT_MARKER for the old hash no longer matches, so the next pass evaluates fresh instead of skipping or re-escalating"
+else
+    fail "appending a ## Revision section changes BODY_HASH -- Champion's VERDICT_MARKER for the old hash no longer matches, so the next pass evaluates fresh instead of skipping or re-escalating"
+fi
 
 echo
 echo "--- _fingerprint: identity of the blocker SET, order-independent ---"
@@ -324,6 +366,11 @@ case "$action" in
       tmp="$(mktemp)"
       jq --arg l "$rmlabel" '.labels = [(.labels // [])[] | select(.name != $l)]' "$f" > "$tmp" && mv "$tmp" "$f"
     fi
+    if [[ -n "$bodyarg" ]]; then
+      printf '%s\n' "$bodyarg" >> "$STUB_DIR/body-edits-$key.log"
+      tmp="$(mktemp)"
+      jq --arg b "$bodyarg" '.body = $b' "$f" > "$tmp" && mv "$tmp" "$f"
+    fi
     ;;
   *)
     echo "stub gh: unhandled action: $action" >&2; exit 3 ;;
@@ -357,7 +404,8 @@ pr_fixture() {
 
 reset_state() {
     rm -f "$STUB_DIR"/issue-*.json "$STUB_DIR"/pr-*.json \
-          "$STUB_DIR"/comments-*.log "$STUB_DIR"/labels-*.log "$STUB_DIR/calls.log"
+          "$STUB_DIR"/comments-*.log "$STUB_DIR"/labels-*.log "$STUB_DIR"/body-edits-*.log \
+          "$STUB_DIR/calls.log"
 }
 
 # run_cdb <args...> -> sets OUT / RC
@@ -368,6 +416,8 @@ run_cdb() {
 
 labels_log() { cat "$STUB_DIR/labels-o_r_$1.log" 2>/dev/null; }
 comments_log() { cat "$STUB_DIR/comments-o_r_$1.log" 2>/dev/null; }
+body_edits_log() { cat "$STUB_DIR/body-edits-o_r_$1.log" 2>/dev/null; }
+issue_body() { jq -r '.body' "$STUB_DIR/issue-o_r_$1.json"; }
 
 # =====================================================================
 # --check-defer
@@ -1000,6 +1050,160 @@ MSG="5-issue regression: #1/#4 startable outright, #2 correctly parks and later 
 pass "$MSG"
 
 # =====================================================================
+# --check-fact-unescalate (#7650) -- the fact-checkable generalization of
+# --check-unescalate for a merits-shaped escalation whose recurring findings
+# are arbitrary re-verifiable claims about repo state, not dependency
+# citations. Mirrors sg13cmos5l-protocol-emulator#6/#8 (a "file still carries
+# the old pin" / "file does not exist" finding that a sibling PR resolved
+# hours later).
+# =====================================================================
+
+# The escalation comment shape from the #7650 motivating incident: two
+# fact-checkable findings, neither a dependency citation (findings_are_
+# dependency_only would report false -- --check-unescalate never fires here).
+# shellcheck disable=SC2016  # literal marker/backtick text, not an expansion
+ESCALATION_FACTS='<!-- champion:proposal-escalated -->
+**Champion: Escalating to Operator — Repeated Rejection Without Revision**
+
+**Recurring findings:**
+- Technical Feasibility: `layout/toolchain.json` still carries the old `klt`
+  pin.
+- Technical Feasibility: `verification/_repo_utils.py` does not exist
+  anywhere in this repo.
+
+A human needs to decide whether to revise this proposal, close it, or accept
+it as-is.
+
+---
+*Automated by Champion role*'
+
+RESOLUTIONS_ALL='RESOLVED: layout/toolchain.json now carries the pin the proposal names (verified against the head commit)
+RESOLVED: verification/_repo_utils.py landed verbatim (verified against the head commit)'
+
+RESOLUTIONS_PARTIAL='RESOLVED: layout/toolchain.json now carries the pin the proposal names (verified against the head commit)
+UNRESOLVED: verification/_repo_utils.py still does not exist'
+
+RESOLUTIONS_SHORT='RESOLVED: layout/toolchain.json now carries the pin the proposal names (verified against the head commit)'
+
+echo
+echo "--- --check-fact-unescalate: all cited objections resolved -> revise body, drop labels, comment once ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
+    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "0" "$RC" "exit 0 - fact-unescalation applies"
+assert_contains "$OUT" "FACT_UNESCALATE" "FACT_UNESCALATE marker present"
+assert_contains "$OUT" "VERIFIED_COMMIT: deadbeef" "the verifying commit is echoed"
+assert_contains "$OUT" "RESOLVED_COUNT: 2" "both findings counted as resolved"
+assert_contains "$OUT" "UNESCALATED: o/r#5" "--apply reports what it changed"
+assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "loom:operator-only is removed"
+assert_contains "$(labels_log 5)" "REMOVE loom:operator-decision" "loom:operator-decision sub-kind is removed alongside the base label"
+if jq -e '[.labels[].name] | (contains(["loom:operator-only"]) or contains(["loom:operator-decision"])) | not' \
+    "$STUB_DIR/issue-o_r_5.json" >/dev/null; then
+    pass "neither label remains on the issue after de-escalation"
+else
+    fail "neither label remains on the issue after de-escalation"
+fi
+assert_contains "$(body_edits_log 5)" "## Revision" "a Revision section was appended to the body"
+assert_contains "$(body_edits_log 5)" "deadbeef" "the Revision section names the verifying commit"
+assert_contains "$(issue_body 5)" "A proposal with a stale toolchain pin." "the ORIGINAL body text is preserved, not replaced"
+assert_contains "$(comments_log 5)" "champion:proposal-unescalated-facts:" "one fingerprinted de-escalation comment is posted"
+assert_contains "$(comments_log 5)" "deadbeef" "the confirming comment also names the verifying commit"
+
+echo
+echo "--- --check-fact-unescalate: only SOME objections resolved -> leave escalation in place, no label/body change ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_PARTIAL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
+    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "1" "$RC" "exit 1 - a partial resolution never applies"
+assert_contains "$OUT" "REASON: partial-resolution" "reason names the partial resolution"
+assert_eq "" "$(labels_log 5)" "no label change on a partial resolution"
+assert_eq "" "$(comments_log 5)" "no comment on a partial resolution"
+assert_eq "" "$(body_edits_log 5)" "no body edit on a partial resolution"
+
+echo
+echo "--- --check-fact-unescalate: a resolutions file that doesn't address every finding never approves (short file) ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_SHORT" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
+    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "1" "$RC" "exit 1 - a resolutions count mismatch never applies"
+assert_contains "$OUT" "REASON: resolutions-mismatch" "reason names the count mismatch"
+assert_eq "" "$(labels_log 5)" "no label change on a resolutions mismatch"
+
+echo
+echo "--- --check-fact-unescalate: loom:operator-only present but NO champion:proposal-escalated marker -> never touched ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only,loom:operator-decision'
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "1" "$RC" "exit 1 - a human-applied (or unmarked) operator-only is never touched"
+assert_contains "$OUT" "REASON: no-escalation-record" "reason is no-escalation-record"
+assert_eq "" "$(labels_log 5)" "no label change without the marker"
+
+echo
+echo "--- --check-fact-unescalate: no loom:operator-only label at all -> never touched ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect'
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "1" "$RC" "exit 1 - nothing to de-escalate"
+assert_contains "$OUT" "REASON: not-operator-only" "reason is not-operator-only"
+
+echo
+echo "--- --check-fact-unescalate: issue also carries champion:dep-cycle -> permanent escalation, never touched ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only,loom:operator-decision' \
+    "$ESCALATION_FACTS" '<!-- champion:dep-cycle:abcdef1234567890 -->
+A genuine dependency cycle.'
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "1" "$RC" "exit 1 - a dependency cycle cannot self-clear and is never touched by this mechanism either"
+assert_contains "$OUT" "REASON: cycle-escalation" "reason is cycle-escalation"
+assert_eq "" "$(labels_log 5)" "no label change on a cycle escalation"
+
+echo
+echo "--- --check-fact-unescalate: idempotent - a re-applied label for the SAME finding set + commit is not fought ---"
+reset_state
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+issue_fixture 'o/r#5' OPEN 'A proposal with a stale toolchain pin.' \
+    'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "0" "$RC" "first de-escalation applies"
+# Simulate a human deliberately re-adding the label.
+tmp="$(mktemp)"
+jq '.labels += [{"name":"loom:operator-only"}]' "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
+rm -f "$STUB_DIR/labels-o_r_5.log" "$STUB_DIR/comments-o_r_5.log" "$STUB_DIR/body-edits-o_r_5.log"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit deadbeef --apply
+assert_eq "1" "$RC" "exit 1 - the same finding set + commit was already de-escalated once"
+assert_contains "$OUT" "REASON: already-unescalated" "idempotency marker short-circuits the second attempt"
+assert_eq "" "$(labels_log 5)" "no second label removal"
+assert_eq "" "$(comments_log 5)" "no second comment"
+
+echo
+echo "--- --check-fact-unescalate: re-verifying against a LATER commit is a genuine new attempt, not a no-op ---"
+# Reuses the state left behind by the idempotency test above: label re-applied,
+# already carrying the deadbeef marker.
+res_file="$(mktemp)"; printf '%s\n' "$RESOLUTIONS_ALL" > "$res_file"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --resolutions-file "$res_file" --commit cafef00d --apply
+assert_eq "0" "$RC" "a later commit produces a different fingerprint, so it is not short-circuited"
+assert_contains "$OUT" "UNESCALATED: o/r#5" "the re-verification against the new commit succeeds"
+assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "the label comes off again"
+
+echo
+echo "--- --check-fact-unescalate: --apply without --resolutions-file never applies (fails safe, not a silent no-op) ---"
+reset_state
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect,loom:operator-only,loom:operator-decision' "$ESCALATION_FACTS"
+run_cdb --issue 5 --repo o/r --check-fact-unescalate --apply
+assert_eq "1" "$RC" "missing --resolutions-file leaves the escalation in place rather than applying blind"
+assert_contains "$OUT" "REASON: missing-resolutions-file" "reason is missing-resolutions-file"
+assert_eq "" "$(labels_log 5)" "no label change without a resolutions file"
+
+# =====================================================================
 # Argument validation
 # =====================================================================
 
@@ -1041,6 +1245,16 @@ echo "--- Doc pins: the Champion prose actually calls the gate ---"
         "champion.md explains why loom:operator-only is excluded from discovery yet still examined"
     assert_doc_contains "$CHAMPION_REF_MD" "classify-dependency-block.sh --check-defer" \
         "champion-reference.md's decision table documents the defer condition"
+    assert_doc_contains "$CURATOR_MD" "classify-dependency-block.sh --issue" \
+        "curator.md invokes the classifier for its fact-based de-escalation procedure (#7650)"
+    assert_doc_contains "$CURATOR_MD" "--check-fact-unescalate" \
+        "curator.md's de-escalation procedure calls the new fact-checkable mode"
+    assert_doc_contains "$CURATOR_MD" "--resolutions-file" \
+        "curator.md's procedure supplies the per-finding resolutions Curator itself verified"
+    assert_doc_contains "$CURATOR_MD" "De-escalating Fact-Based Champion Escalations" \
+        "the de-escalation procedure has its own named section"
+    assert_doc_contains "$CHAMPION_PROMO_MD" "## Revision" \
+        "champion-issue-promo.md documents how a Curator-appended Revision section interacts with BODY_HASH (#7650)"
 }
 
 echo

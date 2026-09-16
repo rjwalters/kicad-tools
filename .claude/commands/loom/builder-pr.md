@@ -805,6 +805,55 @@ When creating a PR, verify:
 8. Tests added/updated as needed
 9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
 10. `## Test Plan` includes a `TDD:` line for any diff touching executing code (see "Test-First Discipline" above) — omit only for docs/config/ADR-only changes
+11. **Rebased onto latest `origin/main` immediately before push** — see "Pre-Push Rebase: Sync with `origin/main`" below
+
+### Pre-Push Rebase: Sync with `origin/main` (#7668)
+
+**Immediately before `git push` + opening the PR** — after the checklist above
+passes and right before the Lease Fencing check below — sync your branch onto
+the current tip of `main`:
+
+```bash
+git fetch origin main
+git rebase origin/main
+```
+
+Do this **unconditionally**, not only when your diff happens to touch a file
+you know is contested. A branch cut even a few hours ago against a busy repo
+can be stale by the time you are ready to push, and the cost of skipping this
+is not hypothetical: three consecutive PRs (example-org/tool-repo#164, #165,
+#166) each landed `DIRTY` with CI never run, purely because every branch was
+cut before the previous PR in the sequence merged and each touched the same
+narrow, frequently-updated surface (a README status paragraph). Each one cost
+a full Judge-rejection + Doctor-rebase round-trip that this step is meant to
+absorb up front, before a reviewer ever sees the PR.
+
+**If the rebase conflicts, resolve it now — this is the moment, not later
+after a review round-trip:**
+
+1. Resolve each conflicted file, `git add` it, `git rebase --continue`
+   (repeat until the rebase completes).
+2. Re-run the project's check command (`buildGate.command`, e.g. `pnpm check:ci`)
+   — a rebase can silently change behavior even when it resolves cleanly.
+3. **Version-bearing-file sync gate (#7168)**: a rebase can absorb a `VERSION`
+   bump from `main` without your own edits raising a conflict, leaving
+   `.loom/install-metadata.json` or another version-bearing file stale. Run
+   the gate before proceeding:
+   ```bash
+   if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "before push."; then
+     echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
+     exit 1
+   fi
+   ```
+4. If you cannot resolve the conflict confidently (e.g. it touches code you
+   don't understand well enough to merge correctly), stop and report rather
+   than force a resolution — this is the same bar as any other blocked-work
+   outcome in `builder.md`.
+
+This is a pure timing/ordering change — it does not weaken any Judge check,
+label invariant, or lifecycle gate; it only moves a rebase that would
+otherwise happen reactively (via Doctor, after a `loom:changes-requested`
+round-trip) to before the PR is ever opened.
 
 ### Lease Fencing: Confirm You Still Own the Claim (Epic #6165 Phase 3, #6309)
 

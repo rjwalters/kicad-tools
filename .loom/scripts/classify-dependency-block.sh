@@ -63,18 +63,71 @@
 #                        an issue that was ALREADY mis-parked before this fix
 #                        landed, without waiting for the blocker to close
 #
+# A THIRD question, added by #7650, generalizes --check-unescalate beyond
+# dependency findings to arbitrary FACT-CHECKABLE ones:
+#
+#   --check-fact-unescalate   "Have ALL the cited findings in this ALREADY-
+#                              escalated proposal's escalation comment been
+#                              independently re-verified as resolved (by the
+#                              CALLER, not this script) against a named
+#                              commit?" -> FACT_UNESCALATE (append a `##
+#                              Revision` section, remove `loom:operator-only`,
+#                              and let it be evaluated again)
+#
+# --check-unescalate's classification (dependency-word + issue/PR reference,
+# resolved by checking the referenced issue/PR's forge state) is entirely
+# mechanical -- it never needs judgement about what a finding actually means.
+# A finding like "`layout/toolchain.json` still carries the old pin" or
+# "`verification/_repo_utils.py` does not exist anywhere in this repo" is
+# fact-checkable in exactly the same self-clearing sense, but verifying it
+# requires READING THE REPO, which only the caller (Curator, an LLM role) can
+# do. --check-fact-unescalate therefore does not re-derive truth itself: it
+# takes the caller's per-finding verdicts via --resolutions-file and enforces
+# the same safety-guard SHAPE --check-unescalate already established --
+# own-marker-only, never a dependency cycle, all-or-nothing, a namespaced
+# anti-refight marker -- around writes the caller could not safely make by
+# hand (label removal + comment ordering, idempotency). See curator.md's "De-
+# escalating Fact-Based Champion Escalations" for the procedure that supplies
+# --resolutions-file.
+#
 # Usage:
 #   classify-dependency-block.sh --issue <N> [--repo <owner/repo>] [options]
 #   classify-dependency-block.sh --issue <N> --check-unescalate [--apply]
+#   classify-dependency-block.sh --issue <N> --check-fact-unescalate \
+#       --resolutions-file <path> --commit <sha> [--apply]
 #
 # Options:
 #   --issue <N>            Issue number (required).
 #   --repo <nwo>           owner/repo of --issue (default: the current repo's origin).
 #   --check-defer          Default mode. Should Champion defer instead of escalating?
-#   --check-unescalate     Should an already-escalated proposal be un-escalated?
-#   --apply                (--check-unescalate only) actually remove
-#                          `loom:operator-only` and post one idempotent comment.
-#                          Without it the script is strictly read-only.
+#   --check-unescalate     Should an already-escalated proposal be un-escalated
+#                          (dependency-timing case)?
+#   --check-fact-unescalate  Should an already-escalated proposal be un-
+#                          escalated (arbitrary fact-checkable finding case,
+#                          #7650)? Requires --resolutions-file and, for
+#                          --apply, --commit.
+#   --apply                (--check-unescalate / --check-fact-unescalate only)
+#                          actually remove `loom:operator-only` and post one
+#                          idempotent comment (--check-fact-unescalate also
+#                          appends the `## Revision` body section). Without it
+#                          the script is strictly read-only.
+#   --resolutions-file <p> (--check-fact-unescalate only) one line per finding
+#                          cited in the escalation comment, in the same order
+#                          `extract_findings` emits them, each prefixed
+#                          `RESOLVED: ` or `UNRESOLVED: ` followed by the
+#                          evidence for that verdict. The line COUNT must match
+#                          the finding count exactly -- a short file cannot
+#                          silently approve a finding it never addressed.
+#   --commit <sha>         (--check-fact-unescalate only) the commit the
+#                          caller verified every finding against. Required
+#                          even without --apply -- the anti-refight
+#                          fingerprint is keyed on it, so the dry-run
+#                          already-unescalated check needs it too. Named in
+#                          the `## Revision` section and the confirming
+#                          comment on --apply, and folded into the anti-
+#                          refight fingerprint so re-verifying against a
+#                          LATER commit is a genuine new attempt rather than
+#                          a no-op.
 #   --findings-file <p>    Read the findings from this file instead of fetching
 #                          the relevant Champion comment (used by the role file
 #                          when it already holds `$COMMENT_BODY`, and by tests).
@@ -104,16 +157,26 @@
 #                                  + UNESCALATED: o/r#5                startable
 #                                    (--apply only, same as above)     subset heals it)
 #     NO_UNESCALATE                + REASON: <slug>
+#   --check-fact-unescalate:
+#     FACT_UNESCALATE              + VERIFIED_COMMIT: <sha>
+#                                  + RESOLVED_COUNT: <n>
+#                                  + FINGERPRINT: fact-<16 hex>
+#                                  + UNESCALATED: o/r#5        (--apply only --
+#                                    appends `## Revision`, removes
+#                                    loom:operator-only AND, best-effort,
+#                                    loom:operator-decision)
+#     NO_FACT_UNESCALATE           + REASON: <slug>
 #   Either mode (informational, never a verdict on its own):
 #     UNREADABLE: o/r#9 ...
 #
 # Reason slugs: no-findings, merits-finding, no-recorded-blocker,
 #   blockers-cleared, dependency-cycle, unreadable-blocker, blocker-still-open,
 #   not-operator-only, no-escalation-record, cycle-escalation,
-#   already-unescalated, apply-failed.
+#   already-unescalated, apply-failed, missing-resolutions-file,
+#   resolutions-mismatch, partial-resolution, missing-commit.
 #
 # Exit codes:
-#   0 - the special action applies (DEFER / UNESCALATE)
+#   0 - the special action applies (DEFER / UNESCALATE / FACT_UNESCALATE)
 #   1 - it does not apply; the caller proceeds exactly as it did before
 #   2 - error (bad arguments, issue unreadable, missing jq)
 #   3 - (--check-defer only) REEVALUATE: the findings were dependency-only and
@@ -127,6 +190,8 @@
 # BOUNDED COST. One cached read of the issue, one cached read per DISTINCT
 # referenced blocker (deduplicated), and - only when an open blocker is found -
 # one bounded `detect-dependency-cycle.sh` walk that shares the same 30s cache.
+# --check-fact-unescalate costs exactly one read (it never fetches blockers --
+# resolution is supplied by the caller).
 # A proposal with no dependency findings costs exactly one read.
 
 set -uo pipefail
@@ -145,7 +210,7 @@ source "$SCRIPT_DIR/detect-dependency-cycle.sh"
 source "$SCRIPT_DIR/detect-startable-subset.sh"
 
 show_help() {
-    sed -n '2,130p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,191p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # Default so the pure helpers above stay sourceable by tests without `main`
@@ -158,12 +223,20 @@ REPO_NWO=""
 MODE="defer"
 DO_APPLY=0
 FINDINGS_FILE=""
+RESOLUTIONS_FILE=""
+COMMIT_SHA=""
 SKIP_CYCLE_CHECK=0
 NO_CACHE=0
 
 ESCALATE_MARKER="<!-- champion:proposal-escalated -->"
 CYCLE_MARKER_PREFIX="<!-- champion:dep-cycle:"
 UNESCALATE_MARKER_PREFIX="<!-- champion:proposal-unescalated:"
+# Namespaced separately from UNESCALATE_MARKER_PREFIX (#7650) -- this
+# mechanism reverses a MERITS-shaped escalation (arbitrary fact-checkable
+# findings), never a dependency-timing one, so its own idempotency/anti-
+# refight marker must never collide with the dependency mechanism's, even for
+# the same issue number.
+FACT_UNESCALATE_MARKER_PREFIX="<!-- champion:proposal-unescalated-facts:"
 REJECT_NEEDLE="Champion Review: NEEDS REVISION"
 OPERATOR_ONLY_LABEL="loom:operator-only"
 # The operator-only sub-kind (#5671) a dependency-only escalation is expected
@@ -173,6 +246,13 @@ OPERATOR_ONLY_LABEL="loom:operator-only"
 # "No backfill" in .loom/docs/label-state-machine.md: a pre-#5679 escalation
 # never carried a sub-label at all, and this script must still heal those).
 OPERATOR_BLOCKED_LABEL="loom:operator-blocked"
+# The sub-kind a fact-checkable (non-dependency) escalation carries instead
+# (#7650) -- champion-issue-promo.md's SUB_KIND selection uses
+# loom:operator-decision as the safe default whenever a recurring finding
+# isn't a pure dependency citation, which is exactly this script's fact-based
+# case. check_fact_unescalate() drops this alongside the base label, best-
+# effort, for the same "sub-label must never outlive the base label" reason.
+OPERATOR_DECISION_LABEL="loom:operator-decision"
 
 # =====================================================================
 # Pure helpers (sourceable and unit-tested directly by
@@ -249,7 +329,9 @@ _extract_refs() {
 #
 #   1. a dependency word ("blocked by", "blocker", "depends on", "dependent
 #      on", "dependency on"/"dependencies on"/"dependency of"/"dependencies
-#      of", "requires", "prerequisite", "waiting on"), and
+#      of", "requires", "prerequisite", "waiting on", "waits on", "cannot
+#      start/proceed/begin ... until", "not startable/beginable until",
+#      "must wait for/until"), and
 #   2. an actual issue/PR reference.
 #
 # (2) is what keeps ordinary English out of the timing bucket: "Requires a
@@ -265,9 +347,14 @@ _extract_refs() {
 # at all -- that false positive incorrectly un-escalated #4196 (#6112).
 # "dependent on" already covers the adjectival phrasing, so nothing is lost by
 # requiring the noun form to be followed by its preposition.
+#
+# "cannot start until #N" / "cannot proceed until #N" and their kin (#7652)
+# describe the exact same timing relationship as "blocked by #N" in different
+# words -- a sequential-ordering finding, not a merits finding -- so they are
+# included as their own phrase family rather than folded into "blocked".
 is_dependency_finding() {
     local bullet="$1"
-    printf '%s' "$bullet" | grep -qiE '(blocked by|blocker|blocking|blocks|depends on|dependent on|dependenc(y|ies) (on|of)|requires|prerequisite|waiting on|waits on)' || return 1
+    printf '%s' "$bullet" | grep -qiE '(blocked by|blocker|blocking|blocks|depends on|dependent on|dependenc(y|ies) (on|of)|requires|prerequisite|waiting on|waits on|cannot (start|proceed|begin)( work)? until|not (start|begin)able until|must wait (for|until))' || return 1
     printf '%s' "$bullet" | grep -qE '([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+|https?://[^[:space:]),]+/(issues|pull)/[0-9]+' || return 1
     return 0
 }
@@ -350,8 +437,9 @@ _has_cycle() {
     [[ "$?" -eq 1 ]]
 }
 
-_no_defer()      { echo "NO_DEFER"; echo "REASON: $1"; exit 1; }
-_no_unescalate() { echo "NO_UNESCALATE"; echo "REASON: $1"; exit 1; }
+_no_defer()           { echo "NO_DEFER"; echo "REASON: $1"; exit 1; }
+_no_unescalate()      { echo "NO_UNESCALATE"; echo "REASON: $1"; exit 1; }
+_no_fact_unescalate() { echo "NO_FACT_UNESCALATE"; echo "REASON: $1"; exit 1; }
 
 _print_unreadable() {
     [[ -n "$UNKNOWN_REFS" ]] && echo "UNREADABLE: $UNKNOWN_REFS"
@@ -658,6 +746,187 @@ check_unescalate() {
 }
 
 # =====================================================================
+# Mode: --check-fact-unescalate (#7650)
+# =====================================================================
+
+# _resolutions_summary <resolutions-file>
+# Strips the leading "RESOLVED: " tag (every line is required to be RESOLVED
+# by the time this is called -- partial sets never reach the apply path) so
+# the evidence text can be folded directly into the body/comment prose.
+_resolutions_summary() {
+    sed -E 's/^RESOLVED:[[:space:]]*/- /' "$1"
+}
+
+# WRITE ORDER IS LOAD-BEARING, same rule as _apply_unescalation() above, with
+# one extra write in front of it: body edit, THEN label removal, THEN comment.
+#
+#   - body edit fails    -> no label change, no comment; a later re-scan finds
+#     the body unrevised and retries the whole sequence from the top.
+#   - label removal fails -> the body already carries the `## Revision`
+#     section (idempotency-guarded below so a retry does not double-append
+#     it), but the label is still present; a later re-scan re-reads the
+#     ALREADY-revised body, recomputes the SAME fingerprint (the fingerprint
+#     is keyed to the escalation comment + commit, not the body), and retries
+#     the label/comment steps.
+#   - comment post fails  -> the state changes that matter (revision + label
+#     removal) already landed; only the audit trail and anti-refight marker
+#     are missing, the soft direction, exactly as in _apply_unescalation().
+_apply_fact_unescalation() {
+    local fingerprint="$1" body="$2"
+    local marker="$FACT_UNESCALATE_MARKER_PREFIX$fingerprint -->"
+    local revision_marker="<!-- curator:fact-revision:$fingerprint -->"
+    local today summary
+    today="$(date -u +%Y-%m-%d)"
+    summary="$(_resolutions_summary "$RESOLUTIONS_FILE")"
+
+    if ! printf '%s' "$body" | grep -qF "$revision_marker"; then
+        local new_body
+        # Assigned via `read`, NOT `"$(cat <<EOF ...)"`: bash 3.2 -- the stock
+        # macOS /bin/bash, which `#!/usr/bin/env bash` resolves to -- does not
+        # skip heredoc bodies when scanning a command substitution for its
+        # closing paren. An apostrophe in the prose below ("Champion's") then
+        # opens a quote that never closes, and the whole file fails `bash -n`
+        # ~150 lines downstream, taking `check-shell-syntax.sh` and every
+        # `resync-installed.sh` run on macOS with it (#7721). `read` returns
+        # non-zero at EOF, hence `|| true`; the trailing-newline strip keeps
+        # this byte-identical to the command substitution it replaces.
+        IFS= read -r -d '' new_body <<EOF || true
+$body
+
+## Revision ($today)
+
+Curator re-verified every objection Champion's escalation cited against
+\`$COMMIT_SHA\` and found all of them resolved:
+
+$summary
+
+$revision_marker
+EOF
+        new_body="${new_body%$'\n'}"
+        if ! gh issue edit "$ISSUE" --repo "$REPO_NWO" --body "$new_body" >/dev/null 2>&1; then
+            warn "could not append the ## Revision section to $REPO_NWO#$ISSUE (no label change, no comment; a later pass will retry)"
+            return 1
+        fi
+    fi
+
+    if ! gh issue edit "$ISSUE" --repo "$REPO_NWO" --remove-label "$OPERATOR_ONLY_LABEL" >/dev/null 2>&1; then
+        warn "could not remove $OPERATOR_ONLY_LABEL from $REPO_NWO#$ISSUE (no comment posted; a later pass will retry)"
+        return 1
+    fi
+    # Best-effort, not fatal -- same "must never outlive the base label, but
+    # never required" rule as _apply_unescalation()'s sub-label removal.
+    gh issue edit "$ISSUE" --repo "$REPO_NWO" --remove-label "$OPERATOR_DECISION_LABEL" >/dev/null 2>&1 || true
+
+    local comment_body
+    # Assigned via `read`, NOT `"$(cat <<EOF ...)"`: bash 3.2 -- the stock
+    # macOS /bin/bash, which `#!/usr/bin/env bash` resolves to -- does not
+    # skip heredoc bodies when scanning a command substitution for its
+    # closing paren. An apostrophe in the prose below ("Champion's") then
+    # opens a quote that never closes, and the whole file fails `bash -n`
+    # ~150 lines downstream, taking `check-shell-syntax.sh` and every
+    # `resync-installed.sh` run on macOS with it (#7721). `read` returns
+    # non-zero at EOF, hence `|| true`; the trailing-newline strip keeps
+    # this byte-identical to the command substitution it replaces.
+    IFS= read -r -d '' comment_body <<EOF || true
+**Curator: De-escalating — every cited objection has resolved on \`main\`**
+
+Champion escalated this proposal for repeated rejection without revision.
+Every objection Champion's escalation cited has since been independently
+re-verified against \`$COMMIT_SHA\`:
+
+$summary
+
+Appended a \`## Revision\` section naming the verifying commit (this changes
+the body hash, the existing contract for "revised — evaluate again") and
+removed \`$OPERATOR_ONLY_LABEL\` (and its \`$OPERATOR_DECISION_LABEL\`
+sub-kind label, if present). This proposal returns to Champion's normal
+evaluation queue. Nothing here overrides a human decision — if this proposal
+genuinely needs one, re-add the label and it will not be de-escalated again
+for the same finding set.
+
+---
+*Automated by Curator role (classify-dependency-block.sh --check-fact-unescalate, #7650)*
+$marker
+EOF
+    comment_body="${comment_body%$'\n'}"
+    if ! gh issue comment "$ISSUE" --repo "$REPO_NWO" --body "$comment_body" >/dev/null 2>&1; then
+        warn "de-escalated $REPO_NWO#$ISSUE but could not post the confirming comment (audit trail missing)"
+    fi
+    return 0
+}
+
+check_fact_unescalate() {
+    local issue_json body labels comments findings escalation
+
+    issue_json="$("$GH_READ" issue view "$ISSUE" --repo "$REPO_NWO" --json body,labels,comments 2>/dev/null)"
+    if [[ -z "$issue_json" ]]; then
+        err "could not read $REPO_NWO#$ISSUE"
+        exit 2
+    fi
+    body="$(printf '%s\n' "$issue_json" | jq -r '.body // ""')"
+    labels="$(printf '%s\n' "$issue_json" | jq -r '[.labels[]?.name] | join(",")')"
+    comments="$(printf '%s\n' "$issue_json" | jq -r '[.comments[]?.body] | join("\n")')"
+
+    printf ',%s,' "$labels" | grep -qF ",$OPERATOR_ONLY_LABEL," || _no_fact_unescalate "not-operator-only"
+
+    # A cycle escalation is correctly permanent -- same rule as check_unescalate().
+    printf '%s' "$comments" | grep -qF "$CYCLE_MARKER_PREFIX" && _no_fact_unescalate "cycle-escalation"
+
+    # Only Champion's OWN escalation is reversible here. No marker, no touch --
+    # a label applied by a human or any other path carries no such record.
+    escalation="$(printf '%s\n' "$issue_json" \
+        | jq -r --arg m "$ESCALATE_MARKER" \
+            '[.comments[] | select(.body | contains($m))] | last | .body // ""')"
+    [[ -n "${escalation//[[:space:]]/}" ]] || _no_fact_unescalate "no-escalation-record"
+
+    findings="$(extract_findings "$escalation")"
+    [[ -n "${findings//[[:space:]]/}" ]] || _no_fact_unescalate "no-findings"
+
+    [[ -n "$RESOLUTIONS_FILE" && -f "$RESOLUTIONS_FILE" ]] || _no_fact_unescalate "missing-resolutions-file"
+
+    local n_findings n_resolutions n_unresolved
+    n_findings=$(printf '%s\n' "$findings" | grep -c '.')
+    n_resolutions=$(grep -cE '^(RESOLVED|UNRESOLVED):' "$RESOLUTIONS_FILE")
+    # A resolutions file that does not address every cited finding 1:1 can
+    # never approve -- a short file must not silently pass a finding it never
+    # spoke to.
+    [[ "$n_findings" -eq "$n_resolutions" ]] || _no_fact_unescalate "resolutions-mismatch"
+
+    n_unresolved=$(grep -cE '^UNRESOLVED:' "$RESOLUTIONS_FILE")
+    # Guard (4) from #7650: a PARTIAL resolution leaves the escalation in
+    # place. All-or-nothing, same conservatism direction as check_unescalate().
+    [[ "$n_unresolved" -eq 0 ]] || _no_fact_unescalate "partial-resolution"
+
+    [[ -n "$COMMIT_SHA" ]] || _no_fact_unescalate "missing-commit"
+
+    local fingerprint
+    fingerprint="fact-$(printf '%s\n%s' "$escalation" "$COMMIT_SHA" | _sha256 | awk '{print substr($1, 1, 16)}')"
+
+    # Idempotency / anti-refight, same shape and same safety argument as
+    # check_unescalate()'s: the marker can only exist once the label removal
+    # already landed (write order below), so "marker present + label present"
+    # unambiguously means a human re-applied the label after a completed
+    # de-escalation -- do not fight them.
+    printf '%s' "$comments" | grep -qF "$FACT_UNESCALATE_MARKER_PREFIX$fingerprint -->" \
+        && _no_fact_unescalate "already-unescalated"
+
+    echo "FACT_UNESCALATE"
+    echo "VERIFIED_COMMIT: $COMMIT_SHA"
+    echo "RESOLVED_COUNT: $n_resolutions"
+    echo "FINGERPRINT: $fingerprint"
+
+    if [[ "$DO_APPLY" -eq 1 ]]; then
+        if _apply_fact_unescalation "$fingerprint" "$body"; then
+            echo "UNESCALATED: $REPO_NWO#$ISSUE"
+        else
+            echo "REASON: apply-failed"
+            exit 1
+        fi
+    fi
+    exit 0
+}
+
+# =====================================================================
 # main
 # =====================================================================
 main() {
@@ -667,7 +936,10 @@ main() {
             --repo)              REPO_NWO="${2:-}"; shift 2 ;;
             --check-defer)       MODE="defer"; shift ;;
             --check-unescalate)  MODE="unescalate"; shift ;;
+            --check-fact-unescalate) MODE="fact-unescalate"; shift ;;
             --apply)             DO_APPLY=1; shift ;;
+            --resolutions-file)  RESOLUTIONS_FILE="${2:-}"; shift 2 ;;
+            --commit)            COMMIT_SHA="${2:-}"; shift 2 ;;
             --findings-file)     FINDINGS_FILE="${2:-}"; shift 2 ;;
             --skip-cycle-check)  SKIP_CYCLE_CHECK=1; shift ;;
             --no-cache)          NO_CACHE=1; shift ;;
@@ -684,12 +956,20 @@ main() {
         err "--issue must be a number (got: $ISSUE)"
         exit 2
     fi
-    if [[ "$DO_APPLY" -eq 1 && "$MODE" != "unescalate" ]]; then
-        err "--apply is only meaningful with --check-unescalate"
+    if [[ "$DO_APPLY" -eq 1 && "$MODE" != "unescalate" && "$MODE" != "fact-unescalate" ]]; then
+        err "--apply is only meaningful with --check-unescalate or --check-fact-unescalate"
         exit 2
     fi
     if [[ -n "$FINDINGS_FILE" && ! -f "$FINDINGS_FILE" ]]; then
         err "--findings-file not found: $FINDINGS_FILE"
+        exit 2
+    fi
+    if [[ -n "$RESOLUTIONS_FILE" && "$MODE" != "fact-unescalate" ]]; then
+        err "--resolutions-file is only meaningful with --check-fact-unescalate"
+        exit 2
+    fi
+    if [[ -n "$COMMIT_SHA" && "$MODE" != "fact-unescalate" ]]; then
+        err "--commit is only meaningful with --check-fact-unescalate"
         exit 2
     fi
     if ! command -v jq >/dev/null 2>&1; then
@@ -712,8 +992,9 @@ main() {
     fi
 
     case "$MODE" in
-        defer)      check_defer ;;
-        unescalate) check_unescalate ;;
+        defer)           check_defer ;;
+        unescalate)      check_unescalate ;;
+        fact-unescalate) check_fact_unescalate ;;
     esac
 }
 

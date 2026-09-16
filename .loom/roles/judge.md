@@ -77,9 +77,14 @@ gh api "repos/{owner}/{repo}/issues/<n>/labels/loom%3Areviewing" -X DELETE
 #   name must be percent-encoded as %3A in the DELETE path segment.
 ```
 
-(The PR's REST comments/labels endpoints live under `/issues/<n>/...` —
-GitHub treats a PR as an issue for labels, comments, and state; there is no
-separate `/pulls/<n>/comments` or `/pulls/<n>/labels`.) `gh api` expands the
+(The PR's **general conversation** comments and its labels live under
+`/issues/<n>/...` — GitHub treats a PR as an issue for labels, comments and
+state, and there is no `/pulls/<n>/labels`. **`/pulls/<n>/comments` does
+exist**, and is a *different* thing: the PR's **inline, diff-anchored review
+comments**. Reading only `/issues/<n>/comments` therefore sees the
+conversation and none of the formal review feedback — the exact blind spot
+behind #7647; see "Formal Review & Inline Thread Reconciliation" below.)
+`gh api` expands the
 literal `{owner}/{repo}` placeholder from the git remote with zero API calls
 of its own — never resolve it via `gh repo view --json nameWithOwner`, which
 is itself GraphQL-backed and fails first under the same exhaustion this
@@ -490,7 +495,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
    fi
    ```
 4. **Understand context**: Read PR description and linked issues
-4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist, skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8) and the fast-path approval write. Otherwise continue normally.
+4b. **Check docs-only fast-path eligibility** (see "Docs-Only Fast Path (WORK_LOG / WORK_PLAN / README, #6134)" below) — if the changed-file list is an exact match against the fast-path allowlist, skip steps 5-7b and the "Evaluation Focus Areas" review entirely; go straight to CI Status Check (step 8), the formal-review reconciliation gate (step 8b — **not** skipped: a docs-only diff can still carry an unresolved formal review, #7647) and the fast-path approval write. Otherwise continue normally.
 5. **Check out code**: Use the existing builder worktree, else `./.loom/scripts/pr-worktree.sh <number>` — never a bare `gh pr checkout` in the main checkout (see "PR Branch Isolation" and Worktree-Aware Code Access below). Capture `REVIEW_HEAD_SHA=$(gh pr view <number> --json headRefOid --jq '.headRefOid')` here — step 11's recheck compares against it, and your verdict marker records it.
 6. **Rebase check**: Verify PR is up-to-date with main (see Rebase Check section below)
 7. **Run quality checks**: Tests, lints, type checks, build (use Scoped Test Execution — see section below)
@@ -505,6 +510,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
     flag-and-move-on step — see "Live Verification and the Circular-Fixture
     Smell".
 8. **Verify CI status**: Check GitHub CI passes before approving (see CI Status Check below)
+8b. **Reconcile formal reviews and inline threads**: `./.loom/scripts/check-review-feedback.sh --number <number> --head-sha "$REVIEW_HEAD_SHA"` — CI green plus friendly issue comments is NOT the whole review record (#7647). Exit 0 = clear; 10/11/12 mean something is outstanding, older-head, or unread, and an approval must dispose of it explicitly. See "Formal Review & Inline Thread Reconciliation" below. **Applies to every approval path, including the fast paths** — `post-verdict.sh` re-runs this gate itself and refuses an ungrounded approval.
 9. **Evaluate changes**: Examine diff, look for issues, suggest improvements
 10. **Provide feedback**: Use `./.loom/scripts/post-verdict.sh` to provide evaluation feedback
 11. **Update labels** (⚠️ NEVER use `gh pr review` - see warning at top of file). **Run the Verdict-Time CAS Recheck (see below) immediately before this step** — abort instead of writing if it finds your claim lost, another Judge's verdict already landed, or the head SHA moved off `REVIEW_HEAD_SHA`. It yields `$VERDICT_SHA`, which `post-verdict.sh` MUST be given (see "Verdict SHA Marker") — the script stamps the `<!-- loom:verdict-sha ... -->` marker itself. **The label update is the PRIMARY deliverable — always run it immediately after the comment using `&&`:**
@@ -1427,6 +1433,7 @@ echo "Branch rebased successfully, continuing evaluation"
 - Both sides adding to same list/config (e.g., `pyproject.toml` entry points, `package.json` scripts)
 - Whitespace or formatting conflicts
 - Independent additions to same file (non-overlapping)
+- **Conflict confined entirely to version-bearing files** (per `./scripts/version.sh list` — VERSION, CLAUDE.md, `.loom/install-metadata.json`, `package.json`, `mcp-loom/package.json`, `loom-daemon/Cargo.toml`, `loom-api/Cargo.toml` as of this writing, but always re-run `./scripts/version.sh list` rather than trusting this cached snapshot). This is the recurring "VERSION bump goes stale before review lands" race (#7684): `main` bumps these single-line/single-field values on nearly every merge, so if another PR merges first it collides on the exact same lines this branch's own bump touched — not a real code conflict. **Only applies when EVERY conflicting file is on that list** — see the "Multiple conflicting files" rule under Edge Cases below, which this case does not override.
 
 **Complex conflicts (Doctor handles):**
 - Overlapping code changes in same function/block
@@ -1450,6 +1457,55 @@ fi
 
 git push --force-with-lease
 gh pr comment <number> --body "🔀 Rebased branch and resolved merge conflict (both sides added entries to config)"
+```
+
+### For Version-Bearing-File-Only Conflicts (Judge Resolves)
+
+**First, confirm EVERY conflicting file is version-bearing.** If even one is
+not, this recipe does not apply — abort it and fall through to "For Complex
+Conflicts" instead (the "if ANY conflict is complex, treat entire rebase as
+complex" rule in Edge Cases still governs):
+
+```bash
+CONFLICTED="$(git diff --name-only --diff-filter=U)"
+NON_VERSION_CONFLICTS="$(comm -23 <(sort <<<"$CONFLICTED") <(./scripts/version.sh list | sort))"
+if [ -n "$NON_VERSION_CONFLICTS" ]; then
+  echo "Non-version-bearing file(s) also conflicted -- this is a complex conflict:"
+  echo "$NON_VERSION_CONFLICTS"
+  # Do NOT continue with this recipe -- use "For Complex Conflicts" below instead.
+fi
+```
+
+Once confirmed, discard this branch's now-superseded bump and re-derive a
+fresh one from `origin/main`'s post-rebase tip — never hand-patch the
+version-bearing files yourself:
+
+```bash
+# Take origin/main's side for every conflicting (version-bearing) file, then
+# re-derive a fresh bump on top of it.
+#
+# `--ours` is correct here, NOT `--theirs`: mid-`git rebase` the two are
+# REVERSED relative to `git merge`. A rebase replays your commits on top of the
+# upstream, so "ours" is the branch being rebased ONTO (origin/main) and
+# "theirs" is the commit being replayed (this branch's own, already-superseded
+# bump). Using `--theirs` here would keep the stale bump and then bump patch on
+# top of that stale base, which can yield a version that is NOT ahead of
+# origin/main's tip -- exactly the #7684 race this recipe exists to end. Do not
+# "correct" this back to `--theirs`.
+git checkout --ours -- $CONFLICTED
+git add $CONFLICTED
+./scripts/version.sh bump patch
+git add $(./scripts/version.sh list)
+git rebase --continue
+
+# Same gate as every other rebase path -- must pass before pushing.
+if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
+  exit 1
+fi
+
+git push --force-with-lease
+gh pr comment <number> --body "🔀 Rebased branch and re-derived a fresh VERSION bump — the previous bump was superseded by main advancing further while this PR waited for review (#7684), not a defect in the PR's own change."
 ```
 
 ### For Complex Conflicts (Request Changes)
@@ -1479,7 +1535,7 @@ FEEDBACK
 - **Rebase succeeds but CI fails**: Continue with evaluation (CI failure is a code issue, not a conflict issue)
 - **PR already rebased by someone else**: `BEHIND` status should be gone, continue normally
 - **Rebase creates new test failures**: Continue evaluation - Judge catches this during normal CI check phase
-- **Multiple conflicting files**: If ANY conflict is complex, treat entire rebase as complex (request changes)
+- **Multiple conflicting files**: If ANY conflict is complex, treat entire rebase as complex (request changes) — this governs the version-bearing-files case above too: it only fires when EVERY conflicting file is version-bearing, and a single non-version-bearing conflicting file still routes to this "treat entire rebase as complex" path unchanged
 
 ### Relationship with Doctor
 
@@ -1706,6 +1762,97 @@ VERDICT_SHA=$(gh pr view 42 --json headRefOid --jq '.headRefOid')
 
 **Always verify `gh pr checks` before approving.**
 
+## Formal Review & Inline Thread Reconciliation (REQUIRED Before Approval, #7647)
+
+Issue comments are not the whole review record. A PR carries **three**
+independent feedback surfaces, and Loom's own approval convention (a
+`gh pr comment` + label, never `gh pr review --approve`) lives on only one of
+them:
+
+| Surface | Endpoint | What Loom writes there |
+|---|---|---|
+| General conversation | `/issues/<n>/comments` | Judge verdicts, Doctor/Builder notes |
+| **Formal reviews** | `/pulls/<n>/reviews` | nothing — but humans and bots submit `CHANGES_REQUESTED` here |
+| **Inline review threads** | `/pulls/<n>/comments` + GraphQL `reviewThreads` | nothing — line-anchored findings and their resolution state |
+
+**A Loom approval comment on surface 1 does not answer, supersede, or erase a
+request on surface 2 or 3.** In kicad-tools#5369 a Judge approved at head
+`23a0289` while an unresolved formal `CHANGES_REQUESTED` review sat at that
+*same* head asking for DFM-analysis coverage; the approving pass had read the
+issue comments and never `pulls/reviews`, and green CI did not exercise the
+missing requirement either. Champion stopped the merge. Nothing in the
+pipeline would have.
+
+### The gate
+
+```bash
+./.loom/scripts/check-review-feedback.sh --number <PR> --head-sha "$REVIEW_HEAD_SHA"
+```
+
+It reads **all pages** of `/pulls/<n>/reviews`, plus the inline threads with
+their **actual** resolution state (GraphQL `reviewThreads`, falling back to
+`/pulls/<n>/comments` when GraphQL is exhausted), retains review id / state /
+commit association / timestamp, and prints eval-safe `KEY=VALUE` lines
+(enums, integers, SHAs and a findings-file path — never forge text; review
+bodies go only to `REVIEW_FEEDBACK_FINDINGS_FILE`, which is data to read, not
+to `eval`).
+
+| Exit | `REVIEW_FEEDBACK_STATE` | What it means | What you must do |
+|---|---|---|---|
+| 0 | `CLEAR` | Complete read; nothing outstanding | Approve normally |
+| 10 | `BLOCKING` | An outstanding `CHANGES_REQUESTED`, or an unresolved inline thread, **at the current head** | Reconcile each finding against the tree in writing, citing its review id — or request changes |
+| 11 | `NEEDS_RECONCILIATION` | Findings anchored to an **older head**, an unrecognized review state, or resolution state that could not be established | Produce evidence of repair or an explicit disposition — a moved head is NOT a dismissal |
+| 12 | `UNKNOWN` | The read itself failed / paginated incompletely | **Not** proof of "no blockers". Re-run it; never assert a state you did not read |
+
+### Disposing of findings
+
+**This is about reading and resolving feedback, not about changing how Loom
+votes.** Do not start using `gh pr review --approve` (the self-review API
+restriction at the top of this file is unchanged), and **never dismiss a
+formal review** to clear the gate. Respect the forge's own state: a review
+GitHub reports as `DISMISSED` is dismissed; one it reports as
+`CHANGES_REQUESTED` is outstanding until the reviewer says otherwise or you
+write down why it no longer applies.
+
+When anything is outstanding, your approval must state — in the verdict
+comment itself — **which findings were fixed, which were superseded, and which
+remain blocking**, naming each review id. Scope disagreement ("that is the
+consumer's job") is a reconciliation you must argue explicitly, never an
+inferred override. If a finding genuinely still applies, the verdict is
+`changes-requested`, not an approval with a caveat.
+
+### It is enforced by the posting mechanism, not by memory
+
+`post-verdict.sh` runs this gate itself on **every `approved` verdict** and
+refuses to post (exit 3) unless the state is `CLEAR` or you supply the
+disposition:
+
+```bash
+./.loom/scripts/post-verdict.sh <PR> approved "$VERDICT_SHA" \
+  --body "…" \
+  --reviews-reconciled "Review 5202931719 (DFM coverage) was addressed in $VERDICT_SHA — tests/test_dfm_coverage.py exercises both modules; nothing deferred."
+```
+
+The disposition text and the gate's counts are appended to the posted comment
+(plus a `<!-- loom:review-reconciliation … -->` marker), so a reconciliation
+is auditable on the forge rather than asserted in a transcript. A blanket
+sentence that cites none of the blocking review ids is refused.
+
+Every *read* failure fails closed. The one exception is a gate script that is
+not installed at all (an install defect, which says nothing about this PR):
+that degrades to the old behaviour with a stderr warning and a
+`state=gate-unavailable` marker, rather than stalling every approval on every
+host. If you see that marker on your own verdict, resync the installed
+`.loom/scripts/` from the primary checkout and re-verify the PR's reviews by
+hand before trusting the approval.
+
+**Because every approval path in this document posts through
+`post-verdict.sh`, this covers the fast paths too** — the Docs-Only Fast Path,
+the conflict-only Fast-Track, the minor-PR-description-fix approval and the
+trivial-fix approval all pass through the same gate without any of them
+opting in. `changes-requested` verdicts are deliberately not gated: they
+cannot merge anything, so gating them would only burn forge reads.
+
 ## Fast-Track Evaluation (Conflict-Only Resolution)
 
 When Doctor resolves **only merge conflicts** without making substantive code changes, they signal this with a special marker. This enables an abbreviated evaluation process that significantly reduces re-evaluation time.
@@ -1746,11 +1893,13 @@ Red flags that should trigger a full evaluation instead:
 - New error handling
 - Documentation updates beyond conflict resolution
 
-**3. Verify CI passes:**
+**3. Verify CI passes — and reconcile formal reviews/inline threads:**
 
 ```bash
 gh pr checks <PR_NUMBER>
 gh pr view <PR_NUMBER> --json mergeStateStatus --jq '.mergeStateStatus'
+# A conflict-only re-push does not resolve anyone's outstanding review (#7647).
+./.loom/scripts/check-review-feedback.sh --number <PR_NUMBER> --head-sha "$REVIEW_HEAD_SHA"
 ```
 
 **4. Approve with fast-track audit trail** (run the Verdict-Time CAS Recheck immediately before the `gh pr edit` below):
@@ -1896,6 +2045,13 @@ When `$ELIGIBILITY` is `ELIGIBLE`:
 checks (step 7), no test plan execution (step 7b), and no code evaluation
 (the "Evaluation Focus Areas" sections below). There is no code to lint,
 type-check, or functionally test in a diff confined to these three files.
+
+**1b. Still reconcile formal reviews and inline threads** (step 8b, "Formal
+Review & Inline Thread Reconciliation" above). Eligibility here is a statement
+about the *diff shape*, not about the *feedback*: anyone can leave a formal
+`CHANGES_REQUESTED` review on a three-file docs PR, and this fast path skips
+code evaluation, never review reconciliation. `post-verdict.sh` enforces it on
+the approval write below regardless (#7647).
 
 **2. Still verify CI status** (step 8, "CI Status Check" above) — a docs-only
 diff can still fail a structural CI job (`claude-md-budget`,

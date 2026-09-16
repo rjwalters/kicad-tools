@@ -165,3 +165,6 @@ boards/**/*.kicad_prl
 
 # Node (root package.json has npm scripts; site/ has its own .gitignore)
 node_modules/
+.squad/
+.claude/skills/squad/.install-local.json
+.mcp.json

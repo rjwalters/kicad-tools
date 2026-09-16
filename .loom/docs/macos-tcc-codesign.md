@@ -46,6 +46,23 @@ keychain but not referenced by config/env on this host — set
 `codesign.identity` in `.loom-local/local.json` (see "Using it" below) and
 re-run the update script before re-checking.
 
+**A fetch-only host never exercises this setting at all (#7609).** Since the
+daemon's auto-update loop rolls from the published Release artifact rather than
+from source-checkout staleness (see
+[`daemon-reference.md` → "Artifact-first auto-update
+ticks"](daemon-reference.md)), a Mac that only ever installs fetched artifacts
+never reaches the local-signing branch: `provision-daemon.sh` refuses to
+re-sign a binary that already carries a real, certificate-backed signature
+("already signed with a real certificate — not re-signing"), because
+`codesign -f` would downgrade the CI Developer ID chain to ad-hoc. On such a
+host `LOOM_CODESIGN_IDENTITY` / `codesign.identity` is inert — the TCC-stable
+DR comes from the release signature instead, and the local one-time
+certificate setup below is unnecessary. It remains the answer for hosts that
+still build from source: a dev machine, a fork with no Releases, an unbuilt
+platform, or a host pinned to `--no-fetch`. This is also what makes the local
+`codesign` invocation — and the keychain prompt it can hang on (#7605) —
+unreachable on a fetch-only host.
+
 ## One-time setup: a self-signed "Code Signing" certificate
 
 You only need a certificate that satisfies the macOS `codeSign` policy — a
@@ -94,6 +111,68 @@ verification failed", and `-T /usr/bin/codesign` at import time is what lets
 `codesign` sign later without prompting — provided the login keychain is
 unlocked in the user session (true for any interactive login; a headless/CI
 context should keep using the ad-hoc default instead).
+
+## Importing a Developer ID / CA-issued identity instead
+
+Everything above mints a **self-signed** certificate. If you already have a
+**Developer ID Application** (or other CA-issued) signing certificate and
+want to use that instead, importing it has the *exact same*
+non-interactive-access requirement as Option B's step 3 above — and getting
+it wrong here has a worse failure mode than a merely-missing identity: it
+**hangs** instead of falling back (see "Why a missing ACL entry hangs
+instead of failing" below).
+
+```bash
+security import DeveloperIDApplication.p12 -k ~/Library/Keychains/login.keychain-db \
+  -P '<p12 passphrase>' -T /usr/bin/codesign
+```
+
+`-T /usr/bin/codesign` at import time is what lets `codesign` use this
+key's private half non-interactively later. Omit it and the import still
+succeeds and `security find-identity -v -p codesigning` still lists the
+identity — the ACL gap only surfaces the next time something actually tries
+to sign with it.
+
+### Repairing an identity imported without `-T /usr/bin/codesign`
+
+Already imported without it (or received the `.p12` from someone else's
+export, which does not carry the ACL along with it)? You don't need to
+re-import — grant the access-control-list entry after the fact:
+
+```bash
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s \
+  -k '<login keychain password>' ~/Library/Keychains/login.keychain-db
+```
+
+`-S apple-tool:,apple:,codesign:` grants the same three access groups
+`-T /usr/bin/codesign` grants at import time. `-k` takes your **login
+password** (the one that unlocks this keychain) — not the `.p12`'s export
+passphrase, which is a separate secret used only during the import step
+above.
+
+### Why a missing ACL entry hangs instead of failing (Issue #7605)
+
+`codesign -f -s <identity>` against a key whose ACL is missing `codesign`
+does not error out — it raises a blocking Keychain **"codesign wants to
+sign using key…"** prompt (SecurityAgent), and that prompt has no timeout
+of its own. On an interactive host someone eventually clicks through it; on
+a headless host (an unattended fleet Mac, a `launchd`-supervised
+self-update roll with no logged-in session, a CI runner) nobody ever does —
+the caller **hangs indefinitely**, blocking installs and the self-update
+loop for 10+ minutes with no output. This is exactly the incident Issue
+#7605 reports.
+
+`sign_daemon_binary` (`scripts/install/provision-daemon.sh`) now preflights
+the resolved identity non-interactively — signing a throwaway copy under a
+hard wall-clock cap — before it ever touches the real binary, and applies
+that same cap to the real signing call, so this misconfiguration degrades
+to a `WARN`-and-fall-back-to-ad-hoc instead of an indefinite hang. Likewise,
+`loom-daemon health` surfaces a configured identity that fails that
+preflight as a `codesign_identity` finding, so the misconfiguration is
+visible before the next roll rather than during it. **Both are a safety
+net, not a fix** — run the repair command above (or re-import with
+`-T /usr/bin/codesign`) to actually get the TCC-grant-survives-rebuilds
+benefit this doc exists for.
 
 ## Using it
 

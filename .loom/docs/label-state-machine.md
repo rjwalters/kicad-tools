@@ -599,6 +599,61 @@ opportunistic, not a mandate to retroactively re-scan the backlog — the same
 "apply going forward" principle from "Additive only" above governs this
 direction too.
 
+## Fact-based de-escalation of a Champion `proposal-escalated` hold (#7650)
+
+`classify-dependency-block.sh --check-unescalate` (#5664, documented above)
+already reverses Champion's own `<!-- champion:proposal-escalated -->`
+escalation when *every* recurring finding names a dependency and cites an
+issue/PR reference that has since closed — a purely mechanical check (the
+script never re-derives truth, it just reads the referenced issue/PR's forge
+state). #7650 generalizes the SAME reversal to an escalation whose recurring
+findings are **arbitrary fact-checkable claims about repo state** instead — a
+finding like "`layout/toolchain.json` still carries the old pin" or "`file.py`
+does not exist anywhere in this repo" is exactly as self-clearing as an open
+dependency once the underlying fact changes, but verifying it requires
+*reading the repo*, which no script can do generically.
+`--check-fact-unescalate` therefore takes the caller's own per-finding
+verdicts (`RESOLVED`/`UNRESOLVED`, one per finding, evidence included) and
+enforces the same safety-guard SHAPE the dependency-timing mechanism already
+established around them:
+
+| Guard | Same as `--check-unescalate`? |
+|---|---|
+| Only reverses Champion's own `<!-- champion:proposal-escalated -->` marker — a human-applied or otherwise-sourced `loom:operator-only` is never touched | Yes, identical check |
+| Never touches an issue also carrying `<!-- champion:dep-cycle:` | Yes, identical check |
+| ALL cited findings must resolve — a partial resolution leaves the escalation in place | Yes, same all-or-nothing direction (a resolutions-file that omits a finding, or marks one `UNRESOLVED`, refuses) |
+| A namespaced, fingerprinted anti-refight marker so a human who deliberately re-applies the label after a completed de-escalation is not fought | Yes, but namespaced separately (`champion:proposal-unescalated-facts:` vs. `champion:proposal-unescalated:`) so the two mechanisms' markers can never collide on the same issue |
+| Write order: state change before the marker-bearing comment, so a partial write always retries rather than getting stuck believing it already succeeded | Yes, identical ordering argument, with one more write in front of it (the body edit) |
+
+**The mechanical difference from `--check-unescalate`**: instead of removing
+the label directly on its own read of forge state, the fact-checkable mode
+also **appends a dated `## Revision` section to the issue body** naming the
+commit the caller verified every finding against. That body edit is not
+cosmetic — it is what changes the body hash Champion's idempotency check
+(`champion-issue-promo.md` → "Idempotency check") keys its `VERDICT_MARKER`
+on, the same "revised — evaluate again" contract every other body edit
+already triggers. No Champion-side code change was needed for that half:
+`BODY_HASH` is computed from title + body verbatim, so any appended text —
+Curator's `## Revision` section included — already produces a fresh
+evaluation on the next pass rather than a repeat escalation (see that file's
+"A Curator-appended `## Revision` section is an ordinary body edit, not a
+special case").
+
+**Owner is Curator, not Champion** — the one place in this document (and in
+`curator.md`) where a Curator procedure removes `loom:operator-only` itself,
+rather than only reporting a possibly-stale premise (contrast "Checking
+Operator-Only Premises (#6849)" above, which is deliberately read-only).
+That is a deliberate exception, not a precedent for other Curator checks:
+this specific mechanism, `curator.md`'s "De-escalating Fact-Based Champion
+Escalations", exists precisely because a script cannot re-derive the
+underlying facts itself the way `--check-unescalate` can for a pure
+dependency reference — the verification step *requires* an LLM reading the
+repo, and Curator is the role already positioned to do that re-check (per
+"Checking Operator-Only Premises" and "Checking Dependencies" above).
+Champion's own promotion pass is unaffected: it still owns the pure
+dependency-timing case end to end via Pass 0, and treats a Curator-revised
+proposal exactly like any other revision once it reaches the queue.
+
 ## Follow-up work
 
 - Wire `loom:operator` into Builder/Doctor's credential-or-policy stop path

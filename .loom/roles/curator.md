@@ -1829,6 +1829,152 @@ fi
   discipline (#7617)" above. `loom:curating` is only ever taken transiently,
   around posting the one comment this section can produce, never left behind.
 
+## De-escalating Fact-Based Champion Escalations (#7650)
+
+**This section is the one exception to "Checking Operator-Only Premises"
+above being read-only.** That section re-checks a *named reference*
+(`Blocked by #N`, an epic header) and never removes anything. This section
+covers a *different* shape: a `loom:operator-only` issue Champion escalated
+via its own N=2 "repeated rejection without revision" gate
+(`<!-- champion:proposal-escalated -->`), whose recurring findings are
+**fact-checkable claims about repo state** rather than a named reference —
+e.g. "`layout/toolchain.json` still carries the old pin" or
+"`verification/_repo_utils.py` does not exist anywhere in this repo". A
+finding like that can go stale in
+hours (a sibling PR lands the exact fact it cited) with no mechanism to
+notice: the body hash is unchanged, so Champion keeps silently skipping, and
+`loom:operator-only` makes every other pass skip it too. The motivating
+incident: `2AMLogic/sg13cmos5l-protocol-emulator`#6 and #8, both rejected on
+facts that were true at review time and false again hours later once a
+sibling issue's PR merged.
+
+**Does not overlap `classify-dependency-block.sh --check-unescalate`
+(#5664).** That mechanism already reverses a Champion escalation whose
+*every* recurring finding names a dependency and cites an issue/PR reference
+— Champion runs it itself, every pass, in "Pass 0: Self-Healing Un-Escalation
+Re-Scan" (`champion-issue-promo.md`). This section is for the complementary
+case: the escalation's findings are **not** dependency citations at all (a
+mixed or non-dependency finding set is exactly what routes Champion to
+`loom:operator-decision` instead of `loom:operator-blocked` in the first
+place — see "Choose the sub-kind before posting" in that file's escalation
+step). Do not attempt this procedure on an escalation `--check-unescalate`
+would already handle; let Pass 0 handle it.
+
+**When this applies**: a `loom:operator-only` issue that carries a
+`<!-- champion:proposal-escalated -->` comment (own-marker-only — see "What
+this never does" below) whose **Recurring findings** bullets are fact-checkable
+claims you can independently re-verify by reading the current repo (files,
+other issues/PRs) — not a preference call, not something only Champion's own
+re-evaluation could settle.
+
+### Procedure
+
+1. **Find candidates** the same way "Checking Operator-Only Premises" above
+   does (`loom:operator-only`, open), filtered to issues carrying the
+   escalation marker:
+
+   ```bash
+   gh issue list --label="loom:operator-only" --state=open --limit=200 \
+     --json number,comments \
+     --jq '.[] | select([.comments[].body] | join("\n") | contains("<!-- champion:proposal-escalated -->")) | .number'
+   ```
+
+2. **Read the latest escalation comment's `Recurring findings:` bullets** —
+   these are the exact claims to re-verify, in order. If any bullet is a
+   dependency citation (a dependency word *and* an issue/PR reference — see
+   `classify-dependency-block.sh`'s `is_dependency_finding`), leave it for
+   Champion's own Pass 0 instead; do not duplicate that path here.
+
+3. **Independently re-verify each finding against current `main`.** Read the
+   file/state the finding claims, and record — per finding, in the SAME
+   order as the bullets — whether it is now RESOLVED (the claim no longer
+   holds) or still UNRESOLVED, with the evidence:
+
+   ```bash
+   cat > /tmp/resolutions-<N>.txt <<'EOF'
+   RESOLVED: layout/toolchain.json now carries the pin the proposal names (verified against <sha>)
+   RESOLVED: verification/_repo_utils.py landed verbatim in <sha> via #<PR>
+   EOF
+   ```
+
+   One line per finding, prefixed exactly `RESOLVED: ` or `UNRESOLVED: `. The
+   script below requires the line count to match the finding count exactly —
+   a short file can never silently approve a finding it never addressed.
+
+4. **Guard (restated from the issue's own Ask): only proceed if EVERY cited
+   finding verified RESOLVED.** A partial resolution — even one UNRESOLVED
+   line — must leave the escalation in place; do not run `--apply` on a
+   partial set (the script also refuses it if you do — see "What this never
+   does" below — but do not lean on that as the only guard).
+
+5. **If (and only if) every finding resolved**, run the shared classifier in
+   its fact-checkable mode — the SAME safety-guard shape
+   `--check-unescalate` already established (own-marker-only, never a
+   dependency cycle, all-or-nothing, a namespaced anti-refight marker),
+   generalized to findings a script cannot verify itself:
+
+   ```bash
+   ./.loom/scripts/classify-dependency-block.sh --issue "$ISSUE_NUMBER" \
+     --check-fact-unescalate --resolutions-file /tmp/resolutions-<N>.txt \
+     --commit "$(git rev-parse HEAD)" --apply
+   ```
+
+   With `--apply` this appends a dated `## Revision` section to the body
+   (naming the verifying commit and which objection each fact resolves —
+   this is the acceptance criterion's "revises the body" step, and it is
+   what changes the body hash, the existing contract Champion already uses
+   for "revised — evaluate again"), removes `loom:operator-only` and, best-
+   effort, its `loom:operator-decision` sub-kind label (the sub-kind a
+   fact-based escalation is expected to carry — see "Choose the sub-kind
+   before posting" in `champion-issue-promo.md`), and posts exactly one
+   comment naming the verifying commit and confirming the label removal. Say
+   so in that comment (it already does) — do not post a second comment of
+   your own repeating it.
+
+   `FACT_UNESCALATE` (exit 0) means it applied; `NO_FACT_UNESCALATE` + a
+   `REASON:` slug (exit 1) means it did not — read the reason before assuming
+   you did something wrong. `not-operator-only` / `no-escalation-record` /
+   `cycle-escalation` mean this issue was never a candidate for this
+   mechanism (do not force it). `partial-resolution` /
+   `resolutions-mismatch` mean your own resolutions file did not satisfy the
+   all-resolved guard (go back to step 3). `already-unescalated` means a
+   human re-applied the label after a completed de-escalation for this exact
+   finding set and commit — do not fight them; if repo state has moved on
+   further since, re-run step 3 against the new HEAD and this becomes a
+   genuinely new attempt (a different verifying commit fingerprints
+   differently, so it is never silently swallowed).
+
+6. **The issue returns to Champion's queue automatically** — you do not need
+   to do anything further. The appended `## Revision` section changed the
+   body hash, so Champion's idempotency check (`champion-issue-promo.md` →
+   "Idempotency check") no longer matches the old `VERDICT_MARKER` and
+   evaluates the proposal fresh on its next pass, posting a new verdict
+   rather than a second escalation — this already works via the existing
+   hash mechanism with no Champion-side code change (verified, not assumed:
+   see the BODY_HASH test in `tests/test-classify-dependency-block.sh`).
+
+### What this never does
+
+- Never touches a `loom:operator-only` issue with no
+  `<!-- champion:proposal-escalated -->` comment — a label a human or any other path
+  applied carries no such record and is left strictly alone (the script
+  enforces this too, but do not rely on the script alone: confirm the marker
+  is present before starting step 3's investigation at all).
+- Never touches an issue that also carries a `<!-- champion:dep-cycle:`
+  comment — a genuine dependency cycle cannot self-clear and stays escalated
+  permanently, exactly as for `--check-unescalate`.
+- Never applies on anything less than ALL cited findings verified resolved —
+  restated three times in this section on purpose; this is the one guard
+  most likely to be shortcut under time pressure, and doing so re-fights a
+  human decision without full grounds.
+- Never re-derives a finding's truth from `--check-fact-unescalate` itself —
+  the script only enforces the guard shape (marker, cycle, all-or-nothing,
+  anti-refight); the verification in step 3 is yours, and it is exactly as
+  reliable as the reading you did.
+- Never re-fights a human who deliberately re-applied `loom:operator-only`
+  after a completed de-escalation for the same finding set and commit (the
+  `already-unescalated` reason) — see step 5.
+
 ## Issue Quality Checklist
 
 Before marking an issue as `loom:curated`, ensure it has:

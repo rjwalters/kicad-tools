@@ -132,6 +132,34 @@
 #                          sim-heavy repo bounding its whole driver, not just
 #                          each leaf's own `timeout`), not a default that
 #                          could kill a legitimate long build.
+#   LOOM_SWEEP_CONTAINER_CPUS  Per-sweep `docker run --cpus=<value>` cap
+#                          applied to a containerized dispatch (issue #7430,
+#                          epic #6896 Phase 3 — the resource-limits follow-up
+#                          to #7429's dispatch mode). Precedence: this env var
+#                          -> `runtimes.containment.cpus` config -> the SAME
+#                          host-wide CPU budget already computed above for
+#                          bare-metal dispatch (`LOOM_SWEEP_CPU_BUDGET_CORES`,
+#                          issues #5111/#5979) when that mechanism is enabled
+#                          -> no `--cpus` flag at all (unbounded) when neither
+#                          an explicit value nor a computed budget is
+#                          available (e.g. `LOOM_SWEEP_CPU_QUOTA=0`).
+#   LOOM_SWEEP_CONTAINER_MEMORY  Per-sweep `docker run --memory=<value>` cap
+#                          (e.g. `4g`, `512m`) applied to a containerized
+#                          dispatch (issue #7430). Precedence: this env var ->
+#                          `runtimes.containment.memory` config -> a computed
+#                          host-wide share (see `LOOM_SWEEP_CONTAINER_RESERVED_MEMORY_MB`
+#                          below), mirroring the CPU budget's own host-wide
+#                          division (issue #5979) so N concurrent containerized
+#                          sweeps' declared caps sum to no more than the
+#                          host's usable memory.
+#   LOOM_SWEEP_CONTAINER_RESERVED_MEMORY_MB  MiB subtracted off the host's
+#                          total physical memory before dividing the remainder
+#                          into the computed `LOOM_SWEEP_CONTAINER_MEMORY`
+#                          default — mirrors `LOOM_SWEEP_RESERVED_CORES` on
+#                          the memory axis. Precedence: this env var ->
+#                          `runtimes.containment.reservedMemoryMb` config ->
+#                          default `2048` (2 GiB). The resulting budget is
+#                          always >= 512 MiB.
 #
 # CPU-quota enforcement mechanism (issue #5111 — nothing bounded a sweep's
 # CPU, so an agent-written driver ran 8 concurrent `ngspice` processes and
@@ -588,15 +616,22 @@ fi
 # cache `post-worktree.sh`'s binary-reuse fast path already assumes, never a
 # path that lives only inside the container's own filesystem.
 #
-# Per-sweep resource LIMITS (CPU/mem ceilings on the container itself) are
-# explicitly OUT of scope here — a separate, later Phase 3 issue per #7429's
-# own scope note ("Per-sweep resource limits ... are separate, LATER issues
-# in this phase"). This mode ships with no `--cpus`/`--memory` docker flags.
-# The host CPU-quota mechanism above (issue #5111, `CPU_QUOTA_WRAP`) is
-# deliberately NOT applied to the `docker run` client below even when
+# Per-sweep resource LIMITS (issue #7430, epic #6896 Phase 3 — the follow-up
+# #7429's own scope note deferred: "Per-sweep resource limits ... are
+# separate, LATER issues in this phase"): `docker run --cpus=<value>
+# --memory=<value>` caps applied directly to the CONTAINER's own cgroup (see
+# `_containment_cpus`/`_containment_memory` below), unlike the host
+# CPU-quota mechanism above (issue #5111, `CPU_QUOTA_WRAP`), which is
+# deliberately NOT applied to the `docker run` client itself even when
 # computed: wrapping the trivial client process in a systemd scope would not
 # constrain the container's own (separate) cgroup, so it would be
-# decorative, not real containment.
+# decorative, not real containment. `--cpus` defaults to reusing the SAME
+# host-wide CPU budget already computed for bare-metal dispatch
+# (`LOOM_SWEEP_CPU_BUDGET_CORES`), and `--memory` defaults to an analogous
+# host-wide share computed via `lib/memory-budget.sh` — both divided across
+# in-flight sweeps exactly like the #5979 CPU fix, so N concurrent
+# containerized sweeps' declared caps sum to no more than the host's usable
+# resources instead of each independently claiming the whole host.
 CONTAINMENT_ENABLED="0"
 _containment_config_lib="${_script_dir}/lib/config-resolver.sh"
 if [[ -z "${LOOM_SPAWN_CONTAINERIZED:-}" ]]; then
@@ -626,6 +661,58 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
         _containment_image="$(loom_config_get "$WORKSPACE" "runtimes.containment.image" "")"
     fi
     : "${_containment_image:=ghcr.io/rjwalters/loom-worker:latest}"
+
+    # --- Per-sweep resource limits (issue #7430, epic #6896 Phase 3) ---
+    #
+    # `--cpus`: reuse the SAME host-wide CPU budget already computed above
+    # for bare-metal dispatch (issues #5111/#5979) unless overridden — a
+    # containerized sweep gets exactly the share a bare-metal sweep on this
+    # host would have gotten, never an independent, unbounded claim.
+    # `LOOM_SWEEP_CPU_BUDGET_CORES` is empty when the CPU-quota mechanism is
+    # disabled (`LOOM_SWEEP_CPU_QUOTA=0`), in which case containment applies
+    # NO `--cpus` flag either (unbounded), rather than inventing a budget the
+    # bare-metal path itself was told to skip.
+    _containment_cpus="${LOOM_SWEEP_CONTAINER_CPUS:-}"
+    if [[ -z "$_containment_cpus" && -f "$_containment_config_lib" ]]; then
+        # shellcheck source=./lib/config-resolver.sh
+        source "$_containment_config_lib"
+        _containment_cpus="$(loom_config_get "$WORKSPACE" "runtimes.containment.cpus" "")"
+    fi
+    [[ -z "$_containment_cpus" ]] && _containment_cpus="${LOOM_SWEEP_CPU_BUDGET_CORES:-}"
+
+    # `--memory`: an analogous host-wide share computed via
+    # lib/memory-budget.sh, divided across the SAME in-flight-sweep count
+    # `_cpu_inflight` already resolved above (issue #5979) when that count is
+    # available; otherwise treated as a solo sweep (divisor 1) — mirroring
+    # the CPU budget's own fail-safe. Always applied (unlike `--cpus`, which
+    # can be legitimately unbounded): an unconfigured container memory cap is
+    # exactly the "one runaway sweep can starve the host" gap this issue
+    # exists to close.
+    _containment_memory="${LOOM_SWEEP_CONTAINER_MEMORY:-}"
+    if [[ -z "$_containment_memory" && -f "$_containment_config_lib" ]]; then
+        # shellcheck source=./lib/config-resolver.sh
+        source "$_containment_config_lib"
+        _containment_memory="$(loom_config_get "$WORKSPACE" "runtimes.containment.memory" "")"
+    fi
+    if [[ -z "$_containment_memory" ]]; then
+        _containment_mem_lib="${_script_dir}/lib/memory-budget.sh"
+        if [[ -f "$_containment_mem_lib" ]]; then
+            # shellcheck source=./lib/memory-budget.sh
+            source "$_containment_mem_lib"
+            _containment_mem_reserved="${LOOM_SWEEP_CONTAINER_RESERVED_MEMORY_MB:-}"
+            if [[ -z "$_containment_mem_reserved" && -f "$_containment_config_lib" ]]; then
+                # shellcheck source=./lib/config-resolver.sh
+                source "$_containment_config_lib"
+                _containment_mem_reserved="$(loom_config_get "$WORKSPACE" "runtimes.containment.reservedMemoryMb" "")"
+            fi
+            [[ "$_containment_mem_reserved" =~ ^[0-9]+$ ]] || _containment_mem_reserved=2048
+            _containment_mem_total="$(loom_mem_total_mb)"
+            _containment_mem_inflight="${_cpu_inflight:-1}"
+            [[ "$_containment_mem_inflight" =~ ^[0-9]+$ ]] || _containment_mem_inflight=1
+            _containment_mem_budget="$(loom_mem_budget_mb "$_containment_mem_total" "$_containment_mem_reserved" "$_containment_mem_inflight")"
+            _containment_memory="${_containment_mem_budget}m"
+        fi
+    fi
 
     _containment_cwd="$(pwd -P)"
     _containment_mounts=(-v "${WORKSPACE}:${WORKSPACE}")
@@ -687,10 +774,27 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     done < <(env)
     _containment_env+=(-e "LOOM_SPAWN_CONTAINERIZED=1" -e "LOOM_WORKSPACE=${WORKSPACE}" -e "HOME=${HOME:-/home/loom}")
 
+    # --- Resource-limit docker flags + observability labels (issue #7430) ---
+    _containment_limit_flags=()
+    [[ -n "$_containment_cpus" ]] && _containment_limit_flags+=(--cpus "$_containment_cpus")
+    [[ -n "$_containment_memory" ]] && _containment_limit_flags+=(--memory "$_containment_memory")
+
     _containment_labels=(--label "loom.sweep=1" --label "loom.dispatch=container")
     [[ -n "${LOOM_SWEEP_CLAIM_OWNED:-}" ]] && _containment_labels+=(--label "loom.sweep.issue=${LOOM_SWEEP_CLAIM_OWNED}")
+    [[ -n "$_containment_cpus" ]] && _containment_labels+=(--label "loom.dispatch.cpus=${_containment_cpus}")
+    [[ -n "$_containment_memory" ]] && _containment_labels+=(--label "loom.dispatch.memory=${_containment_memory}")
 
-    log_info "spawn-claude: containerized dispatch ENABLED (issue #7429) — image=${_containment_image}, workspace=${WORKSPACE} (parity-mounted), cwd=${_containment_cwd}"
+    log_info "spawn-claude: containerized dispatch ENABLED (issue #7429) — image=${_containment_image}, workspace=${WORKSPACE} (parity-mounted), cwd=${_containment_cwd}, cpus=${_containment_cpus:-unbounded}, memory=${_containment_memory:-unbounded} (issue #7430)"
+    # Runtime marker (issue #7430): the canonical, machine-parseable line
+    # loom-daemon reads from the per-sweep log to distinguish a containerized
+    # dispatch from bare-metal and to surface the applied resource limits in
+    # `loom-daemon status`/health output — see
+    # `sweep_registry::containment_signal::parse_containment_after`. `none`
+    # (not an empty field) marks an intentionally-unbounded axis so the
+    # parser can always find both `cpus=`/`memory=` tokens.
+    echo "# LOOM_DISPATCH_MODE mode=container image=${_containment_image} cpus=${_containment_cpus:-none} memory=${_containment_memory:-none}" >&2
+    # Retained for backward compatibility with anything already grepping the
+    # pre-#7430 marker text.
     echo "# LOOM_CONTAINMENT_ENABLED image=${_containment_image}" >&2
 
     exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} docker run --rm \
@@ -698,8 +802,19 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
         -w "$_containment_cwd" \
         "${_containment_env[@]}" \
         "${_containment_labels[@]}" \
+        "${_containment_limit_flags[@]}" \
         "$_containment_image" \
         "${WORKSPACE}/.loom/scripts/spawn-claude.sh" "$@"
+else
+    # Bare-metal dispatch marker (issue #7430): symmetric counterpart to the
+    # container marker above, so a status/health reader can distinguish "this
+    # sweep ran bare-metal" from "this sweep predates the marker" — the
+    # recursed containerized invocation (LOOM_SPAWN_CONTAINERIZED=1 already
+    # set) falls into this branch too and correctly logs itself as running
+    # bare-metal *relative to itself*, which is accurate: from here on,
+    # inside the container, this process's own view of the world is
+    # unremarkable bare-metal dispatch.
+    echo "# LOOM_DISPATCH_MODE mode=bare-metal" >&2
 fi
 
 # --- Locate the loom-daemon binary (token selection, issue #4228) ---

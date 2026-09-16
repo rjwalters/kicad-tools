@@ -1056,13 +1056,75 @@ container instead of risking a duplicate re-dispatch), and teaching
 `cancel_sweep` to `docker stop`/`docker rm` a containerized sweep it
 explicitly cancels.
 
-**Explicitly out of scope for this issue** (separate, later Phase 3 issues
-per #7429's own scope note): per-sweep resource limits (`--cpus`/`--memory`
-docker flags — this mode ships with none) and the fleet-default rollout
-decision. Bare-metal dispatch (`runtimes.containment.enabled` absent or
-`false`) is completely unaffected — the containment check is skipped
-entirely and every subsequent line of `spawn-claude.sh` runs exactly as it
-did before this mode existed.
+**Explicitly out of scope for this issue**: the fleet-default rollout
+decision (a separate, later Phase 3 issue). Per-sweep resource limits shipped
+in the following issue — see the next section. Bare-metal dispatch
+(`runtimes.containment.enabled` absent or `false`) is completely unaffected —
+the containment check is skipped entirely and every subsequent line of
+`spawn-claude.sh` runs exactly as it did before this mode existed.
+
+### Per-sweep resource limits + containment observability (issue #7430, epic #6896 Phase 3)
+
+The second of epic #6896's three sequential Phase 3 issues (mode → **limits**
+→ rollout) adds `docker run --cpus`/`--memory` cgroup caps to the
+containerized dispatch mode above, plus observability distinguishing a
+containerized sweep from a bare-metal one in logs and in `loom-daemon
+status`.
+
+**Resource limits.** Configurable, never hardcoded:
+
+```json
+{
+  "runtimes": {
+    "containment": {
+      "enabled": true,
+      "cpus": "4",
+      "memory": "4g",
+      "reservedMemoryMb": 2048
+    }
+  }
+}
+```
+
+| Axis | Precedence |
+|---|---|
+| `--cpus` | `LOOM_SWEEP_CONTAINER_CPUS` env → `runtimes.containment.cpus` config → the SAME host-wide CPU budget already computed for bare-metal dispatch (`LOOM_SWEEP_CPU_BUDGET_CORES`, issues #5111/#5979) when that mechanism is enabled → no `--cpus` flag at all (unbounded) |
+| `--memory` | `LOOM_SWEEP_CONTAINER_MEMORY` env → `runtimes.containment.memory` config → a computed host-wide share (`defaults/scripts/lib/memory-budget.sh`, mirroring the CPU budget's own host-wide division across in-flight sweeps, issue #5979) |
+| memory reservation | `LOOM_SWEEP_CONTAINER_RESERVED_MEMORY_MB` env → `runtimes.containment.reservedMemoryMb` config → default `2048` (2 GiB) subtracted off total host memory before dividing the remainder |
+
+Unlike `--cpus` (which can be legitimately unbounded, matching bare-metal
+dispatch with the CPU-quota mechanism disabled), `--memory` is **always**
+applied by default — an unconfigured container memory cap is exactly the
+"one runaway sweep can starve the host" gap this issue exists to close. Both
+axes are divided across in-flight sweeps the same way the #5979 CPU fix
+divides the host-wide CPU budget, so N concurrent containerized sweeps'
+declared caps sum to no more than the host's usable resources instead of
+each independently claiming the whole host — this is the "saturated-host"
+regression class the epic's own Success Criteria line names; see the
+`loom_mem_budget_mb` division tests in
+`defaults/scripts/tests/test-memory-budget.sh` and the
+`LOOM_SWEEP_INFLIGHT_SWEEPS`-driven container test in
+`defaults/scripts/tests/test-spawn-claude.sh` for the regression coverage.
+
+Applied limits are surfaced two ways:
+
+- `docker run` labels (`loom.dispatch.cpus=<v>`, `loom.dispatch.memory=<v>`),
+  visible to `docker inspect`/`docker ps --filter label=...`.
+- A canonical, machine-parseable marker line written to the per-sweep log at
+  dispatch time: `# LOOM_DISPATCH_MODE mode=container image=<image>
+  cpus=<v|none> memory=<v|none>` (or `# LOOM_DISPATCH_MODE mode=bare-metal`
+  for the non-containerized path) — `none` marks an intentionally-unbounded
+  axis, never an empty field, so a parser can always find both tokens.
+
+**Containment observability in `loom-daemon status`.** The daemon's
+`sweep_registry::containment_signal` module does a best-effort, client-side
+read of each in-flight sweep's own per-sweep log for the
+`LOOM_DISPATCH_MODE` marker above, and `loom-daemon status`'s human-readable
+in-flight table renders it in a `CTR` column: `-` for bare-metal, or
+`container(cpu=<v>,mem=<v>)` / `container(unbounded)` for a containerized
+sweep. This is a render-time read, not a `SweepInfo` schema field or an IPC
+wire-format change — a missing/unreadable log (e.g. a very recent dispatch)
+degrades to `-`, never an error.
 
 ## Fork mapping table
 

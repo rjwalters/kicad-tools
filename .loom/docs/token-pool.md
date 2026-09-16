@@ -538,7 +538,8 @@ newlines/carriage-returns are sanitized to spaces so every `.bad_tokens` record
 is exactly one line — byte-compatible with the Python implementation, and
 conformance-tested against it in `loom-tools/tests/tokens/test_rust_conformance.py`.
 
-How long an entry keeps blocking (auth = permanent, exhaustion = 6h TTL) and how
+How long an entry keeps blocking (auth = permanent, exhaustion = 6h TTL, a 5h
+session limit = its own window, #7522) and how
 long it survives on disk (24h / 30d) are two different clocks — see
 [Permanence: auth vs exhaustion](#permanence-auth-vs-exhaustion-at-read-time-and-on-disk)
 below.
@@ -916,6 +917,8 @@ text, the CLI, and this document all agree on:
 |---|---|---|
 | `auth` (401 / OAuth / expired / blocked) | `loom-daemon tokens unblock <name>` — **never expires** | 30d (`AUTH_ENTRY_MIN_RETENTION_SECS`), a garbage-collection floor, *not* an expiry |
 | non-auth (`exhausted` / `rate-limited`) | the **exhaustion cooldown** — `LOOM_TOKEN_EXHAUSTION_COOLDOWN_SECS`, default `21600` (6h) | 24h (`DEFAULT_CLEANUP_MAX_AGE_SECS`) |
+| non-auth naming the **5h session limit** specifically | the earlier of: proven window reset, or `min(cooldown, 18000)` — see [Session-limit entries expire with their own window](#session-limit-entries-expire-with-their-own-window-7522) | 24h (`DEFAULT_CLEANUP_MAX_AGE_SECS`) |
+| non-auth, ambiguous reason (does not name the session window) | the exhaustion cooldown (unchanged fixed TTL), **or** earlier if a re-probe proves both signals clear — see [Ambiguous exhaustion entries: two-signal early release](#ambiguous-exhaustion-entries-two-signal-early-release-7538) | 24h (`DEFAULT_CLEANUP_MAX_AGE_SECS`) |
 | unparseable timestamp | never (**fail-closed** — a malformed line never silently un-blocks a token) | never (malformed lines are always retained) |
 
 **Read time** (`bad_tokens::is_bad` / `blocking_entry`, enforced by the selector
@@ -942,6 +945,135 @@ ago, while a fresh line further down is what actually blocks. `blocking_entry`
 reports the deciding line, and the empty-pool error prints its timestamp — read
 that, not the head of the file.
 
+### Session-limit entries expire with their own window (#7522)
+
+The generic 6h exhaustion cooldown is sized for the *durable* signals (weekly /
+monthly ceilings, credit exhaustion). Claude's rolling **5h session limit** is
+not durable: an account that hit it was already inside a window that began at
+some `start <= marked_at`, so the window resets at `start + 5h <= marked_at +
+5h` — up to an **hour before** the generic cooldown would release it. Before
+#7522 that gap reproduced roughly an hour of fleet-wide starvation at every 5h
+boundary, cleared only by a human running `tokens unblock … --all-reasons`.
+
+An entry whose reason names the session window specifically (matched by
+`bad_tokens::is_session_limit_reason`; a *concurrent*-session capacity fault is
+deliberately excluded, and is never marked bad in the first place) now clears at
+whichever of these comes first:
+
+1. **Proven reset.** The account's `.ranking` row records a 5h reset instant
+   (`limit_reset`, #4874) that falls *after* the mark and is now in the past,
+   **or** a probe taken *after* the entry was marked reports 5h utilization back
+   under the load gate (`0.70`, the same threshold selection uses). This is
+   `bad_tokens::session_window_has_reset`.
+
+   Both halves require evidence recorded *after* the mark, for the same reason:
+   a row predating it describes the **previous** window, whose reset has of
+   course already elapsed — trusting that would make a *fresh* session-limit
+   mark an instant no-op (select → insta-crash → re-mark → expire again, a
+   thrash loop with no backoff). Note also that `limit_reset` is the row's
+   **binding**-window reset, which is the *7d* reset for an `exhausted` row and
+   the 5h reset for every other status (`check::limit_reset`) — so an
+   `exhausted` row's instant is ignored here and the utilization signal decides.
+2. **The window cap.** `min(LOOM_TOKEN_EXHAUSTION_COOLDOWN_SECS, 18000)` —
+   `SESSION_WINDOW_SECS`, the provable upper bound. A **cap, never a floor**: a
+   deliberately shorter configured cooldown still wins. This is the backstop
+   for a host with no usable `.ranking` evidence at all.
+
+Three cooperating readers keep the whole pool consistent on that one signal, so
+no host can diverge from another on an identical pool:
+
+- **`tokens check` probes every `Exhaustion`-class entry, not only a
+  session-limit match (#7538).** `check::discover_tokens`'s probe-eligibility
+  is `entry.class == BadReasonClass::Exhaustion` — it no longer additionally
+  requires `is_session_limit_reason`. Only `Auth` and `MalformedTimestamp`
+  entries are still reported `blocked` without a network call (neither
+  self-heals, so probing them is wasted). Skipping the probe made the check
+  self-blinding: an unprobed account writes a bare `<name>|blocked` `.ranking`
+  row carrying no utilization and no reset instant, so criterion 1 above (and
+  the ambiguous-entry check below) had nothing to read and the row stayed
+  `blocked` until an operator intervened. The probe is self-correcting either
+  way — a reset window comes back `available`, and a still-exhausted one
+  returns a 429 whose headers record the real `s5h_reset`/`s7d_reset`. Probing
+  an ambiguous entry is cheap and harmless on its own: it does not by itself
+  change how long the entry is held — that is still decided read-side (below).
+- **The selector's hard-exclusion set** re-verifies a `blocked` `.ranking`
+  status against the *live* `.bad_tokens` state (`select::is_hard_excluded`)
+  instead of trusting the probe-time snapshot forever, so a naturally-expired
+  session entry is readmitted without waiting for a `tokens check --ranking`
+  refresh. Readmission requires **positive evidence** that the block came from a
+  session limit: the account's most recent `.bad_tokens` entry
+  (`bad_tokens::latest_block_was_session_limit`, which ignores expiry and reads
+  the reason) must name the 5h window. A `blocked` row is *not* always a
+  `.bad_tokens` snapshot — `tokens check` also writes it for a probe that
+  returned **401** (`error: auth_401`) or for a credential **shape mismatch**
+  (`shape_mismatch`, #5608), neither of which calls `mark_bad` at all — so a row
+  with no `.bad_tokens` history, or one whose latest entry names some other
+  reason, keeps #5629's unconditional hard exclusion. A revoked credential never
+  self-heals, and readmitting it would let the fail-safe retry hand out a
+  permanently dead account and cost the #4643 empty-pool diagnostic.
+  `exhausted` (a real 7d-utilization reading, not a `.bad_tokens` snapshot)
+  stays unconditionally hard-excluded.
+- **The `healthy=N` count** the work finder logs
+  (`capacity::read_ranking_at`) intersects `.ranking` with live `.bad_tokens`
+  state, downgrading an `available` row that is actually bad-marked. It only
+  ever corrects an overcount — a non-`available` row is never promoted — so the
+  daemon's own log can no longer read healthy while every spawn fails.
+
+### Ambiguous exhaustion entries: two-signal early release (#7538)
+
+Several production writers mark an account bad for the *same* 5h session-limit
+event but with a reason that does not name the session window — the daemon's
+own insta-crash classifier (`exhausted: rate-limited (daemon insta-crash,
+issue #N)`, deliberately neutral because that call site cannot distinguish a
+5h fault from a weekly one) and a few `claude-wrapper.sh` banner-text captures
+(`exhausted: usage/plan limit modal (RATE_LIMIT_ABORT)`, `exhausted: usage
+limit`, `exhausted: hit your limit`). Before #7538 these entries were invisible
+to `is_session_limit_reason` and so kept the full fixed-TTL cooldown even when
+the underlying fault was the same 5h window #7522 already fixed for the
+matching wording.
+
+Widening `is_session_limit_reason` itself was rejected by #4212 for good
+reason: mislabeling a genuinely **weekly** exhaustion as a 5h one and capping
+its hold at `SESSION_WINDOW_SECS` would readmit a still-blocked account after
+only 5h. A weekly-exhausted account's 5h utilization reads "reset" too (it is
+near zero regardless of the still-active 7-day block), so a single-signal
+check like `session_window_has_reset` is not safe to apply to an ambiguous
+reason — that is exactly the harm #4212 declined to risk.
+
+So an ambiguous (non-session-limit-matching) `Exhaustion` entry gets its own,
+separate, two-signal check — `bad_tokens::ambiguous_exhaustion_has_reset` —
+instead of being folded into the session-limit fast path:
+
+1. Prerequisite: **freshness**. The `.ranking` file's mtime must be after the
+   entry's `marked_at`, exactly like `session_window_has_reset`'s fallback
+   branch — a stale row (never re-probed since the mark) proves nothing and
+   the check falls through to the unmodified fixed-TTL cooldown. This is what
+   makes the widened probe eligibility above load-bearing: without it, an
+   ambiguous entry could never accumulate the evidence this check reads.
+2. Release only when the re-probed `.ranking` row shows **both**:
+   - 5h utilization under the load gate (`select::resolve_load_gate()` —
+     `LOOM_TOKEN_5H_LOAD_GATE`, default `0.70`; the exact threshold
+     `session_window_has_reset`'s fallback and `select`'s own tier-1 pick
+     already use — reused, not duplicated), **and**
+   - 7d utilization under the exhausted threshold
+     (`check::EXHAUSTED_THRESHOLD`, `0.99`). `.ranking`'s
+     `name|status|5h_util|limit_reset` format does not carry a raw 7d
+     utilization field, so this reads the row's `status` — which a probe
+     already set to `exhausted` iff 7d utilization cleared
+     `EXHAUSTED_THRESHOLD` (`check::status_from_utilization`) — as the
+     already-applied result of that same comparison
+     (`row.status != "exhausted"`), rather than duplicating the threshold as a
+     second arithmetic check.
+
+Never on 5h evidence alone. The session-limit-matching fast path
+(`SESSION_WINDOW_SECS` cap + `session_window_has_reset`) is completely
+unaffected — it keeps its existing single-signal behavior, unchanged.
+
+An ambiguous entry with no `.ranking` row at all (never probed, or probed
+before this change shipped) falls back to the full fixed-TTL cooldown, exactly
+as before #7538 — the two-signal check only ever narrows a hold, never widens
+one.
+
 ### Empty-pool error detail (#4643)
 
 When every account is excluded, `tokens select` no longer prints a bare "All N
@@ -954,7 +1086,7 @@ and the cooldown remaining — plus the **identity of the binary that decided**
 error: All 3 tokens in ~/.loom/tokens are marked bad, empty, or .ranking-excluded.
   - agent-1: bad-marked [exhaustion, TTL] at 2026-07-30T16:58:32Z — "exhausted: hit your weekly limit"; clears in 5h48m
   - agent-2: bad-marked [auth, permanent] at 2026-07-29T21:33:41Z — "401 unauthorized"; needs `loom-daemon tokens unblock agent-2`
-  - agent-3: hard-excluded by .ranking status (exhausted) — never readmitted by the fail-safe; re-probe with `loom-daemon tokens check --ranking`
+  - agent-3: hard-excluded by .ranking status (exhausted) — never readmitted by the fail-safe; re-probe with `loom-daemon tokens check --ranking` (this re-probes an account whose reset time has already passed, #7420; use `--source probe` to force a probe of every account)
   deciding binary: loom-daemon 0.16.0 (commit 105f9c12, built 2026-07-30T05:23:19Z)
   exhaustion cooldown: 21600s (override LOOM_TOKEN_EXHAUSTION_COOLDOWN_SECS); auth entries never expire …
 ```
@@ -962,6 +1094,51 @@ error: All 3 tokens in ~/.loom/tokens are marked bad, empty, or .ranking-exclude
 The `hard-excluded by .ranking status` line is the #5629 exclusion set above:
 that account is not in `.bad_tokens` at all, so `tokens unblock` will not help —
 the `.ranking` file is what rules it out, and re-probing is the recovery.
+
+### Overdue resets: a revoked account is not an exhausted one (#7420)
+
+`exhausted`/`blocked` are the #5629 hard exclusions — never readmitted without a
+successful re-probe. Under the default `--source auto`, though, Loom derives the
+ranking from claude-monitor's `~/.claude-monitor/ranking.json` whenever that file
+is fresh, and **returns before the probe loop**. So when a credential is *revoked*
+upstream, claude-monitor's own `usage.db` stops refreshing that account, its
+`ranking.json` row freezes, and Loom copied `exhausted` plus a reset instant days
+in the past forward forever — the account looked like it was resting until a date
+that had already gone by, while other hosts had it recorded as
+`auth-dead: 401/invalid credential`.
+
+The combination "hard-excluded status **and** its binding reset is already in the
+past" is now a first-class signal:
+
+- **`tokens check` (source `auto`, which is what `--ranking` and the daemon's
+  10-minute `token_ranking_refresh` use) re-probes exactly those rows** — and only
+  those; every other row still comes from the file with no network call. A `401`
+  records the account in `.bad_tokens` as
+  `auth-dead: 401 on overdue-reset re-probe` (the permanent `auth` class, cleared
+  with `loom-daemon tokens unblock <name>` after re-authenticating). A `200`
+  clears the exclusion outright — the account really was just resting behind a
+  stale monitor db. An *inconclusive* probe (timeout, connection failure, no
+  `.token` file) leaves the row exactly as it was, so a network blip can never
+  soften a hard exclusion into an advisory one.
+- **Only an authoritative run persists the block.** The `.bad_tokens` write is
+  gated on the same flag that writes `.ranking`, so `--ranking` and the daemon
+  refresh record it while read-only diagnostics (`loom-daemon status`'s token
+  snapshot, a bare `tokens check`) re-probe and report the 401 without mutating
+  pool state behind the operator's back.
+- **`--source monitor` keeps its "no probe, ever" contract.** The frozen row is
+  still reported, just flagged.
+- **The table never prints a past reset as current state.** The `Resets at` cell
+  reads `overdue since 2026-09-01T00:00:00Z (7d)`, and a footer names the
+  recovery commands.
+- **`--json` carries `reset_overdue` per account plus a pool-level
+  `overdue_reset_accounts` count**, so fleet tooling can count revoked accounts
+  separately from genuinely quota-exhausted ones without re-deriving the rule.
+
+`rate_limited` is deliberately **not** in scope: its 5h window rolls over
+routinely, it is only an advisory exclusion (the fail-safe readmits it), and a
+monitor file a few minutes behind would flag every such row. An account with no
+reset instant at all is likewise never flagged — missing stays "unknown", never
+coerced into a claim about the past.
 
 **Shadowed shared pool (#6614).** The all-excluded message also says whether a
 *different*, healthy pool exists that was never consulted. `resolve_tokens_dir`

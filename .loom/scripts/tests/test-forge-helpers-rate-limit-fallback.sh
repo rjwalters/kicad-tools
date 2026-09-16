@@ -437,7 +437,7 @@ else
 fi
 
 comment_call_count="$(grep -c 'forge_gh_comment_rl_safe "\$REPO_NWO"' "$MERGE_PR_SRC" || true)"
-assert_eq "3" "$comment_call_count" "merge-pr.sh routes all 3 comment call sites (2x issue, 1x PR) through forge_gh_comment_rl_safe"
+assert_eq "4" "$comment_call_count" "merge-pr.sh routes all 4 comment call sites (2x issue, 2x PR) through forge_gh_comment_rl_safe"
 
 # The raw, un-wrapped mutating calls this issue is about must no longer
 # appear standalone (they are now routed through the wrapper functions

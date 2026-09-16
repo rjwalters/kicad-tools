@@ -164,6 +164,7 @@
 #   ./.loom/scripts/cli/loom-daemon-update.sh --auto-resolve-safe-abort  When the ff-only sync would otherwise hard-abort (#4330), auto-perform the fix IF the blocking state classifies as safe (#4951): content-identical diverged commits with an otherwise-CLEAN working tree (`git reset --hard origin/<default-branch>`), or dirty tracked files that are ALL Loom-managed installed copies (`git checkout --` them + re-run resync-installed.sh). Any other cause (genuine content divergence, any unmanaged dirty file, or a dirty tracked file co-existing with the content-identical divergence) still hard-aborts unchanged — this flag never widens what's classified as safe, only whether the safe cases are printed (default) or performed
 #   ./.loom/scripts/cli/loom-daemon-update.sh --fetch        Artifact-fetch mode (Epic #4990 Phase 3, #5020): REQUIRE a verified GitHub Release artifact for this host's platform (resolve latest Release >= installed version, download, verify checksum unconditionally + signature when present, provision) instead of `cargo build --release`; hard-fails (exit 1) rather than silently falling back to a source build when no matching artifact resolves. Same as LOOM_DAEMON_UPDATE_FETCH=1.
 #   ./.loom/scripts/cli/loom-daemon-update.sh --no-fetch      Disable artifact-fetch mode entirely; always use the local source-build path (pre-#5020 behavior). Same as LOOM_DAEMON_UPDATE_FETCH=0.
+#   ./.loom/scripts/cli/loom-daemon-update.sh --resolve-json  READ-ONLY resolution (Issue #7609): resolve the latest Release artifact for this host's platform and print ONE JSON object on stdout describing it (tag/version/published_at/asset sha256) alongside the installed binary (path/version/commit/sha256) and the source tree's VERSION — then exit WITHOUT fetching, building, provisioning, or restarting anything (no `git fetch`/ff-sync either). Every other line this script prints goes to stderr in this mode, so stdout is pure JSON. Exit 0 when a release artifact resolved, 1 when it did not (`.ok` says which, `.reason` says why). This is the query `loom-daemon`'s auto_update loop drives its artifact-first tick from, so the resolution logic lives here once instead of being duplicated in Rust.
 #   ./.loom/scripts/cli/loom-daemon-update.sh --prune-stale-entry-points  Remove exactly the PATH entries the stale-entry-point advisory below (#4079/#4557) classifies as a "Python console script (stale pip/pipx editable install)" — a frozen console script left behind by the retired pip/pipx package (epic #4081 Phase 4 / #4557) that never resolves to the current loom-daemon binary and so is never touched by an update again. Conservative by construction: it reuses the SAME classification the advisory already computes, so `loom-daemon` itself and the auto-generated bash-wrapper shims (`loom-clean`/`loom-recover-orphans`/`loom-claim`, #4272/#4275 — including a STALE shim whose target moved) are never candidates, only ever reported. Standalone: performs the prune, reports what it removed, and exits — no build/provision/restart. Idempotent (a second run finds nothing to remove) and reports "nothing to prune" when the PATH is already clean. Honors LOOM_SKIP_STALE_ENTRY_POINT_CHECK=1 (a no-op, matching the check it would otherwise act on) (#5139).
 #   ./.loom/scripts/cli/loom-daemon-update.sh --help
 #
@@ -321,6 +322,12 @@
 #      (#5139) if any candidate path failed to `rm` (permissions, a race) —
 #      the paths that DID remove successfully are still reported individually
 #      above the error.
+#      Also used by --resolve-json (#7609) when NO release artifact resolved
+#      for this host's platform — that is an ordinary, expected outcome (no
+#      Releases yet, an unreachable API, an unbuilt platform), not a fault:
+#      the JSON object is still printed on stdout with `.ok=false` and a
+#      `.reason`, and callers are expected to read the JSON rather than
+#      branch on the exit code alone.
 #   3  (--check only) update available
 #   4  build verification FAILED: the freshly-built binary's embedded commit
 #      does not match the source HEAD it was built from. This is a BUILD-SYSTEM
@@ -682,6 +689,105 @@ fetch_resolve_latest() {
     return 0
 }
 
+# =====================================================================
+# --resolve-json: read-only artifact resolution for the daemon (#7609)
+# =====================================================================
+#
+# WHY THIS EXISTS: `loom-daemon`'s auto_update loop used to decide whether to
+# roll purely from SOURCE-CHECKOUT staleness (`self_update::check()`), so on a
+# fleet host with no source checkout, a dirty one, or one whose
+# CARGO_MANIFEST_DIR no longer resolves, the loop never even reached the
+# artifact-preference logic below -- four hosts on four different daemon
+# versions, one three weeks stale, while signed release artifacts sat
+# unconsumed (Issue #7609). The daemon now asks THIS script what the latest
+# artifact is (rather than reimplementing release resolution in Rust) and
+# decides from that. This mode is strictly read-only: no download of the
+# binary, no `git fetch`/ff-sync, no build, no provision, no restart.
+
+# _json_escape <string> -- escape a bash string for embedding in a JSON string
+# literal (backslash, double quote, and the control characters a `gh` error
+# message or a file path can realistically contain).
+_json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\r'/}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    printf '%s' "$s"
+}
+
+# _json_str <string> -- a JSON string literal, or `null` for the empty string
+# (the daemon's "unknown != empty string" contract: an unresolvable value must
+# be absent, never a plausible-looking empty value).
+_json_str() {
+    if [[ -z "${1:-}" ]]; then printf 'null'; else printf '"%s"' "$(_json_escape "$1")"; fi
+}
+
+# resolve_release_published_at -- echo the resolved release's publishedAt
+# timestamp (ISO-8601), or "" when it cannot be read. Best-effort: an older
+# `gh`, a transient API failure, or a forge that does not report it must not
+# turn an otherwise-successful resolution into a failure.
+resolve_release_published_at() {
+    [[ -n "$FETCH_LATEST_TAG" && -n "$FETCH_REPO_SLUG" ]] || { echo ""; return 0; }
+    gh release view "$FETCH_LATEST_TAG" --json publishedAt -R "$FETCH_REPO_SLUG" \
+        --jq '.publishedAt' 2>/dev/null || echo ""
+}
+
+# resolve_release_asset_sha256 -- echo the PUBLISHED sha256 of this host's
+# release binary, read from the release's own `<bin>.sha256` asset, or "" when
+# it cannot be downloaded. This is the ~65-byte checksum asset only -- the
+# binary itself is never downloaded in this mode. The daemon compares it
+# against the installed binary's sha256 to detect the "same version, different
+# bytes" case (a host that built this version from source before the release
+# existed).
+resolve_release_asset_sha256() {
+    [[ -n "$FETCH_LATEST_TAG" && -n "$FETCH_REPO_SLUG" && -n "$FETCH_TARGET" ]] || { echo ""; return 0; }
+    command -v gh >/dev/null 2>&1 || { echo ""; return 0; }
+    local tmpdir sha_name
+    sha_name="loom-daemon-${FETCH_TARGET}.sha256"
+    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/loom-daemon-resolve.XXXXXX" 2>/dev/null)" || { echo ""; return 0; }
+    _LOOM_FETCH_TMPDIRS+=("$tmpdir")
+    if gh release download "$FETCH_LATEST_TAG" -R "$FETCH_REPO_SLUG" \
+            -p "$sha_name" -D "$tmpdir" --clobber >/dev/null 2>&1 \
+        && [[ -f "$tmpdir/$sha_name" ]]; then
+        awk 'NR==1{print $1}' "$tmpdir/$sha_name" 2>/dev/null
+    else
+        echo ""
+    fi
+}
+
+# emit_resolve_json <ok:true|false> <reason> -- print the one JSON object
+# --resolve-json contracts on, to FD 3 (stdout as it was before the mode
+# redirected the script's chatty stdout to stderr). Every field is either a
+# JSON string or `null`; no field is ever omitted, so a consumer can rely on
+# the shape.
+emit_resolve_json() {
+    local ok="$1" reason="${2:-}"
+    local published_at="" asset_sha256="" installed_sha256=""
+    if [[ "$ok" == "true" ]]; then
+        published_at="$(resolve_release_published_at)"
+        asset_sha256="$(resolve_release_asset_sha256)"
+    fi
+    installed_sha256="$(sha256_file "${STALENESS_BIN:-}")"
+    printf '{"ok":%s,"reason":%s,"repo":%s,"target":%s,"tag":%s,"version":%s,"published_at":%s,"asset_sha256":%s,"installed_bin":%s,"installed_version":%s,"installed_commit":%s,"installed_sha256":%s,"source_version":%s,"source_commit":%s}\n' \
+        "$ok" \
+        "$(_json_str "$reason")" \
+        "$(_json_str "${FETCH_REPO_SLUG:-}")" \
+        "$(_json_str "${FETCH_TARGET:-}")" \
+        "$(_json_str "${FETCH_LATEST_TAG:-}")" \
+        "$(_json_str "${FETCH_LATEST_VERSION:-}")" \
+        "$(_json_str "$published_at")" \
+        "$(_json_str "$asset_sha256")" \
+        "$(_json_str "${STALENESS_BIN:-}")" \
+        "$(_json_str "${INSTALLED_VERSION:-}")" \
+        "$(_json_str "${INSTALLED_COMMIT:-}")" \
+        "$(_json_str "$installed_sha256")" \
+        "$(_json_str "${SOURCE_VERSION:-}")" \
+        "$(_json_str "${SOURCE_COMMIT:-}")" \
+        >&3
+}
+
 # resolve_cosign_pubkey -- echo a resolvable cosign public key path, or "".
 # KEY mode only (a `.sig` published without a sibling `.pem` certificate):
 # LOOM_DAEMON_UPDATE_COSIGN_PUBKEY (env) first, else a conventional checked-in
@@ -750,6 +856,23 @@ resolve_cosign_oidc_issuer() {
     echo "${LOOM_DAEMON_UPDATE_COSIGN_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
 }
 
+# sha256_file <path> -- echo the lowercase hex sha256 of <path>, or "" when it
+# cannot be computed (unreadable file, or neither `shasum` nor `sha256sum` on
+# PATH). Shared by verify_artifact_checksum (below) and --resolve-json's
+# installed-binary checksum (#7609) so both spellings of "what is this file's
+# sha256" can never drift apart.
+sha256_file() {
+    local p="${1:-}"
+    [[ -n "$p" && -r "$p" ]] || { echo ""; return 0; }
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$p" 2>/dev/null | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$p" 2>/dev/null | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
 # verify_artifact_checksum <bin_path> <sha256_path> -- unconditional
 # checksum verification. The `.sha256` format is `shasum -a 256` /
 # `sha256sum` output (`<hex>  <filename>`), so the hex digest is always the
@@ -758,12 +881,9 @@ verify_artifact_checksum() {
     local bin_path="$1" sha_path="$2" expected actual
     expected="$(awk 'NR==1{print $1}' "$sha_path" 2>/dev/null)"
     [[ -n "$expected" ]] || return 1
-    if command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$bin_path" | awk '{print $1}')"
-    elif command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$bin_path" | awk '{print $1}')"
-    else
-        err "Neither 'shasum' nor 'sha256sum' is available -- cannot verify the artifact checksum."
+    actual="$(sha256_file "$bin_path")"
+    if [[ -z "$actual" ]]; then
+        err "Could not compute a sha256 for $bin_path (neither 'shasum' nor 'sha256sum' is available, or the file is unreadable) -- cannot verify the artifact checksum."
         return 1
     fi
     [[ "$expected" == "$actual" ]]
@@ -1389,6 +1509,8 @@ RESTART_NOW=false
 # require an artifact, hard-fail rather than silently building from source),
 # or off (--no-fetch -- always build from source, the pre-#5020 behavior).
 FETCH_MODE="auto"
+# --resolve-json (#7609): read-only artifact resolution, JSON on stdout, exit.
+RESOLVE_JSON=false
 [[ "${LOOM_DAEMON_UPDATE_RELAUNCH:-}" =~ ^(1|true|yes)$ ]] && RELAUNCH=true
 [[ "${LOOM_DAEMON_UPDATE_DRAIN:-}" =~ ^(1|true|yes)$ ]] && DRAIN=true
 [[ "${LOOM_DAEMON_UPDATE_RESTART_NOW:-}" =~ ^(1|true|yes)$ ]] && RESTART_NOW=true
@@ -1412,6 +1534,7 @@ while [[ $# -gt 0 ]]; do
         --auto-resolve-safe-abort) AUTO_RESOLVE_SAFE_ABORT=true; shift ;;
         --fetch) FETCH_MODE="force"; shift ;;
         --no-fetch) FETCH_MODE="off"; shift ;;
+        --resolve-json) RESOLVE_JSON=true; shift ;;
         --prune-stale-entry-points) PRUNE_STALE=true; shift ;;
         *) err "Unknown option '$1'"; echo "Use --help for usage" >&2; exit 1 ;;
     esac
@@ -1420,6 +1543,17 @@ done
 if [[ "$DRAIN" == "true" && "$RESTART_NOW" == "true" ]]; then
     err "--drain and --restart-now are mutually exclusive (drain vs. immediate restart)."
     exit 1
+fi
+
+# --resolve-json (#7609): stdout is reserved for the single JSON object, so
+# every informational line this script prints from here on is diverted to
+# stderr and the ORIGINAL stdout is kept as FD 3 (what emit_resolve_json
+# writes to). Doing it once, here, is what lets the resolution block far below
+# be shared verbatim with the ordinary update path instead of being duplicated
+# behind a "quiet" flag. `warn`/`err` already write to stderr and are
+# unaffected.
+if [[ "$RESOLVE_JSON" == "true" ]]; then
+    exec 3>&1 1>&2
 fi
 
 REPO_ROOT=$(find_repo_root)
@@ -1753,6 +1887,21 @@ sync_with_origin() {
         warn "note: local ${DEFAULT_BRANCH} is ${n} commit(s) behind origin/${DEFAULT_BRANCH} — building the current (stale) checkout as-is per --allow-stale."
         return 0
     fi
+    # --fetch (FETCH_MODE=force) never compiles anything (#7609): it REQUIRES a
+    # verified release artifact and hard-fails rather than falling back to
+    # `cargo build`, so the local checkout cannot influence the bytes that get
+    # installed. Fast-forwarding it here would be an unrelated side effect, and
+    # — far worse — the hard-abort branches below would let purely local state
+    # (a dirty tracked file, a diverged commit, a HEAD parked on a feature
+    # branch) block an artifact roll that needs nothing from the source tree.
+    # That is exactly the fleet failure Issue #7609 exists to end, reintroduced
+    # one level down, so --fetch joins --check/--dry-run/--allow-stale as
+    # advisory-only here. This is also the mode the daemon's artifact-first
+    # auto_update tick rolls with.
+    if [[ "$FETCH_MODE" == "force" ]]; then
+        warn "note: local ${DEFAULT_BRANCH} is ${n} commit(s) behind origin/${DEFAULT_BRANCH} — not fast-forwarding: --fetch installs a release artifact and never builds from this checkout."
+        return 0
+    fi
 
     # Default: attempt the ff-sync. Only well-defined when HEAD IS the default
     # branch — on a feature branch or detached HEAD, `git merge --ff-only
@@ -1833,8 +1982,13 @@ sync_with_origin() {
     FF_SYNCED=true
     return 0
 }
-if ! sync_with_origin "$REPO_ROOT"; then
-    exit 1
+# --resolve-json is strictly read-only (#7609): it must never `git fetch` or
+# fast-forward the operator's checkout just to answer "what is the latest
+# release artifact?", which has nothing to do with the local source tree.
+if [[ "$RESOLVE_JSON" != "true" ]]; then
+    if ! sync_with_origin "$REPO_ROOT"; then
+        exit 1
+    fi
 fi
 
 # ---------- launchd ownership detection (macOS, mirrors loom-daemon-stop.sh #4042) ----------
@@ -2111,8 +2265,13 @@ ARTIFACT_FALLBACK_REASON=""
 # the release was also behind source, so the real gap was invisible until a
 # forced `--fetch` hard-failed.
 FETCH_RELEASE_BEHIND_SOURCE=false
+# Whether fetch_resolve_latest() actually resolved a release artifact for this
+# host's platform this run (#7609) — distinct from ARTIFACT_MODE, which also
+# requires the resolved release to be NEWER than what is installed.
+FETCH_RESOLVED=false
 if [[ "$FETCH_MODE" != "off" ]]; then
     if fetch_resolve_latest; then
+        FETCH_RESOLVED=true
         FETCH_VERSION_CMP="$(semver_compare "$FETCH_LATEST_VERSION" "${INSTALLED_VERSION:-0.0.0}")"
         # Strictly newer wins. An EQUAL version only wins under an explicit
         # --fetch: `--force` alone keeps its established meaning ("rebuild this
@@ -2138,6 +2297,26 @@ if [[ "$FETCH_MODE" != "off" ]]; then
         ARTIFACT_FALLBACK_REASON="$FETCH_RESOLVE_REASON"
         warn "Artifact-fetch: ${ARTIFACT_FALLBACK_REASON} — falling back to the local source-build path."
     fi
+fi
+
+# ---------- --resolve-json: report the resolution and exit (#7609) ----------
+# Deliberately placed immediately after the resolution block above and BEFORE
+# anything that writes (prune, provision, build, restart) — this mode exists to
+# answer a question, never to act on the answer. `--no-fetch` is honored here
+# too: an operator who has disabled the artifact path fleet-wide gets an
+# explicit `ok:false` with that as the reason, which is what keeps the daemon's
+# artifact-first tick falling back to its source path on such a host.
+if [[ "$RESOLVE_JSON" == "true" ]]; then
+    if [[ "$FETCH_MODE" == "off" ]]; then
+        emit_resolve_json false "artifact-fetch is disabled on this host (--no-fetch / LOOM_DAEMON_UPDATE_FETCH=0)"
+        exit 1
+    fi
+    if [[ "$FETCH_RESOLVED" == "true" ]]; then
+        emit_resolve_json true ""
+        exit 0
+    fi
+    emit_resolve_json false "${ARTIFACT_FALLBACK_REASON:-no release artifact resolved}"
+    exit 1
 fi
 
 # ---------- --prune-stale-entry-points: standalone action, then exit (#5139) ----------

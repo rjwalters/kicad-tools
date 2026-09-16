@@ -1211,6 +1211,43 @@ _in_any_managed_worktree() {
     return 1
 }
 
+# Reads the `# Branch: <name>` line worktree.sh's write_loom_sentinel() (in
+# defaults/scripts/worktree.sh) records into every managed worktree's
+# `.loom-managed` sentinel at creation time (#7530). Authoritative: recorded
+# once when the worktree is created, so it survives the worktree later going
+# detached/unresolved — unlike reconstructing "current branch" from live git
+# state, which is exactly the ambiguous case this helper exists to resolve.
+# Walks up from $1 the same way _in_any_managed_worktree() does (same 64-hop
+# cap); echoes the recorded branch name (e.g. "feature/issue-7530") if a
+# sentinel is found and it has a `# Branch:` line, else echoes nothing —
+# callers must check the echoed value is non-empty (not every sentinel writer
+# includes a `# Branch:` line, e.g. some docs-worktree flows). Best-effort,
+# ALWAYS returns 0 (mirrors resolve_default_branch()'s contract just above)
+# — this hook's global ERR trap fail-opens (treats any unprotected non-zero
+# exit as an internal error and ALLOWS the command outright), so a helper
+# called outside an `if`/`||` guard must never itself be the source of a
+# non-zero exit for the ordinary "nothing found" case.
+_managed_worktree_branch() {
+    local dir="$1"
+    [[ -n "$dir" ]] || return 0
+    if [[ ! -d "$dir" ]]; then
+        dir="${dir%/*}"
+        [[ -z "$dir" ]] && dir="/"
+    fi
+    local i=0
+    while [[ $i -lt 64 ]]; do
+        if [[ -f "$dir/.loom-managed" ]]; then
+            grep -m1 '^# Branch: ' "$dir/.loom-managed" 2>/dev/null | sed -E 's/^# Branch: //' || true
+            return 0
+        fi
+        [[ "$dir" == "/" ]] && break
+        dir="${dir%/*}"
+        [[ -z "$dir" ]] && dir="/"
+        i=$((i + 1))
+    done
+    return 0
+}
+
 # True if at least one managed worktree currently exists under $1
 # (<base>/<name>/.loom-managed, depth 2 — matches worktree.sh's layout).
 # Mirrors any_managed_worktree_exists() in guard-worktree-paths.sh.
@@ -2693,7 +2730,7 @@ function is_interpreter_opener(line, shell_only,   n, segs, i, seg, m, toks, j, 
 # ever narrow the scan, never blind it: a genuine `$(rm -rf ...)`/backtick
 # command substitution embedded in the body is left fully visible and its
 # write target, if any, still denies exactly as before.
-function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, line, trimmed, body, delim, delim_quoted, closeat, p, off, MASKC, mask_this) {
+function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, line, trimmed, body, delim, delim_quoted, closeat, p, off, MASKC) {
     MASKC = sprintf("%c", 23) # ETB -- placeholder for inert heredoc-body text
     nl = split(s, lines, "\n")
     if (nl == 0) return ""
@@ -2715,14 +2752,38 @@ function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, li
                 if (trimmed == delim) { closeat = j; break }
             }
             if (closeat == 0) continue
-            mask_this = 0
             if (delim_quoted && !is_interpreter_opener(line, shell_only)) {
-                mask_this = 1
-            } else if (shell_only && !delim_quoted && !is_interpreter_opener(line, shell_only) && _heredoc_body_expansion_free(lines, i + 1, closeat)) {
-                mask_this = 1
-            }
-            if (mask_this) {
+                # A quoted delimiter means the WHOLE body is inert to the
+                # outer shell (no expansion of any kind) -- mask every line
+                # unconditionally, exactly as before.
                 for (j = i + 1; j < closeat; j++) {
+                    body = lines[j]
+                    gsub(/./, MASKC, body)
+                    lines[j] = body
+                }
+            } else if (shell_only && !delim_quoted && !is_interpreter_opener(line, shell_only)) {
+                # UNQUOTED delimiter, non-interpreter sink (#7421): per-LINE
+                # live-span tracking (_heredoc_mark_live_lines(), see its own
+                # header) replaces the old whole-body _heredoc_body_
+                # expansion_free() gate here -- that gate disqualified the
+                # ENTIRE body from masking the instant ANY single line
+                # anywhere in it carried a live (even provably-harmless,
+                # single-line, e.g. `$(date -u +...)`) substitution, which
+                # left every OTHER prose line in that same multi-paragraph
+                # body (a realistic shape for Champion'"'"'s own digest text)
+                # fully exposed to the `>`/`>>` write-idiom scan below --
+                # reintroducing #7247'"'"'s false positive on any body that also
+                # happens to embed one harmless `$(...)` elsewhere. Masking
+                # only the lines a live substitution actually spans (never
+                # fewer than that -- see the function header for why
+                # multi-line spans are still fully covered) keeps this a
+                # pure narrowing of the #7247 fix, not a new safety hole.
+                delete _HBEF_LIVE
+                _HBEF_DEPTH = 0
+                _HBEF_BTOPEN = 0
+                _heredoc_mark_live_lines(lines, i + 1, closeat)
+                for (j = i + 1; j < closeat; j++) {
+                    if (_HBEF_LIVE[j]) continue
                     body = lines[j]
                     gsub(/./, MASKC, body)
                     lines[j] = body
@@ -2775,6 +2836,71 @@ function _heredoc_body_expansion_free(lines, from, to,   j, line, k, n, c, BTC) 
         }
     }
     return 1
+}
+# Line-granular sibling of _heredoc_body_expansion_free() above (#7421).
+# Populates the global array _HBEF_LIVE so that _HBEF_LIVE[j] == 1 for every
+# line index j in the body span [from, to) that is part of a LIVE
+# `$(...)`/backtick command-substitution span -- including every line such a
+# span continues across when it does not open and close on the same line.
+# The caller resets the companion globals _HBEF_DEPTH (unclosed `$(` paren
+# depth) and _HBEF_BTOPEN (open/close backtick parity) to 0 immediately
+# before calling this once per heredoc block; both are left however this
+# call last set them, on purpose -- this function'"'"'s whole contract is
+# carrying that "still inside a substitution opened on an earlier line"
+# state FORWARD line by line, the same way the real shell would while
+# building the heredoc body, so a genuinely multi-line command substitution
+# keeps EVERY line it spans live rather than just the one line that opened
+# it.
+#
+# This deliberately does NOT track quoting inside the substitution (single/
+# double quotes, nested heredocs, ...) -- like _heredoc_body_expansion_free()
+# above, an unrelated stray `)` or backtick inside quoted text within an
+# already-live line can only ever end the live span EARLY, which means MORE
+# lines get masked than a fully quote-aware parser would leave live. That is
+# the wrong direction for a bare, no-argument false-positive fix, but this
+# function is never reached unless the ENCLOSING heredoc is itself a
+# non-interpreter sink with an unquoted delimiter (mask_heredoc_bodies_
+# selective()'"'"'s own gating, unchanged) -- the exact narrow case #7247/#7421
+# both target, where the body is ordinary prose/markdown, not a nested
+# script. A body that genuinely needs exact quote-aware substitution
+# tracking is already the `bash <<EOF ... EOF` / interpreter-fed shape that
+# is_interpreter_opener() routes around this function entirely (stays fully
+# visible, unmasked, unconditionally).
+function _heredoc_mark_live_lines(lines, from, to,   j, line, n, k, c, BTC) {
+    BTC = sprintf("%c", 96)   # backtick
+    for (j = from; j < to; j++) {
+        line = lines[j]
+        if (_HBEF_DEPTH > 0 || _HBEF_BTOPEN) _HBEF_LIVE[j] = 1
+        n = length(line)
+        for (k = 1; k <= n; k++) {
+            c = substr(line, k, 1)
+            if (c == "\\") { k++; continue }
+            if (c == BTC) {
+                _HBEF_BTOPEN = !_HBEF_BTOPEN
+                _HBEF_LIVE[j] = 1
+                continue
+            }
+            if (c == "$" && substr(line, k + 1, 1) == "(") {
+                _HBEF_DEPTH++
+                _HBEF_LIVE[j] = 1
+                k++       # consume the '"'"'('"'"' as part of this same "$(" token
+                continue
+            }
+            if (c == "(" && _HBEF_DEPTH > 0) {
+                # A bare "(" nested inside an already-open "$(...)" still needs
+                # its own matching ")" before the span can close -- real bash
+                # counts every paren pair while locating the substitution'"'"'s
+                # closing paren, not just "$("-prefixed opens (#7425).
+                _HBEF_DEPTH++
+                _HBEF_LIVE[j] = 1
+                continue
+            }
+            if (c == ")" && _HBEF_DEPTH > 0) {
+                _HBEF_DEPTH--
+                _HBEF_LIVE[j] = 1
+            }
+        }
+    }
 }
 # Mask the body of an UNQUOTED-delimiter cat-heredoc (`cat <<EOF` / `cat <<-EOF`)
 # whose stdout is captured by a command substitution that is itself the VALUE of
@@ -3903,11 +4029,25 @@ mask_ask_positional_args() {
 # through to the raw substring scan below and hard-denied on read-only
 # forensic log inspection even though the phrase was only ever quoted DATA
 # inside the filter, never a live invocation.
+#
+# #7515: the double-quoted-argument boundary scan below is escape-aware
+# (mirrors mask_stash_scan_positional_args()'s #7363 fix) — a same-character
+# scan that closes on the FIRST raw `"` regardless of a preceding backslash
+# mis-parses a check-duplicate.sh TITLE/DESCRIPTION that quotes an EXAMPLE
+# command string containing its own escaped inner double quotes (e.g. a
+# dedup-check description text ABOUT a for-loop repro, `"for p in \"...
+# catastrophic:aws s3 rb...\"; do ...\"; done ..."`), truncating the
+# "argument" at the first escaped quote and leaving the true remainder of
+# the real argument -- including a catastrophic-tier phrase quoted only as
+# descriptive text -- unmasked and still visible to the raw scan below.
+# Single-quoted spans are untouched (still a plain same-character scan):
+# real bash gives backslash no special meaning inside single quotes.
 mask_catastrophic_positional_args() {
     printf '%s' "$1" | awk '
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
+        BS = sprintf("%c", 92)
         # Command-name allowlist: known non-executing search commands whose
         # positional pattern arguments are inert search text, never live
         # shell syntax. Unlike mask_ask_positional_args() above, grep/egrep/
@@ -3967,8 +4107,31 @@ mask_catastrophic_positional_args() {
                 qc = substr(rest, 1, 1)
                 if (qc != DQ && qc != SQ) break
                 endpos = 0
-                for (i = 2; i <= length(rest); i++) {
-                    if (substr(rest, i, 1) == qc) { endpos = i; break }
+                if (qc == DQ) {
+                    # Escape-aware (#7515, mirrors mask_stash_scan_positional_args()'\''s
+                    # #7363 fix): a backslash swallows the NEXT character as one
+                    # atomic unit, so an escaped `\"` -- e.g. a check-duplicate.sh
+                    # dedup TITLE/DESCRIPTION that quotes an EXAMPLE command
+                    # string with its own inner double quotes -- can never be
+                    # misread as this argument'\''s closing quote, leaving the
+                    # remainder of the real argument (which may itself contain
+                    # the catastrophic-tier phrase) unmasked and still visible to
+                    # the raw scan below.
+                    i = 2
+                    rlen = length(rest)
+                    while (i <= rlen) {
+                        c = substr(rest, i, 1)
+                        if (c == BS) { i += 2; continue }
+                        if (c == DQ) { endpos = i; break }
+                        i++
+                    }
+                } else {
+                    # Single-quoted: bash gives backslash no special meaning
+                    # inside real single quotes, so the plain same-character
+                    # scan is correct here (unchanged from before #7515).
+                    for (i = 2; i <= length(rest); i++) {
+                        if (substr(rest, i, 1) == qc) { endpos = i; break }
+                    }
                 }
                 if (endpos == 0) break
                 inner = substr(rest, 2, endpos - 2)
@@ -4047,11 +4210,10 @@ mask_catastrophic_positional_args() {
 # / stash-scope:main-checkout (confirmed in `.loom/logs/guard-decisions.log`,
 # #7363).
 #
-# ESCAPE-AWARE double-quote scanning (unlike mask_catastrophic_positional_args()
-# above, which — as of this writing, with PR #7519/#7515 still unmerged —
-# still closes a double-quoted span on the FIRST raw `"` regardless of a
-# preceding backslash; mask_ask_positional_args() above already carries this
-# same escape-aware fix, ported via #7516): the real false-positive
+# ESCAPE-AWARE double-quote scanning (as of #7515 also in
+# mask_catastrophic_positional_args() above, which ported this same treatment,
+# and in mask_ask_positional_args() above via #7516): the real
+# false-positive
 # repro from #7363 is `grep -n "^assert_ask \"stash-scope: git stash pop in
 # main checkout asks" file` — a single double-quoted argument containing a
 # backslash-escaped `\"`. A naive same-character scan stops at that escaped
@@ -4313,7 +4475,24 @@ mask_catastrophic_var_assignment() {
 #      sees the argument immediately following the command name, so that
 #      shape stays fail-closed like any other unrecognized consumer;
 #      `printf "text $var text"` (var interpolated directly in the one
-#      format-string argument) IS covered.
+#      format-string argument) IS covered. #7515 adds one more still-open-
+#      quote shape, this time for `jq` specifically: `jq -r --arg p "XX"
+#      'select(.pattern == $p) | .ts'` — the loop variable's TEXT (`$p`)
+#      appears inside jq's own single-quoted FILTER-SCRIPT argument, where
+#      it is a jq-language variable reference (bound by `--arg p "XX"` to
+#      the literal string `"XX"`, never the outer loop variable's value) —
+#      not a bash variable expansion at all, since it sits inside a
+#      single-quoted bash argument bash never expands. The existing
+#      grep/jq case above only recognizes `$var` immediately following
+#      jq/grep/etc. (optionally after short flags) as the ENTIRE quoted
+#      positional argument; it does not tolerate `--arg NAME "VALUE"` pairs
+#      between the command and the final quoted script the way this new
+#      check does, nor does it tolerate `$var` appearing mid-argument
+#      (only at the very start). This new check is scoped narrowly to
+#      `jq` followed by short flags and/or `--arg`/`--argjson NAME "VALUE"`
+#      pairs, then a still-open quoted argument — mirroring the echo/printf
+#      still-open-quote rationale, not a blanket loosening of the jq/grep
+#      trusted-consumer set.
 #
 # Only when every check passes are the word-list literals masked, using the
 # same inertness floor as every other pass in this file: a span containing
@@ -4431,7 +4610,8 @@ mask_catastrophic_forloop_wordlist() {
                     vpre = substr(btmp, 1, RSTART - 1)
                     if (vpre !~ /(--search|--arg[ \t]+[A-Za-z_][A-Za-z0-9_]*|--argjson[ \t]+[A-Za-z_][A-Za-z0-9_]*)[ \t]*=?[ \t]*("(\\")?)?$/ \
                         && vpre !~ /(grep|egrep|fgrep|rg|jq|\.\/\.loom\/scripts\/check-duplicate\.sh)([ \t]+-[A-Za-z0-9_-]+)*[ \t]+"?$/ \
-                        && vpre !~ /(^|[ \t\n;&|`(])(echo|printf)([ \t]+-[A-Za-z0-9_-]+)*[ \t]+["'"'"'][^"'"'"']*$/) {
+                        && vpre !~ /(^|[ \t\n;&|`(])(echo|printf)([ \t]+-[A-Za-z0-9_-]+)*[ \t]+["'"'"'][^"'"'"']*$/ \
+                        && vpre !~ /(^|[ \t\n;&|`(])jq([ \t]+-[A-Za-z0-9_-]+)*([ \t]+--arg(json)?[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]+"[^"]*")*[ \t]+["'"'"'][^"'"'"']*$/) {
                         safe = 0
                     }
                     btmp = substr(btmp, RSTART + RLENGTH)
@@ -5253,6 +5433,17 @@ fi
 if [[ "$COMMAND" == *"='"* || "$COMMAND" == *'="'* ]]; then
     COMMAND_ASK_SCAN_PRINTENV=$(mask_catastrophic_var_assignment "$COMMAND_ASK_SCAN_PRINTENV" "$COMMAND")
 fi
+# #6245 allowlist carve-out for the backstop loop below: the two documented
+# non-secret pointer vars are masked out of THIS scan copy as exact tokens
+# (word-bounded, two passes so adjacent operands both mask), so
+# `printenv LOOM_TOKEN_NAME` no longer trips the TOKEN substring here while
+# a lookalike such as LOOM_TOKEN_NAME_BACKUP still does. Live-invocation
+# precision lives in printenv_ask_reason() further down; this loop stays as
+# the fail-closed backstop for shapes the segment parser cannot see (e.g.
+# a var whose value quotes the phrase and is later read via eval, #6207).
+for _ in 1 2; do
+    COMMAND_ASK_SCAN_PRINTENV=$(printf '%s' "$COMMAND_ASK_SCAN_PRINTENV" | sed -E 's/(^|[^A-Za-z0-9_])LOOM_TOKEN_(NAME|MODE)($|[^A-Za-z0-9_])/\1LOOM_ALLOWLISTED_VAR\3/g')
+done
 
 # COMMAND_STASH_SCAN (#7363): a FOURTH branched copy, same shape as
 # COMMAND_CLOUD_ASK_SCAN / COMMAND_ASK_SCAN_PRINTENV above, used ONLY by the
@@ -7118,6 +7309,175 @@ if worktree_isolation_guard_enabled && \
         return 1
     }
 
+    # ---------------------------------------------------------------------
+    # Env fast path — LOOM_WORKTREE_PATH (#7415).
+    #
+    # guard-worktree-paths.sh (the Edit/Write sibling) honors
+    # LOOM_WORKTREE_PATH as a "this session is pinned to exactly this
+    # worktree" declaration, set by a tmux/manual launcher that owns one
+    # process per worktree. This block had no equivalent, so the SAME target
+    # could be accepted through Edit/Write and denied through
+    # `cp`/`mv`/`tee`/redirection — and a guard that blocks the well-behaved
+    # form of a write it already permits elsewhere is exactly what pushes an
+    # agent toward hunting for another tool, which is the behavior the #4178
+    # confinement exists to discourage. The two guards now read the var
+    # identically for the ALLOW half.
+    #
+    # Two deliberate differences from the sibling guard, both NARROWING:
+    #   - ALLOW-ONLY. In guard-worktree-paths.sh the fast path is also
+    #     exclusive: once the var is set, everything outside it is denied.
+    #     This block has never confined Bash writes outside the repo at all
+    #     (`/tmp` scratch, `~/.cache`, build outputs), so importing the deny
+    #     half would be a large behavior change unrelated to this fix.
+    #   - The var is IGNORED when it resolves to the main checkout root.
+    #     "Pinned to the main checkout" is not a worktree pin, and honoring
+    #     it would let one inherited env var silently switch the whole #4178
+    #     confinement off. The supported, reliable opt-out stays
+    #     guards.worktreeIsolation:false in .loom/config.json.
+    #
+    # Note this cannot be set by the acting command: the hook runs as a
+    # separate process and reads its own inherited env, so an inline
+    # `LOOM_WORKTREE_PATH=… <write>` prefix has no effect here (the same
+    # property the deny messages already cite for
+    # LOOM_GUARD_WORKTREE_ISOLATION).
+    _WT_ENV_WT=""
+    _WT_ENV_WT_DONE=""
+    _wt_under_env_worktree() {
+        local _p="$1" _lex
+        [[ -n "$_p" ]] || return 1
+        [[ -n "${LOOM_WORKTREE_PATH:-}" ]] || return 1
+        if [[ -z "$_WT_ENV_WT_DONE" ]]; then
+            _WT_ENV_WT_DONE=1
+            _WT_ENV_WT=$(cd "$LOOM_WORKTREE_PATH" 2>/dev/null && pwd -P 2>/dev/null) || _WT_ENV_WT=""
+            _WT_ENV_WT="${_WT_ENV_WT%/}"
+            # A pin at the main checkout root is not a worktree pin — drop it.
+            if [[ -n "$_WT_ENV_WT" && ( "$_WT_ENV_WT" == "$_WT_MAIN_ROOT" || "$_WT_ENV_WT" == "$_WT_MAIN_ROOT_LOGICAL" ) ]]; then
+                _WT_ENV_WT=""
+            fi
+        fi
+        [[ -n "$_WT_ENV_WT" ]] || return 1
+        case "$_p" in
+            "$_WT_ENV_WT"|"$_WT_ENV_WT"/*) return 0 ;;
+        esac
+        # ...and the LOGICAL spelling of the pin, for the same reason
+        # _WT_MAIN_ROOT_LOGICAL exists: normalize_abs_path() is lexical, so a
+        # target reached through a symlinked ancestor never string-matches the
+        # physical form.
+        _lex="${LOOM_WORKTREE_PATH%/}"
+        if [[ "$_lex" == /* && "$_lex" != "$_WT_MAIN_ROOT" && "$_lex" != "$_WT_MAIN_ROOT_LOGICAL" ]]; then
+            case "$_p" in
+                "$_lex"|"$_lex"/*) return 0 ;;
+            esac
+        fi
+        return 1
+    }
+
+    # ---------------------------------------------------------------------
+    # Registered-but-unmanaged git worktrees (#7415).
+    #
+    # `.loom-managed` (written only by worktree.sh) is this guard's primary
+    # signal for "this is a worktree, not the main checkout". A worktree
+    # created with a plain `git worktree add` never carries one — harmless
+    # while it sits OUTSIDE the main checkout (the containment test above
+    # already lets it through), but a worktree nested UNDER the main checkout
+    # (`<main>/.claude/worktrees/x`, the layout some repos document) matches
+    # the main-root prefix test and gets denied even though git itself
+    # considers it a separate working tree that shares nothing with the main
+    # checkout's index or tracked files.
+    #
+    # So: consult `git worktree list --porcelain` and treat a target inside
+    # any registered worktree OTHER than the main one as "not the main
+    # checkout". The main worktree entry is excluded in both spellings, so
+    # this can never turn into an allow for the checkout this block protects.
+    #
+    # TRUST BOUNDARY (#4245): this widens recognition from "worktrees Loom
+    # created" to "worktrees git knows about" — a stray or deliberate
+    # `git worktree add` elsewhere in the repo now gains the same treatment.
+    # That is a real widening, and it is accepted knowingly: the sentinel was
+    # never an authentication boundary (the deny message itself says the check
+    # "cannot verify it belongs to the acting session", and `touch
+    # .loom-managed` — not a write form this guard even scans — already forges
+    # it), while the false positive it caused blocks a documented, legitimate
+    # workflow. What is NOT widened: the main checkout's own working tree,
+    # which is what #4178 protects, stays denied.
+    #
+    # Resolved lazily and cached — the `git` call only runs for a write that
+    # is otherwise about to be denied, and the parse itself forks nothing per
+    # entry (a `cd … && pwd -P` per worktree would be ~25 extra forks in a
+    # normal Loom checkout, inside a PreToolUse hook).
+    _WT_REG_ROOTS=""
+    _WT_REG_ROOTS_DONE=""
+    _wt_registered_worktree_roots() {
+        local _line _wtp
+        if [[ -z "$_WT_REG_ROOTS_DONE" ]]; then
+            _WT_REG_ROOTS_DONE=1
+            if [[ -n "$_WT_MAIN_ROOT" && -d "$_WT_MAIN_ROOT" ]]; then
+                while IFS= read -r _line; do
+                    [[ "$_line" == "worktree "* ]] || continue
+                    _wtp="${_line#worktree }"
+                    [[ "$_wtp" == /* ]] || continue
+                    _wtp="${_wtp%/}"
+                    # Skip the MAIN worktree entry in either spelling — it is
+                    # the very checkout this block protects.
+                    if [[ "$_wtp" == "$_WT_MAIN_ROOT" || "$_wtp" == "$_WT_MAIN_ROOT_LOGICAL" ]]; then
+                        continue
+                    fi
+                    _WT_REG_ROOTS+="${_wtp}"$'\n'
+                    # ...plus the ALTERNATE root spelling, for the same reason
+                    # _WT_MAIN_ROOT_LOGICAL exists: git records exactly one
+                    # spelling of a nested worktree's path, while the targets
+                    # this is compared against come from normalize_abs_path(),
+                    # which is lexical and keeps a symlinked ancestor intact.
+                    # Only a worktree nested under the main root can be reached
+                    # here at all (the containment test above already let
+                    # everything else through), so swapping just the root
+                    # prefix covers both spellings without a fork per entry.
+                    if [[ -n "$_WT_MAIN_ROOT_LOGICAL" && "$_WT_MAIN_ROOT_LOGICAL" != "$_WT_MAIN_ROOT" ]]; then
+                        case "$_wtp" in
+                            "$_WT_MAIN_ROOT"/*)
+                                _WT_REG_ROOTS+="${_WT_MAIN_ROOT_LOGICAL}/${_wtp#"$_WT_MAIN_ROOT"/}"$'\n' ;;
+                            "$_WT_MAIN_ROOT_LOGICAL"/*)
+                                _WT_REG_ROOTS+="${_WT_MAIN_ROOT}/${_wtp#"$_WT_MAIN_ROOT_LOGICAL"/}"$'\n' ;;
+                        esac
+                    fi
+                done < <(git -C "$_WT_MAIN_ROOT" worktree list --porcelain 2>/dev/null || true)
+            fi
+        fi
+        printf '%s' "$_WT_REG_ROOTS"
+    }
+
+    # True if $1 (absolute, normalized) sits inside a registered worktree that
+    # is not the main checkout.
+    _wt_in_registered_worktree() {
+        local _p="$1" _root _roots
+        [[ -n "$_p" ]] || return 1
+        _roots=$(_wt_registered_worktree_roots)
+        [[ -n "$_roots" ]] || return 1
+        while IFS= read -r _root; do
+            [[ -n "$_root" ]] || continue
+            if [[ "$_p" == "$_root" || "$_p" == "$_root"/* ]]; then
+                return 0
+            fi
+        done <<< "$_roots"
+        return 1
+    }
+
+    # The worktree location to point a denied write at. Names the ACTUALLY
+    # configured worktree root (LOOM_WORKTREE_ROOT env > worktree.root config >
+    # in-repo default) instead of hardcoding `.loom/worktrees/issue-<N>`, which
+    # is wrong for any repo that relocates its worktree root (#7415).
+    _wt_worktree_hint() {
+        if [[ -z "$_WT_WRITE_BASE_DONE" ]]; then
+            _WT_WRITE_BASE=$(resolve_worktree_root "$_WT_MAIN_ROOT")
+            _WT_WRITE_BASE_DONE=1
+        fi
+        if [[ -n "$_WT_WRITE_BASE" ]]; then
+            printf '%s/issue-<N>' "$_WT_WRITE_BASE"
+        else
+            printf '.loom/worktrees/issue-<N>'
+        fi
+    }
+
     WRITE_TARGETS=$(extract_write_targets "$COMMAND_ASK_SCAN" "$CWD" | head -20)
     while IFS=$'\037' read -r _wcwd _wtarget; do
         [[ -z "$_wtarget" ]] && continue
@@ -7254,7 +7614,7 @@ if worktree_isolation_guard_enabled && \
                         if wt_write_mktemp_same_command_safe "$_wtarget" "$COMMAND_WT_MKTEMP_SCAN"; then
                             continue
                         fi
-                        deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree (.loom/worktrees/issue-<N>) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
+                        deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
                     fi
                     continue
                 fi
@@ -7323,11 +7683,11 @@ if worktree_isolation_guard_enabled && \
                         # value picks a top-level directory, the main
                         # checkout's own included. Same verdict as (1).
                         if _wt_isolation_in_play; then
-                            deny "BLOCKED: Bash-tool write target '${_wtarget}' has an unexpanded shell variable as its first real path component, so this guard cannot tell where the write lands — it may resolve inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree (.loom/worktrees/issue-<N>) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
+                            deny "BLOCKED: Bash-tool write target '${_wtarget}' has an unexpanded shell variable as its first real path component, so this guard cannot tell where the write lands — it may resolve inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
                         fi
                     elif _wt_in_protected_area "$_wknown"; then
                         if _wt_isolation_in_play; then
-                            deny "BLOCKED: Bash-tool write target '${_wtarget}' contains an unexpanded shell variable in a directory component, and its known prefix ('${_wknown}') is inside this repository's worktree/checkout area — this guard cannot tell whether the expanded path stays in your worktree or lands in the main repository checkout ('${_WT_MAIN_ROOT}'). Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree (.loom/worktrees/issue-<N>) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
+                            deny "BLOCKED: Bash-tool write target '${_wtarget}' contains an unexpanded shell variable in a directory component, and its known prefix ('${_wknown}') is inside this repository's worktree/checkout area — this guard cannot tell whether the expanded path stays in your worktree or lands in the main repository checkout ('${_WT_MAIN_ROOT}'). Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
                         fi
                     fi
                     continue
@@ -7382,6 +7742,11 @@ if worktree_isolation_guard_enabled && \
         # where a builder is supposed to write.
         _in_any_managed_worktree "$_wabs" && continue
 
+        # (a2) Inside the worktree this session is explicitly pinned to via
+        # LOOM_WORKTREE_PATH -> allow, matching guard-worktree-paths.sh's
+        # fast path (#7415; see _wt_under_env_worktree's doc comment).
+        _wt_under_env_worktree "$_wabs" && continue
+
         # Not under any worktree. If it's also not under the main checkout,
         # there is nothing this guard protects (e.g. /tmp scratch) -> allow.
         [[ -z "$_WT_MAIN_ROOT" ]] && continue
@@ -7404,6 +7769,17 @@ if worktree_isolation_guard_enabled && \
             continue
         fi
 
+        # (b) Inside a git-registered worktree nested under the main checkout
+        # (e.g. `<main>/.claude/worktrees/x`, created by a plain `git worktree
+        # add` and so carrying no `.loom-managed` sentinel) -> allow. git
+        # itself treats that directory as a separate working tree; it is not
+        # the main checkout this block protects. See
+        # _wt_registered_worktree_roots()'s doc comment for the trust-boundary
+        # trade-off this accepts (#7415).
+        if _wt_in_registered_worktree "$_wabs"; then
+            continue
+        fi
+
         # Target resolves inside the main checkout and outside every
         # worktree. Deny only if worktree isolation is actually in play for
         # this repo/session (a managed worktree exists somewhere); otherwise
@@ -7412,7 +7788,7 @@ if worktree_isolation_guard_enabled && \
         # base is resolved off the same main-checkout root so the "a managed
         # worktree exists" gate stays consistent with the containment test.
         if _wt_isolation_in_play; then
-            deny "BLOCKED: Bash-tool write to '${_wabs}' resolves to the main repository checkout ('${_WT_MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). This is a worktree-isolation bypass via Bash redirection/tee/sed -i/cp/mv — do NOT retry the write through Bash. cd into your issue worktree (.loom/worktrees/issue-<N>) and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement"
+            deny "BLOCKED: Bash-tool write to '${_wabs}' resolves to the main repository checkout ('${_WT_MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). This is a worktree-isolation bypass via Bash redirection/tee/sed -i/cp/mv — do NOT retry the write through Bash. cd into your issue worktree ($(_wt_worktree_hint)) and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement"
         fi
     done <<< "$WRITE_TARGETS"
 fi
@@ -7506,17 +7882,26 @@ if [[ "$COMMAND_ASK_SCAN" == *git* ]] && \
                         # empty here means this was actually a PUSH line, not
                         # a reset, and stays fully ambiguous) resolves to
                         # origin/main, origin/master, origin/<repo-default>,
-                        # or plain HEAD (a bare `git reset --hard` — a no-op
-                        # ref move, only discards uncommitted changes) — none
-                        # of those name a protected branch or another agent's
-                        # WIP — AND the cwd resolves inside a Loom-managed
-                        # worktree (the disposable, session-owned checkout
-                        # this recovery pattern is scoped to, never the main
+                        # plain HEAD (a bare `git reset --hard` — a no-op ref
+                        # move, only discards uncommitted changes), or the
+                        # worktree's OWN tracked branch (#7530: e.g. a
+                        # builder/doctor resyncing its own worktree to its own
+                        # `origin/feature/issue-N` after an upstream
+                        # force-push/rebase — a strict subset of the
+                        # force-push power that same agent already holds over
+                        # that same branch via its own PR) — none of those
+                        # name a protected branch or another agent's WIP —
+                        # AND the cwd resolves inside a Loom-managed worktree
+                        # (the disposable, session-owned checkout this
+                        # recovery pattern is scoped to, never the main
                         # checkout, never an unmanaged directory). Any other
-                        # shape — an unrecognized reset target, a non-reset
-                        # (push) line, or a cwd outside a managed worktree —
-                        # still asks exactly as before.
+                        # shape — an unrecognized reset target (including
+                        # ANOTHER issue's `origin/feature/issue-M` branch), a
+                        # non-reset (push) line, or a cwd outside a managed
+                        # worktree — still asks exactly as before.
                         _fdetached_safe=false
+                        _fcwdabs=""
+                        [[ "$_fcwd" == /* ]] && _fcwdabs=$(normalize_abs_path "$_fcwd")
                         if [[ -n "$_fresettarget" ]]; then
                             if [[ "$_fresettarget" == "HEAD" || \
                                   "$_fresettarget" == "origin/main" || \
@@ -7526,12 +7911,15 @@ if [[ "$COMMAND_ASK_SCAN" == *git* ]] && \
                                 _fdetdefault=$(resolve_default_branch "$_fcwd")
                                 if [[ -n "$_fdetdefault" && "$_fresettarget" == "origin/$_fdetdefault" ]]; then
                                     _fdetached_safe=true
+                                else
+                                    _fownbranch=$(_managed_worktree_branch "$_fcwdabs")
+                                    if [[ -n "$_fownbranch" && "$_fresettarget" == "origin/$_fownbranch" ]]; then
+                                        _fdetached_safe=true
+                                    fi
                                 fi
                             fi
                         fi
                         if [[ "$_fdetached_safe" == true ]]; then
-                            _fcwdabs=""
-                            [[ "$_fcwd" == /* ]] && _fcwdabs=$(normalize_abs_path "$_fcwd")
                             _in_any_managed_worktree "$_fcwdabs" || _fdetached_safe=false
                         fi
                         if [[ "$_fdetached_safe" != true ]]; then
@@ -7644,19 +8032,21 @@ ASK_PATTERNS=(
     '(^|[;&|[:space:]])sky down'
     '(^|[;&|[:space:]])sky stop'
 
-    # NOTE: the credential-exposure `printenv.*(SECRET|TOKEN|KEY)` patterns are
-    # NOT in this array. They used to be plain substring entries here, scanned
-    # against COMMAND_ASK_SCAN like every other entry -- but COMMAND_ASK_SCAN
-    # deliberately never gets grep/rg/jq positional-argument masking (it also
-    # feeds SQL_DDL_PATTERN below, which intentionally still scans a
-    # `grep '<pattern>' file`/jq-filter argument for a live DDL phrase), so a
-    # command whose own quoted jq/grep/rg argument merely CONTAINED the word
-    # "printenv" -- e.g. `jq -c 'select(.pattern | test("printenv"))'`, with no
-    # live `printenv` invocation at all -- false-asked on its leading space
-    # (#7355). They are scanned against COMMAND_ASK_SCAN_PRINTENV (built above,
-    # a further-masked branch dedicated to exactly these three patterns) in
-    # their own loop just below instead — see its own comment block.
-    #
+    # NOTE: `printenv ... SECRET|TOKEN|KEY` is NOT a plain substring entry
+    # here. It used to be three entries — '(^|[;&|[:space:]])printenv.*SECRET'
+    # / '...TOKEN' / '...KEY' — which matched ANY printenv invocation whose
+    # command text contained one of those three substrings anywhere after
+    # "printenv", with no way to distinguish a genuinely secret-bearing read
+    # (`printenv GITHUB_TOKEN`) from a non-secret pointer/identity variable
+    # that merely has one of those words in its name (`printenv
+    # LOOM_TOKEN_NAME` — an account-label string, not a credential; see
+    # docs/token-pool.md). It is handled by the segment-parsed,
+    # name-allowlisted printenv_ask_reason() check below instead — see its
+    # own comment block (#6245).
+    # The #7355 masked-scan substring loop (COMMAND_ASK_SCAN_PRINTENV, just
+    # below this array) is kept as the fail-closed backstop for shapes the
+    # segment parser cannot see, with the two allowlisted names masked out of
+    # that scan copy so both fixes hold at once.
     # NOTE: `cat .../.ssh/<file>` is NOT a plain substring entry here. It used
     # to be '(^|[;&|[:space:]])cat.*/\.ssh/', which matched the whole `.ssh/`
     # directory rather than the specific secret-bearing files inside it — so
@@ -7833,6 +8223,79 @@ ssh_cat_ask_reason() {
 _SSH_CAT_ASK=$(ssh_cat_ask_reason "$COMMAND_ASK_SCAN" | head -1)
 if [[ -n "$_SSH_CAT_ASK" ]]; then
     ask "Command requires confirmation: $COMMAND" "ask:$_SSH_CAT_ASK"
+fi
+
+# =============================================================================
+# PRINTENV CREDENTIAL-NAME ASK — segment-parsed, name-allowlisted (#6245)
+#
+# The plain-substring ASK_PATTERNS entries this replaced — three separate
+# '(^|[;&|[:space:]])printenv.*SECRET' / '...TOKEN' / '...KEY' patterns —
+# matched ANY printenv invocation whose command text contained one of those
+# three substrings anywhere after "printenv", with no way to distinguish a
+# genuinely secret-bearing read (`printenv GITHUB_TOKEN`) from a non-secret
+# pointer/identity variable that merely has one of those words in its name
+# (`printenv LOOM_TOKEN_NAME` — an account-label string identifying which
+# OAuth token slot is active, not a credential value; see
+# docs/token-pool.md — spawn-claude.sh already logs it in plaintext).
+#
+# DENYLIST substring check, ALLOWLIST override (deliberate): mirroring
+# systemctl_ask_reason()/ssh_cat_ask_reason() above, this segment-parses the
+# command with qsplit() (quote-aware, #3755), strips a leading sudo/env
+# wrapper per segment, and only inspects segments whose command word is
+# literally `printenv`. Each remaining operand (the variable name being
+# read) still asks if its name contains SECRET/TOKEN/KEY as a substring —
+# the same narrowing the old patterns used — UNLESS the operand is an
+# EXACT match for a documented non-secret var (LOOM_TOKEN_NAME,
+# LOOM_TOKEN_MODE). The allowlist match is exact-string, not substring, so
+# a lookalike name that merely CONTAINS an allowlisted name (e.g.
+# LOOM_TOKEN_NAME_BACKUP) still asks — guards against a suffix/prefix-match
+# bypass. Any unrecognized/unlisted credential-shaped name falls through to
+# the safer default (ask), so a new var-naming convention is never silently
+# allowed.
+# =============================================================================
+printenv_ask_reason() {
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
+    {
+        $0 = qsplit($0)   # quote-aware segmentation (#3755)
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            # Strip a leading `env` wrapper + its flags/assignments, mirroring
+            # systemctl_ask_reason()/ssh_cat_ask_reason() above (#3586), so
+            # `env FOO=bar printenv LOOM_TOKEN_NAME` still resolves its
+            # command word to `printenv`.
+            if (sub(/^env([ \t]+|$)/, "", seg)) {
+                sub(/^[ \t]+/, "", seg)
+                stripped = 1
+                while (stripped) {
+                    stripped = 0
+                    if (sub(/^-u[ \t]+[^ \t]+([ \t]+|$)/, "", seg)) { stripped = 1; continue }
+                    if (sub(/^-i([ \t]+|$)/, "", seg))              { stripped = 1; continue }
+                    if (sub(/^--([ \t]+|$)/, "", seg))              { break }
+                    if (sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*([ \t]+|$)/, "", seg)) { stripped = 1; continue }
+                }
+            }
+            sub(/^[ \t]+/, "", seg)
+            m = split(seg, toks, /[ \t]+/)
+            if (m < 2) continue
+            if (toks[1] != "printenv") continue
+            for (j = 2; j <= m; j++) {
+                var = toks[j]
+                gsub(/[\047\042]/, "", var)
+                if (var ~ /^-/) continue
+                if (var !~ /SECRET|TOKEN|KEY/) continue
+                if (var == "LOOM_TOKEN_NAME" || var == "LOOM_TOKEN_MODE") continue
+                print "printenv " var
+                exit
+            }
+        }
+    }'
+}
+_PRINTENV_ASK=$(printenv_ask_reason "$COMMAND_ASK_SCAN" | head -1)
+if [[ -n "$_PRINTENV_ASK" ]]; then
+    ask "Command requires confirmation: $COMMAND" "ask:$_PRINTENV_ASK"
 fi
 
 # =============================================================================

@@ -28,6 +28,15 @@
 #                          parent branch (feature/issue-N) still has open
 #                          stacked child PRs targeting it (operator asserts the
 #                          children are already reconciled). See #3747 item 2.
+#   --allow-unapproved     Bypass the pre-merge loom:pr review-signal guard,
+#                          which otherwise hard-blocks merging a PR whose
+#                          current head carries no loom:pr label (no
+#                          forge-visible signal Judge reviewed it — e.g. a
+#                          Doctor rebase cleared it via the staleness guard).
+#                          The bypass is recorded as a warning and, on a real
+#                          (non-dry-run) merge, best-effort as a PR comment
+#                          audit trail. Operator asserts responsibility,
+#                          mirroring --allow-stacked-children. See #7419.
 #   --no-cleanup-primary   Skip the automatic primary-checkout branch cleanup
 #                          (#5015): when the merged branch is checked out in
 #                          the PRIMARY repo checkout (not a worktree) and it
@@ -177,6 +186,17 @@ Options:
                          Pass this flag only after you have manually reconciled
                          (or verified) the children — the operator asserts
                          responsibility, mirroring --worktree-path.
+  --allow-unapproved     Bypass the pre-merge loom:pr review-signal guard.
+                         By default the script refuses to merge (exit 1) a
+                         PR whose current head does not carry the loom:pr
+                         label — the only forge-visible signal Judge
+                         reviewed that head (it may have been cleared by a
+                         staleness guard, e.g. after a Doctor rebase). This
+                         flag bypasses that block; the operator asserts
+                         responsibility, mirroring --allow-stacked-children.
+                         The bypass is always logged as a warning and, on a
+                         real (non-dry-run) merge, best-effort recorded as a
+                         PR comment audit trail too.
   --no-cleanup-primary   Skip automatic primary-checkout branch cleanup (#5015).
                          When the merged branch is checked out in the PRIMARY
                          repo checkout (not a worktree), the script normally
@@ -261,6 +281,11 @@ Examples:
   ./.loom/scripts/merge-pr.sh 123 --no-cleanup-primary
     Merges PR but always prints manual instructions instead of
     auto-cleaning a branch checked out in the primary repo checkout.
+
+  ./.loom/scripts/merge-pr.sh 123 --allow-unapproved
+    Merges PR #123 even though it does not carry loom:pr (no forge-visible
+    Judge review signal for the current head). Logs a warning and posts a
+    PR comment recording the override.
 EOF
 }
 
@@ -365,6 +390,10 @@ DRY_RUN=false
 AUTO_MERGE=false
 WORKTREE_PATH_OVERRIDE=""
 ALLOW_STACKED_CHILDREN=false
+# ALLOW_UNAPPROVED (#7419): bypasses the loom:pr review-signal guard
+# (_check_loom_pr_label below). Off by default — a missing loom:pr label
+# hard-blocks the merge unless the operator explicitly opts in here.
+ALLOW_UNAPPROVED=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -385,6 +414,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=true; shift ;;
     --auto) AUTO_MERGE=true; shift ;;
     --allow-stacked-children) ALLOW_STACKED_CHILDREN=true; shift ;;
+    --allow-unapproved) ALLOW_UNAPPROVED=true; shift ;;
     -*)  error "Unknown option: $1" ;;
     *)
       if [[ -z "$PR_NUMBER" ]]; then
@@ -397,7 +427,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--no-cleanup-primary] [--worktree-path <dir>] [--dry-run] [--auto] [--allow-stacked-children]"
+[[ -z "$PR_NUMBER" ]] && error "Usage: merge-pr.sh <pr-number> [--no-cleanup-worktree] [--no-cleanup-primary] [--worktree-path <dir>] [--dry-run] [--auto] [--allow-stacked-children] [--allow-unapproved]"
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || error "PR number must be numeric: $PR_NUMBER"
 
 # Validate --worktree-path early (before any network calls) so bad input
@@ -444,6 +474,10 @@ PR_MERGEABLE=$(echo "$PR_JSON" | jq -r '.mergeable')
 # PR, so it is safe to force-delete even though it will never satisfy
 # `git branch --merged` after a squash merge.
 PR_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // empty')
+# Labels (#7419): the loom:pr review-signal guard's only input. Both forges'
+# forge_get_pr responses already carry a `labels` array in this shape, so no
+# extra API call is needed beyond the fetch above.
+PR_LABELS=$(echo "$PR_JSON" | jq -r '.labels[]?.name // empty' 2>/dev/null || true)
 
 # Check if already merged
 if [[ "$PR_MERGED" == "true" ]]; then
@@ -640,6 +674,123 @@ instead of bumping VERSION, then re-run this merge."
 # Invoke this guard too, before either merge path attempts the actual merge
 # API call — same reasoning as _check_no_open_stacked_children above.
 _check_defaults_version_bump_collision
+
+# ---------------------------------------------------------------------------
+# Pre-merge loom:pr review-signal guard (#7419).
+#
+# `loom:pr` is the only forge-visible statement that the CURRENT head passed
+# Judge review. Champion's auto-merge path (champion-pr-merge.md) already
+# refuses to merge without it, but this shared script — driven directly by
+# humans and in-session agents, not just Champion — previously merged
+# whatever PR it was pointed at regardless of label state. That gap let a
+# real incident through: a Doctor rebase cleared `loom:pr` via the staleness
+# guard, and a human running this script directly moments later squash-merged
+# a head no Judge had reviewed, with zero friction at the one point it was
+# cheap (#7419).
+#
+# Default is a hard block (error, exit 1) — the same shape as
+# _check_no_open_stacked_children / _check_defaults_version_bump_collision
+# above — printing the CURRENT label set and head SHA so the operator can see
+# exactly what they are about to merge. --allow-unapproved bypasses the
+# block (operator asserts responsibility, mirroring --allow-stacked-children
+# and --worktree-path); the bypass is always recorded as a loud warning
+# (mirrors --allow-stacked-children's own override warning) and, on a REAL
+# run only (never --dry-run — a preview must have zero forge side effects),
+# best-effort recorded as a PR comment audit trail too, mirroring the
+# _post_premature_close_comment / partial-increment comment pattern already
+# used elsewhere in this file. --dry-run reports the would-be block without
+# exiting 1 or merging, same dry-run contract as both guards above.
+#
+# A present `loom:pr` is the overwhelmingly common case and must add zero
+# overhead on that path: labels were already extracted from the initial
+# $PR_JSON fetch into $PR_LABELS above, so this needs no extra API call to
+# pass through.
+#
+# AC #3: when `loom:pr` IS present, also WARN (never hard-block — presence of
+# loom:pr already means Judge approved SOME head, just possibly not the
+# current one, which is a softer signal than the missing-label case above) if
+# a Champion `<!-- champion:hold-state head=<sha> -->` marker (see
+# champion-pr-merge.md's own hold-state tracking) names a SHA that differs
+# from the current head. forge_get_pr's response has no `.comments` (unlike
+# champion-pr-merge.md's own `gh pr view --json comments,...` fetch), so this
+# needs the dedicated forge_get_pr_comments() helper (lib/forge-helpers.sh).
+_check_champion_hold_state_staleness() {
+  local comments hold_head
+  comments="$(forge_get_pr_comments "$REPO_NWO" "$PR_NUMBER" 2>/dev/null || true)"
+  [[ -n "$comments" ]] || return 0
+
+  # Mirrors champion-pr-merge.md's own extraction (same marker, same capture
+  # group); "last" match wins in case of multiple hold episodes on one PR.
+  hold_head="$(printf '%s\n' "$comments" \
+    | grep -o 'champion:hold-state head=[0-9a-f]*' \
+    | tail -1 \
+    | sed -n 's/.*head=\([0-9a-f]*\)/\1/p')"
+  [[ -n "$hold_head" ]] || return 0
+
+  if [[ "$hold_head" != "$PR_HEAD_SHA" ]]; then
+    warning "champion:hold-state marker recorded head=$hold_head, but PR #$PR_NUMBER's current head is $PR_HEAD_SHA — the hold/approval state may have been recorded against a different tree than the one about to merge. loom:pr's presence means Judge approved SOME head; verify it still covers this one before proceeding."
+  fi
+}
+
+_check_loom_pr_label() {
+  local has_loom_pr=false
+
+  if printf '%s\n' "$PR_LABELS" | grep -qx 'loom:pr'; then
+    has_loom_pr=true
+  fi
+
+  if [[ "$has_loom_pr" == "true" ]]; then
+    _check_champion_hold_state_staleness
+    return 0
+  fi
+
+  # loom:pr absent.
+  if [[ "$ALLOW_UNAPPROVED" == "true" ]]; then
+    warning "loom:pr guard: --allow-unapproved set; proceeding without loom:pr (labels: ${PR_LABELS:-<none>}; head: $PR_HEAD_SHA) — operator asserts responsibility for merging an unreviewed head"
+
+    if [[ "$DRY_RUN" != "true" ]]; then
+      local override_comment
+      override_comment="## Merge Proceeded Without \`loom:pr\` (Override)
+
+PR #$PR_NUMBER was merged via \`merge-pr.sh --allow-unapproved\` while the \`loom:pr\` label was absent — no forge-visible Judge review signal existed for the head being merged.
+
+- **Head SHA**: \`$PR_HEAD_SHA\`
+- **Labels at merge time**: ${PR_LABELS:-<none>}
+
+The operator running this merge explicitly asserted responsibility for this override (#7419).
+
+---
+*Recorded by merge-pr.sh at $(date -u +%Y-%m-%dT%H:%M:%SZ)*"
+      forge_gh_comment_rl_safe "$REPO_NWO" "$PR_NUMBER" "$override_comment" 2>/dev/null || \
+        warning "Could not post loom:pr override audit comment on PR #$PR_NUMBER (merge proceeds anyway; the warning above is still the log record)"
+    fi
+
+    return 0
+  fi
+
+  local msg
+  msg="Merge blocked: PR #$PR_NUMBER does not carry the \`loom:pr\` label — no forge-visible signal exists that Judge reviewed the CURRENT head.
+
+Current labels: ${PR_LABELS:-<none>}
+Current head SHA: $PR_HEAD_SHA
+
+loom:pr may have been cleared by a staleness guard (e.g. after a Doctor rebase moved the head) or never applied. Get the PR (re-)reviewed by Judge and re-labeled loom:pr, then re-run this merge.
+
+If you are deliberately merging without that review signal and take responsibility for it, re-run with --allow-unapproved to bypass this guard."
+
+  # --dry-run still runs the guard and REPORTS the would-be block, but honors
+  # the dry-run contract (never exits 1) — same shape as the guards above.
+  if [[ "$DRY_RUN" == "true" ]]; then
+    warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: loom:pr label absent (labels: ${PR_LABELS:-<none>}; head: $PR_HEAD_SHA). Re-run with --allow-unapproved to override."
+    return 0
+  fi
+
+  error "$msg"
+}
+
+# Invoke the guard before either merge path attempts the actual merge API
+# call — same reasoning as the two guards above.
+_check_loom_pr_label
 
 # ---------------------------------------------------------------------------
 # Partial-increment closing-keyword conflict detection (#4569, extended by

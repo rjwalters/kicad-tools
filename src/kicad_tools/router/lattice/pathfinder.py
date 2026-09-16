@@ -52,7 +52,9 @@ from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules
 from .coupled import CoupledConnection
+from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_seg_dist
+from .history import PhysicalHistory
 from .obstacles import (
     CommittedCopper,
     LatticeKeepoutMask,
@@ -313,7 +315,7 @@ class LatticePathfinder:
         self.set_escape_boundary(None, 0.0)
 
     def set_escape_boundary(self, edges: list[tuple[Pt, Pt]] | None, clearance: float) -> None:
-        """Install actual Edge.Cuts and its floor for copper-overlap attachments."""
+        """Install actual Edge.Cuts and its clearance floor for all routed copper."""
         from .escape_boundary import EscapeBoundary
 
         if edges is None:
@@ -1025,6 +1027,7 @@ class LatticePathfinder:
         committed: CommittedCopper,
         *,
         via_in_pad_override: bool | None = None,
+        clearance: float | None = None,
     ) -> bool:
         """Through-via legality at a lattice node.
 
@@ -1039,6 +1042,10 @@ class LatticePathfinder:
         only when the fab tier supports it (:attr:`_via_in_pad_allowed`).
         Dynamic part: committed copper on all layers + committed vias
         (:meth:`CommittedCopper.via_clear`).
+
+        ``clearance`` carries the effective net-class gap through the entire
+        barrel span, including layers the trace search skips. ``None`` keeps
+        the board-global trace and separate fixed-fill via defaults.
 
         ``via_in_pad_override`` (issue #4475, epic #4465 Phase 3) lets a
         caller bypass the tier gate for the SAME-net window hit: ``None``
@@ -1055,7 +1062,14 @@ class LatticePathfinder:
         obstacles = self.obstacles
         point = lattice.node_point(key)
         via_radius = self.rules.via_diameter / 2.0
-        grow = max(self._via_pad_grow, 0.0)
+        if not self._escape_boundary.segment_clear(point, point, via_radius):
+            return False
+        own_clr = (
+            self.rules.trace_clearance
+            if clearance is None
+            else max(self.rules.trace_clearance, clearance)
+        )
+        grow = max(via_radius + own_clr - self._agent_radius, 0.0)
         # The query window must cover the farthest centre distance any check
         # below can reject at.  The hole-to-hole floor against the board's
         # largest drill needs via_drill/2 + max_drill/2 + min_hole_to_hole
@@ -1109,7 +1123,7 @@ class LatticePathfinder:
             None,
             net,
             self.rules.via_diameter / 2.0,
-            max(self._via_pad_grow, 0.0),
+            grow,
             self._pairwise,
         ):
             return False
@@ -1118,7 +1132,7 @@ class LatticePathfinder:
         # of the area's layers (the barrel spans the whole stack).
         if self._keepouts is not None and self._keepouts.via_blocked(point, net, via_radius):
             return False
-        return committed.via_clear(point, net)
+        return committed.via_clear(point, net, clearance)
 
     # -- the route contract ------------------------------------------------------
 
@@ -1154,6 +1168,7 @@ class LatticePathfinder:
         stub_layers: tuple[int, ...] | None = None,
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        escape_plan: dict[int, EscapeChoice] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Apply physical Kelvin isolation throughout every search stage."""
         from ..kelvin import detect_kelvin_topology
@@ -1186,6 +1201,7 @@ class LatticePathfinder:
                 stub_layers=stub_layers,
                 stubs_override=stubs_override,
                 exempt_pads=exempt_pads,
+                escape_plan=escape_plan,
             )
         finally:
             committed.kelvin_guard = previous
@@ -1205,6 +1221,7 @@ class LatticePathfinder:
         stub_layers: tuple[int, ...] | None = None,
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
+        escape_plan: dict[int, EscapeChoice] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """Route one connection, staging via-in-pad as a last resort (#4475).
 
@@ -1238,6 +1255,8 @@ class LatticePathfinder:
             failure -- is returned as-is.
         """
         fat = extra_clearance > 0.0 or partner_net is not None
+        if escape_plan and not fat:
+            committed = foreign_reservations(committed, escape_plan, start.net)
         last_resort = (
             self.rules.via_in_pad_last_resort and allow_vias and not fat and self.num_layers > 1
         )
@@ -1252,6 +1271,8 @@ class LatticePathfinder:
             "stubs_override": stubs_override,
             "exempt_pads": exempt_pads,
         }
+        if escape_plan and not fat:
+            search_kwargs["escape_plan"] = escape_plan
         if not last_resort:
             return self._route_search(start, end, net_class, **search_kwargs)
 
@@ -1294,6 +1315,7 @@ class LatticePathfinder:
         stubs_override: tuple[list, list] | None = None,
         exempt_pads: frozenset[int] | None = None,
         via_in_pad_override: bool | None = None,
+        escape_plan: dict[int, EscapeChoice] | None = None,
     ) -> tuple[_RouteResult | None, str]:
         """A* over the (node, layer) graph; returns ``(result, reason)``.
 
@@ -1396,28 +1418,24 @@ class LatticePathfinder:
             width_a = width_b = body_w
         else:
             stub_kmax = 24 if fat else 4
-            stubs_a, width_a = self._escape_stubs(
-                start,
-                net,
-                committed,
-                kmax=stub_kmax,
-                extra_clearance=extra_clearance,
-                partner_net=partner_net,
-                layers=stub_layers,
-                exempt_pads=exempt_pads,
-                net_class=net_class,
-            )
-            stubs_b, width_b = self._escape_stubs(
-                end,
-                net,
-                committed,
-                kmax=stub_kmax,
-                extra_clearance=extra_clearance,
-                partner_net=partner_net,
-                layers=stub_layers,
-                exempt_pads=exempt_pads,
-                net_class=net_class,
-            )
+
+            def escape(pad: Pad) -> tuple[list, float]:
+                if escape_plan and id(pad) in escape_plan:
+                    return chosen_stub(escape_plan[id(pad)], committed)
+                return self._escape_stubs(
+                    pad,
+                    net,
+                    committed,
+                    kmax=stub_kmax,
+                    extra_clearance=extra_clearance,
+                    partner_net=partner_net,
+                    layers=stub_layers,
+                    exempt_pads=exempt_pads,
+                    net_class=net_class,
+                )
+
+            stubs_a, width_a = escape(start)
+            stubs_b, width_b = escape(end)
         # Issue #4979: drop any escape stub that lands on a hard-avoided
         # layer BEFORE the empty-stub decline check, so a pad whose only
         # legal escape is on a forbidden inner plane declines honestly
@@ -1432,6 +1450,29 @@ class LatticePathfinder:
             stubs_a, stubs_b = kept_a, kept_b
         else:
             had_stubs_a = had_stubs_b = False
+        # The substrate is built at global width. Check the actual emitted
+        # neck and body radii against Edge.Cuts before admitting any state.
+        boundary = self._escape_boundary
+        if not boundary.valid:
+            return None, "invalid-board-outline"
+
+        def boundary_stubs(stubs: list, width: float) -> list:
+            return [
+                stub
+                for stub in stubs
+                if boundary.segment_clear(
+                    lattice.node_point(stub[0]),
+                    lattice.node_point(stub[0]),
+                    half + extra_clearance,
+                )
+                and all(
+                    boundary.segment_clear(a, b, width / 2 + extra_clearance)
+                    for a, b in zip(stub[2], stub[2][1:], strict=False)
+                )
+            ]
+
+        stubs_a = boundary_stubs(stubs_a, width_a)
+        stubs_b = boundary_stubs(stubs_b, width_b)
         if not stubs_a:
             if hard_avoided and had_stubs_a:
                 return None, "layer-constrained-start"
@@ -1447,8 +1488,18 @@ class LatticePathfinder:
                 reason = self._keepout_escape_reason(end, net, stub_layers, half, reason)
             return None, reason
 
+        def copper_cost(a: Pt, b: Pt, layer: int, width: float) -> float:
+            if isinstance(history, PhysicalHistory):
+                return present * history.cost(
+                    a, b, layer, net, width / 2 + extra_clearance, clr, pw, partner_net
+                )
+            return 0.0
+
         goal: dict[_State, tuple[float, list[Pt]]] = {}
         for key, layer, poly, length in stubs_b:
+            length += sum(
+                copper_cost(a, b, layer, width_b) for a, b in zip(poly, poly[1:], strict=False)
+            )
             state = (key, layer)
             if state not in goal or length < goal[state][0]:
                 goal[state] = (length, poly)
@@ -1463,6 +1514,9 @@ class LatticePathfinder:
         heap: list[tuple[float, int, _State]] = []
         counter = 0
         for key, layer, poly, length in stubs_a:
+            length += sum(
+                copper_cost(a, b, layer, width_a) for a, b in zip(poly, poly[1:], strict=False)
+            )
             state = (key, layer)
             if state not in g_score or length < g_score[state]:
                 g_score[state] = length
@@ -1524,6 +1578,11 @@ class LatticePathfinder:
                             )
                             and committed.seg_clear(ea, eb, layer, net, half, clr)
                         )
+                    ok = ok and boundary.segment_clear(
+                        lattice.node_point(edge[0]),
+                        lattice.node_point(edge[1]),
+                        half + extra_clearance,
+                    )
                     edge_ok[ek] = ok
                 if not ok:
                     continue
@@ -1561,6 +1620,7 @@ class LatticePathfinder:
                 if not nok:
                     continue
                 step = elen + present * history.get(("e", edge, layer), 0.0)
+                step += copper_cost(lattice.node_point(key), lattice.node_point(nbr), layer, body_w)
                 tentative = g + step
                 if tentative < g_score.get(nstate, math.inf) - 1e-12:
                     g_score[nstate] = tentative
@@ -1570,7 +1630,13 @@ class LatticePathfinder:
             if allow_vias and self.num_layers > 1:
                 vok = via_ok.get(key)
                 if vok is None:
-                    vok = self._via_ok(key, net, committed, via_in_pad_override=via_in_pad_override)
+                    vok = self._via_ok(
+                        key,
+                        net,
+                        committed,
+                        via_in_pad_override=via_in_pad_override,
+                        clearance=clr if net_class is not None else None,
+                    )
                     via_ok[key] = vok
                 if vok:
                     # Via edges join matching nodes on ADJACENT layers only
@@ -1643,6 +1709,15 @@ class LatticePathfinder:
                         if not nok:
                             continue
                         step = self.via_cost + present * history.get(("v", key), 0.0)
+                        step += sum(
+                            copper_cost(
+                                lattice.node_point(key),
+                                lattice.node_point(key),
+                                li,
+                                self.rules.via_diameter,
+                            )
+                            for li in range(self.num_layers)
+                        )
                         tentative = g + step
                         if tentative < g_score.get(nstate, math.inf) - 1e-12:
                             g_score[nstate] = tentative
@@ -2306,7 +2381,8 @@ class LatticePathfinder:
         # pairs this is exactly the pre-#4270 shortest-first ordering.
         items.sort(key=lambda t: (-t[1], t[0]))
 
-        history: dict[Resource, float] = {}
+        history = PhysicalHistory()
+        escape_plan: dict[int, EscapeChoice] = {}
         best_routes: dict[object, Route] = {}
         best_reasons: dict[object, str] = {}
         best_pair_outcomes: dict[object, str] = {}
@@ -2379,8 +2455,15 @@ class LatticePathfinder:
                         committed.add_run(layer_idx, points, leg_net, half, clr)
                     continue
                 key, start, end, net_class = item
+                plan_options: dict[str, Any] = {"escape_plan": escape_plan} if escape_plan else {}
                 result, reason = self._route_impl(
-                    start, end, net_class, committed=committed, history=history, present=present
+                    start,
+                    end,
+                    net_class,
+                    committed=committed,
+                    history=history,
+                    present=present,
+                    **plan_options,
                 )
                 if result is None:
                     reasons[key] = reason
@@ -2408,7 +2491,12 @@ class LatticePathfinder:
                         layer_idx, points, start.net, [w / 2.0 for w in widths], clr
                     )
                 for via_pt in result.via_points:
-                    committed.add_via(via_pt, start.net)
+                    committed.add_via(via_pt, start.net, clr)
+
+            if escape_plan and routed_items <= best_count:
+                # A local reservation is a proposal, not a permanent lock.
+                # Release it when its full pass fails to improve completion.
+                escape_plan = {}
 
             if routed_items > best_count:
                 best_count = routed_items
@@ -2428,6 +2516,9 @@ class LatticePathfinder:
             if it == max_iterations - 1:
                 break
 
+            if it == 0:
+                escape_plan = plan_tapered_escapes(self, connections, deadline)
+
             # Failed-net demand: bump history on the resources each blocked
             # net WANTS (its corridor with no committed copper in the way) so
             # the occupying nets are pressured to detour next pass.
@@ -2438,6 +2529,13 @@ class LatticePathfinder:
                         item, committed=self._fresh_committed(), history=history, present=present
                     )
                     desired_resources = desired_pair.resources if desired_pair is not None else None
+                    if desired_pair is not None:
+                        half, clearance = self._conn_geometry(item.net_class)
+                        for leg_net, layer, points in desired_pair.runs:
+                            for a, b in zip(points, points[1:], strict=False):
+                                history.add_segment(
+                                    a, b, layer, leg_net, half, clearance, increment
+                                )
                 else:
                     key, start, end, net_class = item
                     desired, _reason = self._route_impl(
@@ -2449,6 +2547,24 @@ class LatticePathfinder:
                         present=present,
                     )
                     desired_resources = desired.resources if desired is not None else None
+                    if desired is not None:
+                        _half, clearance = self._conn_geometry(net_class)
+                        for layer, points, widths in desired.runs:
+                            for a, b, width in zip(points[:-1], points[1:], widths, strict=True):
+                                history.add_segment(
+                                    a, b, layer, start.net, width / 2, clearance, increment
+                                )
+                        for point in desired.via_points:
+                            for layer in range(self.num_layers):
+                                history.add_segment(
+                                    point,
+                                    point,
+                                    layer,
+                                    start.net,
+                                    self.rules.via_diameter / 2,
+                                    clearance,
+                                    increment,
+                                )
                 if desired_resources is None:
                     continue
                 for resource in desired_resources:

@@ -410,6 +410,17 @@ gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:bloc
 > instruction naming a PR by number — those remain a deliberate human
 > decision to work on that specific PR, same as everywhere else in this file.
 >
+> **Why this query does NOT also exclude `loom:operator` (#7660).** Unlike
+> `loom:blocked` / `loom:operator-only` above, `loom:operator` is
+> **deliberately left unfiltered** here — this is not an oversight. When
+> Champion routes a stale, held PR from `loom:pr` to `loom:changes-requested`,
+> it intentionally *keeps* `loom:operator` so this Priority 2 queue can still
+> pick the PR up and refresh the diff; see `.loom/docs/label-state-machine.md`
+> § "Stale departure to Doctor" (#6720/#6852) for the full rationale. Adding a
+> `loom:operator` exclusion to this query would reproduce the exact bug #6720
+> fixed (held PRs becoming permanently stuck as `CONFLICTING`, unreachable by
+> Doctor) — do not add one.
+>
 > **Operator-hold exclusion (Priority 1 queue, #5978).** `loom:operator`
 > (Champion's merge-risk hold) is a *different* label from `loom:blocked` /
 > `loom:operator-only` above — see `.loom/docs/label-state-machine.md`. Doctor
@@ -698,6 +709,7 @@ gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested
    - Do NOT push until all local checks pass
    - This prevents multiple fix-push-fail cycles
 9. **Commit and push**: Push your fixes to the PR branch
+   - **Pre-open rebase onto `origin/main` (MANDATORY, #7668)**: immediately before this push — regardless of whether your dispatch reason *was* a merge conflict — run `git fetch origin main && git rebase origin/main`, mirroring `builder-pr.md` § "Pre-Push Rebase: Sync with `origin/main`". If it conflicts, resolve it now using the "PR Has Merge Conflicts" recipe below (including its version-bearing-file sync gate) rather than re-requesting review on a PR that lands `DIRTY` on the next pass — that reactive round-trip (Priority 1 above) is exactly the cost this proactive check exists to absorb. This is a no-op when `main` hasn't moved since your branch was cut.
    - **Pre-push head-SHA recheck (MANDATORY)**: before the push, re-compare the PR's `headRefOid` against the `CLAIM_HEAD_SHA` you captured in step 2 — see "Pre-Push Head-SHA Recheck" below. If the head moved, another agent pushed while you were working; re-verify the blocker is still unaddressed and stand down rather than duplicating (or clobbering) their fix.
    - **DCO / sign-off**: if `commit.signoff` is `true` in `.loom/config.json` (read it the same way as `buildGate.command`), or the repo has a DCO / required `sign-off` check, add `--signoff` to **every** commit you author — including `git commit --amend --signoff` when re-authoring during a rebase — so each carries a `Signed-off-by:` trailer. Harmless when not required; git will not add a duplicate trailer. Reference: `defaults/docs/commit-signoff.md`.
    - **9a. Rebase any stacked children** (best-effort): if the just-pushed branch matches `feature/issue-<N>` (i.e. you amended a stacked *parent*), run:

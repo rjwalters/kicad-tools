@@ -1089,7 +1089,8 @@ version_only_diff() {
 # that produced the PR #4611 false negative (#4613): reuse the FAIL/PASS
 # lines emitted here verbatim in any later comment, never restate them from
 # memory.
-for file in $FILES; do
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
   for pattern in "${CRITICAL_PATTERNS[@]}"; do
     if [[ "$file" == *"$pattern"* ]]; then
       if version_only_diff "$file" <number>; then
@@ -1101,7 +1102,7 @@ for file in $FILES; do
       continue 2
     fi
   done
-done
+done <<<"$FILES"
 
 echo "PASS: No critical files modified (or only version-only carve-out files)"
 ```
