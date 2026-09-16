@@ -96,10 +96,10 @@ def extract(board, pcbnew):
 
 
 def main():
-    import pcbnew
+    import pcbnew  # type: ignore[import-not-found]  # Supplied by KiCad Python.
 
     if sys.platform != "linux":
-        import wx
+        import wx  # type: ignore[import-not-found]  # Supplied by KiCad Python.
 
         _app = wx.App(False)
     board_path = Path(sys.argv[1]).resolve()

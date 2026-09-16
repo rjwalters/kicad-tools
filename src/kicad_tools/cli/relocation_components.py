@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon  # type: ignore[import-untyped]
 
 from kicad_tools.zones.placement_fill import find_kicad_python
 
