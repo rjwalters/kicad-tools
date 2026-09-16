@@ -236,7 +236,18 @@ namespace router {
 // enforce that resolved value as a hard floor instead of skipping.
 // v26: reject foreign physical copper when seeding source-pad cells in
 // both one-shot and resumable A*. Clearance halos remain valid exits.
-constexpr int ROUTER_CPP_BUILD_VERSION = 26;
+// v27 (Issue #5410): dynamic-route geometry coverage/refinement, the
+// cross-net drill floor, and exact mark-coordinate preservation across the
+// native geometry sync.  This work was developed in parallel with v26 and
+// originally carried its own "v26" bump on the branch; both are real,
+// DISTINCT binding-surface changes, so the rebase resolves to a single v27
+// that is the first build carrying BOTH.  The bump is what forces
+// ``kct build-native`` to discard a stale ``.so`` compiled from either prior
+// v26 state (main's source-pad seeding build, or the branch's own).
+// v28: trace-halo refinement preserves the separate via clearance floor.
+// v29: indexed physical component-hole clearance during via search.
+// v30: final route validation accepts the separate physical component-hole floor.
+constexpr int ROUTER_CPP_BUILD_VERSION = 30;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
@@ -574,6 +585,7 @@ struct DesignRules {
     float cost_congestion = 5.0f;
     float congestion_threshold = 0.5f;
     float min_drill_clearance = 0.102f;
+    float min_hole_to_hole = 0.5f;
     // Issue #4071: soft corridor-attractor bonus (mirrors Python
     // ``DesignRules.cost_corridor_attractor``, default 3.0).  Subtracted
     // from a cell's positive step cost when the cell is reserved for the

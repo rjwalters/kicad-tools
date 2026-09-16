@@ -145,6 +145,7 @@ void Grid3D::mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int ne
 
 void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                           int clearance_cells) {
+    record_route_mark(segment_mark_key(x1, y1, x2, y2, layer, net, clearance_cells), true);
     // Issue #4079: fast-path the reservation consult behind the grid-wide
     // flag so unreserved boards pay zero extra cost (byte-identical).
     const bool check_reservations = has_reservations_;
@@ -216,6 +217,7 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
 // no cell is reserved (``has_reservations_ == false``) the whole check is
 // skipped, preserving byte-identical behaviour on boards without reservations.
 void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
+    record_route_mark(via_mark_key(x, y, net, radius_cells), true);
     const bool check_reservations = has_reservations_;
     for (int layer = 0; layer < layers_; ++layer) {
         for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
@@ -294,6 +296,7 @@ int Grid3D::reserved_cell_count() const {
 
 void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                             int clearance_cells) {
+    record_route_mark(segment_mark_key(x1, y1, x2, y2, layer, net, clearance_cells), false);
     auto unmark_with_clearance = [&](int gx, int gy) {
         for (int dy = -clearance_cells; dy <= clearance_cells; ++dy) {
             for (int dx = -clearance_cells; dx <= clearance_cells; ++dx) {
@@ -349,6 +352,7 @@ void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
 }
 
 void Grid3D::unmark_via(int x, int y, int net, int radius_cells) {
+    record_route_mark(via_mark_key(x, y, net, radius_cells), false);
     for (int layer = 0; layer < layers_; ++layer) {
         for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
             for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
@@ -526,19 +530,151 @@ static float pad_rect_distance(const PadInfo& pad, float x1, float y1,
         c * dx2 - s * dy2, s * dx2 + c * dy2);
 }
 
-void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
-                                float width, int layer_idx, int net) {
-    stored_segments_.push_back({x1, y1, x2, y2, width, layer_idx, net});
+Grid3D::RouteMarkKey Grid3D::segment_mark_key(
+    int x1, int y1, int x2, int y2, int layer, int net, int radius) {
+    if (std::pair<int, int>(x2, y2) < std::pair<int, int>(x1, y1)) {
+        std::swap(x1, x2);
+        std::swap(y1, y2);
+    }
+    return {0, net, layer, x1, y1, x2, y2, radius};
 }
 
-void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net) {
+Grid3D::RouteMarkKey Grid3D::via_mark_key(int x, int y, int net, int radius) {
+    return {1, net, -1, x, y, x, y, radius};
+}
+
+void Grid3D::record_route_mark(const RouteMarkKey& key, bool add) {
+    route_coverage_dirty_ = true;
+    if (add) {
+        ++active_route_marks_[key];
+    } else {
+        auto it = active_route_marks_.find(key);
+        if (it != active_route_marks_.end() && --it->second == 0)
+            active_route_marks_.erase(it);
+    }
+}
+
+bool Grid3D::route_geometry_complete() const {
+    if (!route_coverage_dirty_) return route_coverage_complete_;
+    route_coverage_complete_ = !active_route_marks_.empty();
+    {
+        route_geometry_cells_.assign(cells_.size(), 0);
+        for (const auto& [key, count] : active_route_marks_) {
+            auto geometry_key = key;
+            std::get<7>(geometry_key) = 0;
+            const bool known = registered_route_geometry_.count(geometry_key) != 0;
+            if (!known) route_coverage_complete_ = false;
+            const auto [kind, net, layer, x1, y1, x2, y2, radius] = key;
+            auto mark = [&](int x, int y, int l) {
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        const int cx = x + dx, cy = y + dy;
+                        if (!is_valid(cx, cy, l)) continue;
+                        auto& coverage = route_geometry_cells_[index(cx, cy, l)];
+                        // Unknown overlap remains hard regardless of mark order
+                        // or which net currently owns the cell.
+                        if (!known) coverage = -1;
+                        else if (coverage != -1 && at(cx, cy, l).net == net)
+                            coverage = net;
+                    }
+                }
+            };
+            if (kind == 1) {
+                for (int l = 0; l < layers_; ++l) mark(x1, y1, l);
+            } else {
+                int x = x1, y = y1;
+                const int dx = std::abs(x2 - x1), dy = std::abs(y2 - y1);
+                const int sx = x1 < x2 ? 1 : -1, sy = y1 < y2 ? 1 : -1;
+                int err = dx - dy;
+                while (true) {
+                    mark(x, y, layer);
+                    if (x == x2 && y == y2) break;
+                    const int twice = 2 * err;
+                    if (twice > -dy) { err -= dy; x += sx; }
+                    if (twice < dx) { err += dx; y += sy; }
+                }
+            }
+        }
+    }
+    route_coverage_dirty_ = false;
+    return route_coverage_complete_;
+}
+
+bool Grid3D::route_cell_has_geometry(int x, int y, int layer) const {
+    if (!is_valid(x, y, layer)) return false;
+    const auto& cell = at(x, y, layer);
+    if (!cell.blocked || cell.net <= 0 || cell.static_blocked || cell.pad_blocked ||
+        cell.is_obstacle || cell.reserved_count > 0) return false;
+    route_geometry_complete();  // Refresh local coverage, including unknown marks.
+    return route_geometry_cells_[index(x, y, layer)] == cell.net;
+}
+
+void Grid3D::index_route_geometry(GeometryBins& bins, size_t index,
+                                  float minx, float miny, float maxx, float maxy) {
+    for (int y = static_cast<int>(std::floor(miny / 2.0f));
+         y <= static_cast<int>(std::floor(maxy / 2.0f)); ++y) {
+        for (int x = static_cast<int>(std::floor(minx / 2.0f));
+             x <= static_cast<int>(std::floor(maxx / 2.0f)); ++x) {
+            bins[{x, y}].push_back(index);
+        }
+    }
+}
+
+std::pair<std::vector<size_t>, std::vector<size_t>> Grid3D::route_geometry_candidates(
+    float minx, float miny, float maxx, float maxy) const {
+    auto gather = [&](const GeometryBins& bins) {
+        std::vector<size_t> result;
+        for (int y = static_cast<int>(std::floor(miny / 2.0f));
+             y <= static_cast<int>(std::floor(maxy / 2.0f)); ++y) {
+            for (int x = static_cast<int>(std::floor(minx / 2.0f));
+                 x <= static_cast<int>(std::floor(maxx / 2.0f)); ++x) {
+                const auto it = bins.find({x, y});
+                if (it != bins.end()) result.insert(result.end(), it->second.begin(), it->second.end());
+            }
+        }
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+        return result;
+    };
+    return {gather(route_segment_bins_), gather(route_via_bins_)};
+}
+
+void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
+                                float width, int layer_idx, int net,
+                                std::optional<std::tuple<int, int, int, int>> grid_endpoints) {
+    index_route_geometry(route_segment_bins_, stored_segments_.size(),
+                         std::min(x1, x2) - width / 2, std::min(y1, y2) - width / 2,
+                         std::max(x1, x2) + width / 2, std::max(y1, y2) + width / 2);
+    stored_segments_.push_back({x1, y1, x2, y2, width, layer_idx, net});
+    auto [gx1, gy1] = world_to_grid(x1, y1);
+    auto [gx2, gy2] = world_to_grid(x2, y2);
+    // Python marking uses double precision and ties-to-even rounding. Keep
+    // its exact raster coordinates when supplied with the physical copper.
+    if (grid_endpoints) std::tie(gx1, gy1, gx2, gy2) = *grid_endpoints;
+    registered_route_geometry_.insert(segment_mark_key(gx1, gy1, gx2, gy2, layer_idx, net));
+    route_coverage_dirty_ = true;
+}
+
+void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net,
+                           std::optional<std::pair<int, int>> grid_center) {
+    const float radius = std::max(drill, diameter) / 2;
+    index_route_geometry(route_via_bins_, stored_vias_.size(),
+                         x - radius, y - radius, x + radius, y + radius);
     stored_vias_.push_back({x, y, drill, diameter, net});
+    const auto [gx, gy] = grid_center.value_or(world_to_grid(x, y));
+    registered_route_geometry_.insert(via_mark_key(gx, gy, net));
+    route_coverage_dirty_ = true;
 }
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    clear_component_holes();
     stored_segments_.clear();
     stored_vias_.clear();
+    registered_route_geometry_.clear();
+    route_segment_bins_.clear();
+    route_via_bins_.clear();
+    route_coverage_dirty_ = true;
 }
 
 void Grid3D::clear_stored_routes() {
@@ -547,6 +683,10 @@ void Grid3D::clear_stored_routes() {
     // and must survive rip-up cycles.
     stored_segments_.clear();
     stored_vias_.clear();
+    registered_route_geometry_.clear();
+    route_segment_bins_.clear();
+    route_via_bins_.clear();
+    route_coverage_dirty_ = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +878,108 @@ inline std::pair<float, float> closest_gap_midpoint(
 
 }  // namespace
 
+bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
+                                       int partner_net, float partner_clearance, float via_clearance) const {
+    const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance_});
+    const auto candidates = route_geometry_candidates(
+        std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
+        std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
+    auto required = [&](int other_net, std::pair<float, float> point) {
+        if (other_net == partner_net && partner_clearance >= 0) return partner_clearance;
+        const float pair = pairwise_required_clearance(s.net, other_net);
+        if (pair > clearance && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
+            return pair;
+        return clearance;
+    };
+    for (size_t i : candidates.first) {
+        const auto& other = stored_segments_[i];
+        if (other.net == s.net || other.layer_idx != s.layer) continue;
+        const float gap = segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2,
+            other.x1, other.y1, other.x2, other.y2) - (s.width + other.width) / 2;
+        const auto point = closest_gap_midpoint(s.x1, s.y1, s.x2, s.y2,
+            other.x1, other.y1, other.x2, other.y2);
+        if (gap < required(other.net, point) - CLEARANCE_EPSILON_MM) return false;
+    }
+    for (size_t i : candidates.second) {
+        const auto& other = stored_vias_[i];
+        if (other.net == s.net) continue;
+        const auto cp = closest_point_on_segment(other.x, other.y, s.x1, s.y1, s.x2, s.y2);
+        const float gap = std::hypot(other.x - cp.first, other.y - cp.second)
+            - (s.width + other.diameter) / 2;
+        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}))
+                  - CLEARANCE_EPSILON_MM) return false;
+    }
+    return true;
+}
+
+void Grid3D::clear_component_holes() {
+    component_holes_known_ = true;
+    component_holes_.clear();
+    component_hole_bins_.clear();
+}
+
+void Grid3D::add_component_hole(float x1, float y1, float x2, float y2, float radius) {
+    index_route_geometry(component_hole_bins_, component_holes_.size(),
+        std::min(x1, x2)-radius, std::min(y1, y2)-radius,
+        std::max(x1, x2)+radius, std::max(y1, y2)+radius);
+    component_holes_.push_back({x1, y1, x2, y2, radius});
+}
+
+bool Grid3D::component_holes_clear(float x, float y, float drill, float clearance) const {
+    if (!component_holes_known_) return false;
+    const float reach = drill / 2 + clearance;
+    std::set<size_t> seen;
+    for (int bx = std::floor((x-reach)/2); bx <= std::floor((x+reach)/2); ++bx) {
+        for (int by = std::floor((y-reach)/2); by <= std::floor((y+reach)/2); ++by) {
+            auto bin = component_hole_bins_.find({bx, by});
+            if (bin == component_hole_bins_.end()) continue;
+            for (size_t i : bin->second) {
+                if (!seen.insert(i).second) continue;
+                const auto& h = component_holes_[i];
+                const auto cp = closest_point_on_segment(x, y, h[0], h[1], h[2], h[3]);
+                if (std::hypot(x-cp.first, y-cp.second) - h[4] - drill/2
+                    < clearance - CLEARANCE_EPSILON_MM) return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
+                                     float hole_clearance, float same_net_drill_clearance) const {
+    const float margin = std::max(v.diameter, v.drill) / 2
+        + std::max({clearance, hole_clearance, same_net_drill_clearance, max_pairwise_clearance_});
+    const auto candidates = route_geometry_candidates(v.x - margin, v.y - margin, v.x + margin, v.y + margin);
+    auto required = [&](int other_net, int layer, std::pair<float, float> point) {
+        const float pair = pairwise_required_clearance(v.net, other_net);
+        if (pair > clearance && !attach_zone_exempts(point.first, point.second, v.net, other_net, layer))
+            return pair;
+        return clearance;
+    };
+    for (size_t i : candidates.first) {
+        const auto& s = stored_segments_[i];
+        if (s.net == v.net || s.layer_idx < std::min(v.layer_from, v.layer_to)
+            || s.layer_idx > std::max(v.layer_from, v.layer_to)) continue;
+        const auto cp = closest_point_on_segment(v.x, v.y, s.x1, s.y1, s.x2, s.y2);
+        const float gap = std::hypot(v.x - cp.first, v.y - cp.second) - (v.diameter + s.width) / 2;
+        if (gap < required(s.net, s.layer_idx, {(v.x + cp.first) / 2, (v.y + cp.second) / 2})
+                  - CLEARANCE_EPSILON_MM) return false;
+    }
+    for (size_t i : candidates.second) {
+        const auto& other = stored_vias_[i];
+        const float distance = std::hypot(v.x - other.x, v.y - other.y);
+        if (other.net == v.net && std::abs(v.x - other.x) < 1e-6f && std::abs(v.y - other.y) < 1e-6f) continue;
+        const float drill_gap = distance - (v.drill + other.drill) / 2;
+        const float drill_required = other.net == v.net ? same_net_drill_clearance : hole_clearance;
+        if (drill_gap < drill_required - CLEARANCE_EPSILON_MM) return false;
+        if (other.net == v.net) continue;
+        const float gap = distance - (v.diameter + other.diameter) / 2;
+        if (gap < required(other.net, -1, {(v.x + other.x) / 2, (v.y + other.y) / 2})
+                  - CLEARANCE_EPSILON_MM) return false;
+    }
+    return true;
+}
+
 ValidationResult Grid3D::validate_route(
     const std::vector<Segment>& segments,
     const std::vector<Via>& vias,
@@ -748,7 +990,8 @@ ValidationResult Grid3D::validate_route(
     float min_drill_clearance,
     int partner_net,
     float intra_pair_clearance,
-    const std::vector<uint32_t>& clamp_ref_hashes) const
+    const std::vector<uint32_t>& clamp_ref_hashes,
+    float min_hole_clearance) const
 {
     ValidationResult result;
     result.valid = true;
@@ -765,6 +1008,19 @@ ValidationResult Grid3D::validate_route(
         }
     }
     for (const auto& via : vias) {
+        // Physical component drills are independent of copper/net exemptions.
+        // Keep the older raw-call API usable, while wrapper calls supply the
+        // distinct manufacturer component-hole floor explicitly.
+        const float hole_floor = min_hole_clearance >= 0
+            ? min_hole_clearance : min_drill_clearance;
+        if (!component_holes_clear(via.x, via.y, via.drill, hole_floor)) {
+            result.valid = false;
+            result.min_clearance = 0;
+            result.violation_x = via.x;
+            result.violation_y = via.y;
+            return result;
+        }
+
         for (int layer = std::min(via.layer_from, via.layer_to);
              layer <= std::max(via.layer_from, via.layer_to); ++layer) {
             if (!fixed_fill_clear(via.x, via.y, via.x, via.y, layer,
@@ -1059,8 +1315,13 @@ ValidationResult Grid3D::validate_route(
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
-                result.violation_x = (seg.x1 + seg.x2 + other.x1 + other.x2) / 4.0f;
-                result.violation_y = (seg.y1 + seg.y2 + other.y1 + other.y2) / 4.0f;
+                // Resumable search boosts avoidance at this location. A long
+                // obstacle's midpoint can be far from the actual conflict.
+                const auto conflict = closest_gap_midpoint(
+                    seg.x1, seg.y1, seg.x2, seg.y2,
+                    other.x1, other.y1, other.x2, other.y2);
+                result.violation_x = conflict.first;
+                result.violation_y = conflict.second;
                 result.violation_type = 2;  // seg-seg
                 return result;
             }

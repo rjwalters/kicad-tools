@@ -35,7 +35,7 @@ import logging
 import math
 import threading
 from contextlib import contextmanager, suppress
-from typing import TYPE_CHECKING, Any, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 import numpy as np
 
@@ -75,6 +75,8 @@ CarveoutMode = Literal["none", "skip", "clamp"]
 if TYPE_CHECKING:
     from kicad_tools.performance import PerformanceConfig
     from kicad_tools.schema.pcb import Zone
+
+    from .cpp_backend import CppGrid
 
 from kicad_tools.acceleration import (
     BackendType,
@@ -872,6 +874,9 @@ class RoutingGrid:
         # attribute is loosely typed (``Any``) so this module does not
         # need to import the optional cpp backend.
         self._cpp_grid: object | None = None
+        from .component_hole_index import ComponentHoleIndex
+
+        self._component_hole_index = ComponentHoleIndex()
 
         # Alias for backward compatibility
         self.layers = self.num_layers
@@ -1127,6 +1132,9 @@ class RoutingGrid:
         # grid object (a consumer that stamped a cache with the pre-realloc
         # value can never see its stamp again).
         self._occupancy_generation: int = getattr(self, "_occupancy_generation", 0) + 1
+        from .route_halo_geometry import RouteHaloGeometry
+
+        self._route_halo = RouteHaloGeometry(self)
 
     @property
     def occupancy_generation(self) -> int:
@@ -1758,6 +1766,32 @@ class RoutingGrid:
                 return float(region.escape_clearance)
         return None
 
+    def install_component_hole_census(self, holes: list[Pad] | None) -> None:
+        """Install an authoritative census; None denotes unverified drills."""
+        if holes is None:
+            self._component_hole_index.known = False
+            if self._cpp_grid is not None:
+                cast("CppGrid", self._cpp_grid)._impl.set_component_holes_known(False)
+            return
+        for hole in holes:
+            self.add_component_hole(hole)
+
+    def refresh_component_holes(self) -> None:
+        """Reindex registered physical drills after pad geometry changes."""
+        self._component_hole_index = self._component_hole_index.refreshed()
+        if self._cpp_grid is not None:
+            impl = cast("CppGrid", self._cpp_grid)._impl
+            impl.clear_component_holes()
+            impl.set_component_holes_known(self._component_hole_index.known)
+            for hole in self._component_hole_index.holes:
+                impl.add_component_hole(*hole)
+
+    def add_component_hole(self, pad: Pad, *, physical: bool = True) -> None:
+        """Register a physical drill without adding copper or filtering its net."""
+        hole = self._component_hole_index.add(pad, physical=physical)
+        if hole is not None and self._cpp_grid is not None:
+            cast("CppGrid", self._cpp_grid)._impl.add_component_hole(*hole)
+
     def add_pad(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Add a pad as an obstacle (except for its own net).
 
@@ -1777,6 +1811,7 @@ class RoutingGrid:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
+        self.add_component_hole(pad, physical=False)
 
         # Issue #2908: Sync the pad to the paired C++ grid (if present) so the
         # C++ ``validate_route`` segment-vs-pad clearance check has up-to-date
@@ -4617,6 +4652,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, True)
         marked_cells: set[tuple[int, int]] = set()
 
         # Issue #4079: fast-path when no reservations exist (byte-identical).
@@ -4727,6 +4763,7 @@ class RoutingGrid:
         # clearance violations between traces and vias (mirrors the +1
         # applied in mark_route() for segments, see Issue #1666).
         radius += 1
+        self._route_halo.record(self._route_halo.via_key(via), radius, True)
 
         # Issue #2677: Fast-path when no reservations exist (preserves
         # byte-identical behaviour to pre-fix).
@@ -5054,6 +5091,7 @@ class RoutingGrid:
         gx2, gy2 = self.world_to_grid(seg.x2, seg.y2)
 
         layer_idx = self.layer_to_index(seg.layer.value)
+        self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, False)
         static_blocked = self._static_blocked
 
         def unmark_with_clearance(gx: int, gy: int) -> None:
@@ -5122,6 +5160,7 @@ class RoutingGrid:
         # Issue #1797: Must match _mark_via safety margin so the same
         # cells are cleared during rip-up.
         radius += 1
+        self._route_halo.record(self._route_halo.via_key(via), radius, False)
 
         static_blocked = self._static_blocked
         for layer_idx in range(self.num_layers):

@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 26
+_REQUIRED_CPP_BUILD_VERSION = 30
 
 # Try to import C++ module with detailed error tracking
 _CPP_IMPORT_ERROR: str | None = None
@@ -1072,6 +1072,10 @@ class CppGrid:
                 pad.shape == "circle",
             )
 
+        cpp_grid._impl.set_component_holes_known(grid._component_hole_index.known)
+        for hole in grid._component_hole_index.holes:
+            cpp_grid._impl.add_component_hole(*hole)
+
         from .grid import _sync_pad_via_policies
 
         _sync_pad_via_policies(grid, cpp_grid)
@@ -1257,6 +1261,8 @@ class CppPathfinder:
         cpp_rules.via_drill = rules.via_drill
         cpp_rules.via_diameter = rules.via_diameter
         cpp_rules.via_clearance = rules.via_clearance
+        cpp_rules.min_drill_clearance = rules.min_drill_clearance
+        cpp_rules.min_hole_to_hole = rules.min_hole_to_hole
         cpp_rules.grid_resolution = rules.grid_resolution
         cpp_rules.cost_straight = rules.cost_straight
         cpp_rules.cost_turn = rules.cost_turn
@@ -1513,6 +1519,14 @@ class CppPathfinder:
                 Pass ``None`` or ``[]`` to clear.
         """
         self._pad_channel_budgets = list(budgets) if budgets else []
+
+    def invalidate_pad_geometry_cache(self) -> None:
+        """Mirror changed physical drills before the next native via query."""
+        py_grid = getattr(self._grid, "_py_grid", None)
+        if py_grid is not None:
+            py_grid.refresh_component_holes()
+        if self._py_router is not None:
+            self._py_router.clear_via_cache()
 
     def enable_per_call_timing(self, enabled: bool = True) -> None:
         """Enable or disable per-A*-call wall-clock instrumentation.
@@ -2217,6 +2231,15 @@ class CppPathfinder:
             self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
         if hasattr(self._impl, "set_search_fill_clearances"):
             self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
+
+        if self._grid._py_grid is not None:
+            self._sync_stored_routes(self._grid._py_grid)
+        self._impl.set_search_partner_clearance(
+            partner_net_id,
+            net_class.effective_intra_pair_clearance()
+            if net_class and partner_net_id >= 0
+            else -1.0,
+        )
 
         try:
             result = self._impl.route_resumable(
@@ -2993,6 +3016,7 @@ class CppPathfinder:
             partner_net_id,
             intra_pair_clearance,
             clamp_ref_hashes,
+            self._rules.min_hole_to_hole,
         )
 
         if not vresult.valid:
@@ -3494,6 +3518,10 @@ class CppPathfinder:
                     seg.width,
                     layer_idx,
                     seg.net,
+                    (
+                        *py_grid.world_to_grid(seg.x1, seg.y1),
+                        *py_grid.world_to_grid(seg.x2, seg.y2),
+                    ),
                 )
             for via in route.vias:
                 self._grid._impl.add_stored_via(
@@ -3502,6 +3530,7 @@ class CppPathfinder:
                     via.drill,
                     via.diameter,
                     via.net,
+                    py_grid.world_to_grid(via.x, via.y),
                 )
 
         self._grid._synced_route_count = current_count
@@ -3864,6 +3893,8 @@ class CppCoupledPathfinder:
         cpp_rules.via_drill = float(rules.via_drill)
         cpp_rules.via_diameter = float(rules.via_diameter)
         cpp_rules.via_clearance = float(rules.via_clearance)
+        cpp_rules.min_drill_clearance = float(rules.min_drill_clearance)
+        cpp_rules.min_hole_to_hole = float(rules.min_hole_to_hole)
         cpp_rules.grid_resolution = float(rules.grid_resolution)
         cpp_rules.cost_straight = float(rules.cost_straight)
         cpp_rules.cost_turn = float(rules.cost_turn)
