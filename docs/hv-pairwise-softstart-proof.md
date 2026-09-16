@@ -3,6 +3,99 @@
 Running record of the #4507 T4 manual criterion, newest run first. Each section
 describes the tree as of its own date.
 
+## 2026-09-16: pinned-main original recipe and terminal qualification
+
+A fresh run on `robb-pro` used source
+`9dfbbdb59cc89ef490274d22cd7d862a0ca9e7b0` and native build version 27,
+SHA256 `0c876a647ada9b01ca32f0bd60e6fe43382ef732477cbf3a6398c6344256f31b`.
+This is the main commit pinned at launch, not a claim about later main commits.
+The [evidence package](diagnostics/issue-4507/2026-09-16-current/README.md)
+records source, commands, input hashes, native provenance, audits and residuals.
+The captured fixture remains DO_NOT_FAB; **this run did not pass qualification**.
+
+### Terminal recipe and connectivity
+
+The original three stages exited **2, 8, 0**. Completion ran for 4795.5 seconds;
+its internal report records 4743.805 seconds of a 6060-second budget and
+`deadline_hit=false`. The one reported unresolved link was `/FUSED_LINE`
+`J2.1`–`Q2B.2`, reason `no-path-layer-constrained`. The separate
+`budget_starved` classification is a diagnostic inference, not evidence that
+raising a limit would resolve it. No budget, layer restriction, voltage threshold,
+map or keepout clearance was changed.
+
+Strict connectivity found **96/99 complete nets** at stages 2 and 3. The final
+incomplete nets are:
+
+| Net | Pads in largest island / total | Islands |
+|---|---:|---:|
+| /FUSED_LINE | 6 / 7 | 2 |
+| +3.3V | 1 / 18 | 18 |
+| GND | 16 / 67 | 52 |
+
+The original completion command excludes GND and +3.3V. Their remaining opens
+are recorded, not waived. Strict unconnected-pad counts are 71 after stage 2
+and 69 after stage 3.
+
+Pairwise replay found **zero violations** on both stages. Unwaived creepage
+census failures fell from **30 to 15** after keepout/refill. These checks have
+different policies and scopes; the zero pairwise result does not make the census
+or connectivity pass.
+
+### Native DRC and artifact identity
+
+KiCad 10.0.1 all-track DRC ran on saved and refilled copies, preserving original
+PCB/project/DRU bytes. Every audit reported zero non-connectivity errors and
+18 warnings, with the following unconnected-item counts:
+
+| Output | Saved | Refilled |
+|---|---:|---:|
+| Stage 2 | 69 | 67 |
+| Stage 3 | 68 | 68 |
+
+Completion emitted project/DRU sidecars that differ from the original inputs.
+The audits used those produced contexts without modification. This does not
+establish preservation of the original rule context or replace the strict
+creepage census. All staged input hashes and regular source files were unchanged.
+
+| Artifact | SHA256 |
+|---|---|
+| Input PCB | `bad824faa370307225ec4f45256de8e649afe60ee43b55483e3631555ea190d4` |
+| Stage 2 PCB | `384e24faa80e4a2adc2a5b15789f30cc98f6339a51bee313993e663da214ff53` |
+| Stage 3 PCB | `49fe9bac2e5fc86a61738d266ea6fbbc7a0c22304ac4967bb8fa02b9c783b83b` |
+
+### All fifteen governing witnesses
+
+The attribution reconstructs primitive copper polygons and asserts their unions
+are equal to the census geometry. It enumerates every tied closest pair and
+checks the existing net- and layer-specific attach-zone contract at each witness
+midpoint. All closest ties for the ten above-threshold pairs are attach-exempt;
+five pairs are below the unchanged 30 V threshold. This attributes the selected
+governing witnesses, not every primitive pair or the validity of component ratings.
+The unwaived census remains failing.
+
+| Residual pair | Layer | Gap / census requirement (mm) | Router-policy attribution |
+|---|---|---:|---|
+| /AC_LINE ↔ /V_AC_SENSE_MID | F.Cu | 0.4937 / 1.3000 | Attach zone: R1 |
+| /AC_LINE ↔ /ZC_LINE_MID | F.Cu | 0.4536 / 1.1000 | Attach zone: R3 |
+| /AC_NEUTRAL ↔ /FUSED_LINE | B.Cu | 0.6000 / 1.6000 | Attach zone: J2 |
+| /AC_NEUTRAL ↔ /ZC_NEUT_MID | F.Cu | 0.5687 / 1.1000 | Attach zone: R4 |
+| /CHG ↔ /SCAP_POS | F.Cu | 1.0500 / 1.2500 | Attach zone: D3 |
+| /GATE_BUS_NEG ↔ /SCAP_NEG | In2.Cu | 0.5777 / 1.2500 | Attach zone: Q2A |
+| /LED_A_NEG ↔ /SCAP_POS | F.Cu | 0.7813 / 2.0000 | Attach zone: R41 |
+| /LED_K_NEG ↔ /GATE_NEG_A | F.Cu | 0.4000 / 1.4000 | Attach zone: Q8 |
+| /PRE_D_NEG ↔ /PRECHARGE_NEG | F.Cu | 0.4000 / 0.4800 | Below unchanged 30 V threshold |
+| /RTN_COM_NEG ↔ /GATE_RTN_NEG | F.Cu | 0.4500 / 0.5300 | Below unchanged 30 V threshold |
+| /RTN_COM_POS ↔ /GATE_RTN_POS | F.Cu | 0.2500 / 0.4000 | Below unchanged 30 V threshold |
+| /SCAP_NEG ↔ /SRC_NEG | In1.Cu | 0.5000 / 1.2500 | Attach zone: Q2A |
+| /SCAP_NEG_RTN ↔ /GATE_RTN_NEG | In2.Cu | 0.4000 / 0.5300 | Below unchanged 30 V threshold |
+| /SCAP_POS_RTN ↔ /OC_TRIP_N | F.Cu | 0.2634 / 0.4200 | Below unchanged 30 V threshold |
+| /V_AC_SENSE_MID ↔ /V_AC_SENSE_RAW | F.Cu | 0.3909 / 1.3000 | Attach zone: R75 |
+
+All routing and audit processes ended. #4507 remains open: completion and strict
+connectivity are incomplete, and this run supplies attribution rather than a
+manufacturing acceptance. The original T4 criteria and operator policy decisions
+remain unchanged. Earlier proof sections below are preserved verbatim.
+
 ## 2026-09-16: planner-run residuals, copper origins and policy attribution
 
 This is a new analysis of the retained planner run, **not a new routing run or

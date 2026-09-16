@@ -1,0 +1,27 @@
+{
+  "pcb": "/private/tmp/4507-current-main-20260916/stage2/step2.kicad_pcb",
+  "manufacturer": "jlcpcb",
+  "via_in_pad_supported": false,
+  "deadline_hit": false,
+  "elapsed_s": 4743.805,
+  "budget_s": 6060.0,
+  "unroutable_links": [
+    {
+      "net": "/FUSED_LINE",
+      "reason": "no-path-layer-constrained",
+      "link": {
+        "start": "J2.1",
+        "end": "Q2B.2"
+      },
+      "deadline_hit": false,
+      "layer_constrained": true,
+      "elapsed_s": 4743.805,
+      "budget_s": 6060.0,
+      "blocking_copper": [],
+      "nearest_blocker_mm": 2.4613,
+      "stuck_classification": "budget_starved",
+      "stuck_evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (nearest strict copper 2.461mm away); sparse neighbourhood (0 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+      "tier_limit_note": "manufacturer 'jlcpcb' does not support via-in-pad; a walled SMD pad may require it to close (Phase 3, issue #4475's last-resort via-in-pad ordering, is not applied by this build)"
+    }
+  ]
+}
