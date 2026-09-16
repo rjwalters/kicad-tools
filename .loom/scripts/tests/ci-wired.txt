@@ -12,7 +12,7 @@
 # tests/hooks/ (repo root, NOT defaults/scripts/tests/ — Repo Skills' guard
 # tests live there, one directory per guard family they test). Entries for
 # suites outside this directory are qualified with their path relative to the
-# repo root (e.g. `tests/hooks/test-guard-destructive.sh`); run-ci-suites.sh
+# repo root (e.g. `tests/hooks/test-guard-destructive-core.sh`); run-ci-suites.sh
 # and check-ci-suite-manifest.sh both resolve a `/`-containing entry against
 # the repo root instead of this directory. They were confirmed hermetic (no
 # live forge/network calls — the `gh`/`curl` strings in them are guard-input
@@ -228,7 +228,17 @@ test-worktree-stash-baseline.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
 tests/hooks/test-guard-destructive-dispatcher.sh
-tests/hooks/test-guard-destructive.sh
+tests/hooks/test-guard-destructive-cargo-and-perf.sh
+tests/hooks/test-guard-destructive-category-opt-ins.sh
+tests/hooks/test-guard-destructive-core.sh
+tests/hooks/test-guard-destructive-decision-log.sh
+tests/hooks/test-guard-destructive-force-scope.sh
+tests/hooks/test-guard-destructive-masking.sh
+tests/hooks/test-guard-destructive-matching-precision.sh
+tests/hooks/test-guard-destructive-readonly-fastpath.sh
+tests/hooks/test-guard-destructive-rm-scope.sh
+tests/hooks/test-guard-destructive-stash-scope.sh
+tests/hooks/test-guard-destructive-write-confinement.sh
 tests/hooks/test-guard-loom-workflow.sh
 # Not a Claude-path guard, but the same repo-root tests/hooks/ location and
 # hermetic-fixture pattern (throwaway `git worktree add` trees, fake binaries,

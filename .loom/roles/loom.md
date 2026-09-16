@@ -681,7 +681,8 @@ loom-recover-orphans --recover
 
 **Labels out of sync:**
 ```bash
-gh label sync --file .github/labels.yml
+# `gh` has no `label sync` subcommand — use the shipped script
+.loom/scripts/sync-labels.sh
 ```
 
 **Stale worktrees/branches:**

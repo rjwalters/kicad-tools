@@ -2748,16 +2748,40 @@ else
     fail "(#6716) a failed label fix was not reported as a soft warning (rc=$RC); out=$OUT"
 fi
 
-echo "Test group 28e: forge label check -- the check itself errors -> loud warning, not a resync failure (#6716)"
+echo "Test group 28e: forge label check -- unreachable forge (rc=4) -> soft warning, exit 0 (#6716, #7745)"
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28e.log"; : > "$STUB_LOG"
-OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=1 bash "$SCRIPT" 2>&1)"
+# rc=4 is "could not reach the forge" since #7745 -- benign, because resync
+# must keep working offline. Exit stays 0.
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=4 bash "$SCRIPT" 2>&1)"
 RC=$?
-if [[ $RC -eq 0 ]] && grep -qi "skipped forge label" <<<"$OUT"; then
-    pass "(#6716) a --check lookup error is a loud warning, not a resync-wide failure"
+if [[ $RC -eq 0 ]] && grep -qi "could not reach the forge" <<<"$OUT"; then
+    pass "(#7745) an unreachable forge is a soft warning, not a resync-wide failure"
 else
-    fail "(#6716) a --check lookup error was not reported as a soft warning (rc=$RC); out=$OUT"
+    fail "(#7745) an unreachable forge was not reported as a soft warning (rc=$RC); out=$OUT"
+fi
+
+echo "Test group 28e2: forge label check -- the checker itself is BROKEN -> loud, and carried into the exit code (#7745)"
+REPO="$(make_fixture)"
+add_labels_stub "$REPO"
+STUB_LOG="$WORKDIR/stub28e2.log"; : > "$STUB_LOG"
+# Any rc that is not 0/3/4 means sync-labels.sh failed to run -- a crash, a
+# bash incompatibility, a typo. Before #7745 this was absorbed into exit 0,
+# indistinguishable from a clean check, which is how a checker broken by
+# #7717 went unnoticed on every macOS resync for weeks.
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=127 bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 75 ]] && grep -qi "FAILED to run" <<<"$OUT"; then
+    pass "(#7745) a broken checker exits 75 and says the labels were NOT verified"
+else
+    fail "(#7745) a broken checker did not surface as a defect (rc=$RC, want 75); out=$OUT"
+fi
+
+if grep -qi "label check FAILED TO RUN" <<<"$OUT"; then
+    pass "(#7745) the end-of-run summary states that the check did not run"
+else
+    fail "(#7745) the summary line did not mention the unverified check; out=$OUT"
 fi
 
 echo "Test group 28f: forge label check -- no .github/labels.yml -> silently skipped (#6716)"

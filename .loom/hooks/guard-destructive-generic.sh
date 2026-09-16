@@ -850,7 +850,8 @@ cargo_clean_guard_enabled() {
 #
 # `gh pr close`, `gh issue close`, and `gh label delete` change shared state but
 # are trivially reversible — `gh pr reopen`, `gh issue reopen`, and recreating a
-# label (a repo with labels.yml restores in one `gh label sync`). A guard whose
+# label (a repo with labels.yml restores in one `.loom/scripts/sync-labels.sh`).
+# A guard whose
 # purpose is preventing irreversible loss should not add confirmation friction to
 # these: an autonomous agent that closes its own issue/PR as part of a normal
 # lifecycle would otherwise stall on a prompt (or, headless, block entirely). So

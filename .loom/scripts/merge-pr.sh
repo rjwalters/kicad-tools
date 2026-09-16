@@ -724,7 +724,7 @@ _check_champion_hold_state_staleness() {
   hold_head="$(printf '%s\n' "$comments" \
     | grep -o 'champion:hold-state head=[0-9a-f]*' \
     | tail -1 \
-    | sed -n 's/.*head=\([0-9a-f]*\)/\1/p')"
+    | sed -n 's/.*head=\([0-9a-f]*\)/\1/p')" || true
   [[ -n "$hold_head" ]] || return 0
 
   if [[ "$hold_head" != "$PR_HEAD_SHA" ]]; then

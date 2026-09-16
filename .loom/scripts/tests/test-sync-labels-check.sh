@@ -299,8 +299,14 @@ assert_not_contains "$LOG" "repo view octocat/hello-world --json nameWithOwner,v
 echo ""
 echo "=== --check: a forge lookup failure is a loud, distinct error ==="
 
+# #7745: an unreachable forge exits 4, NOT 1. The two used to share exit 1,
+# which left every caller unable to tell "I could not reach the forge"
+# (benign) from "this script is broken" (a defect). resync-installed.sh's
+# catch-all absorbed both as a skip and still exited 0, which is how a
+# crashing checker went unnoticed on macOS for weeks. 1 now means only the
+# unexpected case.
 run_sls --nwo owner/repo --labels-fail -- --check
-assert_eq "1" "$RC" "a forge lookup failure exits 1 (distinct from drift's exit 3)"
+assert_eq "4" "$RC" "an unreachable forge exits 4 (distinct from drift's 3 and from a defect's 1)"
 assert_contains "$OUT" "Could not list labels" "the lookup failure is reported"
 assert_not_contains "$LOG" "label create" "a lookup failure performs no mutation"
 
