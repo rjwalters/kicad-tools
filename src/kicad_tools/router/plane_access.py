@@ -167,13 +167,13 @@ def install_plane_access(router, pcb_path, net_map, policy: PlaneAccessPolicy) -
     # No geometry mutation occurs until every required access succeeds.
     fills = []
     round_out = 1 / math.cos(math.pi / 256)
-    # Fixed-fill queries carry copper radii, not drill radii. This local,
-    # conservative margin also enforces drill spacing for any nonnegative
-    # candidate annulus without broadening unrelated pad/route halos.
-    barrel_gap = max(
-        rules.clearance, rules.hole_copper, rules.hole_gap - (rules.diameter - rules.drill) / 2
-    )
-    stub_gap = max(rules.clearance, rules.hole_copper)
+    # Track queries need copper and fixed-drill-to-copper separation. Via
+    # queries additionally retain the conservative drill-spacing floor for
+    # any nonnegative candidate annulus; tracks do not inherit that floor.
+    annulus = (rules.diameter - rules.drill) / 2
+    barrel_track_gap = max(rules.clearance, rules.hole_copper - annulus)
+    barrel_via_gap = max(barrel_track_gap, rules.hole_copper, rules.hole_gap - annulus)
+    stub_via_gap = max(rules.clearance, rules.hole_copper)
     for route in planned:
         for segment in route.segments:
             fills.append(
@@ -181,11 +181,12 @@ def install_plane_access(router, pcb_path, net_map, policy: PlaneAccessPolicy) -
                     route.net_name,
                     route.net,
                     router.grid.layer_to_index(segment.layer.value),
-                    stub_gap,
+                    rules.clearance,
                     LineString([(segment.x1, segment.y1), (segment.x2, segment.y2)]).buffer(
                         segment.width / 2 * round_out, quad_segs=64
                     ),
                     source_kind="plane_access_stub",
+                    via_clearance=stub_via_gap,
                 )
             )
         for via in route.vias:
@@ -196,9 +197,10 @@ def install_plane_access(router, pcb_path, net_map, policy: PlaneAccessPolicy) -
                         route.net_name,
                         route.net,
                         layer.index,
-                        barrel_gap,
+                        barrel_track_gap,
                         copper,
                         source_kind="plane_access_barrel",
+                        via_clearance=barrel_via_gap,
                     )
                 )
     router._plane_access_fills = tuple(fills)

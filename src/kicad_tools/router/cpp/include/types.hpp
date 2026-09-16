@@ -260,7 +260,9 @@ namespace router {
 // v40: explicit fine-pitch plane-pad halo provenance (native39 union retained).
 // v41: coupled departure-prefix constraint and diagnostic path evidence.
 // v42: coupled mutual via pitch and per-rail barrel clearance thresholds.
-constexpr int ROUTER_CPP_BUILD_VERSION = 42;
+// v43: query-specific fixed-fill margins (isolated native39 descendant).
+// v44: combine native42 with query-specific fixed-fill track/via margins.
+constexpr int ROUTER_CPP_BUILD_VERSION = 44;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -864,7 +864,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         const double reach = half + (search_fill_via_clearance_ >= 0
             ? search_fill_via_clearance_ : rules_.via_clearance);
         for (int layer = 0; layer < grid_.layers(); ++layer)
-            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
+            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach, true)) return true;
     }
 
     if (!rules_.allow_smd_vias) {

@@ -8,13 +8,17 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 
 namespace router {
 
-void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings) {
+void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings, double via_clearance) {
+    if (!std::isfinite(via_clearance) || (via_clearance < 0 && via_clearance != -1.0))
+        throw std::invalid_argument("Invalid fixed-fill via clearance");
     if (rings.empty() || rings.front().empty()) return;
     FixedFill fill;
     fill.layer = layer; fill.clearance = clearance; fill.rings = rings;
+    fill.via_clearance = std::max(clearance, via_clearance);
     fill.minx = fill.maxx = rings.front().front().first;
     fill.miny = fill.maxy = rings.front().front().second;
     for (const auto& ring : rings) {
@@ -39,10 +43,10 @@ void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillR
 // Exact physical predicates; bins only reject edges that cannot affect a
 // query. Even-odd containment includes holes without scanning every vertex.
 bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
-                             int layer, double half, double reach) const {
+                             int layer, double half, double reach, bool via_query) const {
     for (const auto& fill : fixed_fills_) {
         if (fill.layer != layer) continue;
-        const double required = std::max(reach, half + fill.clearance);
+        const double required = std::max(reach, half + (via_query ? fill.via_clearance : fill.clearance));
         double x0 = std::min(ax,bx)-required, x1 = std::max(ax,bx)+required;
         double y0 = std::min(ay,by)-required, y1 = std::max(ay,by)+required;
         if (x1 < fill.minx || x0 > fill.maxx || y1 < fill.miny || y0 > fill.maxy) continue;
@@ -1084,7 +1088,7 @@ ValidationResult Grid3D::validate_route(
         for (int layer = std::min(via.layer_from, via.layer_to);
              layer <= std::max(via.layer_from, via.layer_to); ++layer) {
             if (!fixed_fill_clear(via.x, via.y, via.x, via.y, layer,
-                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance)) {
+                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance, true)) {
                 result.valid = false;
                 result.min_clearance = 0;
                 result.violation_x = via.x;

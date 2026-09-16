@@ -22,6 +22,13 @@ class FixedFill:
     source_zone_id: str = ""
     source_kind: str = "zone"
     source_object_id: str = ""
+    via_clearance: float | None = None
+
+    def __post_init__(self):
+        if self.via_clearance is not None and (
+            not math.isfinite(self.via_clearance) or self.via_clearance < 0
+        ):
+            raise ValueError("Fixed-fill via clearance must be finite and nonnegative")
 
 
 @dataclass(frozen=True)
@@ -57,6 +64,8 @@ class FixedFillObstacles:
         layer: int,
         half: float,
         clearance: float,
+        *,
+        via_query: bool = False,
     ) -> bool:
         if not self.fills:
             return True
@@ -66,7 +75,10 @@ class FixedFillObstacles:
         for fill in self.fills:
             if fill.layer != layer:
                 continue
-            required = half + max(clearance, fill.clearance)
+            local = fill.clearance
+            if via_query and fill.via_clearance is not None:
+                local = max(local, fill.via_clearance)
+            required = half + max(clearance, local)
             x0, y0, x1, y1 = fill.geometry.bounds
             if (
                 max(a[0], b[0]) + required < x0
@@ -87,9 +99,12 @@ class FixedFillObstacles:
         radius: float,
         clearance: float,
     ) -> bool:
-        return all(self.segment_clear(point, point, layer, radius, clearance) for layer in layers)
+        return all(
+            self.segment_clear(point, point, layer, radius, clearance, via_query=True)
+            for layer in layers
+        )
 
-    def native_polygons(self):
+    def native_polygons(self, *, include_via_clearance=False):
         """Simple polygons with holes; preserve every lobe of a multipolygon."""
         for fill in self.fills:
             geometries = (
@@ -98,7 +113,7 @@ class FixedFillObstacles:
                 else (fill.geometry,)
             )
             for geometry in geometries:
-                yield (
+                record = (
                     fill.layer,
                     fill.clearance,
                     [
@@ -106,6 +121,7 @@ class FixedFillObstacles:
                         *[list(ring.coords) for ring in geometry.interiors],
                     ],
                 )
+                yield record + (fill.via_clearance,) if include_via_clearance else record
 
 
 # Outward rounding for polygonal circle approximations: a tessellated disc

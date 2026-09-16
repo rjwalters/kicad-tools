@@ -725,7 +725,7 @@ CoupledRouteResult CoupledPathfinder::route(
                     double gap = c.is_via ? rules_.via_clearance : (rail_gap >= 0 ? rail_gap : rules_.trace_clearance);
                     if (c.is_via) {
                         for (int l = 0; l < num_layers_; ++l)
-                            if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half+gap)) return false;
+                            if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half+gap, true)) return false;
                         return true;
                     }
                     return grid_.fixed_fill_clear(wx, wy, vx, vy, layer, half, half+gap);

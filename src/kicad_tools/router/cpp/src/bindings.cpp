@@ -216,8 +216,11 @@ NB_MODULE(router_cpp, m) {
         .def("add_component_hole", &Grid3D::add_component_hole)
         .def("component_holes_clear", &Grid3D::component_holes_clear)
         .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
-        .def("add_fixed_fill", &Grid3D::add_fixed_fill)
-        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
+        .def("add_fixed_fill", &Grid3D::add_fixed_fill, nb::arg("layer"), nb::arg("clearance"),
+             nb::arg("rings"), nb::arg("via_clearance") = -1.0)
+        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear, nb::arg("ax"), nb::arg("ay"),
+             nb::arg("bx"), nb::arg("by"), nb::arg("layer"), nb::arg("half"),
+             nb::arg("reach"), nb::arg("via_query") = false)
         .def("route_geometry_complete", &Grid3D::route_geometry_complete)
         .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
         .def("route_trace_geometry_clear", &Grid3D::route_trace_geometry_clear)
