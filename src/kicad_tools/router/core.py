@@ -17875,9 +17875,26 @@ class Autorouter:
 
         all_routes: list[Route] = []
 
+        from .kelvin_escape import recover_kelvin_escapes
+
+        physical_pads = self.all_pads or list(self.pads.values())
         for package in packages:
             escapes = self._escape.generate_escapes(package)
+            original_escapes = {id(escape) for escape in escapes}
+            escapes = recover_kelvin_escapes(
+                self._escape,
+                package,
+                escapes,
+                physical_pads,
+                edge_segments=self._edge_segments,
+                edge_clearance=self._edge_clearance or 0.0,
+            )
+            recovered_escapes = {id(escape) for escape in escapes} - original_escapes
             routes = self._escape.apply_escape_routes(escapes)
+            # Only committed recoveries gain protection from sibling rip-up.
+            self._in_pad_escape_protected_nets.update(
+                escape.pad.net for escape in escapes if id(escape) in recovered_escapes
+            )
             all_routes.extend(routes)
 
             # Track these routes
