@@ -35,7 +35,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
@@ -8324,6 +8324,7 @@ class EscapeRouter:
         max_offset_mm: float | None = None,
         step_mm: float = 0.05,
         existing_escapes: list[EscapeRoute] | None = None,
+        candidate_validator: Callable[[EscapeRoute], bool] | None = None,
     ) -> EscapeRoute | None:
         """Probe off-pad via candidates along the pin's escape direction.
 
@@ -8402,6 +8403,10 @@ class EscapeRouter:
                 drop from the refused in-pad via to its lateral replacement.
                 ``None`` (legacy callers / unit fixtures) disables the
                 sibling check, preserving byte-for-byte behaviour.
+
+            candidate_validator: Optional full-route physical predicate. A
+                rejection continues the existing bounded offset search; legacy
+                callers without a predicate retain their original behavior.
 
         Returns:
             An ``EscapeRoute`` with the laterally-offset via and the
@@ -8632,6 +8637,19 @@ class EscapeRouter:
                     net_name=pad.net_name,
                 )
 
+                candidate = EscapeRoute(
+                    pad=pad,
+                    direction=direction,
+                    escape_point=(escape_x, escape_y),
+                    escape_layer=escape_layer,
+                    via_pos=(cand_x, cand_y),
+                    segments=[surface_seg, inner_seg],
+                    via=lateral_via,
+                    ring_index=0,
+                )
+                if candidate_validator is not None and not candidate_validator(candidate):
+                    continue
+
                 logger.info(
                     "Lateral via-escape rescue for pad %s (ref=%s pin=%s): "
                     "in-pad deferred; off-pad via at (%.3f, %.3f) "
@@ -8650,16 +8668,7 @@ class EscapeRouter:
                     escape_layer.kicad_name,
                 )
 
-                return EscapeRoute(
-                    pad=pad,
-                    direction=direction,
-                    escape_point=(escape_x, escape_y),
-                    escape_layer=escape_layer,
-                    via_pos=(cand_x, cand_y),
-                    segments=[surface_seg, inner_seg],
-                    via=lateral_via,
-                    ring_index=0,
-                )
+                return candidate
 
         # No candidate in the budget passed.  Caller (dispatcher) will
         # treat this as "defer to main router" -- the same outcome the

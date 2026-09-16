@@ -207,6 +207,12 @@ def recover_kelvin_escapes(
             router.rules.get_clearance_for_component(package.ref, pin_pitch=package.pin_pitch),
         )
         width = router._get_trace_width_for_net(pad.net_name)
+
+        def candidate_clear(candidate: EscapeRoute) -> bool:
+            return _candidate_clear(
+                router, candidate, result, pads, clearance, edge_segments or [], edge_clearance
+            )
+
         outward = router._try_lateral_via_escape(
             pad,
             escape.direction,
@@ -214,6 +220,7 @@ def recover_kelvin_escapes(
             width,
             package=package,
             existing_escapes=result,
+            candidate_validator=candidate_clear,
         )
         if outward is not None:
             continue
@@ -224,9 +231,8 @@ def recover_kelvin_escapes(
             width,
             package=package,
             existing_escapes=result,
+            candidate_validator=candidate_clear,
         )
-        if candidate is not None and _candidate_clear(
-            router, candidate, result, pads, clearance, edge_segments or [], edge_clearance
-        ):
+        if candidate is not None:
             result[index] = candidate
     return result

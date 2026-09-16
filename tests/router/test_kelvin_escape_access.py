@@ -17,7 +17,7 @@ from kicad_tools.router.primitives import Pad, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
-def fixture():
+def fixture(pad_height=1.55):
     rules = DesignRules(
         trace_width=0.2,
         trace_clearance=0.2,
@@ -33,7 +33,7 @@ def fixture():
             x=10 + dx,
             y=10,
             width=0.3,
-            height=1.55,
+            height=pad_height,
             layer=Layer.F_CU,
             net=net,
             net_name=name,
@@ -212,3 +212,27 @@ def test_kelvin_access_cannot_merge_into_existing_force_branch(location):
             )
         )
     assert recover_kelvin_escapes(router, package, escapes, pads)[0] is escapes[0]
+
+
+def test_illegal_outward_candidate_does_not_hide_legal_inward_access():
+    router, package, escapes, pads = fixture()
+    for sibling in escapes[1:]:
+        sibling.via = None
+        sibling.via_pos = None
+    router.board_bounds = (0, 0, 20, 11.1)
+    router.edge_clearance = 0.2
+    result = recover_kelvin_escapes(router, package, escapes, pads)
+    assert result[0].via is not None
+    assert result[0].direction == EscapeDirection.SOUTH
+
+
+def test_bounded_search_continues_after_full_clearance_rejects_first_candidate():
+    router, package, escapes, pads = fixture(pad_height=1.6)
+    # First via at y8.70 has .199 mm clearance from this track; the next
+    # allowed offset y8.65 clears it without increasing the search budget.
+    escapes[1].segments.append(
+        Segment(x1=10.599, y1=8.7, x2=11, y2=8.7, width=0.2, layer=Layer.F_CU, net=2)
+    )
+    result = recover_kelvin_escapes(router, package, escapes, pads)
+    assert result[0].via is not None
+    assert result[0].via.y == pytest.approx(8.65)
