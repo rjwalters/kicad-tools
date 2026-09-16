@@ -247,7 +247,11 @@ namespace router {
 // v28: trace-halo refinement preserves the separate via clearance floor.
 // v29: indexed physical component-hole clearance during via search.
 // v30: final route validation accepts the separate physical component-hole floor.
-constexpr int ROUTER_CPP_BUILD_VERSION = 30;
+// v32: combine physical halo/component-hole refinement with the static
+// differential partner-pad guard (#5482). Version 31 is already used by
+// separate held stored-via/coupled-routing builds; do not accept their binaries.
+constexpr int ROUTER_CPP_BUILD_VERSION = 32;
+
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the
