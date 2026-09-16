@@ -431,6 +431,83 @@ class SchematicNetlistMixin:
                     return sym
         return fallback
 
+    def _resolve_net_for_pin_pos(
+        self,
+        pin_pos: tuple,
+        parent: dict,
+        point_to_net_names: dict,
+        point_to_pins: dict,
+    ) -> str | None:
+        """Resolve the net name for an already-rounded pin position.
+
+        Core of :meth:`get_net_for_pin`, factored out so a caller that
+        needs to resolve many pins against the *same* schematic (e.g.
+        :func:`kicad_tools.lvs.board_lvs._schematic_pin_to_net`) can build
+        the connectivity graph once via :meth:`_build_connectivity_graph`
+        and reuse it for every pin, instead of paying its O(wires^2)
+        all-pairs scan again on every single pin lookup (issue #5240).
+        Board 05's ``kct check`` LVS sub-step rebuilt this graph once per
+        pin (316 rebuilds for one schematic), which dominated the job's
+        wall time; profiling showed 3.5M ``wire_segments_connect`` calls
+        from repeated graph builds alone.
+
+        Args:
+            pin_pos: Rounded ``(x, y)`` position of the pin being queried.
+            parent: Union-Find parent mapping from
+                :meth:`_build_connectivity_graph`.
+            point_to_net_names: Point-to-net-name mapping from the same
+                graph build.
+            point_to_pins: Point-to-pins mapping from the same graph
+                build.
+
+        Returns:
+            Same semantics as :meth:`get_net_for_pin`'s return value.
+        """
+
+        def find(p):
+            if p not in parent:
+                parent[p] = p
+            if parent[p] != p:
+                parent[p] = find(parent[p])
+            return parent[p]
+
+        # Find the root of this pin's position
+        pin_root = find(pin_pos)
+
+        # Look for net names in the same connected component
+        for point, net_names in point_to_net_names.items():
+            if find(point) == pin_root and net_names:
+                return net_names[0]
+
+        # No named net — this component carries no label or power symbol.
+        #
+        # Collect EVERY pin in the component and derive one canonical
+        # auto-name from the whole component (issue #4615).  Deriving it
+        # from ``symbol_ref``/``pin`` — the pin being *queried* — made a
+        # single unnamed node answer a different name to every pad that
+        # asked, which splintered the schematic net identity that LVS
+        # builds on and manufactured C(k, 2) false "shorts" for a k-pad
+        # unnamed net.  See :func:`auto_net_name`.
+        #
+        # The floating predicate is deliberately unchanged: a pin is
+        # floating iff no OTHER point in its component carries a pin.
+        # ``board_lvs``, the copper-LVS vacuity guard, and
+        # ``bound_pad_count`` all depend on ``None`` for a floating pin.
+        component_pins: list[PinRef] = []
+        connected_elsewhere = False
+        for point, pins in point_to_pins.items():
+            if find(point) != pin_root:
+                continue
+            component_pins.extend(pins)
+            if point != pin_pos:
+                connected_elsewhere = True
+
+        if connected_elsewhere:
+            return auto_net_name(component_pins)
+
+        # Pin is floating (not connected to anything)
+        return None
+
     def get_net_for_pin(self, symbol_ref: str, pin: str) -> str | None:
         """Get the net name connected to a symbol's pin.
 
@@ -478,50 +555,72 @@ class SchematicNetlistMixin:
 
         # Build connectivity and find what net this pin is on
         parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
+        return self._resolve_net_for_pin_pos(pin_pos, parent, point_to_net_names, point_to_pins)
 
-        def find(p):
-            if p not in parent:
-                parent[p] = p
-            if parent[p] != p:
-                parent[p] = find(parent[p])
-            return parent[p]
+    def get_all_pin_nets(self) -> dict[tuple[str, str], str | None]:
+        """Return ``{(symbol_ref, pin_number) -> net_name}`` for every pin.
 
-        # Find the root of this pin's position
-        pin_root = find(pin_pos)
+        Equivalent to calling :meth:`get_net_for_pin` once per ``(ref,
+        number)`` key that appears across ``self.symbols`` (the same key
+        convention :func:`kicad_tools.lvs.board_lvs._schematic_pin_to_net`
+        uses), but builds the connectivity graph via
+        :meth:`_build_connectivity_graph` exactly **once** instead of once
+        per pin (issue #5240). ``get_net_for_pin`` is unchanged and still
+        rebuilds the graph on every call -- this method exists for bulk
+        callers that need every pin's net and would otherwise pay that
+        O(wires^2) rebuild ``len(pins)`` times over.
 
-        # Look for net names in the same connected component
-        for point, net_names in point_to_net_names.items():
-            if find(point) == pin_root and net_names:
-                return net_names[0]
+        For a multi-unit symbol sharing a ``reference`` across several
+        placed instances, later instances are skipped once a ``(ref,
+        number)`` key is already resolved: :meth:`_resolve_pin_instance`
+        always picks the same canonical unit-owning instance regardless
+        of which instance's pin list is being walked, so re-resolving a
+        key already seen would recompute an identical value -- exactly
+        matching the historical per-pin ``get_net_for_pin`` loop's output.
 
-        # No named net — this component carries no label or power symbol.
-        #
-        # Collect EVERY pin in the component and derive one canonical
-        # auto-name from the whole component (issue #4615).  Deriving it
-        # from ``symbol_ref``/``pin`` — the pin being *queried* — made a
-        # single unnamed node answer a different name to every pad that
-        # asked, which splintered the schematic net identity that LVS
-        # builds on and manufactured C(k, 2) false "shorts" for a k-pad
-        # unnamed net.  See :func:`auto_net_name`.
-        #
-        # The floating predicate is deliberately unchanged: a pin is
-        # floating iff no OTHER point in its component carries a pin.
-        # ``board_lvs``, the copper-LVS vacuity guard, and
-        # ``bound_pad_count`` all depend on ``None`` for a floating pin.
-        component_pins: list[PinRef] = []
-        connected_elsewhere = False
-        for point, pins in point_to_pins.items():
-            if find(point) != pin_root:
+        Returns:
+            Mapping from ``(symbol_ref, pin_number)`` to net name (``None``
+            if floating), covering every ``(ref, number)`` pair reachable
+            by iterating ``self.symbols`` and their ``symbol_def.pins``.
+        """
+        parent, point_to_net_names, point_to_pins = self._build_connectivity_graph()
+
+        result: dict[tuple[str, str], str | None] = {}
+        for sym in self.symbols:  # type: ignore[attr-defined]
+            ref = sym.reference
+            if not ref:
                 continue
-            component_pins.extend(pins)
-            if point != pin_pos:
-                connected_elsewhere = True
+            for p in sym.symbol_def.pins:
+                number = p.number
+                if not number:
+                    continue
+                key = (ref, number)
+                if key in result:
+                    continue
 
-        if connected_elsewhere:
-            return auto_net_name(component_pins)
+                # Mirrors get_net_for_pin's own resolution steps exactly,
+                # just against the graph built once above.
+                symbol = self._resolve_pin_instance(ref, number)
+                if symbol is None:
+                    result[key] = None
+                    continue
 
-        # Pin is floating (not connected to anything)
-        return None
+                pin_pos = None
+                for rp in symbol.symbol_def.pins:
+                    if rp.number == number or rp.name == number:
+                        pos = symbol.pin_position(rp.number)
+                        pin_pos = (round(pos[0], 2), round(pos[1], 2))
+                        break
+
+                if pin_pos is None:
+                    result[key] = None
+                    continue
+
+                result[key] = self._resolve_net_for_pin_pos(
+                    pin_pos, parent, point_to_net_names, point_to_pins
+                )
+
+        return result
 
     def pins_on_net(self, net_name: str) -> list[PinRef]:
         """Get all pins connected to a net.
