@@ -106,9 +106,14 @@ Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
 }
 
 void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
-                          bool pad_blocked) {
+                          bool pad_blocked, bool pad_geometry) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
+    const size_t key = index(x, y, layer);
+    if (pad_geometry && (!cell.blocked || pad_geometry_cells_.count(key)))
+        pad_geometry_cells_.insert(key);
+    else
+        pad_geometry_cells_.erase(key);
     if (cell.congestion_counted) {
         update_congestion(x, y, layer, -1);
         cell.congestion_counted = false;
@@ -181,6 +186,7 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                             cell.congestion_counted = true;
                         }
                     }
+                    pad_geometry_cells_.erase(index(nx, ny, layer));
                     cell.blocked = true;
                 }
             }
@@ -259,6 +265,7 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
                         }
                         cell.net = net;
                     }
+                    pad_geometry_cells_.erase(index(nx, ny, layer));
                     cell.blocked = true;
                 }
             }
@@ -531,6 +538,9 @@ void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
                      float clearance_override, bool is_plane_net, float rotation,
                      bool is_circular) {
+    const float extent = std::hypot(width, height) / 2;
+    index_route_geometry(pad_geometry_bins_, pads_.size(), x-extent, y-extent, x+extent, y+extent);
+    max_pad_clearance_ = std::max(max_pad_clearance_, clearance_override);
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
                      clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
 }
@@ -556,6 +566,44 @@ static float pad_rect_distance(const PadInfo& pad, float x1, float y1,
         0.0f, 0.0f, pad.width, pad.height,
         c * dx1 - s * dy1, s * dx1 + c * dy1,
         c * dx2 - s * dy2, s * dx2 + c * dy2);
+}
+
+void Grid3D::clear_pad_geometry_cell(int x, int y, int layer) {
+    if (is_valid(x, y, layer)) pad_geometry_cells_.erase(index(x, y, layer));
+}
+
+bool Grid3D::pad_cell_has_geometry(int x, int y, int layer) const {
+    if (!is_valid(x, y, layer)) return false;
+    const auto& cell = at(x, y, layer);
+    return cell.blocked && cell.static_blocked && cell.usage_count == 0 &&
+        cell.reserved_count == 0 && !pads_.empty() &&
+        pad_geometry_cells_.count(index(x, y, layer)) != 0;
+}
+
+bool Grid3D::pad_trace_geometry_clear(const Segment& s) const {
+    const float reach = s.width / 2 + std::max(max_pad_clearance_, max_pairwise_clearance());
+    std::set<size_t> seen;
+    for (int bx = std::floor((std::min(s.x1,s.x2)-reach)/2);
+         bx <= std::floor((std::max(s.x1,s.x2)+reach)/2); ++bx) {
+        for (int by = std::floor((std::min(s.y1,s.y2)-reach)/2);
+             by <= std::floor((std::max(s.y1,s.y2)+reach)/2); ++by) {
+            auto bin = pad_geometry_bins_.find({bx, by});
+            if (bin == pad_geometry_bins_.end()) continue;
+            for (size_t i : bin->second) {
+                if (!seen.insert(i).second) continue;
+                const auto& pad = pads_[i];
+                if (pad.net == s.net || (pad.layer_idx != -1 && pad.layer_idx != s.layer)) continue;
+                const float required = std::max(pad.clearance_override,
+                    pairwise_required_clearance(s.net, pad.net));
+                const float distance = pad.is_circular
+                    ? point_to_segment_distance(pad.x,pad.y,s.x1,s.y1,s.x2,s.y2)
+                        - std::max(pad.width,pad.height)/2
+                    : pad_rect_distance(pad,s.x1,s.y1,s.x2,s.y2);
+                if (distance - s.width/2 < required - CLEARANCE_EPSILON_MM) return false;
+            }
+        }
+    }
+    return true;
 }
 
 Grid3D::RouteMarkKey Grid3D::segment_mark_key(
@@ -698,6 +746,9 @@ void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int n
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    pad_geometry_bins_.clear();
+    pad_geometry_cells_.clear();
+    max_pad_clearance_ = 0.0f;
     clear_component_holes();
     stored_segments_.clear();
     stored_vias_.clear();

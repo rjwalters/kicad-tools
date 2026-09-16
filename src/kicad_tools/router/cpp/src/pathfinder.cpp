@@ -648,6 +648,15 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
                 const int floor_r = static_cast<int>(std::ceil((half_mm + floor) / res));
                 if (floor <= 0.0f || dist_sq > floor_r * floor_r) continue;
             }
+            // A pad halo already includes pad clearance. Refine widening
+            // only when every mark on this cell has known pad provenance.
+            if (grid_.pad_cell_has_geometry(cx, cy, layer)) {
+                Segment point;
+                point.x1 = point.x2 = cw.first;
+                point.y1 = point.y2 = cw.second;
+                point.width = 2 * half_mm; point.layer = layer; point.net = net;
+                if (grid_.pad_trace_geometry_clear(point)) continue;
+            }
             // Issue #4507: name the blocker so a drained search can report
             // FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH.  Diagnostic
             // only -- the verdict below is unchanged.

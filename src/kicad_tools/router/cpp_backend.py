@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 49
+_REQUIRED_CPP_BUILD_VERSION = 50
 
 
 # Try to import C++ module with detailed error tracking
@@ -966,7 +966,15 @@ class CppGrid:
                     pad_blocked_np[ls, ys, xs].tolist(),
                     strict=True,
                 ):
-                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
+                    mark_blocked(
+                        x,
+                        y,
+                        layer,
+                        net,
+                        is_obstacle,
+                        pad_blocked,
+                        (layer, y, x) in grid._pad_geometry_cells,
+                    )
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner

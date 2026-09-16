@@ -95,7 +95,7 @@ public:
     // mirroring the Python grid's ``_pad_blocked[metal_slice] = True``
     // at ``grid.py:4458``.
     void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false,
-                      bool pad_blocked = false);
+                      bool pad_blocked = false, bool pad_geometry = false);
     void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
                            bool is_obstacle = false);
 
@@ -292,6 +292,9 @@ public:
                                     int partner_net, float partner_clearance, float via_clearance) const;
     // Authored floors are hard even without matching raster coverage.
     bool authored_trace_geometry_clear(const Segment& segment) const;
+    void clear_pad_geometry_cell(int x, int y, int layer);
+    bool pad_cell_has_geometry(int x, int y, int layer) const;
+    bool pad_trace_geometry_clear(const Segment& segment) const;
     // Hard constraint for negotiated traces; foreign trace copper remains soft.
     bool trace_stored_vias_clear(const Segment& segment, float clearance,
                                  int partner_net, float partner_clearance) const;
@@ -511,6 +514,9 @@ private:
     std::vector<std::array<float, 5>> component_holes_;
     GeometryBins route_segment_bins_;
     GeometryBins route_via_bins_;
+    GeometryBins pad_geometry_bins_;
+    std::set<size_t> pad_geometry_cells_;
+    float max_pad_clearance_ = 0.0f;
     static void index_route_geometry(GeometryBins& bins, size_t index,
                                      float minx, float miny, float maxx, float maxy);
 

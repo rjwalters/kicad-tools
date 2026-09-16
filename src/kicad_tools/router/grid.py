@@ -387,6 +387,7 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
+                    (layer_idx, gy, gx) in py_grid._pad_geometry_cells,
                 )
 
 
@@ -640,6 +641,7 @@ class _CellView:
 
     @blocked.setter
     def blocked(self, value: bool) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._blocked[self._layer, self._y, self._x] = value
         # Issue #4794: this setter is THE per-cell choke point for
         # ``mark_route``/``unmark_route``/``add_pad`` -- bump inline (rather
@@ -653,6 +655,7 @@ class _CellView:
 
     @net.setter
     def net(self, value: int) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._net[self._layer, self._y, self._x] = value
         self._grid._occupancy_generation += 1  # Issue #4794
 
@@ -682,6 +685,7 @@ class _CellView:
 
     @is_obstacle.setter
     def is_obstacle(self, value: bool) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._is_obstacle[self._layer, self._y, self._x] = value
 
     @property
@@ -710,6 +714,7 @@ class _CellView:
 
     @pad_blocked.setter
     def pad_blocked(self, value: bool) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._pad_blocked[self._layer, self._y, self._x] = value
 
     @property
@@ -922,6 +927,10 @@ class RoutingGrid:
         # Issue #750: Grid-based checking is approximate; we need precise geometry
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
+        # Cells blocked exclusively by registered pad geometry. Any generic
+        # occupancy write revokes this proof; overlapping unknown obstacles
+        # must never inherit a pad-halo clearance refinement.
+        self._pad_geometry_cells: set[tuple[int, int, int]] = set()
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation. When pads share the same component (e.g.,
@@ -1548,6 +1557,15 @@ class RoutingGrid:
             round(self.origin_y + gy * self.resolution, 4),
         )
 
+    def _invalidate_pad_geometry_cell(self, layer: int, y: int, x: int) -> None:
+        key = (layer, y, x)
+        if key not in self._pad_geometry_cells:
+            return
+        self._pad_geometry_cells.remove(key)
+        cpp_grid = getattr(self, "_cpp_grid", None)
+        if cpp_grid is not None:
+            cpp_grid._impl.clear_pad_geometry_cell(x, y, layer)
+
     def add_obstacle(self, obs: Obstacle) -> None:
         """Mark grid cells as blocked by an obstacle.
 
@@ -2022,6 +2040,8 @@ class RoutingGrid:
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.cell_at(layer_idx, gy, gx)
+                        key = (layer_idx, gy, gx)
+                        pad_only = not cell.blocked or key in self._pad_geometry_cells
                         cell.blocked = True
                         cell.original_net = pad.net
 
@@ -2166,6 +2186,9 @@ class RoutingGrid:
                                 cell.is_obstacle = True
                             elif cell.net != pad.net:
                                 cell.is_obstacle = True
+
+                        if pad_only:
+                            self._pad_geometry_cells.add(key)
 
             # Always mark the center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
@@ -2514,6 +2537,7 @@ class RoutingGrid:
                         # both standard and negotiated modes (see
                         # pathfinder ``_is_trace_blocked`` and
                         # ``allow_sharing`` paths).
+                        self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                         self._blocked[layer_idx, gy, gx] = True
                         self.bump_occupancy_generation()  # Issue #4794
                     else:
@@ -2525,6 +2549,7 @@ class RoutingGrid:
                         # nets cannot share it in negotiated mode, but
                         # leave its net assignment intact so its owner can
                         # still route through it.
+                        self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                         self._is_obstacle[layer_idx, gy, gx] = True
 
     def _apply_narrow_channel_halo(
@@ -2786,6 +2811,7 @@ class RoutingGrid:
                             # net can still traverse it
                             # (``cell.net == routing_net`` passes both
                             # checks).  Preserve cell.net.
+                            self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                             self._blocked[layer_idx, gy, gx] = True
                             self._is_obstacle[layer_idx, gy, gx] = True
                             self.bump_occupancy_generation()  # Issue #4794
@@ -2802,6 +2828,7 @@ class RoutingGrid:
                             # rather than a hard one (preserves
                             # nuance for the negotiated-mode shared
                             # net flow).
+                            self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                             self._blocked[layer_idx, gy, gx] = True
                             self.bump_occupancy_generation()  # Issue #4794
                         else:
@@ -3053,6 +3080,7 @@ class RoutingGrid:
                         if inside_y and gx1 <= gx <= gx2:
                             continue  # inside the region -- leave untouched
                         cell = self.cell_at(layer_idx, gy, gx)
+                        self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
                             # board edge).  Nothing to add, and mirroring is
@@ -6640,6 +6668,7 @@ class RoutingGrid:
                             blocked_cells.add((nx, ny))
                             for layer_idx in layer_indices:
                                 cell = self.cell_at(layer_idx, ny, nx)
+                                self._invalidate_pad_geometry_cell(layer_idx, ny, nx)
                                 if not cell.blocked:
                                     cell.blocked = True
                                     cell.is_obstacle = True

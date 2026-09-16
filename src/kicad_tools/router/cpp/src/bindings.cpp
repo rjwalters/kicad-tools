@@ -227,7 +227,10 @@ NB_MODULE(router_cpp, m) {
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
-             "pad_blocked"_a = false)
+             "pad_blocked"_a = false, "pad_geometry"_a = false)
+        .def("clear_pad_geometry_cell", &Grid3D::clear_pad_geometry_cell)
+        .def("pad_cell_has_geometry", &Grid3D::pad_cell_has_geometry)
+        .def("pad_trace_geometry_clear", &Grid3D::pad_trace_geometry_clear)
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking
