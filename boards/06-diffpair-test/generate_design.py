@@ -2951,7 +2951,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # before coupled, escape, and ordinary signal routing consume that space.
     access_policy = PlaneAccessPolicy(
         (PlaneAccessTarget("GND", "In1.Cu"),),
-        EscapeRules.from_project(input_path.with_suffix(".kicad_pro")),
+        EscapeRules.from_projects(
+            input_path.with_suffix(".kicad_pro"), output_path.with_suffix(".kicad_pro")
+        ),
     )
     router, net_map = load_pcb_for_routing(
         str(input_path),

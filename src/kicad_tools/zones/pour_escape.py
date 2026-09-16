@@ -130,6 +130,22 @@ class EscapeRules:
     hole_edge_clearance: float = 0.0
 
     @classmethod
+    def from_projects(cls, *paths: Path) -> EscapeRules:
+        """Preserve every minimum across explicit input and deferred-output contexts.
+
+        Each project's sibling DRU is validated independently. This reads both
+        contexts without silently copying, replacing, or weakening either one.
+        """
+        if not paths:
+            raise ValueError("At least one explicit project context is required")
+        contexts = [cls.from_project(path) for path in paths]
+        values = {
+            name: max(getattr(context, name) for context in contexts) for name in vars(contexts[0])
+        }
+        values["diameter"] = max(values["diameter"], values["drill"] + 2 * values["annulus"])
+        return cls(**values)
+
+    @classmethod
     def from_project(cls, path: Path) -> EscapeRules:
         """Strengthen defaults with project minima; reject unmodeled custom rules."""
         dru_path = path.with_suffix(".kicad_dru")

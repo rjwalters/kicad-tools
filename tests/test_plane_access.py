@@ -207,3 +207,42 @@ def test_serialized_reload_cannot_drop_access_policy(board, load_existing):
     assert '(group "kct:fixed-plane-access:v1"' in board.read_text()
     with pytest.raises(ValueError, match="fixed plane access metadata"):
         load_pcb_for_routing(str(board), load_existing_routes=load_existing, force_python=True)
+
+
+def test_access_rules_bind_both_projects_and_output_dru(tmp_path):
+    import json
+
+    from tests.test_board06_pour_escape import _kct_managed_dru
+
+    source, output = [tmp_path / name for name in ("input.kicad_pro", "output.kicad_pro")]
+    source.write_text(
+        json.dumps(
+            {
+                "board": {
+                    "design_settings": {
+                        "rules": {"min_through_hole_diameter": 0.5, "min_clearance": 0.35}
+                    }
+                }
+            }
+        )
+    )
+    output.write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_via_annular_width": 0.3}}}})
+    )
+    output.with_suffix(".kicad_dru").write_text(
+        _kct_managed_dru(
+            '(rule "Copper to Edge - jlcpcb-tier1"\n  (constraint edge_clearance (min 0.3mm)))',
+            '(rule "Hole to Edge - jlcpcb-tier1"\n'
+            "  (condition \"(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'\")\n"
+            "  (constraint physical_hole_clearance (min 0.4mm)))",
+        )
+    )
+    before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+    rules = EscapeRules.from_projects(source, output)
+    assert rules.clearance == 0.35 and rules.drill == 0.5 and rules.annulus == 0.3
+    assert rules.diameter == pytest.approx(1.1)
+    assert rules.edge_clearance == 0.3 and rules.hole_edge_clearance == 0.4
+    assert before == {p: p.read_bytes() for p in tmp_path.iterdir()}
+    output.with_suffix(".kicad_dru").write_text('(version 1)\n(rule "Unknown")')
+    with pytest.raises(ValueError, match="custom DRC rules"):
+        EscapeRules.from_projects(source, output)
