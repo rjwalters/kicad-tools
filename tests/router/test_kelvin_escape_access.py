@@ -191,3 +191,24 @@ def test_same_net_sibling_drills_still_need_spacing():
         )
     )
     assert recover_kelvin_escapes(router, package, escapes, pads)[0] is escapes[0]
+
+
+@pytest.mark.parametrize("location", ["fixed", "sibling"])
+def test_kelvin_access_cannot_merge_into_existing_force_branch(location):
+    from kicad_tools.router.primitives import Route
+
+    router, package, escapes, pads = fixture()
+    force = Segment(x1=9, y1=9.5, x2=11, y2=9.5, width=0.2, layer=Layer.F_CU, net=1)
+    if location == "fixed":
+        router.grid.mark_route(Route(net=1, net_name="VSNS", segments=[force]))
+    else:
+        escapes.append(
+            EscapeRoute(
+                pad=pads[-1],
+                direction=EscapeDirection.SOUTH,
+                escape_point=(11, 9.5),
+                escape_layer=Layer.F_CU,
+                segments=[force],
+            )
+        )
+    assert recover_kelvin_escapes(router, package, escapes, pads)[0] is escapes[0]

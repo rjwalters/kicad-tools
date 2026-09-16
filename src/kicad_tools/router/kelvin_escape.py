@@ -43,6 +43,60 @@ def _candidate_clear(
             continue
         if pad_point_distance(pad, via.x, via.y) < via.diameter / 2 + clearance - 1e-6:
             return False
+    # Kelvin access must not join an existing same-net force/sense branch
+    # before its shunt. Ordinary clearance validators deliberately allow that
+    # electrical merge, so reject it explicitly here. The replaced escape is
+    # the only same-pad geometry that may overlap the new stub.
+    same_net_segments = [
+        segment for route in grid.routes for segment in route.segments if segment.net == via.net
+    ]
+    same_net_vias = [other for route in grid.routes for other in route.vias if other.net == via.net]
+    for sibling in siblings:
+        if sibling.pad is candidate.pad:
+            continue
+        if sibling.pad.net == via.net:
+            same_net_segments.extend(sibling.segments)
+            if sibling.via is not None:
+                same_net_vias.append(sibling.via)
+    for segment in same_net_segments:
+        if (
+            point_to_segment_distance(via.x, via.y, segment.x1, segment.y1, segment.x2, segment.y2)
+            < (via.diameter + segment.width) / 2 + clearance
+        ):
+            return False
+    for segment in candidate.segments:
+        for other_segment in same_net_segments:
+            if (
+                other_segment.layer == segment.layer
+                and segment_to_segment_distance(
+                    segment.x1,
+                    segment.y1,
+                    segment.x2,
+                    segment.y2,
+                    other_segment.x1,
+                    other_segment.y1,
+                    other_segment.x2,
+                    other_segment.y2,
+                )
+                < (segment.width + other_segment.width) / 2 + clearance
+            ):
+                return False
+        for other in same_net_vias:
+            if (
+                point_to_segment_distance(
+                    other.x, other.y, segment.x1, segment.y1, segment.x2, segment.y2
+                )
+                < (segment.width + other.diameter) / 2 + clearance
+            ):
+                return False
+        for other_pad in pads:
+            if (
+                other_pad is not candidate.pad
+                and other_pad.net == via.net
+                and (other_pad.layer == segment.layer or other_pad.through_hole)
+                and router._segment_to_pad_edge_gap(segment, other_pad) < clearance
+            ):
+                return False
     for sibling in siblings:
         if sibling.pad.net == via.net:
             continue
