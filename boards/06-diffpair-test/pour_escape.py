@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import heapq
 import json
 import math
 import re
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -308,11 +308,26 @@ def find_escape(
     origin = (0, 0)
     if blocked_trace.intersects(Point(point(origin))):
         return None
-    pending = deque([origin])
+    # Euclidean distance to any accepted target region is a lower bound on
+    # remaining physical path length. Keep through targets unclipped by via
+    # obstacles/bounds: enlarging the goal set only lowers this heuristic.
+    # The distinct-node cap still makes this a bounded search, not a promise
+    # of completeness or shortest paths under that cap.
+    targets = unary_union([front.context, through.context])
+
+    def estimate(xy):
+        return 0.0 if targets.is_empty else targets.distance(Point(xy))
+
+    pending = [(estimate(point(origin)), 0, 0.0, origin)]
+    sequence = 0
     previous = {origin: None}
+    costs = {origin: 0.0}
+    estimates = {origin: pending[0][0]}
     moves = ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
     while pending:
-        current = pending.popleft()
+        _, _, cost, current = heapq.heappop(pending)
+        if cost != costs[current]:
+            continue  # Superseded open entry; never expand an obsolete path.
         xy = point(current)
         pt = Point(xy)
         on_front = current != origin and front.intersects(pt)
@@ -337,15 +352,25 @@ def find_escape(
             return Escape(tuple(corners), not on_front, rules)
         for dx, dy in moves:
             following = (current[0] + dx, current[1] + dy)
-            if following in previous:
-                continue
             nx, ny = point(following)
+            # Use the emitted (rounded) physical endpoints, including the
+            # longer diagonal step, rather than grid-hop counts.
+            following_cost = cost + math.hypot(nx - xy[0], ny - xy[1])
+            if following_cost >= costs.get(following, math.inf):
+                continue
             if not (min_x <= nx <= max_x and min_y <= ny <= max_y):
                 continue
             if blocked_trace.intersects(LineString([xy, (nx, ny)])):
                 continue
-            if len(previous) >= node_budget:
-                return None
+            if following not in previous:
+                if len(previous) >= node_budget:
+                    return None
+                estimates[following] = estimate((nx, ny))
             previous[following] = current
-            pending.append(following)
+            costs[following] = following_cost
+            sequence += 1
+            heapq.heappush(
+                pending,
+                (following_cost + estimates[following], sequence, following_cost, following),
+            )
     return None
