@@ -34,6 +34,7 @@ import base64
 import logging
 import math
 import threading
+import weakref
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
@@ -642,6 +643,23 @@ class _CellView:
     @blocked.setter
     def blocked(self, value: bool) -> None:
         self._grid._pad_halo_cells.discard((self._layer, self._y, self._x))
+        key = (self._layer, self._y, self._x)
+        route_geometry = getattr(self._grid, "_route_geometry_cells", None)
+        active_route = getattr(self._grid, "_active_geometry_route", None)
+        previous_routes = route_geometry.get(key) if route_geometry is not None else None
+        known_geometry = (
+            not self.blocked
+            or key in getattr(self._grid, "_pad_geometry_cells", ())
+            or previous_routes is not None
+        )
+        if route_geometry is not None:
+            if value and active_route is not None and known_geometry:
+                route_geometry[key] = (previous_routes or frozenset()) | active_route
+            else:
+                route_geometry.pop(key, None)
+        pad_geometry = getattr(self._grid, "_pad_geometry_cells", None)
+        if pad_geometry is not None:
+            pad_geometry.discard((self._layer, self._y, self._x))
         self._grid._blocked[self._layer, self._y, self._x] = value
         # Issue #4794: this setter is THE per-cell choke point for
         # ``mark_route``/``unmark_route``/``add_pad`` -- bump inline (rather
@@ -655,6 +673,10 @@ class _CellView:
 
     @net.setter
     def net(self, value: int) -> None:
+        if not getattr(self._grid, "_active_geometry_pad", False) and not getattr(
+            self._grid, "_active_geometry_route", None
+        ):
+            self._grid._forget_geometry_cell(self._layer, self._y, self._x)
         self._grid._net[self._layer, self._y, self._x] = value
         self._grid._occupancy_generation += 1  # Issue #4794
 
@@ -684,6 +706,10 @@ class _CellView:
 
     @is_obstacle.setter
     def is_obstacle(self, value: bool) -> None:
+        if not getattr(self._grid, "_active_geometry_pad", False) and not getattr(
+            self._grid, "_active_geometry_route", None
+        ):
+            self._grid._forget_geometry_cell(self._layer, self._y, self._x)
         self._grid._is_obstacle[self._layer, self._y, self._x] = value
 
     @property
@@ -712,6 +738,10 @@ class _CellView:
 
     @pad_blocked.setter
     def pad_blocked(self, value: bool) -> None:
+        if not getattr(self._grid, "_active_geometry_pad", False) and not getattr(
+            self._grid, "_active_geometry_route", None
+        ):
+            self._grid._forget_geometry_cell(self._layer, self._y, self._x)
         self._grid._pad_blocked[self._layer, self._y, self._x] = value
 
     @property
@@ -926,6 +956,15 @@ class RoutingGrid:
         self._pads: list[Pad] = []
         # Provenance for padding that must not be inflated a second time.
         self._pad_halo_cells: set[tuple[int, int, int]] = set()
+        # Exact blocker adjudication requires explicit, revocable provenance.
+        self._pad_geometry_cells: set[tuple[int, int, int]] = set()
+        # Monotonic tokens avoid object-ID reuse after rip-up. Weak references
+        # neither retain removed routes nor certify deserialized provenance.
+        self._route_geometry_cells: dict[tuple[int, int, int], frozenset[int]] = {}
+        self._route_geometry_sources: dict[int, weakref.ReferenceType[Route]] = {}
+        self._route_geometry_counter = 0
+        self._active_geometry_route: frozenset[int] | None = None
+        self._active_geometry_pad = False
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation. When pads share the same component (e.g.,
@@ -1184,13 +1223,24 @@ class RoutingGrid:
         """
         return self._occupancy_generation
 
-    def bump_occupancy_generation(self) -> None:
+    def bump_occupancy_generation(self, *, preserve_geometry: bool = False) -> None:
         """Record that ``_blocked``/``_net`` changed (Issue #4794).
 
         Public so out-of-module writers (test fixtures, ad-hoc tooling that
         pokes the occupancy planes) can keep occupancy-derived caches honest.
+        Unknown bulk writes revoke exact-blocker provenance. Internal writers
+        may preserve it only after updating the affected cells explicitly.
         """
+        if not preserve_geometry:
+            getattr(self, "_pad_geometry_cells", set()).clear()
+            getattr(self, "_route_geometry_cells", {}).clear()
+            getattr(self, "_route_geometry_sources", {}).clear()
         self._occupancy_generation += 1
+
+    def _forget_geometry_cell(self, layer: int, y: int, x: int) -> None:
+        """Unknown or non-geometric writes cannot authorize exact exceptions."""
+        getattr(self, "_pad_geometry_cells", set()).discard((layer, y, x))
+        getattr(self, "_route_geometry_cells", {}).pop((layer, y, x), None)
 
     def cell_at(self, layer: int, y: int, x: int) -> _CellView:
         """Return a single ``_CellView`` for ``(layer, y, x)`` directly.
@@ -1851,6 +1901,16 @@ class RoutingGrid:
             self._add_pad_unsafe(pad, pin_pitch=pin_pitch)
 
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
+        """Register pad geometry while preserving the existing pad-write policy."""
+        self.__dict__.setdefault("_pad_geometry_cells", set())
+        previous = getattr(self, "_active_geometry_pad", False)
+        self._active_geometry_pad = True
+        try:
+            self._add_pad_geometry_unsafe(pad, pin_pitch)
+        finally:
+            self._active_geometry_pad = previous
+
+    def _add_pad_geometry_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
         self._pads.append(pad)
@@ -2039,9 +2099,12 @@ class RoutingGrid:
                         cell = self.cell_at(layer_idx, gy, gx)
                         key = (layer_idx, gy, gx)
                         halo_only = plane_pad and (not cell.blocked or key in self._pad_halo_cells)
+                        geometry_only = not cell.blocked or key in self._pad_geometry_cells
                         cell.blocked = True
                         if halo_only:
                             self._pad_halo_cells.add(key)
+                        if geometry_only:
+                            self._pad_geometry_cells.add(key)
                         cell.original_net = pad.net
 
                         # Issue #3233: Two-tier pad-metal classification.
@@ -2534,7 +2597,8 @@ class RoutingGrid:
                         # pathfinder ``_is_trace_blocked`` and
                         # ``allow_sharing`` paths).
                         self._blocked[layer_idx, gy, gx] = True
-                        self.bump_occupancy_generation()  # Issue #4794
+                        self._forget_geometry_cell(layer_idx, gy, gx)
+                        self.bump_occupancy_generation(preserve_geometry=True)  # Issue #4794
                     else:
                         # Cell already owned by a routable signal net
                         # (almost certainly a neighbour pad's clearance
@@ -2545,6 +2609,7 @@ class RoutingGrid:
                         # leave its net assignment intact so its owner can
                         # still route through it.
                         self._is_obstacle[layer_idx, gy, gx] = True
+                        self._forget_geometry_cell(layer_idx, gy, gx)
 
     def _apply_narrow_channel_halo(
         self,
@@ -2806,8 +2871,9 @@ class RoutingGrid:
                             # (``cell.net == routing_net`` passes both
                             # checks).  Preserve cell.net.
                             self._blocked[layer_idx, gy, gx] = True
+                            self._forget_geometry_cell(layer_idx, gy, gx)
                             self._is_obstacle[layer_idx, gy, gx] = True
-                            self.bump_occupancy_generation()  # Issue #4794
+                            self.bump_occupancy_generation(preserve_geometry=True)  # Issue #4794
                         elif cell_net == 0:
                             # Bucket B: unclaimed cell.  Re-block it
                             # with the standard static-obstacle
@@ -2822,7 +2888,8 @@ class RoutingGrid:
                             # nuance for the negotiated-mode shared
                             # net flow).
                             self._blocked[layer_idx, gy, gx] = True
-                            self.bump_occupancy_generation()  # Issue #4794
+                            self._forget_geometry_cell(layer_idx, gy, gx)
+                            self.bump_occupancy_generation(preserve_geometry=True)  # Issue #4794
                         else:
                             # Bucket C: foreign component / foreign
                             # net already owns this cell.  Leave it
@@ -2974,7 +3041,7 @@ class RoutingGrid:
 
                         # Unblock the cell so A* can route through
                         self._blocked[layer_idx, gy, gx] = False
-                        self.bump_occupancy_generation()  # Issue #4794
+                        self.bump_occupancy_generation(preserve_geometry=True)  # Issue #4794
                         # Issue #3545: record that this component's
                         # corridor was relaxed so the same-component
                         # validator carve-out stays available for it
@@ -3072,6 +3139,7 @@ class RoutingGrid:
                         if inside_y and gx1 <= gx <= gx2:
                             continue  # inside the region -- leave untouched
                         cell = self.cell_at(layer_idx, gy, gx)
+                        self._forget_geometry_cell(layer_idx, gy, gx)
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
                             # board edge).  Nothing to add, and mirroring is
@@ -4682,17 +4750,27 @@ class RoutingGrid:
             # first route copper lands so rip-up can restore pad halos /
             # keepouts instead of erasing them.
             self._ensure_static_blockage_snapshot()
-            for seg in route.segments:
-                # Issue #1674: Use seg.width instead of rules.trace_width
-                # so wider net-class traces block the correct number of cells.
-                total_clearance = seg.width / 2 + self.rules.trace_clearance
-                clearance_cells = int(total_clearance / self.resolution) + 1
-                # Issue #1666: Add safety margin to prevent grid-quantization
-                # clearance violations between parallel traces.
-                clearance_cells += 1
-                self._mark_segment(seg, clearance_cells=clearance_cells)
-            for via in route.vias:
-                self._mark_via(via, max_trace_width=max_trace_width)
+            self.__dict__.setdefault("_route_geometry_cells", {})
+            self.__dict__.setdefault("_route_geometry_sources", {})
+            self._route_geometry_counter = getattr(self, "_route_geometry_counter", 0) + 1
+            token = self._route_geometry_counter
+            self._route_geometry_sources[token] = weakref.ref(route)
+            previous_active = getattr(self, "_active_geometry_route", None)
+            self._active_geometry_route = frozenset({token})
+            try:
+                for seg in route.segments:
+                    # Issue #1674: Use seg.width instead of rules.trace_width
+                    # so wider net-class traces block the correct number of cells.
+                    total_clearance = seg.width / 2 + self.rules.trace_clearance
+                    clearance_cells = int(total_clearance / self.resolution) + 1
+                    # Issue #1666: Add safety margin to prevent grid-quantization
+                    # clearance violations between parallel traces.
+                    clearance_cells += 1
+                    self._mark_segment(seg, clearance_cells=clearance_cells)
+                for via in route.vias:
+                    self._mark_via(via, max_trace_width=max_trace_width)
+            finally:
+                self._active_geometry_route = previous_active
             self.routes.append(route)
             # Maintain R-tree index for fast clearance queries (Issue #1249)
             self._rtree_insert_route(route)
@@ -6620,6 +6698,7 @@ class RoutingGrid:
                             for layer_idx in layer_indices:
                                 cell = self.cell_at(layer_idx, ny, nx)
                                 self._pad_halo_cells.discard((layer_idx, ny, nx))
+                                self._forget_geometry_cell(layer_idx, ny, nx)
                                 if not cell.blocked:
                                     cell.blocked = True
                                     cell.is_obstacle = True

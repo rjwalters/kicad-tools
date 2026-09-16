@@ -5200,11 +5200,19 @@ class DiffPairRouter:
                         return False
                     cell = grid.cell_at(layer, y, x)
                     key = (layer, y, x)
+                    # Reservations are independent of raster blockage. An exact
+                    # geometry exception cannot waive a hard access contract.
+                    if key in grid._reserved_for_nets and key not in grid._soft_reservations:
+                        return False
                     if (cell.blocked or cell.pad_blocked) and key not in proven:
                         sources = routed.get(key)
                         if not sources or not sources <= available:
                             return False
         return True
+
+    def _via_has_only_pad_blockers(self, pathfinder: CoupledPathfinder, gx: int, gy: int) -> bool:
+        """Conservative pad-only form of the recorded-geometry predicate."""
+        return self._via_has_only_geometry_blockers(pathfinder, gx, gy, include_routes=False)
 
     def _layer_return_tails(
         self,

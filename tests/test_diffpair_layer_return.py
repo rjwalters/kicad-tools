@@ -630,3 +630,46 @@ def test_planar_tail_avoids_backtracking_through_its_preceding_body():
         [[body.start, body.end]] + [[s.start, s.end] for s in tail.segments]
     ).is_simple
     assert tail.segments[0].start == (head.x, head.y)
+
+
+@pytest.mark.parametrize("before", [False, True])
+@pytest.mark.parametrize("soft", [False, True])
+def test_reservation_only_blocker_cannot_gain_exact_geometry_exception(before, soft):
+    router, finder, head, goal, partner, body = _case()
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+
+    def reserve():
+        # Inner layer has no pad blockage: reservation is the only blocker.
+        assert not grid.cell_at(1, gy, gx).blocked
+        grid.reserve_corridor_cells(1, {(gx, gy)}, {99}, soft=soft)
+
+    if before:
+        reserve()
+    for x in (3.15, 4.45):
+        for y in (2.35, 3.65):
+            grid.add_pad(
+                Pad(x=x, y=y, width=0.45, height=0.45, net=3, net_name="foreign", layer=Layer.F_CU)
+            )
+    if not before:
+        reserve()
+    assert router._via_has_only_geometry_blockers(finder, gx, gy) == soft
+    assert grid._reserved_for_nets[(1, gy, gx)] == frozenset({99})
+
+
+@pytest.mark.parametrize("field,value", [("net", 99), ("is_obstacle", True), ("pad_blocked", True)])
+@pytest.mark.parametrize("source", ["pad", "route"])
+def test_unknown_cell_writes_revoke_recorded_geometry(field, value, source):
+    if source == "pad":
+        router, finder, *_ = _interpad_case()
+        layer = 0
+        x, y = router.autorouter.grid.world_to_grid(3.5, 2.7)
+    else:
+        router, finder, *rest = _routed_halo_case()
+        layer = 3
+        x, y = router.autorouter.grid.world_to_grid(3.8, 2.7)
+    grid = router.autorouter.grid
+    gx, gy = grid.world_to_grid(3.8, 3)
+    assert router._via_has_only_geometry_blockers(finder, gx, gy)
+    setattr(grid.cell_at(layer, y, x), field, value)
+    assert not router._via_has_only_geometry_blockers(finder, gx, gy)

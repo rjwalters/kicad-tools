@@ -156,3 +156,26 @@ def test_reserved_future_trace_participates_without_occupancy_commit():
         == "trace_clearance"
     )
     assert not auto.routes and not auto.grid.routes
+
+
+@pytest.mark.parametrize("kind", ["trace", "via"])
+@pytest.mark.parametrize("soft", [False, True])
+def test_reservation_only_cells_are_not_waived_by_exact_validation(kind, soft):
+    auto, finder, routes, pads = fixture()
+    grid = auto.grid
+    x, y = grid.world_to_grid(3, 2)
+    layer = 0
+    if kind == "via":
+        auto.rules.via_diameter = 0.2
+        auto.rules.via_drill = 0.1
+        routes[0].vias.append(
+            Via(x=3, y=2, diameter=0.2, drill=0.1, layers=(Layer.F_CU, Layer.B_CU), net=1)
+        )
+        layer = grid.layer_to_index(Layer.B_CU.value)
+    assert check(auto, finder, routes, pads) is None
+    assert not grid.cell_at(layer, y, x).blocked
+    grid.reserve_corridor_cells(layer, {(x, y)}, {99}, soft=soft)
+    assert check(auto, finder, routes, pads) == (
+        None if soft else "unknown_via_blocker" if kind == "via" else "unknown_blocker"
+    )
+    assert grid._reserved_for_nets[(layer, y, x)] == frozenset({99})
