@@ -1160,6 +1160,33 @@ class _TraceResolverTransaction:
         self._begun = False
 
 
+def _emit_route_checkpoint(
+    callback, routes: list[Route], overflow: int | Callable[[], int], iteration: int = 0
+) -> None:
+    """Copy committed geometry only when a synchronous checkpoint is due.
+
+    Callers must invoke this outside rip-up/recovery transactions. Persistence
+    errors do not abort routing; deadline exceptions inherit BaseException and
+    still propagate to the supervisor.
+    """
+    if callback is None:
+        return
+    try:
+        if not getattr(callback, "checkpoint_due", lambda: True)():
+            return
+        snapshot = copy.deepcopy(list({id(route): route for route in routes}.values()))
+        callback(
+            snapshot,
+            IterationMetrics(
+                iteration=iteration,
+                routed_count=len({route.net for route in snapshot}),
+                overflow=int(overflow() if callable(overflow) else overflow),
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        flush_print(f"  checkpoint: write failed ({exc!r}); continuing")
+
+
 class Autorouter:
     """High-level autorouter for complete PCBs with net class awareness.
 
@@ -7855,6 +7882,7 @@ class Autorouter:
         suppress_no_timeout_warning: bool = False,
         enable_in_pad_escape_rescues: bool = False,
         in_pad_escape_rescue_pins: dict[str, list[str]] | None = None,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> list[Route]:
         """Route all nets in priority order.
 
@@ -8096,6 +8124,7 @@ class Autorouter:
             # MST/RSMT edge loop bounds each per-edge A* search.
             routes = self.route_net(net, per_net_timeout=per_net_timeout)
             all_routes.extend(routes)
+            _emit_route_checkpoint(checkpoint_callback, self.routes, self.grid.get_total_overflow)
             new_failure_count = sum(1 for f in self.routing_failures if f.net == net)
             recorded_new_failure = new_failure_count > pre_failure_count
 
@@ -8148,6 +8177,11 @@ class Autorouter:
         # skew bookkeeping so consumers (Phase 3I serpentine / 3J DRC)
         # can read ``diffpair_length_tracker.get_all_skews()``.
         self._finalize_routing()
+        _emit_route_checkpoint(
+            getattr(checkpoint_callback, "checkpoint_completed", None),
+            self.routes,
+            self.grid.get_total_overflow,
+        )
 
         return all_routes
 
@@ -9407,6 +9441,7 @@ class Autorouter:
                 progress_callback=progress_callback,
                 timeout=timeout,
                 deterministic_rescue=deterministic_rescue,
+                checkpoint_callback=checkpoint_callback,
             )
 
         # Issue #3474 R1 (budget integrity): when a stage budget exists but
@@ -14839,6 +14874,7 @@ class Autorouter:
         initial_routes: list[Route] | None = None,
         max_iterations: int = 20,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> list[Route]:
         """Route all nets using two-phase global+detailed routing.
 
@@ -14927,10 +14963,16 @@ class Autorouter:
             per_net_timeout=per_net_timeout,
             initial_routes=initial_routes,
             max_iterations=max_iterations,
+            checkpoint_callback=checkpoint_callback,
         )
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
         self._finalize_routing()
+        _emit_route_checkpoint(
+            getattr(checkpoint_callback, "checkpoint_completed", None),
+            self.routes,
+            self.grid.get_total_overflow,
+        )
         return result
 
     def _route_net_with_corridor(
@@ -18417,6 +18459,7 @@ class Autorouter:
         timeout: float | None = None,
         per_net_timeout: float | None = None,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> tuple[list[Route], list[LengthMismatchWarning]]:
         """Compose escape routing with the differential-pair pre-pass.
 
@@ -18519,6 +18562,7 @@ class Autorouter:
                     timeout=timeout,
                     per_net_timeout=per_net_timeout,
                     deterministic_rescue=deterministic_rescue,
+                    checkpoint_callback=checkpoint_callback,
                 )
             else:
                 main_routes = self.route_all(
@@ -18526,6 +18570,7 @@ class Autorouter:
                     timeout=timeout,
                     per_net_timeout=per_net_timeout,
                     suppress_no_timeout_warning=True,
+                    checkpoint_callback=checkpoint_callback,
                 )
 
             # Sub-grid escapes are infrastructure, not net routes; combine
@@ -18564,6 +18609,7 @@ class Autorouter:
         timeout: float | None = None,
         per_net_timeout: float | None = None,
         deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        checkpoint_callback: Callable[[list[Route], IterationMetrics], None] | None = None,
     ) -> list[Route]:
         """Route with automatic escape routing for dense packages.
 
@@ -18626,6 +18672,7 @@ class Autorouter:
                 timeout=timeout,
                 per_net_timeout=per_net_timeout,
                 deterministic_rescue=deterministic_rescue,
+                checkpoint_callback=checkpoint_callback,
             )
         else:
             main_routes = self.route_all(
@@ -18633,6 +18680,7 @@ class Autorouter:
                 timeout=timeout,
                 per_net_timeout=per_net_timeout,
                 suppress_no_timeout_warning=True,
+                checkpoint_callback=checkpoint_callback,
             )
 
         # Combine results -- escape routes that survived rip-up are

@@ -1047,10 +1047,9 @@ def _write_routed_pcb(
             before any net has routed).
         layer_count: Target copper layer count for the layer stackup
             update.  ``2`` is a no-op.  Defaults to ``2``.
-        is_checkpoint: When True, skip the layer-stackup mutation.
-            Checkpoints serialize the in-progress best snapshot; they
-            should match whatever stackup is currently in use and not
-            attempt to escalate.  Defaults to False.
+        is_checkpoint: Marks an in-progress snapshot. The explicit
+            layer_count must describe the active routing stack, including
+            inner layers used by checkpoint copper. Defaults to False.
         guard_copper_loss: Issue #4413 defense-in-depth.  When True (the
             terminal ``--preserve-existing`` / ``--nets`` / ``--region``
             save), the write aborts with
@@ -1076,10 +1075,9 @@ def _write_routed_pcb(
     check_kicad_lock(output_path)
     original_content = pcb_path.read_text()
 
-    # Update layer stackup for terminal writes when we escalated above 2L.
-    # Checkpoints skip this -- they reflect mid-route state and should not
-    # rewrite the stackup at every flush.
-    if not is_checkpoint and layer_count > 2:
+    # Checkpoints need the same active stack as terminal writes: retaining
+    # a 2-layer source header would make inner-layer copper unreadable.
+    if layer_count > 2:
         original_content = update_pcb_layer_stackup(original_content, layer_count)
 
     if route_sexp:
@@ -1461,6 +1459,27 @@ def _mark_nongrid_routes_for_post_pass(
         )
 
 
+def _copy_checkpoint_constraint_sidecars(source: Path, output: Path) -> None:
+    """Retain authored context verbatim for unverified partial geometry.
+
+    Do not generate fabrication rules or DRC acceptance while routing is in
+    progress. Validate both destinations before publishing either sidecar.
+    """
+    from kicad_tools.core.atomic_write import atomic_write_text
+
+    copies: list[tuple[Path, str]] = []
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        authored, destination = source.with_suffix(suffix), output.with_suffix(suffix)
+        if not authored.exists() or authored.resolve() == destination.resolve():
+            continue
+        content = authored.read_text(encoding="utf-8")
+        if destination.exists() and destination.read_text(encoding="utf-8") != content:
+            raise DRCConstraintPropagationError(f"checkpoint constraint conflict: {destination}")
+        copies.append((destination, content))
+    for destination, content in copies:
+        atomic_write_text(destination, content)
+
+
 def _make_checkpoint_callback(
     pcb_path: Path,
     output_path: Path,
@@ -1468,6 +1487,8 @@ def _make_checkpoint_callback(
     quiet: bool = False,
     *,
     preserved_sexp: str = "",
+    router_provider: "Callable[[], Autorouter] | None" = None,
+    source_pcb_path: Path | None = None,
 ):
     """Build a checkpoint callback for ``route_all_negotiated`` (Issue #2808).
 
@@ -1502,7 +1523,10 @@ def _make_checkpoint_callback(
             bytes exactly.
 
     Returns:
-        Callback or ``None``.
+        Callback or ``None``. ``router_provider`` resolves the current attempt
+        lazily, so a layer ladder shares one throttle clock while each snapshot
+        uses its own active layer count. ``source_pcb_path`` identifies authored
+        project/custom rules before CLI staging or renaming.
     """
     if interval <= 0:
         return None
@@ -1515,6 +1539,11 @@ def _make_checkpoint_callback(
     # ``[None]`` sentinel means "no checkpoint written yet"; the first
     # improvement event triggers an immediate write.
     last_time: list[float | None] = [None]
+    last_router_id: list[int | None] = [None]
+    history: list[str] = []
+
+    def _checkpoint_due() -> bool:
+        return last_time[0] is None or time.monotonic() - last_time[0] >= interval
 
     def _checkpoint(best_routes, best_metrics) -> None:
         from kicad_tools.cli.progress import flush_print
@@ -1523,15 +1552,6 @@ def _make_checkpoint_callback(
         if last_time[0] is not None and (now - last_time[0]) < interval:
             return
 
-        # Materialize sexp from the snapshot (NOT self.routes).  Each
-        # Route has its own to_sexp() so we can serialize directly without
-        # touching the router's live state.
-        route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
-        # Issue #3155: carry preserved existing copper through every
-        # checkpoint so the strip-then-rewrite (#2976) inside
-        # _write_routed_pcb does not erase it from the staged input.
-        if preserved_sexp:
-            route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
         # Issue #5266: ``_write_routed_pcb`` stamps ``serialization`` on the
         # deadline-supervisor control file.  A *checkpoint* write is a
         # transient excursion out of whatever stage the router is actually in,
@@ -1543,14 +1563,53 @@ def _make_checkpoint_callback(
         # stamps ``interrupted_stage`` before this restore runs, and the
         # supervisor prefers that field).
         with restore_stage():
+            record_stage("serialization")
+            # Materialize sexp from the snapshot (NOT self.routes).  Each
+            # Route has its own to_sexp() so we can serialize directly without
+            # touching the router's live state.
+            route_sexp = "\n\t".join(r.to_sexp(name_only=name_only) for r in best_routes)
+            # Issue #3155: carry preserved existing copper through every
+            # checkpoint so the strip-then-rewrite (#2976) inside
+            # _write_routed_pcb does not erase it from the staged input.
+            if preserved_sexp:
+                route_sexp = f"{route_sexp}\n\t{preserved_sexp}" if route_sexp else preserved_sexp
+            router = router_provider() if router_provider is not None else None
+            layer_count = router.grid.num_layers if router is not None else 2
+            if (
+                last_time[0] is not None
+                and router is not None
+                and id(router) != last_router_id[0]
+                and output_path.exists()
+            ):
+                # Preserve the previous attempt before a fresh layer/tier can
+                # replace its known copper with a smaller initial checkpoint.
+                import tempfile
+
+                from kicad_tools.core.atomic_write import atomic_write_text
+
+                fd, archived_name = tempfile.mkstemp(
+                    prefix=output_path.stem + "_checkpoint_unverified_",
+                    suffix=output_path.suffix,
+                    dir=output_path.parent,
+                )
+                os.close(fd)
+                archived = Path(archived_name)
+                atomic_write_text(archived, output_path.read_text())
+                _copy_checkpoint_constraint_sidecars(output_path, archived)
+                history.append(str(archived))
+                record_stage("serialization", checkpoint_history=list(history))
+            _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, output_path)
             _write_routed_pcb(
                 pcb_path,
                 output_path,
                 route_sexp,
                 is_checkpoint=True,
+                layer_count=layer_count,
             )
+            record_stage("serialization", checkpoint_saved=True, checkpoint=str(output_path))
 
         last_time[0] = now
+        last_router_id[0] = id(router) if router is not None else None
         if not quiet:
             flush_print(
                 f"  checkpoint: wrote best-so-far "
@@ -1559,6 +1618,33 @@ def _make_checkpoint_callback(
                 f"overflow={best_metrics.overflow}) to {output_path}"
             )
 
+    def _checkpoint_completed(routes, metrics) -> None:
+        """Retain a completed attempt separately from periodic checkpoints."""
+        import tempfile
+
+        with restore_stage():
+            record_stage("serialization")
+            router = router_provider() if router_provider is not None else None
+            layers = router.grid.num_layers if router is not None else 2
+            sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+            if preserved_sexp:
+                sexp = f"{sexp}\n\t{preserved_sexp}" if sexp else preserved_sexp
+            fd, name = tempfile.mkstemp(
+                prefix=output_path.stem + "_completed_unverified_",
+                suffix=output_path.suffix,
+                dir=output_path.parent,
+            )
+            os.close(fd)
+            completed = Path(name)
+            _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, completed)
+            _write_routed_pcb(pcb_path, completed, sexp, layer_count=layers, is_checkpoint=True)
+            history.append(str(completed))
+            record_stage("serialization", checkpoint_history=list(history))
+
+    # The router can avoid deep-copying large snapshots during the throttle
+    # window. Generic callbacks without this hook still receive owned copies.
+    setattr(_checkpoint, "checkpoint_due", _checkpoint_due)  # noqa: B010
+    setattr(_checkpoint, "checkpoint_completed", _checkpoint_completed)  # noqa: B010
     return _checkpoint
 
 
@@ -7035,6 +7121,8 @@ def route_with_layer_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        router_provider=lambda: router,
+        source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
     )
 
     # Issue #3923: pre-rung deduplication.  The escalation ladder built by
@@ -7304,12 +7392,14 @@ def route_with_layer_escalation(
                         use_negotiated=(args.strategy == "negotiated"),
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        checkpoint_callback=_checkpoint_cb,
                     )
                 else:
                     router.route_with_escape(
                         use_negotiated=(args.strategy == "negotiated"),
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        checkpoint_callback=_checkpoint_cb,
                     )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
@@ -7324,6 +7414,7 @@ def route_with_layer_escalation(
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
+                    checkpoint_callback=_checkpoint_cb,
                 )
             elif args.strategy == "negotiated":
                 # Issue #4730: ``deterministic_rescue`` is deliberately NOT
@@ -8202,6 +8293,8 @@ def route_with_rule_relaxation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        router_provider=lambda: router,
+        source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
     )
 
     # Issue #2823: precompute total tier count so per-attempt budget can
@@ -8382,12 +8475,14 @@ def route_with_rule_relaxation(
                         use_negotiated=(args.strategy == "negotiated"),
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        checkpoint_callback=_checkpoint_cb,
                     )
                 else:
                     router.route_with_escape(
                         use_negotiated=(args.strategy == "negotiated"),
                         timeout=_attempt_timeout,
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        checkpoint_callback=_checkpoint_cb,
                     )
             elif getattr(args, "multi_resolution", False):
                 router.route_all_multi_resolution(
@@ -8402,6 +8497,7 @@ def route_with_rule_relaxation(
                     timeout=_attempt_timeout,
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
+                    checkpoint_callback=_checkpoint_cb,
                 )
             elif args.strategy == "negotiated":
                 # Issue #4730: ``deterministic_rescue`` is deliberately NOT
@@ -10489,6 +10585,8 @@ def route_with_combined_escalation(
         float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
         quiet=quiet,
         preserved_sexp=_preserved_sexp,
+        router_provider=lambda: router,
+        source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
     )
 
     # 2D search: prioritize fewer layers first, then stricter rules.
@@ -10694,12 +10792,14 @@ def route_with_combined_escalation(
                             use_negotiated=(args.strategy == "negotiated"),
                             timeout=_attempt_timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                            checkpoint_callback=_checkpoint_cb,
                         )
                     else:
                         router.route_with_escape(
                             use_negotiated=(args.strategy == "negotiated"),
                             timeout=_attempt_timeout,
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                            checkpoint_callback=_checkpoint_cb,
                         )
                 elif getattr(args, "multi_resolution", False):
                     router.route_all_multi_resolution(
@@ -10715,6 +10815,7 @@ def route_with_combined_escalation(
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                         max_iterations=getattr(args, "two_phase_iterations", None)
                         or args.iterations,
+                        checkpoint_callback=_checkpoint_cb,
                     )
                 elif args.strategy == "negotiated":
                     router.route_all_negotiated(
@@ -13385,8 +13486,9 @@ def _route_parser() -> argparse.ArgumentParser:
         default=30.0,
         help=(
             "Interval in seconds between best-so-far checkpoint writes to "
-            "--output during the negotiated routing loop (Issue #2808). "
-            "Each checkpoint atomically replaces the file at --output so a "
+            "--output during negotiated, escape, or two-phase routing. "
+            "Completed escape/two-phase attempts also retain a separate "
+            "unverified snapshot. Each periodic checkpoint atomically replaces --output so a "
             "crash/SIGTERM/--timeout leaves the user with the best partial "
             "result rather than the original unrouted input. Default: 30.0. "
             "Use 0 to disable checkpointing (only the terminal save fires)."
@@ -16474,6 +16576,8 @@ def _run_main_impl(args, parser, argv) -> int:
             float(getattr(args, "checkpoint_interval", 30.0) or 0.0),
             quiet=quiet,
             preserved_sexp=_preserved_sexp,
+            router_provider=lambda: router,
+            source_pcb_path=Path(getattr(args, "pcb", pcb_path)),
         )
 
         # Define routing function for profiling
@@ -16594,6 +16698,7 @@ def _run_main_impl(args, parser, argv) -> int:
                             per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                             max_iterations=getattr(args, "two_phase_iterations", None)
                             or args.iterations,
+                            checkpoint_callback=_checkpoint_cb,
                         )
                     elif args.strategy == "negotiated":
                         return router.route_all_negotiated(
@@ -16662,6 +16767,7 @@ def _run_main_impl(args, parser, argv) -> int:
                         use_negotiated=(args.strategy == "negotiated"),
                         timeout=_budgeted_timeout(args),
                         per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                        checkpoint_callback=_checkpoint_cb,
                     )
                     diffpair_warnings.extend(dp_warnings)
                     # Issue #4095: the escape-composed path delegates to the
@@ -16673,6 +16779,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     use_negotiated=(args.strategy == "negotiated"),
                     timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
+                    checkpoint_callback=_checkpoint_cb,
                 )
 
             # Progressive clearance relaxation mode
@@ -16697,6 +16804,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     timeout=_budgeted_timeout(args),
                     per_net_timeout=getattr(args, "per_net_timeout", None) or None,
                     max_iterations=getattr(args, "two_phase_iterations", None) or args.iterations,
+                    checkpoint_callback=_checkpoint_cb,
                 )
             elif args.differential_pairs and args.strategy == "negotiated":
                 # Issue #2464: Diff-pair pre-pass + negotiated for the rest.

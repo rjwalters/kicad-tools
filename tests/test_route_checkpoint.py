@@ -6,8 +6,7 @@ Covers three concerns:
    four duplicated save sites in ``route_cmd.py``.  Verifies:
    - Normal write produces a valid PCB at the user's exact ``output_path``
      (Issue #2809: no ``_4layer`` suffix mutation).
-   - ``is_checkpoint=True`` skips the layer-stackup mutation so checkpoints
-     write the in-progress state without forcing a stackup escalation.
+   - Checkpoints retain the explicitly supplied active layer stack.
    - Atomic semantics: a forced exception during the rename leaves the
      original ``output_path`` untouched (no torn file).
 
@@ -125,21 +124,12 @@ class TestWriteRoutedPcbBasic:
 
 
 class TestWriteRoutedPcbCheckpoint:
-    """``is_checkpoint=True`` semantics: skip stackup update."""
+    """Checkpoint headers describe the active routing stack (#5478)."""
 
-    def test_checkpoint_skips_stackup_update(self, tmp_path: Path):
-        """When is_checkpoint=True, even ``layer_count=4`` should NOT
-        rewrite the layer block -- checkpoints reflect mid-route state
-        and should not force escalation.
-
-        We verify by passing layer_count=4 on a 2L input: with
-        is_checkpoint=False the helper would inject 4L layer entries;
-        with is_checkpoint=True the input's 2L block is preserved.
-        """
+    def test_checkpoint_keeps_active_inner_layers(self, tmp_path: Path):
         in_path = tmp_path / "input.kicad_pcb"
         in_path.write_text(_MINIMAL_PCB)
         out_path = tmp_path / "ckpt.kicad_pcb"
-
         _write_routed_pcb(
             in_path,
             out_path,
@@ -147,12 +137,9 @@ class TestWriteRoutedPcbCheckpoint:
             layer_count=4,
             is_checkpoint=True,
         )
-
         content = out_path.read_text()
-        # 2L block preserved -- no inner layers injected.
-        assert '"In1.Cu"' not in content
-        assert '"In2.Cu"' not in content
-        # And the route sexp still landed.
+        assert '"In1.Cu"' in content
+        assert '"In2.Cu"' in content
         assert "(segment" in content
 
     def test_checkpoint_output_is_valid_pcb(self, tmp_path: Path):

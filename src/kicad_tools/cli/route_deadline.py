@@ -12,6 +12,7 @@ import contextlib
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -240,6 +241,21 @@ def _supervise(
                 os.close(fd)
                 output.replace(name)
                 state["unverified_output"] = name
+                if state.get("checkpoint") == str(output):
+                    state["checkpoint"] = name
+                # Keep authored context beside the quarantined checkpoint. It
+                # remains unverified; these copies do not authorize promotion.
+                sidecars = []
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    source = output.with_suffix(suffix)
+                    if source.exists():
+                        destination = Path(name).with_suffix(suffix)
+                        try:
+                            shutil.copyfile(source, destination)
+                            sidecars.append(str(destination))
+                        except OSError as exc:
+                            state.setdefault("quarantine_context_errors", []).append(str(exc))
+                state["unverified_sidecars"] = sidecars
             report = output.with_suffix(".timeout.json")
             report.parent.mkdir(parents=True, exist_ok=True)
             report.write_text(json.dumps(state, indent=2) + "\n")

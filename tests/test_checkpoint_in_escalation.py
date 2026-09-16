@@ -84,6 +84,7 @@ def _make_mock_router(nets_routed: int, nets_to_route: int, overflow: int):
     router.placement_disposition = None
     router.nets = {i: [f"pad{j}" for j in range(2)] for i in range(1, nets_to_route + 1)}
     router.grid.width = 50.0
+    router.grid.num_layers = 2
     router.grid.height = 40.0
     router.grid.get_total_overflow.return_value = overflow
     router.get_statistics.return_value = {
