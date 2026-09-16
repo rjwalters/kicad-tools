@@ -1187,10 +1187,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                     if done:
                         break
 
-            # The fixed rays cannot follow a narrow corridor to a distant
-            # legal via. Only after the established repairs fail, search a
-            # bounded physical path without changing any authored geometry.
-            if not merged and comp_pads and not comp_has_via:
+            # The fixed rays cannot follow a narrow corridor to primary
+            # copper. An existing via may itself be on an isolated island,
+            # so it does not remove the need for this bounded physical search.
+            # Keep the same rules and commit only a complete escape.
+            if not merged and comp_pads:
                 from pour_escape import EscapeRules, find_escape
 
                 project = pcb_path.with_suffix(".kicad_pro")
