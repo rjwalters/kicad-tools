@@ -1,0 +1,20 @@
+{
+  "source_commit": "9dfbbdb59cc89ef490274d22cd7d862a0ca9e7b0",
+  "native": {
+    "native_sha256": "0c876a647ada9b01ca32f0bd60e6fe43382ef732477cbf3a6398c6344256f31b",
+    "native_path": "/private/tmp/4507-current-main-20260916/source/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
+    "native_available": true,
+    "required_version": 27,
+    "import_path": "/private/tmp/4507-current-main-20260916/source/src/kicad_tools/router/router_cpp.cpython-312-darwin.so",
+    "python": "3.12.11 (main, Oct  7 2025, 15:53:48) [Clang 20.1.4 ]",
+    "nanobind": "3.0.1",
+    "cmake": "4.4.2",
+    "kicad_cli": "10.0.1"
+  },
+  "source_files_sha256": "46be26b1cac499d9b037e98165b73b0197cac552c0ae04bf01ba6f71851471a7",
+  "python": "3.12.11 (main, Oct  7 2025, 15:53:48) [Clang 20.1.4 ]",
+  "source_snapshot": "exact merged main archive with freshly built native",
+  "kct": "/private/tmp/4507-main-a901-full/source/.venv/bin/kct",
+  "supervisor_sha256": "065de5f3a12a6f138f733c71f4a77eca53b8d55be6ffeac84ca30d46f68aaebd",
+  "sidecar_preseed": false
+}

@@ -228,15 +228,26 @@ get_files_with_find() {
 find_with_glob() {
     local pattern="$1"
 
-    # Enable extended globbing
-    shopt -s globstar nullglob 2>/dev/null || true
+    shopt -s nullglob 2>/dev/null || true
 
-    # Try to match the pattern
     local matches=()
     # shellcheck disable=SC2086
     if [[ "$pattern" == *"**"* ]]; then
-        # Pattern uses ** for recursive matching
-        eval "matches=($pattern)" 2>/dev/null || true
+        # `**` needs globstar, which is bash 4.0+. On stock macOS bash 3.2
+        # `shopt -s globstar` FAILS and `**` then behaves as a single-level
+        # `*` -- so the glob silently returns the wrong file set rather than
+        # erroring (#7802 Class 1). Verified: on a tree with 4 matching files
+        # at depths 0-3, the 3.2 glob returned 1.
+        #
+        # `find` recurses identically on both interpreters, so use it for the
+        # recursive shape and keep the plain glob for everything else.
+        local _gs_root="${pattern%%/\*\**}"   # text before the first /**
+        local _gs_name="${pattern##*/}"         # trailing component, e.g. *.rs
+        [[ "$_gs_root" == "$pattern" ]] && _gs_root="."
+        [[ -z "$_gs_root" ]] && _gs_root="."
+        while IFS= read -r _gs_hit; do
+            [[ -n "$_gs_hit" ]] && matches+=("$_gs_hit")
+        done < <(find "$_gs_root" -type f -name "$_gs_name" 2>/dev/null || true)
     else
         eval "matches=($pattern)" 2>/dev/null || true
     fi

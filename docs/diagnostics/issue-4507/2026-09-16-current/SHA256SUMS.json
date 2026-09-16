@@ -1,0 +1,15 @@
+{
+  "README.md": "f06ab11146fc3a9a14ed835514d09eee64bd6b10b561e87f7ff6eb9e468bdb67",
+  "acceptance-audit-summary.json": "307a8e0c5511217d67150d93b5810af5e24b5c27bdf6658bbb85393e9c51527c",
+  "attribute-census.py.txt": "9b684c37ff73b054a88be44bf1f32e4940488b317cd3d6981942d661b1c17824",
+  "census-attribution.json": "96740dc8bafbf3c3e8a1a4a24f66ed6e17dc896007f04eb86f2179df857b6bb0",
+  "completion-report.json": "df2390aac9a05bbc88477d3ba75a516db0769beb8769bd19589cd97d8cb21ef9",
+  "connectivity-residuals.json": "ece8ec16c09cd7fe2d5fae33aa4ec3e36acea654c19c32d75edc565072dfe806",
+  "final-integrity.json": "ee8e1c0b9f4039ee3f3ebc90aa3b5b022c47f83e6adcc892ab058e7d8f9deb4e",
+  "input-hashes.json": "9d4e6aa1e7f5b1147627992e579370e9da2ef78bedbf98a3cfa4d1309d39e2aa",
+  "native-audits.json": "4e930ce745528587fb452698b744e3ce0400cc2ccb30f69c524c29f0d6640530",
+  "producer.json": "9ecfea0a6e085387bc87dedf6cb487359740c5c3f69bc2e2d79513fcd56b5487",
+  "recipe-processes.json": "d825fd520d3a1d92ecf8fc7d8a5a557f32824dbf5d307a76da053b5c4b23f619",
+  "retained-artifact-hashes.json": "6e10f7d79bb83d9fa03b74b21c65ddfebfb14d8c005b9005b0ebd95774771a08",
+  "source-pin.json": "4d6b5951c3f68e219a560f22282a171df64e4004789faaf288a8afd01cd47184"
+}

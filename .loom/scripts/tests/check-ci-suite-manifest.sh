@@ -77,7 +77,20 @@ manifest_names() { # <manifest-file>
 }
 
 # --- Collect the three sets --------------------------------------------------
-mapfile -t actual_local < <(cd "$SCRIPT_DIR" && for f in test-*.sh; do [[ -e "$f" ]] && printf '%s\n' "$f"; done)
+# `mapfile` is bash 4+; this runs on developer machines and macOS ships 3.2
+# (#7751), so every bulk read below is a `while read` loop instead. The
+# actual_external loop further down already used this idiom -- these now match.
+read_into_lines() { # reads stdin, prints one non-empty line per entry
+    while IFS= read -r _rl_line; do
+        [[ -n "$_rl_line" ]] || continue
+        printf '%s\n' "$_rl_line"
+    done
+}
+
+actual_local=()
+while IFS= read -r name; do
+    actual_local+=("$name")
+done < <(cd "$SCRIPT_DIR" && for f in test-*.sh; do [[ -e "$f" ]] && printf '%s\n' "$f"; done | read_into_lines)
 actual_external=()
 for rel_dir in "${EXTERNAL_TEST_DIRS[@]}"; do
     ext_dir="$REPO_ROOT/$rel_dir"
@@ -87,9 +100,23 @@ for rel_dir in "${EXTERNAL_TEST_DIRS[@]}"; do
         actual_external+=("$rel_dir/$name")
     done < <(cd "$ext_dir" && for f in test-*.sh; do [[ -e "$f" ]] && printf '%s\n' "$f"; done)
 done
-mapfile -t actual < <(printf '%s\n' "${actual_local[@]}" "${actual_external[@]}" | sort)
-mapfile -t wired < <(manifest_names "$WIRED_MANIFEST" | sort)
-mapfile -t excluded < <(manifest_names "$EXCLUDED_MANIFEST" | sort)
+# `${arr[@]+"${arr[@]}"}` rather than a bare `"${arr[@]}"`: under `set -u`,
+# bash 3.2 treats an EMPTY indexed array's expansion as an unbound variable and
+# aborts (fixed upstream in 4.4). Both of these can legitimately be empty.
+actual=()
+while IFS= read -r name; do
+    actual+=("$name")
+done < <(printf '%s\n' ${actual_local[@]+"${actual_local[@]}"} ${actual_external[@]+"${actual_external[@]}"} | read_into_lines | sort)
+
+wired=()
+while IFS= read -r name; do
+    wired+=("$name")
+done < <(manifest_names "$WIRED_MANIFEST" | read_into_lines | sort)
+
+excluded=()
+while IFS= read -r name; do
+    excluded+=("$name")
+done < <(manifest_names "$EXCLUDED_MANIFEST" | read_into_lines | sort)
 
 # --- Every excluded entry must carry a non-empty reason ----------------------
 while IFS= read -r line; do
@@ -103,19 +130,19 @@ while IFS= read -r line; do
 done < "$EXCLUDED_MANIFEST"
 
 # --- No duplicates within either manifest ------------------------------------
-dup_wired="$(printf '%s\n' "${wired[@]}" | sort | uniq -d)"
+dup_wired="$(printf '%s\n' ${wired[@]+"${wired[@]}"} | sort | uniq -d)"
 [[ -z "$dup_wired" ]] || err "duplicate entries in ci-wired.txt: $(tr '\n' ' ' <<<"$dup_wired")"
-dup_excluded="$(printf '%s\n' "${excluded[@]}" | sort | uniq -d)"
+dup_excluded="$(printf '%s\n' ${excluded[@]+"${excluded[@]}"} | sort | uniq -d)"
 [[ -z "$dup_excluded" ]] || err "duplicate entries in ci-excluded.txt: $(tr '\n' ' ' <<<"$dup_excluded")"
 
 # --- No suite may appear in BOTH manifests -----------------------------------
-both="$(comm -12 <(printf '%s\n' "${wired[@]}") <(printf '%s\n' "${excluded[@]}"))"
+both="$(comm -12 <(printf '%s\n' ${wired[@]+"${wired[@]}"}) <(printf '%s\n' ${excluded[@]+"${excluded[@]}"}))"
 [[ -z "$both" ]] || err "suite(s) listed in BOTH manifests: $(tr '\n' ' ' <<<"$both")"
 
 # --- No manifest entry may reference a nonexistent file ----------------------
 # A `/`-containing entry is a path relative to the repo root (tests/hooks/…,
 # #4769); a bare filename is resolved against this directory as before.
-listed="$(printf '%s\n' "${wired[@]}" "${excluded[@]}" | sort -u)"
+listed="$(printf '%s\n' ${wired[@]+"${wired[@]}"} ${excluded[@]+"${excluded[@]}"} | sort -u)"
 while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     if [[ "$name" == */* ]]; then
@@ -127,7 +154,7 @@ while IFS= read -r name; do
 done <<<"$listed"
 
 # --- Every actual test-*.sh must be listed in exactly one manifest -----------
-unlisted="$(comm -23 <(printf '%s\n' "${actual[@]}") <(printf '%s\n' "$listed"))"
+unlisted="$(comm -23 <(printf '%s\n' ${actual[@]+"${actual[@]}"}) <(printf '%s\n' "$listed"))"
 if [[ -n "$unlisted" ]]; then
     while IFS= read -r name; do
         [[ -n "$name" ]] || continue

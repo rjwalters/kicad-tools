@@ -55,7 +55,14 @@ body="$(cat)"
 # Value grammar: lowercase alnum, `:`/`_`/`-` separators (the colon supports
 # the `cloud-profile:<name>` family) -- same character-class discipline as
 # the complexity marker's `[a-z]*`, generalized for parameterized values.
-mapfile -t raw_matches < <(printf '%s' "$body" \
+# `mapfile` is bash 4+; macOS ships 3.2 (#7751). The `|| true` means a
+# no-match grep yields no output, so empty lines are skipped -- the
+# `${#raw_matches[@]} -eq 0` check below is what distinguishes "no markers".
+raw_matches=()
+while IFS= read -r _m; do
+  [[ -n "$_m" ]] || continue
+  raw_matches+=("$_m")
+done < <(printf '%s' "$body" \
   | grep -oE '<!--[[:space:]]*loom:capability=[a-z0-9][a-z0-9:_-]*[[:space:]]*-->' \
   || true)
 
@@ -76,7 +83,11 @@ is_known() {
   return 1
 }
 
-declare -A seen_valid=()
+# Indexed array, not `declare -A` (bash 4+; #7751). This was a pure SET whose
+# only consumer printed its keys through `sort`, so appending every valid value
+# and deduping with `sort -u` on output is byte-identical -- no membership test
+# needed, and one fewer moving part than the associative form.
+seen_valid=()
 unknown=()
 for m in "${raw_matches[@]}"; do
   # Anchored on the same `[[:space:]]*-->` terminator the recognition regex
@@ -91,14 +102,14 @@ for m in "${raw_matches[@]}"; do
   # two steps agree.
   value="$(sed -E 's/.*capability=([a-z0-9][a-z0-9:_-]*)[[:space:]]*-->.*/\1/' <<<"$m")"
   if is_known "$value"; then
-    seen_valid["$value"]=1
+    seen_valid+=("$value")
   else
     unknown+=("$value")
   fi
 done
 
 if [[ "${#seen_valid[@]}" -gt 0 ]]; then
-  printf '%s\n' "${!seen_valid[@]}" | sort
+  printf '%s\n' "${seen_valid[@]}" | sort -u
 fi
 
 if [[ "${#unknown[@]}" -gt 0 ]]; then

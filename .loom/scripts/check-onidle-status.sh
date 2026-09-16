@@ -125,21 +125,31 @@ fi
 #   "role_runner: idle edge for <root> — firing idle-triggered <role> run (#4364)"
 VERIFIED=()
 DORMANT=()
-declare -A LAST_FIRED
-declare -A FIRE_COUNT
+# LAST_FIRED / FIRE_COUNT are INDEXED arrays parallel to ON_IDLE_ROLES, not
+# `declare -A` (bash 4+; macOS ships 3.2 -- #7751). Both the producer loop below
+# and the reporting loop further down iterate `"${ON_IDLE_ROLES[@]}"` literally,
+# in the same order, so position is an exact stand-in for the role key.
+#
+# That parallel-index invariant is the one thing to preserve if either loop is
+# ever changed: they must iterate the same array the same way. Both increment
+# `idx` as their last statement to keep that obvious.
+LAST_FIRED=()
+FIRE_COUNT=()
 
+idx=0
 for role in "${ON_IDLE_ROLES[@]}"; do
     pattern="idle edge for ${ROOT} — firing idle-triggered ${role} run"
     matches="$(grep -F "$pattern" "$DAEMON_LOG" 2>/dev/null || true)"
     count="$(printf '%s\n' "$matches" | grep -cF "$pattern" 2>/dev/null || echo 0)"
     if [[ -n "$matches" && "$count" -gt 0 ]]; then
         VERIFIED+=("$role")
-        FIRE_COUNT["$role"]="$count"
-        LAST_FIRED["$role"]="$(printf '%s\n' "$matches" | tail -1 | grep -oE '^\[[0-9T:.+-]+\]' | tr -d '[]')"
+        FIRE_COUNT[$idx]="$count"
+        LAST_FIRED[$idx]="$(printf '%s\n' "$matches" | tail -1 | grep -oE '^\[[0-9T:.+-]+\]' | tr -d '[]')"
     else
         DORMANT+=("$role")
-        FIRE_COUNT["$role"]=0
+        FIRE_COUNT[$idx]=0
     fi
+    idx=$((idx + 1))
 done
 
 STATUS="verified"
@@ -156,12 +166,14 @@ if [[ "$JSON_OUTPUT" == "true" ]]; then
 else
     echo -e "${BLUE}onIdle status for $ROOT${NC}"
     echo "─────────────────────────────────"
+    idx=0
     for role in "${ON_IDLE_ROLES[@]}"; do
-        if [[ "${FIRE_COUNT[$role]}" -gt 0 ]]; then
-            echo -e "  ${GREEN}$role${NC}: fired ${FIRE_COUNT[$role]}x (last: ${LAST_FIRED[$role]:-unknown})"
+        if [[ "${FIRE_COUNT[$idx]}" -gt 0 ]]; then
+            echo -e "  ${GREEN}$role${NC}: fired ${FIRE_COUNT[$idx]}x (last: ${LAST_FIRED[$idx]:-unknown})"
         else
             echo -e "  ${RED}$role${NC}: configured but never observed firing in $DAEMON_LOG"
         fi
+        idx=$((idx + 1))
     done
     echo ""
 fi

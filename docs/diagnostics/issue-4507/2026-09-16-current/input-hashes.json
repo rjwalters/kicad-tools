@@ -1,0 +1,13 @@
+{
+  "LAYOUT_NOTES.md": "e8dc0159e258c4ab18bbf4f48c14bd5263a6f644f0996f68b860354f262cb68f",
+  "classify_creepage_fails.py": "1663f9454ad8b08680d23235d45efa3a3f684f70c9d255dc7d82124d9370ccef",
+  "creepage_class_map.json": "6f0a1caf64339cbd1db4b469a389f939ca9a8fb04e82476d736cf23268748e2b",
+  "creepage_triage.py": "bdb424e89df606e14d468edff09df34a224d6473b9baa38fce009a54915d9e95",
+  "input-provenance.json": "3458150c134b2b19fa0d3c5ecabed15d23f200209b1ca9431060116cc4646a4c",
+  "net_class_map.json": "89b32f52fdebf68957e97c574f90fb50bc16d7dbd2ae495dcfa2b42cad413b4b",
+  "softstart_revc.kicad_dru": "162eaea4032b6957dffa04b0e87d17cb8ae6ae1e61b47c02772c99775c910464",
+  "softstart_revc.kicad_pcb": "bad824faa370307225ec4f45256de8e649afe60ee43b55483e3631555ea190d4",
+  "softstart_revc.kicad_pro": "090d61a8a680bd216d49499b2b803b2b9cb4214655044abaf0edf3b4ffd16fd9",
+  "softstart_revc.kicad_sch": "79c185f56553c3d173c05594e53a36f0ade828bcb3e87a39cbc1b5570dc78171",
+  "vmap.json": "3b2452a5169be3b09416259b8c9de7b6b8ae1af7f11f525530c00a2e3fe85d55"
+}

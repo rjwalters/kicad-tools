@@ -229,8 +229,13 @@ make_fixture_repo() {
 
   printf '{"version": "%s"}\n' "$version" > "$dir/package.json"
   printf '{"version": "%s"}\n' "$version" > "$dir/mcp-loom/package.json"
-  printf '[package]\nname = "loom-daemon"\nversion = "%s"\n' "$version" > "$dir/loom-daemon/Cargo.toml"
-  printf '[package]\nname = "loom-api"\nversion = "%s"\n' "$version" > "$dir/loom-api/Cargo.toml"
+  # Mirror the real workspace (#7780): the version lives once in the root
+  # manifest's [workspace.package] and both members inherit it. A fixture with
+  # two hardcoded crate versions and no workspace root no longer resembles the
+  # tree version.sh operates on.
+  printf '[workspace]\nmembers = ["loom-api", "loom-daemon"]\nresolver = "2"\n\n[workspace.package]\nversion = "%s"\n' "$version" > "$dir/Cargo.toml"
+  printf '[package]\nname = "loom-daemon"\nversion.workspace = true\n' > "$dir/loom-daemon/Cargo.toml"
+  printf '[package]\nname = "loom-api"\nversion.workspace = true\n' > "$dir/loom-api/Cargo.toml"
   printf '**Loom Version**: %s\n' "$version" > "$dir/CLAUDE.md"
   printf '%s\n' "$version" > "$dir/VERSION"
   cat > "$dir/Cargo.lock" <<EOF
