@@ -48,6 +48,24 @@ lost a cycle each to a phantom failure.
 anything else, `rm -rf .mypy_cache` and re-run **before** investigating. Never
 use `--update` to make a phantom error go away; it bakes it into the baseline.
 
+## Slow single-test runs: check coverage overhead before suspecting a hang
+
+`pyproject.toml`'s default `addopts` (`--cov=kicad_tools --cov-report=term-missing
+--cov-report=html`) instruments the *entire* `kicad_tools` package on every
+`pytest` invocation, even a single targeted test file. This can turn a ~3s test
+into a ~140s one (measured on `tests/test_board02_real_hardware.py::
+test_generated_real_schematic_and_pcb_agree`, issue #5490) — CPU-bound, no I/O,
+easy to mistake for an infinite loop under a short timeout.
+
+Before filing a "test hangs" issue, re-run with coverage disabled:
+
+```bash
+uv run pytest path/to/test_file.py::test_name --no-cov
+```
+
+If it completes quickly without `--cov`, the "hang" was coverage instrumentation
+overhead, not a bug.
+
 <!-- BEGIN REPO-SKILLS -->
 This repository has [Repo Skills](https://github.com/rjwalters/repo) v0.11.1 installed —
 general repository hygiene and environment commands invoked as `/repo:<command>`. Run
