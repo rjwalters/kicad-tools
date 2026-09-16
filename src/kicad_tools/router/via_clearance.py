@@ -126,12 +126,31 @@ def drill_hole_to_hole_clear(
     if not existing_drills:
         return True
     cand_radius = drill / 2.0
+    # Issue #5240: this loop is on the hot path of escape-via placement,
+    # diff-pair fan-out, the post-route nudge pass and stitch-via
+    # placement -- every candidate via site pays one ``math.sqrt`` call
+    # per existing drill.  The comparison this function makes is
+    # ``center_distance < threshold`` (algebraically rearranging the
+    # documented ``edge_distance + tol < min_hole_to_hole`` violation
+    # test, where ``threshold = min_hole_to_hole - tol + cand_radius +
+    # edrill / 2``).  Both sides of that comparison are non-negative
+    # whenever ``threshold > 0``, so squaring preserves it exactly
+    # (``a < b`` iff ``a**2 < b**2`` for ``a, b >= 0``) and the ``sqrt``
+    # is never needed -- only the (already-computed) squared distance
+    # is.  When ``threshold <= 0`` no real ``center_distance >= 0`` can
+    # ever be smaller than it, so that drill can never trigger a
+    # violation regardless of position; skip it without computing a
+    # distance at all.  This is an exact reformulation, not an
+    # approximation: it returns bit-identical results to the prior
+    # ``math.sqrt``-based comparison for every input.
+    base_threshold = min_hole_to_hole - HOLE_TO_HOLE_TOLERANCE + cand_radius
     for ex, ey, edrill in existing_drills:
+        threshold = base_threshold + edrill / 2.0
+        if threshold <= 0.0:
+            continue
         dx = ex - x
         dy = ey - y
-        center_distance = math.sqrt(dx * dx + dy * dy)
-        edge_distance = center_distance - cand_radius - (edrill / 2.0)
-        if edge_distance + HOLE_TO_HOLE_TOLERANCE < min_hole_to_hole:
+        if dx * dx + dy * dy < threshold * threshold:
             return False
     return True
 
