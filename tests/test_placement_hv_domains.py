@@ -92,6 +92,13 @@ class TestBuildRequiredByDomainPair:
         )
         assert required == {}
 
+    def test_zero_threshold_omits_equal_potentials_and_keeps_positive_deltas(self) -> None:
+        required = build_required_by_domain_pair({"a": 0.0, "b": 0.0, "c": 12.0}, hv_threshold=0.0)
+        assert required == {
+            ("a", "c"): pytest.approx(0.42),
+            ("b", "c"): pytest.approx(0.42),
+        }
+
     def test_keys_are_order_independent(self) -> None:
         required = build_required_by_domain_pair({"z": 150.0, "a": 1.65})
         # sorted() -> key is ("a", "z"), not ("z", "a").
