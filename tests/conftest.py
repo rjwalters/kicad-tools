@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
 
 
-@pytest.fixture
-def preserve_cpp_import_state():
+@contextmanager
+def preserved_cpp_import_state():
     """Restore both import caches without reinitializing nanobind's types."""
     package = importlib.import_module("kicad_tools.router")
     missing = object()
@@ -27,9 +28,16 @@ def preserve_cpp_import_state():
         )
         for name in ("cpp_backend", "router_cpp")
     }
+    # Python reload mutates the existing module's dictionary in place.
+    # Keep its original class/function objects as well as the module reference.
+    backend = snapshots["cpp_backend"][0]
+    namespace = vars(backend).copy() if backend is not missing and backend is not None else None
     try:
         yield
     finally:
+        if namespace is not None:
+            vars(backend).clear()
+            vars(backend).update(namespace)
         for name, (module, attribute) in snapshots.items():
             qualified_name = f"kicad_tools.router.{name}"
             if module is missing:
@@ -41,6 +49,12 @@ def preserve_cpp_import_state():
                     delattr(package, name)
             else:
                 setattr(package, name, attribute)
+
+
+@pytest.fixture
+def preserve_cpp_import_state():
+    with preserved_cpp_import_state():
+        yield
 
 
 def resolve_external_boards_dir(start_dir: Path | None = None) -> Path:

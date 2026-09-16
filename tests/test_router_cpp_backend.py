@@ -4,6 +4,7 @@ import glob
 import importlib
 import pathlib
 import sys
+from contextlib import nullcontext
 
 import pytest
 
@@ -13,6 +14,41 @@ from kicad_tools.router.cpp_backend import (
     get_backend_info,
     is_cpp_available,
 )
+
+
+@pytest.mark.parametrize("exit_path", ["normal", "failure", "skip"])
+def test_import_state_restores_classes_after_in_place_reload(exit_path):
+    from tests.conftest import preserved_cpp_import_state
+
+    backend = importlib.import_module("kicad_tools.router.cpp_backend")
+    package = importlib.import_module("kicad_tools.router")
+    classes = {
+        name: getattr(backend, name) for name in ("CppGrid", "CppPathfinder", "AutoBuildOutcome")
+    }
+    missing = object()
+    caches = {
+        name: (
+            sys.modules.get(f"kicad_tools.router.{name}", missing),
+            getattr(package, name, missing),
+        )
+        for name in ("cpp_backend", "router_cpp")
+    }
+    expected = {"failure": RuntimeError, "skip": pytest.skip.Exception}.get(exit_path)
+    with pytest.raises(expected) if expected else nullcontext():
+        with preserved_cpp_import_state():
+            assert backend._reload_cpp_backend() is backend.is_cpp_available()
+            assert backend.CppGrid is not classes["CppGrid"]
+            if exit_path == "failure":
+                raise RuntimeError("intentional cleanup control")
+            if exit_path == "skip":
+                pytest.skip("intentional cleanup control")
+    assert all(getattr(backend, name) is original for name, original in classes.items())
+    for name, (module, attribute) in caches.items():
+        assert sys.modules.get(f"kicad_tools.router.{name}", missing) is module
+        assert getattr(package, name, missing) is attribute
+    if backend.is_cpp_available():
+        assert backend.router_cpp.Grid3D is not None
+        assert backend.router_cpp.Pathfinder is not None
 
 
 class TestCppBackendFallback:
