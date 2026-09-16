@@ -60,3 +60,12 @@ integration control. Passing fake-/proc tests on macOS is not proof of Linux
 runtime behavior or of a memory fix. Full #5501 acceptance additionally needs
 attributed actual workload evidence and an independently reviewed scheduling
 policy, with every original test and assertion preserved.
+
+After the workload has launched, a sampling/read/write failure disables further
+sampling and emits a best-effort fixed-text warning. The observer continues
+waiting for the original workload and returns its authoritative exit status;
+it does not cancel the workload or add a deadline. It attempts a terminal
+record with `diagnostics_degraded: true`. A terminal-record failure likewise
+cannot replace the child status, and a closed/full stderr cannot cause a
+second failure. In either case artifacts may be incomplete and must not be
+read as proof of zero OOM events. Startup failures may abort before launch.

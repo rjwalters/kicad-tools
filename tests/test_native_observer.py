@@ -345,3 +345,96 @@ def test_pid_reuse_during_sample_is_unavailable_not_misattributed(tmp_path, monk
     monkeypatch.setattr(Path, "read_text", raced_read)
     with pytest.raises(OSError, match="PID changed"):
         observer.read_process(directory, "run")
+
+
+@pytest.mark.parametrize("failure", ["sample_write", "sample_read", "terminal_write"])
+def test_postlaunch_diagnostic_failure_waits_for_real_child(tmp_path, monkeypatch, capsys, failure):
+    import errno
+
+    original_exists = Path.exists
+    monkeypatch.setattr(
+        Path, "exists", lambda p: True if str(p) == "/proc/self/stat" else original_exists(p)
+    )
+    monkeypatch.setattr(observer, "cgroup_directory", lambda: None)
+    finished = tmp_path / "child-finished"
+    failed = False
+    failed_before_completion = False
+    original_append = observer.append
+
+    def fail_sample_read(proc, token):
+        nonlocal failed, failed_before_completion
+        if failure == "sample_read":
+            failed = True
+            failed_before_completion = not finished.exists()
+            raise OSError(errno.EIO, "secret-path-must-not-appear")
+        return [], 0
+
+    def fail_write(path, event):
+        nonlocal failed, failed_before_completion
+        target = "memory_sample" if failure == "sample_write" else "finish"
+        if failure != "sample_read" and event["event"] == target:
+            failed = True
+            if failure == "sample_write":
+                failed_before_completion = not finished.exists()
+            raise OSError(errno.ENOSPC, "secret-path-must-not-appear")
+        original_append(path, event)
+
+    monkeypatch.setattr(observer, "snapshot", fail_sample_read)
+    monkeypatch.setattr(observer, "append", fail_write)
+    out = tmp_path / "retained"
+    program = (
+        "import time; from pathlib import Path; time.sleep(.15); "
+        f"Path({str(finished)!r}).write_text('done'); raise SystemExit(7)"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "observer",
+            "--output",
+            str(out),
+            "--interval",
+            "0.01",
+            "--",
+            sys.executable,
+            "-c",
+            program,
+        ],
+    )
+    assert observer.main() == 7
+    assert failed and finished.read_text() == "done"
+    stderr = capsys.readouterr().err
+    assert "diagnostics are incomplete" in stderr
+    assert "secret-path-must-not-appear" not in stderr
+    events = [json.loads(x) for x in (out / "observer.jsonl").read_text().splitlines()]
+    if failure != "terminal_write":
+        assert failed_before_completion
+        assert events[-1]["event"] == "finish"
+        assert events[-1]["exit_code"] == 7
+        assert events[-1]["diagnostics_degraded"] is True
+    else:
+        assert not any(e["event"] == "finish" for e in events)
+
+
+def test_startup_diagnostic_failure_does_not_launch_workload(tmp_path, monkeypatch):
+    original_exists = Path.exists
+    monkeypatch.setattr(
+        Path, "exists", lambda p: True if str(p) == "/proc/self/stat" else original_exists(p)
+    )
+    monkeypatch.setattr(observer, "cgroup_directory", lambda: None)
+
+    def fail_append(*args):
+        raise OSError("startup storage unavailable")
+
+    def forbidden_launch(*args, **kwargs):
+        pytest.fail("workload launched before startup diagnostics succeeded")
+
+    monkeypatch.setattr(observer, "append", fail_append)
+    monkeypatch.setattr(observer.subprocess, "Popen", forbidden_launch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["observer", "--output", str(tmp_path / "new"), "--", sys.executable, "-c", "pass"],
+    )
+    with pytest.raises(OSError, match="startup storage"):
+        observer.main()

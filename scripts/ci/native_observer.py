@@ -13,8 +13,10 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 
 TOKEN = "KCT_NATIVE_OBSERVER_TOKEN"
@@ -167,6 +169,18 @@ class Recorder:
         self.live = live
 
 
+def degraded_notice(stage):
+    """Best effort, fixed vocabulary: exception text may contain secrets."""
+    # A closed/full stderr must not become a second supervision failure.
+    with suppress(Exception):
+        print(
+            f"native observer: {stage} unavailable; diagnostics are incomplete; "
+            "preserving workload supervision and exit status",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -203,36 +217,51 @@ def main():
     )
     recorder = Recorder(args.output / "processes.jsonl")
     child = subprocess.Popen(command, env=env)  # Inherit output, cwd and all workload timeouts.
-    while True:
-        records, unreadable = snapshot(Path("/proc"), token)
-        recorder.sample(records)
+    degraded = False
+    try:
+        while True:
+            records, unreadable = snapshot(Path("/proc"), token)
+            recorder.sample(records)
+            append(
+                args.output / "observer.jsonl",
+                {
+                    "event": "memory_sample",
+                    "memory": memory(cg),
+                    "unreadable_proc_entries": unreadable,
+                },
+            )
+            if child.poll() is not None:
+                break
+            time.sleep(args.interval)
+    except Exception:
+        # Only diagnostic operations are inside this guard. Once launched,
+        # the workload must remain supervised even if /proc or storage fails.
+        degraded = True
+        degraded_notice("sampling")
+    status = child.wait()  # Authoritative status; no new deadline or cancellation.
+    try:
+        after = memory(cg)
+        initial, final = before.get("memory.events"), after.get("memory.events")
+        delta = (
+            {k: final[k] - initial.get(k, 0) for k in final}
+            if initial is not None and final is not None
+            else None
+        )
         append(
             args.output / "observer.jsonl",
-            {"event": "memory_sample", "memory": memory(cg), "unreadable_proc_entries": unreadable},
+            {
+                "event": "finish",
+                "exit_code": status,
+                "memory": after,
+                "memory_events_delta": delta,
+                "diagnostics_degraded": degraded,
+                "still_observed": [
+                    {"pid": p, "start_ticks": tick} for p, tick in sorted(recorder.live)
+                ],
+            },
         )
-        status = child.poll()
-        if status is not None:
-            break
-        time.sleep(args.interval)
-    after = memory(cg)
-    initial, final = before.get("memory.events"), after.get("memory.events")
-    delta = (
-        {k: final[k] - initial.get(k, 0) for k in final}
-        if initial is not None and final is not None
-        else None
-    )
-    append(
-        args.output / "observer.jsonl",
-        {
-            "event": "finish",
-            "exit_code": status,
-            "memory": after,
-            "memory_events_delta": delta,
-            "still_observed": [
-                {"pid": p, "start_ticks": tick} for p, tick in sorted(recorder.live)
-            ],
-        },
-    )
+    except Exception:
+        degraded_notice("terminal record")
     return status if status >= 0 else 128 - status
 
 
