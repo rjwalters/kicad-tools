@@ -259,7 +259,8 @@ namespace router {
 // v39: robust segment intersection under fused floating-point arithmetic.
 // v40: explicit fine-pitch plane-pad halo provenance (native39 union retained).
 // v41: coupled departure-prefix constraint and diagnostic path evidence.
-constexpr int ROUTER_CPP_BUILD_VERSION = 41;
+// v42: coupled mutual via pitch and per-rail barrel clearance thresholds.
+constexpr int ROUTER_CPP_BUILD_VERSION = 42;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 41
+_REQUIRED_CPP_BUILD_VERSION = 42
 
 
 # Try to import C++ module with detailed error tracking
@@ -973,6 +973,17 @@ class CppGrid:
                         pad_blocked,
                         (layer, y, x) in grid._pad_halo_cells,
                     )
+
+            # Escape carve-outs can clear a routing block while retaining
+            # pad-metal occupancy. Via drill checks and pad-exit guards need
+            # that metadata independently of the blocked bit. Copy these
+            # sparse cells without mark_blocked, which would close the escape.
+            pad_layers, pad_ys, pad_xs = np.nonzero(pad_blocked_np & ~blocked_np)
+            for pad_layer, pad_y, pad_x in zip(pad_layers, pad_ys, pad_xs, strict=True):
+                cell = cpp_grid._impl.at(int(pad_x), int(pad_y), int(pad_layer))
+                cell.net = int(net_np[pad_layer, pad_y, pad_x])
+                cell.is_obstacle = bool(obstacle_np[pad_layer, pad_y, pad_x])
+                cell.pad_blocked = True
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
@@ -3962,6 +3973,9 @@ class CppCoupledPathfinder:
         via_drill_cells: int,
         spacing_penalty_factor: float,
         heuristic_weight: float,
+        min_via_pitch_cells: float | None = None,
+        p_via_trace_clearance_cells: float | None = None,
+        n_via_trace_clearance_cells: float | None = None,
     ):
         if not _CPP_AVAILABLE:
             raise RuntimeError("C++ router backend not available")
@@ -3969,6 +3983,14 @@ class CppCoupledPathfinder:
         # Marshal the DesignRules scalars into the C++ struct (mirrors the
         # single-ended CppPathfinder rules marshalling).
         cpp_rules = router_cpp.DesignRules()
+        from .mfr_limits import get_mfr_limits
+
+        cpp_rules.allow_smd_vias = True
+        if rules.manufacturer:
+            with contextlib.suppress(ValueError):
+                cpp_rules.allow_smd_vias = bool(
+                    get_mfr_limits(rules.manufacturer).via_in_pad_supported
+                )
         cpp_rules.trace_width = float(rules.trace_width)
         cpp_rules.trace_clearance = float(rules.trace_clearance)
         cpp_rules.via_drill = float(rules.via_drill)
@@ -3987,6 +4009,21 @@ class CppCoupledPathfinder:
         # this issue wires up).  Marshalled here so a future coupled-attractor
         # port needs no additional plumbing.
         cpp_rules.cost_corridor_attractor = float(rules.cost_corridor_attractor)
+        if min_via_pitch_cells is None:
+            min_via_pitch_cells = (
+                max(
+                    rules.via_diameter + rules.via_clearance,
+                    rules.via_drill + rules.min_hole_to_hole,
+                )
+                / cpp_grid.resolution
+            )
+        default_via_trace_clearance = (
+            rules.via_diameter / 2 + rules.via_clearance + rules.trace_width / 2
+        ) / cpp_grid.resolution
+        if p_via_trace_clearance_cells is None:
+            p_via_trace_clearance_cells = default_via_trace_clearance
+        if n_via_trace_clearance_cells is None:
+            n_via_trace_clearance_cells = default_via_trace_clearance
         self._impl = router_cpp.CoupledPathfinder(
             cpp_grid._impl,
             cpp_rules,
@@ -3997,6 +4034,9 @@ class CppCoupledPathfinder:
             int(via_drill_cells),
             float(spacing_penalty_factor),
             float(heuristic_weight),
+            float(min_via_pitch_cells),
+            float(p_via_trace_clearance_cells),
+            float(n_via_trace_clearance_cells),
         )
 
     def route(

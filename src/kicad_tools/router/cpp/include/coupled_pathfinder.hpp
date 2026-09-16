@@ -107,7 +107,10 @@ public:
                       int via_extra_cells,
                       int via_drill_cells,
                       double spacing_penalty_factor,
-                      double heuristic_weight);
+                      double heuristic_weight,
+                      double min_via_pitch_cells,
+                      double p_via_trace_clearance_cells,
+                      double n_via_trace_clearance_cells);
 
     // Route a coupled pair.  All positions are GRID coordinates (the Python
     // wrapper does world_to_grid + layer_to_index before calling, exactly as
@@ -145,6 +148,8 @@ private:
     int via_drill_cells_;
     double spacing_penalty_factor_;
     double heuristic_weight_;
+    double min_via_pitch_cells_;
+    double p_via_trace_clearance_cells_, n_via_trace_clearance_cells_;
     int cols_, rows_, num_layers_;
 
     // Grid-cell predicates (inlined mirror of the Python helpers).
@@ -157,7 +162,7 @@ private:
     inline bool is_trace_blocked(int gx, int gy, int layer, int net) const {
         return is_cell_blocked(gx, gy, layer, net);
     }
-    bool is_via_blocked(int gx, int gy, int net) const;
+    bool is_via_blocked(int gx, int gy, int net, bool allow_own_pad = false) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {
         return x == gx && y == gy;
