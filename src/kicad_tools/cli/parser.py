@@ -3529,6 +3529,10 @@ def _add_route_parser(subparsers) -> None:
         default="negotiated",
         help="Routing strategy (default: negotiated)",
     )
+    route_parser.add_argument(
+        "--plane-access-plan",
+        help="Deferred automatic-pour access plan JSON (unrouted whole board only)",
+    )
     route_parser.add_argument("--skip-nets", help="Comma-separated nets to skip")
     route_parser.add_argument(
         "--nets",

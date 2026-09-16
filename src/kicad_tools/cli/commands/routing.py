@@ -967,6 +967,8 @@ def run_route_command(args) -> int:
     # Issue #2996: forward --net-class-map sidecar path so rich
     # NetClassRouting fields (intra_pair_clearance, etc.) merge into the
     # autorouter's net_class_map at routing time.
+    if getattr(args, "plane_access_plan", None) is not None:
+        sub_argv.extend(["--plane-access-plan", args.plane_access_plan])
     if getattr(args, "net_class_map", None) is not None:
         sub_argv.extend(["--net-class-map", args.net_class_map])
     # Issue #4980: forward the --current-paths sidecar (and its suppression

@@ -1009,3 +1009,34 @@ An empty problem list confirms matching artifact bytes and optional-file absence
 It does not certify electrical connectivity, native DRC, or factory DFM, and does
 not authenticate who created the receipt. Later board or rule edits invalidate
 the binding. Manufacturing packages retain their separate archive manifest.
+
+### Early access for deferred automatic pours
+
+A recipe that creates its power pours after signal routing can opt in with
+`--plane-access-plan plan.json --no-auto-pour`. The plan describes the exact
+inputs to `auto_create_zones_for_pour_nets`, for example:
+
+```json
+{
+  "version": 1,
+  "source_project": "/absolute/path/board.kicad_pro",
+  "edge_clearance": 0.5,
+  "pour_nets": [["GND", "ground"], ["VCC", "power"]]
+}
+```
+
+Declare the same nets in `--skip-nets`, select a fixed layer stack, and create
+an explicit output `.kicad_pro` before invoking the router. The policy recomputes
+the allocator's real regions in the input board's coordinate frame. Access
+widths, barrels and clearances preserve the strongest minima from the declared
+source, routing input and output project/DRU contexts. Unsupported custom rules
+fail closed. Small SMD pads receive fixed off-pad access before signal routing;
+the component placement and physical pad identity checks remain active.
+
+This opt-in requires a complete, valid, unrouted board without existing zones.
+Partial selection, region routing, unavailable placement checks, layer or tier
+escalation, and existing-copper continuation are rejected. Exported access
+metadata also prevents unsupported staged re-routing. After routing, the recipe
+must create the declared pours with the same inset, fill them, and pass saved
+and refilled connectivity and native DRC checks. An access plan alone does not
+establish filled-plane connectivity.

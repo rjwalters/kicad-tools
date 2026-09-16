@@ -246,3 +246,207 @@ def test_access_rules_bind_both_projects_and_output_dru(tmp_path):
     output.with_suffix(".kicad_dru").write_text('(version 1)\n(rule "Unknown")')
     with pytest.raises(ValueError, match="custom DRC rules"):
         EscapeRules.from_projects(source, output)
+
+
+@pytest.fixture
+def cli_plan(board, tmp_path):
+    import json
+    from argparse import Namespace
+
+    project = board.with_suffix(".kicad_pro")
+    project.write_text("{}")
+    output = tmp_path / "out.kicad_pcb"
+    output.with_suffix(".kicad_pro").write_text("{}")
+    plan = tmp_path / "access.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "edge_clearance": 0.5,
+                "source_project": str(project),
+                "pour_nets": [["GND", "ground"], ["POWER", "power"]],
+            }
+        )
+    )
+    return Namespace(plane_access_plan=str(plan), output=str(output))
+
+
+def test_cli_policy_keeps_component_proof_and_actual_regions(board, cli_plan):
+    from shapely.geometry import Polygon
+
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+    from kicad_tools.placement.routing import analyze_routing_placement
+    from kicad_tools.router.net_class import NetClass
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+    skipped = ["GND", "POWER"]
+    policy = policy_for_attempt(cli_plan, board, skipped)
+    disposition = analyze_routing_placement(board, user_excluded_nets=skipped)
+    router, _ = load_pcb_for_routing(
+        str(board),
+        skip_nets=skipped,
+        force_python=True,
+        rules=DesignRules(grid_resolution=0.05),
+        placement_disposition=disposition,
+        plane_access_policy=policy,
+    )
+    assert router.placement_disposition is disposition
+    assert len(router._plane_access_routes) == 2
+    auto_create_zones_for_pour_nets(
+        board, [("GND", NetClass.GROUND), ("POWER", NetClass.POWER)], edge_clearance=0.5
+    )
+    poured = PCB.load(board)
+    for target in policy.targets:
+        zone = next(z for z in poured.zones if z.net_name == target.net_name)
+        assert target.region.equals(Polygon(zone.polygon))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "nets",
+        "complete",
+        "region",
+        "allow_offboard",
+        "preserve_existing",
+        "auto_layers",
+        "auto_mfr_tier",
+        "adaptive_rules",
+        "auto_pcb_size",
+    ],
+)
+def test_cli_policy_rejects_partial_or_override_modes(board, cli_plan, flag):
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+
+    setattr(cli_plan, flag, True)
+    with pytest.raises(ValueError, match="complete unrouted"):
+        policy_for_attempt(cli_plan, board, ["GND", "POWER"])
+
+
+def test_cli_policy_preserves_stronger_output_and_source_floors(board, cli_plan):
+    import json
+    from pathlib import Path
+
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+
+    board.with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_clearance": 0.31}}}})
+    )
+    Path(cli_plan.output).with_suffix(".kicad_pro").write_text(
+        json.dumps({"board": {"design_settings": {"rules": {"min_hole_to_hole": 0.7}}}})
+    )
+    policy = policy_for_attempt(cli_plan, board, ["GND", "POWER"])
+    assert policy.rules.clearance == 0.31
+    assert policy.rules.hole_gap == 0.7
+
+
+@pytest.mark.parametrize("damage", ["invalid", "partial", "unavailable", "identities"])
+def test_cli_access_rejects_damaged_component_proof(board, cli_plan, damage):
+    from dataclasses import replace
+
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+    from kicad_tools.placement.routing import analyze_routing_placement
+
+    skipped = ["GND", "POWER"]
+    disposition = analyze_routing_placement(board, user_excluded_nets=skipped)
+    if damage == "invalid":
+        disposition = replace(disposition, direct_invalid_nets=frozenset({"SIG"}))
+    elif damage == "partial":
+        disposition = replace(disposition, unrequested_nets=frozenset({"SIG"}))
+    elif damage == "unavailable":
+        disposition = replace(disposition, check_available=False)
+    else:
+        disposition = replace(disposition, pad_net_identities=())
+    with pytest.raises(ValueError):
+        load_pcb_for_routing(
+            str(board),
+            skip_nets=skipped,
+            force_python=True,
+            rules=DesignRules(grid_resolution=0.05),
+            placement_disposition=disposition,
+            plane_access_policy=policy_for_attempt(cli_plan, board, skipped),
+        )
+
+
+def test_outer_cli_delivers_plan_and_placement_proof_to_loader(board, cli_plan, monkeypatch):
+    from kicad_tools.cli import main, route_cmd
+    from kicad_tools.router import io
+
+    seen = []
+    original = io.load_pcb_for_routing
+
+    def capture(*args, **kwargs):
+        assert kwargs["plane_access_policy"] is not None
+        assert kwargs["placement_disposition"] is not None
+        router, _ = original(*args, **kwargs)
+        seen.append(len(router._plane_access_routes))
+        raise RuntimeError("intentional stop after access installation")
+
+    monkeypatch.setattr(io, "load_pcb_for_routing", capture)
+    monkeypatch.setattr(route_cmd, "main", route_cmd._in_process_main)
+    result = main(
+        [
+            "route",
+            str(board),
+            "--output",
+            cli_plan.output,
+            "--no-auto-layers",
+            "--layers",
+            "4",
+            "--skip-nets",
+            "GND,POWER",
+            "--no-auto-pour",
+            "--plane-access-plan",
+            cli_plan.plane_access_plan,
+        ]
+    )
+    assert result == 1
+    assert seen == [2]
+
+
+def test_cli_plan_rejects_auto_pour_before_output_mutation(board, cli_plan, monkeypatch):
+    from pathlib import Path
+
+    from kicad_tools.cli import main, route_cmd
+
+    before = board.read_bytes()
+    monkeypatch.setattr(route_cmd, "main", route_cmd._in_process_main)
+    with pytest.raises(SystemExit) as stopped:
+        main(
+            [
+                "route",
+                str(board),
+                "-o",
+                cli_plan.output,
+                "--no-auto-layers",
+                "--layers",
+                "4",
+                "--skip-nets",
+                "GND,POWER",
+                "--plane-access-plan",
+                cli_plan.plane_access_plan,
+            ]
+        )
+    assert stopped.value.code == 2
+    assert not Path(cli_plan.output).exists()
+    assert board.read_bytes() == before
+
+
+def test_cli_plan_rejects_unmodeled_output_rules(board, cli_plan):
+    from pathlib import Path
+
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+
+    Path(cli_plan.output).with_suffix(".kicad_dru").write_text(
+        '(version 1)\n(rule "custom" (constraint clearance (min .8)))'
+    )
+    with pytest.raises(ValueError, match="custom DRC"):
+        policy_for_attempt(cli_plan, board, ["GND", "POWER"])
+
+
+def test_cli_plan_rejects_extra_skipped_signal(board, cli_plan):
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+
+    with pytest.raises(ValueError, match="all explicitly skipped"):
+        policy_for_attempt(cli_plan, board, ["GND", "POWER", "SIG"])

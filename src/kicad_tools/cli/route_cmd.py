@@ -73,6 +73,7 @@ from kicad_tools.core.kicad_lock import check_kicad_lock
 
 from .route_deadline import record_stage, restore_stage
 from .route_placement import for_attempt, select_result
+from .route_plane_access import policy_for_attempt
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -7293,6 +7294,7 @@ def route_with_layer_escalation(
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
+                    plane_access_policy=policy_for_attempt(args, pcb_path, attempt_skip_nets),
                     placement_disposition=for_attempt(args, attempt_skip_nets),
                     skip_nets=attempt_skip_nets,
                     rules=rules,
@@ -8405,6 +8407,7 @@ def route_with_rule_relaxation(
             with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
+                    plane_access_policy=policy_for_attempt(args, pcb_path, skip_nets),
                     placement_disposition=for_attempt(args, skip_nets),
                     skip_nets=skip_nets,
                     rules=rules,
@@ -10742,6 +10745,7 @@ def route_with_combined_escalation(
                 with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
                     router, net_map = load_pcb_for_routing(
                         str(pcb_path),
+                        plane_access_policy=policy_for_attempt(args, pcb_path, skip_nets),
                         placement_disposition=for_attempt(args, skip_nets),
                         skip_nets=skip_nets,
                         rules=rules,
@@ -13153,6 +13157,10 @@ def _route_parser() -> argparse.ArgumentParser:
         help="Routing strategy (default: negotiated)",
     )
     parser.add_argument(
+        "--plane-access-plan",
+        help="Deferred automatic-pour access plan JSON (unrouted whole board only)",
+    )
+    parser.add_argument(
         "--skip-nets",
         help="Comma-separated nets to skip (e.g., GND,VCC,VBUS)",
     )
@@ -14951,6 +14959,11 @@ def _main_impl(argv: list[str] | None = None) -> int:
 
 
 def _run_main_impl(args, parser, argv) -> int:
+    if getattr(args, "plane_access_plan", None) and getattr(args, "auto_pour", True):
+        parser.error(
+            "--plane-access-plan requires --no-auto-pour; create the declared pours after routing"
+        )
+
     from .route_deadline import configure_output
     from .route_receipt import configure as configure_receipt
 
@@ -15946,6 +15959,7 @@ def _run_main_impl(args, parser, argv) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             router, net_map = load_pcb_for_routing(
                 str(pcb_path),
+                plane_access_policy=policy_for_attempt(args, pcb_path, skip_nets),
                 placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
@@ -16021,6 +16035,7 @@ def _run_main_impl(args, parser, argv) -> int:
         def _order_router_factory() -> "Autorouter":
             fresh, _ = load_pcb_for_routing(
                 str(pcb_path),
+                plane_access_policy=policy_for_attempt(args, pcb_path, skip_nets),
                 placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,

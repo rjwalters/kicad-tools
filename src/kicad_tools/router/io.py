@@ -3882,9 +3882,21 @@ def load_pcb_for_routing(
     # and an unrouted source. Unsupported partial/override contexts fail closed.
     access_nets = set()
     if plane_access_policy is not None:
-        if netlist or placement_disposition is not None or region is not None:
+        if netlist or region is not None:
             raise ValueError("Plane access requires a complete board with authored net identities")
         access_nets = {target.net_name for target in plane_access_policy.targets}
+        if placement_disposition is not None:
+            disposition = placement_disposition
+            if (
+                not disposition.check_available
+                or disposition.invalid_references
+                or disposition.invalid_footprints
+                or disposition.invalid_nets
+                or disposition.unrequested_nets
+                or (disposition.user_excluded_nets | disposition.plane_excluded_nets) - access_nets
+                or disposition.eligible_nets != disposition.all_nets - access_nets
+            ):
+                raise ValueError("Plane access requires a complete valid placement disposition")
         if not access_nets.issubset(skip_nets):
             raise ValueError("Plane access targets must be explicitly skipped plane nets")
     placement_invalid = (

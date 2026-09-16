@@ -1431,6 +1431,46 @@ def write_sidecar(net_class_map: dict, output_dir: Path) -> Path:
     return sidecar_path
 
 
+def _write_plane_access_plan(input_path: Path, output_path: Path) -> Path:
+    """Bind early access to the recipe's actual deferred pours and rule contexts."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+    from kicad_tools.zones.pour_escape import EscapeRules
+
+    source = input_path.with_suffix(".kicad_pro")
+    output = output_path.with_suffix(".kicad_pro")
+    dru = output_path.with_suffix(".kicad_dru")
+    if not source.is_file():
+        raise ValueError("Board07 plane access requires its input project context")
+    if any(path.is_symlink() for path in (output, dru)):
+        raise ValueError("Board07 output rule sidecars must not be symlinks")
+    EscapeRules.from_projects(source, output)
+    pending = {}
+    if not output.exists():
+        pending[output] = source.read_bytes()
+    if not dru.exists():
+        factory = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+        pending[dru] = merge_dru_floors(None, generate_dru(factory, "jlcpcb")).encode()
+    for path, content in pending.items():
+        with path.open("xb") as stream:
+            stream.write(content)
+    EscapeRules.from_projects(source, output)
+    plan_path = output_path.with_suffix(".plane-access.json")
+    plan_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_project": str(source.resolve()),
+                "edge_clearance": 0.5,
+                "pour_nets": [[name, "ground" if name == "GND" else "power"] for name in POUR_NETS],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return plan_path
+
+
 def route_pcb(input_path: Path, output_path: Path) -> bool:
     """Route the PCB by invoking ``kct route`` with the proven flag recipe.
 
@@ -1647,6 +1687,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # the router-skip set and the CI gate's pour audit reference the same
     # declaration.
     skip_nets = list(POUR_NETS)
+    plane_access_plan = _write_plane_access_plan(input_path, output_path)
 
     # Emit the JSON sidecar BEFORE invoking the subprocess.  The CI
     # gate (``find_net_class_map_sidecar`` in
@@ -1896,6 +1937,9 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--deterministic-budget",
         "--skip-nets",
         ",".join(skip_nets),
+        "--no-auto-pour",
+        "--plane-access-plan",
+        str(plane_access_plan),
         "--net-class-map",
         str(sidecar_path),
         "--length-match-groups",

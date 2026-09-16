@@ -997,3 +997,96 @@ def test_native_staged_pad_drill_repair_preserves_connectivity(
         candidate, rules, kicad_cli=executable
     ).relocation.changed
     assert candidate.read_bytes() == published
+
+
+def test_early_plane_access_uses_real_board_regions_and_component_proof(
+    generate_design_mod, tmp_path
+):
+    """Reserve the stranded fine-pitch power pad before any signal route exists."""
+    from argparse import Namespace
+
+    from shapely.geometry import Point
+
+    from kicad_tools.cli.route_plane_access import policy_for_attempt
+    from kicad_tools.placement.routing import analyze_routing_placement
+    from kicad_tools.router.io import load_pcb_for_routing
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.rules import DesignRules
+
+    generate_design_mod.create_project(tmp_path, "matchgroup_test")
+    source = generate_design_mod.create_pcb(tmp_path)
+    output = tmp_path / "out.kicad_pcb"
+    plan = generate_design_mod._write_plane_access_plan(source, output)
+    args = Namespace(plane_access_plan=str(plan), output=str(output))
+    skipped = generate_design_mod.POUR_NETS
+    policy = policy_for_attempt(args, source, skipped)
+    proof = analyze_routing_placement(source, user_excluded_nets=skipped)
+    router, names = load_pcb_for_routing(
+        str(source),
+        skip_nets=skipped,
+        rules=DesignRules(grid_resolution=0.05),
+        layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
+        placement_disposition=proof,
+        plane_access_policy=policy,
+    )
+    assert router.placement_disposition is proof
+    assert len(proof.physical_pad_net_identities) == 244
+    routes = router._plane_access_routes
+    assert {t.net_name for t in policy.targets} == set(skipped)
+    assert {r.net_name for r in routes} == {"GND", "+1V2"}
+    targets = {t.net_name: t for t in policy.targets}
+    for route in routes:
+        assert route.net == names[route.net_name]
+        assert all(targets[route.net_name].region.covers(Point(v.x, v.y)) for v in route.vias)
+    # This regression witness names the formerly stranded pin; production policy
+    # selects every eligible physical pad without reference/name exceptions.
+    pad = next(p for p in router.pads.values() if p.ref == "U4" and p.pin == "C2")
+    assert any(
+        r.net_name == "+1V2"
+        and any(abs(s.x1 - pad.x) < 1e-6 and abs(s.y1 - pad.y) < 1e-6 for s in r.segments)
+        for r in routes
+    )
+    assert router.to_sexp(skip_cleanup=True).count("kct:fixed-plane-access:v1") == 1
+
+
+def test_recipe_cli_bridge_installs_access_in_routing_frame(
+    generate_design_mod, tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from kicad_tools.cli import main, route_cmd
+    from kicad_tools.router import io
+
+    generate_design_mod.create_project(tmp_path, "matchgroup_test")
+    source = generate_design_mod.create_pcb(tmp_path)
+    before = source.read_bytes()
+    output = tmp_path / "out.kicad_pcb"
+    original_load = io.load_pcb_for_routing
+    captured = []
+
+    def capture(*args, **kwargs):
+        router, _ = original_load(*args, **kwargs)
+        pad = next(p for p in router.pads.values() if p.ref == "U4" and p.pin == "C2")
+        access = next(
+            r
+            for r in router._plane_access_routes
+            if r.net_name == "+1V2"
+            and any(abs(s.x1 - pad.x) < 1e-6 and abs(s.y1 - pad.y) < 1e-6 for s in r.segments)
+        )
+        captured.append((router, access))
+        raise RuntimeError("intentional stop before signal routing")
+
+    def run(command, **kwargs):
+        assert command[:4] == [sys.executable, "-m", "kicad_tools.cli", "route"]
+        return SimpleNamespace(returncode=main(command[3:]))
+
+    monkeypatch.setattr(io, "load_pcb_for_routing", capture)
+    monkeypatch.setattr(route_cmd, "main", route_cmd._in_process_main)
+    monkeypatch.setattr(generate_design_mod.subprocess, "run", run)
+    assert generate_design_mod.route_pcb(source, output) is False
+    assert len(captured) == 1
+    router, access = captured[0]
+    assert len(router.placement_disposition.physical_pad_net_identities) == 244
+    assert access.vias
+    assert source.read_bytes() == before
+    assert not output.exists()
