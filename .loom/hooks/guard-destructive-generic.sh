@@ -53,15 +53,37 @@
 
 # Determine log directory relative to this script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
-HOOK_ERROR_LOG="${SCRIPT_DIR}/../logs/hook-errors.log"
+
+# Runtime log directory (#7882). At runtime SCRIPT_DIR is the INSTALLED hook's
+# own directory (.loom/hooks/), so ../logs is .loom/logs — the intended target.
+#
+# But this file is ALSO invoked directly from its SOURCE location in the Loom
+# repo (defaults/hooks/) — by the tests/hooks suites, and by anyone manually
+# exercising the guard. There ../logs would be defaults/logs, i.e. runtime
+# telemetry deposited inside the VENDORED tree that is copy-installed into every
+# consumer repo and scanned by scripts/check-vendored-private-refs.sh — which
+# produced false CI failures on long-lived checkouts. So when the parent
+# directory is literally `defaults`, redirect to the repo's own .loom/logs
+# instead: the log destination must not depend on which copy of the script ran.
+#
+# Pure parameter expansion (no subshells): this runs on every hook invocation,
+# including ahead of the #3687 read-only fast path, so it must stay fork-free.
+_LOOM_HOOK_PARENT="${SCRIPT_DIR%/*}"
+if [[ "${_LOOM_HOOK_PARENT##*/}" == "defaults" ]]; then
+    HOOK_LOG_DIR="${_LOOM_HOOK_PARENT%/*}/.loom/logs"
+else
+    HOOK_LOG_DIR="${SCRIPT_DIR}/../logs"
+fi
+
+HOOK_ERROR_LOG="${HOOK_LOG_DIR}/hook-errors.log"
 
 # Decision telemetry log (issue #3771) — a SEPARATE JSONL file from
-# HOOK_ERROR_LOG. At runtime SCRIPT_DIR is the installed hook's own directory
-# (.loom/hooks/), so this resolves to .loom/logs/guard-decisions.log in a real
-# install. LOOM_GUARD_DECISION_LOG_FILE overrides the path (a test seam; also
-# lets an operator point the log elsewhere). Off by default — see
+# HOOK_ERROR_LOG, in the same HOOK_LOG_DIR, so this resolves to
+# .loom/logs/guard-decisions.log in a real install.
+# LOOM_GUARD_DECISION_LOG_FILE overrides the path (a test seam; also lets an
+# operator point the log elsewhere). Off by default — see
 # decision_log_enabled() below.
-DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${SCRIPT_DIR}/../logs/guard-decisions.log}"
+DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${HOOK_LOG_DIR}/guard-decisions.log}"
 
 # Log a diagnostic error message (best-effort, never fails the script)
 log_hook_error() {

@@ -57,6 +57,7 @@ test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
 test-check-main-clean.sh
 test-check-main-freshness.sh
+test-check-pipefail-early-exit.sh
 test-check-promotion-landed.sh
 test-check-quarantine-stashes.sh
 test-check-runtime-capabilities.sh
@@ -188,6 +189,7 @@ test-resync-installed.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
 test-run-ci-suites-failure-excerpt.sh
+test-run-ci-suites-retry.sh
 test-run-ci-suites-serial-lane.sh
 test-safe-stash-pop.sh
 test-safehoused-service.sh
@@ -217,6 +219,7 @@ test-warn-out-of-set-deps.sh
 test-worktree-base-override.sh
 test-worktree-concurrency.sh
 test-worktree-existing-dir-drift-check.sh
+test-worktree-forge-pr-check.sh
 test-worktree-hookspath.sh
 test-worktree-json-purity.sh
 test-worktree-local-branch-upstream-tracking.sh

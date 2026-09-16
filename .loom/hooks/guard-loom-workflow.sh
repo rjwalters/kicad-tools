@@ -37,17 +37,34 @@
 
 # Determine log directory relative to this script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
-HOOK_ERROR_LOG="${SCRIPT_DIR}/../logs/hook-errors.log"
+
+# Runtime log directory (#7882) — identical resolution to
+# guard-destructive-generic.sh, deliberately kept in lockstep so both guards
+# always write to the same place. At runtime SCRIPT_DIR is the INSTALLED hook's
+# own dir (.loom/hooks/) and ../logs is .loom/logs; when the guard is invoked
+# directly from its SOURCE location (defaults/hooks/) the same expression would
+# resolve to defaults/logs, depositing runtime telemetry inside the VENDORED
+# tree that ships to every consumer repo and that
+# scripts/check-vendored-private-refs.sh scans. Redirect that case to the repo's
+# own .loom/logs. Pure parameter expansion (no subshells) — this runs on every
+# hook invocation.
+_LOOM_HOOK_PARENT="${SCRIPT_DIR%/*}"
+if [[ "${_LOOM_HOOK_PARENT##*/}" == "defaults" ]]; then
+    HOOK_LOG_DIR="${_LOOM_HOOK_PARENT%/*}/.loom/logs"
+else
+    HOOK_LOG_DIR="${SCRIPT_DIR}/../logs"
+fi
+
+HOOK_ERROR_LOG="${HOOK_LOG_DIR}/hook-errors.log"
 
 # Decision telemetry log (issue #3771 / #3898) — a SEPARATE JSONL file from
 # HOOK_ERROR_LOG, sharing the SAME schema + stable rule tags as
 # guard-destructive.sh so a single reader (#3772 / the standing per-trigger
-# review policy) aggregates BOTH guards' fires. At runtime SCRIPT_DIR is the
-# installed hook's own dir (.loom/hooks/), so this resolves to
+# review policy) aggregates BOTH guards' fires. Resolves to
 # .loom/logs/guard-decisions.log. LOOM_GUARD_DECISION_LOG_FILE overrides the
 # path (test seam / operator override). Off by default — see
 # decision_log_enabled() below.
-DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${SCRIPT_DIR}/../logs/guard-decisions.log}"
+DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${HOOK_LOG_DIR}/guard-decisions.log}"
 
 # Shared config-tier resolver (#4063). Source defaults/scripts/lib/config-resolver.sh
 # so decision_log_enabled() below reads the full config tier chain through the

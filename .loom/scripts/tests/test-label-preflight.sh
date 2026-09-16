@@ -63,7 +63,7 @@ assert_eq() {
 
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null; then
         pass "$msg"
     else
         fail "$msg (expected substring '$needle' in: '$haystack')"
@@ -72,7 +72,7 @@ assert_contains() {
 
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
-    if ! printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if ! printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null; then
         pass "$msg"
     else
         fail "$msg (unexpected substring '$needle' in: '$haystack')"

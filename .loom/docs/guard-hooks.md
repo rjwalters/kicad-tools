@@ -1504,7 +1504,7 @@ The log is **off by default** — enabling it writes a new persistent, cross-ses
    ```
 3. **Default** — `false` (no decision log written).
 
-When enabled, each deny/ask appends **one JSON object per line** to `.loom/logs/guard-decisions.log` (`SCRIPT_DIR`-relative, mirroring `hook-errors.log`; override the path with `LOOM_GUARD_DECISION_LOG_FILE`). **Stable schema** (the contract downstream reader tooling in #3772 depends on — field names are load-bearing):
+When enabled, each deny/ask appends **one JSON object per line** to `.loom/logs/guard-decisions.log` (`SCRIPT_DIR`-relative, mirroring `hook-errors.log`; override the path with `LOOM_GUARD_DECISION_LOG_FILE`). A guard invoked directly from its **source** location in the Loom repo (`defaults/hooks/`) resolves the same default to the repo's own `.loom/logs/`, never `defaults/logs/` — the destination must not depend on which copy of the script ran, and the vendored `defaults/` tree must never accumulate runtime telemetry (#7882). **Stable schema** (the contract downstream reader tooling in #3772 depends on — field names are load-bearing):
 
 ```json
 {"ts":"2026-07-22T23:17:13Z","decision":"deny","pattern":"sql-ddl","tier":"catastrophic","command":"<redacted>"}

@@ -130,12 +130,28 @@ is_recognized_top() {
 # top-level dir" means.
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 
-FULL_TREE_CACHE=""
-full_tree() {
-    if [[ -z "$FULL_TREE_CACHE" ]]; then
-        FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
+# Whole-tree membership, as a newline-delimited SET tested with a bash `case`
+# glob -- deliberately NOT `full_tree | grep -qFx "$path"` (#7736, #7771).
+#
+# Under the `set -o pipefail` above, `grep -qFx` exits the moment it matches,
+# closing the pipe while the producer is still writing a tree listing far
+# larger than the 64K pipe buffer. The producer takes SIGPIPE (141), pipefail
+# reports the PIPELINE as failed, and `if ! ...` then records a `MISSING FILE`
+# miss for a path that is demonstrably present -- a silent wrong answer, not a
+# flake (#7771). The same pipe also surfaced as "printf: write error: Broken
+# pipe" noise in CI (#7736). A `case` test has no pipe, no subprocess, and no
+# exit status to misreport; it mirrors is_recognized_top() above, and the
+# candidate paths are drawn from [A-Za-z0-9_.-/:] only, so no glob
+# metacharacter can reach the pattern side.
+FULL_TREE_NL=""
+full_tree_contains() {
+    if [[ -z "$FULL_TREE_NL" ]]; then
+        FULL_TREE_NL=$'\n'"$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"$'\n'
     fi
-    printf '%s' "$FULL_TREE_CACHE"
+    case "$FULL_TREE_NL" in
+        *$'\n'"$1"$'\n'*) return 0 ;;
+    esac
+    return 1
 }
 
 CANDIDATES=()
@@ -163,7 +179,7 @@ for raw_candidate in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
     is_recognized_top "$path" || continue
     CHECKED_PATHS=$((CHECKED_PATHS + 1))
 
-    if ! full_tree | grep -qFx "$path"; then
+    if ! full_tree_contains "$path"; then
         MISSES+=("MISSING FILE: \`$path\` does not exist on origin/main")
         continue
     fi
