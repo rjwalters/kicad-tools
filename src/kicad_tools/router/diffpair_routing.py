@@ -4493,6 +4493,7 @@ class DiffPairRouter:
             layer=Layer(grid.index_to_layer(layer_idx)),
             ref=template.ref,
             component_id=template.component_id,
+            terminal_id=template.terminal_id,
             pin=template.pin,
             # The virtual pad copies the template's copper shape, so it must
             # copy its rotation too or the shape is silently un-rotated
