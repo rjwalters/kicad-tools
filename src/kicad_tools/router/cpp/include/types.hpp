@@ -250,7 +250,9 @@ namespace router {
 // v32: combine physical halo/component-hole refinement with the static
 // differential partner-pad guard (#5482). Version 31 is already used by
 // separate held stored-via/coupled-routing builds; do not accept their binaries.
-constexpr int ROUTER_CPP_BUILD_VERSION = 32;
+// v33: add swept-edge rejection of foreign stored-via copper, retaining
+// the v32 partner-pad and physical halo/component-hole safeguards.
+constexpr int ROUTER_CPP_BUILD_VERSION = 33;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -639,6 +641,8 @@ struct StoredVia {
     float drill;
     float diameter;
     int net;
+    int layer_from = 0;
+    int layer_to = std::numeric_limits<int>::max();
 };
 
 // Rated-footprint attach zone for pairwise clearance (Issue #4510 / #4506).

@@ -656,11 +656,13 @@ void Grid3D::add_stored_segment(float x1, float y1, float x2, float y2,
 }
 
 void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int net,
-                           std::optional<std::pair<int, int>> grid_center) {
+                           std::optional<std::pair<int, int>> grid_center, int layer_from, int layer_to) {
     const float radius = std::max(drill, diameter) / 2;
     index_route_geometry(route_via_bins_, stored_vias_.size(),
                          x - radius, y - radius, x + radius, y + radius);
-    stored_vias_.push_back({x, y, drill, diameter, net});
+    stored_vias_.push_back({x, y, drill, diameter, net,
+        std::min(layer_from, layer_to < 0 ? layers_ - 1 : layer_to),
+        std::max(layer_from, layer_to < 0 ? layers_ - 1 : layer_to)});
     const auto [gx, gy] = grid_center.value_or(world_to_grid(x, y));
     registered_route_geometry_.insert(via_mark_key(gx, gy, net));
     route_coverage_dirty_ = true;
@@ -877,6 +879,32 @@ inline std::pair<float, float> closest_gap_midpoint(
 }
 
 }  // namespace
+
+bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
+                                    int partner_net, float partner_clearance) const {
+    if (stored_vias_.empty()) return true;
+    const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
+    const auto candidates = route_geometry_candidates(
+        std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
+        std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
+    for (size_t i : candidates.second) {
+        const auto& via = stored_vias_[i];
+        if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
+        const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
+        float required = clearance;
+        if (via.net == partner_net && partner_clearance >= 0) {
+            required = partner_clearance;
+        } else {
+            const float pair = pairwise_required_clearance(s.net, via.net);
+            if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
+                    (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
+        }
+        const float gap = std::hypot(via.x - cp.first, via.y - cp.second)
+            - (s.width + via.diameter) / 2;
+        if (gap < required - CLEARANCE_EPSILON_MM) return false;
+    }
+    return true;
+}
 
 bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
                                        int partner_net, float partner_clearance, float via_clearance) const {
@@ -1329,7 +1357,7 @@ ValidationResult Grid3D::validate_route(
 
         // 1c. Segment vs stored vias
         for (const auto& sv : stored_vias_) {
-            if (sv.net == exclude_net) continue;
+            if (sv.net == exclude_net || seg.layer < sv.layer_from || seg.layer > sv.layer_to) continue;
 
             float via_radius = sv.diameter / 2.0f;
             float dist = point_to_segment_distance(

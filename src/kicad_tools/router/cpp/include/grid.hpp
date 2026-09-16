@@ -278,7 +278,8 @@ public:
 
     // Register a completed route's via for clearance validation.
     void add_stored_via(float x, float y, float drill, float diameter, int net,
-                        std::optional<std::pair<int, int>> grid_center = std::nullopt);
+                        std::optional<std::pair<int, int>> grid_center = std::nullopt,
+                        int layer_from = 0, int layer_to = -1);
 
     // Global completeness is diagnostic. A cell is refinable only when all
     // active marks covering it have registered physical geometry. Unknown
@@ -288,6 +289,9 @@ public:
     bool route_cell_has_geometry(int x, int y, int layer) const;
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
                                     int partner_net, float partner_clearance, float via_clearance) const;
+    // Hard constraint for negotiated traces; foreign trace copper remains soft.
+    bool trace_stored_vias_clear(const Segment& segment, float clearance,
+                                 int partner_net, float partner_clearance) const;
     bool route_via_geometry_clear(const Via& via, float clearance,
                                   float hole_clearance, float same_net_drill_clearance) const;
     // Broad-phase candidates whose copper bounding boxes share two-mm bins
