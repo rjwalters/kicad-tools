@@ -39,6 +39,7 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.router.escape import EscapeDirection, EscapeRouter
+from kicad_tools.router.layers import Layer
 from tests.fixtures.strict_in_pad_min import (
     CLEARANCE,
     make_grid,
@@ -178,6 +179,9 @@ class TestMicroViaFallbackOn:
         assert route.via is not None
         assert route.via.diameter == pytest.approx(0.3)
         assert route.via.drill == pytest.approx(0.15)
+        assert route.escape_layer == Layer.IN1_CU
+        assert route.via.layers == (primary.layer, Layer.IN1_CU)
+        assert route.via.is_micro
 
     def test_strict_path_rescued_by_micro_via(self):
         """The fallback works under strict mode too: the strict-mode

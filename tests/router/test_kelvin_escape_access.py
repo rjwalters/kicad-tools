@@ -17,7 +17,7 @@ from kicad_tools.router.primitives import Pad, Segment, Via
 from kicad_tools.router.rules import DesignRules
 
 
-def fixture(pad_height=1.55):
+def fixture(pad_height=1.55, layer_stack=None):
     rules = DesignRules(
         trace_width=0.2,
         trace_clearance=0.2,
@@ -26,7 +26,7 @@ def fixture(pad_height=1.55):
         via_drill=0.3,
         grid_resolution=0.05,
     )
-    grid = RoutingGrid(width=20, height=20, rules=rules)
+    grid = RoutingGrid(width=20, height=20, rules=rules, layer_stack=layer_stack)
     router = EscapeRouter(grid, rules, component_holes=())
     pads = [
         Pad(
@@ -250,5 +250,44 @@ def test_bottom_source_rejects_degenerate_same_layer_via():
     for pad in pads:
         grid.add_pad(pad)
     router = EscapeRouter(grid, old.rules, component_holes=())
+    result = recover_kelvin_escapes(router, package, escapes, pads)
+    assert result[0] is escapes[0]
+
+
+def test_inner_landing_keeps_ordinary_barrel_full_stack():
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Route
+    from kicad_tools.router.via_clearance import segment_clears_foreign_via
+
+    router, package, escapes, pads = fixture(layer_stack=LayerStack.four_layer_all_signal())
+    result = recover_kelvin_escapes(router, package, escapes, pads)
+    candidate = result[0]
+    assert candidate.via is not None
+    assert candidate.escape_layer == Layer.IN1_CU
+    assert candidate.via.layers == (Layer.F_CU, Layer.B_CU)
+    assert any(s.layer == Layer.IN1_CU for s in candidate.segments)
+    via = candidate.via
+    foreign = Segment(via.x - 1, via.y, via.x + 1, via.y, 0.2, Layer.IN2_CU, 99)
+    assert not segment_clears_foreign_via(foreign, via, 0.2)
+    router.grid.mark_route(Route(99, "FOREIGN", segments=[foreign]))
+    assert router.grid.worst_via_segment_deficit(via, via.net)[0] > 0
+    assert not router.grid.validate_via_clearance(via, via.net)[0]
+    assert '(layers "F.Cu" "B.Cu")' in via.to_sexp()
+
+
+def test_inner_landing_rejects_foreign_copper_beyond_logical_transition():
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Route
+
+    router, package, escapes, pads = fixture(layer_stack=LayerStack.four_layer_all_signal())
+    router.grid.routes.append(
+        Route(
+            99,
+            "FOREIGN",
+            segments=[
+                Segment(5, 8.7, 15, 8.7, 2, Layer.IN2_CU, 99),
+            ],
+        )
+    )
     result = recover_kelvin_escapes(router, package, escapes, pads)
     assert result[0] is escapes[0]

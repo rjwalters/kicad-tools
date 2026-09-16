@@ -21,11 +21,12 @@ def _candidate_clear(
 ) -> bool:
     via = candidate.via
     assert via is not None
+    first_layer, last_layer = sorted(layer.value for layer in via.layers)
     if (
         candidate.escape_layer == candidate.pad.layer
         or via.layers[0] == via.layers[1]
-        or candidate.pad.layer not in via.layers
-        or candidate.escape_layer not in via.layers
+        or not first_layer <= candidate.pad.layer.value <= last_layer
+        or not first_layer <= candidate.escape_layer.value <= last_layer
     ):
         return False
     grid = router.grid

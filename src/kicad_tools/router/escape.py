@@ -1985,7 +1985,7 @@ class EscapeRouter:
                 escape.via_pos = self._clamp_to_edge_clearance(*escape.via_pos)
                 if escape.via is not None:
                     clamped_x, clamped_y = escape.via_pos
-                    escape.via = Via(
+                    escape.via = self._make_escape_via(
                         x=clamped_x,
                         y=clamped_y,
                         drill=escape.via.drill,
@@ -3594,7 +3594,7 @@ class EscapeRouter:
             )
 
             # Create via
-            via = Via(
+            via = self._make_escape_via(
                 x=via_x,
                 y=via_y,
                 drill=self.rules.via_drill,
@@ -5124,7 +5124,7 @@ class EscapeRouter:
                     continue
 
                 # Create via
-                via = Via(
+                via = self._make_escape_via(
                     x=via_x,
                     y=via_y,
                     drill=self.rules.via_drill,
@@ -6259,7 +6259,7 @@ class EscapeRouter:
             )
 
             # Create via
-            via = Via(
+            via = self._make_escape_via(
                 x=via_x,
                 y=via_y,
                 drill=self.rules.via_drill,
@@ -6631,7 +6631,7 @@ class EscapeRouter:
                         ),
                     ]
 
-                    via = Via(
+                    via = self._make_escape_via(
                         x=via_x,
                         y=via_y,
                         drill=self.rules.via_drill,
@@ -6934,7 +6934,7 @@ class EscapeRouter:
                     foreign_tracks=foreign_tracks,
                     existing_drills=existing_drills,
                 ):
-                    via = Via(
+                    via = self._make_escape_via(
                         x=via_x,
                         y=via_y,
                         drill=self.rules.via_drill,
@@ -8176,7 +8176,7 @@ class EscapeRouter:
         # the via barrel itself.
         offset = via_diameter / 2 + effective_clearance + self.rules.trace_width
 
-        in_pad_via = Via(
+        in_pad_via = self._make_escape_via(
             x=via_x,
             y=via_y,
             drill=via_drill,
@@ -8608,7 +8608,7 @@ class EscapeRouter:
                 # Via from surface to inner escape layer.  ``in_pad=False``
                 # because the via is geometrically OFF the pad copper
                 # (that's the whole point of the lateral offset).
-                lateral_via = Via(
+                lateral_via = self._make_escape_via(
                     x=cand_x,
                     y=cand_y,
                     drill=via_drill,
@@ -8686,6 +8686,43 @@ class EscapeRouter:
             direction.name,
         )
         return None
+
+    def _make_escape_via(
+        self,
+        *,
+        x: float,
+        y: float,
+        drill: float,
+        diameter: float,
+        layers: tuple[Layer, Layer],
+        net: int = 0,
+        net_name: str = "",
+        in_pad: bool = False,
+        is_micro: bool = False,
+    ) -> Via:
+        """Represent the drilled barrel, independently of the escape landing.
+
+        This router selects ordinary through-hole processing unless it explicitly
+        enables its microvia fallback. Like C++ route conversion, ordinary escape
+        vias must expose the entire stack to physical validators before acceptance.
+        The escape's selected landing layer remains on EscapeRoute and its stub.
+        """
+        if not is_micro:
+            layers = (
+                Layer(self.grid.index_to_layer(0)),
+                Layer(self.grid.index_to_layer(self.grid.num_layers - 1)),
+            )
+        return Via(
+            x=x,
+            y=y,
+            drill=drill,
+            diameter=diameter,
+            layers=layers,
+            net=net,
+            net_name=net_name,
+            in_pad=in_pad,
+            is_micro=is_micro,
+        )
 
     def _select_inner_escape_layer(self, surface_layer: Layer) -> Layer:
         """Select the best inner layer for via escape routing.
