@@ -25,7 +25,9 @@ def _carpet_pathfinder(size=2, cap=0):
     )
     for i in range(int(size / 0.4) + 1):
         for j in range(int(size / 0.4) + 1):
-            grid._impl.add_stored_via(i * 0.4, j * 0.4, 0.3, 0.6, 2)
+            # Keep F.Cu clear so trace expansion reaches the via/budget
+            # decision instead of failing the stored-via trace guard first.
+            grid._impl.add_stored_via(i * 0.4, j * 0.4, 0.3, 0.6, 2, layer_from=1, layer_to=3)
     pathfinder = CppPathfinder(grid, rules, diagonal_routing=True, per_net_iterations=cap)
     pathfinder.set_routable_layers(grid.get_routable_indices())
     return pathfinder

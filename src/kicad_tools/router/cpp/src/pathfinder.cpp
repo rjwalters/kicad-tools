@@ -1394,6 +1394,20 @@ RouteResult Pathfinder::route(
             int ny = current.y + dy;
             int nlayer = current.layer;
 
+            // Stored via metal cannot be ripped up as a soft trace crossing.
+            // Check the swept edge before pad/approach occupancy waivers.
+            {
+                const auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                const auto [bx, by] = grid_.grid_to_world(nx, ny);
+                Segment edge;
+                edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
+                edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
+                edge.layer = nlayer; edge.net = net;
+                if (!grid_.trace_stored_vias_clear(edge,
+                        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                        physical_partner_net_, physical_partner_clearance_)) continue;
+            }
+
             if (grid_.has_fixed_fills()) {
                 auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
                 auto [bx, by] = grid_.grid_to_world(nx, ny);
@@ -2000,6 +2014,20 @@ RouteResult Pathfinder::run_astar_loop() {
             int nx = current.x + dx;
             int ny = current.y + dy;
             int nlayer = current.layer;
+
+            // Stored via metal cannot be ripped up as a soft trace crossing.
+            // Check the swept edge before pad/approach occupancy waivers.
+            {
+                const auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
+                const auto [bx, by] = grid_.grid_to_world(nx, ny);
+                Segment edge;
+                edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
+                edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
+                edge.layer = nlayer; edge.net = search_net_;
+                if (!grid_.trace_stored_vias_clear(edge,
+                        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                        physical_partner_net_, physical_partner_clearance_)) continue;
+            }
 
             if (grid_.has_fixed_fills()) {
                 auto [ax, ay] = grid_.grid_to_world(current.x, current.y);
