@@ -465,6 +465,7 @@ class LatticePathfinder:
             via_via_gap=self._via_via_gap,
             same_net_via_gap=self._same_net_via_gap,
             pairwise=self._pairwise,
+            net_clearance_floors=self.rules.net_clearance_floors,
         )
         # Issue #4355: pre-seed immovable non-listed copper so EVERY fresh
         # model (per-pass negotiation, isolated stub/pair probes, and the
