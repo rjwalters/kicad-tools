@@ -218,29 +218,8 @@ class Escape:
     rules: EscapeRules
 
 
-def find_escape(
-    start,
-    net,
-    layer,
-    pads,
-    segments,
-    vias,
-    primary,
-    bounds,
-    rules,
-    *,
-    step=0.05,
-    node_budget=200_000,
-    allowed_region=None,
-):
-    """Find a clear 45-degree path to primary copper or a legal through via.
-
-    Geometry is immutable here. The caller commits only a complete result.
-    Via entries carry their actual drill diameter, including earlier repairs.
-    A budget exhaustion returns no repair, never a partial path.
-    """
-    if not math.isfinite(step) or step <= 0 or node_budget < 1:
-        raise ValueError("Escape search requires a positive grid step and node budget")
+def _clearance_geometry(net, layer, pads, segments, vias, rules):
+    """Shared immutable trace/via exclusions, including reciprocal hole floors."""
     radius = rules.diameter / 2
     drill_radius = rules.drill / 2
     guard = 0.001
@@ -313,6 +292,109 @@ def find_escape(
         unary_union(trace_blocks).buffer(rules.clearance + rules.width / 2 + guard)
     )
     blocked_via = prep(unary_union(via_blocks))
+    return blocked_trace, blocked_via
+
+
+@dataclass(frozen=True)
+class ViaBridge:
+    points: tuple[tuple[float, float], ...]
+    layer: str
+    rules: EscapeRules
+
+
+def find_bridge_to_via(
+    source, destination, destination_layers, net, pads, segments, vias, bounds, rules
+):
+    """Connect source copper to an existing barrel with one new through via.
+
+    The caller supplies the destination's actual copper span. Reuse never
+    exempts the new via from same-net drill spacing or either trace leg from
+    physical clearance. The three retreats match the existing bounded bridge
+    strategy; a rejected candidate never mutates input geometry.
+    """
+    from shapely.ops import nearest_points
+
+    from kicad_tools.router.quantize import dogleg_points
+
+    goal = tuple(round(v, 3) for v in destination)
+    if not any(vnet == net and pt.distance(Point(goal)) < 0.0005 for pt, vnet, _, _ in vias):
+        return None
+    pa, pb = nearest_points(source, Point(goal))
+    distance = pa.distance(pb)
+    if distance <= 0:
+        return None
+    ux, uy = (pb.x - pa.x) / distance, (pb.y - pa.y) / distance
+    layers = sorted(layer for layer in destination_layers if layer.endswith(".Cu"))
+    exclusions = {
+        layer: _clearance_geometry(net, layer, pads, segments, vias, rules) for layer in layers
+    }
+    xmin, ymin, xmax, ymax = bounds
+    via_margin = max(
+        rules.diameter / 2 + rules.edge_clearance, rules.drill / 2 + rules.hole_edge_clearance
+    )
+    trace_margin = rules.width / 2 + rules.edge_clearance
+    for retreat in (0.5, 0.9, 1.4):
+        start = (round(pa.x - ux * retreat, 3), round(pa.y - uy * retreat, 3))
+        point = Point(start)
+        if not source.covers(point.buffer(rules.diameter / 2)):
+            continue
+        if not (
+            xmin + via_margin <= start[0] <= xmax - via_margin
+            and ymin + via_margin <= start[1] <= ymax - via_margin
+        ):
+            continue
+        for layer, (blocked_trace, blocked_via) in exclusions.items():
+            if blocked_via.intersects(point):
+                continue
+            for axis_first in (False, True):
+                path = tuple(
+                    dict.fromkeys(
+                        (round(x, 3), round(y, 3))
+                        for x, y in dogleg_points(*start, *goal, axis_first=axis_first)
+                    )
+                )
+                if len(path) < 2 or any(
+                    not (
+                        xmin + trace_margin <= x <= xmax - trace_margin
+                        and ymin + trace_margin <= y <= ymax - trace_margin
+                    )
+                    for x, y in path
+                ):
+                    continue
+                if any(
+                    blocked_trace.intersects(LineString([a, b]))
+                    for a, b in zip(path, path[1:], strict=False)
+                ):
+                    continue
+                return ViaBridge(path, layer, rules)
+    return None
+
+
+def find_escape(
+    start,
+    net,
+    layer,
+    pads,
+    segments,
+    vias,
+    primary,
+    bounds,
+    rules,
+    *,
+    step=0.05,
+    node_budget=200_000,
+    allowed_region=None,
+):
+    """Find a clear 45-degree path to primary copper or a legal through via.
+
+    Geometry is immutable here. The caller commits only a complete result.
+    Via entries carry their actual drill diameter, including earlier repairs.
+    A budget exhaustion returns no repair, never a partial path.
+    """
+    if not math.isfinite(step) or step <= 0 or node_budget < 1:
+        raise ValueError("Escape search requires a positive grid step and node budget")
+    radius = rules.diameter / 2
+    blocked_trace, blocked_via = _clearance_geometry(net, layer, pads, segments, vias, rules)
     front = prep(
         unary_union([geom for geom, layers, _ in primary if layer in layers]).buffer(-0.025)
     )

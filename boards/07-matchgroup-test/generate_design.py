@@ -1241,6 +1241,59 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
                     gi, gj = own[i][0], own[j][0]
+                    if own[j][2] == "via":
+                        # A destination barrel already spans its real copper
+                        # layers. Placing another via inside it fails the drill
+                        # spacing guard; reuse it with one fully checked bridge.
+                        from kicad_tools.zones.pour_escape import find_bridge_to_via
+
+                        project = pcb_path.with_suffix(".kicad_pro")
+                        if not project.exists():
+                            if project.with_suffix(".kicad_dru").exists():
+                                raise ValueError(
+                                    "Escape project missing beside artifact-specific DRC rules"
+                                )
+                            project = pcb_path.parent / "matchgroup_test.kicad_pro"
+                        if not project.exists() or outline_bounds is None:
+                            continue
+                        if escape_api is None:
+                            escape_api = _load_pour_escape()
+                            escape_rules = escape_api[0].from_project(project)
+                        bridge = find_bridge_to_via(
+                            gi,
+                            (gj.centroid.x, gj.centroid.y),
+                            own[j][1],
+                            net,
+                            pad_index,
+                            seg_index,
+                            [
+                                (pt, vn, radius, 2 * drill_r)
+                                for pt, vn, radius, drill_r, _layers in via_index
+                            ],
+                            outline_bounds,
+                            escape_rules,
+                        )
+                        if bridge is None:
+                            continue
+                        # No mutation until every emitted rounded leg and the
+                        # new through barrel have passed authored-rule checks.
+                        vx, vy = bridge.points[0]
+                        _emit_via(net, vx, vy, bridge.rules.diameter, bridge.rules.drill)
+                        _append_own(
+                            (Point(vx, vy).buffer(bridge.rules.diameter / 2), all_layers, "via")
+                        )
+                        for a, b in zip(bridge.points, bridge.points[1:], strict=False):
+                            _emit_seg(net, a, b, bridge.layer, bridge.rules.width)
+                            _append_own(
+                                (
+                                    LineString([a, b]).buffer(bridge.rules.width / 2),
+                                    frozenset({bridge.layer}),
+                                    "seg",
+                                )
+                            )
+                        bridges_placed += 1
+                        merged = True
+                        break
                     pa, pb = nearest_points(gi, gj)
                     vec = (pb.x - pa.x, pb.y - pa.y)
                     norm = math.hypot(*vec) or 1.0
