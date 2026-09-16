@@ -15,34 +15,6 @@ from kicad_tools.router.cpp_backend import (
 )
 
 
-@pytest.fixture
-def preserve_cpp_import_state():
-    """Restore both import caches without reinitializing nanobind's types."""
-    package = importlib.import_module("kicad_tools.router")
-    missing = object()
-    snapshots = {
-        name: (
-            sys.modules.get(f"kicad_tools.router.{name}", missing),
-            getattr(package, name, missing),
-        )
-        for name in ("cpp_backend", "router_cpp")
-    }
-    try:
-        yield
-    finally:
-        for name, (module, attribute) in snapshots.items():
-            qualified_name = f"kicad_tools.router.{name}"
-            if module is missing:
-                sys.modules.pop(qualified_name, None)
-            else:
-                sys.modules[qualified_name] = module
-            if attribute is missing:
-                if hasattr(package, name):
-                    delattr(package, name)
-            else:
-                setattr(package, name, attribute)
-
-
 class TestCppBackendFallback:
     """Test that the Python fallback works when C++ is not available."""
 
