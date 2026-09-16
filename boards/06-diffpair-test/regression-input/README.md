@@ -17,3 +17,26 @@ The archived routed witness and production release outputs are not replaced.
 
 The selection is explicit in `manifest.json`; staging verifies both archived
 and successor SHA256 values before accepting the replacement.
+
+## Explicit successor rule context
+
+Schema2 also selects the routed-stem `.kicad_dru` in this directory. It is
+byte-exact `merge_dru_floors(None, generate_dru(get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1), "jlcpcb"))` output. Both archived and successor sidecar
+hashes are checked before staging; archived fixtures remain immutable. This
+is an explicit new qualification context, not a claim about historical runs.
+
+All valid archived scalar minima are retained: trace/general clearance0.1016mm,
+via drill0.2mm, via diameter0.45mm, annulus0.1mm, copper-edge0.3mm,
+silk width0.15mm and height1.0mm. Hole-to-edge0.4mm keeps its intended floor
+with the current explicit Edge.Cuts scope and physical_hole_clearance constraint;
+the old broad hole_clearance stanza was not an equivalent edge rule.
+The invalid solder_mask_margin0.05mm and mask-dam pseudo-rule0.1mm are not emitted
+by the current generator; those independent mask profile/checker minima remain.
+Current explicit silk/SMD/PTH/inner-copper rules are added, not waived.
+
+Staging permits only declared unrouted PCB successors and their stem-derived
+DRU sidecars, never a routed PCB or arbitrary source-file replacement. Unknown
+or modified archived rules fail their hash binding; this is not a generic
+custom-rule migration or parser relaxation. The matching project stays byte-exact,
+including any stronger project or net-class minima. Full fresh recipe/native
+qualification remains required after this context change.

@@ -1,10 +1,22 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "issue": 5059,
   "pcbs": {
     "diffpair_test.kicad_pcb": {
       "archived_sha256": "d69b22100589c86892219723a26e4ba7a08954dc583043ff80e334e119f60143",
       "successor_sha256": "7cec05d63383e4e7f42d2564c2cd83ec04c72e9b5d18cad534d72a6a1234cf3b"
     }
+  },
+  "sidecars": {
+    "diffpair_test_routed.kicad_dru": {
+      "archived_sha256": "4ae5aa6a24246923fb5c1fc5136834296d5742efd47460b0991903ed78cafdb0",
+      "successor_sha256": "aecc1760a2e875c59a90fe7eaf184f1f44c691ec6fa2e486b71b5275c0c432ef"
+    }
+  },
+  "rule_context": {
+    "manufacturer": "jlcpcb",
+    "layers": 4,
+    "copper_oz": 1,
+    "generator": "kicad_tools.manufacturers.dru_generator:generate_dru+merge_dru_floors"
   }
 }
