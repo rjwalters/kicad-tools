@@ -208,3 +208,49 @@ def test_coupled_envelope_retains_either_rail_and_obstacle_floor(
     else:
         actual = committed_point_clear_grown(model, (6, 5.8), 0, {1, 2}, 0.2)
     assert actual is valid
+
+
+def test_coupled_emitted_legs_keep_foreign_pad_floor():
+    from dataclasses import replace
+
+    from shapely.geometry import LineString, box
+
+    from tests.router.lattice.test_coupled_pairs import _pad, _pair_board
+
+    obstacle = _pad(15, 6.4, 3, "foreign", ref="U2", width=0.3, height=0.3)
+    pf, pc = _pair_board([obstacle])
+    pf.rules = replace(pf.rules, net_clearance_floors={3: 1.3})
+    routes, stats = pf.route_netset([], coupled=[pc], max_iterations=2)
+    assert stats.routed == 1 and pf.pair_outcomes[pc.key] == "coupled"
+    polygon = box(14.85, 6.25, 15.15, 6.55)
+    for route in routes.values():
+        for segment in route.segments:
+            gap = LineString([segment.start, segment.end]).distance(polygon) - segment.width / 2
+            assert gap >= 1.3 - 1e-9
+
+
+@pytest.mark.parametrize("kind", ["segment", "point"])
+@pytest.mark.parametrize("strict_net", [1, 2, 3])
+@pytest.mark.parametrize("floor,blocked", [(0.6, False), (0.8, True)])
+def test_coupled_pad_envelope_uses_only_participating_net_floors(kind, strict_net, floor, blocked):
+    from kicad_tools.router.lattice.coupled import pads_block_point_grown, pads_block_segment_grown
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules(trace_width=0.2, trace_clearance=0.15)
+    pf = LatticePathfinder(
+        [(0, 0), (10, 0), (10, 10), (0, 10)],
+        [Pad(5, 5, 1, 1, 3, "foreign")],
+        rules,
+        LayerStack.two_layer(),
+    )
+    kwargs = {"floors": {strict_net: floor, 4: 5.0}, "base_clearance": rules.trace_clearance}
+    if kind == "segment":
+        actual = pads_block_segment_grown(
+            pf.obstacles, (4, 6.5), (6, 6.5), 0, {1, 2}, 0.2, **kwargs
+        )
+    else:
+        actual = pads_block_point_grown(pf.obstacles, (5, 6.5), 0, {1, 2}, 0.2, **kwargs)
+    assert actual is blocked

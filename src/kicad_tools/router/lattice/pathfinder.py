@@ -736,7 +736,14 @@ class LatticePathfinder:
             for layer in layers:
                 if fat:
                     if pads_block_point_grown(
-                        obstacles, point, layer, pair_nets, extra_clearance, exempt_pads
+                        obstacles,
+                        point,
+                        layer,
+                        pair_nets,
+                        extra_clearance,
+                        exempt_pads,
+                        floors=self.rules.net_clearance_floors,
+                        base_clearance=self.rules.trace_clearance,
                     ):
                         continue
                     if not committed_point_clear_grown(
@@ -770,7 +777,15 @@ class LatticePathfinder:
                     for a, b in zip(poly, poly[1:], strict=False):
                         if fat:
                             if pads_block_segment_grown(
-                                obstacles, a, b, layer, pair_nets, extra_clearance, exempt_pads
+                                obstacles,
+                                a,
+                                b,
+                                layer,
+                                pair_nets,
+                                extra_clearance,
+                                exempt_pads,
+                                floors=self.rules.net_clearance_floors,
+                                base_clearance=self.rules.trace_clearance,
                             ) or not committed_seg_clear_grown(
                                 committed, a, b, layer, pair_nets, extra_clearance
                             ):
@@ -1568,7 +1583,15 @@ class LatticePathfinder:
                         pa = lattice.node_point(edge[0])
                         pb = lattice.node_point(edge[1])
                         ok = not pads_block_segment_grown(
-                            obstacles, pa, pb, layer, pair_nets, extra_clearance, exempt_pads
+                            obstacles,
+                            pa,
+                            pb,
+                            layer,
+                            pair_nets,
+                            extra_clearance,
+                            exempt_pads,
+                            floors=self.rules.net_clearance_floors,
+                            base_clearance=self.rules.trace_clearance,
                         ) and committed_seg_clear_grown(
                             committed, pa, pb, layer, pair_nets, extra_clearance
                         )
@@ -1609,7 +1632,14 @@ class LatticePathfinder:
                     if fat:
                         npt = lattice.node_point(nbr)
                         nok = not pads_block_point_grown(
-                            obstacles, npt, layer, pair_nets, extra_clearance, exempt_pads
+                            obstacles,
+                            npt,
+                            layer,
+                            pair_nets,
+                            extra_clearance,
+                            exempt_pads,
+                            floors=self.rules.net_clearance_floors,
+                            base_clearance=self.rules.trace_clearance,
                         ) and committed_point_clear_grown(
                             committed, npt, layer, pair_nets, extra_clearance
                         )
@@ -2176,7 +2206,11 @@ class LatticePathfinder:
                         continue
                     if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
                         return None, "pair-leg-blocked"
-                    if not committed.seg_clear(a, b, layer, net):
+                    if self.obstacles.authored_pad_blocked(
+                        a, b, layer, net, trace_w / 2.0, self.rules.net_clearance_floors
+                    ):
+                        return None, "pair-leg-authored-pad"
+                    if not committed.seg_clear(a, b, layer, net, trace_w / 2.0):
                         return None, "pair-leg-blocked"
                     # Issue #4507: the fat centerline SEARCH deliberately skips
                     # HV pairwise widening (see ``coupled.committed_seg_clear_
