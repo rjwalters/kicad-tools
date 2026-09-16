@@ -3654,11 +3654,25 @@ class RoutingGrid:
 
     def authored_segment_pads_clear(self, seg: Segment, pads: Iterable[Pad] | None = None) -> bool:
         """Enforce mandatory net minima independently of raster/escape relief."""
+        x_min, x_max = sorted((seg.x1, seg.x2))
+        y_min, y_max = sorted((seg.y1, seg.y2))
         for pad in self._pads if pads is None else pads:
             required = self.rules.clearance_for_nets(seg.net, pad.net, 0.0)
             if required <= 0:
                 continue
             if not pad.through_hole and pad.layer != seg.layer:
+                continue
+            # This square encloses every rotation of the pad (and the
+            # circular-pad radius). Expand by the actual pair's authored
+            # clearance and trace radius before rejecting a distant pad.
+            # No cache: late pad/rule changes remain immediately visible.
+            reach = (pad.width + pad.height + seg.width) / 2 + required
+            if (
+                pad.x + reach < x_min
+                or pad.x - reach > x_max
+                or pad.y + reach < y_min
+                or pad.y - reach > y_max
+            ):
                 continue
             if pad.shape == "circle":
                 distance = (
