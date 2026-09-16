@@ -4960,7 +4960,11 @@ class Router:
                     if not segment_clears_foreign_via(
                         seg,
                         via,
-                        trace_clearance=max(self.rules.trace_clearance, self.rules.via_clearance),
+                        trace_clearance=self.rules.clearance_for_nets(
+                            exclude_net,
+                            via.net,
+                            max(self.rules.trace_clearance, self.rules.via_clearance),
+                        ),
                         hard_intersection_only=False,
                     ):
                         return False

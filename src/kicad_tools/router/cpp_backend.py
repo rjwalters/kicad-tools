@@ -3058,7 +3058,11 @@ class CppPathfinder:
                     if not via_clears_foreign_segment(
                         via,
                         segment,
-                        trace_clearance=max(self._rules.trace_clearance, self._rules.via_clearance),
+                        trace_clearance=self._rules.clearance_for_nets(
+                            start.net,
+                            segment.net,
+                            max(self._rules.trace_clearance, self._rules.via_clearance),
+                        ),
                     ):
                         return (via.x, via.y)
 
@@ -3081,7 +3085,11 @@ class CppPathfinder:
                     if not segment_clears_foreign_via(
                         seg,
                         via,
-                        trace_clearance=max(self._rules.trace_clearance, self._rules.via_clearance),
+                        trace_clearance=self._rules.clearance_for_nets(
+                            start.net,
+                            via.net,
+                            max(self._rules.trace_clearance, self._rules.via_clearance),
+                        ),
                         hard_intersection_only=False,
                     ):
                         return (via.x, via.y)

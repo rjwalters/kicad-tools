@@ -1824,7 +1824,12 @@ class NegotiatedRouter:
                 extras_fingerprint = tuple(id(r) for r in extra_routes)
             else:
                 extras_fingerprint = ()
-            effective_cache_key = (cache_key, extras_fingerprint)
+            effective_cache_key = (
+                cache_key,
+                extras_fingerprint,
+                trace_clearance,
+                tuple(sorted(self.rules.net_clearance_floors.items())),
+            )
             cached = self._seg_via_violations_cache
             if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
@@ -1916,7 +1921,8 @@ class NegotiatedRouter:
                         # trace_clearance.  If the via centre is
                         # outside the segment bbox expanded by this
                         # envelope we can skip the exact predicate.
-                        envelope = via.diameter / 2 + half_seg_w + trace_clearance
+                        required = self.rules.clearance_for_nets(net, via_net, trace_clearance)
+                        envelope = via.diameter / 2 + half_seg_w + required
                         if (
                             via.x < seg_min_x - envelope
                             or via.x > seg_max_x + envelope
@@ -1928,7 +1934,7 @@ class NegotiatedRouter:
                         if not segment_clears_foreign_via(
                             seg,
                             via,
-                            trace_clearance,
+                            required,
                             hard_intersection_only=False,
                         ):
                             violators.add(net)
@@ -2047,7 +2053,12 @@ class NegotiatedRouter:
                 extras_fingerprint = tuple(id(r) for r in extra_routes)
             else:
                 extras_fingerprint = ()
-            effective_cache_key = (cache_key, extras_fingerprint)
+            effective_cache_key = (
+                cache_key,
+                extras_fingerprint,
+                trace_clearance,
+                tuple(sorted(self.rules.net_clearance_floors.items())),
+            )
             cached = self._via_seg_violations_cache
             if cached is not None and cached[0] == effective_cache_key:
                 return list(cached[1])
@@ -2119,7 +2130,8 @@ class NegotiatedRouter:
                             seg_max_x = max(seg.x1, seg.x2)
                             seg_min_y = min(seg.y1, seg.y2)
                             seg_max_y = max(seg.y1, seg.y2)
-                            envelope = via_radius + seg.width / 2 + trace_clearance
+                            required = self.rules.clearance_for_nets(net, seg_net, trace_clearance)
+                            envelope = via_radius + seg.width / 2 + required
                             if (
                                 via.x < seg_min_x - envelope
                                 or via.x > seg_max_x + envelope
@@ -2131,7 +2143,7 @@ class NegotiatedRouter:
                             if not via_clears_foreign_segment(
                                 via,
                                 seg,
-                                trace_clearance,
+                                required,
                                 hard_intersection_only=False,
                             ):
                                 # Per PR #3019 judge's invariant: the
