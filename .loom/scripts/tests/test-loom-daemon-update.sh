@@ -1478,12 +1478,16 @@ kill "$old_pid7" 2>/dev/null || true
 # ============================================================
 # 8. --help documents --check / --dry-run / --force / --no-restart.
 #
-# Retried (#7201): a --help invocation re-reads UPDATE_SCRIPT's own banner
-# off disk at runtime (show_help()/_read_help_banner() in
-# loom-daemon-update.sh) rather than printing static text baked in at parse
-# time. A concurrent same-path rewrite of that exact file (the shape
-# `git checkout`/`cp` writes use -- open+truncate+write in place, not an
-# atomic rename) landing while THIS bash process is loading/executing it can
+# Retried (#7201): a --help invocation recovers UPDATE_SCRIPT's own banner
+# from disk at runtime (the `_LOOM_HELP_BANNER` capture at the top of
+# loom-daemon-update.sh, printed by show_help()) rather than printing static
+# text baked in at parse time. Since #7794 that read happens exactly once, as
+# the script's first statement, instead of lazily inside show_help() behind a
+# double-read/five-retry stability check -- which narrows the window but does
+# not close it, so this retry is still load-bearing. A concurrent same-path
+# rewrite of that exact file (the shape `git checkout`/`cp` writes use --
+# open+truncate+write in place, not an atomic rename) landing while THIS bash
+# process is loading/executing it can
 # hand back an empty/torn read that has nothing to do with a real regression
 # in the script's own --help output -- observed as a one-off CI flake in
 # #7201, and reproduced locally by racing a background overwrite against a
@@ -1532,10 +1536,18 @@ fi
 # to reproduce the #7201 failure shape ~95-100% of the time per attempt,
 # vs. effectively 0% with a bare `cmd &` (no subshell) whose write finishes
 # well before a freshly-forked bash even opens the script. Both the
-# hardened show_help()/_read_help_banner() (this same PR) and the
+# single-early-read banner capture (`_LOOM_HELP_BANNER`, #7794 -- which
+# replaced #7201's lazy double-read + five-retry show_help()) and the
 # whole-invocation retry (scenario 8 above) get exercised here, together,
 # across many iterations -- proving the combination holds up, not just a
 # single lucky run.
+#
+# THIS SCENARIO IS THE GATE ON THAT REPLACEMENT. #7794 measured it directly:
+# unretried, the deliberate race fails 80/400 against the old lazy read and
+# 45/400 against the single early read; with the retry budget below it is
+# 0/200 racing iterations for the new form. Do not delete it -- it is the only
+# thing standing between a future "simplify the banner read" edit and #7201
+# coming back.
 # ============================================================
 W8B="$BASE_WORKDIR/w8b"
 mkdir -p "$W8B/cli" "$W8B/lib"

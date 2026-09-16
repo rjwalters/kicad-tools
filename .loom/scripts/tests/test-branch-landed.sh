@@ -21,6 +21,7 @@
 #                                             the fail-closed `unknown`
 #  10. conflicting branch                  -> not-landed
 #  11. unresolvable branch / no default    -> unknown (never a guess)
+#  12. unresolvable branch + forge match   -> not-landed, not landed (#7872)
 
 set -uo pipefail
 
@@ -255,6 +256,17 @@ BRANCH_LANDED_REPO_DIR="$REPO" branch_landed feature/issue-9 main "$EXTRA_TIP" >
 assert_eq "landed" "$BRANCH_LANDED_VERDICT" "tip matching the caller's merged head SHA -> landed"
 assert_eq "merged-head-match" "$BRANCH_LANDED_EVIDENCE" "…attributed to the caller's hint"
 assert_eq "$BEFORE" "$PROBE_CALLS" "…with no forge call made"
+
+# #7872: a branch name that resolves to NO local ref at all must not be
+# declared landed purely because the forge has a same-named merged PR — that
+# is zero local verification, and rung 2 (the caller hint) already treats an
+# unresolvable tip as "no match, fall through", so rung 3 (the forge) must
+# agree rather than special-casing an empty tip as an automatic match.
+STUB_STATUS="found" STUB_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" STUB_NUMBER="9999"
+BRANCH_LANDED_REPO_DIR="$REPO" branch_landed totally-nonexistent-branch main >/dev/null
+assert_eq "not-landed" "$BRANCH_LANDED_VERDICT" \
+    "unresolvable branch + same-named forge-merged PR -> not landed (no local proof)"
+assert_eq "merged-head-mismatch" "$BRANCH_LANDED_EVIDENCE" "…never attributed to the forge alone"
 cleanup "$REPO"
 
 # --- Summary ----------------------------------------------------------------

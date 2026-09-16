@@ -335,12 +335,44 @@ container* mid-job (the daemon-restart analogue), then shows the job container
 still running on the host, and `attach` recovering both its full log and its
 real exit code afterwards.
 
+## Caller migration (#7854)
+
+Issue #7854 — the sibling Phase 4 issue this one names above — audited every
+shipped script and doc for a docker-requiring *caller* in the worker-container
+path (a build-gate toolchain invocation, a Lean/SPICE-style sim/build wrapper)
+that shells out to `docker` directly and needs moving onto this seam. It found
+**none in this repository**: this repo's own `buildGate.command`
+(`defaults/scripts/build-gate.sh`, see [`build-gate.md`](build-gate.md)) is
+`cargo test` + a bash test suite and needs no docker at all, and Loom's own
+worker image deliberately ships no language toolchain for a downstream build
+step to wrap (`docker/worker/README.md` § "What this image deliberately does
+NOT include" — "per-repo build-gate toolchains are a downstream `FROM` layer's
+job"). Lean and SPICE, named in the epic as the motivating examples, are
+themselves downstream-repo concerns, not code that lives here.
+
+So there was nothing left in-tree to migrate — the seam's own socket refusal
+(above) already makes the anti-pattern this migration exists to close
+structurally unavailable, not just discouraged. What #7854 *does* add, given
+that:
+
+- **The sanctioned pattern, documented and worked.** [`build-gate.md`](build-gate.md)
+  § "Docker-requiring toolchains (Lean, SPICE, or similar)" is the copy-paste
+  starting point for a downstream repo (or a future in-repo need) whose
+  `buildGate.command` — or any other worker-container-path step — needs a
+  docker-backed toolchain: wrap it in `run-job.sh` rather than assuming a
+  local docker socket.
+- **A standing regression guard**, not just a point-in-time audit:
+  `defaults/scripts/tests/test-run-job.sh` § 18 greps every shipped script for
+  a literal `docker run`/`docker exec` outside the two files that are
+  legitimately exempt (`spawn-claude.sh`'s containerized dispatch and
+  `spawn-codex.sh`'s session-exec mode — both HOST-side, launching a
+  container from the daemon's own host rather than running inside one). A
+  future build-gate stage or sim/build wrapper that reaches for `docker`
+  directly instead of this seam fails CI at the point it is added, rather than
+  drifting unnoticed the way the pre-#7853 state did.
+
 ## What is NOT here yet
 
-- **Caller migration.** build-gate, sim/build wrappers and the other
-  docker-requiring callers still shell out to `docker` directly; moving them
-  onto this seam is issue **#7854** (the sibling Phase 4 issue). This issue
-  shipped the seam and the executor, not the migration.
 - **Elastic executor placement** — #3979, explicitly out of scope.
 - **Daemon-side job registry.** Jobs are addressable by id through
   `status`/`attach`, but `loom-daemon status` does not yet enumerate in-flight

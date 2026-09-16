@@ -11,6 +11,7 @@ see "Config tiers" below); the operating-core guides (`CLAUDE.md` and
 
 - [Machine-Level Execution (Epic #3835 Phase 5, #4262)](#machine-level-execution-epic-3835-phase-5-4262)
 - [The Ungated Denial Floor](#the-ungated-denial-floor)
+- [Ask-Tier Composition (#7795)](#ask-tier-composition-7795)
 - [Custom Guard Hooks](#custom-guard-hooks)
 <!-- toc:end -->
 
@@ -150,7 +151,12 @@ outside that array for parsing reasons:
   than deny. They are *ungated* (no `guards.*` key switches them off) but they
   are not floor members, because a supervised operator must be able to confirm
   and proceed — see "Second refinement pass (#4216)" below. In a headless run an
-  unanswered ask blocks anyway.
+  unanswered ask blocks anyway. **Two former ask sites are no longer in this
+  tier**: `cargo-clean-scope-outside-repo` and `git-read-tree` were promoted to
+  **deny** by the #7795 sizing pass (see "Ask-tier composition" below) — but
+  note that neither joined the *floor*: `cargo-clean-scope-outside-repo` is
+  still governed by `guards.cargoCleanScope`, and `git-read-tree` is an ungated
+  deny with a carve-out (`GIT_INDEX_FILE=`), not an unconditional block.
 - **The toggleable deny categories**: SQL DDL/DML (`guards.sqlDdl`), the
   cloud/docker ask category (`guards.cloudCli`), rm-scope beyond the
   catastrophic targets (`guards.rmScope`), the generic force-op ask
@@ -332,6 +338,87 @@ runs this automatically after every sync (with `--fix` on a real run) and exits
 `75` when it cannot be repaired — the surface sync itself still succeeded, but
 the run is not a clean bill of health.
 
+## Ask-Tier Composition (#7795)
+
+The ask tier is the guard's middle verdict: not allowed outright, not denied —
+*ask the human*. **In this fleet's primary run mode there is no human.** The
+guard's own source says so in four places, and the decision log agrees: an
+unanswered ask blocks a headless sweep exactly the way a deny does, minus the
+deny's actionable message. That makes "ask" a tier that must justify itself
+site by site rather than a safe middle ground to park things in.
+
+#7795 audited every `ask()` call site against **30 days of
+`.loom/logs/guard-decisions.log`** on a production fleet host — the window
+`2026-08-18T08:57Z … 2026-09-16T18:41Z`, **229 decisions, 60 of them ask-tier**
+— and applied one rule:
+
+> An ask earns its cost only when **refusing would strand work** (so a deny is
+> wrong) **and** the site is not firing overwhelmingly on inert quoted text (so
+> an allow is wrong). A site that names a safe, guard-free alternative *and*
+> whose refusal is lossless belongs in the **deny** tier, where it blocks with
+> an actionable verdict instead of stalling a run without one.
+
+Outcome: **16 ask sites → 13**. Two were promoted to deny and one was retired.
+Thirteen stayed — and "stayed" is a verdict here, not an omission. **Nine of
+the sixteen sites produced zero hits** in the window (seven of them among the
+thirteen kept), so keeping those costs nothing measurable and dropping them
+would trade a real protection for no observed friction.
+
+Two caveats on reading the hit counts, both of which cut against over-reacting
+to a large number:
+
+- **Counts are cumulative over the window, not current.** The single largest
+  source, `force-op:detached`, was a *precision* defect that has since been
+  fixed on `main` (#7530 / PR #7533, merged 2026-09-15); its last logged hit
+  was 2026-09-12. A count is evidence about the window, not a live rate.
+- **A hit is not automatically friction.** Many entries are the guard firing on
+  its own test harnesses, on `jq` queries against this very log, and on issue
+  text quoting the pattern being discussed — inert prose, not blocked work. The
+  table below says which, per site.
+
+| Site (decision tag) | Hits / 30d | Disposition | Reason |
+|---|---|---|---|
+| `cloud-delete-ask` (`az`/`gcloud … delete`) | 0 | **keep ask** | Irreversible external effect; deliberately ungated so `guards.cloudCli:false` cannot bypass it (#4216 chose this tier on purpose, to preserve an interactive confirm on a *security-positive* operation). Zero friction to remove. |
+| `force-op:all` | 0 | **keep ask** | Only reachable in `guards.forceScope:"all"`. The fleet ships `LOOM_FORCE_SCOPE=protected`, so it never fires here. Flipping the *shipped* default to `"protected"` is a separate, already-documented policy decision (see "Force-Op Branch Scope Guard" below), not a conclusion this data supports. |
+| `force-op:detached` | **25** (all pre-#7533) | **keep ask** | The largest single ask source — and a **precision** bug, not a tier error, that is **already fixed**. 22 of the 25 hits are `git -C "$WORKTREE_ABS" reset --hard origin/feature/issue-N` (a builder resetting its *own* worktree to its *own* branch, where the guard could not resolve the `-C` **variable** and so failed toward asking); the other 3 are the guard's own test harnesses. #7530 / PR #7533 extended the safe-list to a worktree's own branch and merged 2026-09-15; the **last logged hit is 2026-09-12**, so this count is a record of a closed defect, not live friction. What remains is the fail-safe for *ambiguous* branch identity — the one case the floor's literal `origin main`/`origin master` patterns cannot cover — so dropping it to allow would silently permit an unresolvable force op against a protected branch. |
+| `force-op:protected` | 5 | **keep ask** | Fires only on a resolved protected-branch target and names it. Four hits are unambiguously genuine (`git reset --hard origin/main` ×3, `HEAD~1` ×1); the fifth (`origin/feature/issue-6752`, 2026-08-22) is the same pre-#7533 own-branch gap as the row above. A deny would break a legitimate operator resync. |
+| `ask:<pattern>` — `ASK_PATTERNS` loop (11 patterns: `git clean -fd`, `git checkout .`, `git restore .`, `gh release delete`, `aws iam delete`, 3× `kubectl`, 2× `sky`, `cat …/.aws/credentials`) | 0 | **keep ask** | Every member is irreversible or credential-bearing, and the whole array fired zero times. No measured cost to keep. |
+| `ask:<pattern>` — `PRINTENV_ASK_PATTERNS` substring backstop | **11** | **RETIRED (allow)** | 11 hits, **11 of them quoted prose, 0 live `printenv` invocations**. Four were guard-test harnesses feeding test-case strings to the guard, three were Guide/Champion digest builders whose shell variables quote issue *titles* containing the phrase (#6245's own title is one), two were `check-duplicate.sh` calls filing an issue *about this pattern*, and two were `jq` queries against this log. None is distinguishable to #6207's "the var is read later, so it might be `eval`'d" heuristic from an actual `eval`. The gated op is a credential **read** (worst case: a secret in a local transcript, recoverable by rotation), it was never a boundary (`echo $GITHUB_TOKEN` and any interpreter one-liner were never scanned), and the precise segment-parsed check below still covers every real invocation. Its dedicated `COMMAND_ASK_SCAN_PRINTENV` scan copy — four conditional masking passes that existed only to stop the backstop firing on quoted data — came off the hot path with it. **Accepted coverage loss**: interpreter-smuggled spellings the segment parser cannot see (`bash -c 'printenv GITHUB_TOKEN'`, an `eval`'d variable) are no longer gated. That is a deliberate trade, not an oversight — the identical `bash -c 'echo $GITHUB_TOKEN'` was never gated either, so the backstop was closing one spelling of an open door. |
+| `ask:<systemctl reason>` | 0 | **keep ask** | Segment-parsed and command-word anchored (#5214); host service management. Zero friction. |
+| `ask:<ssh-cat reason>` | 0 | **keep ask** | Segment-parsed, basename-allowlisted (#5824); private key material. Zero friction. |
+| `ask:<printenv reason>` | 0 | **keep ask** | The **precise** printenv check (#6245): command word literally `printenv`, operand name-matched, two documented non-secret vars allowlisted. Zero hits — its existence is exactly what makes retiring the substring backstop above safe rather than a hole. |
+| `cargo-clean-scope-outside-repo` | 0 | **→ DENY** | Already steered toward two named alternatives (`cargo clean -p <pkg>`, `CARGO_TARGET_DIR`), and refusing is **lossless** — nothing is deleted, the caller just reruns scoped. An ask was the worst of both worlds: headless it blocked anyway with no verdict; interactively it invited a reflex "yes" on a host-wide delete. The `guards.cargoCleanScope` opt-out is unchanged and is named in the denial. |
+| `reversible-gh:<pattern>` | 0 | **keep ask** | Only executes when a repo **opts in** (`guards.reversibleGh:true`, default off). A repo that opts into a confirmation wants the confirmation; converting it to a deny would make the toggle meaningless. |
+| `git-read-tree` | 0 | **→ DENY** | #3637's stated reason for the middle tier ("an isolated form is legitimate") argues for the **carve-out**, not the prompt: an isolated `GIT_INDEX_FILE=` form never reaches this check. What reaches it would clobber the real index with no reflog trace; refusing is lossless and both replacements are named. Scripted-merge shapes (`read-tree -m -u`) must now say which index they mean. |
+| `stash-scope:main-checkout` | 8 | **keep ask** | **Do not weaken** — #5754's telemetry-backed verdict, reaffirmed here on fresh data. All 8 hits were genuine main-checkout `git stash pop`/`drop`. A deny is wrong in the other direction: `refs/stash` has **no sanctioned reader other than a pop**, so denying converts "ask a human" into "lose the work". The lossless half of this hazard is already a deny (`stash-scope:create-redirect`). |
+| `stash-scope:worktree-collision` | 4 | **keep ask** | Same reasoning, same source verdict (#5754/#4821, reaffirmed by #6785): this is the **recovery** half of the cycle, and the create half is where the lossless block belongs. Two hits are genuine cross-worktree stash recovery; the other two (both 2026-09-07) are a `grep`/`awk` **search pattern** quoting a test-case name, already fixed by the `COMMAND_STASH_SCAN` masking merged 2026-09-08 (#7363/#7366) — no hits since. The curator's first-pass table nominated both stash sites for promotion on the "names an alternative" test; the alternative they name is *preventive*, not a recovery path for WIP already on the shared stack, so the test does not apply. |
+| `stash-scope:cd-unresolved` | 1 | **keep ask** | The ambiguity fail-safe for the two sites above. One hit in 30 days. Dropping it to allow would silently permit a stash pop/drop/clear whose scope could not be determined. |
+| `cloud-cli:<pattern>` — `CLOUD_ASK_PATTERNS` | 6 | **keep ask, UNCHANGED (operator ruling)** | The `aws` half: 0 hits, external and irreversible — keep. The **docker** half accounts for all 6 hits (4× `docker rmi`, 2× `docker stop`), of which only 2 are live commands (`sudo docker rmi loom-worker-session:test`, `docker rmi loom-worker:ci-smoke`) and 4 are inert text in a `python3` heredoc or a log-analysis loop. That is a thinner evidence base than #7440's report suggests, **and this pass does not act on it either way**: on 2026-09-16 the operator ruled on #7440 that *"the `'docker rmi'` entry in `CLOUD_ASK_PATTERNS` stays as-is"*, adopting a role-guidance remedy instead (`docker image prune -f`, ungated and dangling-only, or the #7332 retention reaper; never a tag-targeted `docker rmi`). This is the one site whose disposition is an **operator decision, not a telemetry verdict** — the guard is unchanged here, and the test suite asserts it stays that way. Revisit only with a fresh ruling. |
+
+**What this pass deliberately did not do.** It did not add masking, precision
+functions, or a tokenizer (#7760 stays parked); it did not touch the decision
+log (#3898) it is built on; it did not lower the denial floor — nothing moved
+*out* of the floor, and the two promotions stopped short of it (see "What is
+deliberately NOT in the floor" above); and it did not overturn a decision
+already made by someone with more standing than a telemetry table. Two sites
+were left alone for exactly that reason: `stash-scope:*` (#5754's
+telemetry-backed "keep flagged — do not weaken", reaffirmed by #6785) and the
+docker half of `CLOUD_ASK_PATTERNS` (the operator's 2026-09-16 ruling on
+#7440).
+
+**Re-running the audit.** The classification is falsifiable by construction.
+Re-derive the hit counts any time with:
+
+```bash
+jq -r 'select(.tier=="ask") | .pattern' .loom/logs/guard-decisions.log \
+  | sort | uniq -c | sort -rn
+```
+
+A site whose count has moved materially since 2026-09-16 should be re-argued on
+the new data, not on this table. Read a moved count against the two caveats
+above first: check whether a precision fix has already landed for it, and
+whether the new hits are live commands or the guard firing on quoted text.
+
 ## Custom Guard Hooks
 
 Loom ships with several built-in `PreToolUse` guard hooks, registered independently under the `Bash` or `Edit|Write` matcher as noted below:
@@ -399,6 +486,8 @@ LOOM_GUARD_SQL=1 psql -c "DROP TABLE users"
 `guard-destructive.sh` asks for confirmation on **mutating** cloud/container CLI calls — `aws ec2 run-instances`/`create-*`/`stop-instances`/`start-instances`/`terminate-instances`, `aws s3 rm`/`rb`/`cp`/`mv`/`sync`, other mutating `aws <service> <verb>` forms, and `docker rmi`/`stop`/`kill`/`restart`. Read-only calls (`aws ec2 describe-instances`, `aws s3 ls`, `aws lambda list-functions`, `docker ps`, `docker logs`, etc.) are **not** prompted. For a repo whose *purpose* is managing cloud infrastructure (launch/stop/terminate dev VMs, build/tear-down containers), even the mutating asks are workflow friction rather than a safety win.
 
 `docker rm` (#5823) is narrower than the other docker verbs above: a bare/ID/name-only `docker rm [-f] <container>` (e.g. `docker ps -a --filter ancestor=... -q | xargs -r docker rm -f`) is **not** prompted — it only removes container instances, never images, volumes, or networks, so ordinary self-scoped cleanup of containers the agent created itself no longer stalls a headless run. Only the volume-destroying variant (`docker rm -v ...` / `docker rm --volumes ...`) still asks, since it can delete named/anonymous volumes another container depends on.
+
+**Not changed by #7795.** The ask-tier sizing pass looked hard at the docker verbs — they are the only ask site in this document whose disposition was settled by an operator ruling rather than by the decision log. On 2026-09-16 the operator ruled on #7440 (the docker-`rmi` headless-stall report) that *"the `'docker rmi'` entry in `CLOUD_ASK_PATTERNS` stays as-is"*, and adopted a **role-guidance** remedy instead: steer the Auditor to the ungated, dangling-only `docker image prune -f`, or leave images to the #7332 retention reaper, and never issue a tag-targeted `docker rmi`. #7795 records the logged hits behind that report (see "Ask-Tier Composition" above) but does not act on them; dropping these verbs needs a fresh operator decision, not telemetry.
 
 Such repos can opt out of the cloud/docker ASK category while keeping every other guard active — including the genuinely catastrophic cloud denies (`aws s3 rm ... --recursive`, `aws s3 rb`, `aws cloudformation delete-stack`, `docker system prune`), which are **never** gated by this toggle and stay hard denies even with the cloud guard off.
 
@@ -491,18 +580,27 @@ that names nothing about the real cause). The cost is "only" recompilation
 (build output is derived state), but it lands on unrelated in-flight work with
 no way to attribute it.
 
-`guard-destructive.sh` asks for confirmation on a bare, **unscoped** `cargo
-clean` only when the resolved `build.target-dir` is **outside** the current
-repo. `cargo clean -p <pkg>` / `--package <pkg>` (package-scoped) and a
-repo-local target dir are completely unaffected — no resolution is even
-attempted, so this adds zero friction to the common case.
+`guard-destructive.sh` **denies** a bare, **unscoped** `cargo clean` only when
+the resolved `build.target-dir` is **outside** the current repo. `cargo clean
+-p <pkg>` / `--package <pkg>` (package-scoped) and a repo-local target dir are
+completely unaffected — no resolution is even attempted, so this adds zero
+friction to the common case.
+
+**Tier: deny since #7795** (an ask from #6684 until then). The refusal is
+**lossless** — nothing is deleted when the guard says no, so the caller simply
+reruns with one of the two scoped forms the denial names. An ask bought nothing
+in either run mode: headless it blocked anyway but without an actionable
+verdict, and interactively it invited a reflex "yes" on a host-wide delete.
+The category toggle below is unchanged and remains the escape hatch for a repo
+whose shared-target-dir clean is intentional; the denial message names it. See
+"Ask-Tier Composition (#7795)" above for the full sizing rationale.
 
 Detection reads cargo's own resolution precedence, not a config-file grep:
 
 1. A same-command `CARGO_TARGET_DIR=<value> cargo clean` assignment, or the
    guard's own process `CARGO_TARGET_DIR` env var. Either form is always
-   treated as an explicit, deliberate scoping decision and **never asks**,
-   however it resolves — it is the exact fix the ask message itself
+   treated as an explicit, deliberate scoping decision and is **never gated**,
+   however it resolves — it is the exact fix the denial message itself
    recommends, so treating it as unsafe would defeat its own purpose.
 2. `cargo config get build.target-dir` (best-effort; this cargo subcommand is
    unstable on some toolchains, so a failure here is expected and silent).
@@ -514,7 +612,7 @@ Detection reads cargo's own resolution precedence, not a config-file grep:
 5. Cargo's own default, `<repo>/target` — always in-repo, never asks.
 
 Only a target-dir resolved from steps 2-4 above (a **config**-derived value)
-is ever compared against the repo root; steps 1 and 5 never ask.
+is ever compared against the repo root; steps 1 and 5 are never gated.
 
 That comparison resolves symlinks on **both** sides before deciding. The repo
 root comes from `git rev-parse --show-toplevel`, which always reports the
@@ -524,8 +622,8 @@ ancestor produced two different-looking strings for one directory and a
 genuinely repo-local target-dir read as "outside the repo". That is the
 **default** state of any `$TMPDIR`/`mktemp -d` repo on macOS, where `/var` is a
 symlink to `/private/var`. Both spellings must agree that the target-dir is
-outside the repo before the ask fires; the ask message still names the path as
-you configured it, not its resolved form.
+outside the repo before the guard fires; the denial message still names the
+path as you configured it, not its resolved form.
 
 The cargo-clean-scope guard is **on by default**. It is resolved in this order
 (highest precedence first):
@@ -553,11 +651,13 @@ exit non-zero.
 # Repo-local target/ (or no .cargo/config.toml at all) — always allowed:
 cargo clean
 
-# .cargo/config.toml sets build.target-dir to a path outside the repo — ASKS:
+# .cargo/config.toml sets build.target-dir to a path outside the repo — DENIES
+# (#7795; nothing is deleted, so just rerun with one of the named forms):
 cargo clean
-# -> "target-dir is shared at '/Volumes/Stripe/cargo-target'; this clears
-#     every project on this host, including in-flight sweeps — use
-#     'cargo clean -p <pkg>' or set CARGO_TARGET_DIR"
+# -> "cargo's target-dir is shared at '/Volumes/Stripe/cargo-target' — OUTSIDE
+#     this repo — so this clears the build output of every project on this
+#     host ... Nothing has been deleted ... Package-scoped: 'cargo clean -p
+#     <pkg>'. Repo-scoped: prefix with CARGO_TARGET_DIR=<repo>/target"
 
 # Package-scoped clean — unaffected even with a shared target-dir:
 cargo clean -p mypkg
@@ -1601,6 +1701,21 @@ Masking applies **only** when all of these hold, so a heredoc that is genuinely 
 This is deliberately narrower than the `mask_heredoc_bodies()` helper the write-target scanner uses: that one masks any closed heredoc body regardless of its consumer, an accepted fail-open there (#5117 Known Limitation 1) that must not be inherited by the hard-deny floor. **Known limitation** (recorded, not fixed): only the literal `cat`-consumed spelling above is recognized — an equivalent variant (`$(command cat <<'EOF' …)`, a heredoc opened on a continuation line, `) "` with a space before the closing quote) is simply not recognized and keeps false-positiving exactly as before. That is the safe direction: a pre-existing false positive, never a new bypass.
 
 **Fifth review pass (#5675), NO CHANGE — evaluated, kept flagged:** `rm-scope-outside-repo` denying an `rm` of the **installed `loom-daemon` binary** (observed once, 2026-08-07: `rm -f /opt/homebrew/bin/loom-daemon` followed by an `ls` of the same path, from a self-build/reinstall verification session in an issue worktree) stays denied. Two reasons. It was a **single** occurrence — not the recurring, mechanically-identifiable false-positive shape that justified the passes above. And the operation is **unnecessary**, not merely risky: the supported update path overwrites the installed binary in place with `install -m 755` and never deletes it, so allowlisting Loom's own well-known install paths would have widened an outside-repo delete to a *path pattern* — permitting any command that can be shaped to match one — in exchange for a capability no supported flow needs. The remedy documented instead is § "Repo-Scoped rm Guard" → "Removing an installed `loom-daemon` binary — denied, and never necessary", plus the troubleshooting entry it links.
+
+**Sixth refinement pass (#7795), ASK-TIER SIZING:** every `ask()` call site was
+classified individually against 30 days of decision-log data (229 decisions, 60
+ask-tier). Two sites whose refusal is lossless and which already named a
+guard-free replacement were promoted **ask → deny**
+(`cargo-clean-scope-outside-repo`, `git-read-tree`), and one site whose 11 hits
+were 11 pieces of quoted prose was retired (the `printenv` substring backstop,
+along with its dedicated scan copy). Thirteen sites were kept as asks with a
+stated per-site reason — seven of them because they fired **zero** times in the
+window, so removing them would trade a real protection for no measured
+friction, and two (`stash-scope:*`, the docker half of `CLOUD_ASK_PATTERNS`)
+because a prior verdict with more standing than this table already settled
+them. Nothing left the denial floor, and the two promotions did not join it.
+Full table and the rule that produced it: "Ask-Tier Composition (#7795)" near
+the top of this document.
 
 ### When a Legitimate Operation Is Pattern-Blocked
 

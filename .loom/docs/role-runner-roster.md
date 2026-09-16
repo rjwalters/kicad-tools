@@ -500,14 +500,41 @@ record did not make; each is a *tightening*, none changes the rule.
    deadline. A fresh `created_at` turns both back into ordinary joins, fenced
    by conditions 3 and 4. (This is why the published record says, in prose,
    not to edit or delete it by hand.)
-3. **The generation high-water mark resets when a previously observed comment
-   disappears.** Condition 2 is otherwise a ratchet with no release: a record
-   that vanishes (an operator tidying the roster issue, or the replacement in
-   (2)) takes its boundaries with it, and the host would yield **forever**
-   against a generation no live comment set can reach again. Resetting is safe
-   because the settle check still gates on the forge-assigned `gen`, which
-   every host computes identically from the same comment set — a reset cannot
-   make two hosts act under different rings, only let both of them act again.
+3. **The generation high-water mark releases against any view that is not
+   provably staler, and holds only against one that is** (#7691, generalized
+   by #7895). Condition 2 is otherwise a ratchet with no release, and *two*
+   distinct things can lower `gen` without the view being stale:
+   - a previously observed record **disappears** (an operator tidying the
+     roster issue, or the replacement in (2)) and takes its boundaries with
+     it;
+   - an observed `updated_at + ttl` boundary **moves into the future** under
+     an ordinary PATCH. `gen(C, t)` maxes over `{created_at} ∪ {updated_at +
+     ttl}` restricted to `<= t`, so a boundary that a peer observed once — a
+     host's expiry, computed from an `updated_at` that a missed heartbeat left
+     stale — simply ceases to exist the moment that host beats again, with its
+     comment **id unchanged**. In a stable fleet nothing ever reaches that
+     stranded mark again (live hosts keep pushing their expiry boundaries
+     forward, and no join adds a fresh `created_at`), so the peer would yield
+     **forever** on every key while the fleet still sees it as live — its
+     slice silently stops rotating and is never reassigned.
+
+   The signal that separates both of these from a genuine stale read (a
+   cached / ETag-stale response, a lagging replica) is the direction a
+   **shared record's `updated_at`** moved, not the generation instant: a PATCH
+   moves it forward, a stale read presents it older. So the rule is: reset
+   when a previously observed id is missing; **hold** (ratchet) when every
+   previously observed id is still present but at least one carries an
+   `updated_at` older than the one already observed — that view genuinely
+   predates the mark, and condition 2 still yields on it; otherwise the view is
+   provably at least as fresh as the one the mark came from, and its `gen` is
+   authoritative even when lower. Releasing is safe because the settle check
+   still gates on the forge-assigned `gen`, which every host computes
+   identically from the same comment set — a release cannot make two hosts act
+   under different rings, only let both of them act again.
+
+   A corollary: the per-id `updated_at` state, not the id set alone, is what
+   makes this decidable, which is also why read-only callers reaching the fence
+   (`loom-daemon status`) are harmless — any fresh view re-takes the reading.
 4. **The dispatcher's exemption is a field, not a convention.**
    `ShardDecision::owned` keeps the pre-roster verdict on a yield and
    `ShardDecision::admits_role_tick()` is what the role runner calls, so the

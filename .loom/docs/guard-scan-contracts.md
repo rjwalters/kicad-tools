@@ -89,7 +89,6 @@ COMMAND  (raw, masks nothing — implicitly catastrophic-safe)
  └─ COMMAND_NO_COMMENT           deny-safe
      └─ COMMAND_ASK_SCAN         deny-safe
          ├─ COMMAND_CLOUD_ASK_SCAN      ask-only
-         ├─ COMMAND_ASK_SCAN_PRINTENV   ask-only
          └─ COMMAND_STASH_SCAN          deny-safe
 ```
 
@@ -105,7 +104,6 @@ COMMAND  (raw, masks nothing — implicitly catastrophic-safe)
 | `COMMAND_NO_COMMENT` | `deny-safe` | `#…EOL` shell comments, **quote-aware** since #6252 — a `#` inside a quoted span is never a comment start | quote-awareness is exactly what promoted this copy from ask-tier to deny-tier; under-strips rather than over-strips on an unterminated quote |
 | `COMMAND_ASK_SCAN` | `deny-safe` | the above, plus heredoc bodies (selective + unquoted-`cat` with no `$(`/backtick), `check-duplicate.sh` positional args, flag-keyed literal text | every pass masks only provably-non-executing text; a real invocation chained after a heredoc, or smuggled through `bash -c`, still reaches the deny sites |
 | `COMMAND_CLOUD_ASK_SCAN` | **`ask-only`** | the above, plus for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments | justified *because* `CLOUD_ASK_PATTERNS` is a toggleable (`guards.cloudCli`) **ask** tier, not the denial floor — the masking is more aggressive than any deny consumer may accept |
-| `COMMAND_ASK_SCAN_PRINTENV` | **`ask-only`** | the above, plus the two documented non-secret `LOOM_TOKEN_{NAME,MODE}` pointer vars (#6245) | an allowlist carve-out is a deliberate false-negative; only sound for an ask |
 | `COMMAND_STASH_SCAN` | `deny-safe` | the `COMMAND_ASK_SCAN` set, plus grep/egrep/fgrep/rg/awk quoted positional **search patterns** carrying no `$(`/backtick | search-pattern text is inert by construction; feeds the `stash-scope:create-redirect` deny as well as the stash asks |
 
 ### Read sites, by decision tier
@@ -148,10 +146,10 @@ list.
 | `ask:<pattern>` (ASK_PATTERNS loop) | `COMMAND_ASK_SCAN` |
 | `ask:<systemctl reason>` | `COMMAND_NO_COMMENT` |
 | `ask:<ssh-cat reason>` | `COMMAND_ASK_SCAN` |
-| `ask:<printenv reason>` | `COMMAND_ASK_SCAN_PRINTENV` |
-| `cargo-clean-scope-outside-repo` | `COMMAND_ASK_SCAN` |
+| `ask:<printenv reason>` | `COMMAND_ASK_SCAN` |
+| `cargo-clean-scope-outside-repo` (a **deny** since #7795) | `COMMAND_ASK_SCAN` |
 | `reversible-gh:<pattern>` | `COMMAND_ASK_SCAN` |
-| `git-read-tree` | `COMMAND_NO_COMMENT` |
+| `git-read-tree` (a **deny** since #7795) | `COMMAND_NO_COMMENT` |
 | `stash-scope:main-checkout` | `COMMAND_STASH_SCAN` |
 | `stash-scope:worktree-collision` | `COMMAND_STASH_SCAN` |
 | `stash-scope:cd-unresolved` | `COMMAND_NO_COMMENT`, `COMMAND_STASH_SCAN` |
@@ -174,11 +172,13 @@ the ones a future change is most likely to get wrong:
   records the promotion instead of contradicting it — and the checker enforces
   the part of the old reservation that is still live: this copy still must
   never reach the `catastrophic` floor.
-- **`COMMAND_CLOUD_ASK_SCAN` / `COMMAND_ASK_SCAN_PRINTENV` stay `ask-only`.**
-  Their extra masking is justified in-file *by the tier*: "a TOGGLEABLE tier
-  (`guards.cloudCli`), not the catastrophic tier's ungated denial floor", and an
-  explicit allowlist carve-out for two non-secret environment variables. Routing
-  either into a `deny()` is the #6252 shape and fails CI.
+- **`COMMAND_CLOUD_ASK_SCAN` stays `ask-only`.** Its extra masking is
+  justified in-file *by the tier*: "a TOGGLEABLE tier (`guards.cloudCli`), not
+  the catastrophic tier's ungated denial floor". Routing it into a `deny()` is
+  the #6252 shape and fails CI. (`COMMAND_ASK_SCAN_PRINTENV`, a third
+  `ask-only` branch, was retired in #7795 together with the `printenv` substring
+  backstop that was its only consumer — see
+  [`guard-hooks.md` § Ask-tier composition](guard-hooks.md#ask-tier-composition-7795).)
 
 ## Running it
 

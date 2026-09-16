@@ -66,6 +66,25 @@
 
 set -uo pipefail
 
+# ---------- help banner: read "$0" exactly ONCE, before anything else (#7794) ----------
+# `--help` prints this file's leading comment block. Recovering that text
+# lazily -- an awk pass over "$0" from inside show_help(), after sourcing and
+# argument parsing have run -- races a same-path truncate+rewrite of this very
+# file (a resync step, a shared self-hosted-runner checkout, or an operator's
+# `git merge --ff-only` all write in place: open+truncate+write, not an atomic
+# rename-into-place), handing back a torn, incomplete banner with no I/O error
+# to catch. That has failed CI twice on unrelated PRs (#7201, PR #7768).
+# Capturing it here -- the first statement executed, before any sourcing,
+# argument parsing or subprocess -- narrows the window to this script's own
+# startup instant and lets show_help() print from memory. It narrows the
+# window, it does not close it: the permanent fix is #7810 Phase 6, where this
+# wrapper becomes an `exec` stub and clap owns `--help`. Deliberately interim,
+# and deliberately byte-identical -- awk stops at the first non-comment line
+# (the blank line above `set -uo pipefail`), so the captured text never ends in
+# a blank line and the single trailing newline `$( )` strips is exactly the one
+# show_help()'s `printf '%s\n'` puts back.
+_LOOM_HELP_BANNER="$(awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0")"
+
 if [[ -t 1 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 else
@@ -76,11 +95,8 @@ warn() { echo -e "${YELLOW}$*${NC}" >&2; }
 ok()   { echo -e "${GREEN}$*${NC}"; }
 info() { echo -e "${BLUE}$*${NC}"; }
 
-show_help() {
-    # Print the leading comment banner, stripping the leading "# " -- same
-    # pattern as loom-daemon-stop.sh / loom-daemon-start.sh's show_help.
-    awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
-}
+# Prints the banner captured at startup above -- no filesystem access (#7794).
+show_help() { printf '%s\n' "$_LOOM_HELP_BANNER"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STOP_SCRIPT="$SCRIPT_DIR/loom-daemon-stop.sh"

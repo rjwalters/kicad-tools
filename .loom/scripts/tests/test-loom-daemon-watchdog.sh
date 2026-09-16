@@ -2607,15 +2607,12 @@ rm -rf "$STUB53"
 #        the two structural properties that make each function safe.
 # ===================================================================
 
-extract_func_body() {
-    # Prints the source lines of function $1 (its `NAME() {` line through the
-    # matching `^}` at column 0 -- this file's own brace style throughout).
-    awk -v fn="$1" '
-        $0 ~ "^"fn"\\(\\)" { printing = 1 }
-        printing { print }
-        printing && /^}/ { exit }
-    ' "$WATCHDOG"
-}
+# The scan itself lives in lib/heredoc-body-safety.sh so this suite and its
+# sibling test-loom-daemon-watchdog-dedup.sh share ONE implementation (#7834):
+# the vacuous-pass bug it fixes spread by the two suites carrying independent
+# copies of the same heuristic.
+# shellcheck source=lib/heredoc-body-safety.sh
+source "$SCRIPT_DIR/lib/heredoc-body-safety.sh"
 
 # ---- 54. escalate_peer_coordination_degraded() must not rebuild its body ----
 #          via the vulnerable `body="$(cat <<EOF ... EOF)"` construct --
@@ -2623,7 +2620,7 @@ extract_func_body() {
 #          reads the heredoc directly with no `$(...)` wrapper and so never
 #          enters bash 3.2's buggy quote-tracking scan at all, regardless of
 #          what punctuation the body prose contains.
-PCD_FUNC_BODY="$(extract_func_body escalate_peer_coordination_degraded)"
+PCD_FUNC_BODY="$(heredoc_func_body "$WATCHDOG" escalate_peer_coordination_degraded)"
 PCD_FUNC_CODE_ONLY="$(echo "$PCD_FUNC_BODY" | grep -Ev '^\s*#')"
 if echo "$PCD_FUNC_CODE_ONLY" | grep -Eq 'body="\$\(cat <<'; then
     fail "#7508 static: escalate_peer_coordination_degraded() reverted to the vulnerable \$(cat <<EOF) body construction"
@@ -2636,43 +2633,19 @@ else
     fail "#7508 static: expected escalate_peer_coordination_degraded() to build its body via read -d '' <<EOF"
 fi
 
-# ---- 55. Both escalation heredoc bodies stay free of the two confirmed ----
-#          bash-3.2 trigger shapes, as a defense-in-depth belt-and-suspenders
-#          check even though #54 already proves escalate_peer_coordination_degraded()
-#          no longer goes through the vulnerable construct at all: a bare
-#          apostrophe anywhere in either body, or a `#` sharing a physical
-#          line with a backtick.
-check_heredoc_body_safety() {
-    # $1: function name, $2: human label for messages
-    local fn="$1" label="$2" body heredoc_lines bad_apostrophe=0 bad_hash_backtick=0
-    body="$(extract_func_body "$fn")"
-    # Slice out everything between the first `<<EOF` (or `<<'EOF'`) and its
-    # closing `EOF` delimiter line -- the actual issue-body prose, not the
-    # surrounding bash.
-    heredoc_lines="$(echo "$body" | awk '
-        /<<-?'"'"'?EOF'"'"'?$/ { inside = 1; next }
-        inside && /^EOF$/ { inside = 0; next }
-        inside { print }
-    ')"
-    if echo "$heredoc_lines" | grep -q "'"; then
-        bad_apostrophe=1
-    fi
-    if echo "$heredoc_lines" | grep -q '`' && echo "$heredoc_lines" | grep '`' | grep -q '#'; then
-        bad_hash_backtick=1
-    fi
-    if [[ "$bad_apostrophe" -eq 0 ]]; then
-        pass "#7508 static: $label heredoc body has no bare apostrophe"
-    else
-        fail "#7508 static: $label heredoc body contains a bare apostrophe -- reintroduces the bash-3.2 parse trap ($(echo "$heredoc_lines" | grep -n "'"))"
-    fi
-    if [[ "$bad_hash_backtick" -eq 0 ]]; then
-        pass "#7508 static: $label heredoc body has no backtick+# sharing a line"
-    else
-        fail "#7508 static: $label heredoc body has a backtick and # on the same line -- reintroduces the bash-3.2 parse trap ($(echo "$heredoc_lines" | grep '`' | grep -n '#'))"
-    fi
-}
-check_heredoc_body_safety escalate_daemon_outage "escalate_daemon_outage() (#5391)"
-check_heredoc_body_safety escalate_peer_coordination_degraded "escalate_peer_coordination_degraded() (#6222)"
+# ---- 55. Each escalation heredoc body is located and scanned, and the ----
+#          `$(...)`-wrapped one (escalate_daemon_outage()) stays free of both
+#          confirmed bash-3.2 trigger shapes. #7834: the previous inline
+#          version of this scan only recognised openers ENDING in `<<EOF`, so
+#          escalate_peer_coordination_degraded()'s `read -r -d '' body <<EOF
+#          || true` sliced to nothing and BOTH of its assertions passed
+#          without reading the body. The shared scan now fails loudly on an
+#          unlocatable body and scopes the prose rules to the construction
+#          that can actually trip the lexer bug -- a `read -d ''` body that
+#          regresses to `$(cat <<EOF` is reclassified and gets them applied.
+check_heredoc_scan_selftest
+check_heredoc_body_safety "$WATCHDOG" escalate_daemon_outage "escalate_daemon_outage() (#5391)"
+check_heredoc_body_safety "$WATCHDOG" escalate_peer_coordination_degraded "escalate_peer_coordination_degraded() (#6222)"
 
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"

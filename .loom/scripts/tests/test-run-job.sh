@@ -753,6 +753,62 @@ assert_eq "78" "$?" "'attach' with no job id exits 78 (it does not spin)"
 assert_contains "$out" "requires a job id" "'attach' with no id says a job id is required"
 
 echo ""
+echo "=== 18. Caller migration (#7854): no shipped worker-container-path script shells a bare docker command ==="
+# AC: "No remaining caller in the worker-container path mounts or assumes a
+# docker socket." Section 15 above is the load-bearing structural check for a
+# SOCKET MOUNT specifically; this one is the broader regression guard for the
+# migration itself — a shipped script that shells a literal `docker run` /
+# `docker exec` is, by construction, assuming it runs somewhere docker is
+# actually reachable, which a worker container (per ADR-0017 Decision 3) never
+# is. Any future build-gate stage or sim/build wrapper that needs docker-backed
+# work belongs on THIS seam (`run-job.sh`), not a direct `docker` invocation —
+# see `.loom/docs/run-job-seam.md` § "Caller migration" and
+# `.loom/docs/build-gate.md` § "Docker-requiring toolchains" for the pattern.
+#
+# Matched the same way section 15 matches a socket mount: only text before a
+# `#` on its own line counts (a comment explaining docker is excluded), so
+# this stays a check on actual invocations, not prose that merely mentions
+# `docker run`/`docker exec` (this file's own narrative strings above do,
+# hence its own exclusion below).
+#
+# `lib/run-job-exec.sh` (the executor) is deliberately NOT exempt: it invokes
+# docker via `"$DOCKER_BIN" run`/`"$DOCKER_BIN" exec` — a variable expansion,
+# never the literal words — precisely so it stays configurable
+# (`LOOM_RUN_JOB_DOCKER=podman`) and so this check needs no special case for
+# the one file that legitimately runs docker-backed jobs.
+#
+# Two files ARE exempt, by design, because they are HOST-SIDE dispatch, not a
+# worker-container-path caller: `spawn-claude.sh`'s containerized dispatch
+# mode and `spawn-codex.sh`'s session-exec mode both run on the daemon's own
+# host (which has a real docker) to START a worker/session container in the
+# first place — they are the mechanism a worker container arrives FROM, not
+# code that runs INSIDE one assuming a socket it does not have. Their own test
+# doubles (`tests/test-spawn-codex.sh`) reference `docker exec` only in
+# assertion strings, not as a literal invocation, and are exempt for the same
+# reason this file is exempt from scanning itself.
+exempt_files=(
+    "$SCRIPTS_DIR/spawn-claude.sh"
+    "$SCRIPTS_DIR/spawn-codex.sh"
+    "$SCRIPTS_DIR/tests/test-spawn-codex.sh"
+    "$SCRIPT_DIR/test-run-job.sh"
+)
+_is_exempt() {
+    local candidate="$1" ex
+    for ex in "${exempt_files[@]}"; do
+        [[ "$candidate" == "$ex" ]] && return 0
+    done
+    return 1
+}
+offenders=""
+while IFS= read -r f; do
+    _is_exempt "$f" && continue
+    if grep -nE '^[^#]*\bdocker[[:space:]]+(run|exec)\b' "$f" >/dev/null 2>&1; then
+        offenders+="$f "
+    fi
+done < <(find "$SCRIPTS_DIR" -name '*.sh' -type f)
+assert_eq "" "$offenders" "no non-exempt shipped script shells a literal 'docker run'/'docker exec' (route docker-backed work through run-job.sh instead)"
+
+echo ""
 echo "======================================"
 echo "Tests run:    $TESTS_RUN"
 echo -e "Tests passed: ${GREEN}${TESTS_PASSED}${NC}"

@@ -278,15 +278,24 @@ branch_landed() {
             found)
                 BRANCH_LANDED_PR_HEAD_SHA="$_BRANCH_LANDED_PROBE_SHA"
                 BRANCH_LANDED_PR_NUMBER="$_BRANCH_LANDED_PROBE_NUMBER"
-                if [[ -z "$tip" || "$tip" == "$_BRANCH_LANDED_PROBE_SHA" ]]; then
+                # Require an ACTUAL tip match, mirroring rung 2 exactly —
+                # `-z "$tip"` used to short-circuit this to `landed` too,
+                # meaning a branch name that resolves to no local ref at all
+                # (typo, never fetched, truly nonexistent) could be declared
+                # landed purely because the forge has a same-named merged PR,
+                # with zero local verification (#7872). An unresolvable tip
+                # is exactly the case with the LEAST evidence, not a free
+                # pass, so it must fall through like any other mismatch.
+                if [[ -n "$tip" && "$tip" == "$_BRANCH_LANDED_PROBE_SHA" ]]; then
                     BRANCH_LANDED_VERDICT="landed"
                     BRANCH_LANDED_EVIDENCE="forge-merged-pr"
                     printf '%s\n' "$BRANCH_LANDED_VERDICT"
                     return 0
                 fi
-                # A merged PR exists for this branch NAME but the local tip has
-                # moved past it (unpushed work, or the next partial-increment
-                # slice reusing the name) — the tree check decides.
+                # A merged PR exists for this branch NAME but the local tip
+                # either moved past it (unpushed work, or the next
+                # partial-increment slice reusing the name) or could not be
+                # resolved at all — the tree check decides, when it can run.
                 BRANCH_LANDED_EVIDENCE="merged-head-mismatch"
                 forge_answered_negative=true
                 ;;

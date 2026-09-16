@@ -366,6 +366,35 @@ else
 fi
 rm -rf "$STUB6" "$GHSTUB6"
 
+# ===================================================================
+# 7. #7834: the #7508 static heredoc-body scan, applied to THIS lib's own
+#    escalation body. peer_coord_dedup_comment() builds `dedup_body` with the
+#    same `read -r -d '' ... <<EOF || true` shape as the watchdog's
+#    escalate_peer_coordination_degraded(), and was not covered by any scan at
+#    all -- while the main suite's copy of the scan silently skipped that shape
+#    (the opener does not END in `<<EOF`) and so passed vacuously. The scan now
+#    lives in lib/heredoc-body-safety.sh and is shared by both suites, because
+#    two independent copies of one heuristic is exactly how that gap survived.
+# ===================================================================
+# shellcheck source=lib/heredoc-body-safety.sh
+source "$SCRIPT_DIR/lib/heredoc-body-safety.sh"
+DEDUP_LIB="$(cd "$SCRIPT_DIR/../lib" && pwd)/watchdog-peer-coord-dedup.sh"
+
+# ---- 7. peer_coord_dedup_comment() must keep building its body with the ----
+#         `read -d ''` construction (never `$(cat <<EOF ... EOF)`, which trips
+#         the bash 3.2 lexer bug), and that body must actually be reachable by
+#         the static scan -- the self-test is re-run here because this suite is
+#         deliberately standalone (see the header note on #7826) and a scan it
+#         cannot verify proves nothing on its own.
+DEDUP_FUNC_CODE_ONLY="$(heredoc_func_body "$DEDUP_LIB" peer_coord_dedup_comment | grep -Ev '^[[:space:]]*#')"
+if grep -Eq '="\$\(cat <<' <<< "$DEDUP_FUNC_CODE_ONLY"; then
+    fail "#7508 static: peer_coord_dedup_comment() uses the vulnerable \$(cat <<EOF) body construction"
+else
+    pass "#7508 static: peer_coord_dedup_comment() does not use the vulnerable \$(cat <<EOF) body construction"
+fi
+check_heredoc_scan_selftest
+check_heredoc_body_safety "$DEDUP_LIB" peer_coord_dedup_comment "peer_coord_dedup_comment() (#7664)"
+
 # ---- --help documents the #7664 dedup-window knob. ----
 help_out_7664=$(bash "$WATCHDOG" --help 2>/dev/null)
 if grep -q 'LOOM_WATCHDOG_PEER_COORD_DEDUP_WINDOW_SECS' <<< "$help_out_7664"; then

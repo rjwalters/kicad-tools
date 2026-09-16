@@ -395,6 +395,35 @@
 
 set -uo pipefail
 
+# ---------- help banner: read "$0" exactly ONCE, before anything else (#7794) ----------
+# `--help` prints this file's leading comment block. Recovering that text
+# lazily -- an awk pass over "$0" from inside show_help(), after sourcing and
+# argument parsing have run -- races a same-path truncate+rewrite of this very
+# file (a resync step, a shared self-hosted-runner checkout, or this script's
+# own `git merge --ff-only` sync step, #4330: all write in place --
+# open+truncate+write, not an atomic rename-into-place), handing back a torn,
+# incomplete banner with no I/O error to catch. That has failed CI twice on
+# unrelated PRs (#7201, PR #7768).
+#
+# Capturing it here -- the first statement executed, before any sourcing,
+# argument parsing or subprocess -- narrows the window to this script's own
+# startup instant and lets show_help() print from memory. It narrows the
+# window, it does not close it: the permanent fix is #7810 Phase 6, where this
+# wrapper becomes an `exec` stub and clap owns `--help`. Deliberately interim,
+# and deliberately byte-identical -- awk stops at the first non-comment line
+# (the blank line above `set -uo pipefail`), so the captured text never ends in
+# a blank line and the single trailing newline `$( )` strips is exactly the one
+# show_help()'s `printf '%s\n'` puts back.
+#
+# This replaces the #7201 mitigation that used to live in show_help(): a
+# double-read stability check with five bounded retries. That could only ever
+# narrow the same window (after five attempts it printed whatever the last pass
+# read), and it had to re-read the file five times to do it. One early read is
+# strictly fewer reads in a strictly narrower window. The concurrent-rewrite
+# regression fixture (test-loom-daemon-update.sh scenario 8b) stays as the
+# guard for that, and stays green -- see the PR for #7794.
+_LOOM_HELP_BANNER="$(awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0" 2>/dev/null)"
+
 # ---------- output helpers ----------
 if [[ -t 1 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -405,45 +434,8 @@ err()  { echo -e "${RED}$*${NC}" >&2; }
 warn() { echo -e "${YELLOW}$*${NC}" >&2; }
 ok()   { echo -e "${GREEN}$*${NC}"; }
 
-# _read_help_banner -- one awk pass over "$0" printing the leading comment
-# banner (line 2 through the last comment line before `set -uo pipefail`),
-# stripping the leading "# ". Split out of show_help() below so it can be
-# invoked more than once for the torn-read stability check.
-_read_help_banner() {
-    awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0" 2>/dev/null
-}
-
-show_help() {
-    # Reads "$0" at runtime -- fragile against a same-path truncate+rewrite
-    # of THIS exact file landing while the awk pass above is reading it (the
-    # shape `git checkout`/`cp` writes use -- open+truncate+write in place,
-    # not an atomic rename-into-place). That is not hypothetical: a shared
-    # self-hosted-runner checkout, a resync step, or an operator's own
-    # `git merge --ff-only` (this script's ff-sync step, #4330) landing on
-    # this file mid-read can all do it. There is no I/O error to catch --
-    # just a torn, incomplete banner missing whatever lines the writer had
-    # not reached yet. Confirmed reproducible locally: concurrently
-    # overwriting this file with itself during a --help loop took the
-    # failure rate from 0% to 100% (#7201).
-    #
-    # Hardened with a cheap, content-agnostic stability check instead of a
-    # hardcoded sentinel line (robust to future banner edits): read twice
-    # back-to-back and require an identical, non-empty result before
-    # trusting it -- a torn read from a write landing mid-pass is extremely
-    # unlikely to reproduce byte-for-byte on the very next pass a moment
-    # later. Bounded retries with a short backoff so a genuinely corrupted
-    # file (not a transient race) still terminates instead of looping
-    # forever -- it prints whatever the last pass read rather than hanging.
-    local banner banner2 _attempt
-    banner="$(_read_help_banner)"
-    for _attempt in 1 2 3 4 5; do
-        banner2="$(_read_help_banner)"
-        [[ -n "$banner2" && "$banner" == "$banner2" ]] && { banner="$banner2"; break; }
-        banner="$banner2"
-        sleep 0.05
-    done
-    printf '%s\n' "$banner"
-}
+# Prints the banner captured at startup above -- no filesystem access (#7794).
+show_help() { printf '%s\n' "$_LOOM_HELP_BANNER"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

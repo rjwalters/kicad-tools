@@ -76,19 +76,22 @@ there and deliver each operator's real endpoint through
 `LOOM_OBSERVABILITY_ENDPOINT` or the gitignored local-config tier (#6650) —
 **not** the private-defaults tier (`LOOM_CONFIG_DEFAULTS_FILE`, else
 `~/.local/share/loom/config/defaults.json`), which sits *below* the committed
-file and is shadowed by the placeholder. **A placeholder endpoint is not
-rejected by the daemon**: `spawn_task` only bails on an *unset* endpoint, and
-`ingestKeyFile` defaults to `$HOME/.loom/observability/ingest.key`, so a
-committed block with `enabled: true` and a placeholder would POST the host's
-real ingest key to that domain. The committed block must therefore also carry
-`enabled: false` so the placeholder is inert; exporting hosts opt in with
-`LOOM_OBSERVABILITY_ENABLED=true` + `LOOM_OBSERVABILITY_ENDPOINT` (or both
-keys in `.loom-local/local.json`).
+file and is shadowed by the placeholder. **A placeholder endpoint is refused
+by the daemon** (#7815): `spawn_task` treats an endpoint whose host is an
+IANA-reserved placeholder domain — `example.com`/`.net`/`.org` and anything
+under `.example`, `.invalid` or `.test`, but never `localhost` — exactly like
+an unset one, logging a warning, reporting `misconfigured` on
+`loom-daemon status`, and returning before the ingest key is read or any
+request is made. That is defense in depth, not the primary guard: the
+committed block must **also** carry `enabled: false` so the placeholder is
+inert; exporting hosts opt in with `LOOM_OBSERVABILITY_ENABLED=true` +
+`LOOM_OBSERVABILITY_ENDPOINT` (or both keys in `.loom-local/local.json`).
 
 The ingest key is **never inline in config** — `ingestKeyFile` is a path the
 daemon reads once at startup and holds only in memory, sent solely as an
-`Authorization: Bearer` header. A misconfigured block (missing endpoint or
-unreadable key file) degrades to off; it does not crash the daemon. Source of
+`Authorization: Bearer` header. A misconfigured block (missing *or*
+placeholder endpoint, unreadable key file) degrades to off; it does not crash
+the daemon. Source of
 truth: `loom-daemon/src/observability/mod.rs`'s module doc (config
 resolution, FLAGS-OFF posture, read-only invariant) and its `collector.rs` /
 `queue.rs` / `exporter.rs` / `sender.rs` siblings (collector, durable queue,
