@@ -45,15 +45,26 @@ bool segments_intersect(
     float ax1, float ay1, float ax2, float ay2,
     float bx1, float by1, float bx2, float by2)
 {
-    // Cross product helper: sign of (OP x OQ)
-    auto cross = [](float ox, float oy, float px, float py, float qx, float qy) -> float {
+    // Disjoint bounding boxes cannot intersect, including collinear traces.
+    if (std::max(ax1, ax2) < std::min(bx1, bx2) ||
+        std::max(bx1, bx2) < std::min(ax1, ax2) ||
+        std::max(ay1, ay2) < std::min(by1, by2) ||
+        std::max(by1, by2) < std::min(ay1, ay2)) {
+        return false;
+    }
+
+    // Promote BEFORE subtracting/multiplying. Float products under fused
+    // arithmetic can give opposite residual signs for collinear short traces,
+    // falsely reporting a crossing (and zero clearance) millimetres away.
+    auto cross = [](double ox, double oy, double px, double py,
+                    double qx, double qy) -> double {
         return (px - ox) * (qy - oy) - (py - oy) * (qx - ox);
     };
 
-    float d1 = cross(bx1, by1, bx2, by2, ax1, ay1);
-    float d2 = cross(bx1, by1, bx2, by2, ax2, ay2);
-    float d3 = cross(ax1, ay1, ax2, ay2, bx1, by1);
-    float d4 = cross(ax1, ay1, ax2, ay2, bx2, by2);
+    const double d1 = cross(bx1, by1, bx2, by2, ax1, ay1);
+    const double d2 = cross(bx1, by1, bx2, by2, ax2, ay2);
+    const double d3 = cross(ax1, ay1, ax2, ay2, bx1, by1);
+    const double d4 = cross(ax1, ay1, ax2, ay2, bx2, by2);
 
     // Proper intersection: each segment straddles the line of the other
     if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
