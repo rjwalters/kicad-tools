@@ -251,18 +251,16 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     """
     out: dict[tuple[str, str], str | None] = {}
     for sch in _walk_hierarchy_schematics(Path(sch_path)):
-        for sym in sch.symbols:
-            ref = sym.reference
-            if not ref:
-                continue
-            # ``symbol_def.pins`` is the canonical pin list for this
-            # symbol; iterate by pin number so the mapping aligns with the
-            # PCB pads (which are also keyed by pin/pad number).
-            for pin in sym.symbol_def.pins:
-                number = pin.number
-                if not number:
-                    continue
-                out[(ref, number)] = sch.get_net_for_pin(ref, number)
+        # ``get_all_pin_nets`` builds the sheet's connectivity graph once
+        # and resolves every ``(ref, number)`` pin against it, instead of
+        # ``get_net_for_pin`` rebuilding that graph (an O(wires^2)
+        # all-pairs scan) once per pin (issue #5240). Board 05's ~316-pin
+        # schematic rebuilt the graph 316 times before this change;
+        # profiling attributed roughly 30s of a 42s single-threaded
+        # ``kct check`` run to those redundant rebuilds. Behavior is
+        # identical to the historical per-pin loop -- see
+        # ``get_all_pin_nets``'s docstring for why.
+        out.update(sch.get_all_pin_nets())
     return out
 
 
