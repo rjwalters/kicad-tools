@@ -137,7 +137,14 @@ class RouteHaloGeometry:
         return bool(self._cells[layer, y, x] == cell.net)
 
     def clear(
-        self, candidate, router, *, partner_net=None, partner_clearance=None, require_geometry=True
+        self,
+        candidate,
+        router,
+        *,
+        partner_net=None,
+        partner_clearance=None,
+        require_geometry=True,
+        authored_only=False,
     ) -> bool:
         """Check known copper and drills using the effective routing rules.
 
@@ -145,6 +152,8 @@ class RouteHaloGeometry:
         Callers must check cell_known for every blocked cell they refine.
         With require_geometry=False, absent geometry is clear; use that mode
         only to reject known conflicts, never to authorize raster relaxation.
+        authored_only checks mandatory electrical floors on trace steps without
+        imposing scalar rules that may have legitimate local relief.
         """
         from .pairwise_clearance import _attach_zone_exempts
         from .primitives import Segment
@@ -159,6 +168,8 @@ class RouteHaloGeometry:
             layer = candidate.layer
         else:
             shape, half, layer = Point(candidate.x, candidate.y), candidate.diameter / 2, None
+        if authored_only:
+            assert is_trace, "Authored-only step checks require a segment"
         names = router._route_halo_names
         own_name = names.get(candidate.net, "")
         nc = router._halo_net_class(candidate.net)
@@ -215,6 +226,12 @@ class RouteHaloGeometry:
                     return False
                 if same_net:
                     continue
+            if authored_only:
+                required = router.rules.clearance_for_nets(candidate.net, other.net, 0.0)
+                other_half = other.width / 2 if other_trace else other.diameter / 2
+                if required > 0 and distance - half - other_half < required - 1e-9:
+                    return False
+                continue
             required = scalar
             if is_trace and other.net == partner_net and partner_clearance is not None:
                 required = partner_clearance

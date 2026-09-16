@@ -3624,6 +3624,27 @@ class RoutingGrid:
 
         return worst_deficit, worst_loc
 
+    def authored_segment_pads_clear(self, seg: Segment) -> bool:
+        """Enforce mandatory net minima independently of raster/escape relief."""
+        for pad in self._pads:
+            required = self.rules.clearance_for_nets(seg.net, pad.net, 0.0)
+            if required <= 0:
+                continue
+            if not pad.through_hole and pad.layer != seg.layer:
+                continue
+            if pad.shape == "circle":
+                distance = (
+                    self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
+                    - max(pad.width, pad.height) / 2
+                )
+            else:
+                distance = _pad_rect_segment_centerline_distance(
+                    pad, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+            if distance - seg.width / 2 < required - 1e-9:
+                return False
+        return True
+
     def validate_segment_clearance(
         self,
         seg: Segment,

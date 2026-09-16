@@ -1553,12 +1553,25 @@ class Router:
 
         return (gx1, gy1, gx2, gy2)
 
-    def _fixed_step_clear(self, current, nx, ny, layer, net_name, net):
-        if not self.grid.fixed_fills:
+    def _physical_step_clear(self, current, nx, ny, layer, net_name, net):
+        if not self.grid.fixed_fills and not self.rules.net_clearance_floors:
             return True
-        net_class = self._get_net_class(net_name)
+        net_class = self._halo_net_class(net)
         half = (net_class.trace_width if net_class else self.rules.trace_width) / 2
         clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        if self.rules.net_clearance_floors:
+            copper_layer = self._grid_layer_object(layer)
+            if copper_layer is None:
+                return False
+            x1, y1 = self.grid.grid_to_world(current.x, current.y)
+            x2, y2 = self.grid.grid_to_world(nx, ny)
+            segment = Segment(x1, y1, x2, y2, half * 2, copper_layer, net, net_name)
+            if not self.grid.authored_segment_pads_clear(segment):
+                return False
+            if not self.grid._route_halo.clear(
+                segment, self, require_geometry=False, authored_only=True
+            ):
+                return False
         return self.grid.fixed_fills.segment_clear(
             self.grid.grid_to_world(current.x, current.y),
             self.grid.grid_to_world(nx, ny),
@@ -3967,7 +3980,9 @@ class Router:
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
-                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name, start.net):
+                if not self._physical_step_clear(
+                    current, nx, ny, nlayer, start.net_name, start.net
+                ):
                     continue
 
                 # Check bounds and obstacles - account for trace width
@@ -5664,7 +5679,7 @@ class Router:
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
             nlayer = current.layer
-            if not self._fixed_step_clear(
+            if not self._physical_step_clear(
                 current, nx, ny, nlayer, source_pad.net_name, source_pad.net
             ):
                 continue
@@ -6013,11 +6028,16 @@ class Router:
         # Collect backward path (end -> meeting point), then reverse
         backward_path: list[tuple[float, float, int, bool]] = []
         backward_node = backward_nodes.get(meeting_point)
+        # Reversing an edge moves its incoming-via flag to the other endpoint.
+        # Keeping the flag on the original node shifts the emitted barrel by
+        # one grid step, away from the position that passed the physical gate.
+        incoming_via = backward_node.via_from_parent if backward_node else False
         if backward_node:
             backward_node = backward_node.parent  # Skip meeting point (already in forward)
         while backward_node:
             wx, wy = self.grid.grid_to_world(backward_node.x, backward_node.y)
-            backward_path.append((wx, wy, backward_node.layer, backward_node.via_from_parent))
+            backward_path.append((wx, wy, backward_node.layer, incoming_via))
+            incoming_via = backward_node.via_from_parent
             backward_node = backward_node.parent
         # backward_path is now from meeting -> end, which is what we want
 
