@@ -127,7 +127,15 @@ def complete_departure(
     goal_axis = (pads[3].x - pads[1].x, pads[3].y - pads[1].y)
     parallel = abs(goal_axis[0] * across[1] - goal_axis[1] * across[0]) < 1e-9
     resolution = grid.resolution
-    depths = range(max(1, math.ceil(0.6 / resolution)), math.ceil(1.2 / resolution) + 1)
+    preferred_depth = max(1, math.ceil(0.6 / resolution))
+    # The departure has already cleared its pad escape. A fixed minimum body
+    # extension can cross foreign copper even when an earlier turn is legal.
+    # Keep the previous first choice, then try shallower turns before deeper
+    # ones; all attempts still consume the same cap and physical validation.
+    depths = [
+        *range(preferred_depth, -1, -1),
+        *range(preferred_depth + 1, math.ceil(1.2 / resolution) + 1),
+    ]
     retreats = list(
         range(
             max(1, math.ceil(0.5 / resolution)),
