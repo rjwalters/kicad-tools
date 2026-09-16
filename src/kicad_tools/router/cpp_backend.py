@@ -2342,6 +2342,11 @@ class CppPathfinder:
                 if self._relief_mode:
                     return route
 
+                if self._grid._py_grid is not None:
+                    from .via_reuse import reuse_marked_vias
+
+                    reuse_marked_vias(route, self._grid._py_grid, self._rules.via_clearance)
+
                 # Issue #1702 Gap 3 + Issue #2439: Post-route geometric
                 # clearance validation via C++ validate_route().  Issue #2587
                 # threads the partner net id + intra-pair clearance so the
