@@ -69,3 +69,30 @@ record with `diagnostics_degraded: true`. A terminal-record failure likewise
 cannot replace the child status, and a closed/full stderr cannot cause a
 second failure. In either case artifacts may be incomplete and must not be
 read as proof of zero OOM events. Startup failures may abort before launch.
+
+## Opt-in Test job wiring
+
+The Test job enables observation only for a pull request whose body contains
+`<!-- kct:native-diagnostics -->`. The body is evaluated as a boolean GitHub
+expression, never interpolated into shell or written to diagnostics. Do not
+add the marker or activate a run until the wiring has independent review.
+Without it (including push events), `run_observed.py` directly execs the
+original command; no diagnostics directory or plugin environment is added.
+
+The five existing acceptance/bulk commands retain their argument arrays,
+pipelines, selections and timeout flags. Each observed invocation uses a new
+`board05`, `mask-copper`, `stitch`, `zones`, or `bulk` directory. The final
+upload uses `always()` when opted in, preserving observations after a failed
+step as well as successful measurements; runner/container loss can still
+prevent artifact upload.
+
+Each group has an identity receipt containing the checkout SHA, PR head SHA,
+workflow file hash, run/attempt, configured image, job container ID and SHA256
+of the exact JSON argv array. Raw command arguments/environment are not
+retained. Recover the command from the frozen workflow and resolve its temp
+paths before comparing the digest. The configured image tag is **not** an
+immutable image identity: the receipt deliberately records `image_digest:
+null`. Bind the authoritative Initialize-container pull-log digest to the
+same run/container receipt after execution, without exposing a Docker socket
+or granting host access. The PR marker selects diagnostics, not a resource,
+concurrency or test-acceptance policy.
