@@ -581,7 +581,12 @@ bool Grid3D::pad_cell_has_geometry(int x, int y, int layer) const {
 }
 
 bool Grid3D::pad_trace_geometry_clear(const Segment& s) const {
-    const float reach = s.width / 2 + std::max(max_pad_clearance_, max_pairwise_clearance());
+    return pad_trace_geometry_clear_impl(s, false);
+}
+
+bool Grid3D::pad_trace_geometry_clear_impl(const Segment& s, bool authored_only) const {
+    const float reach = s.width / 2 + (authored_only ? max_net_clearance_floor_
+        : std::max(max_pad_clearance_, max_pairwise_clearance()));
     std::set<size_t> seen;
     for (int bx = std::floor((std::min(s.x1,s.x2)-reach)/2);
          bx <= std::floor((std::max(s.x1,s.x2)+reach)/2); ++bx) {
@@ -593,8 +598,9 @@ bool Grid3D::pad_trace_geometry_clear(const Segment& s) const {
                 if (!seen.insert(i).second) continue;
                 const auto& pad = pads_[i];
                 if (pad.net == s.net || (pad.layer_idx != -1 && pad.layer_idx != s.layer)) continue;
-                const float required = std::max(pad.clearance_override,
-                    pairwise_required_clearance(s.net, pad.net));
+                const float required = authored_only ? net_clearance_floor(s.net, pad.net)
+                    : std::max(pad.clearance_override, pairwise_required_clearance(s.net, pad.net));
+                if (authored_only && required <= 0.0f) continue;
                 const float distance = pad.is_circular
                     ? point_to_segment_distance(pad.x,pad.y,s.x1,s.y1,s.x2,s.y2)
                         - std::max(pad.width,pad.height)/2
@@ -1006,6 +1012,10 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
 
 bool Grid3D::authored_trace_geometry_clear(const Segment& s) const {
     if (max_net_clearance_floor_ <= 0.0f) return true;
+    // Pad-exit/approach occupancy exemptions cannot waive authored floors.
+    // Check swept copper against indexed physical pads before those exemptions,
+    // including pads hidden by another net's overlapping raster halo.
+    if (!pad_trace_geometry_clear_impl(s, true)) return false;
     const float margin = s.width / 2 + max_net_clearance_floor_;
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,

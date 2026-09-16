@@ -476,6 +476,7 @@ public:
     const std::vector<StoredVia>& stored_vias() const { return stored_vias_; }
 
 private:
+    bool pad_trace_geometry_clear_impl(const Segment& segment, bool authored_only) const;
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +
                static_cast<size_t>(y) * cols_ +
