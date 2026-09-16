@@ -38,10 +38,10 @@ Design notes
   coupling room and trigger an intra-group clearance violation
   immediately.  See :func:`_outer_normal_hint_group`.
 
-  For pair-aware members the outer-normal is computed **at the pair
-  centerline** (not per-half) so the bulge direction chosen is the same
-  for both P and N halves -- this is what makes the mirror-about-centerline
-  step geometrically meaningful.  See :func:`_outer_normal_hint_pair_group`.
+  For pair-aware members the normal is perpendicular to the P host and
+  points from N toward P. Mirroring across the pair centerline then sends
+  the two bulges away from one another. Other copper remains subject to
+  the candidate clearance checks. See :func:`_pair_outward_normal`.
 
 * **Per-insertion DRC self-check.**  Five-pronged (extended in Issue
   #3317 follow-up to catch broader-DRC violations the legacy
@@ -134,7 +134,7 @@ Design notes
   3. Generate the P-side meander using the same Phase 2E single-ended
      serpentine engine.
   4. Mirror the P-side new segments by reflection-about-centerline,
-     snapping each reflected endpoint to ``grid_resolution_mm``.
+     preserving already legal geometry and its connection endpoints.
   5. Run the paired DRC self-check on BOTH halves; rollback BOTH on
      failure.
 
@@ -490,6 +490,8 @@ def tune_match_group_v2(
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
     fixed_segment_ids: set[int] | None = None,
+    preserve_pair_spacing: bool = False,
+    coupled_pair_ids: set[tuple[int, int]] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Tune the lengths of an N-trace match group to within tolerance.
 
@@ -558,11 +560,17 @@ def tune_match_group_v2(
             ``False`` every member is returned unchanged with
             ``reason="not_length_critical"`` (matches the pair tuner's
             gate at :func:`tune_diff_pair_skew`).
-        grid_resolution_mm: Routing grid resolution used to snap the
-            mirrored N-side endpoints in the pair-aware path.  Default
-            ``0.01`` mm matches the typical 10um router grid; tests pass
-            an explicit value when they need a coarser grid to verify
-            the snap behavior.
+        preserve_pair_spacing: Use a coordinated loop instead of opposite
+            mirrored bulges, retaining the host spacing. All candidate
+            clearance checks and insertion budgets still apply.
+        coupled_pair_ids: Optional per-pair override of ``preserve_pair_spacing``.
+            Only the listed pairs use coordinated loops; other pairs retain
+            mirrored tuning. This keeps mixed scalar/pair groups from inheriting
+            the scalar reference class's coupling policy.
+        grid_resolution_mm: Interior snapping resolution for reflected
+            geometry that needs angle correction. Already legal reflected
+            geometry stays exact so both halves gain the same length.
+            Existing connection endpoints always remain fixed.
         via_clearance_mm: Optional segment-to-via clearance floor in mm
             (Issue #3317 follow-up).  When supplied, the post-insertion
             DRC self-check additionally rejects inserts whose new
@@ -711,6 +719,8 @@ def tune_match_group_v2(
             board_thickness_mm=board_thickness_mm,
             num_copper_layers=num_copper_layers,
             blind_buried_supported=blind_buried_supported,
+            preserve_pair_spacing=preserve_pair_spacing,
+            coupled_pair_ids=coupled_pair_ids,
         )
 
     return _tune_match_group_single_ended(
@@ -2062,6 +2072,26 @@ def _outer_normal_hint_pair_group(
     return (rx / mag, ry / mag)
 
 
+def _pair_outward_normal(p_seg: Segment, n_seg: Segment) -> tuple[float, float]:
+    """Geometric reflection normal, oriented from N toward P.
+
+    A neighboring lane cannot choose the reflection axis: doing so can
+    rotate the mirrored endpoints or direct both meanders into the pair.
+    Neighbor copper is still checked by the candidate clearance gate.
+    """
+    import math
+
+    dx, dy = p_seg.x2 - p_seg.x1, p_seg.y2 - p_seg.y1
+    length = math.hypot(dx, dy)
+    if length <= 1e-12:
+        return (0.0, 1.0)
+    nx, ny = -dy / length, dx / length
+    separation = (p_seg.x1 + p_seg.x2 - n_seg.x1 - n_seg.x2) * nx + (
+        p_seg.y1 + p_seg.y2 - n_seg.y1 - n_seg.y2
+    ) * ny
+    return (nx, ny) if separation >= 0 else (-nx, -ny)
+
+
 def _snap_to_grid(value: float, grid_resolution_mm: float) -> float:
     """Snap ``value`` to the nearest multiple of ``grid_resolution_mm``.
 
@@ -2123,6 +2153,9 @@ def _mirror_segments_about_centerline(
     centerline axis (defined by point ``(cx, cy)`` and normal
     ``(nx, ny)``), snaps each reflected coordinate to the routing grid,
     and emits a new :class:`Segment` carrying the N-side net id / name.
+    Already 45-aligned reflected geometry stays exact, preserving pair length.
+    Otherwise, the first and last endpoints stay exact and interior snapping
+    uses the first reflected endpoint as its grid origin.
 
     The reflection preserves segment length (modulo grid snapping
     rounding within ``grid_resolution_mm / 2``) and segment direction
@@ -2137,8 +2170,8 @@ def _mirror_segments_about_centerline(
         n_net_name: Net name for the N half.
         cx, cy: Centerline midpoint anchor.
         nx, ny: Outer-normal unit vector.
-        grid_resolution_mm: Routing grid resolution; each reflected
-            endpoint is snapped to the nearest multiple.
+        grid_resolution_mm: Routing grid resolution for interior vertices,
+            relative to the first reflected endpoint. Host endpoints stay exact.
 
     Returns:
         A new list of :class:`Segment` instances ready to splice into
@@ -2148,14 +2181,44 @@ def _mirror_segments_about_centerline(
     from .quantize import dogleg_points, is_45_aligned
 
     _ = p_net_id  # caller-side clarity
+    if not new_p_segments:
+        return []
+    first = (new_p_segments[0].x1, new_p_segments[0].y1)
+    last = (new_p_segments[-1].x2, new_p_segments[-1].y2)
+    ox, oy = _reflect_point_about_axis(*first, cx, cy, nx, ny)
+    reflected = {
+        point: _reflect_point_about_axis(*point, cx, cy, nx, ny)
+        for segment in new_p_segments
+        for point in ((segment.x1, segment.y1), (segment.x2, segment.y2))
+    }
+    already_aligned = all(
+        is_45_aligned(
+            reflected[(segment.x2, segment.y2)][0] - reflected[(segment.x1, segment.y1)][0],
+            reflected[(segment.x2, segment.y2)][1] - reflected[(segment.x1, segment.y1)][1],
+        )
+        for segment in new_p_segments
+    )
+
+    def reflected_point(x: float, y: float) -> tuple[float, float]:
+        rx, ry = reflected[(x, y)]
+        # Reflection already preserves length. Independently rounding only N
+        # would create pair skew even when every reflected leg is legal.
+        if already_aligned:
+            return rx, ry
+        # Existing host endpoints are connection anchors, not new grid sites.
+        # Snap interior vertices relative to that host so translating a board
+        # cannot move the replacement away from its original copper.
+        if (x, y) in (first, last):
+            return rx, ry
+        return (
+            ox + _snap_to_grid(rx - ox, grid_resolution_mm),
+            oy + _snap_to_grid(ry - oy, grid_resolution_mm),
+        )
+
     mirrored: list[_Segment] = []
     for pseg in new_p_segments:
-        rx1, ry1 = _reflect_point_about_axis(pseg.x1, pseg.y1, cx, cy, nx, ny)
-        rx2, ry2 = _reflect_point_about_axis(pseg.x2, pseg.y2, cx, cy, nx, ny)
-        sx1 = _snap_to_grid(rx1, grid_resolution_mm)
-        sy1 = _snap_to_grid(ry1, grid_resolution_mm)
-        sx2 = _snap_to_grid(rx2, grid_resolution_mm)
-        sy2 = _snap_to_grid(ry2, grid_resolution_mm)
+        sx1, sy1 = reflected_point(pseg.x1, pseg.y1)
+        sx2, sy2 = reflected_point(pseg.x2, pseg.y2)
         # Issue #3535: even though the P-side meander is 45-aligned by
         # construction, reflecting it about the pair centerline (whose
         # normal is the arbitrary outer-normal hint, not necessarily a
@@ -2228,7 +2291,7 @@ def _splice_mirrored_n_route(
             ``mirrored_segments`` boundary point and the corresponding
             host endpoint for the two to be considered the same point.
             Kept tight by default (sub-micron) since both endpoints are
-            already grid-snapped upstream by
+            preserved exactly upstream by
             :func:`_mirror_segments_about_centerline`; this only absorbs
             floating-point rounding, not genuine geometric mismatch.
 
@@ -2295,6 +2358,86 @@ def _splice_mirrored_n_route(
         segments=new_segments,
         vias=list(n_route.vias),
     )
+
+
+def _shared_pair_window(
+    p_route: Route,
+    n_route: Route,
+    min_length: float,
+    fixed_segment_ids: set[int] | None = None,
+    *,
+    candidate_index: int = 0,
+) -> tuple[Route, int, Route, int] | None:
+    """Split a common parallel span into equal hosts without changing copper.
+
+    The returned routes are proposals. Untouched segments retain identity,
+    and neither fixed segments nor either input route is modified.
+    """
+    import math
+    from dataclasses import replace
+
+    candidates = []
+    for pi, p in enumerate(p_route.segments):
+        if fixed_segment_ids and id(p) in fixed_segment_ids:
+            continue
+        dx, dy = p.x2 - p.x1, p.y2 - p.y1
+        length = math.hypot(dx, dy)
+        if length < max(min_length, 1e-9):
+            continue
+        ux, uy = dx / length, dy / length
+        for ni, n in enumerate(n_route.segments):
+            if n.layer != p.layer or (fixed_segment_ids and id(n) in fixed_segment_ids):
+                continue
+            ndx, ndy = n.x2 - n.x1, n.y2 - n.y1
+            nl = math.hypot(ndx, ndy)
+            if nl < max(min_length, 1e-9) or abs(ndx * uy - ndy * ux) > 1e-9 * nl:
+                continue
+            start = (n.x1 - p.x1) * ux + (n.y1 - p.y1) * uy
+            end = (n.x2 - p.x1) * ux + (n.y2 - p.y1) * uy
+            lo, hi = max(0.0, min(start, end)), min(length, max(start, end))
+            if hi - lo < min_length or hi - lo <= 1e-9:
+                continue
+            separation = abs((n.x1 - p.x1) * uy - (n.y1 - p.y1) * ux)
+            if separation <= 1e-9:
+                continue
+            score = (hi - lo, -separation)
+            na, nb = sorted(((lo - start) / (end - start), (hi - start) / (end - start)))
+            candidates.append((score, pi, ni, lo / length, hi / length, na, nb))
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    if candidate_index >= len(candidates):
+        return None
+    best = candidates[candidate_index]
+
+    def split(route: Route, index: int, lo: float, hi: float) -> tuple[Route, int]:
+        original = route.segments[index]
+        lo, hi = max(0.0, lo), min(1.0, hi)
+        if lo < 1e-10:
+            lo = 0.0
+        if hi > 1.0 - 1e-10:
+            hi = 1.0
+        cuts = sorted({0.0, lo, hi, 1.0})
+        pieces = []
+        host_index = index
+        for a, b in zip(cuts[:-1], cuts[1:], strict=True):
+            pieces.append(
+                replace(
+                    original,
+                    x1=original.x1 + a * (original.x2 - original.x1),
+                    y1=original.y1 + a * (original.y2 - original.y1),
+                    x2=original.x2 if b == 1.0 else original.x1 + b * (original.x2 - original.x1),
+                    y2=original.y2 if b == 1.0 else original.y1 + b * (original.y2 - original.y1),
+                )
+            )
+            if a == lo and b == hi:
+                host_index = index + len(pieces) - 1
+        return replace(
+            route, segments=route.segments[:index] + pieces + route.segments[index + 1 :]
+        ), host_index
+
+    _, pi, ni, pa, pb, na, nb = best
+    prepared_p, pi = split(p_route, pi, pa, pb)
+    prepared_n, ni = split(n_route, ni, na, nb)
+    return prepared_p, pi, prepared_n, ni
 
 
 def _find_corresponding_n_segment(
@@ -2530,6 +2673,48 @@ def _post_insertion_clearance_detail_pair_group(
     return None
 
 
+def _pair_insertion_hosts(
+    p_route: Route,
+    n_route: Route,
+    min_length: float,
+    fixed_segment_ids: set[int] | None,
+    *,
+    max_candidates: int,
+) -> list[tuple[Route, int, Route, int]]:
+    """Bounded deterministic host proposals, preserving the old best first."""
+    proposals: list[tuple[Route, int, Route, int]] = []
+    seen: set[tuple] = set()
+
+    def add(proposal: tuple[Route, int, Route, int]) -> None:
+        pr, pi, nr, ni = proposal
+        p, n = pr.segments[pi], nr.segments[ni]
+        key = (p.start, p.end, p.layer, n.start, n.end, n.layer)
+        if key not in seen:
+            seen.add(key)
+            proposals.append(proposal)
+
+    for pi, p in _rank_candidate_segments(
+        p_route, min_length, max_candidates=max_candidates, fixed_segment_ids=fixed_segment_ids
+    ):
+        corresponding = _find_corresponding_n_segment(
+            n_route, p, fixed_segment_ids=fixed_segment_ids
+        )
+        if corresponding is not None:
+            add((p_route, pi, n_route, corresponding[0]))
+        if len(proposals) >= max_candidates:
+            return proposals
+    for index in range(max_candidates):
+        shared = _shared_pair_window(
+            p_route, n_route, min_length, fixed_segment_ids, candidate_index=index
+        )
+        if shared is None:
+            break
+        add(shared)
+        if len(proposals) >= max_candidates:
+            break
+    return proposals
+
+
 def _tune_match_group_of_pairs(
     group: MatchGroup,
     routes_by_net: dict[int, Route],
@@ -2549,6 +2734,8 @@ def _tune_match_group_of_pairs(
     board_thickness_mm: float | None = None,
     num_copper_layers: int = 4,
     blind_buried_supported: bool = True,
+    preserve_pair_spacing: bool = False,
+    coupled_pair_ids: set[tuple[int, int]] | None = None,
 ) -> dict[int, tuple[Route, TuneResult]]:
     """Pair-aware Phase 2F path: mirrored serpentine geometry for pair members.
 
@@ -2561,13 +2748,15 @@ def _tune_match_group_of_pairs(
 
     1. Pick a candidate P-side segment (mirror the Phase 2E
        single-ended segment-selection heuristic).
-    2. Find the corresponding N-side segment by midpoint proximity.
+    2. Find the corresponding N-side segment; when full spans differ,
+       split a shared parallel window into equal mutable hosts without
+       changing copper or fixed segments.
     3. Compute the outer-normal at the pair centerline (one normal for
        both halves).
     4. Generate the P-side meander using the Phase 2E single-ended
        trombone engine.
-    5. Mirror the P-side new segments across the centerline, snapping
-       each reflected endpoint to ``grid_resolution_mm``.
+    5. Mirror the P-side new segments across the centerline, preserving
+       legal angles and exact connection endpoints.
     6. Run the paired DRC self-check; rollback BOTH halves on failure.
 
     Scalar members in ``group.net_ids`` (e.g. a mixed group with a
@@ -2616,7 +2805,6 @@ def _tune_match_group_of_pairs(
     # --- Measure every member length ------------------------------------
     import math
 
-    from .length import LengthTracker  # avoid cycle
     from .match_group_length import MatchGroupTracker
     from .primitives import Route
 
@@ -2681,6 +2869,9 @@ def _tune_match_group_of_pairs(
     total_inserts_committed = 0
 
     for p_id, n_id in group.pair_ids:
+        pair_preserves_spacing = (
+            preserve_pair_spacing if coupled_pair_ids is None else (p_id, n_id) in coupled_pair_ids
+        )
         maybe_p_route = routes_by_net.get(p_id)
         maybe_n_route = routes_by_net.get(n_id)
 
@@ -2843,180 +3034,247 @@ def _tune_match_group_of_pairs(
                 current_n = original_n_route
                 break
 
-            # --- Step 1: pick a P-side segment.
-            provisional = SerpentineGenerator(base_config)
-            if fixed_segment_ids:
-                hosts = _rank_candidate_segments(
-                    current_p,
-                    base_config.min_segment_length,
-                    max_candidates=1,
-                    fixed_segment_ids=fixed_segment_ids,
+            # Retry a bounded fan of existing shared hosts before abandoning
+            # the pair. Rejected proposals never change the cascade state or
+            # fixed escape identities; all hosts share this insertion budget.
+            host_candidates = _pair_insertion_hosts(
+                current_p,
+                current_n,
+                base_config.min_segment_length,
+                fixed_segment_ids,
+                max_candidates=MAX_SEGMENT_RETRY_CANDIDATES if pair_preserves_spacing else 1,
+            )
+            if not host_candidates:
+                for r in (per_pair_result_p, per_pair_result_n):
+                    r.reason = "no_suitable_segment"
+                    r.message = "No shared mutable host for pair tuning."
+                current_p, current_n = original_p_route, original_n_route
+                break
+            from .coordinated_tuning import MAX_COORDINATED_LOOPS
+
+            host_accepted = False
+            # Preserve the existing single-loop host order, then retry shallower
+            # shapes within the same host/window and insertion budget.
+            loop_counts = range(1, MAX_COORDINATED_LOOPS + 1) if pair_preserves_spacing else (1,)
+            for (proposed_p, _p_seg_idx, proposed_n, n_insertion_seg_idx), loop_count in (
+                (host, count) for count in loop_counts for host in host_candidates
+            ):
+                p_insertion_segment = proposed_p.segments[_p_seg_idx]
+                n_insertion_segment = proposed_n.segments[n_insertion_seg_idx]
+                # --- Step 3: pair centerline midpoint + outer-normal hint.
+                cx, cy = _pair_centerline_midpoint(p_insertion_segment, n_insertion_segment)
+                hint = _pair_outward_normal(p_insertion_segment, n_insertion_segment)
+
+                # --- Step 4: generate P-side meander.
+                loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
+                amplitude = length_needed / (2.0 * loops) * (1.0 + 1e-9)
+                attempt_config = SerpentineConfig(
+                    style=base_config.style,
+                    amplitude=amplitude,
+                    min_spacing=base_config.min_spacing,
+                    min_segment_length=base_config.min_segment_length,
+                    gap_factor=base_config.gap_factor,
+                    max_iterations=base_config.max_iterations,
+                    side="outer",
+                    outer_normal_hint=hint,
                 )
-                best = hosts[0] if hosts else None
-            else:
-                best = provisional.find_best_segment(current_p)
-            if best is None:
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
-                    r.message = (
-                        f"No segment long enough for a trombone on net "
-                        f"{p_id} (pair lane skew={current_skew:.4f}mm > "
-                        f"tol={tolerance_mm:.4f}mm)"
-                    )
-                current_p = original_p_route
-                current_n = original_n_route
-                break
-            _p_seg_idx, p_insertion_segment = best
-
-            # --- Step 2: find the corresponding N-side segment.
-            n_corr = _find_corresponding_n_segment(
-                current_n, p_insertion_segment, fixed_segment_ids=fixed_segment_ids
-            )
-            if n_corr is None:
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
-                    r.message = (
-                        f"No corresponding N-side segment found for the "
-                        f"P-side insertion segment on pair ({p_id}, {n_id})."
-                    )
-                current_p = original_p_route
-                current_n = original_n_route
-                break
-            n_insertion_seg_idx, n_insertion_segment = n_corr
-
-            # --- Step 3: pair centerline midpoint + outer-normal hint.
-            cx, cy = _pair_centerline_midpoint(p_insertion_segment, n_insertion_segment)
-            other_member_routes: dict[int, Route] = {}
-            for other_id in group_net_ids:
-                if other_id in (p_id, n_id):
-                    continue
-                if other_id in routes_by_net:
-                    other_member_routes[other_id] = routes_by_net[other_id]
-            hint = _outer_normal_hint_pair_group(
-                p_insertion_segment,
-                n_insertion_segment,
-                candidate_p_id=p_id,
-                candidate_n_id=n_id,
-                group_routes=other_member_routes,
-            )
-
-            # --- Step 4: generate P-side meander.
-            loops = max(1, math.ceil(length_needed / (2.0 * base_config.amplitude)))
-            amplitude = length_needed / (2.0 * loops) * (1.0 + 1e-9)
-            attempt_config = SerpentineConfig(
-                style=base_config.style,
-                amplitude=amplitude,
-                min_spacing=base_config.min_spacing,
-                min_segment_length=base_config.min_segment_length,
-                gap_factor=base_config.gap_factor,
-                max_iterations=base_config.max_iterations,
-                side="outer",
-                outer_normal_hint=hint,
-            )
-            attempt_generator = SerpentineGenerator(attempt_config)
-            if fixed_segment_ids:
+                attempt_generator = SerpentineGenerator(attempt_config)
                 # Honor the selected mutable host. add_serpentine would rank
                 # the full route again and could select a longer fixed escape.
                 p_serp_result = attempt_generator.generate_trombone(
                     p_insertion_segment, length_needed
                 )
                 candidate_p_route = Route(
-                    net=current_p.net,
-                    net_name=current_p.net_name,
+                    net=proposed_p.net,
+                    net_name=proposed_p.net_name,
                     segments=(
-                        current_p.segments[:_p_seg_idx]
+                        proposed_p.segments[:_p_seg_idx]
                         + p_serp_result.new_segments
-                        + current_p.segments[_p_seg_idx + 1 :]
+                        + proposed_p.segments[_p_seg_idx + 1 :]
                     ),
-                    vias=current_p.vias.copy(),
-                    is_escape=current_p.is_escape,
+                    vias=proposed_p.vias.copy(),
+                    is_escape=proposed_p.is_escape,
                 )
-            else:
-                candidate_p_route, p_serp_result = attempt_generator.add_serpentine(
-                    current_p, LengthTracker.calculate_route_length(current_p) + length_needed
+                per_pair_result_p.serpentine_results.append(p_serp_result)
+                per_pair_result_n.serpentine_results.append(p_serp_result)
+
+                if not p_serp_result.success:
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = (
+                            f"P-side trombone generation failed for pair "
+                            f"({p_id}, {n_id}): {p_serp_result.message}"
+                        )
+                    continue
+
+                # --- Step 5: mirror P-side segments to N-side.
+                new_n_segments = _mirror_segments_about_centerline(
+                    p_serp_result.new_segments,
+                    p_net_id=p_id,
+                    n_net_id=n_id,
+                    n_net_name=proposed_n.net_name,
+                    cx=cx,
+                    cy=cy,
+                    nx=hint[0],
+                    ny=hint[1],
+                    grid_resolution_mm=grid_resolution_mm,
                 )
-            per_pair_result_p.serpentine_results.append(p_serp_result)
-            per_pair_result_n.serpentine_results.append(p_serp_result)
+                if pair_preserves_spacing:
+                    from dataclasses import replace
 
-            if not p_serp_result.success:
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
-                    r.message = (
-                        f"P-side trombone generation failed for pair "
-                        f"({p_id}, {n_id}): {p_serp_result.message}"
+                    from .coordinated_tuning import coordinated_pair_loop
+
+                    span = math.hypot(
+                        p_insertion_segment.x2 - p_insertion_segment.x1,
+                        p_insertion_segment.y2 - p_insertion_segment.y1,
                     )
-                current_p = original_p_route
-                current_n = original_n_route
+                    window = min(4.0, span / 2)
+                    coordinated = coordinated_pair_loop(
+                        p_insertion_segment,
+                        n_insertion_segment,
+                        added_length=length_needed,
+                        window_start=(span - window) / 2,
+                        window_end=(span + window) / 2,
+                        num_loops=loop_count,
+                    )
+                    if coordinated is None:
+                        for r in (per_pair_result_p, per_pair_result_n):
+                            if r.reason != "post_insertion_drc_violation":
+                                r.reason = "no_suitable_segment"
+                                r.message = "No shared window for a spacing-preserving pair loop."
+                        continue
+                    new_p_segments, new_n_segments = coordinated
+                    p_serp_result = replace(
+                        p_serp_result,
+                        new_segments=new_p_segments,
+                        length_added=length_needed,
+                        num_loops=loop_count,
+                        message=f"Added {loop_count} coordinated pair loop(s)",
+                    )
+                    per_pair_result_p.serpentine_results[-1] = p_serp_result
+                    per_pair_result_n.serpentine_results[-1] = p_serp_result
+                    candidate_p_route = replace(
+                        proposed_p,
+                        segments=proposed_p.segments[:_p_seg_idx]
+                        + new_p_segments
+                        + proposed_p.segments[_p_seg_idx + 1 :],
+                    )
+                spliced_n_route = _splice_mirrored_n_route(
+                    proposed_n,
+                    n_insertion_seg_index=n_insertion_seg_idx,
+                    mirrored_segments=new_n_segments,
+                )
+                if spliced_n_route is None:
+                    # Issue #4984: the reflected P-side geometry's endpoints
+                    # do not correspond to the selected N-side host
+                    # segment's own endpoints -- splicing anyway would
+                    # produce a discontinuous route with asymmetric added
+                    # length. Reject the candidate and roll back, same as
+                    # any other failed insertion attempt this cascade loop.
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "no_suitable_segment"
+                        r.message = (
+                            "Reflected P-side geometry does not correspond to "
+                            "the selected N-side host segment's endpoints for "
+                            f"pair ({p_id}, {n_id}); rejecting candidate rather "
+                            "than splicing a malformed route."
+                        )
+                    continue
+
+                candidate_n_route = spliced_n_route
+
+                # --- Step 6: paired DRC self-check.
+                pair_drc_detail = _post_insertion_clearance_detail_pair_group(
+                    new_p_segments=p_serp_result.new_segments,
+                    new_n_segments=new_n_segments,
+                    candidate_p_route=candidate_p_route,
+                    candidate_n_route=candidate_n_route,
+                    candidate_p_id=p_id,
+                    candidate_n_id=n_id,
+                    group_net_ids=group_net_ids,
+                    routes_by_net=routes_by_net,
+                    intra_group_clearance_mm=intra_group_clearance_mm,
+                    intra_pair_clearance_mm=intra_pair_clearance_mm,
+                    via_clearance_mm=via_clearance_mm,
+                    pads_by_net=pads_by_net,
+                    pad_clearance_mm=pad_clearance_mm,
+                )
+                if pair_drc_detail is not None and pair_preserves_spacing:
+                    # A coordinated loop can bulge toward either side while
+                    # preserving both added lengths and the physical pair gap.
+                    # Try the opposite side once before rolling back the pair.
+                    # This is still ONE insertion, with the same fixed hosts,
+                    # target length, cascade cap and full paired clearance gate.
+                    opposite = coordinated_pair_loop(
+                        n_insertion_segment,
+                        p_insertion_segment,
+                        added_length=length_needed,
+                        window_start=(span - window) / 2,
+                        window_end=(span + window) / 2,
+                        num_loops=loop_count,
+                    )
+                    if opposite is not None:
+                        opposite_n, opposite_p = opposite
+                        opposite_p_route = replace(
+                            proposed_p,
+                            segments=proposed_p.segments[:_p_seg_idx]
+                            + opposite_p
+                            + proposed_p.segments[_p_seg_idx + 1 :],
+                        )
+                        opposite_n_route = _splice_mirrored_n_route(
+                            proposed_n,
+                            n_insertion_seg_index=n_insertion_seg_idx,
+                            mirrored_segments=opposite_n,
+                        )
+                        if opposite_n_route is not None:
+                            opposite_detail = _post_insertion_clearance_detail_pair_group(
+                                new_p_segments=opposite_p,
+                                new_n_segments=opposite_n,
+                                candidate_p_route=opposite_p_route,
+                                candidate_n_route=opposite_n_route,
+                                candidate_p_id=p_id,
+                                candidate_n_id=n_id,
+                                group_net_ids=group_net_ids,
+                                routes_by_net=routes_by_net,
+                                intra_group_clearance_mm=intra_group_clearance_mm,
+                                intra_pair_clearance_mm=intra_pair_clearance_mm,
+                                via_clearance_mm=via_clearance_mm,
+                                pads_by_net=pads_by_net,
+                                pad_clearance_mm=pad_clearance_mm,
+                            )
+                            if opposite_detail is None:
+                                candidate_p_route, candidate_n_route = (
+                                    opposite_p_route,
+                                    opposite_n_route,
+                                )
+                                new_n_segments = opposite_n
+                                p_serp_result = replace(
+                                    p_serp_result,
+                                    new_segments=opposite_p,
+                                    message=f"Added {loop_count} coordinated pair loop(s) on the opposite side",
+                                )
+                                per_pair_result_p.serpentine_results[-1] = p_serp_result
+                                per_pair_result_n.serpentine_results[-1] = p_serp_result
+                                pair_drc_detail = None
+                if pair_drc_detail is not None:
+                    # Rollback BOTH halves atomically -- the drift-prevention
+                    # invariant that Phase 2F AC #4 tests.
+                    for r in (per_pair_result_p, per_pair_result_n):
+                        r.reason = "post_insertion_drc_violation"
+                        r.length_after_mm = member_lengths[p_id if r is per_pair_result_p else n_id]
+                        r.message = (
+                            f"Pair-aware DRC self-check failed on pair "
+                            f"({p_id}, {n_id}): {pair_drc_detail}; rolled back."
+                        )
+                    continue
+
+                for r in (per_pair_result_p, per_pair_result_n):
+                    r.reason = ""
+                    r.message = ""
+                host_accepted = True
                 break
-
-            # --- Step 5: mirror P-side segments to N-side.
-            new_n_segments = _mirror_segments_about_centerline(
-                p_serp_result.new_segments,
-                p_net_id=p_id,
-                n_net_id=n_id,
-                n_net_name=current_n.net_name,
-                cx=cx,
-                cy=cy,
-                nx=hint[0],
-                ny=hint[1],
-                grid_resolution_mm=grid_resolution_mm,
-            )
-            candidate_n_route = _splice_mirrored_n_route(
-                current_n,
-                n_insertion_seg_index=n_insertion_seg_idx,
-                mirrored_segments=new_n_segments,
-            )
-            if candidate_n_route is None:
-                # Issue #4984: the reflected P-side geometry's endpoints
-                # do not correspond to the selected N-side host
-                # segment's own endpoints -- splicing anyway would
-                # produce a discontinuous route with asymmetric added
-                # length. Reject the candidate and roll back, same as
-                # any other failed insertion attempt this cascade loop.
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "no_suitable_segment"
-                    r.message = (
-                        "Reflected P-side geometry does not correspond to "
-                        "the selected N-side host segment's endpoints for "
-                        f"pair ({p_id}, {n_id}); rejecting candidate rather "
-                        "than splicing a malformed route."
-                    )
-                current_p = original_p_route
-                current_n = original_n_route
-                break
-
-            # --- Step 6: paired DRC self-check.
-            pair_drc_detail = _post_insertion_clearance_detail_pair_group(
-                new_p_segments=p_serp_result.new_segments,
-                new_n_segments=new_n_segments,
-                candidate_p_id=p_id,
-                candidate_n_id=n_id,
-                group_net_ids=group_net_ids,
-                routes_by_net=routes_by_net,
-                intra_group_clearance_mm=intra_group_clearance_mm,
-                intra_pair_clearance_mm=intra_pair_clearance_mm,
-                via_clearance_mm=via_clearance_mm,
-                pads_by_net=pads_by_net,
-                pad_clearance_mm=pad_clearance_mm,
-                candidate_p_route=candidate_p_route,
-                candidate_n_route=candidate_n_route,
-            )
-            if pair_drc_detail is not None:
-                # Rollback BOTH halves atomically -- the drift-prevention
-                # invariant that Phase 2F AC #4 tests.
-                for r in (per_pair_result_p, per_pair_result_n):
-                    r.reason = "post_insertion_drc_violation"
-                    r.length_after_mm = member_lengths[p_id if r is per_pair_result_p else n_id]
-                    r.message = (
-                        f"Pair-aware DRC self-check failed on pair "
-                        f"({p_id}, {n_id}): {pair_drc_detail}; rolled back."
-                    )
-                current_p = original_p_route
-                current_n = original_n_route
-                assert current_p is original_p_route
-                assert current_p.segments is original_p_segments
-                assert current_n is original_n_route
-                assert current_n.segments is original_n_segments
+            if not host_accepted:
+                current_p, current_n = original_p_route, original_n_route
                 break
 
             # Commit BOTH halves atomically.

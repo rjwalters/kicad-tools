@@ -19,6 +19,7 @@ This module verifies the curator-specified mitigations of
 
 from __future__ import annotations
 
+import math
 from unittest.mock import patch
 
 import pytest
@@ -1939,8 +1940,8 @@ class TestPhase2FMirroredGeometry:
         assert m.net == 11
         assert m.net_name == "DAT0_N"
 
-    def test_mirror_segments_grid_snap_within_half_resolution(self):
-        """Mirror-then-snap rounding stays within grid_resolution/2."""
+    def test_mirror_segments_preserves_off_grid_host_endpoints(self):
+        """Connection anchors and legal reflected length must remain exact."""
         # P-side segment that, when reflected, lands at a non-grid coord.
         new_p = Segment(
             x1=0.123456,
@@ -1965,10 +1966,11 @@ class TestPhase2FMirroredGeometry:
             grid_resolution_mm=grid,
         )
         m = mirrored[0]
-        # Each coordinate must be a multiple of grid.
-        for v in (m.x1, m.y1, m.x2, m.y2):
-            rem = abs(v - round(v / grid) * grid)
-            assert rem < 1e-9, f"Coordinate {v} is not snapped to grid {grid}"
+        assert (m.x1, m.y1) == (new_p.x1, 0.0)
+        assert (m.x2, m.y2) == (new_p.x2, 0.0)
+        assert math.hypot(m.x2 - m.x1, m.y2 - m.y1) == math.hypot(
+            new_p.x2 - new_p.x1, new_p.y2 - new_p.y1
+        )
 
 
 # =============================================================================
@@ -3474,4 +3476,51 @@ class TestViaCountImbalance:
         assert skew <= 0.5, (
             f"via-inclusive group skew should converge within tolerance, "
             f"got {skew:.4f}mm; totals={ {k: round(v, 3) for k, v in totals.items()} }"
+        )
+
+
+def test_mirrored_tuning_translates_with_host_and_splices_exactly():
+    def build(dx, dy):
+        points = [(0, 0), (0.4, 0), (0.4, -0.31), (0.8, -0.31), (0.8, 0), (4.1, 0)]
+        p_segments = [
+            Segment(
+                x1=a[0] + dx,
+                y1=a[1] + dy,
+                x2=b[0] + dx,
+                y2=b[1] + dy,
+                width=0.225,
+                layer=Layer.F_CU,
+                net=10,
+                net_name="P",
+            )
+            for a, b in zip(points, points[1:], strict=False)
+        ]
+        mirrored = _mirror_segments_about_centerline(
+            p_segments, 10, 11, "N", dx + 2.05, dy + 0.1905, 0, 1, 0.127
+        )
+        host = Segment(
+            x1=dx,
+            y1=dy + 0.381,
+            x2=dx + 4.1,
+            y2=dy + 0.381,
+            width=0.225,
+            layer=Layer.F_CU,
+            net=11,
+            net_name="N",
+        )
+        route = Route(net=11, net_name="N", segments=[host])
+        result = _splice_mirrored_n_route(route, 0, mirrored)
+        assert result is not None
+        assert (result.segments[0].x1, result.segments[0].y1) == pytest.approx((host.x1, host.y1))
+        assert (result.segments[-1].x2, result.segments[-1].y2) == pytest.approx((host.x2, host.y2))
+        for a, b in zip(result.segments, result.segments[1:], strict=False):
+            assert (a.x2, a.y2) == pytest.approx((b.x1, b.y1))
+        return result.segments
+
+    original = build(0, 0)
+    translated = build(100.089, 100.051)
+    assert len(original) == len(translated)
+    for a, b in zip(original, translated, strict=True):
+        assert (b.x1 - 100.089, b.y1 - 100.051, b.x2 - 100.089, b.y2 - 100.051) == pytest.approx(
+            (a.x1, a.y1, a.x2, a.y2)
         )
