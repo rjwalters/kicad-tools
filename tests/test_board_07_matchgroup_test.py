@@ -1054,6 +1054,7 @@ def test_recipe_cli_bridge_installs_access_in_routing_frame(
 ):
     from types import SimpleNamespace
 
+    from kicad_tools import router as router_package
     from kicad_tools.cli import main, route_cmd
     from kicad_tools.router import io
 
@@ -1061,7 +1062,7 @@ def test_recipe_cli_bridge_installs_access_in_routing_frame(
     source = generate_design_mod.create_pcb(tmp_path)
     before = source.read_bytes()
     output = tmp_path / "out.kicad_pcb"
-    original_load = io.load_pcb_for_routing
+    original_load = router_package.load_pcb_for_routing
     captured = []
 
     def capture(*args, **kwargs):
@@ -1081,6 +1082,7 @@ def test_recipe_cli_bridge_installs_access_in_routing_frame(
         return SimpleNamespace(returncode=main(command[3:]))
 
     monkeypatch.setattr(io, "load_pcb_for_routing", capture)
+    monkeypatch.setattr(router_package, "load_pcb_for_routing", capture)
     monkeypatch.setattr(route_cmd, "main", route_cmd._in_process_main)
     monkeypatch.setattr(generate_design_mod.subprocess, "run", run)
     assert generate_design_mod.route_pcb(source, output) is False

@@ -370,11 +370,12 @@ def test_cli_access_rejects_damaged_component_proof(board, cli_plan, damage):
 
 
 def test_outer_cli_delivers_plan_and_placement_proof_to_loader(board, cli_plan, monkeypatch):
+    from kicad_tools import router as router_package
     from kicad_tools.cli import main, route_cmd
     from kicad_tools.router import io
 
     seen = []
-    original = io.load_pcb_for_routing
+    original = router_package.load_pcb_for_routing
 
     def capture(*args, **kwargs):
         assert kwargs["plane_access_policy"] is not None
@@ -384,6 +385,7 @@ def test_outer_cli_delivers_plan_and_placement_proof_to_loader(board, cli_plan, 
         raise RuntimeError("intentional stop after access installation")
 
     monkeypatch.setattr(io, "load_pcb_for_routing", capture)
+    monkeypatch.setattr(router_package, "load_pcb_for_routing", capture)
     monkeypatch.setattr(route_cmd, "main", route_cmd._in_process_main)
     result = main(
         [
