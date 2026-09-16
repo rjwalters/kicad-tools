@@ -748,6 +748,10 @@ class LatticePathfinder:
                         continue
                     if extra > 0.0 and obstacles.segment_blocked(point, point, layer, net, extra):
                         continue
+                    if obstacles.authored_pad_blocked(
+                        point, point, layer, net, half, self.rules.net_clearance_floors
+                    ):
+                        continue
                     if pw is not None and obstacles.pairwise_pad_blocked(
                         point, point, layer, net, half, extra, pw
                     ):
@@ -774,6 +778,11 @@ class LatticePathfinder:
                                 break
                         else:
                             if obstacles.segment_blocked(a, b, layer, net, extra):
+                                ok = False
+                                break
+                            if obstacles.authored_pad_blocked(
+                                a, b, layer, net, half, self.rules.net_clearance_floors
+                            ):
                                 ok = False
                                 break
                             if pw is not None and obstacles.pairwise_pad_blocked(
@@ -1575,6 +1584,9 @@ class LatticePathfinder:
                             and not (
                                 extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
                             )
+                            and not obstacles.authored_pad_blocked(
+                                ea, eb, layer, net, half, self.rules.net_clearance_floors
+                            )
                             and not (
                                 pw is not None
                                 and obstacles.pairwise_pad_blocked(
@@ -1612,6 +1624,9 @@ class LatticePathfinder:
                             and not (
                                 extra > 0.0
                                 and obstacles.segment_blocked(npt, npt, layer, net, extra)
+                            )
+                            and not obstacles.authored_pad_blocked(
+                                npt, npt, layer, net, half, self.rules.net_clearance_floors
                             )
                             and not (
                                 pw is not None
@@ -1700,6 +1715,9 @@ class LatticePathfinder:
                                 and not (
                                     landing_extra > 0.0
                                     and obstacles.segment_blocked(kpt, kpt, nl, net, landing_extra)
+                                )
+                                and not obstacles.authored_pad_blocked(
+                                    kpt, kpt, nl, net, landing_half, self.rules.net_clearance_floors
                                 )
                                 and not (
                                     pw is not None

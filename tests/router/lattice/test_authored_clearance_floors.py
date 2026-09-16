@@ -117,3 +117,40 @@ def test_via_pad_gate_keeps_authored_floor_on_inner_layer(strict_net, floor, val
     gap = abs(point[0] - pad.x) - pad.width / 2 - pf.rules.via_diameter / 2
     assert 0.15 < gap < 0.8
     assert pf._via_ok(key, 1, pf._fresh_committed()) is valid
+
+
+@pytest.mark.parametrize("strict_net", [1, 2])
+@pytest.mark.parametrize("width", [0.2, 0.6])
+def test_trace_route_keeps_authored_pad_floor_at_emitted_width(strict_net, width):
+    from shapely.geometry import LineString, box
+
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.layers import Layer, LayerStack
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import DesignRules, NetClassRouting
+
+    pads = [
+        Pad(2, 5, 1, 1, net=1, net_name="N1", ref="J1", pin="1", layer=Layer.F_CU),
+        Pad(8, 5, 1, 1, net=1, net_name="N1", ref="J2", pin="1", layer=Layer.F_CU),
+        Pad(5, 5, 1, 1, net=2, net_name="N2", ref="U1", pin="1", layer=Layer.F_CU),
+    ]
+    rules = DesignRules(
+        trace_width=0.2,
+        trace_clearance=0.15,
+        strict_layers=True,
+        net_clearance_floors={strict_net: 0.8, 3: 4.0},
+    )
+    pf = LatticePathfinder(
+        [(0, 0), (10, 0), (10, 10), (0, 10)], pads, rules, LayerStack.two_layer()
+    )
+    nc = NetClassRouting(
+        name="ordinary", trace_width=width, clearance=0.15, avoid_layers=[1], preferred_layers=[0]
+    )
+    routes, stats = pf.route_netset([("link", pads[0], pads[1], nc)], max_iterations=2)
+    assert stats.converged
+    route = routes["link"]
+    assert route.segments and not route.vias
+    obstacle = box(4.5, 4.5, 5.5, 5.5)
+    for seg in route.segments:
+        gap = LineString([seg.start, seg.end]).distance(obstacle) - seg.width / 2
+        assert gap >= 0.8 - 1e-9
