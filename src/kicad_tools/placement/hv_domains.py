@@ -193,7 +193,8 @@ def build_required_by_domain_pair(
     *hv_threshold*, the required creepage is looked up in the governing
     standard at ``|ΔV|``. Pairs below the threshold are omitted so that
     low-voltage/low-voltage domain pairs are not over-segregated (normal DRC
-    clearance still applies to them).
+    clearance still applies to them). Equal-potential pairs are always omitted,
+    including when the threshold is zero.
 
     Args:
         domain_voltages: ``{domain_id: voltage_magnitude}``.
@@ -216,7 +217,7 @@ def build_required_by_domain_pair(
         for j in range(i + 1, len(ids)):
             a, b = ids[i], ids[j]
             dv = abs(domain_voltages[a] - domain_voltages[b])
-            if dv < hv_threshold:
+            if dv == 0.0 or dv < hv_threshold:
                 continue
             required, _prov = std.required_creepage(dv, pollution_degree, material_group)
             out[(a, b)] = required

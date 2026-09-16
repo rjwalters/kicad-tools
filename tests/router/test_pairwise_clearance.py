@@ -1263,3 +1263,16 @@ def test_checker_matches_collision_checker_protocol_signature() -> None:
     protocol_params = list(inspect.signature(CollisionChecker.path_is_clear).parameters)
     checker_params = list(inspect.signature(PairwisePathChecker.path_is_clear).parameters)
     assert checker_params == protocol_params
+
+
+@pytest.mark.parametrize("potential", [0.0, -150.0, 150.0])
+@pytest.mark.parametrize("dru", [0.15, 0.5])
+def test_zero_threshold_equal_potential_pairs_retain_dru(potential: float, dru: float) -> None:
+    table = build_pairwise_clearance_table(
+        {"/A": potential, "/B": potential, "/C": potential + 12.0},
+        dru=dru,
+        hv_threshold=0.0,
+    )
+    assert table.required_clearance("A", "B") == pytest.approx(dru)
+    assert table.required_clearance("A", "C") == pytest.approx(max(dru, 0.42))
+    assert table.required_clearance("B", "C") == pytest.approx(max(dru, 0.42))
