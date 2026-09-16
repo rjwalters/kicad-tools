@@ -113,7 +113,13 @@ def resolve_project_clearances(
         if net in memberships:
             memberships[net].update(targets)
 
-    result = {}
+    # Unconnected copper uses Default; wildcard assignments cannot give an
+    # unnamed net an electrical identity.
+    result = (
+        {"": NetclassClearance(float(definitions["Default"]["clearance"]), "Default")}
+        if "" in names
+        else {}
+    )
     for net, members in memberships.items():
         ordered = sorted(members, key=lambda name: (definitions[name].get("priority", -1), name))
         for name in [*ordered, "Default"]:

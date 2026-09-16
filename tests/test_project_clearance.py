@@ -50,6 +50,7 @@ def test_priority_overrides_maximum_and_default_without_mutating_input():
         "USB1": NetclassClearance(0.1, "Low"),
         "USB2": NetclassClearance(0.4, "High"),
         "Other": NetclassClearance(0.2, "Default"),
+        "": NetclassClearance(0.2, "Default"),
     }
     assert data == before
 
