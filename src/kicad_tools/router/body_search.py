@@ -128,14 +128,13 @@ def complete_departure(
     parallel = abs(goal_axis[0] * across[1] - goal_axis[1] * across[0]) < 1e-9
     resolution = grid.resolution
     preferred_depth = max(1, math.ceil(0.6 / resolution))
-    # The departure has already cleared its pad escape. A fixed minimum body
-    # extension can cross foreign copper even when an earlier turn is legal.
-    # Keep the previous first choice, then try shallower turns before deeper
-    # ones; all attempts still consume the same cap and physical validation.
-    depths = [
-        *range(preferred_depth, -1, -1),
-        *range(preferred_depth + 1, math.ceil(1.2 / resolution) + 1),
-    ]
+    # Preserve the preferred first body while exploring both sides of it.
+    # Trying every shallower depth first starves legal deeper turns under
+    # the shared bounded prefix of the total-rank shape lattice.
+    depths = sorted(
+        range(math.ceil(1.2 / resolution) + 1),
+        key=lambda depth: (abs(depth - preferred_depth), depth),
+    )
     retreats = list(
         range(
             max(1, math.ceil(0.5 / resolution)),
@@ -148,7 +147,22 @@ def complete_departure(
     offsets = (None,) if parallel else (None, -1, 0)
     loops = (0.0, 4.0, 2 * math.ceil(4.0 / resolution) * resolution)
     reserved_routes = tuple(r for r in reserved_routes if r.net not in (pads[0].net, pads[2].net))
-    for depth, retreat, offset, added in preference_ordered(depths, retreats, offsets, loops):
+    # Try preferred bodies at different depths before spending the remaining budget
+    # on combinations of retreat, offset and loop variations. Reserve at least
+    # half the allowance for those variations on fine grids. Otherwise the
+    # total-rank Cartesian prefix can omit both legal early and deeper turns.
+    seed_count = min(len(depths), max(1, budget.bodies_remaining // 2))
+    seeds = [(depth, retreats[0], offsets[0], loops[0]) for depth in depths[:seed_count]]
+    seeded = set(seeds)
+    shapes = itertools.chain(
+        seeds,
+        (
+            shape
+            for shape in preference_ordered(depths, retreats, offsets, loops)
+            if shape not in seeded
+        ),
+    )
+    for depth, retreat, offset, added in shapes:
         if time.monotonic() >= budget.deadline or budget.bodies_remaining <= 0:
             return None
         budget.bodies_remaining -= 1

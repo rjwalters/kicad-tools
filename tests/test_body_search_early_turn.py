@@ -87,3 +87,41 @@ def test_early_turn_before_foreign_lane_keeps_physical_checks(monkeypatch, obsta
     assert bool(completed) is expected
     assert budget.bodies_used + budget.bodies_remaining == 32
     assert budget.bodies_geometry_rejected > 0
+
+
+@pytest.mark.parametrize(
+    "obstacle_bottom,expected", [(8.4, True), (8.45, True), (8.5, True), (8.55, True), (8.6, True)]
+)
+def test_deeper_turn_remains_reachable_with_early_turns(monkeypatch, obstacle_bottom, expected):
+    finder, pads, departure = case()
+    auto = Autorouter(width=20, height=20, rules=finder.rules)
+    finder = CoupledPathfinder(auto.grid, finder.rules, target_spacing_cells=3, min_spacing_cells=2)
+    finder.net_class_map = {"1": NetClassRouting(name="pair", trace_width=0.15, clearance=0.15)}
+    auto.routes.append(
+        Route(9, "OTHER", segments=[Segment(9, obstacle_bottom, 9, 10, 0.15, Layer.B_CU, 9)])
+    )
+    completed = []
+
+    def observe_terminal(router, finder, pair, pads, body, **kwargs):
+        # The constructor and physical validation are real; this records only
+        # body discovery, without claiming terminal or full-board completion.
+        completed.append(body)
+        return body.p_route, body.n_route
+
+    monkeypatch.setattr(body_search, "complete_pair_body", observe_terminal)
+    budget = body_search.BodySearchBudget(time.monotonic() + 10, 32)
+    result = body_search.complete_departure(
+        auto._diffpair,
+        finder,
+        None,
+        pads,
+        departure,
+        SimpleNamespace(allowed_sites=()),
+        budget,
+        board_thickness_mm=1.6,
+        num_copper_layers=2,
+    )
+    assert (result is not None) is expected
+    assert bool(completed) is expected
+    assert budget.bodies_used + budget.bodies_remaining == 32
+    assert budget.bodies_geometry_rejected > 0
