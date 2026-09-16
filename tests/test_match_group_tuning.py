@@ -874,10 +874,9 @@ class TestPostInsertionBroaderDRC:
         )
         assert ok is True
 
-    def test_via_clearance_pass_skips_when_via_layers_disjoint(self):
-        """The segment-vs-via pass only fires when the new segment's
-        layer is one of the via's layers (a via on B.Cu/In1.Cu does not
-        clash with a segment on F.Cu)."""
+    @pytest.mark.parametrize("is_micro,expected_ok", [(False, False), (True, True)])
+    def test_via_clearance_respects_physical_span(self, is_micro, expected_ok):
+        """Only explicit microvias exclude layers outside their declared span."""
         from kicad_tools.router.primitives import Via
 
         new_seg = Segment(
@@ -890,14 +889,15 @@ class TestPostInsertionBroaderDRC:
             net=1,
             net_name="D0",
         )
-        # Via spans B.Cu <-> In1.Cu only; the F.Cu segment must not
-        # conflict regardless of XY proximity.
+        # A microvia spans B.Cu <-> In1.Cu only. An ordinary via
+        # includes F.Cu despite the routing endpoint metadata.
         other_via = Via(
             x=2.5,
             y=0.4,
             drill=0.35,
             diameter=0.7,
             layers=(Layer.B_CU, Layer.IN1_CU),
+            is_micro=is_micro,
             net=2,
             net_name="OTHER",
         )
@@ -914,7 +914,7 @@ class TestPostInsertionBroaderDRC:
             intra_group_clearance_mm=0.2,
             via_clearance_mm=0.2,
         )
-        assert ok is True
+        assert ok is expected_ok
 
     def test_diff_pair_intra_pass_skipped_when_partner_omitted(self):
         """Legacy behavior preserved: omitting ``diff_pair_partners``
