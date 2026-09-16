@@ -238,31 +238,31 @@ def find_escape(
                 Point(center).buffer(drill_radius + hole_radius + rules.hole_gap + guard)
             )
             if pnet != net:
-                # Candidate vias span all four copper layers. The factory's
-                # inner-PTH rule applies to their copper at an existing PTH
-                # hole, but does not strengthen outer-layer traces or vias'
-                # own drill-to-copper rule against unrelated SMD geometry.
-                inner_floor = (
-                    rules.inner_pth_hole_copper
-                    if any(lay not in {"F.Cu", "B.Cu"} for lay in layers)
-                    else 0.0
-                )
+                # A through drill traverses inner layers even when its pad
+                # copper lists only F.Cu/B.Cu (native applicability probes,
+                # review65). Candidate through-via copper sees that hole.
+                inner_floor = rules.inner_pth_hole_copper
                 via_blocks.append(
                     Point(center).buffer(
                         hole_radius + radius + max(rules.hole_copper, inner_floor) + guard
                     )
                 )
-                if layer in layers:
-                    hole_floor = max(
-                        rules.hole_copper,
-                        rules.pth_hole_track,
-                        inner_floor if layer not in {"F.Cu", "B.Cu"} else 0.0,
-                    )
-                    trace_blocks.append(
-                        Point(center).buffer(hole_radius + max(0, hole_floor - rules.clearance))
-                    )
+                hole_floor = max(
+                    rules.hole_copper,
+                    rules.pth_hole_track,
+                    inner_floor if layer not in {"F.Cu", "B.Cu"} else 0.0,
+                )
+                trace_blocks.append(
+                    Point(center).buffer(hole_radius + max(0, hole_floor - rules.clearance))
+                )
         if pnet != net:
-            via_blocks.append(geom.buffer(drill_radius + rules.hole_copper + guard))
+            # The generated PTH OR condition also matches the reverse
+            # measurement: candidate via hole to existing drilled-pad copper.
+            # Native DRC applies it even with an outer-only PTH copper list.
+            reciprocal_floor = max(
+                rules.hole_copper, rules.inner_pth_hole_copper if hole_radius else 0.0
+            )
+            via_blocks.append(geom.buffer(drill_radius + reciprocal_floor + guard))
     for geom, snet, lay in segments:
         if snet != net:
             via_blocks.append(
