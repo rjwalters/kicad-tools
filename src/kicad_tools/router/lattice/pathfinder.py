@@ -1070,6 +1070,10 @@ class LatticePathfinder:
             if clearance is None
             else max(self.rules.trace_clearance, clearance)
         )
+        if obstacles.authored_pad_blocked(
+            point, point, None, net, via_radius, self.rules.net_clearance_floors
+        ):
+            return False
         grow = max(via_radius + own_clr - self._agent_radius, 0.0)
         # The query window must cover the farthest centre distance any check
         # below can reject at.  The hole-to-hole floor against the board's

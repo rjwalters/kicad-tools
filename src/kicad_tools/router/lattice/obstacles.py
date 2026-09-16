@@ -255,6 +255,39 @@ class LatticeObstacleModel:
                 return True
         return False
 
+    def authored_pad_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int | None,
+        net: int,
+        own_half: float,
+        floors: dict[int, float],
+    ) -> bool:
+        """Mandatory electrical pad spacing, independent of HV attachment waivers.
+
+        A missing layer means a through-via checks pads across the full stack.
+        Existing conservative pad bounding rectangles retain rotated extents.
+        """
+        if not floors:
+            return False
+        reach = max(0.0, own_half + max(floors.values()) - self.agent_radius)
+        x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+        y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+        for idx in self.pads_near(x0 - reach, y0 - reach, x1 + reach, y1 + reach):
+            pad = self.pads[idx]
+            if pad.net == net or (layer is not None and layer not in self.pad_layer_indices[idx]):
+                continue
+            required = max(floors.get(net, 0.0), floors.get(pad.net, 0.0))
+            if required <= 0.0:
+                continue
+            extra = own_half + required - self.agent_radius
+            rect = self.pad_rects[idx]
+            grown = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
+            if seg_rect_intersect(a, b, grown):
+                return True
+        return False
+
     def pairwise_pad_blocked(
         self,
         a: Pt,

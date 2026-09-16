@@ -89,3 +89,31 @@ def test_route_checks_authored_floor_on_skipped_inner_layer(strict_net, floor, e
     assert repr(fixed) == before
     if expected:
         assert routes["link"].vias
+
+
+@pytest.mark.parametrize("strict_net", [1, 2])
+@pytest.mark.parametrize("floor,valid", [(0.15, True), (0.8, False)])
+def test_via_pad_gate_keeps_authored_floor_on_inner_layer(strict_net, floor, valid):
+    from kicad_tools.router.lattice.pathfinder import LatticePathfinder
+    from kicad_tools.router.layers import Layer, LayerStack
+    from kicad_tools.router.primitives import Pad
+    from kicad_tools.router.rules import DesignRules
+
+    pad = Pad(5, 5, 1, 1, net=2, net_name="N2", ref="U1", pin="1", layer=Layer.IN1_CU)
+    pf = LatticePathfinder(
+        [(0, 0), (10, 0), (10, 10), (0, 10)],
+        [pad],
+        DesignRules(
+            trace_width=0.2, trace_clearance=0.15, net_clearance_floors={strict_net: floor, 3: 4.0}
+        ),
+        LayerStack.four_layer_all_signal(),
+    )
+    lattice = pf.build()
+    key = min(
+        lattice.nodes,
+        key=lambda k: abs(lattice.node_point(k)[0] - 6.2) + abs(lattice.node_point(k)[1] - 5),
+    )
+    point = lattice.node_point(key)
+    gap = abs(point[0] - pad.x) - pad.width / 2 - pf.rules.via_diameter / 2
+    assert 0.15 < gap < 0.8
+    assert pf._via_ok(key, 1, pf._fresh_committed()) is valid
