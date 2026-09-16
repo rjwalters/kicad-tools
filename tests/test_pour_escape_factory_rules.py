@@ -149,11 +149,21 @@ def test_inner_pth_floor_reaches_new_through_via_copper(tmp_path):
     assert escape.find_escape(*args, rules, node_budget=1) is None
 
 
-def test_inner_floor_requires_existing_pad_inner_copper(tmp_path):
+@pytest.mark.parametrize("outer_only", [False, True])
+@pytest.mark.parametrize("distance,accepted", [(1.2, False), (1.4, True)])
+def test_native_pth_hole_span_control(tmp_path, outer_only, distance, accepted):
+    # Native review65: 0.6mm through drill spans inner layers even if pad
+    # copper is outer-only. Hole-to-new-barrel gap0.65 fails0.8; gap0.85 passes.
     rules = load_rules(tmp_path, factory_text(min_inner_pth_hole_to_copper_mm=0.8))
-    center = (0, 1.2)
-    pads = [(Point(center).buffer(0.32), "foreign", {"F.Cu", "B.Cu"}, 0.3, center)]
-    result = escape.find_escape(
+    layers = {"F.Cu", "B.Cu"} if outer_only else {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+    result = _native_via_control(rules, distance, 0.32, layers)
+    assert (result is not None and result.via) == accepted
+
+
+def _native_via_control(rules, distance, pad_radius, layers):
+    center = (0, distance)
+    pads = [(Point(center).buffer(pad_radius), "foreign", layers, 0.3, center)]
+    return escape.find_escape(
         (0, 0),
         "power",
         "F.Cu",
@@ -165,7 +175,39 @@ def test_inner_floor_requires_existing_pad_inner_copper(tmp_path):
         rules,
         node_budget=1,
     )
-    assert result is not None and result.via
+
+
+@pytest.mark.parametrize("distance,accepted", [(1.5, False), (1.7, True)])
+def test_native_reciprocal_hole_to_pad_control(tmp_path, distance, accepted):
+    # Native review65: existing-hole→via-copper gap0.95 already clears0.8,
+    # but candidate-hole→1.4mm PTH-pad gap0.65 fails; at1.7 both pass.
+    rules = load_rules(tmp_path, factory_text(min_inner_pth_hole_to_copper_mm=0.8))
+    result = _native_via_control(rules, distance, 0.7, {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"})
+    assert (result is not None and result.via) == accepted
+
+
+@pytest.mark.parametrize("outer_only", [False, True])
+@pytest.mark.parametrize("gap,accepted", [(0.29, False), (0.31, True)])
+def test_native_inner_trace_sees_through_hole_without_inner_annulus(
+    tmp_path, outer_only, gap, accepted
+):
+    rules = load_rules(tmp_path, factory_text())
+    center = (0, 0.3 + rules.width / 2 + gap)
+    layers = {"F.Cu", "B.Cu"} if outer_only else {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+    pads = [(Point(center).buffer(0.32), "foreign", layers, 0.3, center)]
+    result = escape.find_escape(
+        (0, 0),
+        "power",
+        "In1.Cu",
+        pads,
+        [],
+        [],
+        [(box(0.8, -0.2, 1.2, 0.2), {"In1.Cu"}, "fill")],
+        (-0.1, -0.01, 1.3, 0.01),
+        rules,
+        node_budget=1000,
+    )
+    assert (result is not None and not result.via) == accepted
 
 
 def test_nondrilled_smd_is_unaffected_by_pth_floors(tmp_path):
