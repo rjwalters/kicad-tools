@@ -233,6 +233,35 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
         return physical_clear != 0;
     };
 
+    // Pad provenance describes padding, not absence of physical copper.
+    // A reserved route mark may skip occupancy, then a later pad can grant
+    // padding provenance. Check the indexed ledger independently of cell
+    // coverage (which deliberately excludes static/reserved cells).
+    int pad_physical_clear = -1;
+    auto pad_geometry_clear = [&]() {
+        if (pad_physical_clear < 0) {
+            const auto [ax, ay] = grid_.grid_to_world(
+                from_x >= 0 ? from_x : x, from_y >= 0 ? from_y : y);
+            const auto [bx, by] = grid_.grid_to_world(x, y);
+            Segment segment;
+            segment.x1 = ax; segment.y1 = ay;
+            segment.x2 = bx; segment.y2 = by;
+            segment.width = search_trace_half_width_mm_ > 0
+                ? 2 * search_trace_half_width_mm_ : rules_.trace_width;
+            segment.layer = layer; segment.net = net;
+            const float clearance = search_fill_trace_clearance_ >= 0
+                ? search_fill_trace_clearance_ : rules_.trace_clearance;
+            // Only the current physical partner context can relax spacing.
+            const int partner = partner_net == physical_partner_net_
+                ? physical_partner_net_ : -1;
+            pad_physical_clear = grid_.route_trace_geometry_clear(
+                segment, clearance, partner, physical_partner_clearance_,
+                search_fill_via_clearance_ >= 0
+                    ? search_fill_via_clearance_ : rules_.via_clearance) ? 1 : 0;
+        }
+        return pad_physical_clear != 0;
+    };
+
     // Issue #2559 / Epic #2556 Phase 1C: when the partner branch is active
     // (partner_net >= 0 && partner_radius > 0 && partner_radius < radius),
     // partner-owned blocked cells in the slack ring (Euclidean distance
@@ -289,8 +318,10 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             }
 
             const auto& cell = grid_.at(cx, cy, layer);
-            if (!cell.blocked || (cell.pad_halo_only && !cell.pad_blocked &&
-                    !cell.is_obstacle && cell.usage_count == 0)) {
+            if (!cell.blocked) continue;
+            if (cell.pad_halo_only && !cell.pad_blocked &&
+                    !cell.is_obstacle && cell.usage_count == 0) {
+                if (!pad_geometry_clear()) return true;
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
@@ -381,8 +412,10 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             }
 
             const auto& cell = grid_.at(cx, cy, layer);
-            if (!cell.blocked || (cell.pad_halo_only && !cell.pad_blocked &&
-                    !cell.is_obstacle && cell.usage_count == 0)) {
+            if (!cell.blocked) continue;
+            if (cell.pad_halo_only && !cell.pad_blocked &&
+                    !cell.is_obstacle && cell.usage_count == 0) {
+                if (!pad_geometry_clear()) return true;
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {

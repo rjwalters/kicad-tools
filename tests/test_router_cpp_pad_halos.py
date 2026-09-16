@@ -205,3 +205,100 @@ def test_bulk_reconstruction_does_not_restore_reserved_route_halo(kind, soft):
     cell = cpp._impl.at(x, y, 0)
     assert cell.blocked and not cell.pad_halo_only
     assert cell.reserved_count == 1 and cell.reserved_soft == soft
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("radius", [0, 3])
+@pytest.mark.parametrize("soft", [False, True])
+def test_route_before_reserved_pad_requires_physical_clearance(kind, radius, soft):
+    grid = router_cpp.Grid3D(40, 40, 2, 0.1)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    rules.trace_width = rules.trace_clearance = 0.2
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    grid.reserve_cell(22, 20, 0, [9 if soft else 1], soft)
+    if kind == "segment":
+        grid.mark_segment(22, 20, 22, 20, 0, 3, 0)
+        grid.add_stored_segment(2.2, 2, 2.2, 2, 0.5, 0, 3)
+    else:
+        grid.mark_via(22, 20, 3, 0)
+        grid.add_stored_via(2.2, 2, 0.3, 0.6, 3)
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    # Hard reservations (and soft reservations for via marks) skip raster
+    # occupancy, so this later pad CAN regrant provenance. Physical safety
+    # must not depend on that flag or route_cell_has_geometry coverage.
+    if not soft or kind == "via":
+        assert grid.at(22, 20, 0).pad_halo_only
+    for sharing in (False, True):
+        assert finder.is_trace_blocked(20, 20, 0, 1, sharing, radius)
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("radius", [0, 3])
+def test_pad_relief_allows_physically_separated_stored_copper(kind, radius):
+    grid = router_cpp.Grid3D(40, 40, 2, 0.1)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    rules.trace_width = rules.trace_clearance = 0.2
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    if kind == "segment":
+        grid.add_stored_segment(3.2, 2, 3.2, 2.5, 0.5, 0, 3)
+    else:
+        grid.add_stored_via(3.2, 2, 0.3, 0.6, 3)
+    for sharing in (False, True):
+        assert not finder.is_trace_blocked(20, 20, 0, 1, sharing, radius)
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("soft", [False, True])
+@pytest.mark.parametrize("radius", [0, 3])
+def test_bulk_route_before_pad_keeps_physical_veto(kind, soft, radius):
+    from kicad_tools.router.cpp_backend import CppPathfinder
+    from kicad_tools.router.primitives import Route, Segment, Via
+
+    rules = DesignRules(grid_resolution=0.1)
+    grid = RoutingGrid(width=10, height=10, rules=rules, layer_stack=LayerStack.two_layer())
+    x, y = grid.world_to_grid(5.4, 5)
+    grid.reserve_corridor_cells(0, {(x, y)}, {9 if soft else 1}, soft=soft)
+    route = Route(3, "FOREIGN")
+    if kind == "segment":
+        route.segments.append(Segment(5.4, 5, 5.4, 5, 0.2, Layer.F_CU, 3))
+    else:
+        route.vias.append(Via(5.4, 5, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 3))
+    grid.mark_route(route)
+    grid.add_pad(
+        Pad(x=5, y=5, width=0.45, height=0.45, net=0, net_name="GND", layer=Layer.F_CU),
+        pin_pitch=1.27,
+    )
+    cpp = CppGrid.from_routing_grid(grid)
+    finder = CppPathfinder(cpp, rules)
+    finder._sync_stored_routes(grid)
+    assert cpp._synced_route_count == 1
+    # Query just outside the original pad envelope; physical foreign copper
+    # overlaps the emitted trace even if the reserved cell has pad provenance.
+    for sharing in (False, True):
+        assert finder._impl.is_trace_blocked(x + 2, y, 0, 1, sharing, radius)
+
+
+@pytest.mark.parametrize("radius", [0, 3])
+def test_pad_relief_checks_swept_emitted_width_and_fill_clearance(radius):
+    grid = router_cpp.Grid3D(40, 40, 2, 0.1)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    rules.trace_width = rules.trace_clearance = 0.2
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    grid.add_stored_segment(1.5, 2.5, 1.5, 2.5, 0.2, 0, 3)
+
+    def blocked():
+        return finder.is_trace_blocked(20, 20, 0, 1, False, radius, -1, 0, 10, 20)
+
+    # Default swept clearance is .3 mm; increasing emitted width or the
+    # fill-context clearance must each reject this .5-mm center separation.
+    assert not blocked()
+    finder.set_search_pair_widths(0.35, 0.3)
+    assert blocked()
+    finder.set_search_pair_widths(0.1, 0.3)
+    finder.set_search_fill_clearances(0.4, 0.2)
+    assert blocked()
