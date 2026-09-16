@@ -1828,10 +1828,11 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     #   - The aggregate cap fires at 150s and defers the 3 TMDS pairs;
     #     total coupled phase = 150s vs 420s pre-#3439, and reach no
     #     longer collapses (26-28/31 vs the 7/31 incident).
-    # ``--differential-pairs`` is now SAFE to enable (bounded, reach-
-    # preserving) but is not yet a quality win: no pair survives to a
-    # committed coupled route until #3438 (MIPI reach) and #3320
-    # (DQS swap overlap) land.  The recipe therefore still omits it.
+    # That historical run still omitted ``--differential-pairs``. The
+    # current construction path adds validated departures, physical via
+    # policy and bounded completion fallbacks. Enable it below so board
+    # qualification exercises coupled routing and coordinated tuning.
+    # Full-board quality gates still determine whether the result passes.
     #
     # Issue #3441 addendum (2026-06-10): the "--grid 0.1: WORSE"
     # entry above was a router bug, not a grid property.  Waypoint
@@ -1863,6 +1864,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "jlcpcb",
         "--strategy",
         "negotiated",
+        "--differential-pairs",
         "--no-auto-layers",
         "--layers",
         "4",
