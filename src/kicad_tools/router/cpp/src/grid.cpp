@@ -105,8 +105,10 @@ void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
         update_congestion(x, y, layer, -1);
         cell.congestion_counted = false;
     }
+    // A previous route mark is also non-pad blockage, even though it is not
+    // static and does not increment usage_count. Never re-label it as padding.
     cell.pad_halo_only = pad_halo_only &&
-        (!cell.static_blocked || cell.pad_halo_only);
+        (!cell.blocked || cell.pad_halo_only);
     cell.blocked = true;
     cell.net = net;
     cell.is_obstacle = is_obstacle;
@@ -175,6 +177,10 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                             cell.congestion_counted = true;
                         }
                     }
+                    // Routed occupancy invalidates padding provenance even
+                    // on an already-blocked halo cell (usage_count can be 0).
+                    // Rip-up deliberately does not resurrect this exemption.
+                    cell.pad_halo_only = false;
                     cell.blocked = true;
                 }
             }
@@ -253,6 +259,10 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
                         }
                         cell.net = net;
                     }
+                    // Routed occupancy invalidates padding provenance even
+                    // on an already-blocked halo cell (usage_count can be 0).
+                    // Rip-up deliberately does not resurrect this exemption.
+                    cell.pad_halo_only = false;
                     cell.blocked = true;
                 }
             }

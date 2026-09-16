@@ -93,3 +93,55 @@ def test_plane_padding_does_not_bypass_native39_stored_via_guard():
     grid.mark_blocked(20, 20, 0, 2, False, False, True)
     grid.add_stored_via(2.0, 2.0, 0.3, 0.6, 2)
     assert finder.is_via_blocked(20, 20, 1, False, 3)
+
+
+@pytest.mark.parametrize("kind", ["segment", "via"])
+@pytest.mark.parametrize("radius", [0, 3])
+@pytest.mark.parametrize("route_first", [False, True])
+@pytest.mark.parametrize("partner", [False, True])
+@pytest.mark.parametrize("sharing", [False, True])
+def test_native_route_marks_revoke_padding_in_both_trace_kernels(
+    kind, radius, route_first, partner, sharing
+):
+    grid = router_cpp.Grid3D(40, 40, 2, 0.1)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    rules.trace_width = 0.2
+    rules.trace_clearance = 0.2
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    route_net = 2 if partner else 3
+
+    def trace_blocked():
+        # dx=2 is in the tighter partner-radius slack ring. Static pad
+        # provenance must not turn partner copper into an exempt halo.
+        return finder.is_trace_blocked(20, 20, 0, 1, sharing, radius, 2 if partner else -1, 1)
+
+    def mark():
+        if kind == "segment":
+            grid.mark_segment(22, 20, 22, 20, 0, route_net, 0)
+            grid.add_stored_segment(2.2, 2.0, 2.2, 2.0, 0.5, 0, route_net)
+        else:
+            grid.mark_via(22, 20, route_net, 0)
+            grid.add_stored_via(2.2, 2.0, 0.3, 0.6, route_net)
+
+    if route_first:
+        mark()
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    if not route_first:
+        assert not trace_blocked()
+        mark()
+    # Native route markers do not have to set usage_count: the provenance
+    # lifecycle must protect real occupancy independently of that counter.
+    assert grid.at(22, 20, 0).usage_count == 0
+    assert not grid.at(22, 20, 0).pad_halo_only
+    assert trace_blocked()
+    assert finder.is_via_blocked(20, 20, 1, sharing, radius)
+    # A later pad sync cannot re-grant relief over routed occupancy.
+    grid.mark_blocked(22, 20, 0, 2, False, False, True)
+    assert not grid.at(22, 20, 0).pad_halo_only
+    if kind == "segment":
+        grid.unmark_segment(22, 20, 22, 20, 0, route_net, 0)
+    else:
+        grid.unmark_via(22, 20, route_net, 0)
+    assert grid.at(22, 20, 0).blocked
+    assert not grid.at(22, 20, 0).pad_halo_only
