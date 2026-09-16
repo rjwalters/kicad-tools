@@ -912,13 +912,10 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
         if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
         const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
         float required = clearance;
-        if (via.net == partner_net && partner_clearance >= 0) {
-            required = partner_clearance;
-        } else {
-            const float pair = pairwise_required_clearance(s.net, via.net);
-            if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
-                    (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
-        }
+        // Pair spacing exemptions cover trace/trace, never drilled barrels.
+        const float pair = pairwise_required_clearance(s.net, via.net);
+        if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
+                (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
         const float gap = std::hypot(via.x - cp.first, via.y - cp.second)
             - (s.width + via.diameter) / 2;
         if (gap < required - CLEARANCE_EPSILON_MM) return false;
@@ -932,8 +929,8 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
-    auto required = [&](int other_net, std::pair<float, float> point) {
-        if (other_net == partner_net && partner_clearance >= 0) return partner_clearance;
+    auto required = [&](int other_net, std::pair<float, float> point, bool trace_pair = true) {
+        if (trace_pair && other_net == partner_net && partner_clearance >= 0) return partner_clearance;
         const float pair = pairwise_required_clearance(s.net, other_net);
         if (pair > clearance && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
             return pair;
@@ -954,7 +951,7 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
         const auto cp = closest_point_on_segment(other.x, other.y, s.x1, s.y1, s.x2, s.y2);
         const float gap = std::hypot(other.x - cp.first, other.y - cp.second)
             - (s.width + other.diameter) / 2;
-        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}))
+        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}, false))
                   - CLEARANCE_EPSILON_MM) return false;
     }
     return true;
@@ -1389,20 +1386,14 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            // Issue #2559 / Phase 1C: tighter clearance for the partner.
-            const bool is_partner = partner_active && sv.net == partner_net;
-            float effective_clearance = is_partner ? intra_pair_clearance : trace_clearance;
-
-            // Issue #4510: cross-domain widening (partner branch wins).
-            if (!is_partner) {
-                // #4507: the barrel crosses the candidate segment's layer.
-                effective_clearance = widen(effective_clearance, sv.net, seg.layer, [&]() {
-                    const auto cp = closest_point_on_segment(
-                        sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
-                    return std::pair<float, float>((sv.x + cp.first) / 2.0f,
-                                                   (sv.y + cp.second) / 2.0f);
-                });
-            }
+            // Via copper uses the same floor in either insertion order;
+            // differential trace spacing cannot relax a drilled barrel.
+            const float effective_clearance = widen(std::max(trace_clearance, via_clearance), sv.net, seg.layer, [&]() {
+                const auto cp = closest_point_on_segment(
+                    sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
+                return std::pair<float, float>((sv.x + cp.first) / 2.0f,
+                                               (sv.y + cp.second) / 2.0f);
+            });
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
@@ -1478,7 +1469,7 @@ ValidationResult Grid3D::validate_route(
             // stored foreign segment (no diff-pair partner branch here).
             // #4507: the shared layer is the stored segment's (the candidate
             // via's barrel spans it -- the loop above already checked that).
-            const float effective_clearance = widen(via_clearance, seg.net, seg.layer_idx, [&]() {
+            const float effective_clearance = widen(std::max(trace_clearance, via_clearance), seg.net, seg.layer_idx, [&]() {
                 const auto cp = closest_point_on_segment(
                     via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2);
                 return std::pair<float, float>((via.x + cp.first) / 2.0f,

@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 39
+_REQUIRED_CPP_BUILD_VERSION = 45
 
 
 # Try to import C++ module with detailed error tracking
@@ -3045,7 +3045,9 @@ class CppPathfinder:
                     continue
                 for via in route.vias:
                     if not via_clears_foreign_segment(
-                        via, segment, trace_clearance=self._rules.via_clearance
+                        via,
+                        segment,
+                        trace_clearance=max(self._rules.trace_clearance, self._rules.via_clearance),
                     ):
                         return (via.x, via.y)
 
@@ -3068,7 +3070,7 @@ class CppPathfinder:
                     if not segment_clears_foreign_via(
                         seg,
                         via,
-                        trace_clearance=self._rules.trace_clearance,
+                        trace_clearance=max(self._rules.trace_clearance, self._rules.via_clearance),
                         hard_intersection_only=False,
                     ):
                         return (via.x, via.y)

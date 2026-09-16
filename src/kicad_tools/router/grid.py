@@ -3584,7 +3584,7 @@ class RoutingGrid:
             checked foreign segments (<= 0 means no violation) and
             ``worst_location`` is the via center (or ``None``).
         """
-        min_clearance = self.rules.via_clearance
+        min_clearance = max(self.rules.trace_clearance, self.rules.via_clearance)
         via_radius = via.diameter / 2
         worst_deficit = 0.0
         worst_loc: tuple[float, float] | None = None
@@ -3652,9 +3652,9 @@ class RoutingGrid:
                              Used for automatic fine-pitch clearance detection.
             partner_net: Issue #2559 / Phase 1C -- when set, the named net id
                          is the diff-pair partner of ``exclude_net`` and the
-                         seg-vs-seg / seg-vs-via comparisons use
+                         seg-vs-seg comparisons use
                          ``partner_clearance`` instead of ``min_clearance``.
-            partner_clearance: Tighter clearance applied only to elements
+            partner_clearance: Tighter trace-to-trace clearance applied only to elements
                                whose net matches ``partner_net``.
 
         Returns:
@@ -4052,9 +4052,11 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                    if clearance < min_clearance:
-                        has_violation = True
-                        violation_loc = (via.x, via.y)
+                # A barrel keeps its via floor even beside a differential
+                # partner or a closer, otherwise legal trace obstacle.
+                if clearance < max(min_clearance, self.rules.via_clearance):
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
 
         # Issue #1016: is_valid is True only if no violations were found
         is_valid = not has_violation
@@ -4089,7 +4091,7 @@ class RoutingGrid:
             - violation_location: (x, y) of worst violation, or None if valid
         """
         if min_clearance is None:
-            min_clearance = self.rules.via_clearance
+            min_clearance = max(self.rules.trace_clearance, self.rules.via_clearance)
 
         via_radius = via.diameter / 2
         # Via endpoints describe an inclusive physical barrel span, including

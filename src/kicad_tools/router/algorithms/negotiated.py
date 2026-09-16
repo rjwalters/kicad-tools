@@ -1817,6 +1817,7 @@ class NegotiatedRouter:
         # the same ``self.routes``) hit the cache.  A caller that
         # mutates ``self.routes`` between calls produces a different
         # fingerprint and gets a fresh walk.
+        trace_clearance = max(trace_clearance, self.rules.via_clearance)
         effective_cache_key: object | None
         if cache_key is not None:
             if extra_routes:
@@ -2039,6 +2040,7 @@ class NegotiatedRouter:
         # matching block in :meth:`find_nets_with_segment_via_violations`
         # for the rationale (cache hits when the same Route objects are
         # supplied across consecutive calls).
+        trace_clearance = max(trace_clearance, self.rules.via_clearance)
         effective_cache_key: object | None
         if cache_key is not None:
             if extra_routes:

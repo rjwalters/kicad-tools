@@ -309,7 +309,7 @@ NB_MODULE(router_cpp, m) {
              "min_hole_clearance"_a = -1.0f,
              "Validate a candidate route against stored geometry.  Issue #2559 "
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
-             "comparisons against partner_net use intra_pair_clearance instead "
+             "segment-to-segment comparisons against partner_net use intra_pair_clearance instead "
              "of trace_clearance (defaults preserve pre-#2559 behavior).  "
              "Issue #5166: refs in exclude_ref_hashes keep the full-skip "
              "same-component carve-out (#2452 corridor relief, whose floor is "
