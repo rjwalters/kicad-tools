@@ -753,6 +753,7 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
             layer=pad_info["layer"],
             ref=ref,
             component_id=pad_data.get("component_id", ref),
+            terminal_id=pad_data.get("terminal_id", ""),
             pin=pin,
             through_hole=pad_info["through_hole"],
             drill=pad_info["drill"],
@@ -1470,9 +1471,9 @@ class Autorouter:
         )
 
         self.pads: dict[tuple[str, str], Pad] = {}
-        # Issue #4271: every pad, DUPLICATE pad numbers included (thermal-via
-        # arrays / EP paddles share a number and collapse in the (ref, pin)
-        # dict above).  Obstacle input for the exact-geometry engines
+        # Every physical shape, including explicitly jumpered same-number
+        # lands whose topology keys are equivalent. Obstacle input for exact
+        # geometry engines
         # (lattice/mesh); the grid marks pads directly and never reads this.
         self.all_pads: list[Pad] = []
         self._explicit_component_ids: set[str] = set()
@@ -2098,7 +2099,14 @@ class Autorouter:
 
         return layer_widths
 
-    def add_component(self, ref: str, pads: list[dict], *, component_id: str | None = None):
+    def add_component(
+        self,
+        ref: str,
+        pads: list[dict],
+        *,
+        component_id: str | None = None,
+        duplicate_pad_numbers_are_jumpers: bool = False,
+    ):
         """Add a component's pads.
 
         Legacy callers may register disjoint pins incrementally under one
@@ -2141,9 +2149,42 @@ class Autorouter:
                 shape=pad_info.get("shape", "rect"),
             )
             prepared.append(pad)
+        # A pin name identifies an electrical terminal, not necessarily one
+        # connected piece of copper. Retain every land unless the footprint
+        # explicitly declares same-number lands internally jumpered. Reserve
+        # authored names before generating keys so a real pin cannot collide
+        # with a generated land suffix. Sort geometrically for pad-order stability.
+        if not duplicate_pad_numbers_are_jumpers:
+            used = {pad.pin for pad in prepared}
+            seen: set[str] = set()
+            for pad in sorted(
+                prepared,
+                key=lambda p: (
+                    p.pin,
+                    p.x,
+                    p.y,
+                    p.layer.value,
+                    p.width,
+                    p.height,
+                    p.rotation,
+                    p.through_hole,
+                    p.shape,
+                ),
+            ):
+                if pad.pin in seen:
+                    occurrence = 1
+                    candidate = f"{pad.pin}#land:{occurrence}"
+                    while candidate in used:
+                        occurrence += 1
+                        candidate = f"{pad.pin}#land:{occurrence}"
+                    pad.terminal_id = candidate
+                    used.add(candidate)
+                seen.add(pad.pin)
         existing = [p for p in self.all_pads if p.component_key == physical_id]
         if existing:
-            if existing == prepared:
+            if sorted(existing, key=lambda p: (p.key, p.x, p.y, p.layer.value)) == sorted(
+                prepared, key=lambda p: (p.key, p.x, p.y, p.layer.value)
+            ):
                 # Existing callers re-register exact components after trial
                 # reset. That is idempotent, not a second physical footprint.
                 if component_id is not None:
@@ -2159,21 +2200,20 @@ class Autorouter:
                     f"Component identity {physical_id!r} already exists; "
                     "distinct footprints require distinct component_id values"
                 )
+        # A later legacy extension may author a pin name that coincides with
+        # an earlier generated land key. Never silently overwrite that land.
+        for pad in prepared:
+            previous = self.pads.get(pad.key)
+            if previous is not None and previous.pin != pad.pin:
+                raise ValueError(
+                    f"Terminal identity {pad.key!r} conflicts with an existing land; "
+                    "register this component's complete pad population together"
+                )
         if component_id is not None:
             self._explicit_component_ids.add(physical_id)
         for pad in prepared:
             key = pad.key
-            # Issue #4271: ``self.pads`` is keyed (ref, pin), so a footprint
-            # with DUPLICATE pad numbers (thermal-via arrays / EP paddles --
-            # softstart's ESP32-C3 module has 13 pads named "19" and 9 named
-            # "") keeps only ONE of them.  The grid engine is unaffected
-            # (every pad is marked on the grid below, before the dict
-            # overwrite), but the exact-geometry engines build their
-            # obstacle models from the pad OBJECTS, so the collapsed
-            # duplicates were invisible and copper routed straight through
-            # them (measured: every remaining short in the P4 run).
-            # ``all_pads`` preserves every pad for those engines; the
-            # (ref, pin) dict keeps its historical semantics for topology.
+            # Even explicitly jumpered lands retain every obstacle shape.
             self.all_pads.append(pad)
             self.pads[key] = pad
 
@@ -15190,7 +15230,7 @@ class Autorouter:
 
         # Serialize pads data
         pads_data = []
-        # Topology collapses equivalent same-number pads; obstacle geometry
+        # Topology collapses explicitly jumpered pads; obstacle geometry
         # must retain every physical shape in a worker. Legacy callers that
         # populate only the topology dictionary still have a usable payload.
         for pad in self.all_pads or self.pads.values():
@@ -15198,6 +15238,7 @@ class Autorouter:
                 {
                     "ref": pad.ref,
                     "component_id": pad.component_id,
+                    "terminal_id": pad.terminal_id,
                     "number": pad.pin,
                     "x": pad.x,
                     "y": pad.y,
@@ -17776,6 +17817,7 @@ class Autorouter:
                         layer=escape.escape_layer,
                         ref=pad.ref,
                         component_id=pad.component_id,
+                        terminal_id=pad.terminal_id,
                         pin=pad.pin,
                         through_hole=pad.through_hole,
                         drill=pad.drill,
@@ -17864,6 +17906,7 @@ class Autorouter:
                         layer=escape.escape_layer,
                         ref=pad.ref,
                         component_id=pad.component_id,
+                        terminal_id=pad.terminal_id,
                         pin=pad.pin,
                         through_hole=pad.through_hole,
                         drill=pad.drill,

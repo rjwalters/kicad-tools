@@ -216,7 +216,14 @@ class AdaptiveAutorouter:
             )
 
         if pads:
-            router.add_component(ref, pads, component_id=comp.get("component_id"))
+            router.add_component(
+                ref,
+                pads,
+                component_id=comp.get("component_id"),
+                duplicate_pad_numbers_are_jumpers=comp.get(
+                    "duplicate_pad_numbers_are_jumpers", False
+                ),
+            )
 
     def _check_convergence(self, router: Autorouter, overflow: int) -> bool:
         """Check if routing has converged.

@@ -199,8 +199,8 @@ def test_loader_and_reset_keep_same_pin_arrays_as_physical_obstacles(tmp_path, p
     text = text.replace(original_pad, replacement + replacement.replace("(at 0 0)", "(at 1 0)"), 1)
     board.write_text(text)
     router, nets = load_pcb_for_routing(board, force_python=True)
-    assert len(router.all_pads) == 9 and len(router.pads) == 8
-    assert len(router.nets[nets["BAD"]]) == 3
+    assert len(router.all_pads) == 9 and len(router.pads) == 9
+    assert len(router.nets[nets["BAD"]]) == 4
     shapes = [(p.key, p.x, p.y, p.net) for p in router.all_pads]
     router._reset_for_new_trial()
     assert [(p.key, p.x, p.y, p.net) for p in router.all_pads] == shapes

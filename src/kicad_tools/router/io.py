@@ -3396,7 +3396,14 @@ def route_pcb(
             )
 
         if pads:
-            router.add_component(ref, pads, component_id=component_id)
+            router.add_component(
+                ref,
+                pads,
+                component_id=component_id,
+                duplicate_pad_numbers_are_jumpers=comp.get(
+                    "duplicate_pad_numbers_are_jumpers", False
+                ),
+            )
 
     # Get all nets that need routing (exclude plane nets)
     nets_to_route: list[int] = []
@@ -3909,7 +3916,20 @@ def load_pcb_for_routing(
         for section in re.split(r"(?=\((?:footprint|module)\s)", pcb_text)
         if section.startswith("(footprint") or section.startswith("(module")
     ]
-    for section, component_id in zip(footprint_sections, source_keys, strict=True):
+    for section, component_id, footprint in zip(
+        footprint_sections, source_keys, identity_document.footprints, strict=True
+    ):
+        # KiCad only treats duplicate numbers as internal jumpers when the
+        # footprint explicitly opts in. Missing/no leaves each disconnected
+        # land as a physical routing target, including opposite copper layers.
+        jumper_node = (
+            footprint._sexp_node.find_child("duplicate_pad_numbers_are_jumpers")
+            if footprint._sexp_node is not None
+            else None
+        )
+        duplicate_pad_numbers_are_jumpers = (
+            jumper_node is not None and jumper_node.get_first_atom() == "yes"
+        )
         # Get footprint position
         # Note: coordinates can be negative (footprints outside board origin)
         at_match = re.search(r"\(at\s+([-\d.]+)\s+([-\d.]+)(?:\s+([-\d.]+))?\)", section)
@@ -4084,6 +4104,7 @@ def load_pcb_for_routing(
                     "y": fp_y,
                     "rotation": fp_rot,
                     "pads": pads,
+                    "duplicate_pad_numbers_are_jumpers": duplicate_pad_numbers_are_jumpers,
                 }
             )
 
@@ -4285,7 +4306,12 @@ def load_pcb_for_routing(
     # Add all components
     for comp in components:
         # Pads already have absolute positions
-        router.add_component(comp["ref"], comp["pads"], component_id=comp["component_id"])
+        router.add_component(
+            comp["ref"],
+            comp["pads"],
+            component_id=comp["component_id"],
+            duplicate_pad_numbers_are_jumpers=comp["duplicate_pad_numbers_are_jumpers"],
+        )
 
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
