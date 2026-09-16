@@ -15223,9 +15223,9 @@ class Autorouter:
         pitches = self.component_pitches
         for pad in self.all_pads or self.pads.values():
             self.grid.add_pad(pad, pin_pitch=pitches.get(pad.component_key))
-        if self.placement_disposition is not None:
+        if self.placement_disposition is not None or getattr(self, "_plane_access_routes", ()):
             for route in self.existing_routes:
-                self.grid.mark_route(route)
+                self._mark_route(route)
         self.routes = []
 
     def _shuffle_within_tiers(self, net_order: list[int], promotion_rate: float = 0.0) -> list[int]:
@@ -16129,7 +16129,12 @@ class Autorouter:
         """
         if not skip_cleanup:
             self.cleanup_artifacts()
-        return "\n\t".join(route.to_sexp(name_only=name_only) for route in self.routes)
+        access = ()
+        if getattr(self, "_plane_access_routes", ()):
+            from .plane_access import export_plane_access
+
+            access = export_plane_access(self)
+        return "\n\t".join(route.to_sexp(name_only=name_only) for route in [*self.routes, *access])
 
     def get_statistics(self, nets_to_route_ids: set[int] | None = None) -> dict:
         """Get routing statistics including congestion metrics.

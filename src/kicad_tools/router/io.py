@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     from kicad_tools.placement.routing import RoutingPlacementDisposition
     from kicad_tools.progress import ProgressCallback
 
+    from .plane_access import PlaneAccessPolicy
     from .primitives import Pad, Segment
     from .stub_terminals import StubTerminal
 
@@ -3711,12 +3712,17 @@ def load_pcb_for_routing(
     lattice_deadline: float | None = None,
     min_trace_width_floor: float | None = None,
     placement_disposition: RoutingPlacementDisposition | None = None,
+    plane_access_policy: PlaneAccessPolicy | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        plane_access_policy: Optional deferred-plane access policy. Commits fixed
+            physical copper for small SMD pads before routing. Requires an
+            unrouted complete board and explicitly skipped target nets. Emitted
+            by router.to_sexp; existing-copper reload must preserve that output.
         placement_disposition: Optional precomputed placement exclusion. Only
             its invalid nets are removed from targets (selection remains the
             caller's responsibility). Excluded pads and authored copper remain
@@ -3867,6 +3873,15 @@ def load_pcb_for_routing(
     """
     pcb_text = Path(pcb_path).read_text()
     skip_nets = skip_nets or []
+    # Access copper requires authored physical identities, complete board geometry,
+    # and an unrouted source. Unsupported partial/override contexts fail closed.
+    access_nets = set()
+    if plane_access_policy is not None:
+        if netlist or placement_disposition is not None or region is not None:
+            raise ValueError("Plane access requires a complete board with authored net identities")
+        access_nets = {target.net_name for target in plane_access_policy.targets}
+        if not access_nets.issubset(skip_nets):
+            raise ValueError("Plane access targets must be explicitly skipped plane nets")
     placement_invalid = (
         placement_disposition.invalid_nets if placement_disposition is not None else frozenset()
     )
@@ -4031,7 +4046,9 @@ def load_pcb_for_routing(
 
             # For skipped nets (power/ground planes), still add pad as obstacle
             # but use net=0 so it blocks routing without being a routeable net
-            if net_name in skip_nets or net_name in placement_invalid:
+            if (
+                net_name in skip_nets and net_name not in access_nets
+            ) or net_name in placement_invalid:
                 net_num = 0  # Treat as obstacle, not a routable net
 
             # Transform pad position by footprint rotation.
@@ -4314,6 +4331,10 @@ def load_pcb_for_routing(
             component_id=comp["component_id"],
             duplicate_pad_numbers_are_jumpers=comp["duplicate_pad_numbers_are_jumpers"],
         )
+
+    # Keep real pad IDs in obstacle geometry but remove plane routing targets.
+    for name in access_nets:
+        router.nets.pop(net_map.get(name), None)
 
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
@@ -4624,6 +4645,11 @@ def load_pcb_for_routing(
             "same-net reconnection targets (Phase 2b-1)",
             carved,
         )
+
+    if plane_access_policy is not None:
+        from .plane_access import install_plane_access
+
+        install_plane_access(router, pcb_path, net_map, plane_access_policy)
 
     return router, net_map
 

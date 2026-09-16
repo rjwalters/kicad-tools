@@ -2944,8 +2944,18 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # ``per_net_timeout`` (set to 0.0 in _negotiated_non_diffpair_strategy
     # below), so the seed-42 route is reproducible regardless of runner load
     # -- removing the load-dependence that flaked the board-06 re-route gate.
+    from kicad_tools.router.plane_access import PlaneAccessPolicy, PlaneAccessTarget
+    from kicad_tools.zones.pour_escape import EscapeRules
+
+    # The later GND pour covers In1.Cu. Protect small SMD-pad off-pad access
+    # before coupled, escape, and ordinary signal routing consume that space.
+    access_policy = PlaneAccessPolicy(
+        (PlaneAccessTarget("GND", "In1.Cu"),),
+        EscapeRules.from_project(input_path.with_suffix(".kicad_pro")),
+    )
     router, net_map = load_pcb_for_routing(
         str(input_path),
+        plane_access_policy=access_policy,
         skip_nets=skip_nets,
         rules=rules,
         max_search_iterations=DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
