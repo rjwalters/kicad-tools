@@ -266,3 +266,163 @@ def test_pour_repair_finds_narrow_j1_escape(generate_design_mod, tmp_path, block
                 assert stub.distance(copper) >= 0.15
             checked += 1
         assert checked >= 40
+
+
+def _two_fill_board(
+    path,
+    *,
+    version=20260206,
+    gap=0.0,
+    point_touch=False,
+    separate_zones=False,
+    thickness_token="",
+    bridge=False,
+    via=False,
+):
+    """Two saved fill fragments, each anchored by one physical pad."""
+    right_x = 112 + gap
+    right_y = 62 if point_touch else 60
+    rects = [(110, 60, 112, 62), (right_x, right_y, 114 + gap, right_y + 2)]
+    lines = [
+        f'(kicad_pcb (version {version}) (generator "test")',
+        "  (general (thickness 1.6))",
+        '  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))',
+        '  (net 0 "") (net 1 "GND") (net 2 "foreign")',
+    ]
+    for ref, x, y in (("R1", 111, 61), ("R2", right_x + 1, right_y + 1)):
+        lines.append(
+            f'  (footprint "test:pad" (layer "B.Cu") (at {x} {y}) '
+            f'(property "Reference" "{ref}" (at 0 0) (layer "B.SilkS")) '
+            '(pad "1" smd circle (at 0 0) (size 0.3 0.3) '
+            '(layers "B.Cu") (net 1 "GND")))'
+        )
+    groups = [[rect] for rect in rects] if separate_zones else [rects]
+    for group in groups:
+        fills = []
+        for x1, y1, x2, y2 in group:
+            points = f"(pts (xy {x1} {y1}) (xy {x2} {y1}) (xy {x2} {y2}) (xy {x1} {y2}))"
+            fills.append(f'(filled_polygon (layer "B.Cu") {points})')
+        lines.append(
+            '  (zone (net 1) (net_name "GND") (layer "B.Cu") '
+            f"(min_thickness 0.25) {thickness_token} (fill yes) "
+            "(polygon (pts (xy 110 60) (xy 115 60) (xy 115 65) (xy 110 65))) "
+            + " ".join(fills)
+            + ")"
+        )
+    if bridge:
+        lines.append(
+            '  (segment (start 111.5 61) (end 112.5 61) (width 0.2) (layer "B.Cu") (net 1))'
+        )
+    if via:
+        lines.append(
+            '  (via (at 113.5 61.5) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+        )
+    # Real foreign copper near, but not crossing, the legal interior bridge.
+    lines.append('  (segment (start 110 59.7) (end 114 59.7) (width 0.2) (layer "B.Cu") (net 2))')
+    path.write_text("\n".join(lines) + "\n)\n")
+
+
+def _physical_pad_groups(path):
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.connectivity import ConnectivityValidator
+
+    return ConnectivityValidator(PCB.load(path)).extract_pad_partition()
+
+
+@pytest.mark.parametrize(
+    "options,connected",
+    [
+        ({}, False),
+        ({"point_touch": True}, False),
+        ({"gap": -0.2}, False),  # Canonical same-zone solid rule includes area overlap.
+        ({"version": 20240108, "gap": 0.2}, True),
+        ({"version": 20240108, "gap": 0.3}, False),
+        ({"version": 20240108, "thickness_token": "(filled_areas_thickness no)"}, False),
+        ({"thickness_token": "(filled_areas_thickness yes)"}, False),
+        ({"separate_zones": True}, True),
+        ({"separate_zones": True, "gap": -0.2}, True),
+        ({"bridge": True}, True),
+    ],
+)
+def test_pour_audit_matches_canonical_saved_fill_contacts(
+    tmp_path, generate_design_mod, options, connected
+):
+    board = tmp_path / "contact.kicad_pcb"
+    _two_fill_board(board, **options)
+    canonical = _physical_pad_groups(board)
+    assert (len(canonical) == 1) is connected
+    audit = generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]
+    assert audit["connected"] is connected
+    assert sorted(sorted(name for name, _ in group) for group in audit["pad_groups"]) == sorted(
+        sorted(group) for group in canonical
+    )
+
+
+def test_repair_emits_real_bridge_between_touching_solid_fills(tmp_path, generate_design_mod):
+    import math
+
+    from shapely.geometry import LineString, Point, box
+
+    board = tmp_path / "repair-contact.kicad_pcb"
+    _two_fill_board(board, via=True)
+    before = board.read_text()
+    assert len(_physical_pad_groups(board)) == 2
+    assert not generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]["connected"]
+    _, original_segments, original_vias = generate_design_mod._parse_copper(before)
+
+    assert generate_design_mod._repair_pour_connectivity(board, ["GND"]) == (0, 1)
+
+    after = board.read_text()
+    _, segments, vias = generate_design_mod._parse_copper(after)
+    assert len(vias) == len(original_vias)
+    assert len(segments) == len(original_segments) + 1
+    bridge = segments[-1]
+    a, b = (bridge["x1"], bridge["y1"]), (bridge["x2"], bridge["y2"])
+    assert math.dist(a, b) > 0.1
+    assert bridge["w"] == 0.2 and bridge["layer"] == "B.Cu" and bridge["net"] == "GND"
+    copper = LineString([a, b]).buffer(bridge["w"] / 2)
+    assert copper.intersection(box(110, 60, 112, 62)).area > 0
+    assert copper.intersection(box(112, 60, 114, 62)).area > 0
+    assert any(box(110, 60, 112, 62).contains(Point(p)) for p in (a, b))
+    assert any(box(112, 60, 114, 62).contains(Point(p)) for p in (a, b))
+    foreign = LineString([(110, 59.7), (114, 59.7)]).buffer(0.1)
+    assert copper.distance(foreign) >= 0.15
+    assert len(_physical_pad_groups(board)) == 1
+    assert generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]["connected"]
+    for kind in ("footprint", "via", "zone", "segment"):
+        assert all(
+            block in after for block in generate_design_mod._find_sexp_blocks(before, f"({kind}")
+        )
+
+
+def test_audit_keeps_disconnected_solids_in_one_fill_contour_separate(
+    tmp_path, generate_design_mod
+):
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "split-contour.kicad_pcb"
+    _two_fill_board(board, gap=2)
+    text = board.read_text()
+    fills = generate_design_mod._find_sexp_blocks(text, "(filled_polygon")
+    # Two square solids joined only by a retraced zero-width contour edge.
+    points = [
+        (110, 60),
+        (112, 60),
+        (112, 62),
+        (110, 62),
+        (110, 60),
+        (114, 60),
+        (116, 60),
+        (116, 62),
+        (114, 62),
+        (114, 60),
+        (110, 60),
+    ]
+    combined = (
+        '(filled_polygon (layer "B.Cu") (pts ' + " ".join(f"(xy {x} {y})" for x, y in points) + "))"
+    )
+    board.write_text(text.replace(fills[0], combined).replace(fills[1], ""))
+    assert len(PCB.load(board).zones[0].filled_polygons) == 1
+    assert len(_physical_pad_groups(board)) == 2
+    audit = generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]
+    assert not audit["connected"] and len(audit["pad_groups"]) == 2
