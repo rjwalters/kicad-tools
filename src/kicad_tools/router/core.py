@@ -8177,6 +8177,11 @@ class Autorouter:
         # skew bookkeeping so consumers (Phase 3I serpentine / 3J DRC)
         # can read ``diffpair_length_tracker.get_all_skews()``.
         self._finalize_routing()
+        _emit_route_checkpoint(
+            getattr(checkpoint_callback, "checkpoint_completed", None),
+            self.routes,
+            self.grid.get_total_overflow,
+        )
 
         return all_routes
 
@@ -14963,6 +14968,11 @@ class Autorouter:
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
         self._finalize_routing()
+        _emit_route_checkpoint(
+            getattr(checkpoint_callback, "checkpoint_completed", None),
+            self.routes,
+            self.grid.get_total_overflow,
+        )
         return result
 
     def _route_net_with_corridor(

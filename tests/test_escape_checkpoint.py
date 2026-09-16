@@ -255,3 +255,48 @@ def test_checkpoint_context_conflict_preserves_previous_output(tmp_path):
         callback([], IterationMetrics(0, 0, 0))
     assert output.read_text() == "previous copper"
     assert output.with_suffix(".kicad_pro").read_text() == '{"unrelated": true}'
+
+
+@pytest.mark.parametrize("interval", [0, 999])
+def test_completed_attempt_survives_later_attempt_interrupt(tmp_path, monkeypatch, interval):
+    import json
+    from pathlib import Path
+
+    from kicad_tools.cli import route_deadline
+
+    control = tmp_path / "control.json"
+    monkeypatch.setenv(route_deadline.CONTROL_ENV, str(control))
+    route_deadline.record_stage("layer-escalation")
+    source, output = tmp_path / "source.kicad_pcb", tmp_path / "out.kicad_pcb"
+    source.write_text(PCB)
+    active = [make_router()]
+    callback = _make_checkpoint_callback(
+        source, output, interval, quiet=True, router_provider=lambda: active[0]
+    )
+    active[0].route_all_two_phase(
+        timeout=10, per_net_timeout=2, max_iterations=1, checkpoint_callback=callback
+    )
+    report = json.loads(control.read_text())
+    if interval:
+        completed = [
+            Path(path) for path in report["checkpoint_history"] if "completed_unverified" in path
+        ]
+        assert len(completed) == 1
+        first_bytes = completed[0].read_bytes()
+        assert all(f"(net {net})".encode() in first_bytes for net in (1, 2, 3))
+        # Periodic cadence remains throttled: its initial checkpoint has N1,
+        # while the separate completion artifact has both completed nets.
+        assert "(net 2)" not in output.read_text()
+    active[0] = make_router()
+
+    def interrupted(*args, **kwargs):
+        raise RouteDeadlineExpired()
+
+    monkeypatch.setattr(active[0], "_route_net_with_corridor", interrupted)
+    with pytest.raises(RouteDeadlineExpired):
+        active[0].route_all_two_phase(timeout=10, per_net_timeout=2, checkpoint_callback=callback)
+    if interval:
+        assert completed[0].read_bytes() == first_bytes
+    else:
+        assert not list(tmp_path.glob("*unverified*.kicad_pcb"))
+        assert not output.exists()

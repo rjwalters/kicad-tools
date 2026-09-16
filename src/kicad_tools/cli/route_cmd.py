@@ -1618,9 +1618,33 @@ def _make_checkpoint_callback(
                 f"overflow={best_metrics.overflow}) to {output_path}"
             )
 
+    def _checkpoint_completed(routes, metrics) -> None:
+        """Retain a completed attempt separately from periodic checkpoints."""
+        import tempfile
+
+        with restore_stage():
+            record_stage("serialization")
+            router = router_provider() if router_provider is not None else None
+            layers = router.grid.num_layers if router is not None else 2
+            sexp = "\n\t".join(route.to_sexp(name_only=name_only) for route in routes)
+            if preserved_sexp:
+                sexp = f"{sexp}\n\t{preserved_sexp}" if sexp else preserved_sexp
+            fd, name = tempfile.mkstemp(
+                prefix=output_path.stem + "_completed_unverified_",
+                suffix=output_path.suffix,
+                dir=output_path.parent,
+            )
+            os.close(fd)
+            completed = Path(name)
+            _copy_checkpoint_constraint_sidecars(source_pcb_path or pcb_path, completed)
+            _write_routed_pcb(pcb_path, completed, sexp, layer_count=layers, is_checkpoint=True)
+            history.append(str(completed))
+            record_stage("serialization", checkpoint_history=list(history))
+
     # The router can avoid deep-copying large snapshots during the throttle
     # window. Generic callbacks without this hook still receive owned copies.
     setattr(_checkpoint, "checkpoint_due", _checkpoint_due)  # noqa: B010
+    setattr(_checkpoint, "checkpoint_completed", _checkpoint_completed)  # noqa: B010
     return _checkpoint
 
 
@@ -13462,8 +13486,9 @@ def _route_parser() -> argparse.ArgumentParser:
         default=30.0,
         help=(
             "Interval in seconds between best-so-far checkpoint writes to "
-            "--output during the negotiated routing loop (Issue #2808). "
-            "Each checkpoint atomically replaces the file at --output so a "
+            "--output during negotiated, escape, or two-phase routing. "
+            "Completed escape/two-phase attempts also retain a separate "
+            "unverified snapshot. Each periodic checkpoint atomically replaces --output so a "
             "crash/SIGTERM/--timeout leaves the user with the best partial "
             "result rather than the original unrouted input. Default: 30.0. "
             "Use 0 to disable checkpointing (only the terminal save fires)."
