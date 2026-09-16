@@ -408,6 +408,9 @@ _SEGMENT_BLOCK_RE = re.compile(
     re.MULTILINE,
 )
 
+# Shared parser for non-mutating quantization planning.
+SEGMENT_BLOCK_RE = _SEGMENT_BLOCK_RE
+
 
 def _fmt_decimal(value: Decimal) -> str:
     """Format a Decimal coordinate the way KiCad S-expressions store it."""

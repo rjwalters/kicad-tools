@@ -1503,6 +1503,13 @@ def build_corridor_mask(
     return frozenset(corridor)
 
 
+LAYER_RETURN_SEARCH_RADII_MM: tuple[float, ...] = tuple(
+    float(r)
+    for r in os.environ.get("KCT_LAYER_RETURN_RADII_MM", "0.0,0.6,1.2,1.8,2.4").split(",")
+    if r.strip()
+)
+
+
 class CoupledPathfinder:
     """A* pathfinder for coupled differential pair routing.
 
@@ -1795,6 +1802,16 @@ class CoupledPathfinder:
         FIFO/LIFO and 10k/90k-iteration runs).
         """
         return self._is_cell_blocked(gx, gy, layer, net)
+
+    def _minimum_via_pitch_cells(self) -> float:
+        """Mutual via copper and hole clearance, without raster rounding."""
+        return (
+            max(
+                self.rules.via_diameter + self.rules.via_clearance,
+                self.rules.via_drill + self.rules.min_hole_to_hole,
+            )
+            / self.grid.resolution
+        )
 
     def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Check if placing a via at this position would conflict on any layer.
@@ -5013,6 +5030,266 @@ class DiffPairRouter:
             arcs.append(arc0 + span_len / 2.0)
         return arcs
 
+    def _via_has_only_geometry_blockers(
+        self, pathfinder: CoupledPathfinder, gx: int, gy: int, *, include_routes: bool = True
+    ) -> bool:
+        """Allow exact adjudication only with recorded blocker provenance.
+
+        A recreated pad grid cannot prove that a keepout was not superimposed
+        on a halo. Missing provenance therefore fails closed. The caller must
+        still check actual pad geometry, route copper and drilled holes.
+        """
+        grid = self.autorouter.grid
+        proven = getattr(grid, "_pad_geometry_cells", ())
+        routed = getattr(grid, "_route_geometry_cells", {}) if include_routes else {}
+        live_routes = {id(route) for route in grid.routes} if include_routes else set()
+        available = (
+            {
+                token
+                for token, reference in getattr(grid, "_route_geometry_sources", {}).items()
+                if (route := reference()) is not None and id(route) in live_routes
+            }
+            if include_routes
+            else set()
+        )
+        if not proven and not routed:
+            return False
+        radius = max(
+            pathfinder._via_extra_cells,
+            math.ceil(pathfinder.rules.via_drill / (2 * grid.resolution)),
+        )
+        for layer in range(grid.num_layers):
+            for y in range(gy - radius, gy + radius + 1):
+                for x in range(gx - radius, gx + radius + 1):
+                    if not (0 <= x < grid.cols and 0 <= y < grid.rows):
+                        return False
+                    cell = grid.cell_at(layer, y, x)
+                    key = (layer, y, x)
+                    if (cell.blocked or cell.pad_blocked) and key not in proven:
+                        sources = routed.get(key)
+                        if not sources or not sources <= available:
+                            return False
+        return True
+
+    def _layer_return_tails(
+        self,
+        pathfinder: CoupledPathfinder,
+        head: Pad,
+        goal: Pad,
+        partner: Route,
+        body: Route,
+        *,
+        deadline: float | None = None,
+        prefer_shortest_approach: bool = False,
+        rank_pair_coverage: bool = False,
+        allowed_via_sites: frozenset[tuple[int, int]] | None = None,
+        reserved_routes: tuple[Route, ...] = (),
+    ) -> Iterator[Route]:
+        """Yield bounded, uncommitted one-through-via layer-return candidates.
+
+        Both planar portions use the existing pad/partner-aware synthesizer.
+        Exact final checks include every committed route and the uncommitted
+        partner, including barrel copper on every layer and drilled holes.
+        The caller must still validate the assembled pair and its quality.
+        ``prefer_shortest_approach`` changes only the approach-side candidate
+        ordering; the pad-side tail keeps its coupling preference.
+        ``allowed_via_sites`` restricts the existing bounded search to planned
+        grid sites. It never bypasses geometry, hole or occupancy checks.
+        ``reserved_routes`` adds future copper to exact trace, barrel and
+        drill checks without changing the grid or committed route lists.
+        """
+        from .via_clearance import drill_hole_to_hole_clear
+
+        grid, rules = self.autorouter.grid, self.autorouter.rules
+        start_layer = grid.layer_to_index(head.layer.value)
+        end_layer = grid.layer_to_index(goal.layer.value)
+        if start_layer == end_layer or any(
+            li not in grid.get_routable_indices() for li in (start_layer, end_layer)
+        ):
+            return
+        foreign = [
+            r
+            for r in [*self.autorouter.routes, *grid.routes, *reserved_routes, partner]
+            if r.net != head.net
+        ]
+        drills = self._collect_existing_drills() + [
+            (v.x, v.y, v.drill)
+            for r in (*grid.routes, *reserved_routes, partner, body)
+            for v in r.vias
+        ]
+        pair_edge_clearance = self._pair_seg_clearance(
+            pathfinder, head.net_name
+        ) - pathfinder._get_trace_width_for_net(head.net_name)
+        partner_center_clearance = max(
+            (
+                (pathfinder._get_trace_width_for_net(head.net_name) + s.width) / 2
+                + pair_edge_clearance
+                for s in partner.segments
+            ),
+            default=0.0,
+        )
+        # Issue #5333 (TMDS_D1): sites used to be visited in a fixed
+        # anchor/radius/direction raster order, so the caller's
+        # ``itertools.islice(tails, 10)`` stopped at the first ten LEGAL
+        # candidates in THAT order regardless of how well any of them
+        # actually couples to the partner. Meeting the authored
+        # ``effective_coupled_continuity_threshold`` needs the tail to run
+        # close to the partner's own committed copper for most of its
+        # length, so candidate grid sites are visited in order of ascending
+        # distance from the site to the partner's nearest existing segment
+        # or via instead. This only reorders WHICH legal site is tried
+        # first -- every legality/clearance/hole-spacing/occupancy check
+        # below, and "a failed check just moves on to the next site", are
+        # unchanged. When the partner has no committed copper yet (empty
+        # ``partner.segments``/``partner.vias``, e.g. the very first leg of
+        # a pair), every site scores ``inf`` and the stable sort leaves the
+        # original raster order intact.
+        candidate_sites: list[tuple[float, int, int, int]] = []
+        seen_sites: set[tuple[int, int]] = set()
+        # Grid-aligned sites avoid placing a barrel between checked cells.
+        for anchor in (goal, head):
+            for radius in LAYER_RETURN_SEARCH_RADII_MM:
+                for dx, dy in (
+                    (1, 0),
+                    (-1, 0),
+                    (0, 1),
+                    (0, -1),
+                    (1, 1),
+                    (1, -1),
+                    (-1, 1),
+                    (-1, -1),
+                ):
+                    gx, gy = grid.world_to_grid(anchor.x + dx * radius, anchor.y + dy * radius)
+                    if allowed_via_sites is not None and (gx, gy) not in allowed_via_sites:
+                        continue
+                    if (gx, gy) in seen_sites:
+                        continue
+                    seen_sites.add((gx, gy))
+                    site_x, site_y = grid.grid_to_world(gx, gy)
+                    score = min(
+                        (
+                            self._point_segment_distance(site_x, site_y, seg)
+                            for seg in partner.segments
+                        ),
+                        default=math.inf,
+                    )
+                    if partner.vias:
+                        score = min(
+                            score,
+                            min(math.hypot(site_x - v.x, site_y - v.y) for v in partner.vias),
+                        )
+                    candidate_sites.append((score, len(candidate_sites), gx, gy))
+        candidate_sites.sort(key=lambda c: (c[0], c[1]))
+
+        for _score, _order, gx, gy in candidate_sites:
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            raster_blocked = pathfinder._is_via_blocked(gx, gy, head.net)
+            if raster_blocked and not self._via_has_only_geometry_blockers(pathfinder, gx, gy):
+                continue
+            x, y = grid.grid_to_world(gx, gy)
+            via = Via(
+                x=x,
+                y=y,
+                drill=rules.via_drill,
+                diameter=rules.via_diameter,
+                layers=(
+                    Layer(grid.index_to_layer(0)),
+                    Layer(grid.index_to_layer(grid.num_layers - 1)),
+                ),
+                net=head.net,
+                net_name=head.net_name,
+            )
+            if (
+                raster_blocked
+                and grid.worst_via_pad_deficit(
+                    via, exclude_net=-1, clearance_floor=rules.via_clearance
+                )[0]
+                > 1e-9
+            ):
+                # The exact fallback exempts no pad, including own-net
+                # metal. Thus it cannot introduce a via-in-pad escape.
+                continue
+            if (
+                grid.worst_via_pad_deficit(
+                    via, exclude_net=head.net, clearance_floor=rules.via_clearance
+                )[0]
+                > 1e-9
+            ):
+                continue
+            if not drill_hole_to_hole_clear(x, y, via.drill, drills, rules.min_hole_to_hole):
+                continue
+            if any(
+                self._point_segment_distance(x, y, seg)
+                < (via.diameter + seg.width) / 2 + rules.via_clearance - 1e-9
+                for r in foreign
+                for seg in r.segments
+            ) or any(
+                math.hypot(x - v.x, y - v.y)
+                < (via.diameter + v.diameter) / 2 + rules.via_clearance - 1e-9
+                for r in foreign
+                for v in r.vias
+            ):
+                continue
+            before = self._virtual_pad_at(head, x, y, start_layer)
+            after = self._virtual_pad_at(goal, x, y, end_layer)
+            pieces = []
+            for a, b, li in ((head, before, start_layer), (after, goal, end_layer)):
+                if math.hypot(a.x - b.x, a.y - b.y) < 1e-9:
+                    pieces.append(Route(net=head.net, net_name=head.net_name))
+                    continue
+                part = self._synthesize_tail(
+                    pathfinder,
+                    a,
+                    b,
+                    li,
+                    partner_segments=partner.segments,
+                    partner_clearance=partner_center_clearance,
+                    partner_vias=partner.vias,
+                    prefer_shortest=prefer_shortest_approach and li == start_layer,
+                    rank_pair_coverage=rank_pair_coverage,
+                    reserved_routes=reserved_routes,
+                    preceding_segments=body.segments + [s for p in pieces for s in p.segments],
+                )
+                if part is None:
+                    break
+                pieces.append(part)
+            if len(pieces) != 2:
+                continue
+            segments = [seg for part in pieces for seg in part.segments]
+            if any(
+                self._point_segment_distance(v.x, v.y, seg)
+                < (seg.width + v.diameter) / 2 + rules.via_clearance - 1e-9
+                for seg in segments
+                for r in foreign
+                for v in r.vias
+            ) or any(
+                _segment_to_segment_distance(
+                    seg.x1,
+                    seg.y1,
+                    seg.x2,
+                    seg.y2,
+                    other.x1,
+                    other.y1,
+                    other.x2,
+                    other.y2,
+                )
+                < (
+                    (seg.width + other.width) / 2 + rules.trace_clearance
+                    if r.net != partner.net
+                    else (seg.width + other.width) / 2 + pair_edge_clearance
+                )
+                - 1e-9
+                for seg in segments
+                for r in foreign
+                for other in r.segments
+                if seg.layer == other.layer
+            ):
+                continue
+            if deadline is not None and time.monotonic() >= deadline:
+                return
+            yield Route(net=head.net, net_name=head.net_name, segments=segments, vias=[via])
+
     def _synthesize_tail(
         self,
         pathfinder: CoupledPathfinder,
@@ -5021,15 +5298,25 @@ class DiffPairRouter:
         layer_idx: int,
         partner_segments: list[Segment] | None = None,
         partner_clearance: float = 0.0,
+        partner_vias: list[Via] | None = None,
+        *,
+        prefer_shortest: bool = False,
+        rank_pair_coverage: bool = False,
+        reserved_routes: tuple[Route, ...] = (),
+        preceding_segments: list[Segment] | None = None,
     ) -> Route | None:
         """Geometric head->pad tail on the head's layer (issue #3508).
 
         The per-net ``route()`` machinery declines sub-millimetre hops
         whose endpoints sit inside pad clearance halos (measured: every
         board 06 rescue tail it was offered), so we draw the tail
-        directly -- a straight segment, or an axis-aligned dogleg --
+        directly with horizontal, vertical, and 45-degree legs,
         and validate every covered grid cell with
         :meth:`_segment_cells_clear`.
+
+        ``reserved_routes`` screens future foreign traces before candidate
+        selection. ``preceding_segments`` rejects intersections and cycles
+        with the existing body while alternative tails are still available.
 
         Issue #4460: when ``partner_segments`` is supplied the partner
         (diff-pair guide) copper is part of the CANDIDATE FILTER, not a
@@ -5056,7 +5343,10 @@ class DiffPairRouter:
         fraction ``diffpair_routing_continuity`` would score.  The sort is
         STABLE and the legality gates below are untouched, so a tail region
         with no partner copper to follow (every score 0) keeps the historical
-        shape order byte-for-byte.
+        shape order for already-aligned candidates. Off-angle candidates
+        expand into two bounded dogleg orientations before scoring and
+        clearance validation, so later angle repair does not move an
+        accepted chord into foreign copper.
         """
         grid = self.autorouter.grid
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -5135,10 +5425,61 @@ class DiffPairRouter:
                     head, goal, near_partner, width, partner_clearance
                 )
             )
+        # Validate the geometry that serialization will retain, rather than
+        # a chord that a later 45-degree repair may move into foreign copper.
+        # The two global dogleg orientations keep this expansion bounded.
+        from .quantize import dogleg_points
+
+        aligned_candidates = []
+        seen_candidates = set()
+        for candidate in candidates:
+            for axis_first in (False, True):
+                aligned: list[tuple[float, float, float, float]] = []
+                for x1, y1, x2, y2 in candidate:
+                    points = dogleg_points(x1, y1, x2, y2, axis_first=axis_first)
+                    aligned.extend(
+                        (a[0], a[1], b[0], b[1])
+                        for a, b in zip(points[:-1], points[1:], strict=True)
+                    )
+                key = tuple(aligned)
+                if key not in seen_candidates:
+                    seen_candidates.add(key)
+                    aligned_candidates.append(aligned)
+        candidates = aligned_candidates
+        if near_partner:
             scores = [_spans_coupled_fraction(c, width, layer, near_partner) for c in candidates]
             candidates = [
                 candidates[i] for i in sorted(range(len(candidates)), key=lambda i: (-scores[i], i))
             ]
+        if rank_pair_coverage and preceding_segments and partner_segments:
+            # Rank the completed legs together, not just the new tail: a tail
+            # with a high local fraction may leave more of its partner uncoupled.
+            def pair_coverage(spans):
+                own = Route(net=head.net, net_name=head.net_name)
+                own.segments = list(preceding_segments) + [
+                    Segment(x1, y1, x2, y2, width, layer, head.net, net_name=head.net_name)
+                    for x1, y1, x2, y2 in spans
+                ]
+                partner = Route(net=-1, net_name="")
+                partner.segments = partner_segments
+                coverage = min(
+                    self._tail_coupled_fraction(own, partner_segments),
+                    self._tail_coupled_fraction(partner, own.segments),
+                )
+                length_gap = abs(
+                    sum(math.dist(s.start, s.end) for s in own.segments)
+                    - sum(math.dist(s.start, s.end) for s in partner_segments)
+                )
+                return (-round(coverage, 12), length_gap)
+
+            candidates.sort(key=pair_coverage)
+        if prefer_shortest:
+            # A via approach may need a short legal continuation while its
+            # pad-side landing retains coupling-first selection. The caller
+            # must still validate quality on the assembled pair.
+            candidates.sort(
+                key=lambda spans: sum(math.hypot(x2 - x1, y2 - y1) for x1, y1, x2, y2 in spans)
+            )
         for segs in candidates:
             if all(
                 self._segment_cells_clear(pathfinder, x1, y1, x2, y2, layer_idx, head.net)
@@ -5176,9 +5517,52 @@ class DiffPairRouter:
                     for x1, y1, x2, y2 in segs
                 ):
                     continue
+                # The paired tail may have been constructed but not committed
+                # to the grid or foreign-copper cache yet. Filter its barrels
+                # here, while alternative planar candidates remain available.
+                if partner_vias:
+                    from kicad_tools.core.geometry import point_to_segment_distance
+
+                    if any(
+                        point_to_segment_distance(v.x, v.y, x1, y1, x2, y2)
+                        < (width + v.diameter) / 2 + self.autorouter.rules.via_clearance - 1e-9
+                        for v in partner_vias
+                        if not v.is_micro
+                        or min(l.value for l in v.layers)
+                        <= layer.value
+                        <= max(l.value for l in v.layers)
+                        for x1, y1, x2, y2 in segs
+                    ):
+                        continue
+                # Planned foreign traces are not raster-marked. Screen each
+                # geometric candidate before selection so a blocked winner
+                # cannot hide a legal later detour.
+                if reserved_routes and any(
+                    _segment_to_segment_distance(x1, y1, x2, y2, *s.start, *s.end)
+                    < (width + s.width) / 2 + self.autorouter.rules.trace_clearance - 1e-9
+                    for r in reserved_routes
+                    if r.net != head.net
+                    for s in r.segments
+                    if s.layer == layer
+                    for x1, y1, x2, y2 in segs
+                ):
+                    continue
+                if preceding_segments:
+                    from shapely.geometry import MultiLineString  # type: ignore[import-untyped]
+                    from shapely.ops import polygonize  # type: ignore[import-untyped]
+
+                    lines = [[s.start, s.end] for s in preceding_segments if s.layer == layer] + [
+                        [(x1, y1), (x2, y2)]
+                        for x1, y1, x2, y2 in segs
+                        if math.hypot(x2 - x1, y2 - y1) > 1e-9
+                    ]
+                    if not MultiLineString(lines).is_simple or any(
+                        p.area > 1e-9 for p in polygonize(lines)
+                    ):
+                        continue
                 route = Route(net=head.net, net_name=head.net_name)
                 for x1, y1, x2, y2 in segs:
-                    if abs(x2 - x1) < 0.01 and abs(y2 - y1) < 0.01:
+                    if abs(x2 - x1) < 1e-9 and abs(y2 - y1) < 1e-9:
                         continue
                     route.segments.append(
                         Segment(
@@ -5192,14 +5576,17 @@ class DiffPairRouter:
                             net_name=head.net_name,
                         )
                     )
-                # Issue #4572: the sub-0.01 mm drop above is harmless at a PAD
-                # landing (the pad's own copper absorbs it) but leaves a real
-                # hole when the dropped span sat BETWEEN two kept ones -- and
-                # the follow path splices this route between a lead-in and an
-                # offset run, where such a hole strands the net outright.  The
-                # coupling-preference order makes more of these candidates
-                # reachable, so reject a broken one and let the next candidate
-                # compete instead of shipping a break.
+                if preceding_segments:
+                    from .construction_validation import parallel_copper_overlap_issue
+
+                    # Centerline simplicity alone permits close parallel runs
+                    # whose copper folds back onto the body. Reject that losing
+                    # candidate here, while later legal tails are still available.
+                    if parallel_copper_overlap_issue(preceding_segments + route.segments):
+                        continue
+                # Preserve even tiny endpoint legs: virtual tail heads may
+                # be via centers, not pads whose copper covers a dropped span.
+                # Reject a broken candidate rather than shipping a gap.
                 if len(route.segments) > 1 and not self._route_is_chained(route):
                     continue
                 if route.segments:
@@ -10167,6 +10554,41 @@ class DiffPairRouter:
                     timeout_seconds=remaining_budget,
                     max_iterations_budget=remaining_iterations,
                 )
+
+            if (
+                result is None
+                and not shadow_fail_fast
+                and spec.polarity_swap
+                and per_pair_timeout is not None
+                and getattr(pathfinder, "last_coupled_backend", None) == "cpp"
+                and getattr(pathfinder, "last_best_cpp_path", None)
+            ):
+                # Complete the saved native geometry without another search.
+                # This deadline shares the original pair window; recovery
+                # cannot renew either the time or native iteration budget.
+                recovery_deadline = spec_t0 + per_pair_timeout + self._census_elapsed_s
+                if time.monotonic() < recovery_deadline:
+                    from .partial_recovery import recover_partial_pair
+
+                    manufacturer = self.autorouter._build_manufacturer_design_rules()
+                    thickness = getattr(manufacturer, "board_thickness_mm", None)
+                    via_rules = getattr(self.autorouter, "via_rules", None)
+                    partial_vias = bool(
+                        getattr(via_rules, "allow_blind", False)
+                        or getattr(via_rules, "allow_buried", False)
+                    )
+                    if thickness is not None and not partial_vias:
+                        result = recover_partial_pair(
+                            self,
+                            pathfinder,
+                            pair,
+                            (spec.p_start, spec.p_end, spec.n_start, spec.n_end),
+                            deadline=recovery_deadline,
+                            board_thickness_mm=thickness,
+                            num_copper_layers=self.autorouter.grid.num_layers,
+                        )
+                        if result is not None:
+                            coupled_phase = "partial-recovery"
 
             # Issue #4635: deliberately NOT census-adjusted.  The deadlines
             # above credit the census's cost back so census-on and census-off
