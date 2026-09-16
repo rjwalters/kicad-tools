@@ -1,0 +1,11 @@
+{
+  "README.md": "38357a40a335095e7055b23d0f9f1cb75dc9c7bf8da2b6bc8e099b79811f1591",
+  "acceptance-audit.json": "00d7ab6d8162f2c768b715cfe1aa4e1eda44abd46eaf6b461c6c06d314ed084b",
+  "native-refill.json": "4740d9070dc9bf404716fc1e5048aa9ae2b3d0eee5023a9c2db9d5f660e558fd",
+  "no-attach.json": "e3d0ec545aa72c9c4132775fa42d4a03670bf37f3e90e8f6cb65f76d375e56ef",
+  "policy-attribution.json": "930ee9a2047d687e8750dbb5d1c1fcef2310ea98ae1f2803ca579dd1f9c0d8cb",
+  "producer.json": "9c18c23540c0f956c80a4e2d2846d4f7a0ca22b320bcba8f5fcaf0eb821f97f7",
+  "source-verification.json": "cdaef42c2f0319959523ca50d62ab7168f9c3a2830da1af84cf34c7f94728d6b",
+  "stage-origin.json": "fc6b38c69303ff6310af4b658e210ceebbb8c0369ec54906919b1e79125dc0a2",
+  "stage2-process.json": "c002a2e521ad94207428816db6cdbff40c1962d6a0ee252e66a5b1791b763d61"
+}
