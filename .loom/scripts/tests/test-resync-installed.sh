@@ -1101,11 +1101,19 @@ printf 'NEW-TEST\n' > "$REPO/defaults/scripts/check-defaults-version-bump.sh"   
 git -C "$REPO" add defaults/scripts/check-defaults-version-bump.sh >/dev/null 2>&1
 git -C "$REPO" commit -qm "add new shipped defaults/ file" >/dev/null 2>&1
 OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
-commit_line="$(grep -m1 '^ *git add ' <<<"$OUT")"
-if [[ -n "$commit_line" ]]; then
-    pass "(#7336) fixture precondition: the dirty-tree commit hint fired"
+# #6646: the actionable recommendation is now land-resync-commit.sh (which
+# commits AND lands, never rebasing/bypass-pushing on its own) rather than a
+# raw 'git add && git commit' -- but the note line still embeds the resolved
+# resync_paths list ("would be: git add <paths>") so this test can keep
+# verifying suggest_commit_if_resync_only_dirt()'s CLASSIFICATION logic
+# (retired-vs-shipped, #7336) independently of how the commit is landed. The
+# precondition below asserts both halves (this file is frozen by the
+# file-size ratchet, #7711, so the #6646 check shares the existing assertion).
+commit_line="$(grep -m1 'would be: git add ' <<<"$OUT")"
+if [[ -n "$commit_line" ]] && grep -q './.loom/scripts/land-resync-commit\.sh' <<<"$OUT"; then
+    pass "(#7336/#6646) fixture precondition: the dirty-tree commit hint fired and recommends land-resync-commit.sh"
 else
-    fail "(#7336) fixture precondition: the dirty-tree commit hint did not fire, cannot test its content"
+    fail "(#7336/#6646) fixture precondition: the dirty-tree commit hint did not fire / does not recommend land-resync-commit.sh, cannot test its content"
 fi
 if grep -q 'some-retired-tool\.sh' <<<"$commit_line"; then
     fail "(#7336) retired-but-unlisted path was incorrectly included in the 'git add' commit suggestion"

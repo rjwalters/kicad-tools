@@ -31,7 +31,7 @@ Environment: `LOOM_HOME` overrides the machine-level checkout location (default
 - [Config resolution (AC5)](#config-resolution-ac5)
 - [`update`: mcp-loom bundle refresh + thin daemon delegate](#update-mcp-loom-bundle-refresh--thin-daemon-delegate)
 - [User-scoped `loom` MCP server (#4230, epic #3835 Phase 3c)](#user-scoped-loom-mcp-server-4230-epic-3835-phase-3c)
-- [Machine mode: LOOM_MACHINE_CHECKOUT hand-off (Phase 3b, #4229)](#machine-mode-loommachinecheckout-hand-off-phase-3b-4229)
+- [Machine mode: LOOM_MACHINE_CHECKOUT hand-off (Phase 3b, #4229)](#machine-mode-loom_machine_checkout-hand-off-phase-3b-4229)
 - [User-scope skills + agents (Epic #3835 Phase 4, #4261)](#user-scope-skills--agents-epic-3835-phase-4-4261)
 - [User-scope guard hooks (Epic #3835 Phase 5, #4262)](#user-scope-guard-hooks-epic-3835-phase-5-4262)
 - [`loom migrate`: historical consumer install → daemon model (Epic #3835 Phase 6, #4254)](#loom-migrate-historical-consumer-install--daemon-model-epic-3835-phase-6-4254)

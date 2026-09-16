@@ -2296,8 +2296,8 @@ suggest_commit_if_resync_only_dirt() {
         note "${BLUE}[resync] The staging worktree is dirty with only resync output above — stage and commit it there:${NC}"
         printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR && git add ${resync_paths[*]} && git commit -m 'chore: resync installed Loom surfaces'${NC}"
     else
-        note "${BLUE}[resync] The tree is dirty with only resync output above — stage and commit it so the main-health gate doesn't skip on it:${NC}"
-        printf '%b\n' "    ${BOLD}git add ${resync_paths[*]} && git commit -m 'chore: resync installed Loom surfaces'${NC}"
+        note "${BLUE}[resync] The tree is dirty with only resync output above (would be: git add ${resync_paths[*]}) — land it so the main-health gate doesn't skip on it. This commits AND pushes (never rebasing or bypass-pushing — see .loom/docs/troubleshooting.md \"Landing a resync commit on the primary clone (#6646)\"):${NC}"
+        printf '%b\n' "    ${BOLD}./.loom/scripts/land-resync-commit.sh${NC}"
     fi
 }
 [[ "$DRY_RUN" -eq 1 || "$N_FAILED" -gt 0 ]] || suggest_commit_if_resync_only_dirt

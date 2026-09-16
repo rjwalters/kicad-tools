@@ -352,11 +352,37 @@ _extract_refs() {
 # describe the exact same timing relationship as "blocked by #N" in different
 # words -- a sequential-ordering finding, not a merits finding -- so they are
 # included as their own phrase family rather than folded into "blocked".
+#
+# #7756: a phrase word ANYWHERE in the bullet plus a reference ANYWHERE in the
+# bullet is not enough -- a bullet can narratively mention a phrase-list word
+# (e.g. "prerequisite") while discussing an issue reference elsewhere in the
+# same bullet, with no actual "blocked by"/"depends on"/"requires" framing
+# tying the two together. Observed on #7431: "#7430 (... a **prerequisite**
+# for any meaningful soak) merged only minutes before this evaluation, so no
+# soak observation window has started yet" -- "prerequisite" explains why the
+# soak hasn't started, it does not cite #7430 as a blocker of THIS proposal.
+#
+# Every genuine dependency phrase above is grammatically followed immediately
+# by the thing it names ("blocked by #N", "depends on #N", "requires #N",
+# "cannot start until #N", "must wait for #N") -- so in addition to the two
+# bullet-wide checks, require a reference to appear shortly (within
+# $_DEP_REF_WINDOW chars) AFTER a phrase match, not merely somewhere in the
+# bullet. This preserves every existing true positive (the reference
+# immediately or near-immediately follows the phrase in all of them) while
+# rejecting prose where the phrase word and the reference are structurally
+# unrelated.
+_DEP_REF_WINDOW=60
 is_dependency_finding() {
     local bullet="$1"
-    printf '%s' "$bullet" | grep -qiE '(blocked by|blocker|blocking|blocks|depends on|dependent on|dependenc(y|ies) (on|of)|requires|prerequisite|waiting on|waits on|cannot (start|proceed|begin)( work)? until|not (start|begin)able until|must wait (for|until))' || return 1
-    printf '%s' "$bullet" | grep -qE '([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+|https?://[^[:space:]),]+/(issues|pull)/[0-9]+' || return 1
-    return 0
+    local phrase_re='(blocked by|blocker|blocking|blocks|depends on|dependent on|dependenc(y|ies) (on|of)|requires|prerequisite|waiting on|waits on|cannot (start|proceed|begin)( work)? until|not (start|begin)able until|must wait (for|until))'
+    local ref_re='([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+|https?://[^[:space:]),]+/(issues|pull)/[0-9]+'
+    local windows
+
+    printf '%s' "$bullet" | grep -qiE "$phrase_re" || return 1
+    printf '%s' "$bullet" | grep -qE "$ref_re" || return 1
+
+    windows="$(printf '%s' "$bullet" | grep -oiE "${phrase_re}.{0,${_DEP_REF_WINDOW}}")" || return 1
+    printf '%s' "$windows" | grep -qE "$ref_re"
 }
 
 # findings_are_dependency_only <findings, one per line>

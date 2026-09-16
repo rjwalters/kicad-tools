@@ -1138,6 +1138,99 @@ sweep. This is a render-time read, not a `SweepInfo` schema field or an IPC
 wire-format change — a missing/unreadable log (e.g. a very recent dispatch)
 degrades to `-`, never an error.
 
+### Fleet-default rollout — soak criteria and rollback path (issue #7431, epic #6896 Phase 3)
+
+The third and final of epic #6896's three sequential Phase 3 issues (mode →
+limits → **rollout**). Per ADR-0017 § "4. Rollout posture" and the epic's own
+operator decision (2026-08-24), containment is not merely opt-in forever —
+after a soak period it becomes the *default* on Linux fleet hosts, while
+bare installs and macOS/operator hosts keep bare-metal dispatch as their
+default indefinitely. **This issue documents the soak criteria and the
+rollback path; it does not itself flip the default** — see "What this issue
+defers" below.
+
+**Soak criteria — the default may flip on a given Linux fleet host once ALL
+of the following hold, measured from the day containment was first enabled
+(opt-in) on that host:**
+
+1. **Duration**: at least **14 consecutive days** of live fleet sweep
+   dispatch with `runtimes.containment.enabled: true` on that host.
+2. **Volume**: at least **50 containerized sweeps** completed in that window
+   — a duration requirement alone is not meaningful if the host was mostly
+   idle; this keeps the sample large enough to trust.
+3. **Zero containment-attributable sweep failures** — no sweep in the window
+   failed because of the container boundary itself (docker daemon errors,
+   `docker/worker/MOUNT-CONTRACT.md` violations, or a sweep OOM-killed by the
+   `--memory` cap where the equivalent bare-metal sweep would not have hit
+   host memory pressure). A sweep that fails for an ordinary reason
+   unrelated to containment (a bad diff, a flaky test, an exhausted token)
+   does not count against this criterion.
+4. **Zero host-saturation incidents of the #5979/#4903 class** — no incident
+   where containerized sweeps collectively oversubscribed the host's CPU or
+   memory budget (the exact failure mode #5979's CPU-quota division and
+   #7430's `--memory` division exist to prevent).
+5. **Containerized success rate at or above the trailing bare-metal
+   baseline** for the same host — measured as ordinary sweep
+   outcome/telemetry (PR opened / merged vs. abandoned), not a fixed
+   absolute percentage, since baseline sweep success rates vary issue to
+   issue. The comparison is containerized-vs-that-same-host's-own-recent-bare-metal-history,
+   not an arbitrary global target.
+
+If criteria 1–5 hold, the default may flip on that host. If any regressed
+during the window (a containment-attributable failure or a saturation
+incident), the soak clock resets to zero on that host rather than merely
+pausing, so a flip decision is always backed by a clean, uninterrupted
+window.
+
+**Is existing observability (#7430) sufficient to judge this?** Yes, with no
+further instrumentation needed. Every sweep log already carries the
+canonical `# LOOM_DISPATCH_MODE mode=container|bare-metal image=<image>
+cpus=<v|none> memory=<v|none>` marker (see previous section), and
+`loom-daemon status`'s `CTR` column renders it live — together these are
+enough to (a) identify which sweeps ran containerized vs. bare-metal on a
+given host, (b) correlate a sweep's outcome (success/failure, and — if it
+failed — whether the failure looks containment-shaped, e.g. an OOM signal or
+a docker-invocation error in the log) against that marker, and (c) count
+volume and duration directly from existing per-sweep logs without adding a
+new metric. Judging criteria 3–5 above is a **manual aggregation** over
+existing logs (`grep "LOOM_DISPATCH_MODE" .loom/logs/sweep-*.log` or
+equivalent per-host log location), not a new dashboard — if that manual
+review becomes a recurring burden once a real soak window is underway, an
+aggregation script would be a reasonable, but separate, follow-up.
+
+**Rollback path.** Reverting a Linux fleet host from containment-default (or
+containment-opt-in) back to bare-metal-opt-in is a config-only change, never
+a code change or a PR — see
+[`.loom/docs/troubleshooting.md` → "Reverting containment to opt-in on a
+Linux fleet host"](troubleshooting.md#reverting-containment-to-opt-in-on-a-linux-fleet-host-7431)
+for the exact command sequence.
+
+**What this issue defers.** There is currently **no existing mechanism in
+this codebase to distinguish "a Linux fleet host" from "any other Linux
+install"** — `spawn-claude.sh`'s containment-enabled resolution has no OS or
+fleet-membership branch, and `.loom/config.json` is committed and shared
+across every clone (including macOS operator machines), so flipping its
+literal default would flip it everywhere, not just on fleet hosts. The
+config-resolution chain's tier 4, `<repo_root>/.loom-local/local.json`
+(git-ignored, highest precedence — see `defaults/scripts/lib/config-resolver.sh`),
+is the most likely intended per-host flip mechanism: it would let each
+Linux fleet host's own clone carry `runtimes.containment.enabled: true`
+while the shared, committed `.loom/config.json` default stays `false` for
+everyone else. **This is a design decision this issue does not settle** —
+the actual mechanical default flip (updating each qualifying fleet host's
+`.loom-local/local.json`, whether by hand, folded into `fleet add-worker`,
+or a dedicated provisioning script) is left to follow-up issue #7767,
+scoped to be picked up once a real soak window has actually elapsed against
+live fleet data.
+
+**Bare installs and macOS stay unaffected today.** With no config override
+present anywhere in the tier chain, `CONTAINMENT_ENABLED` resolves to `"0"`
+on every platform — there is no OS branch in the resolution logic, so this
+holds identically on macOS and Linux alike. This is covered by the
+"containment disabled by default" regression case in
+`defaults/scripts/tests/test-spawn-claude.sh` (Section 7e, originally added
+for #7429); see that file for the exact assertions.
+
 ## Fork mapping table
 
 The gpeyton/loom fork already built much of this as parallel special-casing. The

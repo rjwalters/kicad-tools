@@ -1699,6 +1699,71 @@ in-session sweep's claim because the claim itself carries no lease record —
 the same "no authoritative liveness record for in-session work" gap,
 approached from the claim-record side rather than the lock side.
 
+### Design decision: no pre-`worktree.sh` live-sibling-process probe (#7694)
+
+**Question considered.** Before `worktree.sh <N>` touches an *existing*
+`.loom/worktrees/issue-N` directory, should the Builder combine (a) worktree
+dirtiness with (b) a live-process filesystem scan
+(`loom-daemon/src/worktree_ops/safety.rs`'s `find_processes_executing_within`
+/ `find_processes_using_directory`) and stand down when both are true, as a
+generalization of the #6765 "task-liveness check before Builder re-dispatch"
+pattern in `defaults/.claude/commands/loom/sweep.md`? This was raised by
+#7672's near-miss, where a second Builder's claim went live while the first
+was still actively working in the same worktree directory.
+
+**Decision: do not build it.** The false-positive cost dominates the
+near-miss cost it would prevent, for three independent reasons:
+
+1. **The signal #6765 actually uses does not generalize the way #7694
+   proposes.** #6765/"Task-liveness check before Builder re-dispatch" queries
+   the harness's own liveness surface for a *specific, known dispatched task
+   ID* (`TaskOutput` on the original dispatch) — a precise question the
+   orchestrator can only ask about work it itself dispatched. #7694 instead
+   proposes a system-wide process/fd scan that has no notion of "which
+   process is the entitled sibling Builder" — it can only answer "is *some*
+   process touching this directory," which is a categorically weaker signal.
+2. **The reused scan is deliberately tuned for a different, cheaper failure
+   mode.** `find_processes_using_directory`'s own doc comment (safety.rs)
+   states it counts a process with only a **read-only** open handle under the
+   directory as "in use" — a `git status`, a `tail -f`, an editor with a file
+   open, a linter/watcher, a human's shell merely `cd`'d in, or a background
+   indexer would all match. That over-inclusiveness is an accepted, explicit
+   trade for the worktree-*removal* safety gate it was built for, where a
+   false positive costs one deferred reset (retried on the next tick,
+   harmless). Reusing it to gate a Builder's *decision to start work at all*
+   inherits the same false-positive rate for a much more expensive outcome —
+   a legitimate Builder standing down on a mere bystander process.
+3. **The genuinely destructive path is already closed, more narrowly, by
+   #6334.** The only git-level mutation `worktree.sh` performs against an
+   *existing* registered worktree is the "stale, no uncommitted changes"
+   reset — a worktree with uncommitted changes is already routed to
+   "preserve and exit" before any reset is attempted. The reset path itself
+   re-derives dirtiness immediately before the destructive `git reset --hard`
+   (`lib/worktree-race-rescue.sh`, `loom_worktree_reset_or_rescue`) and
+   rescues any newly-appeared tracked diff to a patch file (or refuses
+   outright on new commits) rather than discarding it — closing exactly the
+   "false positives are expensive" / "stale-but-dirty recovery worktree"
+   window #7694's own sketch worried about, without needing a new gate. A
+   one-shot pre-probe would not add meaningfully to this: it fires once at
+   invocation and cannot prevent a race that unfolds over the following
+   working session (a genuine second-writer collision on files, not a `git
+   reset`), and a durable fix for *that* belongs at the acquisition/lease
+   layer (#4028), not as a filesystem heuristic bolted in front of
+   `worktree.sh`.
+
+This is also consistent with this repo's "repair over gate" / full-autonomy
+default: the destructive-data-loss instance of this risk already has a
+narrow, low-false-positive repair (#6334); adding a broad-signal stand-down
+gate on top of it trades a well-understood, cheap failure mode (occasional
+deferred reset) for a new, harder-to-diagnose one (Builders silently
+refusing to start because an unrelated process happened to have a read
+handle open in their worktree). If a future incident shows the #6334 rescue
+path itself is insufficient — e.g. two processes genuinely writing
+concurrently, not just one resetting past the other — revisit with a
+narrower signal than a system-wide process scan, such as extending the lease
+record itself (the #4028 acquisition-race track) rather than a local
+filesystem heuristic that can't see cross-host siblings anyway.
+
 ## Sweep Dispatch Troubleshooting
 
 Multi-issue dispatch is driven by the Rust `loom-daemon` binary via `mcp__loom__dispatch_sweep`. The daemon holds the sweep registry, event bus, and reaper in memory — there is no on-disk orchestration state file to inspect. (The v0.9.x `spawn-loop.sh` and its `.loom/spawn-loop-state.json` state file were removed in v0.11.0.)
@@ -1877,6 +1942,75 @@ For now, trigger them manually when the queue is empty:
 claude -p "/loom:architect" --dangerously-skip-permissions
 claude -p "/loom:hermit"    --dangerously-skip-permissions
 ```
+
+### Reverting containment to opt-in on a Linux fleet host (#7431)
+
+**Symptom / scenario**: a Linux fleet host has containerized sweep dispatch
+(`runtimes.containment.enabled`) turned on — either because it was
+individually opted in, or because it was promoted to the fleet-default
+per the soak criteria in
+[`defaults/docs/runtime-adapters.md` → "Fleet-default rollout"](runtime-adapters.md#fleet-default-rollout--soak-criteria-and-rollback-path-issue-7431-epic-6896-phase-3)
+— and it needs to go back to bare-metal dispatch (opt-in only, or off
+entirely) on that host alone, without touching any other host or the
+repo's shared, committed `.loom/config.json` default.
+
+**This is a config-only change — never a code change or a PR.** The
+intended per-host override lives at config-resolver tier 4,
+`<repo_root>/.loom-local/local.json` (git-ignored, highest precedence — see
+`defaults/scripts/lib/config-resolver.sh`), so editing it on one host has no
+effect anywhere else:
+
+```bash
+# On the affected host, in the repo root (main checkout, not a worktree):
+mkdir -p .loom-local
+cat > .loom-local/local.json <<'EOF'
+{
+  "runtimes": {
+    "containment": {
+      "enabled": false
+    }
+  }
+}
+EOF
+```
+
+If `.loom-local/local.json` already exists with other keys, merge the
+`runtimes.containment.enabled: false` key into it (e.g. with `jq`) rather
+than overwriting the file — a plain overwrite would silently drop any other
+per-host overrides already recorded there:
+
+```bash
+jq '.runtimes.containment.enabled = false' .loom-local/local.json \
+  > .loom-local/local.json.tmp && mv .loom-local/local.json.tmp .loom-local/local.json
+```
+
+Alternatively, deleting the file (or just the `runtimes.containment` key)
+falls back to whatever the next-lower tier (`.loom-project/project.json`,
+then the committed `.loom/config.json`) resolves to for this host — use the
+explicit `false` above instead if you specifically want opt-in-only
+behavior on this host regardless of what a lower tier says.
+
+**No daemon restart is required.** `spawn-claude.sh` sources
+`config-resolver.sh` and re-resolves the containment setting fresh on
+**every** sweep dispatch — it is not cached in daemon memory or read once at
+daemon startup. The very next sweep dispatched on this host after the file
+is saved picks up the reverted value; sweeps already in flight are
+unaffected (they already resolved their own containment decision at their
+own dispatch time and keep running as originally dispatched).
+
+**Verify the revert took effect** on the next dispatch by checking the
+sweep's own log for the canonical marker (see
+`defaults/docs/runtime-adapters.md` → "Per-sweep resource limits +
+containment observability"):
+
+```bash
+grep "LOOM_DISPATCH_MODE" <path-to-the-next-sweep's-log>
+# expect: # LOOM_DISPATCH_MODE mode=bare-metal
+```
+
+or, for an in-flight view across the host, check the `CTR` column in
+`loom-daemon status` — it should show `-` for sweeps dispatched after the
+revert.
 
 ## Overnight / long-running orchestration
 
@@ -2190,7 +2324,13 @@ cd <main checkout>                              # NOT .loom/worktrees/issue-N (#
 git merge --ff-only origin/main                 # bring defaults/ current
 ./.loom/scripts/resync-installed.sh --dry-run   # preview what would change (exits 2 on drift)
 ./.loom/scripts/resync-installed.sh             # apply
+./.loom/scripts/land-resync-commit.sh           # commit + land it (never rebases/bypass-pushes, #6646)
 ```
+
+The last step is what actually commits and pushes the refreshed surfaces onto
+the primary clone's default branch — see "Landing a resync commit on the
+primary clone (#6646)" below for exactly what it will and will not do on its
+own.
 
 `--dry-run` makes no changes and exits `2` when drift is detected (so it doubles
 as a check). To pin an intentional per-repo customization so resync never
@@ -2242,3 +2382,148 @@ The same list also declares a file **repo-owned**, so the installer's reinstall
 clean sweep never deletes it — see
 [`repo-owned-files.md`](repo-owned-files.md) for the full ownership rule that
 governs files living inside `.loom/hooks/` and the other managed directories.
+
+### Landing a resync commit on the primary clone (#6646)
+
+**`resync-installed.sh` itself never commits or pushes anything** (see its own
+header) — it only refreshes the installed copies and, when that leaves the
+tree dirty with nothing but resync output, PRINTS a suggested `git add && git
+commit` command. **Actually landing that commit onto the primary clone's
+default branch — including pushing it — is a sweep/agent action, not a config
+toggle or an operator-approval gate**: any sweep or role that finds the
+primary checkout dirty with only resync-managed output may commit and push it
+directly, no human sign-off required. This is deliberate — keeping the
+installed surfaces current is routine maintenance, and gating every one behind
+a human would defeat the point of automating it.
+
+The **landing** step itself always goes through
+`./.loom/scripts/land-resync-commit.sh` (never a hand-rolled `git commit && git
+push`), which is intentionally conservative about how far it will go on its
+own:
+
+- It only ever commits paths inside the known resync-managed surfaces
+  (`.loom/hooks|scripts|roles|docs|bin|runtimes/`, `.claude/commands/loom/`,
+  and the handful of single-file targets `resync-installed.sh` itself
+  resyncs). If the tree is dirty with anything else alongside that output, it
+  refuses to commit **anything** — an unrelated (possibly in-progress
+  operator) change is never swept into a "chore: resync" commit.
+- **It never rebases the primary clone's default branch, and it never
+  force- or bypass-pushes to reconcile with a diverged `origin`.** This is
+  the direct fix for the incident that motivated this script: an operator
+  had just fast-forward-landed a not-yet-pushed local commit in the primary
+  clone when a sweep committed its own resync change on top, rebased local
+  `main` onto `origin/main` (which had gained several merged PRs in the
+  meantime — silently re-creating the operator's commit under a new SHA),
+  and bypass-pushed the result past the branch's required status checks.
+  Nothing was actually lost (the recreated commit had identical content),
+  but the operator's recorded SHA vanished from `git log`, a
+  branch-protection bypass push happened from automation with no
+  announcement, and establishing that this was benign took a reflog read.
+- Concretely: if the primary checkout's default branch is already ahead of
+  `origin` by one or more commits **not authored by the checkout's own
+  configured git identity** (`git config user.email` — presumed to be an
+  operator's own in-flight, not-yet-pushed work), the script commits the
+  resync change locally and **stops** — nothing is pushed, nothing is
+  rebased, nothing is forced. The operator's commit SHA is left exactly as
+  they made it. A human has to push or reconcile by hand before the next
+  resync can land (exit code `3`; the script's own stderr names the commit(s)
+  it stopped for).
+- Otherwise — every commit ahead of `origin` is this checkout's own
+  automation — it first asks the forge whether the default branch is
+  **protected** (GitHub only: an active `pull_request` /
+  `required_status_checks` ruleset rule via
+  `gh api repos/{owner}/{repo}/rules/branches/<default>`, or legacy branch
+  protection). This pre-check exists because "branch protection rejects a
+  plain push" is only true for an identity *without* bypass rights: the
+  #6646 incident was **not** a `--force` push — it was a plain push that
+  GitHub *accepted* from a bypass-capable identity (the operator's own
+  account / the fleet App, admin on the repo) and merely reported on stderr
+  as `remote: Bypassed rule violations for refs/heads/main:`. So on a
+  protected branch the direct push is skipped outright, regardless of
+  whether this identity could bypass. The pre-check fails **closed** on a
+  GitHub API *error*: a non-zero exit from the rules call (rate limit, 5xx,
+  DNS, a token without rulesets read) or an unparseable answer is treated as
+  "protected" and routed to the branch + PR path, because a transient REST
+  failure must never turn into a bypass push from a bypass-capable identity.
+  It fails **open** only when there is no `gh` on PATH or the forge is Gitea
+  (`LOOM_FORGE_TYPE=gitea`), so an offline/non-GitHub host still works —
+  which is why there is a second line of defense: a plain push's stderr is
+  inspected *even on success*, and a `Bypassed rule violations` warning
+  turns the run into a loud failure (exit code `4`, naming the commit and
+  quoting the forge). The commit *is* on origin at that point — this script
+  never force-pushes, so it does not undo it — but the run is reported as
+  failed so a bypass push can never happen silently again; fix the pushing
+  identity / ruleset bypass list (or whatever made the pre-check fail open:
+  no `gh`, a Gitea forge) before the next resync lands.
+- When the branch is unprotected, a plain `git push` is attempted — ordinary
+  git semantics make it fast-forward-only by construction. If it is
+  rejected (`origin` advanced with commits this checkout doesn't have yet),
+  or the pre-check said "protected", it does **not** retry with a rebase or
+  a forced push: it lands the commit via a short-lived side branch + PR —
+  the same path (`create-pr.sh`) other automated commits already use — then
+  resets the primary checkout's default branch back to `origin`'s current
+  tip so it never sits diverged waiting on that PR to merge. The side branch
+  name is the **stable** `chore/resync-installed` (no timestamp): after that
+  reset the next `resync-installed.sh` re-dirties the tree identically, so a
+  host whose plain push is refused every time (a non-bypass identity on a
+  protected branch — the very population the fallback exists for) would
+  otherwise open a fresh PR per sweep. With one name, `create-pr.sh`'s
+  adopt-existing check converges every re-run on the single open PR, and the
+  side branch is pushed with `--force-with-lease` to move that PR's head to
+  the fresh commit (forcing a throwaway side branch is fine; only the
+  default branch is sacred). The PR is opened with `loom:review-requested`
+  so it enters the normal Judge queue rather than waiting for someone to
+  notice it. No local side branch is created or left behind.
+- **Re-running it is idempotent.** If a run commits the resync and then
+  fails before landing it (fetch failure, side-branch push failure — exit
+  `1`), the commit stays on the local default branch. The next run finds a
+  clean tree but does **not** stop at "nothing to land": it still fetches and
+  evaluates `origin/<default>..HEAD`, and if every commit ahead is
+  Loom-authored it lands them (same SHA, no rebase). A clean tree whose only
+  commits ahead are an operator's is left exactly as it is (exit `0`,
+  nothing pushed); a stranded resync commit sitting *behind* an operator
+  commit stops with exit `3` as above.
+- **A note on the identity heuristic's honesty.** "Not authored by this
+  checkout's configured `user.email`" is how the script recognizes operator
+  work. On a host where the operator's own git identity *is* the automation
+  identity (this repo on the operator's workstation, for example), an
+  operator's unpushed commit is indistinguishable from Loom's and will be
+  plain-pushed along with the resync commit. That is a fast-forward of the
+  operator's own commit under its original SHA — never a rewrite — so it
+  cannot reproduce the incident; but do not expect the exit-`3` stop to fire
+  for your own work on such a host.
+
+**How to tell "expected" from "something rewrote my branch".** Since this
+script never rebases, a commit already on the default branch — yours or
+anyone else's — keeps its original SHA forever; a resync landing never
+recreates it. If you ever see the primary clone's default branch move in a
+way you didn't expect (a SHA you just recorded is no longer in `git log`, or
+`git status` reports it's diverged from `origin` after you left the checkout
+untouched), the reflog is the fastest way to establish whether it's benign:
+
+```bash
+git reflog show <default-branch>   # every ref update this local checkout has seen, newest first
+```
+
+The script leaves exactly two signatures on the default branch's reflog, and
+nothing else:
+
+- **Direct push**: a single `commit: chore: resync installed Loom surfaces`
+  entry (a fresh commit; the branch then matches `origin`).
+- **Branch + PR fallback**: `commit: chore: resync installed Loom surfaces`
+  immediately followed by `reset: moving to origin/<default>` — the reset is
+  the script putting the default branch back on `origin`'s tip after pushing
+  the commit to the side branch. The commit it moved away from is on
+  `origin/chore/resync-installed` (with an open PR for it) — `git log
+  origin/chore/resync-installed -1` shows it — so it is not lost.
+
+Anything else is not this script. An entry reading `pull --ff-only` /
+`merge <sha>: Fast-forward` is an ordinary fast-forward picking up someone
+else's merged PR (also benign). A `rebase (finish):` entry — or a `reset:`
+that is *not* immediately preceded by that `commit:` entry, or one moving to
+anything other than `origin/<default>` — is the signature this script is
+specifically designed never to produce: if you see one, it did **not** come
+from `land-resync-commit.sh`; track down what did. If a commit's SHA
+legitimately changed for some other reason, `git diff <old-sha> <new-sha>`
+being empty confirms the content is identical (the #6646 incident's actual
+outcome) even though the identity changed.

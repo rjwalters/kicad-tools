@@ -4918,6 +4918,41 @@ ALWAYS_BLOCK_PATTERNS=(
     # (#3584).
 )
 
+# =============================================================================
+# DERIVED SCAN COPIES — MACHINE-CHECKED TIER CONTRACTS (#7755)
+#
+# Everything from here down decides "is this executable code, or inert quoted
+# data?" by matching patterns against LOSSY derived copies of $COMMAND. Each
+# copy's masking is only ever justified for ONE consumer tier, and the failure
+# direction flips with the consumer: a missed match on an ASK copy costs a
+# missed ask (an accepted risk), the same miss on a DENY copy is a silent
+# ALLOW where the guard is required to refuse. That reservation used to be
+# prose only, and it was violated exactly that way once already — #6252 /
+# ADR-0016, where COMMAND_ASK_SCAN's ask-justified comment stripping was
+# routed into extract_write_targets()'s hard-DENY write-confinement check.
+#
+# The reservation is now machine-checked by
+# scripts/check-guard-scan-contracts.sh (wired into CI), via two markers:
+#
+#   # scan-contract: <VAR>=<TIER> from=<PARENT>   on each derived copy
+#   # scan-reads: <VAR>[,<VAR>...]                on each deny()/ask() line
+#                                                 ("none" = raw $COMMAND only)
+#
+# <TIER> is the STRICTEST consumer this copy may feed — ask-only, deny-safe,
+# or catastrophic-safe (the ungated ALWAYS_BLOCK floor, kept strictly stricter
+# than everything else so a missed BLOCK can never come from a shared masking
+# pass). The checker derives each site's OWN tier mechanically from the line
+# (ask() / deny() / a "catastrophic:" reason code) and fails when a site
+# decides at a stricter tier than the copy it reads was declared for, or when
+# a copy is declared safer than the copy it is derived from. A deliberate
+# exception is recorded with `scan-waiver: <reason>` on the same scan-reads
+# comment — never silently.
+#
+# So: adding a READER is now the reviewed act, not just changing a masking
+# pass. A new derived copy without a contract, or a new deny()/ask() without a
+# scan-reads line, fails CI. Current inventory, with each copy's accepted
+# lossiness and every read site: defaults/docs/guard-scan-contracts.md.
+# =============================================================================
 # Build a literal-text-redacted working copy ONLY for the catastrophic scan
 # below, so a force-push-to-main phrase quoted inside a
 # --body/-m/--title/--notes/--comment value no longer false-positives (#3679,
@@ -4926,7 +4961,7 @@ ALWAYS_BLOCK_PATTERNS=(
 # `#`-present guard). `-c` is intentionally excluded so `bash -c '<payload>'`
 # payloads still reach the raw scan; spans carrying `$(` / backtick are left
 # intact so command-substitution smuggling still hard-denies.
-COMMAND_NO_LITERAL_TEXT="$COMMAND"
+COMMAND_NO_LITERAL_TEXT="$COMMAND"  # scan-contract: COMMAND_NO_LITERAL_TEXT=catastrophic-safe from=COMMAND
 # #6002: mask a fully-closed `for <var> in "<lit>" ...; do ... done` word
 # list's OWN quoted literals BEFORE every other pass below, so a phrase like
 # `for q in "sql-ddl" "catastrophic:aws s3 rb"; do gh issue list --search
@@ -5005,7 +5040,7 @@ fi
 
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
     if echo "$COMMAND_NO_LITERAL_TEXT" | grep -qiE "$pattern"; then
-        deny "BLOCKED: Command matches dangerous pattern: $pattern" "catastrophic:$pattern"
+        deny "BLOCKED: Command matches dangerous pattern: $pattern" "catastrophic:$pattern"  # scan-reads: COMMAND_NO_LITERAL_TEXT
     fi
 done
 
@@ -5042,7 +5077,7 @@ done
 # `-F body=@path` anti-pattern (#4577).
 GH_COMMENT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+comment[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@[/.~]"
 if echo "$COMMAND" | grep -qiE "$GH_COMMENT_BODY_AT_PATTERN"; then
-    deny "BLOCKED: 'gh pr comment'/'gh issue comment --body @path' does NOT expand the file — it posts the literal string '@path' as the comment (lost the PR #4457 review this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-comment-body-literal-at"
+    deny "BLOCKED: 'gh pr comment'/'gh issue comment --body @path' does NOT expand the file — it posts the literal string '@path' as the comment (lost the PR #4457 review this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-comment-body-literal-at"  # scan-reads: none
 fi
 
 # =============================================================================
@@ -5057,7 +5092,7 @@ fi
 # =============================================================================
 GH_EDIT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+edit[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@[/.~]"
 if echo "$COMMAND" | grep -qiE "$GH_EDIT_BODY_AT_PATTERN"; then
-    deny "BLOCKED: 'gh pr edit'/'gh issue edit --body @path' does NOT expand the file — it writes the literal string '@path' as the issue/PR body (corrupted issue #4608's body this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-edit-body-literal-at"
+    deny "BLOCKED: 'gh pr edit'/'gh issue edit --body @path' does NOT expand the file — it writes the literal string '@path' as the issue/PR body (corrupted issue #4608's body this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-edit-body-literal-at"  # scan-reads: none
 fi
 
 # =============================================================================
@@ -5120,7 +5155,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
         for _gh_at_var in $_gh_at_path_vars; do
             # ...and passed straight through as the --body/-b value ($V, ${V}, "$V").
             if echo "$COMMAND" | grep -qiE "(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?[\$]\{?${_gh_at_var}(\}|[^A-Za-z0-9_]|\$)"; then
-                deny "BLOCKED: '\$${_gh_at_var}' is assigned a path-shaped '@<path>' value and passed as --body — 'gh pr comment'/'gh issue comment' does NOT expand '@path' from a variable either; it posts the literal string as the comment (lost the PR #4457 review this way, recurred on PR #4600 through exactly this indirection). Use --body-file <path>, 'gh api ... -F body=@<path>', or --body \"\$(cat <<'EOF' ... EOF)\"." "gh-comment-body-literal-at-var"
+                deny "BLOCKED: '\$${_gh_at_var}' is assigned a path-shaped '@<path>' value and passed as --body — 'gh pr comment'/'gh issue comment' does NOT expand '@path' from a variable either; it posts the literal string as the comment (lost the PR #4457 review this way, recurred on PR #4600 through exactly this indirection). Use --body-file <path>, 'gh api ... -F body=@<path>', or --body \"\$(cat <<'EOF' ... EOF)\"." "gh-comment-body-literal-at-var"  # scan-reads: none
             fi
         done
     fi
@@ -5138,7 +5173,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
             | tr -d '=' | sort -u)
         for _gh_at_var in $_gh_at_path_vars_edit; do
             if echo "$COMMAND" | grep -qiE "(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?[\$]\{?${_gh_at_var}(\}|[^A-Za-z0-9_]|\$)"; then
-                deny "BLOCKED: '\$${_gh_at_var}' is assigned a path-shaped '@<path>' value and passed as --body — 'gh pr edit'/'gh issue edit' does NOT expand '@path' from a variable either; it writes the literal string as the issue/PR body (corrupted issue #4608's body this way). Use --body-file <path>, 'gh api ... -F body=@<path>', or --body \"\$(cat <<'EOF' ... EOF)\"." "gh-edit-body-literal-at-var"
+                deny "BLOCKED: '\$${_gh_at_var}' is assigned a path-shaped '@<path>' value and passed as --body — 'gh pr edit'/'gh issue edit' does NOT expand '@path' from a variable either; it writes the literal string as the issue/PR body (corrupted issue #4608's body this way). Use --body-file <path>, 'gh api ... -F body=@<path>', or --body \"\$(cat <<'EOF' ... EOF)\"." "gh-edit-body-literal-at-var"  # scan-reads: none
             fi
         done
     fi
@@ -5193,6 +5228,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
     # tiers now leave interpreter-fed bodies visible and share one masking
     # contract -- see KNOWN LIMITATIONS #1 above.
     # -------------------------------------------------------------------------
+    # scan-contract: COMMAND_HEREDOC_MASKED=deny-safe from=COMMAND
     if [[ "$COMMAND" == *"<<"* ]]; then
         COMMAND_HEREDOC_MASKED=$(printf '%s' "$COMMAND" | awk "$_MASKHEREDOC_AWK"'
         { buf = buf (NR > 1 ? "\n" : "") $0 }
@@ -5228,7 +5264,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
     # strip_literal_text()'s flags (`gh api` takes `-f`/`--raw-field`/`-F`/
     # `--field`, none of which are in that flag list) -- see the "narrows, never
     # widens" regression tests in tests/hooks/test-guard-destructive.sh.
-    COMMAND_GH_API_RAWFIELD_SCAN="$COMMAND_HEREDOC_MASKED"
+    COMMAND_GH_API_RAWFIELD_SCAN="$COMMAND_HEREDOC_MASKED"  # scan-contract: COMMAND_GH_API_RAWFIELD_SCAN=deny-safe from=COMMAND_HEREDOC_MASKED
     if [[ "$COMMAND_GH_API_RAWFIELD_SCAN" == *"check-duplicate.sh"* ]]; then
         COMMAND_GH_API_RAWFIELD_SCAN=$(mask_ask_positional_args "$COMMAND_GH_API_RAWFIELD_SCAN")
     fi
@@ -5240,7 +5276,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
     fi
     GH_API_RAWFIELD_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+api[^;&]*[[:space:]](-f|--raw-field)[[:space:]]*=?[[:space:]]*[\"']?body=[\"']?$GH_AT_PATHISH"
     if echo "$COMMAND_GH_API_RAWFIELD_SCAN" | grep -qE "$GH_API_RAWFIELD_BODY_AT_PATTERN"; then
-        deny "BLOCKED: 'gh api ... -f/--raw-field body=@<path>' does NOT read the file — only -F/--field gives '@<path>' its read-from-file meaning. As written this posts the literal string '@<path>' as the body (same silent data loss as PR #4457/issue #4608). Use '-F body=@<path>' instead." "gh-api-rawfield-body-literal-at"
+        deny "BLOCKED: 'gh api ... -f/--raw-field body=@<path>' does NOT read the file — only -F/--field gives '@<path>' its read-from-file meaning. As written this posts the literal string '@<path>' as the body (same silent data loss as PR #4457/issue #4608). Use '-F body=@<path>' instead." "gh-api-rawfield-body-literal-at"  # scan-reads: COMMAND_GH_API_RAWFIELD_SCAN
     fi
 fi
 
@@ -5272,6 +5308,7 @@ fi
 # tests/hooks/test-guard-destructive.sh. The awk only runs when a `#` is
 # actually present, keeping it off the hot path (#3553).
 # =============================================================================
+# scan-contract: COMMAND_NO_COMMENT=deny-safe from=COMMAND
 if [[ "$COMMAND" == *"#"* ]]; then
     COMMAND_NO_COMMENT=$(printf '%s' "$COMMAND" | awk "$_MASKCOMMENT_AWK"'
     { buf = buf (NR > 1 ? "\n" : "") $0 }
@@ -5309,7 +5346,7 @@ fi
 # force-op:protected, or any other ASK_PATTERNS entry. Gated on the same
 # command-name substring the awk allowlist matches, keeping it off the hot
 # path for the vast majority of commands that never invoke it.
-COMMAND_ASK_SCAN="$COMMAND_NO_COMMENT"
+COMMAND_ASK_SCAN="$COMMAND_NO_COMMENT"  # scan-contract: COMMAND_ASK_SCAN=deny-safe from=COMMAND_NO_COMMENT
 # HEREDOC-BODY MASKING (#5779): none of the narrowings above touch a
 # single-quoted heredoc BODY -- e.g. `cat > /tmp/x.md <<'EOF' ... git reset
 # --hard ... EOF` -- since that shape carries no --body/-m/etc. flag and is
@@ -5373,7 +5410,7 @@ fi
 # cannot tell "$q" apart from a real literal) -- masking that away first
 # would erase the very `$q` text mask_catastrophic_forloop_wordlist()'s own
 # safety check depends on seeing, causing it to fail closed for no reason.
-COMMAND_CLOUD_ASK_SCAN="$COMMAND_ASK_SCAN"
+COMMAND_CLOUD_ASK_SCAN="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_CLOUD_ASK_SCAN=ask-only from=COMMAND_ASK_SCAN
 if [[ "$COMMAND" == *"for "* && "$COMMAND" == *" in "* ]]; then
     COMMAND_CLOUD_ASK_SCAN=$(mask_catastrophic_forloop_wordlist "$COMMAND_CLOUD_ASK_SCAN")
 fi
@@ -5423,7 +5460,7 @@ fi
 # and only ADDS the extra positional masking on top. Never fed back into
 # COMMAND_ASK_SCAN itself, so SQL_DDL_PATTERN and every other
 # COMMAND_ASK_SCAN consumer are completely unaffected by this branch.
-COMMAND_ASK_SCAN_PRINTENV="$COMMAND_ASK_SCAN"
+COMMAND_ASK_SCAN_PRINTENV="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_ASK_SCAN_PRINTENV=ask-only from=COMMAND_ASK_SCAN
 if [[ "$COMMAND" == *"for "* && "$COMMAND" == *" in "* ]]; then
     COMMAND_ASK_SCAN_PRINTENV=$(mask_catastrophic_forloop_wordlist "$COMMAND_ASK_SCAN_PRINTENV")
 fi
@@ -5469,7 +5506,7 @@ done
 # extra positional masking on top. Never fed back into COMMAND_ASK_SCAN
 # itself, so SQL_DDL_PATTERN and every other COMMAND_ASK_SCAN consumer are
 # completely unaffected by this branch.
-COMMAND_STASH_SCAN="$COMMAND_ASK_SCAN"
+COMMAND_STASH_SCAN="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_STASH_SCAN=deny-safe from=COMMAND_ASK_SCAN
 if [[ "$COMMAND" == *"grep"* || "$COMMAND" == *"awk"* || "$COMMAND" == *"rg "* ]]; then
     COMMAND_STASH_SCAN=$(mask_stash_scan_positional_args "$COMMAND_STASH_SCAN")
 fi
@@ -5570,11 +5607,11 @@ lifecycle_or_cloud_reason() {
 _LIFECYCLE_CLOUD_REASONS=$(lifecycle_or_cloud_reason "$COMMAND_ASK_SCAN")
 _LIFECYCLE_DENY=$(printf '%s\n' "$_LIFECYCLE_CLOUD_REASONS" | grep '^system lifecycle command:' | head -1)
 if [[ -n "$_LIFECYCLE_DENY" ]]; then
-    deny "BLOCKED: $_LIFECYCLE_DENY" "lifecycle"
+    deny "BLOCKED: $_LIFECYCLE_DENY" "lifecycle"  # scan-reads: COMMAND_ASK_SCAN
 fi
 _CLOUD_DELETE_ASK=$(printf '%s\n' "$_LIFECYCLE_CLOUD_REASONS" | grep '^cloud resource deletion:' | head -1)
 if [[ -n "$_CLOUD_DELETE_ASK" ]]; then
-    ask "Command requires confirmation: $COMMAND ($_CLOUD_DELETE_ASK — retiered to the ungated ask tier in #4216; an interactive operator confirms, a headless session still blocks)" "cloud-delete-ask"
+    ask "Command requires confirmation: $COMMAND ($_CLOUD_DELETE_ASK — retiered to the ungated ask tier in #4216; an interactive operator confirms, a headless session still blocks)" "cloud-delete-ask"  # scan-reads: COMMAND_ASK_SCAN
 fi
 
 # =============================================================================
@@ -5602,7 +5639,7 @@ fi
 SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
 if echo "$COMMAND_ASK_SCAN" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
     matched=$(echo "$COMMAND_ASK_SCAN" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
-    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"
+    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
 fi
 
 # =============================================================================
@@ -6991,7 +7028,7 @@ if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
             if [[ "$ABS_PATH" == "/" ]] || \
                [[ -n "$HOME" && "$ABS_PATH" == "$HOME" ]] || \
                [[ "$ABS_PATH" =~ ^/[^/]+$ ]]; then
-                deny "BLOCKED: rm on protected system path: $ABS_PATH" "rm-protected-path"
+                deny "BLOCKED: rm on protected system path: $ABS_PATH" "rm-protected-path"  # scan-reads: COMMAND_ASK_SCAN
             fi
 
             # Opt-in repo-scoped strict mode (guards.rmScope:"repo" /
@@ -7056,7 +7093,7 @@ if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                     # `NAME=$(mktemp -d)` sitting outside every heredoc in the
                     # same command is completely unaffected.
                     if [[ -z "${COMMAND_RM_MKTEMP_SCAN+x}" ]]; then
-                        COMMAND_RM_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"
+                        COMMAND_RM_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"  # scan-contract: COMMAND_RM_MKTEMP_SCAN=deny-safe from=COMMAND_NO_LITERAL_TEXT
                         if [[ "$COMMAND_RM_MKTEMP_SCAN" == *"<<"* ]]; then
                             COMMAND_RM_MKTEMP_SCAN=$(printf '%s' "$COMMAND_RM_MKTEMP_SCAN" | awk "$_MASKHEREDOC_AWK"'
                             { buf = buf (NR > 1 ? "\n" : "") $0 }
@@ -7088,10 +7125,10 @@ if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                         if [[ "$ABS_PATH" == "/" ]] || \
                            [[ -n "$HOME" && "$ABS_PATH" == "$HOME" ]] || \
                            [[ "$ABS_PATH" =~ ^/[^/]+$ ]]; then
-                            deny "BLOCKED: rm on protected system path: $ABS_PATH" "rm-protected-path"
+                            deny "BLOCKED: rm on protected system path: $ABS_PATH" "rm-protected-path"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_RM_MKTEMP_SCAN
                         fi
                     else
-                        deny "BLOCKED: rm target '${target}' is an unexpanded shell variable from the path root down, so this guard cannot tell where it resolves at runtime (guards.rmScope=repo). Unresolvable rm targets fail closed (mirrors rjwalters/repo#244, fixing #239). Use an explicit literal path." "rm-scope-unresolved-var"
+                        deny "BLOCKED: rm target '${target}' is an unexpanded shell variable from the path root down, so this guard cannot tell where it resolves at runtime (guards.rmScope=repo). Unresolvable rm targets fail closed (mirrors rjwalters/repo#244, fixing #239). Use an explicit literal path." "rm-scope-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_RM_MKTEMP_SCAN
                     fi
                 fi
 
@@ -7141,7 +7178,7 @@ if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
                 fi
 
                 if [[ "$IN_SCOPE" == false ]]; then
-                    deny "BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo): $ABS_PATH" "rm-scope-outside-repo"
+                    deny "BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo): $ABS_PATH" "rm-scope-outside-repo"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_RM_MKTEMP_SCAN
                 fi
             fi
         fi
@@ -7605,7 +7642,7 @@ if worktree_isolation_guard_enabled && \
                         # a false SAFE verdict for a live assignment elsewhere in
                         # the same command.
                         if [[ -z "${COMMAND_WT_MKTEMP_SCAN+x}" ]]; then
-                            COMMAND_WT_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"
+                            COMMAND_WT_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"  # scan-contract: COMMAND_WT_MKTEMP_SCAN=deny-safe from=COMMAND_NO_LITERAL_TEXT
                             if [[ "$COMMAND_WT_MKTEMP_SCAN" == *"<<"* ]]; then
                                 COMMAND_WT_MKTEMP_SCAN=$(printf '%s' "$COMMAND_WT_MKTEMP_SCAN" | awk "$_MASKHEREDOC_AWK"'
                                 { buf = buf (NR > 1 ? "\n" : "") $0 }
@@ -7615,7 +7652,7 @@ if worktree_isolation_guard_enabled && \
                         if wt_write_mktemp_same_command_safe "$_wtarget" "$COMMAND_WT_MKTEMP_SCAN"; then
                             continue
                         fi
-                        deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
+                        deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
                     fi
                     continue
                 fi
@@ -7658,7 +7695,7 @@ if worktree_isolation_guard_enabled && \
                     if [[ "$_wmarked" != *$'\001'* && "$_wtarget" != *'$'* ]] \
                         && _wt_write_mktemp_leading_var "$_wcwd"; then
                         if [[ -z "${COMMAND_WT_MKTEMP_SCAN+x}" ]]; then
-                            COMMAND_WT_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"
+                            COMMAND_WT_MKTEMP_SCAN="$COMMAND_NO_LITERAL_TEXT"  # scan-contract: COMMAND_WT_MKTEMP_SCAN=deny-safe from=COMMAND_NO_LITERAL_TEXT
                             if [[ "$COMMAND_WT_MKTEMP_SCAN" == *"<<"* ]]; then
                                 COMMAND_WT_MKTEMP_SCAN=$(printf '%s' "$COMMAND_WT_MKTEMP_SCAN" | awk "$_MASKHEREDOC_AWK"'
                                 { buf = buf (NR > 1 ? "\n" : "") $0 }
@@ -7684,11 +7721,11 @@ if worktree_isolation_guard_enabled && \
                         # value picks a top-level directory, the main
                         # checkout's own included. Same verdict as (1).
                         if _wt_isolation_in_play; then
-                            deny "BLOCKED: Bash-tool write target '${_wtarget}' has an unexpanded shell variable as its first real path component, so this guard cannot tell where the write lands — it may resolve inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
+                            deny "BLOCKED: Bash-tool write target '${_wtarget}' has an unexpanded shell variable as its first real path component, so this guard cannot tell where the write lands — it may resolve inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
                         fi
                     elif _wt_in_protected_area "$_wknown"; then
                         if _wt_isolation_in_play; then
-                            deny "BLOCKED: Bash-tool write target '${_wtarget}' contains an unexpanded shell variable in a directory component, and its known prefix ('${_wknown}') is inside this repository's worktree/checkout area — this guard cannot tell whether the expanded path stays in your worktree or lands in the main repository checkout ('${_WT_MAIN_ROOT}'). Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"
+                            deny "BLOCKED: Bash-tool write target '${_wtarget}' contains an unexpanded shell variable in a directory component, and its known prefix ('${_wknown}') is inside this repository's worktree/checkout area — this guard cannot tell whether the expanded path stays in your worktree or lands in the main repository checkout ('${_WT_MAIN_ROOT}'). Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
                         fi
                     fi
                     continue
@@ -7789,7 +7826,7 @@ if worktree_isolation_guard_enabled && \
         # base is resolved off the same main-checkout root so the "a managed
         # worktree exists" gate stays consistent with the containment test.
         if _wt_isolation_in_play; then
-            deny "BLOCKED: Bash-tool write to '${_wabs}' resolves to the main repository checkout ('${_WT_MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). This is a worktree-isolation bypass via Bash redirection/tee/sed -i/cp/mv — do NOT retry the write through Bash. cd into your issue worktree ($(_wt_worktree_hint)) and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement"
+            deny "BLOCKED: Bash-tool write to '${_wabs}' resolves to the main repository checkout ('${_WT_MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). This is a worktree-isolation bypass via Bash redirection/tee/sed -i/cp/mv — do NOT retry the write through Bash. cd into your issue worktree ($(_wt_worktree_hint)) and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
         fi
     done <<< "$WRITE_TARGETS"
 fi
@@ -7804,7 +7841,7 @@ fi
 # path for non-SQL commands.
 if echo "$COMMAND_NO_COMMENT" | grep -qiE 'DELETE[[:space:]]+FROM[[:space:]]+' && \
    ! echo "$COMMAND_NO_COMMENT" | grep -qiE 'WHERE[[:space:]]+'; then
-    sql_guard_enabled && deny "BLOCKED: DELETE FROM without WHERE clause" "sql-delete-no-where"
+    sql_guard_enabled && deny "BLOCKED: DELETE FROM without WHERE clause" "sql-delete-no-where"  # scan-reads: COMMAND_NO_COMMENT
 fi
 
 # =============================================================================
@@ -7842,7 +7879,7 @@ if [[ "$COMMAND_ASK_SCAN" == *git* ]] && \
         if [[ -n "$_FORCE_OPS" ]]; then
             if [[ "$_FORCE_MODE" == "all" ]]; then
                 # Preserve pre-#3674 behaviour byte-for-byte: any force op asks.
-                ask "Command requires confirmation: $COMMAND" "force-op:all"
+                ask "Command requires confirmation: $COMMAND" "force-op:all"  # scan-reads: COMMAND_ASK_SCAN
             fi
             # "protected" mode: ask only for protected-branch or ambiguous
             # targets; allow own working branches. resolve_default_branch() plus
@@ -7924,7 +7961,7 @@ if [[ "$COMMAND_ASK_SCAN" == *git* ]] && \
                             _in_any_managed_worktree "$_fcwdabs" || _fdetached_safe=false
                         fi
                         if [[ "$_fdetached_safe" != true ]]; then
-                            ask "Command requires confirmation: $COMMAND (force operation on a detached or unresolved branch)" "force-op:detached"
+                            ask "Command requires confirmation: $COMMAND (force operation on a detached or unresolved branch)" "force-op:detached"  # scan-reads: COMMAND_ASK_SCAN
                         fi
                     fi
                     _ftarget="$_fbranch"
@@ -7932,7 +7969,7 @@ if [[ "$COMMAND_ASK_SCAN" == *git* ]] && \
                 _fdefault=$(resolve_default_branch "$_fcwd")
                 if [[ "$_ftarget" == "main" || "$_ftarget" == "master" ]] || \
                    { [[ -n "$_fdefault" && "$_ftarget" == "$_fdefault" ]]; }; then
-                    ask "Command requires confirmation: $COMMAND (force operation targets protected branch '$_ftarget')" "force-op:protected"
+                    ask "Command requires confirmation: $COMMAND (force operation targets protected branch '$_ftarget')" "force-op:protected"  # scan-reads: COMMAND_ASK_SCAN
                 fi
             done <<< "$_FORCE_OPS"
             # No protected/ambiguous target matched — fall through to allow.
@@ -8061,7 +8098,7 @@ ASK_PATTERNS=(
 
 for pattern in "${ASK_PATTERNS[@]}"; do
     if echo "$COMMAND_ASK_SCAN" | grep -qE "$pattern"; then
-        ask "Command requires confirmation: $COMMAND" "ask:$pattern"
+        ask "Command requires confirmation: $COMMAND" "ask:$pattern"  # scan-reads: COMMAND_ASK_SCAN
     fi
 done
 
@@ -8077,7 +8114,7 @@ PRINTENV_ASK_PATTERNS=(
 
 for pattern in "${PRINTENV_ASK_PATTERNS[@]}"; do
     if echo "$COMMAND_ASK_SCAN_PRINTENV" | grep -qE "$pattern"; then
-        ask "Command requires confirmation: $COMMAND" "ask:$pattern"
+        ask "Command requires confirmation: $COMMAND" "ask:$pattern"  # scan-reads: COMMAND_ASK_SCAN_PRINTENV
     fi
 done
 
@@ -8145,7 +8182,7 @@ systemctl_ask_reason() {
 }
 _SYSTEMCTL_ASK=$(systemctl_ask_reason "$COMMAND_NO_COMMENT" | head -1)
 if [[ -n "$_SYSTEMCTL_ASK" ]]; then
-    ask "Command requires confirmation: $COMMAND" "ask:$_SYSTEMCTL_ASK"
+    ask "Command requires confirmation: $COMMAND" "ask:$_SYSTEMCTL_ASK"  # scan-reads: COMMAND_NO_COMMENT
 fi
 
 # =============================================================================
@@ -8223,7 +8260,7 @@ ssh_cat_ask_reason() {
 }
 _SSH_CAT_ASK=$(ssh_cat_ask_reason "$COMMAND_ASK_SCAN" | head -1)
 if [[ -n "$_SSH_CAT_ASK" ]]; then
-    ask "Command requires confirmation: $COMMAND" "ask:$_SSH_CAT_ASK"
+    ask "Command requires confirmation: $COMMAND" "ask:$_SSH_CAT_ASK"  # scan-reads: COMMAND_ASK_SCAN
 fi
 
 # =============================================================================
@@ -8296,7 +8333,7 @@ printenv_ask_reason() {
 }
 _PRINTENV_ASK=$(printenv_ask_reason "$COMMAND_ASK_SCAN" | head -1)
 if [[ -n "$_PRINTENV_ASK" ]]; then
-    ask "Command requires confirmation: $COMMAND" "ask:$_PRINTENV_ASK"
+    ask "Command requires confirmation: $COMMAND" "ask:$_PRINTENV_ASK"  # scan-reads: COMMAND_ASK_SCAN
 fi
 
 # =============================================================================
@@ -8522,7 +8559,7 @@ if echo "$COMMAND_ASK_SCAN" | grep -qE '(^|[;&|(`[:space:]])cargo[[:space:]]+cle
                 # Report the path as CONFIGURED (logical spelling), not the
                 # physically-resolved one — that is the string the operator
                 # will recognize from their own .cargo/config.toml.
-                ask "Command requires confirmation: $COMMAND (target-dir is shared at '$_CARGO_TD_PATH'; this clears every project on this host, including in-flight sweeps — use 'cargo clean -p <pkg>' or set CARGO_TARGET_DIR)" "cargo-clean-scope-outside-repo"
+                ask "Command requires confirmation: $COMMAND (target-dir is shared at '$_CARGO_TD_PATH'; this clears every project on this host, including in-flight sweeps — use 'cargo clean -p <pkg>' or set CARGO_TARGET_DIR)" "cargo-clean-scope-outside-repo"  # scan-reads: COMMAND_ASK_SCAN
             fi
         fi
     fi
@@ -8553,7 +8590,7 @@ REVERSIBLE_GH_ASK_PATTERNS=(
 
 for pattern in "${REVERSIBLE_GH_ASK_PATTERNS[@]}"; do
     if echo "$COMMAND_ASK_SCAN" | grep -qE "$pattern" && reversible_gh_guard_enabled; then
-        ask "Command requires confirmation: $COMMAND (set guards.reversibleGh:true in .loom/config.json to keep this ask; it is off by default because the op is trivially reversible)" "reversible-gh:$pattern"
+        ask "Command requires confirmation: $COMMAND (set guards.reversibleGh:true in .loom/config.json to keep this ask; it is off by default because the op is trivially reversible)" "reversible-gh:$pattern"  # scan-reads: COMMAND_ASK_SCAN
     fi
 done
 
@@ -8585,7 +8622,7 @@ done
 if echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+read-tree'; then
     # Isolated form (GIT_INDEX_FILE=... git read-tree ...) is allowed.
     if ! echo "$COMMAND_NO_COMMENT" | grep -qE 'GIT_INDEX_FILE='; then
-        ask "Command requires confirmation: $COMMAND (a bare 'git read-tree' empties the real staging index with no reflog trace; use 'git merge-tree --write-tree <base> <branch>' for a merge preview, or isolate with GIT_INDEX_FILE=\$(mktemp))" "git-read-tree"
+        ask "Command requires confirmation: $COMMAND (a bare 'git read-tree' empties the real staging index with no reflog trace; use 'git merge-tree --write-tree <base> <branch>' for a merge preview, or isolate with GIT_INDEX_FILE=\$(mktemp))" "git-read-tree"  # scan-reads: COMMAND_NO_COMMENT
     fi
 fi
 
@@ -8829,7 +8866,7 @@ if [[ "$_stash_is_recover" == true || "$_stash_is_create" == true ]] \
             if [[ "$_stash_is_pop" == true && -f "$_stash_common_parent/.loom/scripts/safe-stash-pop.sh" ]]; then
                 _stash_pop_hint=" If you do need this entry back, use the verified wrapper instead of a raw pop: './.loom/scripts/safe-stash-pop.sh' — it snapshots the pre-pop tree, pops, verifies no conflict markers or unmerged index entries were left behind, and rolls the tree back (keeping the stash entry) when the pop conflicts, so it can never leave a tracked file carrying unresolved conflict markers for someone to commit (#6501; add --no-restore to keep a conflicted tree for manual resolution)."
             fi
-            ask "Command requires confirmation: $COMMAND (git stash pop/drop/clear in the MAIN checkout can destroy operator-preserved state — the main checkout's stash stack is operator-owned, not scratch space for an integration check. Run test-merges in an isolated worktree instead. For a clean-baseline-vs-diff comparison in the primary clone use './.loom/scripts/worktree.sh stash-push main' ... './.loom/scripts/worktree.sh stash-pop main', which anchors to refs/loom/stash-baseline/main and never touches refs/stash, so it needs no confirmation. To reconcile a quarantined 'loom-quarantine:' entry, replay it into the owning issue worktree ('git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -') rather than popping it back into main. Set guards.stashScope:false in .loom/config.json, or export LOOM_GUARD_STASH_SCOPE=0 in the agent's OWN environment before the session — an inline 'LOOM_GUARD_STASH_SCOPE=0 git stash pop' prefix does not reach this hook, which runs as a separate process)${_stash_pop_hint}" "stash-scope:main-checkout"
+            ask "Command requires confirmation: $COMMAND (git stash pop/drop/clear in the MAIN checkout can destroy operator-preserved state — the main checkout's stash stack is operator-owned, not scratch space for an integration check. Run test-merges in an isolated worktree instead. For a clean-baseline-vs-diff comparison in the primary clone use './.loom/scripts/worktree.sh stash-push main' ... './.loom/scripts/worktree.sh stash-pop main', which anchors to refs/loom/stash-baseline/main and never touches refs/stash, so it needs no confirmation. To reconcile a quarantined 'loom-quarantine:' entry, replay it into the owning issue worktree ('git stash show -p <ref> | git -C .loom/worktrees/issue-<N> apply -') rather than popping it back into main. Set guards.stashScope:false in .loom/config.json, or export LOOM_GUARD_STASH_SCOPE=0 in the agent's OWN environment before the session — an inline 'LOOM_GUARD_STASH_SCOPE=0 git stash pop' prefix does not reach this hook, which runs as a separate process)${_stash_pop_hint}" "stash-scope:main-checkout"  # scan-reads: COMMAND_STASH_SCAN
         fi
     elif [[ -n "$_stash_toplevel" && -n "$_stash_common_parent" ]]; then
         # cwd is a linked worktree, not the main checkout. Count OTHER
@@ -8858,12 +8895,12 @@ if [[ "$_stash_is_recover" == true || "$_stash_is_create" == true ]] \
                 _stash_wt_base="${_stash_toplevel##*/}"
                 if [[ "$_stash_wt_base" =~ ^issue-([0-9]+)$ ]]; then
                     _stash_issue_num="${BASH_REMATCH[1]}"
-                    deny "Blocked: $COMMAND (raw 'git stash' puts WIP on refs/stash — a SINGLE stack SHARED across every linked worktree of this repo, not per-worktree — where any of the $_stash_worktree_count currently-active managed worktrees can pop or drop it, and where the recovery step ('git stash pop') is itself gated. Nothing has been run: your working tree is untouched, so just rerun with the per-issue equivalent, which never touches refs/stash. Shelve WIP as a patch: './.loom/scripts/worktree.sh snapshot $_stash_issue_num'. Clean baseline vs. diff: './.loom/scripts/worktree.sh stash-push $_stash_issue_num' ... './.loom/scripts/worktree.sh stash-pop $_stash_issue_num'. To opt out repo-wide set guards.stashScope:false in .loom/config.json, or export LOOM_GUARD_STASH_SCOPE=0 in the agent's OWN environment before the session — an inline 'LOOM_GUARD_STASH_SCOPE=0 git stash' prefix does not reach this hook, which runs as a separate process)" "stash-scope:create-redirect"
+                    deny "Blocked: $COMMAND (raw 'git stash' puts WIP on refs/stash — a SINGLE stack SHARED across every linked worktree of this repo, not per-worktree — where any of the $_stash_worktree_count currently-active managed worktrees can pop or drop it, and where the recovery step ('git stash pop') is itself gated. Nothing has been run: your working tree is untouched, so just rerun with the per-issue equivalent, which never touches refs/stash. Shelve WIP as a patch: './.loom/scripts/worktree.sh snapshot $_stash_issue_num'. Clean baseline vs. diff: './.loom/scripts/worktree.sh stash-push $_stash_issue_num' ... './.loom/scripts/worktree.sh stash-pop $_stash_issue_num'. To opt out repo-wide set guards.stashScope:false in .loom/config.json, or export LOOM_GUARD_STASH_SCOPE=0 in the agent's OWN environment before the session — an inline 'LOOM_GUARD_STASH_SCOPE=0 git stash' prefix does not reach this hook, which runs as a separate process)" "stash-scope:create-redirect"  # scan-reads: COMMAND_STASH_SCAN
                 fi
             fi
 
             if [[ "$_stash_is_recover" == true ]]; then
-                ask "Command requires confirmation: $COMMAND (git stash pop/drop/clear from a linked worktree can destroy ANOTHER builder's WIP — refs/stash is a single stack SHARED across every linked worktree of this repo, not per-worktree, and $_stash_worktree_count managed worktrees are currently active. Use './.loom/scripts/worktree.sh snapshot <issue-number>' instead of git stash for ad-hoc WIP, or './.loom/scripts/worktree.sh stash-push <issue-number>' + 'stash-pop <issue-number>' for a clean-baseline-vs-diff comparison — neither touches the shared refs/stash stack, so neither needs this ask; set guards.stashScope:false in .loom/config.json, or export LOOM_GUARD_STASH_SCOPE=0 in the agent's OWN environment before the session — an inline 'LOOM_GUARD_STASH_SCOPE=0 git stash pop' prefix does not reach this hook, which runs as a separate process)" "stash-scope:worktree-collision"
+                ask "Command requires confirmation: $COMMAND (git stash pop/drop/clear from a linked worktree can destroy ANOTHER builder's WIP — refs/stash is a single stack SHARED across every linked worktree of this repo, not per-worktree, and $_stash_worktree_count managed worktrees are currently active. Use './.loom/scripts/worktree.sh snapshot <issue-number>' instead of git stash for ad-hoc WIP, or './.loom/scripts/worktree.sh stash-push <issue-number>' + 'stash-pop <issue-number>' for a clean-baseline-vs-diff comparison — neither touches the shared refs/stash stack, so neither needs this ask; set guards.stashScope:false in .loom/config.json, or export LOOM_GUARD_STASH_SCOPE=0 in the agent's OWN environment before the session — an inline 'LOOM_GUARD_STASH_SCOPE=0 git stash pop' prefix does not reach this hook, which runs as a separate process)" "stash-scope:worktree-collision"  # scan-reads: COMMAND_STASH_SCAN
             fi
         fi
     elif [[ "$_stash_is_recover" == true && "$_stash_effective_cwd" != "$CWD" ]]; then
@@ -8871,7 +8908,7 @@ if [[ "$_stash_is_recover" == true || "$_stash_is_create" == true ]] \
         # not inside any git checkout — ambiguous. Never silently widen an
         # ask into an allow (mirrors parse_force_ops' detached-HEAD fail-safe
         # from #5156/#5161): fail toward asking rather than guessing.
-        ask "Command requires confirmation: $COMMAND (the cd target for this stash operation could not be resolved to a git checkout, so scope cannot be determined — refusing to silently allow an ambiguous stash pop/drop/clear; set guards.stashScope:false / LOOM_GUARD_STASH_SCOPE=0 to disable this ask)" "stash-scope:cd-unresolved"
+        ask "Command requires confirmation: $COMMAND (the cd target for this stash operation could not be resolved to a git checkout, so scope cannot be determined — refusing to silently allow an ambiguous stash pop/drop/clear; set guards.stashScope:false / LOOM_GUARD_STASH_SCOPE=0 to disable this ask)" "stash-scope:cd-unresolved"  # scan-reads: COMMAND_NO_COMMENT,COMMAND_STASH_SCAN
     fi
 fi
 
@@ -8956,7 +8993,7 @@ CLOUD_ASK_PATTERNS=(
 # match -- it can never widen it.
 for pattern in "${CLOUD_ASK_PATTERNS[@]}"; do
     if echo "$COMMAND_CLOUD_ASK_SCAN" | grep -qE "$pattern" && cloud_guard_enabled; then
-        ask "Command requires confirmation: $COMMAND (set guards.cloudCli:false in .loom/config.json if this repo manages cloud infra as a first-class workflow)" "cloud-cli:$pattern"
+        ask "Command requires confirmation: $COMMAND (set guards.cloudCli:false in .loom/config.json if this repo manages cloud infra as a first-class workflow)" "cloud-cli:$pattern"  # scan-reads: COMMAND_CLOUD_ASK_SCAN
     fi
 done
 

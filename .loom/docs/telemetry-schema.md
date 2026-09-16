@@ -17,7 +17,7 @@ writing) will additionally push these records to a cloud backend.
 **Contents**
 
 - [Envelope](#envelope)
-- [`/ingest` response (the bound-`host_id` echo)](#ingest-response-the-bound-hostid-echo)
+- [`/ingest` response (the bound-`host_id` echo)](#ingest-response-the-bound-host_id-echo)
 - [`RepoVisibility` contract — private by default](#repovisibility-contract--private-by-default)
 - [Record kinds](#record-kinds)
 - [Persistence & read surface (`sweep.outcome`, Issue #4704)](#persistence--read-surface-sweepoutcome-issue-4704)

@@ -1,0 +1,662 @@
+# Sweep — Wave lifecycle (Modes A and B only — issue-set)
+
+> **Reference file for [`sweep.md`](sweep.md)**, the `/loom:sweep` dispatcher.
+>
+> **Load when:** **Modes A and B only** (including the `all` sentinel). Mutually exclusive with `sweep-mode-c-lifecycle.md` — never load both for one run.
+>
+> **Flat, one level deep.** `sweep.md` names every file a given run needs up
+> front; nothing here requires opening a *third* file to follow its own
+> procedure. Cross-references worded "above"/"below" that do not resolve inside
+> this file point at a sibling `sweep-*.md` section — see the reference-file map
+> in [`sweep.md`](sweep.md). The body below is **verbatim** from the pre-split
+> `sweep.md` (#7726): no rule, warning, edge case, table, or code block was
+> reworded, softened, reordered, or dropped.
+
+## Contents
+
+- [Wave Lifecycle (Modes A and B only — issue-set)](#wave-lifecycle-modes-a-and-b-only--issue-set)
+  - [0. Snapshot the main-worktree baseline (once, before wave 1) (#3648)](#0-snapshot-the-main-worktree-baseline-once-before-wave-1-3648)
+  - [Checkpoint-driven resume (#3373)](#checkpoint-driven-resume-3373)
+  - [1. Per-issue pre-flight (still per-issue, before the wave dispatch)](#1-per-issue-pre-flight-still-per-issue-before-the-wave-dispatch)
+  - [2. Curator phase (still per-issue, before the wave dispatch)](#2-curator-phase-still-per-issue-before-the-wave-dispatch)
+  - [3. Approval gate (per-issue)](#3-approval-gate-per-issue)
+  - [4. Builder phase (parallel within the wave)](#4-builder-phase-parallel-within-the-wave)
+  - [Stacked dependency (auto-reconciliation on parent merge) — #3729 (v1), #3747 (v2 items 1 & 2)](#stacked-dependency-auto-reconciliation-on-parent-merge--3729-v1-3747-v2-items-1--2)
+  - [Auto-stack detection and wave ordering (`--auto-stack`, #3759)](#auto-stack-detection-and-wave-ordering---auto-stack-3759)
+  - [Out-of-set dependency detect-and-warn (v2 item 4, #3747)](#out-of-set-dependency-detect-and-warn-v2-item-4-3747)
+  - [5. Judge phase (sequential per PR within the wave)](#5-judge-phase-sequential-per-pr-within-the-wave)
+  - [6. Doctor phase (inline per PR, only if Judge requested changes)](#6-doctor-phase-inline-per-pr-only-if-judge-requested-changes)
+  - [7. Merge (per PR)](#7-merge-per-pr)
+  - [8. Wave settled → post-wave integration gate → advance to next wave](#8-wave-settled--post-wave-integration-gate--advance-to-next-wave)
+  - [8a. Wave-boundary candidate re-verification (daemon/champion-active only, #4884)](#8a-wave-boundary-candidate-re-verification-daemonchampion-active-only-4884)
+
+---
+
+## Wave Lifecycle (Modes A and B only — issue-set)
+
+For each wave `W` (partition of the issue list into chunks of up to `--builders-per-wave` candidates, processed in given order), execute the full lifecycle below. **All stages are mandatory** for every issue — do not skip any stage (CLAUDE.md "Sweep Lifecycle (MANDATORY)"). This section applies to Modes A and B only — Mode C uses the shorter "PR-set Wave Lifecycle" section above.
+
+> **Auto-stack pre-partition pass (only when `AUTO_STACK=true`, #3759).** Before partitioning the candidate list into waves, run the detection + edge-resolution + topological-ordering pass in "Auto-stack detection and wave ordering (`--auto-stack`, #3759)": read each candidate's `body` (one added field on the per-issue `gh issue view` already issued at pre-flight step 1), resolve same-candidate-set `Depends on #A` / `Requires #A` edges into the per-issue `DEPENDS_ON[N]` map, reorder so every parent's wave is at or before its child's wave, and — if ≥1 edge survived — print the "Detected stacking pairs" block and (Mode A) prompt for confirmation. When zero edges survive (or the flag is absent), partition proceeds on the original input order exactly as today. The per-issue `DEPENDS_ON[N]` map then feeds the Builder-phase gated path below.
+
+The numbered phases below (Curator → Builder → Judge → Doctor → Merge) are the canonical phase-by-phase reference for this skill — including the label state machine and mid-phase-death recovery procedures. Each phase step tells you which subagent to dispatch and what forge state it should leave behind.
+
+### 0. Snapshot the main-worktree baseline (once, before wave 1) (#3648)
+
+**Before dispatching the first wave's builders**, snapshot main's current working-tree state so the per-builder contamination backstop (step 4's `check-main-clean.sh`) can distinguish builder contamination from dirt that predated the sweep:
+
+```bash
+MAIN_CLEAN_BASELINE=".loom/sweep-checkpoint/main-clean-baseline-${RUN_ID}.txt"
+./.loom/scripts/check-main-clean.sh --snapshot "$MAIN_CLEAN_BASELINE"
+```
+
+Capture this **once, before wave 1 — never per-wave**. The baseline must reflect the pre-sweep state so that if an early wave contaminates main and the dirt is not reverted, every later wave's backstop still flags it (a per-wave re-snapshot would silently absorb that contamination into the "pre-existing" set). The baseline path is **keyed by this sweep's `RUN_ID`** (`main-clean-baseline-${RUN_ID}.txt`, not a fixed `main-clean-baseline.txt`) so that a **concurrent peer `/loom:sweep` never reads or clobbers this run's baseline** (#3768): before the RUN_ID keying, a second sweep re-snapshotting the shared fixed path mid-run of the first could silently absorb real contamination into the "pre-existing" set. The path is a per-sweep-run transient under `.loom/sweep-checkpoint/` whose lifetime is this sweep invocation — enforced by `sweep-run-registry.sh cleanup "$RUN_ID"` at sweep end (Step 0a), with `loom-daemon clean` as the bulk backstop for crashed runs (#4450); do not delete it mid-sweep. `.loom/sweep-checkpoint/` is gitignored in a current install, but a consumer repo's installed loom-managed `.gitignore` block can drift and omit it — so rather than depend on the consumer's `.gitignore` being up to date, `check-main-clean.sh` also excludes `.loom/sweep-checkpoint/` (and the other Loom-owned transient state paths) internally (#3778), so a stale consumer `.gitignore` no longer false-positives the backstop on it. `check-main-clean.sh` needs no change — it already accepts an arbitrary `--snapshot FILE` / `--baseline FILE` path; only this caller-side path construction is keyed by `RUN_ID`. If the snapshot step fails for any reason, proceed anyway — step 4's backstop falls back to the whole-status hard-fail when the baseline file is missing (fail-safe, never a silent pass).
+
+### Checkpoint-driven resume (#3373)
+
+Sweep persists a per-issue phase checkpoint after each successful lifecycle phase so that a killed-and-relaunched sweep can pick up where it left off. The checkpoint is the **only** state required to resume — worktree preservation is handled by `worktree.sh`'s idempotency (re-running for an existing worktree is a no-op).
+
+- **Checkpoint file**: `.loom/sweep-checkpoint/issue-<N>.json` (gitignored).
+- **Schema**: `{phase: "<curator-done|builder-done|judge-rejected|judge-done|doctor-done|merge-done>", task_id, timestamp, pr_number?, attempt?, model?}`.
+- **Helper**: `.loom/scripts/sweep-checkpoint.sh {write|read|phase|attempt|model|exists|delete|list}` — wraps the read/write/delete operations with atomic writes (`.tmp` + `mv`) and validates the phase enum.
+- **Model field (#3482, Phase 3a observability)**: when you resolved a model for the phase's subagent (i.e., you actually passed a `model` param to the Task tool — any tier above session default), record it on the checkpoint write with `--model <resolved>` (alias or pinned ID). When the subagent inherited the session default (tier 4, no `model` param passed), omit `--model` entirely. This is observability-only bookkeeping for per-model metrics — readers MUST tolerate checkpoints without the field (legacy checkpoints predate it; absence means default/unknown), and the field never feeds back into model selection or escalation decisions.
+- **Write timing**: After the *successful completion* of each lifecycle phase below. Never write a checkpoint speculatively before the phase finishes — a kill mid-phase must resume at the start of that phase.
+- **Read timing**: At the start of per-issue pre-flight (step 1) for every issue in the candidate list, before any worktree or label mutation for that issue.
+- **Delete timing**: On `merge-done` (step 7) and on stale-checkpoint detection (step 1).
+- **Scope limit (no mid-builder recovery)**: A kill during the Builder phase resumes at *builder start* — the worktree state and partial diff survive, but sweep does not inspect the diff or attempt to resume mid-edit. This is intentional per #3372/#3373. **This assumes the killed Builder subagent is actually dead** — on some resume paths it is not; see "Task-liveness check before Builder re-dispatch (#5897)" under "Mid-builder kill semantics" below before treating an in-flight partial diff as proof of death.
+
+The skip rules per `phase` value are documented inline in each step below.
+
+#### Mid-phase-death recovery (rate limit or crash, issue #3683)
+
+A checkpoint is written only after a phase *completes* (see "Write timing"), so a subagent that is killed mid-phase — an account-level rate-limit kill (`TOKEN_EXPIRED` / `TOKEN_EXHAUSTED`, the same vocabulary `.loom/scripts/lib/classify-error.sh` uses), a per-model-tier credit exhaustion (`MODEL_CREDITS_EXHAUSTED`), a crash, an API error, or any other abnormal termination — leaves **no fresh checkpoint** even though it may already have pushed a commit, moved a label, or posted a comment. When you resume a **Judge, Doctor, or Merge** phase whose subagent was not observed to exit cleanly and no new checkpoint was written for it, **do not assume no work happened, and do not blindly re-run the whole phase.**
+
+**`TOKEN_EXPIRED`/`TOKEN_EXHAUSTED` (account-side) vs. a forge GraphQL rate limit — do not conflate these (#4856).** The vocabulary above classifies the *Claude account credential* dying mid-turn (weekly/session limit, expired OAuth token) — the fix is to rotate to a different token in the pool; the same account retried immediately fails again. A **GitHub GraphQL quota exhaustion** (`gh` emitting `API rate limit already exceeded` / `secondary rate limit` / etc. — the same five-signature table documented under "GraphQL-exhaustion fallback" above and in judge.md/doctor.md's "REST Fallback for Labels/Comments") is a **different axis entirely**: the Claude account is perfectly healthy, only the shared `gh` credential's GraphQL quota (independent from REST, and shared across every agent + tool) is temporarily out. Rotating the Claude account does **nothing** for it. Most of the time this is invisible at the sweep-orchestrator level — a well-behaved Judge/Doctor subagent detects the rejection and falls back to REST inline (per the REST equivalents documented in judge.md/doctor.md), so the phase still completes normally and a checkpoint is written. It only becomes a **mid-phase-death** case when the rejection itself brings down the subagent (or its parent) before it can retry — in which case, treat it as **retryable, not exhausted**: no token rotation is needed, and a `gh api rate_limit --jq .resources.graphql` check tells you the reset time to wait out (typically well under an hour) before simply re-dispatching the same phase. Do not route this case through the token pool's bad-token/exhausted bookkeeping — that machinery exists for the Claude account axis, not the forge's.
+
+**`MODEL_CREDITS_EXHAUSTED` is a THIRD axis — try the model fallback before treating it as a mid-phase death (#5687).** "You're out of usage credits" means the *account's credits for one model tier* ran out: the credential is fine, the forge is fine, and the same account on a cheaper model still works. It therefore has a remedy the other two axes do not — **re-dispatch the same attempt one rung down**, per "Credit-exhaustion fallback" above — and that remedy must be attempted **first**, because it usually completes the phase outright and leaves nothing to reconstruct. Only when it is unavailable (already at the cheapest rung ⇒ `resolve-model.sh --downgrade` exits 3) or the re-dispatch itself cannot finish does this become an ordinary mid-phase-death case, handled by the forge-state re-verification below. Rotating the Claude account may *also* work if a pool exists, but on the in-session Task-dispatch path there is no pool to rotate — the model rung is the only lever.
+
+**`SPEND_LIMIT` is a FOURTH, related axis — try omitting the `model` param before treating it as a mid-phase death (#6518).** "You've hit your monthly spend limit" is `TOKEN_EXHAUSTED` for the subprocess/daemon path (classified by `.loom/scripts/lib/classify-error.sh`, unchanged), but on the in-session Task-tool path it needs the same reactive text-match treatment as `MODEL_CREDITS_EXHAUSTED` — see "Spend-limit fallback" above for the full remedy (re-dispatch the same attempt with the `model` param omitted first; only fall through to this mid-phase-death procedure once that is exhausted or was never available). Unlike credit exhaustion, a spend limit's scope (account-wide vs. per-tier) is not definitionally known, so its first-line remedy is "inherit the session default," not a cost-ladder walk.
+
+Instead, before re-dispatching anything for that phase, **re-verify the PR's actual forge state against that phase's already-documented "Expected exit state(s)"** (Judge: step 5's Approve / Request-changes bullets; Doctor: step 6's push → relabel → re-Judge sequence; Merge: step 7's merge-then-checkpoint-delete). Specifically check:
+
+- whether a **new commit** landed on the PR branch since the checkpoint's timestamp (`gh pr view <PR> --json commits`, or `git log <checkpoint-ts>..`),
+- whether the **PR label** already reflects a later state than the checkpoint implies (e.g. `loom:review-requested` after a Doctor, or `loom:pr` after a Judge approval), and
+- whether there are **PR comments** from the dead subagent describing work it already completed.
+
+Then **complete only the missing steps** to reach that phase's expected exit state — never redo steps that already landed. Example (the exact #3676 incident this rule is drawn from): a Doctor pushed its fix but was rate-limit-killed before re-labeling `loom:changes-requested` → `loom:review-requested` and handing back to Judge. The correct recovery is to re-label and re-run Judge — **not** to dispatch a fresh Doctor that would duplicate the already-pushed commit.
+
+- **Builder is exempt — unchanged, but only when the Builder subagent is actually dead.** This rule covers Judge / Doctor / Merge only. The Builder's "Scope limit (no mid-builder recovery)" above stands as-is: a Builder kill intentionally resumes from *builder start* and relies on `worktree.sh` idempotency for the builder to decide whether to commit / amend / discard its partial diff. Do not apply the forge-state-reverification rule to Builder. **But this exemption presupposes the orchestrator process that dispatched the Builder was itself killed** — on a resume path where the orchestrator survives (session-limit `/login` resume, `/clear` + re-invoke), the dispatched Builder Task can outlive the "kill" that prompted resume and complete later on its own. See "Task-liveness check before Builder re-dispatch (#5897)" under "Mid-builder kill semantics" below: before re-dispatching, check whether the original Task is still live rather than treating worktree state alone as proof of death.
+- **Should-prefer (optional): resume the same subagent when the parent survives.** When the **orchestrator's own session** is still alive and the dead phase's Task-tool subagent conversation is still resumable (e.g. via `SendMessage` back into that same subagent thread rather than a brand-new Task dispatch), prefer that path — the original subagent already knows exactly what it committed / pushed / labeled, which is strictly more context than a fresh subagent re-deriving intent from a partial diff. This is a preference, not a requirement: an account-level rate-limit kill often takes the whole process (parent included) down, in which case no resumable thread exists. The mandatory forge-state-reverification rule above must **never** depend on this being available.
+
+#### Stale-checkpoint cleanup
+
+A "stale checkpoint" is one whose issue is already closed on the forge (e.g., the merge happened in a different sweep invocation, or the issue was closed manually after sweep was killed). Detect and clean these up on entry — see step 1.
+
+### 1. Per-issue pre-flight (still per-issue, before the wave dispatch)
+
+> **Aggressive-mode override (`all` sentinel).** When `SWEEP_ALL_AGGRESSIVE=true` (set **only** by the build-everything `all` sentinel — see "Build-everything sentinel (`all`)" under Validation rules), the hard-skip rules below are replaced by the recovery routing in the "Aggressive candidate taxonomy" table: stale `loom:building` is reclaimed (after the one-time `recover-orphaned-shepherds.sh --recover` pass), `loom:blocked` is probed and cleared where the blocker has resolved, `loom:epic` containers fan out to their `loom:epic-phase` children, and uncurated / `loom:triage` / `loom:curating` issues are curated inline before promotion. The existing-PR probe still runs first and still wins (an issue with an open PR is driven to Judge/Merge, never rebuilt). Only `loom:operator-only` and `loom:needs-capability` remain a hard skip — with the single narrow exception of a capability-matched `loom:operator-mechanical` item, which routes to the propose-only lane (#6893, see "Capability-aware `loom:operator-mechanical` lane"). Mode A/B explicit-list and NL sweeps leave the flag unset and use the conservative skips exactly as written below.
+
+For each issue `N` in the wave, before any role skill is invoked:
+
+0. **Read the resume checkpoint (if any).** Before any other pre-flight work for this issue:
+   ```bash
+   CHECKPOINT_PHASE=$(./.loom/scripts/sweep-checkpoint.sh phase N)
+   ```
+   `CHECKPOINT_PHASE` is one of: empty string (no checkpoint), `curator-done`, `builder-done`, `judge-rejected`, `judge-done`, `doctor-done`, `merge-done`. Carry this value through the rest of the lifecycle and use it at each phase to decide whether to skip.
+
+   **Stale-checkpoint cleanup.** If a checkpoint exists for `N` *and* the issue's `state` (from step 1's `gh issue view`) is `CLOSED`, the checkpoint is stale (the issue was closed out-of-band — most commonly because a different sweep invocation already merged it, or a human closed it manually). Remove it with a warning and skip the issue entirely:
+   ```bash
+   if [[ -n "$CHECKPOINT_PHASE" && "$ISSUE_STATE" == "CLOSED" ]]; then
+     echo "WARNING: stale sweep checkpoint for closed issue #N (phase=$CHECKPOINT_PHASE) — removing"
+     ./.loom/scripts/sweep-checkpoint.sh delete N
+     # Skip issue — does NOT contribute to this wave.
+   fi
+   ```
+
+   **`merge-done` short-circuit.** If `CHECKPOINT_PHASE == "merge-done"`, the issue was already merged in a previous sweep run but the checkpoint was not deleted (rare — e.g., sweep was killed between the merge call and the delete call). Delete the checkpoint and log `already complete; skipping`. The issue does NOT contribute to this wave.
+
+1. **Verify the issue is open and not already in flight.**
+   ```bash
+   # Plain `gh` — NOT "$GH_READ". This is claim arbitration: a 30s-stale label
+   # set is exactly the window in which a competing Builder's `loom:building`
+   # claim (or another sweep's freshly opened PR) lands, and answering from
+   # cache would dispatch a duplicate builder onto claimed work. Uncached by
+   # design — see "Cached forge reads (`gh-cached`)".
+   gh issue view N --json state,labels,closedByPullRequestsReferences \
+     --jq '{state, labels: [.labels[].name], linked_prs: [.closedByPullRequestsReferences[].url]}'
+   ```
+   - If the issue is closed, skip it (log a warning). It does NOT contribute to this wave.
+   - **Step 1a — daemon self-claim check (#3823, flag added #4111). MANDATORY: evaluate this FIRST, for every issue in the wave, before the `loom:building` skip bullet immediately below — not only when a `loom:building` label happens to be noticed on `N`.** Two equivalent signals, either sufficient on its own:
+     - `--claim-owned N` was present in this invocation's `$ARGUMENTS` (stripped during argument classification — see "Optional flags"), where `N` is the issue currently being pre-flighted; OR
+     - the env var `LOOM_SWEEP_CLAIM_OWNED` is set and equals `N`.
+
+     If either is true for `N`: `SweepRegistry::dispatch` flipped `loom:issue → loom:building` on the forge *immediately before spawning THIS session* (for immediate external visibility of the claim), and told this session so directly through two independent channels — the flag is literally part of the prompt this session is reading, the env var is in this session's own process environment. The `loom:building` label on `N` is therefore **this session's OWN daemon claim**, full stop. **Do NOT skip. Do NOT evaluate the `loom:building` skip bullet below for this issue.** Proceed straight to step 2 as if you had just claimed `N` yourself, and do **not** reason further about `loom:building` label timing, `loom-daemon status` output, PID tables, or worktree presence to "double-check" whether another worker owns it — issue #4111 is precisely a daemon-dispatched child that built a plausible, evidence-citing case that it was racing a competing worker using those exact signals, while the conclusive `--claim-owned`/`LOOM_SWEEP_CLAIM_OWNED` marker for its own issue sat unread the entire time. Once either signal names `N`, no other signal can override it.
+
+     **The lease renewal loop for `N` is normally already running before this prompt begins — the daemon started it (Issue #7672). Run exactly one check, then act on it; do not reason further:**
+     ```bash
+     # Set by the dispatch that spawned this session iff its daemon starts the
+     # renewal loop itself. If it names N, the loop is already running: do nothing.
+     # If it is unset/empty (a pre-#7672 daemon), start it yourself — the #6180 fallback.
+     if [ "${LOOM_SWEEP_LEASE_RENEW_DISPATCHED:-}" != "$N" ]; then
+       ./.loom/scripts/sweep-lease-renew.sh start "$N" > /dev/null 2>&1 || true
+     fi
+     ```
+     A daemon-dispatched claim on `N` also gets a lease record written by the dispatch itself (Issue #6179 — a `<!-- loom:lease host=... sweep=... -->` marker comment, its liveness signal being the comment's own forge-assigned `updated_at`, never a value in the marker text), and that record must be kept fresh for as long as this sweep is actively working `N`. Until #7672 this step unconditionally asked *you* to run `./.loom/scripts/sweep-lease-renew.sh start "$N"` (Issue #6180); now `SweepRegistry::finish_issue_dispatch` issues that one-shot `start` itself — `sweep-lease-renew.sh start <N> --watch-pid <this session's own pid> --host <the host it published> --sweep-id <this sweep's id>` — as part of the same synchronous dispatch that spawned you, and sets `LOOM_SWEEP_LEASE_RENEW_DISPATCHED=<N>` to say so. When that marker names `N`, running `start` again would just fork a second loop PATCHing the same comment on the same cadence, for no added safety.
+
+     **Why the check rather than an unconditional "don't":** the installed prompt and the daemon binary do not roll together — an ordinary `git pull` (or a `resync-installed.sh` pass) refreshes this file on a host whose `loom-daemon` binary is only rebuilt by `loom update`. During that skew a prompt that had simply *stopped* starting the loop would leave the sweep with no renewal from either side, which is exactly the failure below. The marker is the daemon telling you which world you are in, so all three combinations are safe: marker present ⇒ skip (the daemon did it); marker absent ⇒ start it (pre-#7672 behavior, unchanged); old prompt + new daemon ⇒ one harmless duplicate loop.
+
+     Why the `start` moved into dispatch code at all: a prose-mandated step is only as reliable as the session reading it, and **one** session skipping this one produced ~25 claim/yield cycles over 2.5 h across four hosts, plus a near-miss where a second Builder's claim went live while the first was still working in the shared `.loom/worktrees/issue-N` directory (the downstream incident cited in #7672). The lease aged past `LOOM_LEASE_TTL_MINUTES`, a peer's reclamation gate (#6286) correctly judged the claim dead, and it reclaimed live work. On the healthy path the loop now exists whether or not you read this bullet.
+
+     **This did not make the daemon the renewer** — the #6129 hazard (role agents outlive the daemon that spawned them, so daemon-owned renewal would expire a live sweep's lease across an ordinary daemon restart) is still avoided, because only the *invocation* moved. `start` forks one loop, `disown`s it, and returns; the loop is fully detached, watches **this session's own pid** via `--watch-pid`, and therefore stops when this sweep stops — never when the daemon stops or restarts. Everything else about that loop is unchanged: default cadence 5 minutes (`--interval SECS` / `SWEEP_LEASE_RENEW_INTERVAL_SECS`), exact-match targeting of this sweep's own `loom:lease` comment via the `--host`/`--sweep-id` pair the dispatch published (#6485 — "newest wins" would otherwise let a racing peer's later lease comment become the one this loop keeps alive while this sweep's own quietly expired, the #6470 mechanism), self-terminating both when the watched pid dies and when this sweep's own lease yields (`<!-- loom:lease-yield ... -->`), and nothing to stop or clean up. Renewal failures are logged into this sweep's own log file (#6541). The lease IS read: the daemon's reclamation gate (#6286), its dispatch-time ordering check (#6287), and this sweep's own pre-push fence (#6309) all consume it.
+
+     If the marker names `N` but the loop is nevertheless absent (a workspace with no `.loom/scripts/sweep-lease-renew.sh`, a helper that failed to start), the daemon logged it and dispatch proceeded anyway — the lease ages out exactly as it did before any of this existed, and `loom:building` remains the authoritative claim. The marker is a capability signal, not a success receipt; do not try to detect or compensate for that case here, and do not run `start` "just in case" when the marker names `N` — that would fork a duplicate loop on every healthy dispatch to cover a rare, already-logged one.
+
+     If neither signal is present, or both name a *different* issue than `N`, this step does not apply to `N` — fall through to the ordinary `loom:building` skip bullet immediately below, completely unchanged. This is the normal case for an operator-run `/loom:sweep`, a GH Actions cron invocation, and every *other* issue in a daemon-dispatched wave (the flag/env var name only the ONE issue the daemon dispatched THIS session for).
+   - If the issue already has `loom:building` **and Step 1a above did not already establish this is your own daemon claim on this issue**, skip it — another shepherd or builder is working on it. Log a warning. Does NOT contribute to this wave. (This bullet used to carry the self-claim exception inline as a trailing clause; #4111 promoted it to the mandatory Step 1a above after a daemon-dispatched child was observed reasoning about `loom:building` timing/PID/`loom-daemon status` and skipping its own claim without ever consulting the marker. See Step 1a for the full mechanism.)
+   - If the issue has `loom:blocked`, skip it. Log a warning. Does NOT contribute to this wave.
+   - If the issue has `loom:operator-only`, skip it — requires human action outside automation (credentials, infra rotations, manual deploys, hardware access). Log a warning with reason "operator-only". Does NOT contribute to this wave. **Checked before the existing-PR probe** so operator-only issues aren't probed at all.
+   - If the issue has `loom:needs-capability`, skip it — blocked on a missing tool/agent capability, not an operator-by-right decision, but automation still cannot complete it (#5817). Log a warning with reason "needs-capability". Does NOT contribute to this wave. **Checked before the existing-PR probe**, same as the `loom:operator-only` bullet above.
+   - **Existing-PR probe (#3359, #3677).** The set of open PRs for issue `N` is the **union of two GitHub-computed sources** — no body-grep. Both are additive and deduped by PR number before routing:
+
+     1. **Closing-keyword PRs (`closedByPullRequestsReferences`, unchanged since #3359).** The `linked_prs` from the `gh issue view` above. GitHub's native `Closes/Fixes/Resolves #N` parser — populated only by closing keywords.
+     2. **Non-closing cross-reference PRs (timeline, #3677), phrase-confirmed (#6216).** PRs that reference `N` with a **non-closing** phrase (`Part of #N` / `Contributes to #N`, the #3599 partial-increment convention — see `defaults/roles/builder-pr.md`) never appear in `closedByPullRequestsReferences` by design, so probe the issue's timeline for `cross-referenced` events whose source is a PR:
+        ```bash
+        # Plain `gh` — NOT "$GH_READ": same claim-arbitration carve-out as the
+        # `gh issue view` read above (this probe decides whether to dispatch a
+        # Builder at all).
+        gh api "repos/OWNER/REPO/issues/N/timeline" --paginate \
+          --jq '[.[] | select(.event == "cross-referenced"
+                              and .source.issue.pull_request != null
+                              and .source.issue.repository.full_name == "OWNER/REPO")
+                 | {number: .source.issue.number, state: .source.issue.state}]
+                | unique_by(.number)'
+        ```
+        This is GitHub's own reference parser (the same engine behind `closedByPullRequestsReferences`) surfacing **every** `#N` mention as a `cross-referenced` event, with `source.issue.pull_request` non-null when the referrer is a PR and `source.issue.state` giving its live state. Keep only entries whose `state == "open"` (lowercase — the timeline API returns lowercase issue/PR states, unlike the uppercase `closedByPullRequestsReferences` field). **Same-repo guard (required):** `cross-referenced` events include references from *other* repositories in a multi-repo ecosystem (e.g. a sibling repo's PR that mentions `OWNER/REPO#N`); the `.source.issue.repository.full_name == "OWNER/REPO"` filter (the field is reliably populated on every event) scopes the result to this repo so a foreign PR number is never misrouted to `gh pr view` below. This mirrors `closedByPullRequestsReferences`, which is inherently same-repo. No local regex is involved on GitHub's side; GitHub does the text parsing (the #3267 lesson: don't hand-roll what GitHub already parses).
+
+        **Phrase filter (required, #6216).** A `cross-referenced` event fires for **any** mention of `#N` in a PR body — not only a partial-increment phrase — so a same-repo, open timeline hit from source 2 is not yet a confirmed linkage; it is only a candidate. For each surviving candidate PR, fetch its body once and keep the candidate only if the body actually contains a `Part of #N` / `Contributes to #N` reference to **this** issue, tolerant of markdown emphasis/colon between the phrase and `#N` (the same convention `parse_dependencies` uses in `defaults/.claude/commands/loom/guide.md`, #4508):
+        ```bash
+        # One extra call per surviving timeline candidate (bounded — see the
+        # cost note below; not N×M).
+        gh pr view <pr_number> --json body --jq '.body // ""' \
+          | grep -iqE "(Part of|Contributes to)[*_:[:space:]]*#N" \
+          && echo confirmed || echo bare-mention
+        ```
+        Discard any candidate whose body does not match — it was a bare mention, not a partial-increment linkage, and **must not** count as an open linked PR (it does not feed the union below and never produces the `skip (existing PR #X in flight)` log line). A discarded candidate may optionally get a distinct advisory log line — e.g. `note: #N is mentioned by open PR #Y but not confirmed as a partial-increment linkage` — visibly different from the confirmed-linkage skip line above; this is visibility only and never changes the routing decision.
+
+     **Union, then filter at the per-PR read (#6217).** Merge the two source lists and dedupe by PR number, passing **every** source-1 PR through unfiltered at this step — `gh issue view --json closedByPullRequestsReferences` exposes only `id, number, repository, url` per entry, **not `state`**, so a `select(.state == "OPEN")` applied here matches nothing and silently drops every row (the bug #6217 fixed: the union step has no `state` field to filter on). Source 2 needs no further filtering here — its timeline read already filtered to `state == "open"` **and** the phrase filter above already discarded every bare mention (#6216), so only phrase-confirmed open PRs reach the union. For **every** candidate PR from the union (both sources), fetch its live state and labels — this per-PR read is the first and only point in the pipeline where `state` is actually available for a source-1 PR:
+     ```bash
+     # Plain `gh` — NOT "$GH_READ" (routing read; must be live).
+     gh pr view <pr_number_or_url> --json state,labels --jq '{state, labels: [.labels[].name]}'
+     ```
+     **Apply the MERGED/CLOSED exclusion here, not at the union step**: drop any candidate whose returned `state != "OPEN"` (uppercase — `gh pr view --json state` returns uppercase; a source-1 PR can be MERGED or CLOSED, which is not the duplicate-builder hazard this probe exists to catch). Apply the routing rules below based on the count of distinct **open** linked PRs remaining (from either source):
+
+     | Open linked PRs | Action |
+     |-----------------|--------|
+     | 0 | Continue with pre-flight (no behavior change). This includes the case where source 2's only hit(s) were bare mentions discarded by the phrase filter — the issue proceeds to Builder normally. |
+     | 1, no `loom:pr` label | **Skip Builder phase.** Log `skip (existing PR #X in flight)` with the PR URL. The existing PR is routed into the Judge phase (step 5) **for this wave** in place of a freshly-built PR; the Builder is not dispatched. Wave size shrinks by one per the pre-flight skip rule. |
+     | 1, has `loom:pr` label, no `loom:operator` | **Skip Curator + Builder + Judge.** Route the PR directly to Merge (step 7). The PR has already been judged. |
+     | 1, has `loom:pr` label **and** `loom:operator` | **Do NOT route to Merge.** The `labels` array from the same `gh pr view` read above already carries this — no extra call. Champion's merge-risk hold (`.loom/docs/label-state-machine.md`) is still in force on this PR; the engine may not act on it further, but the label stays re-evaluable so **skip the issue** rather than mutating anything — log `skip (PR #X held by loom:operator — human required)` with the PR URL. Do not remove `loom:operator` or `loom:pr`, and do not call `merge-pr.sh`. |
+     | 2 or more | Log all PR URLs and skip the issue. This is a human-attention case (which PR is canonical?) — sweep does not pick one. |
+
+     The closing-keyword path (`closedByPullRequestsReferences`, verified working in `gh` 2.93.0; matches the convention used in `champion-reference.md` and `champion-pr-merge.md`) is **untouched** — this is purely additive. It uses GitHub's native parser for `Closes/Fixes/Resolves #N` (and correctly excludes `Updates #N` / `Related to #N`); the timeline source covers exactly the non-closing references that field deliberately omits, narrowed to confirmed partial-increment references by the phrase filter above. Do **not** body-grep PRs for closing keywords (re-introduces the #3267 bug) — the phrase filter is a narrower, additive check layered on top of GitHub's own `cross-referenced` event, not a replacement for it. Per-issue the open-PR count is 0 or 1 in practice, so the timeline call + a body fetch per surviving source-2 candidate + a secondary `gh pr view` for routing is two or three extra calls per surviving candidate, not N×M.
+
+2. **Read the issue body before briefing any builder.** This is a non-negotiable rule from prior sweep sessions (a misleading title hid the real requirement in the body). Skipped only if pre-flight already routed the issue to Judge/Merge via the existing-PR rules above — those branches use the PR as the source of truth, not the issue body.
+   ```bash
+   gh issue view N --json title,body
+   ```
+   This same `body` also feeds the file-surface estimate ("Overlap-aware wave partitioning" step 1): parse its `## Affected Files` section for the candidate's estimated surface. A missing / "To be determined" section leaves the surface *unknown* (excluded from overlap analysis, never blocked). The estimate is used only to schedule waves and to warn — **never** to create a stacking edge (#3729, scheduling signal only).
+
+3. **Step 1b — publish this sweep's OWN lease record (in-session paths only; #6320, Epic #6165).** Run this for every issue `N` that survived step 1's skip rules **and** for which Step 1a did **not** fire — i.e. an operator-run `/loom:sweep`, a `--no-daemon` run, or a GH Actions cron invocation. (When Step 1a *did* fire, the daemon already wrote the lease record at dispatch; do not publish a second one — that path only starts the renewal loop, as documented there.)
+
+   Every **daemon-dispatched** sweep publishes a `<!-- loom:lease host=... sweep=... -->` record naming its host and sweep id (#6179). Before this step, an **in-session** claim published **none** — so a live in-session claim was indistinguishable from an abandoned one, and any daemon (local or remote) consulting lease records to answer *"is anyone still working this?"* saw a bare `loom:building` label with no lease and reclaimed it. That is not hypothetical: in the incident behind #6320 a fleet-dispatch bot stripped a **9-minute-old** in-session claim, re-claimed it, and dispatched a second Builder into the *same* `.loom/worktrees/issue-<N>` the first was still working in; that Builder ran `git reset --hard HEAD` and discarded the first's uncommitted edits.
+
+   ```bash
+   # Publishes the lease, then keeps it fresh for this session's lifetime.
+   # `$RUN_ID` is Step 0a's stable run id — reuse that literal, never a fresh one.
+   set +e
+   LEASE_IDENT="$(./.loom/scripts/sweep-lease-publish.sh publish "$N" --sweep-id "$RUN_ID")"
+   LEASE_RC=$?
+   set -e
+   if [ "$LEASE_RC" -eq 4 ]; then
+     echo "WARNING: skipping #$N — a live peer host holds a fresh lease on it"
+   elif [ -n "$LEASE_IDENT" ]; then
+     # shellcheck disable=SC2086  # LEASE_IDENT is "<host> <sweep-id>", intentionally split
+     set -- $LEASE_IDENT
+     ./.loom/scripts/sweep-lease-renew.sh start "$N" --host "$1" --sweep-id "$2" > /dev/null 2>&1 || true
+   fi
+   ```
+
+   - **Exit `4` means a *different* host holds a lease that is still fresh** — a live peer worker owns this claim. **Skip `N`** exactly like the `loom:building` skip bullet above (log a warning; it does NOT contribute to this wave). Do not publish over it and do not contest the label.
+   - **Every other outcome proceeds.** Exit `0` is "published, or this sweep already holds a fresh lease"; exit `2` is a best-effort write failure — proceed **without** a lease, exactly as this skill behaved before #6320 (the `loom:building` label remains the authoritative claim; a lease only improves the evidence a reclaim decision has). A `gh` read failure fails open and publishes anyway.
+   - **Pass `--host`/`--sweep-id` through to `sweep-lease-renew.sh start`** (the two whitespace-separated fields `publish` prints on stdout). Without them renewal is "newest lease wins", so a peer's later lease comment would be the one this sweep keeps alive while its own quietly expired.
+   - **Publishing happens at pre-flight, before the Builder claims `loom:building`** — that is deliberate. The reader's question is "is a live worker on this issue right now?", which becomes true at this instant, and the record's forge comment `id` then sorts **earlier** than a racing daemon dispatch's, which is exactly what the daemon's dispatch-time claim-then-verify-order check (#6287) reads to decide to yield instead of co-occupying the worktree.
+
+   The record this writes is byte-compatible with the daemon's (`defaults/docs/lease-record.md`), so every existing reader consumes it unchanged: the daemon's reclamation gate (#6286) refuses to reclaim while it is fresh, dispatch-time ordering (#6287) yields to it, and this sweep's own pre-push fence (`sweep-lease-fence.sh`, #6309) now has a lease to fence against on the in-session path too.
+
+> **Pre-flight skip rule.** If `K` of the wave's `N` candidates are skipped at pre-flight (closed, `loom:building`, `loom:blocked`, `loom:operator-only`, `loom:needs-capability`, a fresh peer-host lease from Step 1b's exit `4` (#6320), or multi-PR ambiguity), dispatch only `N - K` builders for this wave. Issues routed to Judge or Merge via the existing-PR rules consume a wave slot but skip the Builder dispatch. **Do not pull a candidate forward** from the next wave to backfill. Wave boundaries stay clean, and the next wave runs at its originally planned size.
+
+> **This per-issue check is not the only re-verification point.** When a daemon/champion is active in the repo (roleRunner/champion-on-idle, or the legacy daemon), the wave *plan* itself can go stale between waves — see "8a. Wave-boundary candidate re-verification" below, which re-runs this same existing-PR probe and these same skip rules across the **whole remaining candidate list** once per wave boundary, complementing (not replacing) this per-issue check (#4884).
+
+### 2. Curator phase (still per-issue, before the wave dispatch)
+
+For each surviving issue `N` in the wave:
+
+- **Checkpoint skip.** If `CHECKPOINT_PHASE` is one of `curator-done`, `builder-done`, `judge-rejected`, `judge-done`, `doctor-done`, skip the curator phase entirely (it already completed in a prior sweep run). Do NOT re-invoke the curator skill — re-curating is wasted work and can produce churn on an issue that's already mid-lifecycle.
+- Otherwise (no checkpoint, or `CHECKPOINT_PHASE` is empty): if the issue does not already have `loom:curated` or `loom:issue`, run the curator skill on it.
+  - Load and follow the instructions in `.claude/commands/loom/curator.md` for issue `N`.
+  - Expected exit state: issue has `loom:curated`.
+- If the issue already has `loom:curated` or `loom:issue`, skip the curator skill invocation but still write the checkpoint below (so future sweep runs can skip the redundant label probe).
+- **On successful completion** (curator ran, or curator-skip-because-already-curated), write the checkpoint:
+  ```bash
+  # Append --model <resolved> when you passed a model param to the curator subagent (#3482).
+  ./.loom/scripts/sweep-checkpoint.sh write N curator-done --task-id "$RUN_ID"
+  ```
+
+Curator runs sequentially per-issue within wave setup — it is cheap and does not benefit from parallelism here. **Await each Curator's completion explicitly** (a bounded, non-blocking `TaskOutput` poll — see the context-safe recipe, #6168) before advancing — the harness may launch the subagent async even with `run_in_background: false`, so the sequencing here depends on an explicit await, not the dispatch flag (see "Subagent dispatch is async-only", #3822).
+
+> **The `check-main-clean.sh` backstop (see "Backstop: verify the main worktree is clean after EACH builder returns" under the Builder phase below) is orchestrator-side only and does not cover the Curator phase.** It runs from *this* sweep skill, after each Builder's `TaskOutput`, and catches contamination a Builder subagent left in main. A Curator running in the main checkout (e.g. reproducing a measurement/board pipeline while re-baselining an issue) gets **no equivalent check here** — and a bare Champion cron tick or an interactive Curator session outside `/loom:sweep` gets none at all, orchestrator or not. Curators must self-enforce the worktree-or-restore rule in `curator.md` § "Running Measurement / Board-Pipeline Reproductions" (#4991) rather than rely on this backstop catching a missed restore.
+
+### 3. Approval gate (per-issue)
+
+Each issue must reach `loom:issue` before the Builder can claim it. This promotion is authorized — see `.loom/roles/curator.md` § "Who promotes `loom:curated` → `loom:issue`" for the full rule. In short: the orchestrator only ever promotes an issue that is already a member of *this sweep's own resolved candidate set*, so the promotion executes an approval already given one step earlier in this same run (the operator named or confirmed the issue, or the daemon dispatch that started this sweep did) — it is not independent agent judgment, and it is not the Curator acting.
+
+- If the issue already has `loom:issue`, proceed.
+- Otherwise, promote it (add-only — matches Champion promotion):
+  ```bash
+  gh issue edit N --add-label "loom:issue"
+  ```
+  **Do not remove `loom:curated`.** Per #3288 (Option A), `loom:curated` is a persistent milestone marker, not a transient step label — a promoted issue carries *both* `loom:curated` and `loom:issue`. Stripping it here would falsely surface the issue in the Curator Priority 1 "approved-but-uncurated" query (`loom:issue` without `loom:curated`) and drop the Builder prioritization signal that ranks `loom:issue` + `loom:curated` ahead of `loom:issue` alone. This keeps sweep promotion consistent with `champion-issue-promo.md`, which also preserves `loom:curated`.
+
+### 4. Builder phase (parallel within the wave)
+
+**Checkpoint skip.** For each surviving issue, if `CHECKPOINT_PHASE` is one of `builder-done`, `judge-rejected`, `judge-done`, `doctor-done`, the Builder phase has already completed for this issue. Read the `pr_number` from the checkpoint and route the PR directly into the Judge phase (step 5) — do NOT dispatch a builder subagent.
+
+```bash
+EXISTING_PR=$(./.loom/scripts/sweep-checkpoint.sh read N | sed -n 's/.*"pr_number"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
+```
+
+If `CHECKPOINT_PHASE` is `judge-rejected`, `judge-done`, or `doctor-done`, see the corresponding skip rules in steps 5/6 — the PR is routed further along, not back to Builder.
+
+For issues without `builder-done`-or-later checkpoints, proceed with the normal Builder dispatch:
+
+Dispatch up to `min(resolved-wave-size, surviving-candidates-in-wave-needing-builder)` `loom-builder` subagents **in a single tool-call block** from this orchestrator session, where `resolved-wave-size` is the explicit `--builders-per-wave` value or, when the flag was omitted, the Stage -1 auto wave size ("Resolve auto wave size"). Note this Wave Lifecycle is the **subagent** path, so the auto size here is core-scaled within `[3, 6]` (#3289-safe floor 3, ceiling 6, #3693) — the daemon path never runs this section (it dispatches detached processes and exits at Stage -1). **Do NOT invoke `/loom:sweep` as a subagent here** — see the "One level deep" rule in Execution Model above.
+
+Each builder is responsible for:
+
+- Claiming its issue (`loom:issue` → `loom:building`).
+- Creating an issue worktree via `./.loom/scripts/worktree.sh N` (idempotent — re-entering after a kill reuses the existing worktree and branch).
+- Implementing the change, running tests, committing.
+- Filing a follow-up issue for any out-of-scope discovery via `./.loom/scripts/create-issue.sh` (per `builder-complexity.md`) — **never** a bare `gh issue create` (#5047). This is a single filing call, not the concurrent issue-creation-burst hazard the #3707 rule above guards against, so it is expected behavior inside a parallel wave.
+- Pushing the branch and opening a PR labeled `loom:review-requested`.
+- Closing references: `Closes #N` in the PR body.
+
+**Stacked-dependency gated path (`--depends-on`, #3729 v1; per-issue map generalization, `--auto-stack`, #3759).** This gate fires **only** when a parent is set for the issue being built — look it up in the per-issue map `DEPENDS_ON[N]` (which subsumes the historical single global `DEPENDS_ON`: for a single-issue `--depends-on <parent>` dispatch, `DEPENDS_ON[N]` is just that one entry; for an `--auto-stack` wave, it is one entry per detected child). When `DEPENDS_ON[N]` is unset for issue `N`, the two steps below are byte-for-byte the default behavior. When `DEPENDS_ON[N]=<parent>` is set, the builder for issue `N` must:
+  - Create its worktree branched off the parent's branch: `./.loom/scripts/worktree.sh N --base feature/issue-<parent>` (instead of the bare `./.loom/scripts/worktree.sh N`). `worktree.sh` resolves `feature/issue-<parent>` from `origin/feature/issue-<parent>` (or a local branch), so the parent sweep must have created/pushed its branch first; if the base cannot be resolved, `worktree.sh` hard-fails rather than silently branching off the default branch.
+  - Open its PR against the parent branch: `gh pr create --base feature/issue-<parent> --label "loom:review-requested" --body "Closes #N ..."` (instead of the default base). The PR stays stacked on the parent until reconciliation, which now fires automatically when the parent squash-merges (see "Stacked dependency (auto-reconciliation on parent merge)").
+  The **only** thing `--auto-stack` changes here is how `DEPENDS_ON[N]` is *sourced* — the `worktree.sh --base` / `gh pr create --base` mechanics are untouched. Two sources feed the map: (a) an explicit single-issue `--depends-on <parent>` (unchanged, typically a daemon `dispatch_sweep` forwarding `depends_on` as `--depends-on`), and (b) an auto-stack-detected same-candidate-set edge (see "Auto-stack detection and wave ordering"). Absent both, the wave lifecycle does not auto-create stacks.
+  **Same-wave parent/child.** When the topological ordering placed a parent and its child in the **same** wave, the child's Builder branches off `feature/issue-<parent>` even though the parent's Builder is running concurrently in that wave — `worktree.sh --base` resolves the parent branch as soon as the parent Builder has pushed it. The child does **not** branch off the shared pre-wave `main` snapshot its unstacked wave-mates use.
+
+**Await all builders in the wave** before proceeding to Judge. Collect each builder's PR number (or failure marker). This await is **mandatory and explicit** — a bounded, non-blocking `TaskOutput` poll per builder (see the context-safe recipe, #6168), not one large blocking call. The harness may launch each Task async regardless of `run_in_background: false`, so proceeding to Judge on a dispatch flag alone can start Judge before builders finish; the "await all builders before Judge" rule is enforced by this explicit block, not by any dispatch flag (see "Subagent dispatch is async-only", #3822).
+
+**Run the main-clean check after EACH builder returns, not once per wave (#4380).** As each individual builder's `TaskOutput` arrives — before moving on to the next one's result and long before the wave advances to Judge — run the contamination check with that builder's issue in the label:
+
+```bash
+# Immediately after builder for issue N returns (per builder, inside the await loop):
+./.loom/scripts/check-main-clean.sh \
+    --baseline "$MAIN_CLEAN_BASELINE" \
+    --quarantine \
+    --label "run=$RUN_ID issue=$N"
+# exit 0 ⇒ clean · exit 4 ⇒ contamination found and QUARANTINED (continue) · exit 3 ⇒ dirty, NOT quarantined (hard-block)
+```
+
+Why per builder rather than per wave: with a single post-wave check, N builders share one detection point, so any contamination is attributable only to "some builder in this wave" and the risk window is wave-sized. Checking after each `TaskOutput` narrows the window to one builder and makes attribution exact — the `--label` value names the culprit in the quarantine log entry. See the Backstop section below for the full semantics, and keep the per-wave check as a final belt-and-suspenders pass.
+
+**Assert the Builder's cwd before it edits anything.** Before the Builder
+subagent prompt does any Write/Edit/Bash file mutation, it MUST capture
+`WORKTREE_ABS="$(cd .loom/worktrees/issue-N && pwd)"` and verify both: the
+`.loom-managed` sentinel is present at `$WORKTREE_ABS`, and `git -C
+"$WORKTREE_ABS" rev-parse --show-toplevel` equals `$WORKTREE_ABS` — then use
+`$WORKTREE_ABS` (never a bare repo-relative path) for every subsequent
+file-mutating call, Write/Edit or Bash alike (see `builder.md` → "Pre-Work
+Validation" / "Validation Checklist", #4178). A denied write is never a signal
+to retry the same target through a different tool (Edit/Write vs. Bash) — see
+below.
+
+**Backstop: verify the main worktree is clean after EACH builder returns (#3513, per-builder cadence + atomic quarantine #4380).** A builder subagent is dispatched via the Task tool ("one level deep", step 4 above) and inherits the orchestrator's single shared process env, which has **no** `LOOM_WORKTREE_PATH`, because the Task tool exposes no per-subagent env-injection parameter (#3719).
+
+> **Do not re-derive the stale "the guard cannot arm here" claim.** The absent env var does **not** disable worktree confinement. `guard-worktree-paths.sh`'s **path-derived fallback** (#4007, PR #4129) arms with **no env var at all**: it denies any Edit/Write whose target resolves into the main checkout while any `.loom-managed` worktree exists anywhere in the repo. This is directly evidenced, not theoretical — `.loom/logs/hook-errors.log` records a dense deny cluster during the 2026-07-29 #4364 build (`[guard-worktree-paths] Denied: BLOCKED: Edit/Write path '…/loom-daemon/src/main_health_gate.rs' resolves to the main repository checkout …`). `guard-destructive-generic.sh` extends the identical confinement to the common Bash-tool write idioms (`>`/`>>` redirection, `tee`, `sed -i`, `cp`/`mv`, #4178 / PR #4210), closing the escape #4063 used (a write denied on Edit/Write retried through Bash instead).
+>
+> **Both guards are PreToolUse DENY hooks. Neither guard reverts anything** — they block *before* the write lands, and never touch a file that already exists. So a builder narrative like "the guard reverted most of my edits" is a misreading of *denied* writes (which never landed) as *reverted* writes; the "partial" part of that story came from the builder's own ad-hoc per-file `git checkout --` cleanup, not from any hook. That ad-hoc cleanup is exactly what the `--quarantine` mode below replaces.
+
+This `check-main-clean.sh` backstop stays load-bearing despite the guard coverage: it is a whole-tree status check, not an idiom scan, so it catches anything the guards' heuristics don't recognize (an interpreter one-liner like `python -c`, `git apply`/`patch`, most deletion vectors — all deliberately out of scope for #4178's pattern list) or a write that landed before any worktree existed.
+
+**Cadence: after each individual builder's `TaskOutput`, plus once more after the whole wave.** The per-builder run is the primary one — its `--label` carries that builder's issue number, which is what makes the quarantine log entry attributable. The post-wave run is belt-and-suspenders (it catches anything that landed between the last builder's return and the Judge hand-off) and is labelled with the wave rather than an issue:
+
+```bash
+# Per builder, inside the await loop (primary — narrow window, exact attribution):
+./.loom/scripts/check-main-clean.sh --baseline "$MAIN_CLEAN_BASELINE" \
+    --quarantine --label "run=$RUN_ID issue=$N"
+
+# Once more after all builders in the wave return, before advancing any PR to Judge:
+./.loom/scripts/check-main-clean.sh --baseline "$MAIN_CLEAN_BASELINE" \
+    --quarantine --label "run=$RUN_ID wave=$WAVE_INDEX"
+```
+
+The `--baseline` argument points at the snapshot taken once at step 0 (before wave 1). With it, the check subtracts any dirt that predated the sweep and flags **only** changes that appeared after the snapshot — so pre-existing working-tree dirt (a regenerated lockfile, an operator scratch edit) no longer false-positives as contamination on every check (#3648). If the baseline file is missing or unreadable, the check warns and falls back to the whole-status hard-fail (fail-safe).
+
+**Exit codes and what to do with each:**
+
+| Exit | Meaning | Action |
+|------|---------|--------|
+| `0` | Main is clean (or carries only baselined dirt) | Continue normally. |
+| `4` | New dirt was found and **quarantined** to a stash rescue ref; main is provably back at the baseline | **Continue** — do not hard-block. Record the quarantine in the wave summary (see below). |
+| `3` | New dirt was found and could **not** be quarantined (or `--quarantine` was not passed) | **Hard-block** the wave from advancing any PR to Judge until it is resolved. |
+
+**Remediation is ALL-OR-NOTHING, and `--quarantine` performs it.** On detection, the check moves **every** offending path — tracked modifications *and* untracked files together — into a stash rescue ref in **one** `git stash push --include-untracked` operation scoped to exactly those paths, then emits **exactly one** structured JSON line naming the label, the offending paths, and the stash commit:
+
+```
+{"event":"main-clean.quarantine","ts":"…","result":"quarantined","label":"run=… issue=4364","main":"/…","stash_ref":"stash@{0}","stash_commit":"<sha>","paths":["…"],"count":2}
+```
+
+That entry goes to stderr and is appended to `.loom/logs/main-quarantine.log` (override with `--log FILE`). Properties that matter:
+
+- **It is a rescue, never a discard.** The full diff survives in the stash; recover it with `git stash show -p <sha>` and replay it into the owning issue worktree.
+- **Baselined dirt is spared.** Only the paths the check flagged as *new* are stashed, so an operator's unrelated working-tree edits are untouched.
+- **It is verified.** After stashing, the check re-runs detection and only reports success (exit `4`) if main is back at the baseline; a residual-dirt result is reported as a failure (exit `3`), never as a partial success.
+- **An empty quarantine is never created (#5185).** The offending path set is re-derived from a fresh `git status` immediately before the stash push, so dirt that a concurrent sweep / the builder's own commit resolved in the meantime is dropped from the pathspec instead of producing a content-free stash entry. When nothing is left to rescue, no stash is pushed and the check emits `"result":"no_op"` and exits `0` (main is provably at the baseline — treat it exactly like any other exit `0`). `"result":"quarantined_empty"` marks the residual race where an entry was created but captured nothing.
+- **The rescue ref stays outstanding until a human reconciles it.** Nothing drops it automatically, and `git stash`'s reflog is shared by every linked worktree, so entries accumulate. List them with `./.loom/scripts/check-main-clean.sh --list-quarantined` (also surfaced as a `Quarantined work` section by `./.loom/bin/loom status`).
+
+**Do NOT restore contamination piecemeal.** Per-file `git checkout -- <path>` / `rm <path>` sequences are forbidden as the remediation path: they are what produced the half-restored main checkout this section exists to prevent, and a main checkout that is neither the baseline nor the builder's intended change is worse than either extreme. If for any reason you must remediate by hand (e.g. `--quarantine` itself failed and returned `3`), do it as a **single** `git stash push --include-untracked -m "loom-quarantine: run=$RUN_ID issue=$N" -- <all offending paths>` — one operation, all paths, logged.
+
+**Reporting.** Surface every non-zero result loudly in the wave summary — **quote the specific offending paths** the check printed (under `Offending changes:` on exit `3`, or in the `paths` array of the quarantine entry on exit `4`) so the operator can see exactly which files escaped a worktree, along with the stash sha when one was created. The guard-hook denials plus the cwd-assertion prompt discipline above are the primary defense; this status check is the backstop that catches whatever they miss, and the quarantine is what makes its cleanup deterministic.
+
+**On successful PR creation**, write the `builder-done` checkpoint for that issue (record the PR number):
+```bash
+# Append --model <resolved> when you passed a model param to the builder subagent (#3482).
+./.loom/scripts/sweep-checkpoint.sh write N builder-done --task-id "$RUN_ID" --pr-number <PR>
+```
+
+If the builder failed (no PR opened), do NOT write a checkpoint — leave the checkpoint at the previous phase (typically `curator-done`) so the next sweep retries the builder from scratch.
+
+**Genuine no-op conclusion vs. builder failure (#6670, first in-repo caller #6740).** No PR opened is not automatically a failure — distinguish two cases before deciding what to do next:
+
+- **Builder failure** (build error, test failure, unrecoverable conflict, crash) — no PR, and no `.no-changes-needed` marker in the issue's worktree (`.loom/worktrees/issue-N/.no-changes-needed`). Leave the checkpoint as described above and fall through to "Per-builder failure isolation" below.
+- **Genuine no-op** — the worktree carries an untracked `.no-changes-needed` marker (builder.md → "Signaling No Changes Needed"): the builder investigated and deliberately concluded no code changes are required this pass, rather than crashing or erroring out. This is a self-reported "no actionable delta this pass" conclusion — exactly the shape `autonomous.workFinder.noopCooldown` (#6670) exists to suppress immediate re-dispatch on (see `daemon-reference.md` → "No-op re-dispatch cooldown (#6670)"). Handle it as its own outcome, distinct from a failure:
+  1. **Before releasing the claim**, record the no-op so the work finder does not immediately re-offer the same candidate:
+     ```bash
+     ./.loom/scripts/record-noop-release.sh N --reason "$(head -c 200 .loom/worktrees/issue-N/.no-changes-needed)"
+     ```
+     This call is best-effort and defensive, mirroring `build-gate.sh`'s `dispatch-backoff record` arm (#6192): a missing, unreachable, or older `loom-daemon` makes it a silent no-op and never fails the sweep.
+  2. **Release the claim** back to `loom:issue` — do NOT close the issue (the marker records "nothing to do this pass," not "this issue is resolved"):
+     ```bash
+     gh issue edit N --remove-label "loom:building" --add-label "loom:issue"
+     gh issue comment N --body "Builder found no actionable changes this pass: $(head -c 200 .loom/worktrees/issue-N/.no-changes-needed). Releasing the claim; a self-reported no-op cooldown was recorded so this issue is not immediately re-offered (#6670)."
+     ```
+  3. **Do NOT write a `builder-done` checkpoint** — leave it at the previous phase, exactly like the failure path. The marker is untracked and never committed, so nothing about this outcome is durable on the branch itself; the checkpoint staying at `curator-done` is what lets a future sweep pass re-evaluate the issue fresh (the noop-cooldown window from step 1, not the checkpoint, is what actually suppresses the immediate re-dispatch).
+  4. Record it as `no-op (no changes needed)` in the wave summary — distinct from `blocked (builder failed)` — so an operator scanning the summary does not mistake a deliberate conclusion for an error.
+
+**Per-builder failure isolation.** If builder for issue `#A` fails to open a PR (build error, test failure, unrecoverable conflict, etc.), log it and **continue** with the other builders' PRs in this wave. The failed issue is recorded as `blocked (builder failed)` in the summary. Do NOT abort the wave. Do NOT skip Judge for the other PRs.
+
+**Mid-builder kill semantics (#3373).** If sweep is killed during the Builder phase, the next invocation will see `CHECKPOINT_PHASE == "curator-done"` (no `builder-done` was written), so the Builder dispatches again from scratch. The worktree from the killed run is preserved by `worktree.sh`'s idempotency — `./.loom/scripts/worktree.sh N` is a no-op if `.loom/worktrees/issue-N` already exists. The builder re-enters the worktree, sees the partial diff, and decides whether to commit / amend / discard. **Sweep itself does not introspect the partial diff** — that's the builder's job.
+
+**Task-liveness check before Builder re-dispatch (#5897).** The "Mid-builder kill semantics" above is written for the case where sweep's own process died — but "sweep was killed" is not the only way an orchestrator ends up back at `CHECKPOINT_PHASE == "curator-done"` staring at a partial diff. On a **session-roll resume path** — a session-limit kill resumed via `/login` + re-invocation, or a `/clear` + re-invoke — the **orchestrator's own process survives**, and a Builder Task dispatched before the roll can survive with it: dispatched `Task`-tool subagents are not children of the terminal session in the way a killed CLI process's child processes are, so the roll does not necessarily take the in-flight Builder down with it. The incident this rule is drawn from: a `/loom:sweep all` run hit a session limit and was resumed via `/login`; at resume the orchestrator inspected the issue's worktree (uncommitted partial diff, no branch pushed, no PR) and concluded the Builder had died mid-edit — but the original Builder Task was still running, and completed ~40 minutes later (its completion notification arrived in the resumed context), by which point a duplicate Builder had already been dispatched into the same worktree. For a window, two Builders were live against one worktree — a genuine race, not just wasted work, because either could have committed/pushed over the other's in-flight state.
+
+- **The failure signature, stated precisely: "worktree has an uncommitted partial diff, no pushed branch, no PR" is NOT proof the Builder is dead.** It is proof only that the Builder has not yet reached `builder-done`. When the *orchestrator* process survived whatever triggered the resume (session-limit `/login` resume, `/clear` re-invoke), the dispatched Task can still be running and can still complete later, producing a genuine PR after the orchestrator already treated it as dead.
+- **Before re-dispatching a Builder for an issue whose worktree shows an in-flight partial diff, check whether the original Builder Task is still live in the harness** — not just forge/worktree state. Use whatever task-liveness surface the harness exposes for the current session (e.g., a non-blocking `TaskOutput` poll on the original dispatch's task id, or reviewing the transcript/session for a still-outstanding Task dispatch with no completion notification) before concluding the worktree state alone means the builder died.
+- **If the original may still be live, prefer a bounded wait/poll over immediate re-dispatch.** A short, bounded non-blocking `TaskOutput` poll (same context-safe recipe as elsewhere in this doc, #6168) costs little and avoids the duplicate-builder race outright; only fall through to a fresh Builder dispatch once you have positive evidence of death (the harness reports the task itself as gone/errored, or the wait window elapses with no sign of life) — not merely the absence of a pushed branch.
+- **If a duplicate is dispatched anyway and the original then completes, stop the duplicate before it can commit/push.** The moment the original Builder's completion notification (or its pushed branch / opened PR) is observed, treat that as authoritative and `TaskStop` the duplicate Builder Task immediately — before it reaches its own commit/push step — to prevent it from racing a second commit or push against the original's already-landed work into the same worktree/branch.
+
+This rule only *adds* a liveness check ahead of "Mid-builder kill semantics" above — it does not change what happens once a Builder is confirmed dead (worktree preserved by idempotency, next Builder decides commit / amend / discard, sweep itself still does not introspect the diff).
+
+**This generalizes beyond Builder re-dispatch (#6765).** The underlying rule — *query the harness's own liveness surface before treating an indirect proxy (a worktree diff, a lock's holder PID, silence, a stale kill notification) as proof a dispatched subagent has died* — is not specific to the worktree-diff proxy above. Apply the same three steps at **any** point an orchestrator is about to act on the assumption that a subagent it dispatched has died: (1) query positive liveness via the harness before inferring death from a proxy; (2) if liveness is genuinely unknowable from here (the agent was dispatched out-of-session, on another host, or otherwise unpollable), say so explicitly rather than picking a proxy anyway; (3) absent positive evidence of death, default to assuming the agent is live and do not adopt work associated with it. The lock-specific worked case this generalizes to — reaping an orphaned lock is fine, but adopting the branch/worktree it was protecting is a separate decision requiring its own positive "done" signal — is documented in `.loom/docs/troubleshooting.md` → "A dead lock-holder PID is not evidence the requesting agent is dead (#6765)".
+
+### Stacked dependency (auto-reconciliation on parent merge) — #3729 (v1), #3747 (v2 items 1 & 2)
+
+Stacked-PR mode pipelines a genuine dependency: when issue B consumes issue A's output (schema, file, manifest), B is built on `feature/issue-A` so B's lifecycle runs concurrently with A's review instead of serializing behind A's merge. **The dispatch surface is opt-in, daemon-`dispatch_sweep`-only, and linear-chains-only.**
+
+**How to dispatch a chain.** A chain is N independent `dispatch_sweep` calls, each naming its immediate predecessor — there is no multi-node planner:
+
+```text
+# Parent A (independent):
+mcp__loom__dispatch_sweep  kind={"Issue": A}  workspace_root=$WORKSPACE_ROOT
+# Child B stacked on A:
+mcp__loom__dispatch_sweep  kind={"Issue": B}  depends_on=A  workspace_root=$WORKSPACE_ROOT
+# Grandchild C stacked on B (A→B→C works because each hop names only its parent):
+mcp__loom__dispatch_sweep  kind={"Issue": C}  depends_on=B  workspace_root=$WORKSPACE_ROOT
+```
+
+The daemon forwards `depends_on` to the child as `--depends-on <parent>`; the child's Builder branches off `feature/issue-<parent>` and opens its PR with `--base feature/issue-<parent>` (see the gated path in the Builder phase above). A single optional parent makes diamonds / multi-parent stacks **unrepresentable** — there is no rejection logic because the type itself forbids them.
+
+**Block-the-subtree on parent failure (daemon-side, #3729 item 4).** If the parent sweep ends in `loom:blocked` (Doctor-cycle budget exhausted, or an operator cancel), the daemon's reaper does **not** let a child whose `depends_on` names that parent auto-progress: it publishes `sweep.issue.{child}.blocker` on the existing frozen topic (no new topic) so the stuck stack surfaces to the operator. Auto-detach (rebasing an orphaned child onto the default branch) is **not** implemented in v1 — block-the-subtree is the only cascade behavior.
+
+**Reconciliation now fires automatically on parent merge (v2 item 1, #3747).** The repo squash-merges, so after the parent squash-merges to the default branch as one commit, the child branch still carries the parent's original pre-squash commits. `merge-pr.sh` now reconciles child PRs automatically at its post-merge choke point (alongside the partial-increment label reset, before branch deletion): it discovers open child PRs via a **live forge query** (`gh pr list --base feature/issue-<parent>` — never the daemon registry, which is ephemeral and may not be running under a Champion cron or interactive merge), then splits safe/unsafe per child on the child **issue's** `loom:building` label (fresh, uncached `gh api` read):
+
+- **Safe** (child issue not `loom:building`): invokes `./.loom/scripts/reconcile-stack.sh <child-pr> feature/issue-<parent>` for you.
+- **Unsafe** (child issue still `loom:building`): a live Builder likely holds the child branch checked out, so the auto-rebase is **skipped** and a comment is posted on the child PR flagging deferred reconciliation. A later parent-merge-triggered pass (once the issue is no longer `loom:building`), or a manual run, picks it up.
+
+The step is **best-effort** — a reconciliation failure never fails the parent merge — and idempotent (once a child's base is retargeted away from the parent branch, the query returns zero rows).
+
+**Pre-merge merge-ordering guard now ships too (v2 item 2, #3747).** Item 1's reconciliation runs *after* the parent has already merged, and the repo setting Loom itself recommends (`delete_branch_on_merge:true`, applied by `setup-repository-settings.sh`) makes GitHub delete `feature/issue-<parent>` **synchronously during the merge API call** — before the post-merge reconcile pass runs, and once the ref is gone `reconcile-stack.sh`'s `git rebase --onto <default> <parent-branch>` can no longer resolve `<parent-branch>`. So item 1 could race and *lose* against the repo's own settings. To close that race, `merge-pr.sh` now runs a **pre-merge guard** (before both the auto-merge and synchronous-merge paths) that discovers open child PRs with the same live-forge query (`gh pr list --base feature/issue-<parent> --state open`) and, by default, **hard-blocks the merge** (`exit 1`, naming the blocking child PR number(s) and the `reconcile-stack.sh` unblock command) rather than letting the parent merge create the race. This is a normal, recoverable failure — Champion's cron retries it next tick, exactly like any other merge-blocking condition. Unlike item 1's post-merge pass, the guard keys **purely on "does an open child PR still target this branch"** — never on the child's `loom:building` label, since a "safe" child is just as exposed to branch deletion as an "unsafe" one. Pass **`--allow-stacked-children`** to `merge-pr.sh` to bypass the guard once you have manually reconciled/verified the children (operator asserts responsibility, mirroring `--worktree-path`); `--dry-run` still runs the guard and reports the would-be block without exiting 1.
+
+`reconcile-stack.sh` remains available for **manual** invocation — for the unsafe/deferred case once the Builder finishes, or to reconcile ahead of a merge (`--dry-run` previews the surgery):
+
+```bash
+./.loom/scripts/reconcile-stack.sh <child-pr> feature/issue-<parent>
+# = git rebase --onto <default-branch> feature/issue-<parent> <child-branch>
+#   git push --force-with-lease
+#   gh pr edit <child-pr> --base <default-branch>
+```
+
+**Rebase-on-parent-amend now ships too (v2 item 3, #3747).** Items 1 and 2 both handle the *parent-merge* moment; item 3 closes the far more common *pre-merge* case: while a stacked parent's PR (`feature/issue-<parent>`) is still open under review and Doctor amends the parent branch (interactive rewrite or additive commits + force-with-lease), any child that branched off the parent's *pre-amend* tip goes silently stale. The standalone `./.loom/scripts/rebase-stacked-children.sh feature/issue-<parent>` discovers open child PRs with the same live-forge query (`gh pr list --base feature/issue-<parent> --state open`), detects staleness per child via `git merge-base --is-ancestor origin/<parent> origin/<child>` (up-to-date children are skipped), and reuses item 1's safe/unsafe split on the child **issue's** `loom:building` label: safe stale children are rebased onto the parent's current tip (`git rebase origin/<parent> <child>` + `git push --force-with-lease`, **base NOT retargeted** — the child stays stacked on the parent), while unsafe children (issue still `loom:building`) get a deferred-rebase comment instead. It is manual-first (like v1's `reconcile-stack.sh`): **Doctor runs it as a documented workflow step 9a** after pushing to a `feature/issue-<N>` branch (see `doctor.md`), best-effort — a failure never fails the Doctor's own work. `--dry-run` previews the per-child outcome.
+
+**Epic #3747 status (complete):** all four v2 items shipped — the **merge-ordering guard** (item 2), **rebase-on-parent-amend** (item 3, above), and **out-of-set dependency detect-and-warn** (item 4 — the *safe* half of broad dependency-awareness; see "Out-of-set dependency detect-and-warn" below). The two remaining v1-deferred ideas were **decided won't-do** (operator, 2026-07-23): **diamonds / multi-parent** (kept single-parent by design — `depends_on: Option<u32>`; reopen via a fresh issue if a real diamond need appears) and **auto-detach** (proving non-dependence is unreliable — an operator action, not automated). The unsafe **auto-expansion** form of dependency auto-detection is likewise rejected: item 4 ships *detection + advisory only*, never silently reaching out to external issues.
+
+### Auto-stack detection and wave ordering (`--auto-stack`, #3759)
+
+This section is the single home for the opt-in `--auto-stack` behavior. It is entered **only** when `AUTO_STACK=true` (Modes A/B). Absent the flag, none of this runs and the sweep is byte-for-byte unchanged. It **generalizes the single-value `--depends-on` / `worktree.sh --base` / auto-reconcile mechanics above (already shipped, #3729/#3747/#3752) from one global value to a per-issue dependency map** — it does **not** introduce any new worktree/PR/merge machinery. Mode C never runs this (no Builder phase to stack).
+
+**1. Detection — authoritative body-text signal, same-candidate-set only.** During the Stage 0 candidate survey (which already reads each candidate's `title,labels,state` — auto-stack adds `body` to that same `gh issue view N --json` read, **no new API call**), grep each candidate's body for the dependency phrases. **Reuse the exact regex vocabulary already established in `defaults/.claude/commands/loom/guide.md` (`parse_dependencies`, the `(Blocked by|Depends on|Requires|\- \[.\])[*_:[:space:]]*#[0-9]+` convention — tolerant of markdown emphasis/colon between the phrase and `#N`, #4508), restricted here to `Depends on` / `Requires` only:**
+
+```bash
+# Modeled on guide.md's parse_dependencies — restricted to the two declaration phrases.
+# Deliberately EXCLUDES `Blocked by` (that phrase drives the distinct loom:blocked
+# unblock machinery in guide.md / champion-reference.md and is NOT repurposed here)
+# and EXCLUDES the `- [ ]` task-list form (not a stacking declaration).
+# Two-stage (#4508): select matching lines, tolerant of markdown emphasis/colon
+# before the first #N, then extract every #N on those lines.
+echo "$BODY" | grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+' | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+```
+
+A matched `#A` becomes a **stacking edge only when `#A` is also a member of this sweep invocation's own deduplicated candidate list.** A `Depends on #A` naming an issue **outside** the candidate set is left completely untouched — it is not an edge, it does not stack, and it flows through the existing `loom:blocked` handling exactly as today (this feature never touches out-of-set references). This "same-candidate-set only" restriction is load-bearing: it is what keeps auto-stack scoped to one sweep's own resolved set and prevents it from silently reaching out to arbitrary external issues.
+
+**2. Linear, single-parent edges only — no diamonds.** A candidate may declare at most **one** in-set parent, mirroring #3729's `Option<u32>` design (do **not** build a `Vec` of parents). If a body matches multiple in-set `#A` references, take the **first** and log a warning that only single-parent edges are honored (`WARNING: #<child> declares multiple in-set parents (#a, #b) — honoring #a only (single-parent edges)`). Diamonds / multi-parent stacks are structurally unrepresentable, consistent with #3729/#3747.
+
+**3. Cycle guard — drop, never silently orient.** If the surviving edges form a cycle within the candidate set (e.g. `#128 Depends on #129` and `#129 Depends on #128`), **drop every edge in the cycle** and log a warning (`WARNING: dropped cyclic stacking edges among #128 #129 — building independently`), falling back to default (unstacked) behavior for those issues. Never silently pick a direction.
+
+**4. Wave ordering — topological, parent at-or-before child.** After edges resolve, order candidates so **every parent lands in a wave at or before its child's wave** — a topological pass restricted to the linear-chain shape above (no general DAG solver). A parent/child pair **may** land in the *same* wave: in that case the child's Builder still branches off the parent's branch via `--base feature/issue-<parent>`, **not** off the shared pre-wave `main` snapshot its other wave-mates use. This ordering feeds the existing wave-partition pass (Stage 0 step 2 / the wave partition consumed by the Wave Lifecycle) — it reorders the candidate list, then the normal `--builders-per-wave` chunking applies.
+
+**5. Per-issue `DEPENDS_ON[N]` map.** The detected edges populate a per-issue lookup `DEPENDS_ON[N] = <parent>`. This is the sole new data structure — it **generalizes** the pre-existing single global `DEPENDS_ON` value (from `--depends-on <parent>`) into a map keyed by child issue. Sourcing precedence: an explicit single-issue `--depends-on N` seeds `DEPENDS_ON[N]` and a detected auto-stack edge for `N` never overrides it; every other entry comes from detection. The **Builder-phase gate** and the **daemon-dispatch loop** consume `DEPENDS_ON[N]` (see those sections) — the underlying `worktree.sh N --base feature/issue-<parent>` and `gh pr create --base feature/issue-<parent>` mechanics are **not** touched, only how the per-issue parent value is sourced.
+
+**6. Operator confirmation — reuse the existing gate.** When `--auto-stack` finds ≥1 edge, the "Detected stacking pairs" block (see the Stage 0 dry-run output spec) is printed as part of the same candidate-set display Mode B / `--dry-run` already show before awaiting confirmation. **Mode A** (explicit numeric list, today's no-prompt fast path) gains a confirmation prompt **only when `--auto-stack` actually found ≥1 edge** — a zero-edge `--auto-stack` run on Mode A stays prompt-free (identical to the flag being absent). Declining exits cleanly, matching every other gate in this skill. Mode B already prompts, so this adds only the stacking block to its existing display.
+
+**Explicitly out of scope for v1** (do not attempt here): file-overlap-heuristic auto-detection (#3729 rejected file paths as a topology signal — the reactive #3647 in-wave overlap-and-revalidate gate stays the backstop for *accidental* same-file collisions this feature doesn't stack); diamonds / multi-parent stacks; cross-`/loom:sweep` coordination (two independently-running sweeps stacking each other's candidates is #3768's scope — this feature only ever stacks within one sweep invocation's own resolved candidate set); `Part of #A` / `Blocked by #A` timeline cross-reference detection; and any change to `merge-pr.sh` / `reconcile-stack.sh` / `worktree.sh` (reconciliation is reused unchanged).
+
+### Out-of-set dependency detect-and-warn (v2 item 4, #3747)
+
+This is the **safe** half of broad dependency-awareness: the *detection* of dependency references that point **outside** the sweep's resolved candidate set, **without** the unsafe auto-expansion `--auto-stack`'s "same-candidate-set only" restriction (above) deliberately forbids. It runs **unconditionally** in Modes A and B (there is no flag to enable it — an out-of-set dependency is always worth surfacing), and it **never modifies the candidate set**. Where `--auto-stack` acts on **in-set** `Depends on`/`Requires` edges (to *stack* them), this pass warns on **out-of-set** `Depends on`/`Requires`/`Part of` references (to *surface* them). Mode C never runs it (no Builder phase / candidate issues to stack).
+
+**Mechanism.** During candidate-set resolution, for each resolved candidate issue, scan its `body` for dependency references and warn on any that would build against a base the sweep isn't producing:
+
+```bash
+# Reuses guide.md's parse_dependencies vocabulary (the same convention #3759's
+# --auto-stack derives from), restricted to the three DECLARATION phrases:
+./.loom/scripts/warn-out-of-set-deps.sh \
+    --candidates "<resolved candidate issue numbers>" \
+    --depends-on "<operator --depends-on values, if any>"
+```
+
+- **Parser reuse (not a second parser).** `warn-out-of-set-deps.sh` REUSES the exact `(Depends on|Requires|Part of)[*_:[:space:]]*#[0-9]+` vocabulary (tolerant of markdown emphasis/colon before `#N`, #4508) — a restriction of guide.md's `parse_dependencies` — rather than introducing a divergent parser. It EXCLUDES `Blocked by` (that phrase drives the distinct `loom:blocked` unblock machinery), exactly as `--auto-stack` does.
+- **Warn condition.** For each referenced `#A` that is **open** AND **not** a member of this sweep's resolved candidate set AND **not** already covered by an operator `--depends-on`, emit a clear advisory warning, e.g.:
+  `warning: issue #B declares "Depends on #A", but #A is not in this sweep's candidate set — pass --depends-on <A> or include #A to stack them; otherwise #B may build against a stale base.`
+- **No auto-expansion — the load-bearing safety property stays intact.** The candidate set is **never** auto-grown to include `#A`; the tool never probes/expands to external issues beyond the single openness check on a referenced number. This is detection + advisory *only* — the inverse (auto-adding un-named external issues) was **rejected** (operator, 2026-07-23) precisely because it would break the same-set guarantee.
+- **Non-blocking.** The warning never stops the sweep — the helper always exits `0`. In Mode A's no-prompt fast path the warnings go to **stderr/log** (never a prompt); in interactive/Mode B contexts they may also appear alongside the candidate-set preview before the confirmation gate.
+- **Silent cases (no warning).** An **in-set** reference (that is `--auto-stack`'s domain), a reference already covered by an operator **`--depends-on`**, a **closed** dependency (nothing stale to build on), and a self-reference all produce **no** warning.
+- **Dedup.** At most **one** warning per `(candidate, dependency)` pair, even if the body names the same dependency via multiple phrases.
+
+The helper is covered by `defaults/scripts/tests/test-warn-out-of-set-deps.sh` (out-of-set open → warns; in-set → silent; `--depends-on`-covered → silent; closed → silent; dedup; non-blocking exit 0).
+
+### 5. Judge phase (sequential per PR within the wave)
+
+For each PR in the wave (including PRs whose Builder just ran *and* PRs routed in via a `builder-done` checkpoint), in the order the builders completed (or any deterministic order — wave-internal ordering is not load-bearing), run the Judge phase sequentially. **"Sequentially" means await each Judge's completion explicitly** (a bounded, non-blocking `TaskOutput` poll — see the context-safe recipe, #6168) — and, when Judge requests changes, await the inline Doctor→Judge cycle (step 6) — before dispatching the next PR's Judge. The harness may launch each Judge/Doctor Task async regardless of `run_in_background: false`, so this per-PR ordering is enforced by an explicit await, never by a dispatch flag (see "Subagent dispatch is async-only", #3822):
+
+```
+WAVE_MERGED_FILES = {}                          # union of changed paths merged so far this wave (#3647)
+for pr in wave_prs:
+    judge(pr)                                   # may approve or request changes — against the PR's own pre-wave base
+    if changes_requested:
+        doctor(pr)                              # Doctor->Judge cycle(s), up to the cap (see step 6)
+    if still_approved:
+        revalidate_if_overlaps(pr, WAVE_MERGED_FILES)   # step 7 gate — re-judge / Doctor if pr shares a file with an already-merged sibling
+        merge(pr)                               # step 7
+        WAVE_MERGED_FILES |= changed_files(pr)  # feed the next PR's overlap probe
+post_wave_integration_gate()                    # step 8 — buildGate-against-main backstop for cross-file coupling
+```
+
+`WAVE_MERGED_FILES` is the load-bearing state for the intra-wave collision guard (#3647): it accumulates the changed-file paths of every PR already merged **in this wave**, so the step 7 gate can tell whether the next PR overlaps a sibling that has already landed. Seed it empty at the start of each wave (it does **not** carry across waves — each wave rebases onto a settled `main`). The `post_wave_integration_gate()` call (step 8) is the backstop for the cross-file case the file-path probe cannot see.
+
+**Checkpoint skip.** For each PR:
+- If `CHECKPOINT_PHASE == "judge-done"` for the corresponding issue, the Judge already approved the PR in a prior sweep run. Skip the Judge invocation and route the PR straight to Merge (step 7). The PR should already carry `loom:pr` (judge writes that label as part of the approve path); if it doesn't, the checkpoint and forge state have diverged — log a warning and re-run Judge.
+- If `CHECKPOINT_PHASE == "doctor-done"`, Doctor has already addressed Judge's earlier feedback. **Re-run the Judge phase** for this PR — Judge has not yet evaluated the post-doctor diff in the current sweep run. (The previous Judge result that led to Doctor was `changes-requested`, not `judge-done`.)
+- If `CHECKPOINT_PHASE == "judge-rejected"`, an earlier sweep run's Judge already completed and requested changes on this PR — the sweep was killed before the inline Doctor cycle finished. **Do NOT re-run the initial Judge pass.** Route directly to the Doctor phase (step 6) for this PR. **Forge/checkpoint divergence guard:** before trusting this checkpoint, verify the PR still carries `loom:changes-requested`:
+  ```bash
+  # Plain `gh` — NOT "$GH_READ": this recheck exists precisely to detect that a
+  # concurrent process moved the PR on, which a cached label set would hide.
+  gh pr view <PR> --json labels --jq '[.labels[].name] | contains(["loom:changes-requested"])'
+  ```
+  If it does not (e.g. a concurrent process already merged, re-judged, or otherwise moved the PR on), the checkpoint and forge state have diverged — log a warning and fall back to running Judge normally instead of trusting the stale checkpoint.
+- Otherwise (`builder-done`, or no checkpoint yet because Builder just ran in this wave), run Judge normally.
+
+- Load and follow the instructions in `.claude/commands/loom/judge.md` for the PR.
+- The judge uses `gh pr comment` (NOT `gh pr review --approve`) because GitHub's self-review API restriction applies — see `judge.md` for the full explanation.
+- Like the Builder above, the Judge files its own follow-up issues for out-of-scope discoveries via `./.loom/scripts/create-issue.sh` — see `judge.md` § "Creating Follow-up Issues"; the sweep orchestrator does not suppress this.
+- **If a previous Judge attempt for this PR died mid-flight without writing a fresh checkpoint** (rate limit, crash), re-verify forge state and complete only the missing steps before re-dispatching — see "Mid-phase-death recovery" above.
+- Expected exit states per PR:
+  - **Approve** → PR labeled `loom:pr`. Write the `judge-done` checkpoint for this issue (carrying the PR number), then continue to Merge (step 7) for this PR, then advance to the next PR in the wave.
+    ```bash
+    # Append --model <resolved> when you passed a model param to the judge subagent (#3482).
+    ./.loom/scripts/sweep-checkpoint.sh write N judge-done --task-id "$RUN_ID" --pr-number <PR>
+    ```
+  - **Request changes** → PR labeled `loom:changes-requested`. Write the `judge-rejected` checkpoint for this issue **before** continuing to Doctor, so a resume after a kill re-enters the Doctor phase directly instead of repeating this Judge pass:
+    ```bash
+    ./.loom/scripts/sweep-checkpoint.sh write N judge-rejected --task-id "$RUN_ID" --pr-number <PR>
+    ```
+    Continue to Doctor (step 6) **inline for this PR**, then re-judge, then merge or block. Do **not** write a `judge-done` checkpoint here — the PR is not yet approved. (Re-rejections after a Doctor cycle also write `judge-rejected` — with an `--attempt` — under the multi-cycle rules in step 6; the terminal rejection that exhausts the cap does not get a `judge-rejected` write. See step 6's "Doctor-cycle cap" bullets.)
+
+**Why sequential and not parallel?** Parallel Judges add coordination complexity without clear benefit — each judge needs to checkout the PR and reason about it independently. Defer parallel-judge to a future issue if benchmarks justify it.
+
+### 6. Doctor phase (inline per PR, only if Judge requested changes)
+
+If Judge requests changes on PR `#X` mid-wave, **or `CHECKPOINT_PHASE == "judge-rejected"` resumed a Judge rejection that already completed in a prior sweep run** (see step 5's checkpoint skip — do NOT dispatch another initial Judge for `#X` in this case), run inline Doctor→Judge cycles for `#X` — **up to `sweep.max_doctor_cycles`** (default 1; see "Doctor-cycle cap" in the Execution Model) — before moving to the next PR's Judge:
+
+- Load and follow the instructions in `.claude/commands/loom/doctor.md` for PR `#X`.
+- **If a previous Doctor attempt for `#X` died mid-flight without writing a fresh `doctor-done` checkpoint** (rate limit, crash — the #3676 shape), re-verify forge state (pushed commit? already re-labeled `loom:review-requested`?) and complete only the missing steps rather than dispatching a fresh Doctor that would duplicate the pushed fix — see "Mid-phase-death recovery" above.
+- **Model escalation (#3481)**: this Doctor is dispatched because of a Judge rejection, so resolve its model per "Model escalation on Judge rejection" in the Execution Model — pass `ladder[min(attempt - 1, len - 1)]` from `sweep.escalation` (cycle 1 → `ladder[1]`, default `opus`, resolved through `resolve-model.sh` to `claude-opus-5` — #3982) via the Task tool's `model` parameter, **unless** a tier-1/tier-2 pin applies (pins win) or escalation is disabled (`[]`/`false`). The pinned ID degrades to its alias on this Task-tool dispatch — run it through `resolve-model.sh --task-alias` (see "Pinned-ID degradation on Task-tool dispatch", #4282). **A Doctor dispatched from a resumed `judge-rejected` checkpoint resolves this identically** — read `attempt` from the checkpoint (`sweep-checkpoint.sh attempt N`); an absent `attempt` field means this is the first cycle, equivalent to attempt 2 (same convention as every other checkpoint reader in this doc).
+- Doctor addresses the judge's feedback, commits the fixes, and pushes.
+- **On successful Doctor completion**, write the `doctor-done` checkpoint for the issue (carrying the PR number, the attempt counter, and the model the Doctor actually ran on — escalated or pinned, #3482) **before** re-invoking Judge:
+  ```bash
+  # <attempt> is the cycle index + 1: 2 for the first Doctor cycle, 3 for the second, etc.
+  ./.loom/scripts/sweep-checkpoint.sh write N doctor-done --task-id "$RUN_ID" --pr-number <PR> --attempt <attempt> --model <doctor-model>
+  ```
+  This way, if sweep is killed between Doctor and the follow-up Judge, the resume run will see `doctor-done` and re-enter at the Judge phase (step 5), not redo the Doctor work.
+- On completion, re-label the PR from `loom:changes-requested` back to `loom:review-requested` and **re-run the Judge phase** (step 5) for this PR.
+- **Cap: up to `sweep.max_doctor_cycles` Doctor→Judge cycles per PR (default 1).** If Judge still requests changes after the configured number of Doctor passes, mark this PR as blocked (`PR #X blocked: doctor cycle exhausted after <k> Doctor→Judge round(s); human attention required`), log the reason, and proceed to the next PR in the wave (do NOT block the wave on it). **Do NOT write a `judge-rejected` checkpoint for this terminal rejection** — the PR is leaving the sweep for this run, so leave the last checkpoint (`doctor-done`) as-is; the stale-checkpoint cleanup path handles it once the PR is closed or reconciled.
+- **Re-rejection under the cap (multi-cycle, #4185).** If Judge requests changes again and the cap has **not** yet been reached (`sweep.max_doctor_cycles > 1`, or the distinct-defect grace cycle below is granted), write `judge-rejected` for this issue **before** dispatching the next Doctor cycle — same as the initial rejection in step 5, but this time carry `--attempt` matching the value the **next** `doctor-done` write will use, so a kill-and-resume re-enters the correct escalation cycle and the cap survives the kill:
+  ```bash
+  ./.loom/scripts/sweep-checkpoint.sh write N judge-rejected --task-id "$RUN_ID" --pr-number <PR> --attempt <next-attempt>
+  ```
+  Then proceed with the next Doctor cycle as usual.
+- **Distinct-defect exception (default cap only).** When `max_doctor_cycles` is at its default of 1 and the second Judge rejection is a demonstrably distinct defect from the first (forward progress, not the same disagreement re-litigated), you MAY grant **exactly one** additional bounded Doctor→Judge cycle before blocking — single-use per PR, never composing with an operator-raised cap. Emit the required log line naming the distinction (`PR #X: granted one extra Doctor cycle — second rejection is a distinct defect (<short reason>)`). If granted, this is a "re-rejection under the cap" per the bullet above — write `judge-rejected` with the matching `--attempt` before the grace cycle. Same-defect or ambiguous rejections still block immediately (no grace, no `judge-rejected` write — see the cap bullet above). See "Doctor-cycle cap" for the full rule.
+
+The Doctor cycle for `#X` does **not** block other PRs in the wave — but because Judge runs sequentially per-PR within the wave, the next PR's Judge waits for `#X`'s Doctor→Judge cycle to settle before it starts. This is the intended sequencing. "Waits for … to settle" means **await the Doctor Task's completion explicitly** (a bounded, non-blocking `TaskOutput` poll — see the context-safe recipe, #6168) and then await the re-run Judge — the harness may launch the Doctor async regardless of `run_in_background: false`, so this ordering is enforced by an explicit await, not a dispatch flag (see "Subagent dispatch is async-only", #3822).
+
+### 7. Merge (per PR)
+
+**Intra-wave overlap revalidation — run this BEFORE the merge below (#3647).** Every builder in this wave branched off the *same pre-wave `main`* (step 0's snapshot), and Judge (step 5) validated each PR against that shared base — never against the `main` that a *sibling* PR in the same wave just produced. So two PRs that both touch the same file can each pass independently and then break `main` once both land — a *semantic* merge conflict git reports as clean. As the Execution Model's base-branch-only callout states, GitHub's `mergeable`/`mergeStateStatus` compares each PR against the base branch alone and is **not** a sibling-PR conflict check, and the repo's branch ruleset gives **no** server-side protection here either: it has no `required_status_checks` and no "require branches up to date" rule, so `merge-pr.sh --auto` merges a clean-but-stale PR immediately without re-running checks against the new base. This gate is the **reactive** backstop for overlap the **proactive** partitioner ("Overlap-aware wave partitioning", #4161) could not separate into different waves; the step 8 integration gate closes the cross-file case this probe cannot see.
+
+Before calling `merge-pr.sh` for PR `#X`:
+
+1. **Cheap read-only overlap probe — a failed read is "unknown", never "disjoint" (#6390).** Fetch `#X`'s changed-file set and compare it against `WAVE_MERGED_FILES` (the union of paths already merged in this wave — see the step 5 loop), capturing the call's own success/failure explicitly rather than trusting an empty result:
+   ```bash
+   # Plain `gh` — NOT "$GH_READ". Everything from here to the merge call is
+   # merge-gating: the last read before an irreversible action must observe
+   # current state unconditionally (#4667).
+   PROBE_FILES="$(gh pr view X --json files -q '.files[].path')"
+   PROBE_RC=$?
+   ```
+   - **`PROBE_RC == 0`** (the read itself succeeded — regardless of how many lines came back) is the only case where `$PROBE_FILES` is authoritative:
+     - **Disjoint** (no path in `$PROBE_FILES` shared with `WAVE_MERGED_FILES` — this includes a genuinely empty `$PROBE_FILES`, e.g. a real 0-file-diff PR) → **keep the fast path**: fall straight through to the merge below. Two PRs touching disjoint files are safe (the issue confirms this), so no revalidation latency is added. This is the common case. *(Caveat: file-path granularity cannot see cross-file semantic coupling — e.g. a `to_dict()` in a source file vs. an exact-dict assertion in a test file, which are disjoint paths. That class is the step 8 integration gate's job, not this probe's.)*
+     - **Any shared path** → enter the revalidation path (step 2) before merging.
+   - **`PROBE_RC != 0`** (the read failed — e.g. a 503/404/timeout during a forge outage or other transient failure) → the file list is **unknown**, not disjoint. An empty or missing `$PROBE_FILES` produced by a failed call carries no evidence either way — do **not** fast-path on it. Fall back to deriving `#X`'s changed-file set locally, scoped to `#X`'s own base/head (never a hardcoded ref — `<base>` is the default branch, or `feature/issue-<parent>` when `#X`'s issue is stacked per `DEPENDS_ON[N]`, and `N` is `#X`'s corresponding issue number):
+     ```bash
+     git fetch origin feature/issue-N
+     git diff --name-only origin/<base>...origin/feature/issue-N
+     ```
+     Treat this fallback's output exactly like a successful `gh` read (disjoint → fast path, shared path → step 2). **If the fallback also fails** (no local access to `origin`, unresolvable ref, etc.), the overlap status is genuinely unknown — never guess disjoint. Default to treating `#X` as overlapping and enter the revalidation path (step 2), which is always safe (merely slower) even when it turns out the PRs did not actually overlap.
+2. **Revalidate `#X` against the freshly-merged `main`.** Update `#X`'s branch onto the current `main` so it actually contains the already-merged sibling's changes:
+   ```bash
+   gh pr update-branch X    # or the forge equivalent (forge_update_branch)
+   ```
+   Re-check `mergeStateStatus` (`gh pr view X --json mergeStateStatus`) and route:
+   - **`DIRTY`** (the merge introduced a textual conflict) → run an inline Doctor→Judge cycle for `#X` (step 6 — Doctor rebases onto the updated `main` and fixes, then re-Judge), then merge. Reuse — do **not** extend — the step 6 Doctor-cycle budget (a revalidation Doctor counts against `sweep.max_doctor_cycles` for `#X`, same as any other cycle).
+   - **Clean, but the branch was updated** → the update pulled the sibling's changes into `#X`'s branch, so **re-run the Judge phase (step 5) against the integrated branch** before merging. Judge checks out the PR and runs its build/tests, which is what catches a *same-file* semantic break the pre-wave Judge could not. If the integrated build/tests fail → route to Doctor (or, if `#X`'s Doctor-cycle budget is already spent, mark `#X` `loom:blocked`, surface it, and do **not** merge a known-red change).
+   - **A real break Doctor cannot clear in one cycle** → mark `#X` `loom:blocked`, log the reason, skip its merge, and continue with the rest of the wave (do not block the whole wave on it). Consistent with the step 6 cap.
+
+Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PRs keep the parallel fast path. Under `--dry-run` nothing here runs — the plan may simply note that overlapping PRs in a wave will be serialized-with-revalidation.
+
+Use the dedicated merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
+
+```bash
+./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
+```
+
+The script merges via the forge API and cleans up the worktree. `--auto` enables GitHub's server-side auto-merge queue (queues the merge until required checks pass); on PRs that are already in `CLEAN` state (fast CI), the script transparently falls back to an immediate merge — see #3371. **On a repo with GitHub auto-merge disabled** (`allow_auto_merge:false`), `merge-pr.sh` now detects the setting up front and degrades `--auto` gracefully to wait-for-checks-then-merge (immediate if already CLEAN) instead of failing (#3820) — so `--auto` is safe to pass uniformly here regardless of the repo's auto-merge setting; no per-repo branching is needed.
+
+**If a previous Merge attempt for this PR died mid-flight without deleting the checkpoint** (rate limit, crash between `merge-pr.sh` success and the delete call), re-verify forge state first: if the PR is already **merged**, just delete the stale checkpoint — do **not** re-run the merge. See "Mid-phase-death recovery" above. (The step 1 stale-checkpoint cleanup is the belt-and-suspenders backstop for this.)
+
+**On successful merge** (script returns 0), add `#X`'s changed-file paths to `WAVE_MERGED_FILES` (so the next PR's overlap probe sees them), then delete the issue's sweep checkpoint:
+```bash
+./.loom/scripts/sweep-checkpoint.sh delete N
+```
+
+This is the terminal state. The checkpoint must be removed so a future `/loom:sweep` invocation that references the same issue number (e.g., as part of a wider candidate set) doesn't take a `merge-done` short-circuit on the stale state. The stale-checkpoint cleanup in step 1 is the belt-and-suspenders defense if this delete is missed (e.g., sweep killed between `merge-pr.sh` success and the delete call); on the next sweep run that touches the issue, step 1 detects the closed-issue + checkpoint mismatch and removes it.
+
+If `merge-pr.sh` fails (e.g., the merge queue rejects the PR, or required checks haven't passed and `--auto` is rejected), do **not** delete the checkpoint — leave it at `judge-done` so the next sweep retries the merge from a clean state. **Before logging why it failed, classify the failure text through "Forge write failure diagnosis (#6425)"** (Mode B, above) — a forge 5xx/outage signature or an unconfirmed permission-scope 403 must be logged as forge-transient / "will retry", never as a "needs operator attention" credential diagnosis without the positive-evidence check.
+
+### 8. Wave settled → post-wave integration gate → advance to next wave
+
+Once every PR in the wave has reached a terminal state (merged, blocked, or builder-failed), run the integration gate below **before** starting the next wave's builders.
+
+**Post-wave integration gate (#3647).** The step 7 overlap probe is file-path-granular: it catches two PRs that edit the **same** file, but it **cannot** see cross-file semantic coupling. That is exactly the shape of the #3647 incident — PR A changed a `to_dict()` in a *source* file and PR B added an exact-dict assertion in a *test* file. Their changed-file sets are **disjoint**, so step 7 took the fast path for both, yet `main` went red once both landed. File-path overlap alone therefore cannot protect the original incident; this gate is the load-bearing backstop for it:
+
+- **If a build/test command is configured** (`buildGate.command`, honoring `buildGate.enabled`, in `.loom/config.json`), run it once against the post-wave `main` — pull/refresh `main` to its just-merged state and run the command there. On failure, **halt the sweep**: do not start the next wave, log the failing command and its output, and surface the red `main` (e.g. leave a clear error in the summary and/or open a recovery issue). A red `main` must stop the run rather than compound across subsequent waves.
+- **If no such command is configured**, the step 7 overlap revalidation is the only intra-wave protection — same-file collisions are caught, but cross-file semantic coupling (source-vs-test) is **not**. Log a one-line advisory recommending a `buildGate.command` for waves that cluster on one subsystem, and — per the issue's mitigation #3 — prefer placing issues likely to touch a shared serialization/schema surface in **separate size-1 waves** rather than parallelizing them.
+
+Under `--dry-run` the gate does not run (no checkout, no command execution); the plan may note that a post-wave integration check would run if `buildGate.command` is configured.
+
+Once the gate has passed (or is not configured), refresh this run's registry heartbeat (Step 0a's "Heartbeat refresh, at each wave boundary" — `./.loom/scripts/sweep-run-registry.sh heartbeat "$RUN_ID"`, best-effort, non-fatal) and advance to the next wave. Do not start the next wave's builders until the current wave's PRs are all settled and the integration gate (if configured) is green.
+
+### 8a. Wave-boundary candidate re-verification (daemon/champion-active only, #4884)
+
+The wave *plan* — which candidates land in which wave — is computed once, at the confirmation gate, before wave 1 ever starts. Per-issue pre-flight (step 1) re-verifies **one** issue immediately before it enters its own wave, but nothing re-checks the **rest of the still-queued candidate list** in between waves. When a daemon or Champion is independently active in the same repo, that gap is real: it can merge PRs and close issues out from under a plan the orchestrator has not looked at again since the confirmation gate (the #4884 incident — see "Modern daemon coexistence" below — merged 3 PRs and closed 4 issues while sweep waves 1-2 were still running, completing the entirety of the planned wave 4 and part of wave 3).
+
+**Trigger.** Immediately after step 8's integration gate settles and before partitioning/dispatching the next wave (i.e. at every wave boundary except after the final wave, where there is no next wave to protect), check whether a daemon/champion is active using the detection already defined in "Coexistence (peer `/loom:sweep` and legacy daemon)" below — either the legacy `.loom/daemon-loop.pid` liveness check, **or** the modern case this issue is about: a reachable `loom-daemon` (reuse this run's Stage -1 `PROBE_DAEMON` result if already probed; otherwise a fresh 500ms `Ping`) whose resolved `.loom/config.json` has `autonomous.roleRunner.enabled=true` with `champion` present in `roleRunner.roles` (interval cadence) or `roleRunner.onIdle` (idle-edge cadence, #4364 — "champion-on-idle"). If neither signal is active, this step is a **no-op** — fall straight through to "advance to the next wave" exactly as step 8 already says, at zero added cost to the common single-runner case.
+
+**When triggered**, before computing/dispatching the next wave's partition, re-read live forge state for **every** remaining (not-yet-dispatched) candidate in this sweep's list — the whole tail of the plan, not just the next issue up — and apply the **existing** step 1 rules, unchanged, to each:
+
+- `gh issue view N --json state,labels,closedByPullRequestsReferences` per remaining candidate (uncached, same claim-arbitration rationale as step 1's per-issue read — a stale answer here is exactly the window a duplicate build or a stale Judge would slip through).
+- Route each candidate through step 1's existing rules verbatim: closed → drop from the remaining list; `loom:building` (and not this sweep's own claim, per Step 1a) → drop; `loom:blocked` / `loom:operator-only` / `loom:needs-capability` → drop; the existing-PR probe (closing-keyword + timeline cross-reference union, both sources) → route to Judge/Merge instead of Builder, exactly as step 1 already does. When `SWEEP_ALL_AGGRESSIVE=true`, apply the aggressive-mode override / "Aggressive candidate taxonomy" table here too, not the conservative skips — same substitution rule step 1 already documents. **This step invents no new routing** — it is step 1's rules, re-run in a batch, at a different cadence.
+- **New outcome class: "completed externally."** A remaining candidate found already **closed** here, whose close this sweep did not itself just perform (no `merge-done`/`judge-done` checkpoint written by *this run* for it), is classified `completed externally (daemon/champion)` rather than plain `skipped` — it did not fail pre-flight, it was finished by something else. Carry this classification into the Summary Output (see below) so a wave that looks "empty" is legible as external completion, not sweep failure.
+- **Checkpoint hygiene.** For any candidate dropped here, delete a live `.loom/sweep-checkpoint/issue-<N>.json` immediately (`sweep-checkpoint.sh delete N`) rather than leaving it to be discovered later — this is the same stale-checkpoint cleanup step 1 performs on a closed issue at pre-flight, just applied proactively at the wave boundary so a candidate dropped here (and therefore never reaching its own step 1) doesn't strand an orphaned checkpoint for a future sweep run to trip over.
+- **Scope.** Only touches the remaining, not-yet-processed tail of the candidate list — never re-touches a wave that has already settled (merged/blocked candidates from earlier waves are done, not re-opened by this step).
+
+This step composes with, and does not replace, step 1: every surviving candidate still gets its own per-issue pre-flight immediately before its own dispatch, same as today — defense in depth against the (much shorter) window between this wave-boundary batch check and that candidate's actual dispatch. It also does not interact with `--auto-stack` ordering, `--builders-per-wave` sizing, or the step 8 integration gate — it only ever **drops or reroutes** candidates already in the plan; it never adds one or mutates a candidate this sweep has already dispatched a builder for.
+

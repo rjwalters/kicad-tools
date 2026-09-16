@@ -376,8 +376,13 @@ else
     GH="gh"
 fi
 
-REPO_NWO="$(forge_get_repo_nwo "$GH")" || \
-  error "Could not determine repository. Is 'gh' authenticated?"
+REPO_NWO="$(forge_get_repo_nwo "$GH")" || error "Could not determine repository. Is 'gh' authenticated?"
+# Detect which merge strategy the target repo actually allows (#7754) --
+# previously every call site below hardcoded "squash", which fails outright
+# ("Squash merges are not allowed on this repository") on any repo that has
+# squash-merge disabled. Read once per invocation; fails open to "squash"
+# (this script's pre-#7754 behavior) on any probe failure.
+REPO_MERGE_METHOD="$(forge_detect_merge_method "$REPO_NWO" "$GH" 2>/dev/null || echo squash)"
 
 # Parse arguments
 PR_NUMBER=""
@@ -1826,7 +1831,7 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
       # and captures the native exit code (0=merged, 3=Gitea decline,
       # 4=head-SHA mismatch, else fail).
       _AM_RC=0
-      AUTO_MERGE_OUTPUT=$(forge_cmd_perm_safe loom-daemon forge auto-merge "$PR_NUMBER" --method squash --expected-head-sha "$MERGE_PRECONDITION_SHA" 2>&1) || _AM_RC=$?
+      AUTO_MERGE_OUTPUT=$(forge_cmd_perm_safe loom-daemon forge auto-merge "$PR_NUMBER" --method "$REPO_MERGE_METHOD" --expected-head-sha "$MERGE_PRECONDITION_SHA" 2>&1) || _AM_RC=$?
       if [[ $_AM_RC -eq 0 ]]; then
         AUTO_MERGE_OK=true
         break
@@ -1850,7 +1855,7 @@ if [[ "$AUTO_MERGE" == "true" ]]; then
     if [[ "$_AM_DECLINED" == true ]]; then
       # loom-daemon absent, or it declined (e.g. Gitea) — shell-based
       # forge_auto_merge carries the poll-and-merge for both forges.
-      if AUTO_MERGE_OUTPUT=$(forge_auto_merge "$REPO_NWO" "$PR_NUMBER" "$MERGE_PRECONDITION_SHA" 2>&1); then
+      if AUTO_MERGE_OUTPUT=$(forge_auto_merge "$REPO_NWO" "$PR_NUMBER" "$MERGE_PRECONDITION_SHA" "$REPO_MERGE_METHOD" 2>&1); then
         AUTO_MERGE_OK=true
         break
       fi
@@ -2326,7 +2331,7 @@ if [[ "$PR_MERGEABLE" == "false" ]]; then
 fi
 
 if [[ "$DRY_RUN" == "true" ]]; then
-  info "[dry-run] Would merge PR #$PR_NUMBER (squash) and delete remote branch '$PR_BRANCH'"
+  info "[dry-run] Would merge PR #$PR_NUMBER ($REPO_MERGE_METHOD) and delete remote branch '$PR_BRANCH'"
   if [[ "$CLEANUP_WORKTREE" == "true" ]]; then
     info "[dry-run] Would clean up local worktree"
     if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$PR_BRANCH"; then
@@ -2338,12 +2343,13 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-# Merge via API (squash) with retry for stale branch
+# Merge via API (using the repo's detected/allowed merge method, #7754) with
+# retry for stale branch
 MAX_MERGE_RETRIES=3
 MERGE_RETRY_DELAY=5
 
 for MERGE_ATTEMPT in $(seq 1 $MAX_MERGE_RETRIES); do
-  MERGE_RESPONSE=$(forge_merge_pr "$REPO_NWO" "$PR_NUMBER" "$MERGE_PRECONDITION_SHA" 2>&1) && break  # Success, exit loop
+  MERGE_RESPONSE=$(forge_merge_pr "$REPO_NWO" "$PR_NUMBER" "$MERGE_PRECONDITION_SHA" "$REPO_MERGE_METHOD" 2>&1) && break  # Success, exit loop
 
   # Check if it merged despite error (race condition)
   RECHECK_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || echo '{}')

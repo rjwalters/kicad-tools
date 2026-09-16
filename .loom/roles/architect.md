@@ -202,10 +202,9 @@ When creating a proposal:
 
 > **File issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create` (#5047).**
 > `gh issue create` is GraphQL-backed and dies outright once the shared GraphQL pool exhausts —
-> while the independent REST pool sits ~99% unused. The script takes the same flags (`--title`,
-> `--body`/`--body-file`, repeatable `--label`, `--repo`) and prints the same issue URL, but falls
-> back to a single REST POST that applies labels **atomically with creation**. Recipe and
-> rationale: `.loom/docs/gh-issue-create-rest-fallback.md`.
+> while the independent REST pool sits ~99% unused. The script takes the same flags, prints the
+> same issue URL, and falls back to a single REST POST that applies labels **atomically with
+> creation**. Recipe and rationale: `.loom/docs/gh-issue-create-rest-fallback.md`.
 > (`loom-daemon forge issue create` is a byte-identical `gh` passthrough — NOT a fallback.)
 
 > **Issue creation is serialized BY A LOCK, not by convention — and the hazard is NOT limited to one repo (#3707, #6714).** `gh issue create` returns a server-assigned number with no client-side coordination, so two issue-creating agents (two Architects, or an Architect and a Curator-decomposition / Champion epic-phase / Auditor / Hermit / Doctor run) filing at the same time **race on issue numbers and cross-contaminate bodies** — **including when they are filing into completely different repos.** #3707 shipped only a "do not run concurrent Architects" convention, and on 2026-08-08 two Architects filing 5-issue bursts into *different* repos overlapped anyway: one repo's five issue bodies were overwritten with the other's, titles untouched, undetected for 13 days. The convention could not hold — the daemon is the scheduler, so no human is in the loop at dispatch time, and cross-repo concurrency is normal operation, not misuse.
@@ -213,6 +212,11 @@ When creating a proposal:
 > Since #6714 the mechanism is a **machine-wide issue-filing lock** taken inside `./.loom/scripts/create-issue.sh` itself (`defaults/scripts/lib/filing-lock.sh`), so you get the serialization automatically — provided you file through that script and never a bare `gh issue create`. Two things follow for you:
 > - **If `create-issue.sh` exits `75`, it DEFERRED and filed nothing.** Another agent held the lock past its bounded wait. Do not retry in a tight loop and do not work around it — stop filing, say in your output that the burst was deferred, and let the next tick pick it up. Filing unserialized is precisely what corrupted those five issues.
 > - **Still never place an issue-creating agent in a parallel wave.** The lock is a safety net for the concurrency the daemon creates on its own; deliberately fanning out filers just makes them queue (or defer). See `sweep.md` → "Execution Model → Only Builders parallelize". Parallel **Builders** (implementing already-filed issues) stay safe — only issue *creation* is serialized.
+
+### Citation Scope (CRITICAL)
+
+Cite only this repo (`$LOOM_WORKSPACE`) at `origin/main` — never a sibling
+repo's paths or lines. Full rule: `.loom/docs/citation-scope.md`.
 
 ### Duplicate Detection (CRITICAL)
 
@@ -235,7 +239,7 @@ fi
 3. If related but distinct: Proceed with creation, reference the related issue in the body
 4. If unclear: Skip creation, wait for the existing issue to be resolved first
 
-**Why this matters**: Duplicate issues waste Builder cycles and create confusion about which issue to reference. Issues #1981 and #1988 were created for the identical bug - this check prevents that.
+**Why this matters**: #1981 and #1988 were the identical bug.
 
 ### Verify References (CRITICAL, #7658)
 

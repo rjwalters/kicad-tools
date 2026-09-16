@@ -245,6 +245,23 @@ else
     pass "'cannot start' with no 'until' and no reference is a merits finding (#7652)"
 fi
 
+# #7431/#7756: a phrase-list word ("prerequisite") used in ordinary prose,
+# co-occurring in the same bullet with an issue reference that is NOT what the
+# phrase is describing, must not read as a dependency finding. Verbatim shape
+# of the real #7431 escalation comment that exposed the gap -- #7430 is named
+# narratively (it merged minutes earlier and is why a soak window hasn't
+# started), not cited as a "Blocked by"/"Depends on"/"Requires" blocker.
+FINDING_7431='- Scope/Sequencing: #7430 (per-sweep resource limits + containment observability — a prerequisite for any meaningful soak) merged only minutes before this evaluation, so no soak observation window has started yet.'
+if is_dependency_finding "$FINDING_7431"; then
+    fail "'prerequisite' narrating an unrelated issue reference is a merits finding, not a dependency wait (#7756)"
+else
+    pass "'prerequisite' narrating an unrelated issue reference is a merits finding, not a dependency wait (#7756)"
+fi
+assert_true is_dependency_finding '- Technical Feasibility: this work has a hard prerequisite on #3, which is still open' \
+    "'prerequisite on #N' immediately following the reference still classifies as a dependency finding after the #7756 fix"
+assert_true is_dependency_finding '- Scope: this is a hard prerequisite blocked by #3' \
+    "'prerequisite' bullet with the reference immediately after a dependency word still classifies as a dependency finding"
+
 echo
 echo "--- findings_are_dependency_only: one merits finding disqualifies the set ---"
 
@@ -468,6 +485,26 @@ run_cdb --issue 5 --repo o/r --check-defer
 assert_eq "1" "$RC" "exit 1 - escalate exactly as before"
 assert_contains "$OUT" "NO_DEFER" "NO_DEFER marker present"
 assert_contains "$OUT" "REASON: merits-finding" "reason is the merits finding, not the open dependency"
+
+echo
+echo "--- REGRESSION GUARD (#7756): a 'prerequisite' narrating an unrelated, closed issue still escalates, not REEVALUATE ---"
+# The exact #7431 incident shape: the finding narratively mentions #7430 (a
+# just-merged PR) as WHY a soak window hasn't started, using the phrase-list
+# word "prerequisite" in ordinary prose -- not a "Blocked by"/"Depends
+# on"/"Requires" citation of #7430 as this proposal's blocker. #7430 being
+# CLOSED must not misclassify the finding as a self-clearing dependency wait.
+reset_state
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect' \
+    '**Champion Review: NEEDS REVISION**
+
+- Scope/Sequencing: #7430 (per-sweep resource limits + containment observability — a prerequisite for any meaningful soak) merged only minutes before this evaluation, so no soak observation window has started yet.
+'
+issue_fixture 'o/r#7430' CLOSED 'Per-sweep resource limits.' ''
+run_cdb --issue 5 --repo o/r --check-defer
+assert_eq "1" "$RC" "exit 1 - escalate on the merits, exactly like the real #7431 incident"
+assert_contains "$OUT" "NO_DEFER" "NO_DEFER marker present"
+assert_contains "$OUT" "REASON: merits-finding" \
+    "reason is merits-finding, not blockers-cleared -- 'prerequisite' narrating a closed, unrelated issue must not self-clear the escalation (#7756)"
 
 echo
 echo "--- REGRESSION GUARD: mixed findings (merits + dependency) still escalate ---"
