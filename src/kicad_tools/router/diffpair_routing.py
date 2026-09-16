@@ -18,7 +18,7 @@ import logging
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
@@ -1669,6 +1669,9 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        self.last_validated_departure_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        self.last_departure_prefix_progress: int = 0
         # Issue #4459: backend that served the most-recent coupled search
         # ("python" or "cpp").  Lets the ``[coupled-timing]`` diagnostic report
         # ``best_state=n/a (cpp)`` instead of a misleading ``best_state=None``
@@ -2627,6 +2630,7 @@ class CoupledPathfinder:
         corridor: frozenset[tuple[int, int]] | None,
         timeout_seconds: float | None,
         max_iterations_budget: int | None,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[bool, tuple[Route, Route] | None] | None:
         """Attempt the coupled search via the C++ backend (Issue #4065).
 
@@ -2688,6 +2692,7 @@ class CoupledPathfinder:
                 if max_iterations_budget is not None and max_iterations_budget > 0
                 else 0
             ),
+            **({"departure_prefix": departure_prefix} if departure_prefix is not None else {}),
             timeout_seconds=(
                 float(timeout_seconds)
                 if timeout_seconds is not None and timeout_seconds > 0
@@ -2710,6 +2715,9 @@ class CoupledPathfinder:
         # ``best_progress`` / ``rejections`` instead of the None red herring.
         self.last_best_state = None
         self.last_best_node = None
+        self.last_best_cpp_path = list(diagnostics.get("best_path", []))
+        self.last_validated_departure_path = list(diagnostics.get("validated_departure_path", []))
+        self.last_departure_prefix_progress = int(diagnostics.get("departure_prefix_progress", 0))
         self.last_coupled_backend = "cpp"
         self.last_timeout_exceeded = bool(diagnostics["timeout_exceeded"])
         self.last_iteration_limited = bool(diagnostics["iteration_limited"])
@@ -2726,18 +2734,31 @@ class CoupledPathfinder:
     def _reconstruct_coupled_routes_from_cpp_path(
         self,
         path: list[tuple[int, int, int, int, int, int, bool]],
+        *,
+        partial: bool = False,
     ) -> tuple[Route, Route]:
         """Build (p_route, n_route) from a C++ joint grid-cell path.
 
         Produces the exact same ``p_path`` / ``n_path`` world-coordinate
         lists that ``_reconstruct_coupled_routes`` builds from the Python
-        parent chain, then feeds them to the UNCHANGED
+        parent chain, then feeds them to the shared
         ``_build_route_from_path`` -- so C++ and Python routes are
         byte-identical for the same joint path (Issue #4065).  The Pad
         identity for width/net/name is recovered from the endpoint cells
         via the stored ``_cpp_reconstruct_pads`` set by the caller.
+
+        ``partial=True`` stops at the saved search heads. It must not append
+        unchecked segments to the destination pads or mutate the endpoints
+        used by a later complete reconstruction. This only reconstructs
+        diagnostic geometry; callers must validate any proposed completion.
         """
         p_start, p_end, n_start, n_end = self._cpp_reconstruct_pads
+        if partial and path:
+            px, py, pl, nx, ny, nl, _ = path[-1]
+            p_wx, p_wy = self.grid.grid_to_world(px, py)
+            n_wx, n_wy = self.grid.grid_to_world(nx, ny)
+            p_end = replace(p_end, x=p_wx, y=p_wy, layer=Layer(self.grid.index_to_layer(pl)))
+            n_end = replace(n_end, x=n_wx, y=n_wy, layer=Layer(self.grid.index_to_layer(nl)))
         p_route = Route(net=p_start.net, net_name=p_start.net_name)
         n_route = Route(net=n_start.net, net_name=n_start.net_name)
 
@@ -2762,6 +2783,7 @@ class CoupledPathfinder:
         timeout_seconds: float | None = None,
         max_iterations_budget: int | None = None,
         corridor: frozenset[tuple[int, int]] | None = None,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[Route, Route] | None:
         """Route a differential pair with coupled pathfinding.
 
@@ -2819,6 +2841,14 @@ class CoupledPathfinder:
                 landing cells.  ``None`` (default) preserves the
                 unconstrained legacy search.
 
+            departure_prefix: Required native joint steps, excluding the root,
+                as (p_x, p_y, p_layer, n_x, n_y, n_layer) grid tuples. Every
+                step uses the ordinary native clearance/history predicates.
+                A completed prefix is exposed in last_validated_departure_path
+                even when the full route fails. This request fails closed if
+                native validation is unavailable; it never falls back to an
+                unconstrained Python search. Existing search budgets apply.
+
         Returns:
             Tuple of (p_route, n_route) or None if routing failed (no
             path found, ``max_iterations`` exhausted,
@@ -2841,6 +2871,9 @@ class CoupledPathfinder:
         self.last_best_progress: float = float("inf")
         self.last_best_state: CoupledState | None = None
         self.last_best_node: CoupledNode | None = None
+        self.last_best_cpp_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        self.last_validated_departure_path: list[tuple[int, int, int, int, int, int, bool]] = []
+        self.last_departure_prefix_progress: int = 0
         # Issue #4459: which backend served the most-recent search.  Defaults
         # to ``"python"`` here; ``_try_cpp_route_coupled`` overrides it to
         # ``"cpp"`` when the C++ joint-state search handles the pair.  The
@@ -2954,6 +2987,7 @@ class CoupledPathfinder:
             corridor=corridor,
             timeout_seconds=timeout_seconds,
             max_iterations_budget=max_iterations_budget,
+            **({"departure_prefix": departure_prefix} if departure_prefix is not None else {}),
         )
         if cpp_path is not None:
             handled, cpp_result = cpp_path
@@ -2964,6 +2998,12 @@ class CoupledPathfinder:
                 # exit); either way we do NOT run the Python A* -- the
                 # diagnostics on ``self`` were set by the wrapper.
                 return cpp_result
+
+        if departure_prefix is not None:
+            # Never silently replace a constrained native request with an
+            # unconstrained Python search; retain the existing budget.
+            self.last_rejections["departure_backend_unavailable"] += 1
+            return None
 
         start_state = CoupledState(p_start_pos, n_start_pos, (0, 0))
 

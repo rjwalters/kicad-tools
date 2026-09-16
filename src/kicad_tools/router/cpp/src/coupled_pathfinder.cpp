@@ -119,7 +119,8 @@ CoupledRouteResult CoupledPathfinder::route(
     const std::vector<int>& routable_layers,
     const std::vector<uint8_t>& corridor_bitset,
     int max_iterations_budget,
-    double timeout_seconds) {
+    double timeout_seconds,
+    const std::vector<std::array<int, 6>>& departure_prefix) {
 
     CoupledRouteResult result;
 
@@ -214,6 +215,28 @@ CoupledRouteResult CoupledPathfinder::route(
 
     double best_progress = -1.0;  // -1 sentinel = "nothing popped yet".
 
+    int best_node_idx = -1;
+    // Preserve geometry for failed-search diagnosis without returning it as
+    // a successful route. Pool indices remain valid across reallocations.
+    auto partial_path = [&pool](int idx) {
+        std::vector<CoupledPathNode> path;
+        while (idx >= 0) {
+            const CoupledAStarNode& nd = pool[static_cast<size_t>(idx)];
+            CoupledPathNode pn;
+            pn.p_x = nd.p_x; pn.p_y = nd.p_y; pn.p_layer = nd.p_layer;
+            pn.n_x = nd.n_x; pn.n_y = nd.n_y; pn.n_layer = nd.n_layer;
+            pn.via_from_parent = nd.via_from_parent;
+            path.push_back(pn);
+            idx = nd.parent_idx;
+        }
+        std::reverse(path.begin(), path.end());
+        return path;
+    };
+
+    auto best_partial_path = [&partial_path, &best_node_idx]() {
+        return partial_path(best_node_idx);
+    };
+
     // Issue #4459: per-reason move-rejection histogram.  Counts which guard
     // pruned each candidate so a 0/9 budget-exit can be triaged (which
     // constraint dominates the frontier).  Keys mirror the pure-Python
@@ -250,6 +273,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // Iteration-budget classifier (diffpair_routing.py:1707-1721).
         if (have_iter_budget && iterations >= max_iterations_budget) {
             result.success = false;
+            result.best_path = best_partial_path();
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
@@ -260,6 +284,7 @@ CoupledRouteResult CoupledPathfinder::route(
         // Wall-clock check every 64 iters (diffpair_routing.py:1728-1743).
         if (have_deadline && (iterations & 63) == 0 && clock::now() >= deadline) {
             result.success = false;
+            result.best_path = best_partial_path();
             result.iterations = static_cast<int>(iterations);
             result.best_progress = best_progress;
             result.timeout_exceeded = true;
@@ -280,10 +305,24 @@ CoupledRouteResult CoupledPathfinder::route(
         int current_idx = static_cast<int>(pool.size());
         pool.push_back(current);
 
+        // Issue #5333: deepest required departure step actually expanded.
+        // Recorded on the POP (not the push) so it counts steps that survived
+        // the closed-set/goal checks, and carried on every return path below
+        // because it lives on ``result``.  Diagnostic only.
+        result.departure_prefix_progress = std::max(
+            result.departure_prefix_progress, static_cast<int>(current.prefix_step));
+
+        if (!departure_prefix.empty() && result.validated_departure_path.empty() &&
+            current.prefix_step == departure_prefix.size()) {
+            result.validated_departure_path = partial_path(current_idx);
+        }
+
         // Goal check (diffpair_routing.py:1762-1771).
-        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y);
-        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y);
-        if (p_at_goal && n_at_goal) {
+        bool p_at_goal = (current.p_x == p_goal_x && current.p_y == p_goal_y &&
+                          current.p_layer == end_layer);
+        bool n_at_goal = (current.n_x == n_goal_x && current.n_y == n_goal_y &&
+                          current.n_layer == end_layer);
+        if (p_at_goal && n_at_goal && current.prefix_step == departure_prefix.size()) {
             // Reconstruct root->goal path from the pool parent chain.
             std::vector<CoupledPathNode> rev;
             int idx = current_idx;
@@ -311,6 +350,7 @@ CoupledRouteResult CoupledPathfinder::route(
             std::abs(current.n_x - n_goal_x) + std::abs(current.n_y - n_goal_y));
         if (best_progress < 0.0 || progress < best_progress) {
             best_progress = progress;
+            best_node_idx = current_idx;
         }
 
         // ------------------------------------------------------------------
@@ -639,6 +679,17 @@ CoupledRouteResult CoupledPathfinder::route(
                 if (!rail_clear(current.p_x, current.p_y, c.px, c.py, c.pl, p_fill_half_, p_fill_gap_) ||
                     !rail_clear(current.n_x, current.n_y, c.nx, c.ny, c.nl, n_fill_half_, n_fill_gap_)) continue;
             }
+            // Constrain initial expansion, never inject a pre-built path.
+            // Every requested step has passed the ordinary physical/history
+            // guards above and consumes the same search budget as any move.
+            if (current.prefix_step < departure_prefix.size()) {
+                const auto& next = departure_prefix[current.prefix_step];
+                if (c.px != next[0] || c.py != next[1] || c.pl != next[2] ||
+                    c.nx != next[3] || c.ny != next[4] || c.nl != next[5]) {
+                    rej("departure_prefix");
+                    continue;
+                }
+            }
             // Corridor pruning (diffpair_routing.py:1864-1871).
             if (have_corridor) {
                 if (!in_corridor(c.px, c.py) || !in_corridor(c.nx, c.ny)) {
@@ -665,6 +716,7 @@ CoupledRouteResult CoupledPathfinder::route(
                 node.g_score = new_g;
                 node.parent_idx = current_idx;
                 node.via_from_parent = c.is_via;
+                node.prefix_step = std::min(current.prefix_step + 1, departure_prefix.size());
                 node.seq = seq_counter++;
                 open_set.push(node);
             }
@@ -673,6 +725,7 @@ CoupledRouteResult CoupledPathfinder::route(
 
     // No path found (open set exhausted or memory backstop hit).
     result.success = false;
+    result.best_path = best_partial_path();
     result.iterations = static_cast<int>(iterations);
     result.best_progress = best_progress;
     result.rejections = std::move(rejections);  // #4459

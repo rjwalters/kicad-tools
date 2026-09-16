@@ -29,6 +29,7 @@
 #include "types.hpp"
 #include "grid.hpp"
 #include <vector>
+#include <array>
 #include <cstdint>
 #include <optional>
 
@@ -50,6 +51,7 @@ struct CoupledAStarNode {
     // a via (both heads changed layer together).
     int parent_idx;
     bool via_from_parent;
+    size_t prefix_step = 0;  // required departure states consumed
     // Issue #3508 LIFO tie-break: ``seq`` is a monotonically INCREASING
     // push counter, but the comparator prefers the HIGHER seq on an
     // f/g tie (LIFO -- newest equal-f node pops first), the negated-counter
@@ -129,7 +131,8 @@ public:
         const std::vector<int>& routable_layers,
         const std::vector<uint8_t>& corridor_bitset,
         int max_iterations_budget,
-        double timeout_seconds);
+        double timeout_seconds,
+        const std::vector<std::array<int, 6>>& departure_prefix = {});
 
 private:
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;

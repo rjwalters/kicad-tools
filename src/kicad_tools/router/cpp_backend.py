@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 40
+_REQUIRED_CPP_BUILD_VERSION = 41
 
 
 # Try to import C++ module with detailed error tracking
@@ -4017,8 +4017,15 @@ class CppCoupledPathfinder:
         corridor_bitset: list[int],
         max_iterations_budget: int,
         timeout_seconds: float,
+        departure_prefix: list[tuple[int, int, int, int, int, int]] | None = None,
     ) -> tuple[list[tuple[int, int, int, int, int, int, bool]] | None, dict]:
         """Run the coupled C++ search.
+
+        ``departure_prefix`` lists required successive joint grid states
+        after the original start, excluding the root. Every step must pass
+        normal neighbor, spacing, copper/history and corridor checks. The
+        original endpoints and parent history remain intact; prefix steps
+        consume the ordinary iteration/time budgets. Empty means no constraint.
 
         Returns ``(path, diagnostics)`` where ``path`` is a list of
         ``(p_x, p_y, p_layer, n_x, n_y, n_layer, via_from_parent)`` tuples in
@@ -4026,7 +4033,16 @@ class CppCoupledPathfinder:
         ``diagnostics`` carries ``iterations`` / ``best_progress`` /
         ``timeout_exceeded`` / ``iteration_limited`` and (Issue #4459) the
         per-reason ``rejections`` histogram for the caller's ``last_*``
-        bookkeeping.
+        bookkeeping. On failure, ``best_path`` retains the root-to-best
+        partial geometry in the same tuple format; it is diagnostic evidence,
+        not a successful route. It is empty on success or before any expansion.
+        ``validated_departure_path`` separately retains root through the last
+        required prefix step once legally expanded, even when that departure
+        moves away from the goal. It is empty for absent/incomplete prefixes
+        and never changes search success or its budget.
+        ``departure_prefix_progress`` counts how many of those required steps
+        were expanded (0..len(prefix)), so an incomplete prefix names the step
+        that blocked instead of only reporting emptiness.
         """
         res = self._impl.route(
             int(p_start_xy[0]),
@@ -4048,6 +4064,7 @@ class CppCoupledPathfinder:
             corridor_bitset,
             int(max_iterations_budget),
             float(timeout_seconds),
+            departure_prefix or [],
         )
         diagnostics = {
             "iterations": int(res.iterations),
@@ -4060,6 +4077,21 @@ class CppCoupledPathfinder:
             # forcing the caller's ``last_rejections`` to a categorically-empty
             # dict).  ``res.rejections`` is a ``dict[str, int]`` from nanobind.
             "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
+            # A failed search remains failed; retain its best geometry only
+            # for replay/landing diagnosis, separately from the result path.
+            "validated_departure_path": [
+                (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
+                for n in res.validated_departure_path
+            ],
+            # Issue #5333: how many required departure steps were expanded.
+            # ``validated_departure_path`` is non-empty exactly when this
+            # equals the requested prefix length; a smaller value names the
+            # step no legal candidate could satisfy.
+            "departure_prefix_progress": int(res.departure_prefix_progress),
+            "best_path": [
+                (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent)
+                for n in res.best_path
+            ],
         }
         if not res.success:
             return None, diagnostics
