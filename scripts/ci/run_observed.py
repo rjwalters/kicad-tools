@@ -28,7 +28,26 @@ def main():
         os.execvp(command[0], command)
     root = Path(os.environ["RUNNER_TEMP"]) / "native-observer"
     root.mkdir(parents=True, exist_ok=True)
-    source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    checkout = Path.cwd().resolve()
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if workspace and Path(workspace).resolve() != checkout:
+        raise RuntimeError("Observer must run from the trusted checkout root")
+    # checkout runs with a temporary HOME, while container Python may have
+    # another UID/config context. Trust only this invocation's exact checkout;
+    # never alter global/system config or use a wildcard safe.directory.
+    source = subprocess.check_output(
+        [
+            "git",
+            "-c",
+            f"safe.directory={checkout}",
+            "-C",
+            str(checkout),
+            "rev-parse",
+            "--verify",
+            "HEAD",
+        ],
+        text=True,
+    ).strip()
     identity = {
         "group": args.group,
         "source_sha": hex_identity(source),

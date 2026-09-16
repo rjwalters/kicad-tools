@@ -182,3 +182,76 @@ def test_absent_opt_in_executes_without_ci_environment(tmp_path):
     )
     assert result.returncode == 7
     assert list(tmp_path.iterdir()) == []
+
+
+def test_foreign_owned_checkout_identity_uses_only_invocation_scoped_trust(tmp_path):
+    repo = tmp_path / "foreign-checkout"
+    repo.mkdir()
+    config = tmp_path / "global.gitconfig"
+    config.write_text("[user]\n\tname = Test\n\temail = test@example.invalid\n")
+    env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(config))
+    subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+        env=env,
+        check=True,
+    )
+    expected = subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], env=env, text=True
+    ).strip()
+    baseline_config = config.read_bytes()
+    (repo / ".github/workflows").mkdir(parents=True)
+    (repo / ".github/workflows/ci.yml").write_text("fixture workflow")
+    wrapper = repo / "run_observed.py"
+    shutil.copyfile(WRAPPER, wrapper)
+    (repo / "native_observer.py").write_text("raise SystemExit(7)\n")
+    env.update(
+        GIT_TEST_ASSUME_DIFFERENT_OWNER="1",
+        RUNNER_TEMP=str(tmp_path),
+        KCT_NATIVE_DIAGNOSTICS="true",
+        GITHUB_WORKSPACE=str(repo),
+    )
+    baseline = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, env=env, capture_output=True, text=True
+    )
+    assert baseline.returncode == 128 and "dubious ownership" in baseline.stderr
+    successor = subprocess.run(
+        [sys.executable, str(wrapper), "bulk", "--", "unused-workload"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert successor.returncode == 7, successor.stderr
+    identity = json.loads((tmp_path / "native-observer/bulk-identity.json").read_text())
+    assert identity["source_sha"] == expected
+    assert config.read_bytes() == baseline_config
+    # Trust was not persisted: the same ordinary Git invocation still fails.
+    after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, env=env, capture_output=True, text=True
+    )
+    assert after.returncode == 128 and "dubious ownership" in after.stderr
+    # A different directory cannot borrow the workflow's checkout trust.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    wrong = subprocess.run(
+        [sys.executable, str(wrapper), "other", "--", "unused-workload"],
+        cwd=elsewhere,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert wrong.returncode != 0
+    assert not (tmp_path / "native-observer/other-identity.json").exists()
