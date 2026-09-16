@@ -44,6 +44,7 @@ NB_MODULE(router_cpp, m) {
         // ``unmark_segment`` / ``unmark_via`` so rip-up restores static
         // blockage instead of erasing it.
         .def_rw("static_blocked", &GridCell::static_blocked)
+        .def_rw("pad_halo_only", &GridCell::pad_halo_only)
         .def_rw("avoidance_cost", &GridCell::avoidance_cost)
         // Issue #4071: per-cell corridor-reservation owner set count
         // (read-only surface for parity tests; the owner nets are written
@@ -223,7 +224,7 @@ NB_MODULE(router_cpp, m) {
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
-             "pad_blocked"_a = false)
+             "pad_blocked"_a = false, "pad_halo_only"_a = false)
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking

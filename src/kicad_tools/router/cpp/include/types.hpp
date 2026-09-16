@@ -256,7 +256,9 @@ namespace router {
 // v36: track current counted route occupancy through rip-up.
 // v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
 // v38: integrate the stored-via guard with current occupancy and indexed frontier.
-constexpr int ROUTER_CPP_BUILD_VERSION = 39;
+// v39: robust segment intersection under fused floating-point arithmetic.
+// v40: explicit fine-pitch plane-pad halo provenance (native39 union retained).
+constexpr int ROUTER_CPP_BUILD_VERSION = 40;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -288,6 +290,8 @@ struct GridCell {
     // ``mark_blocked``.  Route marking never sets this; rip-up uses it
     // to restore static blockage instead of freeing the cell.
     bool static_blocked = false;
+    // Pad padding provenance; metal, obstacles and route usage take precedence.
+    bool pad_halo_only = false;
     // True only when this route cell contributes to coarse congestion.
     // Imported/static cells were never counted and must not decrement it.
     bool congestion_counted = false;
