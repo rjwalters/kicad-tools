@@ -97,3 +97,37 @@ def test_trace_via_exact_clearance_boundary(offset, valid, via_first):
         grid.routes.append(Route(2, "trace", segments=[segment]))
         actual, _, _ = grid.validate_via_clearance(via, exclude_net=1)
     assert actual is valid
+
+
+@pytest.mark.parametrize(
+    "candidate_kind,foreign_kind",
+    [("trace", "trace"), ("trace", "via"), ("via", "trace"), ("via", "via")],
+)
+@pytest.mark.parametrize("strict_net", [1, 2])
+def test_python_halo_preserves_authored_floor_with_partner_relief(
+    candidate_kind, foreign_kind, strict_net
+):
+    rules = DesignRules(trace_clearance=0.1, via_clearance=0.1, min_hole_to_hole=0.1)
+    grid = RoutingGrid(20, 20, rules)
+    router = Router(grid, rules)
+
+    def copper(kind, y, net):
+        if kind == "trace":
+            return Segment(5, y, 7, y, 0.2, Layer.F_CU, net)
+        return Via(6, y, 0.1, 0.2, (Layer.F_CU, Layer.B_CU), net)
+
+    candidate = copper(candidate_kind, 5.8, 1)
+    foreign = copper(foreign_kind, 8.2, 2)
+    stored = Route(2, "foreign")
+    if foreign_kind == "trace":
+        stored.segments.append(foreign)
+    else:
+        stored.vias.append(foreign)
+    grid.mark_route(stored)
+    # Build geometry bins before changing rules: electrical floors must not
+    # depend on occupancy generation or remain confined to the old halo.
+    assert grid._route_halo.clear(candidate, router, partner_net=2, partner_clearance=0.05)
+    rules.net_clearance_floors = {strict_net: 2.3, 3: 4.0}
+    assert not grid._route_halo.clear(candidate, router, partner_net=2, partner_clearance=0.05)
+    rules.net_clearance_floors = {strict_net: 2.1, 3: 4.0}
+    assert grid._route_halo.clear(candidate, router, partner_net=2, partner_clearance=0.05)

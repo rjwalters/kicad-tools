@@ -175,6 +175,7 @@ class RouteHaloGeometry:
             router.rules.via_clearance,
             partner_clearance or 0,
             widen,
+            max(router.rules.net_clearance_floors.values(), default=0.0),
             router.rules.min_hole_to_hole,
             router.rules.min_drill_clearance,
         )
@@ -231,8 +232,12 @@ class RouteHaloGeometry:
                         shared_layer,
                     ):
                         required = pair
-            if is_trace and not other_trace:
-                required = max(required, router.rules.via_clearance)
+            if not is_trace or not other_trace:
+                required = max(required, router.rules.trace_clearance, router.rules.via_clearance)
+            # Authored electrical minima survive both partner relief and HV
+            # attachment exceptions. The broad-phase margin above includes
+            # these floors even when the copper index predates a rule change.
+            required = router.rules.clearance_for_nets(candidate.net, other.net, required)
             other_half = other.width / 2 if other_trace else other.diameter / 2
             if distance - half - other_half < required - 1e-4:
                 return False
