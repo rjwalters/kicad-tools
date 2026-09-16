@@ -75,3 +75,21 @@ def test_authored_pad_gate_uses_emitted_netclass_via_diameter():
     gx, gy = grid.world_to_grid(5, 6)
     assert not router._authored_via_clear(gx, gy, 1)
     assert router._authored_via_clear(gx, gy + 2, 1)
+
+
+@pytest.mark.parametrize("kind", ["pad", "track"])
+@pytest.mark.parametrize("strict_net", [1, 2])
+def test_supplemental_foreign_geometry_retains_authored_identity(kind, strict_net):
+    rules = DesignRules(
+        grid_resolution=0.1, trace_clearance=0.1, via_clearance=0.1, via_diameter=0.2, via_drill=0.1
+    )
+    grid = RoutingGrid(10, 10, rules)
+    router = Router(grid, rules)
+    if kind == "pad":
+        router.set_via_foreign_context(foreign_pads=[Pad(5, 5, 0.2, 0.2, 2, "foreign")])
+    else:
+        router.set_via_foreign_context(foreign_tracks=[Segment(4, 5, 6, 5, 0.2, Layer.F_CU, 2)])
+    gx, gy = grid.world_to_grid(5, 6)
+    assert router._check_via_placement_cached(gx, gy, 1)
+    rules.net_clearance_floors = {strict_net: 0.9, 3: 4.0}
+    assert not router._check_via_placement_cached(gx, gy, 1)

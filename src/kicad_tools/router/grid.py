@@ -35,7 +35,7 @@ import logging
 import math
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, cast
 
 import numpy as np
 
@@ -3624,9 +3624,9 @@ class RoutingGrid:
 
         return worst_deficit, worst_loc
 
-    def authored_segment_pads_clear(self, seg: Segment) -> bool:
+    def authored_segment_pads_clear(self, seg: Segment, pads: Iterable[Pad] | None = None) -> bool:
         """Enforce mandatory net minima independently of raster/escape relief."""
-        for pad in self._pads:
+        for pad in self._pads if pads is None else pads:
             required = self.rules.clearance_for_nets(seg.net, pad.net, 0.0)
             if required <= 0:
                 continue

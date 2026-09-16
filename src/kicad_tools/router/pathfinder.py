@@ -106,7 +106,7 @@ class _PairwiseSearchState:
 _PAIRWISE_MASK_CACHE_MAX = 64
 
 
-@dataclass(frozen=True)
+@dataclass
 class _SegmentAdapter:
     """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
     attribute names expected by :func:`point_clear_of_copper`.
@@ -122,6 +122,7 @@ class _SegmentAdapter:
     end_x: float
     end_y: float
     width: float
+    net: int = 0
 
 
 @dataclass
@@ -416,6 +417,7 @@ class Router:
         # last remaining via-clearance bug pattern for non-square pads).
         self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
         self._foreign_track_adapters: list[_SegmentAdapter] = []
+        self._foreign_via_pads: list[Pad] = []
 
         # Issue #3002: Symmetric to ``_foreign_pad_tuples`` /
         # ``_foreign_track_adapters`` (Issue #2947), but for the OPPOSITE
@@ -1158,9 +1160,11 @@ class Router:
                         end_x=s.x2,
                         end_y=s.y2,
                         width=s.width,
+                        net=s.net,
                     )
                 )
 
+        self._foreign_via_pads = list(foreign_pads or [])
         self._foreign_pad_tuples = pad_tuples
         self._foreign_track_adapters = track_adapters
 
@@ -2026,6 +2030,17 @@ class Router:
             # reuses the exact circle/rotated-pad distance predicate.
             disc = Segment(x, y, x, y, diameter, layer, net)
             if not self.grid.authored_segment_pads_clear(disc):
+                return False
+            if not self.grid.authored_segment_pads_clear(disc, self._foreign_via_pads):
+                return False
+        for track in self._foreign_track_adapters:
+            required = self.rules.clearance_for_nets(net, track.net, 0.0)
+            if required <= 0:
+                continue
+            distance = self.grid._point_to_segment_distance(
+                x, y, track.start_x, track.start_y, track.end_x, track.end_y
+            )
+            if distance - (diameter + track.width) / 2 < required - 1e-9:
                 return False
         first, last = layers[0], layers[-1]
         if first is None or last is None:
@@ -3094,16 +3109,14 @@ class Router:
             # Net is at index 4 for the 5-tuple (x, y, w, h, net) shape
             # populated by ``set_via_foreign_context`` (Issue #2951).
             other_pads = [p for p in self._foreign_pad_tuples if p[4] != net]
-            # Track adapter does not carry net id; the caller
-            # (``Autorouter``) is responsible for excluding same-net
-            # segments before populating the context.  This matches
-            # ``EscapeRouter``'s pattern at the boundary.
+            # Preserve the setter's any-net contract even for a caller that
+            # supplies a superset; identity also carries authored minima.
             if not point_clear_of_copper(
                 x=wx,
                 y=wy,
                 via_size=eff_diameter,
                 clearance=self.rules.via_clearance,
-                other_net_tracks=self._foreign_track_adapters,
+                other_net_tracks=[s for s in self._foreign_track_adapters if s.net != net],
                 other_net_pads=other_pads,
             ):
                 if self._via_cache_enabled and not allow_sharing:
