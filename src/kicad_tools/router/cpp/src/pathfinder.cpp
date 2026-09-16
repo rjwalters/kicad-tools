@@ -1037,6 +1037,10 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         }
     }
 
+    // Partial raster coverage cannot waive clearance to known copper. Keep
+    // this after via-via diagnostics so their blocker metadata is preserved.
+    if (!geometry_clear()) return true;
+
     // Issue #4511: the scalar via disc + via-vs-via geometry are clear --
     // consult the cross-domain (HV-isolation) annulus against foreign copper
     // cells the scalar disc could not reach.  No-op unless a widening pairwise
