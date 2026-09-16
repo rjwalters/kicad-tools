@@ -7265,7 +7265,7 @@ def route_with_layer_escalation(
             with spinner(f"Loading PCB ({layer_count} layers)...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
-                    project_path=display_input_path.with_suffix(".kicad_pro"),
+                    project_path=Path(display_input_path).with_suffix(".kicad_pro"),
                     placement_disposition=for_attempt(args, attempt_skip_nets),
                     skip_nets=attempt_skip_nets,
                     rules=rules,
@@ -8374,7 +8374,7 @@ def route_with_rule_relaxation(
             with spinner(f"Loading PCB (tier {tier.tier})...", quiet=quiet):
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
-                    project_path=display_input_path.with_suffix(".kicad_pro"),
+                    project_path=Path(display_input_path).with_suffix(".kicad_pro"),
                     placement_disposition=for_attempt(args, skip_nets),
                     skip_nets=skip_nets,
                     rules=rules,
@@ -10708,7 +10708,7 @@ def route_with_combined_escalation(
                 with spinner(f"Loading PCB ({layer_count}L, tier {tier.tier})...", quiet=quiet):
                     router, net_map = load_pcb_for_routing(
                         str(pcb_path),
-                        project_path=display_input_path.with_suffix(".kicad_pro"),
+                        project_path=Path(display_input_path).with_suffix(".kicad_pro"),
                         placement_disposition=for_attempt(args, skip_nets),
                         skip_nets=skip_nets,
                         rules=rules,
@@ -15909,7 +15909,7 @@ def _run_main_impl(args, parser, argv) -> int:
         with spinner("Loading PCB...", quiet=quiet):
             router, net_map = load_pcb_for_routing(
                 str(pcb_path),
-                project_path=display_input_path.with_suffix(".kicad_pro"),
+                project_path=Path(display_input_path).with_suffix(".kicad_pro"),
                 placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
@@ -15985,7 +15985,7 @@ def _run_main_impl(args, parser, argv) -> int:
         def _order_router_factory() -> "Autorouter":
             fresh, _ = load_pcb_for_routing(
                 str(pcb_path),
-                project_path=display_input_path.with_suffix(".kicad_pro"),
+                project_path=Path(display_input_path).with_suffix(".kicad_pro"),
                 placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
