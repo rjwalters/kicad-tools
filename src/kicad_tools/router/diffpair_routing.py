@@ -20,7 +20,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -1449,7 +1449,7 @@ def _dilate_axis_inplace(mask: np.ndarray, radius: int, axis: int) -> np.ndarray
         src[axis] = slice(None, -shift)
         dst[axis] = slice(shift, None)
         out[tuple(dst)] |= mask[tuple(src)]
-    return cast(np.ndarray, out)
+    return out
 
 
 def build_corridor_mask(
