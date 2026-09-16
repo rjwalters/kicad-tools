@@ -2008,6 +2008,42 @@ class Router:
 
         return False
 
+    def _authored_via_clear(self, gx: int, gy: int, net: int) -> bool:
+        """Check mandatory geometry before cached or plane-layer exemptions."""
+        if not self.rules.net_clearance_floors:
+            return True
+        x, y = self.grid.grid_to_world(gx, gy)
+        net_class = self._halo_net_class(net)
+        diameter = net_class.via_size if net_class else self.rules.via_diameter
+        physical_layers = tuple(range(self.grid.num_layers))
+        layers = [self._grid_layer_object(layer) for layer in physical_layers]
+        if not layers or any(layer is None for layer in layers):
+            return False
+        for layer in layers:
+            if layer is None:
+                return False
+            # A zero-length capsule is the emitted via's copper disc. This
+            # reuses the exact circle/rotated-pad distance predicate.
+            disc = Segment(x, y, x, y, diameter, layer, net)
+            if not self.grid.authored_segment_pads_clear(disc):
+                return False
+        first, last = layers[0], layers[-1]
+        if first is None or last is None:
+            return False
+        candidate = Via(x, y, self.rules.via_drill, diameter, (first, last), net)
+        if not self.grid._route_halo.clear(
+            candidate, self, require_geometry=False, authored_only=True
+        ):
+            return False
+        return self.grid.fixed_fills.via_clear(
+            (x, y),
+            physical_layers,
+            diameter / 2,
+            0.0,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
+        )
+
     def _is_via_blocked(
         self,
         gx: int,
@@ -2031,6 +2067,8 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
+        if not self._authored_via_clear(gx, gy, net):
+            return True
         wx, wy = self.grid.grid_to_world(gx, gy)
         if not self.grid._component_hole_index.clear(
             wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
@@ -2979,6 +3017,8 @@ class Router:
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
         """
+        if not self._authored_via_clear(gx, gy, net):
+            return False
         wx, wy = self.grid.grid_to_world(gx, gy)
         if not self.grid._component_hole_index.clear(
             wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole

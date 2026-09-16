@@ -152,7 +152,7 @@ class RouteHaloGeometry:
         Callers must check cell_known for every blocked cell they refine.
         With require_geometry=False, absent geometry is clear; use that mode
         only to reject known conflicts, never to authorize raster relaxation.
-        authored_only checks mandatory electrical floors on trace steps without
+        authored_only checks mandatory electrical floors without
         imposing scalar rules that may have legitimate local relief.
         """
         from .pairwise_clearance import _attach_zone_exempts
@@ -168,8 +168,6 @@ class RouteHaloGeometry:
             layer = candidate.layer
         else:
             shape, half, layer = Point(candidate.x, candidate.y), candidate.diameter / 2, None
-        if authored_only:
-            assert is_trace, "Authored-only step checks require a segment"
         names = router._route_halo_names
         own_name = names.get(candidate.net, "")
         nc = router._halo_net_class(candidate.net)
