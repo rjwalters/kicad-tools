@@ -161,7 +161,10 @@ def test_enabled_identity_redacts_and_forwards_exact_command(tmp_path):
     assert "do-not-record" not in identity_text and "--secret" not in identity_text
     assert (
         identity["source_sha"]
-        == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        == subprocess.check_output(
+            ["git", "-c", f"safe.directory={ROOT}", "-C", str(ROOT), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
     )
     assert identity["container_id"] == "a" * 64
     assert identity["image_digest"] is None
