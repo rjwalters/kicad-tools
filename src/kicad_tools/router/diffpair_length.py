@@ -87,6 +87,7 @@ class DiffPairLengthTracker:
         detected_pairs: list[DetectedPair],
         board_thickness_mm: float | None = None,
         num_copper_layers: int = 2,
+        blind_buried_supported: bool = True,
     ) -> None:
         """Measure and record the routed length of each half of each detected pair.
 
@@ -105,6 +106,9 @@ class DiffPairLengthTracker:
             num_copper_layers: Number of copper layers in the stack (used
                 to compute per-via drilled length when ``board_thickness_mm``
                 is supplied).  Defaults to ``2`` (typical 2-layer stack).
+
+            blind_buried_supported: Whether ordinary vias may retain partial
+                spans; false measures them as full through barrels.
 
         Notes:
             * Routes whose ``net`` is not the P or N of any detected pair
@@ -140,13 +144,13 @@ class DiffPairLengthTracker:
             p_route = routes_by_net.get(p_id)
             if p_route is not None:
                 self.lengths[p_id] = self._measure_route(
-                    p_route, board_thickness_mm, num_copper_layers
+                    p_route, board_thickness_mm, num_copper_layers, blind_buried_supported
                 )
 
             n_route = routes_by_net.get(n_id)
             if n_route is not None:
                 self.lengths[n_id] = self._measure_route(
-                    n_route, board_thickness_mm, num_copper_layers
+                    n_route, board_thickness_mm, num_copper_layers, blind_buried_supported
                 )
 
             # Populate the name-keyed cache only when BOTH halves are

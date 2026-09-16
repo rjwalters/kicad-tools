@@ -55,7 +55,8 @@ Out of scope for Phase 3I:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .optimizer.geometry import segment_length
@@ -157,6 +158,9 @@ def tune_diff_pair_skew(
     grid: RoutingGrid | None = None,
     prefer_reserved_slack: bool = False,
     fixed_segment_ids: set[int] | None = None,
+    board_thickness_mm: float | None = None,
+    num_copper_layers: int = 2,
+    blind_buried_supported: bool = True,
 ) -> tuple[Route, Route, DiffPairTuneResult]:
     """Tune the skew of a detected diff pair by serpentining the shorter half.
 
@@ -191,12 +195,19 @@ def tune_diff_pair_skew(
             its serpentine-insertion segment choice toward segments sitting
             inside the shorter half's own reserved slack corridor (the one
             widened by ``EscapeRouter._reserve_pair_continuation_corridor``)
-            so the meander lands in already-protected space.  When ``None``
-            or ``prefer_reserved_slack=False`` (both defaults) segment
-            selection is byte-identical to the pre-#4085 geometric
-            heuristic.
+            so the meander lands in already-protected space. Without a grid,
+            segment selection retains the existing geometric heuristic.
+            Whenever supplied, the grid enables collinear host consolidation
+            and foreign-pad/via checks, independently of the slack preference.
+            Rejected placements are retried at three interior points of the
+            selected mutable host.
         fixed_segment_ids: Fixed escape segment identities; retained in measurement
             and clearance views, but never selected or replaced as meander hosts.
+        board_thickness_mm: Include drilled via length when supplied, using
+            the same measurement as the differential-pair skew tracker.
+        num_copper_layers: Stack layer count for via-span measurement.
+        blind_buried_supported: When false, ordinary vias contribute the full
+            board thickness even if their routing endpoints span fewer layers.
         prefer_reserved_slack: Issue #4085.  Gate for the slack-aware
             segment preference above.  Default ``False`` (inert).  Has no
             effect unless ``grid`` is also supplied.
@@ -256,11 +267,17 @@ def tune_diff_pair_skew(
             result,
         )
 
+    from .diffpair_length import DiffPairLengthTracker
     from .length import LengthTracker  # avoid cycle
     from .primitives import Route
 
-    l_p = LengthTracker.calculate_route_length(p_route)
-    l_n = LengthTracker.calculate_route_length(n_route)
+    def measure(route: Route) -> float:
+        return DiffPairLengthTracker._measure_route(
+            route, board_thickness_mm, num_copper_layers, blind_buried_supported
+        )
+
+    l_p = measure(p_route)
+    l_n = measure(n_route)
     skew = abs(l_p - l_n)
 
     # Already within tolerance -- byte-for-byte unchanged.
@@ -330,6 +347,33 @@ def tune_diff_pair_skew(
             reserved_net_id=shorter_id if prefer_reserved_slack else None,
             fixed_segment_ids=fixed_segment_ids,
         )
+        if grid is not None:
+            # Coupled search emits one segment per grid step. A straight run
+            # can therefore be long enough for tuning while every individual
+            # segment is too short. Even if a short landing is eligible, rank
+            # the complete straight runs before choosing a host: tuning the
+            # landing can lose coupling unnecessarily. Consolidate only collinear copper, retaining
+            # pad/via junctions and the endpoints of every fixed escape.
+            from .optimizer.consolidate import consolidate_segments
+
+            protected = [(pad.x, pad.y) for pad in grid._pads]
+            protected.extend((via.x, via.y) for via in current_shorter.vias)
+            for segment in current_shorter.segments:
+                if fixed_segment_ids and id(segment) in fixed_segment_ids:
+                    protected.extend((segment.start, segment.end))
+            segments, stats = consolidate_segments(
+                current_shorter.segments,
+                protected_points=protected,
+                tolerance=1e-9,
+            )
+            if stats.segments_removed:
+                current_shorter = replace(current_shorter, segments=segments)
+                best = generator.find_best_segment(
+                    current_shorter,
+                    grid=grid if prefer_reserved_slack else None,
+                    reserved_net_id=shorter_id if prefer_reserved_slack else None,
+                    fixed_segment_ids=fixed_segment_ids,
+                )
         if best is None:
             result.reason = "no_suitable_segment"
             result.message = (
@@ -344,14 +388,17 @@ def tune_diff_pair_skew(
         # partner trace at the insertion segment's midpoint.
         hint = _outer_normal_hint(insertion_segment, longer_route)
 
-        # A trombone adds twice its amplitude. For a sub-loop deficit,
-        # using the configured maximum (1 mm by default) needlessly adds
-        # 2 mm and can hit a neighboring lane before the DRC guard rejects
-        # it. Scale that final loop to the actual remaining target instead.
-        length_needed = serpentine_target - LengthTracker.calculate_route_length(current_shorter)
+        # Each loop adds twice its amplitude. Divide the deficit across
+        # the required loops so rounding the loop count up cannot overshoot
+        # the target (including deficits larger than one loop).
+        length_needed = serpentine_target - measure(current_shorter)
         amplitude = base_config.amplitude
-        if length_needed > 0:
+        if length_needed > 0 and grid is None and board_thickness_mm is None:
+            # Preserve the existing route-only sizing policy.
             amplitude = min(amplitude, length_needed / 2.0)
+        elif length_needed > 0 and amplitude > 0:
+            loops = math.ceil(length_needed / (2.0 * amplitude))
+            amplitude = min(amplitude, math.nextafter(length_needed / (2.0 * loops), math.inf))
 
         # Build the per-attempt config with side="outer" + the hint.
         attempt_config = SerpentineConfig(
@@ -366,7 +413,7 @@ def tune_diff_pair_skew(
         )
         attempt_generator = SerpentineGenerator(attempt_config)
 
-        if fixed_segment_ids:
+        if fixed_segment_ids or grid is not None:
             # Generate on the selected mutable host; reranking the full net
             # could otherwise select a longer fixed escape or a different corridor.
             serp_result = attempt_generator.generate_trombone(insertion_segment, length_needed)
@@ -381,7 +428,8 @@ def tune_diff_pair_skew(
             )
         else:
             candidate_route, serp_result = attempt_generator.add_serpentine(
-                current_shorter, serpentine_target
+                current_shorter,
+                LengthTracker.calculate_route_length(current_shorter) + length_needed,
             )
         result.serpentine_results.append(serp_result)
 
@@ -401,13 +449,48 @@ def tune_diff_pair_skew(
         # ``serp_result.new_segments`` contains *only* the trombone
         # segments (entry + loops + exit) -- those are the segments to
         # check.
-        if not _post_insertion_clearance_ok(
+        clearance_ok = _post_insertion_clearance_ok(
             new_segments=serp_result.new_segments,
             shorter_net_id=shorter_id,
             longer_net_id=longer_id,
             routes_by_net=routes_by_net,
             intra_pair_clearance_mm=intra_pair_clearance_mm,
-        ):
+            grid=grid,
+        )
+        if not clearance_ok and grid is not None:
+            # Pad rows near a host's entry can obstruct the first bulge while
+            # leaving its interior free. Try a bounded set of placements on
+            # this same mutable host; splitting off an unchanged collinear
+            # lead preserves its copper and all other segment identities.
+            for fraction in (0.25, 0.5, 0.75):
+                x = insertion_segment.x1 + fraction * (insertion_segment.x2 - insertion_segment.x1)
+                y = insertion_segment.y1 + fraction * (insertion_segment.y2 - insertion_segment.y1)
+                lead = replace(insertion_segment, x2=x, y2=y)
+                suffix = replace(insertion_segment, x1=x, y1=y)
+                retry = attempt_generator.generate_trombone(suffix, length_needed)
+                result.serpentine_results.append(retry)
+                if not retry.success:
+                    continue
+                replacement = [lead, *retry.new_segments]
+                if not _post_insertion_clearance_ok(
+                    new_segments=replacement,
+                    shorter_net_id=shorter_id,
+                    longer_net_id=longer_id,
+                    routes_by_net=routes_by_net,
+                    intra_pair_clearance_mm=intra_pair_clearance_mm,
+                    grid=grid,
+                ):
+                    continue
+                candidate_route = replace(
+                    current_shorter,
+                    segments=current_shorter.segments[:seg_idx]
+                    + replacement
+                    + current_shorter.segments[seg_idx + 1 :],
+                    vias=current_shorter.vias.copy(),
+                )
+                clearance_ok = True
+                break
+        if not clearance_ok:
             # Rollback: discard the candidate, return the ORIGINAL shorter
             # route (and the original longer route reference).
             result.reason = "post_insertion_drc_violation"
@@ -425,7 +508,7 @@ def tune_diff_pair_skew(
         # Commit this attempt's new route and re-measure skew.
         current_shorter = candidate_route
         result.inserts_applied += 1
-        new_shorter_length = LengthTracker.calculate_route_length(current_shorter)
+        new_shorter_length = measure(current_shorter)
         current_skew = (
             abs(new_shorter_length - target_length)
             if longer_is_p
@@ -450,9 +533,7 @@ def tune_diff_pair_skew(
         )
 
     result.skew_after_mm = (
-        abs(target_length - LengthTracker.calculate_route_length(current_shorter))
-        if result.inserts_applied > 0
-        else skew
+        abs(target_length - measure(current_shorter)) if result.inserts_applied > 0 else skew
     )
 
     # Assemble return values, restoring P/N polarity ordering.  The
@@ -597,6 +678,7 @@ def _post_insertion_clearance_ok(
     longer_net_id: int,
     routes_by_net: dict[int, Route],
     intra_pair_clearance_mm: float,
+    grid: RoutingGrid | None = None,
 ) -> bool:
     """Return True if the proposed serpentine segments are DRC-safe.
 
@@ -632,12 +714,43 @@ def _post_insertion_clearance_ok(
         longer_net_id: Net id of the partner trace.
         routes_by_net: ``{net_id: Route}`` lookup for all routed nets.
         intra_pair_clearance_mm: Edge-to-edge clearance floor in mm.
+        grid: Optional exact pad and physical via geometry checks.
 
     Returns:
         ``True`` if no clearance violation is introduced; ``False``
         otherwise (the caller must roll back).
     """
     from kicad_tools.core.geometry import segment_clearance
+
+    # Route-only checks cannot see pad metal. Use the grid's precise pad
+    # geometry and manufacturing clearances, not its rasterized partner halo.
+    # Only same-net pads are exempt; do not exclude the whole source component.
+    if grid is not None:
+        for new_seg in new_segments:
+            deficit, _ = grid.worst_segment_pad_deficit(new_seg, exclude_net=shorter_net_id)
+            if deficit > 1e-9:
+                return False
+
+        from kicad_tools.core.geometry import point_to_segment_distance
+
+        # Through barrels occupy every copper layer, including when search
+        # endpoints under-report their span. Match the group tuner's policy:
+        # only explicit microvias are restricted to their declared span.
+        for other_net, route in routes_by_net.items():
+            if other_net == shorter_net_id:
+                continue
+            for via in route.vias:
+                first, last = sorted(layer.value for layer in via.layers)
+                for seg in new_segments:
+                    if via.is_micro and not first <= seg.layer.value <= last:
+                        continue
+                    clearance = (
+                        point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
+                        - via.diameter / 2
+                        - seg.width / 2
+                    )
+                    if clearance + 1e-9 < grid.rules.via_clearance:
+                        return False
 
     # Pair-internal check.
     partner = routes_by_net.get(longer_net_id)
