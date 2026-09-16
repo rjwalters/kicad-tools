@@ -70,6 +70,36 @@ kct check routed.kicad_pcb \
 Without `--net-class-map`, the rule short-circuits to zero violations
 (the Phase 2.5G no-op semantic — see guide 06).
 
+### Declaring a swap group (Issue #5522, Phase 1 of Epic #5511, report-only)
+
+A `NetClassRouting` entry may also carry `swap_group: str | None` — a
+DECLARED (never inferred) name grouping the nets on a bundle whose pad
+binding to the *secondary* facing component MAY be re-assigned among
+themselves to reduce facing-row crossings. It is a narrower, separate
+channel from `length_match_group`: a match group says "these nets must
+arrive length-matched" (it may include nets whose *pin binding* is
+fixed, e.g. an unpaired DQS strobe); a swap group says "these nets'
+bindings may be permuted." Nets that do not carry the key are fixed by
+omission — there is no separate top-level `swap_groups` block.
+
+```json
+{
+  "DQ0": { "name": "DDR_DATA_BYTE_0", "length_match_group": "DDR_DATA_BYTE_0", "swap_group": "DDR_BYTE0" },
+  "DQ7": { "name": "DDR_DATA_BYTE_0", "length_match_group": "DDR_DATA_BYTE_0", "swap_group": "DDR_BYTE0" }
+}
+```
+
+When `kct net-status --why --format json` (guide 05) auto-discovers a
+sidecar carrying a `swap_group` declaration next to the PCB and
+classifies a bundle as genuinely REVERSED, each affected net's
+diagnosis gains a `swap_proposal`: the crossing-minimising pad-to-net
+re-binding on the reversed component, plus before/after crossing
+counts (both for the declared group alone and for the wider match
+group, so residual crossings against an undeclared sibling are
+reported, never hidden). **Phase 1 is report-only** — nothing is
+applied to the board; there is no applicator and `kct route`'s default
+output is unaffected.
+
 ## Putting it all together
 
 ```bash

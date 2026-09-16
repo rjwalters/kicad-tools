@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.router.stuck_classifier import (
     Confidence,
     RecommendedAction,
@@ -659,6 +660,74 @@ class TestPinOrderVerification:
         assert co["topology"] == "co_oriented_bundle"
         assert set(co["recommendation"][0].keys()) == set(rev["recommendation"][0].keys())
         assert all(a["action"] != "de_reverse_bundle" for a in co["recommendation"])
+
+
+class TestSwapGroupProposal:
+    """Issue #5522 (Phase 1 of Epic #5511): a declared ``swap_group`` on a
+    VERIFIED-reversed bundle surfaces a ``swap_proposal``; without a
+    declaration (the default), the field is absent and output is
+    byte-identical to pre-#5522 behavior."""
+
+    def _declared_net_class_map(self) -> dict[str, NetClassRouting]:
+        return {
+            "DQ0": NetClassRouting(name="DDR", swap_group="DDR_BYTE0"),
+            "DQ1": NetClassRouting(name="DDR", swap_group="DDR_BYTE0"),
+            "DQ2": NetClassRouting(name="DDR", swap_group="DDR_BYTE0"),
+        }
+
+    def test_verified_reversed_bundle_gets_swap_proposal(self, verified_reversed_bundle_pcb: Path):
+        result = classify_stuck_nets(
+            verified_reversed_bundle_pcb, net_class_map=self._declared_net_class_map()
+        )
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+        assert d.swap_proposal is not None
+        assert d.swap_proposal.swap_group == "DDR_BYTE0"
+        assert d.swap_proposal.target_ref == "UB"
+        assert d.swap_proposal.crossings_before == 3
+        assert d.swap_proposal.crossings_after == 0
+        assert d.swap_proposal.pad_map  # non-empty: a real re-binding proposed
+        # Surfaced in JSON.
+        blob = d.to_dict()
+        assert "swap_proposal" in blob
+        assert blob["swap_proposal"]["swap_group"] == "DDR_BYTE0"
+
+    def test_no_declaration_means_no_swap_proposal(self, verified_reversed_bundle_pcb: Path):
+        """No ``net_class_map`` at all (the default) -> field absent, exactly
+        pre-#5522 output."""
+        result = classify_stuck_nets(verified_reversed_bundle_pcb)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+        assert d.swap_proposal is None
+        assert "swap_proposal" not in d.to_dict()
+
+    def test_net_class_map_without_swap_group_key_means_no_proposal(
+        self, verified_reversed_bundle_pcb: Path
+    ):
+        """A sidecar map is supplied, but no entry declares ``swap_group``."""
+        nc_map = {
+            "DQ0": NetClassRouting(name="DDR"),
+            "DQ1": NetClassRouting(name="DDR"),
+            "DQ2": NetClassRouting(name="DDR"),
+        }
+        result = classify_stuck_nets(verified_reversed_bundle_pcb, net_class_map=nc_map)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+        assert d.swap_proposal is None
+
+    def test_co_oriented_bundle_never_gets_a_proposal(self, co_oriented_bundle_pcb: Path):
+        """Declared-only AND verified-reversed-only: a co-oriented bundle
+        never gets a swap proposal even with a declaration present."""
+        result = classify_stuck_nets(
+            co_oriented_bundle_pcb, net_class_map=self._declared_net_class_map()
+        )
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+        assert d.swap_proposal is None
+
+    def test_single_declared_member_is_insufficient(self, verified_reversed_bundle_pcb: Path):
+        """Declared-only, but fewer than 2 members carry ``swap_group`` ->
+        no proposal (mirrors ``MIN_SWAP_GROUP_NETS``)."""
+        nc_map = {"DQ0": NetClassRouting(name="DDR", swap_group="DDR_BYTE0")}
+        result = classify_stuck_nets(verified_reversed_bundle_pcb, net_class_map=nc_map)
+        d = next(x for x in result.diagnoses if x.net_name == "DQ2")
+        assert d.swap_proposal is None
 
 
 # Committed real-board acceptance evidence (issue #4286): board-07's DDR byte is

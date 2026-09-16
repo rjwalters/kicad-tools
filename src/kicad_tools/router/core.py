@@ -17566,6 +17566,7 @@ class Autorouter:
         excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
         reuse_existing_routes: bool = False,
         require_no_clearance_regression: bool = True,
+        net_class_map: Any = None,
     ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
         """Close the router<->placement loop with classifier-driven deltas (#4467).
 
@@ -17613,6 +17614,12 @@ class Autorouter:
                 a placement change.
             min_confidence / stagnation_patience / outer_timeout: Forwarded to
                 the legacy loop only when the toggle is off.
+            net_class_map: Optional ``{net_name: NetClassRouting}`` sidecar
+                map (issue #5522, Phase 1 of Epic #5511), forwarded to the
+                classifier so a declared ``swap_group`` can surface a
+                ``swap_proposal`` on the ``_placement_delta.json`` artifact.
+                ``None`` (the default) is byte-identical to pre-#5522
+                behavior.
 
         Returns:
             A :class:`PlacementDeltaFeedbackResult` when the delta loop runs, or
@@ -17642,6 +17649,7 @@ class Autorouter:
             max_movement=max_movement,
             delta_proposer=delta_proposer,
             excluded_nets=excluded_nets,
+            net_class_map=net_class_map,
         )
         result = loop.run_delta(
             max_adjustments=max_adjustments,

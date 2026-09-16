@@ -3870,6 +3870,12 @@ def _run_placement_delta_feedback(
             # The routing pass that produced ``router.routes`` just finished;
             # re-routing an identical baseline would double the wall clock.
             reuse_existing_routes=True,
+            # Issue #5522 (Phase 1 of Epic #5511): forward the already-loaded
+            # sidecar (if any) so a declared ``swap_group`` can surface a
+            # ``swap_proposal`` on the delta artifact.  Still opt-in overall
+            # (--placement-delta-feedback default off), so the default `kct
+            # route` path stays byte-identical.
+            net_class_map=getattr(args, "_loaded_net_class_map", None),
         )
     except Exception as exc:
         if not quiet:

@@ -35,9 +35,11 @@ Acceptance criteria covered (see issue #2724):
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import re
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -924,3 +926,137 @@ def test_power_stub_uses_safe_alternate_escape(generate_design_mod, tmp_path, ob
     assert not [v for v in ViaInPadRule().check(pcb, rules).violations if "+1V8" in v.nets]
     uuids = [v.uuid for v in pcb.vias] + [s.uuid for s in pcb.segments]
     assert len(set(uuids)) == len(uuids)
+
+
+# =============================================================================
+# Declared swap-group proposal (issue #5522, Phase 1 of Epic #5511)
+# =============================================================================
+#
+# The committed ``regression-fixture/net_class_map.json`` sidecar declares
+# ``swap_group: "DDR_BYTE0"`` on DQ0-DQ7 (the only permitted edit to this
+# fixture -- the ``.kicad_pcb`` files themselves are never touched).
+# ``matchgroup_test_routed.kicad_pcb`` (NOT the unrouted ``matchgroup_test
+# .kicad_pcb``, which has no reachable ``reorder_pins`` rung) has DQ3/DQ4
+# ``placement_bound`` / ``self_crossing_bundle`` with a VERIFIED reversal
+# between U1 and U2, so both nets' diagnoses carry a computed
+# ``swap_proposal``.
+
+
+class TestSwapGroupProposalOnRoutedFixture:
+    @pytest.fixture
+    def routed_pcb_path(self) -> Path:
+        path = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+        assert path.exists(), f"Routed PCB artifact missing: {path}"
+        return path
+
+    @pytest.fixture
+    def net_class_map(self):
+        from kicad_tools.router.rules import net_class_map_from_path
+
+        sidecar = OUTPUT_DIR / "net_class_map.json"
+        assert sidecar.exists(), f"Sidecar missing: {sidecar}"
+        return net_class_map_from_path(sidecar)
+
+    def test_sidecar_declares_swap_group_on_dq0_dq7_only(self, net_class_map) -> None:
+        declared = {name for name, nc in net_class_map.items() if nc.swap_group}
+        assert declared == {f"DQ{i}" for i in range(8)}
+        for name in declared:
+            assert net_class_map[name].swap_group == "DDR_BYTE0"
+        # DM0/DQS_P/DQS_N are real ``DDR_DATA_BYTE_0`` match-group members
+        # but are NOT declared swappable -- they must stay fixed.
+        for undeclared in ("DM0", "DQS_P", "DQS_N"):
+            assert net_class_map[undeclared].swap_group is None
+
+    def test_dq3_dq4_measure_28_to_0_and_55_to_3(self, routed_pcb_path, net_class_map) -> None:
+        """The curated measured figures: swap-group-only 28 -> 0 crossings;
+        whole ``DDR_DATA_BYTE_0`` match group (11 nets) 55 -> 3, with the
+        residual attributed to the undeclared, fixed DM0/DQS_P/DQS_N."""
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        result = classify_stuck_nets(routed_pcb_path, net_class_map=net_class_map)
+        for net_name in ("DQ3", "DQ4"):
+            d = next(x for x in result.diagnoses if x.net_name == net_name)
+            assert d.topology == "self_crossing_bundle"
+            proposal = d.swap_proposal
+            assert proposal is not None, f"{net_name}: expected a swap_proposal"
+            assert proposal.swap_group == "DDR_BYTE0"
+            assert proposal.target_ref == "U2"
+            assert proposal.crossings_before == 28
+            assert proposal.crossings_after == 0
+            assert proposal.group_crossings_before == 55
+            assert proposal.group_crossings_after == 3
+            assert set(proposal.fixed_members) == {"DM0", "DQS_P", "DQS_N"}
+            # The measured pad_map from the curator's re-measurement.
+            assert proposal.pad_map == {
+                "1": "DQ7",
+                "2": "DQ6",
+                "3": "DQ5",
+                "4": "DQ4",
+                "8": "DQ3",
+                "9": "DQ2",
+                "10": "DQ1",
+                "11": "DQ0",
+            }
+
+    def test_no_swap_group_declared_means_no_proposal(self, routed_pcb_path) -> None:
+        """The AC guard: no declaration -> no proposal, even on a verified
+        reversal (declared-only, never inferred)."""
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        result = classify_stuck_nets(routed_pcb_path)
+        for net_name in ("DQ3", "DQ4"):
+            d = next(x for x in result.diagnoses if x.net_name == net_name)
+            assert d.swap_proposal is None
+            assert "swap_proposal" not in d.to_dict()
+
+    def test_classification_does_not_mutate_the_committed_pcb(
+        self, routed_pcb_path, net_class_map
+    ) -> None:
+        """Report-only (issue #5522 guard): classifying with a swap_group
+        declaration never touches the on-disk PCB -- no footprint, pad or
+        net is mutated anywhere."""
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets
+
+        before = routed_pcb_path.read_bytes()
+        classify_stuck_nets(routed_pcb_path, net_class_map=net_class_map)
+        after = routed_pcb_path.read_bytes()
+        assert before == after
+
+    def test_placement_delta_from_diagnosis_carries_the_proposal(
+        self, routed_pcb_path, net_class_map
+    ) -> None:
+        """The proposal reaches the ``reorder_pins`` delta and round-trips
+        via ``PlacementDelta.to_dict`` / ``from_dict`` (the
+        ``_placement_delta.json`` artifact contract)."""
+        from kicad_tools.router.placement_delta import PlacementDelta, deltas_from_result
+        from kicad_tools.router.stuck_classifier import classify_stuck_nets_from_pcb
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(routed_pcb_path))
+        result = classify_stuck_nets_from_pcb(pcb, net_class_map=net_class_map)
+        deltas = deltas_from_result(pcb, result, include_endpoint_alignment=False)
+        reorder_deltas = [
+            d for d in deltas if d.kind == "reorder_pins" and d.net_name in ("DQ3", "DQ4")
+        ]
+        assert reorder_deltas, "expected an appended reorder_pins delta for DQ3/DQ4"
+        for delta in reorder_deltas:
+            assert delta.pad_map
+            assert delta.crossings_before == 28
+            assert delta.crossings_after == 0
+            reloaded = PlacementDelta.from_dict(json.loads(json.dumps(delta.to_dict())))
+            assert reloaded == delta
+
+    def test_why_json_output_surfaces_the_proposal(self, routed_pcb_path) -> None:
+        """``kct net-status --why --format json`` auto-discovers the
+        committed sidecar (no new flag) and surfaces the proposal."""
+        from kicad_tools.cli.net_status_cmd import output_why
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            output_why(routed_pcb_path, "json")
+        data = json.loads(buf.getvalue())
+        dq_nets = {n["net_name"]: n for n in data["nets"] if n["net_name"] in ("DQ3", "DQ4")}
+        assert dq_nets, "expected DQ3/DQ4 in the --why output"
+        for net in dq_nets.values():
+            assert "swap_proposal" in net
+            assert net["swap_proposal"]["swap_group"] == "DDR_BYTE0"

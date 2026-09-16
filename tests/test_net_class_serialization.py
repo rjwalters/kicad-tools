@@ -197,6 +197,40 @@ class TestNetClassRoutingRoundTrip:
         assert rt == nc
         assert rt.length_match_reference == "clock"
 
+    def test_swap_group_field_roundtrips(self):
+        """Issue #5522 ``swap_group`` declaration round-trips exactly."""
+        nc = NetClassRouting(
+            name="DDR_DATA_BYTE0",
+            length_match_group="DDR_DATA",
+            swap_group="DDR_BYTE0",
+        )
+        rt = NetClassRouting.from_dict(nc.to_dict())
+        assert rt == nc
+        assert rt.swap_group == "DDR_BYTE0"
+
+    def test_swap_group_defaults_to_none(self):
+        """A sidecar entry without ``swap_group`` loads with the field ``None``.
+
+        Issue #5522: pre-#5522 committed sidecars (and any sidecar a
+        designer hand-authors without a swap declaration) carry no
+        ``swap_group`` key at all -- ``from_dict`` must tolerate that and
+        default to ``None`` (the declared-only "fixed by omission"
+        semantics), not raise.
+        """
+        nc = NetClassRouting.from_dict({"name": "NoSwap"})
+        assert nc.swap_group is None
+        # And a dict carrying every OTHER Phase-1A match-group field but not
+        # ``swap_group`` (the realistic pre-#5522 committed-sidecar shape).
+        nc2 = NetClassRouting.from_dict(
+            {
+                "name": "DDR_DATA_BYTE0",
+                "length_match_group": "DDR_DATA",
+                "length_match_reference": "DQS_P",
+                "length_match_tolerance_mm": 0.1,
+            }
+        )
+        assert nc2.swap_group is None
+
 
 class TestDriftPrevention:
     """Lock the :meth:`to_dict` / :meth:`from_dict` contract against drift.
@@ -297,6 +331,7 @@ class TestDriftPrevention:
             "length_match_group": "DRIFT_GROUP",
             "length_match_reference": "DRIFT_REF",
             "length_match_tolerance_mm": 0.15,
+            "swap_group": "DRIFT_SWAP",
         }
         # If the dataclass adds a field that the kwargs map doesn't
         # cover, fail loudly here -- this forces the test author to
