@@ -236,7 +236,9 @@ namespace router {
 // enforce that resolved value as a hard floor instead of skipping.
 // v26: reject foreign physical copper when seeding source-pad cells in
 // both one-shot and resumable A*. Clearance halos remain valid exits.
-constexpr int ROUTER_CPP_BUILD_VERSION = 26;
+// v27: tighter differential partner search radii never bypass authored
+// static, pad, or obstacle occupancy (#5482).
+constexpr int ROUTER_CPP_BUILD_VERSION = 27;
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
 // reservations.  Observed owner sets in practice are tiny: 1 for the

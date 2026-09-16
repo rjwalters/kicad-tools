@@ -255,7 +255,11 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             // Issue #2559: relax partner cells outside the tighter
             // intra-pair radius (Euclidean -- matches the kernel shape
             // used by Python compute_expanded_blocked() post-#3229).
-            if (partner_active && cell.net == partner_net) {
+            // A tighter intra-pair rule applies to routed partner copper, not
+            // authored pads or static obstacles. Those cannot negotiate away
+            // their pad clearance, and final validation retains that floor.
+            if (partner_active && cell.net == partner_net &&
+                !cell.static_blocked && !cell.pad_blocked && !cell.is_obstacle) {
                 const int dist_sq = dx * dx + dy * dy;
                 if (dist_sq > partner_radius_sq) {
                     continue;
@@ -336,7 +340,11 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                 continue;
             }
 
-            if (partner_active && cell.net == partner_net) {
+            // A tighter intra-pair rule applies to routed partner copper, not
+            // authored pads or static obstacles. Those cannot negotiate away
+            // their pad clearance, and final validation retains that floor.
+            if (partner_active && cell.net == partner_net &&
+                !cell.static_blocked && !cell.pad_blocked && !cell.is_obstacle) {
                 if (dist_sq > partner_radius_sq) {
                     continue;
                 }
