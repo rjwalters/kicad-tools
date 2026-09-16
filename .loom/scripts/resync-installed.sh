@@ -726,6 +726,12 @@ INSTALLED_SCRIPTS="$WRITE_ROOT/.loom/scripts"
 LABEL_CHECK_SKIPPED=0
 LABEL_CHECK_BROKEN=0
 
+# Set when a hook wired in .claude/settings.json is missing or not executable
+# (#7761). Carried into the summary line and the exit status for the same
+# reason LABEL_CHECK_BROKEN is: a surface sync that leaves the guard hooks
+# unrunnable is not a clean bill of health, even though the sync itself worked.
+GUARD_CHECK_BROKEN=0
+
 IGNORE_FILE="$WRITE_ROOT/.loom/resync-ignore"
 
 # #6515: every distinct "$rel" ever checked against is_ignored (the "did you
@@ -2138,6 +2144,58 @@ audit_untracked_loom_paths() {
 }
 audit_untracked_loom_paths
 
+# ---------- guard-hook install check (#7761) ----------
+#
+# The per-file sync above already `chmod +x`es every hook it writes, so a lost
+# executable bit self-heals HERE -- but only for hooks this run actually
+# touched, and only reactively. Nothing verified the end state: that every hook
+# the repo's .claude/settings.json WIRES is present and runnable. That gap is
+# what made a missing/non-executable guard invisible until the moment a guard
+# was needed and silently absent (#7761; the installed-guard surface drifting
+# from defaults/hooks/ is a demonstrated failure mode -- #7416, #7423).
+#
+# Read-only by default, and best-effort like every other post-sync check: a
+# broken guard install is reported (and carried into the exit code via
+# GUARD_CHECK_BROKEN below), never a reason to abort a resync that has already
+# fully applied. On a real (non---dry-run) resync it first tries --fix, which
+# only ever restores an executable bit on a file that is already present.
+#
+# Dispatches onto whichever copy ended up installed at
+# .loom/scripts/check-guards-installed.sh, falling back to the defaults/ source
+# for the first run after upgrading past #7761 (when the installed copy is only
+# being previewed, not yet on disk) -- the same resolution the label-drift check
+# below uses.
+GUARD_CHECK_SCRIPT="$WRITE_ROOT/.loom/scripts/check-guards-installed.sh"
+if [[ ! -x "$GUARD_CHECK_SCRIPT" && -x "$DEFAULTS_DIR/scripts/check-guards-installed.sh" ]]; then
+    GUARD_CHECK_SCRIPT="$DEFAULTS_DIR/scripts/check-guards-installed.sh"
+fi
+if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
+    guard_output=""
+    guard_rc=0
+    guard_output="$("$GUARD_CHECK_SCRIPT" --root "$WRITE_ROOT" --quiet 2>&1)" || guard_rc=$?
+
+    if [[ "$guard_rc" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+        # Retry once with --fix: a present-but-not-executable hook is
+        # repairable in place, and repairing it is strictly what this resync
+        # was for. guard_rc is RESET first -- `|| guard_rc=$?` only assigns on
+        # failure, so a successful retry would otherwise inherit the first
+        # run's non-zero status and report a repair as a failure.
+        guard_rc=0
+        guard_output="$("$GUARD_CHECK_SCRIPT" --root "$WRITE_ROOT" --quiet --fix 2>&1)" || guard_rc=$?
+    fi
+
+    case "$guard_rc" in
+        0)
+            note "  ${GREEN}unchanged${NC} guard-hook install (every hook wired in .claude/settings.json is runnable)"
+            ;;
+        *)
+            warn "BROKEN GUARD INSTALL: a hook wired in .claude/settings.json is missing or not executable. PreToolUse tool calls are DENIED in this workspace until it is repaired (#7761)."
+            printf '%b\n' "$guard_output" | sed 's/^/    /' >&2
+            GUARD_CHECK_BROKEN=1
+            ;;
+    esac
+fi
+
 # ---------- forge label drift check + safe auto-create (#6716) ----------
 #
 # .github/labels.yml is kept current by the scripts resync above, but nothing
@@ -2388,6 +2446,9 @@ if [[ "$LABEL_CHECK_BROKEN" -eq 1 ]]; then
 elif [[ "$LABEL_CHECK_SKIPPED" -eq 1 ]]; then
     CHECK_NOTE=" ${YELLOW}[label check skipped -- forge unreachable]${NC}"
 fi
+if [[ "$GUARD_CHECK_BROKEN" -eq 1 ]]; then
+    CHECK_NOTE="${CHECK_NOTE} ${RED}[BROKEN GUARD INSTALL -- a wired hook cannot run]${NC}"
+fi
 
 if [[ "$N_UPDATED" -gt 0 || "$N_REMOVED" -gt 0 ]]; then
     printf '%b\n' "${GREEN}${BOLD}[resync] ${N_UPDATED} file(s) updated, ${N_REMOVED} removed, ${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped.${NC}${CHECK_NOTE}"
@@ -2400,7 +2461,7 @@ fi
 # check did not execute, so this run is not a clean bill of health. A
 # benign unreachable forge still exits 0 -- resync must keep working
 # offline, which is the whole reason that case is soft.
-if [[ "$LABEL_CHECK_BROKEN" -eq 1 ]]; then
+if [[ "$LABEL_CHECK_BROKEN" -eq 1 || "$GUARD_CHECK_BROKEN" -eq 1 ]]; then
     exit 75
 fi
 exit 0

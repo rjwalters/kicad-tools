@@ -54,6 +54,50 @@ cat .loom/logs/hook-errors.log
 
 If the log is absent or empty and hooks aren't blocking, confirm Claude Code is invoked with `--dangerously-skip-permissions` (not `bypassPermissions`).
 
+### Every tool call is denied with "Loom hook … is not installed in this workspace" (#7761)
+
+**Symptom**: every `Bash` call (and/or every `Edit`/`Write`) is denied with a
+message naming a missing `.loom/hooks/<name>` path, and `.loom/logs/hook-errors.log`
+fills with `[hook-wiring] … is not installed`.
+
+**This is working as designed, and it is telling the truth.** Before #7761 a
+missing or non-executable guard failed open *silently*: the command ran
+unguarded with no diagnostic at all, which under `--dangerously-skip-permissions`
+means nothing at all stood between the agent and a destructive command. A
+workspace that carries a `.loom/hooks/` directory is asserting that it expects
+those hooks, so a missing one is now treated as a broken install rather than an
+opt-out. (A repo with no `.loom/` is unaffected — it still fails open silently,
+as it should.)
+
+**Diagnose and repair**:
+
+```bash
+.loom/scripts/check-guards-installed.sh          # names every offender; exit 2 = broken
+.loom/scripts/check-guards-installed.sh --fix    # restores a lost executable bit
+./scripts/install-loom.sh                        # reinstalls missing hook scripts
+```
+
+Then **restart Claude Code** — `.claude/settings.json` hook entries are read at
+session start.
+
+A *lost executable bit alone never denies*: `hook-wiring.sh` runs that hook via
+`bash` (which needs only read permission) and warns, so coverage is intact. A
+deny means the script is genuinely absent from both `.loom/hooks/` and the
+machine-level checkout.
+
+**If you need the session back before you can repair it**, set the escape hatch
+in the environment and relaunch:
+
+```bash
+LOOM_GUARD_WIRING_FAILOPEN=1 claude --dangerously-skip-permissions
+```
+
+That downgrades the deny to a loud warn-and-allow. It is an environment variable
+rather than a `guards.*` config key on purpose: a committed config key could
+restore the silent-allow hole for everyone in one PR. **Repair the install
+rather than leaving the hatch set** — with it on you are running with no guard
+and only a stderr line to tell you.
+
 ### `worktree.sh N` skips a stale post-squash-merge remote branch (#5657)
 
 `worktree.sh N` prefers reusing `refs/remotes/origin/feature/issue-N` over

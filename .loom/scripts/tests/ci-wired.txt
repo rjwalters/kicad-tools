@@ -50,6 +50,7 @@ test-check-conflict-markers.sh
 test-check-dependabot-labels.sh
 test-check-evaluating-staleness.sh
 test-check-git-identity.sh
+test-check-guards-installed.sh
 test-check-host-sleep.sh
 test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
@@ -181,6 +182,7 @@ test-reconcile-stack.sh
 test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
 test-resolve-tier-model.sh
+test-resync-installed-guard-check.sh
 test-resync-installed.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
@@ -218,6 +220,7 @@ test-worktree-hookspath.sh
 test-worktree-json-purity.sh
 test-worktree-local-branch-upstream-tracking.sh
 test-worktree-nested-symlinks.sh
+test-worktree-orphan-guard-spaces.sh
 test-worktree-race-rescue.sh
 test-worktree-remote-branch-tracking.sh
 test-worktree-remove-squash-merge.sh
@@ -253,6 +256,7 @@ tests/hooks/test-post-worktree-target-dir.sh
 defaults/hooks/tests/test-guard-background-subagents.sh
 defaults/hooks/tests/test-guard-loom-workspace.sh
 defaults/hooks/tests/test-guard-worktree-paths.sh
+defaults/hooks/tests/test-hook-wiring.sh
 defaults/hooks/tests/test-methodology-inject.sh
 defaults/hooks/tests/test-skill-router.sh
 

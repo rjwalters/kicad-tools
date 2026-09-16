@@ -2802,6 +2802,10 @@ else
     fail "(#6716) a repo with no labels.yml unexpectedly mentioned forge labels (rc=$RC); out=$OUT"
 fi
 
+# The guard-hook install check's wiring (#7761) is covered by the sibling
+# test-resync-installed-guard-check.sh, split out to respect this file's
+# file-size ratchet (.loom/docs/file-size-policy.md).
+
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "========================================"
