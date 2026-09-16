@@ -232,6 +232,14 @@ cd .loom/worktrees/issue-XX
   captures WIP as a patch file under
   `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to your own
   worktree, with no risk of collision with other builders' stashes.
+- For a "clean baseline vs. my diff" comparison — temporarily clearing your
+  fix to re-run a lint/test baseline, then restoring it — `snapshot` is *not*
+  enough (it captures a patch but does not reset the working tree). Use
+  `./.loom/scripts/worktree.sh stash-push <issue-number>`, run the baseline
+  check, then `./.loom/scripts/worktree.sh stash-pop <issue-number>` (#5217).
+  It anchors your WIP to a **per-issue** ref
+  (`refs/loom/stash-baseline/issue-<N>`), never `refs/stash`, so no concurrent
+  builder's stash can land between your push and pop.
 
 **Don't use `git push --force` without `--force-with-lease`**
 - `--force-with-lease` is safer - it fails if someone else pushed

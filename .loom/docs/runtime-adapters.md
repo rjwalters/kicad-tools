@@ -1231,6 +1231,24 @@ holds identically on macOS and Linux alike. This is covered by the
 `defaults/scripts/tests/test-spawn-claude.sh` (Section 7e, originally added
 for #7429); see that file for the exact assertions.
 
+### Docker-backed work from inside a container: the `run-job` seam (issue #7853, epic #6896 Phase 4)
+
+A contained worker has no docker socket — that is the point of the boundary,
+not an omission (ADR-0017 Decision 3: a mounted `docker.sock` is
+host-root-equivalent). Docker-requiring workloads therefore leave the
+container as a **job spec** sent to a host-level executor, over the
+`run-job` seam: [`run-job-seam.md`](run-job-seam.md)
+(`.loom/scripts/run-job.sh` + `lib/run-job-exec.sh`).
+
+Pointer only — none of this doc's seven contract points change. The seam sits
+*beside* worker dispatch, not inside it: `spawn-worker.sh` still decides what
+a worker is, and a job is something a worker asks for while it runs. Job
+mounts follow the same [`MOUNT-CONTRACT.md`](https://github.com/rjwalters/loom/blob/main/docker/worker/MOUNT-CONTRACT.md)
+§1 path-parity rule containerized dispatch does, and job resource limits
+mirror the per-sweep `--cpus`/`--memory` shape above. Migrating the
+docker-requiring callers (build-gate, sim/build wrappers) onto the seam is
+issue #7854; elastic executor *placement* stays with #3979.
+
 ## Fork mapping table
 
 The gpeyton/loom fork already built much of this as parallel special-casing. The

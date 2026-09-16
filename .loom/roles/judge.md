@@ -1496,21 +1496,21 @@ gh pr comment <number> --body "🔀 Rebased branch and resolved merge conflict (
 ### Version-Bearing-File-Only Conflicts: superseded (#7743)
 
 `baa3fff5` (#7687) added a Judge-resolves recipe here for rebase conflicts
-confined entirely to version-bearing files (VERSION, CLAUDE.md, etc.) — the
-recurring "VERSION bump goes stale before review lands" race (#7684), where
-`main` bumped those single-line/single-field values on nearly every merge and
-collided with this branch's own bump on the exact same lines.
+confined entirely to version-bearing files — the recurring "VERSION bump goes
+stale before review lands" race (#7684), where `main` bumped those
+single-line/single-field values on nearly every merge and collided with this
+branch's own bump on the exact same lines.
 
 That race is now structurally impossible: since #7743, no PR may carry its
 own edit to a version-bearing file's value at all (bumps are exclusively
-`.github/workflows/version-bump-on-merge.yml`'s job, run once, automatically,
-after merge; see `check-defaults-version-bump.sh --forbid-bump`). A
+`.github/workflows/version-bump-on-merge.yml`'s job, run once, after merge;
+see `check-defaults-version-bump.sh --forbid-bump`). A
 version-bearing-file-only conflict can no longer occur, because this branch
-never touched those files to begin with. This section intentionally has no
-recipe anymore — if you ever DO see a conflict confined to version-bearing
-files, that means something violated the new invariant; treat it as a
-**complex conflict** (below), not this now-dead simple case, and flag the
-anomaly rather than reconstructing the old bump-and-continue recipe.
+never touched those files to begin with (`Cargo.lock`/`mcp-loom/package-lock.json`
+included, #7705 — `version-check-gate.sh` owns their uncommitted-bump case).
+This section intentionally has no recipe anymore — if you ever DO see a
+conflict confined to version-bearing files, that means something violated the
+new invariant; treat it as a **complex conflict** (below) and flag it.
 
 **Scope of that impossibility (#7823):** it covers *git rebase conflicts*, not
 every way a stale branch can surface a version-bearing-file complaint. A

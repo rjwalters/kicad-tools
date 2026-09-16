@@ -52,6 +52,18 @@
 # and confirms the gate's new dirty-worktree check catches it; T11 is the
 # false-positive guard -- the same bump, committed, passes cleanly.
 #
+# T12-T13 (#7705) cover the lockfile-specific gap in the #7417 check: it
+# walks only `$(scripts/version.sh list)`, which deliberately excludes
+# `Cargo.lock`/`mcp-loom/package-lock.json`. A caller that bumps, then
+# commits only `list`'s entries (following the gate's own Fix: hint
+# literally) leaves the lockfiles bumped-on-disk-but-uncommitted while every
+# OTHER version-bearing file already agrees with itself and with git HEAD --
+# T10/T11's all-dirty-or-all-committed fixtures can't exercise this
+# committed-except-lockfiles shape. T12 reproduces it and confirms the
+# gate's new lockfile-specific dirty check catches it; T13 is the
+# false-positive guard -- the same bump with the lockfiles ALSO committed
+# passes cleanly.
+#
 # Usage:
 #   ./.loom/scripts/tests/test-version-check-gate.sh
 
@@ -468,6 +480,65 @@ unset LOOM_VERSION_CHECK_SCRIPT
 run_gate_in "$FIXTURE11"
 assert_eq "0" "$EXIT_CODE" "T11: bumped AND committed version-bearing files -> gate passes cleanly (no false positive)"
 rm -rf "$FIXTURE11"
+
+# === T12-T13: the lockfile-specific uncommitted-bump gap (#7705) -- T10/T11
+# prove the DIRTY_FILES check catches an uncommitted bump when EVERY
+# version-bearing file (including the lockfiles) is left dirty. That's not
+# the #7673/#7680 incident shape: there, `VERSION_FILES` (+
+# install-metadata.json) WERE committed at the new version -- only
+# Cargo.lock/mcp-loom/package-lock.json were regenerated on disk and left
+# uncommitted, exactly what a caller gets by following this gate's own
+# `git add -- <file(s) above>` Fix: hint literally (that hint lists only
+# `$(scripts/version.sh list)`'s dirty entries, never the lockfiles). Because
+# every OTHER version-bearing file already agrees with itself and with git
+# HEAD at the new version, T10's all-dirty fixture can't exercise this path
+# -- these two are needed to cover it.
+
+# T12: VERSION_FILES + install-metadata.json committed at NEW_V; the
+# lockfiles are bumped to NEW_V on disk but never staged/committed (still
+# OLD_V in git HEAD). `version.sh check` alone passes (every file on disk
+# agrees with every other file on disk), and the pre-#7705 DIRTY_FILES loop
+# (walking only `$(scripts/version.sh list)`) also passes since it never
+# looks at the lockfiles -- the gate must still fail via the new
+# lockfile-specific check.
+FIXTURE12="$(mktemp -d)"
+make_fixture_repo "$FIXTURE12" "$OLD_V" "$OLD_V"
+bump_version_files "$FIXTURE12" "$OLD_V" "$NEW_V"
+sed -i.bak "s/\"loom_version\": \"$OLD_V\"/\"loom_version\": \"$NEW_V\"/" "$FIXTURE12/.loom/install-metadata.json"
+rm -f "$FIXTURE12"/.loom/*.bak
+(
+  cd "$FIXTURE12"
+  # Mirrors the gate's own Fix: hint literally: stage only
+  # $(scripts/version.sh list)'s entries plus install-metadata.json -- never
+  # the lockfiles -- and commit. Cargo.lock/mcp-loom/package-lock.json stay
+  # modified-but-uncommitted.
+  mapfile -t _t12_version_files < <(./scripts/version.sh list)
+  git add "${_t12_version_files[@]}" .loom/install-metadata.json
+  git commit -q -m "chore: bump version to $NEW_V"
+)
+unset LOOM_VERSION_CHECK_SCRIPT
+run_gate_in "$FIXTURE12" --fix-hint "then push."
+assert_eq "1" "$EXIT_CODE" "T12: VERSION_FILES committed but lockfiles bumped-on-disk-and-uncommitted -> gate fails"
+assert_contains "$OUTPUT" "Cargo.lock" "T12: output names Cargo.lock"
+assert_contains "$OUTPUT" "mcp-loom/package-lock.json" "T12: output names mcp-loom/package-lock.json"
+assert_contains "$OUTPUT" "not committed" "T12: output calls out the uncommitted state"
+assert_contains "$OUTPUT" "BLOCKER" "T12: lockfile uncommitted-bump abort uses the BLOCKER: message"
+assert_contains "$OUTPUT" "then push." "T12: custom --fix-hint text is still appended to the Fix: message"
+rm -rf "$FIXTURE12"
+
+# T13: false-positive guard -- same bump, but this time the lockfiles are
+# ALSO committed (mirrors do_tag()'s explicit `git add ... Cargo.lock
+# mcp-loom/package-lock.json`, #7705's fix) -- the gate must NOT flag it.
+FIXTURE13="$(mktemp -d)"
+make_fixture_repo "$FIXTURE13" "$OLD_V" "$OLD_V"
+bump_version_files "$FIXTURE13" "$OLD_V" "$NEW_V"
+sed -i.bak "s/\"loom_version\": \"$OLD_V\"/\"loom_version\": \"$NEW_V\"/" "$FIXTURE13/.loom/install-metadata.json"
+rm -f "$FIXTURE13"/.loom/*.bak
+(cd "$FIXTURE13" && git add -A && git commit -q -m "chore: bump version to $NEW_V (lockfiles included)")
+unset LOOM_VERSION_CHECK_SCRIPT
+run_gate_in "$FIXTURE13"
+assert_eq "0" "$EXIT_CODE" "T13: bumped AND committed lockfiles (with everything else) -> gate passes cleanly (no false positive)"
+rm -rf "$FIXTURE13"
 
 # --- Summary ---
 echo ""

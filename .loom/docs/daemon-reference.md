@@ -3958,11 +3958,11 @@ knobs not yet audited here.
 | *(host-local tiers only — see below)* | `LOOM_ROLE_RUNNER_SHARD_INDEX` | *(unset)* | **This host's** 0-based role-runner shard index (#6374). Must **differ** per host, so it belongs in the service unit next to `LOOM_ROLE_RUNNER`, never in the tracked `.loom/config.json` — a committed `autonomous.roleRunner.shardIndex` gives every host the same index and leaves every other slice with zero owners fleet-wide, so the daemon **refuses** it (logs `error!`, falls back to unsharded). Requires `shardCount`; out-of-range/malformed → unsharded. See [Role-runner host sharding](#role-runner-host-sharding-6374) |
 | `autonomous.roleRunner.shardCount` | `LOOM_ROLE_RUNNER_SHARD_COUNT` | *(unset)* | Fleet-wide number of role-runner shards (#6374) — must be **identical** on every host, which is why the tracked config is a fine home for it. `0`/`1`/malformed → unsharded (every host rotates every workspace, the pre-#6374 behavior). Requires `shardIndex` |
 | `autonomous.roleRunner.shardKey` | *(config only)* | `owner/repo` from `origin`, else the root's basename | Explicit cross-host-stable key hashed to pick a workspace's owning shard (#6374). Must be identical fleet-wide. Set it when the derived key would diverge between hosts — the basename fallback does exactly that if two hosts cloned the same repo into differently-named directories. `status` reports the resolved key and its tier so two hosts can be diffed |
-| `autonomous.roleRunner.roster.enabled` | `LOOM_ROLE_RUNNER_ROSTER` | `false` | Opt-in publish of this host's roster comment (Issue #7690, Phase A of #6704). Off ⇒ zero extra forge calls, `status` byte-identical to pre-#7690. **Observational only** — does not affect `role_shard::decide()`'s verdict; see [Role-runner host roster](#role-runner-host-roster-7690-phase-a-of-6704) |
+| `autonomous.roleRunner.roster.enabled` | `LOOM_ROLE_RUNNER_ROSTER` | `false` | Opt-in: publish this host's roster comment **and** derive its role-runner ring from the live roster, generation-fenced (#6704). Off ⇒ zero extra forge calls and a `decide()` verdict byte-identical to the static #6374 ring. On ⇒ a dead host's slice is reassigned within `ttl + settle + one interval`, and any membership disagreement yields rather than duplicates. A static `LOOM_ROLE_RUNNER_SHARD_INDEX` + `shardCount` pair still outranks it. See [Role-runner host roster](#role-runner-host-roster-6704-phases-a-and-b) |
 | `autonomous.roleRunner.roster.issue` | `LOOM_ROLE_RUNNER_ROSTER_ISSUE` | *(unset)* | `owner/repo#N` of the designated roster issue. Fleet-wide, so the tracked config is a fine home (same argument as `shardCount`). `enabled: true` with this unset/invalid ⇒ one `error!` and no roster (never a panic) |
 | `autonomous.roleRunner.roster.heartbeatSecs` | `LOOM_ROLE_RUNNER_ROSTER_HEARTBEAT_SECS` | `300` | This host's roster-comment refresh cadence |
 | `autonomous.roleRunner.roster.ttlSecs` | `LOOM_ROLE_RUNNER_ROSTER_TTL_SECS` | `900` | Liveness TTL — floored at 3x `heartbeatSecs` regardless of a smaller configured value, so a single missed round-trip can never look like a death |
-| `autonomous.roleRunner.roster.settleSecs` | `LOOM_ROLE_RUNNER_ROSTER_SETTLE_SECS` | `900` | Quiet period a new ring must survive before anyone acts under it. Unused in Phase A (no ring consumes the roster yet); reserved for Phase B's fencing rule |
+| `autonomous.roleRunner.roster.settleSecs` | `LOOM_ROLE_RUNNER_ROSTER_SETTLE_SECS` | `900` | Quiet period a new ring must survive before **any** host acts under it — floored at `ttlSecs`, without which a host holding a stale view could still be acting when the rest of the fleet resumes |
 | `autonomous.idleExit.enabled` | `LOOM_AUTONOMOUS_IDLE_EXIT_ENABLED` | `false` | End the daemon cleanly after the idle window so a host guard can take over. Independent of Work Finder; never invokes a power command |
 | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` | `60` | Continuous idle/starvation window. Zero/invalid → default |
 | `autonomous.idleExit.onTokenStarvation` | `LOOM_AUTONOMOUS_IDLE_EXIT_ON_TOKEN_STARVATION` | `true` | Also exit after zero healthy accounts for the full window with no sweep in flight, even if roles keep cycling |
@@ -5056,56 +5056,106 @@ line naming the owning shard, the key, and the key's tier. Unconfigured
 single-host installs print neither. `--json` carries the same under
 `role_runner_shard` (report-level) and `per_repo[].role_runner_shard`.
 
-**Still static in this phase.** The assignment consumed by `decide()` /
-`owns()` above still comes from `(shardIndex, shardCount)`, never from the
-roster below — see the next section for what has actually shipped.
+**Static unless the roster is enabled.** By default the assignment consumed by
+`decide()` / `owns()` above comes from `(shardIndex, shardCount)` and nothing
+else: killing a host does **not** reassign its slice. The next section is the
+opt-in that makes the ring dynamic.
 
-### Role-runner host roster (#7690, Phase A of #6704)
+### Role-runner host roster (#6704, phases A and B)
 
 The design record — [`role-runner-roster.md`](role-runner-roster.md) — picked
 a **forge-backed roster** (one marker comment per host on a designated roster
 issue, liveness from the comment's forge-assigned `updated_at`, as with lease
-records) plus a **generation-fenced ring** for a *future* phase to consume.
-Phase A, described here, ships only the write side and `status` rendering:
-**it does not change `decide()`'s verdict at all.** Killing a host still does
-**not** reassign its slice automatically — that is Phase B, gated entirely
-behind `roster.enabled` staying off by default (see the config table above,
-`autonomous.roleRunner.roster.*`).
+records) plus a **generation-fenced ring**. Both halves have shipped, behind
+`autonomous.roleRunner.roster.enabled`, **which defaults to `false`**: with it
+off, `decide()` is byte-identical to the static ring above and the daemon
+makes zero extra forge calls.
 
-**What Phase A does.** With `roster.enabled: true` and a valid `roster.issue`
-(`owner/repo#N`), each daemon runs ONE per-daemon (not per-workspace)
-heartbeat loop that:
+**The heartbeat (Phase A).** With `roster.enabled: true` and a valid
+`roster.issue` (`owner/repo#N`), each daemon runs ONE per-daemon (not
+per-workspace) loop that:
 
 1. Reads back every roster comment on the issue (REST — `gh api
    repos/{owner}/{repo}/issues/{n}/comments`, never GraphQL, #5047).
 2. Locates this host's own comment (by its opaque id — the same
    `opaque_host_id(host_identity())` lease records publish, #6322) — or, on a
    fleet host's very first cycle, has none to find.
-3. `PATCH`es it (or `POST`s a new one) with a fresh body advertising the
-   `fnv1a64` digest of every currently-registered, role-runner-enabled
-   workspace's shard key, sorted ascending. The body is regenerated wholesale
-   every cycle (there is no user prose to preserve), so its own trailing
-   timestamp guarantees the "PATCH must change something" contract
-   (`lease-renewal.md`) on every call, `serves` change or not.
+3. Publishes a body advertising the `fnv1a64` digest of every
+   currently-registered, role-runner-enabled workspace's shard key, sorted
+   ascending, and caches the read-back for `status` and the fence below.
+
+   It **`PATCH`es in place** while its record is live and its `serves` set is
+   unchanged (the body is regenerated wholesale, so its trailing timestamp
+   satisfies `lease-renewal.md`'s "a PATCH must change something" on every
+   call). It **replaces** the record — `DELETE` + `POST` — when the record had
+   expired (a rejoin) or when `serves` changed, so the new `created_at`
+   becomes a membership boundary every host observes identically. Do not edit
+   or delete these comments by hand.
 
 At the default 300s cadence that is ~24 REST calls/hour/host, budgeted in the
-design record. With `roster.enabled: false` (the default) the loop never
-spawns and the daemon makes zero extra forge calls.
+design record.
 
-**Membership and generation are pure functions of `(comment set, instant)`** —
-`role_shard::roster::members`/`ring`/`generation` — exactly as the design
-record specifies, and are the basis for Phase B's fencing rule. Nothing in the
-daemon calls them for ownership yet; `status` is their only consumer so far
-(next paragraph).
+**The ring and its fence (Phase B).** Membership and generation are pure
+functions of `(comment set, instant)` —
+`role_shard::roster::members`/`ring`/`generation`, the design record's
+formulas verbatim. With the roster enabled and no static shard index set,
+`role_shard::decide()` derives `(index, count)` from `ring(C, t, k)` — this
+host's ordinal among the live members serving that workspace's key, and how
+many there are — and `status` reports the source as `roster`. A role tick is
+admitted only when **all five** fence conditions hold, in this order:
+
+1. **Self-liveness** — this host's own record was refreshed within `ttlSecs`.
+2. **Generation monotonicity** — never act under a generation older than the
+   newest this process has observed (a stale/cached read is discarded).
+3. **Settle** — `now - gen >= settleSecs`. A ring that just changed is not
+   actionable by anyone; because `gen` is a forge-assigned instant, every host
+   computes the same absolute deadline regardless of when it read.
+4. **Join fence** — a new member waits a full `ttlSecs` before acting.
+5. **Ownership** — the ordinary `fnv1a64(shardKey) % count == index`.
+
+**The fail-safe direction inverts here, deliberately.** Above, every ambiguity
+duplicates; a roster ambiguity **yields** (this host runs no role tick), because
+a brief gap is one idempotent periodic pass running an interval later while a
+brief duplicate is two `claude` sessions racing the same forge queue. The one
+exception is "this host never got a roster at all" — an unreachable or
+unconfigured roster *at startup* keeps the static fallback, so a typo in
+`roster.issue` cannot silently stop role rotation fleet-wide. Only a host that
+successfully joined and then lost the roster yields.
+
+**Reassignment window (the number to quote).** From a host's death to a
+survivor running its slice: `ttlSecs` (its last heartbeat expires) +
+`settleSecs` (the new ring must be quiet) + one role interval (tick
+alignment). At the defaults — 900 + 900 + 300–900 — that is **30–45 minutes**.
+A dead host's role rotation resumes elsewhere within ~45 minutes, not "never".
+`settleSecs` is floored at `ttlSecs` (as `ttlSecs` is floored at 3×
+`heartbeatSecs`): the no-overlap argument needs it, since a host with a stale
+view keeps acting until its own record expires.
+
+**Escape-hatch precedence**, highest first: `LOOM_ROLE_RUNNER=0` >
+`LOOM_ROLE_RUNNER_SHARD_INDEX` + `shardCount` > roster > unsharded. A resolved
+static pair **beats an enabled roster** — that is the documented way to pin a
+deterministic ring during a roster outage or on a deliberately partitioned
+fleet — and the blunt kill switch is still checked before any of it.
+
+**Blast radius: the dispatcher.** `role_shard::decide(root).owned` is also
+`work_finder`'s preferred repo slice ([`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md),
+#6243). A fence **yield** deliberately does *not* reach it: `owned` keeps the
+pre-roster verdict and only the role runner's `admits_role_tick()` flips, so a
+host having forge trouble pauses role rotation without also starving its own
+dispatch. When the fence *admits*, the dispatcher does follow the roster ring
+— a preference reshuffle with a work-conserving fallback, never a dropped
+dispatch.
 
 **Visibility.** `loom-daemon status` extends the `Role runner (sharding): …`
 header (when the roster has completed at least one heartbeat cycle) with a
 roster block naming the issue, live/seen member counts, the current
-generation and how long it has been settled, and one line per member:
+generation and how long it has been settled, the fence verdict, and one line
+per member:
 
 ```
-Role runner (sharding): shard 1 of 3 (index from env, count from config)
+Role runner (sharding): shard 1 of 3 (index from roster, count from roster)
   Roster: issue owner/repo#1234 · 3 live / 4 seen · gen 2026-09-15T09:41:07Z (settled 22m)
+  Fence: admitted — acting under the ring settled at generation 2026-09-15T09:41:07Z
     host-a3f9c1d2   fresh   (last beat 41s ago)   serves 27
     host-d9142cf3   fresh   (last beat 2m ago)    serves 27   ← this host
     host-e1d4c843   EXPIRED (last beat 31m ago)   serves 27
@@ -5113,11 +5163,18 @@ Role runner (sharding): shard 1 of 3 (index from env, count from config)
 
 An EXPIRED member is always rendered, never dropped — silence about a dead
 host is exactly how the pre-#6374 `LOOM_ROLE_RUNNER=0` mitigation became
-invisible. `status` never triggers its own forge read for this: it renders
-only whatever the heartbeat task's own last successful read cached, so a
-roster that has never completed a cycle (including the always-off default)
-renders nothing. `--json` carries the identical section under
+invisible, and the `Fence:` line exists for the same reason: a *yielding* host
+runs no role ticks at all, which would otherwise look identical to a healthy
+host that owns no slice. `status` never triggers its own forge read for this:
+it renders only whatever the heartbeat task's own last successful read cached,
+so a roster that has never completed a cycle (including the always-off
+default) renders nothing. `--json` carries the identical section under
 `role_runner_shard.roster`.
+
+**Field instrument.** `role_collision.rs` (#4623) counts cross-host role-tick
+collisions. Enabling roster mode must not raise that counter above its
+static-ring baseline; if it does, the fence is not holding and the fleet
+should fall back to the static env pair while it is investigated.
 
 ### Completion narration → public fleet feed (#4426)
 
@@ -5625,6 +5682,17 @@ investigating, not an expected baseline. `docker` being unreachable (not
 installed, permission error) is treated as "unknown", never "zero images" —
 the pass skips rather than guesses. See
 `loom-daemon/src/docker_image_clean.rs`.
+
+**Fleet-side `audit-smoke`/`audit-test` automation should rely on this pass
+too.** Any script outside this repo that cleans up a locally-built
+`loom-worker`/`loom-worker-session` test image after an Auditor-role docker
+smoke test should not call tag-targeted `docker rmi <tag>` directly — that
+matches the `cloud-cli` guard's `docker rmi` ASK pattern
+(`defaults/hooks/guard-destructive-generic.sh`) and blocks indefinitely in a
+headless run with no human to answer the prompt. Either leave the superseded
+image for this reaper to reclaim on its next tick, or run `docker image prune
+-f` for immediate reclaim — it only removes dangling (untagged) images and is
+not gated by the guard.
 
 #### Eager (out-of-cycle) reclaim from the dispatch loop (#7512)
 

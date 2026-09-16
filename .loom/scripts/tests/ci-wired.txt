@@ -191,6 +191,7 @@ test-run-ci-suites-daemon-guard.sh
 test-run-ci-suites-failure-excerpt.sh
 test-run-ci-suites-retry.sh
 test-run-ci-suites-serial-lane.sh
+test-run-job.sh
 test-safe-stash-pop.sh
 test-safehoused-service.sh
 test-spawn-generic.sh
@@ -212,6 +213,7 @@ test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
 test-verify-proposal-refs.sh
+test-version-bump-workflow-identity.sh
 test-version-check-gate-callsites.sh
 test-version-check-gate.sh
 test-warn-operator-gated.sh

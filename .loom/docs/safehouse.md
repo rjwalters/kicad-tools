@@ -87,6 +87,14 @@ Env overrides (each wins over config for that key):
 | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` | `rooms.byRepo`, as `repo=room[,repo=room…]` (#4225) |
 | `LOOM_SAFEHOUSE_ROOM_CLAIMS` | `rooms.claims` — dedicated peer-claim coordination room (#4713) |
 
+**`room` resolution order is env > `.loom-local/local.json` > the committed
+`.loom/config.json`** (`config_resolver.rs`/`config-resolver.sh`), so the
+committed file must never carry a live room id — like `socket` below, ship only
+a placeholder there and deliver the real value through `LOOM_SAFEHOUSE_ROOM` or
+the gitignored local-config tier (#6650) — **not** the private-defaults tier
+(`LOOM_CONFIG_DEFAULTS_FILE`, else `~/.local/share/loom/config/defaults.json`),
+which sits *below* the committed file and is shadowed by the placeholder.
+
 **Socket resolution** (precedence **env > config**, `resolve_socket` in
 `loom-daemon/src/safehouse.rs`; the bash-side worker-injection path
 (`defaults/scripts/lib/mcp-config.sh`'s `loom_mcp_safehouse_socket()`) mirrors
