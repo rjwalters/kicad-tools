@@ -6572,6 +6572,9 @@ class DiffPairRouter:
         goal: Pad,
         layer_idx: int,
         partner_segments: list[Segment],
+        *,
+        body_segments: list[Segment] | None = None,
+        deadline: float | None = None,
     ) -> Route | None:
         """Two-via layer-change tail that may cross the partner guide.
 
@@ -6583,9 +6586,21 @@ class DiffPairRouter:
         pathfinder's via predicate, and -- because the partner guide is
         NOT in the grid -- explicit geometric clearance against the
         partner segments is enforced: same-layer segment portions and
-        via barrels keep ``via_diameter/2 + trace_clearance +
+        via barrels keep ``via_diameter/2 + via_clearance +
         partner_width/2`` of centerline distance.
+
+        Supplying ``body_segments`` compares legal candidates by the minimum
+        coupling fraction of the assembled route and its partner. Ties retain
+        enumeration order. ``deadline`` is an absolute monotonic deadline;
+        expiry returns the best fully validated candidate seen so far. The
+        caller must still validate the assembled pair and its length limits.
         """
+        # Ranking is useful work, not observational census overhead: never
+        # credit it back to the caller's wall-clock budget.
+        best_route = None
+        best_score = -1.0
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         grid = self.autorouter.grid
         rules = self.autorouter.rules
         goal_layer_idx = grid.layer_to_index(goal.layer.value)
@@ -6595,7 +6610,7 @@ class DiffPairRouter:
         partner_width = max((ps.width for ps in partner_segments), default=width)
         # Via barrel vs partner trace clearance bound (vias are not
         # pair members; the standard manufacturer clearance applies).
-        via_clear = rules.via_diameter / 2 + rules.trace_clearance + partner_width / 2
+        via_clear = rules.via_diameter / 2 + rules.via_clearance + partner_width / 2
         # Same-layer trace vs partner trace: the intra-pair bound.
         seg_clear = self._pair_seg_clearance(pathfinder, head.net_name)
 
@@ -6626,6 +6641,7 @@ class DiffPairRouter:
         # committed vias, any net) so each fan-out via candidate can be
         # rejected when its drill would sit within ``min_hole_to_hole``
         # edge-to-edge of an existing drill.  Assembled once per crossover.
+        from .quantize import dogleg_points
         from .via_clearance import drill_hole_to_hole_clear
 
         existing_drills = self._collect_existing_drills()
@@ -6668,7 +6684,7 @@ class DiffPairRouter:
         # one in sorted order, i.e. exactly what the un-instrumented loop
         # returns -- and it costs a full 225-candidate sweep per crossover, so
         # it is opt-in and off in every normal run.
-        census_on = _CROSSTAIL_CENSUS
+        census_on = _CROSSTAIL_CENSUS and body_segments is None
         census_enum = {id(pair): i for i, pair in enumerate(candidate_pairs)}
         census_legal: list[tuple[int, int, float, _XY, _XY]] = []
         census_key: Callable[[tuple[_XY, _XY]], float] | None = None
@@ -6705,7 +6721,23 @@ class DiffPairRouter:
                 candidate_pairs.sort(key=_pair_penalty)
                 census_key = _pair_penalty
 
+        def coupling_score(candidate: Route) -> float:
+            assembled = [*(body_segments or []), *candidate.segments]
+            fractions = []
+            for segments, partner in ((assembled, partner_segments), (partner_segments, assembled)):
+                total = coupled = 0.0
+                for seg in segments:
+                    length = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1)
+                    total += length
+                    coupled += length * _spans_coupled_fraction(
+                        [(seg.x1, seg.y1, seg.x2, seg.y2)], seg.width, seg.layer, partner
+                    )
+                fractions.append(coupled / total if total else 0.0)
+            return min(fractions)
+
         for rank, (v1, v2) in enumerate(candidate_pairs):
+            if deadline is not None and time.monotonic() >= deadline:
+                return best_route
             # Issue #3855: replace the hardcoded 0.6mm center-to-center
             # via-to-via check with an edge-to-edge ``min_hole_to_hole``
             # check.  This single crossover's two vias must clear each
@@ -6741,126 +6773,80 @@ class DiffPairRouter:
                 < via_clear
             ):
                 continue
-            # Surface stubs must stay clear of same-layer partner copper.
-            if (
-                self._min_distance_to_partner(
-                    head.x, head.y, v1[0], v1[1], partner_segments, surface
-                )
-                < seg_clear
-            ):
-                continue
-            if (
-                self._min_distance_to_partner(
-                    v2[0], v2[1], goal.x, goal.y, partner_segments, surface
-                )
-                < seg_clear
-            ):
-                continue
-            if not self._segment_cells_clear(
-                pathfinder, head.x, head.y, v1[0], v1[1], layer_idx, head.net
-            ):
-                continue
-            if not self._segment_cells_clear(
-                pathfinder, v2[0], v2[1], goal.x, goal.y, layer_idx, head.net
-            ):
-                continue
             for alt in routable:
-                if not self._segment_cells_clear(
-                    pathfinder, v1[0], v1[1], v2[0], v2[1], alt, head.net
-                ):
-                    continue
                 alt_layer = Layer(grid.index_to_layer(alt))
-                # Issue #3508 (second pass): the partner guide is
-                # NOT in the grid, so the alt-layer crossover must
-                # also be checked geometrically against partner
-                # copper ON THAT LAYER -- a via-bearing partner
-                # guide has inner-layer segments the cell check
-                # cannot see (measured: USB3_RX1/RX2 "physically
-                # overlapping copper" rips in the recipe's 6b
-                # repair even with nudge protection).
-                if (
-                    self._min_distance_to_partner(
-                        v1[0], v1[1], v2[0], v2[1], partner_segments, alt_layer
-                    )
-                    < seg_clear
-                ):
-                    continue
-                route = Route(net=head.net, net_name=head.net_name)
-                if math.hypot(v1[0] - head.x, v1[1] - head.y) > 0.01:
-                    route.segments.append(
-                        Segment(
-                            x1=head.x,
-                            y1=head.y,
-                            x2=v1[0],
-                            y2=v1[1],
-                            width=width,
-                            layer=surface,
+                route = None
+                # Check the actual emitted legs, including the inner-layer
+                # crossing, before accepting either bounded orientation.
+                for axis_first in (False, True):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return best_route
+                    candidate = Route(net=head.net, net_name=head.net_name)
+                    for start, end, layer in (
+                        ((head.x, head.y), v1, surface),
+                        (v1, v2, alt_layer),
+                        (v2, (goal.x, goal.y), surface),
+                    ):
+                        points = dogleg_points(*start, *end, axis_first=axis_first)
+                        for a, b in zip(points[:-1], points[1:], strict=True):
+                            if math.dist(a, b) <= 1e-9:
+                                continue
+                            candidate.segments.append(
+                                Segment(
+                                    x1=a[0],
+                                    y1=a[1],
+                                    x2=b[0],
+                                    y2=b[1],
+                                    width=width,
+                                    layer=layer,
+                                    net=head.net,
+                                    net_name=head.net_name,
+                                )
+                            )
+                    if any(
+                        not self._segment_cells_clear(
+                            pathfinder,
+                            seg.x1,
+                            seg.y1,
+                            seg.x2,
+                            seg.y2,
+                            grid.layer_to_index(seg.layer.value),
+                            head.net,
+                        )
+                        or self._min_distance_to_partner(
+                            seg.x1, seg.y1, seg.x2, seg.y2, partner_segments, seg.layer
+                        )
+                        < seg_clear
+                        for seg in candidate.segments
+                    ):
+                        continue
+                    candidate.vias = [
+                        Via(
+                            x=site[0],
+                            y=site[1],
+                            drill=rules.via_drill,
+                            diameter=rules.via_diameter,
+                            layers=layers,
                             net=head.net,
                             net_name=head.net_name,
                         )
-                    )
-                route.vias.append(
-                    Via(
-                        x=v1[0],
-                        y=v1[1],
-                        drill=rules.via_drill,
-                        diameter=rules.via_diameter,
-                        layers=(surface, alt_layer),
-                        net=head.net,
-                        net_name=head.net_name,
-                    )
-                )
-                route.segments.append(
-                    Segment(
-                        x1=v1[0],
-                        y1=v1[1],
-                        x2=v2[0],
-                        y2=v2[1],
-                        width=width,
-                        layer=alt_layer,
-                        net=head.net,
-                        net_name=head.net_name,
-                    )
-                )
-                route.vias.append(
-                    Via(
-                        x=v2[0],
-                        y=v2[1],
-                        drill=rules.via_drill,
-                        diameter=rules.via_diameter,
-                        layers=(alt_layer, surface),
-                        net=head.net,
-                        net_name=head.net_name,
-                    )
-                )
-                if math.hypot(goal.x - v2[0], goal.y - v2[1]) > 0.01:
-                    route.segments.append(
-                        Segment(
-                            x1=v2[0],
-                            y1=v2[1],
-                            x2=goal.x,
-                            y2=goal.y,
-                            width=width,
-                            layer=surface,
-                            net=head.net,
-                            net_name=head.net_name,
-                        )
-                    )
-                # Issue #4571: the crossover's stubs, its alt-layer
-                # crossing and BOTH via barrels are only raster-validated
-                # above, and the raster's pad halo is shrunk in fine-pitch
-                # corridors.  Screen the assembled candidate with the exact
-                # DRC-equivalent pad predicate so a violating crossover
-                # loses to a later via-site candidate instead of shipping.
-                if self._route_pad_violation(route)[0] > _SHADOW_PAD_DEFICIT_EPS:
-                    continue
-                # Issue #4575: the barrel screens above measure this crossover
-                # against the partner's SEGMENTS only, and the raster cannot
-                # see the partner at all.  Hold the assembled crossover to the
-                # exact ``clearance_segment_via`` / via-vs-via predicates too,
-                # so a via site that grazes the partner's barrel loses to the
-                # next candidate pair rather than shipping.
-                if not self._route_via_clear(route):
+                        for site, layers in ((v1, (surface, alt_layer)), (v2, (alt_layer, surface)))
+                    ]
+                    # Exact pad and barrel checks must see the doglegs too.
+                    if self._route_pad_violation(candidate)[0] > _SHADOW_PAD_DEFICIT_EPS:
+                        continue
+                    if not self._route_via_clear(candidate):
+                        continue
+                    if body_segments is not None:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return best_route
+                        score = coupling_score(candidate)
+                        if score > best_score:
+                            best_score, best_route = score, candidate
+                        continue
+                    route = candidate
+                    break
+                if route is None:
                     continue
                 if census_on:
                     census_legal.append(
@@ -6900,7 +6886,7 @@ class DiffPairRouter:
                 head, goal, census_legal, len(candidate_pairs), census_extra_s
             )
             return census_first  # observation only: the first legal candidate
-        return None
+        return best_route
 
     def _collect_crossing_tail_census(
         self,
