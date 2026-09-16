@@ -236,3 +236,19 @@ def test_bounded_search_continues_after_full_clearance_rejects_first_candidate()
     result = recover_kelvin_escapes(router, package, escapes, pads)
     assert result[0].via is not None
     assert result[0].via.y == pytest.approx(8.65)
+
+
+def test_bottom_source_rejects_degenerate_same_layer_via():
+    old, package, escapes, pads = fixture()
+    for pad in pads:
+        pad.layer = Layer.B_CU
+    for escape in escapes:
+        for segment in escape.segments:
+            segment.layer = Layer.B_CU
+    escapes[0].escape_layer = Layer.B_CU
+    grid = RoutingGrid(width=20, height=20, rules=old.rules)
+    for pad in pads:
+        grid.add_pad(pad)
+    router = EscapeRouter(grid, old.rules, component_holes=())
+    result = recover_kelvin_escapes(router, package, escapes, pads)
+    assert result[0] is escapes[0]

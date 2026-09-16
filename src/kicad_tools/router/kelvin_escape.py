@@ -21,6 +21,13 @@ def _candidate_clear(
 ) -> bool:
     via = candidate.via
     assert via is not None
+    if (
+        candidate.escape_layer == candidate.pad.layer
+        or via.layers[0] == via.layers[1]
+        or candidate.pad.layer not in via.layers
+        or candidate.escape_layer not in via.layers
+    ):
+        return False
     grid = router.grid
     if not grid.validate_via_clearance(via, via.net, clearance)[0]:
         return False
