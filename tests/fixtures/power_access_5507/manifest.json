@@ -1,0 +1,24 @@
+{
+  "source_commit": "a37f5d679aa20f5e59052d32f3a81194549b1a57",
+  "original_input_sha256": {
+    ".kicad_pcb": "2fb7574b83f06e65b23463c9fbffe98f9fe3adae52803553311e47700ee977b5",
+    ".kicad_pro": "653d9ae0d4c8847d438fd992b9047368487751357ec3655b12c2773d4503a8f3",
+    ".kicad_dru": "aecc1760a2e875c59a90fe7eaf184f1f44c691ec6fa2e486b71b5275c0c432ef"
+  },
+  "fixture_sha256": "f5d332cad7dc2da4f8853f20668a439039f2f305c9871b8ed235055857827f6b",
+  "compressed_sha256": "62e34df7e66db61ad1dd49a6d9156491bb08b5e17ca5a8a44c17a028097b486d",
+  "expected_baseline": {
+    "reached": 928,
+    "frontier": 0,
+    "node_budget": 200000,
+    "result": "None",
+    "counts": {
+      "pads": 18,
+      "segments": 52,
+      "vias": 12,
+      "targets": 22
+    }
+  },
+  "full_scene_receipt": ".loom/sweep-checkpoint/evidence/issue-5507/root-portable-reproduction",
+  "reduction": "Keep obstacles within 3mm of original start, preserve all targets, rules, bounds, layer spans, drill sizes and node budget. Same 928 states and empty frontier as full scene. Not a minimality proof."
+}
