@@ -84,7 +84,7 @@ def test_departures_are_validated_once_and_shared_per_escape_direction(monkeypat
     # Each landing gets its own slice: departures-in-group x per-departure cap,
     # never the whole remaining allowance, so one hopeless goal-side barrel
     # choice cannot consume the lattice of the next.
-    assert calls["bodies"] == [(2, 16), (2, 16), (1, 8), (1, 8)]
+    assert calls["bodies"] == [(2, 16), (1, 8), (2, 16), (1, 8)]
     assert budget.iterations_used == 3 and budget.iterations_remaining == 61
     assert budget.bodies_used == 48 and budget.bodies_remaining == 52
 

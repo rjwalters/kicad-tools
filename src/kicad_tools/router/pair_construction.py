@@ -19,7 +19,7 @@ import itertools
 import math
 import os
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -430,43 +430,63 @@ def _geometric_body_search(
     """
     if deadline is None or deadline > budget.deadline:
         deadline = budget.deadline
-    for outward, group in _by_escape_direction(departures):
+    # Offer each direction its first landing before revisiting an obstructed
+    # direction. Four departures can otherwise spend the entire 400-body
+    # allowance across four landings before another direction gets a turn.
+    # Landing generators remain lazy; all original caps and ledger debits apply.
+    pending = deque(
+        (
+            group,
+            iter(
+                itertools.islice(
+                    landing_proposals(router, finder, pads, outward=outward, deadline=deadline),
+                    max_landings,
+                )
+            ),
+        )
+        for outward, group in _by_escape_direction(departures)
+    )
+    while pending:
         if time.monotonic() >= deadline or budget.bodies_remaining <= 0:
             return None
-        landings = landing_proposals(router, finder, pads, outward=outward, deadline=deadline)
-        for landing in itertools.islice(landings, max_landings):
-            budget.landings_found += 1
-            if time.monotonic() >= deadline or budget.bodies_remaining <= 0:
-                return None
-            portion = BodySearchBudget(
-                deadline,
-                min(max_bodies_per_departure * len(group), budget.bodies_remaining),
+        group, landings = pending.popleft()
+        try:
+            landing = next(landings)
+        except StopIteration:
+            continue
+        budget.landings_found += 1
+        if time.monotonic() >= deadline or budget.bodies_remaining <= 0:
+            return None
+        portion = BodySearchBudget(
+            deadline,
+            min(max_bodies_per_departure * len(group), budget.bodies_remaining),
+        )
+        try:
+            result = complete_departures(
+                router,
+                finder,
+                pair,
+                pads,
+                group,
+                landing,
+                portion,
+                board_thickness_mm=board_thickness_mm,
+                num_copper_layers=num_copper_layers,
+                reserved_routes=reserved_routes,
+                max_bodies_per_departure=max_bodies_per_departure,
+                widen_budget=budget.widen_budget,
             )
-            try:
-                result = complete_departures(
-                    router,
-                    finder,
-                    pair,
-                    pads,
-                    group,
-                    landing,
-                    portion,
-                    board_thickness_mm=board_thickness_mm,
-                    num_copper_layers=num_copper_layers,
-                    reserved_routes=reserved_routes,
-                    max_bodies_per_departure=max_bodies_per_departure,
-                    widen_budget=budget.widen_budget,
-                )
-            finally:
-                budget.bodies_remaining -= portion.bodies_used
-                budget.bodies_used += portion.bodies_used
-                budget.bodies_built += portion.bodies_built
-                budget.bodies_geometry_rejected += portion.bodies_geometry_rejected
-                budget.completions_tried += portion.completions_tried
-                budget.geometry_reasons.update(portion.geometry_reasons)
-                budget.completion_reasons.update(portion.completion_reasons)
-            if result is not None:
-                return result
+        finally:
+            budget.bodies_remaining -= portion.bodies_used
+            budget.bodies_used += portion.bodies_used
+            budget.bodies_built += portion.bodies_built
+            budget.bodies_geometry_rejected += portion.bodies_geometry_rejected
+            budget.completions_tried += portion.completions_tried
+            budget.geometry_reasons.update(portion.geometry_reasons)
+            budget.completion_reasons.update(portion.completion_reasons)
+        if result is not None:
+            return result
+        pending.append((group, landings))
     return None
 
 
