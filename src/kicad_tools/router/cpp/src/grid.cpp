@@ -955,7 +955,10 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
     auto required = [&](int other_net, std::pair<float, float> point, bool trace_pair = true) {
         const float floor = net_clearance_floor(s.net, other_net);
         if (trace_pair && other_net == partner_net && partner_clearance >= 0) return std::max(partner_clearance, floor);
-        const float base = std::max(clearance, floor);
+        // A partner exception may reduce trace-to-trace spacing, but cannot
+        // reduce the barrel floor. A larger authored partner gap still applies.
+        const float base = std::max({clearance, floor,
+            !trace_pair && other_net == partner_net ? partner_clearance : 0.0f});
         const float pair = pairwise_required_clearance(s.net, other_net);
         if (pair > base && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
             return pair;

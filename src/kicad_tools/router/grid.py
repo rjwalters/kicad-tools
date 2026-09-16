@@ -4078,8 +4078,13 @@ class RoutingGrid:
                     min_actual_clearance = clearance
                 # A barrel keeps its via floor even beside a differential
                 # partner or a closer, otherwise legal trace obstacle.
-                if clearance < self.rules.clearance_for_nets(
-                    exclude_net, via.net, max(min_clearance, self.rules.via_clearance)
+                # Match the shared predicate at the exact clearance boundary.
+                if (
+                    clearance
+                    < self.rules.clearance_for_nets(
+                        exclude_net, via.net, max(min_clearance, self.rules.via_clearance)
+                    )
+                    - 1e-9
                 ):
                     has_violation = True
                     violation_loc = (via.x, via.y)
@@ -4157,7 +4162,10 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < self.rules.clearance_for_nets(exclude_net, route.net, min_clearance):
+                if (
+                    clearance
+                    < self.rules.clearance_for_nets(exclude_net, route.net, min_clearance) - 1e-9
+                ):
                     has_violation = True
                     violation_loc = (via.x, via.y)
 

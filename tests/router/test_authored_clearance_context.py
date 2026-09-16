@@ -81,3 +81,19 @@ def test_route_cache_keys_include_floor_values_without_order_dependence(kind):
     assert key() != constrained
     rules.net_clearance_floors = {}
     assert key() == original
+
+
+@pytest.mark.parametrize("offset,valid", [(0.0, True), (-1e-6, False), (1e-6, True)])
+@pytest.mark.parametrize("via_first", [False, True])
+def test_trace_via_exact_clearance_boundary(offset, valid, via_first):
+    rules = DesignRules(trace_clearance=0.15, via_clearance=0.2)
+    grid = RoutingGrid(20, 20, rules)
+    via = Via(10.5, 12.2, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 1)
+    segment = Segment(9.9 - offset, 11.8, 9.9 - offset, 14.6, 0.2, Layer.F_CU, 2)
+    if via_first:
+        grid.routes.append(Route(1, "via", vias=[via]))
+        actual, _, _ = grid.validate_segment_clearance(segment, exclude_net=2)
+    else:
+        grid.routes.append(Route(2, "trace", segments=[segment]))
+        actual, _, _ = grid.validate_via_clearance(via, exclude_net=1)
+    assert actual is valid
