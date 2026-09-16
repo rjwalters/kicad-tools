@@ -3394,8 +3394,12 @@ class RoutingGrid:
             # footprint makes overlap unavoidable) but loses the
             # positive-clearance skip -- ``required_clearance`` below is the
             # authored floor it must actually meet.
-            if carveout_mode != "none" and (
-                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
+            authored_floor = self.rules.clearance_for_nets(exclude_net, pad.net, 0.0)
+            required_clearance = max(required_clearance, authored_floor)
+            if (
+                (authored_floor == 0 or clearance >= authored_floor)
+                and carveout_mode != "none"
+                and (pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp"))
             ):
                 continue
 
@@ -3504,7 +3508,9 @@ class RoutingGrid:
             # ``required_clearance`` -- the configured, deliberately smaller
             # component clearance.  There is no net=0 exemption on the via
             # quadrant (mirrors the C++ via-pad branch, #5182).
-            if carveout_mode == "skip" and clearance >= 0:
+            authored_floor = self.rules.clearance_for_nets(exclude_net, pad.net, 0.0)
+            required_clearance = max(required_clearance, authored_floor)
+            if carveout_mode == "skip" and clearance >= authored_floor:
                 continue
 
             deficit = required_clearance - clearance
@@ -3609,7 +3615,9 @@ class RoutingGrid:
                     continue
                 dist = self._point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
                 clearance = dist - via_radius - seg.width / 2
-                deficit = min_clearance - clearance
+                deficit = (
+                    self.rules.clearance_for_nets(exclude_net, seg.net, min_clearance) - clearance
+                )
                 if deficit > worst_deficit:
                     worst_deficit = deficit
                     worst_loc = (via.x, via.y)
@@ -3843,8 +3851,12 @@ class RoutingGrid:
             # Issue #5166: a "clamp" ref keeps the net=0 exemption but not
             # the positive-clearance skip -- ``required_clearance`` below is
             # the authored floor it must actually meet.
-            if carveout_mode != "none" and (
-                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
+            authored_floor = self.rules.clearance_for_nets(exclude_net, pad.net, 0.0)
+            required_clearance = max(required_clearance, authored_floor)
+            if (
+                (authored_floor == 0 or clearance >= authored_floor)
+                and carveout_mode != "none"
+                and (pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp"))
             ):
                 continue
 
@@ -3926,12 +3938,17 @@ class RoutingGrid:
                     # diff-pair partner only.
                     effective_clearance = (
                         partner_clearance
-                        if partner_active and other_seg.net == partner_net
+                        if partner_active
+                        and other_seg.net == partner_net
+                        and partner_clearance is not None
                         else min_clearance
                     )
 
                     if clearance < best:
                         best = clearance
+                    effective_clearance = self.rules.clearance_for_nets(
+                        exclude_net, other_seg.net, effective_clearance
+                    )
                     if clearance < effective_clearance:
                         found = True
                         loc = (
@@ -3948,7 +3965,9 @@ class RoutingGrid:
             # ``min_clearance`` -- all potential violators.  Violation
             # detection (``is_valid``) is therefore certified by this pass
             # alone.
-            search_margin = seg_half_width + min_clearance
+            # Include authored floors even if they changed after the index
+            # was built. This broad-phase bound does not widen pair policy.
+            search_margin = seg_half_width + max(min_clearance, self.rules.max_clearance)
             best_clearance, seg_violation, seg_violation_loc = _scan_candidates(search_margin)
 
             # Pass 2 (Issue #3522): the bounded pass-1 query only certifies
@@ -4023,12 +4042,17 @@ class RoutingGrid:
                     # Issue #2559 / Phase 1C: tighter clearance for partner.
                     effective_clearance = (
                         partner_clearance
-                        if partner_active and route.net == partner_net
+                        if partner_active
+                        and route.net == partner_net
+                        and partner_clearance is not None
                         else min_clearance
                     )
 
                     if clearance < min_actual_clearance:
                         min_actual_clearance = clearance
+                    effective_clearance = self.rules.clearance_for_nets(
+                        exclude_net, other_seg.net, effective_clearance
+                    )
                     if clearance < effective_clearance:
                         # Violation location at midpoint
                         has_violation = True
@@ -4054,7 +4078,9 @@ class RoutingGrid:
                     min_actual_clearance = clearance
                 # A barrel keeps its via floor even beside a differential
                 # partner or a closer, otherwise legal trace obstacle.
-                if clearance < max(min_clearance, self.rules.via_clearance):
+                if clearance < self.rules.clearance_for_nets(
+                    exclude_net, via.net, max(min_clearance, self.rules.via_clearance)
+                ):
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -4131,7 +4157,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < self.rules.clearance_for_nets(exclude_net, route.net, min_clearance):
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -4188,7 +4214,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < self.rules.clearance_for_nets(exclude_net, route.net, min_clearance):
                     has_violation = True
                     violation_loc = (via.x, via.y)
 

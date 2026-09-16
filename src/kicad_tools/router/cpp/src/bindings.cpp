@@ -9,6 +9,7 @@
 #include "coupled_pathfinder.hpp"
 #include "types.hpp"
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
@@ -319,6 +320,8 @@ NB_MODULE(router_cpp, m) {
              "enforce that resolved per-pad value as a hard floor instead.  "
              "An empty clamp_ref_hashes reproduces pre-#5166 behavior.")
         // Pairwise (HV-isolation) domain clearance -- Issue #4510 / #4431 Phase 2a
+        .def("set_net_clearance_floors", &Grid3D::set_net_clearance_floors)
+        .def("net_clearance_floor", &Grid3D::net_clearance_floor)
         .def("set_pairwise_domains", &Grid3D::set_pairwise_domains,
              "net_to_domain"_a, "matrix"_a,
              "Install the per-net domain-id array (indexed by net id, -1 = no "

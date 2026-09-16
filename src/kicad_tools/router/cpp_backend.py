@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 45
+_REQUIRED_CPP_BUILD_VERSION = 46
 
 
 # Try to import C++ module with detailed error tracking
@@ -866,6 +866,8 @@ class CppGrid:
 
         # Store reference to original Python grid for post-route validation
         cpp_grid._py_grid = grid
+        if grid.rules.net_clearance_floors:
+            cpp_grid._impl.set_net_clearance_floors(grid.rules.net_clearance_floors)
         cpp_grid.install_fixed_fills(grid.fixed_fills)
 
         # Issue #2481: Establish the back-reference from the Python grid
@@ -1663,6 +1665,15 @@ class CppPathfinder:
         impl = getattr(self._grid, "_impl", None)
         if impl is None or not hasattr(impl, "set_pairwise_domains"):
             return  # Stale .so without the #4510 surface -- stay dormant.
+
+        floors = self._rules.net_clearance_floors
+        previous_floors = getattr(self, "_net_floor_cpp_payload", None)
+        if (floors or previous_floors) and (
+            previous_floors != floors or getattr(self, "_net_floor_cpp_grid", None) is not impl
+        ):
+            impl.set_net_clearance_floors(floors)
+            self._net_floor_cpp_payload = dict(floors)
+            self._net_floor_cpp_grid = impl
 
         payload = self._pairwise_cpp_payload
         if payload is False:

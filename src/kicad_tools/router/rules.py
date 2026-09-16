@@ -8,6 +8,7 @@ This module provides:
 """
 
 import logging
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -154,6 +155,10 @@ class DesignRules:
     # Maps component reference (e.g., "U1") to clearance in mm
     # Use for fine-pitch ICs where tighter clearance is needed between pins
     component_clearances: dict[str, float] = field(default_factory=dict)
+
+    # Authored electrical minima in the loader's net-ID space. These are
+    # independent of fabrication tiers, component relief and HV attach zones.
+    net_clearance_floors: dict[int, float] = field(default_factory=dict)
 
     # Pairwise (net-pair) HV-isolation clearance table (Issue #4431, Phase 1).
     # Scalar clearance cannot express "far from LV copper, near from own
@@ -418,6 +423,17 @@ class DesignRules:
         and an unknown manufacturer falls back to the 0.5 default (no raise --
         manufacturer validation belongs to the CLI layer, not the dataclass).
         """
+        for net, value in self.net_clearance_floors.items():
+            if (
+                type(net) is not int
+                or net < 0
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 <= value <= (2**31 - 1) / 1_000_000
+                or not math.isfinite(value)
+            ):
+                raise ValueError("Invalid authored net clearance floor")
+        self.net_clearance_floors = dict(self.net_clearance_floors)
         if self.manufacturer and self.min_hole_to_hole == 0.5:
             try:
                 from .mfr_limits import get_mfr_limits
@@ -426,6 +442,16 @@ class DesignRules:
             except ValueError:
                 # Unknown manufacturer: keep the conservative 0.5 default.
                 pass
+
+    def clearance_for_nets(self, net_a: int, net_b: int, base: float) -> float:
+        """Raise a foreign-net requirement to both authored electrical floors."""
+        if net_a == net_b:
+            return base
+        return max(
+            base,
+            self.net_clearance_floors.get(net_a, 0.0),
+            self.net_clearance_floors.get(net_b, 0.0),
+        )
 
     @property
     def max_clearance(self) -> float:
@@ -446,6 +472,7 @@ class DesignRules:
             Maximum clearance value in mm.
         """
         clearances = [self.trace_clearance, self.via_clearance]
+        clearances.extend(self.net_clearance_floors.values())
         if self.component_clearances:
             clearances.extend(self.component_clearances.values())
         if self.fine_pitch_clearance is not None:

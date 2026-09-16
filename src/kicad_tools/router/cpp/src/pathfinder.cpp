@@ -624,7 +624,8 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             const auto& cell = grid_.at(cx, cy, layer);
             // Only foreign real-net copper can trip a cross-domain rule; net 0
             // (pour / unconnected convention) never carries a domain.
-            if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+            if (!cell.blocked || cell.net == net ||
+                (cell.net == 0 && grid_.net_clearance_floor(net, cell.net) <= 0.0f)) continue;
             const float required = grid_.pairwise_required_clearance(net, cell.net);
             if (required <= 0.0f) continue;  // same domain / no widening
             // Widened radius for THIS specific pair (<= wide_radius).  A cell
@@ -642,7 +643,11 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             const auto fw = grid_.grid_to_world(cx, cy);
             const float mx = (cw.first + fw.first) * 0.5f;
             const float my = (cw.second + fw.second) * 0.5f;
-            if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+            if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) {
+                const float floor = grid_.net_clearance_floor(net, cell.net);
+                const int floor_r = static_cast<int>(std::ceil((half_mm + floor) / res));
+                if (floor <= 0.0f || dist_sq > floor_r * floor_r) continue;
+            }
             // Issue #4507: name the blocker so a drained search can report
             // FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH.  Diagnostic
             // only -- the verdict below is unchanged.
@@ -676,7 +681,8 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 const int cx = x + dx, cy = y + dy;
                 if (!grid_.is_valid(cx, cy, layer)) continue;
                 const auto& cell = grid_.at(cx, cy, layer);
-                if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+                if (!cell.blocked || cell.net == net ||
+                (cell.net == 0 && grid_.net_clearance_floor(net, cell.net) <= 0.0f)) continue;
                 const float required =
                     grid_.pairwise_required_clearance(net, cell.net);
                 if (required <= 0.0f) continue;
@@ -689,7 +695,11 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 // Issue #4507: the candidate via's barrel meets this copper ON
                 // ``layer``, so the waiver is scoped to it (a via passing a
                 // rated SMD part's pad field on an inner layer is not exempt).
-                if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+                if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) {
+                const float floor = grid_.net_clearance_floor(net, cell.net);
+                const int floor_r = static_cast<int>(std::ceil((half_mm + floor) / res));
+                if (floor <= 0.0f || dist_sq > floor_r * floor_r) continue;
+            }
                 // Issue #4507: record the blocker (diagnostic only).
                 note_pairwise_block(cell.net, cw.first, cw.second);
                 return true;
@@ -782,7 +792,8 @@ float Pathfinder::pairwise_avoidance_cost(int x, int y, int layer,
         const int cx = x + off.dx, cy = y + off.dy;
         if (!grid_.is_valid(cx, cy, layer)) continue;
         const auto& cell = grid_.at(cx, cy, layer);
-        if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+        if (!cell.blocked || cell.net == net ||
+                (cell.net == 0 && grid_.net_clearance_floor(net, cell.net) <= 0.0f)) continue;
         if (grid_.pairwise_required_clearance(net, cell.net) <= 0.0f) continue;
         return rules_.cost_straight * off.frac;
     }
@@ -1014,7 +1025,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         // cross-domain (HV) pair, mirroring ``validate_route``'s via-via
         // widening (grid.cpp) -- attach-zone exemption at the gap midpoint
         // waives only the widening, never the scalar ``via_clearance``.
-        float required = clearance_required;
+        float required = std::max(clearance_required, grid_.net_clearance_floor(net, sv.net));
         if (grid_.pairwise_active()) {
             const float pair_req =
                 grid_.pairwise_required_clearance(net, sv.net);
