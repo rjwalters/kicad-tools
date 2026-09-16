@@ -11,6 +11,26 @@ from kicad_tools.router.rules import DesignRules
 pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="Native router required")
 
 
+def _assert_reservation_behavior(grid, x, y, owner, soft):
+    """Probe retained reservation policy without unrelated raster copper vetoes."""
+    assert grid.is_reserved_for(x, y, 0, owner)
+    assert not grid.is_reserved_for(x, y, 0, 3)
+    rules = router_cpp.DesignRules()
+    rules.grid_resolution = 0.1
+    rules.trace_width = rules.trace_clearance = 0.2
+    finder = router_cpp.Pathfinder(grid, rules, True)
+    cells = [grid.at(cx, cy, 0) for cy in range(y - 3, y + 4) for cx in range(x - 3, x + 4)]
+    blocked = [cell.blocked for cell in cells]
+    try:
+        for cell in cells:
+            cell.blocked = False
+        assert not finder.is_trace_blocked(x, y, 0, owner, False, 3)
+        assert finder.is_trace_blocked(x, y, 0, 3, False, 3) == (not soft)
+    finally:
+        for cell, was_blocked in zip(cells, blocked, strict=True):
+            cell.blocked = was_blocked
+
+
 @pytest.mark.parametrize("sharing", [False, True])
 @pytest.mark.parametrize("radius", [0, 3])
 def test_padding_is_not_inflated_but_copper_and_keepouts_are(sharing, radius):
@@ -164,7 +184,7 @@ def test_reserved_route_overlap_cannot_retain_padding_relief(kind, radius, soft)
     grid.reserve_cell(22, 20, 0, [owner], soft)
     assert not finder.is_trace_blocked(20, 20, 0, 1, False, radius)
     before = grid.at(22, 20, 0)
-    original = (before.net, before.original_net, before.reserved_count, before.reserved_soft)
+    original = (before.net, before.original_net, before.reserved_count)
     if kind == "segment":
         grid.mark_segment(22, 20, 22, 20, 0, 3, 0)
         grid.add_stored_segment(2.2, 2.0, 2.2, 2.0, 0.5, 0, 3)
@@ -172,7 +192,7 @@ def test_reserved_route_overlap_cannot_retain_padding_relief(kind, radius, soft)
         grid.mark_via(22, 20, 3, 0)
         grid.add_stored_via(2.2, 2.0, 0.3, 0.6, 3)
     cell = grid.at(22, 20, 0)
-    assert (cell.net, cell.original_net, cell.reserved_count, cell.reserved_soft) == original
+    assert (cell.net, cell.original_net, cell.reserved_count) == original
     assert cell.blocked and cell.static_blocked
     assert cell.usage_count == 0
     assert not cell.pad_halo_only
@@ -181,6 +201,7 @@ def test_reserved_route_overlap_cannot_retain_padding_relief(kind, radius, soft)
     # Replay of the static pad cannot resurrect relief after a skipped mark.
     grid.mark_blocked(22, 20, 0, 2, False, False, True)
     assert not grid.at(22, 20, 0).pad_halo_only
+    _assert_reservation_behavior(grid, 22, 20, owner, soft)
 
 
 @pytest.mark.parametrize("kind", ["segment", "via"])
@@ -204,7 +225,8 @@ def test_bulk_reconstruction_does_not_restore_reserved_route_halo(kind, soft):
     cpp = CppGrid.from_routing_grid(grid)
     cell = cpp._impl.at(x, y, 0)
     assert cell.blocked and not cell.pad_halo_only
-    assert cell.reserved_count == 1 and cell.reserved_soft == soft
+    assert cell.reserved_count == 1
+    _assert_reservation_behavior(cpp._impl, x, y, 1, soft)
 
 
 @pytest.mark.parametrize("kind", ["segment", "via"])
