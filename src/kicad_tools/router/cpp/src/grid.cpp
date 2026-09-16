@@ -12,10 +12,10 @@
 
 namespace router {
 
-void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings) {
+void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings, int source_net) {
     if (rings.empty() || rings.front().empty()) return;
     FixedFill fill;
-    fill.layer = layer; fill.clearance = clearance; fill.rings = rings;
+    fill.layer = layer; fill.clearance = clearance; fill.rings = rings; fill.source_net = source_net;
     fill.minx = fill.maxx = rings.front().front().first;
     fill.miny = fill.maxy = rings.front().front().second;
     for (const auto& ring : rings) {
@@ -40,10 +40,17 @@ void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillR
 // Exact physical predicates; bins only reject edges that cannot affect a
 // query. Even-odd containment includes holes without scanning every vertex.
 bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
-                             int layer, double half, double reach) const {
+                             int layer, double half, double reach, int net) const {
     for (const auto& fill : fixed_fills_) {
         if (fill.layer != layer) continue;
-        const double required = std::max(reach, half + fill.clearance);
+        // Placement-invalid copper remains an obstacle to its own source net.
+        // Do not use the same-net exemption from the routed-copper predicate.
+        const auto own = net_clearance_floors_.find(net);
+        const auto source = net_clearance_floors_.find(fill.source_net);
+        const double own_floor = own == net_clearance_floors_.end() ? 0.0 : own->second;
+        const double source_floor = source == net_clearance_floors_.end() ? 0.0 : source->second;
+        const double required = std::max({reach, half + fill.clearance,
+                                          half + own_floor, half + source_floor});
         double x0 = std::min(ax,bx)-required, x1 = std::max(ax,bx)+required;
         double y0 = std::min(ay,by)-required, y1 = std::max(ay,by)+required;
         if (x1 < fill.minx || x0 > fill.maxx || y1 < fill.miny || y0 > fill.maxy) continue;
@@ -1073,7 +1080,7 @@ ValidationResult Grid3D::validate_route(
 
     for (const auto& seg : segments) {
         if (!fixed_fill_clear(seg.x1, seg.y1, seg.x2, seg.y2, seg.layer,
-                              seg.width / 2.0, seg.width / 2.0 + trace_clearance)) {
+                              seg.width / 2.0, seg.width / 2.0 + trace_clearance, seg.net)) {
             result.valid = false;
             result.min_clearance = 0;
             result.violation_x = seg.x1;
@@ -1098,7 +1105,7 @@ ValidationResult Grid3D::validate_route(
         for (int layer = std::min(via.layer_from, via.layer_to);
              layer <= std::max(via.layer_from, via.layer_to); ++layer) {
             if (!fixed_fill_clear(via.x, via.y, via.x, via.y, layer,
-                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance)) {
+                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance, via.net)) {
                 result.valid = false;
                 result.min_clearance = 0;
                 result.violation_x = via.x;

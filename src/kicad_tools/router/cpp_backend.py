@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 47
+_REQUIRED_CPP_BUILD_VERSION = 48
 
 
 # Try to import C++ module with detailed error tracking
@@ -849,8 +849,8 @@ class CppGrid:
                 raise RuntimeError("Rebuild native router: fixed filled-copper support required")
             return
         self._impl.clear_fixed_fills()
-        for layer, clearance, rings in fills.native_polygons():
-            self._impl.add_fixed_fill(layer, clearance, rings)
+        for layer, clearance, rings, net in fills.native_polygons_with_nets():
+            self._impl.add_fixed_fill(layer, clearance, rings, net)
 
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:

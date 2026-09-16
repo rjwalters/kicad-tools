@@ -113,7 +113,12 @@ class FixedFillObstacles:
         )
 
     def native_polygons(self):
-        """Simple polygons with holes; preserve every lobe of a multipolygon."""
+        """Legacy geometry-only export, retaining the three-field contract."""
+        for layer, clearance, rings, _net in self.native_polygons_with_nets():
+            yield layer, clearance, rings
+
+    def native_polygons_with_nets(self):
+        """Keep source net identity for mandatory electrical floor checks."""
         for fill in self.fills:
             geometries = (
                 fill.geometry.geoms
@@ -128,6 +133,7 @@ class FixedFillObstacles:
                         list(geometry.exterior.coords),
                         *[list(ring.coords) for ring in geometry.interiors],
                     ],
+                    fill.source_net_id,
                 )
 
 

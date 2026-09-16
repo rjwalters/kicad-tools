@@ -624,20 +624,20 @@ CoupledRouteResult CoupledPathfinder::route(
         // Expand neighbors into the open set (diffpair_routing.py:1842-1890).
         for (const Cand& c : neighbors) {
             if (grid_.has_fixed_fills()) {
-                auto rail_clear = [&](int ax, int ay, int bx, int by, int layer, double rail_half, double rail_gap) {
+                auto rail_clear = [&](int ax, int ay, int bx, int by, int layer, double rail_half, double rail_gap, int net) {
                     auto [wx, wy] = grid_.grid_to_world(ax, ay);
                     auto [vx, vy] = grid_.grid_to_world(bx, by);
                     double half = c.is_via ? rules_.via_diameter / 2.0 : (rail_half >= 0 ? rail_half : rules_.trace_width / 2.0);
                     double gap = c.is_via ? rules_.via_clearance : (rail_gap >= 0 ? rail_gap : rules_.trace_clearance);
                     if (c.is_via) {
                         for (int l = 0; l < num_layers_; ++l)
-                            if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half+gap)) return false;
+                            if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half+gap, net)) return false;
                         return true;
                     }
-                    return grid_.fixed_fill_clear(wx, wy, vx, vy, layer, half, half+gap);
+                    return grid_.fixed_fill_clear(wx, wy, vx, vy, layer, half, half+gap, net);
                 };
-                if (!rail_clear(current.p_x, current.p_y, c.px, c.py, c.pl, p_fill_half_, p_fill_gap_) ||
-                    !rail_clear(current.n_x, current.n_y, c.nx, c.ny, c.nl, n_fill_half_, n_fill_gap_)) continue;
+                if (!rail_clear(current.p_x, current.p_y, c.px, c.py, c.pl, p_fill_half_, p_fill_gap_, p_net) ||
+                    !rail_clear(current.n_x, current.n_y, c.nx, c.ny, c.nl, n_fill_half_, n_fill_gap_, n_net)) continue;
             }
             // Corridor pruning (diffpair_routing.py:1864-1871).
             if (have_corridor) {

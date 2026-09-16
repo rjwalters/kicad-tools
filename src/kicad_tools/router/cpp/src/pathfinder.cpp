@@ -837,7 +837,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         const double reach = half + (search_fill_via_clearance_ >= 0
             ? search_fill_via_clearance_ : rules_.via_clearance);
         for (int layer = 0; layer < grid_.layers(); ++layer)
-            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
+            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach, net)) return true;
     }
 
     if (!rules_.allow_smd_vias) {
@@ -1427,7 +1427,7 @@ RouteResult Pathfinder::route(
                     ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
                 const double reach = half + (search_fill_trace_clearance_ >= 0
                     ? search_fill_trace_clearance_ : rules_.trace_clearance);
-                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach, net)) continue;
             }
 
             if (!grid_.is_valid(nx, ny, nlayer)) {
@@ -2049,7 +2049,7 @@ RouteResult Pathfinder::run_astar_loop() {
                     ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
                 const double reach = half + (search_fill_trace_clearance_ >= 0
                     ? search_fill_trace_clearance_ : rules_.trace_clearance);
-                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach, search_net_)) continue;
             }
 
             if (!grid_.is_valid(nx, ny, nlayer)) {
