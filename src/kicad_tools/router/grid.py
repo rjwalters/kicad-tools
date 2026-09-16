@@ -565,15 +565,30 @@ class RoutedNetsUnblocker:
         self._grid = grid
         self._saved_blocked: np.ndarray | None = None
         self._saved_net: np.ndarray | None = None
+        self._saved_congestion: np.ndarray | None = None
+        self._saved_congestion_counted: np.ndarray | None = None
 
     def __enter__(self) -> RoutedNetsUnblocker:
         # Save full copies of the blocked and net arrays
         self._saved_blocked = self._grid._blocked.copy()
         self._saved_net = self._grid._net.copy()
+        self._saved_congestion = self._grid._congestion.copy()
+        counted = self._grid._congestion_counted
+        self._saved_congestion_counted = None if counted is None else counted.copy()
 
         # Build mask: cells that are blocked by routed nets (not by pads/obstacles)
         # A routed-net cell has: blocked=True, pad_blocked=False, net != 0
         routed_mask = self._grid._blocked & ~self._grid._pad_blocked & (self._grid._net != 0)
+
+        # This bulk rollback path already copies full occupancy planes. Update
+        # only the removed cells' coarse bins; normal mark/unmark stays local.
+        if counted is not None:
+            removed = counted & to_numpy(routed_mask)
+            layers, ys, xs = np.nonzero(removed)
+            cy = np.minimum(ys // self._grid.congestion_size, self._grid.congestion_rows - 1)
+            cx = np.minimum(xs // self._grid.congestion_size, self._grid.congestion_cols - 1)
+            np.add.at(self._grid._congestion, (layers, cy, cx), -1)
+            counted[removed] = False
 
         # Clear those cells
         self._grid._blocked[routed_mask] = False
@@ -588,6 +603,9 @@ class RoutedNetsUnblocker:
             np.copyto(self._grid._blocked, self._saved_blocked)
         if self._saved_net is not None:
             np.copyto(self._grid._net, self._saved_net)
+        if self._saved_congestion is not None:
+            np.copyto(self._grid._congestion, self._saved_congestion)
+        self._grid._congestion_counted = self._saved_congestion_counted
         # Issue #4794: the restore is itself an occupancy change (the grid
         # inside the ``with`` body was NOT the grid outside it).
         self._grid.bump_occupancy_generation()
@@ -862,6 +880,12 @@ class RoutingGrid:
         self._congestion = np.zeros(
             (self.num_layers, self.congestion_rows, self.congestion_cols), dtype=np.int32
         )
+
+        # A cell contributes once only when route marking first blocks it.
+        # Keep this separate from blocked/static/usage state: manually supplied
+        # raster and pad obstacles have never contributed to route density.
+        # Allocate lazily so geometry-only engines pay no dense-memory cost.
+        self._congestion_counted: np.ndarray | None = None
 
         # Track placed routes for net assignment
         self.routes: list[Route] = []
@@ -1259,6 +1283,7 @@ class RoutingGrid:
         self._static_blocked = None
         # Congestion planes + cached clearance stamps.
         self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
+        self._congestion_counted = None
         self._clearance_masks = {}
         # Spatial indices (only populated on dense boards).
         self._seg_rtree = {}
@@ -1442,7 +1467,21 @@ class RoutingGrid:
         return self.layer_stack.is_plane_layer(index)
 
     def _update_congestion(self, gx: int, gy: int, layer: int, delta: int = 1) -> None:
-        """Update congestion count for the region containing (gx, gy)."""
+        """Track one route-occupied cell, independently of negotiation history.
+
+        Unmark may visit a cell repeatedly or free a manually supplied raster
+        cell that was never counted. The ledger prevents negative counts and
+        double subtraction while preserving existing ownership decisions.
+        """
+        counted = self._congestion_counted
+        if counted is None:
+            if delta <= 0:
+                return
+            counted = self._congestion_counted = np.zeros(self._blocked.shape, dtype=np.bool_)
+        occupied = delta > 0
+        if bool(counted[layer, gy, gx]) == occupied:
+            return
+        counted[layer, gy, gx] = occupied
         cx = min(gx // self.congestion_size, self.congestion_cols - 1)
         cy = min(gy // self.congestion_size, self.congestion_rows - 1)
         self._congestion[layer, cy, cx] += delta
@@ -5103,6 +5142,7 @@ class RoutingGrid:
                         if cell.pad_blocked:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
+                            self._update_congestion(nx, ny, layer_idx, delta=-1)
                         elif cell.net == seg.net:
                             # Issue #3545: STATICALLY blocked cells (pad
                             # clearance halos, keepouts) must survive
@@ -5115,9 +5155,11 @@ class RoutingGrid:
                             # static owner instead of freeing.
                             if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
                                 cell.net = cell.original_net
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
                             else:
                                 cell.blocked = False
                                 cell.net = 0
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
 
         if gx1 == gx2:
             for gy in range(min(gy1, gy2), max(gy1, gy2) + 1):
@@ -5172,15 +5214,18 @@ class RoutingGrid:
                         if cell.pad_blocked:
                             # Don't unblock pad cells, just restore original net
                             cell.net = cell.original_net
+                            self._update_congestion(nx, ny, layer_idx, delta=-1)
                         elif cell.net == via.net:
                             # Issue #3545: restore static halo / keepout
                             # cells instead of freeing them (see
                             # ``_unmark_segment`` for rationale).
                             if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
                                 cell.net = cell.original_net
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
                             else:
                                 cell.blocked = False
                                 cell.net = 0
+                                self._update_congestion(nx, ny, layer_idx, delta=-1)
 
     def find_relief_conflict_nets(self, route: Route, net: int) -> set[int]:
         """Owner nets of foreign static cells conflicting with ``route``.
@@ -5615,6 +5660,8 @@ class RoutingGrid:
             static = xp.asarray(self._static_blocked)
             self._blocked[...] = static
             self._net[...] = xp.where(static, self._original_net, 0)
+            self._congestion.fill(0)
+            self._congestion_counted = None
             self.bump_occupancy_generation()
         return True
 

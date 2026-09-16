@@ -101,6 +101,10 @@ void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
                           bool pad_blocked) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
+    if (cell.congestion_counted) {
+        update_congestion(x, y, layer, -1);
+        cell.congestion_counted = false;
+    }
     cell.blocked = true;
     cell.net = net;
     cell.is_obstacle = is_obstacle;
@@ -164,7 +168,10 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                     auto& cell = at(nx, ny, layer);
                     if (!cell.blocked) {
                         cell.net = net;
-                        update_congestion(nx, ny, layer, 1);
+                        if (!cell.congestion_counted) {
+                            update_congestion(nx, ny, layer, 1);
+                            cell.congestion_counted = true;
+                        }
                     }
                     cell.blocked = true;
                 }
@@ -238,7 +245,10 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
                         if (!owned) continue;
                     }
                     if (!cell.blocked) {
-                        update_congestion(nx, ny, layer, 1);
+                        if (!cell.congestion_counted) {
+                            update_congestion(nx, ny, layer, 1);
+                            cell.congestion_counted = true;
+                        }
                         cell.net = net;
                     }
                     cell.blocked = true;
@@ -303,6 +313,11 @@ void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                 int nx = gx + dx, ny = gy + dy;
                 if (is_valid(nx, ny, layer)) {
                     auto& cell = at(nx, ny, layer);
+                    if ((cell.pad_blocked || cell.net == net) &&
+                        cell.congestion_counted) {
+                        update_congestion(nx, ny, layer, -1);
+                        cell.congestion_counted = false;
+                    }
                     if (cell.pad_blocked) {
                         cell.net = cell.original_net;
                     } else if (cell.net == net) {
@@ -359,6 +374,11 @@ void Grid3D::unmark_via(int x, int y, int net, int radius_cells) {
                 int nx = x + dx, ny = y + dy;
                 if (is_valid(nx, ny, layer)) {
                     auto& cell = at(nx, ny, layer);
+                    if ((cell.pad_blocked || cell.net == net) &&
+                        cell.congestion_counted) {
+                        update_congestion(nx, ny, layer, -1);
+                        cell.congestion_counted = false;
+                    }
                     if (cell.pad_blocked) {
                         cell.net = cell.original_net;
                     } else if (cell.net == net) {

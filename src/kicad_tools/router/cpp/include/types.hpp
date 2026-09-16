@@ -250,7 +250,7 @@ namespace router {
 // v32: combine physical halo/component-hole refinement with the static
 // differential partner-pad guard (#5482). Version 31 is already used by
 // separate held stored-via/coupled-routing builds; do not accept their binaries.
-constexpr int ROUTER_CPP_BUILD_VERSION = 34;
+constexpr int ROUTER_CPP_BUILD_VERSION = 36;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -282,6 +282,9 @@ struct GridCell {
     // ``mark_blocked``.  Route marking never sets this; rip-up uses it
     // to restore static blockage instead of freeing the cell.
     bool static_blocked = false;
+    // True only when this route cell contributes to coarse congestion.
+    // Imported/static cells were never counted and must not decrement it.
+    bool congestion_counted = false;
     // Issue #4071: corridor-reservation owner set (mirrors the Python
     // ``RoutingGrid._reserved_for_nets`` per-cell ``frozenset[int]``).
     // ``reserved_count == 0`` means "not reserved" (fast path).  A
