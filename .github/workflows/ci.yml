@@ -169,6 +169,39 @@ jobs:
       # -n auto reads the container's 8-core cpuset on the runner; keep the
       # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
       PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
+      # Issue #5501: one native KiCad process at a time across the whole job.
+      #
+      # Attribution (PR #5503's observer, run 35099894489, re-derived with
+      # scripts/ci/analyze_native_observations.py): the bulk pool launched 857
+      # native processes -- all attributed to an owning test and worker --
+      # spread across 50+ modules, so isolating modules cannot fix it. Sampled
+      # peak RSS was 2.31 GiB median / 2.66 GiB max; the pool reached 4-way
+      # native overlap and drove memory.current and memory.peak to the full
+      # 12 GiB with 209 memory.events.max events. 15% of those launches came
+      # from a descendant process rather than the worker itself, which is why
+      # the gate installs in kicad_tools/__init__.py as well as conftest.
+      #
+      # Why 1 and not 2: the CONSTRAINT_MEMCG kill recorded for PR #5499 had
+      # three concurrent natives (2.36 + 2.36 + 1.66 = 6.38 GiB). A bound of 2
+      # still permits 5.32 GiB -- ~1 GiB under the configuration that actually
+      # died -- while a bound of 1 caps native anon at 2.66 GiB, 3.7 GiB below
+      # it. Sampled RSS is a lower bound and is never treated as cgroup usage;
+      # the cgroup counters are audited separately by the step below.
+      #
+      # Measured cost, from replaying this run's own launches through the
+      # bound (--simulate-bound): +257 s on the bulk group, longest single
+      # slot wait 4.8 s, worst single test +23.1 s. Every test whose estimated
+      # duration then exceeds 30 s already carries an explicit 300-900 s
+      # pytest.mark.timeout override; the worst test under the plain 60 s
+      # default lands near 32 s. The job's 45-minute cap is unchanged and the
+      # projected total stays around 22 minutes. The four serial groups below
+      # already observed a maximum native concurrency of 1, so the bound is
+      # measured to cost them nothing (+0 s).
+      #
+      # Nothing here alters the memory limit, worker count, selections,
+      # assertions or any test/subprocess timeout: waiting for a slot is
+      # ordinary wall-clock time inside the waiting test.
+      KCT_NATIVE_MAX_CONCURRENCY: "1"
       # Explicit diagnostic opt-in only; PR body is evaluated, never passed
       # into shell or retained. Pushes/absent markers leave the wrapper inert.
       KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
@@ -330,6 +363,20 @@ jobs:
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi
           python3 scripts/ci/run_observed.py bulk -- uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" "${test_args[@]}"
+
+      - name: Audit native workload observations
+        # Issue #5501: when the observations exist, assert what they show --
+        # no cgroup OOM/OOM-kill event, no gate fallback to an unbounded
+        # launch, and no group exceeding KCT_NATIVE_MAX_CONCURRENCY. Run
+        # against the retained pre-fix baseline this fails on the bulk group
+        # (observed native concurrency 4), so a green result here is evidence
+        # rather than a lucky retry. Additive gate: it can only add failures.
+        if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
+        run: |
+          python3 scripts/ci/analyze_native_observations.py "$RUNNER_TEMP/native-observer" \
+            --max-concurrency "$KCT_NATIVE_MAX_CONCURRENCY" \
+            --simulate-bound 1 --simulate-bound 2 --simulate-bound 4 \
+            --json "$RUNNER_TEMP/native-observer/attribution.json"
 
       - name: Retain native workload observations
         if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
