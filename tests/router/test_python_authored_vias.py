@@ -93,3 +93,27 @@ def test_supplemental_foreign_geometry_retains_authored_identity(kind, strict_ne
     assert router._check_via_placement_cached(gx, gy, 1)
     rules.net_clearance_floors = {strict_net: 0.9, 3: 4.0}
     assert not router._check_via_placement_cached(gx, gy, 1)
+
+
+@pytest.mark.parametrize("kind", ["pad", "supplemental-pad", "supplemental-track"])
+@pytest.mark.parametrize("y,valid", [(5.95, False), (6.05, True)])
+def test_final_via_uses_emitted_coordinates(kind, y, valid):
+    rules = DesignRules(
+        grid_resolution=0.1,
+        trace_clearance=0.1,
+        via_clearance=0.1,
+        via_diameter=0.2,
+        via_drill=0.1,
+        net_clearance_floors={2: 0.8},
+    )
+    grid = RoutingGrid(10, 10, rules)
+    router = Router(grid, rules)
+    pad = Pad(5, 5, 0.2, 0.2, 2, "foreign")
+    if kind == "pad":
+        grid.add_pad(pad)
+    elif kind == "supplemental-pad":
+        router.set_via_foreign_context(foreign_pads=[pad])
+    else:
+        router.set_via_foreign_context(foreign_tracks=[Segment(4, 5, 6, 5, 0.2, Layer.F_CU, 2)])
+    candidate = Route(1, "signal", vias=[Via(5, y, 0.1, 0.2, (Layer.F_CU, Layer.B_CU), 1)])
+    assert router._validate_route_clearance(candidate, 1) is valid

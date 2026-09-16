@@ -2019,10 +2019,22 @@ class Router:
         x, y = self.grid.grid_to_world(gx, gy)
         net_class = self._halo_net_class(net)
         diameter = net_class.via_size if net_class else self.rules.via_diameter
-        physical_layers = tuple(range(self.grid.num_layers))
-        layers = [self._grid_layer_object(layer) for layer in physical_layers]
-        if not layers or any(layer is None for layer in layers):
+        first = self._grid_layer_object(0)
+        last = self._grid_layer_object(self.grid.num_layers - 1)
+        if first is None or last is None:
             return False
+        return self._authored_via_geometry_clear(
+            Via(x, y, self.rules.via_drill, diameter, (first, last), net)
+        )
+
+    def _authored_via_geometry_clear(self, candidate: Via) -> bool:
+        """Validate actual emitted geometry, including unsnapped endpoints."""
+        if not self.rules.net_clearance_floors:
+            return True
+        x, y, diameter, net = candidate.x, candidate.y, candidate.diameter, candidate.net
+        endpoints = sorted(self.grid.layer_to_index(layer.value) for layer in candidate.layers)
+        physical_layers = tuple(range(endpoints[0], endpoints[-1] + 1))
+        layers = [self._grid_layer_object(layer) for layer in physical_layers]
         for layer in layers:
             if layer is None:
                 return False
@@ -2042,10 +2054,6 @@ class Router:
             )
             if distance - (diameter + track.width) / 2 < required - 1e-9:
                 return False
-        first, last = layers[0], layers[-1]
-        if first is None or last is None:
-            return False
-        candidate = Via(x, y, self.rules.via_drill, diameter, (first, last), net)
         if not self.grid._route_halo.clear(
             candidate, self, require_geometry=False, authored_only=True
         ):
@@ -4999,6 +5007,8 @@ class Router:
         # reconstruction or legalization. Component holes are physical on
         # every net/layer; copper-sharing exceptions cannot waive their floor.
         for via in route.vias:
+            if not self._authored_via_geometry_clear(via):
+                return False
             if not self.grid._component_hole_index.clear(
                 via.x, via.y, via.drill, self.rules.min_hole_to_hole
             ):
