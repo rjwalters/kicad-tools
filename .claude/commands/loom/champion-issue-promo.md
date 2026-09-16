@@ -641,6 +641,29 @@ mechanism, no human step.
       or a false "tracked" file-count claim
 - [ ] Test strategy is outlined
 
+#### The `premise-false` finding kind (#7657)
+
+A criterion 6/8 failure is `premise-false` only when the proposal's central
+factual claim is **conclusively false** on current `main` — a cited file
+doesn't exist, a "tracked" file isn't tracked, a cited line range doesn't
+exist, a quoted string isn't present. Mere imprecision ("near line 40, not
+exactly 12") is an ordinary finding, not this kind.
+
+Tag it `[premise-false]` and cite the literal mechanical check + output, not a
+paraphrase:
+
+```
+- [premise-false] Criterion 8: `src/does/not/exist.rs:42` is not on
+  `origin/main` — verified via: `git ls-tree -r origin/main --name-only |
+  grep -Fx src/does/not/exist.rs` → (no output, exit 1)
+```
+
+Other acceptable checks: `git ls-files '<pattern>'` ("tracked" claims), `wc -l
+<path>` (line-range claims), `grep -c '<string>' <path>` ("string appears"
+claims) — always against `origin/main`, always with literal output. This tag
+and citation are what Step 4's premise-false close gate reads back on the N=2
+pass — an untagged or uncited finding never triggers that gate.
+
 ---
 
 ## What NOT to Promote
@@ -1194,10 +1217,12 @@ DEP_RC=0
 | `0` | `DEFER` + `OPEN_BLOCKERS:` | **Do not escalate.** No new label, no new comment. Record the deferral in place (below) and continue the batch loop to the next issue |
 | `3` | `REEVALUATE` + `REASON: blockers-cleared` | The recorded findings were dependency-only and every blocker has since **closed**, so the verdict on file is stale. Do **not** escalate on it — go to Step 1 and re-run the 8 criteria (this is the one case where `ESCALATE_UNREVISED=yes` must not skip Steps 1–3) |
 | `4` | `PROMOTE_SUBSET` + `STARTABLE_SUBSET:` | The blocker is still open, but the issue declares a startable subset (#5664, "Startable-subset carve-out" under criterion 2). This should be rare here — the carve-out normally resolves at Step 2 on a fresh evaluation, before N=2 is ever reached — but if it does fire, treat it like `REEVALUATE`: do **not** escalate, go to Step 1 and re-run the 8 criteria, which will apply the carve-out and promote scoped to the subset if the rest pass |
-| `1` | `NO_DEFER` + `REASON:` | Escalate exactly as before. `merits-finding`, `dependency-cycle`, `no-findings` and `no-recorded-blocker` all land here — **merits-based escalation is completely unaffected by this gate** |
+| `1` | `NO_DEFER` + `REASON:` | Escalate exactly as before. `merits-finding`, `dependency-cycle`, `no-findings`, `no-recorded-blocker`, and `premise-false-only` all land here — **merits-based escalation is completely unaffected by this gate** |
 | `2` | — | The script could not read the issue. Treat as `NO_DEFER`: fail toward the pre-#5664 behaviour, never toward silence |
 
-The gate is deliberately conservative in one direction: a finding counts as dependency-attributable only if it *both* names a dependency (`blocked by` / `depends on` / `requires` / `waiting on` / …) *and* cites an issue or PR reference, and **one** merits finding in the set disqualifies the whole set. "Requires a migration plan" cites nothing and still escalates. A genuine dependency **cycle** still escalates too — a cycle cannot self-clear, so `detect-dependency-cycle.sh` correctly owns it.
+The gate is deliberately conservative in one direction: a finding counts as dependency-attributable only if it *both* names a dependency (`blocked by` / `depends on` / `requires` / `waiting on` / …) *and* cites an issue or PR reference, and **one merits finding** in the set disqualifies the whole set. "Requires a migration plan" cites nothing and still escalates. A genuine dependency **cycle** still escalates too — a cycle cannot self-clear, so `detect-dependency-cycle.sh` correctly owns it.
+
+**A `[premise-false]`-tagged bullet is excluded from that "every finding must be dependency-attributable" test, not treated as a disqualifying merits finding (#7904).** That finding kind self-clears through its own separate mechanism — the premise-false close gate below re-verifies the cited mechanical check against current `main` — never by waiting on a blocker, so a premise-false bullet mixed with a genuine open-dependency bullet must still `DEFER` (`REASON: premise-false-only` is reported only when *every* finding was premise-false, leaving nothing to classify; it is a distinct reason from `merits-finding` precisely so the caller can route it to the close gate below instead of escalating). An ordinary merits finding mixed with a premise-false one still escalates exactly as before — the exclusion applies only to the premise-false tag itself.
 
 **Recording a defer (`DEP_RC=0`) — no new comment.** Deferring must not become its own comment stream; the whole point is that waiting is cheap and silent. PATCH the existing verdict comment exactly as the silent-skip path does, adding a one-time blocker marker beside the skip tally:
 
@@ -1220,7 +1245,69 @@ Never substitute a fresh comment for the missing PATCH.
 
 The deferral is **not** bounded by a streak cap, and that is intentional: the condition that ends it is the blocker's own closure, which is an event this pass cannot manufacture and a later pass detects for free. Adding a "defer N times then escalate anyway" cap would re-create #5664 one cycle later. The escape hatches for a blocker that never closes already exist and are not this mechanism: `detect-dependency-cycle.sh` for a genuine deadlock, and `loom:blocked` / `loom:operator` for a human hold.
 
-**Otherwise (`DEP_RC=1`), escalate.** Re-run the verdict-time recheck first:
+**Otherwise (`DEP_RC=1`), the dependency-timing gate does not save this proposal.** Before escalating, assemble `RECURRING_FINDINGS_TEXT` and run the premise-false close gate below — it can end this pass in a close instead of an escalation.
+
+**Assembling `RECURRING_FINDINGS_TEXT`.** Via `ESCALATE_UNREVISED=yes`: lift the **Recurring findings** bullet list verbatim from the prior `NEEDS REVISION` comment (`$COMMENT_BODY`, from the idempotency check) — do not re-derive it; `SUB_KIND` below follows the same rule. Via a fresh evaluation reaching `UNREVISED_EVALS >= N` in Step 2: derive it from the criteria that just failed. Either way it is the same list the gate inspects and the same list that ends up under **Recurring findings:** in whichever template you use.
+
+#### Premise-false close gate — close instead of escalate when every recurring finding is conclusively false (#7657)
+
+An open dependency self-clears; a **conclusively false factual premise never does**. Routing that shape to `loom:operator-only` just makes a human re-run a check Champion already ran twice. Narrow on purpose: fires only when **every** recurring finding is tagged `premise-false` (see "The `premise-false` finding kind" above) — one ordinary merits finding mixed in still escalates as before.
+
+```bash
+# RECURRING_FINDINGS_TEXT is the exact bullet list you are about to post under
+# "**Recurring findings:**" in either template below -- lifted verbatim from
+# $COMMENT_BODY when ESCALATE_UNREVISED=yes (per "Assembling
+# RECURRING_FINDINGS_TEXT" above), freshly derived from Step 2's failures
+# otherwise. Do not recompute it twice.
+TOTAL_FINDINGS=$(printf '%s\n' "$RECURRING_FINDINGS_TEXT" | grep -c '^- ' || true)
+PREMISE_FALSE_FINDINGS=$(printf '%s\n' "$RECURRING_FINDINGS_TEXT" | grep -c '^- \[premise-false\]' || true)
+
+if [ "$TOTAL_FINDINGS" -gt 0 ] && [ "$TOTAL_FINDINGS" -eq "$PREMISE_FALSE_FINDINGS" ]; then
+  # Every recurring finding is premise-false. Re-run EACH cited mechanical
+  # check verbatim against CURRENT origin/main before closing -- never trust
+  # the prior verdict's captured output, since the repo may have changed:
+  #   git fetch origin main
+  #   <re-run every "verified via: <command>" from the findings list above,
+  #    exactly as cited>
+  # If ANY re-run check now shows the premise IS true after all (the path now
+  # exists, the string is now present, the count now matches), this gate does
+  # NOT apply -- the world changed under the proposal, and only a fresh
+  # evaluation is correct: go to Step 1, not to closing or escalating on a
+  # now-stale finding.
+  CLOSE_PREMISE_FALSE=yes
+else
+  CLOSE_PREMISE_FALSE=no
+fi
+```
+
+| `CLOSE_PREMISE_FALSE` | Re-run outcome | What to do |
+|---|---|---|
+| `yes` | every re-run check still confirms false | **Close** — use the template below. Do not apply `loom:operator-only` |
+| `yes` | a re-run check now contradicts the prior finding | Premise no longer false — do not close or escalate on it; go to Step 1 instead (like the dependency gate's `REEVALUATE`) |
+| `no` | mixed premise-false + ordinary finding, or none at all | Fall through to the ordinary escalation branch below, unchanged |
+
+**Closing (`CLOSE_PREMISE_FALSE=yes`, re-verified false):**
+
+```bash
+MAIN_SHA=$(git rev-parse origin/main 2>/dev/null || git rev-parse main)
+CLOSE_MARKER="<!-- champion:premise-false-closed:$MAIN_SHA -->"
+gh issue comment <number> --body "$CLOSE_MARKER
+**Champion: Closing — Premise Verified False**
+
+[One-paragraph rationale: name the finding(s), the exact mechanical check(s)
+re-run against \`origin/main\` @ \`$MAIN_SHA\`, and their output, so a human
+skimming the closed issue can see for themselves why no operator decision was
+needed. Implemented per #7657.]
+
+---
+*Automated by Champion role*" \
+  && gh issue close <number> --reason "not planned" \
+  && gh issue edit <number> --remove-label "loom:evaluating"
+```
+
+`loom:operator-only` is deliberately **not** applied here — this is a close, not an escalation. Per root `CLAUDE.md`'s "Issues Are Suggestions (Role Autonomy)", Champion is a first-class closer for this one finding kind. A proposal re-filed later with corrected citations is a new proposal (new title/body → new `BODY_HASH`) — nothing carries over.
+
+**Otherwise (`CLOSE_PREMISE_FALSE=no`), escalate.** Re-run the verdict-time recheck first:
 
 **Choose the sub-kind before posting (#5671, see `.loom/docs/label-state-machine.md` "operator-only sub-kinds")**: if every recurring finding cites a still-open dependency/blocker (nothing else is wrong with the proposal) — use `loom:operator-blocked` and include a `Blocked by #N` line so the blocker is machine-readable. Otherwise — a genuine feasibility, scope, or policy question — use `loom:operator-decision`, the safe default when the findings are mixed or the cause isn't purely a live dependency.
 
@@ -1245,9 +1332,7 @@ A human needs to decide whether to revise this proposal, close it, or accept it 
   && gh issue edit <number> --remove-label "loom:evaluating" --add-label "loom:operator-only,$SUB_KIND"
 ```
 
-When you arrive here via `ESCALATE_UNREVISED=yes`, you have not re-run the 8 criteria — and must not. The proposal's title and body are byte-identical to the revision the prior verdict was written against, so the verdict is unchanged by construction: lift the **Recurring findings** verbatim from that prior `NEEDS REVISION` comment (`$COMMENT_BODY`, fetched by the idempotency check) rather than re-deriving them — `SUB_KIND` follows the same rule: unchanged findings mean the sub-kind classification is unchanged too.
-
-`loom:operator-only` removes the issue from every future promotion pass (see "When NOT to Promote" in Batch Processing below), so this escalation comment posts exactly once per issue.
+`RECURRING_FINDINGS_TEXT` (assembled above, before the premise-false gate) is what goes under **Recurring findings:** here — do not re-derive it a second time. `loom:operator-only` removes the issue from every future promotion pass (see "When NOT to Promote" in Batch Processing below), so this escalation comment posts exactly once per issue.
 
 **Otherwise** (first or second evaluation, not yet routed): leave detailed feedback, keep the original proposal label, and release the claim in the same command:
 
@@ -1299,7 +1384,7 @@ Continue evaluating issues until all have been processed or all applicable tier 
 | Dependency-Defer Fast Path hard-stop (recorded `dep-defer` fingerprint unchanged) | Continue the batch loop to the next issue — no comment, no claim, nothing below this row runs |
 | No marker match (new or revised proposal) | Claim → Step 1 (Read) → Step 2 (Evaluate) → Step 3 or 4 |
 | Marker match, `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | Tally the skip (`PATCH` the existing verdict comment), continue the loop to the next issue |
-| Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | Claim → **Step 4's escalation branch directly** (skip Steps 1–3: the text is unchanged, so re-evaluating cannot change the verdict) — but run Step 4's **dependency-timing gate** first: `DEFER` continues the loop with no label and no comment, `REEVALUATE` sends you to Step 1 after all (#5664) |
+| Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | Claim → **Step 4's escalation branch directly** (skip Steps 1–3: the text is unchanged, so re-evaluating cannot change the verdict) — but run Step 4's **dependency-timing gate** first (`DEFER` continues the loop with no label and no comment, `REEVALUATE` sends you to Step 1 after all, #5664), then the **premise-false close gate** (#7657): every recurring finding re-verified `premise-false` closes the issue instead of escalating; any other outcome escalates as before |
 | Marker match, `ALREADY_ROUTED=yes` | Continue the loop — no tally, no escalation; a human already owns it |
 | `FORCE_REEVALUATE=yes` (the self-healing un-escalation just cleared `loom:operator-only`) | Claim → Step 1 (Read) → Step 2 → Step 3 or 4, ignoring the marker entirely (#5664) |
 

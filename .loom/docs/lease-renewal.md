@@ -82,15 +82,19 @@ startup" — because that is precisely what a restart would drop.
 `defaults/scripts/sweep-lease-renew.sh` (mirrored, via a symlink, into
 `.loom/scripts/`) provides:
 
-- **`start <issue> [--interval SECS] [--watch-pid PID] [--host H] [--sweep-id S]`**
+- **`start <issue> [--interval SECS] [--watch-pid PID] [--watch-ident TOKEN]
+  [--max-age SECS] [--host H] [--sweep-id S]`**
   — resolve a liveness PID (the same ancestor-walk `sweep-run-registry.sh`
   uses to find the long-lived `claude -p /loom:sweep ...` orchestrator
   process, never the one-shot Bash-subshell PID of the tool call that
-  invokes `start`), then spawn ONE detached background loop that, every
-  `--interval` seconds (default 300 = 5 minutes, overridable via
-  `SWEEP_LEASE_RENEW_INTERVAL_SECS` too — the epic's suggested cadence,
-  pending #6181's real-world measurement), best-effort renews the lease for
-  `<issue>` as long as the watched PID stays alive. Prints the loop's PID.
+  invokes `start`), pin that PID's start-time **identity**, then spawn ONE
+  detached background loop that, every `--interval` seconds (default 300 =
+  5 minutes, overridable via `SWEEP_LEASE_RENEW_INTERVAL_SECS` too — the
+  epic's suggested cadence, pending #6181's real-world measurement),
+  best-effort renews the lease for `<issue>` for as long as that PID is
+  still running **the same process** and the loop is under its absolute age
+  cap. Prints the loop's PID. See
+  [The loop's four exits](#the-loops-four-exits-7825) below.
 - **`renew-once <issue> [--host H] [--sweep-id S]`** — one synchronous
   renewal cycle: locate the newest comment on `<issue>` whose body starts
   with the lease marker (or, if `--host`/`--sweep-id` are both given, the
@@ -99,6 +103,103 @@ startup" — because that is precisely what a restart would drop.
   silent no-op — not every sweep is daemon-dispatched), 1 on a `gh` failure.
 - **`stop <PID>`** — best-effort kill of a loop PID. Not required for
   correctness; the loop already self-terminates.
+
+### The loop's four exits (#7825)
+
+**Nothing outside the script reaps this loop.** The daemon's orphan-process
+reaper attributes processes to work exclusively by worktree, and a renewal
+loop's cwd is the workspace root while its argv names no worktree — so it is
+invisible to that pass. The crash-path process-group reap cannot reach it
+either: the dispatch deliberately puts it in its own process group, and it
+fires only once, at the moment the registry entry goes terminal. An
+in-session sweep has no registry entry at all. Self-termination is the *only*
+reaping mechanism there is, which is why it has four independent legs rather
+than one:
+
+| Exit | Trigger | Added |
+|---|---|---|
+| Watched PID died | `pid_is_live` reports dead at the next wake-up | #6180 |
+| Watched PID **is not the same process** | its start-time identity no longer matches the token recorded at `start` | #7825 |
+| **Absolute age cap** | the loop has been running longer than `--max-age` / `SWEEP_LEASE_RENEW_MAX_AGE_SECS` (default `86400` = 24 h; `0` = unbounded) | #7825 |
+| Own-yield guard | a `renew-once` cycle exits 4 — this dispatcher's own lease target already posted a `loom:lease-yield` record | #6485 |
+
+In every case the lease comment is **left in place** to age out. A
+terminating loop never deletes it — the epic requires positive evidence on
+the reclaim side, and the renew side simply stops broadcasting.
+
+#### Identity, not just a PID number
+
+A bare PID is not a durable handle on a process. The kernel recycles PID
+numbers, and on a busy worker polled every five minutes over a multi-day
+horizon, wraparound is a certainty rather than an edge case. Once an
+unrelated process inherited the watched PID number, the pre-#7825 liveness
+test flipped back to "alive" **permanently** — the loop could never observe
+its sweep's death again. Six such loops (the oldest 18 days old, most with no
+worktree left behind them) were found on a single worker, each keeping a
+long-dead sweep's `loom:building` lease fresh so that no peer host would ever
+reclaim the claim.
+
+The watch is therefore the **pair** `(pid, start-time identity)`:
+`/proc/<pid>/stat` field 22 on Linux, `ps -o lstart=` elsewhere. Both are
+re-probed on every cycle, and a mismatch — or an identity that can no longer
+be read at all — reads as dead. `--watch-ident` lets a caller that already
+captured the token at spawn time pin it explicitly and close the microsecond
+race between capturing a child's PID and probing it.
+
+Two related defects were fixed in the same pass, in the shared liveness code:
+
+- A **zombie now reads as dead.** `kill -0` *succeeds* for a `Z`-state
+  process, so the old `kill -0` fast path returned "alive" and the
+  documented `state == Z` branch below it was unreachable. `ps` is now
+  consulted first; `kill -0` survives only as the fallback for a host with
+  no usable `ps`, never as the whole decision.
+- **The ancestor walk refuses to hand back a session supervisor.**
+  `resolve_liveness_pid` previously returned whatever it landed on with no
+  validation, so when a sweep's intermediate ancestors had already been
+  reaped it could return `systemd --user`, `launchd`, a `tmux` server, or
+  `sshd` — an immortal watch target by construction. It now neither ascends
+  into a supervisor nor returns one; when no valid work handle exists it
+  returns its own short-lived PID, so the loop stops within a tick and the
+  lease ages out.
+
+#### Why the age cap exists anyway
+
+The identity check should make an immortal loop impossible. The cap is there
+because "should" is what the pre-#7825 code also claimed. It is deliberately
+independent of every other exit: even if the liveness test is defeated again
+by something nobody has anticipated, the blast radius is one day instead of
+eighteen. A sweep that legitimately outruns 24 hours loses lease *renewal*,
+not its work — the claim simply becomes reclaimable, which is the right
+outcome for a sweep nobody can distinguish from a dead one. Raise
+`SWEEP_LEASE_RENEW_MAX_AGE_SECS` (or set it to `0`) on a host that genuinely
+runs multi-day sweeps.
+
+**These functions are duplicated, byte-identically, in
+`defaults/scripts/sweep-lease-renew.sh` and
+`defaults/scripts/sweep-run-registry.sh`**, between
+`# --- BEGIN shared pid-liveness block` / `# --- END …` delimiters.
+`sweep-run-registry.sh` calls `main "$@"` unguarded at the bottom of the
+file, so sourcing it would also run its CLI dispatch; and ADR-0018 /
+`scripts/shell-allowlist.txt` admits no category for a *new* shared shell
+library (`contract` is baseline-only). Test case `(q)` in
+`defaults/scripts/tests/test-sweep-lease-renew.sh` diffs the two copies and
+fails the suite on any drift — that machine check is what stands in for
+`source`.
+
+#### Operator note: killing an orphan loop by hand
+
+An orphan renewal loop from before this fix is safe to `kill`. It holds no
+lock and writes nothing but the lease comment's `updated_at`; the lease it
+stops renewing simply ages out. Enumerate candidates with:
+
+```bash
+pgrep -af 'sweep-lease-renew\.sh start' | while read -r pid rest; do
+  printf '%s\t%s\t%s\n' "$pid" "$(ps -o etime= -p "$pid" | tr -d ' ')" "$rest"
+done
+```
+
+Anything older than the longest sweep you believe is actually running is an
+orphan.
 
 ### Renewal = idempotent PATCH, never a new comment
 
@@ -232,10 +333,34 @@ publish their own record and start renewal at **Step 1b** (#6320,
 
 ```bash
 LEASE_IDENT="$(./.loom/scripts/sweep-lease-publish.sh publish "$N" --sweep-id "$RUN_ID")"
-# shellcheck disable=SC2086
-set -- $LEASE_IDENT
-./.loom/scripts/sweep-lease-renew.sh start "$N" --host "$1" --sweep-id "$2" > /dev/null 2>&1 || true
+# `read` splits the "<host> <sweep-id>" line identically in bash and zsh.
+read -r LEASE_HOST LEASE_SWEEP <<<"$LEASE_IDENT"
+./.loom/scripts/sweep-lease-renew.sh start "$N" --watch-pid "$PPID" \
+  --host "$LEASE_HOST" --sweep-id "$LEASE_SWEEP" > /dev/null 2>&1 || true
 ```
+
+Three details of that invocation are load-bearing, and all three were learned
+the hard way (#7876):
+
+- **Never split `LEASE_IDENT` with `set -- $LEASE_IDENT`.** That relies on
+  bash's word-splitting of an unquoted parameter, and the orchestrator's Bash
+  tool runs the operator's **login shell** — zsh on macOS, where
+  `SH_WORD_SPLIT` is off and an unquoted parameter is *not* split. Under zsh
+  `$1` becomes the whole `"<host> <sweep-id>"` line and `$2` is empty, so the
+  loop forks with a bogus `--host` and an empty `--sweep-id`, its exact-match
+  targeting (#6485) never finds its own lease comment, and the lease ages out
+  at the 15-minute TTL while the operator believes renewal is running. Two
+  sweeps lost a build to the pre-push fence (#6309) this way before it was
+  found. `read -r … <<<"$…"` behaves identically in both shells.
+  `sweep-lease-renew.sh start` now also **refuses** a whitespace-bearing or
+  half-empty `--host`/`--sweep-id` pair rather than forking a doomed loop.
+- **Pass `--watch-pid "$PPID"` explicitly**, for the same reason Step 0a's
+  `sweep-run-registry.sh new --pid "$PPID"` does (#4691): the tool-call shell
+  is reaped the instant the call returns, so leaving `start` to resolve a
+  liveness PID by walking its own ancestry from inside a tool call is fragile.
+- **Keep `> /dev/null 2>&1`.** The loop is disowned but inherits whatever
+  stdout it was given; attach a pipe (e.g. `| tail`) and the calling tool call
+  blocks until the loop exits — i.e. for the lifetime of the sweep.
 
 ## What this does not do (Phase 1 scope)
 

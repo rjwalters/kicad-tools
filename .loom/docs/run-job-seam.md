@@ -138,6 +138,19 @@ ancestor of a known container-runtime socket path: `/run`, `/var`,
 check against a fixed list, so it holds on the client's pre-flight as well as
 on the executor, whether or not the socket exists yet.
 
+**Which is why a mount path must be spelled canonically.** The ancestor check
+is a prefix match, and a prefix match is spelling-sensitive: `/run//`, `//run`,
+`/run/.` and `/run/./` all name `/run`, yet none of them is a prefix of
+`/run/docker.sock`. The executor collapses such a spelling before matching
+(its `readlink -f` resolves the path on the host that will do the mounting),
+but the client cannot resolve a path that does not exist on the *client* host
+— so the pre-flight would have let `--mount /run//` through on a macOS client
+dispatching to a Linux executor. The validator therefore refuses a mount path
+containing a `//` or `/.` segment outright, alongside the existing `..`
+refusal, before any of the checks above run (#7896). One trailing slash is
+still fine (`/srv/work/`). That refusal is what makes the sentence above true
+on the client rather than only on the executor.
+
 **Behind the name-based checks sits a live-socket walk.** Whatever a socket
 is called and wherever a daemon was told to put it (`-H unix:///srv/x.sock`,
 rootless docker under `/run/user/<uid>`), the validator refuses a mount

@@ -657,6 +657,137 @@ issue can. Without this feed the advisory depended entirely on which discovery
 path noticed first: on a host whose work finder is idle and whose role loops
 are the only traffic, it would simply never trip.
 
+### The pool's own diagnostic used to defeat the issue-dispatch feed (#7860)
+
+The *issue-dispatch* half of the feed above almost never fires in production,
+and the symptom is a redispatch storm: the work finder re-offers the same
+candidates every tick, each attempt costing a `loom:issue` → `loom:building` →
+`loom:issue` label-flip pair.
+
+Measured on 2026-09-16 against the deployed daemon
+(`0.19.68`, commit `f2614fb`), across both live `daemon.log` generations:
+
+| Signal | Count |
+|---|---|
+| #6614 feed records from **role ticks** (#7607) | 38,958 |
+| #6614 feed records from **issue dispatches** | **6** |
+| #4689 synchronous hard-`Err` firings | **6** |
+| Token-selection deaths the **reaper** saw, misclassified as account exhaustion | **147** |
+
+That 6-vs-147 split is the whole defect: the synchronous path caught 4 % of
+these deaths, and the other 96 % were silently mislabelled. The forge-side cost
+is visible on `kicad-tools#5333` — 287 recorded label events (142 `loom:issue`,
+140 `loom:building`), 105 lease acquisitions and 12 yields across three hosts
+over ~16 h, every one of them authored by `loom-fleet-dispatch[bot]`. The same
+pattern ran **94** flips deep on `rjwalters/loom#7815`.
+
+**Which executable this was, and why that matters.** Every token-selection
+death in the 2026-09-16 window logs its own deciding binary (#4643), so the
+incident binds to specific revisions rather than to whatever `origin/main`
+happened to say afterwards: `0.19.60` (`6c608ee`) for the bulk, plus
+`ebcb66d`, `8de4d92`, `084b9b6` and `f2614fb` (`0.19.68`) as the host rolled
+through the day. All post-date **#4444** (park guard, 2026-07-29) and
+**#6917** (noop-cooldown guard, 2026-08-25) — so both guards were compiled
+into the running code, and "a guard was missing from the deployment" is
+excluded as an explanation. The mutations themselves are daemon claim/release,
+not a direct wrapper or agent edit: on `#7815` all 89 `loom:issue` ↔
+`loom:building` events are authored by `loom-fleet-dispatch[bot]`, and the
+`loom:blocked` event count is **zero**. The admission decision that let each
+one through is `work_finder.rs`'s `preflight_dispatch_gate` returning `Open`,
+which is exactly what an unarmed streak produces.
+
+The cause was a text collision, not a missing guard. When `spawn-claude.sh`'s
+token-selection step finds an unusable pool it prints a diagnostic listing
+**every pooled account together with that account's stored `.bad_tokens`
+reason** — prose like `exhausted: hit your session limit`. That prose matches
+the daemon's `rate-limited` exhaustion signature verbatim, so the reaper
+classified the death as *account exhaustion* even though **no account was ever
+selected** (`token=unknown`). Under the #4122 "exhaustion wins" precedence that
+verdict is neutral: the pre-flight streak is neither incremented nor reset, so
+the one dampener built for exactly this fault never armed, and the log line
+named a per-account cause for a workspace-wide one — misdirecting two separate
+investigations (#6917, #7860).
+
+`classify_preflight_outcome` now gives the `preflight-token-selection-failed`
+signature precedence over the exhaustion match, and **only** that signature:
+every other exhaustion shape still yields to #4122, because those deaths really
+are attributable to a named spawn account. The issues stay clean either way —
+the #4122 carve-out is untouched, so a dead pool still never charges an issue's
+quarantine tally or parks it `loom:blocked`.
+
+Two things this does **not** change:
+
+- **The `.ranking` force-trip (#4644) is unaffected.** It short-circuits the
+  streak whenever the live snapshot shows zero healthy accounts. The streak
+  matters precisely when that snapshot is stale — which it was during the
+  2026-09-16 incident.
+- **The #4689 synchronous fast path still does not fire for this death.** It
+  needs the child to be confirmed dead within `TOKEN_NAME_CAPTURE_TIMEOUT`
+  (5 s), and a real token-selection death usually takes longer: across 72
+  sampled per-sweep logs, **66 (92 %)** took ≥5.0 s from the dispatch header to
+  the error line (median 10.2 s, max 10.6 s). Past the 5 s deadline
+  `poll_observability` returns with the child still alive, `try_wait` yields
+  `None`, and `immediate_preflight_death` is therefore `None` — so neither
+  #4689's hard `Err` nor #6614's issue-dispatch feed can fire, and the death
+  falls through to the reaper. The 6 fast outliers in that sample line up
+  exactly with the 6 synchronous firings in the table above. The reaper picks
+  the death up either way — which is why the classification fix lives on the
+  reaper path — but the dispatch still reports `Success` with `Token: unknown`
+  rather than the hard `Err` #4689 intended. Tracked separately.
+
+### No unauthorized `loom:blocked` removal was involved (#7860)
+
+`kicad-tools#5481` reported the storm above as a *park-guard* failure: a
+`loom:blocked` applied at 2026-09-16T02:05:30Z, then "stripped" by a dispatch
+that re-took the lease at 02:07:00Z. That premise does not survive the primary
+forge record, and no park guard was missing. Recording the reconstruction here
+because the same misreading is easy to repeat from lease-comment history alone.
+
+What the 1,316-comment thread on `kicad-tools#5333` actually shows:
+
+- The **02:05:30Z** stand-down comment says, verbatim, "Releasing the
+  `loom:building` claim back to `loom:issue` … **No forge state was otherwise
+  mutated**." It did not apply `loom:blocked`.
+- The **first** comment anywhere in that history claiming to apply
+  `loom:blocked` is at **02:11:18Z** — 4m18s *after* the 02:07:00Z lease it
+  supposedly preceded.
+- The **02:12:44Z** pass then wrote "the prior pass applied `loom:blocked` …
+  at 2026-09-16T02:05:30Z", conflating the 02:05:30Z release-to-`loom:issue`
+  with the 02:11:18Z park. `#5481` reproduces that sentence, and its whole
+  "stripped within ~2 minutes" finding, unchanged.
+- **Zero** lease acquisitions follow 02:11:18Z, against 105 in the preceding
+  16 h. The storm stopped dead the moment `loom:blocked` was genuinely applied:
+  the #4444 park guard held, first time, with no fix.
+
+The code agrees, and is the part that generalizes past this one incident:
+
+- `flip_label_to_building` passes `--remove-label loom:issue` and nothing else.
+  A claim *cannot* remove a park. Even the fail-open park-probe path — where
+  #4444 is structurally blind — yields a visible dual
+  `loom:blocked` + `loom:building` state, never a silent unpark. Pinned by
+  `sweep_registry/guards_union_tests.rs`.
+- The daemon's one and only `loom:blocked` → `loom:issue` transition is the
+  startup pass in `quarantine_reconciliation.rs`, and `decide` short-circuits
+  to `Keep` unless the issue carries the daemon's own
+  `QUARANTINE_COMMENT_MARKER`. `#5333` carries none — and the #4122 carve-out
+  means an empty-pool death can never post one, so the path was doubly
+  unreachable.
+
+So the two halves of that incident are one fault, not two: the redispatch storm
+is the token-selection misclassification above, and the "blocked-label removal"
+is a reporting artifact of a sweep session misreading its predecessor's
+comment. **No separate park guard is warranted** — adding one would harden a
+mechanism the evidence shows already worked.
+
+One caveat, recorded because it bounds the claim: GitHub's label-event record
+for `#5333` is itself incomplete. Replaying all 287 recorded events yields a net
+`{loom:curated}`, while the live issue carries `{loom:curated, loom:issue}` — so
+at least one event is missing from both `/issues/N/events` and
+`/issues/N/timeline`, plausibly because the storm's own volume blew past a
+retention limit. The absence of any `loom:blocked` labeling event is therefore
+*corroborating*, not dispositive; the comment record and the code above are what
+carry the conclusion.
+
 ## Role ticks pre-flight the pool instead of spawning into it (#7607)
 
 The role runner already skipped a tick when the workspace had **no** token pool

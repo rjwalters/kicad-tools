@@ -331,7 +331,14 @@ _report_cycle() {
     fi
 
     local body
-    body="$(cat <<EOF
+    # Assigned via `read`, NOT `"$(cat <<EOF ...)"` (#7508): bash 3.2 -- the stock
+    # macOS /bin/bash -- does not skip heredoc bodies when scanning a command
+    # substitution for its closing paren, so the `#5671` issue reference inside
+    # parentheses below is misread as opening a region it never closes. The result
+    # is `bad substitution: no closing )` and an EMPTY body, i.e. a cycle report
+    # that silently says nothing. `read` never enters that scan; it returns
+    # non-zero at EOF, hence `|| true`.
+    IFS= read -r -d '' body <<EOF || true
 **Dependency cycle detected** - this issue cannot be unblocked by waiting.
 
 The declared \`Blocked by\` / \`Depends on\` / \`Requires\` references form a closed loop:
@@ -357,7 +364,6 @@ conclusion forever.
 *Automated by Champion role (detect-dependency-cycle.sh)*
 $marker
 EOF
-)"
 
     if ! gh issue comment "$num" --repo "$repo" --body "$body" >/dev/null 2>&1; then
         warn "could not comment on $node"

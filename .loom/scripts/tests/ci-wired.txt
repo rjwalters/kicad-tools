@@ -43,6 +43,7 @@ test-champion-critical-file-check.sh
 test-champion-epic-phase-marker-normalization.sh
 test-champion-epic-verdict-marker-scope.sh
 test-champion-held-pr-health-pass.sh
+test-champion-premise-false-close.sh
 test-champion-standing-authorization.sh
 test-check-ci-status.sh
 test-check-config-no-host-paths.sh
@@ -66,6 +67,7 @@ test-check-verified-corrections-preserved.sh
 test-claim-staleness.sh
 test-classify-ac-verification.sh
 test-classify-capacity-defer.sh
+test-classify-dependency-block-premise-false.sh
 test-classify-dependency-block.sh
 test-classify-error.sh
 test-clean-stale-binary.sh

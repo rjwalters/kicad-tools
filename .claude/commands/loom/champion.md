@@ -196,7 +196,7 @@ gh pr list \
   --jq '.[] | "#\(.number) \(.title)"'
 ```
 
-Ignore any that also carry `loom:operator-only` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges and never closes.
+Ignore any that also carry `loom:operator-only` (already routed to a human). If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md` → "Capped-PR Recovery Pass"**: read the full rejection history, apply the forward-progress test, and either grant one more Doctor→Judge cycle (remove `loom:blocked` only), keep the PR parked, or recommend closure to the operator — always with a rationale comment. This pass never merges and never closes (Champion's only close authority anywhere is the unrelated Priority 2/3 proposal-evaluation "premise-false close gate", `champion-issue-promo.md` Step 4, #7657 — a proposal issue, never a PR).
 
 ### No Work Available
 

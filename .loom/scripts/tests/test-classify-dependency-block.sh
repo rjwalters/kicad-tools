@@ -558,6 +558,10 @@ run_cdb --issue 5 --repo o/r --check-defer
 assert_eq "1" "$RC" "one merits finding disqualifies the whole set"
 assert_contains "$OUT" "REASON: merits-finding" "mixed set reports merits-finding"
 
+# Premise-false interaction with --check-defer (#7904) is covered in the
+# sibling module test-classify-dependency-block-premise-false.sh -- extracted
+# to keep this file under the file-size-policy.md threshold.
+
 echo
 echo "--- REGRESSION GUARD: a real dependency CYCLE still escalates ---"
 reset_state
@@ -1296,6 +1300,32 @@ assert_eq "2" "$RC" "unreadable root issue exits 2"
 
 # =====================================================================
 # Doc pins: the Champion prose actually calls the gate
+# =====================================================================
+# #7508 regression guard: the bash-3.2 heredoc-in-command-substitution trap
+# =====================================================================
+#
+# Every `--apply` assertion in this suite failed on macOS while passing on CI's
+# bash 5 (#7930), because `_apply_unescalation` built its comment body with
+# `"$(cat <<EOF ...)"`. bash 3.2 does not skip heredoc bodies when scanning a
+# command substitution for its closing paren, so the `#5664` reference inside
+# parentheses was misread as opening a region it never closes: `bad
+# substitution: no closing )`, an EMPTY body, and a silently failed
+# un-escalation. `_apply_fact_unescalation` had already been converted; these
+# two were missed, and nothing scanned this file.
+#
+# The scan already existed (lib/heredoc-body-safety.sh, #7834) but was wired
+# only into the watchdog suites. Wiring it here is the part that makes the fix
+# durable rather than a one-time repair.
+echo
+echo "--- #7508 heredoc-body safety (static scan) ---"
+# shellcheck source=lib/heredoc-body-safety.sh
+source "$TEST_DIR/lib/heredoc-body-safety.sh"
+check_heredoc_scan_selftest
+check_heredoc_body_safety "$CDB" _apply_unescalation "_apply_unescalation() (#7930)"
+check_heredoc_body_safety "$CDB" _apply_fact_unescalation "_apply_fact_unescalation() (#7508)"
+check_heredoc_body_safety "$SCRIPTS_DIR/detect-dependency-cycle.sh" _report_cycle \
+    "_report_cycle() (#7930)"
+
 # =====================================================================
 
 echo

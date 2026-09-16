@@ -178,6 +178,12 @@ _RJ_RUNTIME_SOCKET_PATHS=(
 # work against the canonical list above — no filesystem access — so it holds
 # on the client's pre-flight exactly as it does on the executor host, and does
 # not depend on the socket existing at validation time.
+#
+# PRECONDITION: <path> is already in canonical form. Being a prefix match, this
+# is spelling-sensitive — `/run//` and `/run/.` name `/run` but are a prefix of
+# nothing — so `loom_job_validate_spec` refuses a non-canonical mount path
+# outright before it gets here (#7896). Do not weaken that refusal without
+# giving this function a normalizer of its own.
 _rj_socket_ancestor() {
     local dir="${1%/}" s
     [[ -n "$dir" ]] || return 0 # "/" is refused outright by the caller
@@ -279,19 +285,55 @@ loom_job_validate_spec() {
     # src:dst form to get wrong, so docker/worker/MOUNT-CONTRACT.md §1 (path
     # parity) is structurally enforced by the spec shape itself rather than by
     # a rule callers have to follow.
-    local path mode real candidate below live
+    local path mode real spelled candidate below live refused
     while IFS=$'\t' read -r path mode; do
         [[ -z "$path$mode" ]] && continue
-        if [[ "$path" != /* ]]; then
-            errors+=("mount path must be absolute (got \"$path\")")
-            continue
-        fi
-        [[ "$path" == *..* ]] && errors+=("mount path must not contain '..' (got \"$path\")")
-        [[ "$path" == "/" ]] && errors+=("refusing to mount the host root '/'")
+
+        # Mode is checked first, and unconditionally, so that a path refused
+        # outright below still reports a bad mode alongside its own reason.
         case "$mode" in
             ro | rw) ;;
             *) errors+=("mount mode must be \"ro\" or \"rw\" (got \"$mode\" for \"$path\")") ;;
         esac
+
+        # --- Refused outright: nothing further to learn about this path ------
+        #
+        # Each of these `continue`s, rather than falling through: the spec is
+        # already rejected, and the checks below would only add a second reason
+        # — at the cost of running a filesystem walk (`_rj_live_socket_under`)
+        # over a path the caller has already been told it may not name, and of
+        # reporting a *misleading* second reason for a non-canonical spelling
+        # (#7896).
+        if [[ "$path" != /* ]]; then
+            errors+=("mount path must be absolute (got \"$path\")")
+            continue
+        fi
+        if [[ "$path" == *..* ]]; then
+            errors+=("mount path must not contain '..' (got \"$path\")")
+            continue
+        fi
+        # Canonical spelling is REQUIRED, not merely preferred. Every check
+        # below either matches the path as a string (the socket-name patterns,
+        # `_rj_socket_ancestor`) or compares it against its resolved form, and
+        # a non-canonical spelling of the same directory defeats the string
+        # side of that: `/run//`, `//run`, `/run/.` and `/run/./` all name
+        # `/run`, yet none of them is a prefix match for `/run/docker.sock`.
+        # The EXECUTOR would still catch them (its `readlink -f` collapses the
+        # spelling, and the ancestor check then fires on the resolved
+        # candidate), but the CLIENT pre-flight cannot resolve a path that does
+        # not exist on the client host — a macOS client pre-flighting a job for
+        # a Linux executor emitted `-v /run//:/run//` (#7896). Refusing the
+        # spelling here, next to the `..` refusal, keeps that a property of one
+        # rule rather than of a normalizer every later check must be trusted to
+        # have run.
+        if [[ "$path" == *//* || "$path" == */./* || "$path" == */. ]]; then
+            errors+=("mount path must be in canonical form: no '//' or '/.' path segments (got \"$path\")")
+            continue
+        fi
+        if [[ "$path" == "/" ]]; then
+            errors+=("refusing to mount the host root '/'")
+            continue
+        fi
 
         # Resolve the source path BEFORE the refusal patterns below, and check
         # BOTH spellings against them.
@@ -310,19 +352,32 @@ loom_job_validate_spec() {
         # the container (MOUNT-CONTRACT.md §1), so substituting the resolved
         # path would quietly break the parity guarantee callers rely on. Pass
         # the resolved path explicitly instead.
+        #
+        # The comparison is against the given spelling minus ONE trailing
+        # slash: `/srv/work/` and `/srv/work` name the same directory and
+        # `readlink -f` always returns the latter, so without the `%/` an
+        # ordinary trailing slash was refused as `is a symlink to "/srv/work"`
+        # — a message naming a cause that was not the real one (#7896). Every
+        # other spelling difference is refused outright above, so a mismatch
+        # that survives to here means a genuine symlink.
+        spelled="${path%/}"
         real="$(_rj_realpath "$path")"
-        [[ "$real" == "$path" ]] && real=""
+        [[ "$real" == "$spelled" ]] && real=""
+        refused=""
         if [[ -n "$real" ]]; then
             errors+=("mount path \"$path\" is a symlink to \"$real\": the executor's docker daemon binds the RESOLVED path, so a link would break this seam's path-parity guarantee and could smuggle a refused path past the checks below — pass \"$real\" explicitly instead")
+            refused=1
         fi
 
         for candidate in "$path" ${real:+"$real"}; do
             case "$candidate" in
                 */docker.sock | */docker.sock/* | /var/run/docker* | /run/docker* | */containerd.sock | */podman.sock | */crio.sock)
                     errors+=("refusing docker/container-runtime socket mount \"$candidate\": a mounted container-runtime socket is host-root-equivalent and is exactly what this seam exists to avoid (ADR-0017 Decision 3)")
+                    refused=1
                     ;;
                 /proc* | /sys* | /dev*)
                     errors+=("refusing host kernel-interface mount \"$candidate\" (/proc, /sys and /dev are not mountable through this seam)")
+                    refused=1
                     ;;
             esac
 
@@ -336,8 +391,17 @@ loom_job_validate_spec() {
             below="$(_rj_socket_ancestor "$candidate")"
             if [[ -n "$below" ]]; then
                 errors+=("refusing mount \"$candidate\": it is an ancestor of container-runtime socket path \"$below\", and a bind mount of a directory carries every socket beneath it — host-root-equivalent, exactly what this seam exists to avoid (ADR-0017 Decision 3)")
+                refused=1
             fi
         done
+
+        # Every remaining check reads the filesystem. Once a name-based check
+        # above has already refused this path there is nothing left to decide,
+        # so skip the walk rather than pay for it: `find`ing a huge tree the
+        # caller was told it may not name (`/proc`, `/sys`, `/run`) just to add
+        # a second reason to an already-rejected spec is pure executor cost
+        # (#7896).
+        [[ -n "$refused" ]] && continue
 
         # Second, host-local layer behind the name-based checks: whatever the
         # path is called, refuse to bind a live unix socket, or a directory

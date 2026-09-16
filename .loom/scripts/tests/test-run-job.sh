@@ -269,6 +269,46 @@ done
 argv="$("$RUN_JOB" --dry-run --image alpine --mount /run -- true 2>/dev/null || true)"
 assert_not_contains "$argv" "/run:/run" "no docker argv is produced for the ancestor-directory mount"
 
+# ...AND the ancestor rule cannot be spelled around (#7896). The ancestor check
+# is a PREFIX match, so `/run//`, `//run`, `/run/.` and `/run/./` all name
+# `/run` while matching no prefix of `/run/docker.sock`. The executor collapses
+# them with `readlink -f` and catches them anyway, but the CLIENT pre-flight
+# cannot resolve a path that does not exist on the client host — on macOS
+# `--mount /run//` used to sail through pre-flight and emit `-v /run//:/run//`.
+# Every case below therefore runs on the client, on THIS host, whether or not
+# `/run` exists here.
+for spell in '/run//' '//run' '/run/.' '/run/./' '/var//' '/var/run//' '//run/./'; do
+    out="$("$RUN_JOB" --dry-run --image alpine --mount "$spell" -- true 2>&1)"
+    assert_eq "78" "$?" "refuses the non-canonical spelling $spell (client pre-flight, no filesystem resolution needed)"
+    assert_contains "$out" "must be in canonical form" "refusal for $spell names the spelling as the cause"
+    # A non-canonical spelling is not a symlink: the refusal must not say it is.
+    assert_not_contains "$out" "is a symlink" "refusal for $spell does not misattribute the spelling to a symlink"
+    argv="$("$RUN_JOB" --dry-run --image alpine --mount "$spell" -- true 2>/dev/null || true)"
+    assert_not_contains "$argv" "$spell:" "no docker argv is produced for the non-canonical mount $spell"
+done
+
+# The executor re-checks the spelling rule on its own, as it does every other
+# mount rule — a client that skipped its pre-flight gains nothing by it.
+nc_evil="$(jq -nc '{schema:"loom.run-job/v1", id:"job-noncanon", image:"alpine",
+                    command:["true"], workdir:"", network:"none",
+                    mounts:[{path:"/run//", mode:"ro"}],
+                    env:{}, limits:{cpus:"",memory:""}, timeoutSeconds:0}')"
+out="$(bash "$EXEC_LIB" run "$(printf '%s' "$nc_evil" | base64 | tr -d '\n')" 2>&1)"
+assert_eq "78" "$?" "executor independently rejects a non-canonically spelled mount spec"
+assert_contains "$out" "must be in canonical form" "executor-side spelling refusal is explicit"
+assert_not_contains "$out" "is a symlink" "executor-side spelling refusal does not call /run// a symlink"
+assert_not_contains "$(cat "$FAKE_DOCKER_LOG")" "/run//" "no docker run was issued for the non-canonical spec"
+
+# A single trailing slash stays legal on an ordinary path: `/srv/work/` and
+# `/srv/work` name the same directory, and `readlink -f` returns the latter, so
+# the resolved-vs-given comparison used to refuse the slash as "is a symlink
+# to" — naming a cause that was not the real one.
+TRAILDIR="$TMP_ROOT/trailing"
+mkdir -p "$TRAILDIR"
+out="$("$RUN_JOB" --dry-run --image alpine --mount "$TRAILDIR/" -- true 2>&1)"
+assert_eq "0" "$?" "a real directory with one trailing slash is still accepted"
+assert_not_contains "$out" "is a symlink" "a trailing slash is never reported as a symlink"
+
 # The executor re-checks the ancestor rule on its own: a client that skipped
 # its pre-flight (or lied) still cannot get `-v /run:/run` past it.
 anc_evil="$(jq -nc '{schema:"loom.run-job/v1", id:"job-ancestor", image:"alpine",
@@ -309,6 +349,22 @@ if make_unix_socket "$LIVEDIR/nested/d.sock" && [[ -S "$LIVEDIR/nested/d.sock" ]
     rm -f "$LIVEDIR/nested/d.sock"
     out="$("$RUN_JOB" --dry-run --image alpine --mount "$LIVEDIR" -- true 2>&1)"
     assert_eq "0" "$?" "the same directory is accepted again once the socket is gone (a live walk, not a name check)"
+
+    # The live-socket walk is SKIPPED once a name-based check has already
+    # refused the path (#7896): the spec is rejected either way, and `find`ing
+    # a tree the caller was told it may not name (`/proc`, `/sys`, `/run`, or
+    # the host root) is pure executor cost. Observable hermetically: a path
+    # refused by the socket-NAME pattern that also happens to be a live socket
+    # reports the name refusal only.
+    SKIPDIR="$TMP_ROOT/skipwalk"
+    mkdir -p "$SKIPDIR"
+    if make_unix_socket "$SKIPDIR/docker.sock" && [[ -S "$SKIPDIR/docker.sock" ]]; then
+        out="$("$RUN_JOB" --dry-run --image alpine --mount "$SKIPDIR/docker.sock" -- true 2>&1)"
+        assert_eq "78" "$?" "a name-refused path that is also a live socket is still rejected"
+        assert_contains "$out" "refusing docker/container-runtime socket mount" "the name-based refusal is the one reported"
+        assert_not_contains "$out" "live unix socket" "the live-socket walk is skipped once a name check has already refused the path"
+        rm -f "$SKIPDIR/docker.sock"
+    fi
 else
     echo "  (skip: neither python3 nor perl could create a unix socket here; live-socket walk not exercised)"
 fi
