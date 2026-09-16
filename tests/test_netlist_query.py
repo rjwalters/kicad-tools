@@ -279,6 +279,94 @@ class TestGetNetForPin:
         assert net.startswith("Net-(")
 
 
+class TestGetAllPinNets:
+    """Tests for get_all_pin_nets() -- the bulk counterpart of get_net_for_pin().
+
+    Issue #5240: get_net_for_pin() rebuilds the connectivity graph (an
+    O(wires^2) all-pairs scan) on every call, which made per-pin LVS
+    resolution quadratic in wire count as well as linear in pin count.
+    get_all_pin_nets() builds the graph once and resolves every pin
+    against it; these tests assert its output is identical to calling
+    get_net_for_pin() once per ``(ref, number)`` pair -- the historical
+    per-pin loop it replaces in
+    ``kicad_tools.lvs.board_lvs._schematic_pin_to_net``.
+    """
+
+    def _all_pin_keys(self, sch) -> set[tuple[str, str]]:
+        keys = set()
+        for sym in sch.symbols:
+            ref = sym.reference
+            if not ref:
+                continue
+            for pin in sym.symbol_def.pins:
+                number = pin.number
+                if number:
+                    keys.add((ref, number))
+        return keys
+
+    def test_matches_get_net_for_pin_for_named_and_unnamed_nets(self):
+        """Named net, floating pin, and auto-named net all agree per-pin."""
+        sch = Schematic("Test")
+
+        r_def = make_simple_symbol("Device:R", [("~", "1", -2.54, 0), ("~", "2", 2.54, 0)])
+        r1 = SymbolInstance(symbol_def=r_def, x=100, y=50, rotation=0, reference="R1", value="10k")
+        r2 = SymbolInstance(symbol_def=r_def, x=110, y=50, rotation=0, reference="R2", value="10k")
+        sch.symbols.extend([r1, r2])
+
+        # R1 pin 2 -> labeled net "DATA".
+        sch.wires.append(Wire(x1=102.54, y1=50, x2=105, y2=50))
+        sch.labels.append(Label(text="DATA", x=105, y=50))
+        # R2 pin 1 -> R2 pin 2, unnamed net (auto-generated name).
+        sch.wires.append(Wire(x1=107.46, y1=50, x2=112.54, y2=50))
+        # R1 pin 1 is left floating (no wire).
+
+        bulk = sch.get_all_pin_nets()
+        expected_keys = self._all_pin_keys(sch)
+        assert set(bulk.keys()) == expected_keys
+
+        for ref, number in expected_keys:
+            assert bulk[(ref, number)] == sch.get_net_for_pin(ref, number)
+
+        # Spot-check the three distinct outcomes explicitly.
+        assert bulk[("R1", "2")] == "DATA"
+        assert bulk[("R1", "1")] is None
+        assert bulk[("R2", "1")] is not None
+        assert bulk[("R2", "1")].startswith("Net-(")
+        assert bulk[("R2", "1")] == bulk[("R2", "2")]
+
+    def test_matches_get_net_for_pin_for_multi_unit_symbol(self):
+        """Multi-unit symbol pins resolve identically via the bulk path."""
+        sch = Schematic("Test")
+        sym_def = _build_dual_unit_symdef()
+        u1 = SymbolInstance(
+            symbol_def=sym_def, x=100, y=100, rotation=0, reference="U1", value="LM393", unit=1
+        )
+        u2 = SymbolInstance(
+            symbol_def=sym_def, x=200, y=200, rotation=0, reference="U1", value="LM393", unit=2
+        )
+        sch.symbols.extend([u1, u2])
+        # Unit 1's OUT_A (pin 1) is wired and named; unit 2's OUT_B (pin 7)
+        # is left floating -- the phantom-net regression this mirrors
+        # (issue #4020) would wrongly bind pin 7 to unit 1's net.
+        sch.wires.append(Wire(x1=102.54, y1=100, x2=110, y2=100))
+        sch.labels.append(Label(text="A_OUT", x=110, y=100))
+
+        bulk = sch.get_all_pin_nets()
+        expected_keys = self._all_pin_keys(sch)
+        assert set(bulk.keys()) == expected_keys
+
+        for ref, number in expected_keys:
+            assert bulk[(ref, number)] == sch.get_net_for_pin(ref, number)
+
+        assert bulk[("U1", "1")] == "A_OUT"
+        assert bulk[("U1", "7")] is None
+
+    def test_empty_schematic_returns_empty_mapping(self):
+        """No symbols -> no pins to resolve."""
+        sch = Schematic("Test")
+        assert sch.get_all_pin_nets() == {}
+
+
 class TestPinsOnNet:
     """Tests for pins_on_net() method."""
 
