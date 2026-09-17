@@ -84,6 +84,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
     from kicad_tools.router.primitives import Route
     from kicad_tools.router.reporting import RouteAttemptResult
+    from kicad_tools.router.routing_plan import RoutingPlan
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -2673,6 +2674,46 @@ def _write_net_class_map_sidecar(
             print(f"  Net-class-map sidecar: {sidecar_path}")
 
 
+def _write_routing_plan_sidecar(
+    output_path: Path,
+    routing_plan: "RoutingPlan | None",
+    quiet: bool = False,
+) -> None:
+    """Persist the report-only RoutingPlan next to the routed PCB (Issue #5519).
+
+    Writes ``<output_stem>.routing_plan.json`` -- e.g.
+    ``simple_led_routed.routing_plan.json`` next to
+    ``simple_led_routed.kicad_pcb``.  No collision-avoidance rule is
+    needed (unlike the net-class-map / current-paths sidecars): the
+    stem-keyed name never matches a user-authored input file, since
+    there is no ``--routing-plan`` input flag in this slice.
+
+    A blocked write (read-only output directory) is a non-fatal warning,
+    exactly like the other post-route sidecars -- the route step must
+    never fail just because a diagnostic sidecar could not be written.
+
+    Args:
+        output_path: Path to the routed PCB file. The sidecar is written
+            to the same directory, stem-keyed off this file's name.
+        routing_plan: The ``RoutingPlan`` built by the two-phase global
+            pass (``getattr(router, "routing_plan", None)``), or ``None``
+            when no plan was built (non-dense boards on the default
+            path, or ``emit_routing_plan=False``).
+        quiet: If True, suppress the confirmation / summary lines.
+    """
+    if routing_plan is None:
+        return
+
+    sidecar_path = output_path.parent / f"{output_path.stem}.routing_plan.json"
+    routing_plan.source["pcb"] = str(output_path)
+    written = routing_plan.write_sidecar(sidecar_path, quiet=quiet)
+    if not written:
+        return
+    if not quiet:
+        print(f"  Routing-plan sidecar: {sidecar_path}")
+        print(f"  {routing_plan.summary_line()}")
+
+
 def _write_current_paths_sidecar(
     output_path: Path,
     current_path_specs: "Sequence[CurrentPathSpec] | None",
@@ -3008,6 +3049,7 @@ def run_post_route_drc(
     current_path_specs: "Sequence[CurrentPathSpec] | None" = None,
     current_paths_input_path: Path | None = None,
     preserve_filled_copper: bool = False,
+    routing_plan: "RoutingPlan | None" = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -3062,6 +3104,15 @@ def run_post_route_drc(
             path.  Threaded to the sidecar writer so the derived sidecar
             never overwrites the user's authored file (Issue #4428's
             collision rule, applied to this sidecar too).
+        routing_plan: The report-only ``RoutingPlan`` built by the
+            two-phase global pass (Issue #5519, Epic #5510 Phase 1),
+            typically ``getattr(router, "routing_plan", None)``.  When
+            not ``None`` it is serialized to
+            ``<output_stem>.routing_plan.json`` next to the routed PCB
+            (a blocked write is a non-fatal warning, like the other
+            sidecars here).  ``None`` (the default -- no dense package
+            triggered the two-phase pass, or a caller opted out) is a
+            silent no-op.
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -3093,6 +3144,16 @@ def run_post_route_drc(
         current_path_specs,
         quiet=quiet,
         input_path=current_paths_input_path,
+    )
+
+    # Issue #5519 (Epic #5510, Phase 1): persist the report-only
+    # RoutingPlan next to the routed PCB.  A no-op when no plan was built
+    # (non-dense boards on the default path never reach the two-phase
+    # global pass in this slice).
+    _write_routing_plan_sidecar(
+        output_path,
+        routing_plan,
+        quiet=quiet,
     )
 
     # Issue #3920: persist the resolved fab profile as a ``fab_profile.json``
@@ -8042,6 +8103,10 @@ def route_with_layer_escalation(
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
+            # Issue #5519 (Epic #5510, Phase 1): thread the report-only
+            # RoutingPlan so it is serialized to
+            # <output_stem>.routing_plan.json next to the routed PCB.
+            routing_plan=getattr(final_result.router, "routing_plan", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -8912,6 +8977,10 @@ def route_with_rule_relaxation(
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
+            # Issue #5519 (Epic #5510, Phase 1): thread the report-only
+            # RoutingPlan so it is serialized to
+            # <output_stem>.routing_plan.json next to the routed PCB.
+            routing_plan=getattr(final_result.router, "routing_plan", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -11286,6 +11355,10 @@ def route_with_combined_escalation(
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
+            # Issue #5519 (Epic #5510, Phase 1): thread the report-only
+            # RoutingPlan so it is serialized to
+            # <output_stem>.routing_plan.json next to the routed PCB.
+            routing_plan=getattr(final_result.router, "routing_plan", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -17698,6 +17771,10 @@ def _run_main_impl(args, parser, argv) -> int:
             # for kct check auto-discovery.
             current_path_specs=getattr(args, "_loaded_current_paths", None),
             current_paths_input_path=getattr(args, "_current_paths_input_path", None),
+            # Issue #5519 (Epic #5510, Phase 1): thread the report-only
+            # RoutingPlan so it is serialized to
+            # <output_stem>.routing_plan.json next to the routed PCB.
+            routing_plan=getattr(router, "routing_plan", None),
         )
 
         # Auto-fix DRC violations if requested
@@ -17879,6 +17956,21 @@ def _run_main_impl(args, parser, argv) -> int:
             # Show comprehensive routing summary with successes, failures, and suggestions
             # Use JSON format if requested
             if args.format == "json":
+                # Issue #5519 (Epic #5510, Phase 1): surface the report-only
+                # RoutingPlan's overflow summary + sidecar path under the
+                # "routing_plan" key.  Absent (not null) when no plan was
+                # built for this run.
+                _routing_plan = getattr(router, "routing_plan", None)
+                _routing_plan_json = None
+                if _routing_plan is not None:
+                    _routing_plan_json = {
+                        "overflow_report": _routing_plan.overflow_report.to_dict()
+                        if _routing_plan.overflow_report
+                        else None,
+                        "sidecar": str(
+                            output_path.parent / f"{output_path.stem}.routing_plan.json"
+                        ),
+                    }
                 print_routing_diagnostics_json(
                     router,
                     net_map,
@@ -17886,6 +17978,7 @@ def _run_main_impl(args, parser, argv) -> int:
                     current_strategy=args.strategy,
                     nets_to_route_ids=multi_pad_net_ids,
                     single_pad_count=len(single_pad_nets),
+                    routing_plan=_routing_plan_json,
                 )
             else:
                 # Verbose mode shows detailed path analysis for each failure

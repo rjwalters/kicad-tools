@@ -155,6 +155,13 @@ general single-document stdout contract. Callers must not treat parser flag
 coverage alone as proof that the entire stream is one JSON document. See the
 [route reference](cli.md#routing-around-invalid-placement) for disposition scope.
 
+On dense-package boards the default path also builds a report-only
+`RoutingPlan` (tile-level demand/capacity/overflow from the tile-based
+global-routing pass) written as a `<output_stem>.routing_plan.json`
+sidecar and surfaced under the `routing_plan` key in `--format json`
+output when built. See [`routing-plan.md`](routing-plan.md) for the
+schema (Issue #5519, Epic #5510 Phase 1).
+
 ### Sweep backlog for #4674 — should gain `--format {text,json}`
 
 Read-only/reporting commands should emit their report as JSON; mutating

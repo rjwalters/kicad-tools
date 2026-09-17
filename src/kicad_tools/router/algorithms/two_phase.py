@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from ..grid import RoutingGrid
     from ..pathfinder import Router
     from ..primitives import Pad, Route
+    from ..region_graph import RegionGraph
+    from ..routing_plan import RoutingPlan
     from ..rules import DesignRules
     from ..sparse import Corridor
 
@@ -71,6 +73,7 @@ class TwoPhaseRouter:
         apply_byte_lane_inner_priority: Callable[[list[int]], list[int]] | None = None,
         stall_ripup_budget: int | None = None,
         relief_rescue: Callable[..., bool] | None = None,
+        emit_routing_plan: bool = True,
     ):
         self.grid = grid
         self.router = router
@@ -129,6 +132,25 @@ class TwoPhaseRouter:
         # False for.  ``None`` (e.g. unit tests constructing
         # TwoPhaseRouter directly) preserves legacy behaviour.
         self._relief_rescue = relief_rescue
+
+        # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
+        # sidecar.  ``emit_routing_plan=True`` (default) builds a
+        # ``RoutingPlan`` from the already-computed global-routing result
+        # right after ``GlobalRouter.route_all`` and stashes it here;
+        # ``Autorouter.route_all_two_phase`` copies it to
+        # ``Autorouter.routing_plan``.  Building the plan only READS
+        # ``RegionGraph`` state (edges/regions + the public overflow
+        # queries) -- it never mutates utilization/history costs, so it
+        # cannot perturb subsequent routing and copper stays
+        # byte-identical regardless of this flag.  ``last_region_graph``
+        # is exposed alongside it so callers (and tests) can cross-check
+        # the plan's overflow totals against the live graph. If
+        # ``route_all`` runs more than once in a single ``kct route``
+        # invocation (relaxation/escalation retries), the LAST call's
+        # plan wins -- earlier plans are overwritten, not accumulated.
+        self.emit_routing_plan = emit_routing_plan
+        self.last_routing_plan: RoutingPlan | None = None
+        self.last_region_graph: RegionGraph | None = None
 
         # Issue #2597: Communicates the reason the negotiated outer loop in
         # ``_detailed_negotiated()`` exited.  Read by the progress-callback
@@ -389,11 +411,39 @@ class TwoPhaseRouter:
             history_increment=1.0,
         )
 
+        _global_route_start = time.time()
         global_result = global_router.route_all(
             nets=self.nets,
             pad_dict=self.pads,
             net_order=net_order,
         )
+        _global_route_elapsed = time.time() - _global_route_start
+
+        # Issue #5519 (Epic #5510, Phase 1): serialize the global-routing
+        # result into a report-only RoutingPlan sidecar right after the
+        # emission point.  Read-only w.r.t. ``region_graph`` /
+        # ``global_result`` -- see ``RoutingPlan.from_global_result`` and
+        # the class attribute docstring above.
+        self.last_region_graph = region_graph
+        if self.emit_routing_plan:
+            from ..routing_plan import RoutingPlan
+
+            self.last_routing_plan = RoutingPlan.from_global_result(
+                global_result,
+                region_graph,
+                net_order=net_order,
+                net_names=self.net_names,
+                net_class_map=self.net_class_map,
+                layer_stack=self.grid.layer_stack,
+                tile_mm=tile_size,
+                elapsed_s=_global_route_elapsed,
+                default_trace_width=self.rules.trace_width,
+                default_trace_clearance=self.rules.trace_clearance,
+                pour_skipped=pour_nets,
+                single_pad=single_pad_nets,
+            )
+        else:
+            self.last_routing_plan = None
 
         # Extract corridors from global routing result
         corridors: dict[int, Corridor] = {}

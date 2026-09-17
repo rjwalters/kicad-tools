@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add a report-only `RoutingPlan` sidecar (`<output_stem>.routing_plan.json`)
+  serializing the tile-based global-routing pass's per-net corridor
+  assignments and per-edge demand/capacity/overflow that `kct route`'s
+  default path already computes for dense-package boards but previously
+  discarded. Text mode prints a one-line summary; `--format json` adds a
+  `routing_plan` key. Building the plan is purely a read of existing
+  `RegionGraph` state, so routed copper is unchanged (Issue #5519, Phase 1
+  of Epic #5510). See `docs/reference/routing-plan.md`.
+
 - Add transactional physical power stitching (`kct stitch --complete`), retaining
   native refill evidence and rejecting incomplete nets, broken pad bonds, or new
   native findings; use the shared stage in Board05's active recipe (#5388).

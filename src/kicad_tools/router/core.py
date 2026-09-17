@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .pathfinder import Router
+    from .routing_plan import RoutingPlan
     from .stub_terminals import StubTerminal
 
 from kicad_tools.cli.progress import flush_print
@@ -1807,6 +1808,20 @@ class Autorouter:
         # Populated by register_block() when blocks have internal traces.
         # (Issue #1587)
         self._block_internal_connections: dict[str, list[dict]] = {}
+
+        # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
+        # sidecar.  ON by default -- building the plan only reads
+        # RegionGraph state (see TwoPhaseRouter's own attribute docstring),
+        # so it cannot perturb the copper this run produces.  No CLI flag
+        # exists yet to flip this (``--no-routing-plan`` is 1b); it is
+        # exposed here so tests / future CLI wiring can opt out.
+        # ``routing_plan`` is populated by ``route_all_two_phase`` (every
+        # ``kct route`` entry point that reaches ``route_all_two_phase``
+        # -- ``route_with_escape``, ``route_with_escape_and_diffpairs``,
+        # and the non-dense ``--two-phase`` path -- goes through it) once
+        # the two-phase router's global pass has run; ``None`` otherwise.
+        self.emit_routing_plan: bool = True
+        self.routing_plan: RoutingPlan | None = None
 
     def enable_sub_problem_cache(
         self,
@@ -14909,6 +14924,11 @@ class Autorouter:
             relief_rescue=functools.partial(
                 self._relief_rescue, deterministic_rescue=deterministic_rescue
             ),
+            # Issue #5519 (Epic #5510, Phase 1): forward the report-only
+            # RoutingPlan switch -- ``TwoPhaseRouter`` never sees the
+            # ``Autorouter``, so this is the only way it learns whether to
+            # build the sidecar plan.
+            emit_routing_plan=self.emit_routing_plan,
         )
 
     def route_all_two_phase(
@@ -15013,6 +15033,14 @@ class Autorouter:
             max_iterations=max_iterations,
             checkpoint_callback=checkpoint_callback,
         )
+        # Issue #5519 (Epic #5510, Phase 1): copy the report-only
+        # RoutingPlan the two-phase router built (or ``None`` when
+        # ``emit_routing_plan`` is off) onto the Autorouter so CLI callers
+        # can read it via ``getattr(router, "routing_plan", None)``
+        # without reaching into the (short-lived) TwoPhaseRouter instance.
+        # If this method runs more than once in a single ``kct route``
+        # invocation, the LAST call's plan wins.
+        self.routing_plan = tp_router.last_routing_plan
         # Issue #2657 / Epic #2556 Phase 3H-cont: post-route diff-pair
         # skew bookkeeping (see _finalize_routing docstring).
         self._finalize_routing()
