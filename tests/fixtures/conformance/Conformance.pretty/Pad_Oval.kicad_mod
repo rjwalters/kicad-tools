@@ -1,0 +1,12 @@
+(footprint "Pad_Oval"
+	(version 20240108)
+	(generator "kicad-tools-conformance")
+	(layer "F.Cu")
+	(descr "Conformance oracle probe pad: oval (stadium) SMD pad, 1.6 x 0.8 mm (Epic #5509 Phase 1a)")
+	(attr smd)
+	(pad "1" smd oval
+		(at 0 0)
+		(size 1.6 0.8)
+		(layers "F.Cu" "F.Paste" "F.Mask")
+	)
+)
