@@ -1938,7 +1938,7 @@ class CppPathfinder:
         per_net_timeout: float | None = None,
         extra_goal_cells: set[tuple[int, int, int]] | None = None,
         *,
-        clear_avoidance_after_connection: bool = False,
+        clear_avoidance_after_connection: bool = True,
     ) -> Route | None:
         """Route between two pads.
 
@@ -1961,9 +1961,15 @@ class CppPathfinder:
             extra_goal_cells: Additional goal cells for early termination
                 (accepted for API compatibility but not yet used by C++ backend)
 
-            clear_avoidance_after_connection: Opt in to clearing retry penalties
-                when this connection exits. Defaults to False, preserving caller
-                cleanup at net end until default-on qualification (#5504).
+            clear_avoidance_after_connection: Clear this connection's clearance
+                retry penalties when ``route()`` exits (success, failure and
+                exception paths alike).  Defaults to ``True`` (#5504): the
+                penalties ``_boost_avoidance_at`` accumulates are scoped to one
+                connection's resumable search and must not price the grid for
+                the next pad pair.  Callers keep their own net-end
+                ``clear_avoidance_costs()`` (``Autorouter._route_net``, #2438);
+                the two compose -- this one just clears more often.  Pass
+                ``False`` only to reproduce the pre-#5504 leaking behaviour.
 
         Returns:
             Route object if successful, None if no path found
