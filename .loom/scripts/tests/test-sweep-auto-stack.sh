@@ -182,7 +182,7 @@ echo
 echo "--- Cross-file: guide.md regex convention still present (reused, not modified) ---"
 
 if [[ -f "$GUIDE_MD" ]]; then
-    if grep -qF -- '(Blocked by|Depends on|Requires|\- \[.\])[*_:[:space:]]*#[0-9]+' "$GUIDE_MD"; then
+    if grep -qF -- '(Blocked by|Depends on|Requires|\- \[ \])[*_:[:space:]]*#[0-9]+' "$GUIDE_MD"; then
         echo "PASS: guide.md parse_dependencies regex convention intact (reused by --auto-stack)"
         PASS=$((PASS + 1))
     else

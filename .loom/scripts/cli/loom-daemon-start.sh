@@ -1909,10 +1909,13 @@ sentinel file at \`$sentinel\` — delete it to allow re-filing after a genuine
 reconfiguration.
 EOF
 )"
+    # --force skips create-issue.sh's duplicate backstop (#7971): this filing is
+    # already deduped by $sentinel, and an alert must not be silenced by a
+    # similarity heuristic.
     if "$issue_script" \
         --title "loom-daemon-watchdog cannot be scheduled on $hostname_str (no systemd/launchd) — crash protection absent" \
         --body "$body" \
-        --label "loom:triage" >/dev/null 2>"$LOOM_DIR/logs/.watchdog-escalation-err"; then
+        --label "loom:triage" --force >/dev/null 2>"$LOOM_DIR/logs/.watchdog-escalation-err"; then
         mkdir -p "$LOOM_DIR" 2>/dev/null || true
         date -u '+%Y-%m-%dT%H:%M:%SZ' > "$sentinel" 2>/dev/null || true
         warn "watchdog: filed a tracking issue for the unprovisionable watchdog gap on this host (#5343 AC4)."

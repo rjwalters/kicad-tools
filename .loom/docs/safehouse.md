@@ -16,9 +16,11 @@ race. See [Peer-claim coordination](#peer-claim-coordination-cross-host-soft-cla
 below.
 
 > **Out of scope** (tracked separately): per-worker personas (`loom_builder_42`)
-> and `SAFEHOUSE_PERSONA` forwarding to workers → **#3999**; inbound **human**
-> steering (reading `@`-mentions back to agents) → follow-up (it reuses the same
-> inbound read task #4028 adds); carrying the judge verdict value in an event
+> and `SAFEHOUSE_PERSONA` forwarding to workers → **#3999**; **natural-language**
+> operator steering (an agent persona that reads intent and drives the typed
+> surface below) → phase 3b, its own issue — the *typed* inbound steering surface
+> has landed, see [Inbound steering: ChatOps](#inbound-steering-chatops-phase-3a-7893);
+> carrying the judge verdict value in an event
 > payload (needs a frozen-taxonomy amendment) → follow-up; the **atomic
 > cross-host claim authority** (a real CAS behind the soft claim) → Phase 2 of
 > #4028. Cloud-host provisioning of `safehoused` (formerly tracked here as
@@ -43,6 +45,7 @@ below.
 - [Delivery: session-scoped `--mcp-config` at spawn time](#delivery-session-scoped---mcp-config-at-spawn-time)
 - [Degradation contract (unchanged from phase 1)](#degradation-contract-unchanged-from-phase-1)
 - [Implementation (phase 2)](#implementation-phase-2)
+- [Inbound steering: ChatOps (phase 3a, #7893)](#inbound-steering-chatops-phase-3a-7893)
 <!-- toc:end -->
 
 ## The degradation contract (read this first)
@@ -1429,3 +1432,111 @@ still resolves the loom entry point.
 > `rjwalters/safehouse` repo and is not verifiable from this repo, so the
 > launcher is configurable (`safehouse.mcpCommand`) and a missing command
 > degrades to a logged skip rather than a broken server entry.
+
+## Inbound steering: ChatOps (phase 3a, #7893)
+
+Phase 1 gave the daemon a voice in the room. **Phase 3a gives it an ear** — a
+deliberately tiny one. An allowlisted operator can steer a running
+`loom-daemon` from Element without SSH-ing to the host.
+
+### The boundary (operator ruling, 2026-09-16)
+
+Two layers, not one:
+
+1. **`loom-daemon` keeps a closed, typed command enum.** It never interprets
+   natural language, never builds a shell command from room text, and refuses
+   anything outside the enum with a reply. This layer stays boring and
+   auditable.
+2. **Natural language lives in a separate operator-agent persona** (phase 3b,
+   its own issue) that reads human intent and *uses* this typed surface plus the
+   forge.
+
+### The accepted language, in full
+
+| Command | Maps to | Nonce? |
+|---|---|---|
+| `status` | `Request::DaemonStatus` | no |
+| `dispatch <issue>` | `Request::DispatchSweep` (never `force`) | no |
+| `cancel <sweep-id>` | `Request::CancelSweep` | **yes** |
+| `unblock <issue>` | `Request::ClearQuarantine` | no |
+| `watch <issue>` | `Request::RegisterWatch` | no |
+| `confirm <nonce>` | redeems a pending destructive command | — |
+
+A leading `#` on a number is accepted (`dispatch #7893`). Verbs are
+case-insensitive. Everything else — a sentence, an unknown verb, an extra
+token, a shell metacharacter in an argument — is refused with a reply naming the
+accepted forms. `unblock` deliberately clears the **daemon's insta-crash
+quarantine**, not a forge label: labels remain the coordination substrate.
+
+### The four gates
+
+1. **Addressed to the daemon** — the envelope's `to` equals the persona, or the
+   body opens with an `@loom_daemon` / `loom_daemon:` mention. Anything else in
+   the room is ignored (not refused).
+2. **Sender on the allowlist** — compared against the **`from` safehoused
+   stamps from the socket identity**, never a sender the body claims. A
+   non-allowlisted sender gets a log line and a bus event, and deliberately
+   **no room reply** (replying would make the daemon an echo an unauthorized
+   party can drive).
+3. **Parses to a command** — see above.
+4. **Confirm-nonce for destructive commands** — `cancel` is answered with a
+   single-use nonce; the daemon executes only on `confirm <nonce>` from the
+   **same** sender within the TTL. Expired, replayed, and other-sender
+   confirmations are all refused. The nonce is never logged and never published
+   on the bus.
+
+Every accepted and refused command is logged **and** published on the event bus
+with the stamped sender identity, under `safehouse.chatops.accepted` /
+`.refused` / `.confirm_required`. These ride `Event::Generic`, so the frozen
+event taxonomy is unchanged and the audit trail is never narrated back into the
+room (no feedback loop).
+
+### Configuration — off unless this block is present
+
+```jsonc
+"safehouse": {
+  // …phase 1 keys…
+  "chatops": {
+    "enabled": true,                                  // omit ⇒ on when the block exists
+    "allowedSenders": ["@you:example.org"],           // REQUIRED; empty ⇒ stays off
+    "room": null,                                     // default: the signal room
+    "confirmTtlSecs": 120                             // clamped to [10, 3600]
+  }
+}
+```
+
+| Env var | Overrides |
+|---|---|
+| `LOOM_SAFEHOUSE_CHATOPS_ENABLED` | `enabled` |
+| `LOOM_SAFEHOUSE_CHATOPS_SENDERS` | `allowedSenders`, comma/space separated |
+| `LOOM_SAFEHOUSE_CHATOPS_ROOM` | `room` |
+| `LOOM_SAFEHOUSE_CHATOPS_CONFIRM_TTL_SECS` | `confirmTtlSecs` |
+
+**Fail-closed by construction.** No `safehouse.chatops` block (or
+`safehouse.enabled` false) ⇒ no task, no socket, no subscription — an install
+without safehouse is byte-for-byte unaffected. A block naming no *usable* Matrix
+ID (`@localpart:server`) resolves to off with one `warn`, rather than to an
+enabled-but-accepts-nobody state.
+
+**`room` defaults to the signal room, not `rooms.claims`.** Peer-claim traffic
+may be routed to a dedicated machine-chatter room (#4713) no human is joined to;
+steering must land where the operator actually is.
+
+### Implementation (phase 3a)
+
+- `loom-daemon/src/safehouse_chatops.rs` — config resolution, addressing, the
+  allowlist/parse/nonce router, event publication.
+- `loom-daemon/src/safehouse_chatops/command.rs` — the closed enum + parser.
+- `loom-daemon/src/safehouse_chatops/nonce.rs` — the single-use, TTL-bounded,
+  sender-bound confirmation ledger.
+- `loom-daemon/src/safehouse_chatops/runtime.rs` — the inbound task (one
+  dedicated connection built from phase 1's `SafehouseClient`, same
+  capped-backoff reconnect shape) and the `Command` → `Request` mapping,
+  round-tripped over the daemon's own IPC socket so the ChatOps path can never
+  do more than the operator could already do over IPC.
+- Started from `WorkspacePool::start_peer_coordination`, so inbound steering
+  shares one enablement decision with the rest of the daemon's room presence.
+
+> A sibling module rather than a `safehouse::` submodule because `safehouse.rs`
+> is frozen by the file-size ratchet (`.loom/docs/file-size-policy.md`) — new
+> code lands in a new module, which is exactly what the ratchet is for.

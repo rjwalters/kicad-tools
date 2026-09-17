@@ -32,6 +32,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$HELPERS_DIR/dep-recheck-fingerprint.sh"
 
+# Pin the loom-daemon this suite tests against — the subject is a thin stub over
+# `loom-daemon dep-recheck-fingerprint` now (epic #7810 PR 4). FATAL, not SKIP:
+# see the helper for why.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "dep-recheck-fingerprint"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'

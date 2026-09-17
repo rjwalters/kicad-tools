@@ -135,6 +135,8 @@ boards/*/*/output/*.kct.json
 .loom/.install.lock
 .loom/logs/
 .loom/.resync-in-progress
+.loom/gh-config/
+.loom/gh-config-by-owner/
 # <<< loom-managed <<<
 
 # pytest-benchmark storage

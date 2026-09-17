@@ -149,7 +149,7 @@ list.
 | `ask:<printenv reason>` | `COMMAND_ASK_SCAN` |
 | `cargo-clean-scope-outside-repo` (a **deny** since #7795) | `COMMAND_ASK_SCAN` |
 | `reversible-gh:<pattern>` | `COMMAND_ASK_SCAN` |
-| `git-read-tree` (a **deny** since #7795) | `COMMAND_NO_COMMENT` |
+| `git-read-tree` (a **deny** since #7795) | `COMMAND_NO_COMMENT` (through `index_mutation_unisolated()` since #7923 — see the note below) |
 | `stash-scope:main-checkout` | `COMMAND_STASH_SCAN` |
 | `stash-scope:worktree-collision` | `COMMAND_STASH_SCAN` |
 | `stash-scope:cd-unresolved` | `COMMAND_NO_COMMENT`, `COMMAND_STASH_SCAN` |
@@ -179,6 +179,36 @@ the ones a future change is most likely to get wrong:
   `ask-only` branch, was retired in #7795 together with the `printenv` substring
   backstop that was its only consumer — see
   [`guard-hooks.md` § Ask-tier composition](guard-hooks.md#ask-tier-composition-7795).)
+
+### A read site may narrow *structurally* without a new scan copy (#7923)
+
+`git-read-tree` is the one site that answers the executable-vs-inert question
+with a **parse** rather than with a lossier copy. It still reads
+`COMMAND_NO_COMMENT` — its `scan-reads:` annotation and its tier are unchanged,
+so the invariant this document exists to protect is untouched — but it hands
+that string to `index_mutation_unisolated()`, which resolves simple commands,
+assignment prefixes, interpreter wrappers (`sh|bash|zsh|dash -c`, `eval`,
+`source`/`.`, a pipeline whose sink reads stdin), `$( … )`/backtick
+substitutions and heredoc ownership before deciding.
+
+It is recorded here because the tempting alternative is the one that does *not*
+work, and a future author will reach for it first: #7923 measured swapping this
+site to `COMMAND_ASK_SCAN` (contract-legal — it is `deny-safe`) and it flipped
+`printf '%s\n' 'git read-tree HEAD' > /tmp/notes.txt` to a **deny**, because no
+copy in the chain masks a quoted positional of a general non-executing command,
+while leaving both of the site's isolation-scoping holes wide open. A copy swap
+answers "which text is masked out"; this site needed "which text will a shell
+actually run, and what assignments are in force for it". Adding a new derived
+copy to model that would have widened the masking every *other*
+`COMMAND_NO_COMMENT` / `COMMAND_ASK_SCAN` consumer sees, which is exactly the
+coupling ADR-0016 warns about — so the parse lives at the single site that
+needs it and changes nothing else.
+
+Structural narrowing is **not** exempt from the tier discipline: it may only
+narrow on text that provably cannot execute, and it must fail **closed**
+(`index_mutation_unisolated()` treats an unterminated quote, an unbalanced
+`$(`, an unclosed heredoc and an over-deep recursion as executable, and falls
+back to the pre-#7923 regex pair if `awk` itself fails).
 
 ## Running it
 

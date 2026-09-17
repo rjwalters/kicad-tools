@@ -750,18 +750,15 @@ matched line is captured, not just the first (#4508):
 | Explicit blocker | `Blocked by #123`, `**Blocked by:** #123` |
 | Depends on | `Depends on #123`, `_Depends on_ #123` |
 | Requires | `Requires #123` |
-| Task list | `- [ ] #123: Description` |
+| Task list (unchecked only) | `- [ ] #123: Description` — a checked `- [x] #123` records done work, not a gate (#7973) |
 
 ```bash
 parse_dependencies() {
   local body="$1"
-  # Two-stage parse (#4508): stage 1 selects lines that declare a dependency
-  # phrase, tolerant of markdown emphasis/colon between the phrase and the
-  # first #N (e.g. "**Blocked by:** #1"); stage 2 extracts every #N on those
-  # lines, so comma-separated lists ("#1 (reason), #3 (reason)") capture all
-  # refs, not just the first.
+  # Two-stage parse (#4508): stage 1 selects whole lines declaring a dependency
+  # (forms above; checkbox is UNCHECKED-only, #7973); stage 2 extracts every #N.
   echo "$body" \
-    | grep -E '(Blocked by|Depends on|Requires|\- \[.\])[*_:[:space:]]*#[0-9]+' \
+    | grep -E '(Blocked by|Depends on|Requires|\- \[ \])[*_:[:space:]]*#[0-9]+' \
     | grep -oE '#[0-9]+' | tr -d '#' | sort -u
 }
 ```

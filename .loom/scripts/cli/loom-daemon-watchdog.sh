@@ -1539,10 +1539,13 @@ sentinel at \`$ESCALATION_SENTINEL\`, which is cleared automatically once the da
 healthy again.
 EOF
 )"
+    # --force skips create-issue.sh's duplicate backstop (#7971) on purpose:
+    # this escalation is already deduped by $ESCALATION_SENTINEL, and a
+    # similarity heuristic must never be what silences an outage alert.
     if "$issue_script" \
         --title "loom-daemon is DOWN on $hostname_str and watchdog recovery is exhausted" \
         --body "$body" \
-        --label "loom:triage" >/dev/null 2>&1; then
+        --label "loom:triage" --force >/dev/null 2>&1; then
         mkdir -p "$(dirname "$ESCALATION_SENTINEL")" 2>/dev/null || true
         date -u '+%Y-%m-%dT%H:%M:%SZ' > "$ESCALATION_SENTINEL" 2>/dev/null || true
         return 0
@@ -1761,10 +1764,12 @@ automatically (and this issue commented on + closed) once a later watchdog
 tick observes \`peer_coordination\` back to healthy.
 EOF
     local issue_url create_rc
+    # --force: deduped by $PEER_COORD_SENTINEL already; see the outage
+    # escalation above for why the #7971 backstop is skipped on alert paths.
     issue_url="$("$issue_script" \
         --title "peer-claim coordination is DEGRADED on $hostname_str (#6157 Layer 3)" \
         --body "$body" \
-        --label "loom:triage" 2>/dev/null)"
+        --label "loom:triage" --force 2>/dev/null)"
     create_rc=$?
     [[ "$create_rc" -eq 0 && -n "$issue_url" ]] || return 1
 

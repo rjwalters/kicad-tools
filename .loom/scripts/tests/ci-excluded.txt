@@ -18,13 +18,15 @@ test-spawn-claude.sh  Non-hermetic: spawn-claude.sh's token selection requires a
 
 # epic #7810 PR 3: each of these drives a thin stub that execs a `loom-daemon`
 # subcommand, so it needs a BUILT binary — which run-ci-suites.sh's job has no
-# toolchain for. Wired in the "Dependency Classification Suites" job instead,
+# toolchain for. Wired in the "Native Port Suites" job instead,
 # which builds one first. Each suite FAILS rather than SKIPs without a binary,
 # so neither location can report green while running nothing.
-test-classify-dependency-block.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
-test-classify-dependency-block-premise-false.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
-test-detect-dependency-cycle.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
-test-detect-startable-subset.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
+test-classify-dependency-block.sh  Needs a built loom-daemon; wired in the "Native Port Suites" job (#7952), which builds one first.
+test-classify-dependency-block-premise-false.sh  Needs a built loom-daemon; wired in the "Native Port Suites" job (#7952), which builds one first.
+test-detect-dependency-cycle.sh  Needs a built loom-daemon; wired in the "Native Port Suites" job (#7952), which builds one first.
+test-detect-startable-subset.sh  Needs a built loom-daemon; wired in the "Native Port Suites" job (#7952), which builds one first.
+test-dep-recheck-fingerprint.sh  Needs a built loom-daemon; wired in the "Native Port Suites" job (#7961), which builds one first.
+test-loom-daemon-update-resolve-json.sh  Needs a built loom-daemon since #7977 routed --resolve-json through it; wired in the "Native Port Suites" job, which builds one first. Split from test-loom-daemon-update.sh rather than moving it: the parent is one of the five host-mutating suites LIVE_DAEMON_GUARDED_SUITES owns, and that membership is pinned as a literal in test-run-ci-suites-daemon-guard.sh.
 
 # scripts/ (repo root, top-level only) — since #5278. Each of these already
 # runs as its own direct step in ci.yml and/or build-gate.sh; excluded here

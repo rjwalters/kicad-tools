@@ -166,52 +166,15 @@ assert_true() {
 # can pull in the real scripts/install/provision-daemon.sh (which defines the
 # #4016 sign_daemon_binary helper loom-daemon-update.sh sources at
 # $REPO_ROOT/scripts/install/provision-daemon.sh).
+# shellcheck disable=SC2034  # read by lib/daemon-update-fixtures.sh, sourced below
 LOOM_REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-# ---------- fixture builder ----------
-# Sets up a fresh throwaway repo root at $1 with a real git HEAD, a stub
-# loom-daemon crate, real start/stop scripts, a real copy of
-# provision-daemon.sh (so the #4016 signing step is exercised, not silently
-# skipped as "not found/sourceable"), and a minimal, machine-agnostic PATH
-# (excludes ~/.local/bin and similar, so a real loom-daemon possibly
-# installed on the dev machine can never leak into a test).
-new_fixture() {
-    local root="$1"
-    mkdir -p "$root/.loom/logs" "$root/.loom/scripts/cli" "$root/.loom/scripts/lib" "$root/loom-daemon" "$root/scripts/install"
-    cp "$CLI_DIR/loom-daemon-start.sh" "$root/.loom/scripts/cli/loom-daemon-start.sh"
-    cp "$CLI_DIR/loom-daemon-stop.sh" "$root/.loom/scripts/cli/loom-daemon-stop.sh"
-    chmod +x "$root/.loom/scripts/cli/"*.sh
-    # The fixture start/stop scripts source ../lib/launchd-domain.sh for the
-    # shared gui/<uid> ↦ user/<uid> resolver (#4130), so it must exist alongside
-    # them in the throwaway tree — else a launchd-mode restart path would find no
-    # resolve_launchd_domain. Mirrors the real defaults/scripts/lib layout.
-    cp "$CLI_DIR/../lib/launchd-domain.sh" "$root/.loom/scripts/lib/launchd-domain.sh"
-    # Same for lib/systemd-user.sh (#4268): the fixture start script's systemd
-    # --user path (invoked via perform_systemd_relaunch's call to $START_SCRIPT,
-    # #4260 sub-issue C) sources it relative to ITS OWN location, so it must exist
-    # alongside the fixture copy too, not just in the real repo tree.
-    cp "$CLI_DIR/../lib/systemd-user.sh" "$root/.loom/scripts/lib/systemd-user.sh"
-    # Same for lib/bounded-run.sh (#4799): the fixture start script's
-    # print_calibrate_hint() sources it relative to ITS OWN location to bound
-    # its `calibrate` command substitution, so it must exist alongside the
-    # fixture copy too.
-    cp "$CLI_DIR/../lib/bounded-run.sh" "$root/.loom/scripts/lib/bounded-run.sh"
-    # Same for lib/locate-daemon-bin.sh (#4875): the fixture start script
-    # sources it relative to ITS OWN location to resolve the daemon binary
-    # under a minimal PATH, so every fixture flow that execs the copied
-    # loom-daemon-start.sh (restart, --relaunch, the full update run) needs it
-    # in the throwaway tree. Without it those flows abort with
-    # "locate-daemon-bin.sh not found at <fixture>/.loom/scripts/lib" before
-    # reaching the behaviour under test.
-    cp "$CLI_DIR/../lib/locate-daemon-bin.sh" "$root/.loom/scripts/lib/locate-daemon-bin.sh"
-    cp "$LOOM_REPO_ROOT/scripts/install/provision-daemon.sh" "$root/scripts/install/provision-daemon.sh"
-    cat > "$root/loom-daemon/Cargo.toml" <<'EOF'
-[package]
-name = "loom-daemon"
-version = "0.0.0"
-EOF
-    ( cd "$root" && git init -q && git -c user.email=test@test -c user.name=test commit -q --allow-empty -m init )
-}
+# The fake-binary / fake-forge fixtures, shared with the resolve-json
+# sibling suite so both build identical ones from a single definition
+# (#7977). Requires CLI_DIR / START_SCRIPT / NEW_FAKE_BIN_SRC above.
+# shellcheck source=lib/daemon-update-fixtures.sh
+source "$SCRIPT_DIR/lib/daemon-update-fixtures.sh"
+
 
 # install_update_script_into <root> (#5140) — drops a real copy of
 # loom-daemon-update.sh (plus every lib/ it sources, resolved relative to its
@@ -710,56 +673,6 @@ WantedBy=default.target
 EOF
 }
 
-# Writes a fake `cargo` that, on `cargo build --release [--message-format=...]`
-# (cwd = loom-daemon/), copies $NEW_FAKE_BIN_SRC into
-# ${CARGO_TARGET_DIR:-target}/release/loom-daemon instead of compiling --
-# honoring CARGO_TARGET_DIR (#6160) exactly like real cargo does, so tests can
-# redirect the build output the same way a redirected host does. Tests export
-# NEW_FAKE_BIN_SRC before invoking loom-daemon-update.sh. When a
-# --message-format=json* flag is present (the invocation loom-daemon-update.sh
-# actually uses since #6160), also emits the compiler-artifact/build-finished
-# JSON messages loom-daemon-update.sh parses to locate the built executable --
-# shaped like real `cargo build --message-format=json-render-diagnostics`
-# output (a null-executable library artifact first, matching the real
-# multi-target stream, then the bin target's own artifact with the real,
-# possibly-redirected, absolute executable path). Also answers `cargo metadata
-# --format-version 1 --no-deps` with a minimal object reporting the same
-# (redirect-aware) target_directory, for the fallback path's own test coverage.
-write_fake_cargo() {
-    local path="$1"
-    cat > "$path" <<'EOF'
-#!/usr/bin/env bash
-if [[ "${1:-}" == "build" ]]; then
-    target_dir="${CARGO_TARGET_DIR:-target}"
-    mkdir -p "$target_dir/release"
-    cp "$NEW_FAKE_BIN_SRC" "$target_dir/release/loom-daemon"
-    chmod +x "$target_dir/release/loom-daemon"
-    abs_target_dir="$(cd "$target_dir" && pwd)"
-    for arg in "$@"; do
-        case "$arg" in
-            --message-format=json*)
-                printf '{"reason":"compiler-artifact","target":{"kind":["lib"],"name":"loom_daemon"},"executable":null}\n'
-                printf '{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"loom-daemon"},"executable":"%s/release/loom-daemon"}\n' "$abs_target_dir"
-                printf '{"reason":"build-finished","success":true}\n'
-                break
-                ;;
-        esac
-    done
-    echo "[fake cargo] build ok" >&2
-    exit 0
-fi
-if [[ "${1:-}" == "metadata" ]]; then
-    target_dir="${CARGO_TARGET_DIR:-target}"
-    mkdir -p "$target_dir"
-    abs_target_dir="$(cd "$target_dir" && pwd)"
-    printf '{"target_directory":"%s"}\n' "$abs_target_dir"
-    exit 0
-fi
-echo "[fake cargo] unsupported subcommand: $*" >&2
-exit 1
-EOF
-    chmod +x "$path"
-}
 
 # Fake `crontab` (#4697): the update script's idle-shutdown-notice check runs
 # `crontab -l` unconditionally on every invocation, so without this stub every
@@ -787,123 +700,9 @@ EOF
     chmod +x "$path"
 }
 
-# Writes a fake `gh` at $1 for the artifact-fetch tests (Epic #4990 Phase 3,
-# #5020). Understands exactly the invocations loom-daemon-update.sh's
-# fetch_resolve_latest() / fetch_and_verify_artifact() make:
-#   gh release view --json tagName  -R <slug> --jq '.tagName'         -> $2
-#   gh release view --json assets   -R <slug> --jq '.assets[].name'   -> `ls $3`
-#   gh release download <tag> -R <slug> -p <name> [-p <name> ...] -D <dir> --clobber
-#       -> copies each matching file from $3 into <dir>; exits 1 if NONE of
-#          the -p patterns matched anything under $3 (mirrors real gh's
-#          "no assets match" failure for a required download).
-write_fake_gh() {
-    local path="$1" tag="$2" assets_dir="$3"
-    cat > "$path" <<FAKEGH
-#!/usr/bin/env bash
-ASSETS_DIR="$assets_dir"
-TAG_VAL="$tag"
-FAKEGH
-    cat >> "$path" <<'FAKEGH'
-if [[ "${1:-}" == "release" && "${2:-}" == "view" ]]; then
-    shift 2
-    fields=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --json) fields="$2"; shift 2 ;;
-            *) shift ;;
-        esac
-    done
-    case "$fields" in
-        tagName) echo "$TAG_VAL"; exit 0 ;;
-        assets)  ls "$ASSETS_DIR" 2>/dev/null; exit 0 ;;
-        # --resolve-json (#7609) asks for the release's publish timestamp so
-        # the daemon can surface `artifact_available.published_at`.
-        publishedAt) echo "2026-09-13T12:00:00Z"; exit 0 ;;
-        *) exit 1 ;;
-    esac
-fi
-if [[ "${1:-}" == "release" && "${2:-}" == "download" ]]; then
-    shift 2
-    shift # drop the <tag> positional arg
-    dest="."
-    patterns=()
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -p) patterns+=("$2"); shift 2 ;;
-            -D) dest="$2"; shift 2 ;;
-            -R) shift 2 ;;
-            --clobber) shift ;;
-            *) shift ;;
-        esac
-    done
-    mkdir -p "$dest"
-    copied=0
-    for pat in "${patterns[@]}"; do
-        for f in "$ASSETS_DIR"/$pat; do
-            [[ -e "$f" ]] || continue
-            cp "$f" "$dest/"
-            copied=1
-        done
-    done
-    [[ "$copied" -eq 1 ]] && exit 0 || exit 1
-fi
-echo "fake gh: unsupported invocation: $*" >&2
-exit 1
-FAKEGH
-    chmod +x "$path"
-}
 
-# Writes a fake "release artifact" binary at $1 reporting version $2 / commit
-# $3 on --version, otherwise behaving like write_fake_daemon (rejects unknown
-# subcommands, loops forever on a normal run) — standing in for a downloaded
-# `loom-daemon-<target>` asset. A parameterized-version sibling of
-# write_fake_daemon (which hardcodes 0.15.0), needed so a fetched artifact can
-# report a version NEWER than the installed daemon's.
-write_fake_artifact_daemon() {
-    local path="$1" version="$2" commit="$3"
-    cat > "$path" <<EOF
-#!/usr/bin/env bash
-if [[ "\${1:-}" == "--version" ]]; then
-    echo "loom-daemon ${version} (commit ${commit}, built 2026-08-03T00:00:00Z)"
-    exit 0
-fi
-if [[ "\${1:-}" == "calibrate" ]]; then
-    exit 1
-fi
-if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
-    echo "fake loom-daemon: unsupported subcommand: \$*" >&2
-    exit 1
-fi
-while true; do sleep 1; done
-EOF
-    chmod +x "$path"
-}
 
-# sha256_of <path> — portable checksum in `.sha256`-file format
-# (`<hex>  <basename>`), matching the release workflow's own
-# `shasum -a 256`/`sha256sum` output.
-sha256_of() {
-    local path="$1" base
-    base="$(basename "$path")"
-    if command -v shasum >/dev/null 2>&1; then
-        (cd "$(dirname "$path")" && shasum -a 256 "$base")
-    else
-        (cd "$(dirname "$path")" && sha256sum "$base")
-    fi
-}
 
-# Writes a fake `gh` at $1 whose every `release view` fails — standing in for
-# the "GitHub API unreachable / rate-limited / unauthenticated" case that must
-# SOFTLY fall back to the local source build (AC4), never hard-fail.
-write_fake_gh_unreachable() {
-    local path="$1"
-    cat > "$path" <<'FAKEGH'
-#!/usr/bin/env bash
-echo "gh: failed to fetch release: dial tcp: lookup api.github.com: no such host" >&2
-exit 1
-FAKEGH
-    chmod +x "$path"
-}
 
 # Writes a fake `codesign` at $1 emulating one of three macOS states, so the
 # darwin signature branch of verify_artifact_signature() is testable on ANY
@@ -5940,151 +5739,15 @@ else
 fi
 
 # ============================================================
-# 81. --resolve-json (#7609): READ-ONLY artifact resolution for the daemon's
-#     artifact-first auto_update tick. Must print exactly one JSON object on
-#     stdout (every other line on stderr), report the release AND the
-#     installed binary (version + sha256, which is what lets the daemon
-#     detect "same version, different bytes"), and must not fetch the binary,
-#     build, provision, restart, or touch the git checkout.
+# --resolve-json (#7609) lives in the sibling suite
+# test-loom-daemon-update-resolve-json.sh, split out by #7810 PR 5: as of
+# #7977 that mode delegates to `loom-daemon release-resolve` and so needs a
+# BUILT binary, which this suite must not require — it is one of the five
+# host-mutating suites run-ci-suites.sh guards via LIVE_DAEMON_GUARDED_SUITES
+# (#6386), and that membership is pinned as an explicit literal in
+# test-run-ci-suites-daemon-guard.sh.
 # ============================================================
-W81="$BASE_WORKDIR/w81"
-new_fixture "$W81"
-INSTALLED81="$W81/installed/loom-daemon"
-mkdir -p "$W81/installed"
-write_fake_artifact_daemon "$INSTALLED81" "0.19.21" "deadbee"
-echo "0.19.30" > "$W81/VERSION"
 
-W81_ASSETS="$W81/gh-assets"
-mkdir -p "$W81_ASSETS"
-write_fake_artifact_daemon "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu" "0.19.24" "cafe123"
-sha256_of "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu" \
-    > "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu.sha256"
-ASSET_SHA81="$(awk 'NR==1{print $1}' "$W81_ASSETS/loom-daemon-x86_64-unknown-linux-gnu.sha256")"
-
-W81_FAKEBIN="$W81/fakebin"
-mkdir -p "$W81_FAKEBIN"
-write_fake_gh "$W81_FAKEBIN/gh" "v0.19.24" "$W81_ASSETS"
-write_fake_cargo "$W81_FAKEBIN/cargo"
-
-W81_STDERR="$W81/resolve.stderr"
-out81=$( cd "$W81" && PATH="$W81_FAKEBIN:$TEST_PATH" \
-    LOOM_DAEMON_BIN="$INSTALLED81" \
-    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
-    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
-    bash "$UPDATE_SCRIPT" --resolve-json 2>"$W81_STDERR" )
-rc81=$?
-assert_eq "0" "$rc81" "--resolve-json: exits 0 when a release artifact resolves"
-
-TESTS_RUN=$((TESTS_RUN + 1))
-if [[ "$(printf '%s' "$out81" | wc -l | tr -d ' ')" == "0" ]] && [[ "$out81" == \{*\} ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --resolve-json: stdout is exactly one JSON object (everything else went to stderr)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --resolve-json: stdout is exactly one JSON object (everything else went to stderr)"
-    echo "  stdout: $out81"
-fi
-
-# Field-by-field, parsed the same way the daemon parses it (a real JSON
-# parser when python3 is available; a grep fallback otherwise so the suite
-# still runs on a host without it).
-json81_field() {
-    local key="$1"
-    if command -v python3 >/dev/null 2>&1; then
-        printf '%s' "$out81" | python3 -c "import json,sys; v=json.load(sys.stdin).get('$key'); print('' if v is None else v)" 2>/dev/null
-    else
-        printf '%s' "$out81" | grep -oE "\"$key\":\"[^\"]*\"" | head -n1 | sed -E "s/\"$key\":\"(.*)\"/\1/"
-    fi
-}
-TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out81" | grep -q '"ok":true'; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --resolve-json: ok is true when a release resolves"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --resolve-json: ok is true when a release resolves"
-    echo "  stdout: $out81"
-fi
-assert_eq "0.19.24" "$(json81_field version)" "--resolve-json: reports the resolved release version"
-assert_eq "v0.19.24" "$(json81_field tag)" "--resolve-json: reports the resolved release tag"
-assert_eq "0.19.21" "$(json81_field installed_version)" "--resolve-json: reports the INSTALLED version"
-assert_eq "$ASSET_SHA81" "$(json81_field asset_sha256)" "--resolve-json: reports the release's published sha256 (from the .sha256 asset)"
-assert_eq "$(sha256_of "$INSTALLED81" | awk '{print $1}')" "$(json81_field installed_sha256)" "--resolve-json: reports the installed binary's own sha256"
-assert_eq "0.19.30" "$(json81_field source_version)" "--resolve-json: reports the source tree's VERSION"
-assert_eq "x86_64-unknown-linux-gnu" "$(json81_field target)" "--resolve-json: reports the resolved target triple"
-
-TESTS_RUN=$((TESTS_RUN + 1))
-installed81_after="$("$INSTALLED81" --version 2>/dev/null)"
-if echo "$installed81_after" | grep -q "0.19.21" \
-    && ! grep -q 'Rebuilding loom-daemon (cargo build' "$W81_STDERR" \
-    && ! grep -q 'Downloading loom-daemon-' "$W81_STDERR"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --resolve-json: nothing was built, downloaded, or provisioned (read-only)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --resolve-json: nothing was built, downloaded, or provisioned (read-only)"
-    echo "  installed --version after: $installed81_after"
-    echo "  stderr: $(cat "$W81_STDERR")"
-fi
-
-# ============================================================
-# 82. --resolve-json with NO resolvable release (unreachable/rate-limited
-#     GitHub API): still prints the JSON object, with ok=false and a reason,
-#     and exits 1 — the daemon reads `.ok`/`.reason` and falls back to its
-#     source-staleness path rather than treating this as a fault.
-# ============================================================
-W82="$BASE_WORKDIR/w82"
-new_fixture "$W82"
-INSTALLED82="$W82/installed/loom-daemon"
-mkdir -p "$W82/installed"
-write_fake_artifact_daemon "$INSTALLED82" "0.19.21" "deadbee"
-
-W82_FAKEBIN="$W82/fakebin"
-mkdir -p "$W82_FAKEBIN"
-write_fake_gh_unreachable "$W82_FAKEBIN/gh"
-write_fake_cargo "$W82_FAKEBIN/cargo"
-
-out82=$( cd "$W82" && PATH="$W82_FAKEBIN:$TEST_PATH" \
-    LOOM_DAEMON_BIN="$INSTALLED82" \
-    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
-    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
-    bash "$UPDATE_SCRIPT" --resolve-json 2>/dev/null )
-rc82=$?
-assert_eq "1" "$rc82" "--resolve-json: exits 1 when no release artifact resolves"
-
-TESTS_RUN=$((TESTS_RUN + 1))
-if [[ "$out82" == \{*\} ]] && echo "$out82" | grep -q '"ok":false' && echo "$out82" | grep -q '"reason":"[^"]'; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --resolve-json: an unresolvable release still yields JSON with ok=false + a reason"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --resolve-json: an unresolvable release still yields JSON with ok=false + a reason"
-    echo "  stdout: $out82"
-fi
-
-# ============================================================
-# 83. --resolve-json honors --no-fetch / LOOM_DAEMON_UPDATE_FETCH=0: a host
-#     that has opted out of the artifact path reports ok=false with that as
-#     the reason, which is what keeps the daemon's artifact-first tick on its
-#     source path there.
-# ============================================================
-out83=$( cd "$W81" && PATH="$W81_FAKEBIN:$TEST_PATH" \
-    LOOM_DAEMON_BIN="$INSTALLED81" \
-    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
-    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
-    LOOM_DAEMON_UPDATE_FETCH=0 \
-    bash "$UPDATE_SCRIPT" --resolve-json 2>/dev/null )
-rc83=$?
-assert_eq "1" "$rc83" "--resolve-json: exits 1 when artifact-fetch is disabled on the host"
-TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out83" | grep -q '"ok":false' && echo "$out83" | grep -qi 'disabled'; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} --resolve-json: --no-fetch/LOOM_DAEMON_UPDATE_FETCH=0 is reported as the reason"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} --resolve-json: --no-fetch/LOOM_DAEMON_UPDATE_FETCH=0 is reported as the reason"
-    echo "  stdout: $out83"
-fi
 
 # ============================================================
 # 84. (#7609) A forced --fetch is NOT blocked by local-checkout state. Test 38

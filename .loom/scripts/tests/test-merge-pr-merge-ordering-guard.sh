@@ -1,37 +1,48 @@
 #!/usr/bin/env bash
 # test-merge-pr-merge-ordering-guard.sh - Unit tests for the PRE-merge
-# merge-ordering guard in merge-pr.sh (#3747, stacked-PR v2 item 2).
+# merge-ordering guard in merge-pr.sh (#3747, stacked-PR v2 item 2; reshaped
+# by #7982 into pin-and-warn).
 #
 # Before either the auto-merge or synchronous-merge path attempts the actual
 # merge API call, merge-pr.sh now runs a guard that discovers open CHILD PRs
 # still targeting the PARENT branch (feature/issue-<N>) via a LIVE forge query
-# (`gh pr list --base <parent> --state open`, never the daemon registry). If any
-# open child PR exists the guard, by default, HARD-BLOCKS the merge (error, exit
-# 1) — because the repo's delete_branch_on_merge setting would delete the parent
-# branch synchronously during the merge and leave the children unable to rebase
-# onto it. --allow-stacked-children bypasses the guard; --dry-run still runs it
-# and reports the would-be block but never exits 1 (honors the dry-run contract).
-# The guard is a no-op for non-feature/issue-N parent branches and non-GitHub
-# forges, and keys purely on "does an open child PR target this branch" (NOT on
-# the child issue's loom:building label — that split is item 1's concern).
+# (`gh pr list --base <parent> --state open`, never the daemon registry).
 #
-# Strategy (mirrors test-merge-pr-auto-reconcile.sh): the function under test
-# (_check_no_open_stacked_children) depends only on globals (PR_BRANCH, REPO_NWO,
-# FORGE_TYPE, DRY_RUN, ALLOW_STACKED_CHILDREN) and the `gh` CLI. We extract the
-# function definition from merge-pr.sh and source it, stub `gh` on PATH to serve
-# canned child-PR lists, then assert on the guard's exit code + emitted message.
+# #7982 reshaped the guard's default behavior: instead of hard-blocking every
+# time an open child exists, it now PINS the parent's pre-merge tip to
+# refs/loom/parent/<branch> — a ref reconcile-stack.sh
+# can fall back to once delete_branch_on_merge removes the branch itself — and
+# proceeds with a loud WARNING naming each child PR and the exact
+# reconcile-stack.sh invocation to run once the parent lands. The guard still
+# HARD-BLOCKS (error, exit 1) only when the tip could not be pinned (a
+# detached/unreadable parent) — that is the one case where the original #3747
+# failure is genuinely still reachable. --allow-stacked-children skips
+# straight past that remaining block. --dry-run never mutates local refs; it
+# reports the would-be outcome without pinning or exiting 1. The guard is a
+# no-op for non-feature/issue-N parent branches and non-GitHub forges, and
+# keys purely on "does an open child PR target this branch" (NOT on the child
+# issue's loom:building label — that split is item 1's concern).
+#
+# Strategy (mirrors test-merge-pr-auto-reconcile.sh, extended for #7982): the
+# function under test (_check_no_open_stacked_children) depends only on globals
+# (PR_BRANCH, PR_HEAD_SHA, REPO_ROOT, REPO_NWO, FORGE_TYPE, DRY_RUN,
+# ALLOW_STACKED_CHILDREN) plus the `gh` CLI and REAL git (so the pin/verify
+# plumbing is exercised for real, not mocked). We extract the function
+# definition from merge-pr.sh and source it, stub `gh` on PATH to serve canned
+# child-PR lists, point REPO_ROOT at a small real git sandbox, then assert on
+# the guard's exit code + emitted message + the actual ref state.
 # Because the block path calls `error` (which `exit 1`s), the guard is invoked
-# inside a command-substitution subshell so the exit does not tear down the test.
-# Extracting from source (rather than replicating) keeps the test in lockstep
-# with the script.
+# inside a command-substitution subshell so the exit does not tear down the
+# test. Extracting from source (rather than replicating) keeps the test in
+# lockstep with the script.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-merge-pr-merge-ordering-guard.sh
 
-# SC2034: several globals (PR_BRANCH, REPO_NWO, FORGE_TYPE, DRY_RUN,
-# ALLOW_STACKED_CHILDREN) are read only by the function extracted+sourced from
-# merge-pr.sh, which shellcheck cannot see — every such assignment looks
-# "unused" to the linter.
+# SC2034: several globals (PR_BRANCH, PR_HEAD_SHA, REPO_ROOT, REPO_NWO,
+# FORGE_TYPE, DRY_RUN, ALLOW_STACKED_CHILDREN) are read only by the function
+# extracted+sourced from merge-pr.sh, which shellcheck cannot see — every such
+# assignment looks "unused" to the linter.
 # shellcheck disable=SC2034
 
 set -euo pipefail
@@ -105,11 +116,16 @@ error()   { echo "ERROR: $*" >&2; exit 1; }
 
 # --- Extract the function under test from merge-pr.sh and source it ---
 # From `_check_no_open_stacked_children() {` up to (not including) the
-# `# Invoke the guard before` invocation comment. Extracting from source keeps
-# the test in lockstep with the script.
+# `# Invoke the guard before` invocation comment. The #7982 pin/warn/block
+# decision is inline in that same function (merge-pr.sh is ratcheted and a new
+# sibling shell lib is not an available remedy — see the comment above the
+# function in merge-pr.sh), so this one extraction covers all of it.
+# Extracting from source keeps the test in lockstep with the script.
 FUNCS_FILE="$(mktemp)"
 STUB_DIR="$(mktemp -d)"
-trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" 2>/dev/null || true' EXIT
+SANDBOX_DIR="$(mktemp -d)"
+trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" "$SANDBOX_DIR" 2>/dev/null || true' EXIT
+
 awk '
   /^_check_no_open_stacked_children\(\) \{/ { capture=1 }
   /^# Invoke the guard before/              { capture=0 }
@@ -149,16 +165,55 @@ chmod +x "$STUB_DIR/gh"
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 
-# --- Shared globals the function reads (see the file-level SC2034 disable). ---
+git_q() { git -c advice.detachedHead=false -c protocol.file.allow=always "$@"; }
+
+# --- Real git sandbox for REPO_ROOT (the guard's pin path does real git I/O) ---
+# A bare "origin" plus a working clone (REPO_ROOT) with a parent branch
+# (feature/issue-100) pushed and its tip left checked out locally, so
+# `git cat-file -e` finds the object without needing the fetch fallback.
+# PARENT_SHA is the real, resolvable commit used as PR_HEAD_SHA in the
+# pin-succeeds tests below.
+ORIGIN_BARE="$SANDBOX_DIR/origin.git"
+REPO_ROOT="$SANDBOX_DIR/repo-root"
+git_q init --quiet --bare "$ORIGIN_BARE"
+git_q init --quiet "$REPO_ROOT"
+git_q -C "$REPO_ROOT" config user.email "test@loom.local"
+git_q -C "$REPO_ROOT" config user.name "Loom Test"
+git_q -C "$REPO_ROOT" config commit.gpgsign false
+git_q -C "$REPO_ROOT" checkout -q -b main
+echo "base" > "$REPO_ROOT/base.txt"
+git_q -C "$REPO_ROOT" add base.txt
+git_q -C "$REPO_ROOT" commit -q -m "base"
+git_q -C "$REPO_ROOT" remote add origin "$ORIGIN_BARE"
+git_q -C "$REPO_ROOT" push -q -u origin main
+
+git_q -C "$REPO_ROOT" checkout -q -b feature/issue-100
+echo "parent" > "$REPO_ROOT/parent.txt"
+git_q -C "$REPO_ROOT" add parent.txt
+git_q -C "$REPO_ROOT" commit -q -m "parent tip"
+PARENT_SHA="$(git_q -C "$REPO_ROOT" rev-parse HEAD)"
+git_q -C "$REPO_ROOT" push -q -u origin feature/issue-100
+git_q -C "$REPO_ROOT" checkout -q main
+
+# A SHA that exists nowhere (not in REPO_ROOT, not in origin) — used to force
+# the pin to fail (T8): neither the fast local-object-store check nor the
+# fetch fallback can ever make it resolve.
+UNRESOLVABLE_SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+# --- Shared globals the guard reads (see the file-level SC2034 disable). ---
 PR_NUMBER="999"
 REPO_NWO="owner/repo"
 FORGE_TYPE="github"
 DRY_RUN=false
 ALLOW_STACKED_CHILDREN=false
+PR_HEAD_SHA="$PARENT_SHA"
 
 # Fixture writers (base -> sanitized filename).
 write_prlist() { printf '%s\n' "$2" > "$STUB_DIR/prlist-${1//\//_}.json"; }
 clear_prlist() { rm -f "$STUB_DIR/prlist-${1//\//_}.json"; }
+
+# Clears any refs/loom/parent/<branch> ref left over from a previous test case.
+clear_pin_ref() { git_q -C "$REPO_ROOT" update-ref -d "refs/loom/parent/$1" 2>/dev/null || true; }
 
 # Run the guard in a subshell (its block path calls `error`, which exit 1's),
 # capturing combined stdout+stderr in LAST_OUT and the exit code in LAST_RC.
@@ -173,35 +228,50 @@ run_guard() {
 
 echo "Testing _check_no_open_stacked_children behavior..."
 
-# T1: no open children -> guard passes (rc 0), no block.
+# T1: no open children -> guard passes (rc 0), no block, no pin attempted.
 DRY_RUN=false; ALLOW_STACKED_CHILDREN=false
 PR_BRANCH="feature/issue-100"
 clear_prlist "feature/issue-100"   # stub returns [] with no fixture
+clear_pin_ref "feature/issue-100"
 run_guard
 assert_eq "0" "$LAST_RC" "No open children -> guard passes (exit 0)"
 assert_not_contains "$LAST_OUT" "Merge blocked" "No open children -> no block message"
+assert_eq "" "$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)" \
+  "No open children -> no parent-pin ref written"
 
-# T2: one open child targeting the parent branch -> hard block (rc 1) with an
-# informative message naming the child PR and the reconcile-stack.sh unblock cmd.
+# T2: one open child targeting the parent branch, tip pinnable -> guard now
+# PINS the tip and PROCEEDS (exit 0) with a warning naming the child PR and
+# the reconcile-stack.sh unblock command, instead of hard-blocking (#7982).
 DRY_RUN=false; ALLOW_STACKED_CHILDREN=false
 PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
 write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_pin_ref "feature/issue-100"
 run_guard
-assert_eq "1" "$LAST_RC" "Open child #501 -> merge hard-blocked (exit 1)"
-assert_contains "$LAST_OUT" "Merge blocked" "Open child -> block message emitted"
-assert_contains "$LAST_OUT" "#501" "Block message names the blocking child PR #501"
-assert_contains "$LAST_OUT" "reconcile-stack.sh" "Block message points at the reconcile-stack.sh unblock path"
-assert_contains "$LAST_OUT" "--allow-stacked-children" "Block message mentions the --allow-stacked-children override"
+assert_eq "0" "$LAST_RC" "Open child #501, tip pinnable -> guard proceeds (exit 0)"
+assert_not_contains "$LAST_OUT" "Merge blocked" "Pin succeeds -> no hard block message"
+assert_contains "$LAST_OUT" "Pinned the parent tip" "Pin succeeds -> warning names the pin"
+assert_contains "$LAST_OUT" "refs/loom/parent/feature/issue-100" "Pin succeeds -> warning names the pinned ref"
+assert_contains "$LAST_OUT" "#501" "Pin-succeeds warning names the child PR #501"
+assert_contains "$LAST_OUT" "reconcile-stack.sh 501 feature/issue-100" \
+  "Pin-succeeds warning gives the exact per-child reconcile-stack.sh invocation"
+PINNED_SHA="$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)"
+assert_eq "$PARENT_SHA" "$PINNED_SHA" \
+  "refs/loom/parent/feature/issue-100 actually pinned to the parent's tip SHA"
 
 # T3: --allow-stacked-children with an open child present -> merge proceeds
-# (rc 0); a warning is emitted but no hard block.
+# (rc 0); a warning is emitted but no hard block, AND no pin is attempted
+# (the bypass short-circuits before the pin path runs).
 DRY_RUN=false; ALLOW_STACKED_CHILDREN=true
 PR_BRANCH="feature/issue-100"
 write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_pin_ref "feature/issue-100"
 run_guard
 assert_eq "0" "$LAST_RC" "--allow-stacked-children + open child -> guard proceeds (exit 0)"
 assert_not_contains "$LAST_OUT" "Merge blocked" "--allow-stacked-children -> no hard block"
 assert_contains "$LAST_OUT" "--allow-stacked-children set" "--allow-stacked-children -> override warning emitted"
+assert_eq "" "$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)" \
+  "--allow-stacked-children -> bypass skips pinning entirely"
 ALLOW_STACKED_CHILDREN=false
 
 # T4: non-feature/issue-N parent branch -> guard skipped entirely (rc 0), even
@@ -213,16 +283,19 @@ run_guard
 assert_eq "0" "$LAST_RC" "Non-feature/issue-N parent 'release-1' -> guard skipped (exit 0)"
 assert_not_contains "$LAST_OUT" "Merge blocked" "Non-feature/issue-N parent -> no block"
 
-# T5: --dry-run with an open child present -> reports the would-be block WITHOUT
-# exiting 1 (dry-run contract preserved), and the reported message still surfaces
-# the would-be block.
+# T5: --dry-run with an open child present -> reports the predicted outcome
+# WITHOUT exiting 1 (dry-run contract preserved) and WITHOUT pinning anything
+# (dry-run must have zero side effects).
 DRY_RUN=true; ALLOW_STACKED_CHILDREN=false
 PR_BRANCH="feature/issue-100"
 write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_pin_ref "feature/issue-100"
 run_guard
 assert_eq "0" "$LAST_RC" "--dry-run + open child -> guard does NOT exit 1 (dry-run contract)"
-assert_contains "$LAST_OUT" "[dry-run] Would BLOCK" "--dry-run -> reports the would-be block"
-assert_contains "$LAST_OUT" "#501" "--dry-run block report names the blocking child PR #501"
+assert_contains "$LAST_OUT" "[dry-run]" "--dry-run -> reports the predicted outcome"
+assert_contains "$LAST_OUT" "#501" "--dry-run report names the open child PR #501"
+assert_eq "" "$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)" \
+  "--dry-run -> no ref actually pinned (zero side effects)"
 DRY_RUN=false
 
 # T6: FORGE_TYPE != github -> no-op (GitHub-only for v2 item 2).
@@ -235,15 +308,41 @@ assert_eq "0" "$LAST_RC" "FORGE_TYPE=gitea -> guard skipped (GitHub-only)"
 assert_not_contains "$LAST_OUT" "Merge blocked" "FORGE_TYPE=gitea -> no block"
 FORGE_TYPE="github"
 
-# T7: multiple open children -> hard block naming each blocking child PR.
+# T7: multiple open children, tip pinnable -> proceeds, naming EACH child and
+# its own reconcile-stack.sh invocation.
 DRY_RUN=false; ALLOW_STACKED_CHILDREN=false
 PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
 write_prlist "feature/issue-100" \
   '[{"number":501,"headRefName":"feature/issue-201"},{"number":502,"headRefName":"feature/issue-202"}]'
+clear_pin_ref "feature/issue-100"
 run_guard
-assert_eq "1" "$LAST_RC" "Multiple open children -> merge hard-blocked (exit 1)"
-assert_contains "$LAST_OUT" "#501" "Multi-child block names child #501"
-assert_contains "$LAST_OUT" "#502" "Multi-child block names child #502"
+assert_eq "0" "$LAST_RC" "Multiple open children, tip pinnable -> guard proceeds (exit 0)"
+assert_contains "$LAST_OUT" "#501" "Multi-child pin-succeeds warning names child #501"
+assert_contains "$LAST_OUT" "#502" "Multi-child pin-succeeds warning names child #502"
+assert_contains "$LAST_OUT" "reconcile-stack.sh 501 feature/issue-100" \
+  "Multi-child warning gives child #501's own reconcile-stack.sh invocation"
+assert_contains "$LAST_OUT" "reconcile-stack.sh 502 feature/issue-100" \
+  "Multi-child warning gives child #502's own reconcile-stack.sh invocation"
+
+# T8 (#7982): tip CANNOT be pinned (PR_HEAD_SHA resolves nowhere, not locally
+# and not via either fetch fallback) -> the guard still HARD-BLOCKS, exactly
+# the one case where the original #3747 race remains reachable.
+DRY_RUN=false; ALLOW_STACKED_CHILDREN=false
+PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$UNRESOLVABLE_SHA"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_pin_ref "feature/issue-100"
+run_guard
+assert_eq "1" "$LAST_RC" "Unpinnable parent tip -> merge still hard-blocked (exit 1)"
+assert_contains "$LAST_OUT" "Merge blocked" "Unpinnable tip -> block message emitted"
+assert_contains "$LAST_OUT" "could not be pinned" "Unpinnable tip -> block message explains why"
+assert_contains "$LAST_OUT" "#501" "Unpinnable-tip block message still names the blocking child PR #501"
+assert_contains "$LAST_OUT" "reconcile-stack.sh" "Unpinnable-tip block message points at the reconcile-stack.sh unblock path"
+assert_contains "$LAST_OUT" "--allow-stacked-children" "Unpinnable-tip block message mentions the --allow-stacked-children override"
+assert_eq "" "$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)" \
+  "Unpinnable tip -> no ref was written"
+PR_HEAD_SHA="$PARENT_SHA"
 
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
@@ -251,6 +350,19 @@ echo "Testing merge-pr.sh source guards..."
 src="$(cat "$MERGE_PR_SRC")"
 assert_contains "$src" "_check_no_open_stacked_children" \
   "merge-pr.sh defines and invokes _check_no_open_stacked_children"
+# The #7982 pin behavior: assert the actual ref write and the object-existence
+# check that makes the pinned ref usable. A ref pointing at an object this repo
+# does not have would satisfy a naive "did we write a ref" assertion while
+# being useless to reconcile-stack.sh's later rebase — so both halves are
+# pinned down here.
+assert_contains "$src" 'update-ref "$pin" "$PR_HEAD_SHA"' \
+  "merge-pr.sh pins the parent tip by writing the PR head SHA to the pin ref (#7982)"
+assert_contains "$src" 'pin="refs/loom/parent/$PR_BRANCH"' \
+  "merge-pr.sh pins under the refs/loom/parent/<branch> namespace reconcile-stack.sh reads"
+assert_contains "$src" 'cat-file -e "${PR_HEAD_SHA}^{commit}"' \
+  "merge-pr.sh verifies the commit object exists locally before trusting the pin"
+assert_contains "$src" 'reconcile-stack.sh " + (.number|tostring)' \
+  "merge-pr.sh builds a per-child reconcile-stack.sh invocation for its messages"
 assert_contains "$src" 'gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open' \
   "merge-pr.sh discovers children via a live forge query, not the daemon registry"
 assert_contains "$src" "ALLOW_STACKED_CHILDREN" \

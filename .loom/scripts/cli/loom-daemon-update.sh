@@ -503,6 +503,51 @@ else
 fi
 locate_daemon_bin() { loom_locate_daemon_bin "$1"; }
 
+# resolve_self_daemon_bin -- the loom-daemon that IMPLEMENTS this script's
+# ported logic, which is NOT the same binary as locate_daemon_bin's.
+#
+# The distinction is the whole point and it is easy to get wrong (#7977 caught
+# it in the test fixture): `locate_daemon_bin` / $LOOM_DAEMON_BIN name the
+# INSTALLED daemon this script MANAGES -- the one whose version is compared,
+# which may be an old release that has no `release-resolve` subcommand at all,
+# and which during a test is a deliberately fake binary. Exec'ing a subcommand
+# on that is a category error.
+#
+# Resolution order, most explicit first:
+#   1. $LOOM_DAEMON_SELF_BIN -- must be executable. The seam a test or an
+#      operator uses to name the implementation directly.
+#   2. A build in this checkout ($CARGO_TARGET_DIR honored, release then debug).
+#   3. `loom-daemon` on PATH.
+# Echoes "" when none resolves; the caller then answers in the mode's own
+# contract rather than failing silently.
+resolve_self_daemon_bin() {
+    if [[ -n "${LOOM_DAEMON_SELF_BIN:-}" && -x "${LOOM_DAEMON_SELF_BIN}" ]]; then
+        printf '%s\n' "$LOOM_DAEMON_SELF_BIN"
+        return 0
+    fi
+    # Script-relative FIRST among the build candidates: this file lives at
+    # <checkout>/defaults/scripts/cli/ (or <consumer>/.loom/scripts/cli/), so
+    # the build that implements the logic THIS COPY delegates to is the one in
+    # the checkout this copy came from — not whatever $REPO_ROOT happens to be
+    # (in a test fixture, $REPO_ROOT is the fixture, which has no build at all).
+    local self_root
+    self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)" || self_root=""
+    local base candidate
+    for base in "${CARGO_TARGET_DIR:-}" "${self_root:+$self_root/target}" \
+                "$REPO_ROOT/target" "$REPO_ROOT/loom-daemon/target"; do
+        [[ -n "$base" ]] || continue
+        for candidate in "$base/release/loom-daemon" "$base/debug/loom-daemon"; do
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    candidate="$(command -v loom-daemon 2>/dev/null || true)"
+    [[ -n "$candidate" && -x "$candidate" ]] && printf '%s\n' "$candidate"
+    return 0
+}
+
 # Extract the short commit from `loom-daemon --version` output, e.g.
 # "loom-daemon 0.15.0 (commit ab12cd3, built 2026-07-26T12:00:00Z)" -> ab12cd3
 extract_commit() {
@@ -716,69 +761,8 @@ _json_str() {
     if [[ -z "${1:-}" ]]; then printf 'null'; else printf '"%s"' "$(_json_escape "$1")"; fi
 }
 
-# resolve_release_published_at -- echo the resolved release's publishedAt
-# timestamp (ISO-8601), or "" when it cannot be read. Best-effort: an older
-# `gh`, a transient API failure, or a forge that does not report it must not
-# turn an otherwise-successful resolution into a failure.
-resolve_release_published_at() {
-    [[ -n "$FETCH_LATEST_TAG" && -n "$FETCH_REPO_SLUG" ]] || { echo ""; return 0; }
-    gh release view "$FETCH_LATEST_TAG" --json publishedAt -R "$FETCH_REPO_SLUG" \
-        --jq '.publishedAt' 2>/dev/null || echo ""
-}
 
-# resolve_release_asset_sha256 -- echo the PUBLISHED sha256 of this host's
-# release binary, read from the release's own `<bin>.sha256` asset, or "" when
-# it cannot be downloaded. This is the ~65-byte checksum asset only -- the
-# binary itself is never downloaded in this mode. The daemon compares it
-# against the installed binary's sha256 to detect the "same version, different
-# bytes" case (a host that built this version from source before the release
-# existed).
-resolve_release_asset_sha256() {
-    [[ -n "$FETCH_LATEST_TAG" && -n "$FETCH_REPO_SLUG" && -n "$FETCH_TARGET" ]] || { echo ""; return 0; }
-    command -v gh >/dev/null 2>&1 || { echo ""; return 0; }
-    local tmpdir sha_name
-    sha_name="loom-daemon-${FETCH_TARGET}.sha256"
-    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/loom-daemon-resolve.XXXXXX" 2>/dev/null)" || { echo ""; return 0; }
-    _LOOM_FETCH_TMPDIRS+=("$tmpdir")
-    if gh release download "$FETCH_LATEST_TAG" -R "$FETCH_REPO_SLUG" \
-            -p "$sha_name" -D "$tmpdir" --clobber >/dev/null 2>&1 \
-        && [[ -f "$tmpdir/$sha_name" ]]; then
-        awk 'NR==1{print $1}' "$tmpdir/$sha_name" 2>/dev/null
-    else
-        echo ""
-    fi
-}
 
-# emit_resolve_json <ok:true|false> <reason> -- print the one JSON object
-# --resolve-json contracts on, to FD 3 (stdout as it was before the mode
-# redirected the script's chatty stdout to stderr). Every field is either a
-# JSON string or `null`; no field is ever omitted, so a consumer can rely on
-# the shape.
-emit_resolve_json() {
-    local ok="$1" reason="${2:-}"
-    local published_at="" asset_sha256="" installed_sha256=""
-    if [[ "$ok" == "true" ]]; then
-        published_at="$(resolve_release_published_at)"
-        asset_sha256="$(resolve_release_asset_sha256)"
-    fi
-    installed_sha256="$(sha256_file "${STALENESS_BIN:-}")"
-    printf '{"ok":%s,"reason":%s,"repo":%s,"target":%s,"tag":%s,"version":%s,"published_at":%s,"asset_sha256":%s,"installed_bin":%s,"installed_version":%s,"installed_commit":%s,"installed_sha256":%s,"source_version":%s,"source_commit":%s}\n' \
-        "$ok" \
-        "$(_json_str "$reason")" \
-        "$(_json_str "${FETCH_REPO_SLUG:-}")" \
-        "$(_json_str "${FETCH_TARGET:-}")" \
-        "$(_json_str "${FETCH_LATEST_TAG:-}")" \
-        "$(_json_str "${FETCH_LATEST_VERSION:-}")" \
-        "$(_json_str "$published_at")" \
-        "$(_json_str "$asset_sha256")" \
-        "$(_json_str "${STALENESS_BIN:-}")" \
-        "$(_json_str "${INSTALLED_VERSION:-}")" \
-        "$(_json_str "${INSTALLED_COMMIT:-}")" \
-        "$(_json_str "$installed_sha256")" \
-        "$(_json_str "${SOURCE_VERSION:-}")" \
-        "$(_json_str "${SOURCE_COMMIT:-}")" \
-        >&3
-}
 
 # resolve_cosign_pubkey -- echo a resolvable cosign public key path, or "".
 # KEY mode only (a `.sig` published without a sibling `.pem` certificate):
@@ -2257,13 +2241,8 @@ ARTIFACT_FALLBACK_REASON=""
 # the release was also behind source, so the real gap was invisible until a
 # forced `--fetch` hard-failed.
 FETCH_RELEASE_BEHIND_SOURCE=false
-# Whether fetch_resolve_latest() actually resolved a release artifact for this
-# host's platform this run (#7609) — distinct from ARTIFACT_MODE, which also
-# requires the resolved release to be NEWER than what is installed.
-FETCH_RESOLVED=false
 if [[ "$FETCH_MODE" != "off" ]]; then
     if fetch_resolve_latest; then
-        FETCH_RESOLVED=true
         FETCH_VERSION_CMP="$(semver_compare "$FETCH_LATEST_VERSION" "${INSTALLED_VERSION:-0.0.0}")"
         # Strictly newer wins. An EQUAL version only wins under an explicit
         # --fetch: `--force` alone keeps its established meaning ("rebuild this
@@ -2298,17 +2277,34 @@ fi
 # too: an operator who has disabled the artifact path fleet-wide gets an
 # explicit `ok:false` with that as the reason, which is what keeps the daemon's
 # artifact-first tick falling back to its source path on such a host.
+#
+# DELEGATED as of epic #7810 PR 5. The resolution logic is
+# `loom-daemon release-resolve` (Rust, loom-daemon/src/release_resolve/); this
+# mode hands it the one thing only the shell knows — which binary counts as
+# "installed" on this host, i.e. the binary the DETECTED SUPERVISOR launches
+# ($STALENESS_BIN), not merely whatever is on PATH — and passes its stdout and
+# exit code straight through.
+#
+# `exec` so the subcommand's own exit code reaches the caller unmodified: `1`
+# here means "no artifact resolved", which the daemon's tick reads as data and
+# falls back to its source path on. Remapping it would turn an ordinary
+# outcome into a failure.
+#
+# When no loom-daemon can be resolved this still answers in the mode's own
+# contract — one JSON object, ok:false, with the reason — rather than exiting
+# silently. A consumer that always gets valid JSON can report the problem; one
+# that gets an empty stdout cannot tell that from a crash.
 if [[ "$RESOLVE_JSON" == "true" ]]; then
-    if [[ "$FETCH_MODE" == "off" ]]; then
-        emit_resolve_json false "artifact-fetch is disabled on this host (--no-fetch / LOOM_DAEMON_UPDATE_FETCH=0)"
+    _rj_bin="$(resolve_self_daemon_bin)"
+    if [[ -z "$_rj_bin" ]]; then
+        printf '{"ok":false,"reason":%s,"repo":null,"target":null,"tag":null,"version":null,"published_at":null,"asset_sha256":null,"installed_bin":null,"installed_version":null,"installed_commit":null,"installed_sha256":null,"source_version":null,"source_commit":null}\n' \
+            "$(_json_str "no loom-daemon binary implementing release-resolve could be resolved (set LOOM_DAEMON_SELF_BIN, or build it: cargo build --release --package loom-daemon)")" >&3
         exit 1
     fi
-    if [[ "$FETCH_RESOLVED" == "true" ]]; then
-        emit_resolve_json true ""
-        exit 0
-    fi
-    emit_resolve_json false "${ARTIFACT_FALLBACK_REASON:-no release artifact resolved}"
-    exit 1
+    _rj_args=(release-resolve --repo-root "$REPO_ROOT")
+    [[ -n "${STALENESS_BIN:-}" ]] && _rj_args+=(--installed-bin "$STALENESS_BIN")
+    [[ "$FETCH_MODE" == "off" ]] && _rj_args+=(--no-fetch)
+    exec "$_rj_bin" "${_rj_args[@]}" >&3
 fi
 
 # ---------- --prune-stale-entry-points: standalone action, then exit (#5139) ----------

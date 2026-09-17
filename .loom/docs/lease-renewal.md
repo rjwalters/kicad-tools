@@ -301,6 +301,13 @@ set for every `Issue` dispatch (never for a `PrSet`, which claims no issue and
 holds no lease), and Step 1a runs `start` itself exactly when that marker does
 not name the issue it is pre-flighting.
 
+For a `PrSet` child the marker — and the `LOOM_SWEEP_CLAIM_OWNED` marker beside
+it — is **actively removed** from the child's environment, not merely left
+unset (#7915). A daemon that is itself running inside a sweep carries both
+variables for the issue *it* is building, and a child inherits the parent's
+environment by default; without the removal a `PrSet` child would read a
+renewal hand-off for a lease it does not hold.
+
 The marker exists because **the installed prompt and the daemon binary do not
 roll together**. `.claude/commands/loom/sweep.md` is refreshed by an ordinary
 `git pull` / `resync-installed.sh` pass; the `loom-daemon` binary is only

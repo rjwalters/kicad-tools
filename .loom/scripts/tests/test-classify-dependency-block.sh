@@ -353,6 +353,44 @@ assert_eq "3" "$RC" "a merged PR blocker resolves (gh issue view falls back to g
 assert_contains "$OUT" "REEVALUATE" "merged PR blocker -> REEVALUATE"
 
 echo
+echo "--- #7877: an explicit 'Blocked by' whose citation is restated further along still DEFERs ---"
+# The real #7854 bullet. "Blocked by" and the #3 citation are ~84 characters
+# apart -- a parenthetical description plus a restatement sit between them. The
+# original single 60-character window read this as a merits finding and would
+# have escalated a self-clearing timing dependency to loom:operator-only. The
+# explicit-phrase family now gets a wider window (see DEP_REF_EXPLICIT_WINDOW in
+# loom-daemon/src/dep_classify/finding.rs).
+reset_state
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect' \
+    '**Champion Review: NEEDS REVISION**
+
+- Technical feasibility: this issue'\''s own Dependencies section states it is "Blocked by the sibling Phase 4 issue (run-job seam contract + host executor)" — that issue is #3, which is currently OPEN.
+'
+issue_fixture 'o/r#3' OPEN 'The sibling Phase 4 issue.' ''
+run_cdb --issue 5 --repo o/r --check-defer
+assert_eq "0" "$RC" "exit 0 - defer applies; the far-but-explicit citation is a timing finding (#7877)"
+assert_contains "$OUT" "DEFER" "DEFER marker present"
+assert_contains "$OUT" "OPEN_BLOCKERS: o/r#3" "the restated blocker is named"
+assert_not_contains "$OUT" "merits-finding" "no longer misread as a merits finding"
+
+echo
+echo "--- #7877 GUARD: the wider window is explicit-phrase only; 'requires' at the same distance still escalates ---"
+# Same ~84-character distance, reached through the weak narrative phrase family
+# ("requires"/"prerequisite") instead of a prepositional one. Widening those too
+# is how the #7756/#7431 false positive would come back.
+reset_state
+issue_fixture 'o/r#5' OPEN 'A proposal.' 'loom:architect' \
+    '**Champion Review: NEEDS REVISION**
+
+- Technical feasibility: this proposal requires a redesign of the sibling Phase 4 surface (run-job seam contract + host executor), much like the one landed in #3.
+'
+issue_fixture 'o/r#3' OPEN 'The sibling Phase 4 issue.' ''
+run_cdb --issue 5 --repo o/r --check-defer
+assert_eq "1" "$RC" "exit 1 - a weak phrase far from a reference is still a merits finding"
+assert_contains "$OUT" "NO_DEFER" "NO_DEFER marker present"
+assert_contains "$OUT" "REASON: merits-finding" "the weak-phrase family keeps the conservative window"
+
+echo
 echo "--- REGRESSION GUARD: a merits finding still escalates, unchanged ---"
 reset_state
 issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect' "$REJECT_MERITS"

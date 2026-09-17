@@ -18,7 +18,7 @@
 #
 # Usage:
 #   create-issue.sh --title TITLE (--body BODY | --body-file PATH) \
-#                   [--label LABEL]... [--repo OWNER/REPO]
+#                   [--label LABEL]... [--repo OWNER/REPO] [--force]
 #   create-issue.sh --help
 #
 # Flags are a subset of `gh issue create`'s, chosen so a role prompt's
@@ -34,6 +34,15 @@
 #                         preferred form -- the REST path then resolves the
 #                         repo from the git remote with zero API calls).
 #
+# Loom-specific flags (no `gh issue create` equivalent):
+#   --force, --skip-duplicate-check
+#                         File even if the duplicate backstop below finds an
+#                         above-threshold open match. Same effect as exporting
+#                         LOOM_SKIP_DUPLICATE_CHECK=1.
+#   --duplicate-threshold N
+#                         Jaccard similarity percentage the backstop blocks at
+#                         (default: check-duplicate.sh's own default).
+#
 # Output: the new issue's URL on stdout (identical to `gh issue create`).
 #
 # Exit codes:
@@ -41,11 +50,39 @@
 #   1 - Creation failed (message on stderr). A non-rate-limit failure is
 #       reported as-is and is NEVER retried over REST.
 #   2 - Invalid arguments.
+#   3 - NOT FILED: the duplicate backstop matched an open issue above the
+#       similarity threshold (see below). Nothing was created; the matches are
+#       listed on stderr with the --force re-run.
 #  75 - DEFERRED (#6714): the machine-wide issue-filing lock could not be
 #       acquired within its bounded wait, so NOTHING WAS FILED. The caller
 #       should defer this filing burst to its next tick and try again. This is
 #       deliberately fail-SAFE rather than fail-open: filing unserialized is
 #       what corrupted five issue bodies on 2026-08-08 (see lib/filing-lock.sh).
+#
+# Duplicate backstop (#7971): before filing, this runs the sibling
+# `check-duplicate.sh` against OPEN issues and exits 3 without filing when it
+# reports an above-threshold match. Prompt-level dedup instructions only reach
+# the roles someone remembered to write them into -- on 2026-09-16 three
+# Builders filed the SAME bug (#7957/#7960/#7968) inside four minutes because
+# Builder/Doctor/Judge, the roles that file issues as a SIDE EFFECT of other
+# work, had no dedup step at any layer. A backstop here covers every caller,
+# including roles nobody updates.
+#
+# It is deliberately conservative -- it fails OPEN on everything inconclusive,
+# so it can never become a new way for a filing to die:
+#   * check-duplicate.sh missing, non-executable, erroring, or rate-limited
+#     into a partial answer (exit 2) -> warn on stderr, file anyway. The
+#     backstop never introduces a GraphQL dependency the REST fallback path
+#     (#5047) did not already have: check-duplicate.sh has its own REST
+#     fallback, and a total failure of it does not block the create.
+#   * NON_DISCRIMINATIVE (#4409, the scorer self-reporting that it isn't
+#     separating anything for this query) -> warn, file anyway.
+#   * A match the filing ALREADY cross-references by number ("Part of #123",
+#     "Parent: #123", "split out of #123") -> not a duplicate. An intentional
+#     follow-up naturally scores high against the work that spawned it; that
+#     is the decomposition path, not a duplicate, and it is never blocked.
+#   * --repo given -> skipped entirely (check-duplicate.sh searches the
+#     working directory's repo, so it cannot answer for another one).
 #
 # Serialization (#6714): every create goes through the machine-wide filing
 # lock, so two issue-creating agents -- in the SAME repo or in DIFFERENT ones,
@@ -66,7 +103,7 @@ source "$SCRIPT_DIR/lib/forge-helpers.sh"
 source "$SCRIPT_DIR/lib/filing-lock.sh"
 
 usage() {
-  sed -n '2,58p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,95p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 TITLE=""
@@ -75,6 +112,13 @@ BODY_FILE=""
 REPO_NWO=""
 LABELS=()
 HAVE_BODY=false
+# Duplicate backstop (#7971). Env default so a caller that has ALREADY run
+# check-duplicate.sh for a whole burst (Architect, Hermit, Auditor, Curator,
+# Guide all do) can export LOOM_SKIP_DUPLICATE_CHECK=1 once instead of
+# re-paying for the same search on every filing.
+SKIP_DUP_CHECK=false
+case "${LOOM_SKIP_DUPLICATE_CHECK:-}" in 1 | true | TRUE | yes) SKIP_DUP_CHECK=true ;; esac
+DUP_THRESHOLD=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -109,6 +153,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --repo | -R)
       REPO_NWO="${2:-}"
+      shift 2
+      ;;
+    --force | --skip-duplicate-check)
+      SKIP_DUP_CHECK=true
+      shift
+      ;;
+    --duplicate-threshold)
+      DUP_THRESHOLD="${2:-}"
+      if [[ ! "$DUP_THRESHOLD" =~ ^[0-9]+$ ]]; then
+        echo "create-issue.sh: --duplicate-threshold takes a number: $DUP_THRESHOLD" >&2
+        exit 2
+      fi
       shift 2
       ;;
     *)
@@ -161,6 +217,75 @@ if [[ -z "$REPO_NWO" ]]; then
   _bra_script="$SCRIPT_DIR/lib/body-repo-affinity.sh"
   if [[ -x "$_bra_script" ]]; then
     "$_bra_script" --body "$BODY" --repo-root "$(pwd)" || true
+  fi
+fi
+
+# --- #7971: duplicate backstop ----------------------------------------------
+# Full rationale and the fail-open contract are in the header. Runs BEFORE the
+# filing lock below for the same reason body-repo-affinity does: the lock's
+# held duration must cover the create and nothing else. The residual race this
+# leaves (two agents checking concurrently, both seeing nothing) is bounded by
+# the lock hold -- about a second -- while the duplication window this actually
+# closes is the minutes-to-hours one an open issue is visible for.
+dup_check_skipped_reason() {
+  if [[ "$SKIP_DUP_CHECK" == "true" ]]; then
+    echo "forced"
+  elif [[ -n "$REPO_NWO" ]]; then
+    echo "cross-repo filing (--repo $REPO_NWO): check-duplicate.sh searches the working directory's repo"
+  elif [[ ! -x "$SCRIPT_DIR/check-duplicate.sh" ]]; then
+    echo "check-duplicate.sh not executable at $SCRIPT_DIR"
+  fi
+}
+
+# Issue numbers the filing itself cross-references ("Part of #123"). A match
+# against one of these is an INTENTIONAL follow-up, not a duplicate.
+referenced_issue_numbers() {
+  printf '%s\n%s\n' "$TITLE" "$BODY" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true
+}
+
+if [[ -z "$(dup_check_skipped_reason)" ]]; then
+  _dup_args=(--title "$TITLE")
+  [[ -n "$BODY" ]] && _dup_args+=(--body "$BODY")
+  [[ -n "$DUP_THRESHOLD" ]] && _dup_args+=(--threshold "$DUP_THRESHOLD")
+
+  _dup_rc=0
+  _dup_out="$("$SCRIPT_DIR/check-duplicate.sh" "${_dup_args[@]}" 2>/dev/null)" || _dup_rc=$?
+
+  if [[ "$_dup_rc" -eq 1 ]]; then
+    _dup_refs=" $(referenced_issue_numbers | tr '\n' ' ') "
+    _dup_hits=""
+    _dup_rows=0
+    while IFS= read -r _dup_line; do
+      # Only "#N: <title> (similarity: X%)" rows are matches; DUPLICATE_FOUND,
+      # NON_DISCRIMINATIVE, SEARCH_INCOMPLETE and REST_FALLBACK are markers.
+      [[ "$_dup_line" =~ ^#([0-9]+): ]] || continue
+      _dup_rows=$((_dup_rows + 1))
+      case "$_dup_refs" in
+        *" ${BASH_REMATCH[1]} "*) continue ;;
+      esac
+      _dup_hits+="  $_dup_line"$'\n'
+    done <<< "$_dup_out"
+
+    if [[ -n "$_dup_hits" ]]; then
+      {
+        echo "create-issue.sh: NOT FILED -- this looks like a duplicate of open work:"
+        printf '%s' "$_dup_hits"
+        echo "Nothing was created. Either:"
+        echo "  * comment on the issue above instead of filing a new one, or"
+        echo "  * re-run with --force if this is genuinely distinct work."
+        echo "(Export LOOM_SKIP_DUPLICATE_CHECK=1 to skip this check for a whole filing burst.)"
+      } >&2
+      exit 3
+    fi
+    if [[ "$_dup_rows" -gt 0 ]]; then
+      echo "create-issue.sh: every similar issue is already cross-referenced by this filing (intentional follow-up, not a duplicate) -- filing." >&2
+    else
+      echo "create-issue.sh: duplicate check returned no discriminating match -- filing." >&2
+    fi
+  elif [[ "$_dup_rc" -ne 0 ]]; then
+    # Fail OPEN: a broken/rate-limited duplicate check must never be the reason
+    # an issue does not get filed.
+    echo "create-issue.sh: duplicate check unavailable (check-duplicate.sh exit $_dup_rc) -- filing." >&2
   fi
 fi
 

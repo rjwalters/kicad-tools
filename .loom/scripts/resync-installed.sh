@@ -2379,7 +2379,13 @@ print_output_mode_next_steps() {
     printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR${NC}"
     printf '%b\n' "    ${BOLD}git status${NC}   # confirm only expected resync output is dirty"
     printf '%b\n' "    ${BOLD}git checkout -b chore/resync-installed-$(date +%Y%m%d)${NC}"
-    printf '%b\n' "    ${BOLD}git add -A && git commit -m 'chore: resync installed Loom surfaces'${NC}"
+    # #7818: exclude the daemon-owned GH_CONFIG_DIR credential trees from the
+    # add, belt-and-braces, even though this worktree is a fresh `git worktree
+    # add --detach` checkout that would not normally carry them -- a plain
+    # `git add -A` here is exactly the shape of command that swept a live
+    # GitHub App installation token into a public repo on 2026-08-23.
+    printf '%b\n' "    ${BOLD}git add -A -- . ':!.loom/gh-config' ':!.loom/gh-config-by-owner'${NC}"
+    printf '%b\n' "    ${BOLD}git commit -m 'chore: resync installed Loom surfaces'${NC}"
     printf '%b\n' "    ${BOLD}git push -u origin HEAD${NC}   # then open a PR"
     note "When finished, remove the disposable staging worktree (from the primary checkout, not from inside it):"
     printf '%b\n' "    ${BOLD}git -C $REPO_ROOT worktree remove $OUTPUT_DIR${NC}"

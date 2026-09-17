@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # require-daemon-bin.sh — pin the `loom-daemon` binary a stub-driven suite tests
-# against (epic #7810 PR 3).
+# against (epic #7810, PR 3 onwards).
 #
 # Source this file (do not exec). Defines:
 #
@@ -59,8 +59,9 @@ loom_test_require_daemon_bin() {
     local sub
     for sub in "$@"; do
         if ! "$bin" "$sub" --help >/dev/null 2>&1; then
-            echo "FATAL: $bin does not know '$sub'." >&2
-            echo "It predates epic #7810 PR 3. Rebuild it: cargo build --package loom-daemon" >&2
+            echo "FATAL: $bin does not know the '$sub' subcommand," >&2
+            echo "so it predates the port this suite exists to verify." >&2
+            echo "Rebuild it: cargo build --package loom-daemon" >&2
             exit 1
         fi
     done

@@ -156,7 +156,16 @@ outside that array for parsing reasons:
   **deny** by the #7795 sizing pass (see "Ask-tier composition" below) — but
   note that neither joined the *floor*: `cargo-clean-scope-outside-repo` is
   still governed by `guards.cargoCleanScope`, and `git-read-tree` is an ungated
-  deny with a carve-out (`GIT_INDEX_FILE=`), not an unconditional block.
+  deny with a carve-out (`GIT_INDEX_FILE=`), not an unconditional block. Since
+  #7923 that carve-out is **scoped to the invocation** — the assignment must be
+  an assignment prefix of the same simple command (or a genuinely persistent
+  earlier `export`), not merely present somewhere in the command string — and
+  the site sees interpreter-wrapped spellings (`bash -c '…'`, `eval '…'`,
+  a pipeline into `sh`) while no longer firing on quoted prose that only
+  mentions the command. A heredoc body counts as prose only when its
+  **delimiter is quoted** (`<<'EOF'` / `<<"EOF"`): a bare `<<EOF` body is
+  expanded by the shell before the sink ever reads it, so any `$( … )` /
+  backtick span inside one is still scanned as executable text.
 - **The toggleable deny categories**: SQL DDL/DML (`guards.sqlDdl`), the
   cloud/docker ask category (`guards.cloudCli`), rm-scope beyond the
   catastrophic targets (`guards.rmScope`), the generic force-op ask
@@ -379,7 +388,7 @@ to a large number:
 | Site (decision tag) | Hits / 30d | Disposition | Reason |
 |---|---|---|---|
 | `cloud-delete-ask` (`az`/`gcloud … delete`) | 0 | **keep ask** | Irreversible external effect; deliberately ungated so `guards.cloudCli:false` cannot bypass it (#4216 chose this tier on purpose, to preserve an interactive confirm on a *security-positive* operation). Zero friction to remove. |
-| `force-op:all` | 0 | **keep ask** | Only reachable in `guards.forceScope:"all"`. The fleet ships `LOOM_FORCE_SCOPE=protected`, so it never fires here. Flipping the *shipped* default to `"protected"` is a separate, already-documented policy decision (see "Force-Op Branch Scope Guard" below), not a conclusion this data supports. |
+| `force-op:all` | 0 | **keep ask** | Only reachable in `guards.forceScope:"all"`, which this repo no longer runs (#7980). The `0` here is this table's own 30-day window; the separate figure quoted under "Force-Op Branch Scope Guard" below is from a different log and a different window, and the two are not comparable — see that section for which file and dates it names. Flipping the *shipped* default to `"protected"` is a separate, already-documented policy decision (see "Force-Op Branch Scope Guard" below), not a conclusion this data supports. |
 | `force-op:detached` | **25** (all pre-#7533) | **keep ask** | The largest single ask source — and a **precision** bug, not a tier error, that is **already fixed**. 22 of the 25 hits are `git -C "$WORKTREE_ABS" reset --hard origin/feature/issue-N` (a builder resetting its *own* worktree to its *own* branch, where the guard could not resolve the `-C` **variable** and so failed toward asking); the other 3 are the guard's own test harnesses. #7530 / PR #7533 extended the safe-list to a worktree's own branch and merged 2026-09-15; the **last logged hit is 2026-09-12**, so this count is a record of a closed defect, not live friction. What remains is the fail-safe for *ambiguous* branch identity — the one case the floor's literal `origin main`/`origin master` patterns cannot cover — so dropping it to allow would silently permit an unresolvable force op against a protected branch. |
 | `force-op:protected` | 5 | **keep ask** | Fires only on a resolved protected-branch target and names it. Four hits are unambiguously genuine (`git reset --hard origin/main` ×3, `HEAD~1` ×1); the fifth (`origin/feature/issue-6752`, 2026-08-22) is the same pre-#7533 own-branch gap as the row above. A deny would break a legitimate operator resync. |
 | `ask:<pattern>` — `ASK_PATTERNS` loop (11 patterns: `git clean -fd`, `git checkout .`, `git restore .`, `gh release delete`, `aws iam delete`, 3× `kubectl`, 2× `sky`, `cat …/.aws/credentials`) | 0 | **keep ask** | Every member is irreversible or credential-bearing, and the whole array fired zero times. No measured cost to keep. |
@@ -389,7 +398,7 @@ to a large number:
 | `ask:<printenv reason>` | 0 | **keep ask** | The **precise** printenv check (#6245): command word literally `printenv`, operand name-matched, two documented non-secret vars allowlisted. Zero hits — its existence is exactly what makes retiring the substring backstop above safe rather than a hole. |
 | `cargo-clean-scope-outside-repo` | 0 | **→ DENY** | Already steered toward two named alternatives (`cargo clean -p <pkg>`, `CARGO_TARGET_DIR`), and refusing is **lossless** — nothing is deleted, the caller just reruns scoped. An ask was the worst of both worlds: headless it blocked anyway with no verdict; interactively it invited a reflex "yes" on a host-wide delete. The `guards.cargoCleanScope` opt-out is unchanged and is named in the denial. |
 | `reversible-gh:<pattern>` | 0 | **keep ask** | Only executes when a repo **opts in** (`guards.reversibleGh:true`, default off). A repo that opts into a confirmation wants the confirmation; converting it to a deny would make the toggle meaningless. |
-| `git-read-tree` | 0 | **→ DENY** | #3637's stated reason for the middle tier ("an isolated form is legitimate") argues for the **carve-out**, not the prompt: an isolated `GIT_INDEX_FILE=` form never reaches this check. What reaches it would clobber the real index with no reflog trace; refusing is lossless and both replacements are named. Scripted-merge shapes (`read-tree -m -u`) must now say which index they mean. |
+| `git-read-tree` | 0 | **→ DENY** | #3637's stated reason for the middle tier ("an isolated form is legitimate") argues for the **carve-out**, not the prompt: an isolated `GIT_INDEX_FILE=` form never reaches this check. What reaches it would clobber the real index with no reflog trace; refusing is lossless and both replacements are named. Scripted-merge shapes (`read-tree -m -u`) must now say which index they mean. **Follow-up (#7923)**: promoting the site to a deny made its two context-blind substring tests load-bearing, and both were wrong in both directions — quoted documentation that merely *mentioned* the phrase was hard-denied (blocking `gh issue create --body`/`gh pr comment --body` about this guard), while `bash -c '…'` / `sh -c "…"` / `eval '…'` escaped it entirely and a `GIT_INDEX_FILE=` substring from *anywhere* authorized an unrelated invocation. Both tests were replaced by `index_mutation_unisolated()`, a structural pass over simple commands, interpreter wrappers, substitutions and heredocs. |
 | `stash-scope:main-checkout` | 8 | **keep ask** | **Do not weaken** — #5754's telemetry-backed verdict, reaffirmed here on fresh data. All 8 hits were genuine main-checkout `git stash pop`/`drop`. A deny is wrong in the other direction: `refs/stash` has **no sanctioned reader other than a pop**, so denying converts "ask a human" into "lose the work". The lossless half of this hazard is already a deny (`stash-scope:create-redirect`). |
 | `stash-scope:worktree-collision` | 4 | **keep ask** | Same reasoning, same source verdict (#5754/#4821, reaffirmed by #6785): this is the **recovery** half of the cycle, and the create half is where the lossless block belongs. Two hits are genuine cross-worktree stash recovery; the other two (both 2026-09-07) are a `grep`/`awk` **search pattern** quoting a test-case name, already fixed by the `COMMAND_STASH_SCAN` masking merged 2026-09-08 (#7363/#7366) — no hits since. The curator's first-pass table nominated both stash sites for promotion on the "names an alternative" test; the alternative they name is *preventive*, not a recovery path for WIP already on the shared stack, so the test does not apply. |
 | `stash-scope:cd-unresolved` | 1 | **keep ask** | The ambiguity fail-safe for the two sites above. One hit in 30 days. Dropping it to allow would silently permit a stash pop/drop/clear whose scope could not be determined. |
@@ -1167,6 +1176,33 @@ rebase/amend/reset workflow. The genuinely dangerous case is a force op against 
 The shipped default is **`"all"`** — a zero-config install sees **no behaviour
 change**. Consumers who want the autonomous-friendly behaviour opt in explicitly
 (`guards.forceScope: "protected"` in `.loom/config.json`).
+
+**This repo runs `"protected"`** (#7980). The fleet already shipped
+`LOOM_FORCE_SCOPE=protected` to *dispatched* agents, but that env var never
+reached an interactive operator session — so every stacked-PR
+`git push --force-with-lease origin feature/issue-N` still stopped and asked,
+and a human answered yes.
+
+The decision log sized that gap. **Which log matters**: the hook writes to
+`<its own checkout>/.loom/logs/guard-decisions.log`, so every worktree keeps a
+separate one and no single file is authoritative for the host. The figure below
+is from the **primary clone's** log
+(`/Users/joseph/dev/loom/.loom/logs/guard-decisions.log`) over
+2026-09-16T03:12Z–2026-09-17T05:12Z: **17 of 18 ASKs were `force-op:all`**,
+every one an own-branch force op. (The 18th is a `force-op:detached` ask —
+which `"protected"` still raises, by design.) A reviewer on another checkout
+will see different counts from their own log; treat this as a measurement of
+this session's traffic, not a host-wide constant.
+
+Setting it in `.loom/config.json` closes the gap for every session shape at
+once. It changes nothing about the protected set: **no protected-branch force
+op moves from deny or ask to allow.** Note the precise tiers, since "still
+denies" would overstate it — only the six literal
+`git push --force|-f|--force-with-lease origin main|master` forms are
+`ALWAYS_BLOCK` hard denies; every other default-branch-targeting form
+(`HEAD:main`, `+main`, a flag after the refspec, `--force-with-lease=…`, and
+`git reset --hard` on `main`) **asks** via `force-op:protected`, in this mode
+as before.
 
 **Protected set & branch resolution**:
 - Protected branches = the repo default branch (detected offline via

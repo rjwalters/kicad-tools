@@ -8697,6 +8697,657 @@ for pattern in "${REVERSIBLE_GH_ASK_PATTERNS[@]}"; do
 done
 
 # =============================================================================
+# INDEX-MUTATION ANALYZER (#7923) — the executable-context / per-segment
+# isolation engine behind the `git-read-tree` deny site below.
+#
+# WHY A STRUCTURED PASS AND NOT A REGEX
+#
+# The deny site used to ask two independent substring questions of
+# COMMAND_NO_COMMENT:
+#
+#   1. does `(^|[;&|(`]|[[:space:]])git[[:space:]]+read-tree` appear anywhere?
+#   2. does `GIT_INDEX_FILE=` appear anywhere?
+#
+# Neither question is about EXECUTION, so both were wrong in both directions:
+#
+#   * FALSE DENY — COMMAND_NO_COMMENT strips only `#` comments, so a quoted
+#     `--body` value or a `cat > file <<QUOTED` heredoc body that merely
+#     MENTIONS the phrase matched (1) and was hard-denied. That blocked
+#     filing/commenting on any issue about this guard, including #7923 itself.
+#   * FALSE ALLOW — the boundary class has no quote characters, so
+#     `bash -c <SQ>git read-tree HEAD<SQ>`, `sh -c "…"` and `eval <SQ>…<SQ>`
+#     -- which DO mutate the real index -- never matched (1) at all. And (2)
+#     accepted a `GIT_INDEX_FILE=` occurrence from ANYWHERE in the string, so
+#     `echo <SQ>GIT_INDEX_FILE=<SQ> ; git read-tree HEAD` and
+#     `GIT_INDEX_FILE=/tmp/i git status; git read-tree HEAD` (assignment scoped
+#     to a DIFFERENT simple command) both authorized an unrelated invocation.
+#
+# No lossier scan COPY fixes this: #7923 measured the obvious
+# COMMAND_ASK_SCAN swap and it flipped `printf <SQ>%s\n<SQ> <SQ>git read-tree
+# HEAD<SQ> > /tmp/notes.txt` to a deny (a quoted POSITIONAL of a non-executing
+# command is inert, and no copy in the chain masks those generally) while
+# leaving both isolation-scoping holes open. The questions this site actually
+# needs answered are structural, so it gets a structural pass.
+#
+# WHAT IT ANSWERS
+#
+# For each SIMPLE COMMAND in the command text: is its command word `git` with
+# subcommand `read-tree`, and is a `GIT_INDEX_FILE=` assignment in force FOR
+# THAT SIMPLE COMMAND? Quoted text is inert DATA unless the segment that
+# carries it actually re-executes it — the wrapper vocabulary is exactly the
+# one mask_ask_positional_args() already names as the reason it excludes
+# wrappers from its allowlist (`sh|bash|zsh|dash -c`, `eval`, `source`/`.`),
+# plus the `$(…)` / backtick substitutions qsplit()/has_live_subst() already
+# treat as live and a pipeline whose sink is a stdin-reading shell.
+#
+# MONOTONE ON THE DENY SET (the security floor, argued not asserted)
+#
+# For any text that is actually EXECUTED, this pass is a strict superset of
+# the old regex:
+#   * The old regex required a separator/whitespace boundary then the literal
+#     bytes `git` + whitespace + `read-tree`. That is exactly an ADJACENT
+#     `git` / `read-tree` word pair inside one segment, which im_segments()
+#     re-checks verbatim as its "lenient net" AFTER the precise command-word
+#     walk — so nothing the old matcher caught in executable text is lost,
+#     even when a prefix this pass does not model (`timeout 5 …`, `sudo -u x
+#     …`) sits in front of it.
+#   * The precise walk ADDS shapes the old regex structurally could not see:
+#     `git -c core.quotepath=false read-tree` (git accepts `-c`/`-C`/
+#     `--git-dir` config overrides BEFORE the subcommand, so the two words are
+#     not adjacent), a quoted subcommand, and every interpreter-wrapped body.
+#   * Isolation only ever gets STRICTER: a bare `GIT_INDEX_FILE=` substring no
+#     longer authorizes anything; the assignment must be an assignment PREFIX
+#     of the same simple command, an `env`/`sudo`-carried assignment for it, or
+#     a genuinely persistent earlier `export GIT_INDEX_FILE=` / standalone
+#     assignment segment (the shapes where the real shell would in fact export
+#     it to the later segment).
+# The ONLY direction it narrows is the intended one: a `git read-tree` phrase
+# that no shell would ever execute — quoted data handed to a non-executing
+# command, or a LITERAL heredoc body fed to something that is not an
+# interpreter. "Literal" is load-bearing there: only a QUOTED delimiter
+# (`<<'EOF'` / `<<"EOF"`) makes a body literal. A bare `<<EOF` body is
+# expanded BY THE SHELL before the sink reads a byte of it, so its `$( … )` /
+# backtick spans are scanned as executable text (im_hd_expand()) even when the
+# owning command is a known inert sink.
+#
+# Fail-closed by construction: an unterminated quote, an unbalanced `$(`, an
+# unclosed heredoc and a recursion beyond the depth bound all leave the text
+# VISIBLE/treated as executable rather than inert, and index_mutation_unisolated()
+# falls back to the legacy regex pair if awk itself fails.
+#
+# MEASURED, not asserted. A differential sweep of a 148-shape corpus against
+# the merge-base hook (`origin/main` at 44e9ab48), each version built into its
+# OWN isolated tree and fed PreToolUse JSON exactly as
+# tests/hooks/lib/guard-destructive-harness.sh make_input() builds it (throwaway
+# git cwd, no .loom/config.json, every LOOM_* unset):
+#
+#     36 shapes  allow -> deny    wrapper escapes, both isolation-scoping
+#                                 holes, git -c/-C/--git-dir/--work-tree
+#     27 shapes  deny  -> allow
+#     85 shapes  unchanged
+#
+# Of the 27 deny -> allow, 22 are PROVABLY inert: each was probed by replacing
+# the index subcommand with a marker program and RUNNING the shape — the marker
+# never fired, so no shell ever executed that text. They are quoted
+# `--body`/`--comment` values and heredoc bodies owned by a known inert sink
+# (`cat > file`, `tee`, `git commit -F -`, `grep`, `jq`, the
+# `--body "$(cat <<QUOTED … )"` filing idiom), either with a QUOTED delimiter or
+# with no substitution in the body at all. The other 5 are the write-then-execute
+# shapes recorded as limitation 4 below: their marker DOES fire, and they are
+# accepted with reasons, not claimed inert.
+#
+# KNOWN LIMITATIONS (unchanged from the old matcher — recorded, not introduced)
+#
+#   1. A phrase QUOTED inside a non-shell interpreter body — `python - <<EOF` /
+#      `os.system("git read-tree HEAD")` — is not seen. The old regex missed it
+#      for the same reason (no quote character in its boundary class), and this
+#      pass does not parse Python/Perl/Ruby syntax. Bodies of such commands keep
+#      the old regex verbatim (im_legacy()) rather than the structural pass, so
+#      the coverage is identical to before, not narrower.
+#   2. A payload ASSEMBLED at runtime — `bash -c "$(printf 'git read-tree')"`,
+#      an `eval` of a variable — is not resolvable without executing it. Also
+#      unchanged: the old matcher missed every one of these too.
+#   3. `git` reached through an alias/variable command word (`$G read-tree`) is
+#      not resolved, matching every other command-word-anchored check in this
+#      file (see the printenv/systemctl/ssh-cat segment parsers).
+#
+# ACCEPTED LIMITATIONS INTRODUCED BY THIS PASS (measured, with reasons)
+#
+#   4. WRITE-THEN-EXECUTE inside ONE command string —
+#      `cat > /tmp/x.sh <<QUOTED … EOF` followed by `bash /tmp/x.sh` (also the
+#      `tee`, `source` and `cat <<QUOTED > file && bash file` variants). The
+#      heredoc body genuinely IS literal to `cat`, so this pass treats it as
+#      file content; the same string then executes the file it just wrote. The
+#      old regex denied these only by accident — it matched the raw bytes
+#      wherever they sat — and the shape was never actually covered: no guard
+#      can follow a file across `bash /tmp/x.sh`, and splitting the write and
+#      the run into two tool calls escaped the old matcher exactly as it escapes
+#      this one. 5 shapes in the sweep; accepted as out of remit, recorded here
+#      rather than omitted from the deny -> allow table.
+#   5. PROCESS SUBSTITUTION as an interpreter payload —
+#      `source <(echo 'git read-tree HEAD')`, `. <(…)`, `bash <(…)`.
+#      ALLOW on both sides (no regression, so not a deny -> allow move), but it
+#      is the same class of escape this pass set out to close: the phrase is a
+#      quoted argument of a non-executing producer whose output the interpreter
+#      then runs through a /dev/fd path. Recorded so this inventory stays
+#      honest rather than silently short. (A process substitution whose own
+#      text is unquoted — `diff <(git read-tree HEAD) f` — is still denied by
+#      the lenient net, which sees the adjacent word pair.)
+#
+# Hot path: gated behind a `read-tree` substring test at the call site, so the
+# awk fork only happens for a command that mentions the phrase at all.
+# =============================================================================
+_INDEXMUT_AWK="$_HASLIVESUBST_AWK"'
+# Basename of a command word (so /usr/bin/git is still git).
+function im_base(w,   p, k) {
+    p = w
+    k = index(p, "/")
+    while (k > 0) { p = substr(p, k + 1); k = index(p, "/") }
+    return p
+}
+
+# Interpreters whose ARGUMENTS are shell source text. Deliberately the same
+# vocabulary mask_ask_positional_args() names in its own header as the set it
+# refuses to allowlist ("a command that WRAPS the phrase and then executes it").
+function im_is_interp(b) {
+    return (b == "sh" || b == "bash" || b == "zsh" || b == "dash" ||
+            b == "ksh" || b == "mksh" || b == "ash" || b == "busybox" ||
+            b == "eval" || b == "source" || b == ".")
+}
+
+# Shells that execute their STANDARD INPUT when given no -c payload -- the
+# sink shape of `echo <SQ>…<SQ> | sh`.
+function im_is_stdin_shell(b) {
+    return (b == "sh" || b == "bash" || b == "zsh" || b == "dash" ||
+            b == "ksh" || b == "mksh" || b == "ash")
+}
+
+# Commands that can own a heredoc without EXECUTING its body: the body is file
+# content, message text or search input. DELIBERATELY NARROW, the same
+# convention mask_ask_positional_args() states for its own allowlist -- this is
+# the ONLY list that lets a heredoc body stop being scanned, so anything not on
+# it (an interpreter, a language runtime, an unknown command) keeps the
+# pre-#7923 treatment via im_legacy() below. Adding an entry here is a claim
+# that the command cannot run its stdin as code.
+function im_is_inert_sink(b) {
+    return (b == "cat" || b == "tee" || b == "grep" || b == "egrep" ||
+            b == "fgrep" || b == "rg" || b == "head" || b == "tail" ||
+            b == "wc" || b == "sort" || b == "uniq" || b == "diff" ||
+            b == "cmp" || b == "jq" || b == "yq" || b == "gh" || b == "git" ||
+            b == "base64" || b == "tr" || b == "column" || b == "cut" ||
+            b == "md5sum" || b == "shasum" || b == "sha1sum" || b == "sha256sum")
+}
+
+# The PRE-#7923 matcher, verbatim, over a raw string. Applied to a heredoc body
+# whose owning command is neither a shell (re-scanned structurally) nor a known
+# inert sink (ignored) -- a `python - <<EOF` / `perl <<EOF` body can call out to
+# the shell in its own syntax, which this pass does not parse, so those bodies
+# keep exactly the treatment they had before this change rather than silently
+# becoming allow. Monotonicity over cleverness.
+function im_legacy(s) {
+    if (index(s, "read-tree") == 0) return
+    if (s ~ /GIT_INDEX_FILE=/) return
+    if (s ~ /(^|[;&|(`]|[ \t\n])git[ \t]+read-tree/) IMHIT = 1
+}
+
+# Words that may PRECEDE the real command word without being it: shell
+# grammar keywords/openers and env-preserving launcher prefixes.
+function im_is_prefix(b) {
+    return (b == "{" || b == "!" || b == "if" || b == "then" || b == "else" ||
+            b == "elif" || b == "while" || b == "until" || b == "do" ||
+            b == "time" || b == "command" || b == "builtin" || b == "exec" ||
+            b == "nohup" || b == "sudo" || b == "doas" || b == "env" ||
+            b == "stdbuf" || b == "nice" || b == "ionice" || b == "setsid" ||
+            b == "xargs")
+}
+
+# git GLOBAL options that consume the NEXT word as their value, so the
+# subcommand walk does not mistake the value for the subcommand. This is what
+# makes `git -c core.quotepath=false read-tree` visible.
+function im_git_opt_takes_value(u) {
+    return (u == "-c" || u == "-C" || u == "--git-dir" || u == "--work-tree" ||
+            u == "--namespace" || u == "--exec-path" || u == "--super-prefix" ||
+            u == "--config-env")
+}
+
+# NAME of a shell assignment token, or "" when the token is not one. Tested on
+# the RAW token on purpose: `"GIT_INDEX_FILE=/tmp/i"` (quote BEFORE the name)
+# is a command word to the shell, not an assignment, and must not isolate.
+function im_assign_name(rawtok) {
+    if (match(rawtok, /^[A-Za-z_][A-Za-z0-9_]*=/)) return substr(rawtok, 1, RLENGTH - 1)
+    return ""
+}
+
+# An assignment/export only reaches a LATER segment across a separator that
+# keeps the same shell: `;`, `&&` and a newline. Never across a pipe.
+function im_persist_sep(sep) {
+    return (sep == ";" || sep == "&&" || sep == "\n" || sep == "")
+}
+
+function im_hd_index(u) {
+    if (match(u, /^IMHD[0-9]+IM$/)) return substr(u, 5, length(u) - 6) + 0
+    return 0
+}
+
+# Remove ONE quoting layer, shell-accurately: quotes at the outer level are
+# removed, quotes nested inside the other kind are preserved, so recursing into
+# `bash -c <SQ>echo "hi"<SQ>` still sees the inner double quotes.
+function im_unquote(tok,   out, i, n, c, q) {
+    out = ""; n = length(tok); i = 1; q = ""
+    while (i <= n) {
+        c = substr(tok, i, 1)
+        if (q == SQ) {
+            if (c == SQ) q = ""; else out = out c
+            i++; continue
+        }
+        if (q == DQ) {
+            if (c == "\\") { i++; if (i <= n) out = out substr(tok, i, 1); i++; continue }
+            if (c == DQ) { q = ""; i++; continue }
+            out = out c; i++; continue
+        }
+        if (c == SQ) { q = SQ; i++; continue }
+        if (c == DQ) { q = DQ; i++; continue }
+        if (c == "\\") { i++; if (i <= n) out = out substr(tok, i, 1); i++; continue }
+        out = out c; i++
+    }
+    return out
+}
+
+# Replace each heredoc BODY with a marker word on the opener line, remembering
+# the body in the GLOBAL IMHD[] (global, and keyed by a global counter, so a
+# marker still resolves when the opener line is later re-scanned one recursion
+# level down -- e.g. the `cat` inside `--body "$(cat <<QUOTED … )"`). What
+# happens to a body is decided by its OWNING command in im_segments(), not
+# here: a `bash <<QUOTED` body executes, a `cat > file <<QUOTED` body is file
+# content, and anything else keeps the pre-#7923 regex treatment.
+# An UNCLOSED heredoc is left untouched (body stays visible => fail-closed).
+function im_mask_heredocs(s,   lines, nl, i, j, line, delim, closeat, trimmed,
+                          dashform, k, out, skip, rs, rl, body, any, hdquoted) {
+    if (index(s, "<<") == 0) return s
+    nl = split(s, lines, "\n")
+    for (i = 1; i <= nl; i++) skip[i] = 0
+    any = 0
+    for (i = 1; i <= nl; i++) {
+        if (skip[i]) continue
+        line = lines[i]
+        if (!match(line, HDRE)) continue
+        rs = RSTART; rl = RLENGTH
+        delim = substr(line, rs, rl)
+        dashform = (substr(delim, 3, 1) == "-")
+        sub(/^<<-?[ \t]*/, "", delim)
+        # QUOTEDNESS of the delimiter is security-relevant, so it is RECORDED
+        # here, not merely stripped: a quoted delimiter makes the body literal,
+        # but a bare `<<EOF` does NOT -- the shell performs parameter expansion
+        # and command substitution on such a body BEFORE the owning command
+        # reads a single byte of it. See im_hd_expand().
+        # (No apostrophes in this awk program: it is a single-quoted string.)
+        hdquoted = (substr(delim, 1, 1) == SQ || substr(delim, 1, 1) == DQ)
+        if (hdquoted) {
+            delim = substr(delim, 2, length(delim) - 2)
+        }
+        if (delim == "") continue
+        closeat = 0
+        for (j = i + 1; j <= nl; j++) {
+            trimmed = lines[j]
+            if (dashform) sub(/^\t+/, "", trimmed)
+            sub(/[ \t]+$/, "", trimmed)
+            if (trimmed == delim) { closeat = j; break }
+        }
+        if (closeat == 0) continue
+        IMHDN++
+        k = IMHDN
+        any = 1
+        body = ""
+        for (j = i + 1; j < closeat; j++) {
+            body = body (body == "" ? "" : "\n") lines[j]
+            skip[j] = 1
+        }
+        skip[closeat] = 1
+        IMHD[k] = body
+        IMHDQ[k] = hdquoted
+        lines[i] = substr(line, 1, rs - 1) " IMHD" k "IM " substr(line, rs + rl)
+    }
+    if (!any) return s
+    out = ""
+    for (i = 1; i <= nl; i++) {
+        if (skip[i]) continue
+        out = out (out == "" ? "" : "\n") lines[i]
+    }
+    return out
+}
+
+# Recurse into every LIVE command substitution -- `$( … )` and backticks,
+# including inside double quotes -- and replace the span with an inert
+# placeholder so the outer lex is not confused by its separators. A span inside
+# SINGLE quotes is skipped: bash performs no expansion there at all, the same
+# floor strip_literal_text() records for its own single-quote carve-out.
+# Unbalanced/unterminated spans are left verbatim (fail-closed).
+function im_extract_subst(s, depth,   out, n, i, c, q, dep, j, inner) {
+    out = ""; n = length(s); i = 1; q = ""
+    while (i <= n) {
+        c = substr(s, i, 1)
+        if (q == SQ) { out = out c; if (c == SQ) q = ""; i++; continue }
+        if (q == DQ) {
+            if (c == "\\") { out = out c; i++; if (i <= n) { out = out substr(s, i, 1); i++ }; continue }
+            if (c == DQ) { out = out c; q = ""; i++; continue }
+        } else {
+            if (c == SQ) { q = SQ; out = out c; i++; continue }
+            if (c == DQ) { q = DQ; out = out c; i++; continue }
+            if (c == "\\") { out = out c; i++; if (i <= n) { out = out substr(s, i, 1); i++ }; continue }
+        }
+        if (c == "$" && substr(s, i + 1, 1) == "(") {
+            dep = 1; j = i + 2
+            while (j <= n) {
+                if (substr(s, j, 1) == "(") dep++
+                else if (substr(s, j, 1) == ")") { dep--; if (dep == 0) break }
+                j++
+            }
+            if (dep != 0) { out = out c; i++; continue }
+            inner = substr(s, i + 2, j - i - 2)
+            im_scan(inner, depth + 1)
+            out = out "IMSUB"
+            i = j + 1
+            continue
+        }
+        if (c == "`") {
+            j = i + 1
+            while (j <= n && substr(s, j, 1) != "`") j++
+            if (j > n) { out = out c; i++; continue }
+            inner = substr(s, i + 1, j - i - 1)
+            im_scan(inner, depth + 1)
+            out = out "IMSUB"
+            i = j + 1
+            continue
+        }
+        out = out c; i++
+    }
+    return out
+}
+
+# LIVE expansions inside an UNQUOTED-delimiter heredoc body.
+#
+# `cat > f <<QUOTED` is genuinely literal, but a bare `cat > f <<EOF` is NOT:
+# the SHELL performs parameter expansion and command substitution on the body
+# and hands the RESULT to the sink, so a `$( ... )` / backtick span in such a
+# body executes against the real index even though cat/tee/gh/jq/grep never run
+# a byte of it as code. Only the SPANS are live -- the surrounding text really
+# is data -- so this scans the spans and nothing else, which is why a plain
+# `cat > f <<EOF` body naming the index command stays allow.
+#
+# DELIBERATELY QUOTE-BLIND, unlike im_extract_subst(): quote characters carry
+# no quoting meaning inside a heredoc body, so a span wrapped in single quotes
+# there is expanded exactly like a bare one. A BACKSLASH is the one suppressor
+# the shell honours, so it is honoured here too. An unbalanced/unterminated
+# span is not resolvable -- fail closed by handing the whole body to the
+# pre-#7923 regex rather than ignoring it.
+function im_hd_expand(s, depth,   n, i, c, j, dep) {
+    n = length(s); i = 1
+    while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "\\") { i += 2; continue }
+        if (c == "$" && substr(s, i + 1, 1) == "(") {
+            dep = 1; j = i + 2
+            while (j <= n) {
+                if (substr(s, j, 1) == "(") dep++
+                else if (substr(s, j, 1) == ")") { dep--; if (dep == 0) break }
+                j++
+            }
+            if (dep != 0) { im_legacy(s); return }
+            im_scan(substr(s, i + 2, j - i - 2), depth + 1)
+            i = j + 1
+            continue
+        }
+        if (c == "`") {
+            j = i + 1
+            while (j <= n && substr(s, j, 1) != "`") j++
+            if (j > n) { im_legacy(s); return }
+            im_scan(substr(s, i + 1, j - i - 1), depth + 1)
+            i = j + 1
+            continue
+        }
+        i++
+    }
+}
+
+# Quote-aware lexer. tok[]/typ[] hold words ("w", quote characters PRESERVED so
+# im_assign_name() can tell an assignment from a quoted look-alike) and
+# separators ("s": ; && || | & newline ( ) ).
+function im_lex(s, tok, typ,   n, i, c, cur, q, cnt) {
+    n = length(s); i = 1; cur = ""; q = ""; cnt = 0
+    while (i <= n) {
+        c = substr(s, i, 1)
+        if (q != "") {
+            cur = cur c
+            if (q == DQ && c == "\\") { i++; if (i <= n) cur = cur substr(s, i, 1); i++; continue }
+            if (c == q) q = ""
+            i++; continue
+        }
+        if (c == SQ || c == DQ) { q = c; cur = cur c; i++; continue }
+        if (c == "\\") {
+            # Backslash-newline is a LINE CONTINUATION: both bytes vanish and
+            # the word continues, so `git \<newline>  read-tree` is the same
+            # adjacent word pair as `git read-tree`.
+            if (substr(s, i + 1, 1) == "\n") { i += 2; continue }
+            cur = cur c; i++; if (i <= n) { cur = cur substr(s, i, 1); i++ }
+            continue
+        }
+        if (c == " " || c == "\t") {
+            if (cur != "") { cnt++; tok[cnt] = cur; typ[cnt] = "w"; cur = "" }
+            i++; continue
+        }
+        if (c == "\n" || c == ";" || c == "&" || c == "|" || c == "(" || c == ")") {
+            if (cur != "") { cnt++; tok[cnt] = cur; typ[cnt] = "w"; cur = "" }
+            cnt++
+            if (c == "&" && substr(s, i + 1, 1) == "&") { tok[cnt] = "&&"; i += 2 }
+            else if (c == "|" && substr(s, i + 1, 1) == "|") { tok[cnt] = "||"; i += 2 }
+            else { tok[cnt] = c; i++ }
+            typ[cnt] = "s"
+            continue
+        }
+        cur = cur c; i++
+    }
+    if (cur != "") { cnt++; tok[cnt] = cur; typ[cnt] = "w" }
+    return cnt
+}
+
+# Index of the command word in tok[lo..hi] (assignments and launcher prefixes
+# skipped), or 0 when the segment has none.
+function im_cmdidx(tok, typ, lo, hi,   i, b) {
+    i = lo
+    while (i <= hi) {
+        if (typ[i] != "w") { i++; continue }
+        if (im_assign_name(tok[i]) != "") { i++; continue }
+        b = im_base(im_unquote(tok[i]))
+        if (b == "" || im_is_prefix(b)) { i++; continue }
+        return i
+    }
+    return 0
+}
+
+# Does tok[lo..hi] name a shell that will EXECUTE ITS STDIN (no -c payload)?
+function im_seg_is_stdin_shell(tok, typ, lo, hi,   ci, j) {
+    ci = im_cmdidx(tok, typ, lo, hi)
+    if (ci == 0) return 0
+    if (!im_is_stdin_shell(im_base(im_unquote(tok[ci])))) return 0
+    for (j = ci + 1; j <= hi; j++) {
+        if (typ[j] == "w" && im_unquote(tok[j]) == "-c") return 0
+    }
+    return 1
+}
+
+function im_segments(tok, typ, n, depth,
+                     ns, sstart, send, ssep, feeds, k, i, hi, j, b, u,
+                     seg_iso, env_iso, assigned, payload, hdk) {
+    ns = 1; sstart[1] = 1
+    for (i = 1; i <= n; i++) {
+        if (typ[i] != "s") continue
+        send[ns] = i - 1
+        ssep[ns] = tok[i]
+        ns++
+        sstart[ns] = i + 1
+    }
+    send[ns] = n
+    ssep[ns] = ""
+
+    # A segment whose pipeline SINK is a stdin-reading shell has its own data
+    # words executed, so they are source text, not inert arguments.
+    for (k = 1; k <= ns; k++) feeds[k] = 0
+    for (k = ns - 1; k >= 1; k--) {
+        if (ssep[k] != "|") continue
+        if (feeds[k + 1] || im_seg_is_stdin_shell(tok, typ, sstart[k + 1], send[k + 1])) feeds[k] = 1
+    }
+
+    env_iso = 0
+    for (k = 1; k <= ns; k++) {
+        i = sstart[k]; hi = send[k]
+        if (i > hi) continue
+        seg_iso = env_iso
+        assigned = 0
+        # Assignment PREFIX of this simple command.
+        while (i <= hi && typ[i] == "w" && im_assign_name(tok[i]) != "") {
+            if (im_assign_name(tok[i]) == "GIT_INDEX_FILE") { seg_iso = 1; assigned = 1 }
+            i++
+        }
+        if (i > hi) {
+            # Assignments only: these DO persist into the following segments.
+            if (assigned && im_persist_sep(ssep[k])) env_iso = 1
+            continue
+        }
+        # Launcher prefixes (env/sudo/…) may carry further assignments.
+        while (i <= hi && typ[i] == "w") {
+            if (im_assign_name(tok[i]) != "") {
+                if (im_assign_name(tok[i]) == "GIT_INDEX_FILE") seg_iso = 1
+                i++; continue
+            }
+            b = im_base(im_unquote(tok[i]))
+            if (b == "" || im_is_prefix(b)) { i++; continue }
+            break
+        }
+        if (i > hi) continue
+        b = im_base(im_unquote(tok[i]))
+
+        # Heredoc bodies OWNED by this segment, routed by what the owning
+        # command does with its stdin. Done before the branches below so every
+        # command word reaches it, including `git` and `export`.
+        for (j = sstart[k]; j <= hi; j++) {
+            if (typ[j] != "w") continue
+            hdk = im_hd_index(im_unquote(tok[j]))
+            if (hdk == 0) continue
+            if (im_is_interp(b) || feeds[k]) im_scan(IMHD[hdk], depth + 1)
+            else if (!im_is_inert_sink(b)) im_legacy(IMHD[hdk])
+            else if (!IMHDQ[hdk]) im_hd_expand(IMHD[hdk], depth)
+        }
+
+        if (b == "export") {
+            for (j = i + 1; j <= hi; j++) {
+                if (typ[j] != "w") continue
+                if (im_assign_name(tok[j]) == "GIT_INDEX_FILE" && im_persist_sep(ssep[k])) env_iso = 1
+            }
+            continue
+        }
+
+        if (im_is_interp(b)) {
+            # Every argument of an interpreter is shell SOURCE: scan each one
+            # on its own AND the joined non-option run, so both
+            # `bash -c <SQ>git read-tree HEAD<SQ>` and `eval git read-tree HEAD`
+            # are seen. Its heredoc body was already scanned above.
+            payload = ""
+            for (j = i + 1; j <= hi; j++) {
+                if (typ[j] != "w") continue
+                u = im_unquote(tok[j])
+                if (im_hd_index(u) > 0) continue
+                if (substr(u, 1, 1) == "-") continue
+                payload = payload (payload == "" ? "" : " ") u
+                im_scan(u, depth + 1)
+            }
+            if (payload != "") im_scan(payload, depth + 1)
+            continue
+        }
+
+        if (b == "git") {
+            j = i + 1
+            while (j <= hi && typ[j] == "w") {
+                u = im_unquote(tok[j])
+                if (length(u) > 1 && substr(u, 1, 1) == "-") {
+                    if (im_git_opt_takes_value(u)) j += 2; else j++
+                    continue
+                }
+                break
+            }
+            if (j <= hi && typ[j] == "w" && im_unquote(tok[j]) == "read-tree") {
+                if (!seg_iso) IMHIT = 1
+                continue
+            }
+        }
+
+        # LENIENT NET -- the old regex, re-expressed per segment: an ADJACENT
+        # `git` / `read-tree` word pair in executable text. Keeps every shape
+        # the previous matcher denied denied, including behind a prefix this
+        # pass does not model (`timeout 5 git read-tree`).
+        for (j = i; j < hi; j++) {
+            if (typ[j] != "w" || typ[j + 1] != "w") continue
+            if (im_base(im_unquote(tok[j])) == "git" && im_unquote(tok[j + 1]) == "read-tree") {
+                if (!seg_iso) IMHIT = 1
+            }
+        }
+
+        if (feeds[k]) {
+            for (j = i + 1; j <= hi; j++) {
+                if (typ[j] != "w") continue
+                u = im_unquote(tok[j])
+                if (im_hd_index(u) > 0) continue
+                im_scan(u, depth + 1)
+            }
+        }
+    }
+}
+
+function im_scan(s, depth,   tok, typ, n) {
+    if (index(s, "read-tree") == 0 && index(s, "IMHD") == 0) return
+    if (depth > 5) { IMHIT = 1; return }
+    s = im_mask_heredocs(s)
+    s = im_extract_subst(s, depth)
+    n = im_lex(s, tok, typ)
+    im_segments(tok, typ, n, depth)
+}
+
+BEGIN {
+    SQ = sprintf("%c", 39)
+    DQ = sprintf("%c", 34)
+    HDRE = "<<-?[ \t]*(" SQ "[A-Za-z_][A-Za-z0-9_]*" SQ "|" DQ "[A-Za-z_][A-Za-z0-9_]*" DQ "|[A-Za-z_][A-Za-z0-9_]*)"
+    IMHIT = 0
+    IMHDN = 0
+    buf = ""
+}
+{ buf = buf (NR > 1 ? "\n" : "") $0 }
+END {
+    im_scan(buf, 0)
+    printf "%d", IMHIT
+}
+'
+
+# Returns 0 (true) when $1 contains a `git read-tree` that would mutate the
+# REAL staging index without an isolating GIT_INDEX_FILE assignment in force
+# for that invocation. Falls back to the pre-#7923 regex pair if awk itself
+# fails, so a broken analyzer can only ever be as permissive as the old check
+# (never more) — the ERR trap`s fail-open must not reach this deny floor.
+index_mutation_unisolated() {
+    local verdict
+    verdict=$(printf '%s' "$1" | awk "$_INDEXMUT_AWK" 2>/dev/null) || verdict="awk-failed"
+    if [[ "$verdict" == "1" ]]; then
+        return 0
+    elif [[ "$verdict" == "0" ]]; then
+        return 1
+    fi
+    log_hook_error "index_mutation_unisolated: analyzer failed, falling back to legacy matcher"
+    if echo "$1" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+read-tree' &&
+        ! echo "$1" | grep -qE 'GIT_INDEX_FILE='; then
+        return 0
+    fi
+    return 1
+}
+
+# =============================================================================
 # git read-tree WITHOUT an isolating GIT_INDEX_FILE assignment
 #
 # A bare `git read-tree` (no tree-ish, no isolated index) is equivalent to
@@ -8729,13 +9380,26 @@ done
 # BACKTICK BOUNDARY (#5783): the leading class below now also admits a
 # backtick, matching the `(` it already had — `` `git read-tree` `` used to
 # be invisible to this check for the same reason `` `git clean -fd` `` was
-# invisible to ASK_PATTERNS above.
+# invisible to ASK_PATTERNS above. Since #7923 the boundary question is no
+# longer asked by a regex at all — index_mutation_unisolated() above resolves
+# command words, interpreter wrappers, substitutions and heredocs structurally,
+# which subsumes that class (and its remaining quote/adjacency gaps) entirely.
+#
+# EXECUTABLE vs. INERT (#7923): the two substring tests this site used to make
+# were both context-blind, so it denied documentation that merely QUOTED the
+# phrase (`gh issue create --body <SQ>…git read-tree…<SQ>`, a `cat > file
+# <<QUOTED` body) while allowing real index mutation smuggled through an
+# interpreter (`bash -c <SQ>git read-tree HEAD<SQ>`), and accepted a
+# `GIT_INDEX_FILE=` occurrence from anywhere in the string as proof of
+# isolation. index_mutation_unisolated() replaces BOTH tests: it still reads
+# COMMAND_NO_COMMENT (unchanged tier), but asks the structural question —
+# is a `git read-tree` simple command actually going to run, and is an
+# isolating assignment in force FOR IT. See its header for the monotonicity
+# argument: on executable text its deny set is a strict SUPERSET of the old
+# regex pair; it narrows only on text no shell would execute.
 # =============================================================================
-if echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(`]|[[:space:]])git[[:space:]]+read-tree'; then
-    # Isolated form (GIT_INDEX_FILE=... git read-tree ...) is allowed.
-    if ! echo "$COMMAND_NO_COMMENT" | grep -qE 'GIT_INDEX_FILE='; then
-        deny "Blocked: $COMMAND (this 'git read-tree' targets the REAL staging index — a bare form empties it outright, turning every tracked file into a phantom staged deletion, and no reflog entry is written, so the damage is silent and near-unrecoverable. Nothing has been run: your index is intact, so just rerun against an isolated index. Merge preview with no index at all: 'git merge-tree --write-tree <base> <branch>'. Temporary index: 'GIT_INDEX_FILE=\$(mktemp) git read-tree <tree>' — any command carrying a GIT_INDEX_FILE= assignment passes through untouched)" "git-read-tree"  # scan-reads: COMMAND_NO_COMMENT
-    fi
+if [[ "$COMMAND_NO_COMMENT" == *"read-tree"* ]] && index_mutation_unisolated "$COMMAND_NO_COMMENT"; then
+    deny "Blocked: $COMMAND (this 'git read-tree' targets the REAL staging index — a bare form empties it outright, turning every tracked file into a phantom staged deletion, and no reflog entry is written, so the damage is silent and near-unrecoverable. Nothing has been run: your index is intact, so just rerun against an isolated index. Merge preview with no index at all: 'git merge-tree --write-tree <base> <branch>'. Temporary index: 'GIT_INDEX_FILE=\$(mktemp) git read-tree <tree>' — a GIT_INDEX_FILE= assignment on THAT invocation passes through untouched)" "git-read-tree"  # scan-reads: COMMAND_NO_COMMENT
 fi
 
 # =============================================================================

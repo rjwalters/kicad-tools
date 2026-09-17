@@ -24,10 +24,16 @@
 #                          wait-for-checks-then-merge (immediate if CLEAN)
 #                          instead of failing (#3820).
 #   --allow-stacked-children
-#                          Bypass the pre-merge merge-ordering guard when the
-#                          parent branch (feature/issue-N) still has open
-#                          stacked child PRs targeting it (operator asserts the
-#                          children are already reconciled). See #3747 item 2.
+#                          Bypass the pre-merge merge-ordering guard's hard-block
+#                          path. That guard's DEFAULT behavior, when the parent
+#                          branch (feature/issue-N) still has open stacked child
+#                          PRs targeting it, is now to pin the parent's tip to
+#                          refs/loom/parent/<branch> and proceed with a WARNING
+#                          (see #7982) — it only still hard-blocks when the tip
+#                          could not be pinned (a detached/unreadable parent).
+#                          This flag skips straight past that remaining block
+#                          (operator asserts responsibility, mirroring
+#                          --worktree-path). See #3747 item 2.
 #   --allow-unapproved     Bypass the pre-merge loom:pr review-signal guard,
 #                          which otherwise hard-blocks merging a PR whose
 #                          current head carries no loom:pr label (no
@@ -176,16 +182,15 @@ Options:
                          degrades gracefully to wait-for-checks-then-merge
                          (immediate if already CLEAN) rather than failing (#3820).
   --allow-stacked-children
-                         Bypass the pre-merge merge-ordering guard. That guard
-                         hard-blocks merging a stacked PARENT PR (branch
-                         feature/issue-N) while it still has open stacked CHILD
-                         PRs targeting its branch, because the repo's
-                         delete_branch_on_merge setting would delete the parent
-                         branch synchronously during the merge and leave the
-                         children unable to rebase onto it (see #3747 item 2).
-                         Pass this flag only after you have manually reconciled
-                         (or verified) the children — the operator asserts
-                         responsibility, mirroring --worktree-path.
+                         Bypass the pre-merge merge-ordering guard's remaining
+                         hard-block path. By default (#7982) the guard pins
+                         the parent's tip to refs/loom/parent/<branch> and
+                         WARNS instead of blocking when open stacked CHILD PRs
+                         target the parent branch (feature/issue-N) — see
+                         #3747 item 2. It still hard-blocks only when the tip
+                         could not be pinned; this flag skips past that.
+                         Operator asserts responsibility, mirroring
+                         --worktree-path.
   --allow-unapproved     Bypass the pre-merge loom:pr review-signal guard.
                          By default the script refuses to merge (exit 1) a
                          PR whose current head does not carry the loom:pr
@@ -529,11 +534,31 @@ fi
 # label. Discovery reuses item 1's live-forge-query shape (`gh pr list --base
 # <parent> --state open`), NOT the ephemeral daemon registry.
 #
-# Default is a hard block (error, exit 1) — a normal, recoverable failure that
-# Champion's cron retries next tick, exactly like every other merge-blocking
-# condition in this file. --allow-stacked-children bypasses it (operator asserts
-# the children are reconciled). --dry-run still runs the guard and REPORTS the
-# would-be block, but honors the dry-run contract (never exits 1).
+# #7982: the guard used to hard-block unconditionally here. The failure it
+# protects against is narrow and concrete — reconcile-stack.sh's rebase needs
+# `<parent-branch>` to still resolve as a ref AFTER the forge deletes it — and
+# the parent's tip is already known at merge time (PR_HEAD_SHA), so the guard
+# can ESTABLISH that postcondition itself instead of just asserting it. Default
+# behavior is now: pin the parent tip to refs/loom/parent/<branch> (a plain,
+# non-per-worktree ref, so every worktree of this repo can see it) and proceed
+# with a loud WARNING naming each child PR and the exact reconcile-stack.sh
+# invocation. reconcile-stack.sh falls back to that ref when the branch name no
+# longer resolves. The guard hard-blocks (error, exit 1) ONLY when the tip could
+# not be pinned (a detached/unreadable parent) — that is when the original
+# failure is genuinely still reachable. --allow-stacked-children skips straight
+# past that remaining block (operator asserts the children are reconciled).
+# --dry-run never mutates local refs; it reports the would-be outcome without
+# pinning or exiting 1.
+#
+# This file is over the file-size threshold and ratcheted
+# (.loom/docs/file-size-policy.md), and a sibling shell lib is not available as
+# a remedy here — `contract` is baseline-only in scripts/shell-allowlist.txt,
+# so a NEW `.sh` cannot be justified by "merge-pr.sh sources it"
+# (.loom/docs/shell-language-policy.md). #7982 therefore takes the policy's
+# other remedy — "remove at least as much as you added from the same file" —
+# and the block below is written densely on purpose: it replaces the old
+# unconditional-block tail at a net code-line saving, keeping the ratchet
+# intact without inventing an unjustifiable file.
 _check_no_open_stacked_children() {
   # Only GitHub, and only a parent PR on a feature/issue-<N> branch, can have
   # stacked children — identical guard conditions to
@@ -562,24 +587,33 @@ _check_no_open_stacked_children() {
     return 0
   fi
 
-  local msg
-  msg="Merge blocked: PR #$PR_NUMBER's branch '$PR_BRANCH' still has $count open stacked child PR(s) ($child_list) targeting it.
+  # One ready-to-paste reconcile-stack.sh invocation per child, reused verbatim
+  # by both the warn and the block message below, so the operator never has to
+  # assemble the command themselves.
+  local pin="refs/loom/parent/$PR_BRANCH" cmds
+  cmds="$(echo "$children_json" | jq -r --arg p "$PR_BRANCH" '.[] | "  ./.loom/scripts/reconcile-stack.sh " + (.number|tostring) + " " + $p' 2>/dev/null || echo "  ./.loom/scripts/reconcile-stack.sh <child-pr> $PR_BRANCH")"
 
-Merging now would race the repo's delete_branch_on_merge setting: GitHub deletes '$PR_BRANCH' synchronously during the merge, before the child PR(s) can be rebased/retargeted onto the default branch — leaving reconcile-stack.sh's rebase unable to resolve the parent branch ref (#3747 item 2).
-
-Reconcile each child first (from a clean checkout), then re-run this merge:
-  ./.loom/scripts/reconcile-stack.sh <child-pr> $PR_BRANCH
-
-Or, if you have already verified/reconciled them, re-run with --allow-stacked-children to bypass this guard."
-
-  # --dry-run still runs the guard and reports the would-be outcome, but honors
-  # the dry-run contract (dry-run always exits 0). A real run hard-blocks.
+  # --dry-run reports the predicted outcome and mutates NOTHING (no ref is
+  # written), honoring the dry-run contract (dry-run always exits 0).
   if [[ "$DRY_RUN" == "true" ]]; then
-    warning "[dry-run] Would BLOCK merge of PR #$PR_NUMBER: $count open stacked child PR(s) ($child_list) still target '$PR_BRANCH'. Re-run with --allow-stacked-children to override, or reconcile the children first."
+    warning "[dry-run] $count open stacked child PR(s) ($child_list) still target '$PR_BRANCH'. A real run would pin the parent tip to $pin and proceed with a warning naming each child, or hard-block if the tip could not be pinned. No ref was written."
     return 0
   fi
 
-  error "$msg"
+  # Pin the parent's tip so the postcondition reconcile-stack.sh needs is
+  # ESTABLISHED rather than asserted. The ref must point at an object this repo
+  # actually has — a ref to a missing object is useless to a later rebase — so
+  # verify the object locally, fetch the branch once if it is absent, and
+  # re-verify. All three failing means a detached/unreadable parent.
+  if { git -C "$REPO_ROOT" cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null || git -C "$REPO_ROOT" fetch --quiet origin "$PR_BRANCH" 2>/dev/null; } && git -C "$REPO_ROOT" cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null && git -C "$REPO_ROOT" update-ref "$pin" "$PR_HEAD_SHA" 2>/dev/null; then
+    warning "Merge-ordering guard: PR #$PR_NUMBER's branch '$PR_BRANCH' still has $count open stacked child PR(s) ($child_list) targeting it. Pinned the parent tip to $pin ($PR_HEAD_SHA) so reconcile-stack.sh can still resolve '$PR_BRANCH' after the merge deletes it (#3747 item 2, #7982). Proceeding with the merge — reconcile each child once this has landed:"$'\n'"$cmds"
+    return 0
+  fi
+
+  # Pin failed: this is the one case where the original #3747 race is genuinely
+  # still reachable, so the guard still hard-blocks (a normal, recoverable
+  # failure Champion's cron retries next tick).
+  error "Merge blocked: PR #$PR_NUMBER's branch '$PR_BRANCH' still has $count open stacked child PR(s) ($child_list) targeting it, and its tip ($PR_HEAD_SHA) could not be pinned to $pin — a detached or unreadable parent. Merging now would race the repo's delete_branch_on_merge setting: GitHub deletes '$PR_BRANCH' synchronously during the merge, before the child PR(s) can be rebased/retargeted onto the default branch — leaving reconcile-stack.sh's rebase unable to resolve the parent branch ref (#3747 item 2). Reconcile each child first (from a clean checkout), then re-run this merge:"$'\n'"$cmds"$'\n'"Or, if you have already verified/reconciled them, re-run with --allow-stacked-children to bypass this guard."
 }
 
 # Invoke the guard before either merge path attempts the actual merge API call.
