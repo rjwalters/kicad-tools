@@ -1660,23 +1660,60 @@ class NetStatusAnalyzer:
 
         # Build segment adjacency graph
         segment_graph: dict[int, set[int]] = defaultdict(set)
-        for i, seg_a in enumerate(segments):
-            for j, seg_b in enumerate(segments):
-                if i != j:
-                    if self.strict:
-                        connected = seg_a.layer == seg_b.layer and self._geoms_touch(
-                            polys[i], polys[j]
-                        )
-                    else:
+        if self.strict:
+            # Issue #5240: the naive nested loop below calls ``gi.intersects(gj)``
+            # for every same-layer segment pair -- O(n^2) GEOS calls per net.
+            # Profiling ``scripts/ci/check_diffpair_coverage.py`` against board
+            # 06 showed this is the dominant Python-side cost of the post-route
+            # connectivity/pour audit (``_geoms_touch`` called ~7.2M times,
+            # ~35s cumulative across the two ``analyze()`` passes the gate makes).
+            # Mirror the ``STRtree`` bulk self-join fix #5488 applied to
+            # ``_audit_pour_nets``'s identical pattern: spatially prune
+            # candidate pairs via the tree's bounding-box index before paying
+            # for any GEOS ``intersects`` call, using the SAME predicate (not
+            # an approximation). Segments are grouped by layer first so the
+            # tree query itself only ever considers same-layer candidates,
+            # matching the ``seg_a.layer == seg_b.layer`` gate the original
+            # loop enforced via short-circuit. A ``None`` polygon (a
+            # degenerate/unbuildable copper shape) never touches anything,
+            # matching ``_geoms_touch`` -- exclude it before building the tree
+            # since ``STRtree`` does not accept ``None`` geometries.
+            from shapely.strtree import STRtree
+
+            layer_indices: dict[Any, list[int]] = defaultdict(list)
+            for idx, seg in enumerate(segments):
+                if polys[idx] is not None:
+                    layer_indices[seg.layer].append(idx)
+
+            for indices in layer_indices.values():
+                if len(indices) < 2:
+                    continue
+                geoms = [polys[k] for k in indices]
+                left, right = STRtree(geoms).query(geoms, predicate="intersects")
+                for a, b in zip(left.tolist(), right.tolist(), strict=True):
+                    # ``a < b`` keeps exactly one direction per unordered pair
+                    # (the bulk self-join also returns each element trivially
+                    # paired with itself, plus both directions of every true
+                    # pair) -- matching the original loop's exclusion of
+                    # self-pairs (``i != j``) while still recording both graph
+                    # edges below.
+                    if a < b:
+                        i, j = indices[a], indices[b]
+                        segment_graph[i].add(j)
+                        segment_graph[j].add(i)
+        else:
+            for i, seg_a in enumerate(segments):
+                for j, seg_b in enumerate(segments):
+                    if i != j:
                         connected = (
                             self._points_close(seg_a.start, seg_b.start)
                             or self._points_close(seg_a.start, seg_b.end)
                             or self._points_close(seg_a.end, seg_b.start)
                             or self._points_close(seg_a.end, seg_b.end)
                         )
-                    if connected:
-                        segment_graph[i].add(j)
-                        segment_graph[j].add(i)
+                        if connected:
+                            segment_graph[i].add(j)
+                            segment_graph[j].add(i)
 
         # Find connected components
         visited: set[int] = set()
