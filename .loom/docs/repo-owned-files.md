@@ -65,6 +65,16 @@ This is the same file that pins a customization against being *overwritten* by
 *deleted* by the installer's clean sweep. One list, one meaning: **this path is
 the repo's, not Loom's.**
 
+Since #7995 a `PreToolUse` guard reads this list too. In a repo that is not
+Loom's own source tree, an agent writing to an **unpinned** path under
+`.loom/hooks|scripts|roles|docs|bin/` or `.claude/commands/loom/` is denied —
+through the `Edit`/`Write` tools and through the Bash write idioms alike — with
+a message naming the two dispositions above. Adding the path here is what turns
+that denial off for that one file, because the pin is the repo declaring the
+file its own. See [`guard-hooks.md`](guard-hooks.md) §"Installed-File Write
+Guard" for the discriminator that decides "consumer repo vs. Loom's own tree"
+and for the category toggle.
+
 Commit `.loom/resync-ignore` — it is repo configuration, and the installer
 never removes it.
 

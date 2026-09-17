@@ -537,6 +537,27 @@ digest_aggregate_line() {
 # (lowest-numbered) open title match instead of returning empty and letting
 # Step 4b create a duplicate digest issue.
 # =====================================================================
+# =====================================================================
+# Digest pin (#8083), mirrored from champion-pr-merge.md's Step 2
+# `gh issue pin "$DIGEST_ISSUE" 2>/dev/null || true` line. Two properties
+# are load-bearing and neither is obvious from the one-liner:
+#   - it runs on EVERY pass, so a digest that is unpinned (never pinned in
+#     the first place, or unpinned by hand) self-heals on the next tick
+#     rather than staying invisible until someone notices;
+#   - it is best-effort. `gh issue pin` exits non-zero when the issue is
+#     already pinned, when the repo is at GitHub's 3-pin-per-repo cap, and
+#     when the token lacks push scope. The digest is reporting/visibility
+#     only, so none of those may abort the merge pass.
+# `gh_pin` stands in for the real `gh issue pin`; its exit status is the
+# only thing the mirrored line observes. The trailing echo represents the
+# pass carrying on to the steps that follow the pin.
+# =====================================================================
+digest_pin() {
+    local issue="$1"
+    gh_pin "$issue" 2>/dev/null || true
+    echo "pass-continued"
+}
+
 digest_issue_lookup() {
     local json="$1" marker="$2"
     printf '%s\n' "$json" | jq "([.[] | select(.body | startswith(\"$marker\"))] as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end) | .number // empty"
@@ -1052,6 +1073,41 @@ assert_eq "7050" "$(digest_issue_lookup "$TAGGED_LOWER_NUMBER" "$MARKER")" \
 # (Step 4b's create-a-new-issue path still applies when nothing exists).
 assert_eq "" "$(digest_issue_lookup '[]' "$MARKER")" \
     "(c) no title match at all still returns empty, unaffected by the fallback (#7338)"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 12C: the digest issue is re-pinned every pass, best-effort (#8083)"
+
+# (a) An unpinned digest is pinned by the pass itself. Before #8083 three
+# prompts and a doc described #6877 as pinned while no code path ever pinned
+# one, so `pinnedIssues` read totalCount 0 and an operator had no path to the
+# held-PR pile without already knowing the issue number.
+gh_pin() { echo "PIN:$1"; return 0; }
+PIN_OUT=$(digest_pin 6877)
+assert_contains "$PIN_OUT" "PIN:6877" \
+    "(a) an unpinned digest is pinned by the pass itself - no one-off manual action needed"
+assert_contains "$PIN_OUT" "pass-continued" \
+    "(a) a successful pin lets the pass continue"
+
+# (b) Already pinned: `gh issue pin` errors, and that is the steady state on
+# every pass after the first. It must be a no-op for the pass, and the issue
+# is still pinned afterwards either way - idempotent in effect.
+gh_pin() { echo "gh: Issue is already pinned" >&2; return 1; }
+assert_eq "pass-continued" "$(digest_pin 6877)" \
+    "(b) re-pinning an already-pinned digest does not abort the pass"
+
+# (c) GitHub caps a repository at 3 pinned issues; a repo already at the cap
+# must not lose its Champion pass over a visibility affordance.
+gh_pin() { echo "gh: over the maximum number of pinned issues" >&2; return 1; }
+assert_eq "pass-continued" "$(digest_pin 6877)" \
+    "(c) hitting GitHub's 3-pin cap does not abort Champion's merge pass"
+
+# (d) Pinning needs push access, which a rotated/scoped token may not hold.
+gh_pin() { echo "gh: HTTP 403: Resource not accessible" >&2; return 1; }
+assert_eq "pass-continued" "$(digest_pin 6877)" \
+    "(d) a pin refused for lack of push scope does not abort Champion's merge pass"
+
+unset -f gh_pin
 echo
 
 # ---------------------------------------------------------------------

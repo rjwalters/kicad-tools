@@ -1451,6 +1451,41 @@ Two layers, not one:
    its own issue) that reads human intent and *uses* this typed surface plus the
    forge.
 
+### What enabling ChatOps puts in the daemon's TCB
+
+**Read this before turning it on.** Phase 1 was outbound only: safehouse could
+be wrong, absent, or hostile and the worst outcome was a missing room line.
+Inbound steering transfers trust — with `safehouse.chatops` enabled, **your
+homeserver, the room's membership, and `safehoused`'s sender stamping become
+part of the daemon's trusted computing base**:
+
+- **The homeserver** decides which account sent which event. It is the thing
+  that authenticates the operator; the daemon only compares the result against
+  an allowlist.
+- **Room membership** is the perimeter. Anyone who can post to the steering room
+  *as an allowlisted Matrix ID* can steer the daemon — the daemon has no second
+  factor and no separate credential of its own. Room access control is therefore
+  daemon access control.
+- **`safehoused`'s stamping** supplies the identity. The envelope's `from` is
+  stamped by `safehoused` from the local socket identity, never taken from the
+  message body (which is why spoofing is structurally impossible on this side).
+  A `safehoused` that stamps the wrong `from` bypasses the allowlist entirely —
+  the daemon cannot detect it.
+
+What that reach *is*, concretely: the ChatOps path round-trips through the
+daemon's own IPC socket, so an allowlisted sender can do exactly what an
+operator with shell access on that host could already do over IPC, no more —
+but they no longer need the shell access. The mitigations: an explicit allowlist
+(empty ⇒ off), a closed six-verb grammar, and a confirm-nonce on `cancel`. The
+non-mitigations, stated plainly: there is no rate limit, no audit outside the
+daemon's own log and event bus, and no capability the nonce withholds from an
+allowlisted sender.
+
+Treat the steering room as you would an SSH key for the host. A private,
+invite-only room with only operator accounts in it is the intended deployment;
+the signal room (`room`'s default) qualifies only if its membership already
+meets that bar.
+
 ### The accepted language, in full
 
 | Command | Maps to | Nonce? |
@@ -1491,6 +1526,43 @@ with the stamped sender identity, under `safehouse.chatops.accepted` /
 event taxonomy is unchanged and the audit trail is never narrated back into the
 room (no feedback loop).
 
+### Why `dispatch` is not nonce-gated (decision, #8021)
+
+`cancel` needs a confirm-nonce and `dispatch` does not, which is the asymmetry
+worth explaining: `dispatch` is the only forge-mutating verb and the only one
+that *spends* — tokens, shared forge API budget, and label churn on a real
+issue. "Gate the money verb too" was reconsidered explicitly and **declined**:
+
+- **The nonce is not a second authentication factor.** It is minted by the
+  daemon and delivered into the same room, to the same sender, over the same
+  channel. Anyone who can send as an allowlisted sender can also read the reply
+  and echo the nonce back. It defends against *accident and replay* — never
+  against a compromised sender — so it cannot be the control that protects
+  spend.
+- **Gating the common verb is what breaks the gate on the dangerous one.**
+  `dispatch` is the routine verb; a confirm round-trip on every one of them
+  trains a reflex, and a reflexive `confirm` is worse than no confirm at all for
+  `cancel`, which is the case the nonce exists for.
+- **A spurious dispatch is bounded and reversible.** It is never `force`, it is
+  subject to the daemon's ordinary concurrency caps / noop cooldown / dispatch
+  backoff, it is narrated into the room, and it can be `cancel`led (with a
+  nonce). A spurious `cancel` destroys in-flight work that re-running cannot
+  restore.
+- **ChatOps grants reach, not capability.** Every verb round-trips the daemon's
+  own IPC socket, where `dispatch` is ungated as well. A second factor at only
+  one of the two surfaces advertises a protection that does not exist.
+
+The accepted cost, stated so it is a choice and not an oversight: **an
+allowlisted sender can make this daemon spend tokens and forge budget with no
+second factor.** The allowlist plus the room's membership is the whole control
+(see the TCB section above).
+
+Revisit this if `dispatch` ever gains `force`, or if a verb arrives whose spend
+is unbounded per message (e.g. a multi-issue dispatch).
+`Command::requires_confirmation` in
+`loom-daemon/src/safehouse_chatops/command.rs` is the single place
+destructiveness is decided — adding a gated verb is one match arm there.
+
 ### Configuration — off unless this block is present
 
 ```jsonc
@@ -1518,6 +1590,13 @@ without safehouse is byte-for-byte unaffected. A block naming no *usable* Matrix
 ID (`@localpart:server`) resolves to off with one `warn`, rather than to an
 enabled-but-accepts-nobody state.
 
+**`enabled` is parsed strictly (#8021).** Omitted ⇒ on (the block's presence is
+the opt-in); the literals `true` / `false` mean what they say; **anything that
+is not a JSON boolean means off, with a `warn`**. `"enabled": "false"` — the
+string, not the literal — is a realistic hand-edit typo, and it must not switch
+an inbound control channel on. `LOOM_SAFEHOUSE_CHATOPS_ENABLED` follows the same
+rule: set but unparseable is `false`, not "unset".
+
 **`room` defaults to the signal room, not `rooms.claims`.** Peer-claim traffic
 may be routed to a dedicated machine-chatter room (#4713) no human is joined to;
 steering must land where the operator actually is.
@@ -1540,3 +1619,17 @@ steering must land where the operator actually is.
 > A sibling module rather than a `safehouse::` submodule because `safehouse.rs`
 > is frozen by the file-size ratchet (`.loom/docs/file-size-policy.md`) — new
 > code lands in a new module, which is exactly what the ratchet is for.
+
+**Two structural properties a refactor must not quietly drop** (recorded because
+they are load-bearing and easy to lose, #8021):
+
+1. **Sender spoofing is impossible by construction, not by validation.**
+   `safehouse::Envelope` has no `from` field at all, so a client *cannot* assert
+   an identity; `safehoused` stamps it from the socket identity. Adding a
+   writable `from` to the envelope would turn the allowlist into a
+   self-attestation check.
+2. **The command enum is genuinely closed.** `Command` derives no
+   `Deserialize`, so there is no `#[serde(other)]` arm and no untagged fallback,
+   and `Verb::from_word` returns `Option` with an explicit `_ => None`. Deriving
+   `Deserialize` on it later — for a config file, a test fixture, anything —
+   would reopen it.

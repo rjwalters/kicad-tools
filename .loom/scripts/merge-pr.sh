@@ -576,6 +576,17 @@ _check_no_open_stacked_children() {
   count="$(echo "$children_json" | jq 'length' 2>/dev/null || echo 0)"
   [[ "$count" -gt 0 ]] || return 0
 
+  # Captured for the POST-merge reconcile pass (#8010 item 2) —
+  # _auto_reconcile_stacked_children below prefers this pre-merge snapshot
+  # over a fresh post-merge query: GitHub retargets an open child PR the
+  # instant delete_branch_on_merge removes this parent branch, so a query run
+  # AFTER the merge can return zero rows even though children existed seconds
+  # earlier. A plain (non-local) assignment so it survives this function
+  # returning — read via `${STACKED_CHILDREN_JSON:-}` everywhere else so a
+  # standalone invocation of either function (e.g. from a test) without this
+  # guard having run first still behaves exactly as before.
+  STACKED_CHILDREN_JSON="$children_json"
+
   # Comma-separated "#N" list for the operator-facing message.
   child_list="$(echo "$children_json" \
     | jq -r '[.[].number | "#" + tostring] | join(", ")' 2>/dev/null || echo '')"
@@ -606,7 +617,13 @@ _check_no_open_stacked_children() {
   # verify the object locally, fetch the branch once if it is absent, and
   # re-verify. All three failing means a detached/unreadable parent.
   if { git -C "$REPO_ROOT" cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null || git -C "$REPO_ROOT" fetch --quiet origin "$PR_BRANCH" 2>/dev/null; } && git -C "$REPO_ROOT" cat-file -e "${PR_HEAD_SHA}^{commit}" 2>/dev/null && git -C "$REPO_ROOT" update-ref "$pin" "$PR_HEAD_SHA" 2>/dev/null; then
-    warning "Merge-ordering guard: PR #$PR_NUMBER's branch '$PR_BRANCH' still has $count open stacked child PR(s) ($child_list) targeting it. Pinned the parent tip to $pin ($PR_HEAD_SHA) so reconcile-stack.sh can still resolve '$PR_BRANCH' after the merge deletes it (#3747 item 2, #7982). Proceeding with the merge — reconcile each child once this has landed:"$'\n'"$cmds"
+    # Non-local global, mirroring STACKED_CHILDREN_JSON above: unlike that
+    # var (set as soon as an open child is FOUND), this one is set only once
+    # a pin is actually WRITTEN — the item-3 re-pin below must gate on this,
+    # not on STACKED_CHILDREN_JSON, or the --allow-stacked-children bypass
+    # path (which returns above without ever reaching this line) would still
+    # trip the re-pin and write a ref the guard itself chose not to create.
+    STACKED_CHILDREN_PIN_WRITTEN=true; warning "Merge-ordering guard: PR #$PR_NUMBER's branch '$PR_BRANCH' still has $count open stacked child PR(s) ($child_list) targeting it. Pinned the parent tip to $pin ($PR_HEAD_SHA) so reconcile-stack.sh can still resolve '$PR_BRANCH' after the merge deletes it (#3747 item 2, #7982). Proceeding with the merge — reconcile each child once this has landed:"$'\n'"$cmds"
     return 0
   fi
 
@@ -1455,10 +1472,16 @@ _auto_reconcile_stacked_children() {
   # Only a parent PR on a feature/issue-<N> branch can have stacked children.
   [[ "$PR_BRANCH" =~ ^feature/issue-([0-9]+)$ ]] || return 0
 
-  # Live forge discovery — NEVER the daemon registry. Plain `gh` (uncached) so we
-  # see child PRs as of the merge, not a cached list snapshot.
-  local children_json
-  children_json="$(gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open \
+  # Prefer the pre-merge snapshot the guard above already captured (#8010
+  # item 2) over a fresh post-merge query: GitHub retargets an open child PR
+  # the instant delete_branch_on_merge removes this parent branch, so a query
+  # run AFTER the merge can return zero rows even though children existed
+  # seconds earlier — the guard's own pre-merge query already paid for this
+  # exact answer. Live forge discovery (uncached `gh`, NEVER the daemon
+  # registry) is only a fallback for when the guard never ran (e.g. this
+  # function invoked standalone, as the unit tests do).
+  local children_json="${STACKED_CHILDREN_JSON:-}"
+  [[ -n "$children_json" ]] || children_json="$(gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open \
     --json number,headRefName 2>/dev/null || echo '[]')"
   [[ -n "$children_json" ]] || return 0
 
@@ -1764,6 +1787,28 @@ _MPS_JSON="$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>/dev/null || 
 _MPS_FRESH_SHA="$(echo "$_MPS_JSON" | jq -r '.head.sha // empty' 2>/dev/null || echo '')"
 [[ -n "$_MPS_FRESH_SHA" ]] && MERGE_PRECONDITION_SHA="$_MPS_FRESH_SHA"
 unset _MPS_JSON _MPS_FRESH_SHA
+
+# Re-pin refs/loom/parent/<branch> to the SHA actually being merged (#8010
+# item 3), when the merge-ordering guard above pinned one. That guard pinned
+# $PR_HEAD_SHA — read once, at the top of the script, from the initial
+# (possibly gh-cached) $PR_JSON — but the merge itself uses the
+# $MERGE_PRECONDITION_SHA just refreshed above, live, ~1100 lines and one
+# CI-wait later. If the parent branch was pushed in between, the two SHAs
+# differ and the pin would otherwise still point at a tip that is NOT what
+# gets merged. Re-pointing it here keeps reconcile-stack.sh's fallback
+# rebasing from the tip that was ACTUALLY merged. Best-effort and silent: a
+# failure here leaves the existing (already-correct-when-written) pin in
+# place, and reconcile-stack.sh's #8010-item-4 ancestry check refuses any pin
+# that is not an ancestor of the child rather than silently replaying the
+# wrong commit range. Gated on `$DRY_RUN != true` — this runs unconditionally
+# ahead of both merge paths' own dry-run checks below, and the guard's pin
+# path honors the "dry-run never mutates local refs" contract, so this must
+# too. Gated on STACKED_CHILDREN_PIN_WRITTEN, NOT STACKED_CHILDREN_JSON: the
+# latter is set as soon as the guard FINDS an open child, even on the
+# --allow-stacked-children bypass path that returns without ever writing a
+# pin — gating on it would silently create a pin the guard itself declined
+# to create.
+[[ "$DRY_RUN" != "true" && "${STACKED_CHILDREN_PIN_WRITTEN:-}" == "true" && "$MERGE_PRECONDITION_SHA" != "$PR_HEAD_SHA" ]] && { git -C "$REPO_ROOT" update-ref "refs/loom/parent/$PR_BRANCH" "$MERGE_PRECONDITION_SHA" 2>/dev/null || true; }
 
 if [[ "$AUTO_MERGE" == "true" ]]; then
   # Bounded poll window for the UNSTABLE-because-checks-are-still-running case

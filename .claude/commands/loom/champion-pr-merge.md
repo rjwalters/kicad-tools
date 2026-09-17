@@ -1719,9 +1719,9 @@ dispatch guard, #4123)" section for the daemon-side mechanics.
 
 The aggregate line above answers "how big is the pile"; it does not answer
 "which PRs, and why". #6848 was filed after a human found 19 held PRs by
-manually inspecting labels, despite the aggregate line having very likely been
-printing a growing count in every Champion session's own transcript all
-along — a number nobody durably records is not a tracked signal. Extend the
+manually inspecting labels, despite the aggregate line printing a growing
+count in every Champion session's own transcript all along — a number nobody
+durably records is not a tracked signal. Extend the
 *same* pass (reusing `$HELD_JSON` from above — no second `gh pr list` call)
 into a **per-PR digest** (PR number, hold reason, `mergeable` status) and
 persist it **durably across passes**, following the same idempotency-marker
@@ -1735,14 +1735,13 @@ comment or issue every tick.
 per-PR conflict-duration clock forward across ticks — `gh pr view` only ever
 reports the *current* `mergeable` value, never how long it has read
 `CONFLICTING`, so the only durable place to keep "since when" is the digest
-issue Champion already overwrites every pass. Moved here, ahead of Step 1,
-so the lookup that used to live in Step 2 runs first:
+issue Champion already overwrites every pass:
 
 ```bash
 DIGEST_TITLE="Champion: Merge-Risk Hold Digest"
 DIGEST_MARKER="<!-- champion:merge-risk-hold-digest -->"
 
-# Cached ("$GH_READ") — locating the pinned issue is itself an observation,
+# Cached ("$GH_READ") — locating the digest issue is itself an observation,
 # same rule as the follow-on-issue duplicate search elsewhere in this role.
 #
 # Marker-tagged matches always win over marker-less ones, regardless of
@@ -1844,18 +1843,18 @@ criterion #5 already routes on.** It answers a different question: staleness
 since the PR was last touched at all*; rotting is about *how long a specific
 conflict has sat unresolved*, and only the digest tracks it — nothing routes
 or force-pushes on it. Three days is long enough that a conflict Champion's
-very next tick would still be reporting on doesn't immediately read as
-"rotting", and short enough to flag real multi-day drift (the 1–3 week piles
-this section exists to make visible) well before it compounds into the
-crisis-sized pile #6720/#6848 both describe. This distinguishes "held,
+very next tick would still be reporting on doesn't read as "rotting", and
+short enough to flag real multi-day drift (the 1–3 week piles this section
+exists to make visible) before it compounds into the crisis-sized pile
+#6720/#6848 both describe. This distinguishes "held,
 clean" (`$HELD_CONFLICTING_CLEAN`, a conflict younger than the threshold)
 from "held, rotting" (`$HELD_ROTTING`, at or past it) in the aggregate line
 below.
 
-**Step 2 — write the digest to a durable, pinned tracking issue.** Champion
+**Step 2 — write the digest to a durable tracking issue, and pin it.** Champion
 edits this issue's **body** in place every pass (not a comment thread) — the
-current pile belongs at the top of the issue, not buried at the bottom of a
-scrollback with one comment per 10-minute tick. `$DIGEST_ISSUE` was already
+current pile belongs at the top of the issue, not buried in a comment
+scrollback. `$DIGEST_ISSUE` was already
 located in Step 0 above; this step only builds the new body (including the
 hidden `champion:conflict-since` markers Step 1 collected, which is how the
 clock survives into the *next* pass) and writes it:
@@ -1885,27 +1884,28 @@ if [ -z "$DIGEST_ISSUE" ]; then
   # `loom:curated` / `loom:pr` search can ever match it) while it stays a
   # normal, findable OPEN issue for a human or Guide to read directly.
   DIGEST_URL=$(./.loom/scripts/create-issue.sh --title "$DIGEST_TITLE" --body "$DIGEST_BODY" --label "loom:blocked")
+  DIGEST_ISSUE="${DIGEST_URL##*/}"
 else
   gh issue edit "$DIGEST_ISSUE" --body "$DIGEST_BODY"
   DIGEST_URL="https://github.com/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/issues/$DIGEST_ISSUE"
 fi
+gh issue pin "$DIGEST_ISSUE" 2>/dev/null || true   # #8083: self-healing, best-effort
 "$GH_READ" --clear-cache   # your own write must not be masked by your own cache
 echo "Merge-risk hold digest updated: $DIGEST_URL"
 ```
 
 **Report it even when it is zero, same as the aggregate line** — an empty
-`$HELD_JSON` still writes the digest issue, with a single `_none_` row; the
-issue's continued existence and fresh "Last updated" timestamp is itself the
-useful signal ("Champion is still running its census and the pile is
-currently empty") rather than a stale artifact nobody can distinguish from
-"Champion stopped running this".
+`$HELD_JSON` still writes the digest issue, with a single `_none_` row. Its
+continued existence and fresh "Last updated" timestamp is itself the useful
+signal ("the census ran and the pile is empty") rather than a stale artifact
+nobody can distinguish from "Champion stopped running this".
 
 **Never let this block a merge decision.** The digest is a read-only summary
 of state this pass already computed for other reasons (`$HELD_JSON`, plus one
 cached comment read per held PR) — it changes no label, comments on no PR, and
-touches no Safety Criterion. If writing it fails (rate limit, transient API
-error), log the failure and continue; it never blocks or alters criterion #1-6
-evaluation for any PR.
+touches no Safety Criterion. If writing or pinning it fails (rate limit,
+transient API error, GitHub's 3-pin-per-repo cap), log the failure and
+continue; it never blocks or alters criterion #1-6 evaluation for any PR.
 
 ---
 

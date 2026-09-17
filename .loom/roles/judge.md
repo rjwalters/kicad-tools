@@ -1006,7 +1006,6 @@ It prints `KEY=VALUE` lines and exits with a code that names the decision:
 | `10` | `SKIP` | PR author is a bot (`is_bot: true` — Dependabot, Renovate, `github-actions[bot]`, …). Outside the Loom label workflow by construction: the fallback path never labels it, so it can never leave this query's result set through any Loom-side action. Skipped **permanently**, checked **before** the cap. |
 | `11` | `SKIP` | **Lifetime cap reached** — `MARKER_COUNT` (total `loom:fallback-evaluated` markers across the PR's *entire* comment history, **not scoped to the current head SHA**) has reached `--cap` (default 20). See "Why the cap is per-PR-lifetime, not per-SHA" below. |
 | `12` | `SKIP` | SHA dedup (#5058) — the most recent marker's SHA already equals the current head SHA; nothing changed since the last evaluation. |
-| `13` | `SKIP` | **Draft PR** (`isDraft: true`) — the author has not requested review; a fallback-mode verdict is not meaningful yet. Read fresh on every invocation (never cached), so the PR falls through to the cap/dedup logic on the very next pass after the author marks it "Ready for review". Checked before the cap, like the bot-author check. |
 | `1`  | — | Environment/`gh` error — treat exactly like any other fallback-queue `gh` failure (see the Pre-Iteration Environment Check above); **never** interpret this as "no work available". |
 
 Also read `VELOCITY_ALERT` from the output — **independent of `DECISION`**: if
@@ -1053,7 +1052,7 @@ Pre-Iteration Environment Check (gh repo view)
                     ↓
                     ├─→ Found? → Walk the list in order; for each candidate run
                     │     │        judge-fallback-guard.sh <PR>
-                    │     ├─→ exit 10/11/12/13 (SKIP)? → try the next unlabeled PR
+                    │     ├─→ exit 10/11/12 (SKIP)? → try the next unlabeled PR
                     │     │        (exit iteration if none remain)
                     │     ├─→ exit 1 (gh/env error)? → Exit with error, same as
                     │     │        any other fallback-queue gh failure

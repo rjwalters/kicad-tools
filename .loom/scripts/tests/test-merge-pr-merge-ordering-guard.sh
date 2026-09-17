@@ -344,6 +344,141 @@ assert_eq "" "$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/paren
   "Unpinnable tip -> no ref was written"
 PR_HEAD_SHA="$PARENT_SHA"
 
+# T9 (#8010 item 2): the guard captures STACKED_CHILDREN_JSON (consumed by
+# the post-merge reconcile AND the merge-time re-pin, #8010 items 2 and 3)
+# exactly when it found an open child — never when there were none. Called
+# DIRECTLY (not via run_guard, which wraps the call in a `$( … )` command
+# substitution — a subshell whose plain-assignment globals never propagate
+# back to this script) so the global side effect is actually observable.
+DRY_RUN=false; ALLOW_STACKED_CHILDREN=false
+PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
+unset STACKED_CHILDREN_JSON 2>/dev/null || true
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_pin_ref "feature/issue-100"
+_check_no_open_stacked_children >/dev/null 2>&1 || true
+assert_contains "${STACKED_CHILDREN_JSON:-}" '"number":501' \
+  "Guard captures STACKED_CHILDREN_JSON with an open child present (#8010 item 2)"
+
+unset STACKED_CHILDREN_JSON 2>/dev/null || true
+clear_prlist "feature/issue-100"
+clear_pin_ref "feature/issue-100"
+_check_no_open_stacked_children >/dev/null 2>&1 || true
+assert_eq "" "${STACKED_CHILDREN_JSON:-}" \
+  "Guard does NOT set STACKED_CHILDREN_JSON when there are no open children"
+
+# T9b (Judge fix, #8010 follow-up): STACKED_CHILDREN_PIN_WRITTEN must track
+# whether a pin was actually WRITTEN, not merely whether an open child was
+# FOUND. The --allow-stacked-children bypass finds a child (sets
+# STACKED_CHILDREN_JSON) but returns before ever reaching the pin write, so
+# STACKED_CHILDREN_PIN_WRITTEN must stay unset in that path even though a real
+# pin-succeeds run sets it.
+unset STACKED_CHILDREN_PIN_WRITTEN STACKED_CHILDREN_JSON 2>/dev/null || true
+DRY_RUN=false; ALLOW_STACKED_CHILDREN=true
+PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+clear_pin_ref "feature/issue-100"
+_check_no_open_stacked_children >/dev/null 2>&1 || true
+assert_eq "" "${STACKED_CHILDREN_PIN_WRITTEN:-}" \
+  "--allow-stacked-children bypass finds a child but STACKED_CHILDREN_PIN_WRITTEN stays unset (no pin was written)"
+ALLOW_STACKED_CHILDREN=false
+
+unset STACKED_CHILDREN_PIN_WRITTEN 2>/dev/null || true
+clear_pin_ref "feature/issue-100"
+_check_no_open_stacked_children >/dev/null 2>&1 || true
+assert_eq "true" "${STACKED_CHILDREN_PIN_WRITTEN:-}" \
+  "A genuine pin-succeeds run sets STACKED_CHILDREN_PIN_WRITTEN=true"
+
+# T10 (#8010 item 3): the merge-time re-pin. This is top-level script code
+# (not a function — it runs once, right after $MERGE_PRECONDITION_SHA is
+# refreshed), so it is extracted by unique CONTENT rather than by the
+# name()-matching `awk` extraction the rest of this file uses, keeping the
+# test in lockstep with the exact line shipped.
+REPIN_LINE="$(grep -F 'MERGE_PRECONDITION_SHA" != "$PR_HEAD_SHA"' "$MERGE_PR_SRC")"
+if [[ -z "$REPIN_LINE" ]]; then
+    echo -e "${RED}FATAL${NC}: could not find the #8010 item 3 re-pin line in $MERGE_PR_SRC" >&2
+    exit 2
+fi
+
+# A second commit on the parent branch simulates it being pushed again
+# between the pre-merge guard's pin (item 2's PARENT_SHA) and the live
+# merge-time SHA read — the exact race item 3 closes.
+git_q -C "$REPO_ROOT" checkout -q feature/issue-100
+echo "parent v2" > "$REPO_ROOT/parent.txt"
+git_q -C "$REPO_ROOT" add parent.txt
+git_q -C "$REPO_ROOT" commit -q -m "parent tip v2"
+PARENT_SHA_V2="$(git_q -C "$REPO_ROOT" rev-parse HEAD)"
+git_q -C "$REPO_ROOT" push -q origin feature/issue-100
+git_q -C "$REPO_ROOT" checkout -q main
+
+# (a) SHA drifted + a pin was actually WRITTEN -> the pin moves to the fresh SHA.
+PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
+STACKED_CHILDREN_PIN_WRITTEN=true
+clear_pin_ref "feature/issue-100"
+git_q -C "$REPO_ROOT" update-ref "refs/loom/parent/feature/issue-100" "$PARENT_SHA"
+MERGE_PRECONDITION_SHA="$PARENT_SHA_V2"
+eval "$REPIN_LINE" || true
+REPINNED_SHA="$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100)"
+assert_eq "$PARENT_SHA_V2" "$REPINNED_SHA" \
+  "Re-pin moves refs/loom/parent/<branch> to the freshly-read merge-time SHA when it drifted (#8010 item 3)"
+
+# (b) No drift -> the pin is left exactly as the guard wrote it.
+clear_pin_ref "feature/issue-100"
+git_q -C "$REPO_ROOT" update-ref "refs/loom/parent/feature/issue-100" "$PARENT_SHA"
+MERGE_PRECONDITION_SHA="$PARENT_SHA"
+eval "$REPIN_LINE" || true
+UNCHANGED_SHA="$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100)"
+assert_eq "$PARENT_SHA" "$UNCHANGED_SHA" \
+  "Re-pin is a no-op when the merge-time SHA matches what the guard already pinned"
+
+# (c) No pin was ever WRITTEN (STACKED_CHILDREN_PIN_WRITTEN unset) -> nothing
+# is written even though the SHAs differ (no orphan pin for an unrelated PR).
+clear_pin_ref "feature/issue-100"
+unset STACKED_CHILDREN_PIN_WRITTEN 2>/dev/null || true
+MERGE_PRECONDITION_SHA="$PARENT_SHA_V2"
+PR_HEAD_SHA="$PARENT_SHA"
+eval "$REPIN_LINE" || true
+NO_PIN="$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)"
+assert_eq "" "$NO_PIN" \
+  "Re-pin writes nothing when no pre-merge pin was written (STACKED_CHILDREN_PIN_WRITTEN unset)"
+
+# (e) Judge fix regression (#8010 follow-up): --allow-stacked-children bypass
+# + drift. The guard's bypass path finds an open child (sets
+# STACKED_CHILDREN_JSON) but returns without ever writing a pin, so
+# STACKED_CHILDREN_JSON alone is NOT proof a pin exists. Before the fix, the
+# re-pin line gated on STACKED_CHILDREN_JSON and would still fire here,
+# silently creating a pin the guard itself declined to create.
+clear_pin_ref "feature/issue-100"
+unset STACKED_CHILDREN_PIN_WRITTEN STACKED_CHILDREN_JSON 2>/dev/null || true
+STACKED_CHILDREN_JSON='[{"number":501,"headRefName":"feature/issue-201"}]'
+MERGE_PRECONDITION_SHA="$PARENT_SHA_V2"
+PR_HEAD_SHA="$PARENT_SHA"
+eval "$REPIN_LINE" || true
+BYPASS_DRIFT_PIN="$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)"
+assert_eq "" "$BYPASS_DRIFT_PIN" \
+  "--allow-stacked-children bypass + SHA drift -> re-pin still writes nothing (STACKED_CHILDREN_JSON alone is not proof a pin exists)"
+unset STACKED_CHILDREN_JSON 2>/dev/null || true
+
+# (f) --dry-run must never mutate the pin, even with a genuine SHA drift and a
+# real pin write — this line runs unconditionally ahead of both merge paths'
+# own dry-run checks, so it needs its own guard.
+clear_pin_ref "feature/issue-100"
+DRY_RUN=true
+STACKED_CHILDREN_PIN_WRITTEN=true
+PR_HEAD_SHA="$PARENT_SHA"
+MERGE_PRECONDITION_SHA="$PARENT_SHA_V2"
+eval "$REPIN_LINE" || true
+DRY_RUN_PIN="$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)"
+assert_eq "" "$DRY_RUN_PIN" \
+  "--dry-run -> re-pin writes nothing even with a genuine SHA drift (zero side effects)"
+DRY_RUN=false
+
+clear_pin_ref "feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
+unset STACKED_CHILDREN_PIN_WRITTEN 2>/dev/null || true
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."
@@ -369,6 +504,14 @@ assert_contains "$src" "ALLOW_STACKED_CHILDREN" \
   "merge-pr.sh threads the --allow-stacked-children override into the guard"
 assert_contains "$src" "--allow-stacked-children) ALLOW_STACKED_CHILDREN=true" \
   "merge-pr.sh parses the --allow-stacked-children flag alongside the other options"
+assert_contains "$src" "STACKED_CHILDREN_JSON=\"\$children_json\"" \
+  "merge-pr.sh captures the pre-merge children snapshot into STACKED_CHILDREN_JSON (#8010 item 2)"
+assert_contains "$src" 'update-ref "refs/loom/parent/$PR_BRANCH" "$MERGE_PRECONDITION_SHA"' \
+  "merge-pr.sh re-pins to the freshly-read merge-time SHA when it drifted from the guard's pin (#8010 item 3)"
+assert_contains "$src" "STACKED_CHILDREN_PIN_WRITTEN=true" \
+  "merge-pr.sh sets STACKED_CHILDREN_PIN_WRITTEN only at the point the pin write actually succeeds"
+assert_contains "$src" '"${STACKED_CHILDREN_PIN_WRITTEN:-}" == "true"' \
+  "merge-pr.sh gates the item-3 re-pin on STACKED_CHILDREN_PIN_WRITTEN, not on STACKED_CHILDREN_JSON alone"
 
 # Assert the guard is invoked BEFORE the auto-merge path (line ordering): the
 # _check_no_open_stacked_children invocation must precede `# Handle auto-merge mode`.

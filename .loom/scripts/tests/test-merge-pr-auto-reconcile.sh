@@ -308,6 +308,32 @@ assert_not_contains "$(read_recon)" "502" \
 assert_contains "$(read_gh_log)" "issue comment 502 --repo owner/repo" \
   "Mixed set: unsafe child #502 got a deferred comment"
 
+# T8 (#8010 item 2): when STACKED_CHILDREN_JSON is already populated (the
+# pre-merge guard's snapshot), the post-merge query must NOT be re-run — the
+# function has to reconcile the child the pre-merge snapshot names even
+# though a fresh `gh pr list` would return zero rows (simulating GitHub
+# having already retargeted the child once delete_branch_on_merge removed the
+# parent branch).
+reset_logs
+PR_BRANCH="feature/issue-100"
+clear_prlist "feature/issue-100"   # a post-merge re-query would see []
+STACKED_CHILDREN_JSON='[{"number":501,"headRefName":"feature/issue-201"}]'
+_auto_reconcile_stacked_children
+assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
+  "Pre-merge snapshot (STACKED_CHILDREN_JSON) drives reconciliation even though a post-merge re-query would see zero rows"
+unset STACKED_CHILDREN_JSON
+
+# T9 (#8010 item 2): with no pre-merge snapshot at all (STACKED_CHILDREN_JSON
+# unset — e.g. the guard never ran), behavior falls back to the live
+# post-merge query unchanged.
+reset_logs
+PR_BRANCH="feature/issue-100"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+unset STACKED_CHILDREN_JSON 2>/dev/null || true
+_auto_reconcile_stacked_children
+assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
+  "No pre-merge snapshot -> falls back to the live post-merge query (unchanged behavior)"
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."
@@ -318,6 +344,8 @@ assert_contains "$src" "_auto_reconcile_stacked_children || true" \
   "merge-pr.sh invokes the reconcile step best-effort (|| true) at the merge choke point"
 assert_contains "$src" 'gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open' \
   "merge-pr.sh discovers children via a live forge query, not the daemon registry"
+assert_contains "$src" 'local children_json="${STACKED_CHILDREN_JSON:-}"' \
+  "merge-pr.sh's post-merge reconcile prefers the pre-merge STACKED_CHILDREN_JSON snapshot (#8010 item 2)"
 assert_contains "$src" "grep -qx 'loom:building'" \
   "merge-pr.sh gates safe/unsafe on the child issue's loom:building label"
 assert_contains "$src" '"$SCRIPT_DIR/reconcile-stack.sh" "$child_pr" "$parent_branch"' \

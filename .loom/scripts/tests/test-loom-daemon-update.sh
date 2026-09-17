@@ -742,6 +742,41 @@ FAKECS
     chmod +x "$path"
 }
 
+# Writes a fake `codesign` at $1 that reports a Developer ID Authority for
+# every target EXCEPT the exact path $2 (the eventual provisioning
+# destination), which it reports as ad-hoc-signed (no `Authority=` line,
+# `--verify` still succeeds -- an ad-hoc signature IS a valid signature, just
+# not a certificate-anchored one). Simulates the #7932 regression class this
+# test (#8008) guards against: a verified download that demonstrably carried
+# a Developer ID signature, whose post-provision destination does not.
+write_fake_codesign_signature_downgrade() {
+    local path="$1" downgraded_target="$2"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+DOWNGRADED_TARGET="$downgraded_target"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        if [[ "$target" == "$DOWNGRADED_TARGET" ]]; then
+            echo "Signature=adhoc"
+        else
+            echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+        fi
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    exit 0
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
 # Writes a fake `cosign` at $1 whose `verify-blob` exits $2 — the Linux
 # detached-signature branch of verify_artifact_signature().
 write_fake_cosign() {
@@ -4368,6 +4403,21 @@ else
     echo "  output: $outN"
 fi
 
+# #8008: the post-provision signature-preservation check must NOT fire when
+# the destination's signature matches the verified download's (both carry an
+# Authority=) -- write_fake_codesign's "signed-ok" mode reports the same
+# Authority= line for every target, so this is the "signed-to-signed" no-op
+# case the new check must stay silent-success on.
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'retains its Developer ID Authority signature' <<< "$outN"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} macOS artifact signed: post-provision signature-preservation check ran and confirmed no downgrade"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} macOS artifact signed: post-provision signature-preservation check ran and confirmed no downgrade"
+    echo "  output: $outN"
+fi
+
 # ------------------------------------------------------------
 # O. macOS target, artifact SIGNED but codesign verification FAILS -> abort
 #    (exit 1), destination untouched. Distinct from the "unsigned" case in M.
@@ -4748,6 +4798,54 @@ if echo "$outU" | grep -q 'Rebuilding loom-daemon (cargo build'; then
 else
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} release-gap: forced --fetch hard-fail never falls back to 'cargo build'"
+fi
+
+# ------------------------------------------------------------
+# V. Post-provision signature-preservation assertion (#8008, the follow-up to
+#    #7932): the VERIFIED download carries a Developer ID Authority=
+#    signature, but the PROVISIONED DESTINATION reports ad-hoc/no Authority=
+#    afterward -- exactly the shape of the #7932 regression (sign_daemon_binary's
+#    `codesign ... | grep -q` pipe form silently reported 141 under
+#    `set -o pipefail`, so it force-resigned every Developer ID-signed release
+#    artifact ad-hoc on every provision, unnoticed because nothing compared
+#    the destination's signature against the verified download's). Must
+#    hard-fail (exit 5, same class as the existing version-mismatch check),
+#    not silently succeed.
+# ------------------------------------------------------------
+WV="$BASE_WORKDIR/w-fetch-v"
+new_fixture "$WV"
+write_fake_daemon "$WV/installed-loom-daemon" "oldc0mm" "$WV/marker"
+
+WV_ASSETS="$WV/gh-assets"
+mkdir -p "$WV_ASSETS"
+WV_BIN_NAME="loom-daemon-aarch64-apple-darwin"
+write_fake_artifact_daemon "$WV_ASSETS/$WV_BIN_NAME" "0.16.0" "sigdown0"
+sha256_of "$WV_ASSETS/$WV_BIN_NAME" > "$WV_ASSETS/$WV_BIN_NAME.sha256"
+
+WV_FAKEBIN="$WV/fakebin"
+mkdir -p "$WV_FAKEBIN"
+write_fake_gh "$WV_FAKEBIN/gh" "v0.16.0" "$WV_ASSETS"
+# Authority= for every codesign target EXCEPT the provisioning destination
+# itself, which reports ad-hoc -- simulating a post-provision downgrade.
+write_fake_codesign_signature_downgrade "$WV_FAKEBIN/codesign" "$WV/installed-loom-daemon"
+
+outV=$( cd "$WV" && PATH="$WV_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$WV/installed-loom-daemon" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="aarch64-apple-darwin" \
+    bash "$UPDATE_SCRIPT" --no-restart 2>&1; echo "EXIT=$?" )
+rcV=$(echo "$outV" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
+assert_eq "5" "$rcV" "macOS signature-preservation: Authority pre-provision, ad-hoc post-provision hard-fails (exit 5)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'Post-provision verification FAILED.*Developer ID (Authority=) signature' <<< "$outV" \
+    && grep -q 'DOWNGRADED the signature' <<< "$outV"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} macOS signature-preservation: downgrade reported explicitly, names the #7932 regression class"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} macOS signature-preservation: downgrade reported explicitly, names the #7932 regression class"
+    echo "  output: $outV"
 fi
 
 # ============================================================
@@ -5832,169 +5930,6 @@ if echo "$out84" | grep -q 'Rebuilding loom-daemon (cargo build'; then
 else
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --fetch (#7609): never compiles on the artifact path"
-fi
-
-# ============================================================
-# 85. (#8008) Post-provision signature-preservation assertion: the verified
-#     downloaded artifact carries a Developer ID (Authority=) signature, but
-#     provisioning (a stand-in for the pre-#7932 sign_daemon_binary
-#     regression, #6662/#7932) silently downgrades the DESTINATION to an
-#     ad-hoc signature. verify_destination_artifact() must catch this itself
-#     -- it is the ONLY thing that runs after provisioning and can see both
-#     the pre-provision Authority= state and the post-provision one -- and
-#     fail loudly (exit 5) rather than reporting success with a downgraded,
-#     TCC-grant-orphaning signature.
-#
-#     No LOOM_DAEMON_BIN override: this must go through the REAL
-#     provision_machine_daemon() branch (line 3089+), so a fake
-#     scripts/install/provision-daemon.sh replaces the one new_fixture()
-#     copied in, standing in for a provisioner whose sign_daemon_binary()
-#     call strips the Authority= line -- exactly like test 11 does for the
-#     version-mismatch counterpart of this same hazard.
-# ============================================================
-W85="$BASE_WORKDIR/w85"
-new_fixture "$W85"
-write_fake_daemon "$W85/installed-loom-daemon" "oldc0mm" "$W85/marker"
-
-W85_ASSETS="$W85/gh-assets"
-mkdir -p "$W85_ASSETS"
-W85_BIN_NAME="loom-daemon-aarch64-apple-darwin"
-write_fake_artifact_daemon "$W85_ASSETS/$W85_BIN_NAME" "0.16.0" "sigdown0"
-sha256_of "$W85_ASSETS/$W85_BIN_NAME" > "$W85_ASSETS/$W85_BIN_NAME.sha256"
-
-W85_FAKEBIN="$W85/fakebin"
-mkdir -p "$W85_FAKEBIN"
-write_fake_gh "$W85_FAKEBIN/gh" "v0.16.0" "$W85_ASSETS"
-
-# Marker-file-driven fake codesign: reports a real Developer ID Authority=
-# for any target EXCEPT one with a "<target>.noauth" marker sitting next to
-# it -- which the fake provisioner below creates at the destination, standing
-# in for an ad-hoc re-sign that strips the certificate chain.
-cat > "$W85_FAKEBIN/codesign" <<'FAKECS'
-#!/usr/bin/env bash
-target="${!#}"
-if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
-    if [[ -e "${target}.noauth" ]]; then
-        {
-            echo "Executable=$target"
-            echo "Identifier=com.rjwalters.loom-daemon"
-            echo "Format=Mach-O thin (arm64)"
-            echo "Signature=adhoc"
-        } >&2
-        exit 0
-    fi
-    {
-        echo "Executable=$target"
-        echo "Identifier=com.rjwalters.loom-daemon"
-        echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
-    } >&2
-    exit 0
-fi
-if [[ "${1:-}" == "--verify" ]]; then
-    exit 0
-fi
-exit 0
-FAKECS
-chmod +x "$W85_FAKEBIN/codesign"
-
-# Fake provision_machine_daemon(): copies the (Authority=-signed) artifact to
-# a sandboxed destination, then drops a ".noauth" marker next to it -- the
-# observable effect of the pre-#7932 sign_daemon_binary bug (silent ad-hoc
-# re-sign of an already Developer ID-signed destination).
-cat > "$W85/scripts/install/provision-daemon.sh" <<EOF
-provision_machine_daemon() {
-    local dest_dir="\${2:-$W85/machine-install}"
-    mkdir -p "\$dest_dir"
-    local dest="\$dest_dir/loom-daemon"
-    cp -f "\$1" "\$dest"
-    chmod 755 "\$dest"
-    : > "\$dest.noauth"
-    PROVISIONED_DAEMON_BIN="\$dest"
-    return 0
-}
-EOF
-
-out85=$( cd "$W85" && PATH="$W85_FAKEBIN:$TEST_PATH" \
-    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
-    LOOM_DAEMON_UPDATE_TARGET="aarch64-apple-darwin" \
-    bash "$UPDATE_SCRIPT" --no-restart 2>&1; echo "EXIT=$?" )
-rc85=$(echo "$out85" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
-assert_eq "5" "$rc85" "#8008: destination signature downgraded from Authority= to ad-hoc after provisioning -> exit 5"
-
-TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out85" | grep -qi 'signature DOWNGRADE'; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} #8008: the signature downgrade is reported distinguishably from a version mismatch"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} #8008: the signature downgrade is reported distinguishably from a version mismatch"
-    echo "  output: $out85"
-fi
-
-# ============================================================
-# 86. (#8008) Counterpart to test 85: the destination PRESERVES the
-#     Authority= signature through provisioning (the #7932-fixed, correct
-#     behavior) -- the new assertion must stay silent and the run must still
-#     exit 0, proving 85's failure is a real regression signal and not the
-#     assertion firing unconditionally.
-# ============================================================
-W86="$BASE_WORKDIR/w86"
-new_fixture "$W86"
-write_fake_daemon "$W86/installed-loom-daemon" "oldc0mm" "$W86/marker"
-
-W86_ASSETS="$W86/gh-assets"
-mkdir -p "$W86_ASSETS"
-W86_BIN_NAME="loom-daemon-aarch64-apple-darwin"
-write_fake_artifact_daemon "$W86_ASSETS/$W86_BIN_NAME" "0.16.0" "sigkept0"
-sha256_of "$W86_ASSETS/$W86_BIN_NAME" > "$W86_ASSETS/$W86_BIN_NAME.sha256"
-
-W86_FAKEBIN="$W86/fakebin"
-mkdir -p "$W86_FAKEBIN"
-write_fake_gh "$W86_FAKEBIN/gh" "v0.16.0" "$W86_ASSETS"
-cp "$W85_FAKEBIN/codesign" "$W86_FAKEBIN/codesign"
-
-# Fake provision_machine_daemon(): copies the artifact WITHOUT ever dropping
-# a ".noauth" marker -- the destination's signature is untouched, exactly
-# like sign_daemon_binary()'s post-#7932 "already signed with a real
-# certificate (not re-signing)" guard.
-cat > "$W86/scripts/install/provision-daemon.sh" <<EOF
-provision_machine_daemon() {
-    local dest_dir="\${2:-$W86/machine-install}"
-    mkdir -p "\$dest_dir"
-    local dest="\$dest_dir/loom-daemon"
-    cp -f "\$1" "\$dest"
-    chmod 755 "\$dest"
-    PROVISIONED_DAEMON_BIN="\$dest"
-    return 0
-}
-EOF
-
-out86=$( cd "$W86" && PATH="$W86_FAKEBIN:$TEST_PATH" \
-    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
-    LOOM_DAEMON_UPDATE_TARGET="aarch64-apple-darwin" \
-    bash "$UPDATE_SCRIPT" --no-restart 2>&1; echo "EXIT=$?" )
-rc86=$(echo "$out86" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
-assert_eq "0" "$rc86" "#8008: destination signature PRESERVED through provisioning -> update still succeeds (exit 0)"
-
-TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out86" | grep -qi 'retains its Developer ID (Authority=) signature'; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} #8008: a preserved signature is explicitly confirmed, not just silently allowed"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} #8008: a preserved signature is explicitly confirmed, not just silently allowed"
-    echo "  output: $out86"
-fi
-
-installed86_version="$("$W86/machine-install/loom-daemon" --version 2>/dev/null)"
-TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$installed86_version" | grep -q 'commit sigkept0'; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} #8008: the artifact was actually provisioned when the signature survived intact"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} #8008: the artifact was actually provisioned when the signature survived intact"
-    echo "  --version: $installed86_version"
 fi
 
 # ============================================================

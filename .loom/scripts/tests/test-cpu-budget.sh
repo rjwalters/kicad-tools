@@ -122,17 +122,50 @@ assert_eq "$(loom_cpu_budget_cores 8 2 -3)" "6" \
     "a negative divisor degrades to 1"
 
 # ------------------------------------------------------------------
+# Shared "this host has no daemon" isolation (#8074)
+# ------------------------------------------------------------------
+
+# Every assertion whose expected answer is the no-daemon fail-safe must
+# neutralize the WHOLE of loom_locate_daemon_bin's fallback chain, not just
+# its first step. Setting $LOOM_DAEMON_BIN to a non-executable path only
+# defeats step 1; on any host with a real `loom-daemon` installed (i.e. every
+# fleet host — CI has none, which is why this was invisible there) resolution
+# then falls through to PATH or $HOME/.local/bin and the probe queries the
+# LIVE production daemon, answering its real in-flight count instead of 1.
+#
+# $NO_DAEMON_PATH is a PATH containing nothing but jq (which the probe needs
+# before it ever looks for a daemon), so no `loom-daemon` is discoverable on
+# it. $WORKDIR is the repo root every caller passes, and it holds no
+# target/{release,debug}/loom-daemon build output, so the repo-local
+# candidates cannot resolve either.
+NO_DAEMON_PATH="$WORKDIR/empty-path"
+mkdir -p "$NO_DAEMON_PATH"
+if command -v jq >/dev/null 2>&1; then
+    ln -sf "$(command -v jq)" "$NO_DAEMON_PATH/jq"
+fi
+
+# inflight_no_daemon <repo_root> — loom_cpu_inflight_sweeps with every
+# daemon-resolution route closed off, so the result depends only on the
+# library's logic and never on what this host happens to have installed.
+inflight_no_daemon() {
+    PATH="$NO_DAEMON_PATH" \
+    LOOM_DAEMON_BIN=/nonexistent/loom-daemon \
+    LOOM_DAEMON_BIN_DIR="$WORKDIR/no-such-bin-dir" \
+    CARGO_TARGET_DIR="$WORKDIR/no-such-target-dir" \
+    LOOM_PREFER_REPO_BUILD='' \
+        loom_cpu_inflight_sweeps "$@" 2>/dev/null
+}
+
+# ------------------------------------------------------------------
 echo ""
 echo "-- loom_cpu_inflight_sweeps: explicit override --"
 # ------------------------------------------------------------------
 
 assert_eq "$(LOOM_SWEEP_INFLIGHT_SWEEPS=4 loom_cpu_inflight_sweeps "$WORKDIR")" "4" \
     "LOOM_SWEEP_INFLIGHT_SWEEPS wins outright — no daemon is consulted"
-assert_eq "$(LOOM_SWEEP_INFLIGHT_SWEEPS=0 LOOM_DAEMON_BIN=/nonexistent \
-    loom_cpu_inflight_sweeps "$WORKDIR")" "1" \
+assert_eq "$(LOOM_SWEEP_INFLIGHT_SWEEPS=0 inflight_no_daemon "$WORKDIR")" "1" \
     "an override of 0 is rejected and falls through to the fail-safe"
-assert_eq "$(LOOM_SWEEP_INFLIGHT_SWEEPS=nope LOOM_DAEMON_BIN=/nonexistent \
-    loom_cpu_inflight_sweeps "$WORKDIR")" "1" \
+assert_eq "$(LOOM_SWEEP_INFLIGHT_SWEEPS=nope inflight_no_daemon "$WORKDIR")" "1" \
     "a non-numeric override is rejected and falls through to the fail-safe"
 
 # ------------------------------------------------------------------
@@ -143,14 +176,7 @@ echo "-- loom_cpu_inflight_sweeps: no daemon reachable --"
 # $LOOM_DAEMON_BIN pointing at a non-executable path, with PATH stripped of
 # any real `loom-daemon`, is the "this host has no daemon" shape. It must
 # answer 1 (pre-#5979 behavior), not fail the caller.
-NO_DAEMON_PATH="$WORKDIR/empty-path"
-mkdir -p "$NO_DAEMON_PATH"
-if command -v jq >/dev/null 2>&1; then
-    ln -sf "$(command -v jq)" "$NO_DAEMON_PATH/jq"
-fi
-out="$(PATH="$NO_DAEMON_PATH" LOOM_DAEMON_BIN=/nonexistent/loom-daemon \
-    LOOM_DAEMON_BIN_DIR="$WORKDIR/no-such-bin-dir" \
-    loom_cpu_inflight_sweeps "$WORKDIR" 2>/dev/null)"
+out="$(inflight_no_daemon "$WORKDIR")"
 assert_eq "$out" "1" \
     "no locatable daemon binary answers the fail-safe 1"
 

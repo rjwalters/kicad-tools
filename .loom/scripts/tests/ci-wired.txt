@@ -261,6 +261,7 @@ tests/hooks/test-post-worktree-target-dir.sh
 
 # defaults/hooks/tests/ — remaining unwired guard-hook suites, wired since #4451.
 defaults/hooks/tests/test-guard-background-subagents.sh
+defaults/hooks/tests/test-guard-installed-file-writes.sh
 defaults/hooks/tests/test-guard-loom-workspace.sh
 defaults/hooks/tests/test-guard-worktree-paths.sh
 defaults/hooks/tests/test-hook-wiring.sh
@@ -291,3 +292,7 @@ tests/install/test-uninstall-shim-cleanup.sh
 # guard, wired since #5275 (was previously orphaned, no CI runner at all).
 # Hermetic: python3 AST parsing over local fixtures only, no network.
 tests/hermit/test-stateless-ceremony.sh
+
+# scripts/ — repo-root tooling suites. Hermetic: builds a disposable git
+# repo under mktemp -d with its own identity, no network, no gh.
+scripts/test-changelog.sh

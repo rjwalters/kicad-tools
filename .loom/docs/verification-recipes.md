@@ -187,10 +187,90 @@ the telemetry review ruled "keep flagged — do not weaken"). An agent that does
 not query the history will confidently re-derive conclusions that were already
 tested and rejected.
 
-## The shape all five share
+## 6. A port: differential-test against the implementation you are replacing
+
+**When**: replacing a working implementation with a rewrite — the shell-to-Rust
+ports of epic #7810, but the shape is general.
+
+**The check**: generate the corpus from the grammar the code parses, run both
+implementations over it, and classify every difference. Do not hand-pick inputs.
+
+The port method for #7810 is a *retained black-box suite*: keep the shell's own
+test file and run its assertions unchanged against the Rust. That is a good
+proof and it is not a sufficient one. #8011 is the counter-example — the
+`dep_recheck` port shipped **three** silent behavioural divergences while its
+retained suite was 104/104 green:
+
+| Divergence | Why the suite missed it |
+|---|---|
+| `[-*]` vs `-` bullet markers | no assertion used a `*` bullet |
+| `--refs` silently dropping non-numeric tokens | no assertion passed a bad token |
+| phrase and `#N` split across a newline | no assertion spanned a line break |
+
+A retained suite proves only what its author thought to write down, and **nobody
+writes down the input they did not imagine**. All three escapees were inputs
+nobody imagined. That is not a failure of diligence; it is the method's ceiling.
+
+Differential testing raises the ceiling because the corpus comes from the
+grammar rather than from imagination. Replaying 700 generated inputs through
+both implementations of `extract-refs` reproduced the newline divergence and
+found two more that #8011 had not caught (zero-padded `#007`, and `#N` above
+`u64::MAX` being dropped by `.parse().ok()`).
+
+```bash
+# 1. Recover the reference implementation — the commit BEFORE the port.
+git log --oneline -- <path/to/script.sh>          # find the port commit
+git show <port-commit>^:<path/to/script.sh> > /tmp/ref.sh
+
+# 2. Generate the corpus from the grammar, not from memory: every trigger
+#    phrase AND its near-misses, every separator INCLUDING newline, and
+#    boundary values for each captured field (0, leading zeros, the integer
+#    limit and one past it, non-numeric).
+
+# 3. Run both over every case and classify each difference. Any difference you
+#    cannot name is a finding; a class you can name is a decision to record.
+```
+
+**Freeze the answers, not the reference.** Once the old implementation is
+deleted, re-running it needs either a full-history checkout (CI checks out
+shallow) or vendoring dead code plus its runtime dependencies into the test. So
+capture its answers once into a fixture with a provenance record and assert
+against that — see `loom-daemon/tests/differential_extract_refs.rs` and
+`loom-daemon/tests/fixtures/extract_refs_shell_oracle.jsonl`, which pin the
+three accepted divergences and fail on a fourth.
+
+**Recognise each divergence class by its MECHANISM, not by a property of the
+input that correlates with it.** This is the sharpest trap in the whole recipe,
+and the first version of `differential_extract_refs.rs` fell into it. Its
+newline-spanning class was recognised as *"the port found an extra reference and
+the body contains a newline"* — but 88% of the corpus bodies contain a newline,
+so the class absorbed an extra reference from **any** cause. Measured against
+its own proof mutation, the test caught 9 of the 116 cases the mutation actually
+changed; the other 107 were silently classified as expected.
+
+The fix is to compute what the class can *actually* produce and require the
+observed difference to be a subset of exactly that — here, references the
+pattern matches over the whole text but not within any single line. Same corpus,
+same green baseline, 116 of 116 caught instead of 9.
+
+A class whose test is a property of the input is a hole shaped like a class.
+Check every class you write this way: *if the port changed for an unrelated
+reason, would this class still say "expected"?*
+
+**A difference in rendering is not a difference in findings.** If both sides
+report the same set but different text — ordering, separators, padding — no
+class about *which* references were found explains it. Say so rather than
+letting a coincidentally-applicable class absorb it.
+
+**Every surviving divergence gets written down where the code is**, with the
+direction of its risk. "Kept, because missing a genuine declared reference is
+worse than one extra" is a decision; the same behaviour undocumented is a bug
+waiting to be re-litigated.
+
+## The shape all six share
 
 Each failure was a *plausible* story that fit the first two observations,
 reported before checking the third. The cost is asymmetric: a wrong result
-delivered confidently sends the next reader somewhere the work isn't. All five
+delivered confidently sends the next reader somewhere the work isn't. All six
 recipes are the same move — **spend one command to make the silent failure
 loud.**
