@@ -115,8 +115,7 @@ class TestExtractValuesHoleToHoleWording:
 
         data: dict = {}
         message = (
-            "Drilled holes too close together (netclass 'Default', min 0.4995 mm; "
-            "actual 0.4500 mm)"
+            "Drilled holes too close together (netclass 'Default', min 0.4995 mm; actual 0.4500 mm)"
         )
         _extract_values(data, message)
 
