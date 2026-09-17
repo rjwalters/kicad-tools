@@ -106,6 +106,57 @@ class TestDRCViolation:
         assert unconnected[0].is_connection
 
 
+class TestExtractValuesHoleToHoleWording:
+    """Issue #5534: kicad-cli 10's hole-to-hole wording must populate values."""
+
+    def test_min_actual_wording_is_parsed(self):
+        """kicad-cli 10 phrases hole-to-hole violations as 'min X mm; actual Y mm'."""
+        from kicad_tools.drc.report import _extract_values
+
+        data: dict = {}
+        message = (
+            "Drilled holes too close together (netclass 'Default', min 0.4995 mm; "
+            "actual 0.4500 mm)"
+        )
+        _extract_values(data, message)
+
+        assert data["required_value_mm"] == pytest.approx(0.4995)
+        assert data["actual_value_mm"] == pytest.approx(0.45)
+
+    def test_clearance_wording_still_takes_precedence(self):
+        """The new fallback pattern must not shadow the existing 'clearance' pattern."""
+        from kicad_tools.drc.report import _extract_values
+
+        data: dict = {}
+        message = "Clearance violation (clearance 0.2000 mm; actual 0.1500 mm)"
+        _extract_values(data, message)
+
+        assert data["required_value_mm"] == pytest.approx(0.2)
+        assert data["actual_value_mm"] == pytest.approx(0.15)
+
+    def test_minimum_wording_still_parsed(self):
+        """The pre-existing 'minimum' (drill clearance) wording keeps working."""
+        from kicad_tools.drc.report import _extract_values
+
+        data: dict = {}
+        message = "Drill out of range (minimum 0.3000 mm; actual 0.2000 mm)"
+        _extract_values(data, message)
+
+        assert data["required_value_mm"] == pytest.approx(0.3)
+        assert data["actual_value_mm"] == pytest.approx(0.2)
+
+    def test_width_wording_still_parsed(self):
+        """The pre-existing 'width' wording keeps working."""
+        from kicad_tools.drc.report import _extract_values
+
+        data: dict = {}
+        message = "Track width too small (width 0.1500 mm; actual 0.1000 mm)"
+        _extract_values(data, message)
+
+        assert data["required_value_mm"] == pytest.approx(0.15)
+        assert data["actual_value_mm"] == pytest.approx(0.1)
+
+
 class TestUnconnectedItemsReportingBoundary:
     """Issue #4498: connectivity items must not become geometric violations.
 
