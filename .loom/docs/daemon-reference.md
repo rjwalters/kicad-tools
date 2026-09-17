@@ -2066,7 +2066,12 @@ an operator checks:
 2. The paired `autonomous.roleRunner.roleModels.<role>` pin that made that
    runtime usable is later removed, so the model falls back to the
    Claude-shaped built-in default (`sonnet`) while the admitted runtime stays
-   `codex`.
+   `codex`. (**Since #7894 this exact step no longer skips** — an *unpinned*
+   model that conflicts with the admitted runtime degrades to the runtime
+   CLI's own default instead of being refused. Only an explicitly *pinned*
+   mismatch still reaches step 3; the walkthrough is kept verbatim because it
+   is the recorded incident, and every other pre-spawn bail-out below still
+   produces the same silence.)
 3. Every subsequent tick trips the #5028 model/runtime mismatch preflight and
    returns `RoleTickOutcome::ModelRuntimeMismatch` — **before**
    `run_role_with_timeout`, the only writer of `.loom/logs/role-<role>.log`,
@@ -2083,7 +2088,7 @@ make the artifact operators actually read honest — all five pre-spawn bail-out
 `ModelRuntimeMismatch`) now append a dated line to `role-<role>.log`:
 
 ```
-==== loom-daemon role_runner: 2026-08-14T16:45:51+00:00 role=curator SKIPPED BEFORE SPAWN (#6201): model/runtime mismatch: runtime "codex" only accepts Codex models, but the resolved model "sonnet" is a Claude model (model source=default); set autonomous.roleRunner.roleModels.curator to a model the codex runtime accepts, or point this role back at a Claude runtime ====
+==== loom-daemon role_runner: 2026-08-14T16:45:51+00:00 role=curator SKIPPED BEFORE SPAWN (#6201): model/runtime mismatch: runtime "codex" only accepts Codex models, but the resolved model "sonnet" is a Claude model (model source=autonomous.roleRunner.roleModels.curator); set autonomous.roleRunner.roleModels.curator to a model the codex runtime accepts — or to "default" to pass through to the codex CLI's own default model, which is the only working shape on a seat that rejects an explicit pin (e.g. a ChatGPT-plan Codex account) — or point this role back at a Claude runtime ====
 ```
 
 A role stuck this way now shows a growing, timestamped, self-diagnosing trail
@@ -4747,16 +4752,36 @@ being logged/counted. When enabled, just before the label flip the registry
 reads the issue's **pre-flip** label state (`gh issue view <N> --json labels`)
 and classifies it:
 
-- `loom:issue` already gone **or** `loom:building` already present → **collision**
-  (a peer host claimed it first). A diagnostic record is logged at `warn` — issue
-  number, repo/workspace, this host's identity (`LOOM_HOST_ID` → `$HOSTNAME` →
-  `hostname` → `unknown-host`), timestamp, and the observed pre-flip label set —
-  a per-registry cumulative counter is incremented, and (#5789) the dispatch
-  backs off instead of proceeding.
-- `loom:issue` present and `loom:building` absent → **clean** (this host is first).
+- a **claim label** (`loom:building`, `loom:reviewing`, `loom:treating`) already
+  present → **collision** (a peer host claimed it first), whether or not
+  `loom:issue` is still alongside it. A diagnostic record is logged at `warn` —
+  issue number, repo/workspace, this host's identity (`LOOM_HOST_ID` →
+  `$HOSTNAME` → `hostname` → `unknown-host`), timestamp, the observed claim
+  label(s), and the full pre-flip label set — a per-registry cumulative counter
+  is incremented, and (#5789) the dispatch backs off instead of proceeding.
+- no claim label, `loom:issue` present → **clean** (this host is first).
+- no claim label, no `loom:issue` → **not yet approved**. Logged at `info`, not
+  counted, **not** refused (#7873): an issue that is unlabeled or still at
+  `loom:triage` / `loom:curating` / `loom:curated` was never promoted by anyone,
+  so its missing `loom:issue` evidences no peer. Dispatch proceeds and the child
+  sweep's own pre-flight curates and promotes it, exactly as an operator
+  `/loom:sweep N` does.
 - gh timeout / non-zero exit / unparseable JSON → **unknown**. **Fail-closed:**
   an unverifiable read is never counted as a collision, so the baseline is never
   inflated.
+
+> **Why absence of `loom:issue` is not evidence (#7873).** The original
+> predicate collided on `!has_issue || has_building`; the `!has_issue` half was
+> meant to catch a peer that had already *removed* `loom:issue` as part of its
+> own flip. But the probe reads a label **snapshot**, not a diff, so that test
+> is equally true for an issue that never carried `loom:issue` at all. The work
+> finder only ever offers `loom:issue` candidates so it never tripped this, but
+> every explicit `dispatch_sweep` / `loom-daemon dispatch <N>` of an unpromoted
+> issue was refused as a cross-host collision naming a peer that did not exist
+> (observed on #7743, #7812, #7849). Only the *presence* of a claim label —
+> applied by the claimant itself — evidences a peer, so that is what the guard
+> keys on. `loom:curating` / `loom:evaluating` are deliberately **not** claim
+> labels here: both are pre-dispatch lifecycle states, not a competing sweep.
 
 **How to read the count.** The running total is surfaced on the work-finder's
 per-tick summary line as the trailing `N cross-host-collision(s)` field, e.g.:
@@ -6224,9 +6249,9 @@ resolved model and the tier that supplied it are recorded in the per-role log
 header: `==== loom-daemon role_runner: <ts> role=<role> model=<m> (source=<tier>) ====`.
 
 **A pinned model can still be the wrong provider family for the admitted
-runtime (#5028).** `runtimes.roles.<role> = "codex"` with no matching
-`autonomous.roleRunner.roleModels.<role>` override resolves the Claude-shaped
-default model above and forwards it to the Codex adapter, which 400s — before
+runtime (#5028).** `runtimes.roles.<role> = "codex"` with
+`autonomous.roleRunner.roleModels.<role> = "sonnet"` forwards a Claude-shaped
+model to the Codex adapter, which 400s — before
 #5028 this retried identically, at full cost, on every tick forever. Runtime
 admission now resolves before the model, and a confidently-known
 Claude-vs-Codex mismatch is refused pre-spawn as `RoleTickOutcome::
@@ -6236,6 +6261,20 @@ directly via the outcome's `detail()` (no spawn transcript needed), and the
 per-root log warns once on the edge and downgrades to `DEBUG` on repeat. Full
 mechanism and the `spawn-codex.sh`-side counterpart:
 [`runtime-adapters.md` § "Model/runtime mismatch refusal (#5028)"](runtime-adapters.md#modelruntime-mismatch-refusal-5028).
+
+**The refusal applies to an explicit pin only (#7894).** An *unpinned* role —
+`runtimes.roles.<role> = "codex"` with no `roleModels.<role>` entry at all —
+used to resolve the shipped Claude-shaped default and get refused every tick,
+forever (453+ consecutive skips on the host that filed #6565), with no way out:
+a ChatGPT-plan Codex seat rejects an explicit model pin too, so "no pin" was
+simultaneously the only correct configuration and permanently unadmittable.
+The role runner now degrades that case to the runtime CLI's own default — no
+`--model` argument is emitted at all, the tick launches, and the log header
+records `model=<runtime CLI default> (source=default (CLI default for codex))`.
+The same pass-through can be requested deliberately with
+`autonomous.roleRunner.roleModels.<role> = "default"` (or the global
+`autonomous.roleRunner.model`); see
+[`runtime-adapters.md` § "Per-role model override"](runtime-adapters.md#per-role-model-override-autonomousrolerunnerrolemodels).
 
 `roles` restricts the dispatched subset (an explicit empty array runs none;
 unknown names are ignored with a warning). **It is an allowlist, not an

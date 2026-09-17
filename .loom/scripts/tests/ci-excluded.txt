@@ -16,6 +16,16 @@ test-install-reinstall-safety.sh  Already wired in the "Installer Integration Te
 test-spawn-codex.sh  Already wired in the "Codex Adapter Smoke (mocked)" job (#4468), which adds adapter-specific hermeticity guards; excluded here to avoid double-running it.
 test-spawn-claude.sh  Non-hermetic: spawn-claude.sh's token selection requires a built loom-daemon binary (#4228), absent on a fresh ubuntu runner (FATAL: no loom-daemon binary). Wiring it needs a cargo build step or a binary stub — follow-up.
 
+# epic #7810 PR 3: each of these drives a thin stub that execs a `loom-daemon`
+# subcommand, so it needs a BUILT binary — which run-ci-suites.sh's job has no
+# toolchain for. Wired in the "Dependency Classification Suites" job instead,
+# which builds one first. Each suite FAILS rather than SKIPs without a binary,
+# so neither location can report green while running nothing.
+test-classify-dependency-block.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
+test-classify-dependency-block-premise-false.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
+test-detect-dependency-cycle.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
+test-detect-startable-subset.sh  Needs a built loom-daemon; wired in the "Dependency Classification Suites" job (#7952), which builds one first.
+
 # scripts/ (repo root, top-level only) — since #5278. Each of these already
 # runs as its own direct step in ci.yml and/or build-gate.sh; excluded here
 # (rather than wired) to avoid double-running it via run-ci-suites.sh.

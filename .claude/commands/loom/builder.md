@@ -126,7 +126,7 @@ If you discover issues in files you're reading:
 
 ## Related Documentation
 
-This role definition is split across multiple files for maintainability:
+This role definition is split across multiple files:
 
 | Document | Content |
 |----------|---------|
@@ -145,7 +145,7 @@ If this repository configures a `buildGate` block in `.loom/config.json`, the sw
 
 If any check fails the orchestrator releases the claim (`loom:building` -> `loom:issue`) and **no PR is opened**. The next builder retries from scratch.
 
-This is enforced by the orchestrator independent of your prompt — you cannot disable it from inside the agent session. In practice this means: commit real source changes, make sure the build passes before you exit, and don't rely on logfiles or scratch files being treated as "the implementation." See `.loom/docs/build-gate.md` for the full schema.
+Enforced by the orchestrator independent of your prompt; you cannot disable it in-session. In practice: commit real source changes and make sure the build passes before you exit — logfiles and scratch files do not count as "the implementation." Full schema: `.loom/docs/build-gate.md`.
 
 ## CRITICAL: Never End Your Turn on a Background Build or CI Monitor
 
@@ -641,44 +641,42 @@ not for a Builder mid-issue: see
 `.loom/docs/troubleshooting.md` if you land
 here as the human operator rather than a Builder subagent.)
 
+### Never fix an installed Loom file in place (consumer repos)
+
+Outside `rjwalters/loom` itself, `.loom/hooks|scripts|roles|docs|bin/` and
+`.claude/commands/loom/` are resync-refreshed copies of Loom's `defaults/`. An
+in-place fix there is reverted by the next resync — or, if you *added* the file,
+orphaned with no upstream counterpart — silently, after your PR merges. Only two
+dispositions are valid:
+
+1. **Upstream it** — PR `rjwalters/loom`'s `defaults/<same relative path>`; the
+   fix returns via the normal `chore: resync installed Loom surfaces` commit.
+2. **Pin it** — add the path to that repo's `.loom/resync-ignore`, with a comment
+   saying why and which upstream PR retires the pin if it is temporary.
+
+**The tell is a fix you are re-applying because a resync reverted it.** Meeting
+that a second time means only upstreaming or pinning will make it stick — change
+strategy, do not repeat the edit. Adding a file under those prefixes needs the
+same decision made explicitly, not by default. Full rule:
+`.loom/docs/repo-owned-files.md`.
+
 ### Working with gh CLI from a Worktree
 
-**You do NOT need to `cd` to the main repo to use `gh` or `.loom/scripts/` commands.**
-
-These all work from within your worktree:
-- `gh issue view <N>` — no cd needed
-- `gh pr list` — no cd needed
-- `./.loom/scripts/check-main-clean.sh` — no cd needed
-
-❌ **WRONG** (causes worktree escape):
-```bash
-cd <repo-root> && gh issue view 123
-cd <repo-root> && gh pr list
-```
-
-✅ **CORRECT** (stay in worktree):
-```bash
-gh issue view 123   # Works from worktree
-./.loom/scripts/check-main-clean.sh   # Works from worktree
-```
+**You do NOT need to `cd` to the main repo to use `gh` or `.loom/scripts/`
+commands** — `gh issue view <N>`, `gh pr list`, `./.loom/scripts/check-main-clean.sh`
+all work as-is from inside your worktree. ❌ `cd <repo-root> && gh …` is a worktree
+escape; ✅ run the bare command and stay put.
 
 ## Progress Checkpoints (optional breadcrumb)
 
 Writing per-stage checkpoints is **optional**. The live sweep lifecycle tracks
-phase progress itself via `.loom/scripts/sweep-checkpoint.sh` (which writes
-`.loom/sweep-checkpoint/issue-<N>.json`, keyed by the sweep run) and
-re-dispatches Builder fresh on resume — it does **not** read any worktree-level
-`.loom-checkpoint` file. So skipping checkpoints costs nothing in the live path.
-
-If you still want to leave a recovery breadcrumb, you may write one from your
-worktree:
-
-```bash
-./.loom/scripts/checkpoint.sh write --stage implementing --issue <number>
-```
-
-The far more reliable form of "recovery insurance" is to **commit real work
-early and often** — a committed change survives any crash, a checkpoint does not.
+phase progress itself via `.loom/scripts/sweep-checkpoint.sh` (writing
+`.loom/sweep-checkpoint/issue-<N>.json`, keyed by the sweep run) and re-dispatches
+Builder fresh on resume — it never reads a worktree-level `.loom-checkpoint` file,
+so skipping checkpoints costs nothing. For a recovery breadcrumb anyway, run
+`./.loom/scripts/checkpoint.sh write --stage implementing --issue <number>` from
+your worktree. Far more reliable insurance: **commit real work early and often**
+— a commit survives any crash, a checkpoint does not.
 
 ## Signaling "No Changes Needed"
 
@@ -687,8 +685,6 @@ If after analyzing the issue you determine that **no code changes are required**
 ```bash
 echo "Bug is already fixed on main — verified by running the test suite" > .no-changes-needed
 ```
-
-The marker file should contain a brief explanation of why no changes are needed.
 
 **IMPORTANT: Do NOT commit the marker file.** Leave it as an untracked file in the worktree. Sweep orchestration checks for the marker file on disk — if you `git add` and commit it, the commit shows as work done and defeats the detection mechanism.
 
@@ -717,24 +713,14 @@ gh issue view 100 --comments
 gh issue view 100
 ```
 
-### What You'll Find in Comments
+### Where Curator Context Lives
 
-Curator comments typically include:
-- **Implementation guidance** - Technical approach and options
-- **Root cause analysis** - Why this issue exists
-- **Detailed acceptance criteria** - Specific success metrics
-- **Test plans and debugging tips** - How to verify your solution
-- **Code examples and specifications** - Concrete patterns to follow
-- **Architecture decisions** - Design considerations and tradeoffs
-
-### What You'll Find in Amended Descriptions
-
-Sometimes Curators amend the issue description itself (preserving the original). Look for:
-- **"## Original Issue"** section - The user's initial request
-- **"## Curator Enhancement"** section - Comprehensive spec with acceptance criteria
-- **Problem Statement** - Clear explanation of what needs fixing and why
-- **Implementation Guidance** - Recommended approaches
-- **Test Plan** - Checklist of what to verify
+Curator comments carry implementation guidance and technical options, root-cause
+analysis, detailed acceptance criteria, test plans and debugging tips, code
+examples, and architecture tradeoffs. Curators sometimes amend the issue
+description itself instead — the user's original request preserved under
+**"## Original Issue"**, the full spec under **"## Curator Enhancement"**. Read
+both places.
 
 ### Red Flags: Issue Needs More Info
 
@@ -756,13 +742,7 @@ Before claiming, check for these warning signs:
 
 ### Why This Matters
 
-**Workers who skip comments miss critical information:**
-- Implement wrong approach (comment had better option)
-- Miss important constraints or gotchas
-- Build incomplete solution (comment had full requirements)
-- Waste time redoing work (comment had shortcut)
-
-**Reading comments is not optional** - it's where Curators put the detailed spec that makes issues truly ready for implementation.
+Skipping comments means implementing the wrong approach, missing a constraint or gotcha, shipping an incomplete solution, or redoing work a comment already solved. **Reading comments is not optional** - it's where Curators put the detailed spec that makes issues truly ready for implementation.
 
 ### Re-Verify Date-Stamped Facts Before Acting
 

@@ -46,10 +46,11 @@ CHAMPION_MD="$PROMPT_DIR/champion.md"
 CHAMPION_REF_MD="$PROMPT_DIR/champion-reference.md"
 CURATOR_MD="$PROMPT_DIR/curator.md"
 
-# Source for the pure helpers BEFORE defining our own colors (the sourced chain
-# defines RED/YELLOW/BLUE/NC itself).
-# shellcheck source=/dev/null
-source "$CDB"
+# Pin the loom-daemon this suite tests against — the subject is a thin stub over
+# `loom-daemon classify-dependency-block` now (epic #7810 PR 3). FATAL, not SKIP: see the helper.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "classify-dependency-block"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -170,190 +171,27 @@ This issue requires additional work before promotion to `loom:issue`:
 *Automated by Champion role*'
 
 # =====================================================================
-# Unit tests: the real sourced helpers
+# Where the pure-helper unit tests went (epic #7810, PR 3)
 # =====================================================================
-
-echo "--- extract_findings: the first bullet block, continuations folded ---"
-
-out="$(extract_findings "$ESCALATION_DEP_ONLY")"
-assert_eq "- Technical Feasibility (no obvious blockers): Hard dependency on #3, which is   still open." \
-    "$out" "escalation comment: one folded finding from **Recurring findings:**"
-
-out="$(extract_findings "$ESCALATION_MERITS")"
-assert_eq 2 "$(printf '%s\n' "$out" | grep -c '^-')" "escalation comment with two findings yields two lines"
-
-out="$(extract_findings "$REJECT_DEP_ONLY")"
-assert_contains "$out" "depends on #3" "NEEDS REVISION comment: the failing-criteria bullet is captured"
-assert_not_contains "$out" "Wait for #3 to land" \
-    "**Recommended actions:** bullets are NOT findings (a suggestion citing an issue must not read as a blocker)"
-
-assert_eq "" "$(extract_findings 'No bullets at all, just prose.')" \
-    "a comment with no bullet block yields no findings"
-
-echo
-echo "--- is_dependency_finding: dependency word AND a reference, both required ---"
-
-assert_true is_dependency_finding '- Technical Feasibility: hard dependency on #3, which is still open' \
-    "dependency word + #N is a dependency finding"
-assert_true is_dependency_finding '- Blocked by example-org/tool-repo#202' \
-    "cross-repo reference is a dependency finding"
-if is_dependency_finding '- Technical Feasibility: requires a migration plan before this can land'; then
-    fail "a dependency WORD with no reference is a merits finding (ordinary English must not defer)"
-else
-    pass "a dependency WORD with no reference is a merits finding (ordinary English must not defer)"
-fi
-if is_dependency_finding '- Implementation Clarity: acceptance criteria are untestable, see #12 for the pattern'; then
-    fail "a reference with no dependency word is a merits finding"
-else
-    pass "a reference with no dependency word is a merits finding"
-fi
-
-# #4196/#6112: a bare "Dependencies" noun (quoting a section heading) plus an
-# incidental, unrelated issue-number mention must NOT read as a dependency
-# finding. The real #4196 escalation bullet, reproduced verbatim in shape.
-FINDING_4196='- Scope appropriateness: the issue'"'"'s own "Dependencies / references" section recommends filing Phase 2 as its own issue. Phase 1 is shipped (#3997).'
-if is_dependency_finding "$FINDING_4196"; then
-    fail "a bare 'Dependencies' section-heading reference is a merits finding, not a dependency wait (#6112)"
-else
-    pass "a bare 'Dependencies' section-heading reference is a merits finding, not a dependency wait (#6112)"
-fi
-assert_true is_dependency_finding '- Technical Feasibility: hard dependency on private/repo#77, which is still open' \
-    "'dependency on' + #N still classifies as a dependency finding after the #6112 fix"
-assert_true is_dependency_finding '- Technical Feasibility: this has a dependency of the RTL work on #3' \
-    "'dependency of' + #N still classifies as a dependency finding"
-
-# #7652: "cannot start until #N" describes the same sequential-ordering
-# relationship as "blocked by #N" but used none of the previously recognized
-# keywords, so it misclassified as a merits finding and defeated the #5664
-# self-clearing-timing-block protection. Verbatim wording from the real #7431
-# escalation comment that exposed the gap.
-assert_true is_dependency_finding '- Scope: this issue is explicitly sequential (3 of 3, final) and cannot start until #7430 closes.' \
-    "'cannot start until' + #N is a dependency finding (#7652, verbatim #7431 wording)"
-assert_true is_dependency_finding '- Scope: this work cannot proceed until private/repo#88 lands' \
-    "'cannot proceed until' + #N is a dependency finding (#7652)"
-assert_true is_dependency_finding '- Scope: implementation cannot begin work until #12 merges' \
-    "'cannot begin work until' + #N is a dependency finding (#7652)"
-assert_true is_dependency_finding '- Scope: this is not startable until #9 is resolved' \
-    "'not startable until' + #N is a dependency finding (#7652)"
-assert_true is_dependency_finding '- Scope: we must wait until #14 before touching this' \
-    "'must wait until' + #N is a dependency finding (#7652)"
-assert_true is_dependency_finding '- Scope: we must wait for #14 before touching this' \
-    "'must wait for' + #N is a dependency finding (#7652)"
-if is_dependency_finding '- Scope: this work cannot start soon given the current backlog'; then
-    fail "'cannot start' with no 'until' and no reference is a merits finding (#7652)"
-else
-    pass "'cannot start' with no 'until' and no reference is a merits finding (#7652)"
-fi
-
-# #7431/#7756: a phrase-list word ("prerequisite") used in ordinary prose,
-# co-occurring in the same bullet with an issue reference that is NOT what the
-# phrase is describing, must not read as a dependency finding. Verbatim shape
-# of the real #7431 escalation comment that exposed the gap -- #7430 is named
-# narratively (it merged minutes earlier and is why a soak window hasn't
-# started), not cited as a "Blocked by"/"Depends on"/"Requires" blocker.
-FINDING_7431='- Scope/Sequencing: #7430 (per-sweep resource limits + containment observability — a prerequisite for any meaningful soak) merged only minutes before this evaluation, so no soak observation window has started yet.'
-if is_dependency_finding "$FINDING_7431"; then
-    fail "'prerequisite' narrating an unrelated issue reference is a merits finding, not a dependency wait (#7756)"
-else
-    pass "'prerequisite' narrating an unrelated issue reference is a merits finding, not a dependency wait (#7756)"
-fi
-assert_true is_dependency_finding '- Technical Feasibility: this work has a hard prerequisite on #3, which is still open' \
-    "'prerequisite on #N' immediately following the reference still classifies as a dependency finding after the #7756 fix"
-assert_true is_dependency_finding '- Scope: this is a hard prerequisite blocked by #3' \
-    "'prerequisite' bullet with the reference immediately after a dependency word still classifies as a dependency finding"
-
-# #7784: the bare verb/noun family ("blocks"/"blocking"/"blocker") is the one
-# part of the phrase list whose natural word order puts the reference BEFORE
-# the phrase ("#N blocks this", "#N is the blocker"), so #7756's
-# after-phrase-only window silently dropped those shapes. Both word orders must
-# classify as dependency findings; the narrow leading window must NOT reopen
-# the #7431 false positive (guarded again immediately below and in the
-# --check-defer regression block further down).
-assert_true is_dependency_finding '- #7430 blocks this proposal' \
-    "ref-first 'blocks' is a dependency finding (#7784)"
-assert_true is_dependency_finding '- #7430 is the blocker here' \
-    "ref-first 'blocker' is a dependency finding (#7784)"
-assert_true is_dependency_finding '- #7430 is still blocking this work' \
-    "ref-first 'blocking' is a dependency finding (#7784)"
-assert_true is_dependency_finding '- Scope: private/repo#88 blocks this proposal' \
-    "ref-first 'blocks' with a cross-repo reference is a dependency finding (#7784)"
-# The ref-after word orders that already worked under #7756 must keep working.
-assert_true is_dependency_finding '- This blocks on #7430' \
-    "ref-after 'blocks' still classifies as a dependency finding (#7784)"
-assert_true is_dependency_finding '- Blocking dependency: #7430' \
-    "ref-after 'blocking' still classifies as a dependency finding (#7784)"
-assert_true is_dependency_finding '- The open blocker is tracked at #7430' \
-    "ref-after 'blocker' still classifies as a dependency finding (#7784)"
-# The leading window is deliberately narrow: a reference far upstream of a
-# bare-verb/noun phrase is narrative co-occurrence, not a citation.
-if is_dependency_finding '- Scope: #7430 merged minutes before this evaluation and there is nothing blocking here'; then
-    fail "a reference far upstream of 'blocking' is a merits finding, not a dependency wait (#7784)"
-else
-    pass "a reference far upstream of 'blocking' is a merits finding, not a dependency wait (#7784)"
-fi
-# Narrowest-possible regression restatement of #7756: the #7431 bullet is
-# unaffected by the leading window (it uses "prerequisite", a prepositional-
-# family phrase, which keeps after-phrase-only directionality).
-if is_dependency_finding "$FINDING_7431"; then
-    fail "the #7431 bullet stays a merits finding after the #7784 leading-window fix"
-else
-    pass "the #7431 bullet stays a merits finding after the #7784 leading-window fix"
-fi
-
-echo
-echo "--- findings_are_dependency_only: one merits finding disqualifies the set ---"
-
-assert_true findings_are_dependency_only "$(extract_findings "$ESCALATION_DEP_ONLY")" \
-    "all-dependency findings are dependency-only"
-if findings_are_dependency_only "$(extract_findings "$ESCALATION_MERITS")"; then
-    fail "a mixed set (merits + dependency) is NOT dependency-only"
-else
-    pass "a mixed set (merits + dependency) is NOT dependency-only"
-fi
-if findings_are_dependency_only ""; then
-    fail "an empty finding set is not dependency-only"
-else
-    pass "an empty finding set is not dependency-only"
-fi
-
-echo
-echo "--- _extract_refs: normalization of every reference form ---"
-
-assert_eq "o/r#3" "$(_extract_refs 'depends on #3' 'o/r')" "bare #N normalizes to the citing repo"
-assert_eq "a/b#9" "$(_extract_refs 'blocked by a/b#9' 'o/r')" "explicit owner/repo#N keeps its own repo"
-assert_eq "o/x#56" "$(_extract_refs 'blocked by https://github.com/o/x/issues/56' 'o/r')" \
-    "issue URL normalizes to owner/repo#N"
-assert_eq "o/x#7" "$(_extract_refs 'blocked by https://github.com/o/x/pull/7' 'o/r')" \
-    "pull-request URL normalizes too (a blocker may be a PR)"
-
-echo
-echo "--- BODY_HASH (#7650 Test Plan): an appended ## Revision section changes champion-issue-promo.md's hash ---"
-# Reproduces champion-issue-promo.md's own BODY_HASH formula exactly
-# (printf '%s\n%s' "$title" "$body" | _sha256 | ...) rather than assuming it
-# holds -- the Test Plan explicitly calls this out as something to verify,
-# not take on faith.
-ORIG_TITLE='Fix the stale toolchain pin'
-ORIG_BODY='A proposal with a stale toolchain pin.'
-ORIG_HASH="$(printf '%s\n%s' "$ORIG_TITLE" "$ORIG_BODY" | _sha256 | awk '{print substr($1, 1, 16)}')"
-# shellcheck disable=SC2016  # literal backtick/marker text, not an expansion
-REVISED_BODY="$(printf '%s\n\n## Revision (2026-09-14)\n\nCurator re-verified every objection Champion cited against `deadbeef` and found all of them resolved.\n\n<!-- curator:fact-revision:fact-abc123 -->' "$ORIG_BODY")"
-REVISED_HASH="$(printf '%s\n%s' "$ORIG_TITLE" "$REVISED_BODY" | _sha256 | awk '{print substr($1, 1, 16)}')"
-if [[ "$ORIG_HASH" != "$REVISED_HASH" ]]; then
-    pass "appending a ## Revision section changes BODY_HASH -- Champion's VERDICT_MARKER for the old hash no longer matches, so the next pass evaluates fresh instead of skipping or re-escalating"
-else
-    fail "appending a ## Revision section changes BODY_HASH -- Champion's VERDICT_MARKER for the old hash no longer matches, so the next pass evaluates fresh instead of skipping or re-escalating"
-fi
-
-echo
-echo "--- _fingerprint: identity of the blocker SET, order-independent ---"
-
-assert_eq "$(_fingerprint 'o/r#3 o/r#5')" "$(_fingerprint 'o/r#5 o/r#3')" \
-    "same set in either order fingerprints identically"
-if [[ "$(_fingerprint 'o/r#3')" == "$(_fingerprint 'o/r#4')" ]]; then
-    fail "a different blocker set fingerprints differently"
-else
-    pass "a different blocker set fingerprints differently"
-fi
+#
+# This suite used to `source "$CDB"` and call extract_findings /
+# is_dependency_finding / findings_are_dependency_only / _extract_refs /
+# _fingerprint directly — the script guarded its `main` on `BASH_SOURCE == $0`
+# precisely so it could. Those functions no longer exist in shell: they are
+# `loom-daemon/src/dep_classify/{findings,finding,refs,fingerprint}.rs`, with
+# their own unit tests.
+#
+# They were not translated on trust. #7943 landed each port alongside a
+# DIFFERENTIAL test that ran the Rust function and the shell function over the
+# same fixture corpus and asserted they agreed, character for character. Those
+# differential tests are deleted in this change, with the shell they compared
+# against — a comparison needs both sides, and keeping a copy of the shell
+# purely to compare with would be keeping the thing this epic retires. The
+# evidence is the merged CI run, not a permanent fixture.
+#
+# What remains below is the part that CAN still be proven both ways: every
+# black-box assertion, written against the shell implementation, run unchanged
+# against the Rust one through the same CLI.
 
 # =====================================================================
 # Black-box: stub `gh` on PATH, run the real script
@@ -1301,32 +1139,19 @@ assert_eq "2" "$RC" "unreadable root issue exits 2"
 # =====================================================================
 # Doc pins: the Champion prose actually calls the gate
 # =====================================================================
-# #7508 regression guard: the bash-3.2 heredoc-in-command-substitution trap
+# #7508 heredoc-body safety: retired with its subject (epic #7810, PR 3)
 # =====================================================================
 #
-# Every `--apply` assertion in this suite failed on macOS while passing on CI's
-# bash 5 (#7930), because `_apply_unescalation` built its comment body with
-# `"$(cat <<EOF ...)"`. bash 3.2 does not skip heredoc bodies when scanning a
-# command substitution for its closing paren, so the `#5664` reference inside
-# parentheses was misread as opening a region it never closes: `bad
-# substitution: no closing )`, an EMPTY body, and a silently failed
-# un-escalation. `_apply_fact_unescalation` had already been converted; these
-# two were missed, and nothing scanned this file.
+# This suite used to run lib/heredoc-body-safety.sh over _apply_unescalation,
+# _apply_fact_unescalation and _report_cycle. The trap it guarded is a bash 3.2
+# parsing bug — a heredoc body inside `"$(cat <<EOF ...)"` is scanned for a
+# closing paren, so punctuation in the prose silently produces an EMPTY body.
+# All three functions are Rust now, and none of these three scripts contains a
+# heredoc any more, so there is nothing here for that scan to find.
 #
-# The scan already existed (lib/heredoc-body-safety.sh, #7834) but was wired
-# only into the watchdog suites. Wiring it here is the part that makes the fix
-# durable rather than a one-time repair.
-echo
-echo "--- #7508 heredoc-body safety (static scan) ---"
-# shellcheck source=lib/heredoc-body-safety.sh
-source "$TEST_DIR/lib/heredoc-body-safety.sh"
-check_heredoc_scan_selftest
-check_heredoc_body_safety "$CDB" _apply_unescalation "_apply_unescalation() (#7930)"
-check_heredoc_body_safety "$CDB" _apply_fact_unescalation "_apply_fact_unescalation() (#7508)"
-check_heredoc_body_safety "$SCRIPTS_DIR/detect-dependency-cycle.sh" _report_cycle \
-    "_report_cycle() (#7930)"
+# The scan itself is NOT retired: it stays wired into the watchdog suites for
+# the rest of the repo's shell. See defaults/scripts/tests/lib/heredoc-body-safety.sh.
 
-# =====================================================================
 
 echo
 echo "--- Doc pins: the Champion prose actually calls the gate ---"

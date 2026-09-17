@@ -67,6 +67,23 @@ Invariants a future edit must preserve:
   reverts were bot-authored passes carrying out a human ruling. A structured
   "operator ruling" marker was rejected because it depends on the operator
   remembering to post one; the timeline records what they actually did.
+- **That actor-blind read rests on a CROSS-FILE invariant (#7965).** "Nothing
+  automated removes `loom:operator-only`" is not a property of this file. It holds
+  because `defaults/scripts/classify-dependency-block.sh`'s `check_unescalate()` /
+  `check_fact_unescalate()` (and its Rust port) bail `no-escalation-record` unless
+  the issue carries a `<!-- champion:proposal-escalated -->` comment — and
+  `champion-epic.md`'s Step 4 writes a **different** marker,
+  `<!-- champion:epic-escalated -->`. **Relaxing that precondition, or making the
+  epic ladder write the proposal marker, turns a bot un-escalation into a "human
+  ruling" here.** Belt and braces meanwhile: `OPERATOR_RULED=yes` also requires
+  `BOT_UNESCALATABLE=no` (that marker absent from the epic), so an issue carrying
+  both `loom:epic` and a proposal label could not stand the ladder down on the
+  bot's own label removal.
+- **Both unknown inputs fail open (#7965).** `OPERATOR_RULED=yes` also requires a
+  non-empty `VERDICT_CREATED_AT`: `PRIOR_REJECTIONS ≥ 1` already proves a verdict
+  exists, so an empty read is a failed REST re-read — and `[[ "$UNPARKED_AT" > "" ]]`
+  matches *any* historical un-park, standing the ladder down on an API hiccup. A
+  missing un-park event and a failed verdict read now both fail the same way.
 - **Escalation requires a posted rejection to escalate about (#7666).**
   `PRIOR_REJECTIONS ≥ 1` is a precondition of both the skip tally and the
   escalation; every trace row satisfies it because `SKIP_STREAK` only advances by
@@ -81,4 +98,5 @@ These are enforced statically, not by prose:
 single-writer rule and Step 0.5 routing),
 `test-epic-label-preserved-on-escalation.sh` (#6715, the escalation edit is
 add-only), and `test-champion-epic-escalation-respects-human-hold.sh` (#7734 /
-#7921, the hold labels and the un-park check).
+#7921 / #7965, the hold labels, the un-park check, and its two fail-open
+preconditions).

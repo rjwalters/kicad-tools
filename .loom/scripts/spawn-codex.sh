@@ -535,6 +535,7 @@ if [[ -n "$EFFECTIVE_MODEL" && "${LOOM_CODEX_MODEL_CHECK:-1}" != "0" ]]; then
             log_error "This model/runtime combination is guaranteed to fail on the wire (HTTP 400)."
             log_error "Fix one of:"
             log_error "  - set autonomous.roleRunner.roleModels.<role> to a Codex-valid model in .loom/config.json"
+            log_error "  - set autonomous.roleRunner.roleModels.<role> to \"default\" to pass through to the Codex CLI's own default model (#7894) -- the only working shape on a ChatGPT-plan seat, which rejects every explicit pin"
             log_error "  - set LOOM_MODEL / LOOM_CODEX_MODEL to a Codex-valid model for this invocation"
             log_error "  - point this role/runtime binding back at Claude (unset runtimes.roles.<role> / LOOM_RUNTIME_<ROLE>)"
             log_error "Escape hatch: LOOM_CODEX_MODEL_CHECK=0 (only if this really is a valid Codex model name)."

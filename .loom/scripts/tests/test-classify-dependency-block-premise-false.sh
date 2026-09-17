@@ -26,10 +26,11 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 CDB="$SCRIPTS_DIR/classify-dependency-block.sh"
 
-# Source for the pure helpers BEFORE defining our own colors (the sourced chain
-# defines RED/YELLOW/BLUE/NC itself).
-# shellcheck source=/dev/null
-source "$CDB"
+# Pin the loom-daemon this suite tests against — the subject is a thin stub over
+# `loom-daemon classify-dependency-block` now (epic #7810 PR 3). FATAL, not SKIP: see the helper.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "classify-dependency-block"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

@@ -68,8 +68,6 @@ test-check-verified-corrections-preserved.sh
 test-claim-staleness.sh
 test-classify-ac-verification.sh
 test-classify-capacity-defer.sh
-test-classify-dependency-block-premise-false.sh
-test-classify-dependency-block.sh
 test-classify-error.sh
 test-clean-stale-binary.sh
 test-clean-stale-building-labels.sh
@@ -82,8 +80,6 @@ test-create-pr-version-check.sh
 test-default-branch.sh
 test-dep-recheck-fingerprint.sh
 test-dependency-parse.sh
-test-detect-dependency-cycle.sh
-test-detect-startable-subset.sh
 test-detect-unlabeled-epics.sh
 test-disk-headroom.sh
 test-docs-guide-lock.sh

@@ -20,6 +20,7 @@ points here.
 - [Error classification (`.loom/scripts/lib/classify-error.sh`)](#error-classification-loomscriptslibclassify-errorsh)
 - [Dispatch pauses when the whole pool is unusable (#6614)](#dispatch-pauses-when-the-whole-pool-is-unusable-6614)
 - [Role ticks pre-flight the pool instead of spawning into it (#7607)](#role-ticks-pre-flight-the-pool-instead-of-spawning-into-it-7607)
+- [Sweep dispatch pre-flights the pool too, and holds the host (#7708)](#sweep-dispatch-pre-flights-the-pool-too-and-holds-the-host-7708)
 - [Worktree handling](#worktree-handling)
 - [Shared machine-level pool fallback (#3938)](#shared-machine-level-pool-fallback-3938)
 - [Hard-fail on missing pool](#hard-fail-on-missing-pool)
@@ -833,6 +834,84 @@ fail-safe retry, #5629) enforces, so `usable == 0` guarantees a real selection
 would have failed. It does not model the `index.json` non-Claude exclusion
 (#5609), which can only make the real count *lower* — so this can never block a
 spawn that would have succeeded.
+
+## Sweep dispatch pre-flights the pool too, and holds the host (#7708)
+
+`#7607` above fixed **role ticks**. The work finder's **sweep dispatch** had no
+such check, and its only view of pool health was `.ranking` (`capacity::read_ranking`
+→ `available`), which does not consult `.bad_tokens` TTL marks at all. So a pool
+whose `.ranking` still reported six accounts `available` — every one of them
+carrying a live six-hour exhaustion cooldown — looked perfectly healthy to the
+dispatcher. Observed on 2026-09-15 across four fleet hosts in 4.3 h: **228**
+insta-crashes at token selection, one issue dispatched **20 times**, and **39**
+permanent `loom:lease` record comments plus 40 `loom:issue`↔`loom:building` label
+flips on a single public issue, for zero work.
+
+Why no existing brake stopped it: the #4485 dispatch-backoff ladder *did* arm on
+every death, and it is keyed **per issue** and capped at 900 s. With ~10 ready
+issues each behaving perfectly, the aggregate is still ~40 doomed spawns an hour.
+**A pool-wide fault needs a pool-wide hold; no per-issue ladder can ever damp
+one.**
+
+Every work-finder tick now resolves the pool the sweep would actually spawn
+from — the same `resolve_tokens_dir` precedence documented below — and holds all
+dispatch for that pool when `total > 0 && usable == 0`
+(`work_finder::pool_preflight`):
+
+- The hold is keyed by **resolved pool directory**, not workspace root, so every
+  registered repo resolving to one pool shares one hold and one log line. A
+  daemon owns one host, so this is the host-level hold in practice.
+- **Held means nothing happens at all** — no claim-label flip, no lease comment,
+  no worktree. The dispatch never reaches `begin_issue_dispatch`.
+- Arm/clear are logged on the **edge** (one `WARN` when a pool goes dead, one
+  `INFO` when it recovers), never once per tick.
+- Nothing is cached: the verdict is re-derived from the live pool every tick, so
+  a readmission (`loom-daemon tokens unblock`, a cooldown ageing out, the
+  `.ranking` refresher observing a reset) resumes dispatch on the **next** tick
+  with no restart — the same self-healing property #7607 relies on.
+- A hold outranks #5030's half-open recovery probe: a probe dispatched into a
+  pool with zero spawnable accounts tests nothing and costs exactly the label
+  flip and lease comment this exists to prevent.
+- **Not broadcast to peers.** Each host resolves its *own* pool (repo-local
+  shadow if it holds `.token` files, else shared — #3938/#7527), so one host's
+  exhaustion says nothing about a peer's; broadcasting it would suppress a peer
+  whose pool is healthy.
+- `total == 0` (no pool provisioned at all) is a *different* condition with a
+  different remedy (`loom-daemon tokens bootstrap`) and its own detection
+  (#4642). It never arms this hold.
+
+### `no-usable-account`: a death class that names the pool, not an account
+
+A death at token selection is now classified `no-usable-account` by
+`classify_crash`, distinct from `account-exhausted:*`, and journaled that way in
+`crash_classification`. The old label was actively misleading: `spawn-claude.sh`'s
+own "no usable accounts" diagnostic **echoes each pooled account's stored
+`.bad_tokens` reason**, prose like `exhausted: hit your session limit`, which the
+`rate-limited` exhaustion regex matches verbatim. All 228 incident deaths were
+therefore journaled `account-exhausted:rate-limited` with `token=unknown` — a
+label asserting a *named account* hit a limit, about a death in which no account
+was ever selected. That misdirected two separate investigations (#6917, #7860).
+
+Two contracts are deliberately unchanged:
+
+- **#4122 account rotation.** A genuine *mid-run* exhaustion (the CLI started,
+  ran, then hit a limit) still classifies `account-exhausted:*` and still marks
+  the spawn account bad. The classifier requires the child to have **never
+  reached `# CLAUDE_CLI_START`** before calling a death pool-level, so reaching
+  the CLI proves an account was selected and keeps the death on the account.
+- **#4644/#7860 visibility.** `death_class` still reports
+  `preflight-token-selection-failed` and still feeds the #4386 workspace
+  pre-flight streak.
+
+A `no-usable-account` death is **exempt from both arms of the #4485 per-issue
+ladder** — it neither arms it (a pool-wide fault is not that issue's fault, and
+must never be reported as "the issue's dispatch failed") nor clears it (the
+dispatch proved nothing about the issue, so an already-armed window survives).
+Instead it arms the host hold above as a post-mortem backstop, trusted over this
+daemon's own read of the same directory: the wrapper proved a spawn cannot select
+an account there. That backstop is bounded by `pool_clear_estimate`'s 900 s cap,
+so the worst case when the wrapper and the daemon disagree is one doomed dispatch
+per host per TTL, not one per tick.
 
 ## Worktree handling
 

@@ -41,6 +41,15 @@ _lsh_find_repo_root() {
     return 1
 }
 
+# LOOM_SCRIPT_HELPER_MISSING_RC — the exit code used when no loom-daemon can be
+# resolved. Defaults to 1.
+#
+# A stub whose subcommand uses non-zero codes as DATA must override this, or a
+# missing binary is indistinguishable from an answer. `detect-dependency-cycle`
+# exits 1 to mean "cycle found" and `detect-startable-subset` exits 1 to mean
+# "no subset declared"; a caller branching on the code alone would read a
+# missing binary as a detected cycle. Those stubs set it to 2, which every one
+# of these entry points already reserves for "could not run".
 loom_exec_script_helper() {
     local subcommand="$1"
     shift
@@ -70,5 +79,5 @@ loom_exec_script_helper() {
     else
         echo "  - re-running the Loom installer, which provisions loom-daemon onto PATH" >&2
     fi
-    exit 1
+    exit "${LOOM_SCRIPT_HELPER_MISSING_RC:-1}"
 }
