@@ -431,6 +431,31 @@ def _print_recommendation(diag: StuckNetDiagnosis) -> None:
         print(f"                    {i}. {label} ({ranked.rationale}){preferred}")
 
 
+def _discover_net_class_map(pcb_path: Path) -> dict[str, Any] | None:
+    """Auto-discover + load a ``net_class_map.json`` sidecar for *pcb_path*.
+
+    Issue #5522: scoped to *pcb_path*'s own directory only (a single-element
+    directory list to :func:`~kicad_tools.sidecars.
+    first_existing_net_class_map_sidecar`), matching the other
+    single-directory sidecar consumers (the CI merge gates, the export
+    report) rather than ``kct check``'s wider three-directory probe --
+    widening the scope is explicitly out of AC4 for that shared module.
+    Returns ``None`` (never raises) when no sidecar exists, or when one
+    exists but fails to parse -- a malformed sidecar must not break
+    ``--why`` output that worked before #5522.
+    """
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.sidecars import first_existing_net_class_map_sidecar
+
+    sidecar_path = first_existing_net_class_map_sidecar([pcb_path.parent], pcb_path.stem)
+    if sidecar_path is None:
+        return None
+    try:
+        return net_class_map_from_path(sidecar_path, pcb_path=pcb_path)
+    except Exception:
+        return None
+
+
 def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = None) -> int:
     """Classify incomplete signal nets by why they are stuck and print them.
 
@@ -448,10 +473,20 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
     Returns 2 if any (selected) stuck nets were found (matching the rest of
     net-status' exit-code convention), 0 if there are none -- so under
     ``--net`` the exit code reflects the selected net only.
+
+    Issue #5522 (Phase 1 of Epic #5511): auto-discovers a committed
+    ``net_class_map.json`` / ``<stem>.net_class_map.json`` sidecar next to
+    *pcb_path* (single-directory scope, matching the other single-directory
+    sidecar consumers per ``sidecars.py``'s AC4 note) and forwards it to the
+    classifier so a declared ``swap_group`` can surface a ``swap_proposal``
+    on a verified-reversed bundle.  No new CLI flag -- an absent sidecar
+    resolves to ``None``, which keeps this output byte-identical to
+    pre-#5522 behavior.
     """
     from kicad_tools.router.stuck_classifier import StuckClassifierResult, classify_stuck_nets
 
-    result = classify_stuck_nets(pcb_path, strict=strict)
+    net_class_map = _discover_net_class_map(pcb_path)
+    result = classify_stuck_nets(pcb_path, strict=strict, net_class_map=net_class_map)
 
     # --net filter (issue #4682): restrict diagnoses (and every derived
     # count) to the selected net.

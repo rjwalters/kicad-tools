@@ -177,6 +177,16 @@ class PlacementDelta:
     rationale: str = ""
     confidence: str = ""
     component_id: str = ""
+    # Declared swap-group proposal data (issue #5522, Phase 1 of Epic #5511).
+    # Populated ONLY when the diagnosed bundle carries a declared
+    # ``swap_group`` (:attr:`~kicad_tools.router.stuck_classifier.
+    # StuckNetDiagnosis.swap_proposal`); ``None`` otherwise -- a
+    # ``reorder_pins`` delta with no declared swap group therefore stays
+    # rationale-only, byte-identical to pre-#5522 output (emitted
+    # conditionally in :meth:`to_dict`, same style as ``component_id``).
+    pad_map: dict[str, str] | None = None
+    crossings_before: int | None = None
+    crossings_after: int | None = None
 
     @property
     def target_key(self) -> str:
@@ -195,6 +205,17 @@ class PlacementDelta:
             "rationale": self.rationale,
             "confidence": self.confidence,
             **({"component_id": self.component_id} if self.component_id else {}),
+            **({"pad_map": dict(self.pad_map)} if self.pad_map is not None else {}),
+            **(
+                {"crossings_before": self.crossings_before}
+                if self.crossings_before is not None
+                else {}
+            ),
+            **(
+                {"crossings_after": self.crossings_after}
+                if self.crossings_after is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -219,6 +240,13 @@ class PlacementDelta:
             rationale=data.get("rationale", ""),
             confidence=data.get("confidence", ""),
             component_id=data.get("component_id", ""),
+            pad_map=dict(data["pad_map"]) if data.get("pad_map") is not None else None,
+            crossings_before=(
+                int(data["crossings_before"]) if data.get("crossings_before") is not None else None
+            ),
+            crossings_after=(
+                int(data["crossings_after"]) if data.get("crossings_after") is not None else None
+            ),
         )
 
 
@@ -270,12 +298,33 @@ def deltas_from_result(
     behaviour, and only reaches an alignment candidate once the ladder's own
     proposal has been probed.  ``fixed_refs`` names parts the caller has
     anchored; they are never proposed for rotation.
+
+    Issue #5522 (Phase 1 of Epic #5511): when a diagnosis carries a computed
+    ``swap_proposal`` (a declared swap group on a VERIFIED-reversed bundle)
+    and the primary delta is NOT already the ``reorder_pins`` kind (e.g. the
+    top-ranked action was ``DE_REVERSE_BUNDLE``, so the primary delta is
+    ``mirror``), a ``reorder_pins`` delta carrying the proposal's ``pad_map``
+    / crossing counts is APPENDED after the primary delta -- same append,
+    never replace, precedent as #4968: a caller that takes the first
+    applyable delta is unaffected, and ``_select_delta`` keeps skipping
+    ``reorder_pins`` regardless (report-only, no applicator).  This is what
+    gets the proposal into the ``proposed`` list of the
+    ``_placement_delta.json`` artifact even when rung 1 is ``mirror``.
     """
     out: list[PlacementDelta] = []
     for diag in result.diagnoses:
         delta = delta_from_diagnosis(pcb, diag)
         if delta is not None:
             out.append(delta)
+        if diag.swap_proposal is not None and (delta is None or delta.kind != "reorder_pins"):
+            rung = next(
+                (r for r in diag.recommendation if r.action is RecommendedAction.REORDER_PINS),
+                None,
+            )
+            if rung is not None:
+                extra = _reorder_pins_delta(diag, rung.confidence.value, rung.rationale)
+                if extra is not None:
+                    out.append(extra)
         if include_endpoint_alignment:
             out.extend(endpoint_align_deltas(pcb, diag, fixed_refs=fixed_refs))
     return out
@@ -319,15 +368,22 @@ def _mirror_delta(
 def _reorder_pins_delta(
     diag: StuckNetDiagnosis, confidence: str, rationale: str
 ) -> PlacementDelta | None:
-    """REORDER_PINS -> a rationale-only delta (no geometry in Phase 1).
+    """REORDER_PINS -> rationale-only, or a declared-swap-group proposal.
 
-    A pad-level re-map applicator does not exist yet, so this carries no
-    ``(dx, dy, rotation)`` -- it names the part whose pin order should change
-    (the reversed facing part when known) and defers the mechanics to a future
-    phase.
+    A pad-level re-map APPLICATOR does not exist yet, so the geometric move
+    is never executed -- but issue #5522 (Phase 1 of Epic #5511) adds a data
+    payload for it when the diagnosed bundle carries a declared
+    ``swap_group``: :attr:`StuckNetDiagnosis.swap_proposal` already computed
+    the crossing-minimising ``pad_map`` at the classifier level, so this
+    builder only needs to copy it onto the delta.  Without a declared swap
+    group ``diag.swap_proposal`` is ``None`` and this stays exactly the
+    pre-#5522 rationale-only delta (byte-identical ``to_dict`` output --
+    ``pad_map`` / ``crossings_before`` / ``crossings_after`` stay unset and
+    are therefore omitted, same as ``component_id``).
     """
     orientation = diag.bundle_orientation
     target_ref = orientation.secondary_ref if orientation else ""
+    proposal = diag.swap_proposal
     return PlacementDelta(
         net_name=diag.net_name,
         target_ref=target_ref,
@@ -335,6 +391,9 @@ def _reorder_pins_delta(
         source_action=RecommendedAction.REORDER_PINS.value,
         rationale=rationale,
         confidence=confidence,
+        pad_map=dict(proposal.pad_map) if proposal is not None else None,
+        crossings_before=proposal.crossings_before if proposal is not None else None,
+        crossings_after=proposal.crossings_after if proposal is not None else None,
     )
 
 

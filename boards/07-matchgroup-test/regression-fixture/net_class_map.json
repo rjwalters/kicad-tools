@@ -29,7 +29,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ1": {
     "name": "DDR_DATA_BYTE_0",
@@ -61,7 +62,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ2": {
     "name": "DDR_DATA_BYTE_0",
@@ -93,7 +95,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ3": {
     "name": "DDR_DATA_BYTE_0",
@@ -125,7 +128,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ4": {
     "name": "DDR_DATA_BYTE_0",
@@ -157,7 +161,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ5": {
     "name": "DDR_DATA_BYTE_0",
@@ -189,7 +194,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ6": {
     "name": "DDR_DATA_BYTE_0",
@@ -221,7 +227,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DQ7": {
     "name": "DDR_DATA_BYTE_0",
@@ -253,7 +260,8 @@
     "skew_tolerance_mm": null,
     "length_match_group": "DDR_DATA_BYTE_0",
     "length_match_reference": null,
-    "length_match_tolerance_mm": 0.1
+    "length_match_tolerance_mm": 0.1,
+    "swap_group": "DDR_BYTE0"
   },
   "DM0": {
     "name": "DDR_DATA_BYTE_0",

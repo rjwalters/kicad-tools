@@ -32,7 +32,9 @@ from kicad_tools.router.stuck_classifier import (
     RankedAction,
     RecommendedAction,
     StuckClass,
+    StuckClassifierResult,
     StuckNetDiagnosis,
+    SwapProposal,
     classify_stuck_nets_from_pcb,
 )
 from kicad_tools.schema.pcb import PCB
@@ -234,6 +236,57 @@ class TestMappingTable:
         assert delta.target_ref == "UB"
         assert delta.dx == 0.0 and delta.dy == 0.0 and delta.rotation_delta == 0.0
         assert delta.source_action == "reorder_pins"
+        # No declared swap group (issue #5522) -> the new fields stay unset,
+        # so ``to_dict`` output is byte-identical to pre-#5522 output.
+        assert delta.pad_map is None
+        assert delta.crossings_before is None
+        assert delta.crossings_after is None
+        assert set(delta.to_dict().keys()) == {
+            "net_name",
+            "target_ref",
+            "kind",
+            "dx",
+            "dy",
+            "rotation_delta",
+            "source_action",
+            "rationale",
+            "confidence",
+        }
+
+    def test_reorder_pins_with_swap_proposal_carries_pad_map_and_counts(self):
+        """Issue #5522: a declared swap group on a verified-reversed bundle
+        populates ``pad_map`` / crossing counts on the ``reorder_pins`` delta."""
+        proposal = SwapProposal(
+            target_ref="U2",
+            swap_group="DDR_BYTE0",
+            pad_map={"1": "DQ7", "11": "DQ0"},
+            crossings_before=28,
+            crossings_after=0,
+            group_crossings_before=55,
+            group_crossings_after=3,
+            fixed_members=("DM0", "DQS_N", "DQS_P"),
+        )
+        diag = _make_diag(
+            "DQ3",
+            [RecommendedAction.REORDER_PINS],
+            bundle_orientation=BundleOrientation(
+                verdict="reversed", primary_ref="U1", secondary_ref="U2"
+            ),
+            swap_proposal=proposal,
+        )
+        delta = delta_from_diagnosis(None, diag)
+        assert delta is not None
+        assert delta.kind == "reorder_pins"
+        assert delta.pad_map == {"1": "DQ7", "11": "DQ0"}
+        assert delta.crossings_before == 28
+        assert delta.crossings_after == 0
+        # Round-trips through JSON, and through PlacementDelta.from_dict.
+        blob = json.loads(json.dumps(delta.to_dict()))
+        assert blob["pad_map"] == {"1": "DQ7", "11": "DQ0"}
+        assert blob["crossings_before"] == 28
+        assert blob["crossings_after"] == 0
+        reloaded = PlacementDelta.from_dict(blob)
+        assert reloaded == delta
 
     def test_accept_plateau_top_returns_none(self):
         diag = _make_diag("N", [RecommendedAction.ACCEPT_PLATEAU])
@@ -528,6 +581,75 @@ class TestEndpointAlignment:
         assert restored.rotation_delta == delta.rotation_delta
         assert restored.target_ref == delta.target_ref
         assert restored.rationale == delta.rationale
+
+
+# ---------------------------------------------------------------------------
+# Declared swap-group proposal -> deltas_from_result appends (issue #5522)
+# ---------------------------------------------------------------------------
+
+
+class TestSwapProposalAppendedDelta:
+    """A ``swap_proposal`` gets its own ``reorder_pins`` delta APPENDED after
+    the primary delta -- even when rung 1 is ``DE_REVERSE_BUNDLE`` (a
+    ``mirror`` primary delta), same append-not-replace precedent as #4968."""
+
+    def test_appended_after_mirror_primary_delta(self, tmp_path: Path):
+        proposal = SwapProposal(
+            target_ref="UB",
+            swap_group="DDR_BYTE0",
+            pad_map={"1": "DQ2", "3": "DQ0"},
+            crossings_before=3,
+            crossings_after=0,
+            group_crossings_before=3,
+            group_crossings_after=0,
+        )
+        pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))
+        diag = _diag(pcb, "DQ2")
+        assert diag.recommendation[0].action is RecommendedAction.DE_REVERSE_BUNDLE
+        diag.swap_proposal = proposal
+
+        result = StuckClassifierResult(diagnoses=[diag])
+        deltas = deltas_from_result(pcb, result, include_endpoint_alignment=False)
+
+        assert [d.kind for d in deltas] == ["mirror", "reorder_pins"]
+        reorder = deltas[1]
+        assert reorder.pad_map == {"1": "DQ2", "3": "DQ0"}
+        assert reorder.crossings_before == 3
+        assert reorder.crossings_after == 0
+
+    def test_no_duplicate_when_primary_is_already_reorder_pins(self):
+        """When rung 1 IS ``REORDER_PINS``, the primary delta already carries
+        the proposal -- no second delta is appended."""
+        proposal = SwapProposal(
+            target_ref="UB",
+            swap_group="DDR_BYTE0",
+            pad_map={"1": "DQ2"},
+            crossings_before=1,
+            crossings_after=0,
+            group_crossings_before=1,
+            group_crossings_after=0,
+        )
+        diag = _make_diag(
+            "DQ2",
+            [RecommendedAction.REORDER_PINS, RecommendedAction.DE_REVERSE_BUNDLE],
+            bundle_orientation=BundleOrientation(
+                verdict="reversed", primary_ref="UA", secondary_ref="UB"
+            ),
+            swap_proposal=proposal,
+        )
+        result = StuckClassifierResult(diagnoses=[diag])
+        deltas = deltas_from_result(None, result, include_endpoint_alignment=False)
+        assert [d.kind for d in deltas] == ["reorder_pins"]
+        assert deltas[0].pad_map == {"1": "DQ2"}
+
+    def test_no_appended_delta_without_swap_proposal(self, tmp_path: Path):
+        """No declared swap group -> no extra delta (pre-#5522 behavior)."""
+        pcb = _load(tmp_path, _facing_rows_bundle_board(reversed_rows=True))
+        diag = _diag(pcb, "DQ2")
+        assert diag.swap_proposal is None
+        result = StuckClassifierResult(diagnoses=[diag])
+        deltas = deltas_from_result(pcb, result, include_endpoint_alignment=False)
+        assert [d.kind for d in deltas] == ["mirror"]
 
 
 # ---------------------------------------------------------------------------

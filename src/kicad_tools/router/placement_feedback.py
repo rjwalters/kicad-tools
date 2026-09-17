@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.core import Autorouter
     from kicad_tools.router.placement_delta import PlacementDelta
     from kicad_tools.router.primitives import Route
+    from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
 
 from kicad_tools.recovery import (
@@ -1355,6 +1356,7 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         max_movement: float | None = 5.0,
         delta_proposer: Callable[[PCB], list[PlacementDelta]] | None = None,
         excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
+        net_class_map: dict[str, NetClassRouting] | None = None,
     ):
         super().__init__(
             router=router,
@@ -1371,6 +1373,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         # by copper fill rather than traces, so classifying them as stuck signal
         # nets would propose placement moves for a non-problem (issue #4468).
         self.excluded_nets: frozenset[str] = frozenset(excluded_nets or ())
+        # Issue #5522 (Phase 1 of Epic #5511): optional sidecar map, forwarded
+        # to the classifier so a declared ``swap_group`` can surface a
+        # ``swap_proposal`` on the ``_placement_delta.json`` artifact.
+        # ``None`` (the default) is byte-identical to pre-#5522 behavior.
+        self.net_class_map: dict[str, NetClassRouting] | None = net_class_map
 
     # --- delta proposal / selection ----------------------------------------
 
@@ -1444,7 +1451,9 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         view = self._routed_pcb_view()
         if view is None:
             return []
-        result = classify_stuck_nets_from_pcb(view, excluded_nets=self.excluded_nets)
+        result = classify_stuck_nets_from_pcb(
+            view, excluded_nets=self.excluded_nets, net_class_map=self.net_class_map
+        )
         # ``fixed_refs`` is forwarded so the #4968 endpoint-orientation search
         # never spends a candidate slot on a part the caller anchored -- the
         # loop would only skip it again at selection time.
