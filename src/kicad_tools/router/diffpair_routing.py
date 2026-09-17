@@ -32,6 +32,8 @@ if TYPE_CHECKING:
 
 import contextlib
 
+import numpy as np
+
 from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
@@ -1422,6 +1424,34 @@ class CoupledNode:
     seq: int = field(compare=True, default=0)
 
 
+def _dilate_axis_inplace(mask: np.ndarray, radius: int, axis: int) -> np.ndarray:
+    """Exact 1D Chebyshev dilation of a boolean array by ``radius`` along ``axis``.
+
+    For every ``True`` cell at index ``i`` this marks every index in
+    ``[i - radius, i + radius]`` that lies inside ``mask`` -- no
+    wraparound, matching the bounds-check semantics
+    ``build_corridor_mask`` needs (a shift that would fall off either
+    edge simply drops that contribution). Square (Chebyshev) dilation is
+    separable: dilating along axis 0 and then axis 1 is bit-identical to
+    dilating with the full square structuring element in one pass, so
+    the caller applies this twice (once per axis) instead of doing an
+    O(radius**2) 2D pass.
+    """
+    if radius <= 0:
+        return mask
+    out: np.ndarray = mask.copy()
+    src: list[slice] = [slice(None), slice(None)]
+    dst: list[slice] = [slice(None), slice(None)]
+    for shift in range(1, radius + 1):
+        src[axis] = slice(shift, None)
+        dst[axis] = slice(None, -shift)
+        out[tuple(dst)] |= mask[tuple(src)]
+        src[axis] = slice(None, -shift)
+        dst[axis] = slice(shift, None)
+        out[tuple(dst)] |= mask[tuple(src)]
+    return out
+
+
 def build_corridor_mask(
     grid: RoutingGrid,
     guide_route: Route,
@@ -1445,6 +1475,14 @@ def build_corridor_mask(
     exact layer sequence, which was computed for a single trace and may
     not have room for two.
 
+    Issue #5240 (CI runtime): the dilation is done with NumPy instead
+    of a nested Python loop over every ``(base cell, dx, dy)`` triple.
+    The array is sized to the guide path's own bounding box (plus a
+    ``radius``-cell margin), not the full routing grid, so cost tracks
+    the corridor's physical footprint rather than the board's total
+    cell count. See ``_dilate_axis_inplace`` for why two 1D passes are
+    bit-identical to the original's square (Chebyshev) dilation.
+
     Args:
         grid: The routing grid (used for world->grid conversion and
             bounds clamping).
@@ -1466,41 +1504,85 @@ def build_corridor_mask(
         Frozenset of in-bounds ``(x, y)`` grid cells forming the
         corridor.
     """
-    base_cells: set[tuple[int, int]] = set(extra_cells)
+    xs: list[int] = []
+    ys: list[int] = []
+    for cx, cy in extra_cells:
+        xs.append(cx)
+        ys.append(cy)
 
     for seg in guide_route.segments:
         gx1, gy1 = grid.world_to_grid(seg.x1, seg.y1)
         gx2, gy2 = grid.world_to_grid(seg.x2, seg.y2)
         steps = max(abs(gx2 - gx1), abs(gy2 - gy1))
         if steps == 0:
-            base_cells.add((gx1, gy1))
+            xs.append(gx1)
+            ys.append(gy1)
             continue
-        for i in range(steps + 1):
-            t = i / steps
-            base_cells.add(
-                (
-                    int(round(gx1 + (gx2 - gx1) * t)),
-                    int(round(gy1 + (gy2 - gy1) * t)),
-                )
-            )
+        # Vectorized version of the original's per-step
+        # ``int(round(gx1 + (gx2 - gx1) * i / steps))`` loop; NumPy's
+        # round-half-to-even matches Python's ``round()`` bit-for-bit.
+        t = np.arange(steps + 1, dtype=np.float64) / steps
+        xs.extend(np.round(gx1 + (gx2 - gx1) * t).astype(np.int64).tolist())
+        ys.extend(np.round(gy1 + (gy2 - gy1) * t).astype(np.int64).tolist())
 
     for via in guide_route.vias:
-        base_cells.add(grid.world_to_grid(via.x, via.y))
+        vx, vy = grid.world_to_grid(via.x, via.y)
+        xs.append(vx)
+        ys.append(vy)
+
+    if not xs:
+        return frozenset()
 
     radius = max(0, int(radius_cells))
-    corridor: set[tuple[int, int]] = set()
     cols, rows = grid.cols, grid.rows
-    for cx, cy in base_cells:
-        for dx in range(-radius, radius + 1):
-            x = cx + dx
-            if x < 0 or x >= cols:
-                continue
-            for dy in range(-radius, radius + 1):
-                y = cy + dy
-                if 0 <= y < rows:
-                    corridor.add((x, y))
 
-    return frozenset(corridor)
+    xs_arr = np.asarray(xs, dtype=np.int64)
+    ys_arr = np.asarray(ys, dtype=np.int64)
+
+    # Drop base cells that cannot contribute ANY in-bounds output cell:
+    # every cell they dilate to is >= radius away on one axis, so it
+    # falls outside [0, cols) x [0, rows) and the original nested loop's
+    # per-axis bounds checks discarded it too.  ``world_to_grid()``
+    # already clamps into the grid, so in practice nothing is dropped
+    # here -- the filter exists so a caller passing an unclamped
+    # ``extra_cells`` entry cannot inflate the dense box below (the
+    # original loop's cost was independent of coordinate magnitude, and
+    # this keeps that property).
+    keep = (
+        (xs_arr >= -radius)
+        & (xs_arr < cols + radius)
+        & (ys_arr >= -radius)
+        & (ys_arr < rows + radius)
+    )
+    if not keep.all():
+        xs_arr = xs_arr[keep]
+        ys_arr = ys_arr[keep]
+        if xs_arr.size == 0:
+            return frozenset()
+
+    # Work in a local coordinate system sized to the base cells'
+    # bounding box plus a ``radius``-cell margin on every side -- a base
+    # cell farther than ``radius`` outside that box can never contribute
+    # a dilated cell inside it, and world_to_grid() already clamps every
+    # coordinate into [0, cols) x [0, rows) anyway, so this is a bound
+    # on the box, not on the grid's total extent (the box is normally
+    # far smaller than the whole board for a single guide path).
+    origin_x = int(xs_arr.min()) - radius
+    origin_y = int(ys_arr.min()) - radius
+    local_w = int(xs_arr.max()) - origin_x + radius + 1
+    local_h = int(ys_arr.max()) - origin_y + radius + 1
+
+    base = np.zeros((local_w, local_h), dtype=bool)
+    base[xs_arr - origin_x, ys_arr - origin_y] = True
+
+    dilated = _dilate_axis_inplace(base, radius, axis=0)
+    dilated = _dilate_axis_inplace(dilated, radius, axis=1)
+
+    local_out_xs, local_out_ys = np.nonzero(dilated)
+    out_xs = local_out_xs + origin_x
+    out_ys = local_out_ys + origin_y
+    in_bounds = (out_xs >= 0) & (out_xs < cols) & (out_ys >= 0) & (out_ys < rows)
+    return frozenset(zip(out_xs[in_bounds].tolist(), out_ys[in_bounds].tolist(), strict=True))
 
 
 class CoupledPathfinder:

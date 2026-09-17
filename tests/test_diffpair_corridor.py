@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.diffpair import DifferentialPairConfig
@@ -39,7 +40,7 @@ from kicad_tools.router.diffpair_routing import (
 )
 from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.primitives import Pad, Route, Segment
+from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,205 @@ def test_corridor_mask_includes_extra_cells():
     far_cell = grid.world_to_grid(11.5, 11.5)
     corridor = build_corridor_mask(grid, route, radius_cells=1, extra_cells=(far_cell,))
     assert far_cell in corridor
+
+
+def _reference_corridor_mask(
+    grid: RoutingGrid,
+    guide_route: Route,
+    radius_cells: int,
+    extra_cells: tuple[tuple[int, int], ...] = (),
+) -> frozenset[tuple[int, int]]:
+    """Oracle: the pre-Issue-#5240 nested-Python-loop dilation.
+
+    Reproduces the original ``build_corridor_mask`` bit-for-bit (same
+    per-step interpolation, same unbounded square/Chebyshev dilation with
+    independent per-axis bounds checks) so the NumPy-vectorized
+    implementation can be checked against it directly, instead of only
+    against hand-picked single-cell assertions.
+    """
+    base_cells: set[tuple[int, int]] = set(extra_cells)
+
+    for seg in guide_route.segments:
+        gx1, gy1 = grid.world_to_grid(seg.x1, seg.y1)
+        gx2, gy2 = grid.world_to_grid(seg.x2, seg.y2)
+        steps = max(abs(gx2 - gx1), abs(gy2 - gy1))
+        if steps == 0:
+            base_cells.add((gx1, gy1))
+            continue
+        for i in range(steps + 1):
+            t = i / steps
+            base_cells.add(
+                (
+                    int(round(gx1 + (gx2 - gx1) * t)),
+                    int(round(gy1 + (gy2 - gy1) * t)),
+                )
+            )
+
+    for via in guide_route.vias:
+        base_cells.add(grid.world_to_grid(via.x, via.y))
+
+    radius = max(0, int(radius_cells))
+    corridor: set[tuple[int, int]] = set()
+    cols, rows = grid.cols, grid.rows
+    for cx, cy in base_cells:
+        for dx in range(-radius, radius + 1):
+            x = cx + dx
+            if x < 0 or x >= cols:
+                continue
+            for dy in range(-radius, radius + 1):
+                y = cy + dy
+                if 0 <= y < rows:
+                    corridor.add((x, y))
+
+    return frozenset(corridor)
+
+
+def test_corridor_mask_matches_reference_on_multi_segment_route():
+    """Issue #5240: the NumPy-vectorized dilation must reproduce the
+    original nested-loop algorithm bit-for-bit on a non-trivial guide
+    route (multiple angled segments + a via + several radii)."""
+    grid = _make_grid(width=25.0, height=20.0)
+    route = Route(net=1, net_name="MULTI")
+    route.segments.append(
+        Segment(
+            x1=1.0, y1=1.0, x2=9.3, y2=4.7, width=0.2, layer=Layer.F_CU, net=1, net_name="MULTI"
+        )
+    )
+    route.segments.append(
+        Segment(
+            x1=9.3, y1=4.7, x2=9.3, y2=15.2, width=0.2, layer=Layer.F_CU, net=1, net_name="MULTI"
+        )
+    )
+    route.segments.append(
+        Segment(
+            x1=9.3, y1=15.2, x2=18.6, y2=18.0, width=0.2, layer=Layer.F_CU, net=1, net_name="MULTI"
+        )
+    )
+    route.vias.append(
+        Via(
+            x=9.3,
+            y=15.2,
+            drill=0.3,
+            diameter=0.6,
+            layers=(Layer.F_CU, Layer.B_CU),
+            net=1,
+            net_name="MULTI",
+        )
+    )
+    extra = (grid.world_to_grid(0.5, 0.5), grid.world_to_grid(19.5, 19.5))
+
+    for radius in (0, 1, 4, 9, 17):
+        expected = _reference_corridor_mask(grid, route, radius, extra_cells=extra)
+        actual = build_corridor_mask(grid, route, radius, extra_cells=extra)
+        assert actual == expected, f"radius={radius} mismatch vs reference"
+
+
+def test_corridor_mask_matches_reference_near_board_edges():
+    """Edge/corner guide routes exercise the per-axis bounds clamping the
+    reference implementation relies on."""
+    grid = _make_grid(width=10.0, height=8.0)
+    route = Route(net=1, net_name="CORNER")
+    route.segments.append(
+        Segment(
+            x1=0.05, y1=0.05, x2=0.4, y2=7.9, width=0.2, layer=Layer.F_CU, net=1, net_name="CORNER"
+        )
+    )
+    route.segments.append(
+        Segment(
+            x1=9.95, y1=7.9, x2=9.95, y2=0.05, width=0.2, layer=Layer.F_CU, net=1, net_name="CORNER"
+        )
+    )
+
+    for radius in (0, 2, 6, 12):
+        expected = _reference_corridor_mask(grid, route, radius)
+        actual = build_corridor_mask(grid, route, radius)
+        assert actual == expected, f"radius={radius} mismatch vs reference near edges"
+
+
+def test_corridor_mask_matches_reference_with_out_of_range_extra_cells():
+    """Base cells outside the grid contribute nothing, exactly as before.
+
+    ``build_corridor_mask`` sizes a dense array to the base cells'
+    bounding box, so an unclamped ``extra_cells`` entry must be dropped
+    rather than inflating that box.  Dropping it is not a behaviour
+    change: the reference implementation's per-axis bounds checks
+    already discarded every cell such a base cell dilates to.
+    """
+    grid = _make_grid(width=10.0, height=8.0)
+    route = _straight_guide_route(grid)
+    far = (grid.cols + 10_000, grid.rows + 10_000)
+    negative = (-10_000, -10_000)
+
+    for radius in (0, 3, 7):
+        expected = _reference_corridor_mask(grid, route, radius, extra_cells=(far, negative))
+        actual = build_corridor_mask(grid, route, radius, extra_cells=(far, negative))
+        assert actual == expected, f"radius={radius} mismatch with out-of-range extra cells"
+
+    # Only out-of-range cells and no guide geometry -> empty corridor.
+    empty_route = Route(net=1, net_name="NONE")
+    assert build_corridor_mask(grid, empty_route, 4, extra_cells=(far, negative)) == frozenset()
+    assert (
+        _reference_corridor_mask(grid, empty_route, 4, extra_cells=(far, negative)) == frozenset()
+    )
+
+
+def test_corridor_mask_matches_reference_on_randomized_routes():
+    """Fuzz the vectorized dilation against the nested-loop oracle.
+
+    Seeded so the case set is fixed run-to-run; covers axis-aligned,
+    diagonal and shallow-slope segments (the three interpolation
+    regimes), several radii, vias, and pad-derived extra cells.
+    """
+    rng = random.Random(5240)
+    grid = _make_grid(width=20.0, height=16.0)
+
+    for case in range(40):
+        route = Route(net=1, net_name=f"FUZZ{case}")
+        for _ in range(rng.randint(1, 4)):
+            route.segments.append(
+                Segment(
+                    x1=rng.uniform(0.2, 19.8),
+                    y1=rng.uniform(0.2, 15.8),
+                    x2=rng.uniform(0.2, 19.8),
+                    y2=rng.uniform(0.2, 15.8),
+                    width=0.2,
+                    layer=Layer.F_CU,
+                    net=1,
+                    net_name=f"FUZZ{case}",
+                )
+            )
+        if rng.random() < 0.5:
+            route.vias.append(
+                Via(
+                    x=rng.uniform(0.2, 19.8),
+                    y=rng.uniform(0.2, 15.8),
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=1,
+                    net_name=f"FUZZ{case}",
+                )
+            )
+        extra = tuple(
+            grid.world_to_grid(rng.uniform(0.0, 20.0), rng.uniform(0.0, 16.0))
+            for _ in range(rng.randint(0, 3))
+        )
+        radius = rng.choice((0, 1, 2, 5, 11))
+
+        expected = _reference_corridor_mask(grid, route, radius, extra_cells=extra)
+        actual = build_corridor_mask(grid, route, radius, extra_cells=extra)
+        assert actual == expected, f"case {case} (radius={radius}) mismatch vs reference"
+
+
+def test_corridor_mask_matches_reference_empty_route():
+    """No segments/vias, only ``extra_cells`` -- the early-return path."""
+    grid = _make_grid()
+    route = Route(net=1, net_name="EMPTY")
+    extra = (grid.world_to_grid(3.0, 3.0),)
+    assert build_corridor_mask(grid, route, radius_cells=5, extra_cells=extra) == (
+        _reference_corridor_mask(grid, route, radius_cells=5, extra_cells=extra)
+    )
+    assert build_corridor_mask(grid, route, radius_cells=0) == frozenset()
 
 
 # ---------------------------------------------------------------------------
