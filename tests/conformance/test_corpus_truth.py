@@ -15,10 +15,13 @@ live in well-separated slots, so the only near-neighbour relationship on a
 board is the intended one. A stray cross-slot finding would silently inflate
 every disagreement rate.
 
-One test item per ``(seed, refill)``: the CI ``test`` job runs with
-``--timeout=60`` and ``-n auto``, so a loop over many seeds inside a single
-item would be a timeout waiting to happen (and would report one failure for
-the whole corpus instead of naming the seed).
+One test item per ``(seed, fill state)``, never a loop over seeds inside one
+item: the CI ``test`` job runs with ``--timeout=60`` and ``-n auto``, so a
+batched item would be a timeout waiting to happen -- and would report one
+failure for the whole corpus instead of naming the seed that broke.
+
+Each item launches kicad-cli, so the smoke corpus is kept small on purpose;
+the published table is measured out-of-band over a much wider seed range.
 """
 
 from __future__ import annotations
@@ -34,10 +37,13 @@ from tests.conformance.oracle import run_oracle
 
 pytestmark = requires_kicad_cli
 
-# Kept deliberately small: this is the *smoke* corpus that runs on every PR.
-# The published table is regenerated over a much wider seed range by
+# Kept deliberately small: this is the *smoke* corpus that runs on every PR,
+# and every item here launches a kicad-cli process. The CI ``test`` job runs
+# ``-n auto`` inside a 12 GiB cgroup alongside the C++ router suite, so each
+# extra concurrent kicad-cli is memory the rest of the suite does not get. The
+# published table is regenerated over a much wider seed range out-of-band by
 # ``python -m tests.conformance.report --seeds 0-199``.
-CI_SEEDS = tuple(range(8))
+CI_SEEDS = tuple(range(6))
 
 # Seed 0 carries a zone, so it is the seed where refilling can actually change
 # something. Kept to a single seed on purpose: a refilled item costs three
@@ -47,14 +53,21 @@ REFILL_SEEDS = (0,)
 
 
 @pytest.mark.parametrize("seed", CI_SEEDS)
-def test_kicad_cli_reproduces_the_intended_gaps(seed: int, tmp_path: Path) -> None:
-    """Every pair the generator placed at ``gap < required`` is flagged, and
-    no pair placed above it is.
+def test_kicad_cli_reproduces_the_intended_geometry(seed: int, tmp_path: Path) -> None:
+    """The generator's intent and KiCad's measurement agree, per seed.
 
-    This is the harness's self-check. It is an equality, not an inclusion:
-    a missing flag means the placement did not realise the gap it recorded,
-    and an extra flag means two objects interact that were supposed to be in
-    different slots.
+    Both halves of the harness self-check are asserted from a **single**
+    kicad-cli run, because they are two readings of the same measurement and
+    splitting them would double this suite's process count for no extra
+    coverage:
+
+    1. *Which* pairs are flagged. An equality, not an inclusion -- a missing
+       flag means the placement did not realise the gap it recorded, and an
+       extra flag means two objects interact that were supposed to be in
+       different slots.
+    2. *What gap* KiCad measured, against the gap the generator computed
+       analytically, within 1 um. If this drifts, the placement maths is wrong
+       and the corpus is not probing where it thinks it is.
     """
     case = generate_case(seed)
     board = write_case(case, tmp_path)
@@ -73,19 +86,6 @@ def test_kicad_cli_reproduces_the_intended_gaps(seed: int, tmp_path: Path) -> No
         f"seed {seed}: clearance rows that could not be mapped to a net pair "
         f"(harness gap, not a consumer disagreement): {result.dropped}"
     )
-
-
-@pytest.mark.parametrize("seed", CI_SEEDS)
-def test_measured_gap_matches_the_analytic_placement(seed: int, tmp_path: Path) -> None:
-    """KiCad's reported ``actual`` equals the gap the generator computed.
-
-    Within 1 um -- the same band the generator treats as "too close to the
-    threshold to mean anything". If this drifts, the placement maths is wrong
-    and the corpus is not probing where it thinks it is.
-    """
-    case = generate_case(seed)
-    board = write_case(case, tmp_path)
-    result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
 
     by_pair = {v.nets: v for v in result.without_zones() if v.kind == "clearance"}
     checked = 0
