@@ -43,14 +43,15 @@
 # T10-T11 (#7417) cover a different drop shape: `scripts/version.sh bump`
 # (no `--tag`) only rewrites the version-bearing files on disk -- the `git
 # add`/`git commit` pair lives exclusively inside `do_tag()`, invoked only
-# for `--tag`. A caller (e.g. Doctor's rebase recipes) that follows this
-# gate's own printed Fix: hint (`./scripts/version.sh bump patch`) and then
-# pushes WITHOUT an intervening commit pushes a head where the bump exists
-# on disk but never landed in the committed tree -- `version.sh check` can't
-# catch this on its own because it only compares the files against EACH
-# OTHER, never against git. T10 reproduces the bumped-but-uncommitted state
-# and confirms the gate's new dirty-worktree check catches it; T11 is the
-# false-positive guard -- the same bump, committed, passes cleanly.
+# for `--tag`. A caller (e.g. Doctor's rebase recipes, before #7743/#7954
+# forbade a hand-bump on a PR branch) that ran `./scripts/version.sh bump
+# <part>` and then pushed WITHOUT an intervening commit pushes a head where
+# the bump exists on disk but never landed in the committed tree --
+# `version.sh check` can't catch this on its own because it only compares
+# the files against EACH OTHER, never against git. T10 reproduces the
+# bumped-but-uncommitted state and confirms the gate's new dirty-worktree
+# check catches it; T11 is the false-positive guard -- the same bump,
+# committed, passes cleanly.
 #
 # T12-T13 (#7705) cover the lockfile-specific gap in the #7417 check: it
 # walks only `$(scripts/version.sh list)`, which deliberately excludes
@@ -451,9 +452,9 @@ rm -rf "$FIXTURE9"
 # with git HEAD), then every version-bearing file -- including
 # .loom/install-metadata.json -- is bumped to NEW_V ON DISK but never
 # committed. This is exactly the shape a Doctor rebase recipe produces if it
-# runs `./scripts/version.sh bump patch` (this gate's own printed Fix: hint)
-# and then pushes without an intervening commit. The gate must fail even
-# though every file still agrees with every OTHER file.
+# runs `./scripts/version.sh bump patch` and then pushes without an
+# intervening commit. The gate must fail even though every file still
+# agrees with every OTHER file.
 FIXTURE10="$(mktemp -d)"
 make_fixture_repo "$FIXTURE10" "$OLD_V" "$OLD_V"
 bump_version_files "$FIXTURE10" "$OLD_V" "$NEW_V"

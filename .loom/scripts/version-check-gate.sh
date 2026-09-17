@@ -53,22 +53,23 @@
 # A third drop shape (#7417): `scripts/version.sh bump` (no `--tag`) only
 # rewrites the version-bearing files on disk -- the `git add`/`git commit`
 # pair lives exclusively inside `do_tag()`, which only runs when a caller
-# passes `--tag`. Doctor's rebase recipes call `version.sh bump patch` with
-# no `--tag` from this gate's own printed Fix: hint, so a caller that follows
-# that hint and pushes without also committing can push a head where the
-# bump exists on disk but never landed in the committed tree -- `version.sh
-# check` alone can't catch this because it only compares the files against
-# EACH OTHER on disk, never against git's index/HEAD. When VERSION_CHECK_SCRIPT
-# was auto-detected (case 2 above, meaning file paths are trustworthy relative
-# to a real worktree), this gate additionally fails if any version-bearing
-# file is modified/untracked-but-present relative to HEAD.
+# passes `--tag`. Before #7743/#7954 forbade it, Doctor's rebase recipes
+# would run `version.sh bump <part>` with no `--tag` from this gate's own
+# printed Fix: hint; a caller that followed that hint and pushed without
+# also committing could push a head where the bump exists on disk but never
+# landed in the committed tree -- `version.sh check` alone can't catch this
+# because it only compares the files against EACH OTHER on disk, never
+# against git's index/HEAD. When VERSION_CHECK_SCRIPT was auto-detected
+# (case 2 above, meaning file paths are trustworthy relative to a real
+# worktree), this gate additionally fails if any version-bearing file is
+# modified/untracked-but-present relative to HEAD.
 #
 # A fourth drop shape (#7705): the #7417 check above only walks
 # `$(scripts/version.sh list)`, and `list` deliberately excludes
 # `Cargo.lock`/`mcp-loom/package-lock.json` -- they're "derived artifacts" as
 # far as `/repo:release`'s use of `list` is concerned, even though
 # `version.sh check`/`bump` both DO treat them as version-bearing on disk. A
-# caller that runs `bump patch` (regenerating both lockfiles on disk) and
+# caller that runs `bump <part>` (regenerating both lockfiles on disk) and
 # then stages/commits only `$(scripts/version.sh list)` passes BOTH the
 # content-comparison check above AND the #7417 dirty check above cleanly --
 # every version-bearing file the gate walks agrees with itself and with git
@@ -134,7 +135,7 @@ VERSION_CHECK_OUTPUT="$(bash "$VERSION_CHECK_SCRIPT" check 2>&1)" || VERSION_CHE
 if [[ "$VERSION_CHECK_STATUS" -ne 0 ]]; then
   echo "$VERSION_CHECK_OUTPUT" >&2
   echo "version-check-gate.sh: BLOCKER: 'scripts/version.sh check' found a version mismatch -- see MISMATCH line(s) above." >&2
-  echo "version-check-gate.sh: Fix: ./scripts/version.sh bump patch   (re-syncs all version-bearing files, including .loom/install-metadata.json if present), then commit the version-bearing files ('bump' only rewrites them -- it does not commit; only 'bump --tag'/'set --tag' does), $FIX_HINT" >&2
+  echo "version-check-gate.sh: Fix: NEVER run './scripts/version.sh bump' here -- #7743 forbids a hand-bump on a PR branch and CI's defaults-version-bump-check will reject it. A clean rebase lands origin/main's own values, so a mismatch means this branch itself carries a version-bearing edit (often a pre-#7743 bump commit): revert the MISMATCH file(s) above to origin/main's values (git checkout origin/main -- <file(s)>, e.g. VERSION CLAUDE.md .loom/install-metadata.json) and commit that, $FIX_HINT" >&2
   exit 1
 fi
 
@@ -171,7 +172,7 @@ if $VERSION_CHECK_SCRIPT_AUTO_DETECTED; then
   # `scripts/version.sh list`'s output above (list's contract is consumed by
   # `/repo:release` and must stay unchanged), even though `version.sh
   # check`/`bump` both treat them as version-bearing on disk. That means the
-  # DIRTY_FILES loop above never looks at them, so a `bump patch` whose
+  # DIRTY_FILES loop above never looks at them, so a `bump <part>` whose
   # lockfile changes were regenerated on disk but never staged/committed
   # (e.g. a caller that stages only $(./scripts/version.sh list) + commits)
   # passed this gate cleanly -- both files agreeing with each other AND with

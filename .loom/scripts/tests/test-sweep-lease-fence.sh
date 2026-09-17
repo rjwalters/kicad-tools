@@ -40,6 +40,14 @@
 #   (q) a yield record for a DIFFERENT sweep on the SAME host does not
 #       exclude a later, legitimately-reclaimed lease from that host --
 #       matched by exact (host, sweep), not by host alone (#6485)
+#   (s) LOOM_REPO unset (the common case -- this script has no --repo CLI
+#       flag) leaves `repo_args` a genuinely empty array; expanding
+#       `"${repo_args[@]}"` unguarded there is an "unbound variable" under
+#       `set -u` on bash < 4.4 (macOS system bash 3.2), which silently
+#       corrupts the comments fetch into the unrelated fail-open path
+#       instead of actually evaluating the real lease (#7957). Asserted on
+#       the ambient bash always, and again under a real 3.x /bin/bash when
+#       one is present on the host (skipped, not failed, elsewhere).
 #
 # Usage:
 #   ./.loom/scripts/tests/test-sweep-lease-fence.sh
@@ -158,7 +166,7 @@ export PATH="$STUB_DIR:$PATH"
 reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail
     unset LOOM_LEASE_FENCE_NOW LOOM_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
-        LOOM_LEASE_PUBLISH_HOSTNAME 2> /dev/null || true
+        LOOM_LEASE_PUBLISH_HOSTNAME LOOM_REPO 2> /dev/null || true
 }
 
 run_script() {
@@ -350,6 +358,68 @@ JSON
 LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
 assert_eq "0" "$RC" "(q) a stale yield for a DIFFERENT (older) sweep on the same host does not block this host's brand new lease"
 assert_contains "$ERR" "sweep=sweep-new" "(q) stderr confirms the match is the new sweep's lease, not the old yielded one"
+
+# --- (s) LOOM_REPO unset -> empty `repo_args[@]` must never surface as
+# "unbound variable" and must not be mistaken for a genuine fetch failure
+# (#7957). First on the ambient (test-runner) bash -- always runs, though it
+# cannot by itself reproduce the bash-3.2-only crash since the empty-array
+# `set -u` hazard was fixed upstream in bash 4.4 -- then again under a real
+# 3.x /bin/bash when one is present (macOS system bash), which is the one
+# environment that actually exhibits the pre-fix bug; skipped, not failed,
+# on every other host (mirrors test-loom-daemon-quiesce.sh's own
+# detect-and-skip convention for the identical empty-array hazard).
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"}]
+JSON
+unset LOOM_REPO
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(s) ambient bash: LOOM_REPO unset -> exit 0 (real PASS, not a crash)"
+assert_contains "$ERR" "lease fence OK" "(s) ambient bash: the comments fetch actually ran and produced the real PASS reason"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$ERR" != *"unbound variable"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (s) ambient bash: no 'unbound variable' on stderr"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (s) ambient bash: no 'unbound variable' on stderr"
+    echo "    stderr: $ERR"
+fi
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$ERR" != *"could not fetch comments"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (s) ambient bash: did not take the unrelated fail-open 'could not fetch comments' path"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (s) ambient bash: did not take the unrelated fail-open 'could not fetch comments' path"
+    echo "    stderr: $ERR"
+fi
+
+LEGACY_BASH=""
+if [[ -x /bin/bash ]]; then
+    bash_version_output="$(/bin/bash --version 2>/dev/null)"
+    if [[ "$bash_version_output" == *"version 3."* ]]; then
+        LEGACY_BASH=/bin/bash
+    fi
+fi
+if [[ -n "$LEGACY_BASH" ]]; then
+    OUT="$("$LEGACY_BASH" "$SCRIPT" check 6309 --host studio-host 2>"$STUB_DIR/stderr-legacy.log")"
+    RC=$?
+    ERR="$(cat "$STUB_DIR/stderr-legacy.log" 2> /dev/null || true)"
+    assert_eq "0" "$RC" "(s) bash 3.2: LOOM_REPO unset -> exit 0 (real PASS, not a crash)"
+    assert_contains "$ERR" "lease fence OK" "(s) bash 3.2: the comments fetch actually ran and produced the real PASS reason"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$ERR" != *"unbound variable"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: (s) bash 3.2: no 'unbound variable' on stderr"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: (s) bash 3.2: no 'unbound variable' on stderr"
+        echo "    stderr: $ERR"
+    fi
+else
+    echo "· skipped: (s) bash 3.2 unbound-variable regression check (no 3.x /bin/bash on this host)"
+fi
 
 # --- (j) --ttl-minutes overrides the default TTL ---------------------------
 reset_state

@@ -386,7 +386,7 @@ cmd_check() {
     # fetched together in ONE round trip so the yield-exclusion filter below
     # never needs a second `gh api` call.
     local comments_ndjson
-    if ! comments_ndjson="$(gh api "${repo_args[@]}" "repos/{owner}/{repo}/issues/${issue}/comments" \
+    if ! comments_ndjson="$(gh api "${repo_args[@]+"${repo_args[@]}"}" "repos/{owner}/{repo}/issues/${issue}/comments" \
         --paginate --jq \
         ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body}" \
         2>&1)"; then
