@@ -21,15 +21,26 @@
 #      result set through any Loom-side action. Skip permanently, independent
 #      of the cap or velocity below. (#5455 AC "structurally exclude PRs the
 #      fallback queue can never advance")
-#   2. LIFETIME CAP — total `loom:fallback-evaluated` marker comments on the
+#   2. DRAFT PR — `gh pr view --json isDraft` -> `.isDraft == true`. The
+#      author has explicitly signaled the PR is not ready for review (GitHub
+#      draft state), so a fallback-mode verdict is not meaningful yet. This is
+#      orthogonal to bot-authorship (a human author's PR can be a draft; a
+#      bot's PR could in principle also be one), so it is its own priority
+#      step and exit code rather than folded into the bot-author check.
+#      Checked before the cap so it never counts toward MARKER_COUNT or costs
+#      a comments-fetch API call. Read fresh on every invocation (never
+#      cached), so once the author marks the PR "Ready for review" the very
+#      next pass falls through to the cap/dedup logic with no further code
+#      change. (#5535)
+#   3. LIFETIME CAP — total `loom:fallback-evaluated` marker comments on the
 #      PR, counted across ALL head SHAs over the PR's full history (not just
 #      the current SHA), has reached --cap. See "Why the cap is per-PR-
 #      lifetime, not per-SHA" below. (#5455 AC "hard per-PR cap ... independent
 #      of marker/SHA state")
-#   3. SHA DEDUP — the existing #5058 mechanism: the most recent marker's SHA
+#   4. SHA DEDUP — the existing #5058 mechanism: the most recent marker's SHA
 #      already equals the PR's current head SHA, i.e. nothing has changed
 #      since the last evaluation.
-#   4. Otherwise: OK to evaluate.
+#   5. Otherwise: OK to evaluate.
 #
 # Independent of the decision above: VELOCITY ALERT. If the marker-comment
 # count within the trailing --velocity-window-hours meets or exceeds
@@ -75,6 +86,7 @@
 #   10 = SKIP: bot author
 #   11 = SKIP: lifetime cap reached
 #   12 = SKIP: SHA dedup (already evaluated at the current head SHA)
+#   13 = SKIP: draft PR (author has not requested review)
 #   1  = usage or environment error (bad args, `gh` call failed) — the caller
 #        should treat this the same as any other fallback-queue `gh` failure,
 #        NOT as "no work available".
@@ -156,15 +168,16 @@ emit() {
 GH_STDERR="$(mktemp)"
 trap 'rm -f "$GH_STDERR" 2>/dev/null || true' EXIT
 
-# --- Step 1: bot-author check + current head SHA ---------------------------
-PR_JSON="$(gh pr view "$PR" --json author,headRefOid 2>"$GH_STDERR")" || {
-  echo "ERROR: 'gh pr view $PR --json author,headRefOid' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
+# --- Step 1: bot-author check + draft check + current head SHA -------------
+PR_JSON="$(gh pr view "$PR" --json author,headRefOid,isDraft 2>"$GH_STDERR")" || {
+  echo "ERROR: 'gh pr view $PR --json author,headRefOid,isDraft' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1
 }
 
 IS_BOT="$(jq -r '.author.is_bot // false' <<<"$PR_JSON" 2>/dev/null || echo "false")"
 AUTHOR_LOGIN="$(jq -r '.author.login // empty' <<<"$PR_JSON" 2>/dev/null || true)"
 HEAD_SHA="$(jq -r '.headRefOid // empty' <<<"$PR_JSON" 2>/dev/null || true)"
+IS_DRAFT="$(jq -r '.isDraft // false' <<<"$PR_JSON" 2>/dev/null || echo "false")"
 
 if [[ -z "$HEAD_SHA" ]]; then
   echo "ERROR: could not resolve head SHA for PR #$PR from: $PR_JSON" >&2
@@ -182,6 +195,16 @@ fi
 if [[ "$IS_BOT" == "true" && "$AUTHOR_LOGIN" != "app/loom-fleet-dispatch" ]]; then
   emit "SKIP" "bot-author (outside Loom label workflow; fallback queue cannot advance it)" "$HEAD_SHA" 0 0 0
   exit 10
+fi
+
+# --- Step 1b: draft-PR check ------------------------------------------------
+# Orthogonal to bot authorship: a human author's PR can be a draft, and a
+# bot's PR could in principle also be one. Checked before the cap/comments
+# fetch (like the bot-author check above), so it never counts toward
+# MARKER_COUNT or costs a comments-fetch API call. (#5535)
+if [[ "$IS_DRAFT" == "true" ]]; then
+  emit "SKIP" "draft PR (author has not requested review)" "$HEAD_SHA" 0 0 0
+  exit 13
 fi
 
 # --- Step 2: fetch every fallback-evaluated marker across the PR's full
