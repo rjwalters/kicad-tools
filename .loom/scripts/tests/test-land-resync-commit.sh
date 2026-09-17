@@ -471,10 +471,18 @@ if ! grep -q "some-retired-tool.sh" <<< "$ORIGIN_LOG_TREE"; then
 else
     fail "the retired-but-unlisted file was never actually committed"
 fi
-if grep -q "\.loom/hooks/foo\.sh" <<< "$ORIGIN_LOG_TREE"; then
-    pass "the legitimate resync-managed change was still committed and pushed"
+# #8006/#8045: assert on CONTENT and HISTORY, never on path presence. Both
+# make_primary (as `initial`) and the `scaffold: defaults/ tree` commit above
+# push .loom/hooks/foo.sh to origin BEFORE the script under test runs, so the
+# path is in origin's tree whether or not this run landed anything -- a
+# presence grep here is vacuous.
+ORIGIN_SUBJECT_I="$(git --git-dir="$WORKDIR/origin-i.git" log -1 --format='%s' main)"
+ORIGIN_FOO_I="$(git --git-dir="$WORKDIR/origin-i.git" show "main:.loom/hooks/foo.sh" 2>/dev/null)"
+if [[ "$ORIGIN_SUBJECT_I" == "chore: resync installed Loom surfaces" ]] && \
+   [[ "$ORIGIN_FOO_I" == "updated" ]]; then
+    pass "the legitimate resync-managed change was still committed and pushed (origin's tip IS the resync commit and carries the updated content)"
 else
-    fail "the legitimate resync-managed change was still committed and pushed"
+    fail "the legitimate resync-managed change was still committed and pushed (origin tip subject=$ORIGIN_SUBJECT_I, foo.sh=$ORIGIN_FOO_I)"
 fi
 if [[ -f "$WORKDIR/primary-i/.loom/scripts/some-retired-tool.sh" ]] && \
    [[ -n "$(git -C "$WORKDIR/primary-i" status --porcelain -- .loom/scripts/some-retired-tool.sh)" ]]; then
@@ -723,10 +731,17 @@ else
     fail "an untracked-again credential path is excluded, not blocking (rc=$RC, out=$OUT)"
 fi
 ORIGIN_TREE_O="$(git --git-dir="$WORKDIR/origin-o.git" log -1 --format='%H' main | xargs -I{} git --git-dir="$WORKDIR/origin-o.git" ls-tree -r --name-only {})"
-if grep -q "\.loom/hooks/foo\.sh" <<< "$ORIGIN_TREE_O" && ! grep -q "gh-config" <<< "$ORIGIN_TREE_O"; then
+# #8006/#8045: the ABSENCE half below is a genuine check, but "the legitimate
+# change landed" must be read off CONTENT and HISTORY: the `oops: committed the
+# GH_CONFIG_DIR tree` commit already pushed .loom/hooks/foo.sh to origin, so a
+# presence grep passes even when this run commits nothing at all.
+ORIGIN_SUBJECT_O="$(git --git-dir="$WORKDIR/origin-o.git" log -1 --format='%s' main)"
+ORIGIN_FOO_O="$(git --git-dir="$WORKDIR/origin-o.git" show "main:.loom/hooks/foo.sh" 2>/dev/null)"
+if [[ "$ORIGIN_SUBJECT_O" == "chore: resync installed Loom surfaces" ]] && \
+   [[ "$ORIGIN_FOO_O" == "updated" ]] && ! grep -q "gh-config" <<< "$ORIGIN_TREE_O"; then
     pass "the legitimate resync change landed and the credential path is no longer tracked on origin"
 else
-    fail "the legitimate resync change landed and the credential path is no longer tracked on origin (tree=$ORIGIN_TREE_O)"
+    fail "the legitimate resync change landed and the credential path is no longer tracked on origin (origin tip subject=$ORIGIN_SUBJECT_O, foo.sh=$ORIGIN_FOO_O, tree=$ORIGIN_TREE_O)"
 fi
 if [[ -f "$WORKDIR/primary-o/.loom/gh-config/hosts.yml" ]]; then
     pass "the credential file is still on disk after the untracking (git rm --cached keeps it)"
