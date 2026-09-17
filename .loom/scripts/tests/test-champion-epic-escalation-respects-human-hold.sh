@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-champion-epic-escalation-respects-human-hold.sh - Regression test for
-# issues #7734 and #7921
+# issues #7734, #7921 and #7965
 #
 # THE FAILURE MODE THIS GUARDS AGAINST
 #
@@ -23,6 +23,17 @@
 #          issue TIMELINE: an `unlabeled loom:operator-only` event newer than
 #          the current revision's own verdict comment is a ruling on this
 #          exact body, and the guard stands down until the body is revised.
+#   #7965  That un-park read is deliberately actor-blind, which is only safe
+#          while NOTHING automated can remove `loom:operator-only` from an
+#          epic -- a fact owned by a different file
+#          (classify-dependency-block.sh gates every un-escalation on a
+#          `champion:proposal-escalated` comment, which this ladder never
+#          writes; it writes `champion:epic-escalated`). The guard now also
+#          requires that marker's ABSENCE, and requires a non-empty
+#          VERDICT_CREATED_AT -- an empty one meant a failed REST re-read was
+#          silently treated as "every historical un-park is newer", standing
+#          the ladder down on an API hiccup. Both unknown inputs now fail
+#          OPEN (escalate), like the no-un-park-event case already did.
 #
 # Prose alone did not prevent either, so this suite makes both mechanisms
 # statically checkable, modeled on test-champion-epic-verdict-marker-scope.sh:
@@ -146,8 +157,31 @@ has_unpark_check() {
         && grep -qE '^ *OPERATOR_RULED=yes' <<<"$block"
 }
 
+# The whole (possibly line-continued) `if` condition that guards
+# `OPERATOR_RULED=yes`, flattened onto one line: the nearest preceding `if` line
+# plus every line between it and the assignment. Used to assert #7965's two
+# fail-open preconditions sit in THAT condition, not merely somewhere in the
+# block.
+unpark_condition_of() {
+    guard_block "$1" | cut -f2- | awk '
+        /^ *if / { cond = $0; collecting = 1; next }
+        collecting && /^ *OPERATOR_RULED=yes/ { print cond; exit }
+        collecting { cond = cond " " $0 }
+    '
+}
+
+# 0 if the guard computes BOT_UNESCALATABLE from the proposal-escalation marker
+# that classify-dependency-block.sh requires before it may un-escalate anything
+# (#7965); 1 otherwise.
+has_bot_unescalatable_probe() {
+    local block
+    block="$(guard_block "$1" | cut -f2-)"
+    grep -qE '^ *BOT_UNESCALATABLE=' <<<"$block" \
+        && grep -qF 'champion:proposal-escalated' <<<"$block"
+}
+
 echo "================================"
-echo "test-champion-epic-escalation-respects-human-hold.sh (#7734 / #7921)"
+echo "test-champion-epic-escalation-respects-human-hold.sh (#7734 / #7921 / #7965)"
 echo "================================"
 
 FIXTURE_DIR="$(mktemp -d)"
@@ -212,6 +246,27 @@ fi
 #### 0c. Close, or ask the operator to
 
 3. The epic carries none of `loom:blocked`, `loom:operator-only`, `loom:operator`.
+EOF
+
+# The #7965 shape: the same guard, with both fail-open preconditions added.
+cat >"$FIXTURE_DIR/fail-open.md" <<'EOF'
+## Idempotency Guard for Unrevised Epics (`champion:epic-verdict:body-*`)
+
+```bash
+OPERATOR_RULED=no
+if true; then
+  VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
+  BOT_UNESCALATABLE=$(printf '%s\n' "$EPIC_JSON" | jq -e \
+    '.comments[] | select(.body | contains("<!-- champion:proposal-escalated -->"))' >/dev/null && echo yes || echo no)
+  UNPARKED_AT=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/timeline" --paginate \
+    --jq '.[] | select(.event == "unlabeled" and .label.name == "loom:operator-only") | .created_at' \
+    | sort | tail -n 1)
+  if [ -n "$UNPARKED_AT" ] && [ -n "$VERDICT_CREATED_AT" ] && [ "$BOT_UNESCALATABLE" = "no" ] \
+     && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]]; then
+    OPERATOR_RULED=yes
+  fi
+fi
+```
 EOF
 
 # --- Test 1: controls -- the lints discriminate the pre-fix shape from the fix
@@ -392,11 +447,72 @@ else
     else
         fail "notes do not record the #7921 un-park invariant"
     fi
+    if grep -q '#7965' <<<"$NOTES" && grep -q 'classify-dependency-block\.sh' <<<"$NOTES" \
+        && grep -qF 'champion:proposal-escalated' <<<"$NOTES" \
+        && grep -qF 'champion:epic-escalated' <<<"$NOTES"; then
+        pass "notes record the cross-file un-escalation invariant (#7965) naming both markers and classify-dependency-block.sh"
+    else
+        fail "notes do not record the #7965 cross-file invariant (classify-dependency-block.sh gating un-escalation on champion:proposal-escalated, while this ladder writes champion:epic-escalated)"
+    fi
     if [[ -f "$CHAMPION_EPIC" ]] && grep -q 'champion-epic-guard-invariants\.md' <<<"$(section_body "$CHAMPION_EPIC" 'Idempotency Guard for Unrevised Epics')"; then
         pass "the guard section links to the maintainer notes"
     else
         fail "the guard section does not link to champion-epic-guard-invariants.md"
     fi
+fi
+
+# --- Test 9: both unknown inputs fail OPEN, and a bot un-escalation cannot
+#             masquerade as a human ruling (#7965)
+echo ""
+echo "Test 9: OPERATOR_RULED=yes additionally requires a non-empty VERDICT_CREATED_AT and BOT_UNESCALATABLE=no"
+# Controls first, so a vacuous lint cannot pass: the #7921-era shape must be
+# REJECTED, the #7965 shape ACCEPTED.
+if has_bot_unescalatable_probe "$FIXTURE_DIR/post-fix.md"; then
+    fail "pre-#7965 fixture (no BOT_UNESCALATABLE) was accepted as having the marker probe (lint is vacuous)"
+else
+    pass "a guard with no BOT_UNESCALATABLE probe is reported"
+fi
+if has_bot_unescalatable_probe "$FIXTURE_DIR/fail-open.md"; then
+    pass "a guard that probes for the champion:proposal-escalated marker is recognised"
+else
+    fail "fail-open fixture was NOT accepted as having the BOT_UNESCALATABLE probe"
+fi
+PRE_COND="$(unpark_condition_of "$FIXTURE_DIR/post-fix.md")"
+if grep -qF -- '-n "$VERDICT_CREATED_AT"' <<<"$PRE_COND"; then
+    fail "pre-#7965 fixture's condition was read as requiring a non-empty VERDICT_CREATED_AT (lint is vacuous)"
+else
+    pass "the pre-#7965 condition is reported as lacking the non-empty VERDICT_CREATED_AT requirement"
+fi
+
+if [[ -f "$CHAMPION_EPIC" ]]; then
+    if has_bot_unescalatable_probe "$CHAMPION_EPIC"; then
+        pass "guard computes BOT_UNESCALATABLE from the champion:proposal-escalated marker"
+    else
+        fail "guard does not compute BOT_UNESCALATABLE from the champion:proposal-escalated marker (#7965)"
+    fi
+    COND="$(unpark_condition_of "$CHAMPION_EPIC")"
+    if [[ -z "$COND" ]]; then
+        fail "could not extract the if-condition guarding OPERATOR_RULED=yes"
+    else
+        if grep -qF -- '-n "$VERDICT_CREATED_AT"' <<<"$COND"; then
+            pass "an empty/failed VERDICT_CREATED_AT read fails open (no stand-down) rather than matching any historical un-park"
+        else
+            fail "the OPERATOR_RULED condition does not require a non-empty VERDICT_CREATED_AT:"$'\n'"$COND"
+        fi
+        if grep -qF '"$BOT_UNESCALATABLE" = "no"' <<<"$COND"; then
+            pass "a proposal-escalated epic (bot-un-escalatable) cannot set OPERATOR_RULED=yes"
+        else
+            fail "the OPERATOR_RULED condition does not require BOT_UNESCALATABLE=no:"$'\n'"$COND"
+        fi
+        if grep -qF -- '-n "$UNPARKED_AT"' <<<"$COND" \
+            && grep -qF '"$UNPARKED_AT" > "$VERDICT_CREATED_AT"' <<<"$COND"; then
+            pass "the original #7921 timestamp comparison is still part of the same condition"
+        else
+            fail "the #7921 un-park timestamp comparison left the OPERATOR_RULED condition:"$'\n'"$COND"
+        fi
+    fi
+else
+    fail "champion-epic.md not found at $CHAMPION_EPIC"
 fi
 
 # ---------------------------------------------------------------------------

@@ -651,16 +651,42 @@ resolved model and names the tier that supplied it
 (`source=autonomous.roleRunner.roleModels.<role>`), so an operator can confirm the
 pin from the log alone.
 
+##### `"default"` — the CLI-default pass-through pin (#7894)
+
+One value is a **sentinel rather than a model name**: `"default"` (or the more
+explicit synonym `"cli-default"`, both trimmed and case-insensitive) resolves to
+*no model at all*, so the daemon emits **no `--model` argument** and the
+runtime's own CLI picks the model. It short-circuits the precedence chain — it
+never falls through to a lower tier, and it is never run through the
+`sweep.modelAliases` map:
+
+```json
+{
+  "runtimes": { "roles": { "curator": "codex" } },
+  "autonomous": { "roleRunner": { "model": "sonnet",
+                                  "roleModels": { "curator": "default" } } }
+}
+```
+
+Here Curator runs on Codex with whatever model that Codex seat defaults to,
+while every other role keeps `sonnet` on Claude. **This is not a stylistic
+option** — it is the only configuration a ChatGPT-plan Codex seat accepts (see
+"ChatGPT-plan seats cannot serve a pinned model at all" below), and before
+#7894 there was no way to express it: omitting the pin fell through to the
+Claude-shaped shipped default and made the #5028 preflight below skip the tick
+forever. The per-role log header records the pass-through explicitly:
+`model=<runtime CLI default> (source=autonomous.roleRunner.roleModels.curator (CLI default))`.
+
 #### Model/runtime mismatch refusal (#5028)
 
 `roleModels` above gives an operator a *way* to configure a matching model, but
 before #5028 nothing ever verified the two axes actually agreed: the daemon
 resolved the model and the runtime independently and forwarded whatever it got.
-Set `runtimes.roles.judge = "codex"` with no `roleModels.judge` override, and
-the runner still resolved the Claude-shaped default (`sonnet`) and forwarded it
-verbatim to the Codex adapter, which 400s — the original #5001 outage,
-recurring verbatim for anyone who reaches for the runtime axis without the
-matching model one.
+Set `runtimes.roles.judge = "codex"` with `roleModels.judge = "sonnet"` (or with
+no `roleModels.judge` override at all, which fell through to the same
+Claude-shaped default), and the runner forwarded that model verbatim to the
+Codex adapter, which 400s — the original #5001 outage, recurring verbatim for
+anyone who reaches for the runtime axis without the matching model one.
 
 `loom-daemon/src/sweep_registry/model.rs` now carries a narrow, fail-open
 classifier — `model_family` / `runtime_model_family` / `model_runtime_mismatch`
@@ -699,6 +725,20 @@ tick is refused as `RoleTickOutcome::ModelRuntimeMismatch` before any spawn:
   session — and it self-heals the moment `roleModels.<role>` is corrected, with
   no restart and no one-shot disable to clear.
 
+**Only an explicitly pinned model is ever refused (#7894).** The refusal above
+reads as "the operator stated an intent that is provably wrong". A model nobody
+asked for cannot state an intent, so when the resolved model came from the
+**shipped default** tier (`source=default`) and conflicts with the admitted
+runtime, the runner degrades it to the CLI-default pass-through — exactly as if
+`roleModels.<role>` had been set to `"default"` — and launches the tick instead
+of skipping it. This closes #6565: an unpinned `runtimes.roles.<role> = "codex"`
+binding was guaranteed to skip on every tick forever (453+ consecutive skips on
+the affected host), and the "obvious" remedy of pinning a Codex model is not
+available on a ChatGPT-plan seat, so that configuration was simultaneously the
+only correct one and permanently unadmittable. A Claude model *pinned* onto a
+Codex runtime — from `roleModels.<role>`, `autonomous.roleRunner.model`, or
+`autonomous.model` — is still refused exactly as before.
+
 `defaults/scripts/spawn-codex.sh` carries an independent copy of the same
 refusal for every OTHER caller that reaches this adapter directly with no
 daemon preflight in front of it (sweep dispatch also pins models). After the
@@ -724,11 +764,15 @@ The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account
 ```
 
 **If the Codex profile a role/runtime binding points at is authenticated via a
-ChatGPT plan, omit `roleModels`/`LOOM_MODEL`/`LOOM_CODEX_MODEL` for that
-role entirely** and let the CLI use the account's own default — this is the
-single most likely first-run misconfiguration for a Codex-bound role, and the
-error text otherwise only ever surfaces in the role's own log
-(`role-<role>.log` or a sweep's per-issue log), never in `loom-daemon health`.
+ChatGPT plan, set `roleModels.<role>` to `"default"`** (the #7894 pass-through
+sentinel above) **and omit `LOOM_MODEL`/`LOOM_CODEX_MODEL` for that role**, so
+the CLI uses the account's own default — this is the single most likely
+first-run misconfiguration for a Codex-bound role, and the error text otherwise
+only ever surfaces in the role's own log (`role-<role>.log` or a sweep's
+per-issue log), never in `loom-daemon health`. Omitting `roleModels.<role>`
+entirely now works too (an unpinned conflict degrades to the same pass-through
+rather than skipping the tick, #7894) — the explicit `"default"` is preferred
+because it says *why* no model is pinned, in the config an operator reads.
 
 `spawn-codex.sh` now guards against it directly: once CODEX_HOME is resolved
 and an explicit model is about to be forwarded, it runs `codex login status`

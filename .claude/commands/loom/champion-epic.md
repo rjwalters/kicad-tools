@@ -223,18 +223,23 @@ elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
   VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
 
   # Operator un-park (#7921): loom:operator-only removed AFTER this revision's
-  # own rejection was posted means a human read the escalation for THIS body
-  # and ruled it stays in flow, unrevised. Labels are not text, so the hash
-  # cannot see that, and the tally is already at the cap — without this check
-  # the very next pass re-escalates (3x in one day on the incident). Keyed to
-  # the current verdict's timestamp, so a revision (fresh verdict, newer than
-  # any old un-park) resumes the ladder. The actor is deliberately not
-  # inspected: nothing automated removes loom:operator-only from an epic, so
-  # any such event is a human's ruling or a pass carrying one out.
+  # own rejection is a human ruling on THIS body — keep it in flow, unrevised,
+  # until the body changes (a revision posts a newer verdict and resumes the
+  # ladder). Without it the very next pass re-escalates: no label distinguishes
+  # "ruled on" from "never escalated", and the tally is already at the cap.
+  # The actor is deliberately not inspected; BOT_UNESCALATABLE (a
+  # champion:proposal-escalated comment — classify-dependency-block.sh's own
+  # precondition for un-escalating anything, which Step 4 never writes) and a
+  # non-empty VERDICT_CREATED_AT are what keep that safe (#7965; notes below).
+  BOT_UNESCALATABLE=$(printf '%s\n' "$EPIC_JSON" | jq -e \
+    '.comments[] | select(.body | contains("<!-- champion:proposal-escalated -->"))' >/dev/null && echo yes || echo no)
   UNPARKED_AT=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/timeline" --paginate \
     --jq '.[] | select(.event == "unlabeled" and .label.name == "loom:operator-only") | .created_at' \
     | sort | tail -n 1)
-  if [ -n "$UNPARKED_AT" ] && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]]; then
+  # Unknown inputs fail OPEN, never closed (#7965): an empty VERDICT_CREATED_AT
+  # is a failed REST re-read, and `> ""` would match ANY historical un-park.
+  if [ -n "$UNPARKED_AT" ] && [ -n "$VERDICT_CREATED_AT" ] && [ "$BOT_UNESCALATABLE" = "no" ] \
+     && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]]; then
     OPERATOR_RULED=yes
   fi
 
@@ -299,9 +304,9 @@ A silent skip is neither an approval nor a rejection, so it never counts against
 `LOOM_MAX_UNREVISED_EVALUATIONS` (default **2**) is the same knob the proposal
 path reads — one threshold, both surfaces.
 
-**Maintainer notes** — why the marker keys on a title + body hash and not
-`updatedAt`, what each counter counts, the cycle-by-cycle trace, and the
-invariants a future edit must preserve (#7734 and #7921 included) — live in
+**Maintainer notes** — the hash choice, what each counter counts, the
+cycle-by-cycle trace, and the invariants a future edit must preserve (#7734 /
+#7921 / #7965) — live in
 [`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md). Read
 them before editing this section; the tests named there enforce them.
 

@@ -2066,7 +2066,12 @@ an operator checks:
 2. The paired `autonomous.roleRunner.roleModels.<role>` pin that made that
    runtime usable is later removed, so the model falls back to the
    Claude-shaped built-in default (`sonnet`) while the admitted runtime stays
-   `codex`.
+   `codex`. (**Since #7894 this exact step no longer skips** — an *unpinned*
+   model that conflicts with the admitted runtime degrades to the runtime
+   CLI's own default instead of being refused. Only an explicitly *pinned*
+   mismatch still reaches step 3; the walkthrough is kept verbatim because it
+   is the recorded incident, and every other pre-spawn bail-out below still
+   produces the same silence.)
 3. Every subsequent tick trips the #5028 model/runtime mismatch preflight and
    returns `RoleTickOutcome::ModelRuntimeMismatch` — **before**
    `run_role_with_timeout`, the only writer of `.loom/logs/role-<role>.log`,
@@ -2083,7 +2088,7 @@ make the artifact operators actually read honest — all five pre-spawn bail-out
 `ModelRuntimeMismatch`) now append a dated line to `role-<role>.log`:
 
 ```
-==== loom-daemon role_runner: 2026-08-14T16:45:51+00:00 role=curator SKIPPED BEFORE SPAWN (#6201): model/runtime mismatch: runtime "codex" only accepts Codex models, but the resolved model "sonnet" is a Claude model (model source=default); set autonomous.roleRunner.roleModels.curator to a model the codex runtime accepts, or point this role back at a Claude runtime ====
+==== loom-daemon role_runner: 2026-08-14T16:45:51+00:00 role=curator SKIPPED BEFORE SPAWN (#6201): model/runtime mismatch: runtime "codex" only accepts Codex models, but the resolved model "sonnet" is a Claude model (model source=autonomous.roleRunner.roleModels.curator); set autonomous.roleRunner.roleModels.curator to a model the codex runtime accepts — or to "default" to pass through to the codex CLI's own default model, which is the only working shape on a seat that rejects an explicit pin (e.g. a ChatGPT-plan Codex account) — or point this role back at a Claude runtime ====
 ```
 
 A role stuck this way now shows a growing, timestamped, self-diagnosing trail
@@ -6224,9 +6229,9 @@ resolved model and the tier that supplied it are recorded in the per-role log
 header: `==== loom-daemon role_runner: <ts> role=<role> model=<m> (source=<tier>) ====`.
 
 **A pinned model can still be the wrong provider family for the admitted
-runtime (#5028).** `runtimes.roles.<role> = "codex"` with no matching
-`autonomous.roleRunner.roleModels.<role>` override resolves the Claude-shaped
-default model above and forwards it to the Codex adapter, which 400s — before
+runtime (#5028).** `runtimes.roles.<role> = "codex"` with
+`autonomous.roleRunner.roleModels.<role> = "sonnet"` forwards a Claude-shaped
+model to the Codex adapter, which 400s — before
 #5028 this retried identically, at full cost, on every tick forever. Runtime
 admission now resolves before the model, and a confidently-known
 Claude-vs-Codex mismatch is refused pre-spawn as `RoleTickOutcome::
@@ -6236,6 +6241,20 @@ directly via the outcome's `detail()` (no spawn transcript needed), and the
 per-root log warns once on the edge and downgrades to `DEBUG` on repeat. Full
 mechanism and the `spawn-codex.sh`-side counterpart:
 [`runtime-adapters.md` § "Model/runtime mismatch refusal (#5028)"](runtime-adapters.md#modelruntime-mismatch-refusal-5028).
+
+**The refusal applies to an explicit pin only (#7894).** An *unpinned* role —
+`runtimes.roles.<role> = "codex"` with no `roleModels.<role>` entry at all —
+used to resolve the shipped Claude-shaped default and get refused every tick,
+forever (453+ consecutive skips on the host that filed #6565), with no way out:
+a ChatGPT-plan Codex seat rejects an explicit model pin too, so "no pin" was
+simultaneously the only correct configuration and permanently unadmittable.
+The role runner now degrades that case to the runtime CLI's own default — no
+`--model` argument is emitted at all, the tick launches, and the log header
+records `model=<runtime CLI default> (source=default (CLI default for codex))`.
+The same pass-through can be requested deliberately with
+`autonomous.roleRunner.roleModels.<role> = "default"` (or the global
+`autonomous.roleRunner.model`); see
+[`runtime-adapters.md` § "Per-role model override"](runtime-adapters.md#per-role-model-override-autonomousrolerunnerrolemodels).
 
 `roles` restricts the dispatched subset (an explicit empty array runs none;
 unknown names are ignored with a warning). **It is an allowlist, not an
