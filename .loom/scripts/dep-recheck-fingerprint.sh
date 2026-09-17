@@ -55,18 +55,31 @@
 #                      nothing to compare.
 #   named-dependency   The `## Dependencies` checklist fingerprint (#7314) -
 #                      the shape dep-recheck cannot see, a checklist item
-#                      naming a different, non-closing prerequisite.
+#                      naming a different, non-closing prerequisite. Accepts
+#                      both `- [ ] #N` and `* [ ] #N` bullets (#8011) - the
+#                      pre-port shell matched `-` only; `*` is valid GitHub
+#                      task-list syntax and missing it would produce a false
+#                      VERDICT=clear, the worse failure direction.
 #   extract-refs       Reference extraction (#4963): the issue body always,
 #                      plus any comment NOT authored by the automation
 #                      identity and NOT carrying its own marker. That
 #                      exclusion is what stops the self-perpetuating loop from
-#                      #4507.
+#                      #4507. The phrase/`#N` pattern may span a line break
+#                      (#8011) - kept, same worse-failure-direction reasoning
+#                      as the bullet marker above. `--bot-login` normalises
+#                      the same way on both the flag and the comment author
+#                      (#8011); the pre-port shell only normalised the
+#                      author's side, which defeated the normalisation for
+#                      any caller passing a non-default `app/`-prefixed
+#                      `--bot-login`.
 #   decide             The four-way decision (#7617): ACTION
 #                      (none|skip|comment|heartbeat) and CLAIM (true|false).
 #
 # Exit codes:
 #   0  evaluation completed (branch on VERDICT / CONCLUSION_HASH)
-#   2  usage error, an unreadable issue, or no loom-daemon
+#   1  an unreadable issue, PR, or --refs reference (live-mode gh read/parse
+#      failure - fail safe: never guess a conclusion from a failed read)
+#   2  usage error, or no loom-daemon
 #   3  missing dependency
 #
 # `eval`-safe like `claim-staleness.sh`: KEY=VALUE output is built only from a
