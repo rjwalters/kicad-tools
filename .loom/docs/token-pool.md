@@ -679,7 +679,8 @@ these deaths, and the other 96 % were silently mislabelled. The forge-side cost
 is visible on `kicad-tools#5333` — 287 recorded label events (142 `loom:issue`,
 140 `loom:building`), 105 lease acquisitions and 12 yields across three hosts
 over ~16 h, every one of them authored by `loom-fleet-dispatch[bot]`. The same
-pattern ran **94** flips deep on `rjwalters/loom#7815`.
+pattern ran **89** `loom:issue` ↔ `loom:building` label events deep on
+`rjwalters/loom#7815`.
 
 **Which executable this was, and why that matters.** Every token-selection
 death in the 2026-09-16 window logs its own deciding binary (#4643), so the
@@ -743,7 +744,7 @@ that re-took the lease at 02:07:00Z. That premise does not survive the primary
 forge record, and no park guard was missing. Recording the reconstruction here
 because the same misreading is easy to repeat from lease-comment history alone.
 
-What the 1,316-comment thread on `kicad-tools#5333` actually shows:
+What the 187-comment thread on `kicad-tools#5333` actually shows:
 
 - The **02:05:30Z** stand-down comment says, verbatim, "Releasing the
   `loom:building` claim back to `loom:issue` … **No forge state was otherwise
@@ -758,6 +759,13 @@ What the 1,316-comment thread on `kicad-tools#5333` actually shows:
 - **Zero** lease acquisitions follow 02:11:18Z, against 105 in the preceding
   16 h. The storm stopped dead the moment `loom:blocked` was genuinely applied:
   the #4444 park guard held, first time, with no fix.
+
+(187 comments as of 2026-09-16, per
+`gh api repos/rjwalters/kicad-tools/issues/5333 --jq .comments`; the issue is
+still open, so re-count before relying on the figure. An earlier revision of
+this section said 1,316 — the *line* count of the concatenated comment bodies,
+`--jq '.[].body' | wc -l`, not the comment count. A re-derivation that yields
+1,316 has measured that, not a larger thread.)
 
 The code agrees, and is the part that generalizes past this one incident:
 

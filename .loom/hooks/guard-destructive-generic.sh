@@ -1500,6 +1500,60 @@ resolve_default_branch() {
 }
 
 # =============================================================================
+# LIVE-vs-ESCAPED COMMAND-SUBSTITUTION SCAN (#7495 / #7498)
+#
+# Every masking-eligibility gate in this file asks "does this quoted span carry
+# a command substitution?" before redacting it. A plain byte-presence check
+# (index(inner, "$(") / index(inner, "`")) cannot tell a backslash-ESCAPED
+# backtick or `\$(` -- a literal character inside a double-quoted string, the
+# standard way to spell a markdown code span, and what every automated
+# Champion/Judge/Curator/Doctor comment contains -- from a genuinely live one.
+# The escaped form has zero execution risk, so vetoing masking on it is a false
+# positive (a recurring class: #5109, #6464/#6866, #7495, #7558, #7498).
+#
+# has_live_subst(str) returns 1 only when a backtick or `$(` is preceded by an
+# EVEN number of backslashes (0, 2, ...) -- i.e. is live at the shell's first
+# parse -- and 0 when every occurrence is escaped. The body is byte-identical to
+# the copies in guard-loom-workflow.sh (#7495/#7559). It is held here as ONE
+# shared awk source string -- the same mechanism as _QSPLIT_AWK /
+# _MASKHEREDOC_AWK below -- so its consumers cannot drift: it is prepended to
+# _QSPLIT_AWK (so every qsplit()-bearing program gets it) and to each standalone
+# masker's own awk program (strip_literal_text, mask_ask_positional_args,
+# mask_catastrophic_positional_args, mask_stash_scan_positional_args,
+# mask_catastrophic_var_assignment, mask_catastrophic_forloop_wordlist).
+# NEVER also define it inside _MASKHEREDOC_AWK: extract_write_targets()
+# concatenates _QSPLIT_AWK and _MASKHEREDOC_AWK into ONE program, and awk
+# rejects a duplicate function definition. (_heredoc_body_expansion_free()
+# needs no helper -- its own per-line backslash walk covers `$(` directly.)
+#
+# Safety direction: an escaped-only span expands to a plain string that merely
+# CONTAINS a backtick / `$(` -- the same risk class as any plain literal these
+# passes already redact. It can only execute if something re-parses it, and
+# every pass gates re-parsing separately and independently of this scan (the
+# non-executing command allowlists, the `$NAME`/`${NAME}` read check, the
+# interpreter-sink and pipe-to-interpreter checks). A live occurrence keeps the
+# span visible exactly as before, so this only ever narrows a false positive
+# -- it never widens a deny into an allow on live substitution.
+# =============================================================================
+_HASLIVESUBST_AWK='
+function has_live_subst(str,    i, c, bs) {
+    bs = 0
+    for (i = 1; i <= length(str); i++) {
+        c = substr(str, i, 1)
+        if (c == "\\") {
+            bs++
+            continue
+        }
+        if (bs % 2 == 0) {
+            if (c == "`") return 1
+            if (c == "$" && substr(str, i + 1, 1) == "(") return 1
+        }
+        bs = 0
+    }
+    return 0
+}
+'
+# =============================================================================
 # QUOTE-AWARE COMMAND SEGMENTATION (#3755)
 #
 # The three segment parsers below (parse_force_ops, lifecycle_or_cloud_reason,
@@ -1514,7 +1568,9 @@ resolve_default_branch() {
 # `qsplit()` replaces that gsub: it walks the string tracking single-/double-quote
 # state and emits a newline for a separator ONLY when it is OUTSIDE a quoted span.
 # A quoted span is treated as inert (its separators are preserved as literal
-# text) ONLY when it carries no command substitution — no `$(` and no backtick —
+# text) ONLY when it carries no LIVE command substitution — no unescaped `$(`
+# and no unescaped backtick (has_live_subst(), #7498: a backslash-escaped
+# `\`code\`` / `\$(` is literal text and keeps the span inert) —
 # mirroring strip_literal_text()'s #3679 safety floor: a smuggled
 # `"$(a|halt)"` keeps its separators ACTIVE so the genuine protection is intact.
 # The token VALUES are preserved verbatim (unlike a redaction approach), so
@@ -1524,7 +1580,7 @@ resolve_default_branch() {
 #
 # Shared as a single awk source string so the three parsers cannot drift.
 # =============================================================================
-_QSPLIT_AWK='
+_QSPLIT_AWK="$_HASLIVESUBST_AWK"'
 function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom) {
     SQ = sprintf("%c", 39)   # single quote
     DQ = sprintf("%c", 34)   # double quote
@@ -1570,7 +1626,7 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom) {
                 continue
             }
             inner = substr(s, i + 1, ci - i - 1)
-            if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+            if (!has_live_subst(inner)) {
                 # Inert quoted span: copy verbatim, separators inside are literal.
                 out = out substr(s, i, ci - i + 1)
                 i = ci + 1
@@ -2827,7 +2883,12 @@ function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, li
 #   * a `$(` command substitution -- the shell runs whatever is inside it while
 #     building the body, so text there is executable, not data. (`$((...))`
 #     arithmetic also starts with `$(` and is likewise rejected: conservative,
-#     and arithmetic never appears in prose bodies anyway.)
+#     and arithmetic never appears in prose bodies anyway.) A backslash-
+#     escaped `\$(` is literal text -- in an unquoted-delimiter heredoc body
+#     backslash escapes exactly `$`, backtick and `\`, the same rule the
+#     escaped-backtick bullet below already relies on -- and does NOT
+#     disqualify the body (#7498; mirrors _heredoc_mark_live_lines() below,
+#     which has walked backslash parity for `$(` since #7421).
 #   * an UNESCAPED backtick -- the older command-substitution spelling. A
 #     backslash-escaped backtick (`\`` -- overwhelmingly the common case, since
 #     a markdown fenced code block inside a double-quoted `"$(cat <<EOF ...)"`
@@ -2843,19 +2904,19 @@ function mask_heredoc_bodies_selective(s, shell_only,   out, lines, nl, i, j, li
 # and escaped markdown fences.
 #
 # Backslash handling walks the line so an escaped backslash (`\\`) does not
-# swallow the character after it -- `\\` followed by a backtick is a LIVE
-# backtick and correctly disqualifies the body.
+# swallow the character after it -- `\\` followed by a backtick or `$(` is a
+# LIVE substitution and correctly disqualifies the body.
 function _heredoc_body_expansion_free(lines, from, to,   j, line, k, n, c, BTC) {
     BTC = sprintf("%c", 96)   # backtick
     for (j = from; j < to; j++) {
         line = lines[j]
-        if (index(line, "$(")) return 0
-        if (index(line, BTC) == 0) continue
+        if (index(line, "$(") == 0 && index(line, BTC) == 0) continue
         n = length(line)
         for (k = 1; k <= n; k++) {
             c = substr(line, k, 1)
             if (c == "\\") { k++; continue }
             if (c == BTC) return 0
+            if (c == "$" && substr(line, k + 1, 1) == "(") return 0
         }
     }
     return 1
@@ -3729,7 +3790,7 @@ resolve_stash_cwd() {
 # bypass), and the shape above is the one the repo's own role prompts prescribe.
 # -----------------------------------------------------------------------------
 strip_literal_text() {
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_HASLIVESUBST_AWK"'
     # Mask the body of a `<flag> "$(cat <<QUOTED_DELIM … DELIM\n)"` heredoc.
     # See the header comment above for the four conditions and why each is
     # load-bearing. Body bytes are replaced 1:1 with "X" so the buffer keeps
@@ -3868,11 +3929,16 @@ strip_literal_text() {
             # elsewhere in this file must not turn that inert prose into a new
             # false ask/deny. A DOUBLE-quoted span keeps the original
             # conservative floor: dollar-paren / backtick there IS live shell
-            # syntax, so it stays un-redacted and visible to the scans below.
+            # syntax, so it stays un-redacted and visible to the scans below
+            # -- unless every such occurrence is backslash-ESCAPED (#7498,
+            # has_live_subst()): `\`code\`` / `\$(...)` inside double quotes
+            # is literal text -- the standard markdown code-span spelling in
+            # an automated Champion/Judge/Curator/Doctor comment -- and
+            # carries no execution risk, so it no longer vetoes redaction.
             # gsub(/./) leaves embedded newlines untouched (awk `.` never matches a
             # newline), so a multi-line span stays SAME-LENGTH and byte offsets of
             # the surrounding command are preserved.
-            if (qchar == SQ || (index(inner, "$(") == 0 && index(inner, "`") == 0)) {
+            if (qchar == SQ || !has_live_subst(inner)) {
                 gsub(/./, "X", inner)
             }
             out = out pre head inner qchar
@@ -3932,7 +3998,7 @@ strip_literal_text() {
 # after that boundary — including a real ask-triggering invocation chained
 # onto the same line — fully visible.
 mask_ask_positional_args() {
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_HASLIVESUBST_AWK"'
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
@@ -3992,7 +4058,7 @@ mask_ask_positional_args() {
                 }
                 if (endpos == 0) break
                 inner = substr(rest, 2, endpos - 2)
-                if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+                if (!has_live_subst(inner)) {
                     gsub(/./, "X", inner)
                 }
                 out = out qc inner qc
@@ -4066,7 +4132,7 @@ mask_ask_positional_args() {
 # Single-quoted spans are untouched (still a plain same-character scan):
 # real bash gives backslash no special meaning inside single quotes.
 mask_catastrophic_positional_args() {
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_HASLIVESUBST_AWK"'
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
@@ -4167,7 +4233,7 @@ mask_catastrophic_positional_args() {
                 # real text of each embedded line. A single-line narrated
                 # heading (`echo "=== docker system prune ==="`, #6068'\''s own
                 # target shape) has no embedded newline and is unaffected.
-                if (index(inner, "$(") == 0 && index(inner, "`") == 0 && \
+                if (!has_live_subst(inner) && \
                     !(is_echo_printf && index(inner, "\n") != 0)) {
                     gsub(/./, "X", masked_inner)
                 }
@@ -4249,7 +4315,7 @@ mask_catastrophic_positional_args() {
 # special meaning inside single quotes, so the plain same-character scan
 # mask_catastrophic_positional_args() already uses is correct there too.
 mask_stash_scan_positional_args() {
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_HASLIVESUBST_AWK"'
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
@@ -4302,7 +4368,7 @@ mask_stash_scan_positional_args() {
                 }
                 if (endpos == 0) break
                 inner = substr(rest, 2, endpos - 2)
-                if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+                if (!has_live_subst(inner)) {
                     gsub(/./, "X", inner)
                 }
                 out = out qc inner qc
@@ -4372,7 +4438,7 @@ mask_stash_scan_positional_args() {
 # own anchor above) so an incidental `NAME=` substring inside an unrelated
 # quoted string or URL query component is not mistaken for an assignment.
 mask_catastrophic_var_assignment() {
-    printf '%s' "$1" | ORIG_COMMAND_FOR_READ_CHECK="$2" awk '
+    printf '%s' "$1" | ORIG_COMMAND_FOR_READ_CHECK="$2" awk "$_HASLIVESUBST_AWK"'
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
@@ -4412,8 +4478,12 @@ mask_catastrophic_var_assignment() {
             }
             inner = substr(rest, 2, endpos - 2)
             after = substr(rest, endpos + 1)
-            if (index(inner, "$(") != 0 || index(inner, "`") != 0) {
-                # Value itself carries a command substitution -- never mask.
+            if (has_live_subst(inner)) {
+                # Value itself carries a LIVE command substitution -- never mask.
+                # (#7498: a backslash-escaped `\$(` / backtick is literal text,
+                # so it no longer forces the value visible; the $NAME read
+                # check below is unchanged and still fails closed on ANY
+                # consumer of the variable.)
                 out = out pre matched qc inner qc
                 s = after
                 continue
@@ -4519,10 +4589,11 @@ mask_catastrophic_var_assignment() {
 #
 # Only when every check passes are the word-list literals masked, using the
 # same inertness floor as every other pass in this file: a span containing
-# `$(` or a backtick is left unmasked so command-substitution smuggling
+# a LIVE (unescaped, #7498) `$(` or backtick is left unmasked so
+# command-substitution smuggling
 # still reaches the raw scan.
 mask_catastrophic_forloop_wordlist() {
-    printf '%s' "$1" | awk '
+    printf '%s' "$1" | awk "$_HASLIVESUBST_AWK"'
     BEGIN {
         SQ = sprintf("%c", 39)
         DQ = sprintf("%c", 34)
@@ -4650,11 +4721,12 @@ mask_catastrophic_forloop_wordlist() {
 
             # All checks passed — mask each word-list literal (same
             # inertness floor as every other masking pass in this file: only
-            # a span with no `$(` / backtick is redacted).
+            # a span with no LIVE `$(` / backtick is redacted -- a backslash-
+            # escaped one is literal text, see has_live_subst(), #7498).
             masked = ""
             for (wi = 1; wi <= words_n; wi++) {
                 inner = word_inner[wi]
-                if (index(inner, "$(") == 0 && index(inner, "`") == 0) {
+                if (!has_live_subst(inner)) {
                     gsub(/./, "X", inner)
                 }
                 masked = masked word_q[wi] inner word_q[wi] word_trail[wi]

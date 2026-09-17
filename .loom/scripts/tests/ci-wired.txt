@@ -40,6 +40,7 @@ test-cargo-target-dir-reclaim.sh
 test-cargo-test-daemon-guard.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh
+test-champion-epic-escalation-respects-human-hold.sh
 test-champion-epic-phase-marker-normalization.sh
 test-champion-epic-verdict-marker-scope.sh
 test-champion-held-pr-health-pass.sh

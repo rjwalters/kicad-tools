@@ -6,7 +6,10 @@
 # `VERSION` file, then exercises:
 #   (a) no defaults/ change              -> PASS
 #   (b) defaults/ change + VERSION bump  -> PASS
-#   (c) defaults/ change, no bump        -> FAIL, lists the changed files
+#   (c) defaults/ change, no bump        -> FAIL, lists the changed files,
+#       and (#7919) warns a Builder not to run the remediation command
+#       itself, cross-referencing --forbid-bump (the mode CI's PR gate
+#       actually runs) so the two modes stop giving opposite instructions
 #   (d) defaults/ change + PR_BODY marker -> PASS
 #   (e) defaults/ change + commit-message marker -> PASS
 #   (f) non-defaults/ change only        -> PASS (nothing to check)
@@ -160,6 +163,16 @@ if printf '%s' "$err_out" | grep -q "loom:no-surface-change"; then
     pass "failure output mentions the no-surface-change marker escape hatch"
 else
     fail "failure output missing marker escape hatch. Got: $err_out"
+fi
+if grep -q "do NOT run that command yourself" <<<"$err_out"; then
+    pass "failure output warns a Builder not to run the bump command itself (#7919)"
+else
+    fail "failure output missing the Builder do-not-bump warning. Got: $err_out"
+fi
+if grep -q -- "--forbid-bump" <<<"$err_out"; then
+    pass "failure output cross-references --forbid-bump so the two modes stop disagreeing (#7919)"
+else
+    fail "failure output missing --forbid-bump cross-reference. Got: $err_out"
 fi
 
 # -------- Test 5: defaults/ change + PR_BODY marker -> PASS --------

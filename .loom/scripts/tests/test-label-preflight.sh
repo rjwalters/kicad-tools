@@ -61,9 +61,13 @@ assert_eq() {
     fi
 }
 
+# assert_contains/assert_not_contains use a pure-bash substring match (no
+# forked printf|grep pipeline) so a transient fork/exec failure under
+# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
+# content mismatch (#7819, #7874).
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
-    if printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         pass "$msg"
     else
         fail "$msg (expected substring '$needle' in: '$haystack')"
@@ -72,7 +76,7 @@ assert_contains() {
 
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
-    if ! printf '%s' "$haystack" | grep -F -- "$needle" >/dev/null; then
+    if ! [[ "$haystack" == *"$needle"* ]]; then
         pass "$msg"
     else
         fail "$msg (unexpected substring '$needle' in: '$haystack')"

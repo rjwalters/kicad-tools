@@ -96,15 +96,15 @@ COMMAND  (raw, masks nothing — implicitly catastrophic-safe)
 
 | Copy | Tier | Masked out (accepted lossiness) | Why that tier |
 |---|---|---|---|
-| `COMMAND_NO_LITERAL_TEXT` | `catastrophic-safe` | for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments, flag-keyed literal text, comment lines — each masked only when provably non-executing, and spans carrying `$(`/backtick are left intact | the only copy the ungated `ALWAYS_BLOCK_PATTERNS` scan reads; deliberately does **not** get `#`-comment stripping |
+| `COMMAND_NO_LITERAL_TEXT` | `catastrophic-safe` | for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments, flag-keyed literal text, comment lines — each masked only when provably non-executing, and spans carrying a *live* (unescaped) `$(`/backtick are left intact — a backslash-escaped one is literal text and does not veto masking (#7498) | the only copy the ungated `ALWAYS_BLOCK_PATTERNS` scan reads; deliberately does **not** get `#`-comment stripping |
 | `COMMAND_RM_MKTEMP_SCAN` | `deny-safe` | inherits the above, plus selective heredoc-body masking | narrow branch feeding the `rm-*` denies only |
 | `COMMAND_WT_MKTEMP_SCAN` | `deny-safe` | inherits the above, plus selective heredoc-body masking | narrow branch feeding the write-confinement denies only |
 | `COMMAND_HEREDOC_MASKED` | `deny-safe` | closed, quoted-delimiter heredoc bodies; **interpreter-fed** bodies (`bash <<EOF`, `cat <<EOF \| sh`) stay visible (#5198) | feeds a hard deny, not the ALWAYS_BLOCK floor |
 | `COMMAND_GH_API_RAWFIELD_SCAN` | `deny-safe` | the above, plus `check-duplicate.sh` positional args and flag-keyed literal text | `gh api … -f body=@path` deny only |
 | `COMMAND_NO_COMMENT` | `deny-safe` | `#…EOL` shell comments, **quote-aware** since #6252 — a `#` inside a quoted span is never a comment start | quote-awareness is exactly what promoted this copy from ask-tier to deny-tier; under-strips rather than over-strips on an unterminated quote |
-| `COMMAND_ASK_SCAN` | `deny-safe` | the above, plus heredoc bodies (selective + unquoted-`cat` with no `$(`/backtick), `check-duplicate.sh` positional args, flag-keyed literal text | every pass masks only provably-non-executing text; a real invocation chained after a heredoc, or smuggled through `bash -c`, still reaches the deny sites |
+| `COMMAND_ASK_SCAN` | `deny-safe` | the above, plus heredoc bodies (selective + unquoted-`cat` with no live `$(`/backtick), `check-duplicate.sh` positional args, flag-keyed literal text | every pass masks only provably-non-executing text; a real invocation chained after a heredoc, or smuggled through `bash -c`, still reaches the deny sites |
 | `COMMAND_CLOUD_ASK_SCAN` | **`ask-only`** | the above, plus for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments | justified *because* `CLOUD_ASK_PATTERNS` is a toggleable (`guards.cloudCli`) **ask** tier, not the denial floor — the masking is more aggressive than any deny consumer may accept |
-| `COMMAND_STASH_SCAN` | `deny-safe` | the `COMMAND_ASK_SCAN` set, plus grep/egrep/fgrep/rg/awk quoted positional **search patterns** carrying no `$(`/backtick | search-pattern text is inert by construction; feeds the `stash-scope:create-redirect` deny as well as the stash asks |
+| `COMMAND_STASH_SCAN` | `deny-safe` | the `COMMAND_ASK_SCAN` set, plus grep/egrep/fgrep/rg/awk quoted positional **search patterns** carrying no live (unescaped) `$(`/backtick | search-pattern text is inert by construction; feeds the `stash-scope:create-redirect` deny as well as the stash asks |
 
 ### Read sites, by decision tier
 

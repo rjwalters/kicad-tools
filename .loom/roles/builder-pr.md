@@ -841,13 +841,12 @@ after a review round-trip:**
    (repeat until the rebase completes).
 2. Re-run the project's check command (`buildGate.command`, e.g. `pnpm check:ci`)
    — a rebase can silently change behavior even when it resolves cleanly.
-3. **Version-bearing-file sync gate (#7168)**: a rebase can absorb a `VERSION`
-   bump from `main` without your own edits raising a conflict, leaving
-   `.loom/install-metadata.json` or another version-bearing file stale. Run
-   the gate before proceeding:
+3. **Version-bearing-file sync gate (#7168; moot after #7743)**: a clean rebase
+   lands `origin/main`'s exact version values, so it never fires unless your
+   branch carries its own version-bearing edit — revert it, never `version.sh bump`:
    ```bash
    if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "before push."; then
-     echo "Aborting: version-bearing files are out of sync after rebase (see BLOCKER:/Fix: above)." >&2
+     echo "Aborting: version-bearing files out of sync after rebase (see BLOCKER: above) -- revert, never bump." >&2
      exit 1
    fi
    ```

@@ -153,10 +153,11 @@ Everything downstream reads its presence as *proof that a rejection was posted*:
 
 Compute a marker keyed to a **hash of the epic's own text** (title + body), so a
 genuine revision always gets a fresh evaluation while an unchanged epic is never
-re-commented. The check is **four-way**, not two-way: no match → evaluate; match
-with no posted rejection behind it → ignore the stray marker (#7666); match with
-skips left in the budget → skip silently; match with the budget exhausted →
-**escalate**.
+re-commented. The check is **five-way**, not two-way: no match → evaluate; match
+with no posted rejection behind it → ignore the stray marker (#7666); match after
+a human un-parked this revision → stand down (#7921); match with skips left in
+the budget → skip silently; match with the budget exhausted → **escalate**. A
+human-held epic (#7734) never gets that far.
 
 ```bash
 EPIC_NUMBER=<number>
@@ -186,16 +187,23 @@ VERDICT_MARKER="<!-- champion:epic-verdict:body-$BODY_HASH -->"
 # reaching Step 4. Step 4 reuses these same variables.
 PRIOR_REJECTIONS=$(printf '%s\n' "$EPIC_JSON" | jq \
   '[.comments[] | select(.body | contains("Champion Review: Epic Needs Revision"))] | length')
-ALREADY_ROUTED=$(printf '%s\n' "$EPIC_JSON" | jq -e '.labels[] | select(.name=="loom:operator-only")' >/dev/null && echo yes || echo no)
+# A human owns the epic when it carries ANY of the three labels 0c's close-branch
+# criterion 3 refuses to close past (#7734): loom:operator-only is Step 4's own
+# terminal state; loom:blocked / loom:operator are an operator's park, which
+# escalating would silently undo. All three end the pass identically.
+HELD_BY=$(printf '%s\n' "$EPIC_JSON" | jq -r \
+  '[.labels[].name | select(. == "loom:operator-only" or . == "loom:blocked" or . == "loom:operator")] | join(",")')
+ALREADY_ROUTED=$([ -n "$HELD_BY" ] && echo yes || echo no)
 SKIP_STREAK=0            # silent skips already recorded for THIS body revision
 ESCALATE_UNREVISED=no    # set to yes to bypass re-evaluation and go straight to Step 4's escalation
+OPERATOR_RULED=no        # set to yes when a human un-parked THIS body revision after its rejection (#7921)
 
 if [ "$ALREADY_ROUTED" = "yes" ]; then
-  # Terminal state — a human owns this epic now. This short-circuit is what makes
-  # the escalation terminal: unlike Priorities 1-3, champion.md's Priority 4 epic
-  # discovery query does NOT filter loom:operator-only, so an escalated epic keeps
-  # being handed to this file and must be dropped here.
-  echo "#$EPIC_NUMBER already routed to loom:operator-only — skipping (no comment, no tally, no evaluation)"
+  # Terminal state — a human owns this epic. This short-circuit is what makes
+  # the escalation terminal: champion.md's Priority 4 epic discovery query does
+  # NOT filter any of these labels, so a held epic keeps being handed to this
+  # file and must be dropped here — never tallied, never escalated.
+  echo "#$EPIC_NUMBER carries $HELD_BY — a human owns it; skipping (no comment, no tally, no evaluation, no escalation)"
   # Continue to the next epic; do not read further.
 elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
        '.comments[] | select(.body | contains($m))' >/dev/null; then
@@ -212,6 +220,23 @@ elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
     | sed -n "s|.*<!-- champion:epic-unrevised-skips:$BODY_HASH:\([0-9]\{1,\}\) -->.*|\1|p" | tail -n 1)
   SKIP_STREAK=${SKIP_STREAK:-0}
   UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
+  VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
+
+  # Operator un-park (#7921): loom:operator-only removed AFTER this revision's
+  # own rejection was posted means a human read the escalation for THIS body
+  # and ruled it stays in flow, unrevised. Labels are not text, so the hash
+  # cannot see that, and the tally is already at the cap — without this check
+  # the very next pass re-escalates (3x in one day on the incident). Keyed to
+  # the current verdict's timestamp, so a revision (fresh verdict, newer than
+  # any old un-park) resumes the ladder. The actor is deliberately not
+  # inspected: nothing automated removes loom:operator-only from an epic, so
+  # any such event is a human's ruling or a pass carrying one out.
+  UNPARKED_AT=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/timeline" --paginate \
+    --jq '.[] | select(.event == "unlabeled" and .label.name == "loom:operator-only") | .created_at' \
+    | sort | tail -n 1)
+  if [ -n "$UNPARKED_AT" ] && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]]; then
+    OPERATOR_RULED=yes
+  fi
 
   # NOTE: the branches below are reached only if Step 0's Completion-First Check
   # and Step 0.5's Tracking-Umbrella Stand-Down both declined to act. Run them
@@ -226,6 +251,12 @@ elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
     # whatever wrote it — not an unrevised rejection and not a stuck epic.
     # Never tally it and NEVER escalate on it (#7666).
     echo "#$EPIC_NUMBER carries a verdict marker but has no posted 'Epic Needs Revision' comment — stray marker (#7666): no tally, no escalation, no comment"
+    # Continue to the next epic; do not read further.
+  elif [ "$OPERATOR_RULED" = "yes" ]; then
+    # A human already answered this revision's escalation by un-parking it.
+    # Re-escalating with nothing new re-fights that ruling (#7921); the ladder
+    # resumes only when the body is revised.
+    echo "#$EPIC_NUMBER: loom:operator-only removed at $UNPARKED_AT, after this revision's rejection — a human has ruled on body $BODY_HASH; standing down (no comment, no tally, no escalation) until it is revised"
     # Continue to the next epic; do not read further.
   elif [ "$UNREVISED_EVALS" -ge "${LOOM_MAX_UNREVISED_EVALUATIONS:-2}" ]; then
     # Silence is not free forever: the skip budget is spent, so this pass does NOT
@@ -257,64 +288,22 @@ fi
 |---|---|
 | No marker match — a new epic, or one revised since its last rejection | Step 0 (Completion-First Check) → Step 0.5 (Tracking-Umbrella Stand-Down) → Step 1 (Read) → Step 2 (Evaluate) → Step 2.5 → Step 3 or 4. Either of Step 0 / Step 0.5 may end the pass on its own (close / operator ask / stand-down); only an epic that is neither finished nor already decomposed reaches the structural criteria — that part is then a **full** re-evaluation, exactly as before this section existed |
 | Marker match, `PRIOR_REJECTIONS == 0` (stray marker, #7666) | **Run Step 0 and Step 0.5 first.** If neither acts, continue to the next epic — no tally, no escalation, no comment. Only Step 4's rejection branch may write this marker, so a match with no posted rejection is a defect in the writer, never evidence of a stuck epic |
+| Marker match, `OPERATOR_RULED=yes` (`loom:operator-only` removed after this revision's rejection, #7921) | **Run Step 0 and Step 0.5 first.** If neither acts, continue to the next epic — no tally, no escalation, no comment. A human has already ruled on this exact body; only a revision (new hash, new verdict) restarts the ladder |
 | Marker match, `PRIOR_REJECTIONS ≥ 1` and `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | **Run Step 0, then Step 0.5, first.** If either acts (close / operator ask / stand-down), the pass ends there. Otherwise tally the skip in place (`PATCH` the existing verdict comment) and continue to the next epic: no new comment, no label change, no structural evaluation |
 | Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | **Run Step 0, then Step 0.5, first**, then — if neither acted — go **straight to Step 4's escalation branch**, skipping Steps 1–3: the text is byte-identical, so re-evaluating the criteria cannot change the verdict |
-| `ALREADY_ROUTED=yes` | Continue to the next epic — no tally, no re-escalation, no comment; a human already owns it |
+| `ALREADY_ROUTED=yes` (`loom:operator-only`, `loom:blocked`, or `loom:operator` present, #7734) | Continue to the next epic — no tally, no re-escalation, no comment, no evaluation; a human already owns it |
 
 A silent skip is neither an approval nor a rejection, so it never counts against
 "Epic Rate Limiting" below. An escalation **is** a verdict.
 
-#### Why a hash of title + body, and NOT the epic's `updatedAt`
-
-`updatedAt` is **self-invalidating** — posting the verdict comment bumps it, so
-the marker could never match and every pass would re-comment. A title + body hash
-changes if and only if the epic is actually edited. Full derivation:
-`champion-issue-promo.md` → "Why a body hash and NOT the issue's `updatedAt`
-(#4966)".
-
-#### The counters, and why the skip must cost something
-
-| Mechanism | Counts | Written by | Survives a silent skip? |
-|---|---|---|---|
-| `PRIOR_REJECTIONS` | posted `Champion Review: Epic Needs Revision` comments (any revision) | Step 4's reject branch | Yes, but **frozen** while skipping — it cannot advance on its own |
-| `SKIP_STREAK` | silent skips recorded for the **current** body hash | the skip path's in-place `PATCH` of the existing verdict comment | **Yes — this is the counter that keeps advancing** |
-| `UNREVISED_EVALS` = `PRIOR_REJECTIONS + SKIP_STREAK` | evaluation cycles spent on an unrevised epic | derived | Yes — the single escalation gate, used identically by the skip path and Step 4 |
-
-Suppressing duplicate comments must never suppress the escalation that puts a
-stuck epic in front of a human (#4967). Traced against an epic that fails at
-body hash H1 and is never revised:
-
-| Cycle | Marker match? | `PRIOR_REJECTIONS` | `SKIP_STREAK` | `UNREVISED_EVALS` | Outcome | Comments posted |
-|---|---|---|---|---|---|---|
-| 1 | no (H1 unseen) | 0 | 0 | 0 | evaluate → reject → post "Epic Needs Revision" carrying `VERDICT_MARKER` + `epic-unrevised-skips:H1:0` | 1 |
-| 2 | yes (H1) | 1 | 0 | 1 < 2 | silent skip; `PATCH` the tally to `1` | 0 |
-| 3 | yes (H1) | 1 | 1 | 2 ≥ 2 | `ESCALATE_UNREVISED=yes` → Step 4 escalation → `loom:operator-only` | 1 (escalation) |
-| 4+ | — | — | — | — | `ALREADY_ROUTED=yes` drops it from every future pass | 0 |
-
-Invariants a future edit must preserve:
-
-- **Comment budget for an unrevised epic is exactly 2**: one "Epic Needs
-  Revision", one escalation. The skip path may only ever *edit* the existing
-  verdict comment (`gh api --method PATCH .../issues/comments/<id>` — no
-  notification, no new timeline entry), never post.
-- **A revision resets `SKIP_STREAK`, not `PRIOR_REJECTIONS`.** A new hash means a
-  new marker, so the tally restarts at 0 for the new revision — but the rejection
-  count keeps accumulating across revisions, so an epic revised-and-rejected twice
-  still escalates on its third cycle. Both paths stay bounded.
-- **`ALREADY_ROUTED=yes` short-circuits everything**, and here it is
-  unconditional: there is no epic analogue of the #5664 self-healing
-  un-escalation, because no epic criterion is a self-clearing dependency finding.
-- **Escalation requires a posted rejection to escalate about (#7666).**
-  `PRIOR_REJECTIONS ≥ 1` is a precondition of both the skip tally and the
-  escalation; every trace row satisfies it because `SKIP_STREAK` only advances by
-  `PATCH`ing a comment Step 4 posted. A match with `PRIOR_REJECTIONS == 0` means
-  something else wrote the marker — ignore it; counting it would escalate an epic
-  nobody ever rejected. Any future verdict type (a pass, a stand-down, a status
-  note) must carry its own marker name and idempotency rule — Step 0.5 is the
-  worked example.
-
 `LOOM_MAX_UNREVISED_EVALUATIONS` (default **2**) is the same knob the proposal
 path reads — one threshold, both surfaces.
+
+**Maintainer notes** — why the marker keys on a title + body hash and not
+`updatedAt`, what each counter counts, the cycle-by-cycle trace, and the
+invariants a future edit must preserve (#7734 and #7921 included) — live in
+[`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md). Read
+them before editing this section; the tests named there enforce them.
 
 ---
 
@@ -322,9 +311,10 @@ path reads — one threshold, both surfaces.
 
 **Run the "Idempotency Guard for Unrevised Epics" above FIRST.**
 `ALREADY_ROUTED=yes` ends the pass immediately (a human owns the epic). Its other
-four outcomes — stray marker / skip silently / escalate / evaluate — **all enter
-Step 0 and then Step 0.5 first**, because "is it finished?" and "is it already
-decomposed?" are facts about the epic's *children*, not its text (#6516, #7666).
+five outcomes — stray marker / operator ruled / skip silently / escalate /
+evaluate — **all enter Step 0 and then Step 0.5 first**, because "is it
+finished?" and "is it already decomposed?" are facts about the epic's
+*children*, not its text (#6516, #7666).
 Only after both decline to act do they resume their own behavior.
 
 ### Step 0: Completion-First Check — ask "is this already done?" before "is this well-shaped?" (#6516)
@@ -714,21 +704,23 @@ instead of posting another comment — the mechanism that stops the duplicate
 "Epic Needs Revision" loop:
 
 ```bash
-# All four were computed by the "Idempotency Guard for Unrevised Epics" above,
+# All five were computed by the "Idempotency Guard for Unrevised Epics" above,
 # which always runs first — do NOT recompute them here:
 #   PRIOR_REJECTIONS   — posted "Champion Review: Epic Needs Revision" comments (any revision)
 #   SKIP_STREAK        — silent skips recorded for THIS body revision (0 if the marker did not match)
-#   ALREADY_ROUTED     — yes when loom:operator-only is already present
+#   ALREADY_ROUTED     — yes when loom:operator-only, loom:blocked, or loom:operator is present (#7734)
+#   OPERATOR_RULED     — yes when loom:operator-only was removed after THIS revision's rejection (#7921)
 #   ESCALATE_UNREVISED — yes when the guard sent you straight here without re-evaluating
 UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
 ```
 
 **If `ESCALATE_UNREVISED=yes`, or `UNREVISED_EVALS >= ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}`
-— and, in both cases, `PRIOR_REJECTIONS >= 1` and `ALREADY_ROUTED=no`** — escalate
-to the operator instead of rejecting again. `PRIOR_REJECTIONS >= 1` ties this
-branch to a **real, posted** `Champion Review: Epic Needs Revision` comment: an
-epic nobody has ever rejected must never reach it, whatever markers its thread
-carries (#7666). Keep `loom:epic` (parked, not withdrawn) and use the
+— and, in both cases, `PRIOR_REJECTIONS >= 1`, `ALREADY_ROUTED=no`, and
+`OPERATOR_RULED=no`** — escalate to the operator instead of rejecting again.
+`PRIOR_REJECTIONS >= 1` ties this branch to a **real, posted**
+`Champion Review: Epic Needs Revision` comment: an epic nobody has ever rejected
+must never reach it, whatever markers its thread carries (#7666). Keep
+`loom:epic` (parked, not withdrawn) and use the
 `loom:operator-decision` sub-kind (#5671): repeatedly failing structural criteria
 is a judgement call about shape, never a self-clearing dependency wait, so
 `loom:operator-blocked` is never right here.

@@ -1364,17 +1364,16 @@ if [ "$MERGE_STATE" = "DIRTY" ]; then
 
     # Attempt rebase
     if git rebase origin/main; then
-        # Version-bearing-file sync gate (#7168, extended #7341): this
-        # auto-rebase pushes directly, exactly like Doctor's rebase-conflict
-        # recipes (#7171) and never routes through create-pr.sh -- a rebase
-        # silently absorbs whatever version-bearing values origin/main
-        # already had, and a file the branch's own commits never touched (in
-        # practice .loom/install-metadata.json) never raises a git conflict,
-        # so it can end up stale relative to VERSION/the files that WERE
-        # part of the rebase, invisible until CI's "Installer Integration
-        # Tests" fails. Gate BEFORE the push below, folded into the same
-        # push condition so a mismatch is treated exactly like a push
-        # failure (never hand-patch the version-bearing files yourself).
+        # Version-bearing-file sync gate (#7168, #7341; largely moot after
+        # #7743): this auto-rebase pushes directly, never through
+        # create-pr.sh, so gate BEFORE the push below, folded into the same
+        # push condition. Under #7743 no PR carries a version-bearing edit,
+        # so a clean rebase lands exactly origin/main's values; if the gate
+        # still fires, this branch itself carries one (usually a pre-#7743
+        # bump commit): never hand-patch the version-bearing files yourself
+        # and never run `version.sh bump` (the printed Fix: predates #7743)
+        # -- fall back to the change request below, naming the file(s) to
+        # revert to origin/main's values.
         GATE_OK=true
         if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
             echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - falling back to change request"
@@ -1448,10 +1447,11 @@ fi
 git fetch origin main
 git rebase origin/main
 
-# Version-bearing-file sync gate (#7168, extended #7341): this push goes
-# directly, never through create-pr.sh -- gate before it, same as the DIRTY
-# path above. Never hand-patch VERSION/CLAUDE.md/etc. yourself on a mismatch;
-# run the printed `./scripts/version.sh bump patch` fix instead.
+# Version-bearing-file sync gate (#7168, #7341; moot after #7743) -- see the
+# DIRTY path's gate comment above. If it fires, this branch carries its own
+# version-bearing edit: never hand-patch VERSION/CLAUDE.md/etc. and never run
+# `version.sh bump` (the printed Fix: predates #7743) -- abort the push and
+# request changes naming the file(s) to revert to origin/main's values.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
   echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - aborting push"
   exit 1
