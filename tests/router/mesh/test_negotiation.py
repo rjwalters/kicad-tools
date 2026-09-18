@@ -18,6 +18,32 @@ from kicad_tools.router.rules import DesignRules
 
 router_cpp = pytest.importorskip("kicad_tools.router.router_cpp")
 
+# Issue #5556: CI's `Test` job runs `pytest -n auto -o addopts=
+# --benchmark-disable --timeout=60` (ci.yml "Run tests"); `-o addopts=` means
+# coverage is OFF in CI, so the comparable local baseline is that same command.
+# Half of this module negotiates real multi-net routes over board fixtures.
+# Measured serially on an unloaded 18-core host with the C++ backend built,
+# using CI's exact flags (2026-09-18):
+#
+#   7.87s  test_multinet_netset_is_drc_clean          <- reaped in CI twice
+#   6.45s  test_route_netset_converges_and_is_competitive
+#   2.89s  test_triangulation_runs_once_per_board_not_per_net
+#
+# test_multinet_netset_is_drc_clean still blew the 60 s cap on runs 35313138438
+# and 35329950883 (>=7.6x inflation).  The cause is environmental, not in the
+# test: `-n auto` CPU contention plus `KCT_NATIVE_MAX_CONCURRENCY=1`
+# (#5501/#5524), whose native-slot wait is charged as ordinary wall time inside
+# the waiting test (measured there at up to +23.1 s for a single test).
+#
+# The marker is module-level rather than per-test because
+# test_route_netset_converges_and_is_competitive is within 1.5 s of the observed
+# offender and would simply be reaped next; the module's remaining tests are
+# navmesh assertions (<0.2 s) that a larger budget cannot slow down.  180 s
+# matches tests/test_board_05_drc_allowlist.py and leaves ~23x headroom over the
+# measured CI-equivalent cost (4.7x over the 38.1 s this test costs locally
+# *with* `--cov=kicad_tools`).
+pytestmark = pytest.mark.timeout(180)
+
 _REPO = Path(__file__).resolve().parents[3]
 _CHARLIEPLEX = _REPO / "boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb"
 _STM32 = _REPO / "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb"
