@@ -1452,9 +1452,12 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
     and Phase-1's translator
     (:func:`~kicad_tools.router.placement_delta.deltas_from_result`).  That lets
     it execute the ``mirror`` (layer-flip the reversed facing QFN to un-reverse
-    its pad column, #4560), ``rotate_180``, and ``rotate_align`` (a bounded
-    +/-90 endpoint-orientation quarter turn, #4968) moves the classifier-driven
-    proposer emits -- moves the blocker-geometry loop cannot express.
+    its pad column, #4560), ``rotate_180``, ``rotate_align`` (a bounded
+    +/-90 endpoint-orientation quarter turn, #4968) and ``reorder_pins`` (a
+    DECLARED swap group's pad->net rebinding, #5536) moves the
+    classifier-driven proposer emits -- moves the blocker-geometry loop cannot
+    express.  ``reorder_pins`` is the only one that changes no geometry at
+    all: it spends the netlist's own degrees of freedom instead.
 
     Relationship to the file-based, subprocess-driven
     :mod:`kicad_tools.router.placement_nudge` (#3865): both classify stuck nets

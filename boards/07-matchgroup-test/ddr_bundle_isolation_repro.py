@@ -42,10 +42,20 @@ measures reach twice:
     SAME ``placement_feedback`` helpers the Phase-2a ``reorder_pins``
     applicator uses on a real board.
 
-The acceptance assertion is ``reach(before) < reach(after) == 11/11``; the
-script exits non-zero when it does not hold, so it is a re-runnable check
-rather than a quoted number.  Nothing here is inferred: with no
-``swap_group`` declared on the net class the proposal is never computed.
+Both passes route the SAME pads at the SAME positions under the SAME
+budget; the only difference is the pad->net binding.  The acceptance
+assertion is ``reach(before) < reach(after) == 11/11``, and the script
+exits non-zero when it does not hold -- a re-runnable check rather than a
+quoted number.  Measured 2026-09-18 (C++ backend built, default budget):
+**9/11 before, 11/11 after**, with the proposal itself reporting
+``crossings 55 -> 0``.  Nothing here is inferred: with no ``swap_group``
+declared on the net class the proposal is never computed and the mode
+reports that it has nothing to measure.
+
+The mode deliberately runs on ONE signal layer inside a sealed 3 mm
+channel -- see ``build_isolated_router`` for the three configurations that
+were measured and why the other two make a reach assertion vacuous (on the
+open 4-layer board a fully reversed bundle still reaches 11/11).
 
 Why the CO-ORIENTED harness does NOT exercise placement-delta feedback (#4468)
 -----------------------------------------------------------------------------
@@ -88,7 +98,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from kicad_tools.router.bundle_river import RowMember  # noqa: E402
 from kicad_tools.router.core import Autorouter  # noqa: E402
-from kicad_tools.router.layers import LayerStack  # noqa: E402
+from kicad_tools.router.layers import Layer, LayerStack  # noqa: E402
 from kicad_tools.router.placement_feedback import (  # noqa: E402
     apply_router_pad_net_bindings,
     resolve_router_swap_bindings,
@@ -101,6 +111,18 @@ from kicad_tools.router.swap_groups import (  # noqa: E402
 
 PITCH = 0.8
 SWAP_GROUP = "DDR_BYTE0"
+BOARD_W, BOARD_H = 80.0, 40.0
+# Vertical breathing room left between the outermost pad and a channel wall:
+# the widest DDR trace is 0.15mm with 0.10mm clearance, so 0.4mm clears the
+# wall's own halo without giving a crossing anywhere to escape to.
+CHANNEL_MARGIN = 0.4
+# Reversed-mode channel width.  Short on purpose: a 30mm channel leaves room
+# to resolve the crossings, which is exactly what must NOT be available for
+# the reach assertion to mean anything (see build_isolated_router).
+REVERSED_CHANNEL_MM = 3.0
+# Default budget for the reversed acceptance run (the CLI flags override it).
+DEFAULT_REVERSED_TIMEOUT = 120.0
+DEFAULT_REVERSED_PER_NET_TIMEOUT = 20.0
 
 # The DDR byte's row order on both facing columns (U1 pins 25-35 == U2
 # pins 1-11), matching generate_pcb.py's pin_nets declarations.  DQS_P /
@@ -127,6 +149,7 @@ def build_isolated_router(
     reversed_secondary: bool = False,
     declare_swap_group: bool = False,
     single_layer: bool = False,
+    channel_walls: bool = False,
 ) -> tuple[Autorouter, list[int]]:
     """Build a router with ONLY the 11-net DDR byte on an empty board.
 
@@ -146,14 +169,26 @@ def build_isolated_router(
     membership is never inferred (see ``NetClassRouting.swap_group``).
 
     ``single_layer`` pins routing to F.Cu (the #715 ``allowed_layers`` hard
-    constraint).  This is what makes a reversal a REACH question instead of a
-    via-count one: on the full 4-layer stack the negotiated router answers a
-    fully reversed bundle by diving to the back layer and still reaches 11/11
-    (measured under a 240s/30s bound; the co-oriented control reached 10/11 in
-    the same budget), so the swap would buy vias and length, not nets.  On one
-    signal layer the 55 forced crossings are unresolvable -- exactly the
-    regime the monotone certificate (#4084) describes -- and the reach delta
-    the swap buys is real.
+    constraint) and ``channel_walls`` seals the byte lane between two
+    full-width keepouts, leaving a corridor exactly as tall as the pad column
+    (+/-0.4 mm).  Together with a SHORT ``channel_mm`` those two are what make
+    a reversal a REACH question instead of a via-count one.  Measured on this
+    harness (2026-09-18, C++ backend built):
+
+    * 4-layer stack, 30 mm channel, no walls -- the router answers a fully
+      reversed bundle by diving to the back layer and still reaches 11/11
+      (the co-oriented control reached 10/11 in the same 240s/30s budget).
+      The reversal costs vias and length there, not nets, so a reach-based
+      assertion on that geometry is vacuous.
+    * one signal layer, 30 mm channel -- the reversal costs reach (9/11 vs a
+      10/11 co-oriented control) but the bundle's own ceiling is 10/11: the
+      coupled DQS_P/DQS_N strobe pair never lands on a single layer over that
+      span, in EITHER ordering.
+    * one signal layer, sealed 3 mm channel (the reversed mode's default) --
+      the 55 forced crossings have neither a layer nor a way around to escape
+      to, and the co-oriented control is clean: 11/11 in 3.2s.  That is the
+      regime the monotone certificate (#4084) describes, and the one where
+      the swap's reach delta is real.
     """
     cls = NetClassRouting(
         name="DDR_DATA_BYTE_0",
@@ -168,8 +203,8 @@ def build_isolated_router(
     )
     net_class_map: dict[str, NetClassRouting] = {}
     router = Autorouter(
-        width=80.0,
-        height=40.0,
+        width=BOARD_W,
+        height=BOARD_H,
         net_class_map=net_class_map,
         layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig(),
     )
@@ -208,7 +243,29 @@ def build_isolated_router(
             ],
         )
     router.net_class_map = net_class_map
+    if channel_walls:
+        top_y = base_y + (len(ROW_NETS) - 1) * PITCH
+        low_h = base_y - CHANNEL_MARGIN
+        high_h = BOARD_H - (top_y + CHANNEL_MARGIN)
+        # (x, y, w, h, layer) with (x, y) the obstacle CENTRE.
+        router._repro_walls = [
+            (BOARD_W / 2.0, low_h / 2.0, BOARD_W, low_h, Layer.F_CU),
+            (BOARD_W / 2.0, top_y + CHANNEL_MARGIN + high_h / 2.0, BOARD_W, high_h, Layer.F_CU),
+        ]
+        install_channel_walls(router)
     return router, net_ids
+
+
+def install_channel_walls(router: Autorouter) -> None:
+    """(Re-)install the corridor keepouts recorded on ``router``.
+
+    Must be re-run after any grid reset: ``Autorouter._reset_for_new_trial``
+    rebuilds the grid from the live pads, fixed fills and edge keepout, but
+    NOT from obstacles registered through ``add_obstacle`` -- so a reset
+    silently reopens the channel.
+    """
+    for x, y, width, height, layer in getattr(router, "_repro_walls", ()):
+        router.add_obstacle(x, y, width, height, layer)
 
 
 def _facing_rows(router: Autorouter) -> tuple[list[RowMember], list[RowMember]]:
@@ -269,6 +326,7 @@ def apply_swap(router: Autorouter, pad_map: dict[str, str]) -> int:
     # instead of 11/11: every net would be routed at pads the grid still
     # attributes to the net that used to own them.
     router._reset_for_new_trial()
+    install_channel_walls(router)
     return len(bindings)
 
 
@@ -335,18 +393,27 @@ def measure_reversed_reach(
     the swap strictly improves reach AND lands 11/11, 1 otherwise.
     """
     total = len(ROW_NETS)
+    if timeout is None and per_net_timeout is None:
+        # Equal, finite budget for BOTH passes.  The swapped bundle routes in
+        # well under a second; the budget exists only so the unroutable
+        # "before" pass stops grinding on nets that have nowhere to go.
+        timeout, per_net_timeout = DEFAULT_REVERSED_TIMEOUT, DEFAULT_REVERSED_PER_NET_TIMEOUT
+    print(f"budget: timeout={timeout}s per_net_timeout={per_net_timeout}s (identical both passes)")
     build = {
         "enable_certificate": True,
         "reversed_secondary": True,
         "declare_swap_group": True,
         "single_layer": single_layer,
+        "channel_walls": single_layer,
+        "channel_mm": REVERSED_CHANNEL_MM if single_layer else 30.0,
     }
     print(
         "\n=== reversed geometry: swap NOT applied (before) ==="
         + (
-            "\n(routing pinned to F.Cu -- crossings cannot be resolved by a layer change)"
+            f"\n(sealed {REVERSED_CHANNEL_MM}mm channel on ONE signal layer -- a crossing has"
+            "\n neither a layer nor a way around to escape to)"
             if single_layer
-            else ""
+            else "\n(full 4-layer stack, open board -- the reversal costs vias, not reach)"
         )
     )
     router, net_ids = build_isolated_router(**build)

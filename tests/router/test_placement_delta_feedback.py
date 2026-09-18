@@ -1494,6 +1494,19 @@ class TestReorderPinsSelection:
         # Geometry untouched.
         assert (ub1.x, ub1.y) == (10.0, 10.0)
 
+    def test_applied_swap_lands_in_the_artifact_with_its_pad_map(self, tmp_path):
+        """The kept rebinding is what Phase 2b (#5548) replays on regeneration."""
+        loop, _router, _pcb = _make_swap_loop(tmp_path, _crossing_nets_fail, _swap_delta())
+        result = loop.run_delta(max_adjustments=3)
+
+        data = write_placement_delta_json(
+            tmp_path / "board_placement_delta.json",
+            result.applied_deltas,
+            result.proposed_deltas,
+        )
+        assert [d["kind"] for d in data["applied"]] == ["reorder_pins"]
+        assert data["applied"][0]["pad_map"] == _SWAP_PAD_MAP
+
     def test_rationale_only_delta_is_still_skipped(self, tmp_path):
         """No declared swap group => no ``pad_map`` => never applied (#5522 guard)."""
         loop, router, pcb = _make_swap_loop(

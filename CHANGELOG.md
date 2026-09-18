@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Apply a DECLARED swap group's pad re-binding instead of only reporting it: a
+  `reorder_pins` placement delta carrying a `pad_map` is now executed by the
+  placement-delta feedback loop through the new `StrategyType.REORDER_PINS`
+  applicator (`assign_net_to_footprint_pad` on the PCB plus the router's own pad
+  list and net membership), kept only on a strict routed-net improvement and
+  otherwise reverted atomically -- pad net bindings included. A `reorder_pins`
+  delta without a declared `swap_group` stays rationale-only and is still never
+  applied, so flag-off behavior is unchanged. `boards/07-matchgroup-test/
+  ddr_bundle_isolation_repro.py --mode reversed` measures the result on a
+  reversed DDR byte: 9/11 nets reached before the swap, 11/11 after, with the
+  proposal reporting `crossings 55 -> 0` (Issue #5536, Phase 2a of Epic #5511).
+
 - Add a report-only `RoutingPlan` sidecar (`<output_stem>.routing_plan.json`)
   serializing the tile-based global-routing pass's per-net corridor
   assignments and per-edge demand/capacity/overflow that `kct route`'s
