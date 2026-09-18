@@ -213,3 +213,135 @@ def test_candidate_order_is_retreat_then_layer():
     ]
     assert plan.destination.point[0] == pytest.approx(8.9)
     assert plan.layer == "In1.Cu"
+
+
+# ---------------------------------------------------------------------------
+# Through-hole pads: the same unsatisfiable shape one element-kind over.
+#
+# ``_via_ok`` rejects a drill anywhere on a pad (same-net pads included) and
+# independently holds every new drill off that pad's own hole, so no retreat
+# point on a pad is ever legal -- while a through-hole pad's plated barrel
+# already spans the copper stack.  An SMD pad is NOT reusable: it reaches only
+# its own layer, so a crossing elsewhere genuinely needs a new drill.
+# ---------------------------------------------------------------------------
+
+TH_PAD = (10.0, 0.0)
+TH_PAD_R = 0.8
+
+
+def _pad_side(*, plated_through, layers=ALL_LAYERS, name="C40.1") -> BridgeSide:
+    return BridgeSide(
+        Point(TH_PAD).buffer(TH_PAD_R),
+        layers,
+        f"pad:{name}",
+        plated_through=plated_through,
+    )
+
+
+def _pad_ban_via_ok(recorded: list) -> callable:
+    """A ``via_ok`` modelling the real via-in-pad ban + drill-to-drill floor."""
+
+    def via_ok(point):
+        recorded.append(point)
+        if Point(point).buffer(VIA_R).intersects(Point(TH_PAD).buffer(TH_PAD_R)):
+            return False  # via-in-pad ban (same-net included)
+        return math.dist(point, TH_PAD) >= TH_PAD_R + VIA_DRILL_R + MIN_HOLE_TO_HOLE
+
+    return via_ok
+
+
+def test_a_through_hole_pad_destination_is_unreachable_without_reuse():
+    """Red control: every retreat on a pad is rejected by the real predicates."""
+    recorded: list = []
+    plan = plan_via_hop_bridge(
+        BridgeSide(box(0, -1, 5, 1), frozenset({"In1.Cu"}), "fill"),
+        _pad_side(plated_through=None),  # pre-fix: kind alone, so not reusable
+        layers=LAYERS,
+        retreats=RETREATS,
+        via_ok=_pad_ban_via_ok(recorded),
+        path_ok=lambda a, b, lay: True,
+        new_via_layers=ALL_LAYERS,
+    )
+    assert plan is None
+    # Every destination candidate that landed on the pad's copper was offered
+    # to ``via_ok`` and refused; nothing outside it is on the component.
+    assert recorded, "the stage did try, and every drill it proposed was illegal"
+
+
+def test_a_through_hole_pad_is_reused_instead_of_redrilled():
+    recorded: list = []
+    plan = plan_via_hop_bridge(
+        BridgeSide(box(0, -1, 5, 1), frozenset({"In1.Cu"}), "fill"),
+        _pad_side(plated_through=True),
+        layers=LAYERS,
+        retreats=RETREATS,
+        via_ok=_pad_ban_via_ok(recorded),
+        path_ok=lambda a, b, lay: True,
+        new_via_layers=ALL_LAYERS,
+    )
+    assert plan is not None
+    assert plan.destination.new_via is False
+    assert plan.destination.point == pytest.approx(TH_PAD, abs=1e-6)
+    assert plan.new_vias == (plan.source.point,)
+    # No drill was ever proposed on or beside the pad.
+    assert all(math.dist(p, TH_PAD) > TH_PAD_R for p in recorded)
+
+
+def test_an_smd_pad_is_not_reusable_and_still_needs_a_drill():
+    """The relaxation is plating-specific, not "pads are always free"."""
+    plan = plan_via_hop_bridge(
+        BridgeSide(box(0, -1, 5, 1), frozenset({"In1.Cu"}), "fill"),
+        _pad_side(plated_through=False, layers=frozenset({"F.Cu"})),
+        layers=LAYERS,
+        retreats=RETREATS,
+        via_ok=_pad_ban_via_ok([]),
+        path_ok=lambda a, b, lay: True,
+        new_via_layers=ALL_LAYERS,
+    )
+    assert plan is None
+
+
+def test_reused_pad_still_obeys_foreign_copper_and_its_own_layer_span():
+    """Reuse relaxes no clearance and invents no layer reach."""
+    assert (
+        plan_via_hop_bridge(
+            BridgeSide(box(0, -1, 5, 1), frozenset({"In1.Cu"}), "fill"),
+            _pad_side(plated_through=True),
+            layers=LAYERS,
+            retreats=RETREATS,
+            via_ok=lambda p: True,
+            path_ok=lambda a, b, lay: False,
+            new_via_layers=ALL_LAYERS,
+        )
+        is None
+    )
+
+    attempted: list = []
+    plan = plan_via_hop_bridge(
+        BridgeSide(box(0, -1, 5, 1), ALL_LAYERS, "fill"),
+        _pad_side(plated_through=True, layers=frozenset({"In1.Cu", "In2.Cu"})),
+        layers=LAYERS,
+        retreats=RETREATS,
+        via_ok=lambda p: True,
+        path_ok=lambda a, b, lay: attempted.append(lay) or True,
+        new_via_layers=ALL_LAYERS,
+    )
+    assert plan is not None and plan.layer == "In1.Cu"
+    assert "F.Cu" not in attempted and "B.Cu" not in attempted
+
+
+def test_plated_through_none_preserves_the_kind_derived_default():
+    """Callers that only know about barrels keep their existing behaviour."""
+    assert BridgeSide(Point(BARREL).buffer(VIA_R), ALL_LAYERS, "via").reuses_existing_hole
+    assert not BridgeSide(box(0, -1, 5, 1), ALL_LAYERS, "fill").reuses_existing_hole
+    assert not BridgeSide(box(0, -1, 5, 1), ALL_LAYERS, "seg").reuses_existing_hole
+    assert not BridgeSide(
+        Point(TH_PAD).buffer(TH_PAD_R), ALL_LAYERS, "pad:C40.1"
+    ).reuses_existing_hole
+    # An explicit flag overrides the default in both directions.
+    assert not BridgeSide(
+        Point(BARREL).buffer(VIA_R), ALL_LAYERS, "via", plated_through=False
+    ).reuses_existing_hole
+    assert BridgeSide(
+        Point(TH_PAD).buffer(TH_PAD_R), ALL_LAYERS, "pad:C40.1", plated_through=True
+    ).reuses_existing_hole

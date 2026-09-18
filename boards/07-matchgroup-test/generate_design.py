@@ -1040,6 +1040,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 # audit's conservative connectivity model).
                 own.append((inscribed, layers, f"pad:{name}"))
         pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
+        # Through-hole pads of this net.  Their plated barrel already spans
+        # the copper stack, so sub-stage D may terminate a bridge on one
+        # without drilling (issue #5507); an SMD pad reaches only its own
+        # layer and still needs a via placed on other own-net copper.
+        th_pads = {entry[5] for entry in pad_index if entry[1] == net and entry[6]}
 
         # Union-find over own elements, built ONCE and maintained
         # incrementally as repair geometry is appended (a full O(n^2)
@@ -1069,6 +1074,17 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 gj, lj, _ = own[j]
                 if (li & lj) and gi.intersects(gj):
                     parent[_find(len(own) - 1)] = _find(j)
+
+        def _bridge_side(idx: int) -> BridgeSide:
+            """Describe ``own[idx]`` to the shared via-hop planner.
+
+            Only a pad's kind is ambiguous about plating, so pads state it
+            explicitly and every other kind keeps the planner's own
+            ``kind``-derived default.
+            """
+            geom, layers, kind = own[idx][:3]
+            plated = kind[4:] in th_pads if kind.startswith("pad:") else None
+            return BridgeSide(geom, layers, kind, plated_through=plated)
 
         max_rounds = 40
         skipped_roots: set[int] = set()
@@ -1243,14 +1259,20 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # bbox-carved pour), hop OVER it: drop a via inside each
             # copper region near the gap and cross on a different layer.
             #
-            # Issue #5507: an endpoint that is ALREADY a same-net barrel is
+            # Issue #5507: an endpoint that ALREADY carries a plated hole is
             # reused rather than re-drilled.  A barrel's own copper is just
             # its annulus, so every retreat point either misses that disc or
             # lands inside it -- where the drill-to-drill floor rejects a
             # second drill -- and the pair was skipped for every retreat on
-            # every layer.  ``plan_via_hop_bridge`` keeps the candidate order
-            # and the physical predicates below unchanged; it only stops
-            # demanding a drill where the stack is already bridged.
+            # every layer.  A through-hole PAD is the same case: ``_via_ok``
+            # bans a drill anywhere on a pad (same-net included) and holds it
+            # off that pad's own drill, so no retreat on it is ever legal
+            # either, while its barrel already spans the stack.  An SMD pad
+            # stays non-reusable -- it reaches only its own layer, so a
+            # crossing on another layer genuinely needs a new via elsewhere
+            # on the component.  ``plan_via_hop_bridge`` keeps the candidate
+            # order and the physical predicates below unchanged; it only
+            # stops demanding a drill where the stack is already bridged.
             if not merged:
                 pairs_d: list[tuple[float, int, int]] = []
                 for i in target:
@@ -1261,8 +1283,8 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
                     plan = plan_via_hop_bridge(
-                        BridgeSide(*own[i][:3]),
-                        BridgeSide(*own[j][:3]),
+                        _bridge_side(i),
+                        _bridge_side(j),
                         layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
                         retreats=(0.5, 0.9, 1.4),
                         via_ok=lambda p, _net=net: _via_ok(_net, *p),
