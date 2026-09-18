@@ -231,13 +231,35 @@ git show <port-commit>^:<path/to/script.sh> > /tmp/ref.sh
 #    cannot name is a finding; a class you can name is a decision to record.
 ```
 
+**Generate every input FIELD, not just the interesting one.** The first version
+of the `extract-refs` corpus populated `body` and left `comments` empty in all
+700 cases, so the whole comment half of the function — the self-comment loop
+suppression the subcommand exists for — was never reached. That is invisible
+from a green run, and it is not the same failure as a thin grammar: the grammar
+for `body` was thorough. Mutation-measured (#8094), gutting `comment_counts()`
+to `true` or making `normalise_login()` the identity left the suite green, while
+every mutation to the body half turned it red. The extension replays 350
+comment-bearing cases and both mutations now fail; the fourth divergence in
+#8011 — the shell lower-cased only the supplied `--bot-login` while normalising
+the comment author fully — is the class that corpus can finally see.
+
+**Assert the corpus's discriminating power, not just its size.** "700 cases" and
+"1000 cases" say nothing about which code they reach. `differential_extract_refs.rs`
+counts, as part of the test, how many cases would change answer under each
+mutation it was blind to (the filter ingesting everything; the identity
+normalisation) and fails below a floor. A size assertion cannot catch a corpus
+that quietly stops exercising a field; this one does.
+
 **Freeze the answers, not the reference.** Once the old implementation is
 deleted, re-running it needs either a full-history checkout (CI checks out
 shallow) or vendoring dead code plus its runtime dependencies into the test. So
 capture its answers once into a fixture with a provenance record and assert
 against that — see `loom-daemon/tests/differential_extract_refs.rs` and
-`loom-daemon/tests/fixtures/extract_refs_shell_oracle.jsonl`, which pin the
-three accepted divergences and fail on a fourth.
+`loom-daemon/tests/fixtures/extract_refs_shell_oracle.jsonl`, which pin the four
+accepted divergences and fail on a fifth. Extending a frozen oracle is additive
+rather than a regeneration — replay the existing cases against the same pinned
+rev to confirm they still reproduce (700 of 700 did), then append the new cases
+and their own provenance record below them.
 
 **Recognise each divergence class by its MECHANISM, not by a property of the
 input that correlates with it.** This is the sharpest trap in the whole recipe,

@@ -161,7 +161,6 @@
 # fail-closed path we choose, never abort the script with no output.
 set -uo pipefail
 
-LOOM_HOOK_VERSION_DEFAULT=1
 CODEX_SCHEMA_PIN="0.146.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
