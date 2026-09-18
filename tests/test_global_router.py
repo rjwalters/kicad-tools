@@ -391,6 +391,41 @@ class TestRegionGraphUtilization:
 
         assert low_cost < mid_cost < high_cost
 
+    def test_total_overflow_agrees_on_reverse_direction_traffic(self):
+        """get_total_overflow() must not undercount reverse-direction overflow.
+
+        Regression test for issue #5529: RegionGraph stores two directed
+        RegionEdge objects per adjacent region pair (a, b), and
+        update_utilization() only mutates the edge matching the path's
+        actual traversal direction. If all traffic crosses a boundary in
+        the descending-region-id direction (b -> a), the ascending
+        (source=a) edge stays at overflow == 0. get_total_overflow() used
+        to dedupe by undirected key unconditionally, so it could latch onto
+        that zero-overflow edge and never see the real overflow on the
+        source=b edge -- disagreeing with get_overflowed_edges(), which
+        finds it correctly.
+        """
+        graph = RegionGraph(
+            board_width=10.0,
+            board_height=5.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=2.0,
+            num_layers=1,
+            base_capacity=1,
+        )
+
+        # Descending-ID traversal: region 1 -> region 0.
+        for _ in range(5):
+            graph.update_utilization([1, 0], layer=0)
+
+        overflowed_edges = graph.get_overflowed_edges()
+        assert len(overflowed_edges) == 1
+        assert overflowed_edges[0].overflow == 3
+
+        # Must agree with get_overflowed_edges() -- not report 0.
+        assert graph.get_total_overflow() == 3
+
     def test_waypoint_coords_from_path(self, small_board_graph):
         """Path can be converted to waypoint coordinates."""
         graph = small_board_graph
