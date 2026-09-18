@@ -21,6 +21,7 @@
   - [Clarification triggers (Mode B asks before spawning)](#clarification-triggers-mode-b-asks-before-spawning)
   - [Mode C — PR-set mode (explicit `--prs` flag)](#mode-c--pr-set-mode-explicit---prs-flag)
   - [Mode C — PR-set mode (NL trigger, no flag)](#mode-c--pr-set-mode-nl-trigger-no-flag)
+  - [Headless / non-interactive runs (`--yes`)](#headless--non-interactive-runs---yes)
 
 ---
 
@@ -151,5 +152,29 @@
 
 # "merge-ready PRs" triggers Mode C:
 /loom:sweep all merge-ready PRs
+```
+
+### Headless / non-interactive runs (`--yes`)
+
+```bash
+# A hand-rolled operator script, e.g. an unattended cron job on a box the
+# operator has already told "launch a wave on the issues that are ready" and
+# is not watching in real time. Without --yes this would stall forever on the
+# Mode B confirmation gate (no one to answer the prompt); the pre-approval
+# still prints the full resolved candidate set, overlap/operator-gate
+# advisories, and orphan-claim recovery status before proceeding.
+claude -p "/loom:sweep all loom:curated issues --yes" --dangerously-skip-permissions
+
+# Same idea for a Mode C NL description:
+claude -p "/loom:sweep all loom:review-requested PRs --yes" --dangerously-skip-permissions
+
+# --dry-run wins over --yes with no special handling: prints the plan and
+# EXITs before the confirmation gate is ever reached.
+/loom:sweep all loom:curated issues --dry-run --yes
+
+# CAUTION: `all --yes` is a whole-backlog auto-dispatch — every open issue,
+# aggressively promoted and driven toward a merged PR, with nobody reading
+# the plan first. Reserve it for operators who mean exactly that.
+/loom:sweep all --yes
 ```
 

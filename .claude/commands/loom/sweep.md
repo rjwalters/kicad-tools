@@ -39,7 +39,7 @@ Read the files the run actually reaches, and only those.
 
 | File | Lines | Load when |
 |------|-------|-----------|
-| [`sweep-arguments.md`](sweep-arguments.md) | ~377 | **Always, first.** Mode A / Mode B / Mode C classification, the `all` build-everything sentinel, every flag (`--builders-per-wave`, `--dry-run`, `--prs`, `--no-daemon`, `--claim-owned`, `--depends-on`, `--auto-stack`), edge cases, and validation rules. |
+| [`sweep-arguments.md`](sweep-arguments.md) | ~377 | **Always, first.** Mode A / Mode B / Mode C classification, the `all` build-everything sentinel, every flag (`--builders-per-wave`, `--dry-run`, `--prs`, `--no-daemon`, `--yes`, `--claim-owned`, `--depends-on`, `--auto-stack`), edge cases, and validation rules. |
 | [`sweep-examples.md`](sweep-examples.md) | ~155 | Optional. Worked invocation examples per mode, including the `all` sentinel and the Mode B clarification triggers. Never required to execute a run. |
 | [`sweep-execution-model.md`](sweep-execution-model.md) | ~462 | **Always, before dispatching any subagent.** The three CRITICAL dispatch invariants (only Builders parallelize / async-only dispatch / one level deep), model selection + escalation ladder, credit- and spend-limit fallbacks, the Doctor-cycle cap, model-cost experiment mode, and the `gh-cached` read wrapper. |
 | [`sweep-backend-detection.md`](sweep-backend-detection.md) | ~493 | **Always, at sweep start.** Step 0a (stable run id), Step 0b (peer-`/loom:sweep` detection), and Stage -1 (daemon-vs-subagent decision tree, the three probes, auto wave-size resolution, the daemon-dispatch path, smoke tests). |

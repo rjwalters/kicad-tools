@@ -25,6 +25,8 @@
 
 If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs after printing the plan. The dry-run gate is the single inviolable contract of `--dry-run`: no label edits, no `worktree.sh` invocation, no `gh pr create`, no `merge-pr.sh`, no daemon-state writes, no Task/subagent dispatch. This contract is uniform across Modes A, B, and C.
 
+**`--dry-run --yes` needs no special-case code.** This stage runs and EXITs *before* the mandatory confirmation-gate machinery (see "`--yes` (non-interactive confirmation)" in `sweep-arguments.md`) is ever reached, so `--dry-run` always wins regardless of whether `--yes` is also present — as long as `--yes` is parsed as an ordinary bare flag token, stripped before mode classification like every other flag, `--dry-run --yes` "just works" with zero bespoke interaction handling.
+
 ### Procedure — Modes A and B (issue-set)
 
 1. **Survey each candidate (read-only).** For every deduplicated, validated issue number `N` in the candidate list:
