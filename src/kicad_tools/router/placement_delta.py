@@ -436,10 +436,12 @@ def deltas_from_result(
     ``mirror``), a ``reorder_pins`` delta carrying the proposal's ``pad_map``
     / crossing counts is APPENDED after the primary delta -- same append,
     never replace, precedent as #4968: a caller that takes the first
-    applyable delta is unaffected, and ``_select_delta`` keeps skipping
-    ``reorder_pins`` regardless (report-only, no applicator).  This is what
-    gets the proposal into the ``proposed`` list of the
-    ``_placement_delta.json`` artifact even when rung 1 is ``mirror``.
+    applyable delta is unaffected.  This is what gets the proposal into the
+    ``proposed`` list of the ``_placement_delta.json`` artifact even when
+    rung 1 is ``mirror``.  Since Phase 2a (#5536) ``_select_delta`` APPLIES
+    such a delta when it carries a ``pad_map``; a ``reorder_pins`` delta
+    without one (no declared swap group) is still rationale-only and is
+    still skipped.
     """
     out: list[PlacementDelta] = []
     for diag in result.diagnoses:
@@ -500,10 +502,9 @@ def _reorder_pins_delta(
 ) -> PlacementDelta | None:
     """REORDER_PINS -> rationale-only, or a declared-swap-group proposal.
 
-    A pad-level re-map APPLICATOR does not exist yet, so the geometric move
-    is never executed -- but issue #5522 (Phase 1 of Epic #5511) adds a data
-    payload for it when the diagnosed bundle carries a declared
-    ``swap_group``: :attr:`StuckNetDiagnosis.swap_proposal` already computed
+    Issue #5522 (Phase 1 of Epic #5511) adds a data payload -- the pad-level
+    re-map Phase 2a (#5536) applies -- when the diagnosed bundle carries a
+    declared ``swap_group``: :attr:`StuckNetDiagnosis.swap_proposal` computed
     the crossing-minimising ``pad_map`` at the classifier level, so this
     builder only needs to copy it onto the delta.  Without a declared swap
     group ``diag.swap_proposal`` is ``None`` and this stays exactly the

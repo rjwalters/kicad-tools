@@ -59,16 +59,15 @@ kct check routed.kicad_pcb --mfr jlcpcb --net-class-map net_class_map.json
 Without `--net-class-map`, the rule short-circuits to zero violations
 (the Phase 2.5G no-op semantic — see guide 06).
 
-### Declaring a swap group (Issue #5522, Phase 1 of Epic #5511, report-only)
+### Declaring a swap group (Issue #5522 / #5536, Epic #5511)
 
 A `NetClassRouting` entry may also carry `swap_group: str | None` — a
 DECLARED (never inferred) name grouping nets whose pad binding to the
 *secondary* facing component MAY be permuted to reduce facing-row
-crossings. Narrower than `length_match_group`: a match group says
-"these nets must arrive length-matched" (may include a fixed-binding
-net, e.g. an unpaired DQS strobe); a swap group says "these bindings
-may be permuted." Nets without the key are fixed by omission — there
-is no top-level `swap_groups` block.
+crossings. Narrower than `length_match_group`: a match group says "these
+nets must arrive length-matched" (may include a fixed-binding net, e.g. an
+unpaired DQS strobe); a swap group says "these bindings may be permuted."
+Nets without the key are fixed by omission — no top-level `swap_groups`.
 
 ```json
 {"DQ0": {"name": "DDR_DATA_BYTE_0", "length_match_group": "DDR_DATA_BYTE_0", "swap_group": "DDR_BYTE0"}}
@@ -79,9 +78,10 @@ When `kct net-status --why --format json` (guide 05) auto-discovers a
 each affected net's diagnosis gains a `swap_proposal`: the
 crossing-minimising pad-to-net re-binding, plus before/after crossing
 counts for both declared group and wider match group (residual crossings
-against an undeclared sibling are reported, never hidden). Classification
-stays report-only; a *generator-owned* board can replay a reviewed
-proposal into its schematic + PCB (#5537 — board 07's fixture README).
+against an undeclared sibling are reported, never hidden). The placement-delta
+loop applies the proposal as a `reorder_pins` delta (#5536), keeping it only on
+a strict routed-net improvement; a *generator-owned* board replays a reviewed
+one into schematic + PCB (#5537).
 
 ## Putting it all together
 

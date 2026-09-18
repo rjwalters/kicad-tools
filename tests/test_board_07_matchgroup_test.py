@@ -1368,3 +1368,98 @@ class TestCommittedPlacementDeltaWriteBack:
         assert generate_design_mod.main() == 1
         assert "cannot read placement delta" in capsys.readouterr().err
         assert not (tmp_path / "matchgroup_test.kicad_pcb").exists()
+
+
+# =============================================================================
+# Issue #5536 (Epic #5511 Phase 2a): the DDR repro's reversed-geometry mode
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def ddr_repro_mod():
+    """Load ``boards/07-matchgroup-test/ddr_bundle_isolation_repro.py``."""
+    return _load_module("board_07_ddr_repro", BOARD_DIR / "ddr_bundle_isolation_repro.py")
+
+
+class TestDdrReversedGeometryMode:
+    """The reversed mode's proposal + application, without routing.
+
+    The reach measurement itself (9/11 before, 11/11 after) needs a real
+    negotiated routing pass and lives in the script; these tests pin the
+    parts that make that measurement meaningful and are cheap to re-check:
+    the geometry really is reversed, the proposal is declared-only, and
+    applying it lands the production rebinding on the router.
+    """
+
+    @staticmethod
+    def _by_ref(router, ref):
+        return sorted((pad for pad in router.all_pads if pad.ref == ref), key=lambda pad: pad.y)
+
+    def test_reversed_build_inverts_every_facing_pair(self, ddr_repro_mod):
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True, reversed_secondary=True, declare_swap_group=True
+        )
+        u1 = [pad.net_name for pad in self._by_ref(router, "U1")]
+        u2 = [pad.net_name for pad in self._by_ref(router, "U2")]
+        assert u1 == ddr_repro_mod.ROW_NETS
+        assert u2 == list(reversed(ddr_repro_mod.ROW_NETS))
+
+    def test_declared_proposal_zeroes_the_crossings(self, ddr_repro_mod):
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True, reversed_secondary=True, declare_swap_group=True
+        )
+        assignment, pad_map = ddr_repro_mod.propose_swap(router)
+        # 11 nets fully reversed == every pair crosses == C(11, 2).
+        assert assignment.crossings_before == 55
+        assert assignment.crossings_after == 0
+        # The middle pad of an odd-length reversal is already in place, so it
+        # is absent from the map (non-identity entries only).
+        assert len(pad_map) == len(ddr_repro_mod.ROW_NETS) - 1
+        assert pad_map["1"] == "DQ0"
+
+    def test_undeclared_group_is_never_swapped(self, ddr_repro_mod):
+        """Declared-only: no ``swap_group`` on the net class => no proposal."""
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True, reversed_secondary=True, declare_swap_group=False
+        )
+        assert ddr_repro_mod.propose_swap(router) is None
+
+    def test_applying_the_proposal_re_co_orients_the_rows(self, ddr_repro_mod):
+        router, net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True,
+            reversed_secondary=True,
+            declare_swap_group=True,
+            single_layer=True,
+            channel_walls=True,
+        )
+        _assignment, pad_map = ddr_repro_mod.propose_swap(router)
+        assert ddr_repro_mod.apply_swap(router, pad_map) == len(pad_map)
+
+        # Every net's two pads now sit at the same y -- no crossings left.
+        by_net: dict[int, set[float]] = {}
+        for pad in router.all_pads:
+            by_net.setdefault(pad.net, set()).add(round(pad.y, 6))
+        assert all(len(ys) == 1 for net, ys in by_net.items() if net in set(net_ids))
+        # ...and the router's own net membership followed the rebinding.
+        for net_id in net_ids:
+            assert len(router.nets[net_id]) == 2
+
+    def test_apply_swap_reinstalls_the_channel_walls(self, ddr_repro_mod):
+        """``_reset_for_new_trial`` drops obstacles -- the walls must come back."""
+        router, _net_ids = ddr_repro_mod.build_isolated_router(
+            enable_certificate=True,
+            reversed_secondary=True,
+            declare_swap_group=True,
+            single_layer=True,
+            channel_walls=True,
+        )
+        _assignment, pad_map = ddr_repro_mod.propose_swap(router)
+        ddr_repro_mod.apply_swap(router, pad_map)
+
+        from kicad_tools.router.layers import Layer
+
+        grid = router.grid
+        layer_index = grid.layer_to_index(Layer.F_CU.value)
+        # A point well inside the lower wall must still be blocked.
+        gx, gy = grid.world_to_grid(ddr_repro_mod.BOARD_W / 2.0, 5.0)
+        assert grid.cell_at(layer_index, gy, gx).blocked is True

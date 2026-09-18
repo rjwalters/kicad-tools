@@ -1398,11 +1398,14 @@ class NetClassRouting:
     :attr:`length_match_reference` are all keyed by net name, and a
     rename would silently break each of those.
 
-    Phase 1 (#5522) scope is report-only: :func:`~kicad_tools.router.
+    Phase 1 (#5522) was report-only: :func:`~kicad_tools.router.
     swap_groups.propose_swap_assignment` computes the crossing-minimising
     pad permutation and surfaces it as data (``kct net-status --why``,
-    the ``reorder_pins`` delta); nothing is applied.  A later phase of
-    Epic #5511 adds the applicator.
+    the ``reorder_pins`` delta).  Phase 2a (#5536) added the applicator:
+    a ``reorder_pins`` delta carrying that proposal's ``pad_map`` is now
+    applied by the placement-delta feedback loop (pads re-bound on the
+    PCB *and* on the router's own pad list), kept only on a strict
+    routed-net improvement, and otherwise reverted atomically.
     """
 
     def effective_intra_pair_clearance(self) -> float:
