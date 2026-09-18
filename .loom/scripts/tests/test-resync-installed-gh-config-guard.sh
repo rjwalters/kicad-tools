@@ -86,7 +86,10 @@ make_fixture() {
         "$repo" > "$repo/.loom/install-metadata.json"
 
     git -C "$repo" add -A >/dev/null 2>&1
-    git -C "$repo" commit -qm "fixture" >/dev/null 2>&1
+    # A routine install-subject commit -- this fixture isn't exercising the
+    # local-fix guard (#7864), and a non-routine "fixture" subject now trips
+    # it, blocking the --output run this test actually cares about.
+    git -C "$repo" commit -qm "chore: install Loom v0.0.0" >/dev/null 2>&1
 
     echo "$repo"
 }

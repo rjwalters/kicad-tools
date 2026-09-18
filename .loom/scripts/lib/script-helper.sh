@@ -8,6 +8,32 @@
 #       execs `loom-daemon <subcommand> "$@"`, resolving the binary through
 #       lib/locate-daemon-bin.sh. Never returns on success.
 #
+# WHICH BINARY A STUB EXECS (#8134)
+#
+# A stub needs the binary that IMPLEMENTS its subcommand, which is not always
+# the binary `$LOOM_DAEMON_BIN` names. That variable means "the daemon this
+# caller manages or probes" — the install whose version is compared, the
+# endpoint a watchdog round-trips, a deliberately fake binary in a test — and
+# a script that BOTH is a stub AND invokes a daemon has two different binaries
+# in play at once. `loom-daemon-watchdog.sh` is the first of those: its
+# retained suite pins `$LOOM_DAEMON_BIN` to a hanging mock to exercise the IPC
+# probe, and before this split the stub exec'd that mock as the watchdog and
+# never returned.
+#
+# So resolution here is:
+#
+#   1. $LOOM_DAEMON_SELF_BIN (loom_daemon_self_bin_override) — the explicit
+#      "this is my implementation" seam, for a test harness or an operator.
+#   2. Otherwise loom_locate_daemon_bin, UNCHANGED — $LOOM_DAEMON_BIN, then
+#      $PATH, then the machine-level install, then a repo-local build.
+#
+# Tier 2 is deliberately the whole existing chain and not the rest of
+# loom_resolve_self_daemon_bin's: in production the installed daemon IS the
+# implementation, `$LOOM_DAEMON_BIN` must keep pinning it (that is what
+# `loom update` and an operator debugging a stub both rely on), and hoisting a
+# checkout-local build above it would be a silent behaviour change of exactly
+# the kind #8134 rejected.
+#
 # This is the native replacement for `lib/loom-tools.sh`'s `run_loom_tool` on
 # the six script-helper entry points (`strip-ansi.sh`, `resolve-model.sh`,
 # `check-usage.sh`, `checkpoint.sh`, `sweep-experiment.sh`,
@@ -63,17 +89,21 @@ loom_exec_script_helper() {
 
     # shellcheck source=/dev/null
     source "$(dirname "${BASH_SOURCE[0]}")/locate-daemon-bin.sh"
-    bin="$(loom_locate_daemon_bin "$repo_root")"
+
+    # $LOOM_DAEMON_SELF_BIN first (the implementation), then the normal
+    # resolution completely unchanged — see "WHICH BINARY A STUB EXECS" above.
+    # Both tiers are defined in the resolver library, not here: this file stays
+    # glue, and every "which loom-daemon?" question is answered in one place.
+    bin="$(loom_daemon_self_bin_override || loom_locate_daemon_bin "$repo_root")"
 
     if [[ -n "$bin" ]]; then
         exec "$bin" "$subcommand" "$@"
     fi
 
-    echo "[ERROR] loom-daemon not found (needed for '$subcommand')." >&2
-    echo "" >&2
+    printf '%s\n\n' "[ERROR] loom-daemon not found (needed for '$subcommand')." >&2
     echo "This script is a thin stub over the native \`loom-daemon $subcommand\`" >&2
     echo "subcommand (issue #4275). Provide a binary by either:" >&2
-    echo "  - setting LOOM_DAEMON_BIN=/path/to/loom-daemon, or" >&2
+    echo "  - setting LOOM_DAEMON_SELF_BIN=/path/to/loom-daemon (the binary that IMPLEMENTS this subcommand, checked first) or LOOM_DAEMON_BIN=/path/to/loom-daemon, or" >&2
     if [[ -n "$repo_root" && -d "$repo_root/loom-daemon" ]]; then
         echo "  - building it: cargo build --release --manifest-path $repo_root/loom-daemon/Cargo.toml" >&2
     else

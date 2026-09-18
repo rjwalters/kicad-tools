@@ -68,7 +68,6 @@ test-check-verified-corrections-preserved.sh
 test-claim-staleness.sh
 test-classify-ac-verification.sh
 test-classify-capacity-defer.sh
-test-claude-wrapper-retry.sh
 test-classify-error.sh
 test-clean-stale-binary.sh
 test-clean-stale-building-labels.sh
@@ -148,6 +147,7 @@ test-memory-budget.sh
 test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
+test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-auto-reconcile.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-closed-issue-cleanup.sh
@@ -186,6 +186,7 @@ test-require-complexity-marker.sh
 test-resolve-tier-model.sh
 test-resync-installed-gh-config-guard.sh
 test-resync-installed-guard-check.sh
+test-resync-installed-local-fix-guard.sh
 test-resync-installed.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
@@ -244,10 +245,12 @@ tests/hooks/test-guard-destructive-dispatcher.sh
 tests/hooks/test-guard-destructive-cargo-and-perf.sh
 tests/hooks/test-guard-destructive-category-opt-ins.sh
 tests/hooks/test-guard-destructive-core.sh
+tests/hooks/test-guard-destructive-cp-mv-continuation.sh
 tests/hooks/test-guard-destructive-decision-log.sh
 tests/hooks/test-guard-destructive-force-scope.sh
 tests/hooks/test-guard-destructive-masking.sh
 tests/hooks/test-guard-destructive-matching-precision.sh
+tests/hooks/test-guard-destructive-mkdir-confinement.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
@@ -281,6 +284,7 @@ tests/install/test-lint-ignore-configs.sh
 tests/install/test-manifest-freshness-after-hook-wiring.sh
 tests/install/test-pnpm-runnable-check.sh
 tests/install/test-provision-daemon.sh
+tests/install/test-setup-branch-protection-required-checks.sh
 tests/install/test-setup-repository-settings-merge-method.sh
 tests/install/test-uninstall-clean-preserves-unmanaged-hooks.sh
 tests/install/test-uninstall-labels-block.sh

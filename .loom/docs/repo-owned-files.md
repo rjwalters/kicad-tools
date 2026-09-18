@@ -94,6 +94,33 @@ never removes it.
   you need a durable fork, give it a name Loom does not ship and wire that name
   up instead.
 
+## Before you hand-edit an installed file, stop
+
+An agent (Builder, Doctor, or otherwise) that finds a bug in a file under
+`.loom/hooks|scripts|roles|docs|bin/` or `.claude/commands/loom/` — in *any*
+repo, not just Loom's own source — has exactly two valid moves, never a
+third:
+
+1. **Fix it upstream**: open a PR against `rjwalters/loom`'s `defaults/` tree.
+   The fix then returns to this repo through the normal `chore: resync
+   installed Loom surfaces` flow.
+2. **Pin it**: if the change is a deliberate, repo-specific override that
+   should never resync from upstream, add its path to `.loom/resync-ignore`
+   (see "Declaring a file repo-owned" above) so the divergence is explicit and
+   durable.
+
+**Never silently hand-edit the installed copy and move on.** `resync-installed.sh`
+does now warn and block instead of silently reverting an unpinned local
+divergence it can detect (its own "LOCAL-DIVERGENCE PROTECTION" header) — but
+that is a safety net for the one shape it can recognize, not a substitute for
+either move above, and it is not foolproof (a pure-addition upstream change,
+or a resync commit that happens to land on top, both slip past it cleanly).
+`2AMLogic/sky130-modexp` hit this the hard way: an installed hook fix got
+silently reverted by a resync, was hand-reapplied in place, got reverted
+again — four commits repeating that cycle — before the repo gave up and
+blocked its own resync outright rather than keep losing the fix. Upstreaming
+or pinning the first time avoids the whole loop.
+
 ## Why not just delete anything unrecognized?
 
 That is what the sweep used to do, and it deleted a consumer repo's own

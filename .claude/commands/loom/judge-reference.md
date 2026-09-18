@@ -231,16 +231,7 @@ Or when recommending a missing tool:
 | No test framework detected | Note absence in evaluation; check if project has tests at all |
 | PR touches shared utilities | Scoped tools may miss downstream tests — note this risk in evaluation |
 
-### Why Scoped Test Execution Matters
-
-| Metric | Full Suite | Scoped |
-|--------|-----------|--------|
-| Typical duration | 2-10 minutes | 10-60 seconds |
-| Tests executed | All | Only affected |
-| Confidence | Maximum | High (with caveats) |
-| Use case | Config changes, first run | Focused code changes |
-
-**Key principle**: Scoped execution is an optimization, not a replacement for CI. The full test suite still runs in CI (step 8 verifies CI status). Scoped execution gives the Judge faster local feedback during evaluation.
+**Key principle**: Scoped execution is an optimization, not a replacement for CI. The full test suite still runs in CI (step 8 verifies CI status). Scoped execution gives the Judge faster local feedback during evaluation — see [`judge-reference-rationale.md`](../../../.loom/docs/judge-reference-rationale.md) for the full duration/confidence comparison.
 
 ---
 

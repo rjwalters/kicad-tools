@@ -504,49 +504,13 @@ fi
 locate_daemon_bin() { loom_locate_daemon_bin "$1"; }
 
 # resolve_self_daemon_bin -- the loom-daemon that IMPLEMENTS this script's
-# ported logic, which is NOT the same binary as locate_daemon_bin's.
-#
-# The distinction is the whole point and it is easy to get wrong (#7977 caught
-# it in the test fixture): `locate_daemon_bin` / $LOOM_DAEMON_BIN name the
-# INSTALLED daemon this script MANAGES -- the one whose version is compared,
-# which may be an old release that has no `release-resolve` subcommand at all,
-# and which during a test is a deliberately fake binary. Exec'ing a subcommand
-# on that is a category error.
-#
-# Resolution order, most explicit first:
-#   1. $LOOM_DAEMON_SELF_BIN -- must be executable. The seam a test or an
-#      operator uses to name the implementation directly.
-#   2. A build in this checkout ($CARGO_TARGET_DIR honored, release then debug).
-#   3. `loom-daemon` on PATH.
-# Echoes "" when none resolves; the caller then answers in the mode's own
-# contract rather than failing silently.
-resolve_self_daemon_bin() {
-    if [[ -n "${LOOM_DAEMON_SELF_BIN:-}" && -x "${LOOM_DAEMON_SELF_BIN}" ]]; then
-        printf '%s\n' "$LOOM_DAEMON_SELF_BIN"
-        return 0
-    fi
-    # Script-relative FIRST among the build candidates: this file lives at
-    # <checkout>/defaults/scripts/cli/ (or <consumer>/.loom/scripts/cli/), so
-    # the build that implements the logic THIS COPY delegates to is the one in
-    # the checkout this copy came from — not whatever $REPO_ROOT happens to be
-    # (in a test fixture, $REPO_ROOT is the fixture, which has no build at all).
-    local self_root
-    self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)" || self_root=""
-    local base candidate
-    for base in "${CARGO_TARGET_DIR:-}" "${self_root:+$self_root/target}" \
-                "$REPO_ROOT/target" "$REPO_ROOT/loom-daemon/target"; do
-        [[ -n "$base" ]] || continue
-        for candidate in "$base/release/loom-daemon" "$base/debug/loom-daemon"; do
-            if [[ -x "$candidate" ]]; then
-                printf '%s\n' "$candidate"
-                return 0
-            fi
-        done
-    done
-    candidate="$(command -v loom-daemon 2>/dev/null || true)"
-    [[ -n "$candidate" && -x "$candidate" ]] && printf '%s\n' "$candidate"
-    return 0
-}
+# ported logic, which is NOT the same binary as locate_daemon_bin's. The
+# definition moved into lib/locate-daemon-bin.sh with #8037, when
+# claude-wrapper.sh became the second caller needing that distinction; see
+# `loom_resolve_self_daemon_bin` there for the resolution order and the #7977
+# category error it exists to prevent. Wrapped under the local name this
+# script's call sites already use, the same way locate_daemon_bin is.
+resolve_self_daemon_bin() { loom_resolve_self_daemon_bin; }
 
 # Extract the short commit from `loom-daemon --version` output, e.g.
 # "loom-daemon 0.15.0 (commit ab12cd3, built 2026-07-26T12:00:00Z)" -> ab12cd3

@@ -74,9 +74,14 @@ make_fixture() {
     printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "old",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
         "$repo" > "$repo/.loom/install-metadata.json"
 
-    # A real commit so loom_commit re-stamps to an actual short sha.
+    # A real commit so loom_commit re-stamps to an actual short sha. #7864:
+    # the message deliberately matches resync-installed.sh's local-divergence
+    # protection "safe lineage" pattern (RESYNC_COMMIT_SUBJECT_RE) -- this
+    # fixture's hooks/guard.sh drift (OLD -> A below) must resync cleanly for
+    # this file's guard-hook-install-check assertions to hold; a non-matching
+    # message would make that drift look like a local fix and BLOCK it.
     git -C "$repo" add -A >/dev/null 2>&1
-    git -C "$repo" commit -qm "fixture" >/dev/null 2>&1
+    git -C "$repo" commit -qm "chore: install Loom v0.0.0" >/dev/null 2>&1
 
     echo "$repo"
 }
