@@ -1575,8 +1575,21 @@ function has_live_subst(str,    i, c, bs) {
 # `"$(a|halt)"` keeps its separators ACTIVE so the genuine protection is intact.
 # The token VALUES are preserved verbatim (unlike a redaction approach), so
 # extract_rm_targets still sees the real `rm` targets. Best-effort like
-# strip_literal_text(): backslash-escaped quotes and an unterminated quote fall
-# back to the old separator-active behaviour, never widening a deny into an allow.
+# strip_literal_text(): an unterminated quote falls back to the old
+# separator-active behaviour, never widening a deny into an allow.
+#
+# An UNQUOTED backslash-escaped quote (`\"`, `\'`) is handled explicitly as of
+# #8025 — it is a LITERAL quote character that opens no span, so both bytes are
+# consumed and emitted and the separators after it stay live. Until #8025 this
+# comment claimed such a quote "fell back to the old separator-active
+# behaviour, never widening a deny into an allow"; that second clause was
+# FALSE, and measurably so. The escaped quote entered the quoted-span branch
+# below, which scanned forward to the next same-type quote character anywhere
+# later in the command and copied the whole stretch verbatim as inert data —
+# so `echo foo\"bar; cp /tmp/s.txt "<main-checkout>/pwned.txt"` lost its `;`,
+# the `cp` never reached toks[1], and a write-confinement DENY became a silent
+# ALLOW (the control without the escaped quote denied). Do not restate a
+# safety property here without a measurement behind it.
 #
 # UNQUOTED BACKSLASH-NEWLINE LINE CONTINUATION (ported from sky130-modexp
 # fdced41, #7945): every caller downstream of qsplit() ultimately does
@@ -1634,20 +1647,22 @@ function has_live_subst(str,    i, c, bs) {
 # real continuation: one statement) still IS. This is the same even/odd
 # parity rule has_live_subst() (#7498) applies a few dozen lines above.
 #
-# KNOWN LIMITATION (unchanged by #7978, and PRE-EXISTING -- present
-# identically before the continuation branch was introduced): qsplit() still
-# has no escape tracking for characters OTHER than a backslash before a
-# backslash or a newline. Two consequences, in opposite safety directions:
+# KNOWN LIMITATION (narrowed by #8025): qsplit() has escape tracking for a
+# backslash before a backslash (#7978), a newline (#7945) and a quote
+# character (#8025) -- and for nothing else. Two consequences remain, in
+# opposite safety directions:
 #   * An escaped separator (`\;`, `\|`, `\&`) is still split on, though the
 #     real shell treats it as a literal character. Over-splitting yields MORE
 #     command words to check -- fail-closed, at worst a false positive.
-#   * An escaped QUOTE (`\"`, `\'`) still enters the quoted-span branch as if
-#     it opened a real span, so separators up to the next same-type quote are
-#     treated as inert. That direction CAN hide a real statement boundary,
-#     and a probe against both this file and its pre-#7945 ancestor confirms
-#     the resulting allow is identical in both -- so it is a standing gap in
-#     this helper, tracked separately, NOT something this branch introduced
-#     or is entitled to claim it closes.
+#   * INSIDE a quoted span, the forward scan for the closing quote still
+#     matches on the quote character alone: a `"foo\"bar"` ends its span at
+#     the ESCAPED quote rather than the real one, so the trailing `bar"`
+#     re-enters the loop as unquoted text. That direction over-splits at the
+#     escaped quote (fail-closed there) but the stray trailing quote can then
+#     open a span of its own, which can suppress a later separator -- a
+#     standing gap in this helper, tracked in #8166, NOT something the #8025
+#     branch (which only ever fires OUTSIDE a span) introduced or is entitled
+#     to claim it closes.
 # Do not restate either of these as "harmless": state the direction.
 #
 # Shared as a single awk source string so the three parsers cannot drift.
@@ -1764,6 +1779,42 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom) {
             # even/odd backslash-parity scan has_live_subst() (line ~1539,
             # #7498) already performs for the same reason: only a backslash
             # preceded by an EVEN number of backslashes is itself live.
+            out = out c substr(s, i + 1, 1)
+            i += 2
+            continue
+        }
+        if (c == "\\" && i < n && (substr(s, i + 1, 1) == DQ || substr(s, i + 1, 1) == SQ)) {
+            # ESCAPED QUOTE (#8025 -- MUST stay BELOW the `\\` pair branch
+            # directly above, so backslash parity is already settled by the
+            # time this is reached). Only a backslash with EVEN parity behind
+            # it gets here, so it really is the shell'"'"'s escape character and
+            # the quote after it is a LITERAL quote character that opens
+            # NOTHING.
+            #
+            # Emit BOTH bytes and consume BOTH, so that quote character can
+            # never be re-examined on the next iteration by the DQ/SQ branch
+            # at the top of this loop. Without this, an unquoted `\"` / `\'"'"'`
+            # opened a PHANTOM quoted span running to the next same-type
+            # quote character anywhere later in the command, and every
+            # `;`/`&`/`|` in that stretch was copied verbatim as inert quoted
+            # data instead of being split on -- deleting a real statement
+            # boundary and hiding the following statement'"'"'s command word from
+            # toks[1], which is exactly what gates the cp / mv / sed -i /
+            # mkdir branches of extract_write_targets(). Same fail-OPEN
+            # direction as the #7978 parity bug (a live worktree-write-
+            # confinement bypass), different and independent cause: that one
+            # was the continuation branch, this one the quote branch.
+            #
+            # Direction of this branch, stated explicitly: it can only ever
+            # ADD segment boundaries the real shell also has (an escaped
+            # quote is not a quote, so the separators after it are live) --
+            # never remove one. It therefore cannot hide a command word from
+            # toks[1]; at worst it surfaces one more command word to check.
+            #
+            # The token TEXT is preserved byte-for-byte (both bytes are
+            # emitted, nothing is elided), so qsplit()'"'"'s verbatim-value
+            # contract -- depended on by extract_rm_targets()/
+            # parse_force_ops() -- is unchanged.
             out = out c substr(s, i + 1, 1)
             i += 2
             continue
@@ -2469,13 +2520,28 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc) {
 # always split into the SAME number of tokens at the SAME boundaries, because
 # mask_gt() only ever changes `>` bytes, never whitespace-ness.
 #
-# Deliberately does NOT model backslash-escaped quotes or attempt look-ahead
-# for a terminating quote — same simplification qsplit()/mask_gt() already
-# accept (see mask_gt()'s comment above for the accepted-risk rationale). An
-# unterminated quote just runs to the end of the string in that quote state;
-# never crashes, never mis-indexes, and never widens a deny into an allow
-# (the SAME fallback direction qsplit()'s own unterminated-quote handling
-# already uses, #4926).
+# A BACKSLASH-ESCAPED QUOTE IS NOT A QUOTE (#8025). mask_ws() tracks the
+# escape exactly as mask_gt() already does (#6472): a `\` outside single-quoted
+# mode makes the NEXT byte literal data, so `\"` / `\'` never toggles `mode`.
+# This is a correctness requirement, not a refinement — mask_gt() runs on
+# mask_ws()'s output and the two are required (see mask_gt()'s own header) to
+# reach the SAME quote-state conclusion at every byte position, which they
+# could not do while only one of them modelled the escape. It is also what
+# makes qsplit()'s #8025 fix observable: qsplit() restoring a real statement
+# boundary after an unquoted `\"` achieves nothing if mask_ws() then treats
+# the rest of the command as one quoted span and masks away the whitespace
+# that separates the next statement's command word from its arguments (the
+# tokens that feed toks[1], which gates every cp/mv/sed -i/mkdir write idiom).
+# Direction: this only ever ENDS a phantom span earlier, so it can only split
+# a token that should have been split — it never merges tokens, never hides a
+# command word, and so never widens a deny into an allow.
+#
+# Still deliberately NOT modelled: look-ahead for a terminating quote — same
+# simplification qsplit()/mask_gt() accept (see mask_gt()'s comment above for
+# the accepted-risk rationale). An unterminated quote just runs to the end of
+# the string in that quote state; never crashes, never mis-indexes, and never
+# widens a deny into an allow (the SAME fallback direction qsplit()'s own
+# unterminated-quote handling already uses, #4926).
 #
 # This is scoped ONLY to extract_write_targets() -- qsplit()'s OWN
 # verbatim-quote-preservation contract (depended on by extract_rm_targets() /
@@ -2485,7 +2551,7 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc) {
 # calls the other.
 # =============================================================================
 _MASKWS_AWK='
-function mask_ws(s,   out, n, i, c, mode, SQ, DQ, SPMASK, TABMASK) {
+function mask_ws(s,   out, n, i, c, mode, SQ, DQ, SPMASK, TABMASK, esc) {
     SQ = sprintf("%c", 39)    # single quote
     DQ = sprintf("%c", 34)    # double quote
     SPMASK = sprintf("%c", 2)    # STX -- placeholder for a quoted space
@@ -2494,8 +2560,42 @@ function mask_ws(s,   out, n, i, c, mode, SQ, DQ, SPMASK, TABMASK) {
     n = length(s)
     i = 1
     mode = 0   # 0 = unquoted, 1 = single-quoted, 2 = double-quoted
+    esc = 0    # previous byte was an unescaped backslash (mode 0/2 only, #8025)
     while (i <= n) {
         c = substr(s, i, 1)
+        if (esc) {
+            # This byte is backslash-escaped literal data -- never a quote
+            # toggle (#8025). Byte-for-byte the same esc branch mask_gt()
+            # carries (#6472), so the two passes reach the same quote-state
+            # conclusion at every position, which is what the #4934 header
+            # above requires of them.
+            #
+            # Whitespace is STILL masked when this escaped byte sits INSIDE a
+            # quoted span, for the same reason every other byte there is: it
+            # is one shell word with its neighbours, so splitting on it would
+            # break the token. An escaped space OUTSIDE any quote is left
+            # unmasked, exactly as before this change -- modelling `a\ b` as
+            # one word is a separate behavioural question this fix
+            # deliberately does not open.
+            esc = 0
+            if (mode != 0 && c == " ") { out = out SPMASK; i++; continue }
+            if (mode != 0 && c == "\t") { out = out TABMASK; i++; continue }
+            out = out c
+            i++
+            continue
+        }
+        if (c == "\\" && mode != 1) {
+            # Single-quoted mode (mode == 1) never reaches here: a backslash
+            # has no escaping power inside single quotes in real bash, so it
+            # must stay a plain literal byte there and must never suppress
+            # the next quote-close check -- nor disturb the #6968
+            # embedded-apostrophe idiom detected in the mode==1 branch below.
+            # mask_gt() states and implements this identically.
+            esc = 1
+            out = out c
+            i++
+            continue
+        }
         if (mode == 0) {
             if (c == SQ) { mode = 1; out = out c; i++; continue }
             if (c == DQ) { mode = 2; out = out c; i++; continue }

@@ -818,6 +818,14 @@ what feeds the public fleet feed. Loom is the producer:
     > across 76 published completions, every one of them `tokens: null`. Source 2
     > exists because of this; do not diagnose a `tokens: null` feed record by
     > looking for missing rollup rows.
+    >
+    > **Amended by #8059**: `resource_usage` now has a dispatch-path writer —
+    > `loom-daemon ingest-transcripts`, plus an opt-in periodic daemon pass
+    > (`LOOM_TRANSCRIPT_INGEST=1`), which ingests these same transcripts (see
+    > [`transcript-token-ingest.md`](transcript-token-ingest.md)). Source 1 is
+    > unaffected either way: it is `get_cost_by_issue`, whose join also needs
+    > `prompt_github`, which ingestion deliberately does not write. Source 2
+    > remains this feed's real source.
 
     The transcript source locates a sweep's session by content, since nothing
     records a sweep-id → session-uuid mapping: a sweep runs `claude -p

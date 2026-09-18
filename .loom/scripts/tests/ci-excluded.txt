@@ -27,6 +27,7 @@ test-detect-startable-subset.sh  Needs a built loom-daemon; wired in the "Native
 test-dep-recheck-fingerprint.sh  Needs a built loom-daemon; wired in the "Native Port Suites" job (#7961), which builds one first.
 test-claude-wrapper-retry.sh  Needs a built loom-daemon since #8037 routed claude-wrapper.sh's six classifiers through `loom-daemon retry-classify`; wired in the "Native Port Suites" job, which builds one first. Its 44 assertions are unchanged from #8032 — they are the equivalence proof for that port.
 test-loom-daemon-update-resolve-json.sh  Needs a built loom-daemon since #7977 routed --resolve-json through it; wired in the "Native Port Suites" job, which builds one first. Split from test-loom-daemon-update.sh rather than moving it: the parent is one of the five host-mutating suites LIVE_DAEMON_GUARDED_SUITES owns, and that membership is pinned as a literal in test-run-ci-suites-daemon-guard.sh.
+test-loom-daemon-update-fetch.sh  Needs a built loom-daemon since #8028 routed fetch_and_verify_artifact() through `loom-daemon release-fetch`; wired in the "Native Port Suites" job, which builds one first. Split from test-loom-daemon-update.sh for the same reason as its resolve-json sibling: the parent is one of the five host-mutating suites LIVE_DAEMON_GUARDED_SUITES owns, and that membership is pinned as a literal in test-run-ci-suites-daemon-guard.sh.
 
 # scripts/ (repo root, top-level only) — since #5278. Each of these already
 # runs as its own direct step in ci.yml and/or build-gate.sh; excluded here
