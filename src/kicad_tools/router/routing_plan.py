@@ -395,8 +395,9 @@ class RoutingPlan:
             # ``capacity`` / ``layer_capacity`` / ``blockage`` are symmetric
             # across the pair by construction: ``RegionGraph._build_edges``
             # builds both directed edges from the same ``edge_capacity`` /
-            # ``layer_cap``, and ``set_obstacles`` recomputes both from the
-            # same (order-independent) region-blockage average.  Only the
+            # ``layer_cap``, and ``register_obstacles`` (via
+            # ``_accumulate_edge_blockage``) recomputes both from the same
+            # (order-independent) region-blockage average.  Only the
             # utilization-derived fields differ per direction, so only those
             # are combined.
             reverse_utilization = reverse.utilization if reverse is not None else 0

@@ -125,13 +125,18 @@ built -- absent, not `null`, otherwise):
     | `single_pad` | Filtered out before the global pass as trivially-connected (fewer than 2 pads). |
     | `no_endpoints` | Passed to the global pass as a candidate, but fewer than two of its pads resolved to a position, so `GlobalRouter.route_all` silently dropped it (neither assigned nor failed). |
 - **`edges`** -- one row per *undirected* region-graph edge that carries
-  at least one net (edges with zero demand are omitted). `capacity` /
-  `demand` / `overflow` are read from the same directed `RegionEdge`
-  object `RegionGraph.get_total_overflow()` / `get_overflowed_edges()`
-  count internally (the edge whose `source` is the smaller region ID) --
-  see the docstring in `routing_plan.py` for why this makes the two
-  totals derivable by construction. `layers` gives the same
-  capacity/demand split per layer index (empty `{}` on a single-layer
+  at least one net (edges with zero demand are omitted). Each pair is
+  backed by two directed `RegionEdge` objects, and `update_utilization()`
+  only bumps the one matching a corridor's traversal direction, so
+  `demand` / `overflow` sum **both** directions -- matching
+  `RegionGraph.get_total_overflow()` / `get_overflowed_edges()` no matter
+  which direction carried the traffic (issue #5544). `overflow` is
+  therefore the per-direction sum of `max(0, utilization - capacity)`,
+  **not** `max(0, demand - capacity)`. `capacity` / `blockage_mm` are read
+  from the ascending edge (the one whose `source` is the smaller region
+  ID) alone, because they are symmetric across the pair by construction.
+  `layers` gives the same capacity/demand split per layer index (`demand`
+  likewise summed across both directions; empty `{}` on a single-layer
   graph).
 - **`overflow_report`** -- named `overflow_report`, never "certificate":
   that word is owned by `monotone_certificate.py`'s planarity proof.
