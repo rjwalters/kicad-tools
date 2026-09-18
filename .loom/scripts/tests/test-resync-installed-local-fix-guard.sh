@@ -334,12 +334,14 @@ for SUBJECT in \
     '[skip ci] chore(loom): Install Loom 0.19.60 orchestration framework (#123)' \
     'chore: resync installed Loom surfaces with a local fix (#123)' \
     'chore: install Loom v0.19.60 (#123)' \
-    'chore: install Loom v1 and also revert the guard fix'; do
+    'chore: install Loom v1 and also revert the guard fix' \
+    'chore: install Loom v1 plus my hand fix'; do
     REPO9="$(make_fixture)"
     git -C "$REPO9" commit --amend -qm "$SUBJECT"
     OUT="$(cd "$REPO9" && bash "$SCRIPT" 2>&1)"
     RC=$?
-    if [[ "$SUBJECT" == *'with a local fix'* || "$SUBJECT" == *'and also revert'* ]]; then
+    if [[ "$SUBJECT" == *'with a local fix'* || "$SUBJECT" == *'and also revert'* \
+        || "$SUBJECT" == *'plus my hand fix'* ]]; then
         if [[ $RC -eq 1 ]] && [[ "$(cat "$REPO9/.loom/hooks/guard.sh")" == OLD ]]; then
             pass "non-routine suffixed subject retains its local content: $SUBJECT"
         else
@@ -351,6 +353,100 @@ for SUBJECT in \
         fail "routine squash subject falsely blocks update: $SUBJECT: $OUT"
     fi
 done
+
+# --- the removed-line count must not depend on the ambient locale (#8165) ----
+#
+# removed_line_count() sorts both of comm's inputs with LC_ALL=C, but used to
+# run `comm` itself in the ambient locale. GNU comm validates input order
+# against the CURRENT collation, so under a locale that collates differently
+# from C (en_US.UTF-8 folds case and ignores punctuation; C is byte order) it
+# rejected the C-sorted streams as "not in sorted order" and emitted a garbage
+# line set -- over-counting (a pure-addition update spuriously BLOCKED, only
+# recoverable with --force) or under-counting (a silent fail-open back to the
+# pre-#7864 revert-the-local-fix behaviour). The verdict must be identical in
+# every locale.
+echo "Test group 10: the local-divergence verdict is locale-invariant (#8165)"
+
+# Deterministic half: assert the script hands `comm` LC_ALL=C no matter what
+# the ambient LC_ALL says. This runs everywhere -- it does not need any
+# particular locale to be installed, only the env var to be set, since the
+# shim reads LC_ALL rather than collating with it.
+export LOOM_TEST_REAL_COMM
+LOOM_TEST_REAL_COMM="$(command -v comm)"
+mkdir -p "$WORKDIR/comm-bin"
+cat > "$WORKDIR/comm-bin/comm" <<'SH'
+#!/usr/bin/env bash
+if [[ "${LC_ALL:-unset}" != "C" ]]; then
+    echo "TEST_COMM_BAD_LOCALE=${LC_ALL:-unset}" >&2
+    exit 90
+fi
+exec "$LOOM_TEST_REAL_COMM" "$@"
+SH
+chmod +x "$WORKDIR/comm-bin/comm"
+REPO10="$(make_fixture)"
+printf 'a\nB\nLOCAL-FIX\n' > "$REPO10/.loom/hooks/guard.sh"
+git -C "$REPO10" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO10" commit -qm "fix(guard): a direct local fix" >/dev/null 2>&1
+printf 'a\nB\n' > "$REPO10/defaults/hooks/guard.sh"
+OUT="$(cd "$REPO10" && PATH="$WORKDIR/comm-bin:$PATH" LC_ALL=en_US.UTF-8 bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" && ! grep -q "TEST_COMM_BAD_LOCALE" <<<"$OUT"; then
+    pass "(#8165) comm runs under LC_ALL=C even when the caller's LC_ALL is not C"
+else
+    fail "(#8165) comm did not run under LC_ALL=C with a non-C ambient locale (rc=$RC); out=$OUT"
+fi
+
+# Real-locale half: run the guard end-to-end under an installed locale whose
+# collation actually differs from C, and require the same verdicts as under C.
+# Skipped (not failed) on a host with no such locale installed -- the shim
+# half above still covers the mechanism there.
+NONC_LOCALE=""
+while read -r CAND; do
+    [[ -n "$CAND" ]] || continue
+    PROBE="$(printf 'B\na\n' | LC_ALL="$CAND" sort 2>/dev/null)"
+    if [[ "${PROBE%%$'\n'*}" == "a" ]]; then
+        NONC_LOCALE="$CAND"
+        break
+    fi
+done < <(locale -a 2>/dev/null)
+
+if [[ -z "$NONC_LOCALE" ]]; then
+    echo "  SKIP: no installed locale collates differently from C on this host"
+else
+    echo "  (non-C collating locale: $NONC_LOCALE)"
+    for LOC in C "$NONC_LOCALE"; do
+        # (a) pure addition on a diverged file: removed=0 -> must apply. This
+        #     is the shape the unpinned comm mis-scored as removed=1.
+        REPO10A="$(make_fixture)"
+        printf 'a\nB\n' > "$REPO10A/.loom/hooks/guard.sh"
+        git -C "$REPO10A" add .loom/hooks/guard.sh >/dev/null 2>&1
+        git -C "$REPO10A" commit -qm "fix(guard): a direct local fix" >/dev/null 2>&1
+        printf 'a\nB\nNEW\n' > "$REPO10A/defaults/hooks/guard.sh"
+        OUT="$(cd "$REPO10A" && LC_ALL="$LOC" bash "$SCRIPT" 2>&1)"
+        RC=$?
+        if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+            && [[ "$(cat "$REPO10A/.loom/hooks/guard.sh")" == $'a\nB\nNEW' ]]; then
+            pass "(#8165) LC_ALL=$LOC: a pure-addition update still applies (no phantom removal)"
+        else
+            fail "(#8165) LC_ALL=$LOC: a pure-addition update was spuriously blocked (rc=$RC); out=$OUT"
+        fi
+
+        # (b) a real removal on the same content: removed>0 -> must block.
+        REPO10B="$(make_fixture)"
+        printf 'a\nB\nLOCAL-FIX\n' > "$REPO10B/.loom/hooks/guard.sh"
+        git -C "$REPO10B" add .loom/hooks/guard.sh >/dev/null 2>&1
+        git -C "$REPO10B" commit -qm "fix(guard): a direct local fix" >/dev/null 2>&1
+        printf 'a\nB\n' > "$REPO10B/defaults/hooks/guard.sh"
+        OUT="$(cd "$REPO10B" && LC_ALL="$LOC" bash "$SCRIPT" 2>&1)"
+        RC=$?
+        if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+            && [[ "$(cat "$REPO10B/.loom/hooks/guard.sh")" == $'a\nB\nLOCAL-FIX' ]]; then
+            pass "(#8165) LC_ALL=$LOC: a real removal is still blocked"
+        else
+            fail "(#8165) LC_ALL=$LOC: a real removal was not blocked (rc=$RC); out=$OUT"
+        fi
+    done
+fi
 
 # --- summary -----------------------------------------------------------------
 echo ""

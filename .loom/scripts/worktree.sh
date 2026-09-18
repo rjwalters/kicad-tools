@@ -120,6 +120,15 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-race-rescue.s
 # shellcheck source=lib/worktree-forge-pr-check.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-forge-pr-check.sh"
 
+# loom-daemon binary discovery, for the claim-lease step near the bottom of
+# this file (#8193). Sourced with the diagnostic libs' defensive shape, not the
+# forge-check's loud one: a partially-resynced .loom/ must degrade to "no
+# lease", never to a `source` failure that breaks worktree creation outright.
+# When the source fails, `loom_resolve_self_daemon_bin` is simply undefined and
+# the call site's own `|| true` swallows the resulting 127.
+# shellcheck source=lib/locate-daemon-bin.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/locate-daemon-bin.sh" 2>/dev/null || true
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -1562,18 +1571,13 @@ disable_sparse_checkout() {
     git -C "$wt_path" checkout >/dev/null 2>&1 || true
 }
 
-# Check whether a worktree currently has sparse-checkout enabled (per-worktree
-# config). Echoes "true" or "false".
-is_sparse_enabled() {
-    local wt_path="$1"
-    local val
-    val=$(git -C "$wt_path" config --get core.sparseCheckout 2>/dev/null || echo "")
-    if [[ "$val" == "true" ]]; then
-        echo "true"
-    else
-        echo "false"
-    fi
-}
+# (`is_sparse_enabled` lived here and had no caller anywhere in the tree — not
+# in this script, not in any sibling, not in any test. Removed in #8193 to pay
+# for the lease call site below: `defaults/scripts/` is the shell budget's
+# `contract` (portable) pool, whose growth `check_against_rev` refuses with no
+# `Shell-Budget-Growth:` override available, so new reach into loom-daemon here
+# has to be funded by retiring portable lines. `git log -S is_sparse_enabled`
+# has it if it is ever wanted back.)
 
 # Log the realized disk footprint of a worktree (human-readable only).
 log_worktree_size() {
@@ -2283,6 +2287,32 @@ WORKTREE_ROOT_DIR="$(loom_worktree_root "$WORKTREE_REPO_ROOT")"
 # external override root (e.g. /Volumes/Stripe/<repo>) needs its parents made.
 mkdir -p "$WORKTREE_ROOT_DIR" 2>/dev/null || true
 WORKTREE_PATH="$WORKTREE_ROOT_DIR/issue-$ISSUE_NUMBER"
+
+# --- Lease this claim's liveness (#8193) -------------------------------------
+# An in-session Task-tool Builder claims `loom:building` and then publishes no
+# liveness record of any kind: `SweepRegistry::dispatch` never ran for it, so
+# there is no journal entry and no `write_lease_comment` (#6179), and the
+# in-session publish step lives in the SWEEP orchestrator's prompt, not the
+# builder's. `claim_reconciliation`'s Phase-2 gate (#6286) then reads
+# `lease_evidence=absent` and reclaims a claim that is actively being worked --
+# three such reclaims on one six-builder wave, 2026-09-17.
+#
+# Here, rather than in `builder.md`, for the reason #7672 established: a
+# prose-mandated lease step was skipped by exactly one session and cost ~2.5h of
+# fleet claim/yield thrash. Every builder already runs this script immediately
+# after claiming, so this is the one call site that cannot be forgotten. It sits
+# at pre-flight (before the create/reuse branch below) so it covers every way
+# this script can conclude, which is also `sweep-lease-publish.sh`'s own
+# documented publish-at-pre-flight semantics.
+#
+# `--watch-pid` is `${CLAUDE_PID:-$PPID}` and NEVER `$$`: `$$` is the one-shot
+# tool-call subshell, which exits the instant the call returns, so the renewal
+# loop would self-terminate on its first wake-up. The remaining policy -- the
+# no-op when the daemon already published (#7672), the refusal outside an agent
+# session, the 4h renewal cap -- lives in `loom-daemon lease ensure`, per
+# ADR-0018 and because this file's `contract` category admits no growth.
+_LEASE_DAEMON_BIN="$(loom_resolve_self_daemon_bin 2>/dev/null || true)"
+[[ -z "$_LEASE_DAEMON_BIN" ]] || "$_LEASE_DAEMON_BIN" lease ensure "$ISSUE_NUMBER" --watch-pid "${CLAUDE_PID:-$PPID}" > /dev/null 2>&1 || true
 
 # Check if worktree already exists
 if [[ -d "$WORKTREE_PATH" ]]; then
