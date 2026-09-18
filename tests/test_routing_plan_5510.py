@@ -1,4 +1,5 @@
-"""Tests for the report-only RoutingPlan sidecar (Issue #5519, Epic #5510 Phase 1).
+"""Tests for the report-only RoutingPlan sidecar (Issue #5519, Epic #5510 Phase 1)
+and for the plan stage that runs on every default route (Issue #5520, Phase 1b).
 
 Not to be confused with ``boards/03-usb-joystick/routing_plan.py`` /
 ``routing-plan.json`` (an unrelated board-03 copper replay recipe) or
@@ -10,9 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
+from kicad_tools.router.core import Autorouter
 from kicad_tools.router.global_router import CorridorAssignment, GlobalRoutingResult
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.region_graph import RegionGraph
@@ -22,9 +28,13 @@ from kicad_tools.router.routing_plan import (
     OverflowReport,
     RegionInfo,
     RoutingPlan,
+    build_plan,
+    select_plan_nets,
 )
-from kicad_tools.router.rules import NetClassRouting
+from kicad_tools.router.rules import DesignRules, NetClassRouting
 from kicad_tools.router.sparse import Corridor, Waypoint
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _make_two_region_graph(num_layers: int = 2) -> RegionGraph:
@@ -436,3 +446,330 @@ class TestWriteSidecar:
             assert captured.out == ""
         finally:
             blocked_dir.chmod(0o700)
+
+
+# =============================================================================
+# Plan stage on every default route (Issue #5520, Epic #5510 Phase 1b)
+# =============================================================================
+
+
+def _route_signature(routes) -> list:
+    """Order-independent copper signature (segments + vias per net)."""
+    out = []
+    for route in routes:
+        segs = tuple(
+            (
+                round(s.start[0], 6),
+                round(s.start[1], 6),
+                round(s.end[0], 6),
+                round(s.end[1], 6),
+                s.layer,
+                round(s.width, 6),
+            )
+            for s in route.segments
+        )
+        vias = tuple((round(v.x, 6), round(v.y, 6)) for v in route.vias)
+        out.append((route.net, segs, vias))
+    return sorted(out)
+
+
+def _plain_autorouter(with_single_pad_net: bool = False) -> Autorouter:
+    """A small NON-dense board: no BGA/fine-pitch package, so ``kct route``
+    would take the plain ``route_all_negotiated`` path, never the two-phase
+    router that Issue #5519 hooked."""
+    router = Autorouter(
+        width=20.0,
+        height=20.0,
+        rules=DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.2,
+            via_drill=0.35,
+            via_diameter=0.7,
+            grid_resolution=0.1,
+        ),
+        force_python=True,
+    )
+    router.add_component(
+        ref="R1",
+        pads=[
+            {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "N1"},
+        ],
+    )
+    router.add_component(
+        ref="R2",
+        pads=[
+            {"number": "1", "x": 10.0, "y": 3.0, "net": 2, "net_name": "N2"},
+            {"number": "2", "x": 10.0, "y": 17.0, "net": 2, "net_name": "N2"},
+        ],
+    )
+    if with_single_pad_net:
+        router.add_component(
+            ref="TP1",
+            pads=[{"number": "1", "x": 5.0, "y": 5.0, "net": 3, "net_name": "N3"}],
+        )
+    return router
+
+
+class TestPlanStageOnNegotiatedPath:
+    """``route_all_negotiated`` runs the plan stage (Issue #5520).
+
+    Before this slice only boards reaching ``route_all_two_phase``
+    (dense packages / ``--two-phase``) produced a ``RoutingPlan``; a plain
+    negotiated route left ``Autorouter.routing_plan`` at ``None``.
+    """
+
+    def test_plain_negotiated_route_builds_a_plan(self):
+        router = _plain_autorouter()
+        router.route_all_negotiated(max_iterations=3, timeout=60.0)
+
+        plan = router.routing_plan
+        assert plan is not None
+        assert {"N1", "N2"} == {n.name for n in plan.nets.values()}
+        assert plan.overflow_report is not None
+        # AC: the sidecar's total_overflow is the graph's own query, never a
+        # hand-summed value.
+        assert router.plan_region_graph is not None
+        assert plan.overflow_report.total_overflow == router.plan_region_graph.get_total_overflow()
+        assert plan.overflow_report.elapsed_s >= 0.0
+
+    def test_no_routing_plan_switch_suppresses_plan_and_keeps_copper_identical(self):
+        on = _plain_autorouter()
+        on.emit_routing_plan = True
+        routes_on = on.route_all_negotiated(max_iterations=3, timeout=60.0)
+
+        off = _plain_autorouter()
+        off.emit_routing_plan = False
+        routes_off = off.route_all_negotiated(max_iterations=3, timeout=60.0)
+
+        assert on.routing_plan is not None
+        assert off.routing_plan is None
+        # The plan stage is report-only: identical copper with and without it.
+        assert _route_signature(routes_on) == _route_signature(routes_off)
+
+    def test_plan_stage_is_silent(self, capsys):
+        """The core hook must not print -- the text summary + sidecar stay
+        the CLI's job, so the many unit tests that call
+        ``route_all_negotiated`` directly keep their stdout assertions."""
+        router = _plain_autorouter()
+        router.plan_routing()
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+
+    def test_plan_stage_never_touches_the_grid(self, monkeypatch):
+        """Byte-identity rests on the stage not setting corridor preferences
+        (or otherwise mutating the routing grid)."""
+        router = _plain_autorouter()
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("plan stage must not mutate the routing grid")
+
+        monkeypatch.setattr(router.grid, "set_corridor_preference", _forbidden)
+        monkeypatch.setattr(router.grid, "clear_all_corridor_preferences", _forbidden)
+        assert router.plan_routing() is not None
+
+    def test_existing_plan_is_not_rebuilt(self):
+        """A board that already planned (two-phase, or an earlier negotiated
+        call on the same Autorouter) must not run the pass twice."""
+        router = _plain_autorouter()
+        sentinel = RoutingPlan()
+        router.routing_plan = sentinel
+        router._run_routing_plan_stage()
+        assert router.routing_plan is sentinel
+
+    def test_emit_routing_plan_false_skips_the_stage_entirely(self):
+        router = _plain_autorouter()
+        router.emit_routing_plan = False
+        router._run_routing_plan_stage()
+        assert router.routing_plan is None
+
+    def test_plan_stage_failure_is_not_fatal(self, monkeypatch, capsys):
+        router = _plain_autorouter()
+
+        def _boom():
+            raise RuntimeError("synthetic plan failure")
+
+        monkeypatch.setattr(router, "plan_routing", _boom)
+        router._run_routing_plan_stage()  # must not raise
+        assert router.routing_plan is None
+        assert "routing-plan stage skipped" in capsys.readouterr().out
+
+    def test_dense_and_non_dense_paths_select_the_same_nets(self):
+        """``select_plan_nets`` is shared by ``TwoPhaseRouter.route_all`` and
+        ``Autorouter.plan_routing``, so a board's plan does not depend on
+        which path it took."""
+        router = _plain_autorouter(with_single_pad_net=True)
+        two_phase = router._create_two_phase_router()
+
+        from_autorouter = select_plan_nets(router)
+        from_two_phase = select_plan_nets(two_phase)
+
+        assert from_autorouter.net_order == from_two_phase.net_order
+        assert from_autorouter.single_pad_nets == from_two_phase.single_pad_nets
+        assert from_autorouter.pour_nets == from_two_phase.pour_nets
+
+    def test_filtered_nets_keep_their_status_in_the_plan(self):
+        """The single-pad filter still reaches the plan through the shared
+        selection helper (status ``single_pad``, not silently missing)."""
+        router = _plain_autorouter(with_single_pad_net=True)
+        plan = router.plan_routing()
+        assert plan is not None
+        statuses = {n.name: n.status for n in plan.nets.values()}
+        assert statuses["N3"] == "single_pad"
+        assert statuses["N1"] == "assigned"
+
+    def test_select_plan_nets_reports_only_when_asked(self, capsys):
+        router = _plain_autorouter(with_single_pad_net=True)
+
+        select_plan_nets(router)
+        assert capsys.readouterr().out == ""
+
+        lines: list[str] = []
+        select_plan_nets(router, report=lines.append)
+        assert any("single-pad net(s)" in line for line in lines)
+
+    def test_build_plan_emit_false_still_returns_the_graph(self):
+        router = _plain_autorouter()
+        selection = select_plan_nets(router)
+        result = build_plan(router, net_order=selection.net_order, emit=False)
+        assert result.plan is None
+        assert result.region_graph is not None
+        assert result.global_result is not None
+        assert result.tile_mm > 0.0
+
+    def test_board_without_routable_nets_plans_nothing(self):
+        router = Autorouter(width=10.0, height=10.0, force_python=True)
+        assert router.plan_routing() is None
+        assert router.routing_plan is None
+
+
+class TestNoRoutingPlanFlag:
+    """``--no-routing-plan`` (Issue #5520) is the only new flag."""
+
+    @staticmethod
+    def _inner_parser():
+        from kicad_tools.cli.route_cmd import _route_parser
+
+        return _route_parser()
+
+    @staticmethod
+    def _outer_parser():
+        from kicad_tools.cli.parser import create_parser
+
+        return create_parser()
+
+    def test_inner_parser_defaults_to_on(self):
+        args = self._inner_parser().parse_args(["board.kicad_pcb"])
+        assert args.routing_plan is True
+
+    def test_inner_parser_flag_turns_it_off(self):
+        args = self._inner_parser().parse_args(["board.kicad_pcb", "--no-routing-plan"])
+        assert args.routing_plan is False
+
+    def test_outer_parser_defaults_to_on(self):
+        args = self._outer_parser().parse_args(["route", "board.kicad_pcb"])
+        assert args.routing_plan is True
+
+    def test_outer_parser_flag_turns_it_off(self):
+        args = self._outer_parser().parse_args(["route", "board.kicad_pcb", "--no-routing-plan"])
+        assert args.routing_plan is False
+
+    def test_there_is_no_positive_opt_in_flag(self):
+        with pytest.raises(SystemExit):
+            self._inner_parser().parse_args(["board.kicad_pcb", "--routing-plan"])
+
+    def test_apply_flag_helper_sets_the_router_switch(self):
+        from argparse import Namespace
+
+        from kicad_tools.cli.route_cmd import _apply_routing_plan_flag
+
+        router = _plain_autorouter()
+        _apply_routing_plan_flag(router, Namespace(routing_plan=False))
+        assert router.emit_routing_plan is False
+        _apply_routing_plan_flag(router, Namespace(routing_plan=True))
+        assert router.emit_routing_plan is True
+        # Absent flag (library callers / older Namespaces) keeps the default.
+        _apply_routing_plan_flag(router, Namespace())
+        assert router.emit_routing_plan is True
+
+    def test_outer_command_forwards_the_flag_to_the_inner_cli(self, monkeypatch):
+        """The outer ``kct route`` shim rebuilds argv from a whitelist, so a
+        flag that is not forwarded is silently dropped."""
+        from kicad_tools.cli import route_cmd
+
+        captured: list[list[str]] = []
+
+        def _fake_main(argv):
+            captured.append(list(argv))
+            return 0
+
+        monkeypatch.setattr(route_cmd, "main", _fake_main)
+        from kicad_tools.cli.commands.routing import run_route_command
+
+        args = self._outer_parser().parse_args(["route", "board.kicad_pcb", "--no-routing-plan"])
+        run_route_command(args)
+        assert "--no-routing-plan" in captured[0]
+
+        captured.clear()
+        args = self._outer_parser().parse_args(["route", "board.kicad_pcb"])
+        run_route_command(args)
+        assert "--no-routing-plan" not in captured[0]
+
+
+# --- Full-board evidence (slow, env-gated) -----------------------------------
+#
+# ``KCT_ROUTING_PLAN_BOARDS=1 pytest tests/test_routing_plan_5510.py -m slow``
+# routes board 00 (non-dense -> negotiated path) and board 03 (dense ->
+# two-phase path) twice each and asserts the routed copper is unchanged by
+# the plan stage (UUIDs normalised: they are regenerated per run and are not
+# copper).  Env-gated because each board takes minutes and the suite's
+# default budget is seconds.
+
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _normalized_copper(path: Path) -> str:
+    return _UUID_RE.sub("UUID", path.read_text())
+
+
+def _route(pcb: Path, out: Path, *extra: str) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "kicad_tools.cli", "route", str(pcb), "-o", str(out), *extra],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(
+    os.environ.get("KCT_ROUTING_PLAN_BOARDS") != "1",
+    reason="set KCT_ROUTING_PLAN_BOARDS=1 to run the full-board plan-stage sweep",
+)
+@pytest.mark.parametrize(
+    "pcb_rel",
+    [
+        "boards/00-simple-led/output/simple_led.kicad_pcb",
+        "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+    ],
+)
+def test_board_copper_unchanged_by_plan_stage(tmp_path, pcb_rel):
+    pcb = REPO_ROOT / pcb_rel
+    on = tmp_path / "on.kicad_pcb"
+    off = tmp_path / "off.kicad_pcb"
+    _route(pcb, on)
+    _route(pcb, off, "--no-routing-plan")
+
+    assert on.exists() and off.exists()
+    # Default route writes the sidecar; --no-routing-plan suppresses it.
+    assert (tmp_path / "on.routing_plan.json").exists()
+    assert not (tmp_path / "off.routing_plan.json").exists()
+
+    plan = json.loads((tmp_path / "on.routing_plan.json").read_text())
+    assert plan["schema_version"] == 1
+    # AC: plan stage wall clock < 5 s on the fleet boards.
+    assert plan["overflow_report"]["elapsed_s"] < 5.0
+
+    assert _normalized_copper(on) == _normalized_copper(off)

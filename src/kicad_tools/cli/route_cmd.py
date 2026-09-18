@@ -4726,6 +4726,26 @@ def _apply_ripup_budget_override(router: "Autorouter", args) -> None:
     router.stall_ripup_budget = budget
 
 
+def _apply_routing_plan_flag(router: "Autorouter", args) -> None:
+    """Apply ``--no-routing-plan`` to a freshly loaded router (Issue #5520).
+
+    The report-only routing-plan stage (Epic #5510) is ON by default:
+    ``Autorouter.route_all_negotiated`` and ``route_all_two_phase`` both
+    build a ``RoutingPlan``, and ``run_post_route_drc`` writes it next to
+    the routed PCB.  ``--no-routing-plan`` sets ``argparse``'s
+    ``routing_plan`` dest to ``False``, which this helper forwards onto
+    the router.
+
+    Called right after every ``load_pcb_for_routing`` return (the only
+    place an ``Autorouter`` is constructed on the CLI path), so all
+    escalation wrappers and the fixed-layer closure are covered by one
+    line each.  A no-op when the flag is absent (library callers, older
+    ``Namespace`` objects in tests), which preserves the default-on
+    behaviour.
+    """
+    router.emit_routing_plan = bool(getattr(args, "routing_plan", True))
+
+
 def _apply_rescue_pass_override(router: "Autorouter", args) -> None:
     """Disable the post-negotiation rescue sweep when requested (Issue #4159).
 
@@ -7390,6 +7410,8 @@ def route_with_layer_escalation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #5520: --no-routing-plan (report-only plan stage).
+        _apply_routing_plan_flag(router, args)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -8483,6 +8505,8 @@ def route_with_rule_relaxation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #5520: --no-routing-plan (report-only plan stage).
+        _apply_routing_plan_flag(router, args)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -10821,6 +10845,8 @@ def route_with_combined_escalation(
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(router, args, quiet=quiet)
+            # Issue #5520: --no-routing-plan (report-only plan stage).
+            _apply_routing_plan_flag(router, args)
             # Issue #3470: thread --max-ripups-per-net into the destructive
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
@@ -14762,6 +14788,26 @@ def _route_parser() -> argparse.ArgumentParser:
             "Only effective with --two-phase."
         ),
     )
+    # Issue #5520 (Epic #5510, Phase 1b): the report-only routing-plan
+    # stage runs on EVERY default route.  This is the only escape hatch --
+    # there is deliberately no positive opt-in flag, because the plan is
+    # on by default.
+    parser.add_argument(
+        "--no-routing-plan",
+        action="store_false",
+        dest="routing_plan",
+        default=True,
+        help=(
+            "Skip the report-only routing-plan stage (Epic #5510). By "
+            "default every route runs a coarse tile-graph global pass "
+            "before detailed routing and writes "
+            "<output_stem>.routing_plan.json next to the routed PCB. The "
+            "stage never changes routed copper -- it only reports "
+            "per-edge capacity/demand/overflow -- so this flag exists to "
+            "save its wall-clock time (and suppress the sidecar), not to "
+            "change routing behaviour."
+        ),
+    )
     parser.add_argument(
         "--batch-routing",
         action="store_true",
@@ -16032,6 +16078,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
     # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
     _apply_pairwise_clearance(router, args, quiet=quiet)
+    # Issue #5520: --no-routing-plan (report-only plan stage).
+    _apply_routing_plan_flag(router, args)
     # Issue #3470: thread --max-ripups-per-net into the destructive
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
@@ -16092,6 +16140,8 @@ def _run_main_impl(args, parser, argv) -> int:
             _apply_net_class_map_sidecar(fresh, args, quiet=True)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(fresh, args, quiet=True)
+            # Issue #5520: --no-routing-plan (report-only plan stage).
+            _apply_routing_plan_flag(fresh, args)
             _apply_analog_net_class(fresh, args, quiet=True)
             return fresh
 

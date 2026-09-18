@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Run the report-only routing-plan stage on **every** default `kct route`,
+  not just the dense-package boards that reach the two-phase global router.
+  The tile-graph build + negotiated global pass + `RoutingPlan`
+  serialization moved out of `TwoPhaseRouter.route_all` into
+  `routing_plan.build_plan` / `select_plan_nets`, and the new
+  `Autorouter.plan_routing()` runs the identical stage from
+  `route_all_negotiated` -- covering all seven CLI dispatch sites (the three
+  escalation wrappers plus the fixed-layer `--layers N` / `--no-auto-layers`
+  closure), `route_with_progressive_clearance` and library callers with one
+  hook. Dense and non-dense boards now share one net-selection path, so
+  their plans agree. The stage is silent, never touches the routing grid and
+  never runs twice (guarded on `routing_plan is None`), so routed copper is
+  unchanged; the new `--no-routing-plan` flag is the only escape hatch and
+  the only flag added (Issue #5520, Phase 1b of Epic #5510). See
+  `docs/reference/routing-plan.md`.
+
 - Apply a DECLARED swap group's pad re-binding instead of only reporting it: a
   `reorder_pins` placement delta carrying a `pad_map` is now executed by the
   placement-delta feedback loop through the new `StrategyType.REORDER_PINS`

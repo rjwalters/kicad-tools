@@ -806,6 +806,7 @@ Common flags (the full surface lives in `kct route --help`):
 | `--seed N` | Seed Python `random` for reproducible routing (#2589) |
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
+| `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
 
 #### Routing around invalid placement
 

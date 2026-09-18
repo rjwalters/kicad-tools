@@ -606,6 +606,13 @@ def run_route_command(args) -> int:
     # forward when the user set it (byte-identical when absent).
     if getattr(args, "no_rescue_pass", False):
         sub_argv.append("--no-rescue-pass")
+    # Issue #5520 (Epic #5510, Phase 1b): forward --no-routing-plan.  Both
+    # parsers declare it as ``store_false`` onto dest ``routing_plan``
+    # (default True, i.e. the report-only plan stage is ON), so only
+    # forward when the user turned it OFF -- flag-off argv stays
+    # byte-identical (tests/test_cli_parser_drift.py).
+    if not getattr(args, "routing_plan", True):
+        sub_argv.append("--no-routing-plan")
     if getattr(args, "cross_package_pair_corridor", False):
         sub_argv.append("--cross-package-pair-corridor")
     if getattr(args, "slack_corridor_widening", False):

@@ -12,27 +12,71 @@
 
 ## When it is written
 
-`kct route`'s default path (`--strategy negotiated`, the default) reaches
-the tile-based two-phase global router (`TwoPhaseRouter.route_all`) for
-boards with at least one detected dense package (BGA / fine-pitch QFP —
-see `Autorouter.detect_dense_packages`). On that path the sidecar is
-written next to the routed PCB:
+**Every default `kct route` writes the sidecar** (Issue #5520, Phase 1b).
+The plan stage runs on both routing paths:
+
+- **Dense-package boards** (BGA / fine-pitch QFP — see
+  `Autorouter.detect_dense_packages`) reach the tile-based two-phase
+  global router (`route_with_escape` -> `route_all_two_phase` ->
+  `TwoPhaseRouter.route_all`), whose Phase 1 *is* the plan stage.
+- **Every other board** gets the same stage from
+  `Autorouter.route_all_negotiated`, which calls
+  `Autorouter.plan_routing()` before any copper is committed. Hooking the
+  core method rather than each CLI dispatch site covers all seven
+  `route_all_negotiated` call sites in `route_cmd.py` — the three
+  escalation wrappers (`route_with_layer_escalation`,
+  `route_with_rule_relaxation`, `route_with_combined_escalation`) *and*
+  the fixed-layer closure a `--layers N` / `--no-auto-layers` run falls
+  into — plus `route_with_progressive_clearance` and library callers.
 
 ```
-kct route boards/03-usb-joystick/output/usb_joystick.kicad_pcb \
-    -o usb_joystick_routed.kicad_pcb
-# writes usb_joystick_routed.routing_plan.json alongside the PCB
+kct route boards/00-simple-led/output/simple_led.kicad_pcb \
+    -o simple_led_routed.kicad_pcb
+# writes simple_led_routed.routing_plan.json alongside the PCB
 ```
 
-Non-dense boards (no `route_with_escape` call) do not reach the two-phase
-global pass on the default path in this slice, so no sidecar is written
-and `kct route ... --format json` has no `routing_plan` key. The
-`--two-phase` flag forces the two-phase path (and therefore a sidecar)
-even on a non-dense board.
+Both paths go through the same `routing_plan.select_plan_nets` /
+`routing_plan.build_plan` helpers, so a board's plan does not depend on
+which path it took: the same net universe (pour nets and single-pad nets
+filtered by the same rules and reported with their own `status`), the same
+tile sizing, the same negotiated global pass.
+
+The stage never runs twice: the hook is guarded on `routing_plan is None`,
+so a board that already planned via the two-phase path does not plan again
+if a later fallback calls `route_all_negotiated`. Each layer-escalation
+attempt builds a fresh `Autorouter` (via `load_pcb_for_routing`), so every
+attempt still gets its own plan and the **last** attempt's plan is the one
+written.
+
+### `--no-routing-plan`
+
+`--no-routing-plan` is the only flag this phase adds, and it is the only
+escape hatch (there is deliberately no positive opt-in flag — the plan is
+on by default):
+
+```
+kct route board.kicad_pcb -o routed.kicad_pcb --no-routing-plan
+# no <stem>.routing_plan.json, no summary line, no routing_plan JSON key
+```
+
+It sets `Autorouter.emit_routing_plan = False` (applied right after every
+`load_pcb_for_routing` call site). Because the stage is report-only, the
+flag changes **no copper** — it only saves the stage's wall clock and
+suppresses the sidecar.
 
 A blocked write (e.g. a read-only output directory) prints a warning and
 the route step still exits 0 -- exactly like the other post-route
 sidecars (`net_class_map.json`, `current_paths.json`).
+
+### Why it cannot change routed copper
+
+The plan stage builds its own coarse `RegionGraph` and runs `GlobalRouter`
+over it. It never touches `Autorouter.grid`: no `set_corridor_preference`,
+no obstacle marking, no RNG draw — and on the `route_all_negotiated` hook
+it prints nothing (the text summary and the sidecar remain the CLI's job,
+so the many unit tests that call `route_all_negotiated` directly keep
+their stdout assertions). The only object it mutates is the
+freshly-constructed `RegionGraph` it also owns.
 
 ## Text and JSON output
 
@@ -150,12 +194,27 @@ built -- absent, not `null`, otherwise):
 
 ## Non-goals of this phase
 
-- No CLI flag exists yet to disable the plan (`--no-routing-plan` is a
-  later phase); it is always built on the default path when the
-  two-phase global router runs.
 - No per-board corridor / tile-size / keepout configuration.
-- Capacity still counts every grid layer, including planes.
+- **Capacity is not yet honest.** It still uses one global pitch
+  (`DesignRules.trace_width + trace_clearance`) for every net regardless
+  of net class, counts *every* grid layer including PLANE layers as
+  signal capacity, and treats only pads as blockage (keepout rule areas
+  and preserved copper do not reduce it). Per-class pitch, plane-layer
+  exclusion and blockage beyond pads are the next slice of Epic #5510
+  (see the Phase 1b follow-up issue), which is why `layers.signal` /
+  `layers.plane` below are still reporting-only.
 - Building the plan never mutates `RegionGraph` state (utilization,
   history costs) and never changes routed copper -- see the byte-identity
   tests in `tests/test_routing_plan_5510.py` and
   `tests/test_global_router.py`.
+
+## Cost
+
+The stage is a coarse-graph pass, not a detailed route: graph build is
+~0.01 s at 53x33 tiles, and the negotiated global pass is cheap whenever
+nothing overflows. On the fleet boards (00-06, <= 38 nets) the measured
+`overflow_report.elapsed_s` is well under a millisecond. Boards that
+*honestly overflow* with several hundred nets are the expensive case (the
+pass then runs all 15 negotiated iterations, rerouting every net through
+the hot edge); `elapsed_s` records that cost rather than gating on it.
+`--no-routing-plan` is the escape hatch if the stage is ever unwelcome.
