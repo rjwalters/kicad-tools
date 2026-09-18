@@ -36,6 +36,7 @@
   - [7. Merge (per PR)](#7-merge-per-pr)
   - [8. Wave settled → post-wave integration gate → advance to next wave](#8-wave-settled--post-wave-integration-gate--advance-to-next-wave)
   - [8a. Wave-boundary candidate re-verification (daemon/champion-active only, #4884)](#8a-wave-boundary-candidate-re-verification-daemonchampion-active-only-4884)
+  - [8b. Final wave settled → archival hook, then summary (#8110)](#8b-final-wave-settled--archival-hook-then-summary-8110)
 
 ---
 
@@ -650,7 +651,7 @@ Once every PR in the wave has reached a terminal state (merged, blocked, or buil
 
 Under `--dry-run` the gate does not run (no checkout, no command execution); the plan may note that a post-wave integration check would run if `buildGate.command` is configured.
 
-Once the gate has passed (or is not configured), refresh this run's registry heartbeat (Step 0a's "Heartbeat refresh, at each wave boundary" — `./.loom/scripts/sweep-run-registry.sh heartbeat "$RUN_ID"`, best-effort, non-fatal) and advance to the next wave. Do not start the next wave's builders until the current wave's PRs are all settled and the integration gate (if configured) is green.
+Once the gate has passed (or is not configured), refresh this run's registry heartbeat (Step 0a's "Heartbeat refresh, at each wave boundary" — `./.loom/scripts/sweep-run-registry.sh heartbeat "$RUN_ID"`, best-effort, non-fatal) and advance to the next wave — or, when no candidates remain, to **step 8b**. Do not start the next wave's builders until the current wave's PRs are all settled and the integration gate (if configured) is green.
 
 ### 8a. Wave-boundary candidate re-verification (daemon/champion-active only, #4884)
 
@@ -667,3 +668,15 @@ The wave *plan* — which candidates land in which wave — is computed once, at
 - **Scope.** Only touches the remaining, not-yet-processed tail of the candidate list — never re-touches a wave that has already settled (merged/blocked candidates from earlier waves are done, not re-opened by this step).
 
 This step composes with, and does not replace, step 1: every surviving candidate still gets its own per-issue pre-flight immediately before its own dispatch, same as today — defense in depth against the (much shorter) window between this wave-boundary batch check and that candidate's actual dispatch. It also does not interact with `--auto-stack` ordering, `--builders-per-wave` sizing, or the step 8 integration gate — it only ever **drops or reroutes** candidates already in the plan; it never adds one or mutates a candidate this sweep has already dispatched a builder for.
+
+### 8b. Final wave settled → archival hook, then summary (#8110)
+
+Step 8 has no next wave once the candidate list is exhausted — a mechanical fact about the plan, not a judgment about how the run feels 20+ turns in. **This step is reached, not recognised.** In order, before your final message:
+
+1. Run the transcript-archival completion hook (#3726) — safe unconditionally, a no-op unless archival is opted in. It is the settle's only durable side effect, and was skipped on 27 of 43 measured settled sweeps while `sweep.md`'s turn-1 load-order list was the only thing naming it ([`prompt-prefix-loading.md`](../../../.loom/docs/prompt-prefix-loading.md) §8, #8110):
+
+   ```bash
+   ./.loom/scripts/archive-transcripts.sh
+   ```
+
+2. Load [`sweep-summary-output.md`](sweep-summary-output.md) — outcome vocabulary, summary-table format, that hook's full contract — then print the summary.

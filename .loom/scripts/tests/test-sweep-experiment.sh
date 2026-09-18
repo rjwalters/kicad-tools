@@ -98,8 +98,8 @@ HARV="$(SE harvest --stats-file "$STATS" --archive-dir "$ROOT/archive" --format 
 assert_contains "$HARV" '"transcript": 1' "harvest joined 1 transcript (exact cost)"
 assert_contains "$HARV" '"first_attempt_pass_rate": 1.0' "arm A first-attempt pass rate 100%"
 assert_contains "$HARV" '"merge_rate": 1.0' "arm A merge rate 100%"
-# exact cost 0.022275 from the single usage block
-assert_contains "$HARV" '0.022275' "exact cache-aware cost from transcript usage"
+# exact cost 0.007425 from the single usage block (Opus 4.8 at the #8060-verified rate)
+assert_contains "$HARV" '0.007425' "exact cache-aware cost from transcript usage"
 rm -rf "$ROOT"
 echo ""
 

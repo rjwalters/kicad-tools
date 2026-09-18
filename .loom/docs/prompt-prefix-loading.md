@@ -1,5 +1,10 @@
 # Finding (#8065): `sweep-*` progressive disclosure IS honored at spawn time
 
+> §1-§7 are #8065's finding (no bug in the spawn/dispatch layer).
+> **§8 is #8110's** — the one anomaly §6 parked, where the mechanism works but
+> a *needed* file's trigger was too weak to be reached. Two findings, one
+> measurement apparatus.
+
 **Status**: investigation complete, **no bug found**. Nothing in Loom's spawn
 or dispatch layer inlines a slash command's sibling markdown. The "Load when"
 table in `.claude/commands/loom/sweep.md` (source:
@@ -191,7 +196,12 @@ from the A/B counter, and `loom:sweep-wave-lifecycle` absent from the C one.
   on essentially every completed run, and which carries the transcript-archival
   completion hook. That is the *opposite* failure mode from the one this issue
   investigated (under-loading a needed file, not over-loading an unneeded one),
-  so it is out of scope here and filed separately.
+  so it was out of scope here and filed separately as #8110.
+  **Resolved — see [§8](#8-8110-the-summary-output-under-load-measured-and-fixed).**
+  Short version: the null hypothesis explains the *denominator* (most finished
+  sweeps never settle — they are killed mid-wave by an account limit) but not
+  the *numerator*: among runs that genuinely settled, the transcript-archival
+  hook ran on 15/15 that opened the file and 1/28 that did not.
 - This measures one host's transcript store. The mechanism (`skill_listing` +
   `Skill` tool) is Claude Code's, so a different runtime adapter
   (see [`runtime-adapters.md`](runtime-adapters.md)) may resolve
@@ -199,6 +209,13 @@ from the A/B counter, and `loom:sweep-wave-lifecycle` absent from the C one.
 - The `~49k` post-split floor is not decomposed. #8066 (prefix ordering for
   cross-session cache hits) and #8064 (trimming `champion-*` /
   `judge-reference.md` / `watch.md`) own that.
+  **#8066 is answered** — see
+  [`prompt-prefix-cache-ordering.md`](prompt-prefix-cache-ordering.md): the
+  ordering hypothesis is falsified (Loom's injected prefix is already last and
+  contiguous, and cache matching is block-granular so intra-block reordering is
+  a no-op), and the real determinant of a hit is which OAuth account the spawn
+  selected — 65% full-hit rate on a same-account repeat within the hour vs 1.4%
+  otherwise.
 
 ## 7. Regression guard
 
@@ -210,3 +227,163 @@ free of any sibling-file body. If someone ever "helpfully" pre-expands the
 skill family into the dispatch prompt, that test fails. The CLI-side half
 (which files the session actually fetches) is not unit-testable from here —
 re-run the recipe in §5 instead.
+
+## 8. #8110: the `summary-output` under-load, measured and fixed
+
+§6 parked one anomaly out of #8065's scope: `sweep-summary-output.md` loaded in
+only **12 of 123** finished Mode A/B runs, against a "Load when: the run is
+settling" trigger that should fire on essentially every completed run. #8110
+asked which of four candidate explanations held — a weak trigger, tail context
+pressure, sessions ending before settling (the null hypothesis), or the content
+being answered from `sweep.md`'s prose without fetching the sibling.
+
+**Answer: the null hypothesis explains the denominator but not the numerator.**
+Both halves are true at once, which is why the raw ratio looked so damning and
+is not by itself the defect.
+
+### 8.1 Cohort
+
+Re-measured on 2026-09-18 with §5's recipe extended to also classify each
+session's **terminal state**: 156 finished (idle > 1h), substantial (> 60
+transcript records), post-#7726 Mode A/B `/loom:sweep` sessions across 12 repos
+on one host, window 2026-09-16 → 2026-09-18. (Larger than #8065's 123 because
+two more days of sessions had accumulated; same host, same filters.)
+
+The classifier keys on the last assistant text blocks: an account/session/
+weekly/spend-limit message ⇒ *killed*; a terminal report (summary table, "sweep
+complete", `→ merged`/`blocked`/`skipped`, "issue closed", "doctor cycle
+exhausted") ⇒ *settled*; a "continuing to poll / dispatching X" tail with
+neither ⇒ *killed mid-poll*.
+
+| Terminal state | n | loaded `summary-output` | ran archival hook | loaded `wave-lifecycle` |
+|---|---|---|---|---|
+| **KILLED**: account/session/weekly/spend limit | 71 | 0 | 0 | 56 |
+| **KILLED**: mid-poll on a role subagent | 36 | 0 | 0 | 30 |
+| Indeterminate tail | 6 | 0 | 0 | 5 |
+| **SETTLED**: printed a terminal report | 39 | 8 | 16 | 24 |
+| **SETTLED**: merged, no report in tail | 4 | 0 | 0 | 4 |
+| | **156** | **8** | **16** | **119** |
+
+**107 of 156 (69%) never reached a settle point at all** — they were killed
+mid-wave, overwhelmingly by a Claude account limit (`"You've hit your
+session/weekly limit"`, `"hit your org's monthly spend limit"`). None of the 107
+loaded the file and none ran the archival hook, which is **correct**: there was
+no settle to summarise. That is candidate (3), and it accounts for the bulk of
+the 12/123 shortfall. It is a sharper cause than #8110 guessed — not merges,
+blocks, or operator gates exiting early, but rate-limit kills mid-flight.
+
+### 8.2 The defect is in the 43 that did settle
+
+Of the 43 sessions that genuinely settled, only **15 (35%)** consulted
+`sweep-summary-output.md`. Whether they did is almost perfectly predictive of
+whether the transcript-archival completion hook (`archive-transcripts.sh`, the
+file's one load-bearing side effect) ran:
+
+| | ran archival hook | did not |
+|---|---|---|
+| opened `sweep-summary-output.md` | **15** | 0 |
+| did not open it | 1 | **27** |
+
+`P(archived | opened) = 15/15`; `P(archived | not opened) = 1/28`. Fisher exact
+two-sided **p ≈ 1.1 × 10⁻¹⁰**. So **27 of 43 settled sweeps (63%) skipped the
+archival hook** — the cost #8110 predicted, now measured. These were not
+half-finished runs: sampled tails show PRs merged, issues closed, worktrees and
+branches cleaned, checkpoints and run-registry entries removed, summary tables
+printed — everything except the one step that only that file names. One tail
+ends literally at step 8's integration gate ("running the post-wave integration
+gate as a final health check before wrapping up") and stops there.
+
+Candidate (4) is also **ruled out**: a session that skipped the file did not
+answer from `sweep.md`'s prose instead — it skipped the *action*, not just the
+*format*. Candidate (2) (tail context pressure) is not separable from (1) with
+this data and needs no separate remedy: the fix for (1) removes the judgment
+call that pressure was eroding.
+
+**Root cause.** The only thing naming the archival hook was `sweep.md`'s
+load-order item 8, expanded at turn 1 and 20-200 turns out of view by the time a
+run settles. `sweep-wave-lifecycle.md` — the file the session is *actually*
+executing, loaded in 119/156 runs — ended at step 8 ("advance to the next wave")
+and step 8a (a conditional wave-boundary re-check). Neither had a terminal
+branch for "there is no next wave", so reaching the settle step depended on
+recognising a mood rather than following the procedure.
+
+**Fix (this PR).** `sweep-wave-lifecycle.md` gains **step 8b** — reached
+mechanically from step 8 when the candidate list is exhausted — which inlines
+the `archive-transcripts.sh` invocation (so the load-bearing action needs no
+second file fetch) and then names `sweep-summary-output.md` for the table
+format. `sweep-mode-c-lifecycle.md` C3 gains the same terminal branch: Mode C
+prints its summary inline but had the identical hook gap, unmeasurable at n=3.
+The "Load when" rows in `sweep-summary-output.md` and `sweep.md` now name those
+steps instead of "the run is settling".
+
+### 8.3 Two methodology corrections to §5
+
+1. **`Skill`-only counting undercounts consultation.** 7 of the 15 openers
+   opened the file with the **`Read`** tool against its
+   `.claude/commands/loom/` path, not the `Skill` tool — so the true
+   consultation rate is 15/156, not 8/156, and §5's table understates this file
+   by ~47%. Count both. (It does not affect §5's load-bearing mode-gate
+   assertions, which are *absences*: neither counter contains the wrong
+   lifecycle file.)
+2. **Settle state must be classified, not assumed.** "Finished" (file idle >
+   1h) is not "settled". On a fleet running near its account limits, most
+   finished sweep transcripts are kills, and any per-file load rate computed
+   over them is diluted by a factor of ~3.6 here. Condition on the terminal
+   state before reading a load rate as a compliance rate.
+
+### 8.4 Caveat: the realised loss is currently zero
+
+Transcript archival is **not opted in on this host** — `LOOM_TRANSCRIPT_ARCHIVE`
+is unset and no repo's `.loom/config.json` carries a `loom.transcriptArchive`
+block — so `archive-transcripts.sh` is a no-op today and the 27 skipped hooks
+destroyed nothing. That is also why the gap went unnoticed for so long: the
+symptom is invisible until someone opts in, at which point ~63% of settled
+sweeps would silently fail to capture their subagent transcripts. The measured
+signal is therefore "did the session perform the step", which is exactly the
+compliance question — but the *cost* is latent, not realised. Re-running §5 +
+§8.1 after this change is the verification; the honest post-fix check is a
+fresh cohort of settled runs, and on this fleet accumulating 43 of those takes
+days.
+
+### 8.5 Recipe delta: add settle-state classification to §5
+
+§5's loop already yields per-session `Skill` loads. Collect three more fields
+inside it — every `Bash` tool_use `command`, every `Read` `file_path`, and the
+assistant **text** blocks — then classify. Note `Agent`, not `Task`, is the
+subagent-dispatch tool in this CLI; keying on `Task` finds zero dispatches and
+makes every session look like a pre-flight skip.
+
+```python
+# inside §5's per-block loop, alongside the Skill branch:
+if b.get("type") == "tool_use":
+    if b["name"] == "Bash":  bash.append((b.get("input") or {}).get("command", ""))
+    if b["name"] == "Read":  reads.add(str((b.get("input") or {}).get("file_path", "")))
+    if b["name"] == "Agent": agents[(b.get("input") or {}).get("subagent_type", "?")] += 1
+elif b.get("type") == "text" and b.get("text", "").strip():
+    texts.append(b["text"])
+
+# then, per session:
+import re
+LIMIT = re.compile(r"hit your (session|weekly|usage) limit|monthly spend limit", re.I)
+TERM  = re.compile(r"sweep complete|(→|->) *(merged|blocked|skipped|routed)|"
+                   r"issue #?\d+ (is )?closed|doctor cycle exhausted", re.I)
+tail     = "\n".join(texts[-3:])
+killed   = bool(LIMIT.search(tail))
+settled  = (not killed) and (bool(TERM.search(tail)) or "merge-pr.sh" in "\n".join(bash))
+opened   = ("loom:sweep-summary-output" in skills
+            or any("sweep-summary-output" in r for r in reads))
+archived = "archive-transcripts.sh" in "\n".join(bash)
+```
+
+Verified: run as written on 2026-09-18 (cohort of 157 by then, one more session
+having aged past the 1h idle cut) it reports 8 `Skill` loads, 15 openers, 72
+killed, 42 settled, and the same contingency — 15/15 archived among openers vs
+1/27 among non-openers. §8.1's table came from a slightly wider regex set (it
+also catches `"resets <time>"` limit tails, `"## Summary"` headings, and a
+"continuing to poll" mid-poll tail as its own bucket), which moves one session
+between *settled* and *indeterminate*; the conclusion is identical either way.
+
+The assertion that matters post-fix: among sessions with `settled == True`,
+`archived` should approach 1.0 **independently** of `opened`, because step 8b
+now carries the command inline. A post-fix cohort where `archived` still tracks
+`opened` means the terminal step is still not being reached.

@@ -46,8 +46,8 @@ Read the files the run actually reaches, and only those.
 | [`sweep-scheduling-signals.md`](sweep-scheduling-signals.md) | ~161 | Before the confirmation gate / first wave. Overlap-aware wave partitioning (#4161), the capability-aware `loom:operator-mechanical` lane (#6893 — **also needed in Mode C**, C0 references it), and the operator-gate advisory scan (#5137/#6391). |
 | [`sweep-dry-run.md`](sweep-dry-run.md) | ~197 | `--dry-run` is present (any mode). The gate prints the plan and EXITs, so nothing after it is reached on that run. |
 | [`sweep-mode-c-lifecycle.md`](sweep-mode-c-lifecycle.md) | ~183 | **Mode C only.** C0 pre-flight → C1 per-PR routing → C2 merge → C3 advance, plus the Mode C summary format. |
-| [`sweep-wave-lifecycle.md`](sweep-wave-lifecycle.md) | ~662 | **Modes A and B only** (including the `all` sentinel). Baseline snapshot, checkpoint resume, steps 1-8a (pre-flight incl. Step 1a/1b lease handling, Curator, approval gate, Builder, stacking, Judge, Doctor, Merge, wave boundary). |
-| [`sweep-summary-output.md`](sweep-summary-output.md) | ~81 | The run is settling. Summary table format, the `merged`/`blocked`/`skipped`/`rate-limited`/`completed externally` outcome vocabulary, and the transcript-archival completion hook. |
+| [`sweep-wave-lifecycle.md`](sweep-wave-lifecycle.md) | ~662 | **Modes A and B only** (including the `all` sentinel). Baseline snapshot, checkpoint resume, steps 1-8b (pre-flight incl. Step 1a/1b lease handling, Curator, approval gate, Builder, stacking, Judge, Doctor, Merge, wave boundary). |
+| [`sweep-summary-output.md`](sweep-summary-output.md) | ~81 | Step 8b / C3 (#8110). Summary table format, the `merged`/`blocked`/`skipped`/`rate-limited`/`completed externally` outcome vocabulary, and the transcript-archival completion hook. |
 | [`sweep-run-hygiene.md`](sweep-run-hygiene.md) | ~158 | Stop conditions; the three advisory **pre-wave** checks (host sleep, main-branch freshness, outstanding quarantine stashes); the sweep-child working-set contract; peer-sweep / legacy-daemon / role-runner coexistence. |
 | [`sweep-reference.md`](sweep-reference.md) | ~171 | Look-up only: the Limitations (deferred vs. implemented) status table, and the daemon event-bus wire contract — **required whenever the in-process `loom-daemon` is running**, since the sweep child must publish phase events onto its bus. |
 
@@ -100,7 +100,7 @@ the siblings below. Resolve a citation here, in one hop:
 | "Overlap-aware wave partitioning", "Capability-aware `loom:operator-mechanical` lane", "Operator-gate advisory scan" | `sweep-scheduling-signals.md` |
 | "0. Dry-run gate" | `sweep-dry-run.md` |
 | "PR-set Wave Lifecycle (Mode C only)", "C0"/"C1"/"C2"/"C3", "Mode C summary output" | `sweep-mode-c-lifecycle.md` |
-| "Wave Lifecycle (Modes A and B only — issue-set)", "1. Per-issue pre-flight", "Step 1a", "Step 1b", "Existing-PR probe", "Checkpoint-driven resume", "Genuine no-op conclusion vs. builder failure", "Stacked dependency", "`--auto-stack` detection", steps 2-8a | `sweep-wave-lifecycle.md` |
+| "Wave Lifecycle (Modes A and B only — issue-set)", "1. Per-issue pre-flight", "Step 1a", "Step 1b", "Existing-PR probe", "Checkpoint-driven resume", "Genuine no-op conclusion vs. builder failure", "Stacked dependency", "`--auto-stack` detection", steps 2-8b | `sweep-wave-lifecycle.md` |
 | "Summary Output", "Session Transcript Archival" | `sweep-summary-output.md` |
 | "Stop Conditions", "Host Sleep Readiness", "Main Branch Freshness", "Outstanding Quarantine Stashes", "Sweep Child Working-Set Contract", "Coexistence" (incl. "Modern daemon coexistence") | `sweep-run-hygiene.md` |
 | "Limitations", "Daemon event bus" | `sweep-reference.md` |

@@ -1859,13 +1859,18 @@ managed repo, fetched *after* the IPC round-trip completes:
   dispatch is a separate follow-up from `/loom:sweep`'s skip parity, see
   "Park-label dispatch guard" below), open `loom:building`
   (claimed), open PRs by `loom:review-requested` / `loom:changes-requested` /
-  `loom:pr`, and PRs merged in the last 24h (`gh pr list --state merged
-  --search "merged:>=<24h-ago RFC3339>"`).
+  `loom:pr`, PRs merged in the last 24h (`gh pr list --state merged
+  --search "merged:>=<24h-ago RFC3339>"`), and — since Issue #8091 — the
+  operator-attention bucket: open PRs labeled `loom:operator`
+  (`operator_held`, plus `operator_held_conflicting` — the `mergeable:
+  CONFLICTING` subset — and `operator_held_oldest_days`, all three from one
+  `gh pr list --label loom:operator --json number,mergeable,createdAt` call)
+  and open issues labeled `loom:operator-only` (`operator_only_issues`).
 - **Module** — `loom_daemon::pipeline_snapshot`: `PipelineSource` is the forge
   abstraction (mirrors `work_finder::WorkSource` / `GhWorkSource`),
-  `GhPipelineSource` is the `gh`-backed implementation (six `gh` invocations
-  per repo, `current_dir(root)` so `gh` auto-detects that repo's own remote —
-  same convention as `GhWorkSource::for_root`), and
+  `GhPipelineSource` is the `gh`-backed implementation (up to nine `gh`
+  invocations per repo, `current_dir(root)` so `gh` auto-detects that repo's
+  own remote — same convention as `GhWorkSource::for_root`), and
   `collect_pipeline_snapshots` fans the per-repo fetch out onto Tokio's
   blocking-thread pool so N managed repos cost roughly one repo's worth of
   wall-clock latency.
@@ -1873,20 +1878,28 @@ managed repo, fetched *after* the IPC round-trip completes:
   a failed metric renders as `?` (`RepoPipelineSnapshot::error` names the
   first failure) without blocking the other metrics for that repo or any
   sibling repo's snapshot — the same per-workspace error-isolation rule the
-  work-finder's `tick_multi` already applies to dispatch.
+  work-finder's `tick_multi` already applies to dispatch. The
+  operator-attention trio (`operator_held`/`operator_held_conflicting`/
+  `operator_held_oldest_days`) is fetched together from one `gh` call and
+  fails together: a bad read leaves all three `None`, never a fabricated `0`.
 - **Output** — `loom-daemon status --pipeline` adds a "Forge pipeline" table
   below the existing "Managed repos" table (same row order); `--json
   --pipeline` adds a `pipeline` array (`null` when `--pipeline` was not
   passed, so a consumer can distinguish "not requested" from "requested but
-  empty"). Terminal-friendly and safe to `watch -n 60`.
-- **Why opt-in** — six `gh` calls per managed repo is too slow to bundle into
-  the default view (which is used for frequent, low-latency operator checks);
-  `--pipeline` trades that latency for the queue-depth picture on demand.
+  empty"). Terminal-friendly and safe to `watch -n 60`. The same row shape —
+  including the operator-attention fields — is what `GET /api/pipeline`
+  (below) and the dashboard's pipeline table render.
+- **Why opt-in** — up to nine `gh` calls per managed repo is too slow to
+  bundle into the default view (which is used for frequent, low-latency
+  operator checks); `--pipeline` trades that latency for the queue-depth
+  picture on demand.
 - **Metric mask (#4761)** — `GhPipelineSource::with_metrics(PipelineMetrics)`
-  selects which of the six counts to fetch (each is one `gh` call, run
+  selects which of the nine counts to fetch (each is one `gh` call, run
   sequentially within a repo). `PipelineMetrics::ALL` is the default and what
   `status --pipeline` / the dashboard use; `PipelineMetrics::HEALTH` (queued +
-  merged) is what `loom-daemon health` uses to stay inside its latency budget.
+  the review-side axes + merged + the two #8091 operator-attention axes, minus
+  `building`) is what `loom-daemon health` uses to stay inside its latency
+  budget.
   `with_merge_window(Duration)` widens/narrows the merge-throughput window from
   its 24h default. A masked-off metric is left `None`; a caller that masks a
   metric off simply must not read it.
@@ -1908,7 +1921,11 @@ without parsing anything:
 | `2` | the daemon is genuinely dead |
 | `3` | busy, not confirmed unhealthy — see "Busy vs degraded" (#6191) below |
 
-Seven sections, one line each (or the full structured payload with `--json`):
+Several sections, one line each (or the full structured payload with `--json`);
+the table below is not exhaustive — `peer_coordination` (#6157), `stale_sweeps`
+(#7529), `auto_update` (#7584), `worktree_reaper` (#7590), and `pool_hold`
+(#7708/#7990) also always render, each documented at its own point in this
+file:
 
 | section | what it reports | source |
 |---------|-----------------|--------|
@@ -1919,6 +1936,7 @@ Seven sections, one line each (or the full structured payload with `--json`):
 | `role_liveness` | roles configured to tick that have gone **silent** — no tick at all in `>= 4x` their own interval (#6201) | `role_runner::last_role_tick_snapshot()` + each root's `role_runner_enabled`/`role_runner_roles` |
 | `queues` | per-root ready (`loom:issue`) counts **plus the review-side axes** (`loom:review-requested` / `loom:changes-requested` / `loom:pr`), and a per-repo *review stall* verdict | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
 | `throughput` | merges across managed repos inside the window | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
+| `operator_attention` | fleet-wide open PRs labeled `loom:operator` (the first-class, re-evaluable "a human is needed" hold, #5502) — count, `CONFLICTING`-mergeable sub-count, oldest age in days — plus open issues labeled `loom:operator-only` (the hard park). **Always `GREEN`** (#8091): held work is normal steady state, not a fault, so this section can never move `health`'s exit code — see "`operator_attention` is always GREEN" below | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
 
 #### `queues`: the review-stall rule (#5021)
 
@@ -1933,6 +1951,26 @@ cannot be masked by the fleet-wide `total_ready` sum. An axis that was not
 observed (forge query failed, or the caller masked the metric off) is reported
 as `null`/`?`, never as `0`, and never produces a stall verdict in either
 direction.
+
+#### `operator_attention` is always GREEN (#8091)
+
+`assess`'s `overall` roll-up is `all(sections, is_green)`, and `exit_code()`
+maps `overall` straight to the process exit code — so any section that can
+ever render non-Green changes `health`'s exit code. A fleet carrying several
+`loom:operator` PRs is normal steady state, not a fault (this repo alone
+typically has some): "a human is needed" is a routing fact about work, not a
+statement that the fleet is unhealthy, the same distinction
+`.github/labels.yml` draws between `loom:operator` and an actual failure. So
+`operator_attention`'s verdict is **unconditionally** `Verdict::Green`, never
+gated on a count or a threshold — `health/operator_attention.rs`'s test
+`with_held_prs_does_not_change_the_exit_code` pins a fleet with held PRs and
+everything else green at `exit_code() == EXIT_HEALTHY`, in the style of
+`build_skew_alone_does_not_change_the_exit_code`. A forge-read failure (a
+missing `gh`, or one repo's query erroring) renders `?`/`held: null` rather
+than a fabricated `0 held` — `crate::pipeline_snapshot::format_count` — and,
+because the verdict is unconditionally Green either way, cannot itself move
+the exit code; `queues`/`throughput` still degrade on the same input, per
+their own (unrelated) contract.
 
 ### Liveness precedence: pgrep + pid-file first, launchd NEVER alone
 
@@ -6226,6 +6264,8 @@ leaves the daemon's behavior byte-for-byte unchanged:
 | — | `autonomous.roleRunner.roles` | config only | the 7 interval-default roles (`architect` excluded, #5656) |
 | — | `autonomous.roleRunner.onIdle` | config only | `[]` (none; may name any of the 8 shipped roles, `architect` included) |
 | — | `autonomous.roleRunner.model` | config only (`roleRunner.model` > `autonomous.model` > default) | `sonnet` (`DEFAULT_DISPATCH_MODEL`) |
+| — | `autonomous.roleRunner.effort` | config only (`roleRunner.roleEfforts.<role>` > `roleRunner.effort` > unset) | *(unset ⇒ **no** `--effort` argument; the runtime CLI's own session default, #8054)* |
+| — | `autonomous.roleRunner.roleEfforts` | config only — a `{"<role>": "<level>"}` object occupying the tier **above** `roleRunner.effort`, exactly as `roleModels` sits above `model` | `{}` (every role falls through to the global tier) |
 | `LOOM_ARCHITECT_MAX_PROPOSALS` | `autonomous.roleRunner.architectMaxProposals` | env > config > default | `5` (per-invocation architect proposal cap, #5656) |
 | `LOOM_ROLE_RUNNER_DETECT_COLLISIONS` | `autonomous.roleRunner.collisionDetection` | env > config > `autonomous.collisionDetection.enabled` > default | `false` (off) |
 | `LOOM_ROLE_RUNNER_COLLISION_WINDOW_SECS` | `autonomous.roleRunner.collisionWindowSecs` | env > config > default | that role's tick interval, clamped to `[60, 3600]` |
@@ -6246,7 +6286,53 @@ sweeps use, including the #3982 logical-tier aliases (`opus` → `claude-opus-5`
 with `autonomous.roleRunner.model` occupying the explicit-request tier. Blank
 values are treated as unset at every tier (`--model ""` is never emitted). The
 resolved model and the tier that supplied it are recorded in the per-role log
-header: `==== loom-daemon role_runner: <ts> role=<role> model=<m> (source=<tier>) ====`.
+header, alongside the resolved effort (#8054):
+`==== loom-daemon role_runner: <ts> role=<role> model=<m> (source=<tier>) effort=<e> (source=<tier>) ====`.
+
+**Role children can also pin reasoning effort — but nothing is pinned by
+default (#8054).** Until #8054 the role-runner path emitted no `--effort` at
+all; the flag existed only on the sweep-dispatch path (#3716). Two config keys
+now reach it, in this order:
+
+**`autonomous.roleRunner.roleEfforts.<role>` > `autonomous.roleRunner.effort` >
+unset**
+
+- **Unset is the shipped state and stays byte-identical.** There is deliberately
+  **no** default effort and no fall-through to a shared `autonomous.*` key: with
+  neither key configured the resolver returns the empty string, the spawn emits
+  **no `--effort` token at all**, and the runtime CLI's own session-default
+  effort survives end-to-end — exactly the pre-#8054 argv. The asymmetry with
+  `--model` (which always pins) is intentional: an inherited *model* was a live
+  incident (#4501), an inherited *effort* is the status quo every workspace
+  already has.
+- **Blanks are unset at both tiers.** A blank/whitespace/non-string value is
+  dropped at parse time — per-entry for `roleEfforts` (one typo never disables
+  the rest of the object), whole-field for `effort` — so a blank per-role entry
+  falls through to the global key and a blank global key falls through to unset.
+  `--effort ""` is never emitted: it would clobber the session default with
+  nothing.
+- **Values are forwarded opaquely.** The level is trimmed but not lower-cased
+  and not validated against a vocabulary — the runtime owns that list (the
+  sweep-dispatch path forwards `effort` the same way), so a bad level fails the
+  tick loudly at the CLI instead of being silently dropped.
+- **Keys are trimmed + lower-cased**, matching `roleModels`/`onIdleMaxWait`, so
+  a `"Judge"` config key matches the `judge` role the runner dispatches under.
+- **Logged per tick** in the header line above as
+  `effort=<level> (source=autonomous.roleRunner.roleEfforts.judge)`, with the
+  unconfigured case rendered `effort=<runtime CLI default> (source=unset)` —
+  the same placecard the model field uses for its own pass-through, so a header
+  never reads like its own bug.
+
+```json
+{
+  "autonomous": {
+    "roleRunner": {
+      "effort": "medium",
+      "roleEfforts": { "curator": "low", "guide": "low" }
+    }
+  }
+}
+```
 
 **A pinned model can still be the wrong provider family for the admitted
 runtime (#5028).** `runtimes.roles.<role> = "codex"` with
@@ -6542,12 +6628,64 @@ Two valid ways to flip a root on, with very different blast radii:
   root that does not set `roleRunner.enabled` itself. This is the right lever for
   a fleet of repos you own that should all behave the same way. Because it is the
   lowest-priority tier, any repo that wants to opt back out can simply set
-  `enabled: false` in its own config and win.
+  `enabled: false` in its own config and win. **Tier 1 is live code, not a
+  future phase** — `resolve_effective_config` merges it on every read; what is
+  absent by default is only the *file*. See the recipe immediately below.
 - **Per-repo (tier 2/3/4)** — one edit per *repo*, in that repo's own checkout.
   Use this when a root needs a different `roles`/`onIdle` set than the host
   default, or when the repo's maintainers should see the setting in review.
 
-Either way the JSON block is the same shape as the example above:
+##### One file, fleet-wide: the machine-level defaults tier
+
+Any `autonomous.*` key — not just `enabled` — can be set once per host in tier
+1 and picked up by **every** workspace the daemon manages, with each repo's own
+`.loom/config.json` still layering on top. Nothing creates that file, so on a
+host that has never written one the tier contributes an empty object and looks
+like it does not exist; the fix is to write it, not to edit N repos.
+
+```bash
+mkdir -p ~/.local/share/loom/config
+cat > ~/.local/share/loom/config/defaults.json <<'JSON'
+{
+  "autonomous": {
+    "model": "sonnet",
+    "roleRunner": {
+      "roleModels": { "judge": "sonnet", "curator": "haiku" },
+      "effort": "medium",
+      "roleEfforts": { "curator": "low", "guide": "low" }
+    }
+  }
+}
+JSON
+```
+
+That single file pins the per-role model and reasoning effort for **every**
+workspace on the host at once — no per-repo commit, and nothing for
+`fleet-resync` to carry. On a host managing dozens of workspaces this is the
+difference between one edit and dozens. Notes:
+
+- **`$LOOM_CONFIG_DEFAULTS_FILE` overrides the path** (set it *empty* to
+  disable the tier entirely — the escape hatch a test or a one-off run uses).
+  Point it at a temp file to rehearse a change against one daemon before
+  writing the real one.
+- **It is the lowest-priority tier**, so any repo that disagrees wins by
+  setting the same key in its own `.loom/config.json` / `.loom-project/` /
+  `.loom-local/`. Fleet default below, per-repo exception above.
+- **Env vars still outrank all four tiers** for the knobs that have one
+  (`LOOM_ROLE_RUNNER`, `LOOM_ROLE_RUNNER_INTERVAL_SECS`, …) — a service unit
+  that exports one will not be overridden by this file.
+- **Not tracked by any repo, and per-host.** Two hosts do not share it; a key
+  that must be identical fleet-wide (e.g. `roleRunner.shardCount`) still
+  belongs in the tracked config. When a role tick's resolved value looks
+  surprising, check this file before re-reading the repo's own config — the
+  boot log names the winning tier, e.g.
+  `source=config:autonomous.roleRunner.intervalSecs from private/shared
+  defaults (/path/to/defaults.json)`.
+- Full tier semantics and the deep-merge rules:
+  [`docs/design/config-resolution-tiers.md`](https://github.com/rjwalters/loom/blob/main/docs/design/config-resolution-tiers.md).
+
+Either way — machine-level or per-repo — the JSON block is the same shape as
+the example above:
 
 ```json
 {
@@ -8988,7 +9126,7 @@ loom-daemon serve --peers http://host2:7420,http://host3:7420   # multihost flee
 | `GET /` | The embedded single-page dashboard (plain HTML/CSS/vanilla JS, no build toolchain, compiled into the binary) |
 | `GET /api/status` | JSON status snapshot: the same `DaemonStatusReport` `loom-daemon status --json` aggregates, flattened with a `hostname` field |
 | `GET /api/events` | `text/event-stream` (SSE) tail of the daemon's event bus |
-| `GET /api/pipeline` | Forge-side queue counts per managed repo (same source `status --pipeline` uses), fronted by a 20s in-process cache |
+| `GET /api/pipeline` | Forge-side queue counts per managed repo (same source `status --pipeline` uses, including the #8091 operator-attention bucket — `operator_held`/`operator_held_conflicting`/`operator_held_oldest_days`/`operator_only_issues`), fronted by a 20s in-process cache |
 | `GET /api/tokens` | Per-account rows (name / status / 5h utilization) read from the resolved token pool's `.ranking` file |
 | `GET /api/peers` | The configured `--peers` list, verbatim — this daemon never fetches a peer itself; the browser fetches each peer's own `/api/status`/`/api/events` directly |
 

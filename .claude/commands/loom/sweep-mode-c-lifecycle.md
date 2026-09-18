@@ -161,6 +161,12 @@ The script merges via the forge API and cleans up the worktree. `--auto` enables
 
 Mode C waves are size-1, so "wave settled" is synonymous with "this PR reached a terminal state (merged, blocked, or skipped)". Advance to the next PR in the candidate list and repeat from C0. Do not parallelize PRs (sequential per-PR processing is load-bearing — see "CRITICAL: One level deep" in the Execution Model).
 
+**When the PR list is exhausted there is no next PR** — a mechanical fact about the list, so this mode's terminal step is reached, not recognised (Mode A/B counterpart: `sweep-wave-lifecycle.md` step 8b, #8110). Before printing the summary below, run the transcript-archival completion hook — safe unconditionally, the settle's only durable side effect; full contract in [`sweep-summary-output.md`](sweep-summary-output.md) → "Session Transcript Archival":
+
+```bash
+./.loom/scripts/archive-transcripts.sh
+```
+
 ### Mode C summary output
 
 When the entire PR list has been processed, print a per-PR summary:

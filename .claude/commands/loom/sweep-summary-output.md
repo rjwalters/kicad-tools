@@ -2,7 +2,7 @@
 
 > **Reference file for [`sweep.md`](sweep.md)**, the `/loom:sweep` dispatcher.
 >
-> **Load when:** the run is settling — the outcome vocabulary for the summary table, and the transcript-archival completion hook that runs just before it.
+> **Load when:** a named terminal step is reached — `sweep-wave-lifecycle.md` **step 8b** (Modes A/B), `sweep-mode-c-lifecycle.md` **C3** with the PR list exhausted, or the last `mcp__loom__dispatch_sweep` returning (daemon path). Not "when the run feels like it is settling" (#8110). Carries the outcome vocabulary for the summary table, and the transcript-archival completion hook that runs just before it.
 >
 > **Flat, one level deep.** `sweep.md` names every file a given run needs up
 > front; nothing here requires opening a *third* file to follow its own
