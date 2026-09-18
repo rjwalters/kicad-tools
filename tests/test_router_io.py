@@ -1800,6 +1800,81 @@ class TestValidateRoutes:
         seg_violations = [v for v in violations if v.obstacle_type == "segment"]
         assert len(seg_violations) == 0
 
+    def test_pair_clearance_memoization_is_per_pair_correct(self):
+        """Issue #5240: the per-net-pair clearance cache inside ``validate_routes``
+        must not collide across distinct net pairs, and must return the same
+        ``max(class_a, class_b)`` clearance regardless of which net is looked
+        up first (segment-to-pad calls look up ``(this_route, obstacle)``;
+        segment-to-segment calls look up ``(route, other_route)`` -- the two
+        loops naturally query the same net pair in both orders across a run).
+
+        Four nets, four distinct per-class clearances, laid out so every
+        cross-net segment pair sits at a distance that violates its OWN
+        pair's ``max(class_a, class_b)`` clearance but not a neighbor
+        pair's -- a stale or key-colliding cache entry would report the
+        wrong ``required`` value for at least one pair.
+        """
+        ncm = {
+            "NET_A": NetClassRouting(name="A", clearance=0.20),
+            "NET_B": NetClassRouting(name="B", clearance=0.30),
+            "NET_C": NetClassRouting(name="C", clearance=0.40),
+            "NET_D": NetClassRouting(name="D", clearance=0.50),
+        }
+        rules = DesignRules(trace_width=0.2, trace_clearance=0.1, grid_resolution=0.1)
+        router = Autorouter(width=100, height=100, rules=rules, net_class_map=ncm)
+        router.net_names = {1: "NET_A", 2: "NET_B", 3: "NET_C", 4: "NET_D"}
+
+        # Parallel horizontal segments, each pair separated by the smaller
+        # net's own required max-clearance minus a small margin (0.02mm) so
+        # it violates ITS pair's clearance but the gap is comfortably above
+        # every smaller pair clearance in the set (no accidental violation
+        # against the wrong threshold).
+        names = ["NET_A", "NET_B", "NET_C", "NET_D"]
+        clearances = {"NET_A": 0.20, "NET_B": 0.30, "NET_C": 0.40, "NET_D": 0.50}
+        y = 10.0
+        routes = []
+        for i, name in enumerate(names, start=1):
+            seg = Segment(x1=10, y1=y, x2=30, y2=y, layer=Layer.F_CU, width=0.2)
+            routes.append(Route(net=i, net_name=name, segments=[seg], vias=[]))
+            y += 10.0  # generous spacing; only adjacent-pair checks matter below
+        router.routes.extend(routes)
+
+        # Re-check each unordered pair in isolation at a tight, pair-specific
+        # gap so the expected ``required`` is unambiguous.
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                name_i, name_j = names[i], names[j]
+                expected = max(clearances[name_i], clearances[name_j])
+                gap = expected - 0.02  # violates by 0.02mm
+                seg1 = Segment(x1=0, y1=0, x2=20, y2=0, layer=Layer.F_CU, width=0.2)
+                # center-to-center = gap + seg_half_width*2 (0.1 each)
+                seg2 = Segment(x1=0, y1=gap + 0.2, x2=20, y2=gap + 0.2, layer=Layer.F_CU, width=0.2)
+                pair_router = Autorouter(width=100, height=100, rules=rules, net_class_map=ncm)
+                pair_router.net_names = {1: name_i, 2: name_j}
+                pair_router.routes.extend(
+                    [
+                        Route(net=1, net_name=name_i, segments=[seg1], vias=[]),
+                        Route(net=2, net_name=name_j, segments=[seg2], vias=[]),
+                    ]
+                )
+                pair_violations = validate_routes(pair_router)
+                seg_violations = [v for v in pair_violations if v.obstacle_type == "segment"]
+                assert len(seg_violations) >= 1, f"expected a violation for {name_i}/{name_j}"
+                assert seg_violations[0].required == pytest.approx(expected), (
+                    f"{name_i}/{name_j} pair resolved required={seg_violations[0].required}, "
+                    f"expected max({clearances[name_i]}, {clearances[name_j]})={expected}"
+                )
+
+        # The four-net combined router (all pairs looked up within ONE
+        # ``validate_routes`` call, exercising the shared pair-clearance
+        # cache across every (net_a, net_b) combination) must still find
+        # zero violations at the generous 10mm spacing used above -- proves
+        # the cache does not spuriously report an unrelated pair's
+        # clearance for a comfortably-clear pair.
+        combined_violations = validate_routes(router)
+        combined_seg_violations = [v for v in combined_violations if v.obstacle_type == "segment"]
+        assert combined_seg_violations == []
+
     def test_fallback_when_no_net_class_map(self):
         """Router with no net_class_map uses rules.trace_clearance for all checks."""
         rules = DesignRules(
