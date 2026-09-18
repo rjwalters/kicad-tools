@@ -115,6 +115,16 @@ divergence it can detect (its own "LOCAL-DIVERGENCE PROTECTION" header) — but
 that is a safety net for the one shape it can recognize, not a substitute for
 either move above, and it is not foolproof (a pure-addition upstream change,
 or a resync commit that happens to land on top, both slip past it cleanly).
+Two more shapes are known, deliberate gaps rather than bugs (#8098): the gate
+reads COMMITTED git history only, so a local fix still sitting solely in the
+uncommitted working tree is invisible to it and gets silently reverted by a
+resync just like the pre-protection behavior; and the gate only trips on a
+REMOVED line, so a local fix implemented as a pure *deletion* of a broken
+upstream line (nothing added back) never arms it either, and the resync
+re-adds the broken line. Widening the gate to cover either shape changes its
+false-positive rate on a fleet-wide updater path, which is a deliberate
+tradeoff decision, not a reflexive fix — upstreaming or pinning (the two moves
+above) remains the only fully reliable protection for either.
 `2AMLogic/sky130-modexp` hit this the hard way: an installed hook fix got
 silently reverted by a resync, was hand-reapplied in place, got reverted
 again — four commits repeating that cycle — before the repo gave up and

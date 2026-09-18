@@ -332,16 +332,18 @@ for SUBJECT in \
     'chore: resync installed Loom surfaces (#123)' \
     'chore(loom): Install Loom 0.19.60 orchestration framework (#123)' \
     '[skip ci] chore(loom): Install Loom 0.19.60 orchestration framework (#123)' \
-    'chore: resync installed Loom surfaces with a local fix (#123)'; do
+    'chore: resync installed Loom surfaces with a local fix (#123)' \
+    'chore: install Loom v0.19.60 (#123)' \
+    'chore: install Loom v1 and also revert the guard fix'; do
     REPO9="$(make_fixture)"
     git -C "$REPO9" commit --amend -qm "$SUBJECT"
     OUT="$(cd "$REPO9" && bash "$SCRIPT" 2>&1)"
     RC=$?
-    if [[ "$SUBJECT" == *'with a local fix'* ]]; then
+    if [[ "$SUBJECT" == *'with a local fix'* || "$SUBJECT" == *'and also revert'* ]]; then
         if [[ $RC -eq 1 ]] && [[ "$(cat "$REPO9/.loom/hooks/guard.sh")" == OLD ]]; then
-            pass "non-routine suffixed subject retains its local content"
+            pass "non-routine suffixed subject retains its local content: $SUBJECT"
         else
-            fail "non-routine suffixed subject lost protection: $OUT"
+            fail "non-routine suffixed subject lost protection: $SUBJECT: $OUT"
         fi
     elif [[ $RC -eq 0 ]] && [[ "$(cat "$REPO9/.loom/hooks/guard.sh")" == A ]]; then
         pass "routine squash subject permits update: $SUBJECT"

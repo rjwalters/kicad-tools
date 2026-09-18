@@ -373,6 +373,37 @@ knob a port inherits is *"does this name still pick out exactly one thing once
 the implementation moves?"* When it does not, the new meaning is the one that
 gets the new name — the old name belongs to whoever already depends on it.
 
+### One shared build directory makes "the binary under test" ambiguous
+
+**When**: a suite pins a built binary by *path*, and `$CARGO_TARGET_DIR` (or
+`~/.cargo/config.toml`'s `build.target-dir`) is redirected to one directory
+shared by every checkout and every worktree on the host — a common and sensible
+disk-space arrangement, and the arrangement on this fleet.
+
+A path is not an identity. Two ways the same path answered with the wrong
+binary while verifying #8119/PR #8174, both reported as a clean, plausible
+regression in the change under test (#8176):
+
+- **Release-over-debug.** The candidate order probes `release/` before
+  `debug/`, so a months-old release build outranked the debug build that had
+  just been made.
+- **Cross-worktree clobber.** Another worktree's `cargo build` replaced the
+  resolved file *after* resolution and *before* the assertions ran.
+
+**The rule: resolve to a binary, then take it out of the shared namespace.**
+`tests/lib/require-daemon-bin.sh` now picks the *freshest* repo-local candidate
+rather than the first listed, copies it to a private per-suite path, and pins
+that copy — a copy has its own inode, so a later rebuild cannot reach it. What
+neither can fix (a build genuinely older than the checkout's sources) is
+*reported*: every resolution prints path, mtime and a content fingerprint, and
+a binary older than `loom-daemon/src/**` warns by name.
+
+The generalisable half is the diagnostic, not the copy: **a run that cannot say
+which artifact it tested cannot be trusted about what it tested.** An mtime and
+a fingerprint in the log cost one line and turn "this assertion failed" into
+"this assertion failed against a binary from 02:10" — recoverable weeks later,
+from a log, by someone who no longer has the file.
+
 ## The shape all six share
 
 Each failure was a *plausible* story that fit the first two observations,
