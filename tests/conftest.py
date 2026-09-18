@@ -11,9 +11,17 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.native_concurrency import install_from_environment
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 EXTERNAL_BOARDS_ENV_VAR = "KICAD_TOOLS_EXTERNAL_BOARDS_DIR"
+
+# Issue #5501: install the native-subprocess concurrency gate in every xdist
+# worker before collection, so a test that launches ``kicad-cli`` directly is
+# bounded even if it never imports ``kicad_tools``. No-op unless
+# ``KCT_NATIVE_MAX_CONCURRENCY`` is set; idempotent with the package import.
+install_from_environment()
 
 
 @contextmanager
