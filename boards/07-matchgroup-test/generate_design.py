@@ -775,6 +775,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
     net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
@@ -1241,6 +1242,15 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # blocked by a foreign trace (the B.Cu carve that splits a
             # bbox-carved pour), hop OVER it: drop a via inside each
             # copper region near the gap and cross on a different layer.
+            #
+            # Issue #5507: an endpoint that is ALREADY a same-net barrel is
+            # reused rather than re-drilled.  A barrel's own copper is just
+            # its annulus, so every retreat point either misses that disc or
+            # lands inside it -- where the drill-to-drill floor rejects a
+            # second drill -- and the pair was skipped for every retreat on
+            # every layer.  ``plan_via_hop_bridge`` keeps the candidate order
+            # and the physical predicates below unchanged; it only stops
+            # demanding a drill where the stack is already bridged.
             if not merged:
                 pairs_d: list[tuple[float, int, int]] = []
                 for i in target:
@@ -1250,50 +1260,37 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         pairs_d.append((gi.distance(gj), i, j))
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
-                    gi, gj = own[i][0], own[j][0]
-                    pa, pb = nearest_points(gi, gj)
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    done = False
-                    for back_a in (0.5, 0.9, 1.4):
-                        va = (pa.x - ux * back_a, pa.y - uy * back_a)
-                        if not Point(va).intersects(gi) or not _via_ok(net, *va):
-                            continue
-                        for back_b in (0.5, 0.9, 1.4):
-                            vb = (pb.x + ux * back_b, pb.y + uy * back_b)
-                            if not Point(vb).intersects(gj) or not _via_ok(net, *vb):
-                                continue
-                            for lay in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
-                                if not _path_ok(net, va, vb, lay, BRIDGE_W):
-                                    continue
-                                _emit_via(net, *va)
-                                _emit_via(net, *vb)
-                                # Straight chord cleared above, so a
-                                # 45-aligned chord always emits; an off-angle
-                                # chord doglegs (both via barrels span all
-                                # layers, the bulge clears the same copper the
-                                # straight chord did at this short length).
-                                _emit_seg_45(net, va, vb, lay, BRIDGE_W)
-                                _append_own((Point(va).buffer(VIA_R), all_layers, "via"))
-                                _append_own((Point(vb).buffer(VIA_R), all_layers, "via"))
-                                _append_own(
-                                    (
-                                        LineString([va, vb]).buffer(BRIDGE_W / 2.0),
-                                        frozenset({lay}),
-                                        "seg",
-                                    )
-                                )
-                                bridges_placed += 1
-                                merged = True
-                                done = True
-                                break
-                            if done:
-                                break
-                        if done:
-                            break
-                    if done:
-                        break
+                    plan = plan_via_hop_bridge(
+                        BridgeSide(*own[i][:3]),
+                        BridgeSide(*own[j][:3]),
+                        layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
+                        retreats=(0.5, 0.9, 1.4),
+                        via_ok=lambda p, _net=net: _via_ok(_net, *p),
+                        path_ok=lambda a, b, lay, _net=net: _path_ok(_net, a, b, lay, BRIDGE_W),
+                        new_via_layers=all_layers,
+                    )
+                    if plan is None:
+                        continue
+                    va, vb = plan.source.point, plan.destination.point
+                    # The 45-aligned copper is committed FIRST: the straight
+                    # chord cleared above, but a dogleg leg need not, and a
+                    # failed bridge must not strand the drills it would have
+                    # needed.
+                    if not _emit_seg_45(net, va, vb, plan.layer, BRIDGE_W):
+                        continue
+                    for vx, vy in plan.new_vias:
+                        _emit_via(net, vx, vy)
+                        _append_own((Point(vx, vy).buffer(VIA_R), all_layers, "via"))
+                    _append_own(
+                        (
+                            LineString([va, vb]).buffer(BRIDGE_W / 2.0),
+                            frozenset({plan.layer}),
+                            "seg",
+                        )
+                    )
+                    bridges_placed += 1
+                    merged = True
+                    break
 
             if not merged:
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
