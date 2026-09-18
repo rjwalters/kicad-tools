@@ -25,6 +25,9 @@ from kicad_tools.router.placement_delta import (
     delta_from_diagnosis,
     deltas_from_result,
     endpoint_align_deltas,
+    format_pad_map_report,
+    load_placement_deltas,
+    pad_map_overrides,
 )
 from kicad_tools.router.stuck_classifier import (
     BundleOrientation,
@@ -752,3 +755,153 @@ class TestBoard07:
         assert all(isinstance(d, PlacementDelta) for d in deltas)
         # JSON round-trips for the whole batch.
         json.dumps([d.to_dict() for d in deltas])
+
+
+# =============================================================================
+# Committed-artifact replay (issue #5537, Epic #5511 Phase 2b)
+# =============================================================================
+#
+# ``write_placement_delta_json`` is the WRITE half of the artifact contract;
+# ``load_placement_deltas`` / ``pad_map_overrides`` / ``format_pad_map_report``
+# are the READ half a recipe uses to replay a reviewed delta deterministically
+# -- no classifier run, no re-search.
+
+
+def _reorder(net_name: str, pad_map: dict[str, str] | None, **kwargs) -> PlacementDelta:
+    return PlacementDelta(
+        net_name=net_name,
+        target_ref=kwargs.pop("target_ref", "U2"),
+        kind=kwargs.pop("kind", "reorder_pins"),
+        source_action=RecommendedAction.REORDER_PINS.value,
+        rationale="re-order pins to un-cross the byte",
+        confidence="medium",
+        pad_map=pad_map,
+        **kwargs,
+    )
+
+
+class TestLoadPlacementDeltas:
+    def test_defaults_to_the_applied_section(self, tmp_path: Path):
+        path = tmp_path / "placement_delta.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "applied": [_reorder("DQ3", {"1": "DQ7"}).to_dict()],
+                    "proposed": [_reorder("DQ4", {"2": "DQ6"}).to_dict()],
+                    "reverted": [],
+                }
+            )
+        )
+        loaded = load_placement_deltas(path)
+        assert [d.net_name for d in loaded] == ["DQ3"]
+        assert loaded[0].pad_map == {"1": "DQ7"}
+
+    def test_reads_the_named_section(self, tmp_path: Path):
+        path = tmp_path / "placement_delta.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "applied": [],
+                    "proposed": [_reorder("DQ4", {"2": "DQ6"}).to_dict()],
+                    "reverted": [],
+                }
+            )
+        )
+        assert load_placement_deltas(path, section="applied") == []
+        assert [d.net_name for d in load_placement_deltas(path, section="proposed")] == ["DQ4"]
+
+    def test_reverted_entries_load_despite_extra_measurement_keys(self, tmp_path: Path):
+        """``reverted`` payloads carry routed_before/after + revert_reason."""
+        entry = _reorder("DQ3", {"1": "DQ7"}).to_dict()
+        entry.update(routed_before=25, routed_after=24, revert_reason="no reach gain")
+        path = tmp_path / "placement_delta.json"
+        path.write_text(json.dumps({"applied": [], "proposed": [], "reverted": [entry]}))
+        loaded = load_placement_deltas(path, section="reverted")
+        assert [d.net_name for d in loaded] == ["DQ3"]
+
+    def test_accepts_a_bare_list(self, tmp_path: Path):
+        path = tmp_path / "placement_delta.json"
+        path.write_text(json.dumps([_reorder("DQ3", {"1": "DQ7"}).to_dict()]))
+        assert [d.net_name for d in load_placement_deltas(path)] == ["DQ3"]
+
+    def test_round_trips_the_writer(self, tmp_path: Path):
+        from kicad_tools.router.placement_feedback import write_placement_delta_json
+
+        applied = [_reorder("DQ3", {"1": "DQ7"}, crossings_before=28, crossings_after=0)]
+        path = tmp_path / "board_placement_delta.json"
+        write_placement_delta_json(path, applied, [], [])
+        assert load_placement_deltas(path) == applied
+
+    def test_unknown_section_raises(self, tmp_path: Path):
+        path = tmp_path / "placement_delta.json"
+        path.write_text(json.dumps({"applied": []}))
+        with pytest.raises(ValueError, match="unknown placement-delta section"):
+            load_placement_deltas(path, section="kept")
+
+    def test_missing_section_is_empty_not_an_error(self, tmp_path: Path):
+        path = tmp_path / "placement_delta.json"
+        path.write_text(json.dumps({"proposed": [_reorder("DQ4", {"2": "DQ6"}).to_dict()]}))
+        assert load_placement_deltas(path) == []
+
+    def test_non_artifact_payload_fails_loud(self, tmp_path: Path):
+        """A recipe pointed at the wrong JSON must not route as if no swap
+        were declared."""
+        path = tmp_path / "net_class_map.json"
+        path.write_text(json.dumps({"DQ0": {"name": "DDR", "swap_group": "DDR_BYTE0"}}))
+        with pytest.raises(ValueError, match="not a placement-delta artifact"):
+            load_placement_deltas(path)
+
+    def test_missing_file_raises(self, tmp_path: Path):
+        with pytest.raises(FileNotFoundError):
+            load_placement_deltas(tmp_path / "nope.json")
+
+
+class TestPadMapOverrides:
+    def test_merges_identical_duplicates(self):
+        """DQ3 and DQ4 diagnose the same reversed byte and propose the same
+        U2 re-binding -- merging them is the normal case, not a conflict."""
+        pad_map = {"1": "DQ7", "2": "DQ6"}
+        merged = pad_map_overrides([_reorder("DQ3", pad_map), _reorder("DQ4", dict(pad_map))])
+        assert merged == {"U2": pad_map}
+
+    def test_contradiction_raises(self):
+        with pytest.raises(ValueError, match="conflicting pad_map entries"):
+            pad_map_overrides([_reorder("DQ3", {"1": "DQ7"}), _reorder("DQ4", {"1": "DQ6"})])
+
+    def test_rationale_only_delta_contributes_nothing(self):
+        """The Phase-2b edge case: a delta with no pad_map must not move a
+        single pin."""
+        assert pad_map_overrides([_reorder("DQ3", None)]) == {}
+
+    def test_geometry_only_kinds_contribute_nothing(self):
+        translate = PlacementDelta(net_name="DQ3", target_ref="U3", kind="translate", dx=2.0)
+        mirror = PlacementDelta(net_name="DQ3", target_ref="U2", kind="mirror")
+        assert pad_map_overrides([translate, mirror]) == {}
+
+    def test_component_id_wins_over_authored_reference(self):
+        """``target_key`` is the physical identity; two footprints can share a
+        reference designator."""
+        delta = _reorder("DQ3", {"1": "DQ7"}, component_id="U2@2")
+        assert pad_map_overrides([delta]) == {"U2@2": {"1": "DQ7"}}
+
+
+class TestFormatPadMapReport:
+    def test_names_the_swap_and_the_crossing_delta(self):
+        report = format_pad_map_report(
+            [_reorder("DQ3", {"1": "DQ7", "10": "DQ1"}, crossings_before=28, crossings_after=0)]
+        )
+        assert "U2" in report
+        assert "reorder_pins" in report
+        assert "crossings 28 -> 0" in report
+        assert "pad 1 -> DQ7" in report
+        assert "pad 10 -> DQ1" in report
+        # Pads sort naturally: 1 before 10, not lexicographically.
+        assert report.index("pad 1 -> DQ7") < report.index("pad 10 -> DQ1")
+
+    def test_empty_without_a_pad_map(self):
+        assert format_pad_map_report([_reorder("DQ3", None)]) == ""
+
+    def test_omits_crossings_when_unrecorded(self):
+        report = format_pad_map_report([_reorder("DQ3", {"1": "DQ7"})])
+        assert "crossings" not in report
+        assert "pad 1 -> DQ7" in report

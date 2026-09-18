@@ -78,9 +78,10 @@ When `kct net-status --why --format json` (guide 05) auto-discovers a
 `swap_group` declaration and classifies a bundle as genuinely REVERSED,
 each affected net's diagnosis gains a `swap_proposal`: the
 crossing-minimising pad-to-net re-binding, plus before/after crossing
-counts for both the declared group and the wider match group (residual
-crossings against an undeclared sibling are reported, never hidden).
-**Phase 1 is report-only** — no applicator exists.
+counts for both declared group and wider match group (residual crossings
+against an undeclared sibling are reported, never hidden). Classification
+stays report-only; a *generator-owned* board can replay a reviewed
+proposal into its schematic + PCB (#5537 — board 07's fixture README).
 
 ## Putting it all together
 
