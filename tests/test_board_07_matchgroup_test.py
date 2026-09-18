@@ -1445,7 +1445,13 @@ class TestDdrReversedGeometryMode:
             assert len(router.nets[net_id]) == 2
 
     def test_apply_swap_reinstalls_the_channel_walls(self, ddr_repro_mod):
-        """``_reset_for_new_trial`` drops obstacles -- the walls must come back."""
+        """The walls must still be standing after the swap's grid reset.
+
+        Issue #5555: ``_reset_for_new_trial`` used to drop ``add_obstacle``
+        keepouts, so the harness re-installed them by hand; the router now
+        replays them itself.  Either way this assertion is what makes the
+        reach measurement meaningful, so it stays.
+        """
         router, _net_ids = ddr_repro_mod.build_isolated_router(
             enable_certificate=True,
             reversed_secondary=True,
