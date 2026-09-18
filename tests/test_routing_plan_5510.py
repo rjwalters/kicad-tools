@@ -186,6 +186,109 @@ class TestFromGlobalResult:
         assert len(plan.edges) == 1
         assert plan.edges[0].overflow == graph.get_total_overflow()
 
+    def test_edge_overflow_agrees_on_reverse_direction_traffic(self):
+        """Issue #5544: descending-only traffic must not report overflow 0.
+
+        A region pair ``(a, b)`` is backed by two directed ``RegionEdge``
+        objects, and ``update_utilization()`` only bumps the one matching
+        the path's traversal direction.  ``get_total_overflow()`` sums both
+        (PR #5540), so an ``EdgePlanEntry`` that read only the ascending
+        ``(a, b)`` edge reported ``overflow == 0`` for a pair whose traffic
+        ran entirely in the descending ``b -> a`` direction -- disagreeing
+        with the plan's own ``overflow_report``.  Built the same way as
+        ``test_global_router.py::
+        test_total_overflow_agrees_on_reverse_direction_traffic``.
+        """
+        graph = RegionGraph(
+            board_width=10.0,
+            board_height=5.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=2.0,
+            num_layers=1,
+            base_capacity=1,
+        )
+
+        # Descending-ID traversal only: region 1 -> region 0.
+        for _ in range(5):
+            graph.update_utilization([1, 0], layer=0)
+
+        # Precondition: all traffic (and all overflow) sits on the
+        # descending edge; the ascending edge this code used to read is 0.
+        assert graph._edge_lookup[(0, 1)].overflow == 0
+        assert graph._edge_lookup[(1, 0)].overflow == 3
+        assert graph.get_total_overflow() == 3
+
+        assignment = _corridor_assignment(net=1, region_path=[1, 0], layer=0)
+        result = GlobalRoutingResult(
+            assignments={1: assignment},
+            failed_nets=[],
+            region_graph=graph,
+            iterations=4,
+            final_overflow=3,
+        )
+
+        plan = RoutingPlan.from_global_result(
+            result,
+            graph,
+            net_order=[1],
+            net_names={1: "N1"},
+            net_class_map=None,
+            layer_stack=LayerStack.two_layer(),
+            tile_mm=5.0,
+            elapsed_s=1.0,
+            default_trace_width=0.2,
+            default_trace_clearance=0.2,
+        )
+
+        assert len(plan.edges) == 1
+        edge = plan.edges[0]
+        assert (edge.a, edge.b) == (0, 1)
+        # Before the fix this was 0 while total_overflow was 3.
+        assert edge.overflow == graph.get_total_overflow() == 3
+        assert plan.overflow_report is not None
+        assert edge.overflow == plan.overflow_report.total_overflow
+        # Demand likewise counts traffic in both directions.
+        assert edge.demand == 5
+
+    def test_edge_demand_sums_both_directions_per_layer(self):
+        """Issue #5544: per-layer demand also sums both traversal directions."""
+        graph = _make_two_region_graph(num_layers=2)
+        graph.update_utilization([0, 1], layer=0)  # ascending
+        graph.update_utilization([1, 0], layer=0)  # descending
+        graph.update_utilization([1, 0], layer=1)  # descending, other layer
+
+        assignment = _corridor_assignment(net=1, region_path=[0, 1], layer=0)
+        result = GlobalRoutingResult(
+            assignments={1: assignment},
+            failed_nets=[],
+            region_graph=graph,
+            iterations=1,
+            final_overflow=0,
+        )
+
+        plan = RoutingPlan.from_global_result(
+            result,
+            graph,
+            net_order=[1],
+            net_names={1: "N1"},
+            net_class_map=None,
+            layer_stack=LayerStack.two_layer(),
+            tile_mm=5.0,
+            elapsed_s=0.5,
+            default_trace_width=0.2,
+            default_trace_clearance=0.2,
+        )
+
+        assert len(plan.edges) == 1
+        edge = plan.edges[0]
+        assert edge.demand == 3
+        assert edge.layers["0"]["demand"] == 2
+        assert edge.layers["1"]["demand"] == 1
+        # Capacity is symmetric across the pair, so it is NOT doubled.
+        assert edge.capacity == graph._edge_lookup[(0, 1)].capacity
+        assert edge.layers["0"]["capacity"] == graph._edge_lookup[(0, 1)].layer_capacity[0]
+
     def test_pour_skipped_and_single_pad_and_no_endpoints_status(self):
         graph = _make_two_region_graph(num_layers=1)
         result = GlobalRoutingResult(assignments={}, region_graph=graph, iterations=0)
