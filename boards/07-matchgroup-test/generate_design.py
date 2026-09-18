@@ -1333,14 +1333,65 @@ def create_project(output_dir: Path, project_name: str) -> Path:
     return project_path
 
 
-def create_schematic(output_dir: Path) -> Path:
+# =============================================================================
+# Committed placement-delta replay (issue #5537, Epic #5511 Phase 2b)
+# =============================================================================
+# Phase 2a applies a swap-group delta at the ROUTER-PAD level, for one routing
+# run.  This is the durable half: a committed ``placement_delta.json`` is
+# replayed into the GENERATED schematic and PCB, so the re-assignment survives
+# a full regeneration and the two views stay in lock-step (copper/label LVS
+# compares them pad-for-pad, and a one-sided swap would show up as mismatches
+# on every re-bound pad).
+#
+# Replay is EXPLICIT (``--placement-delta PATH``), never auto-discovered.  The
+# committed artifact under ``regression-fixture/`` documents a reviewed swap;
+# applying it silently on every regen would change what the CI re-route and
+# end-to-end jobs measure without anyone asking for it.  With the flag absent
+# this recipe is byte-identical (modulo UUIDs) to the pre-#5537 one.
+
+#: The reviewed, committed swap artifact for this board's legacy fixture.
+COMMITTED_PLACEMENT_DELTA = Path(__file__).parent / "regression-fixture" / "placement_delta.json"
+
+#: Filename of the change report written next to the regenerated artifacts.
+PLACEMENT_DELTA_REPORT_NAME = "placement_delta_applied.txt"
+
+
+def load_pad_overrides(delta_path: Path) -> tuple[dict[str, dict[str, str]], str]:
+    """Load ``{ref: {pad: net}}`` plus its change report from a delta artifact.
+
+    Returns ``({}, "")`` when the artifact carries no ``pad_map`` at all --
+    the rationale-only / geometry-only case.  Such a delta must not move a
+    single pin: only ``pad_map`` data re-binds a netlist here.
+    """
+    from kicad_tools.router.placement_delta import (
+        format_pad_map_report,
+        load_placement_deltas,
+        pad_map_overrides,
+    )
+
+    deltas = load_placement_deltas(delta_path)
+    return pad_map_overrides(deltas), format_pad_map_report(deltas)
+
+
+def write_placement_delta_report(output_dir: Path, delta_path: Path, report: str) -> Path:
+    """Emit the change report naming the swap and its crossing-count delta."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / PLACEMENT_DELTA_REPORT_NAME
+    report_path.write_text(f"source: {delta_path}\n{report}\n")
+    print(f"   Wrote placement-delta change report: {report_path}")
+    return report_path
+
+
+def create_schematic(
+    output_dir: Path, pad_overrides: dict[str, dict[str, str]] | None = None
+) -> Path:
     """Generate the schematic."""
     output_path = output_dir / "matchgroup_test.kicad_sch"
-    generate_schematic.create_matchgroup_schematic(output_path)
+    generate_schematic.create_matchgroup_schematic(output_path, pad_overrides)
     return output_path
 
 
-def create_pcb(output_dir: Path) -> Path:
+def create_pcb(output_dir: Path, pad_overrides: dict[str, dict[str, str]] | None = None) -> Path:
     """Generate the unrouted PCB (sheet-centered as a final text step).
 
     ``generate_pcb`` deliberately places the board in the historical
@@ -1355,7 +1406,7 @@ def create_pcb(output_dir: Path) -> Path:
     print("Creating PCB...")
     print("=" * 60)
     output_path = output_dir / "matchgroup_test.kicad_pcb"
-    pcb_content = generate_pcb.generate_pcb()
+    pcb_content = generate_pcb.generate_pcb(pad_overrides=pad_overrides)
     centered, report = center_pcb_text(pcb_content)
     output_path.write_text(centered)
     print(f"   PCB: {output_path}")
@@ -2344,6 +2395,12 @@ def main() -> int:
 
         # Phase 4N (#2660) pattern: re-route only for the CI regression gate.
         python generate_design.py --step route --seed 42
+
+        # Epic #5511 Phase 2b (#5537): regenerate with the reviewed,
+        # committed swap-group pad re-binding applied to BOTH the schematic
+        # and the PCB before routing.
+        python generate_design.py /tmp/board07-swap \\
+            --placement-delta regression-fixture/placement_delta.json
     """
     import argparse
     import random
@@ -2367,6 +2424,20 @@ def main() -> int:
             "committed unrouted PCB into ``output/matchgroup_test_routed.kicad_pcb``  "
             "without regenerating the schematic or unrouted PCB; used by the "
             "Phase 3N CI gate to detect routing-algorithm regressions."
+        ),
+    )
+    parser.add_argument(
+        "--placement-delta",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Replay a committed ``placement_delta.json`` (issue #5537): every "
+            "recorded ``pad_map`` re-binds the named pads in BOTH the generated "
+            "schematic and the generated PCB before routing, and a change report "
+            f"is written to ``{PLACEMENT_DELTA_REPORT_NAME}``.  Opt-in only -- "
+            "omitted, this recipe generates the authored netlist unchanged.  The "
+            "reviewed artifact for this board is "
+            "``regression-fixture/placement_delta.json``."
         ),
     )
     parser.add_argument(
@@ -2402,11 +2473,46 @@ def main() -> int:
         random.seed(args.seed)
         print(f"[seed] Seeded global random with --seed {args.seed}")
 
+    # Issue #5537: replay the committed swap BEFORE anything is generated, so
+    # the schematic, the PCB and therefore the routed board all derive from the
+    # same re-bound netlist.  No classifier is run and no search happens here --
+    # the artifact's recorded ``pad_map`` is simply applied.
+    pad_overrides: dict[str, dict[str, str]] = {}
+    delta_report = ""
+    delta_path = Path(args.placement_delta).resolve() if args.placement_delta else None
+    if delta_path is not None:
+        if args.step == "route":
+            # The route step consumes an ALREADY-generated PCB; there is no
+            # netlist to re-bind here.  Say so instead of implying the swap was
+            # applied to a board that was generated without it.
+            print(
+                "[placement-delta] --step route does not regenerate the "
+                "schematic/PCB, so --placement-delta applies nothing.  Generate "
+                "with ``--step all --placement-delta ...`` (or ``--step pcb``) "
+                "first; this run routes whatever netlist the input PCB carries.",
+                file=sys.stderr,
+            )
+        try:
+            pad_overrides, delta_report = load_pad_overrides(delta_path)
+        except (OSError, ValueError) as exc:
+            print(f"Error: cannot read placement delta {delta_path}: {exc}", file=sys.stderr)
+            return 1
+        if pad_overrides:
+            print(f"[placement-delta] Replaying {delta_path}")
+            print(delta_report)
+        else:
+            print(
+                f"[placement-delta] {delta_path} carries no pad_map "
+                "-- pin assignments unchanged (rationale-only delta)."
+            )
+
     try:
         if args.step == "all":
             project_path = create_project(output_dir, "matchgroup_test")
-            sch_path = create_schematic(output_dir)
-            pcb_path = create_pcb(output_dir)
+            sch_path = create_schematic(output_dir, pad_overrides)
+            pcb_path = create_pcb(output_dir, pad_overrides)
+            if delta_path is not None and delta_report:
+                write_placement_delta_report(output_dir, delta_path, delta_report)
             routed_path = output_dir / "matchgroup_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
@@ -2528,11 +2634,15 @@ def main() -> int:
             return gate.exit_code()
 
         if args.step == "schematic":
-            create_schematic(output_dir)
+            create_schematic(output_dir, pad_overrides)
+            if delta_path is not None and delta_report:
+                write_placement_delta_report(output_dir, delta_path, delta_report)
             return 0
 
         if args.step == "pcb":
-            create_pcb(output_dir)
+            create_pcb(output_dir, pad_overrides)
+            if delta_path is not None and delta_report:
+                write_placement_delta_report(output_dir, delta_path, delta_report)
             return 0
 
         if args.step == "route":

@@ -18,11 +18,20 @@ JLCPCB tier-1 stackup the Phase 3K impedance formulas were calibrated
 against drives both boards.
 
 Usage:
-    python generate_pcb.py [output_file]
+    python generate_pcb.py [output_file] [--placement-delta PATH]
+
+``--placement-delta`` (issue #5537, Epic #5511 Phase 2b) replays a
+committed ``placement_delta.json`` artifact: every ``pad_map`` it carries
+re-binds the named pads of the named footprint to their new nets BEFORE the
+PCB text is emitted, so the swap is part of the generated board rather than a
+post-hoc patch.  Without the flag the emitted PCB is byte-identical (modulo
+UUIDs) to the pre-#5537 recipe.
 """
 
 from __future__ import annotations
 
+import argparse
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -740,12 +749,89 @@ def generate_qfp48_addr_sink() -> str:
 
 
 # =============================================================================
+# Pad -> net re-binding (issue #5537, Epic #5511 Phase 2b)
+# =============================================================================
+# A committed ``placement_delta.json`` can carry a ``pad_map``
+# (``{pad_number: new_net_name}`` on one footprint) computed by the declared
+# swap-group proposer (#5522).  Applying it here -- at the point the footprint
+# block is emitted -- keeps the change BYTE-MINIMAL: only the ``(net N
+# "NAME")`` of the named pads differs, so a diff of two generated boards shows
+# exactly the re-binding and nothing else.
+#
+# The rewrite is deliberately fail-loud.  A pad map naming a footprint that is
+# not on the board, a pad that footprint does not have, or a net the board
+# does not declare is a STALE artifact, and silently generating the unswapped
+# board from it would ship a netlist nobody reviewed.
+
+_REFERENCE_RE = re.compile(r'\(fp_text reference "([^"]+)"')
+
+
+def _footprint_reference(block: str) -> str | None:
+    """Reference designator of an emitted footprint block, if it is one."""
+    match = _REFERENCE_RE.search(block)
+    return match.group(1) if match else None
+
+
+def apply_pad_overrides(block: str, pad_map: dict[str, str]) -> str:
+    """Re-bind ``pad_map``'s pads inside one emitted footprint ``block``.
+
+    Every other byte of the block -- pad geometry, layers, UUIDs, ordering --
+    is preserved exactly.  Raises ``KeyError`` for a pad the footprint does not
+    carry and ``KeyError`` for a net :data:`NETS` does not declare.
+
+    The match is confined to ONE LINE (``[^\\n]``, no ``re.DOTALL``) because
+    ``_emit_smd_pad`` / ``_emit_through_hole_pad`` emit exactly one pad per
+    line.  A dot-all match would silently walk past an unbound pad and re-bind
+    the NEXT pad's net instead of failing.
+    """
+    updated = block
+    for pad, net_name in pad_map.items():
+        if net_name not in NETS:
+            raise KeyError(f"pad_map assigns pad {pad!r} to undeclared net {net_name!r}")
+        net_num = NETS[net_name]
+        pad_re = re.compile(
+            r'(\(pad "' + re.escape(pad) + r'" [^\n]*?)\(net \d+ "[^"]*"\)',
+        )
+        updated, count = pad_re.subn(rf'\g<1>(net {net_num} "{net_name}")', updated, count=1)
+        if count != 1:
+            raise KeyError(f"footprint has no net-bound pad {pad!r} to re-bind")
+    return updated
+
+
+def apply_pad_map_overrides(
+    parts: list[str], pad_overrides: dict[str, dict[str, str]]
+) -> list[str]:
+    """Apply ``{ref: {pad: net}}`` to the footprint blocks of ``parts``."""
+    remaining = dict(pad_overrides)
+    out: list[str] = []
+    for block in parts:
+        ref = _footprint_reference(block)
+        pad_map = remaining.pop(ref, None) if ref is not None else None
+        out.append(apply_pad_overrides(block, pad_map) if pad_map else block)
+    if remaining:
+        raise KeyError(
+            "placement delta targets footprint(s) not on this board: "
+            + ", ".join(sorted(remaining))
+        )
+    return out
+
+
+# =============================================================================
 # Top-level PCB Generator
 # =============================================================================
 
 
-def generate_pcb(*, mipi_source_rotation: float = 0) -> str:
-    """Generate the complete PCB file."""
+def generate_pcb(
+    *,
+    mipi_source_rotation: float = 0,
+    pad_overrides: dict[str, dict[str, str]] | None = None,
+) -> str:
+    """Generate the complete PCB file.
+
+    ``pad_overrides`` (``{reference: {pad_number: net_name}}``, issue #5537)
+    replays a committed placement delta's pad re-binding.  ``None`` / empty --
+    the default -- emits exactly the authored netlist.
+    """
     parts = [
         generate_header(),
         generate_nets(),
@@ -763,25 +849,53 @@ def generate_pcb(*, mipi_source_rotation: float = 0) -> str:
         generate_addr_header(),
         generate_qfp48_addr_sink(),
     ]
+    if pad_overrides:
+        parts = apply_pad_map_overrides(parts, pad_overrides)
     parts.append(")")  # close kicad_pcb
     return "\n".join(parts)
 
 
+def load_pad_overrides(delta_path: str | Path) -> dict[str, dict[str, str]]:
+    """``{reference: {pad: net}}`` replayed from a committed delta artifact."""
+    from kicad_tools.router.placement_delta import load_placement_deltas, pad_map_overrides
+
+    return pad_map_overrides(load_placement_deltas(delta_path))
+
+
 def main() -> int:
     """Generate the PCB file."""
-    output_file = (
-        sys.argv[1] if len(sys.argv) > 1 else "regression-output/matchgroup_test.kicad_pcb"
+    parser = argparse.ArgumentParser(description="Generate match-group testbench PCB")
+    parser.add_argument(
+        "output_file",
+        nargs="?",
+        default="regression-output/matchgroup_test.kicad_pcb",
+        help="Output .kicad_pcb path (relative paths resolve next to this script).",
     )
-    output_path = Path(output_file)
+    parser.add_argument(
+        "--placement-delta",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Replay a committed placement_delta.json: apply every recorded "
+            "pad_map to the generated board before emitting it (issue #5537)."
+        ),
+    )
+    args = parser.parse_args()
+
+    output_path = Path(args.output_file)
     if not output_path.is_absolute():
-        output_path = Path(__file__).parent / output_file
+        output_path = Path(__file__).parent / args.output_file
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    pcb_content = generate_pcb()
+    pad_overrides = load_pad_overrides(args.placement_delta) if args.placement_delta else None
+    pcb_content = generate_pcb(pad_overrides=pad_overrides)
     output_path.write_text(pcb_content)
 
     print(f"Generated: {output_path}")
+    if pad_overrides:
+        for ref, pad_map in sorted(pad_overrides.items()):
+            print(f"  Pad re-binding ({ref}): {len(pad_map)} pad(s) from {args.placement_delta}")
     print(f"  Board size: {BOARD_WIDTH}mm x {BOARD_HEIGHT}mm")
     print("  Stackup: 4-layer (F.Cu / In1.Cu GND / In2.Cu PWR / B.Cu)")
     print(

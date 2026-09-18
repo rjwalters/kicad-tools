@@ -440,10 +440,53 @@ def _wire_all_pins(sch: Schematic, sym, pin_nets: dict[str, str]) -> int:
     return wired
 
 
-def create_matchgroup_schematic(output_path: Path) -> bool:
-    """Create the match-group testbench schematic (fully wired, #4012)."""
+def effective_pin_nets(
+    pad_overrides: dict[str, dict[str, str]] | None = None,
+) -> dict[str, dict[str, str]]:
+    """``PIN_NETS`` with a committed placement delta's ``pad_map`` applied.
+
+    Issue #5537 (Epic #5511 Phase 2b).  ``pad_overrides`` is
+    ``{reference: {pad_number: net_name}}`` -- exactly what
+    ``kicad_tools.router.placement_delta.pad_map_overrides`` returns for a
+    committed ``placement_delta.json`` -- and the SAME mapping
+    ``generate_pcb.generate_pcb(pad_overrides=...)`` applies to the board.
+    Feeding both sides from one artifact is what keeps schematic and PCB in
+    lock-step across the swap (LVS stays clean by construction rather than by
+    a hand-edited mirror of the re-binding).
+
+    ``None`` / empty returns the authored netlist unchanged.  A reference or
+    pad the board does not carry raises ``KeyError``: a stale artifact must
+    fail the build, not silently emit the unswapped schematic against a
+    swapped PCB.
+    """
+    if not pad_overrides:
+        return {ref: dict(pads) for ref, pads in PIN_NETS.items()}
+    unknown = sorted(set(pad_overrides) - set(PIN_NETS))
+    if unknown:
+        raise KeyError(f"placement delta targets unknown component(s): {', '.join(unknown)}")
+    out: dict[str, dict[str, str]] = {}
+    for ref, pads in PIN_NETS.items():
+        pads = dict(pads)
+        for pad, net_name in pad_overrides.get(ref, {}).items():
+            if pad not in pads:
+                raise KeyError(f"placement delta targets unknown pad {ref}.{pad}")
+            pads[pad] = net_name
+        out[ref] = pads
+    return out
+
+
+def create_matchgroup_schematic(
+    output_path: Path,
+    pad_overrides: dict[str, dict[str, str]] | None = None,
+) -> bool:
+    """Create the match-group testbench schematic (fully wired, #4012).
+
+    ``pad_overrides`` replays a committed placement delta's pad re-binding
+    (issue #5537); see :func:`effective_pin_nets`.
+    """
     print("Creating Match-Group Test Schematic...")
     print("=" * 60)
+    pin_nets = effective_pin_nets(pad_overrides)
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -482,11 +525,11 @@ def create_matchgroup_schematic(output_path: Path) -> bool:
             value=value,
             footprint=footprint,
         )
-        wired = _wire_all_pins(sch, sym, PIN_NETS[ref])
+        wired = _wire_all_pins(sch, sym, pin_nets[ref])
         total_wired += wired
         print(f"   {ref} ({symbol_name}): {wired} pins wired at ({sym.x}, {sym.y})")
 
-    expected = sum(len(v) for v in PIN_NETS.values())
+    expected = sum(len(v) for v in pin_nets.values())
     print(f"   Total: {total_wired}/{expected} pins wired")
     if total_wired != expected:
         raise RuntimeError(f"expected {expected} wired pins, got {total_wired}")
@@ -523,6 +566,15 @@ def main() -> int:
         default=None,
         help="Output file path or directory (default: regression-output/matchgroup_test.kicad_sch)",
     )
+    parser.add_argument(
+        "--placement-delta",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Replay a committed placement_delta.json: apply every recorded "
+            "pad_map to the generated netlist (issue #5537)."
+        ),
+    )
     args = parser.parse_args()
 
     default_filename = "matchgroup_test.kicad_sch"
@@ -533,8 +585,14 @@ def main() -> int:
     else:
         output_path = Path(__file__).parent / "regression-output" / default_filename
 
+    pad_overrides = None
+    if args.placement_delta:
+        from kicad_tools.router.placement_delta import load_placement_deltas, pad_map_overrides
+
+        pad_overrides = pad_map_overrides(load_placement_deltas(args.placement_delta))
+
     try:
-        ok = create_matchgroup_schematic(output_path)
+        ok = create_matchgroup_schematic(output_path, pad_overrides)
         return 0 if ok else 1
     except Exception as e:
         print(f"\nError: {e}", file=sys.stderr)
