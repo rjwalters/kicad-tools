@@ -131,23 +131,31 @@ class NetPlanEntry:
 class EdgePlanEntry:
     """Per-undirected-edge demand/capacity/overflow.
 
-    One row per undirected region-graph edge (never per directed edge --
-    see :meth:`RoutingPlan.from_global_result` for why the forward-direction
-    ``(min(a, b), max(a, b))`` edge is the canonical source of ``capacity``
-    / ``demand`` / ``overflow`` here, matching ``RegionGraph.
-    get_total_overflow()`` / ``get_overflowed_edges()`` exactly).
+    One row per undirected region-graph edge (never per directed edge).
+    The region graph backs each pair with two directed ``RegionEdge``
+    objects; ``demand`` / ``overflow`` sum **both** directions so they agree
+    with ``RegionGraph.get_total_overflow()`` regardless of which direction
+    carried the traffic (Issue #5544), while ``capacity`` / ``blockage_mm``
+    are read from the ascending ``(min(a, b), max(a, b))`` edge alone
+    because they are symmetric across the pair by construction.  See
+    :meth:`RoutingPlan.from_global_result` for the full rationale.
 
     Attributes:
         a: Smaller region ID of the pair.
         b: Larger region ID of the pair.
-        capacity: Scalar capacity (summed across layers).
-        demand: Scalar utilization (summed across layers).
-        overflow: ``max(0, demand - capacity)``.
+        capacity: Scalar per-direction capacity (summed across layers).
+        demand: Scalar utilization (summed across layers AND across both
+            traversal directions of the pair).
+        overflow: Sum of ``max(0, utilization - capacity)`` over both
+            directed edges of the pair -- NOT ``max(0, demand - capacity)``,
+            since each direction is measured against the same capacity
+            independently (matching ``RegionGraph.get_total_overflow()``).
         blockage_mm: Obstacle blockage length along the boundary (mm).
         nets: Net IDs whose corridor crosses this edge.
         layers: Per-layer ``{"capacity": int, "demand": int}`` rows, keyed
-            by the string layer index.  Empty when the graph has no
-            per-layer data (``num_layers <= 1``).
+            by the string layer index; ``demand`` likewise sums both
+            directions.  Empty when the graph has no per-layer data
+            (``num_layers <= 1``).
     """
 
     a: int
@@ -371,30 +379,50 @@ class RoutingPlan:
         edges: list[EdgePlanEntry] = []
         edge_lookup = getattr(graph, "_edge_lookup", {})
         for (a, b), net_ids in sorted(edge_nets.items()):
-            # ``get_total_overflow`` / ``get_overflowed_edges`` dedupe an
-            # undirected pair onto the edge object stored in the SMALLER
-            # region's outgoing list -- i.e. the (a, b) directed edge with
-            # a < b, since region graph construction always makes the
-            # neighbor ID larger than the source.  Reading from the same
-            # directed edge here keeps the two totals derivable by
-            # construction (asserted in tests).
+            # Every adjacent region pair is backed by TWO directed
+            # ``RegionEdge`` objects (``source=a, target=b`` and
+            # ``source=b, target=a``), and ``update_utilization()`` only
+            # bumps the one matching a path's actual traversal direction.
+            # ``RegionGraph.get_total_overflow()`` sums both directions per
+            # undirected pair (Issue #5529 / PR #5540), so the traffic
+            # counters here must be summed the same way -- reading only the
+            # ascending (a, b) edge reported ``overflow=0`` for a pair whose
+            # traffic ran descending-only (Issue #5544).
             edge = edge_lookup.get((a, b))
             if edge is None:
                 continue
+            reverse = edge_lookup.get((b, a))
+            # ``capacity`` / ``layer_capacity`` / ``blockage`` are symmetric
+            # across the pair by construction: ``RegionGraph._build_edges``
+            # builds both directed edges from the same ``edge_capacity`` /
+            # ``layer_cap``, and ``set_obstacles`` recomputes both from the
+            # same (order-independent) region-blockage average.  Only the
+            # utilization-derived fields differ per direction, so only those
+            # are combined.
+            reverse_utilization = reverse.utilization if reverse is not None else 0
+            reverse_overflow = reverse.overflow if reverse is not None else 0
+            reverse_layer_utilization = reverse.layer_utilization if reverse is not None else {}
             layers_block: dict[str, dict[str, int]] = {}
-            layer_indices = set(edge.layer_capacity) | set(edge.layer_utilization)
+            layer_indices = (
+                set(edge.layer_capacity)
+                | set(edge.layer_utilization)
+                | set(reverse_layer_utilization)
+            )
             for layer_idx in sorted(layer_indices):
                 layers_block[str(layer_idx)] = {
                     "capacity": edge.layer_capacity.get(layer_idx, 0),
-                    "demand": edge.layer_utilization.get(layer_idx, 0),
+                    "demand": (
+                        edge.layer_utilization.get(layer_idx, 0)
+                        + reverse_layer_utilization.get(layer_idx, 0)
+                    ),
                 }
             edges.append(
                 EdgePlanEntry(
                     a=a,
                     b=b,
                     capacity=edge.capacity,
-                    demand=edge.utilization,
-                    overflow=edge.overflow,
+                    demand=edge.utilization + reverse_utilization,
+                    overflow=edge.overflow + reverse_overflow,
                     blockage_mm=edge.blockage,
                     nets=sorted(net_ids),
                     layers=layers_block,
