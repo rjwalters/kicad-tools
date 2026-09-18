@@ -34,6 +34,7 @@ from kicad_tools.router import (
     PlacementDeltaFeedbackResult,
     write_placement_delta_json,
 )
+from kicad_tools.schema.pcb import PCB
 
 # Reuse the Phase-1 reversed-bundle fixture verbatim so the classifier emits a
 # genuine DE_REVERSE_BUNDLE -> rotate_180 delta on UB.
@@ -151,13 +152,25 @@ class MockPCB:
 
 class FakePad:
     def __init__(
-        self, x: float, y: float, ref: str, pin: str = "1", layer=None, through_hole=False
+        self,
+        x: float,
+        y: float,
+        ref: str,
+        pin: str = "1",
+        layer=None,
+        through_hole=False,
+        net: int = 0,
+        net_name: str = "",
     ):
         self.x = x
         self.y = y
         self.ref = ref
         self.pin = pin
         self.through_hole = through_hole
+        # Net binding: only the ``reorder_pins`` delta (#5536) reads or writes
+        # these; the geometric kinds leave them alone.
+        self.net = net
+        self.net_name = net_name
         # Router-pad layer set only when given (#4560): the mirror transform
         # and layer-aware router-pad snapshot guard via ``getattr``.
         if layer is not None:
@@ -1298,3 +1311,267 @@ class TestComposedDeltaFeedbackIntegration:
         ub2 = next(fp for fp in reloaded.footprints if fp.reference == "UB")
         assert ub2.rotation == ub.rotation
         assert [pad.rotation for pad in ub2.pads] == [pad.rotation for pad in ub.pads]
+
+
+# --------------------------------------------------------------------------- #
+# reorder_pins: declared-swap-group pad rebinding (#5536, Epic #5511 Phase 2a)  #
+# --------------------------------------------------------------------------- #
+
+# Two facing single-pad-per-net parts whose SECONDARY column (UB) carries the
+# two-net bundle in the opposite order: UB pad "1" holds DQ1 while its facing
+# UA pad holds DQ0, and vice versa.  The declared swap group's proposal is
+# therefore ``{"1": "DQ0", "2": "DQ1"}`` -- the rebinding that re-co-orients
+# the rows without moving a single pad.
+_SWAP_BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+  (net 0 "")
+  (net 1 "DQ0")
+  (net 2 "DQ1")
+  (footprint "R" (layer "F.Cu") (at 2 10)
+    (property "Reference" "UA")
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 1 "DQ0"))
+    (pad "2" smd rect (at 0 2) (size 0.5 0.5) (layers "F.Cu") (net 2 "DQ1"))
+  )
+  (footprint "R" (layer "F.Cu") (at 10 10)
+    (property "Reference" "UB")
+    (pad "1" smd rect (at 0 0) (size 0.5 0.5) (layers "F.Cu") (net 2 "DQ1"))
+    (pad "2" smd rect (at 0 2) (size 0.5 0.5) (layers "F.Cu") (net 1 "DQ0"))
+  )
+)
+"""
+
+_SWAP_PAD_MAP = {"1": "DQ0", "2": "DQ1"}
+
+
+def _swap_delta(pad_map: dict[str, str] | None = _SWAP_PAD_MAP) -> PlacementDelta:
+    return PlacementDelta(
+        net_name="DQ0",
+        target_ref="UB",
+        kind="reorder_pins",
+        source_action="reorder_pins",
+        pad_map=dict(pad_map) if pad_map is not None else None,
+        crossings_before=1,
+        crossings_after=0,
+    )
+
+
+def _swap_router_pads() -> list[FakePad]:
+    """Router pads mirroring ``_SWAP_BOARD``'s bindings (UB reversed)."""
+    return [
+        FakePad(2.0, 10.0, "UA", "1", net=1, net_name="DQ0"),
+        FakePad(2.0, 12.0, "UA", "2", net=2, net_name="DQ1"),
+        FakePad(10.0, 10.0, "UB", "1", net=2, net_name="DQ1"),
+        FakePad(10.0, 12.0, "UB", "2", net=1, net_name="DQ0"),
+    ]
+
+
+def _crossing_nets_fail(router: FakeRouter) -> list[int]:
+    """A net fails while its two pads sit at different ``y`` (a crossing)."""
+    by_net: dict[int, list[FakePad]] = {}
+    for pad in router.all_pads:
+        by_net.setdefault(pad.net, []).append(pad)
+    return [
+        net
+        for net, pads in sorted(by_net.items())
+        if net != 0 and len({round(pad.y, 6) for pad in pads}) != 1
+    ]
+
+
+def _make_swap_loop(tmp_path: Path, failed_predicate, delta: PlacementDelta, **kw):
+    pcb = _load(tmp_path, _SWAP_BOARD)
+    pads = _swap_router_pads()
+    router = FakeRouter(pads, 2, failed_predicate)
+    # Real membership (the double's default is empty lists): the loop has to
+    # move a rebound pad's key between these buckets or the re-route would
+    # solve the OLD netlist.
+    router.nets = {
+        0: [],
+        1: [("UA", "1"), ("UB", "2")],
+        2: [("UA", "2"), ("UB", "1")],
+    }
+    loop = PlacementDeltaFeedbackLoop(
+        router=router,
+        pcb=pcb,
+        verbose=False,
+        delta_proposer=lambda _pcb: [delta],
+        **kw,
+    )
+    return loop, router, pcb
+
+
+def _ub(pcb: PCB):
+    return next(fp for fp in pcb.footprints if fp.reference == "UB")
+
+
+def _ub_bindings(pcb: PCB) -> dict[str, str]:
+    return {pad.number: pad.net_name for pad in _ub(pcb).pads}
+
+
+class TestReorderPinsApplicator:
+    """``StrategyApplicator`` gained a REORDER_PINS branch (#5536)."""
+
+    @staticmethod
+    def _strategy(pad_map: dict[str, str], target: str = "UB") -> ResolutionStrategy:
+        return ResolutionStrategy(
+            type=StrategyType.REORDER_PINS,
+            difficulty=Difficulty.MEDIUM,
+            confidence=1.0,
+            actions=[Action(type="reorder_pins", target=target, params={"pad_map": pad_map})],
+            affected_components=[target],
+        )
+
+    def test_pad_map_is_applied_via_assign_net_to_footprint_pad(self, tmp_path):
+        pcb = _load(tmp_path, _SWAP_BOARD)
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+
+        result = StrategyApplicator().apply_strategy(pcb, self._strategy(dict(_SWAP_PAD_MAP)))
+
+        assert result.success is True
+        assert _ub_bindings(pcb) == {"1": "DQ0", "2": "DQ1"}
+        # Pads did not MOVE -- a swap is a netlist change, not a placement one.
+        assert _ub(pcb).position == (10.0, 10.0)
+        assert [pad.position for pad in _ub(pcb).pads] == [(0.0, 0.0), (0.0, 2.0)]
+
+    def test_rebinding_survives_save_and_reload(self, tmp_path):
+        """The S-expression tree ``PCB.save`` writes is rebound too, not just RAM."""
+        pcb = _load(tmp_path, _SWAP_BOARD)
+        StrategyApplicator().apply_strategy(pcb, self._strategy(dict(_SWAP_PAD_MAP)))
+        out = tmp_path / "swapped.kicad_pcb"
+        pcb.save(str(out))
+        assert _ub_bindings(PCB.load(str(out))) == {"1": "DQ0", "2": "DQ1"}
+
+    def test_unknown_pad_number_fails_without_partial_mutation(self, tmp_path):
+        pcb = _load(tmp_path, _SWAP_BOARD)
+        result = StrategyApplicator().apply_strategy(pcb, self._strategy({"1": "DQ0", "99": "DQ1"}))
+        assert result.success is False
+        assert "99" in result.message
+        # All-or-nothing: pad "1" was NOT rebound on the way to the failure.
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+
+    def test_empty_pad_map_fails(self, tmp_path):
+        pcb = _load(tmp_path, _SWAP_BOARD)
+        result = StrategyApplicator().apply_strategy(pcb, self._strategy({}))
+        assert result.success is False
+        assert "pad_map" in result.message
+
+    def test_missing_component_fails(self, tmp_path):
+        pcb = _load(tmp_path, _SWAP_BOARD)
+        result = StrategyApplicator().apply_strategy(
+            pcb, self._strategy(dict(_SWAP_PAD_MAP), target="UZ")
+        )
+        assert result.success is False
+
+    def test_is_safe_to_apply_moves_no_copper(self, tmp_path):
+        """REORDER_PINS is bounds-exempt: it moves nothing (cf. #4467/#4560)."""
+        pcb = _load(tmp_path, _SWAP_BOARD)
+        applicator = StrategyApplicator()
+        assert applicator.is_safe_to_apply(self._strategy(dict(_SWAP_PAD_MAP)), pcb) is True
+        assert applicator.is_safe_to_apply(self._strategy(dict(_SWAP_PAD_MAP), "UZ"), pcb) is False
+
+
+class TestReorderPinsSelection:
+    """``_select_delta`` applies a declared swap group, skips a bare proposal."""
+
+    def test_declared_swap_group_delta_is_applied(self, tmp_path):
+        loop, router, pcb = _make_swap_loop(tmp_path, _crossing_nets_fail, _swap_delta())
+        result = loop.run_delta(max_adjustments=3)
+
+        assert [d.kind for d in result.applied_deltas] == ["reorder_pins"]
+        assert result.exit_reason == "pd_converged"
+        # PCB side: pads re-bound as the proposal asked.
+        assert _ub_bindings(pcb) == {"1": "DQ0", "2": "DQ1"}
+        # Router side: pad bindings AND net membership follow, so the re-route
+        # solved the swapped netlist rather than the original one.
+        ub1 = router.pads[("UB", "1")]
+        ub2 = router.pads[("UB", "2")]
+        assert (ub1.net, ub1.net_name) == (1, "DQ0")
+        assert (ub2.net, ub2.net_name) == (2, "DQ1")
+        assert sorted(router.nets[1]) == [("UA", "1"), ("UB", "1")]
+        assert sorted(router.nets[2]) == [("UA", "2"), ("UB", "2")]
+        # Geometry untouched.
+        assert (ub1.x, ub1.y) == (10.0, 10.0)
+
+    def test_rationale_only_delta_is_still_skipped(self, tmp_path):
+        """No declared swap group => no ``pad_map`` => never applied (#5522 guard)."""
+        loop, router, pcb = _make_swap_loop(
+            tmp_path, _crossing_nets_fail, _swap_delta(pad_map=None)
+        )
+        result = loop.run_delta(max_adjustments=3)
+
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_no_delta"
+        assert any("rationale-only" in reason for reason in result.skip_reasons)
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+
+    def test_pad_map_naming_an_absent_pad_is_skipped(self, tmp_path):
+        loop, _router, pcb = _make_swap_loop(
+            tmp_path, _crossing_nets_fail, _swap_delta({"1": "DQ0", "42": "DQ1"})
+        )
+        result = loop.run_delta(max_adjustments=3)
+
+        assert result.applied_deltas == []
+        assert any("42" in reason for reason in result.skip_reasons)
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+
+    def test_pad_map_naming_a_net_the_router_lacks_is_skipped(self, tmp_path):
+        loop, _router, pcb = _make_swap_loop(
+            tmp_path, _crossing_nets_fail, _swap_delta({"1": "DQ9", "2": "DQ1"})
+        )
+        result = loop.run_delta(max_adjustments=3)
+
+        assert result.applied_deltas == []
+        assert any("does not carry" in reason for reason in result.skip_reasons)
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+
+    def test_anchored_target_is_still_skipped(self, tmp_path):
+        loop, _router, pcb = _make_swap_loop(
+            tmp_path, _crossing_nets_fail, _swap_delta(), fixed_refs={"UB"}
+        )
+        result = loop.run_delta(max_adjustments=3)
+
+        assert result.applied_deltas == []
+        assert any("anchored" in reason for reason in result.skip_reasons)
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+
+
+class TestReorderPinsAtomicRevert:
+    """A rejected swap restores pad net bindings, not just geometry (#5536 AC3)."""
+
+    def test_non_improving_swap_restores_pcb_and_router_bindings(self, tmp_path):
+        loop, router, pcb = _make_swap_loop(tmp_path, _rotate_never_helps, _swap_delta())
+        before_nets = {net: sorted(keys) for net, keys in router.nets.items()}
+
+        result = loop.run_delta(max_adjustments=1)
+
+        assert result.applied_deltas == []
+        assert [d.kind for d in result.reverted_deltas] == ["reorder_pins"]
+        assert result.exit_reason == "pd_reverted"
+        # PCB pads back to the board's original bindings...
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+        # ...including in the S-expression tree that gets written out.
+        out = tmp_path / "reverted.kicad_pcb"
+        pcb.save(str(out))
+        assert _ub_bindings(PCB.load(str(out))) == {"1": "DQ1", "2": "DQ0"}
+        # ...and the router's pads + net membership.
+        ub1 = router.pads[("UB", "1")]
+        ub2 = router.pads[("UB", "2")]
+        assert (ub1.net, ub1.net_name) == (2, "DQ1")
+        assert (ub2.net, ub2.net_name) == (1, "DQ0")
+        assert {net: sorted(keys) for net, keys in router.nets.items()} == before_nets
+
+    def test_clearance_regression_reverts_the_rebinding(self, tmp_path):
+        """The #4468 clearance guard rejects a swap the same way it rejects a move."""
+        loop, router, pcb = _make_swap_loop(tmp_path, _crossing_nets_fail, _swap_delta())
+        violations = iter([0, 3])
+        loop._clearance_violation_count = lambda: next(violations)  # type: ignore[method-assign]
+
+        result = loop.run_delta(max_adjustments=1, require_no_clearance_regression=True)
+
+        assert result.applied_deltas == []
+        assert [d.kind for d in result.reverted_deltas] == ["reorder_pins"]
+        assert any("clearance violations 0 -> 3" in r for r in result.reverted_reasons)
+        assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
+        assert router.pads[("UB", "1")].net_name == "DQ1"

@@ -96,7 +96,7 @@ class StrategyApplicator:
         # In particular, a later ambiguous reference in MOVE_MULTIPLE must not
         # leave the earlier, uniquely identified footprints partially moved.
         for action in strategy.actions:
-            if action.type in {"move", "rotate", "mirror"}:
+            if action.type in {"move", "rotate", "mirror", "reorder_pins"}:
                 self._find_footprint(pcb, action.target)
 
         if strategy.type == StrategyType.MOVE_COMPONENT:
@@ -107,6 +107,8 @@ class StrategyApplicator:
             return self._apply_rotate_component(pcb, strategy)
         elif strategy.type == StrategyType.MIRROR_COMPONENT:
             return self._apply_mirror_component(pcb, strategy)
+        elif strategy.type == StrategyType.REORDER_PINS:
+            return self._apply_reorder_pins(pcb, strategy)
         else:
             return ApplicationResult(
                 success=False,
@@ -369,6 +371,83 @@ class StrategyApplicator:
             message=f"Mirrored {ref} (layer {old_layer} -> {new_layer}, left/right flip)",
         )
 
+    def _apply_reorder_pins(self, pcb: PCB, strategy: ResolutionStrategy) -> ApplicationResult:
+        """Re-bind a declared swap group's pads to different nets (issue #5536).
+
+        Phase 2a of Epic #5511.  The action's ``pad_map`` parameter is the
+        ``{pad_number: new_net_name}`` mapping
+        :class:`~kicad_tools.router.stuck_classifier.SwapProposal` computed for
+        a DECLARED swap group on a measured-reversed bundle -- only the pads
+        whose binding actually changes are present.  Applying it is a pure
+        **net rebinding** on pads that do not move: no position, rotation,
+        layer or footprint-local geometry is touched, so there is no pad-angle
+        (#3902/#4518/#4966) or cosmetics (#4560) counterpart to keep in sync.
+
+        ``PCB.assign_net_to_footprint_pad`` does the per-pad work: it updates
+        the in-memory :class:`~kicad_tools.schema.pcb.Pad` **and** the
+        S-expression tree ``PCB.save`` serialises, creating the net when the
+        board does not carry it yet, and assigns every pad sharing the number
+        (KiCad's EP/thermal-group convention, #4186).
+
+        Every pad number is resolved against the footprint BEFORE the first
+        mutation, so an unknown pad number fails the whole strategy instead of
+        leaving the board half-rebound -- the same all-or-nothing contract
+        :meth:`apply_strategy` enforces for ``MOVE_MULTIPLE`` selectors.
+        """
+        if not strategy.actions:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message="No actions in strategy",
+            )
+
+        action = strategy.actions[0]
+        if action.type != "reorder_pins":
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message=f"Expected reorder_pins action, got {action.type}",
+            )
+
+        ref = action.target
+        pad_map = action.params.get("pad_map") or {}
+        if not pad_map:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message=f"reorder_pins action for {ref} carries an empty pad_map",
+            )
+
+        fp = self._find_footprint(pcb, ref)
+        if fp is None:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message=f"Component {ref} not found",
+            )
+
+        # Pre-validate every selector before mutating anything (all-or-nothing).
+        present = {pad.number for pad in getattr(fp, "pads", [])}
+        missing = sorted(str(number) for number in pad_map if str(number) not in present)
+        if missing:
+            return ApplicationResult(
+                success=False,
+                components_moved=[],
+                message=f"Pad(s) {', '.join(missing)} not found on {ref}",
+            )
+
+        for pad_number, net_name in pad_map.items():
+            pcb.assign_net_to_footprint_pad(fp.reference, str(pad_number), net_name)
+
+        bindings = ", ".join(
+            f"{pad_number}->{net_name}" for pad_number, net_name in sorted(pad_map.items())
+        )
+        return ApplicationResult(
+            success=True,
+            components_moved=[],
+            message=f"Re-bound {len(pad_map)} pad(s) on {ref} ({bindings})",
+        )
+
     # Footprint-level cosmetic children a left/right flip must move to the
     # other side and y-mirror ("pad" is deliberately absent -- pads flip via
     # the attribute write-through above, never twice).
@@ -517,13 +596,17 @@ class StrategyApplicator:
             True if the strategy is safe to apply.
         """
         # ROTATE_COMPONENT and MIRROR_COMPONENT keep the footprint centre fixed
-        # (rotation/flip about the anchor), so board-bounds / move-distance
-        # checks do not apply -- only the target's existence matters (issues
-        # #4467, #4560).
-        if strategy.type in (StrategyType.ROTATE_COMPONENT, StrategyType.MIRROR_COMPONENT):
-            expected_action = (
-                "rotate" if strategy.type == StrategyType.ROTATE_COMPONENT else "mirror"
-            )
+        # (rotation/flip about the anchor) and REORDER_PINS moves no copper at
+        # all (it only re-binds pads to nets, issue #5536), so board-bounds /
+        # move-distance checks do not apply -- only the target's existence
+        # matters (issues #4467, #4560).
+        _NON_MOVING_ACTION = {
+            StrategyType.ROTATE_COMPONENT: "rotate",
+            StrategyType.MIRROR_COMPONENT: "mirror",
+            StrategyType.REORDER_PINS: "reorder_pins",
+        }
+        if strategy.type in _NON_MOVING_ACTION:
+            expected_action = _NON_MOVING_ACTION[strategy.type]
             for action in strategy.actions:
                 if action.type != expected_action:
                     continue

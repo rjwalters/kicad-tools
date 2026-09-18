@@ -42,6 +42,139 @@ from kicad_tools.recovery import (
 _PadState = tuple[tuple[float, float] | None, float | None, list[str] | None]
 _FootprintState = tuple[tuple[float, float], float, str | None, list[_PadState]]
 
+# Router-side pad->net rebinding for an applied ``reorder_pins`` delta (issue
+# #5536, Phase 2a of Epic #5511).  A binding is ``(pad, net_id, net_name)``;
+# applying a list of them returns the list of bindings they displaced, so the
+# return value is BOTH the "what changed" record and an exact restore token
+# (replaying it through the same function is the inverse operation).
+_RouterPadNetBinding = tuple[Any, int, str]
+
+
+@dataclass
+class _PadNetSnapshot:
+    """Pre-apply pad->net bindings a ``reorder_pins`` revert must restore.
+
+    ``reference`` is the authored footprint reference
+    ``PCB.assign_net_to_footprint_pad`` keys on; ``pcb_bindings`` is
+    ``{pad_number: net_name}`` for exactly the pads the delta rewrites; and
+    ``router_bindings`` is the router-side counterpart (issue #5536).
+    """
+
+    reference: str
+    pcb_bindings: dict[str, str]
+    router_bindings: list[_RouterPadNetBinding]
+
+
+def _router_pad_key(pad: Any) -> tuple[str, str]:
+    """The ``Autorouter.nets`` membership key for a router ``Pad``.
+
+    Mirrors :attr:`kicad_tools.router.primitives.Pad.key`, with a getattr
+    fallback so pad doubles that carry only ``ref``/``pin`` work too.
+    """
+    key = getattr(pad, "key", None)
+    if key is not None:
+        first, second = key
+        return (first, second)
+    ref = getattr(pad, "component_id", "") or getattr(pad, "ref", "")
+    return (ref, getattr(pad, "terminal_id", "") or getattr(pad, "pin", ""))
+
+
+def router_net_ids_by_name(router: Any) -> dict[str, int]:
+    """``{net_name: net_id}`` as the router's own flat pad list declares it.
+
+    The router routes against net *ids*; a swap proposal names its target
+    nets by *name*.  Every name a declared swap group re-binds to is, by
+    construction, already carried by one of the group's pads (the proposal is
+    a permutation WITHIN the group), so this pad-derived map resolves every
+    rebinding without consulting the PCB's net table.
+    """
+    pads = getattr(router, "all_pads", None) or list(getattr(router, "pads", {}).values())
+    ids: dict[str, int] = {}
+    for pad in pads:
+        name = getattr(pad, "net_name", "")
+        if name and name not in ids:
+            ids[name] = pad.net
+    return ids
+
+
+def resolve_router_swap_bindings(
+    router: Any,
+    target_key: str,
+    pad_map: dict[str, str],
+) -> list[_RouterPadNetBinding] | None:
+    """Translate a delta's ``{pad_number: net_name}`` map into router bindings.
+
+    Returns ``None`` when a pad_map entry names a net the router does not
+    carry -- applying a partial rebinding would desynchronise the router from
+    the PCB, so the caller must decline the delta instead (the loop skips it
+    with an explicit reason).  Pads of ``target_key`` that the map does not
+    name are left alone.
+
+    A pad_map key is an AUTHORED pad number (``schema.pcb.Pad.number``), so it
+    is matched against ``Pad.pin`` -- which "keeps its authored display name"
+    -- and never against ``Pad.terminal_id``, the internal physical land
+    identity that only :attr:`~kicad_tools.router.primitives.Pad.key` uses.
+    """
+    pads = getattr(router, "all_pads", None) or list(getattr(router, "pads", {}).values())
+    ids_by_name = router_net_ids_by_name(router)
+    bindings: list[_RouterPadNetBinding] = []
+    for pad in pads:
+        if (getattr(pad, "component_id", "") or getattr(pad, "ref", "")) != target_key:
+            continue
+        new_name = pad_map.get(getattr(pad, "pin", ""))
+        if new_name is None:
+            continue
+        new_id = ids_by_name.get(new_name)
+        if new_id is None:
+            return None
+        bindings.append((pad, new_id, new_name))
+    return bindings
+
+
+def apply_router_pad_net_bindings(
+    router: Any,
+    bindings: list[_RouterPadNetBinding],
+) -> list[_RouterPadNetBinding]:
+    """Re-bind router pads to new nets, returning the displaced bindings.
+
+    Mutates ``pad.net`` / ``pad.net_name`` IN PLACE on the pathfinder's own
+    ``Pad`` objects and moves the pad's membership key between the affected
+    ``Autorouter.nets`` buckets -- the router decides which pads a net must
+    connect from that dict, so a pad rebinding that skipped it would re-route
+    the OLD netlist.  The returned list restores the exact prior state when
+    passed straight back in (the operation is its own inverse).
+
+    **The caller must re-stamp the routing grid before routing again.**  The
+    grid records each pad's cells under the net that owned them when the pad
+    was added, so routing straight after a rebinding would send a net at pads
+    the grid still attributes to its old net -- measured on the isolated DDR
+    bundle: 1/11 reached without a re-stamp versus 10/11 with one.  Inside
+    :class:`PlacementDeltaFeedbackLoop` this is already guaranteed -- the
+    keep path re-routes through ``_clear_routes`` and the revert path through
+    ``_rebuild_grid_for_routes``, both of which call
+    ``Autorouter._reset_for_new_trial`` (which re-adds every live pad).  A
+    caller driving these helpers directly has to do the same.
+    """
+    nets = getattr(router, "nets", None)
+    displaced: list[_RouterPadNetBinding] = []
+    for pad, new_id, new_name in bindings:
+        old_id, old_name = pad.net, getattr(pad, "net_name", "")
+        displaced.append((pad, old_id, old_name))
+        if old_id == new_id and old_name == new_name:
+            continue
+        pad.net = new_id
+        pad.net_name = new_name
+        if not isinstance(nets, dict):
+            continue
+        key = _router_pad_key(pad)
+        members = nets.get(old_id)
+        if members is not None and key in members:
+            members.remove(key)
+        new_members = nets.setdefault(new_id, [])
+        if key not in new_members:
+            new_members.append(key)
+    return displaced
+
 
 def detect_pf_stagnation(
     routed_history: list[int],
@@ -1462,7 +1595,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
     def _strategy_from_delta(self, delta: PlacementDelta) -> ResolutionStrategy | None:
         """Build a recovery ``ResolutionStrategy`` for an applyable delta.
 
-        Returns ``None`` for kinds with no Phase-2 applicator (``reorder_pins``)
+        Returns ``None`` for an unknown kind, for a rationale-only
+        ``reorder_pins`` delta (no ``pad_map`` -- no swap group was declared),
         or when the target footprint is missing.
         """
         fp = self._find_footprint(delta.target_key)
@@ -1515,7 +1649,30 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 affected_components=[delta.target_key],
                 affected_nets=[delta.net_name],
             )
-        # reorder_pins (rationale-only in Phase 1) and any unknown kind.
+        if delta.kind == "reorder_pins":
+            # Issue #5536 (Phase 2a of Epic #5511): a ``reorder_pins`` delta is
+            # applyable exactly when Phase 1 attached a ``pad_map`` to it --
+            # which the classifier only does for a DECLARED ``swap_group`` on a
+            # measured-reversed bundle.  Membership is never inferred, so a
+            # rationale-only delta (``pad_map`` unset) still has no applicator
+            # and falls through to ``None`` here, exactly as before.
+            if not delta.pad_map:
+                return None
+            return ResolutionStrategy(
+                type=StrategyType.REORDER_PINS,
+                difficulty=Difficulty.MEDIUM,
+                confidence=1.0,
+                actions=[
+                    Action(
+                        type="reorder_pins",
+                        target=delta.target_key,
+                        params={"pad_map": dict(delta.pad_map)},
+                    )
+                ],
+                affected_components=[delta.target_key],
+                affected_nets=sorted({delta.net_name, *delta.pad_map.values()} - {""}),
+            )
+        # Any unknown kind.
         return None
 
     def _select_delta(
@@ -1531,6 +1688,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         action (e.g. ``WIDEN_CHANNEL`` for a reversed bus) is never present to
         select.  Records every declined delta + reason on the parallel
         ``skipped`` / ``skip_reasons`` lists so the skip is observable.
+
+        Issue #5536 lifted the unconditional ``reorder_pins`` skip: a delta
+        carrying a declared swap group's ``pad_map`` is now applyable, while a
+        rationale-only one (membership is NEVER inferred -- see
+        :meth:`_reorder_pins_skip_reason`) is still declined with a reason.
         """
 
         def _skip(delta: PlacementDelta, reason: str) -> None:
@@ -1541,8 +1703,10 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
 
         for delta in deltas:
             if delta.kind == "reorder_pins":
-                _skip(delta, "reorder_pins has no Phase-2 applicator (pad-remap not implemented)")
-                continue
+                reason = self._reorder_pins_skip_reason(delta)
+                if reason is not None:
+                    _skip(delta, reason)
+                    continue
             if self._target_is_fixed(delta.target_key):
                 _skip(delta, f"target {delta.target_ref} is anchored (fixed_refs)")
                 continue
@@ -1571,6 +1735,49 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 _skip(delta, "unsafe to apply (board bounds)")
                 continue
             return delta, strategy
+        return None
+
+    def _reorder_pins_skip_reason(self, delta: PlacementDelta) -> str | None:
+        """Why a ``reorder_pins`` delta cannot be applied, or ``None`` to apply it.
+
+        Phase 2a (#5536) gates the applicator on everything the atomic
+        keep-or-revert contract needs to hold:
+
+        * a ``pad_map`` -- only a DECLARED ``swap_group`` produces one, so an
+          inferred/rationale-only delta is still never applied;
+        * a resolvable target footprint, carrying every pad the map names;
+        * a current net binding on each of those pads, so the pre-apply
+          snapshot can name the net a revert must restore them to;
+        * a router that already carries every net the map re-binds TO, so the
+          PCB and the router's own pad list cannot end up disagreeing.
+        """
+        pad_map = delta.pad_map or {}
+        if not pad_map:
+            return (
+                "reorder_pins delta is rationale-only (no declared swap_group, "
+                "so no pad_map to apply)"
+            )
+        fp = self._find_footprint(delta.target_key)
+        if fp is None:
+            return f"reorder_pins target {delta.target_ref} not found on the board"
+        bound: dict[str, str] = {}
+        for pad in getattr(fp, "pads", []):
+            number = getattr(pad, "number", None)
+            if number in pad_map and number not in bound:
+                bound[number] = getattr(pad, "net_name", "") or ""
+        missing = sorted(number for number in pad_map if number not in bound)
+        if missing:
+            return f"reorder_pins pad(s) {', '.join(missing)} not found on {delta.target_ref}"
+        unbound = sorted(number for number, net_name in bound.items() if not net_name)
+        if unbound:
+            return (
+                f"reorder_pins pad(s) {', '.join(unbound)} on {delta.target_ref} carry no "
+                "current net (a revert could not restore them)"
+            )
+        if resolve_router_swap_bindings(self.router, delta.target_key, pad_map) is None:
+            return (
+                f"reorder_pins pad_map for {delta.target_ref} names a net the router does not carry"
+            )
         return None
 
     def _target_is_locked(self, ref: str) -> bool:
@@ -1700,6 +1907,59 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 with contextlib.suppress(Exception):  # pragma: no cover - defensive
                     fn()
 
+    def _snapshot_pad_nets(self, delta: PlacementDelta) -> _PadNetSnapshot | None:
+        """Capture the pad->net bindings a ``reorder_pins`` delta will rewrite.
+
+        Returns ``None`` for every other delta kind -- no other kind touches a
+        net binding, so the default path allocates and restores nothing and
+        behaves exactly as it did before issue #5536.
+
+        The snapshot is TARGETED: only the pads the delta's ``pad_map`` names,
+        on both sides of the mirror the loop has to keep in step --
+
+        * the PCB footprint's pads (``{pad_number: net_name}``), restored
+          through the same ``assign_net_to_footprint_pad`` writer the
+          applicator used, so the S-expression tree ``PCB.save`` serialises is
+          reverted along with the in-memory objects; and
+        * the router's own flat ``Pad`` objects plus their ``Autorouter.nets``
+          membership, restored by replaying the displaced bindings.
+
+        :meth:`_reorder_pins_skip_reason` has already refused any delta whose
+        pads lack a current net, so every captured name is restorable.
+        """
+        pad_map = delta.pad_map or {}
+        if delta.kind != "reorder_pins" or not pad_map:
+            return None
+        fp = self._find_footprint(delta.target_key)
+        if fp is None:
+            return None
+        pcb_bindings: dict[str, str] = {}
+        for pad in getattr(fp, "pads", []):
+            number = getattr(pad, "number", None)
+            if number in pad_map and number not in pcb_bindings:
+                pcb_bindings[number] = getattr(pad, "net_name", "") or ""
+        # The resolver reports the pads the rebinding will touch (with their
+        # NEW nets); the snapshot keeps those same pads' CURRENT nets, which is
+        # what a revert has to replay.
+        pending = resolve_router_swap_bindings(self.router, delta.target_key, pad_map) or []
+        router_bindings = [
+            (pad, pad.net, getattr(pad, "net_name", "") or "") for pad, _id, _name in pending
+        ]
+        return _PadNetSnapshot(
+            reference=fp.reference,
+            pcb_bindings=pcb_bindings,
+            router_bindings=router_bindings,
+        )
+
+    def _restore_pad_nets(self, snapshot: _PadNetSnapshot | None) -> None:
+        """Undo the pad->net rebinding captured by :meth:`_snapshot_pad_nets`."""
+        if snapshot is None:
+            return
+        if self.pcb is not None:
+            for pad_number, net_name in snapshot.pcb_bindings.items():
+                self.pcb.assign_net_to_footprint_pad(snapshot.reference, pad_number, net_name)
+        apply_router_pad_net_bindings(self.router, snapshot.router_bindings)
+
     def _restore_router_pads(self, snapshot: list[tuple[Any, float, float, Any]]) -> None:
         """Restore router Pad state captured by :meth:`_snapshot_router_pads`."""
         for pad, x, y, layer in snapshot:
@@ -1750,6 +2010,11 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
           pinned by the ``tests/fixtures/mirror_flip`` golden) and swap SMD pad
           routing layers ``F_CU <-> B_CU``.  Through-hole pads mirror position
           only (they span all layers).  Inner-layer SMD pads do not exist.
+        * ``reorder_pins`` (#5536) -> re-bind the declared swap group's pads on
+          the target ref to their new nets (``pad.net``/``pad.net_name`` plus
+          the ``Autorouter.nets`` membership the router derives connectivity
+          from).  Pad POSITIONS are untouched: a swap is a netlist move, the
+          exact dual of the geometric kinds above.
 
         Every mutation here is IN PLACE on the pathfinder's own ``Pad``
         objects and leaves the pad count unchanged, so
@@ -1799,6 +2064,17 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                     dx, dy = pad.x - cx, pad.y - cy
                     pad.x = cx + dx * cos_a - dy * sin_a
                     pad.y = cy + dx * sin_a + dy * cos_a
+            elif delta.kind == "reorder_pins":
+                # #5536: a swap moves no copper -- it re-binds pads to nets.
+                # The router decides what to connect from ``pad.net`` and its
+                # ``nets`` membership dict, so without this the re-route would
+                # solve the OLD netlist on unchanged geometry and the swap
+                # would read as a no-op.
+                bindings = resolve_router_swap_bindings(
+                    self.router, delta.target_key, delta.pad_map or {}
+                )
+                if bindings:
+                    apply_router_pad_net_bindings(self.router, bindings)
             elif delta.kind == "mirror":
                 from kicad_tools.router.layers import Layer
 
@@ -1950,6 +2226,10 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             # atomically (placement + router pads + routes together).
             pre_placement = self._snapshot_placement()
             pre_pads = self._snapshot_router_pads()
+            # #5536: pad->net bindings live outside the geometry snapshots
+            # above (a ``reorder_pins`` delta moves no pad).  ``None`` for
+            # every other kind, so the default path is unchanged.
+            pre_pad_nets = self._snapshot_pad_nets(delta)
             pre_routes = copy.deepcopy(list(self.router.routes))
             pre_count = _routed_count()
             pre_violations = self._clearance_violation_count()
@@ -2033,8 +2313,16 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 # KEEPS another delta saves a board whose copper is on the
                 # front while its silk/fab is mirrored onto the back -- the
                 # silent half-flip this issue exists to close.
+                #
+                # Issue #5536: a ``reorder_pins`` delta's effect is entirely a
+                # pad->net rebinding, which no geometry snapshot can see --
+                # ``_restore_pad_nets`` puts the PCB pads (in memory AND in the
+                # S-expression tree) and the router's pad/``nets`` membership
+                # back, so a rejected swap leaves the netlist exactly as it was
+                # found.  A no-op for every other kind.
                 if delta.kind == "mirror":
                     self._strategy_applicator.apply_strategy(self.pcb, strategy)
+                self._restore_pad_nets(pre_pad_nets)
                 self._restore_placement(pre_placement)
                 self._restore_router_pads(pre_pads)
                 self._rebuild_grid_for_routes(pre_routes)
