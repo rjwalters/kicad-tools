@@ -109,15 +109,24 @@ def test_groups_without_an_adapter_say_not_measured() -> None:
     assert NOT_MEASURED in by_group[18]
 
 
-def test_phase_1a_registers_no_adapters() -> None:
-    """The harness must not import the code it measures, yet.
+def test_adapters_are_registered_for_the_five_wired_groups() -> None:
+    """``ADAPTERS`` wires one consumer per measured group, and no more.
 
-    Keeping ``ADAPTERS`` empty is what lets this package stay free of
-    ``kicad_tools.router`` / ``kicad_tools.validate`` imports -- the truth side
-    of a conformance oracle should not depend on the implementations under
-    test.
+    Succeeds ``test_phase_1a_registers_no_adapters`` (#5513 / PR #5532), which
+    pinned ``ADAPTERS == ()`` while only the truth side existed.  That pin was
+    a *phase* assertion, not a shape assertion: populating ``ADAPTERS`` is the
+    whole content of #5533, so the check becomes "exactly the five intended
+    groups are wired" rather than "none is".
+
+    The invariant the old test really protected -- that the harness does not
+    import the code it measures -- is unchanged and still enforced, one test
+    down, by ``test_truth_side_does_not_import_the_code_it_measures``.
     """
-    assert ADAPTERS == ()
+    assert {adapter.group for adapter in ADAPTERS} == {1, 4, 12, 13, 18}
+    assert [adapter.group for adapter in ADAPTERS] == sorted(a.group for a in ADAPTERS), (
+        "keep ADAPTERS in group order so the table's measured rows read top-to-bottom"
+    )
+    assert len({adapter.name for adapter in ADAPTERS}) == len(ADAPTERS)
 
 
 def test_truth_side_does_not_import_the_code_it_measures() -> None:
@@ -127,10 +136,13 @@ def test_truth_side_does_not_import_the_code_it_measures() -> None:
     towards them: a shared constant, a shared helper, a shared bug. The rule is
     that the truth side sees only KiCad's answer and the case it generated.
 
-    This is the split line for the adapter PR too -- an adapter module is
+    This is the split line for the adapters too -- an adapter module is
     exactly the place where ``import kicad_tools.router`` becomes legitimate,
     so this test is scoped to the harness modules and deliberately exempts the
-    ``adapters/`` package (which contains only the protocol today).
+    ``adapters/`` package.  ``report.py`` imports the adapter *modules* (to
+    populate ``ADAPTERS``) and that is fine: the forbidden thing is a harness
+    module reaching into a consumer directly, not a harness module composing
+    the wrappers.
     """
     package = Path(__file__).resolve().parent
     forbidden = ("kicad_tools.router", "kicad_tools.validate")

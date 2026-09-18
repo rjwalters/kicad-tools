@@ -8,13 +8,12 @@ than quietly omitted.  An omitted row reads as "fine"; a ``not measured`` row
 reads as "unknown", which is the truth and is what keeps later phases honest
 about their own coverage.
 
-Phase 1a ships the truth side of the harness, so :data:`ADAPTERS` is
-deliberately empty here and every group row renders ``not measured``.  The
-corpus columns are still real: the generator, the board writer and the oracle
-all run, so the document records the seed range actually exercised, how many
-pairs were placed, how many landed in the boundary band, and which fill states
-were measured.  The adapter PR populates :data:`ADAPTERS` and the same
-renderer fills the rate columns in.
+:data:`ADAPTERS` wires one adapter per measured group (1, 4, 12, 13, 18); the
+other fourteen groups have no adapter and render ``not measured``.  Each
+adapter drives an **unmodified** consumer, and an adapter that cannot run on
+this machine (e.g. ``grid_cpp`` without the compiled router extension) is
+skipped so its group reads ``not measured`` rather than contributing a
+confidently-wrong zero-disagreement row.
 
 Run as a module (``tests`` is a package and pytest's ``pythonpath`` only adds
 ``src``, so invoking this file by path cannot import its own package)::
@@ -36,6 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tests.conformance.adapters import ConsumerAdapter
+from tests.conformance.adapters.grid_cpp import GridCppAdapter
+from tests.conformance.adapters.grid_py import GridPyAdapter
+from tests.conformance.adapters.kct_check import KctCheckAdapter
+from tests.conformance.adapters.occupancy import OccupancyAdapter
+from tests.conformance.adapters.route_halo import RouteHaloAdapter
 from tests.conformance.board import write_case
 from tests.conformance.generator import (
     BOUNDARY_BAND_MM,
@@ -214,11 +218,34 @@ GROUPS: tuple[Group, ...] = (
 assert len(GROUPS) == 19, "Epic #5509 section 1 inventories nineteen groups"
 
 
-# Populated by the adapter PR (Epic #5509 Phase 1b).  Keeping it empty here is
-# what makes this module free of any ``import kicad_tools.router`` /
-# ``kicad_tools.validate`` -- the truth side of the harness does not depend on
-# the code it measures.
-ADAPTERS: tuple[ConsumerAdapter, ...] = ()
+# The wired consumer adapters, in Epic #5509 section-1 group order.
+#
+# Importing them here does NOT put a consumer import in this module: an adapter
+# module is the one legitimate place for ``import kicad_tools.router`` /
+# ``kicad_tools.validate``, which is why
+# ``test_truth_side_does_not_import_the_code_it_measures`` scopes itself to the
+# harness's own top-level modules and exempts the ``adapters/`` package.  The
+# generator, the board writer and the oracle -- the truth side proper -- still
+# import nothing from the code under test.
+ADAPTERS: tuple[ConsumerAdapter, ...] = (
+    OccupancyAdapter(),
+    RouteHaloAdapter(),
+    GridPyAdapter(),
+    GridCppAdapter(),
+    KctCheckAdapter(),
+)
+
+
+def _adapter_available(adapter: ConsumerAdapter) -> bool:
+    """Whether ``adapter`` can run here (optional protocol member)."""
+    probe = getattr(adapter, "available", None)
+    return True if probe is None else bool(probe())
+
+
+def _adapter_pair_kinds(adapter: ConsumerAdapter) -> frozenset[str] | None:
+    """The pair kinds ``adapter`` is in scope for, or ``None`` for all of them."""
+    kinds = getattr(adapter, "pair_kinds", None)
+    return None if kinds is None else frozenset(kinds)
 
 
 @dataclass(frozen=True)
@@ -372,8 +399,24 @@ def render_document(
             if not measured
             else [
                 f"{len(measured)} of {len(GROUPS)} consumer groups are wrapped "
-                "by an adapter and measured below. The rest read "
-                f"`{NOT_MEASURED}`.",
+                "by an adapter and measured below "
+                f"(groups {', '.join(str(g) for g in measured)}). The rest "
+                f"read `{NOT_MEASURED}`.",
+                "",
+                "Each adapter drives an **unmodified** consumer: no rule "
+                "value, heuristic or consumer was changed to produce these "
+                "numbers. Two things shape the denominators and are worth "
+                "reading before the percentages. First, a consumer is only "
+                "compared on the pair kinds it is actually consulted for in "
+                "production (`ConsumerAdapter.pair_kinds`) -- the "
+                "route-halo refinement, for instance, never sees pad copper, "
+                "so pad pairs are out of its scope rather than counted "
+                "against it. Second, the commit gates are measured under one "
+                "named insertion order, **via-first**; #5398 is the "
+                "observation that the other order gives a different answer "
+                "for the same two objects, and the "
+                "`issue5398-seg-via-0p18-order` fixture is where that is "
+                "recorded.",
             ]
         ),
         "",
@@ -544,13 +587,31 @@ def measure_corpus(
         )
 
         measurements: dict[int, AdapterMeasurement] = {}
-        for adapter in ADAPTERS:  # pragma: no cover - empty until the adapter PR
+        for adapter in ADAPTERS:
+            if not _adapter_available(adapter):
+                # No row rather than a zero-disagreement row: the same rule the
+                # oracle applies to a missing kicad-cli.  A group whose adapter
+                # could not run renders ``not measured``.
+                continue
+            kinds = _adapter_pair_kinds(adapter)
             over = under = boundary_hits = 0
             compared = 0
+            # An adapter never sees zone fill, so its answer is the same at
+            # both fill states; measure once per case and reuse it for each.
+            verdict_cache: dict[str, set[frozenset[str]]] = {}
             for case, result in results:
                 truth = {v.nets for v in result.without_zones()}
-                consumer = {v.nets for v in adapter.verdicts(case)}
+                consumer = verdict_cache.get(case.name)
+                if consumer is None:
+                    consumer = {v.nets for v in adapter.verdicts(case)}
+                    verdict_cache[case.name] = consumer
                 for pair in case.pairs:
+                    if kinds is not None and pair.kind not in kinds:
+                        # Out of this consumer's declared scope -- see
+                        # ``ConsumerAdapter.pair_kinds``.  Counting it would
+                        # record the absence of a check elsewhere in the
+                        # pipeline, not a disagreement in this model.
+                        continue
                     if pair.boundary:
                         boundary_hits += 1
                         continue
