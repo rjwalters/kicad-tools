@@ -23,6 +23,17 @@ its centre is a legal bridge terminus that costs no new drill.  A bridge to a
 barrel therefore needs one new via (or zero, when both sides are barrels)
 instead of two, and the impossible second drill is never attempted.
 
+A **through-hole pad** is the same case one element-kind over, and for exactly
+the same two reasons: its plated barrel already spans the copper stack, and no
+retreat point on it can ever be drilled -- the via-in-pad ban rejects every
+point on its copper (same-net pads included) and its own drill puts the whole
+disc inside the drill-to-drill exclusion.  So a bridge whose nearest primary
+copper is a same-net through-hole pad was skipped for every retreat on every
+layer, exactly like the barrel case.  Callers mark such a side with
+``plated_through=True`` and it is reused in place; an SMD pad, which reaches
+only its own layer, is *not* reusable and correctly still needs a drill on
+other own-net copper to reach the crossing layer.
+
 The planner is deliberately free of any clearance model of its own: the caller
 supplies its existing ``via_ok`` / ``path_ok`` predicates, so the authored
 manufacturing rules that already govern the repair remain the only physical
@@ -55,20 +66,34 @@ class BridgeSide:
         geometry: Shapely geometry of the element's own-net copper.
         layers: Copper layers the element actually reaches.
         kind: Element kind; :data:`VIA_KIND` marks an existing barrel.
+        plated_through: Whether this element already carries a plated hole
+            through the copper stack, making its centre a legal terminus at
+            no drill cost.  ``None`` (the default) derives it from ``kind``,
+            so a caller that only distinguishes barrels needs no change; a
+            caller that also sees pads states it explicitly, because a pad's
+            kind alone cannot tell a through-hole pad from an SMD one.
     """
 
     geometry: Any
     layers: frozenset[str]
     kind: str
+    plated_through: bool | None = None
+
+    @property
+    def reuses_existing_hole(self) -> bool:
+        """True when a bridge may terminate here without a new drill."""
+        if self.plated_through is None:
+            return self.kind == VIA_KIND
+        return self.plated_through
 
 
 @dataclass(frozen=True)
 class BridgeEndpoint:
     """A validated bridge terminus.
 
-    ``new_via`` is ``False`` when an existing barrel is being reused, in
-    which case ``point`` is that barrel's centre and the caller must not
-    emit a drill there.
+    ``new_via`` is ``False`` when an existing plated hole (a barrel or a
+    through-hole pad) is being reused, in which case ``point`` is that
+    element's centre and the caller must not emit a drill there.
     """
 
     point: Point2D
@@ -102,13 +127,14 @@ def _endpoints(
 ) -> Iterator[BridgeEndpoint]:
     """Yield legal termini on ``side``, nearest-first.
 
-    An existing barrel yields exactly one candidate -- itself.  Any other
+    An element that already carries a plated hole (an existing barrel, or a
+    through-hole pad) yields exactly one candidate -- itself.  Any other
     element yields the retreat points that both land on its own copper and
     satisfy the caller's via predicate, in the caller's retreat order.
     """
     from shapely.geometry import Point  # type: ignore[import-untyped]
 
-    if side.kind == VIA_KIND:
+    if side.reuses_existing_hole:
         centre = side.geometry.centroid
         yield BridgeEndpoint((centre.x, centre.y), side.layers, new_via=False)
         return
@@ -136,8 +162,10 @@ def plan_via_hop_bridge(
     Candidates are enumerated in the caller's own order -- source retreats
     outermost, destination retreats next, ``layers`` innermost -- and the
     first combination whose new drills pass ``via_ok`` and whose chord passes
-    ``path_ok`` is returned.  An existing same-net barrel on either side is
-    reused in place instead of being drilled through a second time.
+    ``path_ok`` is returned.  A side that already carries a plated hole --
+    an existing same-net barrel, or a through-hole pad the caller flagged
+    with ``plated_through=True`` -- is reused in place instead of being
+    drilled through a second time.
 
     Args:
         source: Element on the component being reconnected.
@@ -146,7 +174,7 @@ def plan_via_hop_bridge(
         retreats: Distances to back a *new* via away from the gap, nearest
             first.
         via_ok: Predicate for a new drill at a point; never consulted for a
-            reused barrel, which needs no drill.
+            reused plated hole, which needs no drill.
         path_ok: Predicate for the straight chord between two termini on a
             layer.
         new_via_layers: Layers a newly emitted via reaches (a through via
