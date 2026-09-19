@@ -663,6 +663,77 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
+class _AppendOnlyBboxIndex:
+    """Bounding-box spatial index over an append-only obstacle list.
+
+    Issue #5240.  ``_repair_pour_connectivity``'s ``_via_ok`` / ``_path_ok``
+    guards validated every candidate via / stub against the board's ENTIRE
+    segment obstacle list with a shapely ``distance`` call per entry.  Board
+    06's routed PCB carries ~11.3k segment polygons and the repair pass
+    probes thousands of candidate positions (14 offsets x 8 compass rays,
+    plus 15-degree interleaves, per stranded pad per repair round), so that
+    scan alone measured ~19% of the whole ``--step route`` wall clock -- and
+    it was almost entirely far-field geometry that can never violate the
+    0.15 mm clearance.
+
+    This index answers "which entries could possibly be within ``margin`` of
+    this bounding box" using an ``STRtree``.  It is a PRE-FILTER only: the
+    caller still runs the identical exact predicate on every candidate it
+    returns, so the verdict is unchanged -- geometry whose bounding box is
+    farther than ``margin`` away simply never pays for a GEOS call.
+
+    The obstacle lists grow while the repair runs (each placed via / stub is
+    registered immediately so later placements cannot collide with it), and
+    an ``STRtree`` is immutable.  Entries appended since the last build are
+    therefore returned unconditionally (the caller's exact check still
+    decides), and the tree is rebuilt once that un-indexed tail grows past
+    :data:`_TAIL_LIMIT` so neither the tail scan nor the rebuild rate can
+    dominate.
+    """
+
+    #: Rebuild the tree once this many entries have been appended since the
+    #: last build.  Small enough that the unconditional tail stays cheap,
+    #: large enough that the O(n log n) rebuild stays amortised.
+    _TAIL_LIMIT = 64
+
+    def __init__(self, entries: list, geom_index: int = 0) -> None:
+        from shapely.geometry import box
+        from shapely.strtree import STRtree
+
+        self._entries = entries
+        self._geom_index = geom_index
+        self._box = box
+        self._strtree = STRtree
+        self._tree = None
+        self._indexed = 0
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        self._indexed = len(self._entries)
+        self._tree = (
+            self._strtree([entry[self._geom_index] for entry in self._entries[: self._indexed]])
+            if self._indexed
+            else None
+        )
+
+    def candidates(self, bounds: tuple[float, float, float, float], margin: float) -> list[int]:
+        """Indices of entries that may lie within ``margin`` of ``bounds``.
+
+        A conservative superset: every entry whose geometry is genuinely
+        within ``margin`` is included, plus some that are not.
+        """
+        if len(self._entries) - self._indexed > self._TAIL_LIMIT:
+            self._rebuild()
+        min_x, min_y, max_x, max_y = bounds
+        hits: list[int] = []
+        if self._tree is not None:
+            hits = self._tree.query(
+                self._box(min_x - margin, min_y - margin, max_x + margin, max_y + margin)
+            ).tolist()
+        hits.extend(range(self._indexed, len(self._entries)))
+        return hits
+
+
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
     """Repair pour-net connectivity: offset vias + stubs + island bridges.
 
@@ -777,6 +848,14 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         )
         seg_index.append((line.buffer(width / 2.0), id_to_name.get(nid, ""), lay))
 
+    # Issue #5240: bounding-box pre-filter over the segment obstacles.  The
+    # clearance guards below only ever reject on a *near* segment, and board
+    # 06 routes ~11.3k of them, so scanning the whole list per candidate was
+    # the single largest cost in the pour-repair pass.  ``seg_tree`` tracks
+    # the SAME list object (``_emit_seg`` keeps appending to it), so the
+    # guards stay exact -- see :class:`_AppendOnlyBboxIndex`.
+    seg_tree = _AppendOnlyBboxIndex(seg_index)
+
     # Vias: (center_point, net, radius, actual drill diameter)
     via_index: list[tuple] = []
     for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
@@ -840,7 +919,12 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # edge-to-edge (drill_r is the pad's drill RADIUS).
             if drill_r > 0 and not _drills_clear(vx, vy, px, py, drill_r * 2.0):
                 return False
-        for geom, snet, _lay in seg_index:
+        # Issue #5240: identical ``distance < CLEAR`` rejection, restricted to
+        # the segments whose bounding box is within CLEAR of the via's --
+        # anything farther cannot be closer than CLEAR, so skipping it cannot
+        # change the verdict.
+        for seg_i in seg_tree.candidates(vgeom.bounds, CLEAR):
+            geom, snet, _lay = seg_index[seg_i]
             if snet != net and vgeom.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius, drill in via_index:
@@ -867,7 +951,10 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             geom, pnet, layers = entry[:3]
             if pnet != net and layer in layers and path.distance(geom) < CLEAR:
                 return False
-        for geom, snet, lay in seg_index:
+        # Issue #5240: same bounding-box pre-filter as ``_via_ok`` -- the
+        # net / layer / distance tests below are unchanged.
+        for seg_i in seg_tree.candidates(path.bounds, CLEAR):
+            geom, snet, lay = seg_index[seg_i]
             if snet != net and lay == layer and path.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius, drill in via_index:
