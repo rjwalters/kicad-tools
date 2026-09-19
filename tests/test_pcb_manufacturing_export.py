@@ -429,6 +429,7 @@ class TestGenerateReport:
 # margin over the worst inflation observed, at the repo's existing override
 # value (tests/test_board_06_diffpair_test.py uses the same class-scoped 180 s
 # form).
+@pytest.mark.timeout(180)
 class TestRenderReportPdf:
     """Tests for ManufacturingPackage._render_report_pdf integration."""
 
