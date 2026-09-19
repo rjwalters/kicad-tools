@@ -771,16 +771,18 @@ class TestNoRoutingPlanFlag:
 # so a future failure distinguishes "the plan stage changed copper" from
 # "the protocol stopped working".
 #
-# Do NOT "simplify" this to the one-line grep in
-# ``scripts/ci/board_route_determinism_smoke.sh`` (``normalize_copper()``,
-# ``grep -E '^[[:space:]]*\((segment|via|arc)'``).  This repo writes copper
-# as MULTI-LINE s-expressions, so that grep keeps only the bare ``(segment``
-# / ``(via`` header lines and discards every ``(start ...)`` / ``(end ...)``
-# / ``(layer ...)`` child: on board 03 it reduces a 25k-line PCB to 1913
-# lines that are exactly ``1872 segments + 41 vias``, i.e. it compares copper
-# element COUNTS and is blind to geometry.  ``_copper_elements`` keeps the
-# whole node.  (The smoke script's own blind spot is tracked in #5580; this
-# test does not depend on it.)
+# Do NOT "simplify" this to a one-line ``grep -E
+# '^[[:space:]]*\((segment|via|arc)'`` over the raw file.  This repo writes
+# copper as MULTI-LINE s-expressions, so that grep keeps only the bare
+# ``(segment`` / ``(via`` header lines and discards every ``(start ...)`` /
+# ``(end ...)`` / ``(layer ...)`` child: on board 03 it reduces a routed PCB
+# to 1793 lines holding just 3 distinct values (2026-09-19 at 0c261d41), i.e.
+# it compares copper element COUNTS and is blind to geometry.
+# ``_copper_elements`` keeps the whole node.  That grep WAS
+# ``scripts/ci/board_route_determinism_smoke.sh``'s ``normalize_copper()``
+# until #5580 replaced it with ``scripts/ci/normalize_copper.py`` (a
+# paren-balanced whole-node normalizer); this test predates that fix and
+# never depended on the smoke script.
 #
 # The element count is asserted non-empty: a normalisation regression that
 # filtered everything out would otherwise compare two empty lists and pass.

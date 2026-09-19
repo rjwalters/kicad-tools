@@ -124,14 +124,18 @@ board measured on 2026-09-19 — **00, 01, 02, 03, 04 and 06** — routes an
 identical copper set with and without `--no-routing-plan`, so the assertion
 is enforced, not skipped.
 
-Note that `scripts/ci/board_route_determinism_smoke.sh`'s
-`normalize_copper()` is *not* a usable instrument here: this repo writes
-copper as multi-line s-expressions, so its
-`grep -E '^[[:space:]]*\((segment|via|arc)'` keeps only the bare `(segment` /
-`(via` header lines and discards every `(start …)` / `(layer …)` child — on
-board 03 it reduces a 25 k-line PCB to 1913 lines that are exactly
-`1872 segments + 41 vias`, i.e. it compares element *counts* (tracked as
-[#5580](https://github.com/rjwalters/kicad-tools/issues/5580)).
+`scripts/ci/board_route_determinism_smoke.sh`'s `normalize_copper()` now
+applies the same instrument (it shells out to `scripts/ci/normalize_copper.py`,
+a paren-balanced whole-node normalizer). Until
+[#5580](https://github.com/rjwalters/kicad-tools/issues/5580) it did *not*:
+this repo writes copper as multi-line s-expressions, so its
+`grep -E '^[[:space:]]*\((segment|via|arc)'` kept only the bare `(segment` /
+`(via` header lines and discarded every `(start …)` / `(layer …)` child. Its
+output was therefore one line per copper element drawn from a handful of
+*identical* strings — on board 03, 1793 lines holding 3 distinct values
+(measured 2026-09-19 at `0c261d41`; #5580 measured 1913 lines = 1872 segments
++ 41 vias on an earlier route). The element **count** was the only thing that
+could differ. Do not reintroduce a line-based filter in either place.
 
 Board 05 is out of scope for this comparison by construction: its recipe is a
 wall-clock re-route loop that the repo's own determinism smoke deliberately
