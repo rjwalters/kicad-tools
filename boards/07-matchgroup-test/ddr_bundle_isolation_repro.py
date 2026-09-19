@@ -257,12 +257,14 @@ def build_isolated_router(
 
 
 def install_channel_walls(router: Autorouter) -> None:
-    """(Re-)install the corridor keepouts recorded on ``router``.
+    """Install the corridor keepouts recorded on ``router``.
 
-    Must be re-run after any grid reset: ``Autorouter._reset_for_new_trial``
-    rebuilds the grid from the live pads, fixed fills and edge keepout, but
-    NOT from obstacles registered through ``add_obstacle`` -- so a reset
-    silently reopens the channel.
+    Issue #5555: this no longer has to be re-run after a grid reset.
+    ``Autorouter.add_obstacle`` now persists its registrations on the router
+    and ``_reset_for_new_trial`` replays them onto the rebuilt grid, the same
+    way it replays the board-edge keepout -- so the sealed channel survives
+    every rip-up/reroute iteration on its own.  Before that fix a reset
+    silently reopened the channel and the measurement was meaningless.
     """
     for x, y, width, height, layer in getattr(router, "_repro_walls", ()):
         router.add_obstacle(x, y, width, height, layer)
@@ -325,8 +327,9 @@ def apply_swap(router: Autorouter, pad_map: dict[str, str]) -> int:
     # ``_clear_routes`` before every re-route.  Skipping it measures 1/11
     # instead of 11/11: every net would be routed at pads the grid still
     # attributes to the net that used to own them.
+    # Issue #5555: no wall re-install needed here any more -- the reset
+    # replays every ``add_obstacle`` registration onto the grid it rebuilds.
     router._reset_for_new_trial()
-    install_channel_walls(router)
     return len(bindings)
 
 

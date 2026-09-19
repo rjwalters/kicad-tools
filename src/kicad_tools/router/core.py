@@ -662,6 +662,51 @@ def _should_flush_oscillation_msgs(
     return bool(deferred_msgs) and stranded_net_count > 0
 
 
+def install_serialized_obstacles(router: Autorouter, config: dict) -> None:
+    """Replay ``add_obstacle`` keepouts carried by a worker config dict.
+
+    Issue #5555: ``Autorouter._obstacles`` never crosses a
+    ``ProcessPoolExecutor`` boundary on its own -- it only reaches a worker
+    through :meth:`Autorouter._serialize_for_parallel`'s ``"obstacles"`` key.
+    Without this replay a worker's A* search routes straight through cells
+    the parent process had blocked.  Registrations are restored on the
+    worker's ``_obstacles`` list too, so a reset inside the worker
+    (``_reset_for_new_trial``) keeps them as well.
+
+    A config dict with no ``"obstacles"`` key (an older payload) is a strict
+    no-op, mirroring how the edge-keepout restore treats absent geometry.
+
+    Args:
+        router: The worker's freshly reconstructed ``Autorouter``.
+        config: The serialized parent state the worker was handed.
+    """
+    for obs_data in config.get("obstacles") or ():
+        layer_data = obs_data.get("layer", Layer.F_CU)
+        if isinstance(layer_data, Layer):
+            obs_layer = layer_data
+        elif isinstance(layer_data, str):
+            try:
+                obs_layer = Layer.from_kicad_name(layer_data)
+            except ValueError:
+                obs_layer = Layer.F_CU
+        else:
+            try:
+                obs_layer = Layer(layer_data)
+            except ValueError:
+                obs_layer = Layer.F_CU
+
+        obstacle = Obstacle(
+            obs_data["x"],
+            obs_data["y"],
+            obs_data["width"],
+            obs_data["height"],
+            obs_layer,
+            obs_data.get("clearance", 0.0),
+        )
+        router._obstacles.append(obstacle)
+        router.grid.add_obstacle(obstacle)
+
+
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     """Run a single Monte Carlo trial in a worker process.
 
@@ -806,6 +851,10 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
         router._edge_clearance = edge_clearance
         if edge_segments and edge_clearance:
             router.grid.add_edge_keepout(edge_segments, edge_clearance)
+
+    # Issue #5555: same treatment for ``add_obstacle`` keepouts -- they only
+    # reach this worker via the "obstacles" key of the serialized config.
+    install_serialized_obstacles(router, config)
 
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
@@ -1646,6 +1695,16 @@ class Autorouter:
         # edge keepout (Issue #2743).
         self._edge_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None
 
+        # Keepouts registered through :meth:`add_obstacle` (Issue #5555).
+        # Sibling of ``_edge_segments`` / ``_edge_clearance`` above: the
+        # blocked cells live on the *grid*, which ``_reset_for_new_trial``
+        # throws away and rebuilds, so the registrations have to be
+        # persisted on ``self`` to be re-stamped onto the new grid.  Without
+        # this list every rip-up/reroute iteration in
+        # ``route_all_negotiated`` (and every Monte Carlo / evolutionary
+        # trial reset) silently reopened the grid at those cells.
+        self._obstacles: list[Obstacle] = []
+
         # Shapely-based board geometry for accurate non-rectangular edge
         # clearance (Issue #2340).  Set by load_pcb_for_routing() when
         # Shapely is available.
@@ -2394,8 +2453,16 @@ class Autorouter:
     def add_obstacle(
         self, x: float, y: float, width: float, height: float, layer: Layer = Layer.F_CU
     ):
-        """Add an obstacle (keepout area, mounting hole, etc.)."""
+        """Add an obstacle (keepout area, mounting hole, etc.).
+
+        Issue #5555: the obstacle is also recorded on ``self._obstacles`` so
+        it survives a grid rebuild.  ``_reset_for_new_trial`` discards the
+        whole :class:`RoutingGrid` -- the blocked cells live there, not on
+        ``self`` -- and replays the persisted registrations onto the new
+        grid, exactly as it does for the board-edge keepout (Issue #5374).
+        """
         obs = Obstacle(x, y, width, height, layer)
+        self._obstacles.append(obs)
         self.grid.add_obstacle(obs)
 
     def register_block(self, block: PCBBlock) -> None:
@@ -15247,6 +15314,17 @@ class Autorouter:
         if self._edge_segments and self._edge_clearance:
             self.grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
 
+        # Issue #5555: same reasoning for keepouts registered through
+        # ``add_obstacle`` (component bodies, mechanical exclusions,
+        # courtyards).  They only ever existed as blocked cells on the grid
+        # discarded above, so without this replay every rip-up/reroute
+        # iteration reopened them and the A* search could cross an obstacle
+        # no DRC stage in the loop is looking for.  Re-stamped *before* the
+        # pads below so pad cells keep their own-net ownership, matching the
+        # ordering ``register_block`` documents for the initial install.
+        for obstacle in self._obstacles:
+            self.grid.add_obstacle(obstacle)
+
         # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
         pitches = self.component_pitches
         for pad in self.all_pads or self.pads.values():
@@ -15372,6 +15450,23 @@ class Autorouter:
             if self._edge_segments is not None
             else [],
             "edge_clearance": self._edge_clearance,
+            # Issue #5555: keepouts registered through ``add_obstacle``.
+            # Same rationale as the edge geometry above -- a worker process
+            # builds its own Autorouter from this dict and would otherwise
+            # route straight through obstacles the parent had blocked.
+            # Plain dicts (layer as its KiCad name) keep the payload
+            # transport-safe and isolated from later parent-side edits.
+            "obstacles": [
+                {
+                    "x": obs.x,
+                    "y": obs.y,
+                    "width": obs.width,
+                    "height": obs.height,
+                    "layer": obs.layer.value if hasattr(obs.layer, "value") else str(obs.layer),
+                    "clearance": obs.clearance,
+                }
+                for obs in self._obstacles
+            ],
         }
 
     def route_all_monte_carlo(
