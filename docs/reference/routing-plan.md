@@ -279,8 +279,13 @@ built -- absent, not `null`, otherwise):
 The stage is a coarse-graph pass, not a detailed route: graph build is
 ~0.01 s at 53x33 tiles, and the negotiated global pass is cheap whenever
 nothing overflows. On the fleet boards (00-06, <= 38 nets) the measured
-`overflow_report.elapsed_s` is well under a millisecond. Boards that
-*honestly overflow* with several hundred nets are the expensive case (the
-pass then runs all 15 negotiated iterations, rerouting every net through
-the hot edge); `elapsed_s` records that cost rather than gating on it.
-`--no-routing-plan` is the escape hatch if the stage is ever unwelcome.
+`overflow_report.elapsed_s` ranges from ~0.1 ms to 57 ms, with the maximum
+on board 05 (37 nets, total overflow 4 -- see the measurement above).
+`tests/test_routing_plan_5510.py::test_board_copper_unchanged_by_plan_stage`
+encodes the actual acceptance bound: `plan["overflow_report"]["elapsed_s"]
+< 5.0`, i.e. the guarantee is "well under 5 s on fleet-sized boards," not
+sub-millisecond. Boards that *honestly overflow* with several hundred nets
+are the expensive case (the pass then runs all 15 negotiated iterations,
+rerouting every net through the hot edge); `elapsed_s` records that cost
+rather than gating on it. `--no-routing-plan` is the escape hatch if the
+stage is ever unwelcome.
