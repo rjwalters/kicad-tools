@@ -426,3 +426,51 @@ def test_audit_keeps_disconnected_solids_in_one_fill_contour_separate(
     assert len(_physical_pad_groups(board)) == 2
     audit = generate_design_mod._audit_pour_nets(board, ["GND"])["GND"]
     assert not audit["connected"] and len(audit["pad_groups"]) == 2
+
+
+def test_repair_routes_around_barrier_between_existing_via_islands(
+    tmp_path, generate_design_mod, monkeypatch
+):
+    """Straight bridges fail, but existing barrels allow a bent B.Cu path."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.clearance import ClearanceRule
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pour_escape",
+        _load_module("board06_island_escape", BOARD_DIR / "pour_escape.py"),
+    )
+    parts = [
+        """(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "VBUS_USB") (net 2 "BLOCKER")"""
+    ]
+    for number, x in enumerate((110, 115), 1):
+        parts.append(f"""
+  (footprint "test:pad" (layer "F.Cu") (at {x} 59)
+    (property "Reference" "J{number}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 1 "VBUS_USB")))
+  (via (at {x} 60) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (segment (start {x} 59) (end {x} 60) (width 0.2) (layer "F.Cu") (net 1))""")
+    for layer in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+        parts.append(f'''
+  (segment (start 112.5 58) (end 112.5 62) (width 1) (layer "{layer}") (net 2))''')
+    board = tmp_path / "islands.kicad_pcb"
+    board.write_text("\n".join(parts) + "\n)\n")
+    before = PCB.load(board)
+    assert not generate_design_mod._audit_pour_nets(board, ["VBUS_USB"])["VBUS_USB"]["connected"]
+    vias, bridges = generate_design_mod._repair_pour_connectivity(board, ["VBUS_USB"])
+    assert vias == 0 and bridges == 1
+    assert generate_design_mod._audit_pour_nets(board, ["VBUS_USB"])["VBUS_USB"]["connected"]
+    after = PCB.load(board)
+    assert len(after.vias) == len(before.vias)
+    assert [(s.start, s.end, s.layer) for s in after.segments[: len(before.segments)]] == [
+        (s.start, s.end, s.layer) for s in before.segments
+    ]
+    assert (
+        not ClearanceRule()
+        .check(after, get_profile("jlcpcb").get_design_rules(layers=4))
+        .violations
+    )

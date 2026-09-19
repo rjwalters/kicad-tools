@@ -1469,3 +1469,171 @@ class TestDdrReversedGeometryMode:
         # A point well inside the lower wall must still be blocked.
         gx, gy = grid.world_to_grid(ddr_repro_mod.BOARD_W / 2.0, 5.0)
         assert grid.cell_at(layer_index, gy, gx).blocked is True
+
+
+@pytest.mark.parametrize("hole_clearance,power_stub", [(0.25, False), (0.3, False), (0.25, True)])
+def test_native_staged_pad_drill_repair_preserves_connectivity(
+    tmp_path, hole_clearance, power_stub
+):
+    """Qualify all seven repairs against native fills, without weakening direct guards."""
+    from kicad_tools.cli.relocate_with_refill import (
+        _violation_identities,
+        relocate_in_pad_vias_with_refill,
+    )
+    from kicad_tools.cli.runner import find_kicad_cli
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
+
+    executable = find_kicad_cli()
+    if executable is None:
+        pytest.skip("native KiCad is required for staged refill qualification")
+    source = OUTPUT_DIR / "matchgroup_test_routed.kicad_pcb"
+    source_bytes = source.read_bytes()
+    candidate = tmp_path / source.name
+    candidate.write_bytes(source_bytes)
+    pcb = PCB.load(candidate)
+    for uid, xy in [
+        ("0de3e62a-2521-486b-a847-963011236afa", (85.19, 56.27)),
+        ("91bd6227-0458-43fc-9f1b-5cec0fbfdb8c", (83.73, 56.47)),
+    ]:
+        assert pcb.relocate_via(next(v for v in pcb.vias if v.uuid == uid), xy)
+    if power_stub:
+        pcb.add_trace((83.82, 56.27), (85.19, 56.27), width=0.2, layer="F.Cu", net="+1V8")
+        pcb.add_via(84.52, 55.85, size=0.6, drill=0.2, net="+1V8")
+    pcb.save(candidate)
+    project = candidate.with_suffix(".kicad_pro")
+    project.write_text(
+        json.dumps(
+            {
+                "board": {"design_settings": {"rules": {"min_hole_clearance": hole_clearance}}},
+            }
+        )
+    )
+    project_bytes = project.read_bytes()
+    rules = get_profile("jlcpcb").get_design_rules(layers=4)
+    assert len(ViaInPadRule().check(pcb, rules).violations) == 7
+    result = relocate_in_pad_vias_with_refill(candidate, rules, kicad_cli=executable)
+    assert len(result.relocation.moved) == 7
+    if power_stub:
+        moved = next(
+            move
+            for move in result.relocation.moved
+            if move.uuid == "0de3e62a-2521-486b-a847-963011236afa"
+        )
+        assert moved.new_x > moved.old_x
+        assert moved.new_y == pytest.approx(moved.old_y)
+        assert set(moved.stub_layers) == {"F.Cu", "In1.Cu", "In2.Cu", "B.Cu"}
+    assert not ViaInPadRule().check(PCB.load(candidate), rules).violations
+    assert not (
+        _violation_identities(result.candidate_report)
+        - _violation_identities(result.baseline_report)
+    )
+    assert source.read_bytes() == source_bytes
+    assert project.read_bytes() == project_bytes
+    published = candidate.read_bytes()
+    assert not relocate_in_pad_vias_with_refill(
+        candidate, rules, kicad_cli=executable
+    ).relocation.changed
+    assert candidate.read_bytes() == published
+
+
+def test_captured_pour_boundaries_require_a_copper_bridge(generate_design_mod, tmp_path):
+    """A shared fill boundary must not hide the native U5.24 open."""
+    from shapely import wkt
+
+    data = json.loads((REPO_ROOT / "tests/fixtures/board07_touching_pour_regions.json").read_text())
+    polygons = [wkt.loads(value) for value in data["polygons"]]
+    contact = polygons[0].intersection(polygons[1])
+    assert contact.length > 3
+    assert contact.area == 0
+    fills = "\n".join(
+        '(filled_polygon (layer "In2.Cu") (pts '
+        + " ".join(f"(xy {x} {y})" for x, y in poly.exterior.coords)
+        + "))"
+        for poly in polygons
+    )
+    pads = "\n".join(
+        f"""(footprint "test" (layer "F.Cu") (at {x} 113)
+          (property "Reference" "R{i}" (at 0 0) (layer "F.SilkS"))
+          (pad "1" smd rect (at 0 0) (size 0.5 0.5)
+            (layers "F.Cu") (net 1 "+1V2")))
+  (via (at {x} 113) (size 0.5) (drill 0.3)
+    (layers "F.Cu" "B.Cu") (net 1))"""
+        for i, x in enumerate((155.5, 157.5), 1)
+    )
+    board = tmp_path / "boundary.kicad_pcb"
+    board.write_text(
+        f"""(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "+1V2")
+  {pads}
+  (zone (net 1) (net_name "+1V2") (layer "In2.Cu")
+    (fill yes) {fills})
+)"""
+    )
+    before = generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]
+    assert not before["connected"]
+    assert len(before["pad_groups"]) == 2
+    vias, bridges = generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
+    assert bridges > 0
+    assert vias == 0
+    assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+
+
+def test_repair_routes_around_barrier_between_existing_via_islands(
+    tmp_path, generate_design_mod, monkeypatch
+):
+    """Straight bridges fail, but existing barrels allow a bent B.Cu path."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.clearance import ClearanceRule
+
+    parts = [
+        """(kicad_pcb (version 20240108) (generator "test")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal))
+  (net 0 "") (net 1 "+1V2") (net 2 "BLOCKER")"""
+    ]
+    for number, x in enumerate((110, 115), 1):
+        parts.append(f"""
+  (footprint "test:pad" (layer "F.Cu") (at {x} 129)
+    (property "Reference" "J{number}" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd circle (at 0 0) (size 0.3 0.3) (layers "F.Cu") (net 1 "+1V2")))
+  (via (at {x} 130) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))
+  (segment (start {x} 129) (end {x} 130) (width 0.2) (layer "F.Cu") (net 1))""")
+    for layer in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
+        parts.append(f'''
+  (segment (start 112.5 128) (end 112.5 132) (width 1) (layer "{layer}") (net 2))''')
+    board = tmp_path / "islands.kicad_pcb"
+    board.write_text("\n".join(parts) + "\n)\n")
+    before = PCB.load(board)
+    assert not generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+    original_bytes = board.read_bytes()
+    from kicad_tools.zones import pour_escape
+
+    contexts = []
+    with monkeypatch.context() as patch:
+        patch.setattr(pour_escape, "find_escape", lambda **_: None)
+        assert generate_design_mod._repair_pour_connectivity(
+            board, ["+1V2"], failed_escapes=contexts, dry_run=True
+        ) == (0, 0)
+    assert contexts and all(context["net"] == "+1V2" for context in contexts)
+    assert board.read_bytes() == original_bytes
+    assert generate_design_mod._repair_pour_connectivity(board, ["+1V2"], dry_run=True) == (0, 1)
+    assert board.read_bytes() == original_bytes
+    vias, bridges = generate_design_mod._repair_pour_connectivity(board, ["+1V2"])
+    assert vias == 0 and bridges == 1
+    assert generate_design_mod._audit_pour_nets(board, ["+1V2"])["+1V2"]["connected"]
+    after = PCB.load(board)
+    assert len(after.vias) == len(before.vias)
+    assert [(s.start, s.end, s.layer) for s in after.segments[: len(before.segments)]] == [
+        (s.start, s.end, s.layer) for s in before.segments
+    ]
+    assert (
+        not ClearanceRule()
+        .check(after, get_profile("jlcpcb").get_design_rules(layers=4))
+        .violations
+    )

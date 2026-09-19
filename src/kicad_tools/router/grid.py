@@ -387,6 +387,7 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
+                    (layer_idx, gy, gx) in py_grid._pad_halo_cells,
                 )
 
 
@@ -640,6 +641,7 @@ class _CellView:
 
     @blocked.setter
     def blocked(self, value: bool) -> None:
+        self._grid._pad_halo_cells.discard((self._layer, self._y, self._x))
         self._grid._blocked[self._layer, self._y, self._x] = value
         # Issue #4794: this setter is THE per-cell choke point for
         # ``mark_route``/``unmark_route``/``add_pad`` -- bump inline (rather
@@ -922,6 +924,8 @@ class RoutingGrid:
         # Issue #750: Grid-based checking is approximate; we need precise geometry
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
+        # Provenance for padding that must not be inflated a second time.
+        self._pad_halo_cells: set[tuple[int, int, int]] = set()
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation. When pads share the same component (e.g.,
@@ -2043,12 +2047,27 @@ class RoutingGrid:
         gx2 = max(gx2, pad_gx2)
         gy2 = max(gy2, pad_gy2)
 
+        # Only power/ground plane pads carry this padding exemption. NC
+        # pads and skipped signal nets can also have net=0; their existing
+        # hard halos still protect endpoint seed/escape constraints.
+        # Keep the coarse-pitch routing envelope unchanged. Dense packages
+        # need metal-based radius checks to avoid sealing their escape lanes.
+        plane_pad = (
+            _is_plane_net_pad(pad)
+            and pin_pitch is not None
+            and self.rules.fine_pitch_threshold is not None
+            and pin_pitch < self.rules.fine_pitch_threshold
+        )
         for layer_idx in layers_to_block:
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.cell_at(layer_idx, gy, gx)
+                        key = (layer_idx, gy, gx)
+                        halo_only = plane_pad and (not cell.blocked or key in self._pad_halo_cells)
                         cell.blocked = True
+                        if halo_only:
+                            self._pad_halo_cells.add(key)
                         cell.original_net = pad.net
 
                         # Issue #3233: Two-tier pad-metal classification.
@@ -6714,6 +6733,7 @@ class RoutingGrid:
                             blocked_cells.add((nx, ny))
                             for layer_idx in layer_indices:
                                 cell = self.cell_at(layer_idx, ny, nx)
+                                self._pad_halo_cells.discard((layer_idx, ny, nx))
                                 if not cell.blocked:
                                     cell.blocked = True
                                     cell.is_obstacle = True
