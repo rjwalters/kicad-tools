@@ -11,6 +11,28 @@ that report was retracted -- routed copper *is* reproducible, and
 ``tests/test_routing_plan_5510.py::test_board_copper_unchanged_by_plan_stage``
 hard-asserts it.  The pour-fill half was real.
 
+Which fill path board 03 takes (instrumented live, 2026-09-19, KiCad 10.0.5)
+----------------------------------------------------------------------------
+
+``route_cmd._fill_zones_after_route`` picks between two fill backends, and
+#5578 asked which one board 03 actually uses rather than assuming.  Measured
+by wrapping all three entry points and running the real deterministic route:
+
+    GENERAL: runner.run_fill_zones (kicad-cli)
+    GENERAL: _remediate_starved_thermal
+
+``zones.placement_fill.fill_around_fixed_copper`` (the ``pcbnew``-subprocess
+path) is **not** reached -- board 03 has no placement-excluded copper to
+preserve, so ``placement_disposition.preserve_copper_nets`` is unset.
+
+That measurement also *refutes* all three mechanisms #5578 listed under
+"Suspected cause".  The nondeterminism is not in the multi-pass refill loop,
+not in ``apply_foreign_pad_clearance``'s shapely carve, and not inside
+``kicad-cli``'s filler: every one of those is downstream of the real cause,
+which is that the board handed to the fill engine *differed between runs* in
+one field -- the auto-poured zone's UUID.  The fill engine is deterministic
+given identical input; it was not being given identical input.
+
 Root cause (measured 2026-09-19, KiCad 10.0.5)
 ----------------------------------------------
 
@@ -218,9 +240,11 @@ def _island_counts(path: Path) -> dict[tuple[str, str], int]:
 
 #: Per-``(net, layer)`` union-area tolerance, mm^2.
 #:
-#: NOT slack for the bug this module gates -- that one moved whole planes
-#: (board 03's ``VCC`` pour went from 2.25 mm^2 of copper to **zero**, three
-#: orders of magnitude past this epsilon).  It absorbs a separate, much
+#: NOT slack for the bug this module gates -- that one moved whole planes.
+#: On the winning branch board 03's ``VCC`` pour holds 0.513203 mm^2 of
+#: copper across 4 islands (measured on a live post-fix route, 2026-09-19);
+#: on the losing branch it holds **zero**, a step hundreds of times this
+#: epsilon, and ``VBUS`` swallows the plane instead.  It absorbs a separate, much
 #: smaller residual that survives the #5578 fix and is tracked on its own
 #: in **#5591**: board 03's committed fixture declares pads with no
 #: ``(uuid ...)``, so
