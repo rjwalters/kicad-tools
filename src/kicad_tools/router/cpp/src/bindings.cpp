@@ -9,6 +9,7 @@
 #include "coupled_pathfinder.hpp"
 #include "types.hpp"
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/map.h>
 #include <nanobind/stl/vector.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/tuple.h>
@@ -214,8 +215,11 @@ NB_MODULE(router_cpp, m) {
         .def("add_component_hole", &Grid3D::add_component_hole)
         .def("component_holes_clear", &Grid3D::component_holes_clear)
         .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
-        .def("add_fixed_fill", &Grid3D::add_fixed_fill)
-        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
+        .def("add_fixed_fill", &Grid3D::add_fixed_fill,
+             nb::arg("layer"), nb::arg("clearance"), nb::arg("rings"), nb::arg("source_net") = -1)
+        .def("fixed_fill_clear", &Grid3D::fixed_fill_clear,
+             nb::arg("ax"), nb::arg("ay"), nb::arg("bx"), nb::arg("by"),
+             nb::arg("layer"), nb::arg("half"), nb::arg("reach"), nb::arg("net") = -1)
         .def("route_geometry_complete", &Grid3D::route_geometry_complete)
         .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
         .def("route_trace_geometry_clear", &Grid3D::route_trace_geometry_clear)
@@ -223,7 +227,10 @@ NB_MODULE(router_cpp, m) {
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
         .def("mark_blocked", &Grid3D::mark_blocked,
              "x"_a, "y"_a, "layer"_a, "net"_a, "is_obstacle"_a = false,
-             "pad_blocked"_a = false)
+             "pad_blocked"_a = false, "pad_geometry"_a = false)
+        .def("clear_pad_geometry_cell", &Grid3D::clear_pad_geometry_cell)
+        .def("pad_cell_has_geometry", &Grid3D::pad_cell_has_geometry)
+        .def("pad_trace_geometry_clear", &Grid3D::pad_trace_geometry_clear)
         .def("mark_rect_blocked", &Grid3D::mark_rect_blocked,
              "x1"_a, "y1"_a, "x2"_a, "y2"_a, "layer"_a, "net"_a, "is_obstacle"_a = false)
         // Route marking
@@ -309,7 +316,7 @@ NB_MODULE(router_cpp, m) {
              "min_hole_clearance"_a = -1.0f,
              "Validate a candidate route against stored geometry.  Issue #2559 "
              "/ Phase 1C: when partner_net >= 0 and intra_pair_clearance >= 0, "
-             "comparisons against partner_net use intra_pair_clearance instead "
+             "segment-to-segment comparisons against partner_net use intra_pair_clearance instead "
              "of trace_clearance (defaults preserve pre-#2559 behavior).  "
              "Issue #5166: refs in exclude_ref_hashes keep the full-skip "
              "same-component carve-out (#2452 corridor relief, whose floor is "
@@ -319,6 +326,8 @@ NB_MODULE(router_cpp, m) {
              "enforce that resolved per-pad value as a hard floor instead.  "
              "An empty clamp_ref_hashes reproduces pre-#5166 behavior.")
         // Pairwise (HV-isolation) domain clearance -- Issue #4510 / #4431 Phase 2a
+        .def("set_net_clearance_floors", &Grid3D::set_net_clearance_floors)
+        .def("net_clearance_floor", &Grid3D::net_clearance_floor)
         .def("set_pairwise_domains", &Grid3D::set_pairwise_domains,
              "net_to_domain"_a, "matrix"_a,
              "Install the per-net domain-id array (indexed by net id, -1 = no "

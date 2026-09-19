@@ -152,6 +152,8 @@ class CacheKey:
             "preferred_layer": rules.preferred_layer.value,
             "alternate_layer": rules.alternate_layer.value,
         }
+        if rules.net_clearance_floors:
+            rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
         # Issue #4602: the derived HV pairwise matrix (--voltage-map, #4431)
         # changes the ROUTES themselves -- grid (#4454/#4511) and lattice
         # (#4602) avoid HV<->LV proximity during search -- so it must key the
@@ -373,6 +375,8 @@ class SubProblemSignature:
             "via_diameter": rules.via_diameter,
             "grid_resolution": rules.grid_resolution,
         }
+        if rules.net_clearance_floors:
+            rules_data["net_clearance_floors"] = sorted(rules.net_clearance_floors.items())
         # Issue #4700: see CacheKey.from_pcb_and_rules -- the fab minimum trace
         # width changes the emitted copper, so it must key the signature too.
         min_trace_floor = getattr(rules, "min_trace_width_floor", None)

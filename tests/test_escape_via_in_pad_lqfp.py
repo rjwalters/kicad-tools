@@ -239,10 +239,10 @@ class TestLqfp48InPadEscape:
             assert esc.via is not None
             assert abs(esc.via.x - esc.pad.x) < 0.001
             assert abs(esc.via.y - esc.pad.y) < 0.001
-            # 4-layer signal-signal-ground-power stack: inner escape lands
-            # on In1.Cu (a SIGNAL layer).
-            assert esc.via.layers[0] == esc.pad.layer
-            assert esc.via.layers[1] == Layer.IN1_CU
+            # The logical escape lands on In1.Cu, while an ordinary drilled
+            # via has copper through the full four-layer physical stack.
+            assert esc.escape_layer == Layer.IN1_CU
+            assert esc.via.layers == (Layer.F_CU, Layer.B_CU)
 
     def test_no_in_pad_escape_when_unsupported(self):
         """With manufacturer=jlcpcb (no via-in-pad capability), no in-pad

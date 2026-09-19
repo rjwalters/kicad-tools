@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 39
+_REQUIRED_CPP_BUILD_VERSION = 51
 
 
 # Try to import C++ module with detailed error tracking
@@ -849,8 +849,8 @@ class CppGrid:
                 raise RuntimeError("Rebuild native router: fixed filled-copper support required")
             return
         self._impl.clear_fixed_fills()
-        for layer, clearance, rings in fills.native_polygons():
-            self._impl.add_fixed_fill(layer, clearance, rings)
+        for layer, clearance, rings, net in fills.native_polygons_with_nets():
+            self._impl.add_fixed_fill(layer, clearance, rings, net)
 
     @classmethod
     def from_routing_grid(cls, grid: RoutingGrid) -> CppGrid:
@@ -866,6 +866,8 @@ class CppGrid:
 
         # Store reference to original Python grid for post-route validation
         cpp_grid._py_grid = grid
+        if grid.rules.net_clearance_floors:
+            cpp_grid._impl.set_net_clearance_floors(grid.rules.net_clearance_floors)
         cpp_grid.install_fixed_fills(grid.fixed_fills)
 
         # Issue #2481: Establish the back-reference from the Python grid
@@ -964,7 +966,15 @@ class CppGrid:
                     pad_blocked_np[ls, ys, xs].tolist(),
                     strict=True,
                 ):
-                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
+                    mark_blocked(
+                        x,
+                        y,
+                        layer,
+                        net,
+                        is_obstacle,
+                        pad_blocked,
+                        (layer, y, x) in grid._pad_geometry_cells,
+                    )
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
@@ -1663,6 +1673,15 @@ class CppPathfinder:
         impl = getattr(self._grid, "_impl", None)
         if impl is None or not hasattr(impl, "set_pairwise_domains"):
             return  # Stale .so without the #4510 surface -- stay dormant.
+
+        floors = self._rules.net_clearance_floors
+        previous_floors = getattr(self, "_net_floor_cpp_payload", None)
+        if (floors or previous_floors) and (
+            previous_floors != floors or getattr(self, "_net_floor_cpp_grid", None) is not impl
+        ):
+            impl.set_net_clearance_floors(floors)
+            self._net_floor_cpp_payload = dict(floors)
+            self._net_floor_cpp_grid = impl
 
         payload = self._pairwise_cpp_payload
         if payload is False:
@@ -3024,6 +3043,8 @@ class CppPathfinder:
                     layer,
                     segment.width / 2,
                     fill_clearance,
+                    net=start.net,
+                    net_clearance_floors=self._rules.net_clearance_floors,
                 ):
                     return (segment.x1, segment.y1)
 
@@ -3057,7 +3078,13 @@ class CppPathfinder:
                     continue
                 for via in route.vias:
                     if not via_clears_foreign_segment(
-                        via, segment, trace_clearance=self._rules.via_clearance
+                        via,
+                        segment,
+                        trace_clearance=self._rules.clearance_for_nets(
+                            start.net,
+                            segment.net,
+                            max(self._rules.trace_clearance, self._rules.via_clearance),
+                        ),
                     ):
                         return (via.x, via.y)
 
@@ -3071,17 +3098,28 @@ class CppPathfinder:
         # mirroring the predicate consumed by the Python pathfinder at
         # ``pathfinder.py:_validate_route_clearance``.
         if self._foreign_vias:
-            from .via_clearance import segment_clears_foreign_via
+            from .via_clearance import segment_via_deficit
 
             for seg in route.segments:
                 for via in self._foreign_vias:
                     if via.net == start.net:
                         continue  # Same-net via -- skipped by convention.
-                    if not segment_clears_foreign_via(
-                        seg,
-                        via,
-                        trace_clearance=self._rules.trace_clearance,
-                        hard_intersection_only=False,
+                    # Native results carry float32 coordinates. Match the
+                    # existing 1e-4 mm grid.cpp validation epsilon so merely
+                    # supplying a via through supplemental context cannot
+                    # reject a route the same native geometry accepts.
+                    if (
+                        segment_via_deficit(
+                            seg,
+                            via,
+                            trace_clearance=self._rules.clearance_for_nets(
+                                start.net,
+                                via.net,
+                                max(self._rules.trace_clearance, self._rules.via_clearance),
+                            ),
+                            hard_intersection_only=False,
+                        )
+                        > 1e-4
                     ):
                         return (via.x, via.y)
 

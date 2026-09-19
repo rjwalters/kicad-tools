@@ -244,7 +244,7 @@ def test_export_reload_and_presave_validation(tmp_path, checkpoint):
     assert reloaded.placement_preserved_arcs == (arc,)
 
 
-def _coupled_fill_route(native, *, legacy_dimensions=False):
+def _coupled_fill_route(native, *, legacy_dimensions=False, net_clearance_floors=None):
     from kicad_tools.router.diffpair_routing import CoupledPathfinder
     from kicad_tools.router.grid import RoutingGrid
     from kicad_tools.router.layers import Layer, LayerDefinition, LayerStack, LayerType
@@ -253,7 +253,12 @@ def _coupled_fill_route(native, *, legacy_dimensions=False):
 
     # Exact grid-aligned pitch avoids the large convergence search in the
     # general coupled-parity fixture. One layer forces a physical detour.
-    rules = DesignRules(grid_resolution=0.2, trace_width=0.2, trace_clearance=0.2)
+    rules = DesignRules(
+        grid_resolution=0.2,
+        trace_width=0.2,
+        trace_clearance=0.2,
+        net_clearance_floors=net_clearance_floors or {},
+    )
     stack = LayerStack([LayerDefinition("F.Cu", 0, LayerType.SIGNAL, True)])
     grid = RoutingGrid(5, 5, rules, layer_stack=stack)
     pads = [
@@ -460,3 +465,12 @@ def test_engine_via_uses_physical_radius_and_via_gap(strategy):
     assert not clear((0.45, 0.5))  # .55 gap < .3 body + .35 via clearance
     assert not clear((0.37, 0.5))  # .63 would clear the trace gap, but not via gap
     assert clear((0.34, 0.5))
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("strict_net", [1, 9])
+def test_coupled_search_retains_authored_fill_floor(native, strict_net):
+    # The unchanged .31 mm class yields a .335 mm gap. An authored .35 mm
+    # floor must alter the route, with the same iteration/time budget.
+    assert _coupled_fill_route(native) < 0.35
+    assert _coupled_fill_route(native, net_clearance_floors={strict_net: 0.35}) >= 0.35 - 1e-4

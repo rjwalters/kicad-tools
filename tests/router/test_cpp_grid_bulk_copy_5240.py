@@ -98,7 +98,9 @@ def _actual_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, boo
         real_ctor(self, *args, **kwargs)
         real_mark = self._impl.mark_blocked
 
-        def mark_blocked(x, y, layer, net, is_obstacle, pad_blocked):
+        def mark_blocked(x, y, layer, net, is_obstacle, pad_blocked, pad_geometry=False):
+            # Raw-array fixture cells have no registered pad provenance.
+            assert pad_geometry is False
             recorded.append(
                 (
                     int(x),
@@ -109,7 +111,7 @@ def _actual_marks(grid: RoutingGrid) -> list[tuple[int, int, int, int, bool, boo
                     bool(pad_blocked),
                 )
             )
-            return real_mark(x, y, layer, net, is_obstacle, pad_blocked)
+            return real_mark(x, y, layer, net, is_obstacle, pad_blocked, pad_geometry)
 
         # ``_impl`` is a nanobind object, so patch a Python-level shim onto
         # the CppGrid wrapper's captured reference instead of the C++ type.

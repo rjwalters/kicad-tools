@@ -82,6 +82,17 @@ search. This applies to Python and C++ grid routing, including negotiated
 routing, and avoids joining nearby pins of the same IC before routing the star.
 An existing shunt escape does not move the tap to its outer endpoint.
 
+During dense-package escape generation, a recognized Kelvin terminal whose
+surface endpoint remains inside its physical pad can also receive an inward
+off-pad via when no legal outward via exists. The normal bounded escape search
+and manufacturing via geometry apply; this does not require via-in-pad support.
+The candidate must clear physical pads, existing copper, sibling escapes,
+drilled holes and board edges, and must not join another same-net branch before
+the shunt. Failed candidates leave the original escape unchanged. This runs
+through `Autorouter.generate_escape_routes()` and the CLI's dense-package escape
+prephase without a board-specific option. It preserves local access but does not
+guarantee that the subsequent full route will complete.
+
 This standalone example constructs an adversarial four-terminal net: the force
 terminal lies directly between the shunt and a sense terminal.
 

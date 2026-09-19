@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import json
 import math
 import re
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -255,11 +256,23 @@ def find_escape(
     origin = (0, 0)
     if blocked_trace.intersects(Point(point(origin))):
         return None
-    pending = deque([origin])
+    # Prefer states near primary copper. Breadth-first expansion can exhaust
+    # the fixed budget in open space before reaching a distant power island.
+    # This is a bounded feasibility search, not a shortest-path guarantee;
+    # every accepted edge and destination retains the physical checks below.
+    target = unary_union([front.context, through.context])
+    if target.is_empty:
+        return None
+    serial = itertools.count()
+
+    def priority(node):
+        return target.distance(Point(point(node)))
+
+    pending = [(priority(origin), next(serial), origin)]
     previous = {origin: None}
     moves = ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
     while pending:
-        current = pending.popleft()
+        _, _, current = heapq.heappop(pending)
         xy = point(current)
         pt = Point(xy)
         on_front = current != origin and front.intersects(pt)
@@ -294,5 +307,5 @@ def find_escape(
             if len(previous) >= node_budget:
                 return None
             previous[following] = current
-            pending.append(following)
+            heapq.heappush(pending, (priority(following), next(serial), following))
     return None

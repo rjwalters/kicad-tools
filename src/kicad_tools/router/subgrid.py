@@ -403,6 +403,8 @@ class SubGridRouter:
         result = SubGridResult(analysis=analysis)
 
         for sgp in analysis.off_grid_pads:
+            if sgp.pad.obstacle_only:
+                continue
             escape, reason = self._find_escape_for_pad(sgp)
             if escape is not None:
                 result.escapes.append(escape)
@@ -468,6 +470,8 @@ class SubGridRouter:
         for escape in result.escapes:
             gx, gy = escape.grid_point
             pad = escape.pad
+            if pad.obstacle_only:
+                continue
 
             # Determine which layers to unblock
             if pad.through_hole:

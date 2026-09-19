@@ -34,8 +34,8 @@ import base64
 import logging
 import math
 import threading
-from contextlib import contextmanager, suppress
-from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, cast
 
 import numpy as np
 
@@ -387,6 +387,7 @@ def _sync_pad_cells_to_cpp_grid(
                     int(py_net[layer_idx, gy, gx]),
                     bool(py_is_obstacle[layer_idx, gy, gx]),
                     bool(py_pad_blocked[layer_idx, gy, gx]),
+                    (layer_idx, gy, gx) in py_grid._pad_geometry_cells,
                 )
 
 
@@ -640,6 +641,7 @@ class _CellView:
 
     @blocked.setter
     def blocked(self, value: bool) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._blocked[self._layer, self._y, self._x] = value
         # Issue #4794: this setter is THE per-cell choke point for
         # ``mark_route``/``unmark_route``/``add_pad`` -- bump inline (rather
@@ -653,6 +655,7 @@ class _CellView:
 
     @net.setter
     def net(self, value: int) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._net[self._layer, self._y, self._x] = value
         self._grid._occupancy_generation += 1  # Issue #4794
 
@@ -682,6 +685,7 @@ class _CellView:
 
     @is_obstacle.setter
     def is_obstacle(self, value: bool) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._is_obstacle[self._layer, self._y, self._x] = value
 
     @property
@@ -710,6 +714,7 @@ class _CellView:
 
     @pad_blocked.setter
     def pad_blocked(self, value: bool) -> None:
+        self._grid._invalidate_pad_geometry_cell(self._layer, self._y, self._x)
         self._grid._pad_blocked[self._layer, self._y, self._x] = value
 
     @property
@@ -922,6 +927,10 @@ class RoutingGrid:
         # Issue #750: Grid-based checking is approximate; we need precise geometry
         # for post-route validation to catch diagonal segment violations
         self._pads: list[Pad] = []
+        # Cells blocked exclusively by registered pad geometry. Any generic
+        # occupancy write revokes this proof; overlapping unknown obstacles
+        # must never inherit a pad-halo clearance refinement.
+        self._pad_geometry_cells: set[tuple[int, int, int]] = set()
 
         # Issue #2452: Track pads by component reference for same-component
         # clearance relaxation. When pads share the same component (e.g.,
@@ -1574,6 +1583,15 @@ class RoutingGrid:
             round(self.origin_y + gy * self.resolution, 4),
         )
 
+    def _invalidate_pad_geometry_cell(self, layer: int, y: int, x: int) -> None:
+        key = (layer, y, x)
+        if key not in self._pad_geometry_cells:
+            return
+        self._pad_geometry_cells.remove(key)
+        cpp_grid = getattr(self, "_cpp_grid", None)
+        if cpp_grid is not None:
+            cpp_grid._impl.clear_pad_geometry_cell(x, y, layer)
+
     def add_obstacle(self, obs: Obstacle) -> None:
         """Mark grid cells as blocked by an obstacle.
 
@@ -2048,6 +2066,8 @@ class RoutingGrid:
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         cell = self.cell_at(layer_idx, gy, gx)
+                        key = (layer_idx, gy, gx)
+                        pad_only = not cell.blocked or key in self._pad_geometry_cells
                         cell.blocked = True
                         cell.original_net = pad.net
 
@@ -2192,6 +2212,9 @@ class RoutingGrid:
                                 cell.is_obstacle = True
                             elif cell.net != pad.net:
                                 cell.is_obstacle = True
+
+                        if pad_only:
+                            self._pad_geometry_cells.add(key)
 
             # Always mark the center cell with this pad's net
             if 0 <= center_gx < self.cols and 0 <= center_gy < self.rows:
@@ -2540,6 +2563,7 @@ class RoutingGrid:
                         # both standard and negotiated modes (see
                         # pathfinder ``_is_trace_blocked`` and
                         # ``allow_sharing`` paths).
+                        self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                         self._blocked[layer_idx, gy, gx] = True
                         self.bump_occupancy_generation()  # Issue #4794
                     else:
@@ -2551,6 +2575,7 @@ class RoutingGrid:
                         # nets cannot share it in negotiated mode, but
                         # leave its net assignment intact so its owner can
                         # still route through it.
+                        self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                         self._is_obstacle[layer_idx, gy, gx] = True
 
     def _apply_narrow_channel_halo(
@@ -2812,6 +2837,7 @@ class RoutingGrid:
                             # net can still traverse it
                             # (``cell.net == routing_net`` passes both
                             # checks).  Preserve cell.net.
+                            self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                             self._blocked[layer_idx, gy, gx] = True
                             self._is_obstacle[layer_idx, gy, gx] = True
                             self.bump_occupancy_generation()  # Issue #4794
@@ -2828,6 +2854,7 @@ class RoutingGrid:
                             # rather than a hard one (preserves
                             # nuance for the negotiated-mode shared
                             # net flow).
+                            self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                             self._blocked[layer_idx, gy, gx] = True
                             self.bump_occupancy_generation()  # Issue #4794
                         else:
@@ -3079,6 +3106,7 @@ class RoutingGrid:
                         if inside_y and gx1 <= gx <= gx2:
                             continue  # inside the region -- leave untouched
                         cell = self.cell_at(layer_idx, gy, gx)
+                        self._invalidate_pad_geometry_cell(layer_idx, gy, gx)
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
                             # board edge).  Nothing to add, and mirroring is
@@ -3420,8 +3448,12 @@ class RoutingGrid:
             # footprint makes overlap unavoidable) but loses the
             # positive-clearance skip -- ``required_clearance`` below is the
             # authored floor it must actually meet.
-            if carveout_mode != "none" and (
-                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
+            authored_floor = self.rules.clearance_for_nets(exclude_net, pad.net, 0.0)
+            required_clearance = max(required_clearance, authored_floor)
+            if (
+                (authored_floor == 0 or clearance >= authored_floor)
+                and carveout_mode != "none"
+                and (pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp"))
             ):
                 continue
 
@@ -3530,7 +3562,9 @@ class RoutingGrid:
             # ``required_clearance`` -- the configured, deliberately smaller
             # component clearance.  There is no net=0 exemption on the via
             # quadrant (mirrors the C++ via-pad branch, #5182).
-            if carveout_mode == "skip" and clearance >= 0:
+            authored_floor = self.rules.clearance_for_nets(exclude_net, pad.net, 0.0)
+            required_clearance = max(required_clearance, authored_floor)
+            if carveout_mode == "skip" and clearance >= authored_floor:
                 continue
 
             deficit = required_clearance - clearance
@@ -3610,7 +3644,7 @@ class RoutingGrid:
             checked foreign segments (<= 0 means no violation) and
             ``worst_location`` is the via center (or ``None``).
         """
-        min_clearance = self.rules.via_clearance
+        min_clearance = max(self.rules.trace_clearance, self.rules.via_clearance)
         via_radius = via.diameter / 2
         worst_deficit = 0.0
         worst_loc: tuple[float, float] | None = None
@@ -3635,12 +3669,52 @@ class RoutingGrid:
                     continue
                 dist = self._point_to_segment_distance(via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2)
                 clearance = dist - via_radius - seg.width / 2
-                deficit = min_clearance - clearance
+                deficit = (
+                    self.rules.clearance_for_nets(exclude_net, seg.net, min_clearance) - clearance
+                )
                 if deficit > worst_deficit:
                     worst_deficit = deficit
                     worst_loc = (via.x, via.y)
 
         return worst_deficit, worst_loc
+
+    def authored_segment_pads_clear(self, seg: Segment, pads: Iterable[Pad] | None = None) -> bool:
+        """Enforce mandatory net minima independently of raster/escape relief."""
+        x_min, x_max = sorted((seg.x1, seg.x2))
+        y_min, y_max = sorted((seg.y1, seg.y2))
+        # Compute a conservative bound once per segment instead of resolving
+        # a net pair for every remote pad on every A* edge. Read live floors
+        # each time so edits after loading the board remain visible.
+        floor_bound = max(self.rules.net_clearance_floors.values(), default=0.0)
+        for pad in self._pads if pads is None else pads:
+            if not pad.through_hole and pad.layer != seg.layer:
+                continue
+            # This square encloses every rotation and the circular-pad radius.
+            # The global bound only rejects distant pads; nearby pads still
+            # use their actual pair requirement, without policy widening.
+            reach = (pad.width + pad.height + seg.width) / 2 + floor_bound
+            if (
+                pad.x + reach < x_min
+                or pad.x - reach > x_max
+                or pad.y + reach < y_min
+                or pad.y - reach > y_max
+            ):
+                continue
+            required = self.rules.clearance_for_nets(seg.net, pad.net, 0.0)
+            if required <= 0:
+                continue
+            if pad.shape == "circle":
+                distance = (
+                    self._point_to_segment_distance(pad.x, pad.y, seg.x1, seg.y1, seg.x2, seg.y2)
+                    - max(pad.width, pad.height) / 2
+                )
+            else:
+                distance = _pad_rect_segment_centerline_distance(
+                    pad, seg.x1, seg.y1, seg.x2, seg.y2
+                )
+            if distance - seg.width / 2 < required - 1e-9:
+                return False
+        return True
 
     def validate_segment_clearance(
         self,
@@ -3678,9 +3752,9 @@ class RoutingGrid:
                              Used for automatic fine-pitch clearance detection.
             partner_net: Issue #2559 / Phase 1C -- when set, the named net id
                          is the diff-pair partner of ``exclude_net`` and the
-                         seg-vs-seg / seg-vs-via comparisons use
+                         seg-vs-seg comparisons use
                          ``partner_clearance`` instead of ``min_clearance``.
-            partner_clearance: Tighter clearance applied only to elements
+            partner_clearance: Tighter trace-to-trace clearance applied only to elements
                                whose net matches ``partner_net``.
 
         Returns:
@@ -3699,6 +3773,8 @@ class RoutingGrid:
             self.layer_to_index(seg.layer.value),
             seg.width / 2,
             min_clearance,
+            net=exclude_net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         ):
             return False, 0.0, (seg.x1, seg.y1)
 
@@ -3869,8 +3945,12 @@ class RoutingGrid:
             # Issue #5166: a "clamp" ref keeps the net=0 exemption but not
             # the positive-clearance skip -- ``required_clearance`` below is
             # the authored floor it must actually meet.
-            if carveout_mode != "none" and (
-                pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp")
+            authored_floor = self.rules.clearance_for_nets(exclude_net, pad.net, 0.0)
+            required_clearance = max(required_clearance, authored_floor)
+            if (
+                (authored_floor == 0 or clearance >= authored_floor)
+                and carveout_mode != "none"
+                and (pad.net == 0 or (clearance >= 0 and carveout_mode != "clamp"))
             ):
                 continue
 
@@ -3952,12 +4032,17 @@ class RoutingGrid:
                     # diff-pair partner only.
                     effective_clearance = (
                         partner_clearance
-                        if partner_active and other_seg.net == partner_net
+                        if partner_active
+                        and other_seg.net == partner_net
+                        and partner_clearance is not None
                         else min_clearance
                     )
 
                     if clearance < best:
                         best = clearance
+                    effective_clearance = self.rules.clearance_for_nets(
+                        exclude_net, other_seg.net, effective_clearance
+                    )
                     if clearance < effective_clearance:
                         found = True
                         loc = (
@@ -3974,7 +4059,9 @@ class RoutingGrid:
             # ``min_clearance`` -- all potential violators.  Violation
             # detection (``is_valid``) is therefore certified by this pass
             # alone.
-            search_margin = seg_half_width + min_clearance
+            # Include authored floors even if they changed after the index
+            # was built. This broad-phase bound does not widen pair policy.
+            search_margin = seg_half_width + max(min_clearance, self.rules.max_clearance)
             best_clearance, seg_violation, seg_violation_loc = _scan_candidates(search_margin)
 
             # Pass 2 (Issue #3522): the bounded pass-1 query only certifies
@@ -4049,12 +4136,17 @@ class RoutingGrid:
                     # Issue #2559 / Phase 1C: tighter clearance for partner.
                     effective_clearance = (
                         partner_clearance
-                        if partner_active and route.net == partner_net
+                        if partner_active
+                        and route.net == partner_net
+                        and partner_clearance is not None
                         else min_clearance
                     )
 
                     if clearance < min_actual_clearance:
                         min_actual_clearance = clearance
+                    effective_clearance = self.rules.clearance_for_nets(
+                        exclude_net, other_seg.net, effective_clearance
+                    )
                     if clearance < effective_clearance:
                         # Violation location at midpoint
                         has_violation = True
@@ -4078,9 +4170,18 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                    if clearance < min_clearance:
-                        has_violation = True
-                        violation_loc = (via.x, via.y)
+                # A barrel keeps its via floor even beside a differential
+                # partner or a closer, otherwise legal trace obstacle.
+                # Match the shared predicate at the exact clearance boundary.
+                if (
+                    clearance
+                    < self.rules.clearance_for_nets(
+                        exclude_net, via.net, max(min_clearance, self.rules.via_clearance)
+                    )
+                    - 1e-9
+                ):
+                    has_violation = True
+                    violation_loc = (via.x, via.y)
 
         # Issue #1016: is_valid is True only if no violations were found
         is_valid = not has_violation
@@ -4115,31 +4216,26 @@ class RoutingGrid:
             - violation_location: (x, y) of worst violation, or None if valid
         """
         if min_clearance is None:
-            min_clearance = self.rules.via_clearance
+            min_clearance = max(self.rules.trace_clearance, self.rules.via_clearance)
 
         via_radius = via.diameter / 2
+        # Via endpoints describe an inclusive physical barrel span, including
+        # inner copper layers between them (also for blind/buried vias).
+        endpoints = [self.layer_to_index(layer.value) for layer in via.layers]
+        via_layer_indices = tuple(range(min(endpoints), max(endpoints) + 1))
         if not self.fixed_fills.via_clear(
             (via.x, via.y),
-            tuple(
-                range(
-                    min(self.layer_to_index(layer.value) for layer in via.layers),
-                    max(self.layer_to_index(layer.value) for layer in via.layers) + 1,
-                )
-            ),
-            via.diameter / 2,
+            via_layer_indices,
+            via_radius,
             min_clearance,
+            net=exclude_net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         ):
             return False, 0.0, (via.x, via.y)
 
         min_actual_clearance = float("inf")
         violation_loc: tuple[float, float] | None = None
         has_violation = False
-
-        # Determine which layer indices the via spans
-        via_layer_indices: set[int] = set()
-        for layer in via.layers:
-            with suppress(KeyError, ValueError):
-                via_layer_indices.add(self.layer_to_index(layer.value))
 
         # Check against segments from existing routes
         for route in self.routes:
@@ -4162,7 +4258,10 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if (
+                    clearance
+                    < self.rules.clearance_for_nets(exclude_net, route.net, min_clearance) - 1e-9
+                ):
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -4219,7 +4318,7 @@ class RoutingGrid:
 
                 if clearance < min_actual_clearance:
                     min_actual_clearance = clearance
-                if clearance < min_clearance:
+                if clearance < self.rules.clearance_for_nets(exclude_net, route.net, min_clearance):
                     has_violation = True
                     violation_loc = (via.x, via.y)
 
@@ -6714,6 +6813,7 @@ class RoutingGrid:
                             blocked_cells.add((nx, ny))
                             for layer_idx in layer_indices:
                                 cell = self.cell_at(layer_idx, ny, nx)
+                                self._invalidate_pad_geometry_cell(layer_idx, ny, nx)
                                 if not cell.blocked:
                                     cell.blocked = True
                                     cell.is_obstacle = True

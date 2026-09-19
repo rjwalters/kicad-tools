@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import logging
 import math
 import re
@@ -3841,12 +3842,15 @@ def load_pcb_for_routing(
     lattice_deadline: float | None = None,
     min_trace_width_floor: float | None = None,
     placement_disposition: RoutingPlacementDisposition | None = None,
+    project_path: str | Path | None = None,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
 
     Args:
         pcb_path: Path to .kicad_pcb file
+        project_path: Original .kicad_pro sidecar when the PCB has been staged.
+            Defaults to the PCB basename. Missing sidecars retain legacy rules.
         placement_disposition: Optional precomputed placement exclusion. Only
             its invalid nets are removed from targets (selection remains the
             caller's responsibility). Excluded pads and authored copper remain
@@ -3996,6 +4000,10 @@ def load_pcb_for_routing(
         ...     load_existing_routes=True)
     """
     pcb_text = Path(pcb_path).read_text()
+    sidecar = (
+        Path(project_path) if project_path is not None else Path(pcb_path).with_suffix(".kicad_pro")
+    )
+    project_data = json.loads(sidecar.read_text()) if sidecar.exists() else {}
     skip_nets = skip_nets or []
     placement_invalid = (
         placement_disposition.invalid_nets if placement_disposition is not None else frozenset()
@@ -4247,6 +4255,32 @@ def load_pcb_for_routing(
             # Fall back to conservative defaults
             rules = DesignRules(grid_resolution=0.1)
 
+    from kicad_tools.core.project_clearance import resolve_project_clearances
+
+    authored = resolve_project_clearances(project_data, ["", *net_map])
+    neutral_ids: dict[str, int] = {}
+    if authored:
+        floors = dict(rules.net_clearance_floors)
+        for name, resolved in authored.items():
+            net_id = net_map.get(name, 0)
+            floors[net_id] = max(floors.get(net_id, 0.0), resolved.clearance)
+        # Skipped and placement-excluded copper must retain distinct electrical
+        # floors without becoming a target or reusable same-net copper. Reserve
+        # private positive identities outside the board's net-number space.
+        next_id = max([*net_map.values(), *floors], default=0) + 1
+        for name in sorted(set(skip_nets) | set(placement_invalid) | set(preserve_placement)):
+            if name not in authored:
+                continue
+            neutral_ids[name] = next_id
+            floors[next_id] = floors.get(net_map.get(name, 0), authored[name].clearance)
+            next_id += 1
+        for comp in components:
+            for pad in comp["pads"]:
+                if pad["net"] == 0 and pad["net_name"] in neutral_ids:
+                    pad["net"] = neutral_ids[pad["net_name"]]
+                    pad["obstacle_only"] = True
+        rules = replace(rules, net_clearance_floors=floors)
+
     # Auto-adjust grid resolution if enabled
     if auto_adjust_grid:
         adjustment = adjust_grid_for_compliance(
@@ -4445,6 +4479,12 @@ def load_pcb_for_routing(
             duplicate_pad_numbers_are_jumpers=comp["duplicate_pad_numbers_are_jumpers"],
         )
 
+    # Obstacle identities are never routing targets, including the mesh and
+    # lattice front ends which consume the same component census.
+    for net_id in neutral_ids.values():
+        router.nets.pop(net_id, None)
+        router.net_names.pop(net_id, None)
+
     # Extract edge segments for board bbox and optional edge clearance
     # (Issue #2039).  The bbox derived from actual edge cuts is more
     # accurate than grid origin/dimensions for OOB filtering.
@@ -4603,12 +4643,13 @@ def load_pcb_for_routing(
                 # Source copper may use a net that a netlist override split
                 # into valid and invalid effective nets. Neutral ownership is
                 # essential: no currently routable net may reuse that copper.
+                neutral_id = neutral_ids.get(net_name, 0)
                 route = replace(
                     route,
-                    net=0,
+                    net=neutral_id,
                     net_name="",
-                    segments=[replace(seg, net=0, net_name="") for seg in route.segments],
-                    vias=[replace(via, net=0, net_name="") for via in route.vias],
+                    segments=[replace(seg, net=neutral_id, net_name="") for seg in route.segments],
+                    vias=[replace(via, net=neutral_id, net_name="") for via in route.vias],
                 )
             if net_name in preserve_placement:
                 router.placement_neutral_routes += (route,)

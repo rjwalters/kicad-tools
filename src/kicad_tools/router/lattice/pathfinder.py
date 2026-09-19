@@ -465,6 +465,7 @@ class LatticePathfinder:
             via_via_gap=self._via_via_gap,
             same_net_via_gap=self._same_net_via_gap,
             pairwise=self._pairwise,
+            net_clearance_floors=self.rules.net_clearance_floors,
         )
         # Issue #4355: pre-seed immovable non-listed copper so EVERY fresh
         # model (per-pass negotiation, isolated stub/pair probes, and the
@@ -735,7 +736,14 @@ class LatticePathfinder:
             for layer in layers:
                 if fat:
                     if pads_block_point_grown(
-                        obstacles, point, layer, pair_nets, extra_clearance, exempt_pads
+                        obstacles,
+                        point,
+                        layer,
+                        pair_nets,
+                        extra_clearance,
+                        exempt_pads,
+                        floors=self.rules.net_clearance_floors,
+                        base_clearance=self.rules.trace_clearance,
                     ):
                         continue
                     if not committed_point_clear_grown(
@@ -746,6 +754,10 @@ class LatticePathfinder:
                     if obstacles.node_blocked(key, layer, net):
                         continue
                     if extra > 0.0 and obstacles.segment_blocked(point, point, layer, net, extra):
+                        continue
+                    if obstacles.authored_pad_blocked(
+                        point, point, layer, net, half, self.rules.net_clearance_floors
+                    ):
                         continue
                     if pw is not None and obstacles.pairwise_pad_blocked(
                         point, point, layer, net, half, extra, pw
@@ -765,7 +777,15 @@ class LatticePathfinder:
                     for a, b in zip(poly, poly[1:], strict=False):
                         if fat:
                             if pads_block_segment_grown(
-                                obstacles, a, b, layer, pair_nets, extra_clearance, exempt_pads
+                                obstacles,
+                                a,
+                                b,
+                                layer,
+                                pair_nets,
+                                extra_clearance,
+                                exempt_pads,
+                                floors=self.rules.net_clearance_floors,
+                                base_clearance=self.rules.trace_clearance,
                             ) or not committed_seg_clear_grown(
                                 committed, a, b, layer, pair_nets, extra_clearance
                             ):
@@ -773,6 +793,11 @@ class LatticePathfinder:
                                 break
                         else:
                             if obstacles.segment_blocked(a, b, layer, net, extra):
+                                ok = False
+                                break
+                            if obstacles.authored_pad_blocked(
+                                a, b, layer, net, half, self.rules.net_clearance_floors
+                            ):
                                 ok = False
                                 break
                             if pw is not None and obstacles.pairwise_pad_blocked(
@@ -1069,6 +1094,10 @@ class LatticePathfinder:
             if clearance is None
             else max(self.rules.trace_clearance, clearance)
         )
+        if obstacles.authored_pad_blocked(
+            point, point, None, net, via_radius, self.rules.net_clearance_floors
+        ):
+            return False
         grow = max(via_radius + own_clr - self._agent_radius, 0.0)
         # The query window must cover the farthest centre distance any check
         # below can reject at.  The hole-to-hole floor against the board's
@@ -1554,7 +1583,15 @@ class LatticePathfinder:
                         pa = lattice.node_point(edge[0])
                         pb = lattice.node_point(edge[1])
                         ok = not pads_block_segment_grown(
-                            obstacles, pa, pb, layer, pair_nets, extra_clearance, exempt_pads
+                            obstacles,
+                            pa,
+                            pb,
+                            layer,
+                            pair_nets,
+                            extra_clearance,
+                            exempt_pads,
+                            floors=self.rules.net_clearance_floors,
+                            base_clearance=self.rules.trace_clearance,
                         ) and committed_seg_clear_grown(
                             committed, pa, pb, layer, pair_nets, extra_clearance
                         )
@@ -1569,6 +1606,9 @@ class LatticePathfinder:
                             and not obstacles.edge_blocked(edge, layer, net)
                             and not (
                                 extra > 0.0 and obstacles.segment_blocked(ea, eb, layer, net, extra)
+                            )
+                            and not obstacles.authored_pad_blocked(
+                                ea, eb, layer, net, half, self.rules.net_clearance_floors
                             )
                             and not (
                                 pw is not None
@@ -1592,7 +1632,14 @@ class LatticePathfinder:
                     if fat:
                         npt = lattice.node_point(nbr)
                         nok = not pads_block_point_grown(
-                            obstacles, npt, layer, pair_nets, extra_clearance, exempt_pads
+                            obstacles,
+                            npt,
+                            layer,
+                            pair_nets,
+                            extra_clearance,
+                            exempt_pads,
+                            floors=self.rules.net_clearance_floors,
+                            base_clearance=self.rules.trace_clearance,
                         ) and committed_point_clear_grown(
                             committed, npt, layer, pair_nets, extra_clearance
                         )
@@ -1607,6 +1654,9 @@ class LatticePathfinder:
                             and not (
                                 extra > 0.0
                                 and obstacles.segment_blocked(npt, npt, layer, net, extra)
+                            )
+                            and not obstacles.authored_pad_blocked(
+                                npt, npt, layer, net, half, self.rules.net_clearance_floors
                             )
                             and not (
                                 pw is not None
@@ -1695,6 +1745,9 @@ class LatticePathfinder:
                                 and not (
                                     landing_extra > 0.0
                                     and obstacles.segment_blocked(kpt, kpt, nl, net, landing_extra)
+                                )
+                                and not obstacles.authored_pad_blocked(
+                                    kpt, kpt, nl, net, landing_half, self.rules.net_clearance_floors
                                 )
                                 and not (
                                     pw is not None
@@ -1979,6 +2032,10 @@ class LatticePathfinder:
         net_n = pc.pad_n_a.net
         pair_nets = {net_p, net_n}
         half_pitch = pc.pitch / 2.0
+        trace_width = getattr(pc.net_class, "trace_width", None) or self.rules.trace_width
+        authored_gap = self.rules.clearance_for_nets(net_p, net_n, 0.0)
+        if pc.pitch < trace_width + authored_gap - 1e-9:
+            return None, "pair-authored-clearance"
 
         layer_sets = [
             set(self._pad_layer_indices(p))
@@ -2149,7 +2206,11 @@ class LatticePathfinder:
                         continue
                     if pads_block_segment_grown(self.obstacles, a, b, layer, pair_nets, 0.0):
                         return None, "pair-leg-blocked"
-                    if not committed.seg_clear(a, b, layer, net):
+                    if self.obstacles.authored_pad_blocked(
+                        a, b, layer, net, trace_w / 2.0, self.rules.net_clearance_floors
+                    ):
+                        return None, "pair-leg-authored-pad"
+                    if not committed.seg_clear(a, b, layer, net, trace_w / 2.0):
                         return None, "pair-leg-blocked"
                     # Issue #4507: the fat centerline SEARCH deliberately skips
                     # HV pairwise widening (see ``coupled.committed_seg_clear_

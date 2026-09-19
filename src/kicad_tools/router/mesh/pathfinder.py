@@ -300,7 +300,8 @@ class MeshPathfinder:
         # rebuild (rect + polygon lists, no triangulation).  This is the model
         # the octilinear fit validates each leg against -- a route that cannot
         # clear it is declined (None).
-        keepouts = self._keepouts(net, agent_radius)
+        committed = self._query_copper(committed or [], net, trace_w / 2)
+        keepouts = self._keepouts(net, agent_radius, trace_half=trace_w / 2)
         pour_obstacles = self.pours + (committed or [])
         obstacles = ObstacleModel(
             self.outline,
@@ -310,6 +311,8 @@ class MeshPathfinder:
             layer=self._layer_index(start.layer) or 0,
             half=trace_w / 2,
             clearance=clearance,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         )
 
         cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
@@ -537,7 +540,9 @@ class MeshPathfinder:
 
     # -- helpers ----------------------------------------------------------
 
-    def _keepouts(self, net: int, agent_radius: float) -> list[Rect]:
+    def _keepouts(
+        self, net: int, agent_radius: float, *, trace_half: float | None = None
+    ) -> list[Rect]:
         """Inflated keep-out rects for every OTHER-net pad, clamped + merged."""
         from .obstacles import merge_overlapping
 
@@ -549,8 +554,10 @@ class MeshPathfinder:
             if pad.net == net:
                 continue  # same-net copper is not an obstacle
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
+            half = self.rules.trace_width / 2 if trace_half is None else trace_half
+            radius = max(agent_radius, half + self.rules.clearance_for_nets(net, pad.net, 0.0))
+            hx = half_w + radius
+            hy = half_h + radius
             r = (pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy)
             r = (
                 max(r[0], bx0 + margin),
@@ -593,7 +600,9 @@ class MeshPathfinder:
         except Exception:
             return None
 
-    def _keepouts_layer(self, net: int, agent_radius: float, layer_idx: int) -> list[Rect]:
+    def _keepouts_layer(
+        self, net: int, agent_radius: float, layer_idx: int, *, trace_half: float | None = None
+    ) -> list[Rect]:
         """Per-layer inflated pad keep-outs (issue #4276 section 3).
 
         An SMD pad blocks only its own copper layer; a through-hole pad blocks
@@ -617,8 +626,10 @@ class MeshPathfinder:
             if not pad.through_hole and layer_enum is not None and pad.layer != layer_enum:
                 continue
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
+            half = self.rules.trace_width / 2 if trace_half is None else trace_half
+            radius = max(agent_radius, half + self.rules.clearance_for_nets(net, pad.net, 0.0))
+            hx = half_w + radius
+            hy = half_h + radius
             r = (
                 max(pad.x - hx, bx0 + margin),
                 max(pad.y - hy, by0 + margin),
@@ -653,8 +664,16 @@ class MeshPathfinder:
         """
         for pad in self.pads:
             half_w, half_h = pad_half_extents(pad)
-            hx = half_w + via_radius
-            hy = half_h + via_radius
+            radius = (
+                max(
+                    via_radius,
+                    self.rules.via_diameter / 2 + self.rules.clearance_for_nets(net, pad.net, 0.0),
+                )
+                if pad.net != net
+                else via_radius
+            )
+            hx = half_w + radius
+            hy = half_h + radius
             if abs(site[0] - pad.x) <= hx and abs(site[1] - pad.y) <= hy:
                 if pad.net == net:
                     if not self._via_in_pad_allowed:
@@ -666,13 +685,15 @@ class MeshPathfinder:
             tuple(range(self.layer_stack.num_layers)),
             self.rules.via_diameter / 2,
             self.rules.via_clearance,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         ):
             return False
         # A through-via spans every copper layer, so its body must clear
         # committed cross-net copper on ALL layers -- not just the two the A*
         # hop nominally joins.  Check every layer with committed copper.
         for caps in committed_by_layer.values():
-            for poly in caps:
+            for poly in self._query_copper(caps, net, self.rules.via_diameter / 2):
                 if point_in_polygon(site, poly):
                     return False
         return True
@@ -715,10 +736,14 @@ class MeshPathfinder:
         start_pt: Pt = (start.x, start.y)
         end_pt: Pt = (end.x, end.y)
 
+        committed_by_layer = {
+            layer: self._query_copper(polygons, net, trace_w / 2)
+            for layer, polygons in committed_by_layer.items()
+        }
         # Per-layer obstacle model for the authoritative octilinear fit.
         obstacles_by_layer: dict[int, ObstacleModel] = {}
         for lidx in range(num_layers):
-            keepouts = self._keepouts_layer(net, agent_radius, lidx)
+            keepouts = self._keepouts_layer(net, agent_radius, lidx, trace_half=trace_w / 2)
             pour_obstacles = self.pours + committed_by_layer.get(lidx, [])
             obstacles_by_layer[lidx] = ObstacleModel(
                 self.outline,
@@ -728,6 +753,8 @@ class MeshPathfinder:
                 layer=lidx,
                 half=trace_w / 2,
                 clearance=clearance,
+                net=net,
+                net_clearance_floors=self.rules.net_clearance_floors,
             )
 
         # Per-layer portal blocking (issue #4276 section 3): a portal is blocked
@@ -914,37 +941,44 @@ class MeshPathfinder:
             )
         return route
 
-    def _route_obstacles(self, route: Route) -> list[list[Pt]]:
-        """Inflated capsule polygons for each segment of a committed route.
+    def _query_copper(self, polygons, net: int, half: float):
+        """Rebuild typed copper obstacles for the actual querying net/width."""
+        return [
+            polygon.for_query(net, half, self.rules)
+            if isinstance(polygon, _CommittedPolygon)
+            else polygon
+            for polygon in polygons
+        ]
 
-        Each segment is grown by ``trace_width + clearance`` (covers both
-        traces' half-widths plus the clearance gap on a single-width board) so
-        another net's centreline staying outside keeps full copper clearance.
-        """
-        half = self.rules.trace_width + self.rules.trace_clearance
-        polys: list[list[Pt]] = []
-        for seg in route.segments:
-            poly = _segment_capsule((seg.x1, seg.y1), (seg.x2, seg.y2), half)
-            if poly is not None:
-                polys.append(poly)
-        return polys
+    def _route_obstacles(self, route: Route) -> list[list[Pt]]:
+        """Copper polygons with source identity retained for later queries."""
+        copper_objects: list[Segment | Via] = [*route.segments, *route.vias]
+        return [
+            _CommittedPolygon.from_copper(copper, self.rules)
+            for copper in copper_objects
+            if isinstance(copper, Via)
+            or math.hypot(copper.x2 - copper.x1, copper.y2 - copper.y1) > 1e-12
+        ]
 
     def _route_obstacles_by_layer(self, route: Route) -> dict[int, list[list[Pt]]]:
-        """Committed-copper capsules bucketed by routing-graph layer index (#4276).
-
-        A via-injected route lays copper on several layers; committed copper
-        must be tracked per layer so later nets see it only where it actually
-        sits (an F.Cu net is not blocked by another net's B.Cu cross-under).
-        """
-        half = self.rules.trace_width + self.rules.trace_clearance
+        """Preserve actual segment widths and each via's physical layer span."""
         out: dict[int, list[list[Pt]]] = {}
-        for seg in route.segments:
-            lidx = self._layer_index(seg.layer)
-            if lidx is None:
-                continue
-            poly = _segment_capsule((seg.x1, seg.y1), (seg.x2, seg.y2), half)
-            if poly is not None:
-                out.setdefault(lidx, []).append(poly)
+        for segment in route.segments:
+            layer = self._layer_index(segment.layer)
+            if (
+                layer is not None
+                and math.hypot(segment.x2 - segment.x1, segment.y2 - segment.y1) > 1e-12
+            ):
+                out.setdefault(layer, []).append(_CommittedPolygon.from_copper(segment, self.rules))
+        for via in route.vias:
+            low = min(layer.value for layer in via.layers)
+            high = max(layer.value for layer in via.layers)
+            # The search stack can omit physical copper layers (single-layer
+            # routing). Retain the barrel on every represented layer it spans.
+            for layer in range(self.layer_stack.num_layers):
+                physical = self.layer_stack.index_to_layer_enum(layer).value
+                if low <= physical <= high:
+                    out.setdefault(layer, []).append(_CommittedPolygon.from_copper(via, self.rules))
         return out
 
     def _seed_fixed_copper(
@@ -961,13 +995,9 @@ class MeshPathfinder:
         pass), so the seed is re-applied per pass.  A ``None`` / empty seed adds
         nothing and is a byte-identical no-op.
 
-        Issue #4597 (scope note): unlike the lattice engine, this seed does NOT
-        carry the preserved net's ``--net-class-map`` clearance -- the capsules
-        are inflated at the board-global ``trace_width + trace_clearance`` and
-        the mesh committed model is net-AGNOSTIC (plain polygons with no per-net
-        field), so it cannot express a per-net clearance without a model change.
-        Multi-step ``--preserve-existing`` composition therefore still spaces
-        cross-step pairs at the DRU floor on ``--engine mesh``.
+        Source net and actual copper geometry survive in list-compatible
+        polygons. Each subsequent query rebuilds its own width/clearance
+        envelope, including either net's mandatory project clearance floor.
         """
         for route in fixed_copper or []:
             for lidx, polys in self._route_obstacles_by_layer(route).items():
@@ -991,6 +1021,42 @@ class MeshPathfinder:
                 )
             )
         return route
+
+
+class _CommittedPolygon(list[Pt]):
+    """List-compatible obstacle retaining the copper that generated it."""
+
+    def __init__(self, points: list[Pt], copper: Segment | Via, base_radius: float):
+        super().__init__(points)
+        self.copper = copper
+        self.base_radius = base_radius
+
+    @classmethod
+    def from_copper(cls, copper: Segment | Via, rules: DesignRules):
+        half = copper.width / 2 if isinstance(copper, Segment) else copper.diameter / 2
+        radius = max(
+            rules.trace_width + rules.trace_clearance,
+            half + rules.trace_width / 2 + rules.trace_clearance,
+        )
+        return cls(cls._points(copper, radius), copper, radius)
+
+    @staticmethod
+    def _points(copper: Segment | Via, radius: float) -> list[Pt]:
+        if isinstance(copper, Segment):
+            return _segment_capsule(copper.start, copper.end, radius) or []
+        return [
+            (copper.x - radius, copper.y - radius),
+            (copper.x + radius, copper.y - radius),
+            (copper.x + radius, copper.y + radius),
+            (copper.x - radius, copper.y + radius),
+        ]
+
+    def for_query(self, net: int, half: float, rules: DesignRules):
+        copper = self.copper
+        stored_half = copper.width / 2 if isinstance(copper, Segment) else copper.diameter / 2
+        required = rules.clearance_for_nets(net, copper.net, rules.trace_clearance)
+        radius = max(self.base_radius, stored_half + half + required)
+        return type(self)(self._points(copper, radius), copper, self.base_radius)
 
 
 def _segment_capsule(a: Pt, b: Pt, half_width: float) -> list[Pt] | None:

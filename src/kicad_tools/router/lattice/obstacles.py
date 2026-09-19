@@ -255,6 +255,39 @@ class LatticeObstacleModel:
                 return True
         return False
 
+    def authored_pad_blocked(
+        self,
+        a: Pt,
+        b: Pt,
+        layer: int | None,
+        net: int,
+        own_half: float,
+        floors: dict[int, float],
+    ) -> bool:
+        """Mandatory electrical pad spacing, independent of HV attachment waivers.
+
+        A missing layer means a through-via checks pads across the full stack.
+        Existing conservative pad bounding rectangles retain rotated extents.
+        """
+        if not floors:
+            return False
+        reach = max(0.0, own_half + max(floors.values()) - self.agent_radius)
+        x0, x1 = min(a[0], b[0]), max(a[0], b[0])
+        y0, y1 = min(a[1], b[1]), max(a[1], b[1])
+        for idx in self.pads_near(x0 - reach, y0 - reach, x1 + reach, y1 + reach):
+            pad = self.pads[idx]
+            if pad.net == net or (layer is not None and layer not in self.pad_layer_indices[idx]):
+                continue
+            required = max(floors.get(net, 0.0), floors.get(pad.net, 0.0))
+            if required <= 0.0:
+                continue
+            extra = own_half + required - self.agent_radius
+            rect = self.pad_rects[idx]
+            grown = (rect[0] - extra, rect[1] - extra, rect[2] + extra, rect[3] + extra)
+            if seg_rect_intersect(a, b, grown):
+                return True
+        return False
+
     def pairwise_pad_blocked(
         self,
         a: Pt,
@@ -484,7 +517,9 @@ class CommittedCopper:
         via_via_gap: float,
         same_net_via_gap: float,
         pairwise: LatticePairwise | None = None,
+        net_clearance_floors: dict[int, float] | None = None,
     ) -> None:
+        self.net_clearance_floors = dict(net_clearance_floors or {})
         self.kelvin_guard: KelvinBranchGuard | None = None
         self.num_layers = num_layers
         self.trace_half = trace_half  # global default copper half-width
@@ -574,6 +609,16 @@ class CommittedCopper:
 
     # -- predicates --------------------------------------------------------
 
+    def _electrical_floor(self, net: int, other: int) -> float:
+        if net == other:
+            return 0.0
+        return max(
+            self.net_clearance_floors.get(net, 0.0), self.net_clearance_floors.get(other, 0.0)
+        )
+
+    def _electrical_reach(self) -> float:
+        return max(self.net_clearance_floors.values(), default=0.0)
+
     def _own(self, half: float | None, clearance: float | None) -> tuple[float, float]:
         """Resolve the querying connection's (half-width, clearance)."""
         own_half = self.trace_half if half is None else half
@@ -593,7 +638,15 @@ class CommittedCopper:
         own_half, own_clr = self._own(half, clearance)
         if self.kelvin_guard is not None and not self.kelvin_guard.clear(a, b, layer, own_half):
             return False
-        if not self.fixed_fills.segment_clear(a, b, layer, own_half, own_clr):
+        if not self.fixed_fills.segment_clear(
+            a,
+            b,
+            layer,
+            own_half,
+            own_clr,
+            net=net,
+            net_clearance_floors=self.net_clearance_floors,
+        ):
             return False
         # Issue #4602: an active pairwise projection inflates the spatial query
         # window to the widest requirement THIS net participates in (the #4511
@@ -602,11 +655,11 @@ class CommittedCopper:
         # forbidden copper).  Dormant/unmapped nets keep the scalar window.
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
-        pad = own_half + max(own_clr, pw_reach) + 0.5
+        pad = own_half + max(own_clr, pw_reach, self._electrical_reach()) + 0.5
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(a, b, pad=pad):
             if cnet == net:
                 continue
-            gap = own_half + hw + max(own_clr, iclr)
+            gap = own_half + hw + max(own_clr, iclr, self._electrical_floor(net, cnet))
             d_cc = seg_seg_dist(a, b, c, d)
             if d_cc < gap - 1e-9:
                 return False
@@ -629,7 +682,10 @@ class CommittedCopper:
         own_via_gap = self.via_radius + own_half + own_clr
         for point, vnet, vclr in self.vias:
             if vnet != net:
-                via_gap = own_via_gap if vclr <= own_clr else self.via_radius + own_half + vclr
+                via_gap = max(
+                    own_via_gap,
+                    self.via_radius + own_half + max(vclr, self._electrical_floor(net, vnet)),
+                )
                 d_vp = seg_pt_dist(a, b, point)
                 if d_vp < via_gap - 1e-9:
                     return False
@@ -667,17 +723,25 @@ class CommittedCopper:
             point, point, layer, own_half
         ):
             return False
-        if not self.fixed_fills.segment_clear(point, point, layer, own_half, own_clr):
+        if not self.fixed_fills.segment_clear(
+            point,
+            point,
+            layer,
+            own_half,
+            own_clr,
+            net=net,
+            net_clearance_floors=self.net_clearance_floors,
+        ):
             return False
         # Issue #4602: inflate the query window to the pairwise reach (see
         # ``seg_clear``); dormant/unmapped nets keep the scalar window.
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
-        pad = own_half + max(own_clr, pw_reach) + 0.5
+        pad = own_half + max(own_clr, pw_reach, self._electrical_reach()) + 0.5
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
             if cnet == net:
                 continue
-            gap = own_half + hw + max(own_clr, iclr)
+            gap = own_half + hw + max(own_clr, iclr, self._electrical_floor(net, cnet))
             d_cc = seg_pt_dist(c, d, point)
             if d_cc < gap - 1e-9:
                 return False
@@ -693,7 +757,10 @@ class CommittedCopper:
         for vpt, vnet, vclr in self.vias:
             if vnet == net:
                 continue
-            via_gap = own_via_gap if vclr <= own_clr else self.via_radius + own_half + vclr
+            via_gap = max(
+                own_via_gap,
+                self.via_radius + own_half + max(vclr, self._electrical_floor(net, vnet)),
+            )
             d_vp = dist(point, vpt)
             if d_vp < via_gap - 1e-9:
                 return False
@@ -732,16 +799,24 @@ class CommittedCopper:
                 if clearance is None
                 else max(self.fixed_fill_via_clearance, own_clr)
             ),
+            net=net,
+            net_clearance_floors=self.net_clearance_floors,
         ):
             return False
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
-        pad = self.via_radius + own_clr + self.trace_half + 2.0 + pw_reach
+        pad = (
+            self.via_radius
+            + max(own_clr, self._electrical_reach())
+            + self.trace_half
+            + 2.0
+            + pw_reach
+        )
         for layer in range(self.num_layers):
             for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
                 if cnet == net:
                     continue
-                gap = self.via_radius + hw + max(own_clr, iclr)
+                gap = self.via_radius + hw + max(own_clr, iclr, self._electrical_floor(net, cnet))
                 d_cc = seg_pt_dist(c, d, point)
                 if d_cc < gap - 1e-9:
                     return False
@@ -767,7 +842,7 @@ class CommittedCopper:
                 # bounds, including when either class is unspecified.
                 gap = max(
                     self.via_via_gap,
-                    2.0 * self.via_radius + max(own_clr, vclr),
+                    2.0 * self.via_radius + max(own_clr, vclr, self._electrical_floor(net, vnet)),
                     self.same_net_via_gap,
                 )
             else:

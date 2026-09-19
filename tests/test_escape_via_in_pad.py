@@ -159,9 +159,11 @@ class TestInPadEscapeStrategy:
             assert esc.via is not None
             assert abs(esc.via.x - esc.pad.x) < 0.001
             assert abs(esc.via.y - esc.pad.y) < 0.001
-            # Inner-layer escape on a 4-layer stack lands on In1.Cu.
-            assert esc.via.layers[0] == esc.pad.layer
-            assert esc.via.layers[1] == Layer.IN1_CU
+            # The landing is internal, but an ordinary drilled barrel crosses
+            # the full stack and must obstruct foreign copper on every layer.
+            assert esc.escape_layer == Layer.IN1_CU
+            assert not esc.via.is_micro
+            assert esc.via.layers == (Layer.F_CU, Layer.B_CU)
 
     def test_no_in_pad_escape_when_unsupported(self):
         """With default manufacturer=jlcpcb (no via-in-pad), behavior is
