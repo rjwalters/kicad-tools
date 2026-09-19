@@ -717,52 +717,190 @@ class TestNoRoutingPlanFlag:
         assert "--no-routing-plan" not in captured[0]
 
 
-# --- Full-board evidence (slow, env-gated) -----------------------------------
+# --- Full-board evidence (slow) ----------------------------------------------
 #
-# ``KCT_ROUTING_PLAN_BOARDS=1 pytest tests/test_routing_plan_5510.py -m slow``
-# routes board 00 (non-dense -> negotiated path) and board 03 (dense ->
-# two-phase path) twice each and asserts the routed copper is unchanged by
-# the plan stage (UUIDs normalised: they are regenerated per run and are not
-# copper).  Env-gated because each board takes minutes and the suite's
-# default budget is seconds.
+# Routes board 00 (non-dense -> negotiated path), board 00 again with
+# ``--no-auto-layers`` (the fixed-layer ``do_routing()`` closure, which an
+# explicit ``--layers N`` also falls into -- ``route_cmd.py`` silently clears
+# ``--auto-layers`` there) and board 03 (dense -> two-phase path) twice each,
+# then asserts the routed COPPER is unchanged by the plan stage.
+#
+# ``@pytest.mark.slow`` keeps these out of the per-PR Test job (which runs
+# ``-m "not slow"`` under a 60 s per-test timeout) and into the nightly Slow
+# Tests workflow, which is where the Epic #5510 Phase 1b acceptance criterion
+# "CI asserts boards 00 and 03" is enforced.  Measured 2026-09-19 on the
+# fleet host: board 00 ~13 s, board 03 ~500 s for its two routes.
+#
+# DETERMINISM PROTOCOL (load-bearing -- do not drop these flags).  A bare
+# ``kct route`` is NOT reproducible run-to-run: its iteration budget is
+# wall-clock-based, so an A* that is near a budget boundary lands different
+# copper on an otherwise identical run.  Measured 2026-09-19 on board 01:
+# three unflagged runs produced three distinct copper sets *with the plan
+# stage disabled*, i.e. the nondeterminism is pre-existing and has nothing to
+# do with this phase.  ``--seed 42 --deterministic-budget`` plus a pinned
+# ``PYTHONHASHSEED`` is the repo's existing remedy (#3538 / #3799); under it
+# the fleet boards are reproducible AND identical with vs without
+# ``--no-routing-plan``.  Without the flags this test would be a flake
+# generator that tells you nothing about the plan stage.
+#
+# THE INSTRUMENT IS THE COPPER SET, NOT THE FILE (Issue #5578).  Comparing
+# whole ``.kicad_pcb`` text with UUIDs substituted is NOT a valid measurement
+# of "did the plan stage change copper", and getting this wrong is what
+# produced the retracted #5578 report.  Two things in the file vary
+# run-to-run on their own, with the plan stage OFF in both runs:
+#
+#   1. Element EMISSION ORDER.  Board 06, 2026-09-19, two stage-off runs:
+#      2365 diff lines whole-file, yet the multiset of normalised lines was
+#      byte-identical -- the files were pure permutations of each other.
+#   2. Zone POUR FILL island decomposition.  Board 03's In2.Cu plane filled
+#      as 5 islands on three runs and 20 on a fourth; the fourth happened to
+#      be a stage-ON run, which is exactly how the plan stage gets blamed for
+#      it.  Re-running stage-ON (``on2``) reproduced 5 islands with an
+#      identical copper set, so the fragmentation is pre-existing
+#      pour-fill variance, not a plan-stage effect.  Pours are filled after
+#      routing and flow around finished traces; they are not routed copper.
+#
+# ``_copper_elements`` therefore compares the sorted multiset of whole
+# ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` NODES with their ``uuid``
+# tokens normalised -- geometry, width, layer and net included, emission
+# order and pour fills excluded.  Under that instrument every fleet board
+# measured on 2026-09-19 (00, 01, 02, 03, 04, 06) is copper-identical with
+# vs without ``--no-routing-plan``, so the assertion below is a hard
+# assertion, not a skip.  ``test_deterministic_flags_make_the_route_
+# reproducible`` is the paired control: it routes with the stage OFF twice,
+# so a future failure distinguishes "the plan stage changed copper" from
+# "the protocol stopped working".
+#
+# Do NOT "simplify" this to the one-line grep in
+# ``scripts/ci/board_route_determinism_smoke.sh`` (``normalize_copper()``,
+# ``grep -E '^[[:space:]]*\((segment|via|arc)'``).  This repo writes copper
+# as MULTI-LINE s-expressions, so that grep keeps only the bare ``(segment``
+# / ``(via`` header lines and discards every ``(start ...)`` / ``(end ...)``
+# / ``(layer ...)`` child: on board 03 it reduces a 25k-line PCB to 1913
+# lines that are exactly ``1872 segments + 41 vias``, i.e. it compares copper
+# element COUNTS and is blind to geometry.  ``_copper_elements`` keeps the
+# whole node.  (The smoke script's own blind spot is tracked in #5580; this
+# test does not depend on it.)
+#
+# The element count is asserted non-empty: a normalisation regression that
+# filtered everything out would otherwise compare two empty lists and pass.
 
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_UUID_RE = re.compile(r'\(uuid "[^"]*"\)')
+_TSTAMP_RE = re.compile(r"\(tstamp [^)]*\)")
+_COPPER_OPEN_RE = re.compile(r"^\s*\((segment|via|arc)\b")
+
+#: Flags that make ``kct route`` reproducible (see the note above).
+_DETERMINISTIC_FLAGS = ("--seed", "42", "--deterministic-budget")
+
+
+def _copper_elements(path: Path) -> list[str]:
+    """Sorted multiset of a PCB's routed-copper s-expressions.
+
+    Each ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` node is collected
+    whole (paren-balanced, so multi-line nodes survive), whitespace-collapsed
+    and ``uuid`` / ``tstamp``-normalised, then the list is sorted -- so the
+    comparison is over the SET of copper geometry and is insensitive to
+    emission order.  Zone pour fills and all non-copper nodes are excluded;
+    see the module note above for why.
+    """
+    elements: list[str] = []
+    current: list[str] | None = None
+    depth = 0
+    for raw in path.read_text().splitlines():
+        if current is None:
+            if not _COPPER_OPEN_RE.match(raw):
+                continue
+            current = []
+            depth = 0
+        current.append(raw.strip())
+        depth += raw.count("(") - raw.count(")")
+        if depth <= 0:
+            node = " ".join(current)
+            node = _UUID_RE.sub('(uuid "X")', node)
+            elements.append(_TSTAMP_RE.sub("(tstamp X)", node))
+            current = None
+    return sorted(elements)
 
 
 def _normalized_copper(path: Path) -> str:
-    return _UUID_RE.sub("UUID", path.read_text())
+    return "\n".join(_copper_elements(path))
 
 
 def _route(pcb: Path, out: Path, *extra: str) -> None:
+    env = dict(os.environ, PYTHONHASHSEED="0")
     subprocess.run(
-        [sys.executable, "-m", "kicad_tools.cli", "route", str(pcb), "-o", str(out), *extra],
+        [
+            sys.executable,
+            "-m",
+            "kicad_tools.cli",
+            "route",
+            str(pcb),
+            "-o",
+            str(out),
+            *_DETERMINISTIC_FLAGS,
+            *extra,
+        ],
         check=False,
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env=env,
     )
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(
-    os.environ.get("KCT_ROUTING_PLAN_BOARDS") != "1",
-    reason="set KCT_ROUTING_PLAN_BOARDS=1 to run the full-board plan-stage sweep",
-)
+@pytest.mark.timeout(600)
+def test_deterministic_flags_make_the_route_reproducible(tmp_path):
+    """Control for the copper-identity test below.
+
+    Routes board 00 twice with the plan stage OFF both times.  If this
+    fails, ``test_board_copper_unchanged_by_plan_stage`` is measuring the
+    router's own run-to-run variance rather than anything the plan stage
+    did -- fix the determinism protocol, not the plan stage.
+    """
+    pcb = REPO_ROOT / "boards/00-simple-led/output/simple_led.kicad_pcb"
+    a = tmp_path / "a.kicad_pcb"
+    b = tmp_path / "b.kicad_pcb"
+    _route(pcb, a, "--no-routing-plan")
+    _route(pcb, b, "--no-routing-plan")
+
+    assert a.exists() and b.exists()
+    assert _copper_elements(a), "no copper parsed -- the instrument is broken"
+    assert _normalized_copper(a) == _normalized_copper(b)
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(1800)
 @pytest.mark.parametrize(
-    "pcb_rel",
+    ("pcb_rel", "extra"),
     [
-        "boards/00-simple-led/output/simple_led.kicad_pcb",
-        "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+        pytest.param(
+            "boards/00-simple-led/output/simple_led.kicad_pcb",
+            (),
+            id="board00-escalation",
+        ),
+        pytest.param(
+            "boards/00-simple-led/output/simple_led.kicad_pcb",
+            ("--no-auto-layers",),
+            id="board00-fixed-layers",
+        ),
+        pytest.param(
+            "boards/03-usb-joystick/output/usb_joystick.kicad_pcb",
+            (),
+            id="board03-two-phase",
+        ),
     ],
 )
-def test_board_copper_unchanged_by_plan_stage(tmp_path, pcb_rel):
+def test_board_copper_unchanged_by_plan_stage(tmp_path, pcb_rel, extra):
     pcb = REPO_ROOT / pcb_rel
     on = tmp_path / "on.kicad_pcb"
     off = tmp_path / "off.kicad_pcb"
-    _route(pcb, on)
-    _route(pcb, off, "--no-routing-plan")
+    _route(pcb, on, *extra)
+    _route(pcb, off, "--no-routing-plan", *extra)
 
     assert on.exists() and off.exists()
+
+    # --- Flag behaviour ---
     # Default route writes the sidecar; --no-routing-plan suppresses it.
     assert (tmp_path / "on.routing_plan.json").exists()
     assert not (tmp_path / "off.routing_plan.json").exists()
@@ -772,4 +910,14 @@ def test_board_copper_unchanged_by_plan_stage(tmp_path, pcb_rel):
     # AC: plan stage wall clock < 5 s on the fleet boards.
     assert plan["overflow_report"]["elapsed_s"] < 5.0
 
-    assert _normalized_copper(on) == _normalized_copper(off)
+    # --- Copper identity (the Phase 1 "report-only" contract) ---
+    copper_on = _copper_elements(on)
+    assert copper_on, f"no copper parsed from {on} -- the instrument is broken"
+    assert copper_on == _copper_elements(off), (
+        f"{pcb_rel} routed a different copper SET with the plan stage on "
+        "than with --no-routing-plan -- the report-only plan stage changed "
+        "routed copper, which Epic #5510 Phase 1 forbids.  If "
+        "test_deterministic_flags_make_the_route_reproducible is also red, "
+        "fix the determinism protocol first; the comparison is meaningless "
+        "while a stage-off route cannot reproduce itself."
+    )

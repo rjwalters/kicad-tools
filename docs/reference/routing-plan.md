@@ -78,6 +78,68 @@ so the many unit tests that call `route_all_negotiated` directly keep
 their stdout assertions). The only object it mutates is the
 freshly-constructed `RegionGraph` it also owns.
 
+**Verifying that claim needs the determinism protocol.** A bare `kct route`
+is not reproducible run-to-run *at all*: its iteration budget is
+wall-clock-based, so an A* search sitting near a budget boundary lands
+different copper on an otherwise identical invocation. Measured on board 01
+(2026-09-19): three unflagged runs produced three distinct copper sets
+**with the plan stage disabled**. Any "with vs without `--no-routing-plan`"
+comparison must therefore pin the budget the way `--deterministic-budget`
+(#3538 / #3799) was built for:
+
+```
+PYTHONHASHSEED=0 kct route board.kicad_pcb -o out.kicad_pcb \
+    --seed 42 --deterministic-budget [--no-routing-plan]
+```
+
+The slow tests in `tests/test_routing_plan_5510.py` use exactly these flags
+and ship a separate "route twice with the stage off" control so a failure
+distinguishes "the plan stage changed copper" from "the protocol stopped
+working".
+
+### The instrument is the copper set, not the file
+
+**Do not compare whole `.kicad_pcb` text**, even with UUIDs normalised — it
+does not measure "did the plan stage change copper", and getting this wrong
+is what produced the (retracted) report in
+[#5578](https://github.com/rjwalters/kicad-tools/issues/5578). Two things in
+the file vary run-to-run on their own, with the plan stage **off in both
+runs**:
+
+1. **Element emission order.** Board 06, two stage-off runs (2026-09-19):
+   2365 diff lines whole-file, yet the multiset of normalised lines was
+   byte-identical — the two files were pure permutations of each other.
+2. **Zone pour-fill island decomposition.** Board 03's `In2.Cu` plane filled
+   as 5 islands on three runs and 20 on a fourth; the fourth happened to be a
+   stage-**on** run, which is how the plan stage gets blamed for it. Repeating
+   the stage-on route reproduced 5 islands with an identical copper set, so
+   the fragmentation is pre-existing pour-fill variance. Pours are filled
+   after routing and flow around finished traces — they are not routed copper.
+
+`tests/test_routing_plan_5510.py::_copper_elements` therefore compares the
+**sorted multiset of whole `(segment ...)` / `(via ...)` / `(arc ...)`
+nodes** (geometry, width, layer and net included; `uuid`/`tstamp` normalised;
+emission order and pour fills excluded). Under that instrument every fleet
+board measured on 2026-09-19 — **00, 01, 02, 03, 04 and 06** — routes an
+identical copper set with and without `--no-routing-plan`, so the assertion
+is enforced, not skipped.
+
+Note that `scripts/ci/board_route_determinism_smoke.sh`'s
+`normalize_copper()` is *not* a usable instrument here: this repo writes
+copper as multi-line s-expressions, so its
+`grep -E '^[[:space:]]*\((segment|via|arc)'` keeps only the bare `(segment` /
+`(via` header lines and discards every `(start …)` / `(layer …)` child — on
+board 03 it reduces a 25 k-line PCB to 1913 lines that are exactly
+`1872 segments + 41 vias`, i.e. it compares element *counts* (tracked as
+[#5580](https://github.com/rjwalters/kicad-tools/issues/5580)).
+
+Board 05 is out of scope for this comparison by construction: its recipe is a
+wall-clock re-route loop that the repo's own determinism smoke deliberately
+excludes as nondeterministic (#3894), and a bare `kct route` on it does not
+converge within an hour on the fleet host. Its plan stage was measured
+directly instead (`Autorouter.plan_routing()` on the committed unrouted
+board: 37 nets, `elapsed_s` 0.057 s, total overflow 4).
+
 ## Text and JSON output
 
 Text mode prints one summary line:
@@ -201,7 +263,7 @@ built -- absent, not `null`, otherwise):
   signal capacity, and treats only pads as blockage (keepout rule areas
   and preserved copper do not reduce it). Per-class pitch, plane-layer
   exclusion and blockage beyond pads are the next slice of Epic #5510
-  (see the Phase 1b follow-up issue), which is why `layers.signal` /
+  (Issue #5575), which is why `layers.signal` /
   `layers.plane` below are still reporting-only.
 - Building the plan never mutates `RegionGraph` state (utilization,
   history costs) and never changes routed copper -- see the byte-identity
