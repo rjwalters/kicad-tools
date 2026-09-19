@@ -52,7 +52,7 @@ import math
 import sys
 import uuid as uuid_module
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -78,6 +78,15 @@ def _zone_uuid_factory() -> str:
     segments matched.  The import is deferred to call time so module
     load order between :mod:`kicad_tools.zones.generator` and
     :mod:`kicad_tools.router.primitives` is irrelevant.
+
+    .. note::
+
+       Since Issue #5578 :class:`GeneratedZone` no longer uses this
+       factory by default -- it derives a **content-addressed** UUID via
+       :func:`_content_zone_uuid` instead, which is reproducible even when
+       the router's toggle has not been flipped on yet (auto-pour runs
+       *before* ``route_all_negotiated``).  This factory is kept for
+       callers that explicitly want a stochastic / RNG-tracked zone UUID.
     """
     try:
         from kicad_tools.router.primitives import (
@@ -90,6 +99,56 @@ def _zone_uuid_factory() -> str:
 
         return str(uuid_module.UUID(int=_random.getrandbits(128), version=4))
     return str(uuid_module.uuid4())
+
+
+# Fixed, arbitrary namespace for content-addressed zone UUIDs (Issue #5578).
+# Its VALUE carries no meaning, but it must never change: it is one of the
+# inputs to every generated zone's UUID, and a zone's UUID is what KiCad
+# tie-breaks on when two equal-priority zones share a layer.  Re-rolling it
+# would renumber every generated zone on every board AND could flip which of
+# board 03's two In2.Cu pours gets starved (see :func:`_content_zone_uuid`),
+# so treat it as a pinned constant, not a tunable.
+_ZONE_UUID_NAMESPACE = uuid_module.UUID("6c5a2e30-9cfc-5b1d-b2b3-6a0f1fbba1c4")
+
+
+def _content_zone_uuid(key: str) -> str:
+    """Derive a zone UUID deterministically from the zone's own content.
+
+    Issue #5578.  A generated zone's UUID is not cosmetic: KiCad's zone
+    ordering (and therefore which of two *equal-priority, same-layer*
+    overlapping zones wins the contested copper) tie-breaks on it.  Board
+    03 ships a hand-authored ``VCC`` pour on ``In2.Cu`` and ``kct route``
+    auto-pours a ``VBUS`` zone onto the same layer at the same priority;
+    with a random :func:`uuid.uuid4` the two sorted in a different order on
+    roughly every third run, and the whole ``In2.Cu`` fill flipped with it
+    (measured: ``VBUS uuid e4c41fb8-...`` -> ``VCC`` 4 islands / ``VBUS``
+    1 island, versus ``VBUS uuid 18329af8-...`` -> ``VCC`` **0** islands /
+    ``VBUS`` 4 islands, on two boards otherwise identical byte-for-byte).
+
+    Deriving the UUID from ``key`` with :func:`uuid.uuid5` makes it a pure
+    function of the zone: the same board always produces the same zone
+    UUID, with or without ``--seed``, and regardless of whether the
+    router's ``enable_deterministic_uuids`` toggle (Issue #3272) happens to
+    be latched on yet.  That matters because ``auto_pour_if_missing`` runs
+    *before* ``route_all_negotiated`` ever flips that toggle, so the
+    #3272 mechanism never covered this call site.
+
+    ``uuid5`` is SHA-1-based and emits a version-5 UUID; KiCad only
+    requires the canonical 8-4-4-4-12 hex shape, which this satisfies.
+
+    .. warning::
+
+       This makes the outcome *reproducible*, not *fair*: with two zones
+       still sharing a layer and a priority, one of them is still starved
+       of most of its copper -- the generator already warns about that in
+       :meth:`ZoneGenerator._check_overlap`, and fixing it needs a
+       priority / outline-partition change that is deliberately out of
+       #5578's scope.  ``tests/test_pour_fill_determinism_5578.py``
+       asserts board 03's two ``In2.Cu`` pours both end up with copper, so
+       a future change to this derivation cannot silently flip the board
+       into the zero-copper branch.
+    """
+    return str(uuid_module.uuid5(_ZONE_UUID_NAMESPACE, key))
 
 
 @dataclass
@@ -201,14 +260,41 @@ class GeneratedZone:
     config: ZoneConfig
     net_number: int
     boundary: list[tuple[float, float]]
-    # Issue #3272: defer to the router primitives' deterministic-UUID
-    # toggle so zones written by ``auto_create_zones_for_pour_nets``
-    # share the same byte-identical-across-runs property as routed
-    # segments / vias when the upstream caller has activated the
-    # toggle via :func:`route_all_negotiated` (with ``seed=...``).
-    # When the toggle is off this falls through to ``uuid.uuid4()``
-    # exactly as before.
-    uuid: str = field(default_factory=lambda: _zone_uuid_factory())
+    # Issue #5578: the UUID is derived from the zone's own content rather
+    # than drawn from an RNG.  The predecessor (Issue #3272) deferred to
+    # the router primitives' deterministic-UUID toggle, which covers zones
+    # created *during* a seeded route -- but ``kct route``'s auto-pour runs
+    # BEFORE ``route_all_negotiated`` flips that toggle, so it still got a
+    # fresh ``uuid.uuid4()`` every run.  On a board with two equal-priority
+    # zones on one layer that random UUID decides which zone KiCad starves,
+    # making the pour fill itself non-reproducible.  See
+    # :func:`_content_zone_uuid`.  Callers may still pass an explicit UUID
+    # (e.g. to preserve an existing zone's identity).
+    uuid: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.uuid:
+            self.uuid = _content_zone_uuid(self.content_key())
+
+    def content_key(self) -> str:
+        """Stable identity string for this zone (Issue #5578).
+
+        Covers everything that distinguishes one generated zone from
+        another on the same board: the net (by name *and* number), the
+        copper layer, the fill priority, and the boundary polygon at
+        nanometre resolution.  Two zones that agree on all of those are
+        the same zone; anything else derives a different UUID.
+        """
+        pts = ";".join(f"{x:.6f},{y:.6f}" for x, y in (self.boundary or ()))
+        return "|".join(
+            (
+                self.config.net,
+                str(self.net_number),
+                self.config.layer,
+                str(self.config.priority),
+                pts,
+            )
+        )
 
     def to_sexp_node(self) -> SExp:
         """Build S-expression node for this zone."""
@@ -733,9 +819,32 @@ class ZoneGenerator:
             net_number=net_number,
             boundary=actual_boundary,
         )
+        # Issue #5578: content-addressed UUIDs are deterministic, so two
+        # genuinely identical zones queued on one generator would collide.
+        # KiCad resolves board items by UUID, so disambiguate with a
+        # deterministic, position-derived discriminator rather than falling
+        # back to an RNG (which would reintroduce the non-determinism this
+        # derivation exists to remove).
+        zone.uuid = self._deduplicate_zone_uuid(zone)
 
         self._zones.append(zone)
         return zone
+
+    def _deduplicate_zone_uuid(self, zone: GeneratedZone) -> str:
+        """Return a UUID for *zone* that no already-queued zone is using.
+
+        Issue #5578.  Re-derives from ``content_key()`` with a ``#<n>``
+        suffix until the result is free.  Deterministic by construction:
+        the suffix depends only on how many identical zones precede this
+        one in the queue, which is itself deterministic.
+        """
+        taken = {existing.uuid for existing in self._zones}
+        candidate = zone.uuid
+        suffix = 1
+        while candidate in taken:
+            candidate = _content_zone_uuid(f"{zone.content_key()}#{suffix}")
+            suffix += 1
+        return candidate
 
     def add_ground_plane(
         self,
