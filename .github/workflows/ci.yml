@@ -198,9 +198,30 @@ jobs:
       # already observed a maximum native concurrency of 1, so the bound is
       # measured to cost them nothing (+0 s).
       #
-      # Nothing here alters the memory limit, worker count, selections,
-      # assertions or any test/subprocess timeout: waiting for a slot is
-      # ordinary wall-clock time inside the waiting test.
+      # Nothing here alters the memory limit, worker count, selections or
+      # assertions.
+      #
+      # Issue #5572 -- the one thing that estimate got wrong. Waiting for a
+      # slot is wall-clock time inside the waiting test, and pytest-timeout
+      # charged it to that test's budget, so a test's effective deadline became
+      # its own work plus a queue wait for a shared resource. The ">30 s
+      # already has an override" audit above did not cover the tests that sat
+      # just under it, and marking the observed offenders (#5556/#5573) only
+      # moved the failure to the next-heaviest native-using test.
+      #
+      # Decision (option 1 of #5572): the gate now gives the measured wait back
+      # to the armed pytest-timeout deadline instead of raising --timeout for
+      # every test in the job (option 2) or chasing the next offender with
+      # another marker (option 3). The tradeoff is explicit: a blanket raise
+      # would have multiplied hang-detection latency -- the reason the cap is
+      # 60 s at all (#2794) -- across ~8000 tests that never queue, whereas the
+      # credit is paid only by tests that actually waited, is exactly the
+      # measured wait, and is capped per test by
+      # KCT_NATIVE_SLOT_CREDIT_SECONDS (default 120 s). Worst-case detection
+      # latency for a hung test is therefore bounded at 60 s + 120 s, the same
+      # ceiling option 2 would have set globally, and the deadline still
+      # measures the test's own work. Subprocess timeouts are untouched.
+      # See src/kicad_tools/native_concurrency.py "Timeout credit".
       KCT_NATIVE_MAX_CONCURRENCY: "1"
       # Explicit diagnostic opt-in only; PR body is evaluated, never passed
       # into shell or retained. Pushes/absent markers leave the wrapper inert.

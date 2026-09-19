@@ -235,6 +235,14 @@ def gate_summary(directory: Path) -> dict[str, Any]:
     waits = [r["waited_s"] for r in records if r.get("event") == "acquire"]
     waits.sort()
     unbounded = [r for r in records if r.get("event") == "unbounded"]
+    # Issue #5572: queue time handed back to the waiting test's pytest-timeout
+    # deadline. Summed per test so the report shows what the bound would
+    # otherwise have charged to budgets that never covered it.
+    credited: dict[str, float] = defaultdict(float)
+    for record in records:
+        seconds = record.get("credited_s") or 0.0
+        if seconds:
+            credited[str(record.get("owner"))] += seconds
     held: dict[int, int] = {}
     intervals: list[tuple[int, int]] = []
     for record in sorted(records, key=lambda r: r["time_ns"]):
@@ -250,6 +258,8 @@ def gate_summary(directory: Path) -> dict[str, Any]:
         "unbounded_launches": len(unbounded),
         "unbounded_reasons": dict(Counter(r.get("reason") for r in unbounded)),
         "permit_concurrency": concurrency_profile(intervals) if intervals else None,
+        "timeout_credit_seconds_total": round(sum(credited.values()), 6) or None,
+        "timeout_credit_seconds_max_test": round(max(credited.values()), 6) if credited else None,
     }
 
 

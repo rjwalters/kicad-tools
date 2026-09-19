@@ -29,13 +29,39 @@ Permits are not re-entrant by design: only the innermost native launch takes
 one. A permitted child is given ``KCT_NATIVE_SLOT_HELD=1`` so any native
 descendant it spawns reuses the permit already charged for that subtree.
 
-Waiting for a permit is ordinary wall-clock time inside the calling test, so
-existing ``pytest-timeout`` values and ``subprocess`` timeouts keep their exact
-meaning -- nothing here extends, suppresses or re-arms a deadline. To make a
-programming error impossible to turn into a hang, a permit wait longer than
-``KCT_NATIVE_SLOT_WAIT_SECONDS`` (default 120 s, versus a measured worst-case
-native process lifetime of 2.7 s) gives up and launches unbounded rather than
-blocking forever; the event is recorded and reported on stderr.
+Waiting for a permit is ordinary wall-clock time inside the calling test. To
+make a programming error impossible to turn into a hang, a permit wait longer
+than ``KCT_NATIVE_SLOT_WAIT_SECONDS`` (default 120 s, versus a measured
+worst-case native process lifetime of 2.7 s) gives up and launches unbounded
+rather than blocking forever; the event is recorded and reported on stderr.
+
+Timeout credit (Issue #5572)
+----------------------------
+Queue time is not the waiting test's own work, but ``pytest-timeout`` charges
+it to that test's budget anyway, so under the bound a test's effective deadline
+became "its own work plus a queue wait for a shared resource". That turned the
+bound into a job-wide flake source: any native-using test whose baseline plus a
+slot wait crossed the 60 s CI cap failed, and marking the current offenders
+simply moved the failure to the next-heaviest native-using test (observed on
+PR #5573).
+
+So a wait *is* given back: after blocking for a permit, the gate adds exactly
+the measured wait to the deadline that is already armed, restoring "the
+deadline measures the test's own work". Only an armed ``ITIMER_REAL`` with a
+live Python ``SIGALRM`` handler is touched -- pytest-timeout's signal method,
+which is its default wherever ``SIGALRM`` exists -- and only from the main
+thread. Anything else (thread method, no timer armed, non-pytest use) is left
+alone, so this is inert outside the case it was written for. ``subprocess``
+timeouts are never touched.
+
+Hang detection stays bounded, which is the point of the low CI cap (#2794):
+the credit is capped per test at ``KCT_NATIVE_SLOT_CREDIT_SECONDS`` (default
+120 s, set it to ``0`` to disable crediting entirely), so the worst-case
+detection latency for a genuinely hung test is its own timeout plus that cap --
+and only tests that actually queued pay any of it. A credited test that times
+out anyway still reports its *configured* timeout ("Timeout (>60.0s)"), which
+now understates elapsed wall clock by the credit; ``credited_s`` in the permit
+records is the exact amount, per launch and per test.
 """
 
 from __future__ import annotations
@@ -43,8 +69,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -57,6 +85,7 @@ except ImportError:  # pragma: no cover - Windows has no flock
     fcntl = None  # type: ignore[assignment]
 
 __all__ = [
+    "ENV_CREDIT_SECONDS",
     "ENV_HELD",
     "ENV_LIMIT",
     "ENV_LOG",
@@ -77,6 +106,9 @@ ENV_SLOT_DIR = "KCT_NATIVE_SLOT_DIR"
 ENV_HELD = "KCT_NATIVE_SLOT_HELD"
 #: Fail-open ceiling on a single permit wait, in seconds.
 ENV_WAIT_SECONDS = "KCT_NATIVE_SLOT_WAIT_SECONDS"
+#: Per-test ceiling on how much permit-wait time is given back to an armed
+#: ``pytest-timeout`` deadline (Issue #5572). ``0`` disables crediting.
+ENV_CREDIT_SECONDS = "KCT_NATIVE_SLOT_CREDIT_SECONDS"
 #: Optional directory for append-only JSONL permit records.
 ENV_LOG = "KCT_NATIVE_SLOT_LOG"
 #: ``scripts/ci/native_observer.py`` exports this to the workload it supervises.
@@ -85,6 +117,7 @@ ENV_LOG = "KCT_NATIVE_SLOT_LOG"
 ENV_OBSERVER_OUTPUT = "KCT_NATIVE_OBSERVER_OUTPUT"
 
 DEFAULT_WAIT_SECONDS = 120.0
+DEFAULT_CREDIT_SECONDS = 120.0
 _MIN_POLL_SECONDS = 0.005
 _MAX_POLL_SECONDS = 0.05
 
@@ -151,6 +184,90 @@ def _wait_ceiling(environ: Any) -> float:
     except (TypeError, ValueError):
         return DEFAULT_WAIT_SECONDS
     return value if value > 0 else DEFAULT_WAIT_SECONDS
+
+
+def _credit_ceiling(environ: Any) -> float:
+    """Per-test credit cap; ``0`` (or a negative value) disables crediting."""
+    raw = environ.get(ENV_CREDIT_SECONDS)
+    if raw is None or raw == "":
+        return DEFAULT_CREDIT_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_CREDIT_SECONDS
+    return max(value, 0.0)
+
+
+def _deadline_owner(environ: Any) -> str | None:
+    """Identify the pytest item whose deadline is currently armed, if any.
+
+    ``PYTEST_CURRENT_TEST`` is ``"<nodeid> (<phase>)"``; the phase is dropped so
+    setup, call and teardown of one item share a single credit budget -- which
+    matches pytest-timeout, whose default (``timeout_func_only`` false) arms one
+    timer across all three phases.
+    """
+    raw = environ.get("PYTEST_CURRENT_TEST")
+    if not raw:
+        return None
+    return str(raw).rsplit(" (", 1)[0]
+
+
+#: ``(owner, seconds already credited)`` for the item being timed right now.
+_credited: tuple[str | None, float] = (None, 0.0)
+
+
+def _extend_armed_deadline(seconds: float) -> float:
+    """Push an armed pytest-timeout ``SIGALRM`` deadline out by ``seconds``.
+
+    Deliberately conservative: it touches ``ITIMER_REAL`` only when a live
+    Python ``SIGALRM`` handler owns it and a one-shot deadline is actually
+    counting down, and only from the main thread (``setitimer`` is rejected
+    elsewhere). Every other configuration -- pytest-timeout's thread method, a
+    repeating itimer, no timer at all, a non-pytest process -- returns ``0.0``
+    and changes nothing, so a missing credit is always a lost mitigation rather
+    than a corrupted deadline.
+    """
+    if seconds <= 0 or not hasattr(signal, "setitimer"):  # pragma: no cover - Windows
+        return 0.0
+    if threading.current_thread() is not threading.main_thread():
+        return 0.0
+    if not callable(signal.getsignal(signal.SIGALRM)):
+        # SIG_DFL would kill the process and SIG_IGN would swallow the alarm:
+        # in neither case is there a deadline of ours to extend.
+        return 0.0
+    try:
+        remaining, interval = signal.getitimer(signal.ITIMER_REAL)
+        if remaining <= 0 or interval:
+            return 0.0
+        signal.setitimer(signal.ITIMER_REAL, remaining + seconds, interval)
+    except (OSError, ValueError):  # pragma: no cover - platform/thread guard
+        return 0.0
+    return seconds
+
+
+def _credit_wait(waited: float, environ: Any) -> float:
+    """Give ``waited`` seconds of queue time back to the current test's budget.
+
+    Returns the seconds actually credited, which is ``0.0`` whenever no armed
+    deadline was found or the item has already spent its cap.
+    """
+    global _credited
+    if waited <= 0:
+        return 0.0
+    ceiling = _credit_ceiling(environ)
+    if ceiling <= 0:
+        return 0.0
+    owner = _deadline_owner(environ)
+    if owner is None:
+        # Not inside a pytest item: no per-test budget was charged for the wait.
+        return 0.0
+    spent = _credited[1] if _credited[0] == owner else 0.0
+    allowance = min(waited, ceiling - spent)
+    if allowance <= 0:
+        return 0.0
+    granted = _extend_armed_deadline(allowance)
+    _credited = (owner, spent + granted)
+    return granted
 
 
 def _slot_directory(environ: Any) -> Path:
@@ -254,23 +371,49 @@ def _acquire(limit: int, environ: Any) -> _Permit:
             try:
                 fd = _try_slot(directory, index)
             except OSError as exc:
+                waited = time.monotonic() - started
+                credited = _credit_wait(waited, environ)
                 _notice(f"slot file unavailable ({exc.__class__.__name__}); launching unbounded")
-                _record({"event": "unbounded", "reason": "slot_file_unavailable"})
-                return _Permit(None, None, time.monotonic() - started)
+                _record(
+                    {
+                        "event": "unbounded",
+                        "reason": "slot_file_unavailable",
+                        "waited_s": round(waited, 6),
+                        "credited_s": round(credited, 6),
+                    }
+                )
+                return _Permit(None, None, waited)
             if fd is not None:
                 waited = time.monotonic() - started
-                _record({"event": "acquire", "slot": index, "waited_s": round(waited, 6)})
+                credited = _credit_wait(waited, environ)
+                _record(
+                    {
+                        "event": "acquire",
+                        "slot": index,
+                        "waited_s": round(waited, 6),
+                        "credited_s": round(credited, 6),
+                    }
+                )
                 return _Permit(fd, index, waited)
         waited = time.monotonic() - started
         if waited >= ceiling:
             # Measured worst-case native lifetime in this pool is 2.7 s, so a
             # wait this long means a defect, not contention. Proceed unbounded
             # rather than converting it into an unbounded hang.
+            credited = _credit_wait(waited, environ)
             _notice(
                 f"no slot after {waited:.0f}s (limit {limit}); launching unbounded. "
-                "Existing test and subprocess timeouts are unchanged."
+                f"Credited {credited:.1f}s of that wait back to the caller's deadline; "
+                "subprocess timeouts are unchanged."
             )
-            _record({"event": "unbounded", "reason": "wait_ceiling", "waited_s": round(waited, 6)})
+            _record(
+                {
+                    "event": "unbounded",
+                    "reason": "wait_ceiling",
+                    "waited_s": round(waited, 6),
+                    "credited_s": round(credited, 6),
+                }
+            )
             return _Permit(None, None, waited)
         time.sleep(poll)
         poll = min(poll * 2, _MAX_POLL_SECONDS)
