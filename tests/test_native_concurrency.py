@@ -355,6 +355,29 @@ def test_wait_ceiling_launches_unbounded_instead_of_hanging(fake_native, tmp_pat
     assert [r["reason"] for r in records if r["event"] == "unbounded"] == ["wait_ceiling"]
 
 
+def test_slot_wait_ceiling_is_the_public_queue_bound(monkeypatch):
+    """Callers with a wall-clock budget size it against this, not a literal.
+
+    Issue #5579: the gate can inject up to this much queue time into a caller
+    that launches a native workload, and that time is charged to whatever
+    budget the caller runs under. The accessor is public so such a caller
+    (``tests/test_route_partial_placement_cli.py``) tracks the gate's own
+    configuration instead of hardcoding 120.
+    """
+    monkeypatch.delenv(native_concurrency.ENV_WAIT_SECONDS, raising=False)
+    assert native_concurrency.slot_wait_ceiling() == native_concurrency.DEFAULT_WAIT_SECONDS
+
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "45")
+    assert native_concurrency.slot_wait_ceiling() == 45.0
+    # An explicit environ wins over the process environment.
+    assert native_concurrency.slot_wait_ceiling({"KCT_NATIVE_SLOT_WAIT_SECONDS": "7"}) == 7.0
+
+    # Unusable values fall back rather than shrinking the bound to nothing.
+    for unusable in ("", "0", "-1", "not-a-number"):
+        monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, unusable)
+        assert native_concurrency.slot_wait_ceiling() == native_concurrency.DEFAULT_WAIT_SECONDS
+
+
 def test_permit_records_are_written_and_redacted(fake_native, tmp_path, monkeypatch):
     log = tmp_path / "records"
     monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")

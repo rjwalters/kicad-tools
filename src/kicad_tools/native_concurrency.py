@@ -96,6 +96,7 @@ __all__ = [
     "install_from_environment",
     "is_native_launch",
     "native_slot",
+    "slot_wait_ceiling",
 ]
 
 #: Positive integer: the maximum number of simultaneous native processes.
@@ -178,7 +179,21 @@ def configured_limit(environ: Any = None) -> int | None:
     return limit if limit > 0 else None
 
 
-def _wait_ceiling(environ: Any) -> float:
+def slot_wait_ceiling(environ: Any = None) -> float:
+    """Return the longest a single permit acquisition may block, in seconds.
+
+    This is the gate's fail-open bound: :func:`_acquire` waits at most this
+    long for a slot and then launches unbounded rather than hanging. It is
+    therefore also the largest amount of *queue* time the gate can inject into
+    a caller that launches a native workload -- time which is not the caller's
+    own work but is charged to whatever wall-clock budget that caller is
+    running under.
+
+    Public so a caller holding a wall-clock budget of its own can size it
+    against the gate's contract instead of hardcoding a number that silently
+    goes stale when ``KCT_NATIVE_SLOT_WAIT_SECONDS`` changes (Issue #5579).
+    """
+    environ = os.environ if environ is None else environ
     try:
         value = float(environ.get(ENV_WAIT_SECONDS, ""))
     except (TypeError, ValueError):
@@ -355,7 +370,7 @@ def _try_slot(directory: Path, index: int) -> int | None:
 
 def _acquire(limit: int, environ: Any) -> _Permit:
     directory = _slot_directory(environ)
-    ceiling = _wait_ceiling(environ)
+    ceiling = slot_wait_ceiling(environ)
     started = time.monotonic()
     try:
         directory.mkdir(parents=True, exist_ok=True)

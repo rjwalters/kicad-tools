@@ -8,8 +8,138 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.native_concurrency import ENV_LIMIT, configured_limit, slot_wait_ceiling
 from kicad_tools.schema.pcb import PCB
 from tests.test_routing_placement_disposition import board_text
+
+# Wall-clock budgets (Issue #5579)
+# --------------------------------
+# The ``finite`` half of these tests passes ``--timeout`` to `kct route` so the
+# #5413 preservation/reporting semantics are proven to hold under the deadline
+# SUPERVISOR too (`kicad_tools.cli.route_deadline.run_attempt` only takes the
+# supervised-subprocess path for a positive budget).  The deadline FIRING is not
+# what any assertion here is about -- when it fires, the supervisor quarantines
+# the routed PCB under a `_timeout_unverified_` name and every downstream
+# assertion collapses into noise.
+#
+# The budget used to be a flat 30 s, which is not what this invocation costs in
+# the hosted Test job.  Four parametrizations across four consecutive runs blew
+# it during `post-route-drc` on 2026-09-19 (35414096506 and 35420001281 on
+# `main`; 35425883418 and 35427127450 on PR #5577), all with routing itself
+# reporting 0.0 s and the PCB already saved.  `post-route-drc` shells out to
+# `kicad-cli pcb drc` (kicad_tools/drc/geometric.py), which under CI's
+# `KCT_NATIVE_MAX_CONCURRENCY=1` gate (#5501) must first take a permit from a
+# semaphore shared with every other xdist worker.  That queue wait is ordinary
+# wall time inside the route worker, so it is charged to the route budget --
+# and unlike the pytest-timeout credit added in #5572, nothing gives it back:
+# the credit only extends an armed `SIGALRM` deadline in a pytest process, and
+# the waiter here is a grandchild subprocess with no such deadline.
+#
+# So the budget is composed, not guessed: the invocation's own work, plus the
+# gate's own fail-open queue bound when (and only when) the gate is configured.
+# That bound is the largest queue time the gate can inject by construction, so
+# the budget absorbs the load-sensitive term in full rather than out-guessing
+# it.  With the gate inert -- local runs, every non-Test CI job -- the numbers
+# are exactly the historical 30 s/90 s, keeping hang detection tight where
+# there is no queue to wait in.
+_ROUTE_WORK_SECONDS = 30.0
+_SUBPROCESS_MARGIN_SECONDS = 60.0
+_PYTEST_MARGIN_SECONDS = 60.0
+
+
+def _queue_ceiling_seconds() -> float:
+    """Worst-case native-permit queue time this invocation can be charged."""
+    return slot_wait_ceiling() if configured_limit() is not None else 0.0
+
+
+#: Value handed to ``kct route --timeout`` in the ``finite`` parametrizations.
+ROUTE_DEADLINE_SECONDS = _ROUTE_WORK_SECONDS + _queue_ceiling_seconds()
+#: Outer bound on the CLI subprocess.  Strictly greater than the route budget
+#: so a genuine overrun surfaces as the supervisor's diagnosable PARTIAL report
+#: rather than an opaque ``subprocess.TimeoutExpired``.
+CLI_SUBPROCESS_SECONDS = ROUTE_DEADLINE_SECONDS + _SUBPROCESS_MARGIN_SECONDS
+#: pytest-timeout override.  The Test job arms a 60 s default (`--timeout=60`),
+#: which is below the budgets above and would reap the test before either can
+#: report anything useful.  Ordering is deliberate: route budget < subprocess
+#: bound < pytest deadline, so the innermost bound is always the one that fires.
+PYTEST_TIMEOUT_SECONDS = CLI_SUBPROCESS_SECONDS + _PYTEST_MARGIN_SECONDS
+
+pytestmark = pytest.mark.timeout(PYTEST_TIMEOUT_SECONDS)
+
+
+def _reject_deadline_expiry(output: Path, diagnostics: str = "") -> None:
+    """Fail loudly, and legibly, when the route deadline actually fired.
+
+    A deadline expiry is still a FAILURE -- these parametrizations exist to
+    enforce the #5413 preservation behavior and must never pass by tolerating a
+    timeout.  But the bare ``assert output.is_file()`` that used to report it
+    named neither the deadline nor the stage that consumed it, which is what
+    made #5579 take four CI runs to diagnose.  Read the supervisor's own report
+    and say so.
+    """
+    report = output.with_suffix(".timeout.json")
+    if not report.is_file():
+        return
+    try:
+        state = json.loads(report.read_text())
+    except (OSError, ValueError):  # pragma: no cover - unreadable report
+        state = {}
+    quarantined = state.get("unverified_output")
+    pytest.fail(
+        "kct route exceeded its "
+        f"{state.get('timeout_seconds', ROUTE_DEADLINE_SECONDS)}s wall-clock deadline "
+        f"during stage {state.get('stage')!r}, so "
+        + (
+            f"the routed PCB was quarantined as {quarantined}"
+            if quarantined
+            else "no canonical routed PCB was produced"
+        )
+        + " and the placement assertions below cannot run.\n"
+        "This is a budget-sizing failure, not a placement regression (#5579): the budget is "
+        f"{_ROUTE_WORK_SECONDS}s of the invocation's own work plus a "
+        f"{_queue_ceiling_seconds()}s native-permit queue allowance "
+        f"({ENV_LIMIT}={os.environ.get(ENV_LIMIT)!r}). Re-size it against the stage named "
+        f"above rather than re-running.\nReport: {report}\n{diagnostics}"
+    )
+
+
+def test_finite_budget_absorbs_the_native_permit_queue(monkeypatch):
+    """The route budget tracks the gate's bound instead of hardcoding one.
+
+    Regression guard for #5579: a future edit that drops the queue term (or
+    pins a literal that goes stale when ``KCT_NATIVE_SLOT_WAIT_SECONDS``
+    changes) puts the flat-30 s flake straight back.
+    """
+    from kicad_tools.native_concurrency import ENV_WAIT_SECONDS
+
+    monkeypatch.delenv(ENV_LIMIT, raising=False)
+    assert _queue_ceiling_seconds() == 0.0, "an inert gate must not inflate the budget"
+
+    monkeypatch.setenv(ENV_LIMIT, "1")
+    monkeypatch.setenv(ENV_WAIT_SECONDS, "45")
+    assert _queue_ceiling_seconds() == 45.0
+    assert slot_wait_ceiling() == 45.0
+
+    # Ordering: the innermost bound must always be the one that fires, so the
+    # failure is the supervisor's diagnosable PARTIAL report rather than an
+    # opaque subprocess kill or a pytest-timeout reap.
+    assert ROUTE_DEADLINE_SECONDS >= _ROUTE_WORK_SECONDS
+    assert CLI_SUBPROCESS_SECONDS > ROUTE_DEADLINE_SECONDS
+    assert PYTEST_TIMEOUT_SECONDS > CLI_SUBPROCESS_SECONDS
+
+
+def test_deadline_expiry_fails_loudly_rather_than_passing(tmp_path):
+    """A genuine expiry stays a failure, and names the stage that caused it."""
+    output = tmp_path / "routed.kicad_pcb"
+    _reject_deadline_expiry(output)  # no report -> no-op
+
+    output.with_suffix(".timeout.json").write_text(
+        json.dumps({"stage": "post-route-drc", "timeout_seconds": 30.0, "status": "partial"})
+    )
+    with pytest.raises(pytest.fail.Exception) as caught:
+        _reject_deadline_expiry(output)
+    assert "post-route-drc" in str(caught.value)
+    assert "#5579" in str(caught.value)
 
 
 @pytest.mark.parametrize("entry", ["inner", "outer"])
@@ -76,7 +206,7 @@ def test_partial_placement_cli_preserves_and_reports(
         *extra_options,
     ]
     if finite:
-        argv += ["--timeout", "30"]
+        argv += ["--timeout", str(ROUTE_DEADLINE_SECONDS)]
     code = (
         "from kicad_tools.cli.route_cmd import main; import sys; sys.exit(main(sys.argv[1:]))"
         if entry == "inner"
@@ -86,11 +216,12 @@ def test_partial_placement_cli_preserves_and_reports(
         [sys.executable, "-c", code, *argv],
         capture_output=True,
         text=True,
-        timeout=90,
+        timeout=CLI_SUBPROCESS_SECONDS,
         cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
     )
     assert board.read_bytes() == original
+    _reject_deadline_expiry(output, result.stdout + result.stderr)
     assert output.is_file(), result.stdout + result.stderr
     if selection == "complete_partial" or (extra_options and selection == "mixed"):
         # The retained off-board trace can also trigger the DRC exit (3).
@@ -253,11 +384,12 @@ def test_json_attempt_summary_includes_placement_on_all_outcomes(
     output = tmp_path / "output.kicad_pcb"
     argv = [str(source), "-o", str(output), "--quiet", "--format", "json"]
     if finite:
-        argv += ["--timeout", "30"]
+        argv += ["--timeout", str(ROUTE_DEADLINE_SECONDS)]
     if selection != "mixed":
         argv += ["--nets", "BAD" if selection == "all_invalid" else "GOOD"]
     rc = outer_main(["route", *argv]) if entry == "outer" else inner_main(argv)
     stdout = capfd.readouterr().out
+    _reject_deadline_expiry(output, stdout)
     # Existing progress output can precede JSON. The final object is the
     # attempt summary, not an inferred success from a prior routing diagnostic.
     start = stdout.rfind("\n{") + 1 if "\n{" in stdout else 0
