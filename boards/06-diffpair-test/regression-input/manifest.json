@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 5059,
+  "pcbs": {
+    "diffpair_test.kicad_pcb": {
+      "archived_sha256": "d69b22100589c86892219723a26e4ba7a08954dc583043ff80e334e119f60143",
+      "successor_sha256": "7cec05d63383e4e7f42d2564c2cd83ec04c72e9b5d18cad534d72a6a1234cf3b"
+    }
+  }
+}

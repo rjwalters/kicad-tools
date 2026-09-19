@@ -306,6 +306,12 @@ def generate_qfn48_ddr_controller() -> str:
     pad_w = 0.3
     pad_h = 0.35
 
+    # These are synthetic routing pads, not the stock library land pattern.
+    # Shorten only the eight corner pads: 0.70 -> 0.68 mm makes the
+    # diagonal corner gap sqrt(2) * 0.11 = 0.15556 mm (factory floor 0.15).
+    def pad_length(i: int) -> float:
+        return 0.68 if i in (0, 11) else pad_h * 2
+
     def pin_offset(i: int) -> float:
         return (i - 5.5) * pitch  # 12 pins per side -> -4.4..+4.4
 
@@ -332,22 +338,22 @@ def generate_qfn48_ddr_controller() -> str:
     for i in range(12):
         pin = i + 1
         py = pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), -pad_offset, py, pad_h * 2, pad_w, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), -pad_offset, py, pad_length(i), pad_w, pin_nets[pin]))
     # Top (13-24)
     for i in range(12):
         pin = i + 13
         px = pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), px, -pad_offset, pad_w, pad_h * 2, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), px, -pad_offset, pad_w, pad_length(i), pin_nets[pin]))
     # Right (25-36)
     for i in range(12):
         pin = i + 25
         py = -pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), pad_offset, py, pad_h * 2, pad_w, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), pad_offset, py, pad_length(i), pad_w, pin_nets[pin]))
     # Bottom (37-48)
     for i in range(12):
         pin = i + 37
         px = -pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), px, pad_offset, pad_w, pad_h * 2, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), px, pad_offset, pad_w, pad_length(i), pin_nets[pin]))
 
     pads_str = "\n".join(pads)
     return f"""  (footprint "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm"
@@ -378,6 +384,12 @@ def generate_qfn48_ddr_sink() -> str:
     pad_w = 0.3
     pad_h = 0.35
 
+    # These are synthetic routing pads, not the stock library land pattern.
+    # Shorten only the eight corner pads: 0.70 -> 0.68 mm makes the
+    # diagonal corner gap sqrt(2) * 0.11 = 0.15556 mm (factory floor 0.15).
+    def pad_length(i: int) -> float:
+        return 0.68 if i in (0, 11) else pad_h * 2
+
     def pin_offset(i: int) -> float:
         return (i - 5.5) * pitch
 
@@ -403,19 +415,19 @@ def generate_qfn48_ddr_sink() -> str:
     for i in range(12):
         pin = i + 1
         py = pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), -pad_offset, py, pad_h * 2, pad_w, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), -pad_offset, py, pad_length(i), pad_w, pin_nets[pin]))
     for i in range(12):
         pin = i + 13
         px = pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), px, -pad_offset, pad_w, pad_h * 2, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), px, -pad_offset, pad_w, pad_length(i), pin_nets[pin]))
     for i in range(12):
         pin = i + 25
         py = -pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), pad_offset, py, pad_h * 2, pad_w, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), pad_offset, py, pad_length(i), pad_w, pin_nets[pin]))
     for i in range(12):
         pin = i + 37
         px = -pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), px, pad_offset, pad_w, pad_h * 2, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), px, pad_offset, pad_w, pad_length(i), pin_nets[pin]))
 
     pads_str = "\n".join(pads)
     return f"""  (footprint "Package_DFN_QFN:QFN-48-1EP_7x7mm_P0.5mm"
@@ -699,6 +711,12 @@ def generate_qfp48_addr_sink() -> str:
     pad_w = 0.3
     pad_h = 0.35
 
+    # These are synthetic routing pads, not the stock library land pattern.
+    # Shorten only the eight corner pads: 0.70 -> 0.68 mm makes the
+    # diagonal corner gap sqrt(2) * 0.11 = 0.15556 mm (factory floor 0.15).
+    def pad_length(i: int) -> float:
+        return 0.68 if i in (0, 11) else pad_h * 2
+
     def pin_offset(i: int) -> float:
         return (i - 5.5) * pitch
 
@@ -719,19 +737,19 @@ def generate_qfp48_addr_sink() -> str:
     for i in range(12):
         pin = i + 1
         py = pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), -pad_offset, py, pad_h * 2, pad_w, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), -pad_offset, py, pad_length(i), pad_w, pin_nets[pin]))
     for i in range(12):
         pin = i + 13
         px = pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), px, -pad_offset, pad_w, pad_h * 2, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), px, -pad_offset, pad_w, pad_length(i), pin_nets[pin]))
     for i in range(12):
         pin = i + 25
         py = -pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), pad_offset, py, pad_h * 2, pad_w, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), pad_offset, py, pad_length(i), pad_w, pin_nets[pin]))
     for i in range(12):
         pin = i + 37
         px = -pin_offset(i)
-        pads.append(_emit_smd_pad(str(pin), px, pad_offset, pad_w, pad_h * 2, pin_nets[pin]))
+        pads.append(_emit_smd_pad(str(pin), px, pad_offset, pad_w, pad_length(i), pin_nets[pin]))
 
     pads_str = "\n".join(pads)
     return f"""  (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"

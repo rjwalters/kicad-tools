@@ -7,6 +7,9 @@
 (rule "Silk to Pad - JLCPCB"
   (condition "A.Type == 'Pad' || B.Type == 'Pad'")
   (constraint silk_clearance (min 0.15mm)))
+(rule "SMD Pad Clearance - JLCPCB"
+  (condition "A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'")
+  (constraint clearance (min 0.1524mm)))
 (rule "PTH Hole to Track - JLCPCB"
   (condition "(A.Pad_Type == 'Through-hole' && B.Type == 'Track') || (B.Pad_Type == 'Through-hole' && A.Type == 'Track')")
   (constraint hole_clearance (min 0.28mm)))

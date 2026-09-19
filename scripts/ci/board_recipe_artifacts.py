@@ -1,5 +1,7 @@
 """Keep synthetic recipe witnesses separate from assembled gallery releases."""
 
+import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -21,6 +23,28 @@ def recipe_output_dir(board_dir: Path, *, prepare: bool = False) -> Path:
                 ".json",
             }:
                 shutil.copy2(source, output / source.name)
+        # Explicit, hash-bound successors preserve the archived witness.
+        # Never overlay a routed result: existing recipe gates must build it.
+        successor = board_dir / "regression-input"
+        if successor.is_dir():
+            manifest = json.loads((successor / "manifest.json").read_text())
+            if manifest.get("schema_version") != 1:
+                raise ValueError("Unsupported regression successor manifest")
+            for name, binding in manifest["pcbs"].items():
+                if (
+                    Path(name).name != name
+                    or not name.endswith(".kicad_pcb")
+                    or name.endswith("_routed.kicad_pcb")
+                ):
+                    raise ValueError(f"Regression successor must name an unrouted PCB: {name}")
+                source = successor / name
+                for path, expected in [
+                    (fixture / name, binding["archived_sha256"]),
+                    (source, binding["successor_sha256"]),
+                ]:
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                        raise ValueError(f"Regression successor hash mismatch: {path}")
+                shutil.copy2(source, output / name)
     return output if output.is_dir() else fixture
 
 
