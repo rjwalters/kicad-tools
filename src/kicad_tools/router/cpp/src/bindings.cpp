@@ -25,6 +25,13 @@ using namespace router;
 // the vendored poly2tri headers stay out of the main bindings compile.
 void register_mesh(nb::module_& m);
 
+// Defined in clearance_kernel.cpp (Epic #5509 Phase 1b): registers the
+// exact-geometry clearance kernel (KSegment/KVia/KEdge + copper_gap/hole_gap/
+// clear).  Same "own translation unit" pattern as register_mesh above -- the
+// kernel is deliberately independent of Grid3D and the pathfinder, and no
+// shipped consumer calls it yet.
+void register_clearance_kernel(nb::module_& m);
+
 NB_MODULE(router_cpp, m) {
     m.doc() = "C++ router core for high-performance PCB routing";
 
@@ -693,4 +700,8 @@ NB_MODULE(router_cpp, m) {
     // Issue #4268: poly2tri constrained-Delaunay mesh binding for the
     // mesh-router navigation substrate.
     register_mesh(m);
+
+    // Epic #5509 Phase 1b: exact-geometry clearance kernel (no consumer
+    // switched -- parity/fixture evidence only).
+    register_clearance_kernel(m);
 }
