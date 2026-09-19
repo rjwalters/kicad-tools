@@ -409,6 +409,73 @@ run_guard 113 --cap 3
 assert_eq "11" "$RC" "(k2) app/loom-fleet-dispatch past bot-check, cap reached -> exit 11 (not 10)"
 assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(k2) DECISION=SKIP via lifetime cap, not bot-author path"
 
+# (l) Draft PR (#5535) -> SKIP, exit 13, REASON mentions "draft", MARKER_COUNT=0
+#     even though canned marker comments exist for this PR number -- proving
+#     the check runs before the comments fetch, mirroring how case (f) proves
+#     the bot-author check is independent of markers.
+reset_state
+cat > "$STUB_DIR/pr-114.json" <<'EOF'
+{"author":{"is_bot":false,"login":"someuser"},"headRefOid":"e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e","isDraft":true}
+EOF
+{
+  echo "["
+  marker_comment "$(hours_ago 1)" "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
+  echo "]"
+} > "$STUB_DIR/comments-114.json"
+run_guard 114 --cap 20
+assert_eq "13" "$RC" "(l) Draft PR -> exit 13"
+assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(l) DECISION=SKIP for draft PR"
+assert_contains "$OUT" "draft" "(l) REASON mentions draft"
+assert_eq "0" "$(get_field "$OUT" MARKER_COUNT)" "(l) MARKER_COUNT=0 (checked before comments fetch, ignoring canned markers)"
+assert_eq "0" "$(get_field "$OUT" VELOCITY_ALERT)" "(l) VELOCITY_ALERT=0"
+assert_eq "0" "$(get_field "$OUT" VELOCITY_COUNT)" "(l) VELOCITY_COUNT=0"
+
+# (m) Non-draft, non-bot PR with no prior markers -> DECISION=EVALUATE, exit 0.
+#     Regression guard that the isDraft field's `// false` default doesn't
+#     accidentally flip existing behavior when the field is absent from a
+#     stub's canned JSON (e.g. the pre-existing (b) fixture never set isDraft
+#     at all).
+reset_state
+cat > "$STUB_DIR/pr-115.json" <<'EOF'
+{"author":{"is_bot":false,"login":"someuser"},"headRefOid":"f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f","isDraft":false}
+EOF
+run_guard 115
+assert_eq "0" "$RC" "(m) Non-draft, non-bot PR, no prior markers -> exit 0"
+assert_eq "EVALUATE" "$(get_field "$OUT" DECISION)" "(m) DECISION=EVALUATE for non-draft PR"
+
+# (m2) Same as (m) but the isDraft field is entirely absent from the canned
+#      JSON (as every pre-#5535 fixture in this file is) -> `// false` default
+#      must NOT be misread as draft; still EVALUATE.
+reset_state
+cat > "$STUB_DIR/pr-116.json" <<'EOF'
+{"author":{"is_bot":false,"login":"someuser"},"headRefOid":"a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a"}
+EOF
+run_guard 116
+assert_eq "0" "$RC" "(m2) isDraft absent from JSON -> defaults to false, exit 0"
+assert_eq "EVALUATE" "$(get_field "$OUT" DECISION)" "(m2) DECISION=EVALUATE when isDraft field is absent"
+
+# (n) A bot-authored DRAFT PR must not reach EVALUATE -- either the bot-author
+#     check (exit 10) or the draft check (exit 13) is an acceptable SKIP, since
+#     the two checks are independent and both fire before the cap. The
+#     bot-author check runs first in the script, so this also pins that
+#     ordering choice as a stable, tested behavior.
+reset_state
+cat > "$STUB_DIR/pr-117.json" <<'EOF'
+{"author":{"is_bot":true,"login":"app/dependabot"},"headRefOid":"b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b","isDraft":true}
+EOF
+run_guard 117
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$RC" == "10" || "$RC" == "13" ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (n) Bot-authored draft PR skipped (exit 10 or 13)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (n) Bot-authored draft PR skipped (exit 10 or 13)"
+    echo "    Expected: '10' or '13'"
+    echo "    Actual:   '$RC'"
+fi
+assert_eq "SKIP" "$(get_field "$OUT" DECISION)" "(n) DECISION=SKIP for bot-authored draft PR"
+
 # --- Summary -------------------------------------------------------------
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"
