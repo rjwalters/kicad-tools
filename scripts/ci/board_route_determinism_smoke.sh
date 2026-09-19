@@ -22,10 +22,18 @@
 #
 # Usage:
 #   ./scripts/ci/board_route_determinism_smoke.sh <board-number> [runs]
+#   ./scripts/ci/board_route_determinism_smoke.sh --normalize-copper <pcb>
 #
 # Examples:
 #   ./scripts/ci/board_route_determinism_smoke.sh 02        # 2 runs
 #   ./scripts/ci/board_route_determinism_smoke.sh 04 3      # 3 runs
+#
+# ``--normalize-copper <pcb>`` prints the normalized copper for ONE already-
+# routed PCB and exits -- the exact code path the determinism loop below
+# compares.  It exists so the normalizer can be exercised directly, without
+# routing a board (Issue #5580); ``tests/test_ci_normalize_copper.py`` is the
+# positive control that mutates one copper coordinate through this hook and
+# asserts the output changes.
 #
 # Supported boards: 02 (charlieplex-led), 03 (usb-joystick),
 # 04 (stm32-devboard).  Each board's flag set mirrors the ``kct route`` argv
@@ -46,6 +54,47 @@
 
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Normalize routed copper to the SORTED SET of whole, paren-balanced
+# ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` nodes -- geometry, width,
+# layer and net included; ``uuid`` / ``tstamp`` children stripped (they are
+# deterministic per-seed, but stripped defensively so a regression in that
+# toggle cannot masquerade as a copper divergence); zone pour fills excluded
+# (#5578).  Sorted, so element WRITE ORDER in the file does not matter --
+# only the multiset of copper geometry.  One record per line, so the ``diff``
+# below is readable per element.
+#
+# Issue #5580: this used to be a ``grep -E '^[[:space:]]*\((segment|via|arc)'``
+# over the raw file.  This repo writes copper as MULTI-LINE s-expressions, so
+# that grep kept only the bare ``(segment`` / ``(via`` HEADER lines and threw
+# away every ``(start ...)`` / ``(end ...)`` / ``(width ...)`` /
+# ``(layer ...)`` / ``(net ...)`` child.  Its output was one line per copper
+# element drawn from a handful of IDENTICAL strings -- on board 03, 1793 lines
+# holding 3 distinct values (measured 2026-09-19 at 0c261d41; #5580 measured
+# 1913 lines = 1872 segments + 41 vias on an earlier route).  The copper
+# assertion had silently degenerated into ``segment_count == segment_count &&
+# via_count == via_count`` and would have passed two completely different
+# routes.  The helper below compares whole nodes; it exits non-zero on a parse
+# failure or when a PCB contains NO copper at all (two empty normalizations
+# would otherwise compare equal and report determinism never measured).
+normalize_copper() {
+  uv run python "${REPO_ROOT}/scripts/ci/normalize_copper.py" "$1"
+}
+
+# Self-test / introspection hook (Issue #5580): normalize ONE routed PCB and
+# exit.  Keep this delegating to normalize_copper() above so the tested code
+# path is the same one the determinism loop runs.
+if [[ "${1:-}" == "--normalize-copper" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    echo "ERROR: --normalize-copper requires a .kicad_pcb path" >&2
+    echo "Usage: $0 --normalize-copper <pcb>" >&2
+    exit 1
+  fi
+  normalize_copper "$2"
+  exit 0
+fi
+
 BOARD="${1:-}"
 N="${2:-2}"
 
@@ -54,8 +103,6 @@ if [[ -z "${BOARD}" ]]; then
   echo "Usage: $0 <board-number> [runs]" >&2
   exit 1
 fi
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # Per-board configuration: directory, unrouted-PCB stem, and the exact
 # ``kct route`` flag list from generate_design.py:route_pcb().  These flag
@@ -134,16 +181,6 @@ echo "    PYTHONHASHSEED: ${PYTHONHASHSEED}"
 echo "    Output dir:     ${OUT_DIR}"
 echo
 
-# Normalize routed copper: keep only (segment|via|arc) lines, strip the
-# per-element UUID / tstamp tokens (which are deterministic per-seed but
-# stripped defensively), and sort so element ORDER in the file does not
-# matter -- only the SET of copper geometry.
-normalize_copper() {
-  sed -E 's/\(uuid "[^"]*"\)/(uuid "X")/g; s/\(tstamp [^)]*\)/(tstamp X)/g' "$1" \
-    | grep -E '^[[:space:]]*\((segment|via|arc)' \
-    | sort
-}
-
 # Issue #3894: blocking-incomplete-net count for a routed PCB, via the same
 # NetStatusAnalyzer.blocking_incomplete_count metric the board CI gates and
 # the DRC gate enforce.  The determinism contract is extended from "byte-
@@ -190,11 +227,19 @@ for ((i = 1; i <= N; i++)); do
     exit 2
   fi
 
-  normalize_copper "${pcb}" >"${norm}"
+  # A non-zero exit here is a TOOL error (unparseable PCB, or a PCB with no
+  # copper at all) -- never silently accept it, because an empty/partial
+  # normalization would compare equal to the next one and report determinism
+  # that was never measured (Issue #5580).
+  if ! normalize_copper "${pcb}" >"${norm}"; then
+    echo "FAIL: run ${i} routed copper could not be normalized (see above)." >&2
+    echo "      PCB preserved at ${pcb}." >&2
+    exit 2
+  fi
   count="$(blocking_count "${pcb}")"
-  echo "  Elapsed:      $((end_s - start_s))s"
-  echo "  Copper lines: $(wc -l <"${norm}")"
-  echo "  Blocking nets: ${count:-<analysis failed>}"
+  echo "  Elapsed:         $((end_s - start_s))s"
+  echo "  Copper elements: $(wc -l <"${norm}")"
+  echo "  Blocking nets:   ${count:-<analysis failed>}"
 
   if [[ -z "${count}" ]]; then
     echo "FAIL: run ${i} blocking-net analysis failed (NetStatusAnalyzer)." >&2
