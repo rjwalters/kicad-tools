@@ -24,6 +24,35 @@ import pytest
 
 from kicad_tools.cli.route_cmd import _engine_post_passes_enabled
 
+# Issue #5556: CI's `Test` job runs the suite with
+# `pytest -n auto -o addopts= --benchmark-disable --timeout=60` (ci.yml "Run
+# tests").  Note `-o addopts=`: CI does NOT run coverage, so the comparable
+# local baseline is a `--no-cov`-equivalent run.  All three `test_cli_*` tests
+# below spawn a full `kct route` CLI over a real board fixture.  Measured
+# serially on an unloaded 18-core host with the C++ backend built, using CI's
+# exact flags (2026-09-18):
+#
+#   6.76s  test_cli_lattice_optimize_runs_passes_without_demotion
+#   6.13s  test_cli_lattice_skips_both_passes_and_demotes_nothing[default]
+#   6.03s  test_cli_lattice_skips_both_passes_and_demotes_nothing[no-optimize]
+#
+# All three nevertheless blew the 60 s cap on six separate `main`/PR runs on
+# 2026-09-18 (35326888585, 35332776797, 35352885759, 35377430154, 35389517906,
+# 35396447396/35396782236), i.e. CI inflates them by >=8.9x.  Two contributors,
+# neither of which the test can control: `-n auto` xdist CPU contention inside
+# the container, and `KCT_NATIVE_MAX_CONCURRENCY=1` (#5501/#5524, merged
+# 2026-09-18T06:00Z -- the first of these failures started 67 s later), whose
+# slot wait is charged as ordinary wall time inside the *waiting* test and was
+# measured there at up to +23.1 s for a single test.
+#
+# 180 s follows the existing convention (tests/test_board_05_drc_allowlist.py,
+# tests/test_board_06_diffpair_test.py) and leaves ~26x headroom over the
+# measured CI-equivalent cost -- ~3x above the worst inflation actually
+# observed -- while staying short enough to reap a genuine hang.  For
+# reference, the same three cost 33.5s/30.7s/28.8s when run locally *with*
+# `--cov=kicad_tools`, so a local coverage run also stays inside this budget.
+pytestmark = pytest.mark.timeout(180)
+
 _REPO = Path(__file__).resolve().parents[3]
 _CHARLIEPLEX = (
     _REPO
