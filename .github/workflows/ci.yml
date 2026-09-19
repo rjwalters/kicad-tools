@@ -314,7 +314,7 @@ jobs:
 
       - name: Retain native mask diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mask-copper-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mask-copper-native/
@@ -336,7 +336,7 @@ jobs:
 
       - name: Retain native physical-stitch diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: stitch-physical-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/stitch-physical-native/
@@ -358,7 +358,7 @@ jobs:
 
       - name: Retain native zone diagnostics
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: zone-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/zone-native/
@@ -401,7 +401,7 @@ jobs:
 
       - name: Retain native workload observations
         if: ${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: native-workload-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/native-observer/
