@@ -143,7 +143,8 @@ def _content_zone_uuid(key: str) -> str:
        of most of its copper -- the generator already warns about that in
        :meth:`ZoneGenerator._check_overlap`, and fixing it needs a
        priority / outline-partition change that is deliberately out of
-       #5578's scope.  ``tests/test_pour_fill_determinism_5578.py``
+       #5578's scope and tracked in #5590.
+       ``tests/test_pour_fill_determinism_5578.py``
        asserts board 03's two ``In2.Cu`` pours both end up with copper, so
        a future change to this derivation cannot silently flip the board
        into the zero-copper branch.

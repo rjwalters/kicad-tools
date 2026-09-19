@@ -58,6 +58,18 @@ The union-based comparison is deliberately separate from the island-count
 comparison: "same total copper" and "same fragmentation" are different
 guarantees, and #5578's scope guards call out that conflating them is what
 produced the original false report.
+
+Deliberately out of scope, tracked separately
+---------------------------------------------
+
+* **#5590** -- making the outcome reproducible does not make it *fair*.
+  Board 03's two ``In2.Cu`` pours still share a layer and a priority, so
+  one of them is still starved.  :func:`test_board03_pour_fill_is_reproducible`
+  asserts both end up with non-zero copper, which pins the board to the
+  non-degenerate branch but does not fix the underlying allocation.
+* **#5591** -- the fleet boards emit pads with no ``(uuid ...)``, so KiCad
+  invents a random one per pad on load.  That is what
+  :data:`_UNION_AREA_TOLERANCE_MM2` exists to absorb.
 """
 
 from __future__ import annotations
@@ -209,8 +221,9 @@ def _island_counts(path: Path) -> dict[tuple[str, str], int]:
 #: NOT slack for the bug this module gates -- that one moved whole planes
 #: (board 03's ``VCC`` pour went from 2.25 mm^2 of copper to **zero**, three
 #: orders of magnitude past this epsilon).  It absorbs a separate, much
-#: smaller residual that survives the #5578 fix and is tracked on its own:
-#: board 03's committed fixture declares pads with no ``(uuid ...)``, so
+#: smaller residual that survives the #5578 fix and is tracked on its own
+#: in **#5591**: board 03's committed fixture declares pads with no
+#: ``(uuid ...)``, so
 #: KiCad invents a random one per pad on load and ``--save-board`` persists
 #: it.  That perturbs KiCad's internal board-item ordering, which shows up
 #: as (a) a pure permutation of the routed-copper emission order (already
@@ -220,6 +233,7 @@ def _island_counts(path: Path) -> dict[tuple[str, str], int]:
 #: / 7659 / 7660 and areas 3793.945551 / 3793.945555 / 3793.945554 mm^2 --
 #: a spread of 4e-6 mm^2 (4 um^2, ~1e-9 relative).  The bounds and the
 #: island counts were identical on all three, so both are asserted exactly.
+#: Tighten this to ``0.0`` once #5591 lands.
 _UNION_AREA_TOLERANCE_MM2 = 1e-3
 
 
