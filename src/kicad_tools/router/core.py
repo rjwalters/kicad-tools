@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .pathfinder import Router
+    from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
     from .stub_terminals import StubTerminal
 
@@ -1871,16 +1872,25 @@ class Autorouter:
         # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
         # sidecar.  ON by default -- building the plan only reads
         # RegionGraph state (see TwoPhaseRouter's own attribute docstring),
-        # so it cannot perturb the copper this run produces.  No CLI flag
-        # exists yet to flip this (``--no-routing-plan`` is 1b); it is
-        # exposed here so tests / future CLI wiring can opt out.
-        # ``routing_plan`` is populated by ``route_all_two_phase`` (every
-        # ``kct route`` entry point that reaches ``route_all_two_phase``
-        # -- ``route_with_escape``, ``route_with_escape_and_diffpairs``,
-        # and the non-dense ``--two-phase`` path -- goes through it) once
-        # the two-phase router's global pass has run; ``None`` otherwise.
+        # so it cannot perturb the copper this run produces.
+        #
+        # Issue #5520 (Phase 1b): ``routing_plan`` is now populated on
+        # EVERY default route, not only the ones that reach
+        # ``route_all_two_phase`` (``route_with_escape`` /
+        # ``route_with_escape_and_diffpairs`` / ``--two-phase``):
+        # :meth:`route_all_negotiated` runs :meth:`plan_routing` up front
+        # when this flag is on and no plan has been built yet, which
+        # covers the non-dense CLI paths (all seven ``route_all_negotiated``
+        # dispatch sites in ``route_cmd.py``, including the fixed-layer
+        # ``--layers N`` / ``--no-auto-layers`` closure) plus library
+        # callers.  ``kct route --no-routing-plan`` flips the flag off.
         self.emit_routing_plan: bool = True
         self.routing_plan: RoutingPlan | None = None
+        # Issue #5520: the RegionGraph the last plan stage was computed on
+        # (report-only; kept so callers/tests can cross-check the plan's
+        # overflow totals against the live graph, mirroring
+        # ``TwoPhaseRouter.last_region_graph``).
+        self.plan_region_graph: RegionGraph | None = None
 
     def enable_sub_problem_cache(
         self,
@@ -9339,6 +9349,82 @@ class Autorouter:
                 )
         return all_non_starved, labels
 
+    def plan_routing(self) -> RoutingPlan | None:
+        """Run the report-only tile-based plan stage (Issue #5520).
+
+        Builds the coarse :class:`~kicad_tools.router.region_graph.RegionGraph`,
+        runs the negotiated global pass over it and serializes the result
+        into a :class:`~kicad_tools.router.routing_plan.RoutingPlan`, which
+        is stored on :attr:`routing_plan` (and the graph on
+        :attr:`plan_region_graph`).
+
+        This is the same stage ``TwoPhaseRouter.route_all`` runs as its
+        Phase 1 -- both go through ``routing_plan.build_plan`` /
+        ``routing_plan.select_plan_nets``, so a board's plan does not
+        depend on whether it happened to take the dense (two-phase) or the
+        non-dense (negotiated) path.
+
+        **Report-only and silent.**  It never touches ``self.grid`` (no
+        corridor preferences, no obstacle marking) and prints nothing, so
+        it cannot change routed copper and cannot perturb the stdout the
+        CLI / tests assert on.  The text summary line and the JSON sidecar
+        remain the CLI's job (Issue #5519).
+
+        Returns:
+            The freshly built plan, or ``None`` when the board has no
+            routable nets (nothing to plan).
+        """
+        from .routing_plan import build_plan, select_plan_nets
+
+        selection = select_plan_nets(self)
+        if not selection.net_order:
+            self.routing_plan = None
+            self.plan_region_graph = None
+            return None
+        result = build_plan(
+            self,
+            net_order=selection.net_order,
+            pour_nets=selection.pour_nets,
+            single_pad_nets=selection.single_pad_nets,
+            emit=True,
+        )
+        self.routing_plan = result.plan
+        self.plan_region_graph = result.region_graph
+        return result.plan
+
+    def _run_routing_plan_stage(self) -> None:
+        """Build the routing plan ahead of a negotiated route (Issue #5520).
+
+        Called from :meth:`route_all_negotiated` so that **every** default
+        ``kct route`` -- not just the dense-package boards that reach
+        ``route_all_two_phase`` -- emits the Epic #5510 plan artifact.
+        Hooking the core method (rather than each CLI dispatch site)
+        covers all seven ``route_all_negotiated`` call sites in
+        ``route_cmd.py``, the escalation wrappers, and library callers at
+        once.
+
+        Two guards keep this cheap and side-effect free:
+
+        - ``emit_routing_plan`` (``--no-routing-plan``) skips it entirely.
+        - ``routing_plan is None`` means a board that already planned --
+          e.g. ``route_with_escape`` -> ``route_all_two_phase`` -> a later
+          negotiated fallback on the SAME ``Autorouter`` -- does not run
+          the pass twice.  Each layer-escalation attempt builds a fresh
+          ``Autorouter`` via ``load_pcb_for_routing``, so every attempt
+          still gets its own plan.
+
+        A failure here is never fatal: the plan is a diagnostic artifact,
+        so an unexpected error degrades to "no sidecar" plus one warning
+        line rather than aborting the route.
+        """
+        if not self.emit_routing_plan or self.routing_plan is not None:
+            return
+        try:
+            self.plan_routing()
+        except Exception as e:  # pragma: no cover - defensive
+            self.routing_plan = None
+            flush_print(f"  Warning: routing-plan stage skipped ({type(e).__name__}: {e})")
+
     def route_all_negotiated(
         self,
         max_iterations: int = 10,
@@ -9640,6 +9726,13 @@ class Autorouter:
         # in the CLI), so wiring here is what actually fires Phase 1C on
         # production boards.
         self._prepare_routing()
+
+        # Issue #5520 (Epic #5510, Phase 1b): run the report-only plan
+        # stage before any copper is committed, at the same relative point
+        # ``route_all_two_phase`` reaches its Phase 1 global pass.  Silent,
+        # grid-untouching, and skipped when a plan already exists -- see
+        # ``_run_routing_plan_stage``.
+        self._run_routing_plan_stage()
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         self._run_subgrid_prepass()
