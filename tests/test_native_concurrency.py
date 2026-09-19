@@ -10,12 +10,15 @@ not a scheduling accident.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -386,6 +389,172 @@ def test_native_slot_context_manager_is_reentrant_and_inert(tmp_path, monkeypatc
             assert nested.bounded is False
 
 
+@contextlib.contextmanager
+def _own_the_alarm(seconds: float | None):
+    """Stand in for pytest-timeout's signal method for the duration of a block.
+
+    The ambient deadline (this suite really does run under ``--timeout`` in CI)
+    is saved and put back on the way out, minus the time the block consumed, so
+    a test that borrows ``ITIMER_REAL`` cannot quietly disarm its own timeout.
+    """
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_remaining, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    fired: list[float] = []
+    signal.signal(signal.SIGALRM, lambda *_: fired.append(time.monotonic()))
+    if seconds is not None:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield fired
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_remaining:
+            left = previous_remaining - (time.monotonic() - started)
+            # A non-positive remainder means the borrowed-from deadline really
+            # did expire; firing immediately is the honest restoration.
+            signal.setitimer(signal.ITIMER_REAL, max(left, 0.000001), previous_interval)
+
+
+def _release_after(handles, delay: float) -> threading.Timer:
+    timer = threading.Timer(delay, lambda: [handle.close() for handle in handles])
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def test_slot_wait_is_credited_back_to_the_waiting_tests_deadline(tmp_path, monkeypatch):
+    """Issue #5572: the deadline measures the test's work, not its queue time."""
+    slots = tmp_path / "slots"
+    log = tmp_path / "records"
+    handles = _hold_every_slot(slots, 1)
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "30")
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(log))
+    monkeypatch.delenv(native_concurrency.ENV_CREDIT_SECONDS, raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_credit (call)")
+    timer = _release_after(handles, 0.4)
+    permit = None
+    try:
+        with _own_the_alarm(10.0) as fired:
+            permit = native_concurrency._acquire(1, os.environ)
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+            # ``bounded`` reads the live fd, so sample it before releasing.
+            bounded = permit.bounded
+    finally:
+        timer.cancel()
+        if permit is not None:
+            permit.release()
+        for handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+    records = [
+        json.loads(line)
+        for path in log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert [record["event"] for record in records] == ["acquire", "release"]
+    assert records[0]["credited_s"] == pytest.approx(permit.waited_s, abs=0.01)
+    assert bounded is True
+    assert permit.waited_s >= 0.3
+    assert not fired
+    # Without the credit the deadline would read 10 - waited; with it the test
+    # is left with (very nearly) the whole budget it started with.
+    assert remaining > 10.0 - 0.2
+    assert remaining <= 10.0 + permit.waited_s
+
+
+def test_credit_is_capped_per_test_and_reset_for_the_next_test(monkeypatch):
+    monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, "0.5")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_a (call)")
+    with _own_the_alarm(30.0):
+        assert native_concurrency._credit_wait(0.4, os.environ) == pytest.approx(0.4)
+        # Same item, now over the cap: only the remainder is granted.
+        assert native_concurrency._credit_wait(0.4, os.environ) == pytest.approx(0.1)
+        assert native_concurrency._credit_wait(0.4, os.environ) == 0.0
+        # A later phase of the same item shares one budget, as pytest-timeout
+        # arms one timer across setup/call/teardown.
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_a (teardown)")
+        assert native_concurrency._credit_wait(0.4, os.environ) == 0.0
+        # The next item starts fresh.
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_b (call)")
+        assert native_concurrency._credit_wait(0.4, os.environ) == pytest.approx(0.4)
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert remaining > 30.0
+
+
+@pytest.mark.parametrize(
+    ("credit_seconds", "current_test"),
+    [
+        ("0", "tests/t.py::test_disabled (call)"),  # crediting switched off
+        ("120", None),  # not running under pytest at all
+    ],
+)
+def test_credit_is_inert_when_disabled_or_outside_a_test(monkeypatch, credit_seconds, current_test):
+    monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, credit_seconds)
+    if current_test is None:
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", current_test)
+    with _own_the_alarm(10.0):
+        assert native_concurrency._credit_wait(1.0, os.environ) == 0.0
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert remaining <= 10.0
+
+
+def test_credit_never_arms_a_deadline_that_was_not_already_running(monkeypatch):
+    """No armed timer means nobody charged the wait -- and none is created."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_unarmed (call)")
+    with _own_the_alarm(None):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        assert native_concurrency._credit_wait(1.0, os.environ) == 0.0
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_credit_is_skipped_off_the_main_thread(monkeypatch):
+    """``setitimer`` is main-thread only; an off-thread launch is left alone."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_thread (call)")
+    granted: list[float] = []
+    with _own_the_alarm(10.0):
+        worker = threading.Thread(
+            target=lambda: granted.append(native_concurrency._credit_wait(1.0, os.environ))
+        )
+        worker.start()
+        worker.join(timeout=10)
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert granted == [0.0]
+    assert remaining <= 10.0
+
+
+def test_wait_ceiling_fallback_still_credits_and_records(tmp_path, monkeypatch):
+    """The fail-open path is a defect signal, not work the test should pay for."""
+    slots = tmp_path / "slots"
+    log = tmp_path / "records"
+    handles = _hold_every_slot(slots, 1)
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "0.5")
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(log))
+    monkeypatch.delenv(native_concurrency.ENV_CREDIT_SECONDS, raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_ceiling (call)")
+    try:
+        with _own_the_alarm(10.0):
+            permit = native_concurrency._acquire(1, os.environ)
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        for handle in handles:
+            handle.close()
+    assert permit.bounded is False
+    assert remaining > 10.0 - 0.2
+    records = [
+        json.loads(line)
+        for path in log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    fallback = [record for record in records if record["event"] == "unbounded"]
+    assert [record["reason"] for record in fallback] == ["wait_ceiling"]
+    assert fallback[0]["credited_s"] >= 0.5
+
+
 def _write_group(root: Path, name: str, *, samples, events):
     directory = root / name
     directory.mkdir(parents=True)
@@ -491,11 +660,30 @@ def test_analyzer_reports_attribution_and_unbounded_gate_launches(tmp_path):
         events=NO_EVENTS,
     )
     (directory / "slots-99.jsonl").write_text(
-        json.dumps({"time_ns": 1, "pid": 99, "event": "acquire", "slot": 0, "waited_s": 0.5})
+        json.dumps(
+            {
+                "time_ns": 1,
+                "pid": 99,
+                "event": "acquire",
+                "slot": 0,
+                "waited_s": 0.5,
+                "credited_s": 0.5,
+                "owner": "tests/a.py::test_a (call)",
+            }
+        )
         + "\n"
         + json.dumps({"time_ns": 2, "pid": 99, "event": "release", "slot": 0})
         + "\n"
-        + json.dumps({"time_ns": 3, "pid": 99, "event": "unbounded", "reason": "wait_ceiling"})
+        + json.dumps(
+            {
+                "time_ns": 3,
+                "pid": 99,
+                "event": "unbounded",
+                "reason": "wait_ceiling",
+                "credited_s": 0.25,
+                "owner": "tests/b.py::test_b (call)",
+            }
+        )
         + "\n"
     )
     out = tmp_path / "attribution.json"
@@ -508,6 +696,9 @@ def test_analyzer_reports_attribution_and_unbounded_gate_launches(tmp_path):
     assert group["memory"]["memory_max"] == [12 << 30]
     assert group["gate"]["unbounded_launches"] == 1
     assert group["gate"]["wait_seconds_max"] == 0.5
+    # Issue #5572: queue time handed back, summed overall and per worst test.
+    assert group["gate"]["timeout_credit_seconds_total"] == 0.75
+    assert group["gate"]["timeout_credit_seconds_max_test"] == 0.5
 
 
 def _worker_sample(pid, time_ns, owner, worker):
