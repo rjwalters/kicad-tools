@@ -2477,7 +2477,7 @@ class CppPathfinder:
             # 10-100x-slower Python fallback was accidentally providing.
             rejected_goal_cells: list[tuple[int, int, int]] = []
             iterations_spent_prior = 0
-            last_violation_cell: tuple[int, int, int] | None = None
+            last_violation_cell: tuple[int, int] | None = None
             site_repeat_run = 0
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, end, net_class)
@@ -3567,7 +3567,7 @@ class CppPathfinder:
 
     def _boost_avoidance_at(
         self,
-        location: tuple[float, float] | None,
+        location: RouteClearanceViolation | tuple[float, float] | None,
         trace_radius_cells: int,
         amount: float = 20.0,
         radius_extra_cells: int = 0,
@@ -3576,7 +3576,10 @@ class CppPathfinder:
 
         When post-route validation detects a clearance violation, this method
         marks the region in the C++ grid so subsequent A* searches incur a
-        cost penalty and explore alternative paths.
+        cost penalty and explore alternative paths.  ``location`` may be the
+        Issue-#5599 ``RouteClearanceViolation`` (a NamedTuple -- positional
+        ``[0]``/``[1]`` access is unchanged) or the historical bare
+        ``(x, y)`` pair.
 
         Args:
             location: (x, y) world coordinates of the violation, or None.
