@@ -174,7 +174,11 @@ NB_MODULE(router_cpp, m) {
         .def_ro("failure_reason", &RouteResult::failure_reason)
         .def_ro("blocking_via_net", &RouteResult::blocking_via_net)
         .def_ro("failure_x", &RouteResult::failure_x)
-        .def_ro("failure_y", &RouteResult::failure_y);
+        .def_ro("failure_y", &RouteResult::failure_y)
+        // Issue #5599: the goal node the A* actually accepted.
+        .def_ro("goal_gx", &RouteResult::goal_gx)
+        .def_ro("goal_gy", &RouteResult::goal_gy)
+        .def_ro("goal_layer", &RouteResult::goal_layer);
 
     // Issue #2476: FailureReason constants (exposed as module attributes
     // so Python tests/strategies can dispatch on the same vocabulary the

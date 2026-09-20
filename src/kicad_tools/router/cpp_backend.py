@@ -25,7 +25,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from .resource_guard import reraise_if_resource_exhaustion
 
@@ -51,7 +51,74 @@ logger = logging.getLogger(__name__)
 # ``AttributeError`` deep in the routing code (e.g. ``router_cpp.PadBounds``
 # missing).  The guard below catches that at import time and falls back to the
 # pure-Python router with an actionable ``kct build-native`` hint.
-_REQUIRED_CPP_BUILD_VERSION = 41
+#
+# v42 (Issue #5599): ``RouteResult.goal_gx/goal_gy/goal_layer`` -- the goal
+# node the A* actually accepted, consumed by the resume loop to reject the
+# correct goal cell (the last-segment endpoint derivation always produced the
+# end-pad center, a no-op rejection after the first attempt).
+_REQUIRED_CPP_BUILD_VERSION = 42
+
+
+# Issue #5599: human-readable names for the ``ValidationResult::violation_type``
+# codes the C++ validator assigns (see the field comment on the struct in
+# ``cpp/include/types.hpp``).  Used by the resume-loop instrumentation so
+# ``fallback_stats['resume_diagnostics']`` records WHY each post-route
+# validation attempt failed (spacing vs via-clearance vs same-net drill ...),
+# not just where.
+_CPP_VIOLATION_KINDS: dict[int, str] = {
+    0: "none",
+    1: "seg-pad",
+    2: "seg-seg",
+    3: "seg-via",
+    4: "via-seg",
+    5: "via-via",
+    6: "drill",
+    7: "reserved",
+    8: "via-pad",
+}
+
+
+class RouteClearanceViolation(NamedTuple):
+    """A post-route clearance violation found by ``_validate_route_clearance``.
+
+    Issue #5599: the validator previously returned a bare ``(x, y)`` tuple --
+    a location but no KIND.  The resume-loop instrumentation needs both to
+    answer "what specifically fails clearance on the resume attempts".
+    Tuple-compatible with the old return (``v[0]``/``v[1]`` are x/y), so
+    existing positional consumers keep working.
+
+    Attributes:
+        x: World X of the violation site (mm).
+        y: World Y of the violation site (mm).
+        kind: Human-readable violation kind.  C++ validator results map
+            through ``_CPP_VIOLATION_KINDS`` (e.g. ``"seg-pad"``); the
+            Python-side post-checks carry their own labels (e.g.
+            ``"seg_vs_foreign_via"``).
+        type_code: Raw ``ValidationResult::violation_type`` code when the
+            violation came from the C++ validator, ``None`` for the
+            Python-side post-checks.
+        min_clearance: The measured gap at the violation site when the C++
+            validator reports one (``ValidationResult::min_clearance``),
+            ``None`` otherwise.  Issue #5599 diagnostics: quantifies HOW far
+            below the clearance threshold each rejected candidate sat.
+    """
+
+    x: float
+    y: float
+    kind: str
+    type_code: int | None = None
+    min_clearance: float | None = None
+
+
+# Issue #5599: avoidance-boost escalation for the post-route clearance resume
+# loop.  The historical flat 20.0 per failed attempt accumulates too slowly
+# (five overlapping boosts still let board 04's USER_LED/BOOT0 re-enter the
+# goal through the identical seg-pad violation window), so each REPEATED
+# failure at the same violation site multiplies the amount by 4:
+# 20 -> 80 -> 320 -> 1280 -> 5120.  A first-time site keeps the historical
+# 20.0 exactly.
+_RESUME_BOOST_BASE_AMOUNT = 20.0
+_RESUME_BOOST_ESCALATION = 4.0
 
 
 # Try to import C++ module with detailed error tracking
@@ -1330,6 +1397,22 @@ class CppPathfinder:
         # loss the optimization targets.
         self._resume_clearance_exhaustions: dict[str, int] = {}
 
+        # Issue #5599: per-net record of the MOST RECENT post-route
+        # clearance-validation resume loop that had at least one failed
+        # validation attempt.  Each entry is a dict with:
+        #   - ``attempts``: list of per-attempt records (violation kind +
+        #     world/grid location + the goal cell rejected after that
+        #     attempt)
+        #   - ``exhausted``: True when the loop burned all
+        #     ``max_resume_attempts`` and handed the net to the Python
+        #     fallback (the #5599 give-up path)
+        #   - ``resume_failed``: True when a resumed search died with a
+        #     search failure (the #3923 case-2 path) instead of exhausting
+        # Overwritten on each subsequent resume loop for the same net, so
+        # memory stays bounded under negotiated rip-up retries.  Surfaced
+        # via ``fallback_stats['resume_diagnostics']``.
+        self._resume_diagnostics: dict[str, dict] = {}
+
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
         # ``_same_component_carveout_eligible``.
@@ -2250,27 +2333,33 @@ class CppPathfinder:
         # The call is idempotent and fully dormant without a voltage map (it
         # returns after a single ``pairwise_clearance is None`` check), so the
         # no-voltage-map hot path is unaffected.
-        self._sync_pairwise_domains_to_cpp()
-        # Give the C++ search the routing net's copper half-extents so the
-        # cross-domain widening measures its widened radius from the SAME
-        # half-width the scalar ``trace_radius_cells`` used (0.0 => rules
-        # fallback on a stale .so without the #4511 setter).
-        if hasattr(self._impl, "set_search_pair_widths"):
-            self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
-        if hasattr(self._impl, "set_search_fill_clearances"):
-            self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
+        #
+        # Issue #5599: the whole search-time state push + the
+        # ``route_resumable`` launch are wrapped in ``_run_fresh_search`` so a
+        # resume-strategy RESTART can re-run a full search (with the
+        # accumulated avoidance boosts and remaining budget) instead of only
+        # continuing the preserved open set.  Every pushed setter is
+        # idempotent, so calling them again before a restart is safe.
+        def _run_fresh_search(timeout_s: float, max_iters: int):
+            self._sync_pairwise_domains_to_cpp()
+            # Give the C++ search the routing net's copper half-extents so the
+            # cross-domain widening measures its widened radius from the SAME
+            # half-width the scalar ``trace_radius_cells`` used (0.0 => rules
+            # fallback on a stale .so without the #4511 setter).
+            if hasattr(self._impl, "set_search_pair_widths"):
+                self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
+            if hasattr(self._impl, "set_search_fill_clearances"):
+                self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
 
-        if self._grid._py_grid is not None:
-            self._sync_stored_routes(self._grid._py_grid)
-        self._impl.set_search_partner_clearance(
-            partner_net_id,
-            net_class.effective_intra_pair_clearance()
-            if net_class and partner_net_id >= 0
-            else -1.0,
-        )
-
-        try:
-            result = self._impl.route_resumable(
+            if self._grid._py_grid is not None:
+                self._sync_stored_routes(self._grid._py_grid)
+            self._impl.set_search_partner_clearance(
+                partner_net_id,
+                net_class.effective_intra_pair_clearance()
+                if net_class and partner_net_id >= 0
+                else -1.0,
+            )
+            return self._impl.route_resumable(
                 start.x,
                 start.y,
                 start_layer,
@@ -2299,8 +2388,8 @@ class CppPathfinder:
                 # Issue #3881: use the EFFECTIVE cap -- when the tuned per-net
                 # iteration cap is set it binds (clamped by the memory
                 # backstop); otherwise this is the memory backstop / heuristic.
-                timeout_seconds,
-                self._effective_search_iterations,
+                timeout_s,
+                max_iters,
                 # Issue #3130: per-net emit widths/diameters.  Forwarded so the
                 # C++-internal RouteResult carries per-net Segment.width and
                 # Via.diameter/drill matching the source net class instead of
@@ -2322,6 +2411,9 @@ class CppPathfinder:
                 # is shaped.
                 self._filter_pad_channel_budgets_for_net(start.net),
             )
+
+        try:
+            result = _run_fresh_search(timeout_seconds, self._effective_search_iterations)
 
             if not result.success:
                 # Issue #2476: Capture structured failure diagnostics from
@@ -2345,6 +2437,36 @@ class CppPathfinder:
                     cpp_failure_reason=getattr(result, "failure_reason", None),
                 )
 
+            # Issue #5599: per-attempt instrumentation for the post-route
+            # clearance-validation resume loop.  ``resume_attempts`` records,
+            # for each validation failure in this loop, the violation KIND +
+            # location and the goal cell rejected afterwards -- the data the
+            # issue's "instrument first" directive requires to distinguish
+            # "five near-clone resumes against the same mid-path violation"
+            # (hypothesis 1) from a search/validation clearance-model
+            # disagreement (hypothesis 2).  Published through
+            # ``fallback_stats['resume_diagnostics']`` only when at least one
+            # attempt failed, so clean first-try routes stay free of noise.
+            resume_attempts: list[dict] = []
+            # Issue #5599 fix state: the plain reject-one-goal-cell + flat 20.0
+            # avoidance-boost resume strategy produces near-clone candidates
+            # when the violation sits mid-corridor (or at a fixed pad-approach
+            # window): every resume re-enters the goal through the same
+            # clearance-violating approach because (a) the preserved open set
+            # has the shared corridor prefix already CLOSED (g-scores frozen,
+            # immune to the fresh avoidance cost) and (b) the flat boost is too
+            # weak to make the search buy a materially longer corridor.  The
+            # fix: escalate the boost exponentially while the SAME violation
+            # site keeps rejecting candidates, and -- once the site has repeated
+            # -- RESTART the search from scratch (fresh open/closed sets with
+            # every accumulated avoidance boost and goal rejection active)
+            # instead of continuing the frozen frontier.  A fresh C++ restart
+            # is exactly the "materially different candidate generator" the
+            # 10-100x-slower Python fallback was accidentally providing.
+            rejected_goal_cells: list[tuple[int, int, int]] = []
+            iterations_spent_prior = 0
+            last_violation_cell: tuple[int, int, int] | None = None
+            site_repeat_run = 0
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, end, net_class)
 
@@ -2371,13 +2493,92 @@ class CppPathfinder:
 
                 if violation_location is None:
                     # Route passed validation
+                    if resume_attempts:
+                        # Issue #5599: a resume loop that recovered after one
+                        # or more failed validation attempts -- record it so
+                        # post-hoc analysis can see which violations the
+                        # boost+reject strategy DID steer around.
+                        self._resume_diagnostics[start.net_name] = {
+                            "attempts": resume_attempts,
+                            "exhausted": False,
+                        }
                     return route
 
                 # Validation failed. Boost avoidance cost at violation location
                 # (complementary mechanism to resumable search).
-                self._boost_avoidance_at(violation_location, trace_radius_cells)
+                #
+                # Issue #5599: ESCALATE the boost while the SAME violation
+                # site keeps rejecting candidates.  The historical flat 20.0
+                # proved insufficient: on board 04 the USER_LED/BOOT0 nets saw
+                # the identical seg-pad violation six times in a row -- five
+                # overlapping 20.0 boosts never made the alternative corridor
+                # cheaper than re-entering the goal through the violating
+                # approach.  20 * 4**run (20 -> 80 -> 320 -> ...) turns each
+                # repeated rejection into a decisively more expensive
+                # violation window.  A FIRST-time violation keeps the
+                # historical 20.0 (byte-identical behavior for healthy nets).
+                try:
+                    _vgx, _vgy = self._grid._impl.world_to_grid(
+                        violation_location.x, violation_location.y
+                    )
+                    violation_cell = (int(_vgx), int(_vgy))
+                except Exception:  # pragma: no cover - world_to_grid is total
+                    violation_cell = None
+                if violation_cell is not None and violation_cell == last_violation_cell:
+                    site_repeat_run += 1
+                else:
+                    last_violation_cell = violation_cell
+                    site_repeat_run = 0
+                boost_amount = _RESUME_BOOST_BASE_AMOUNT * (
+                    _RESUME_BOOST_ESCALATION ** min(site_repeat_run, 6)
+                )
+                self._boost_avoidance_at(
+                    violation_location, trace_radius_cells, amount=boost_amount
+                )
 
                 if attempt >= max_resume_attempts:
+                    # Issue #5599: final per-attempt record for the attempt
+                    # that exhausted the budget (no goal cell is rejected
+                    # after it -- the net moves to the Python fallback).
+                    resume_attempts.append(
+                        self._resume_attempt_record(
+                            attempt, violation_location, None
+                        )
+                    )
+                    resume_attempts[-1]["strategy"] = "exhausted"
+                    resume_attempts[-1]["boost_amount"] = boost_amount
+                    self._resume_diagnostics[start.net_name] = {
+                        "attempts": resume_attempts,
+                        "exhausted": True,
+                    }
+                    # Issue #5599: surface the per-attempt violation kinds +
+                    # locations next to (and deduped like) the #3456 fallback
+                    # WARNING, so a plain `kct route` log carries the "what
+                    # kept failing" answer without a debugger.  Repeated
+                    # exhaustions of the same net stay at DEBUG to match the
+                    # #3456/#3923 noise discipline.
+                    summary = ", ".join(
+                        f"#{a['attempt']}:{a['violation_kind']}"
+                        f"@({a['violation_xy'][0]:.3f},{a['violation_xy'][1]:.3f})"
+                        f"{' gap=%.4f' % a['min_clearance'] if a['min_clearance'] is not None else ''}"
+                        f"/{a['strategy']}@{a['boost_amount']:.0f}"
+                        f"{' reject=%r' % (a['rejected_goal'],) if a['rejected_goal'] else ''}"
+                        for a in resume_attempts
+                    )
+                    _exhaust_log = (
+                        logger.warning
+                        if start.net_name not in self._fallback_warned
+                        else logger.debug
+                    )
+                    _exhaust_log(
+                        "Net %s: post-route clearance validation rejected "
+                        "every candidate (%d attempts); per-attempt "
+                        "violations: %s. See backend_info['fallback_stats']"
+                        "['resume_diagnostics'] for the rejected goal cells.",
+                        start.net_name,
+                        len(resume_attempts),
+                        summary,
+                    )
                     # Exhausted resume attempts, try Python fallback.
                     # Issue #2476: Capture failure-info before falling back
                     # so the negotiated strategy can still see the cpp-side
@@ -2401,22 +2602,164 @@ class CppPathfinder:
                     )
 
                 # Find the goal cell of the failed path and reject it.
-                # The last segment's endpoint (converted to grid coords) is the
-                # goal cell that A* reached.
-                last_seg = result.segments[-1] if result.segments else None
-                if last_seg is not None:
-                    reject_gx, reject_gy = self._grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
-                    reject_layer = last_seg.layer
+                #
+                # Issue #5599: use the goal node the A* actually ACCEPTED
+                # (``RouteResult.goal_gx/gy/layer``, exposed in binding-surface
+                # v42).  The historical derivation from the last segment's
+                # endpoint always produced the END PAD CENTER cell --
+                # ``reconstruct_path`` draws a final segment to the pad center
+                # regardless of which goal node was popped -- so every resume
+                # re-rejected the same center cell while the search kept
+                # accepting neighboring goal nodes: the reject-goal-cell
+                # mechanism (#2447) was a no-op after its first use, and the
+                # five resumes were near-clones by construction.  The
+                # last-segment derivation remains as a defensive fallback.
+                goal_gx = int(getattr(result, "goal_gx", -1))
+                goal_gy = int(getattr(result, "goal_gy", -1))
+                goal_layer = int(getattr(result, "goal_layer", -1))
+                if goal_gx >= 0 and goal_gy >= 0 and goal_layer >= 0:
+                    reject_gx, reject_gy, reject_layer = goal_gx, goal_gy, goal_layer
                 else:
-                    # Fallback: use end pad grid coords
-                    reject_gx, reject_gy = self._grid._impl.world_to_grid(end.x, end.y)
-                    reject_layer = end_layer
+                    last_seg = result.segments[-1] if result.segments else None
+                    if last_seg is not None:
+                        reject_gx, reject_gy = self._grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
+                        reject_layer = last_seg.layer
+                    else:
+                        # Fallback: use end pad grid coords
+                        reject_gx, reject_gy = self._grid._impl.world_to_grid(end.x, end.y)
+                        reject_layer = end_layer
 
-                # Resume A* from the preserved open set, skipping the
-                # rejected goal cell.
-                result = self._impl.resume(reject_gx, reject_gy, reject_layer)
+                # Issue #5599: LANDING-BAND REJECTION.  When the SAME
+                # violation site keeps rejecting candidates AND the site sits
+                # inside the END pad's approach zone, the failure class is the
+                # pad-approach itself (the validator keeps rejecting every
+                # landing whose approach corridor/dogleg clips the same
+                # neighbor pad -- board 04 BOOT0 rejected six consecutive
+                # landings in the pad's center band).  A single-cell rejection
+                # then only walks the landing one cell at a time through that
+                # band; rejecting the landing's neighborhood too (radius
+                # growing with the repeat run) jumps the candidate out of the
+                # failing band -- toward the pad-end approaches that DO
+                # validate -- within the fixed attempt budget.
+                new_rejections: list[tuple[int, int, int]] = [
+                    (reject_gx, reject_gy, reject_layer)
+                ]
+                if site_repeat_run >= 1 and violation_cell is not None:
+                    try:
+                        eb = end_pad_bounds
+                        in_approach = (
+                            eb.approach_gx1 <= violation_cell[0] <= eb.approach_gx2
+                            and eb.approach_gy1 <= violation_cell[1] <= eb.approach_gy2
+                        )
+                    except AttributeError:  # pragma: no cover - defensive
+                        in_approach = False
+                    if in_approach:
+                        rej_radius = min(site_repeat_run, 5)
+                        seen = {cell for cell in rejected_goal_cells}
+                        for dx in range(-rej_radius, rej_radius + 1):
+                            for dy in range(-rej_radius, rej_radius + 1):
+                                cell = (reject_gx + dx, reject_gy + dy, reject_layer)
+                                if cell not in seen:
+                                    seen.add(cell)
+                                    new_rejections.append(cell)
+                rejected_goal_cells.extend(new_rejections)
+
+                # Issue #5599: record this failed attempt (kind + location +
+                # the goal cell about to be rejected) before resuming.
+                resume_attempts.append(
+                    self._resume_attempt_record(
+                        attempt,
+                        violation_location,
+                        (reject_gx, reject_gy, reject_layer),
+                    )
+                )
+                resume_attempts[-1]["rejected_goal_count"] = len(new_rejections)
+
+                # Issue #5599: pick the next-candidate strategy.  A repeated
+                # violation site (site_repeat_run >= 2, i.e. the third
+                # consecutive candidate failing on the same site) is the
+                # near-clone signature -- a plain resume would once again
+                # inherit the frozen closed-set prefix that funnels every
+                # path through the violating approach.  RESTART instead:
+                # a fresh search sees every accumulated avoidance boost from
+                # expansion #1 and has no frozen prefix, so its candidates
+                # are materially different.  Budget discipline (all
+                # deterministic -- no wall-clock branch beyond the pre-existing
+                # per-net deadline):
+                #   - iterations: the restart draws from the REMAINING
+                #     per-net iteration budget (initial + prior sequences +
+                #     the sequence just ended), split evenly over the attempts
+                #     still eligible to restart, so one restart cannot starve
+                #     the later ones.  When no explicit cap is configured
+                #     (0 => C++ default per search) the restart keeps that
+                #     convention.
+                #   - wall-clock: when a per-net deadline exists, the restart
+                #     receives only the unspent remainder (issue #2610's
+                #     "one budget covers the retry sequence" contract); with
+                #     <= 0.05s left the restart is skipped in favor of a
+                #     plain resume, which fails fast on the ORIGINAL deadline
+                #     (FAILURE_TIMEOUT) instead of silently resetting it.
+                strategy = "resume"
+                remaining_timeout: float | None = None
+                restart_cap = 0
+                if site_repeat_run >= 2:
+                    total_spent = iterations_spent_prior + self._impl.iterations
+                    if self._effective_search_iterations > 0:
+                        attempts_left = max(1, max_resume_attempts - attempt)
+                        restart_cap = max(
+                            0,
+                            (self._effective_search_iterations - total_spent)
+                            // attempts_left,
+                        )
+                    if route_deadline is not None:
+                        remaining_timeout = route_deadline - time.monotonic()
+                    if (
+                        self._effective_search_iterations > 0 and restart_cap > 0
+                    ) or self._effective_search_iterations <= 0:
+                        if remaining_timeout is None or remaining_timeout > 0.05:
+                            strategy = "restart"
+                resume_attempts[-1]["strategy"] = strategy
+                resume_attempts[-1]["boost_amount"] = boost_amount
+
+                if strategy == "restart":
+                    iterations_spent_prior += self._impl.iterations
+                    result = _run_fresh_search(
+                        remaining_timeout if remaining_timeout is not None else 0.0,
+                        int(restart_cap),
+                    )
+                    if result.success and rejected_goal_cells:
+                        # Replay every goal rejection collected so far so the
+                        # fresh search cannot simply re-find the previously
+                        # rejected landings (resume() inserts each cell into
+                        # the freshly-cleared rejected_goals_ set and returns
+                        # the next acceptable goal; intermediate results are
+                        # discarded by design).
+                        for rx, ry, rl in rejected_goal_cells:
+                            result = self._impl.resume(rx, ry, rl)
+                            if not result.success:
+                                break
+                else:
+                    # Resume A* from the preserved open set, skipping the
+                    # rejected goal cell(s) -- the landing cell plus, for a
+                    # repeated goal-vicinity violation, its rejected band.
+                    # Each resume() call inserts one rejection and returns
+                    # the next acceptable goal; only the final result is the
+                    # next candidate (intermediates are discarded).
+                    for rx, ry, rl in new_rejections:
+                        result = self._impl.resume(rx, ry, rl)
+                        if not result.success:
+                            break
 
                 if not result.success:
+                    # Issue #5599: the resumed search died (the #3923 case-2
+                    # path) -- persist the attempt history with the resume
+                    # failure annotated.
+                    self._resume_diagnostics[start.net_name] = {
+                        "attempts": resume_attempts,
+                        "exhausted": False,
+                        "resume_failed": True,
+                        "resume_failure": self._describe_cpp_failure(result),
+                    }
                     # Issue #2476: Capture failure diagnostics; resume()
                     # accumulates trackers from the original
                     # route_resumable() call so the most recent via-blocker
@@ -2894,6 +3237,49 @@ class CppPathfinder:
             return "skip"
         return "none"
 
+    def _resume_attempt_record(
+        self,
+        attempt: int,
+        violation: RouteClearanceViolation,
+        rejected_goal: tuple[int, int, int] | None,
+    ) -> dict:
+        """Build one Issue #5599 per-attempt instrumentation record.
+
+        Args:
+            attempt: 0-based index of the validation attempt inside the
+                post-route clearance resume loop.
+            violation: The violation the validator reported for this
+                candidate path.
+            rejected_goal: The ``(gx, gy, layer)`` goal cell rejected after
+                this attempt (None on the final, budget-exhausting attempt).
+
+        Returns:
+            JSON-friendly dict with the violation kind + world/grid location
+            and the rejected goal cell.
+        """
+        violation_cell: list[int] | None = None
+        try:
+            vgx, vgy = self._grid._impl.world_to_grid(violation.x, violation.y)
+            violation_cell = [int(vgx), int(vgy)]
+        except Exception:  # pragma: no cover - defensive, world_to_grid is total
+            violation_cell = None
+        min_clearance = getattr(violation, "min_clearance", None)
+        return {
+            "attempt": attempt,
+            "violation_kind": violation.kind,
+            "violation_type_code": violation.type_code,
+            "violation_xy": [round(float(violation.x), 4), round(float(violation.y), 4)],
+            "violation_cell": violation_cell,
+            "min_clearance": (
+                round(float(min_clearance), 4) if min_clearance is not None else None
+            ),
+            "rejected_goal": (
+                [int(rejected_goal[0]), int(rejected_goal[1]), int(rejected_goal[2])]
+                if rejected_goal is not None
+                else None
+            ),
+        }
+
     def _validate_route_clearance(
         self,
         route: Route,
@@ -2901,7 +3287,7 @@ class CppPathfinder:
         end: Pad,
         trace_radius_cells: int,
         net_class: NetClassRouting | None = None,
-    ) -> tuple[float, float] | None:
+    ) -> RouteClearanceViolation | None:
         """Validate post-route geometric clearance using C++ validation.
 
         Issue #2439: Uses the C++ validate_route() call which runs
@@ -2927,7 +3313,12 @@ class CppPathfinder:
                 within-pair clearance to the C++ validator.
 
         Returns:
-            (x, y) world coordinates of violation, or None if route is valid.
+            Issue #5599: a :class:`RouteClearanceViolation` carrying the
+            world coordinates AND the violation kind (C++
+            ``violation_type`` mapped through ``_CPP_VIOLATION_KINDS`` for
+            the native checks; a per-check label for the Python-side
+            post-checks), or None if route is valid.  Tuple-compatible with
+            the historical ``(x, y)`` return.
         """
         py_grid = getattr(self._grid, "_py_grid", None)
         if py_grid is None:
@@ -3031,7 +3422,9 @@ class CppPathfinder:
                     segment.width / 2,
                     fill_clearance,
                 ):
-                    return (segment.x1, segment.y1)
+                    return RouteClearanceViolation(
+                        segment.x1, segment.y1, "fixed_fill", None
+                    )
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,
@@ -3048,7 +3441,20 @@ class CppPathfinder:
         )
 
         if not vresult.valid:
-            return (vresult.violation_x, vresult.violation_y)
+            type_code = int(getattr(vresult, "violation_type", 0))
+            raw_min = getattr(vresult, "min_clearance", None)
+            min_clearance = (
+                float(raw_min)
+                if raw_min is not None and math.isfinite(float(raw_min))
+                else None
+            )
+            return RouteClearanceViolation(
+                vresult.violation_x,
+                vresult.violation_y,
+                _CPP_VIOLATION_KINDS.get(type_code, f"cpp:{type_code}"),
+                type_code,
+                min_clearance,
+            )
 
         # A selected-layer grid has no native planar slot for omitted copper.
         # A physical via can still cross that copper between its endpoints.
@@ -3065,7 +3471,9 @@ class CppPathfinder:
                     if not via_clears_foreign_segment(
                         via, segment, trace_clearance=self._rules.via_clearance
                     ):
-                        return (via.x, via.y)
+                        return RouteClearanceViolation(
+                            via.x, via.y, "via_vs_offgrid_segment", None
+                        )
 
         # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
         # post-check.  ``validate_route`` already walks the C++ side's
@@ -3089,7 +3497,9 @@ class CppPathfinder:
                         trace_clearance=self._rules.trace_clearance,
                         hard_intersection_only=False,
                     ):
-                        return (via.x, via.y)
+                        return RouteClearanceViolation(
+                            via.x, via.y, "seg_vs_foreign_via", None
+                        )
 
         # Issue #4431 (Phase 1): additive pairwise HV-isolation post-check on the
         # Python validation path (no C++ change in this slice).  When a
@@ -3113,7 +3523,9 @@ class CppPathfinder:
                 attach_zones=self._attach_zones,
             )
             if violation is not None:
-                return (violation.x, violation.y)
+                return RouteClearanceViolation(
+                    violation.x, violation.y, "pairwise_hv", None
+                )
 
         return None
 
@@ -3121,6 +3533,7 @@ class CppPathfinder:
         self,
         location: tuple[float, float] | None,
         trace_radius_cells: int,
+        amount: float = 20.0,
     ) -> None:
         """Boost avoidance cost around a DRC violation location.
 
@@ -3132,6 +3545,10 @@ class CppPathfinder:
             location: (x, y) world coordinates of the violation, or None.
             trace_radius_cells: Trace half-width in grid cells (used to
                 scale the avoidance radius).
+            amount: Boost amount at the region center (tapering with
+                Chebyshev distance).  Historically a fixed 20.0; issue #5599
+                passes an exponentially escalated amount when the SAME
+                violation site keeps rejecting resume candidates.
         """
         if location is None:
             return
@@ -3139,7 +3556,6 @@ class CppPathfinder:
         gx, gy = self._grid._impl.world_to_grid(vx, vy)
         # Boost on all layers since violations may affect via transitions
         radius = max(1, trace_radius_cells * 3)
-        amount = 20.0
         for layer in range(self._grid.num_layers):
             self._grid._impl.boost_region_cost(gx, gy, layer, radius, amount)
 
@@ -3525,11 +3941,24 @@ class CppPathfinder:
                   fallback was attempted but ALSO failed (those do not
                   appear in ``fallback_nets``), so slow failed grinds are
                   attributable too.
+                - resume_diagnostics: Mapping of net name -> record of the
+                  most recent post-route clearance-validation resume loop
+                  that failed at least one attempt (issue #5599).  Each
+                  record carries the per-attempt violation kind + location
+                  and the rejected goal cell, plus ``exhausted`` /
+                  ``resume_failed`` markers for how the loop ended.
         """
         return {
             "fallback_count": self._fallback_count,
             "fallback_nets": list(self._fallback_nets),
             "fallback_reasons": dict(self._fallback_reasons),
+            "resume_diagnostics": {
+                net: {
+                    **record,
+                    "attempts": list(record.get("attempts", ())),
+                }
+                for net, record in self._resume_diagnostics.items()
+            },
         }
 
     @property

@@ -1370,6 +1370,10 @@ RouteResult Pathfinder::route(
                                           emit_trace_width, emit_via_diameter,
                                           emit_via_drill);
                 result.success = true;
+                // Issue #5599: report the accepted goal node (grid coords).
+                result.goal_gx = current.x;
+                result.goal_gy = current.y;
+                result.goal_layer = current.layer;
                 return result;
             }
         }
@@ -1987,6 +1991,13 @@ RouteResult Pathfinder::run_astar_loop() {
                                               search_emit_via_diameter_,
                                               search_emit_via_drill_);
                     result.success = true;
+                    // Issue #5599: report the goal node actually accepted so
+                    // the Python resume loop rejects THIS cell (not the pad
+                    // center the reconstruction's final segment always ends
+                    // at).
+                    result.goal_gx = current.x;
+                    result.goal_gy = current.y;
+                    result.goal_layer = current.layer;
                     return result;
                 }
                 // Goal rejected, continue searching from open set
