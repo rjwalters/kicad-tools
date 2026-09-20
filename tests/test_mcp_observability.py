@@ -407,34 +407,39 @@ def test_stdio_rejected_dispatch_is_recorded(name, args, kind):
 
 def test_fastmcp_protocol_discovery_dispatch_and_diagnostics():
     import asyncio
-    from datetime import timedelta
 
     pytest.importorskip("mcp")
-    from mcp.shared.memory import create_connected_server_and_client_session
+    pytest.importorskip("fastmcp")
+    from fastmcp import Client  # mcp 2.x (#5601): the in-memory session helper moved
 
     from kicad_tools.mcp.server import create_fastmcp_server
     from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
 
     async def exercise():
         server = create_fastmcp_server(http_mode=True)
-        async with create_connected_server_and_client_session(
-            server, read_timeout_seconds=timedelta(seconds=10)
-        ) as client:
+        # mcp 2.x removed create_connected_server_and_client_session; the
+        # pinned fastmcp 4 package's Client speaks the same surface over an
+        # in-memory transport when handed a server instance directly.
+        async with Client(server) as client:
             discovery = await client.list_tools()
-            assert {t.name: t.inputSchema for t in discovery.tools} == {
+            assert {t.name: t.input_schema for t in discovery} == {
                 name: spec.parameters for name, spec in TOOL_REGISTRY.items()
             }
             initial = await client.call_tool("get_recent_calls", {})
-            assert not initial.isError
-            assert initial.structuredContent["calls"] == []
+            assert not initial.is_error
+            assert initial.structured_content["calls"] == []
             assert CALL_RECORDER.stats()["total_calls"] == 1
             for name, args, kind in [
                 ("missing_tool", {}, "not_found"),
                 ("get_recent_calls", {"limit": "invalid"}, "validation"),
                 ("route_net", {}, "validation"),
             ]:
-                result = await client.call_tool(name, args)
-                assert result.isError
+                # fastmcp's Client raises ToolError on isError results by
+                # default (mcp 2.x, #5601); opt out per call so the error
+                # RESULT itself can be inspected, as the old SDK session
+                # client allowed.
+                result = await client.call_tool(name, args, raise_on_error=False)
+                assert result.is_error
                 assert CALL_RECORDER.recent_calls()[0].error_kind == kind
             assert CALL_RECORDER.stats()["total_calls"] == 4
             filtered = await client.call_tool(
@@ -445,10 +450,10 @@ def test_fastmcp_protocol_discovery_dispatch_and_diagnostics():
                     "status": "error",
                 },
             )
-            assert not filtered.isError
-            assert len(filtered.structuredContent["calls"]) == 1
-            assert filtered.structuredContent["calls"][0]["tool_name"] == "route_net"
-            assert filtered.structuredContent["stats"]["total_errors"] == 3
+            assert not filtered.is_error
+            assert len(filtered.structured_content["calls"]) == 1
+            assert filtered.structured_content["calls"][0]["tool_name"] == "route_net"
+            assert filtered.structured_content["stats"]["total_errors"] == 3
             assert CALL_RECORDER.stats()["total_calls"] == 5
             # A handler-reported failure is also counted once.
             spec = TOOL_REGISTRY["list_mistake_categories"]
@@ -458,7 +463,9 @@ def test_fastmcp_protocol_discovery_dispatch_and_diagnostics():
                 # Construct after patch: the dispatcher snapshots registry handlers.
                 other = create_fastmcp_server(http_mode=True)
                 result = await other.call_tool(spec.name, {})
-                assert result["success"] is False
+                # mcp 2.x (#5601): the SDK call_tool returns a CallToolResult;
+                # the handler dict rides in structured_content.
+                assert result.structured_content["success"] is False
             assert CALL_RECORDER.stats()["total_calls"] == 6
             assert CALL_RECORDER.recent_calls()[0].error_kind == "timeout"
 
@@ -540,8 +547,14 @@ def test_dispatch_preserves_handler_diagnostics(monkeypatch, transport, field, l
                 return server.call_tool(name, arguments)
             return await server.call_tool(name, arguments)
 
-        assert await call(spec.name, {}) == result
-        history = await call("get_recent_calls", {"tool_name": spec.name})
+        def payload(res):
+            # stdio dispatch returns the raw handler dict; the SDK server
+            # (mcp 2.x, #5601) returns a CallToolResult with the dict in
+            # structured_content.
+            return res if transport == "stdio" else res.structured_content
+
+        assert payload(await call(spec.name, {})) == result
+        history = payload(await call("get_recent_calls", {"tool_name": spec.name}))
         assert history["stats"]["total_calls"] == 1
         assert history["stats"]["total_errors"] == 1
         assert len(history["calls"]) == 1

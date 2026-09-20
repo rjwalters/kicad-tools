@@ -110,14 +110,19 @@ capability it can't back.
 ### 2.2 HTTP — the SDK exists, but nothing wires it automatically
 
 `create_fastmcp_server` (`src/kicad_tools/mcp/server.py`) imports
-`from mcp.server.fastmcp import FastMCP` — the **official MCP Python SDK's**
-`FastMCP` (package `mcp`, installed version 1.28.1), not the third-party
-`fastmcp` package pinned in `pyproject.toml` (`"fastmcp>=2.0,<4"`) for the
-`mcp` extra. That pin is unused by this import path today — worth noting as
-a latent naming trap for the next person who greps `pyproject.toml` expecting
-it to explain `server.py`'s behavior.
+`from mcp.server.mcpserver import MCPServer` — the **official MCP Python
+SDK's** server class (package `mcp`, installed version 2.2.0). In mcp 1.x
+this class lived at `mcp.server.fastmcp.FastMCP`; the rename to
+`MCPServer` is part of the mcp 2.x migration (issue #5601). The
+`fastmcp` package pinned in `pyproject.toml` (`"fastmcp>=4,<5"`) for the
+`mcp` extra now does gate this import path transitively — fastmcp 4
+depends on the mcp 2.x SDK — and supplies the in-memory `Client` the
+protocol tests use; the pre-#5601 naming trap (a `fastmcp` pin that
+nothing on this path consumed) is resolved.
 
-Checked directly in the installed `mcp` 1.28.1 tree:
+Checked directly in the installed `mcp` 1.28.1 tree (pre-#5601 audit;
+the 2.x equivalents of these internals have not been re-audited, but the
+override-bypass structure below is unchanged by the rename):
 
 - `mcp.server.fastmcp.server.FastMCP.add_tool` / `.remove_tool` mutate the
   tool manager's storage only — neither calls send a
@@ -131,9 +136,10 @@ Checked directly in the installed `mcp` 1.28.1 tree:
   happens automatically from `add_tool`/`remove_tool`.
 
 So the "genuine push" building block (`send_tool_list_changed`) does exist
-in the pinned SDK and is reachable from a tool handler — but nothing in
-`RegistryFastMCP` (`src/kicad_tools/mcp/server.py`) calls it, and
-`RegistryFastMCP` doesn't even route through `FastMCP`'s own tool manager:
+in the SDK lineage and is reachable from a tool handler — but nothing in
+`RegistrySDKServer` (`src/kicad_tools/mcp/server.py`, the post-#5601 name
+of the registry-driven subclass; previously `RegistryFastMCP`) calls it, and
+`RegistrySDKServer` doesn't even route through the SDK's own tool manager:
 its `list_tools`/`call_tool` overrides (same class) delegate straight to the
 shared `MCPServer` dispatcher, bypassing `add_tool`/`remove_tool` entirely.
 Wiring dynamic load/unload here means building a second, HTTP-only tool

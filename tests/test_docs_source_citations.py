@@ -310,7 +310,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "docs/konnect-item1-toolset-economy-audit.md",
-        "RegistryFastMCP",
+        "RegistrySDKServer",
         "src/kicad_tools/mcp/server.py",
     ),
     (
@@ -320,7 +320,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "docs/konnect-item1-toolset-economy-audit.md",
-        "fastmcp>=2.0,<4",
+        "fastmcp>=4,<5",
         "pyproject.toml",
     ),
 )

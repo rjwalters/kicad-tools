@@ -66,45 +66,51 @@ class TestFastMCPServerCreation:
             assert tool_name in tool_names, f"Tool {tool_name} not registered"
 
     def test_create_fastmcp_server_defaults_host_port(self):
-        """Omitting host/port leaves the FastMCP SDK defaults untouched."""
+        """Omitting host/port leaves the SDK defaults untouched at run time."""
         pytest.importorskip("mcp")
         from kicad_tools.mcp.server import create_fastmcp_server
 
         mcp = create_fastmcp_server(http_mode=True)
 
-        # SDK defaults: 127.0.0.1:8000 -- we must not silently override them.
-        assert mcp.settings.host == "127.0.0.1"
-        assert mcp.settings.port == 8000
+        # mcp 2.x (#5601): host/port are no longer constructor settings.
+        # Omitting them records nothing, so the SDK defaults (127.0.0.1:8000)
+        # apply when run() is invoked.
+        assert mcp.http_run_options == {"stateless_http": True}
 
     def test_create_fastmcp_server_custom_host_port(self):
-        """host/port are forwarded to the FastMCP constructor (not run())."""
+        """host/port are recorded as run() options for the caller to splat."""
         pytest.importorskip("mcp")
         from kicad_tools.mcp.server import create_fastmcp_server
 
         mcp = create_fastmcp_server(http_mode=True, host="127.0.0.1", port=8792)
 
-        assert mcp.settings.host == "127.0.0.1"
-        assert mcp.settings.port == 8792
-        assert mcp.settings.stateless_http is True
+        assert mcp.http_run_options == {
+            "stateless_http": True,
+            "host": "127.0.0.1",
+            "port": 8792,
+        }
 
-    def test_fastmcp_run_signature_rejects_host_port(self):
-        """Regression guard: FastMCP.run() takes no host/port kwargs.
+    def test_sdk_run_wiring_takes_host_port_stateless(self):
+        """Regression guard: where host/port/stateless_http live in mcp 2.x.
 
-        This is the API fact that made ``kct mcp --transport http`` raise
-        TypeError. If a future SDK adds them back, this test fails loudly so
-        the wiring can be revisited deliberately.
+        mcp 1.x carried them as constructor Settings and ``FastMCP.run()``
+        accepted neither; mcp 2.x (#5601) inverted the fact -- they are
+        keyword arguments of the streamable-HTTP run path.  If a future SDK
+        moves them again, this test fails loudly so the wiring can be
+        revisited deliberately (the same contract its 1.x predecessor held).
         """
         pytest.importorskip("mcp")
         import inspect
 
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer
 
-        params = inspect.signature(FastMCP.run).parameters
-        assert "host" not in params
-        assert "port" not in params
+        params = inspect.signature(MCPServer.run_streamable_http_async).parameters
+        assert "host" in params
+        assert "port" in params
+        assert "stateless_http" in params
 
     def test_fastmcp_import_error(self, monkeypatch):
-        """Test ImportError when fastmcp is not installed."""
+        """Import failures surface as actionable ImportErrors, not skips."""
         import sys
 
         # Remove mcp from sys.modules if present
@@ -118,27 +124,31 @@ class TestFastMCPServerCreation:
         original_import = builtins.__import__
 
         def mock_import(name, *args, **kwargs):
-            if name == "mcp.server.fastmcp" or name.startswith("mcp"):
-                raise ImportError("No module named 'mcp'")
+            if name.startswith("mcp"):
+                raise ImportError("cannot import name 'MCPServer' from 'mcp.server.mcpserver'")
             return original_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", mock_import)
 
-        # Need to reload the module to test the import error
-        # This is tricky in tests, so we just verify the error handling exists
-        # by checking the function raises ImportError when mcp is unavailable
+        from kicad_tools.mcp.server import create_fastmcp_server
+
+        # A renamed/moved API must surface as "SDK version problem", not be
+        # swallowed as "not installed" (#5601) -- that misclassification is
+        # what turned the mcp 2.x CI failures into silent test skips.
+        with pytest.raises(ImportError, match="MCP SDK"):
+            create_fastmcp_server(http_mode=True)
 
 
 class _FakeFastMCP:
-    """Minimal stand-in for FastMCP that records how run() was called."""
+    """Minimal stand-in for the SDK server that records how run() was called."""
 
     def __init__(self):
         self.run_calls = []
 
-    def run(self, transport="stdio", mount_path=None):
-        # Mirrors mcp.server.fastmcp.FastMCP.run's signature exactly: any
-        # host/port kwarg would raise TypeError here, just like the real SDK.
-        self.run_calls.append({"transport": transport, "mount_path": mount_path})
+    def run(self, transport="stdio", **kwargs):
+        # Mirrors mcp 2.x MCPServer.run: transport plus forwarded
+        # transport-specific options (host/port/stateless_http, #5601).
+        self.run_calls.append({"transport": transport, **kwargs})
 
 
 class TestRunServerFunction:
@@ -152,7 +162,7 @@ class TestRunServerFunction:
             run_server(transport="invalid")
 
     def test_run_server_http_passes_host_port_to_constructor(self, monkeypatch):
-        """run_server's HTTP branch wires host/port at construction time."""
+        """run_server's HTTP branch records host/port at creation, uses at run."""
         from kicad_tools.mcp import server as server_module
 
         fake = _FakeFastMCP()
@@ -160,6 +170,11 @@ class TestRunServerFunction:
 
         def fake_create(http_mode=False, host=None, port=None):
             created.update({"http_mode": http_mode, "host": host, "port": port})
+            fake.http_run_options = {"stateless_http": http_mode}
+            if host is not None:
+                fake.http_run_options["host"] = host
+            if port is not None:
+                fake.http_run_options["port"] = port
             return fake
 
         monkeypatch.setattr(server_module, "create_fastmcp_server", fake_create)
@@ -167,14 +182,21 @@ class TestRunServerFunction:
         server_module.run_server(transport="http", host="0.0.0.0", port=9123)
 
         assert created == {"http_mode": True, "host": "0.0.0.0", "port": 9123}
-        # run() must be called with transport only -- no host/port kwargs.
-        assert fake.run_calls == [{"transport": "streamable-http", "mount_path": None}]
+        assert fake.run_calls == [
+            {
+                "transport": "streamable-http",
+                "stateless_http": True,
+                "host": "0.0.0.0",
+                "port": 9123,
+            }
+        ]
 
     def test_run_server_http_does_not_raise_type_error(self, monkeypatch):
-        """Regression for #4855: the HTTP branch reached mcp.run with bad kwargs.
+        """Regression for #4855: the HTTP branch must call run() with the
+        mcp 2.x wiring -- transport plus host/port/stateless_http kwargs.
 
-        Uses a real FastMCP instance (so the real run() signature applies) with
-        run() stubbed out, guaranteeing no socket is bound.
+        Uses a real SDK server instance (so the real run() signature applies)
+        with run() stubbed out, guaranteeing no socket is bound.
         """
         pytest.importorskip("mcp")
         from kicad_tools.mcp import server as server_module
@@ -195,12 +217,24 @@ class TestRunServerFunction:
             lambda http_mode=False, host=None, port=None: mcp_instance,
         )
 
-        # Would have raised TypeError before the fix.
         server_module.run_server(transport="http", host="127.0.0.1", port=8792)
 
-        assert calls == [((), {"transport": "streamable-http"})]
-        assert mcp_instance.settings.host == "127.0.0.1"
-        assert mcp_instance.settings.port == 8792
+        assert calls == [
+            (
+                (),
+                {
+                    "transport": "streamable-http",
+                    "stateless_http": True,
+                    "host": "127.0.0.1",
+                    "port": 8792,
+                },
+            )
+        ]
+        assert mcp_instance.http_run_options == {
+            "stateless_http": True,
+            "host": "127.0.0.1",
+            "port": 8792,
+        }
 
     def test_run_server_stdio_unaffected(self, monkeypatch):
         """The stdio path still uses MCPServer and never touches FastMCP."""
