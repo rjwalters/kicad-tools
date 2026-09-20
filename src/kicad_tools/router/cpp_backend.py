@@ -2532,8 +2532,20 @@ class CppPathfinder:
                 boost_amount = _RESUME_BOOST_BASE_AMOUNT * (
                     _RESUME_BOOST_ESCALATION ** min(site_repeat_run, 6)
                 )
+                # Issue #5599: grow the DISC as well as the amount.  A seg-pad
+                # violation is reported at the pad center; the corridor that
+                # keeps failing can lie just past the pad's own corners
+                # (Chebyshev ~half-height of the pad + a couple of cells),
+                # OUTSIDE the historical radius-3*trace disc -- in which case
+                # no amount escalation can reach it.  4 cells per repeat keeps
+                # step-0 byte-identical while covering the corner corridors
+                # from the first repeat on.
+                boost_extra_radius = 4 * site_repeat_run
                 self._boost_avoidance_at(
-                    violation_location, trace_radius_cells, amount=boost_amount
+                    violation_location,
+                    trace_radius_cells,
+                    amount=boost_amount,
+                    radius_extra_cells=boost_extra_radius,
                 )
 
                 if attempt >= max_resume_attempts:
@@ -2579,6 +2591,35 @@ class CppPathfinder:
                         len(resume_attempts),
                         summary,
                     )
+                    # Issue #5599 field diagnostics: under KCT_DEBUG_5599, dump
+                    # the final rejected candidate's head/tail segments so the
+                    # violating geometry (mid-path corridor vs rendered
+                    # pad-center tail) is directly readable from the log.
+                    if os.environ.get("KCT_DEBUG_5599"):
+                        logger.warning(
+                            "Net %s: last rejected candidate head=%s tail=%s "
+                            "(%d segments, %d vias); rejection counts=%s "
+                            "violation_cell=%s end_metal=(%d,%d)-(%d,%d) "
+                            "goal_margin=%d",
+                            start.net_name,
+                            [
+                                (round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
+                                for s in route.segments[:4]
+                            ],
+                            [
+                                (round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
+                                for s in route.segments[-6:]
+                            ],
+                            len(route.segments),
+                            len(route.vias),
+                            [a.get("rejected_goal_count") for a in resume_attempts],
+                            [a.get("violation_cell") for a in resume_attempts],
+                            end_pad_bounds.metal_gx1,
+                            end_pad_bounds.metal_gy1,
+                            end_pad_bounds.metal_gx2,
+                            end_pad_bounds.metal_gy2,
+                            2 * trace_radius_cells + 4,
+                        )
                     # Exhausted resume attempts, try Python fallback.
                     # Issue #2476: Capture failure-info before falling back
                     # so the negotiated strategy can still see the cpp-side
@@ -2647,13 +2688,24 @@ class CppPathfinder:
                 if site_repeat_run >= 1 and violation_cell is not None:
                     try:
                         eb = end_pad_bounds
-                        in_approach = (
-                            eb.approach_gx1 <= violation_cell[0] <= eb.approach_gx2
-                            and eb.approach_gy1 <= violation_cell[1] <= eb.approach_gy2
+                        # Issue #5599: the failing approach's violation sits
+                        # against a NEIGHBOR pad of the goal pad -- up to one
+                        # pad pitch (0.5mm on board 04's QFP) plus the clearance
+                        # radius beyond the goal metal -- far outside the
+                        # +2-cell approach bbox.  Use a margin of two trace
+                        # radii + 4 cells (~ one fine pitch + clearance).
+                        goal_margin = 2 * trace_radius_cells + 4
+                        in_goal_vicinity = (
+                            eb.metal_gx1 - goal_margin
+                            <= violation_cell[0]
+                            <= eb.metal_gx2 + goal_margin
+                            and eb.metal_gy1 - goal_margin
+                            <= violation_cell[1]
+                            <= eb.metal_gy2 + goal_margin
                         )
                     except AttributeError:  # pragma: no cover - defensive
-                        in_approach = False
-                    if in_approach:
+                        in_goal_vicinity = False
+                    if in_goal_vicinity:
                         rej_radius = min(site_repeat_run, 5)
                         seen = {cell for cell in rejected_goal_cells}
                         for dx in range(-rej_radius, rej_radius + 1):
@@ -3534,6 +3586,7 @@ class CppPathfinder:
         location: tuple[float, float] | None,
         trace_radius_cells: int,
         amount: float = 20.0,
+        radius_extra_cells: int = 0,
     ) -> None:
         """Boost avoidance cost around a DRC violation location.
 
@@ -3549,13 +3602,22 @@ class CppPathfinder:
                 Chebyshev distance).  Historically a fixed 20.0; issue #5599
                 passes an exponentially escalated amount when the SAME
                 violation site keeps rejecting resume candidates.
+            radius_extra_cells: Extra radius (cells) beyond the historical
+                ``3 * trace_radius_cells`` disc.  Issue #5599: the seg-pad
+                violation is REPORTED at the pad's center, but the violating
+                corridor can sit just past the pad's own corners (board 04's
+                BOOT0 escaped under the neighbor pad's tip at Chebyshev ~16
+                cells from the center -- one cell OUTSIDE the historical
+                radius-15 disc, so no amount escalation could reach it).  A
+                repeated site grows the disc so the corridor that keeps
+                failing is actually inside it.
         """
         if location is None:
             return
         vx, vy = float(location[0]), float(location[1])
         gx, gy = self._grid._impl.world_to_grid(vx, vy)
         # Boost on all layers since violations may affect via transitions
-        radius = max(1, trace_radius_cells * 3)
+        radius = max(1, trace_radius_cells * 3 + max(0, int(radius_extra_cells)))
         for layer in range(self._grid.num_layers):
             self._grid._impl.boost_region_cost(gx, gy, layer, radius, amount)
 

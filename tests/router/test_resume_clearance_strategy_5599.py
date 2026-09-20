@@ -323,6 +323,36 @@ class TestResumeStrategy:
         # over the 3 attempts still eligible to restart (attempts 2, 3, 4).
         assert fake.route_resumable_calls[1] == (0.0, (1_000_000 - 400_000) // 3)
 
+    def test_repeated_goal_vicinity_violation_rejects_landing_band(self) -> None:
+        """A repeated violation AT the goal pad's neighborhood must reject the
+        landing's BAND (growing radius), not just the single landing cell --
+        the single-cell walk is what kept board 04's BOOT0 inside the pad's
+        failing center band for all six attempts."""
+        pathfinder = _make_pathfinder()
+        start, end = _make_pads(net_name="NET_BAND")
+        fake = _FakeImpl(net=start.net)
+
+        # (7.6, 5.0) sits inside the end pad's metal+margin vicinity (end pad
+        # at (8.0, 5.0)); (5.0, 5.0) in the other tests does not.
+        with (
+            mock.patch.object(pathfinder, "_impl", fake),
+            mock.patch.object(
+                pathfinder,
+                "_validate_route_clearance",
+                return_value=cpp_backend.RouteClearanceViolation(7.6, 5.0, "seg-pad", 1, 0.1),
+            ),
+            mock.patch.object(pathfinder, "_try_python_fallback", return_value=None),
+        ):
+            pathfinder.route(start, end)
+
+        attempts = pathfinder.fallback_stats["resume_diagnostics"]["NET_BAND"]["attempts"]
+        counts = [a.get("rejected_goal_count") for a in attempts]
+        assert counts[0] == 1, "first sighting keeps the historical single-cell rejection"
+        assert counts[1] == 9, "first repeat rejects the 3x3 landing band"
+        assert counts[2] >= 17, "later repeats reject growing bands"
+        # All rejections were actually issued to the C++ side.
+        assert len(fake.resume_calls) >= sum(c for c in counts if c)
+
     def test_distinct_violation_sites_never_restart(self) -> None:
         """A violation that MOVES between attempts is not the near-clone
         signature -- the loop keeps plain resumes and the historical flat
