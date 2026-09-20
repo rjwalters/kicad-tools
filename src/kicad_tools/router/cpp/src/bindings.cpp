@@ -174,7 +174,11 @@ NB_MODULE(router_cpp, m) {
         .def_ro("failure_reason", &RouteResult::failure_reason)
         .def_ro("blocking_via_net", &RouteResult::blocking_via_net)
         .def_ro("failure_x", &RouteResult::failure_x)
-        .def_ro("failure_y", &RouteResult::failure_y);
+        .def_ro("failure_y", &RouteResult::failure_y)
+        // Issue #5599: the goal node the A* actually accepted.
+        .def_ro("goal_gx", &RouteResult::goal_gx)
+        .def_ro("goal_gy", &RouteResult::goal_gy)
+        .def_ro("goal_layer", &RouteResult::goal_layer);
 
     // Issue #2476: FailureReason constants (exposed as module attributes
     // so Python tests/strategies can dispatch on the same vocabulary the
@@ -552,6 +556,12 @@ NB_MODULE(router_cpp, m) {
              "passable at a finite per-step penalty instead of hard, so a "
              "zero-overflow hard failure can produce a min-conflict probe "
              "path whose crossed owner nets feed the targeted rip-up.")
+        // Issue #5599: evidence-gated strict foreign-pad kernel for the A*
+        // neighbor filter (see pathfinder.hpp).  Armed by the Python resume
+        // loop after a repeated post-route clearance violation, localized to
+        // a disc around that violation site (cx/cy/radius; cx < 0 = global).
+        .def("set_search_strict_pad_kernel", &Pathfinder::set_search_strict_pad_kernel,
+             "enabled"_a, "cx"_a = -1, "cy"_a = -1, "radius"_a = 0)
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)
