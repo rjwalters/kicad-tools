@@ -808,6 +808,26 @@ Common flags (the full surface lives in `kct route --help`):
 | `--skip-drc` | Skip post-route DRC validation |
 | `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
 
+#### Post-route sidecars
+
+Besides the routed `.kicad_pcb`, a successful `kct route` writes several
+derived sidecars next to the output board. All of them degrade to a warning
+(the route still exits 0) if the output directory is not writable.
+
+| Sidecar | Contents |
+|---------|----------|
+| `net_class_map.json` | The resolved per-net routing classes, for `kct check` auto-discovery |
+| `current_paths.json` | The declared branch current-path intent this route validated against |
+| `<stem>.routing_plan.json` | The report-only capacity plan — see [`routing-plan.md`](routing-plan.md) |
+| `<stem>.access_witness.json` | The ordered commit journal: every copper commit and rip-up, in order, tagged with the pass and iteration that produced it — see [`commit-journal.md`](commit-journal.md) |
+| `fab_profile.json`, `.kicad_pro`, `.kicad_dru` | The resolved manufacturer tier and its constraint exports |
+
+The commit journal has no flag: it is always written, because recording is one
+list append plus one shallow geometry copy per grid mutation and changes no
+copper. It is what lets a later `kct net-status --why` explain a stranded pad
+from a *saved* board, where the live router (and with it the commit order) is
+long gone.
+
 #### Routing around invalid placement
 
 By default, routing excludes each whole net incident to a placement-invalid

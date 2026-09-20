@@ -34,6 +34,7 @@ import base64
 import logging
 import math
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
@@ -889,6 +890,17 @@ class RoutingGrid:
 
         # Track placed routes for net assignment
         self.routes: list[Route] = []
+
+        # Issue #5517 (Epic #5508 Phase 1b): optional commit-journal observer.
+        # Set by ``Autorouter`` to
+        # ``CommitJournal.observe``; called from inside this grid's own lock
+        # at the end of every copper mutation (``mark_route``,
+        # ``unmark_route``, ``resync_route_occupancy``) so the journal's
+        # append order IS the commit order even under region-parallel
+        # routing.  The observer is a pure sink: it must never read the grid
+        # or mutate routing state, which is what makes journaling free of any
+        # effect on the routed copper.
+        self.commit_observer: Callable[[str, Route], None] | None = None
 
         # Issue #2481: Optional back-reference to a paired C++ grid.  When
         # set (by ``CppGrid.from_routing_grid``), rip-up paths invalidate
@@ -4702,6 +4714,11 @@ class RoutingGrid:
             # O(log V) instead of walking ``self.routes`` linearly.
             self._rtree_insert_route_vias(route)
 
+            # Issue #5517: journal the commit while still holding the lock,
+            # so append order is commit order under region-parallel routing.
+            if self.commit_observer is not None:
+                self.commit_observer("mark", route)
+
     def _mark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Mark cells along a segment as blocked (with clearance buffer).
 
@@ -5183,6 +5200,14 @@ class RoutingGrid:
                 self._rtree_remove_route_vias(route)
                 self.routes.remove(route)
                 removed = True
+
+                # Issue #5517: journal the rip-up.  Only a route that was
+                # actually in ``self.routes`` is journaled -- that list is
+                # what ``pad_access.compute_access_set`` reads as "the copper
+                # committed so far", so a no-op unmark of unknown geometry
+                # must not appear in the replay as copper going away.
+                if self.commit_observer is not None:
+                    self.commit_observer("unmark", route)
 
         # Issue #2481: After releasing the grid lock, propagate the rip-up
         # to the paired C++ grid (if any) so its ``stored_vias_`` /
@@ -5690,6 +5715,23 @@ class RoutingGrid:
                     kept.append(current)
                     kept_ids.add(id(current))
             self.routes = kept
+
+            # Issue #5517: journal the resync as explicit removals then
+            # additions, so a replay reproduces this swap without needing to
+            # know WHY it happened (best-iteration rollback, optimizer
+            # geometry swap, connectivity revert).  Both sides are journaled
+            # for EVERY changed pair -- including the in-place-mutation shape
+            # ``(geometry_snapshot, live_route)``, where the object
+            # membership of ``self.routes`` is unchanged but the copper on
+            # the grid is not: the snapshot's geometry left, the live
+            # object's new geometry arrived.
+            if self.commit_observer is not None:
+                for stale, _current in changed:
+                    if stale is not None:
+                        self.commit_observer("resync_remove", stale)
+                for _stale, current in changed:
+                    if current is not None:
+                        self.commit_observer("resync_add", current)
 
             # 3. Wholesale R-tree rebuild from the refreshed routes.
             self._rebuild_segment_index()

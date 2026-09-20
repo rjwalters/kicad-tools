@@ -35,6 +35,18 @@ logger = logging.getLogger(__name__)
 import contextlib
 
 from . import via_conflict as _via_conflict_module
+from .access_witness import (
+    PASS_ESCAPE,
+    PASS_FIXED,
+    PASS_GRACE,
+    PASS_INITIAL,
+    PASS_ITERATION,
+    PASS_POST,
+    PASS_RELIEF,
+    PASS_RESET,
+    PASS_ROUTING,
+    CommitJournal,
+)
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .adaptive_grid import AdaptiveGridRouter
 from .algorithms import (
@@ -1578,11 +1590,21 @@ class Autorouter:
         # ``_release_routing_engine_state`` nulling ``_lattice_pathfinder``.
         self._lattice_failure_reasons: dict[object, str] = {}
 
+        # Issue #5517 (Epic #5508 Phase 1b): ordered commit journal.  A pure
+        # observer on the routing grid -- see
+        # :mod:`kicad_tools.router.access_witness` -- recording every copper
+        # commit / rip-up in order so an offline replay can name the commit
+        # that stranded an unrouted pad.  Always on: the per-mutation cost is
+        # an append plus one shallow geometry copy, which is why Epic #5508's
+        # scope guard forbids a knob for it.
+        self._commit_journal = CommitJournal()
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
+        self._attach_commit_journal()
 
         self.pads: dict[tuple[str, str], Pad] = {}
         # Every physical shape, including explicitly jumpered same-number
@@ -2097,6 +2119,43 @@ class Autorouter:
                 + 1
             )
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
+
+    # ------------------------------------------------------------------
+    # Commit journal (Epic #5508 Phase 1b, issue #5517)
+    # ------------------------------------------------------------------
+
+    @property
+    def commit_journal(self) -> CommitJournal:
+        """Ordered record of every copper commit / rip-up in this run.
+
+        See :mod:`kicad_tools.router.access_witness`.  The journal is
+        populated by an observer installed on ``self.grid``, so it captures
+        the commit paths that bypass :meth:`_mark_route` as well -- the escape
+        pre-pass (``EscapeRouter.apply_escape_routes``) and the negotiated
+        rip-up paths (``NegotiatedRouter``), both of which call the grid
+        directly.
+        """
+        return self._commit_journal
+
+    def _attach_commit_journal(self) -> None:
+        """(Re-)install the journal observer on the current ``self.grid``.
+
+        ``self.grid`` is replaced in three places -- ``__init__``, the
+        region-parallel thread-safe rebuild in :meth:`route_all_negotiated`,
+        and :meth:`_reset_for_new_trial` -- and each new grid starts with no
+        observer, so every one of them must call this.
+        """
+        journal = getattr(self, "_commit_journal", None)
+        if journal is not None:
+            journal.attach(self.grid)
+
+    def _journal_stage(self, pass_name: str, iteration: int = 0):
+        """Tag every commit recorded inside the ``with`` block.
+
+        Returns the :meth:`CommitJournal.context` context manager, so callers
+        read as ``with self._journal_stage(PASS_INITIAL): ...``.
+        """
+        return self._commit_journal.context(pass_name, iteration)
 
     @staticmethod
     def _recovery_hold_worthy(current_overflow: int, best_overflow: int) -> bool:
@@ -5904,6 +5963,17 @@ class Autorouter:
         returns ``None`` because no ``diffpair_partner`` is set anywhere,
         which is bit-for-bit identical to pre-Phase-1C behavior.
         """
+        # Issue #5517 (Epic #5508 Phase 1b): this is the one place every
+        # ``route_all_*`` entry point passes through, so it is where the
+        # commit journal stops calling copper "fixed".  The journal starts
+        # tagged PASS_FIXED, which is true only of the preserved input copper
+        # marked before any routing began; once a routing entry point starts,
+        # its commits must not inherit that label.  The instrumented paths
+        # (``route_all_negotiated``, ``route_all_two_phase``) immediately
+        # refine this to PASS_INITIAL / PASS_ITERATION / ...; the rest report
+        # an honest "some routing entry point, stage unknown".
+        self._commit_journal.set_context(PASS_ROUTING, 0)
+
         # 0. Engage impedance-driven sizing (Issue #2672 / Epic #2556
         #    Phase 3K-cont).  When any net class declares
         #    ``target_diff_impedance`` or ``target_single_impedance``,
@@ -10145,6 +10215,9 @@ class Autorouter:
                 self.grid.bump_occupancy_generation()
                 # Update router to use new grid
                 self.router.grid = self.grid
+                # Issue #5517: the thread-safe rebuild above discarded the
+                # grid the journal observer was installed on.
+                self._attach_commit_journal()
                 neg_router = NegotiatedRouter(
                     self.grid,
                     self.router,
@@ -10287,6 +10360,11 @@ class Autorouter:
             return f"{elapsed:.1f}s"
 
         flush_print("\n--- Iteration 0: Initial routing with sharing ---")
+        # Issue #5517: tag every commit from here to the grace pass as the
+        # initial negotiated pass.  Set (rather than ``with``-scoped) because
+        # the stages below run sequentially in this one function body; the
+        # final tag is reset to PASS_POST after the rip-up loop returns.
+        self._commit_journal.set_context(PASS_INITIAL, 0)
         if progress_callback is not None:
             if not progress_callback(0.0, "Initial routing pass", True):
                 # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
@@ -10382,6 +10460,8 @@ class Autorouter:
 
             if grace_nets:
                 grace_start = time.time()
+                # Issue #5517: still iteration 0, but a distinct stage.
+                self._commit_journal.set_context(PASS_GRACE, 0)
 
                 def _grace_route(net: int, cap: float) -> list[Route]:
                     return self._route_net_negotiated(net, present_factor, per_net_timeout=cap)
@@ -10881,6 +10961,9 @@ class Autorouter:
         try:
             if not timed_out:
                 for iteration in range(1, max_iterations + 1):
+                    # Issue #5517: everything committed or ripped from here on
+                    # belongs to this rip-up / reroute iteration.
+                    self._commit_journal.set_context(PASS_ITERATION, iteration)
                     full_reorder_used_this_iter = False
                     if check_timeout():
                         print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
@@ -13012,6 +13095,12 @@ class Autorouter:
             # (follow-up to #3488).  No-op when no window is open.
             self._flush_corridor_reservation(net_routes)
 
+            # Issue #5517: the rip-up loop is over; everything the caller does
+            # next (best-state restore, optimizer, DRC nudge, clearance
+            # correction) is post-route, and must not be attributed to the
+            # last iteration.
+            self._commit_journal.set_context(PASS_POST, 0)
+
         # Issue #3942: flush buffered oscillation/escape diagnostics only when
         # the route did NOT fully succeed.  These intermediate local-minimum
         # messages describe a state the negotiated loop hit mid-way; when a
@@ -13699,6 +13788,47 @@ class Autorouter:
         )
 
     def _relief_rescue(
+        self,
+        failed_net: int,
+        neg_router: NegotiatedRouter,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_factor: float,
+        per_net_timeout: float | None,
+        flush_print_fn,
+        elapsed_fn,
+        depth: int = 0,
+        deadline: float | None = None,
+        deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        txn_deadline: float | None = None,
+    ) -> bool:
+        """Journal-tagged entry point for :meth:`_relief_rescue_txn` (#5517).
+
+        The rescue is a transaction that rips victims, probes, commits and
+        (on failure) restores -- all of which are copper mutations the
+        commit journal must attribute to the *relief* stage rather than to
+        the enclosing rip-up iteration, so a witness can say "the relief
+        rescue for net N took that copper away".  The iteration number is
+        carried through unchanged.  Behaviour is otherwise identical: this
+        only sets a label.
+        """
+        with self._journal_stage(PASS_RELIEF, self._commit_journal.iteration):
+            return self._relief_rescue_txn(
+                failed_net,
+                neg_router,
+                net_routes,
+                pads_by_net,
+                present_factor,
+                per_net_timeout,
+                flush_print_fn,
+                elapsed_fn,
+                depth=depth,
+                deadline=deadline,
+                deterministic_rescue=deterministic_rescue,
+                txn_deadline=txn_deadline,
+            )
+
+    def _relief_rescue_txn(
         self,
         failed_net: int,
         neg_router: NegotiatedRouter,
@@ -15313,6 +15443,12 @@ class Autorouter:
             # ``Autorouter``, so this is the only way it learns whether to
             # build the sidecar plan.
             emit_routing_plan=self.emit_routing_plan,
+            # Issue #5517 (Epic #5508 Phase 1b): let the detailed-routing
+            # loop tag the commit journal with its own stage boundaries.
+            # ``kct route`` sends every escape-routed board here, so without
+            # this the journal of a dense board would record the right
+            # commits in the right order under no stage at all.
+            journal_stage=self._commit_journal.set_context,
         )
 
     def route_all_two_phase(
@@ -15417,6 +15553,10 @@ class Autorouter:
             max_iterations=max_iterations,
             checkpoint_callback=checkpoint_callback,
         )
+        # Issue #5517: the detailed-routing loop is over; whatever the
+        # caller does next (optimizer, DRC nudge, clearance correction) is
+        # post-route and must not be attributed to the last iteration.
+        self._commit_journal.set_context(PASS_POST, 0)
         # Issue #5519 (Epic #5510, Phase 1): copy the report-only
         # RoutingPlan the two-phase router built (or ``None`` when
         # ``emit_routing_plan`` is off) onto the Autorouter so CLI callers
@@ -15612,11 +15752,27 @@ class Autorouter:
 
         fixed_fills = self.grid.fixed_fills
 
+        # Issue #5517: the grid below is discarded wholesale, taking every
+        # committed route with it.  Journal that as an explicit removal of
+        # each route rather than letting the copper vanish silently -- a
+        # replay that missed this would carry the previous trial's copper
+        # forward and blame the wrong commit for a stranded pad.
+        with self._journal_stage(PASS_RESET):
+            for route in list(self.grid.routes):
+                self._commit_journal.observe("resync_remove", route)
+
         # Recreate grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
+        # Issue #5517: fresh grid, fresh observer install.  The journal itself
+        # is NOT cleared -- a Monte Carlo / evolutionary trial reset is part
+        # of the same run, and the witness needs to see the whole history.
+        # The re-marking below (pads, keepouts, preserved input copper) is the
+        # fixed baseline again, not routing output.
+        self._attach_commit_journal()
+        self._commit_journal.set_context(PASS_FIXED, 0)
 
         self.grid.install_fixed_fills(fixed_fills)
 
@@ -18323,30 +18479,36 @@ class Autorouter:
 
         all_routes: list[Route] = []
 
-        for package in packages:
-            escapes = self._escape.generate_escapes(package)
-            routes = self._escape.apply_escape_routes(escapes)
-            all_routes.extend(routes)
+        # Issue #5517: the escape pre-phase is the replay's baseline -- "access
+        # at escape-prephase end" is the reference point Epic #5508's Phase 2
+        # measures against.  ``EscapeRouter.apply_escape_routes`` marks the
+        # stubs straight onto ``self.grid`` (bypassing ``_mark_route``), so the
+        # grid-level observer is what catches them; this only supplies the tag.
+        with self._journal_stage(PASS_ESCAPE):
+            for package in packages:
+                escapes = self._escape.generate_escapes(package)
+                routes = self._escape.apply_escape_routes(escapes)
+                all_routes.extend(routes)
 
-            # Track these routes
-            self.routes.extend(routes)
+                # Track these routes
+                self.routes.extend(routes)
 
-            # Issue #2401: Build virtual pads at escape endpoints so the
-            # main routing pipeline routes between escape endpoints instead
-            # of original pad centers.  Also mark escape nets as protected
-            # so their stub segments are not ripped up.
-            for escape in escapes:
-                pad = escape.pad
-                pad_key = pad.key
-                if pad_key in self.pads:
-                    self._escape_pad_overrides[pad_key] = self._build_escape_endpoint_pad(
-                        pad, escape
-                    )
+                # Issue #2401: Build virtual pads at escape endpoints so the
+                # main routing pipeline routes between escape endpoints instead
+                # of original pad centers.  Also mark escape nets as protected
+                # so their stub segments are not ripped up.
+                for escape in escapes:
+                    pad = escape.pad
+                    pad_key = pad.key
+                    if pad_key in self.pads:
+                        self._escape_pad_overrides[pad_key] = self._build_escape_endpoint_pad(
+                            pad, escape
+                        )
 
-            print(
-                f"  Escape routes: {package.ref} ({package.package_type.name})"
-                f" - {len(escapes)} pins escaped"
-            )
+                print(
+                    f"  Escape routes: {package.ref} ({package.package_type.name})"
+                    f" - {len(escapes)} pins escaped"
+                )
 
         if self._escape_pad_overrides:
             print(
