@@ -362,8 +362,9 @@ DETERMINISTIC_RESCUE_DEFAULT = False
 # to the +20.0 the DRC-retry feedback already uses; radius adds a small
 # corridor margin so crossing the contested region is priced, not just
 # touching its centre cells.  The mark persists for the rest of the
-# negotiated loop -- bounded by ``max_stagnation_recoveries`` (2) marks per
-# route_all, unlike the unbounded leak it replaces.
+# negotiated loop -- bounded by ``2 * max_stagnation_recoveries`` (2
+# observation points x 2 recoveries) marks per route_all, unlike the
+# unbounded leak it replaces.
 STAGNATION_CONGESTION_AMOUNT = 20.0
 STAGNATION_CONGESTION_RADIUS_CELLS = 2
 
@@ -2127,10 +2128,14 @@ class Autorouter:
           (its negotiated cost is also ``present + history``).
 
         Both marks persist for the remainder of the negotiated loop and
-        are bounded: at most ``max_stagnation_recoveries`` applications
-        per ``route_all_negotiated`` call, each a single fixed-amount
-        bump, unlike the unbounded cross-connection accumulation the
-        leak produced.
+        are bounded: the recovery applies the mark at each congestion
+        observation it makes -- before the cohort sweep (the stagnated
+        footprint) and after it re-lands (the re-landed footprint the
+        follow-through conflict reroutes inherit) -- for at most
+        ``2 * max_stagnation_recoveries`` applications per
+        ``route_all_negotiated`` call, each a single fixed-amount bump,
+        unlike the unbounded cross-connection accumulation the leak
+        produced.
 
         Args:
             overused: Contested cells as ``(gx, gy, layer_idx, usage)``
@@ -11533,6 +11538,27 @@ class Autorouter:
                             # Recompute overflow & cohort tracking after recovery
                             current_overflow = self.grid.get_total_overflow()
                             overused = self.grid.find_overused_cells()
+                            # Issue #5545: the sweep moves the contention, it
+                            # does not necessarily dissolve it -- the cohort
+                            # re-lands in a configuration whose own overused
+                            # cells are NEW (unpriced) cells.  Re-mark the
+                            # post-recovery contended footprint so this
+                            # iteration's subsequent conflict reroutes (the
+                            # ``Rerouted X/Y nets`` follow-through below)
+                            # negotiate around the re-landed contention too,
+                            # not just the original stagnation footprint.
+                            # Measured on board 06 (seed 42): with only the
+                            # pre-sweep mark the sweep landed overflow 2 but
+                            # the follow-through's 2-net conflict reroute
+                            # plowed back up to overflow 5 and the iteration
+                            # still lost to the iter-2 best.
+                            remarked_cells = self._mark_stagnation_congestion(overused)
+                            if remarked_cells:
+                                flush_print(
+                                    f"    Congestion mark (post-sweep): {remarked_cells} "
+                                    f"re-landed contended cell(s) carry "
+                                    f"+{STAGNATION_CONGESTION_AMOUNT:.0f} congestion cost"
+                                )
                             # Update the latest overflow_history entry to reflect
                             # post-recovery state so subsequent oscillation
                             # detection sees the recovery's effect.
