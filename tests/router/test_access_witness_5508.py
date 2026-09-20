@@ -403,6 +403,112 @@ class TestSerialization:
     def test_sidecar_suffix_is_stem_keyed(self):
         assert ACCESS_WITNESS_SIDECAR_SUFFIX == ".access_witness.json"
 
+    def test_repeated_geometry_is_written_once(self):
+        """A rip restates its commit's geometry; the sidecar stores it once.
+
+        Most of a journal IS repeated geometry (186 of board 03's 261
+        records), so without this the always-on sidecar is an order of
+        magnitude larger than the board it describes.
+        """
+        router = _kelvin_fixture()
+        route = _route_obj()
+        router.grid.mark_route(route)
+        router.grid.unmark_route(route)
+        router.grid.mark_route(route)
+
+        payload = router.commit_journal.to_dict()
+        tail = payload["records"][-3:]
+        assert "segments" in tail[0] and "geom_ref" not in tail[0]
+        # The rip and the restore both point back at the commit.
+        assert [r.get("geom_ref") for r in tail[1:]] == [tail[0]["index"]] * 2
+        assert all("segments" not in r for r in tail[1:])
+
+        # ...and a back-reference decodes to the same geometry, so the
+        # de-duplication is invisible to a replay.
+        restored = CommitJournal.from_dict(json.loads(json.dumps(payload)))
+        assert restored.records[-1].segments == restored.records[-3].segments
+        assert restored.records[-1].segments == router.commit_journal.records[-1].segments
+
+    def test_dangling_geometry_reference_is_rejected(self):
+        """A truncated / hand-edited sidecar must fail loudly, not silently."""
+        router = _kelvin_fixture()
+        route = _route_obj()
+        router.grid.mark_route(route)
+        router.grid.unmark_route(route)
+
+        payload = router.commit_journal.to_dict()
+        # Drop the record the last one's geom_ref points at.
+        ref = payload["records"][-1]["geom_ref"]
+        payload["records"] = [r for r in payload["records"] if r["index"] != ref]
+        with pytest.raises(ValueError, match="geometry"):
+            CommitJournal.from_dict(payload)
+
+    def test_geometry_is_not_shared_across_differing_net_names(self):
+        """Segments take their name from the owning record, so the key includes it."""
+
+        def named(net_name: str) -> Route:
+            seg = _segment(2.0, 5.0, 8.0, 5.0)
+            seg.net_name = net_name
+            return Route(net=7, net_name=net_name, segments=[seg])
+
+        router = _kelvin_fixture()
+        router.grid.mark_route(named("A"))
+        router.grid.mark_route(named("B"))
+
+        payload = router.commit_journal.to_dict()
+        # Identical coordinates, but the names differ, so nothing is shared...
+        assert "geom_ref" not in payload["records"][-1]
+        # ...and neither record needs to spell its segment's name out, because
+        # each one agrees with its own record.
+        assert len(payload["records"][-1]["segments"][0]) == 7
+
+        restored = CommitJournal.from_dict(json.loads(json.dumps(payload)))
+        assert restored.records[-1].segments[0].net_name == "B"
+        assert restored.records[-2].segments[0].net_name == "A"
+
+    def test_a_segment_that_disagrees_with_its_record_keeps_its_own_name(self):
+        """The optional trailing element keeps the round trip lossless."""
+        router = _kelvin_fixture()
+        # ``_segment`` names by net number, so this route's segment says "N7"
+        # while the route itself says "ODD" -- the disagreeing case.
+        router.grid.mark_route(
+            Route(net=7, net_name="ODD", segments=[_segment(2.0, 5.0, 8.0, 5.0)])
+        )
+
+        payload = router.commit_journal.to_dict()
+        assert payload["records"][-1]["segments"][0][7] == "N7"
+        restored = CommitJournal.from_dict(json.loads(json.dumps(payload)))
+        assert restored.records[-1].segments[0].net_name == "N7"
+        assert restored.records[-1].net_name == "ODD"
+
+    def test_via_flags_survive_the_compact_encoding(self):
+        router = _kelvin_fixture()
+        route = Route(
+            net=4,
+            net_name="V",
+            segments=[],
+            vias=[
+                Via(
+                    x=3.0,
+                    y=4.0,
+                    drill=0.3,
+                    diameter=0.6,
+                    layers=(Layer.F_CU, Layer.B_CU),
+                    net=4,
+                    net_name="V",
+                    in_pad=True,
+                    is_micro=True,
+                )
+            ],
+        )
+        router.grid.mark_route(route)
+
+        restored = CommitJournal.from_dict(json.loads(json.dumps(router.commit_journal.to_dict())))
+        via = restored.records[-1].vias[0]
+        assert (via.in_pad, via.is_micro) == (True, True)
+        assert via.layers == (Layer.F_CU, Layer.B_CU)
+        assert via.net_name == "V"
+
 
 class TestSidecar:
     def test_route_step_writes_the_sidecar(self, tmp_path):

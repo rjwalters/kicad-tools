@@ -47,6 +47,10 @@ that committed nothing writes no sidecar: an empty witness would read as
 
 ## Format
 
+Written with compact separators (no indentation) — it carries every segment of
+every commit and rip-up, so pretty-printing doubles the file for no reader.
+Expanded here for legibility:
+
 ```json
 {
   "schema_version": 1,
@@ -66,13 +70,20 @@ that committed nothing writes no sidecar: an empty witness would read as
         "net_name": "COMP",
         "route_id": 139742036352208,
         "is_escape": false,
-        "segments": [
-          {
-            "x1": 1.0, "y1": 1.0, "x2": 6.0, "y2": 1.0,
-            "width": 0.2, "layer": 0, "net": 2, "net_name": "COMP"
-          }
-        ],
+        "segments": [[1.0, 1.0, 6.0, 1.0, 0.2, 0, 2]],
         "vias": []
+      },
+      {
+        "index": 1,
+        "kind": "rip",
+        "added": false,
+        "pass": "iteration",
+        "iteration": 1,
+        "net": 2,
+        "net_name": "COMP",
+        "route_id": 139742036352208,
+        "is_escape": false,
+        "geom_ref": 0
       }
     ]
   }
@@ -91,11 +102,30 @@ that committed nothing writes no sidecar: an empty witness would read as
 | `net`, `net_name` | The net whose copper moved. |
 | `route_id` | `id()` of the live `Route` object, so a re-mark can be tied back to its rip. Process-local; meaningful only *within* one journal. |
 | `is_escape` | True for escape-pre-phase stubs. |
-| `segments`, `vias` | A **geometry snapshot** taken at record time (`layer` is the `CopperLayer` integer value). |
+| `segments` | `[x1, y1, x2, y2, width, layer, net]` per segment (`layer` is the `CopperLayer` integer value; coordinates in mm, rounded to 6 dp — the precision a `.kicad_pcb` itself stores). |
+| `vias` | `[x, y, drill, diameter, layer_from, layer_to, net, flags]` per via; `flags` is a bitmask, `1` = in-pad, `2` = microvia. |
+| `geom_ref` | Present *instead of* `segments`/`vias`: the index of an earlier record with identical geometry. |
 
 Geometry is snapshotted rather than referenced on purpose: the post-route
 optimizer and the DRC nudge mutate `Route` objects *in place*, so holding a
 reference would silently rewrite history.
+
+Segments and vias take their `net_name` from the owning record, which is why
+`geom_ref` is only shared between records that agree on it.
+
+### Size
+
+The sidecar is written on every route with no flag to turn it off, so its size
+has to stay proportionate to the board. Two things do that:
+
+- **Fixed-order arrays** instead of a `{"x1": …, "y1": …}` object per segment —
+  ~34 bytes rather than ~136.
+- **`geom_ref` back-references.** Most of a journal *is* repeated geometry: a
+  rip re-states what its commit stated, a restore states it a third time. On
+  board 03, 186 of 261 records are exact geometry duplicates.
+
+Board 03 (~42 000 journaled segments across 261 records) lands at ~0.4 MB;
+written naively it would be ~11 MB.
 
 ### Kinds
 

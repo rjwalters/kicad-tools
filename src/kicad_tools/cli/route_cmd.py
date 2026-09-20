@@ -2767,13 +2767,17 @@ def _write_access_witness_sidecar(
         "journal": journal.to_dict(),
     }
     try:
-        sidecar_path.write_text(json.dumps(payload, indent=2))
+        # Compact separators, unlike the other (small, hand-read) sidecars:
+        # this one carries every segment of every commit and rip-up, so
+        # pretty-printing it doubles a dense board's file for no reader.
+        sidecar_path.write_text(json.dumps(payload, separators=(",", ":")))
     except (OSError, TypeError, ValueError) as e:
         if not quiet:
             print(f"  Warning: could not write access-witness sidecar: {e}")
         return
     if not quiet:
-        print(f"  Access-witness sidecar: {sidecar_path}")
+        size_kb = sidecar_path.stat().st_size / 1024
+        print(f"  Access-witness sidecar: {sidecar_path} ({size_kb:.0f} KB)")
         print(f"  {journal.summary_line()}")
 
 

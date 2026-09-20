@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from kicad_tools.cli.progress import flush_print
 
+from ..access_witness import PASS_GRACE, PASS_INITIAL, PASS_ITERATION
 from .negotiated import (
     GRACE_PASS_BUDGET_S,
     GRACE_PASS_TIER_CAPS_S,
@@ -74,6 +75,7 @@ class TwoPhaseRouter:
         stall_ripup_budget: int | None = None,
         relief_rescue: Callable[..., bool] | None = None,
         emit_routing_plan: bool = True,
+        journal_stage: Callable[[str, int], None] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -132,6 +134,17 @@ class TwoPhaseRouter:
         # False for.  ``None`` (e.g. unit tests constructing
         # TwoPhaseRouter directly) preserves legacy behaviour.
         self._relief_rescue = relief_rescue
+
+        # Issue #5517 (Epic #5508 Phase 1b): optional hook to
+        # ``Autorouter._journal_stage``, which tags every copper commit and
+        # rip-up recorded inside its ``with`` block with the stage that
+        # produced it.  This path is the default ``kct route`` entry point for
+        # any escape-routed board (``route_with_escape`` ->
+        # ``route_all_two_phase``), so without it the commit journal of a
+        # dense board would carry no stage at all.  ``None`` (a unit test
+        # constructing TwoPhaseRouter directly) makes every tag a no-op --
+        # the journal still records, it just cannot say which stage.
+        self._journal_stage = journal_stage
 
         # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
         # sidecar.  ``emit_routing_plan=True`` (default) builds a
@@ -196,6 +209,18 @@ class TwoPhaseRouter:
         # grid's index may still contain a discarded iteration during restore;
         # it is not a snapshot authority.
         _emit_route_checkpoint(callback, self.routes, self.grid.get_total_overflow, iteration)
+
+    def _stage(self, pass_name: str, iteration: int = 0) -> None:
+        """Tag subsequent commit-journal records with this stage (Issue #5517).
+
+        A no-op when no journal hook was threaded in, so a TwoPhaseRouter
+        constructed directly (as unit tests do) behaves exactly as before.
+        The stages below run sequentially in one function body, so this sets
+        the tag rather than scoping it -- ``Autorouter.route_all_two_phase``
+        retags everything after this router returns as post-route work.
+        """
+        if self._journal_stage is not None:
+            self._journal_stage(pass_name, iteration)
 
     def route_all(
         self,
@@ -528,6 +553,9 @@ class TwoPhaseRouter:
         timed_out = False
 
         # Initial routing pass
+        # Issue #5517: every commit from here to the grace pass belongs to
+        # the initial detailed pass, which is iteration 0.
+        self._stage(PASS_INITIAL, 0)
         # Issue #3452: when the wall-clock budget expires mid-list, record
         # the starved tail for the bounded grace pass below instead of
         # silently dropping every remaining net.
@@ -589,6 +617,8 @@ class TwoPhaseRouter:
 
         if grace_nets:
             grace_start = time.monotonic()
+            # Issue #5517: still iteration 0, but a distinct stage.
+            self._stage(PASS_GRACE, 0)
 
             def _grace_route(net: int, cap: float) -> list[Route]:
                 return self._route_net_with_corridor(net, present_factor, per_net_timeout=cap)
@@ -828,6 +858,9 @@ class TwoPhaseRouter:
             present_factor_increment = 0.5
 
             for iteration in range(1, max_iterations + 1):
+                # Issue #5517: everything committed or ripped from here on
+                # belongs to this rip-up / reroute iteration.
+                self._stage(PASS_ITERATION, iteration)
                 if check_timeout():
                     flush_print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
                     timed_out = True

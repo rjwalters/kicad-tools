@@ -44,6 +44,7 @@ from .access_witness import (
     PASS_POST,
     PASS_RELIEF,
     PASS_RESET,
+    PASS_ROUTING,
     CommitJournal,
 )
 from .adaptive import AdaptiveAutorouter, RoutingResult
@@ -5844,6 +5845,17 @@ class Autorouter:
         returns ``None`` because no ``diffpair_partner`` is set anywhere,
         which is bit-for-bit identical to pre-Phase-1C behavior.
         """
+        # Issue #5517 (Epic #5508 Phase 1b): this is the one place every
+        # ``route_all_*`` entry point passes through, so it is where the
+        # commit journal stops calling copper "fixed".  The journal starts
+        # tagged PASS_FIXED, which is true only of the preserved input copper
+        # marked before any routing began; once a routing entry point starts,
+        # its commits must not inherit that label.  The instrumented paths
+        # (``route_all_negotiated``, ``route_all_two_phase``) immediately
+        # refine this to PASS_INITIAL / PASS_ITERATION / ...; the rest report
+        # an honest "some routing entry point, stage unknown".
+        self._commit_journal.set_context(PASS_ROUTING, 0)
+
         # 0. Engage impedance-driven sizing (Issue #2672 / Epic #2556
         #    Phase 3K-cont).  When any net class declares
         #    ``target_diff_impedance`` or ``target_single_impedance``,
@@ -15207,6 +15219,12 @@ class Autorouter:
             # ``Autorouter``, so this is the only way it learns whether to
             # build the sidecar plan.
             emit_routing_plan=self.emit_routing_plan,
+            # Issue #5517 (Epic #5508 Phase 1b): let the detailed-routing
+            # loop tag the commit journal with its own stage boundaries.
+            # ``kct route`` sends every escape-routed board here, so without
+            # this the journal of a dense board would record the right
+            # commits in the right order under no stage at all.
+            journal_stage=self._commit_journal.set_context,
         )
 
     def route_all_two_phase(
@@ -15311,6 +15329,10 @@ class Autorouter:
             max_iterations=max_iterations,
             checkpoint_callback=checkpoint_callback,
         )
+        # Issue #5517: the detailed-routing loop is over; whatever the
+        # caller does next (optimizer, DRC nudge, clearance correction) is
+        # post-route and must not be attributed to the last iteration.
+        self._commit_journal.set_context(PASS_POST, 0)
         # Issue #5519 (Epic #5510, Phase 1): copy the report-only
         # RoutingPlan the two-phase router built (or ``None`` when
         # ``emit_routing_plan`` is off) onto the Autorouter so CLI callers
