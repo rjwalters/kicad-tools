@@ -27,17 +27,17 @@
  * meet the parity bound against Python's float64, so the three primitives are
  * re-implemented in double inside ``clearance_kernel.cpp`` rather than reused.
  *
- * SCOPE (Phase 1b, PR A)
- * ----------------------
- * Segment, via and board-edge shapes.  ``KPad`` (with the ``pad_outline``
- * port of ``validate/rules/clearance.py:_pad_polygon``) and ``KZonePoly``
- * (rings with holes) arrive in the follow-up PR; this header is laid out so
- * adding them is an extra variant alternative, not a re-design.
+ * SCOPE (Phase 1b, complete)
+ * --------------------------
+ * All five shape classes: ``KSegment``, ``KVia``, ``KEdge`` (PR A) plus
+ * ``KPad`` and ``KZonePoly`` (PR B).  Fifteen unordered pair kinds, every one
+ * of them exercised by the parity suite.
  */
 
 #pragma once
 
 #include <limits>
+#include <string>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -101,7 +101,93 @@ struct KEdge {
     std::vector<std::pair<double, double>> points;
 };
 
-using KShape = std::variant<KSegment, KVia, KEdge>;
+// A polygon ring: a *closed* vertex list (first vertex repeated at the end),
+// the convention ``Grid3D::add_fixed_fill`` already uses for zone fills.
+using KRing = std::vector<std::pair<double, double>>;
+
+// A footprint pad, as a Minkowski sum: a convex ``core`` (1, 2 or 4 vertices,
+// already rotated and translated into the board frame) dilated by
+// ``corner_radius``.
+//
+// Every branch of the reference model
+// ``validate/rules/clearance.py:_pad_polygon`` is exactly such a sum:
+//
+//   * ``circle`` (and ``oval``/``obround`` with w == h) -> core is the single
+//     centre point, radius ``min(w, h) / 2``;
+//   * ``oval``/``obround`` -> core is a segment of length
+//     ``max(w, h) - min(w, h)`` along the long axis, radius ``min(w, h) / 2``;
+//   * ``roundrect`` -> core is the inner box ``(w - 2r) x (h - 2r)``, radius
+//     ``r = rratio * min(w, h)``;
+//   * ``rect`` **and every other shape** (``custom``, ``trapezoid``,
+//     ``chamfered``) -> core is the exact ``w x h`` rectangle, radius 0.
+//
+// Carrying the core rather than a tessellated outline is what makes pad
+// distances *exact*: ``copper_gap(pad, X) = dist(core, X) - corner_radius``
+// has no vertex list for the two ports to disagree about, and no chord error
+// to leak into a verdict.  ``pad_outline`` still produces the tessellated
+// polygon for export and for the Phase 1c oracle adapter.
+//
+// ``cx``/``cy`` is the pad centre, which is where the drilled hole sits.
+// ``drill <= 0`` models an SMD pad (hole queries return NO_INTERACTION).
+// ``layer`` is ALL_LAYERS for a through-hole pad.
+struct KPad {
+    KRing core;
+    double corner_radius = 0.0;
+    double cx = 0.0;
+    double cy = 0.0;
+    double drill = 0.0;
+    int layer = ALL_LAYERS;
+};
+
+// A filled copper pour on one layer: an outer ring plus zero or more interior
+// rings (holes).  Mirrors ``grid.hpp``'s ``FixedFill`` and the ``_ZoneFill``
+// model at ``validate/rules/clearance.py:1485``, where one zone fill is a
+// shapely polygon **with holes** and ``SegmentZoneClearanceRule`` measures
+// ``line.distance(poly)`` minus the half width.
+//
+// Containment is even-odd across every ring (the
+// ``grid.cpp:fixed_fill_clear`` walk, without its binning), so a point inside
+// a hole is correctly *outside* the copper.  A zone carries no width: the pour
+// *is* the copper.
+struct KZonePoly {
+    std::vector<KRing> rings;
+    int layer = ALL_LAYERS;
+};
+
+using KShape = std::variant<KSegment, KVia, KEdge, KPad, KZonePoly>;
+
+// ---------------------------------------------------------------------------
+// Pad construction (the ``_pad_polygon`` port)
+// ---------------------------------------------------------------------------
+
+// Build a pad's Minkowski core + radius from KiCad pad parameters.
+//
+// ``shape`` is the KiCad pad-shape keyword; ``w``/``h`` are the pad's *local*
+// size; ``rratio`` the roundrect corner ratio (KiCad default 0.25);
+// ``rotation_deg`` the pad's ABSOLUTE board-frame angle (``Pad.rotation``
+// already includes the footprint rotation per KiCad's file convention, issue
+// #3902); ``cx``/``cy`` the absolute pad centre.
+//
+// The core is rotated by the **negated** angle, matching KiCad's forward
+// transform (``core/geometry.py:rotate_pad_offset``, pcbnew-verified in
+// #3739; the sign error #5227 fixed).  Non-positive sizes yield an empty core,
+// which cannot interact.
+KPad make_pad(const std::string& shape, double w, double h, double rratio,
+              double rotation_deg, double cx, double cy,
+              int layer = ALL_LAYERS, double drill = 0.0);
+
+// The pad's true copper outline as a closed polygon, for export and for the
+// Phase 1c oracle adapter.  Arcs are tessellated with a fixed segment *count*
+// per arc derived from the <= 0.5 um chord-error rule, computed identically in
+// both ports -- never a per-side choice.
+//
+// Not used by ``copper_gap``: pad distances go through the exact core (see
+// ``KPad``), so tessellation can never move a verdict.
+KRing pad_outline(const std::string& shape, double w, double h, double rratio,
+                  double rotation_deg, double cx, double cy);
+
+// Maximum sagitta (chord error) allowed when tessellating a pad arc, in mm.
+constexpr double ARC_CHORD_ERROR_MM = 0.0005;
 
 // ---------------------------------------------------------------------------
 // Predicates

@@ -23,9 +23,13 @@ Two shape sources are driven through both ports:
    overlapping and coincident geometry the corpus never emits (negative gaps
    and the proper-intersection early-out in ``segment_to_segment_distance``).
 
-Scope: Phase 1b PR A covers ``KSegment`` / ``KVia`` / ``KEdge``.  ``KPad`` and
-``KZonePoly`` arrive in the follow-up PR and extend the ``PAIR_KINDS`` table
-below; corpus pads are skipped here on purpose (see ``_corpus_shapes``).
+Scope: Phase 1b is complete here -- all five shape classes (``KSegment``,
+``KVia``, ``KEdge``, ``KPad``, ``KZonePoly``) and all **fifteen** unordered
+pair kinds five shape classes admit.  (#5589's acceptance criteria call that
+"25 kinds", counting ordered pairs; the kernel's answer is order-independent by
+construction, so the unordered count is the one a coverage assertion can use --
+``test_every_pair_kind_is_covered`` checks 15 and the order-independence of
+every pair is asserted separately, on every pair, in ``_compare_shapes``.)
 
 Shaped after ``tests/router/test_pairwise_cpp_parity.py``: module-level
 ``requires_cpp`` skipif, ``router_cpp`` imported lazily inside helpers, and a
@@ -45,7 +49,12 @@ import pytest
 
 from kicad_tools.router import clearance_kernel as ck
 from kicad_tools.router.cpp_backend import is_cpp_available
-from tests.conformance.generator import BOUNDARY_BAND_MM, generate_case
+from tests.conformance.generator import (
+    BOUNDARY_BAND_MM,
+    PAD_SHAPES,
+    PadSpec,
+    generate_case,
+)
 
 requires_cpp = pytest.mark.skipif(
     not is_cpp_available(),
@@ -68,8 +77,8 @@ VERDICT_BOUNDARY_BAND_MM = BOUNDARY_BAND_MM
 # vias and the board outline span every layer and carry no layer at all.
 _LAYER_INDEX = {"F.Cu": 0, "In1.Cu": 1, "In2.Cu": 2, "B.Cu": 3}
 
-# Shape kinds this PR's kernel covers.  KPad / KZonePoly extend it later.
-PAIR_KINDS = ("segment", "via", "edge")
+# Every shape kind the kernel covers.
+PAIR_KINDS = ("segment", "via", "edge", "pad", "zone")
 
 
 # ---------------------------------------------------------------------------
@@ -95,13 +104,46 @@ def _cpp_edge(edge: ck.KEdge):
     return router_cpp.KEdge([(x, y) for x, y in edge.points])
 
 
+def _cpp_pad(pad: ck.KPad):
+    """Twin the *already-built* Python pad, core vertices and all.
+
+    Deliberately not ``router_cpp.make_pad(...)`` from the same parameters:
+    passing the Python core across means a divergence in ``make_pad`` itself
+    cannot hide behind matching gaps.  ``make_pad`` parity is asserted
+    separately, and exactly, by ``test_make_pad_agrees_on_the_core``.
+    """
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KPad(
+        [(x, y) for x, y in pad.core],
+        pad.corner_radius,
+        pad.cx,
+        pad.cy,
+        pad.drill,
+        pad.layer,
+    )
+
+
+def _cpp_zone(zone: ck.KZonePoly):
+    from kicad_tools.router import router_cpp
+
+    return router_cpp.KZonePoly(
+        [[(x, y) for x, y in ring] for ring in zone.rings],
+        zone.layer,
+    )
+
+
 def _to_cpp(shape: ck.KShape):
     """Build the C++ twin of a Python kernel shape."""
     if isinstance(shape, ck.KSegment):
         return _cpp_segment(shape)
     if isinstance(shape, ck.KVia):
         return _cpp_via(shape)
-    return _cpp_edge(shape)
+    if isinstance(shape, ck.KEdge):
+        return _cpp_edge(shape)
+    if isinstance(shape, ck.KPad):
+        return _cpp_pad(shape)
+    return _cpp_zone(shape)
 
 
 def _kind(shape: ck.KShape) -> str:
@@ -109,7 +151,11 @@ def _kind(shape: ck.KShape) -> str:
         return "segment"
     if isinstance(shape, ck.KVia):
         return "via"
-    return "edge"
+    if isinstance(shape, ck.KEdge):
+        return "edge"
+    if isinstance(shape, ck.KPad):
+        return "pad"
+    return "zone"
 
 
 # ---------------------------------------------------------------------------
@@ -117,13 +163,42 @@ def _kind(shape: ck.KShape) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _corpus_pad(pad: PadSpec) -> ck.KPad:
+    """A corpus ``PadSpec`` as a kernel pad, through the ``_pad_polygon`` port.
+
+    The probe footprints are SMD (``drill`` 0), single-layer, and carry their
+    shape keyword / local size / roundrect ratio on ``PadSpec.shape``.  The
+    rotation is already absolute -- the generator's own ``local_x_axis`` uses
+    ``rotate_pad_offset(.., pad.rotation)`` for the same reason (#3902).
+    """
+    shape = pad.shape
+    return ck.make_pad(
+        shape.shape,
+        shape.size[0],
+        shape.size[1],
+        0.25 if shape.roundrect_rratio is None else shape.roundrect_rratio,
+        pad.rotation,
+        pad.x,
+        pad.y,
+        _LAYER_INDEX[pad.layer],
+        0.0,
+    )
+
+
 def _corpus_shapes(seed: int) -> tuple[list[ck.KShape], float]:
     """Kernel shapes for one Phase 1a corpus case, plus its requirement.
 
-    Pads are deliberately skipped: ``KPad`` (and the ``pad_outline`` port of
-    ``validate/rules/clearance.py:_pad_polygon``) lands in the follow-up PR.
-    The board outline is added as a closed ``KEdge`` so copper-to-edge pairs
-    are exercised on every seed.
+    Every copper object the case declares is converted: segments, vias, pads
+    (through :func:`_corpus_pad`) and the pour, plus the board outline as a
+    closed ``KEdge`` so copper-to-edge pairs are exercised on every seed.
+
+    The pour is modelled as its **declared boundary** -- one outer ring, no
+    interior rings.  The corpus writes zones *unfilled* (``ZoneSpec``: "only
+    meaningful after a refill"), so there is no committed ``filled_polygon`` to
+    read here and inventing a knockout would be fiction.  Rings *with* holes --
+    the structure ``KZonePoly`` exists for -- are covered by
+    :func:`_random_shapes` and pinned semantically by
+    ``test_zone_interior_rings_are_not_copper``.
     """
     case = generate_case(seed)
     shapes: list[ck.KShape] = []
@@ -141,23 +216,66 @@ def _corpus_shapes(seed: int) -> tuple[list[ck.KShape], float]:
         )
     for via in case.vias:
         shapes.append(ck.KVia(x=via.x, y=via.y, diameter=via.diameter, drill=via.drill))
+    for pad in case.pads:
+        shapes.append(_corpus_pad(pad))
+    if case.zone is not None:
+        boundary = tuple(case.zone.boundary)
+        shapes.append(
+            ck.KZonePoly(
+                rings=((*boundary, boundary[0]),),
+                layer=_LAYER_INDEX[case.zone.layer],
+            )
+        )
 
     w, h = case.width, case.height
     shapes.append(ck.KEdge(points=((0.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, 0.0))))
     return shapes, case.rules.project_clearance
 
 
+def _random_zone(rng: random.Random) -> ck.KZonePoly:
+    """A rectangular pour, half the time with a rectangular hole punched in it.
+
+    The hole is what makes ``KZonePoly`` more than a polygon: a point inside it
+    is *not* copper.  Sampling holed and un-holed pours in the same corpus is
+    what makes a containment bug on either side show up as a verdict mismatch
+    rather than as a quietly-agreed wrong answer.
+    """
+    cx = round(rng.uniform(-2.0, 2.0), 6)
+    cy = round(rng.uniform(-2.0, 2.0), 6)
+    half_w = round(rng.uniform(0.8, 2.0), 6)
+    half_h = round(rng.uniform(0.8, 2.0), 6)
+    outer = (
+        (cx - half_w, cy - half_h),
+        (cx + half_w, cy - half_h),
+        (cx + half_w, cy + half_h),
+        (cx - half_w, cy + half_h),
+    )
+    rings: list[tuple[tuple[float, float], ...]] = [(*outer, outer[0])]
+    if rng.random() < 0.5:
+        hw = round(half_w * rng.uniform(0.2, 0.6), 6)
+        hh = round(half_h * rng.uniform(0.2, 0.6), 6)
+        hole = (
+            (cx - hw, cy - hh),
+            (cx + hw, cy - hh),
+            (cx + hw, cy + hh),
+            (cx - hw, cy + hh),
+        )
+        rings.append((*hole, hole[0]))
+    return ck.KZonePoly(rings=tuple(rings), layer=rng.choice([0, 1, ck.ALL_LAYERS]))
+
+
 def _random_shapes(rng: random.Random, count: int) -> list[ck.KShape]:
     """Adversarial raw shapes: crossing, overlapping and coincident geometry.
 
     The corpus places every pair at a positive gap near the requirement, so on
-    its own it never reaches the negative-gap branch or the proper-intersection
-    early-out.  These do.
+    its own it never reaches the negative-gap branch, the proper-intersection
+    early-out, or the "this shape is *inside* that pour" containment branch.
+    These do.
     """
     shapes: list[ck.KShape] = []
     for _ in range(count):
         pick = rng.random()
-        if pick < 0.45:
+        if pick < 0.30:
             shapes.append(
                 ck.KSegment(
                     x1=round(rng.uniform(-2.0, 2.0), 6),
@@ -168,7 +286,7 @@ def _random_shapes(rng: random.Random, count: int) -> list[ck.KShape]:
                     layer=rng.choice([0, 1, ck.ALL_LAYERS]),
                 )
             )
-        elif pick < 0.85:
+        elif pick < 0.55:
             diameter = round(rng.uniform(0.3, 0.9), 6)
             shapes.append(
                 ck.KVia(
@@ -180,7 +298,7 @@ def _random_shapes(rng: random.Random, count: int) -> list[ck.KShape]:
                     drill=0.0 if rng.random() < 0.2 else round(diameter * 0.5, 6),
                 )
             )
-        else:
+        elif pick < 0.70:
             n = rng.randint(1, 4)
             shapes.append(
                 ck.KEdge(
@@ -190,6 +308,29 @@ def _random_shapes(rng: random.Random, count: int) -> list[ck.KShape]:
                     )
                 )
             )
+        elif pick < 0.88:
+            # Pads from the whole shape catalogue, including an unknown keyword
+            # so the ``rect`` fallback of ``_pad_polygon`` is exercised, and a
+            # 1-in-4 drilled (through-hole) pad for the hole branches.
+            catalogue = [(s.shape, s.size, s.roundrect_rratio) for s in PAD_SHAPES]
+            catalogue.append(("trapezoid", (1.1, 0.7), None))
+            shape_kw, (w, h), rratio = rng.choice(catalogue)
+            drilled = rng.random() < 0.25
+            shapes.append(
+                ck.make_pad(
+                    shape_kw,
+                    w,
+                    h,
+                    0.25 if rratio is None else rratio,
+                    round(rng.uniform(0.0, 360.0), 3),
+                    round(rng.uniform(-2.0, 2.0), 6),
+                    round(rng.uniform(-2.0, 2.0), 6),
+                    ck.ALL_LAYERS if drilled else rng.choice([0, 1]),
+                    round(min(w, h) * 0.4, 6) if drilled else 0.0,
+                )
+            )
+        else:
+            shapes.append(_random_zone(rng))
     return shapes
 
 
@@ -344,12 +485,17 @@ def test_random_shape_parity(seed_base: int, record_property) -> None:
 
 @requires_cpp
 def test_every_pair_kind_is_covered() -> None:
-    """All six unordered pair kinds this PR's kernel supports are exercised.
+    """All fifteen unordered pair kinds the kernel supports are exercised.
 
     A silent gap in coverage is the failure mode that makes a parity suite
     feel green while the interesting branch is never run.
+
+    Fifteen, not twenty-five: five shape classes admit 25 *ordered* pairs, and
+    #5589's acceptance criteria count them that way, but the kernel's answer is
+    order-independent by construction (that absence is the #5398 fix), so the
+    unordered count is what a coverage set can assert.  Order-independence is
+    checked separately on *every* pair in :func:`_compare_shapes`.
     """
-    rng = random.Random(0xC1EA4)
     shapes: list[ck.KShape] = [
         ck.KSegment(0.0, 0.0, 5.0, 0.0, 0.2, 0),
         ck.KSegment(0.0, 1.0, 5.0, 1.0, 0.2, 0),
@@ -357,16 +503,139 @@ def test_every_pair_kind_is_covered() -> None:
         ck.KVia(3.0, 2.0, 0.6, 0.3),
         ck.KEdge(((-1.0, -1.0), (6.0, -1.0))),
         ck.KEdge(((-1.0, 4.0), (6.0, 4.0))),
+        ck.make_pad("roundrect", 1.0, 1.0, 0.25, 30.0, 1.0, 2.5, 0, 0.0),
+        ck.make_pad("circle", 0.9, 0.9, 0.25, 0.0, 4.0, 2.5, ck.ALL_LAYERS, 0.4),
+        ck.KZonePoly(
+            rings=(((-2.0, 5.0), (7.0, 5.0), (7.0, 7.0), (-2.0, 7.0), (-2.0, 5.0)),),
+            layer=0,
+        ),
+        ck.KZonePoly(
+            rings=(
+                ((-2.0, 8.0), (7.0, 8.0), (7.0, 12.0), (-2.0, 12.0), (-2.0, 8.0)),
+                ((1.0, 9.0), (4.0, 9.0), (4.0, 11.0), (1.0, 11.0), (1.0, 9.0)),
+            ),
+            layer=0,
+        ),
     ]
-    del rng
     seen = {
         tuple(sorted((_kind(a), _kind(b)))) for i, a in enumerate(shapes) for b in shapes[i + 1 :]
     }
     expected = {tuple(sorted((x, y))) for i, x in enumerate(PAIR_KINDS) for y in PAIR_KINDS[i:]}
+    assert len(expected) == 15
     assert seen == expected, f"uncovered pair kinds: {sorted(expected - seen)}"
 
     stats = _compare_shapes(shapes, 0.25)
     assert int(stats["kinds"]) == len(expected)
+
+
+@requires_cpp
+def test_make_pad_agrees_on_the_core() -> None:
+    """``make_pad`` itself is a port, so its output is compared, not assumed.
+
+    :func:`_cpp_pad` deliberately twins the *Python* core rather than calling
+    the C++ ``make_pad``, so a divergence in the shape branches or the rotation
+    sign could not show up as a gap mismatch.  This is where it would.
+    """
+    from kicad_tools.router import router_cpp
+
+    catalogue = [(s.shape, s.size, s.roundrect_rratio) for s in PAD_SHAPES]
+    catalogue += [
+        ("trapezoid", (1.1, 0.7), None),
+        ("obround", (0.8, 0.8), None),
+        ("roundrect", (1.0, 1.0), 0.0),
+        ("roundrect", (1.0, 1.0), 0.5),
+        ("roundrect", (1.4, 0.8), 0.5),
+    ]
+    for shape_kw, (w, h), rratio in catalogue:
+        rr = 0.25 if rratio is None else rratio
+        for rotation in (0.0, 45.0, 90.0, 137.5, 270.0, -33.25):
+            py = ck.make_pad(shape_kw, w, h, rr, rotation, 3.0, -4.0, 1, 0.3)
+            cpp = router_cpp.make_pad(shape_kw, w, h, rr, rotation, 3.0, -4.0, 1, 0.3)
+            label = f"{shape_kw} @ {rotation} deg"
+            assert cpp.corner_radius == pytest.approx(py.corner_radius, abs=1e-15), label
+            assert len(cpp.core) == len(py.core), f"{label}: core vertex count differs"
+            for (pxv, pyv), (cxv, cyv) in zip(py.core, cpp.core, strict=True):
+                assert cxv == pytest.approx(pxv, abs=GAP_TOLERANCE_MM), label
+                assert cyv == pytest.approx(pyv, abs=GAP_TOLERANCE_MM), label
+            assert cpp.cx == pytest.approx(py.cx) and cpp.cy == pytest.approx(py.cy)
+            assert cpp.drill == pytest.approx(py.drill)
+            assert cpp.layer == py.layer
+
+
+@requires_cpp
+def test_pad_outline_agrees_vertex_for_vertex() -> None:
+    """Both ports tessellate a pad arc into the *same* vertex list.
+
+    The segment count per arc is derived from the chord-error rule rather than
+    chosen per side, so the lists must match in length as well as in position.
+    A length mismatch is the drift this assertion exists to catch.
+    """
+    from kicad_tools.router import router_cpp
+
+    catalogue = [(s.shape, s.size, s.roundrect_rratio) for s in PAD_SHAPES]
+    catalogue += [
+        ("trapezoid", (1.1, 0.7), None),
+        # rratio 0 -> a plain rectangle; 0.5 (KiCad's maximum) -> the inner box
+        # collapses to a point and the pad is a true disc.  Both are edge cases
+        # of the ``roundrect`` branch and both must still produce a valid ring.
+        ("roundrect", (1.0, 1.0), 0.0),
+        ("roundrect", (1.0, 1.0), 0.5),
+        ("roundrect", (1.4, 0.8), 0.5),
+    ]
+    for shape_kw, (w, h), rratio in catalogue:
+        rr = 0.25 if rratio is None else rratio
+        for rotation in (0.0, 45.0, 137.5):
+            py = ck.pad_outline(shape_kw, w, h, rr, rotation, 2.0, 1.0)
+            cpp = router_cpp.pad_outline(shape_kw, w, h, rr, rotation, 2.0, 1.0)
+            label = f"{shape_kw} @ {rotation} deg"
+            assert len(py) == len(cpp), f"{label}: {len(py)} vs {len(cpp)} vertices"
+            for (pxv, pyv), (cxv, cyv) in zip(py, cpp, strict=True):
+                assert cxv == pytest.approx(pxv, abs=GAP_TOLERANCE_MM), label
+                assert cyv == pytest.approx(pyv, abs=GAP_TOLERANCE_MM), label
+            # Closed ring, and every vertex on or inside the true outline: the
+            # tessellation is *inscribed*, so it may under-reach by at most the
+            # chord error and must never over-reach.
+            assert py[0] == py[-1], f"{label}: outline is not closed"
+            pad = ck.make_pad(shape_kw, w, h, rr, rotation, 2.0, 1.0)
+            for vx, vy in py:
+                reach = -ck.copper_gap(pad, ck.KVia(vx, vy, 0.0, 0.0))
+                assert reach >= -1e-12, f"{label}: vertex outside the pad copper"
+                assert reach <= ck.ARC_CHORD_ERROR_MM + 1e-12, (
+                    f"{label}: vertex {reach:.3e} mm inside the outline, over the chord budget"
+                )
+
+
+@requires_cpp
+def test_zone_interior_rings_are_not_copper() -> None:
+    """A hole in a pour is not copper -- on both sides, with the same numbers.
+
+    ``KZonePoly`` exists to carry interior rings; a port that ignored them
+    would still agree with itself on every *outer*-ring pair, which is exactly
+    why this is asserted directly rather than left to the random corpus.
+    """
+    from kicad_tools.router import router_cpp
+
+    outer = ((0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0))
+    hole = ((4.0, 4.0), (6.0, 4.0), (6.0, 6.0), (4.0, 6.0), (4.0, 4.0))
+    solid = ck.KZonePoly(rings=(outer,), layer=0)
+    holed = ck.KZonePoly(rings=(outer, hole), layer=0)
+
+    # A via at the hole's centre: buried in copper in the solid pour, 1.0 mm
+    # from the hole wall (minus its own radius) in the holed one.
+    via = ck.KVia(5.0, 5.0, 0.6, 0.3)
+    assert ck.copper_gap(solid, via) == pytest.approx(-0.3, abs=1e-12)
+    assert ck.copper_gap(holed, via) == pytest.approx(1.0 - 0.3, abs=1e-12)
+
+    for zone, expected in ((solid, -0.3), (holed, 0.7)):
+        assert router_cpp.copper_gap(_to_cpp(zone), _to_cpp(via)) == pytest.approx(
+            expected, abs=1e-12
+        )
+
+    # And the verdict flips with it at a 0.5 mm requirement.
+    assert ck.clear(solid, via, 0.5) is False
+    assert ck.clear(holed, via, 0.5) is True
+    assert router_cpp.clear(_to_cpp(solid), _to_cpp(via), 0.5) is False
+    assert router_cpp.clear(_to_cpp(holed), _to_cpp(via), 0.5) is True
 
 
 @requires_cpp
@@ -406,6 +675,52 @@ def test_kernel_matches_reference_arithmetic() -> None:
     edge = ck.KEdge(((-5.0, 2.0), (15.0, 2.0)))
     assert ck.copper_gap(a, edge) == pytest.approx(2.0 - 0.075, abs=1e-12)
     assert math.isinf(ck.copper_gap(edge, ck.KEdge(((0.0, 0.0), (1.0, 0.0)))))
+
+    # A 1.0 mm circular pad is a disc: reach 0.5 mm in every direction, so a
+    # via 2.0 mm away with a 0.6 copper pad leaves 2.0 - 0.5 - 0.3.
+    disc = ck.make_pad("circle", 1.0, 1.0, 0.25, 0.0, 0.0, 5.0, 0, 0.5)
+    v3 = ck.KVia(2.0, 5.0, 0.6, 0.3)
+    assert ck.copper_gap(disc, v3) == pytest.approx(2.0 - 0.5 - 0.3, abs=1e-12)
+    assert router_cpp.copper_gap(_to_cpp(disc), _to_cpp(v3)) == pytest.approx(1.2, abs=1e-12)
+    # ... and its drill-to-drill reading uses the two drills, not the coppers.
+    assert ck.hole_gap(disc, v3) == pytest.approx(2.0 - 0.25 - 0.15, abs=1e-12)
+
+    # A 1.2 x 0.8 rect pad, unrotated: reach 0.6 along +X.
+    rect = ck.make_pad("rect", 1.2, 0.8, 0.25, 0.0, 0.0, 10.0, 0)
+    assert ck.copper_gap(rect, ck.KVia(2.0, 10.0, 0.6, 0.3)) == pytest.approx(
+        2.0 - 0.6 - 0.3, abs=1e-12
+    )
+    # An SMD pad has no hole at all.
+    assert math.isinf(ck.hole_gap(rect, ck.KVia(2.0, 10.0, 0.6, 0.0)))
+
+    # A roundrect at KiCad's maximum rratio 0.5 IS a disc -- the inner box
+    # collapses -- so it must read exactly like the circle above.
+    maxed = ck.make_pad("roundrect", 1.0, 1.0, 0.5, 33.0, 0.0, 5.0, 0)
+    assert len(maxed.core) == 1
+    assert maxed.corner_radius == pytest.approx(0.5, abs=1e-15)
+    assert ck.copper_gap(maxed, v3) == pytest.approx(1.2, abs=1e-12)
+    # rratio 0 is the opposite end: a plain 4-vertex rectangle, no rounding.
+    flat = ck.make_pad("roundrect", 1.0, 1.0, 0.0, 0.0, 0.0, 5.0, 0)
+    assert len(flat.core) == 4
+    assert flat.corner_radius == 0.0
+
+    # A 1.6 x 0.8 oval is a stadium: 0.8 along its long axis, 0.4 across.
+    oval = ck.make_pad("oval", 1.6, 0.8, 0.25, 0.0, 0.0, 15.0, 0)
+    assert ck.copper_gap(oval, ck.KVia(2.0, 15.0, 0.0, 0.0)) == pytest.approx(2.0 - 0.8, abs=1e-12)
+    assert ck.copper_gap(oval, ck.KVia(0.0, 17.0, 0.0, 0.0)) == pytest.approx(2.0 - 0.4, abs=1e-12)
+
+    # A pour is copper with no width of its own: a track whose centreline is
+    # 1.0 mm outside the fill edge leaves 1.0 - half width.
+    zone = ck.KZonePoly(
+        rings=(((0.0, 20.0), (10.0, 20.0), (10.0, 30.0), (0.0, 30.0), (0.0, 20.0)),),
+        layer=0,
+    )
+    track = ck.KSegment(-1.0, 20.0, -1.0, 30.0, 0.2, 0)
+    assert ck.copper_gap(zone, track) == pytest.approx(1.0 - 0.1, abs=1e-12)
+    # Different layer -> no interaction, pours included.
+    assert math.isinf(ck.copper_gap(zone, ck.KSegment(-1.0, 20.0, -1.0, 30.0, 0.2, 1)))
+    # A pour is never drilled.
+    assert math.isinf(ck.hole_gap(zone, track))
 
 
 @requires_cpp
