@@ -256,7 +256,10 @@ namespace router {
 // v36: track current counted route occupancy through rip-up.
 // v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
 // v38: integrate the stored-via guard with current occupancy and indexed frontier.
-constexpr int ROUTER_CPP_BUILD_VERSION = 39;
+// v40: add the Epic #5509 Phase 1b clearance-kernel bindings (KSegment/KVia/
+// KEdge, copper_gap, hole_gap, clear) -- a new bindings.cpp symbol surface, so
+// a v39 .so must be rejected rather than AttributeError inside the parity test.
+constexpr int ROUTER_CPP_BUILD_VERSION = 40;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
