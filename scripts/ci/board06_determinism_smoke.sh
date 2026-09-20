@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Quick board-06 routing determinism smoke test (Issue #3144 / #3272 / #3880 /
-# #5586).
+# #5586 / #5597).
 #
 # Re-routes board 06 N times at seed=42 (default N=5) and asserts:
 #   (1) every routed PCB has the same routed-COPPER SET content-hash
@@ -45,6 +45,18 @@
 # -- so it can be exercised directly in a unit test without a ~9min route
 # (Issue #5586); mirrors the sibling ``board_route_determinism_smoke.sh``'s
 # ``--normalize-copper`` self-test hook.
+#
+# Issue #5597: each run seeds a SCRATCH route dir under ``$OUT_DIR/route``
+# with the committed unrouted PCB
+# (``boards/06-diffpair-test/output/diffpair_test.kicad_pcb``) and passes
+# that dir as ``generate_design.py``'s EXPLICIT positional ``output_dir``.
+# The positional default changed to ``regression-output/`` in d95b6eff3
+# (2026-09-10), and ``--step route`` on a fresh ``regression-output/``
+# fails with "unrouted PCB not found" -- so relying on the implicit default
+# broke this script outright.  This mirrors
+# ``tests/test_board06_determinism.py::_run_route_regen`` and decouples the
+# smoke run from the board's own ``output/`` and ``regression-output/``
+# dirs (a concurrent local ``kct build`` cannot race with it).
 
 set -euo pipefail
 
@@ -98,15 +110,27 @@ OUT_DIR="${BOARD06_DETERMINISM_OUT:-/tmp/board06-determinism}"
 SEED="${BOARD06_DETERMINISM_SEED:-42}"
 SCRIPT="${REPO_ROOT}/boards/06-diffpair-test/generate_design.py"
 PCB_NAME="diffpair_test_routed.kicad_pcb"
+# Issue #5597: scratch route dir passed to generate_design.py as the
+# explicit positional output_dir (seeded per-run below); UNROUTED_PCB is
+# the committed unrouted board the --step route step re-routes.
+ROUTE_DIR="${OUT_DIR}/route"
+UNROUTED_PCB="${REPO_ROOT}/boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
 
 if [[ ! -f "${SCRIPT}" ]]; then
   echo "ERROR: generate_design.py not found at ${SCRIPT}" >&2
+  exit 1
+fi
+if [[ ! -f "${UNROUTED_PCB}" ]]; then
+  echo "ERROR: committed unrouted PCB not found at ${UNROUTED_PCB}" >&2
+  echo "       (boards/06-diffpair-test/output/diffpair_test.kicad_pcb is a" >&2
+  echo "        tracked file; a missing copy means the checkout is broken.)" >&2
   exit 1
 fi
 
 mkdir -p "${OUT_DIR}"
 rm -f "${OUT_DIR}"/run-*.log "${OUT_DIR}"/run-*.kicad_pcb \
       "${OUT_DIR}/hashes.txt" "${OUT_DIR}/drc-counts.txt"
+rm -rf "${ROUTE_DIR}"
 
 echo "==> Board 06 determinism smoke test"
 echo "    Runs:           ${N}"
@@ -129,11 +153,24 @@ for ((i = 1; i <= N; i++)); do
 
   echo "==> Run ${i}/${N}..."
   start_s=$(date +%s)
-  uv run python "${SCRIPT}" --step route --seed "${SEED}" >"${log}" 2>&1
+  # Issue #5597: seed the scratch route dir with the committed unrouted
+  # PCB and pass it as generate_design.py's EXPLICIT positional
+  # output_dir.  The implicit default (regression-output/, d95b6eff3)
+  # starts empty, and --step route requires the unrouted PCB to already
+  # be there -- relying on the default made every run fail with "unrouted
+  # PCB not found".  Re-seeding per run also guarantees each iteration
+  # routes the identical committed input regardless of what a previous
+  # run (or a concurrent kct build) left behind.  Same pattern as
+  # tests/test_board06_determinism.py::_run_route_regen.
+  rm -rf "${ROUTE_DIR}"
+  mkdir -p "${ROUTE_DIR}"
+  cp "${UNROUTED_PCB}" "${ROUTE_DIR}/diffpair_test.kicad_pcb"
+  uv run python "${SCRIPT}" --step route --seed "${SEED}" "${ROUTE_DIR}" \
+    >"${log}" 2>&1
   end_s=$(date +%s)
   elapsed=$((end_s - start_s))
 
-  cp "${REPO_ROOT}/boards/06-diffpair-test/output/${PCB_NAME}" "${pcb_dst}"
+  cp "${ROUTE_DIR}/${PCB_NAME}" "${pcb_dst}"
   raw_hash=$(md5 -q "${pcb_dst}" 2>/dev/null || md5sum "${pcb_dst}" | awk '{print $1}')
   content_hash=$(compute_content_hash "${pcb_dst}")
   # kct check returns exit code 2 when DRC errors are found (board 06
