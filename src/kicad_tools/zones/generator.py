@@ -725,7 +725,9 @@ class ZoneGenerator:
             if loser_poly.area <= 1e-9:
                 return False
             exclusive = loser_poly.difference(winner_poly).area
-            return exclusive >= _OVERLAP_EXCLUSIVE_AREA_MIN_RATIO * loser_poly.area
+            # bool() pins the untyped-Shapely comparison to the declared
+            # return type (mypy no-any-return).
+            return bool(exclusive >= _OVERLAP_EXCLUSIVE_AREA_MIN_RATIO * loser_poly.area)
         except ImportError:
             # No exact geometry available: assume covered (warn), matching
             # the conservative legacy behaviour.
