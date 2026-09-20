@@ -56,28 +56,52 @@ commit) stores a back-reference instead of a second copy.  Board 03's journal
 is 261 records over ~42 000 segments: ~11 MB written naively, ~0.4 MB written
 this way.
 
-Phase 1b's second half adds ``replay(journal, router)`` here, walking these
-records against :func:`~kicad_tools.router.pad_access.compute_access_set` to
-name the commit that stranded each unrouted pad.
+Replay (Phase 1b, second half)
+------------------------------
+
+:func:`replay` walks these records against
+:func:`~kicad_tools.router.pad_access.compute_access_set`, stepping the copper
+forward one record at a time, and reports for every terminal that ended the run
+unrouted: the first ``(pass, iteration)`` at which its access set became empty,
+the nets whose copper closed it, and whether it still had a way out when the
+escape pre-phase finished.  A terminal whose access set is **non-empty** at the
+end is reported as such -- that is a search that refused legal copper (#5509's
+category), not a stranding, and the witness must say so rather than inventing a
+culprit.
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 from .layers import Layer
 from .primitives import Route, Segment, Via
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from .pad_access import AccessSet
+    from .rules import DesignRules
+
 __all__ = [
     "ACCESS_WITNESS_SIDECAR_SUFFIX",
+    "ACCESS_NON_EMPTY",
+    "ACCESS_EMPTY",
+    "ACCESS_NOT_EVALUATED",
     "JOURNAL_SCHEMA_VERSION",
     "MAX_JOURNAL_RECORDS",
+    "MAX_WITNESS_EVALUATIONS",
+    "MAX_WITNESS_PADS",
+    "WITNESS_SCHEMA_VERSION",
+    "AccessWitness",
     "CommitJournal",
     "CommitRecord",
+    "PadWitness",
     "PASS_ESCAPE",
     "PASS_FIXED",
     "PASS_GRACE",
@@ -87,6 +111,10 @@ __all__ = [
     "PASS_RELIEF",
     "PASS_RESET",
     "PASS_ROUTING",
+    "load_access_witness_sidecar",
+    "replay",
+    "stranded_terminals",
+    "witness_for_router",
 ]
 
 #: Sidecar basename suffix, stem-keyed off the routed PCB
@@ -589,3 +617,596 @@ def _copy_vias(vias: Sequence[Via]) -> list[Via]:
         )
         for v in vias
     ]
+
+
+# ===========================================================================
+# Offline witness replay
+# ===========================================================================
+
+#: Bumped when the serialized witness shape changes incompatibly.  Independent
+#: of :data:`JOURNAL_SCHEMA_VERSION`: the two blocks share a sidecar but not a
+#: shape, and either can move without the other.
+WITNESS_SCHEMA_VERSION = 1
+
+#: ``access_at_escape_end`` / ``final_access`` vocabulary.  Spelled with a
+#: hyphen because these strings are read by humans in ``net-status --why``.
+ACCESS_NON_EMPTY = "non-empty"
+ACCESS_EMPTY = "empty"
+#: The replay never got far enough to evaluate this state (the evaluation
+#: budget below ran out).  Distinct from ``empty`` on purpose: "we did not
+#: look" must never read as "there was no way out".
+ACCESS_NOT_EVALUATED = "not-evaluated"
+
+#: Terminals a single replay will track.  The replay is O(pads) per journal
+#: record, so a board that ends with hundreds of stranded pads would otherwise
+#: turn a diagnostic into the run's dominant cost.  Terminals are taken in
+#: sorted ``(ref, pin)`` order, so the truncation is deterministic.
+MAX_WITNESS_PADS = 64
+
+#: Ceiling on :func:`~kicad_tools.router.pad_access.compute_access_set` calls
+#: in one replay.  Each call is a full geometric sweep over the copper
+#: committed so far; this bounds a pathological board's replay to something
+#: comparable to a single routing iteration.  On exhaustion the replay stops
+#: and :attr:`AccessWitness.truncated` says so -- a partial witness that
+#: admits it beats a complete one nobody waited for.
+MAX_WITNESS_EVALUATIONS = 5000
+
+#: Passes that precede the negotiated search.  The replay's baseline -- Epic
+#: #5508's "access at escape-prephase end" -- is the state after the last of
+#: these.
+_BASELINE_PASSES = frozenset({PASS_FIXED, PASS_ESCAPE})
+
+
+@dataclass(frozen=True)
+class PadWitness:
+    """What the journal says about one terminal's access set.
+
+    The fields answer, in order: *did this pad ever lose every way out*, *when*,
+    and *whose copper did it*.
+
+    ``first_closed_at`` is ``None`` when the access set never emptied -- which
+    is a real and important answer, not a missing one: a pad that ends the run
+    unrouted with a non-empty access set was not stranded by committed copper
+    at all, so no commit can be blamed for it (the #5509 category, and the
+    negative control the epic requires).
+    """
+
+    ref: str
+    pin: str
+    net: int
+    net_name: str
+
+    access_at_escape_end: str
+    """:data:`ACCESS_NON_EMPTY` / :data:`ACCESS_EMPTY` / :data:`ACCESS_NOT_EVALUATED`
+    at the end of the escape pre-phase (the replay's baseline)."""
+
+    final_access: str
+    """The same vocabulary, evaluated after the last journal record."""
+
+    first_closed_at: tuple[str, int] | None = None
+    """``(pass, iteration)`` of the record that first emptied the access set."""
+
+    first_closed_index: int | None = None
+    """Journal index of that record, so a reader can find it verbatim."""
+
+    first_closed_kind: str | None = None
+    """That record's :attr:`CommitRecord.kind` (normally ``"commit"``)."""
+
+    closing_nets: tuple[str, ...] = ()
+    """Net names of the copper that rejected every remaining candidate."""
+
+    closing_refs: tuple[str, ...] = ()
+    """``ref.pin`` labels of that copper (``ref`` alone for route copper)."""
+
+    closing_copper_class: tuple[str, ...] = ()
+    """Phase 1a's :attr:`~kicad_tools.router.pad_access.ClosingCopper.kind`
+    classification -- ``foreign_pad`` / ``route_segment`` / ``route_via`` /
+    ``fixed_fill`` / ``keepout`` / ``board_edge`` / ..."""
+
+    closing_markings: tuple[str, ...] = ()
+    """Raster markings read at the closing copper (descriptive labels only --
+    they never took part in the legality decision)."""
+
+    reopened: bool = False
+    """True when a later rip-up gave this terminal a way out again.  The pad
+    was stranded at ``first_closed_at`` and is not stranded now, so a reader
+    must not present the closing commit as the final cause."""
+
+    @property
+    def pad_key(self) -> tuple[str, str]:
+        return (self.ref, self.pin)
+
+    @property
+    def label(self) -> str:
+        return f"{self.ref}.{self.pin}" if self.pin else self.ref
+
+    @property
+    def stranded(self) -> bool:
+        """True when the terminal has no legal first move left."""
+        return self.final_access == ACCESS_EMPTY
+
+    def one_line(self) -> str:
+        """Compact human rendering, e.g. ``U3.1: closed at initial[0] by COMP``."""
+        if self.first_closed_at is None:
+            return (
+                f"{self.label}: access {self.final_access}, no commit closed it "
+                "(search refused legal copper)"
+            )
+        pass_name, iteration = self.first_closed_at
+        nets = ", ".join(self.closing_nets) or "(unattributed)"
+        suffix = " (reopened by a later rip-up)" if self.reopened else ""
+        return f"{self.label}: closed at {pass_name}[{iteration}] by {nets}{suffix}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ref": self.ref,
+            "pin": self.pin,
+            "net": self.net,
+            "net_name": self.net_name,
+            "access_at_escape_end": self.access_at_escape_end,
+            "final_access": self.final_access,
+            "first_closed_at": (
+                {"pass": self.first_closed_at[0], "iteration": self.first_closed_at[1]}
+                if self.first_closed_at is not None
+                else None
+            ),
+            "first_closed_index": self.first_closed_index,
+            "first_closed_kind": self.first_closed_kind,
+            "closing_nets": list(self.closing_nets),
+            "closing_refs": list(self.closing_refs),
+            "closing_copper_class": list(self.closing_copper_class),
+            "closing_markings": list(self.closing_markings),
+            "reopened": self.reopened,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> PadWitness:
+        closed = payload.get("first_closed_at")
+        return cls(
+            ref=str(payload.get("ref", "")),
+            pin=str(payload.get("pin", "")),
+            net=int(payload.get("net", 0)),
+            net_name=str(payload.get("net_name", "")),
+            access_at_escape_end=str(payload.get("access_at_escape_end", ACCESS_NOT_EVALUATED)),
+            final_access=str(payload.get("final_access", ACCESS_NOT_EVALUATED)),
+            first_closed_at=(
+                (str(closed["pass"]), int(closed["iteration"])) if closed is not None else None
+            ),
+            first_closed_index=(
+                int(payload["first_closed_index"])
+                if payload.get("first_closed_index") is not None
+                else None
+            ),
+            first_closed_kind=(
+                str(payload["first_closed_kind"])
+                if payload.get("first_closed_kind") is not None
+                else None
+            ),
+            closing_nets=tuple(str(n) for n in payload.get("closing_nets", ())),
+            closing_refs=tuple(str(n) for n in payload.get("closing_refs", ())),
+            closing_copper_class=tuple(str(n) for n in payload.get("closing_copper_class", ())),
+            closing_markings=tuple(str(n) for n in payload.get("closing_markings", ())),
+            reopened=bool(payload.get("reopened", False)),
+        )
+
+
+@dataclass(frozen=True)
+class AccessWitness:
+    """Replay-derived verdict for every terminal the replay tracked.
+
+    Carries the clearance values the access sets were decided with, because a
+    witness is only as good as the resolver that produced it: Epic #5508's
+    Phase 1a inherits #5509's caveat that the via-site branch uses today's
+    rule resolver, so a witness can be off by exactly that delta until #5509
+    Phase 2 lands.  Recording the numbers is what lets Phase 1c flag it
+    instead of guessing.
+    """
+
+    pads: tuple[PadWitness, ...] = ()
+    record_count: int = 0
+    """Journal records the replay walked."""
+
+    evaluations: int = 0
+    """:func:`~kicad_tools.router.pad_access.compute_access_set` calls made."""
+
+    truncated: bool = False
+    """True when the journal, the pad list, or the evaluation budget was cut."""
+
+    clearance: tuple[tuple[str, float], ...] = ()
+    """Resolver values in force, as sorted ``(name, mm)`` pairs."""
+
+    def __bool__(self) -> bool:
+        return bool(self.pads)
+
+    def __len__(self) -> int:
+        return len(self.pads)
+
+    def __iter__(self) -> Iterator[PadWitness]:
+        return iter(self.pads)
+
+    @property
+    def stranded_pads(self) -> tuple[PadWitness, ...]:
+        """Terminals whose access set is empty at the end of the run."""
+        return tuple(p for p in self.pads if p.stranded)
+
+    def for_net(self, net_name: str) -> AccessWitness:
+        """A view carrying only ``net_name``'s terminals (metadata preserved)."""
+        return AccessWitness(
+            pads=tuple(p for p in self.pads if p.net_name == net_name),
+            record_count=self.record_count,
+            evaluations=self.evaluations,
+            truncated=self.truncated,
+            clearance=self.clearance,
+        )
+
+    def for_pad(self, ref: str, pin: str) -> PadWitness | None:
+        for pad in self.pads:
+            if pad.ref == ref and pad.pin == pin:
+                return pad
+        return None
+
+    def summary_line(self) -> str:
+        closed = sum(1 for p in self.pads if p.first_closed_at is not None)
+        suffix = " (truncated)" if self.truncated else ""
+        return (
+            f"Access witness: {len(self.pads)} terminal(s) replayed over "
+            f"{self.record_count} journal record(s) -- {closed} closed by a "
+            f"commit{suffix}"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": WITNESS_SCHEMA_VERSION,
+            "record_count": self.record_count,
+            "evaluations": self.evaluations,
+            "truncated": self.truncated,
+            "clearance": dict(self.clearance),
+            "pads": [p.to_dict() for p in self.pads],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> AccessWitness:
+        """Inverse of :meth:`to_dict`; rejects an unknown schema version."""
+        version = int(payload.get("schema_version", 0))
+        if version != WITNESS_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported access-witness schema_version {version} "
+                f"(expected {WITNESS_SCHEMA_VERSION})"
+            )
+        clearance = payload.get("clearance") or {}
+        return cls(
+            pads=tuple(PadWitness.from_dict(p) for p in payload.get("pads", ())),
+            record_count=int(payload.get("record_count", 0)),
+            evaluations=int(payload.get("evaluations", 0)),
+            truncated=bool(payload.get("truncated", False)),
+            clearance=tuple(sorted((str(k), float(v)) for k, v in clearance.items())),
+        )
+
+
+def stranded_terminals(router: Any) -> list[tuple[str, str]]:
+    """Terminals of every net that ended the run unrouted, in ``(ref, pin)`` order.
+
+    Two sources, unioned because neither alone is complete:
+
+    * ``router.get_failed_nets()`` -- nets with no committed copper at all
+      (an escape stub does not count, per #3441).  Every pad of such a net is
+      unrouted by definition.
+    * ``router.routing_failures`` -- the per-edge failures, which also catch a
+      *partially* routed net whose remaining pad never landed.
+
+    Returns an empty list for a router that exposes neither (a stub, a
+    non-grid engine), so a caller never has to type-check first.
+    """
+    pads: Mapping[tuple[str, str], Any] = getattr(router, "pads", {}) or {}
+    if not pads:
+        return []
+    nets: Mapping[int, Sequence[tuple[str, str]]] = getattr(router, "nets", {}) or {}
+
+    keys: set[tuple[str, str]] = set()
+    failed_nets = getattr(router, "get_failed_nets", None)
+    if callable(failed_nets):
+        try:
+            for net in failed_nets():
+                keys.update(nets.get(net, ()))
+        except Exception:  # pragma: no cover - defensive; router API is stable
+            pass
+    for failure in getattr(router, "routing_failures", ()) or ():
+        for key in (getattr(failure, "source_pad", None), getattr(failure, "target_pad", None)):
+            if isinstance(key, tuple) and key in pads:
+                keys.add(key)
+    return sorted(k for k in keys if k in pads)
+
+
+class _ReplayCopper:
+    """The copper present at one point in the replay, as ``grid.routes`` sees it.
+
+    Records carry geometry *snapshots*, not references, so a removal cannot be
+    matched by object identity against what the replay has appended.  Matching
+    is by ``route_id`` (the ``id()`` of the live Route the journal observed,
+    which a rip and its commit share) with a geometry-key fallback for the
+    resync case, where the stale and current geometry are different objects.
+    """
+
+    def __init__(self) -> None:
+        self.routes: list[Route] = []
+        self._by_id: dict[int, list[Route]] = {}
+        self._keys: dict[int, tuple[Any, ...]] = {}
+
+    def apply(self, record: CommitRecord) -> None:
+        if record.added:
+            route = record.route
+            self.routes.append(route)
+            self._by_id.setdefault(record.route_id, []).append(route)
+            self._keys[id(route)] = record.geometry_key()
+            return
+        bucket = self._by_id.get(record.route_id)
+        if bucket:
+            route = bucket.pop()
+            self._drop(route)
+            return
+        # Fallback: a wholesale resync removes geometry the replay appended
+        # under a different route_id.  Match the most recent identical shape.
+        key = record.geometry_key()
+        for route in reversed(self.routes):
+            if self._keys.get(id(route)) == key:
+                self._drop(route)
+                return
+
+    def _drop(self, route: Route) -> None:
+        self._keys.pop(id(route), None)
+        for index in range(len(self.routes) - 1, -1, -1):
+            if self.routes[index] is route:
+                del self.routes[index]
+                return
+
+
+def _closing_summary(access: AccessSet) -> dict[str, tuple[str, ...]]:
+    """Attribution fields from an empty access set's closing copper."""
+    nets: set[str] = set()
+    refs: set[str] = set()
+    kinds: set[str] = set()
+    markings: set[str] = set()
+    for item in access.closing_copper:
+        nets.add(item.net_name or f"net{item.net}")
+        refs.add(f"{item.ref}.{item.pin}" if item.pin else item.ref)
+        kinds.add(item.kind)
+        markings.update(item.marking)
+    return {
+        "closing_nets": tuple(sorted(nets)),
+        "closing_refs": tuple(sorted(refs)),
+        "closing_copper_class": tuple(sorted(kinds)),
+        "closing_markings": tuple(sorted(markings)),
+    }
+
+
+def _clearance_values(rules: DesignRules) -> tuple[tuple[str, float], ...]:
+    names = ("trace_width", "trace_clearance", "via_clearance", "min_hole_to_hole")
+    return tuple(
+        sorted((name, float(getattr(rules, name))) for name in names if hasattr(rules, name))
+    )
+
+
+def replay(
+    journal: CommitJournal,
+    router: Any,
+    *,
+    pad_keys: Sequence[tuple[str, str]] | None = None,
+    rules: DesignRules | None = None,
+    max_pads: int = MAX_WITNESS_PADS,
+    max_evaluations: int = MAX_WITNESS_EVALUATIONS,
+) -> AccessWitness:
+    """Name the commit that closed each tracked terminal's access set.
+
+    Walks ``journal`` from an empty board, applying each record's copper in
+    order, and re-evaluates
+    :func:`~kicad_tools.router.pad_access.compute_access_set` for the terminals
+    a record could actually have changed
+    (:func:`~kicad_tools.router.pad_access.affected_pads` over the record's
+    dilated envelope).  **Read-only and offline**: no search runs, no routing
+    decision is consulted, and nothing about the router's outcome changes.
+
+    Args:
+        journal: The run's ordered commit journal.
+        router: The :class:`~kicad_tools.router.core.Autorouter` that produced
+            it.  Supplies the grid (pads, board bounds, clearance predicates),
+            the design rules, and -- when ``pad_keys`` is omitted -- the set of
+            terminals that ended unrouted.
+        pad_keys: Explicit terminals to track, instead of
+            :func:`stranded_terminals`.  Used by the negative control, where
+            the point is to interrogate a pad that is *not* stranded.
+        rules: Design rules override; defaults to ``router.rules``.
+        max_pads: Cap on tracked terminals (:data:`MAX_WITNESS_PADS`).
+        max_evaluations: Cap on access-set evaluations
+            (:data:`MAX_WITNESS_EVALUATIONS`).
+
+    Returns:
+        The :class:`AccessWitness`.  Empty (falsy) when nothing ended unrouted,
+        which is the overwhelmingly common case on a board that routes.
+
+    Note:
+        The replay temporarily rebinds ``grid.routes`` to its own list so the
+        grid's clearance predicates -- which read that attribute and nothing
+        else for committed copper -- see the copper of the replayed *step*
+        rather than the finished board.  The original list is restored on every
+        exit path.  The grid's blocked/usage **raster** is not replayed, so the
+        ``closing_markings`` labels describe the finished board; they are
+        descriptive only and never take part in a legality decision.
+    """
+    from .pad_access import affected_pads, compute_access_set, route_envelope
+
+    grid = getattr(router, "grid", None)
+    resolved_rules = rules if rules is not None else getattr(router, "rules", None)
+    if grid is None or resolved_rules is None:
+        return AccessWitness(record_count=len(journal), truncated=journal.truncated)
+
+    all_pads: Mapping[tuple[str, str], Any] = getattr(router, "pads", {}) or {}
+    keys = list(pad_keys) if pad_keys is not None else stranded_terminals(router)
+    keys = [k for k in keys if k in all_pads]
+    truncated = journal.truncated or len(keys) > max_pads
+    keys = keys[:max_pads]
+    clearance = _clearance_values(resolved_rules)
+    if not keys:
+        return AccessWitness(
+            record_count=len(journal),
+            truncated=truncated,
+            clearance=clearance,
+        )
+
+    # The SEARCH's origin, not the physical pad centre: a net that went through
+    # the escape pre-phase starts from its escape terminal (core.py's
+    # ``_escape_pad_overrides``), and an access set computed at the pad centre
+    # would describe a search nobody ran.
+    overrides = getattr(router, "_escape_pad_overrides", {}) or {}
+    pads = {key: overrides.get(key, all_pads[key]) for key in keys}
+
+    copper = _ReplayCopper()
+    budget = max_evaluations
+    evaluations = 0
+
+    saved_routes = getattr(grid, "routes", [])
+    try:
+        grid.routes = copper.routes
+
+        def evaluate(key: tuple[str, str]) -> AccessSet:
+            nonlocal evaluations
+            evaluations += 1
+            return compute_access_set(pads[key], grid, resolved_rules)
+
+        state: dict[tuple[str, str], AccessSet] = {}
+        for key in keys:
+            if evaluations >= budget:
+                truncated = True
+                break
+            state[key] = evaluate(key)
+
+        first_closed: dict[tuple[str, str], tuple[CommitRecord, dict[str, tuple[str, ...]]]] = {}
+        baseline: dict[tuple[str, str], str] = {}
+        seen_search_pass = False
+
+        for record in journal.records:
+            if not seen_search_pass and record.pass_name not in _BASELINE_PASSES:
+                # First record of the negotiated search: everything before it
+                # is the escape-pre-phase baseline.
+                baseline = {k: _state_label(a) for k, a in state.items()}
+                seen_search_pass = True
+            copper.apply(record)
+            if evaluations >= budget:
+                truncated = True
+                break
+            envelope = route_envelope(record.route, resolved_rules)
+            for key in affected_pads(state, envelope):
+                if evaluations >= budget:
+                    truncated = True
+                    break
+                access = evaluate(key)
+                state[key] = access
+                if access.is_empty() and key not in first_closed:
+                    first_closed[key] = (record, _closing_summary(access))
+        if not seen_search_pass:
+            baseline = {k: _state_label(a) for k, a in state.items()}
+    finally:
+        grid.routes = saved_routes
+
+    witnesses: list[PadWitness] = []
+    for key in keys:
+        pad = pads[key]
+        closed = first_closed.get(key)
+        final = _state_label(state.get(key))
+        attribution = closed[1] if closed is not None else {}
+        witnesses.append(
+            PadWitness(
+                ref=key[0],
+                pin=key[1],
+                net=int(getattr(pad, "net", 0)),
+                net_name=str(getattr(pad, "net_name", "")),
+                access_at_escape_end=baseline.get(key, ACCESS_NOT_EVALUATED),
+                final_access=final,
+                first_closed_at=(
+                    (closed[0].pass_name, closed[0].iteration) if closed is not None else None
+                ),
+                first_closed_index=closed[0].index if closed is not None else None,
+                first_closed_kind=closed[0].kind if closed is not None else None,
+                reopened=closed is not None and final == ACCESS_NON_EMPTY,
+                closing_nets=attribution.get("closing_nets", ()),
+                closing_refs=attribution.get("closing_refs", ()),
+                closing_copper_class=attribution.get("closing_copper_class", ()),
+                closing_markings=attribution.get("closing_markings", ()),
+            )
+        )
+
+    return AccessWitness(
+        pads=tuple(witnesses),
+        record_count=len(journal),
+        evaluations=evaluations,
+        truncated=truncated,
+        clearance=clearance,
+    )
+
+
+def _state_label(access: AccessSet | None) -> str:
+    if access is None:
+        return ACCESS_NOT_EVALUATED
+    return ACCESS_EMPTY if access.is_empty() else ACCESS_NON_EMPTY
+
+
+def witness_for_router(router: Any) -> AccessWitness | None:
+    """Replay ``router``'s own journal, memoizing the result on the router.
+
+    Two post-route consumers want the same witness -- the
+    ``<stem>.access_witness.json`` sidecar and ``kct route --format json`` --
+    and the replay is the expensive half.  Computing it once per router keeps
+    the second consumer free.
+
+    Returns ``None`` when the router has no journal (a stub, a non-grid
+    engine); returns an empty-but-present witness when the journal exists and
+    nothing ended unrouted, so a caller can tell "not applicable" from
+    "nothing stranded".
+    """
+    journal = getattr(router, "commit_journal", None)
+    if journal is None:
+        return None
+    cached = getattr(router, "_access_witness_cache", None)
+    if isinstance(cached, AccessWitness) and cached.record_count == len(journal):
+        return cached
+    witness = replay(journal, router)
+    with contextlib.suppress(Exception):  # a frozen / slotted stub router
+        router._access_witness_cache = witness
+    return witness
+
+
+def load_access_witness_sidecar(path: str | Path) -> AccessWitness | None:
+    """Load the witness block of an ``.access_witness.json`` sidecar.
+
+    ``net-status --why`` classifies a *saved* board: the live router that knew
+    the commit order is long gone, so the sidecar is the only thing that can
+    carry the witness across that boundary.
+
+    Args:
+        path: Either the sidecar itself, or -- the usual case -- the
+            ``.kicad_pcb`` it belongs to, in which case
+            ``<stem>.access_witness.json`` beside that board is read.
+            Discovery is scoped to the board's own directory, matching the
+            other single-directory sidecar consumers.
+
+    Returns:
+        ``None`` -- never raises -- when there is no sidecar, when it holds no
+        witness block (a run where nothing was stranded writes none), or when
+        it cannot be parsed.  A malformed diagnostic sidecar must not break
+        output that worked without it.
+    """
+    given = Path(path)
+    sidecar = (
+        given
+        if given.name.endswith(ACCESS_WITNESS_SIDECAR_SUFFIX)
+        else given.parent / f"{given.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+    )
+    if not sidecar.is_file():
+        return None
+    try:
+        payload = json.loads(sidecar.read_text())
+        block = payload.get("witness")
+        if not isinstance(block, dict):
+            return None
+        return AccessWitness.from_dict(block)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None

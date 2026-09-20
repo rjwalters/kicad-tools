@@ -819,7 +819,7 @@ derived sidecars next to the output board. All of them degrade to a warning
 | `net_class_map.json` | The resolved per-net routing classes, for `kct check` auto-discovery |
 | `current_paths.json` | The declared branch current-path intent this route validated against |
 | `<stem>.routing_plan.json` | The report-only capacity plan — see [`routing-plan.md`](routing-plan.md) |
-| `<stem>.access_witness.json` | The ordered commit journal: every copper commit and rip-up, in order, tagged with the pass and iteration that produced it — see [`commit-journal.md`](commit-journal.md) |
+| `<stem>.access_witness.json` | The ordered commit journal — every copper commit and rip-up, in order, tagged with the pass and iteration that produced it ([`commit-journal.md`](commit-journal.md)) — plus, when the run stranded anything, the replayed per-pad access witness ([`../diagnostics/access-witness.md`](../diagnostics/access-witness.md)) |
 | `fab_profile.json`, `.kicad_pro`, `.kicad_dru` | The resolved manufacturer tier and its constraint exports |
 
 The commit journal has no flag: it is always written, because recording is one
@@ -827,6 +827,13 @@ list append plus one shallow geometry copy per grid mutation and changes no
 copper. It is what lets a later `kct net-status --why` explain a stranded pad
 from a *saved* board, where the live router (and with it the commit order) is
 long gone.
+
+The sidecar's `witness` block is written only when the run left something
+unrouted — a board that routes cleanly gets the journal alone. The block is
+produced by replaying the journal against the live grid at the end of the
+route, because the clearance resolver that decided each access set is gone
+once the router is. `kct route --format json` reports the same block under
+`access_witness`.
 
 #### Routing around invalid placement
 
@@ -1494,6 +1501,42 @@ kct net-status board.kicad_pcb --incomplete --format json
 kct net-status board.kicad_pcb --by-class
 kct net-status board.kicad_pcb --net DAC_CLK --why   # only DAC_CLK's diagnosis
 ```
+
+#### `--why`: the access witness
+
+`--why` classifies each incomplete net into the `ESCAPE_BLOCKED` /
+`CONGESTION_SATURATED` / `BUDGET_STARVED` / `PLACEMENT_BOUND` /
+`POUR_DISCONTINUOUS` taxonomy, and reports the `blocking nets` its
+line-of-sight scan finds near the stranded pads.
+
+When a [`<stem>.access_witness.json`](#post-route-sidecars) sidecar sits next
+to the board — `kct route` writes one — each diagnosis additionally carries an
+**access witness**: the per-pad verdict replayed from the order copper actually
+landed in, rather than inferred from the finished board. No flag enables it;
+the sidecar is auto-discovered from the board's own directory, and output is
+byte-identical to a run without one when it is absent.
+
+| Field | Meaning |
+|-------|---------|
+| `access at escape end` | Whether the pad still had a legal first move when the escape pre-phase finished (`non-empty` / `empty` / `not-evaluated`). `empty` here means the pad was walled in by *placement*, before the search committed anything |
+| `access now` | The same, evaluated after the last journal record |
+| `first closed at` | `pass[iteration]` of the commit that emptied the access set, plus its journal record index and kind (`commit` / `rip` / `restore` / `rollback`). `never` when no commit closed it |
+| `closing nets` | Net names of the copper that rejected every remaining candidate |
+| `closing copper` | Those items as `ref.pin` labels |
+| `closing copper class` | Phase 1a's classification of them — `foreign_pad`, `route_segment`, `route_via`, `fixed_fill`, `keepout`, `board_edge`, … |
+| `resolver clearances` | The `trace_width` / `trace_clearance` / `via_clearance` / `min_hole_to_hole` values the verdict was decided with |
+
+A pad reported as `access now: non-empty` with `first closed at: never` is the
+important negative result: **nothing the router committed took this pad's way
+out**. The pad was reachable and the search declined to reach it, which is a
+different defect from a stranding and must not be reported as one.
+
+In `--format json` the same data appears under each net's `access_witness`
+key, with `pads[]` carrying `access_at_escape_end`, `final_access`,
+`first_closed_at`, `first_closed_index`, `first_closed_kind`, `closing_nets`,
+`closing_refs`, `closing_copper_class`, `closing_markings` and `reopened`. The
+key is **absent** (not null) when no sidecar was found. Full format reference:
+[`../diagnostics/access-witness.md`](../diagnostics/access-witness.md).
 
 ---
 
