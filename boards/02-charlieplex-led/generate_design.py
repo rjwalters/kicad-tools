@@ -158,11 +158,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # copper.  --deterministic-budget (#3538) disables the per-net
         # wall-clock cutoff and pins a fixed node-expansion backstop, so
         # the seed-42 re-route is byte-identical (UUID-normalized) across
-        # machines.  --timeout 240 below is retained only as a SAFETY
-        # backstop (the normalizer warns if it would bind).
+        # machines.  --timeout below is retained only as a SAFETY backstop
+        # (the normalizer warns if it would bind).
+        #
+        # Issue #5587: 240s was measured firing on a contended host even
+        # with --deterministic-budget -- the outer stage deadline is still
+        # WALL-CLOCK, so it can bind before the negotiated loop's own
+        # best-stall-patience early-stop does, reintroducing host-load
+        # dependence.  Raised to 900s (well beyond the ~30-100s a quiet
+        # host needs) so the iteration budget, not the wall clock, is what
+        # bounds the work in practice.
         "--deterministic-budget",
         "--timeout",
-        "240",
+        "900",
         "--seed",
         "42",
         "--no-auto-pour",
