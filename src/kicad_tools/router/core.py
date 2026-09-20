@@ -339,6 +339,34 @@ RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 # stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
 
+# Issue #5545: congestion-mark parameters for the stagnation-recovery cohort
+# reroute.  When the negotiated loop's rip-up cohort has stagnated (same
+# cohort, overflow stuck in a narrow band), the recovery sweep needs a
+# persistent spatial cost signal to de-oscillate the contended cells.
+# Historically that signal arrived by accident: stale per-connection
+# clearance-retry penalties (``_boost_avoidance_at``'s +20-per-boost region
+# marks) leaked across connections and priced the grid the cohort reroute
+# searched.  Flipping ``clear_avoidance_after_connection`` to ``True``
+# removed the leak -- and with it the ONLY persistent per-cell congestion
+# memory the C++ A* ever saw (production never syncs Python-grid usage /
+# history onto the C++ grid, so the PathFinder present/history terms are
+# inert on the native backend; see ``Grid3D::get_negotiated_cost``).
+# The recovery therefore now derives the same class of signal from its own
+# congestion state: the cells the cohort keeps fighting over
+# (``find_overused_cells``) get a bounded tapered bump on the *history*
+# cost term of both grids (see ``_mark_stagnation_congestion``).  History
+# is the right channel: it prices negotiated-mode searches only, and no
+# production path clears it -- the per-connection cleanup zeroes
+# ``avoidance_cost`` instead, so a mark placed there would survive only
+# until the cohort sweep's first ``route()`` call exited.  Amount anchors
+# to the +20.0 the DRC-retry feedback already uses; radius adds a small
+# corridor margin so crossing the contested region is priced, not just
+# touching its centre cells.  The mark persists for the rest of the
+# negotiated loop -- bounded by ``max_stagnation_recoveries`` (2) marks per
+# route_all, unlike the unbounded leak it replaces.
+STAGNATION_CONGESTION_AMOUNT = 20.0
+STAGNATION_CONGESTION_RADIUS_CELLS = 2
+
 
 @dataclass
 class RoutingFailure:
@@ -2068,6 +2096,75 @@ class Autorouter:
                 + 1
             )
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
+
+    def _mark_stagnation_congestion(
+        self,
+        overused: list[tuple[int, int, int, int]],
+        *,
+        amount: float = STAGNATION_CONGESTION_AMOUNT,
+        radius_cells: int = STAGNATION_CONGESTION_RADIUS_CELLS,
+    ) -> int:
+        """Put a persistent congestion cost mark on a stagnating cohort's cells.
+
+        Issue #5545: the stagnation-recovery cohort reroute de-oscillates
+        through a persistent spatial penalty on the contended cells.  The
+        pre-#5504 router got that penalty by accident -- clearance-retry
+        boosts from an earlier connection leaked across connections and
+        priced the cohort's A* searches.  This helper replaces the leak
+        with a congestion-derived mark on the PathFinder *history* term:
+
+        * C++ grid: a tapered ``history_cost`` bump (Chebyshev radius,
+          ``amount * (1 - dist / (radius + 1))`` -- the same kernel shape
+          ``boost_region_cost`` uses) written through the bound
+          ``at(x, y, layer)`` cell reference.  History is the right
+          channel: it prices negotiated-mode searches only, and nothing
+          in production clears it -- the per-connection cleanup zeroes
+          ``avoidance_cost``, so a mark placed there would survive only
+          until the cohort sweep's first ``route()`` call exited.
+        * Python grid: ``update_history_costs(amount)`` raises history
+          cost by ``amount * (usage - 1)`` on exactly the overused cells,
+          so the pure-Python fallback A* sees the equivalent steering
+          (its negotiated cost is also ``present + history``).
+
+        Both marks persist for the remainder of the negotiated loop and
+        are bounded: at most ``max_stagnation_recoveries`` applications
+        per ``route_all_negotiated`` call, each a single fixed-amount
+        bump, unlike the unbounded cross-connection accumulation the
+        leak produced.
+
+        Args:
+            overused: Contested cells as ``(gx, gy, layer_idx, usage)``
+                tuples from ``RoutingGrid.find_overused_cells``.
+            amount: Per-cell cost added at each mark centre (anchors to
+                the +20.0 the DRC-retry feedback uses).
+            radius_cells: Chebyshev radius around each centre that also
+                receives the (tapered) cost.
+
+        Returns:
+            Number of contended cells marked (0 when ``overused`` is
+            empty -- nothing to de-oscillate).
+        """
+        if not overused:
+            return 0
+        cpp_grid = self._cpp_grid
+        if cpp_grid is not None:
+            impl = cpp_grid._impl
+            cols, rows = cpp_grid.cols, cpp_grid.rows
+            for gx, gy, layer_idx, _usage in overused:
+                x1 = max(gx - radius_cells, 0)
+                x2 = min(gx + radius_cells, cols - 1)
+                y1 = max(gy - radius_cells, 0)
+                y2 = min(gy + radius_cells, rows - 1)
+                for y in range(y1, y2 + 1):
+                    for x in range(x1, x2 + 1):
+                        dist = max(abs(x - gx), abs(y - gy))
+                        scale = 1.0 - dist / (radius_cells + 1.0)
+                        cell = impl.at(x, y, layer_idx)
+                        cell.history_cost += amount * scale
+        # Python-grid mirror for the fallback A*: bumps history cost by
+        # amount * (usage - 1) on exactly the overused cells.
+        self.grid.update_history_costs(amount)
+        return len(overused)
 
     def _mark_route(self, route: Route) -> None:
         """Mark a route on both Python and C++ grids.
@@ -11357,6 +11454,23 @@ class Autorouter:
                                 f"elevated present_factor ({elapsed_str()})"
                             )
                             flush_print(f"    Cohort: {', '.join(cohort_names)}")
+                            # Issue #5545: congestion-mark the contended cells
+                            # BEFORE ripping the cohort, so both the cohort
+                            # sweep and this iteration's subsequent conflict
+                            # reroutes search a grid that prices the region
+                            # they keep fighting over.  This is the
+                            # congestion-derived replacement for the stale
+                            # per-connection clearance-retry penalty that
+                            # used to leak into these searches (see
+                            # ``_mark_stagnation_congestion``).
+                            marked_cells = self._mark_stagnation_congestion(overused)
+                            if marked_cells:
+                                flush_print(
+                                    f"    Congestion mark: {marked_cells} contended "
+                                    f"cell(s) carry +{STAGNATION_CONGESTION_AMOUNT:.0f} "
+                                    f"congestion cost (radius "
+                                    f"{STAGNATION_CONGESTION_RADIUS_CELLS} cells)"
+                                )
                             # Rip up all cohort routes (only the ones currently routed)
                             ripup_targets = [
                                 n for n in recovery_cohort if n in net_routes and net_routes[n]
