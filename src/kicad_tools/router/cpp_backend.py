@@ -2559,7 +2559,15 @@ class CppPathfinder:
                     and violation_cell is not None
                     and hasattr(self._impl, "set_search_strict_pad_kernel")
                 ):
-                    strict_radius = 2 * trace_radius_cells + 6
+                    # Disc radius: the violation is REPORTED at the neighbor
+                    # pad's center, but the failing steps can run the whole
+                    # own-pad-to-neighbor corridor -- up to a pad pitch plus
+                    # a pad length away (board 04 BOOT0's under-tip diagonal
+                    # sits ~18 cells from the reported center; a 16-cell disc
+                    # missed it).  Two trace radii + 24 cells (~1.7mm at a
+                    # 0.05mm grid) covers the pad pair; still local enough to
+                    # leave the rest of a dense pad array untouched.
+                    strict_radius = 2 * trace_radius_cells + 24
                     self._impl.set_search_strict_pad_kernel(
                         True, violation_cell[0], violation_cell[1], strict_radius
                     )
