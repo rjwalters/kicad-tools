@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Quick board-06 routing determinism smoke test (Issue #3144 / #3272 / #3880).
+# Quick board-06 routing determinism smoke test (Issue #3144 / #3272 / #3880 /
+# #5586).
 #
 # Re-routes board 06 N times at seed=42 (default N=5) and asserts:
 #   (1) every routed PCB has the same routed-COPPER SET content-hash
-#       (only ``(segment|via|arc)`` lines, UUID-stripped, SORTED),
+#       (whole ``(segment|via|arc)`` nodes via
+#       ``scripts/ci/normalize_copper.py``, UUID-stripped, SORTED),
 #   (2) every ``kct check`` invocation reports the same error count.
 #
 # The two checks are complementary: (1) catches routing-path
@@ -32,15 +34,66 @@
 # Usage:
 #   ./scripts/ci/board06_determinism_smoke.sh        # 5 runs
 #   ./scripts/ci/board06_determinism_smoke.sh 3      # 3 runs (faster)
+#   ./scripts/ci/board06_determinism_smoke.sh --content-hash <pcb>
 #
 # Each run takes ~6-9 min wall-clock on local 8-core hardware and
 # ~20-30 min on a 2-core CI runner.  The script bails on the first
 # divergence rather than running the full N x ~9min loop.
+#
+# ``--content-hash <pcb>`` prints the content hash for ONE already-routed
+# PCB and exits -- the exact code path the determinism loop below compares
+# -- so it can be exercised directly in a unit test without a ~9min route
+# (Issue #5586); mirrors the sibling ``board_route_determinism_smoke.sh``'s
+# ``--normalize-copper`` self-test hook.
 
 set -euo pipefail
 
-N="${1:-5}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+# Helper: compute a content hash of the routed COPPER SET by delegating to
+# ``scripts/ci/normalize_copper.py`` (Issue #5580 / #5586), which compares
+# whole, paren-balanced ``(segment ...)`` / ``(via ...)`` / ``(arc ...)``
+# nodes -- geometry, width, layer and net included -- rather than raw
+# lines.  ``uuid`` / ``tstamp`` children are stripped and the record list
+# is SORTED, so element WRITE ORDER in the file does not matter, only the
+# SET of copper geometry.  This mirrors the sibling
+# ``board_route_determinism_smoke.sh`` (#3799) and the order-insensitive
+# DRC-count gate.
+#
+# Issue #3880 (original hash, superseded by #5586): a line-based
+# ``grep -E '^[[:space:]]*\((segment|via|arc)'`` over the raw file kept only
+# the bare ``(segment`` / ``(via`` HEADER line of each MULTI-LINE
+# s-expression and discarded every ``(start ...)`` / ``(end ...)`` /
+# ``(width ...)`` / ``(layer ...)`` / ``(net ...)`` child -- degenerating the
+# comparison to ``segment_count == segment_count && via_count == via_count``,
+# blind to actual routed geometry.  See ``scripts/ci/normalize_copper.py``'s
+# module docstring for the full history.
+#
+# Issue #3272: the router emits deterministic UUIDs when a seed is
+# supplied (see
+# :func:`kicad_tools.router.primitives.enable_deterministic_uuids`) but
+# the normalizer still strips ``uuid``/``tstamp`` defensively so the harness
+# catches a regression in that toggle via the raw-MD5 NOTE path rather than
+# masking it.
+compute_content_hash() {
+  local path="$1"
+  uv run python "${REPO_ROOT}/scripts/ci/normalize_copper.py" "${path}" \
+    | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | awk '{print $1}'; fi; }
+}
+
+# Self-test / introspection hook (Issue #5586): hash ONE routed PCB and
+# exit, without running the full N x ~9min route loop below.
+if [[ "${1:-}" == "--content-hash" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    echo "ERROR: --content-hash requires a .kicad_pcb path" >&2
+    echo "Usage: $0 --content-hash <pcb>" >&2
+    exit 1
+  fi
+  compute_content_hash "$2"
+  exit 0
+fi
+
+N="${1:-5}"
 OUT_DIR="${BOARD06_DETERMINISM_OUT:-/tmp/board06-determinism}"
 SEED="${BOARD06_DETERMINISM_SEED:-42}"
 SCRIPT="${REPO_ROOT}/boards/06-diffpair-test/generate_design.py"
@@ -65,30 +118,6 @@ echo
 # Standardise PYTHONHASHSEED for the child processes so callers who
 # forgot to export it still get deterministic string-hash behaviour.
 export PYTHONHASHSEED="${PYTHONHASHSEED:-42}"
-
-# Helper: compute a content hash of the routed COPPER SET.  Issue #3880:
-# keep only ``(segment|via|arc)`` lines, strip every ``(uuid "...")`` /
-# ``(tstamp ...)`` token, and SORT -- so element WRITE ORDER in the file
-# does not matter, only the SET of copper geometry.  This mirrors the
-# sibling ``board_route_determinism_smoke.sh`` (#3799) and the
-# order-insensitive DRC-count gate.
-#
-# Issue #3272: the router emits deterministic UUIDs when a seed is
-# supplied (see
-# :func:`kicad_tools.router.primitives.enable_deterministic_uuids`) but
-# we still strip defensively so the harness catches a regression in that
-# toggle via the raw-MD5 NOTE path rather than masking it.  Restricting
-# to copper + sorting (rather than hashing the whole file in write order)
-# is what makes the hash assert the ROUTING invariant -- the diff-pair
-# pre-pass reorders segment emission run-to-run without changing the
-# routed copper, and that cosmetic reordering must not red-light the gate.
-compute_content_hash() {
-  local path="$1"
-  sed -E 's/\(uuid "[^"]*"\)/(uuid "X")/g; s/\(tstamp [^)]*\)/(tstamp X)/g' "${path}" \
-    | grep -E '^[[:space:]]*\((segment|via|arc)' \
-    | sort \
-    | { if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | awk '{print $1}'; fi; }
-}
 
 prev_hash=""
 prev_drc=""

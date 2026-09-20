@@ -33,7 +33,7 @@ built.
 
 from __future__ import annotations
 
-import re
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -49,11 +49,32 @@ BOARD_01_UNROUTED = (
     REPO_ROOT / "boards" / "01-voltage-divider" / "output" / "voltage_divider.kicad_pcb"
 )
 
-#: Copper-element prefixes that constitute the routed output.  Pads, zones, and
-#: footprints are part of the input and never change between runs.
-_COPPER_RE = re.compile(r"^\s*\((segment|via|arc)\b")
-_UUID_RE = re.compile(r'\(uuid "[^"]*"\)')
-_TSTAMP_RE = re.compile(r"\(tstamp [^)]*\)")
+
+def _load_normalize_copper_module():
+    """Import ``scripts/ci/normalize_copper.py`` as a module.
+
+    Issue #5586: this module's ``_normalized_copper`` used to be an
+    independent line-based reimplementation (``grep``-equivalent regex over
+    raw lines) that kept only the bare ``(segment|via|arc)`` HEADER line of
+    each MULTI-LINE s-expression node this repo actually writes, discarding
+    every ``(start ...)`` / ``(end ...)`` / ``(width ...)`` / ``(layer ...)``
+    / ``(net ...)`` child.  That degenerated the comparison to
+    ``segment_count == segment_count && via_count == via_count`` -- two
+    routes placing every trace on a different path, layer, or width compared
+    EQUAL.  Delegating to the shared, paren-balanced
+    ``scripts/ci/normalize_copper.py`` helper (added by #5580/#5585) fixes
+    that blind spot and keeps this test in lockstep with the shell gate it
+    mirrors.
+    """
+    path = REPO_ROOT / "scripts" / "ci" / "normalize_copper.py"
+    spec = importlib.util.spec_from_file_location("ci_normalize_copper", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_normalize_copper_module = _load_normalize_copper_module()
 
 
 def _cpp_available() -> bool:
@@ -67,22 +88,76 @@ def _cpp_available() -> bool:
 
 
 def _normalized_copper(pcb_path: Path) -> list[str]:
-    """Return the sorted, UUID-stripped routed-copper lines of *pcb_path*.
+    """Return the sorted, UUID-stripped routed-copper records of *pcb_path*.
 
-    Mirrors ``scripts/ci/board_route_determinism_smoke.sh``: keep only the
-    ``(segment|via|arc)`` lines, strip the per-element ``uuid``/``tstamp``
-    tokens (deterministic per-seed but stripped defensively so a UUID toggle
-    regression cannot mask a true copper divergence), and sort so element
-    ORDER in the file does not matter -- only the SET of copper geometry.
+    Delegates to ``scripts/ci/normalize_copper.py::normalize_copper``, which
+    mirrors ``scripts/ci/board_route_determinism_smoke.sh``: whole,
+    paren-balanced ``(segment ...)`` / ``(via ...)`` / ``(arc ...)`` nodes
+    (geometry, width, layer, net included), per-element ``uuid``/``tstamp``
+    children stripped (deterministic per-seed but stripped defensively so a
+    UUID toggle regression cannot mask a true copper divergence), sorted so
+    element ORDER in the file does not matter -- only the SET of copper
+    geometry.
     """
-    lines = []
-    for raw in pcb_path.read_text().splitlines():
-        if not _COPPER_RE.match(raw):
-            continue
-        norm = _UUID_RE.sub('(uuid "X")', raw)
-        norm = _TSTAMP_RE.sub("(tstamp X)", norm)
-        lines.append(norm)
-    return sorted(lines)
+    return _normalize_copper_module.normalize_copper(pcb_path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Positive control for ``_normalized_copper`` (#5586 AC): prove the wrapper
+# used by the (slow, C++-backend-gated) tests below actually discriminates
+# routed-copper geometry rather than degenerating to element COUNTS, the
+# way the superseded line-based implementation did.  Synthetic, fast, and
+# unconditional -- no real route or C++ backend required.  Mirrors
+# ``tests/test_ci_normalize_copper.py``'s coverage of the sibling shell gate.
+# ---------------------------------------------------------------------------
+
+_CONTROL_SEGMENT = """\t(segment
+\t\t(start 12 26)
+\t\t(end 14.0135 23.9865)
+\t\t(width 0.2)
+\t\t(layer "F.Cu")
+\t\t(uuid "seg-uuid-1")
+\t\t(net 3)
+\t)"""
+
+_CONTROL_VIA = """\t(via
+\t\t(at 14.0135 23.9865)
+\t\t(size 0.6)
+\t\t(drill 0.3)
+\t\t(layers "F.Cu" "B.Cu")
+\t\t(uuid "via-uuid-1")
+\t\t(net 3)
+\t)"""
+
+
+def _control_pcb(*nodes: str) -> str:
+    body = "\n".join(nodes)
+    return f'(kicad_pcb\n\t(version 20241229)\n\t(generator "kicad-tools")\n{body}\n)\n'
+
+
+def test_normalized_copper_detects_a_single_coordinate_change(tmp_path: Path) -> None:
+    pcb_text = _control_pcb(_CONTROL_SEGMENT, _CONTROL_VIA)
+    moved_text = pcb_text.replace("(start 12 26)", "(start 12 27)", 1)
+    assert moved_text != pcb_text
+
+    pcb = tmp_path / "a.kicad_pcb"
+    moved = tmp_path / "b.kicad_pcb"
+    pcb.write_text(pcb_text)
+    moved.write_text(moved_text)
+
+    assert _normalized_copper(pcb) != _normalized_copper(moved), (
+        "_normalized_copper is blind to a moved trace -- it has regressed to "
+        "comparing element counts (the #5586 bug)"
+    )
+
+
+def test_normalized_copper_ignores_emission_order(tmp_path: Path) -> None:
+    pcb = tmp_path / "a.kicad_pcb"
+    reordered = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_control_pcb(_CONTROL_SEGMENT, _CONTROL_VIA))
+    reordered.write_text(_control_pcb(_CONTROL_VIA, _CONTROL_SEGMENT))
+
+    assert _normalized_copper(pcb) == _normalized_copper(reordered)
 
 
 def _route(board: Path, output: Path) -> subprocess.CompletedProcess[str]:
