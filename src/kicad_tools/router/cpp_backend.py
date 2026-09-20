@@ -2290,6 +2290,16 @@ class CppPathfinder:
         # previous net.
         self._last_failure_info = None
 
+        # Issue #5599: reset the evidence-gated strict foreign-pad kernel at
+        # the start of every route() call -- a fresh search keeps the full
+        # historical relaxation surface (the kernel is cell-center
+        # conservative and can close corridors that would validate; e.g.
+        # NRST on board 04 loses its only C++ corridor when it is armed
+        # unconditionally).  The resume loop arms it below, ONLY after a
+        # post-route clearance violation has repeated at the same site.
+        if hasattr(self._impl, "set_search_strict_pad_kernel"):
+            self._impl.set_search_strict_pad_kernel(False)
+
         # Issue #2610: Convert the per-net timeout into the (seconds, float)
         # contract the C++ binding expects.  ``None`` or ``0`` => no deadline
         # (the C++ search runs until success / open-set exhaustion / the
@@ -2529,6 +2539,20 @@ class CppPathfinder:
                 else:
                     last_violation_cell = violation_cell
                     site_repeat_run = 0
+                # Issue #5599: arm the evidence-gated strict foreign-pad
+                # kernel once the same violation site has repeated -- the
+                # relaxation surface (same-net corridors from this net's own
+                # escape stub, approach zones) keeps producing candidates the
+                # validator rejects, so the remaining resumes/restarts search
+                # under the strict #3226-style pad predicate instead.  The
+                # flag is read live per neighbor expansion, so it applies to
+                # the very next resume()/restart; it is reset at the start of
+                # every route() call (see above) so fresh nets keep the
+                # historical reach.
+                if site_repeat_run >= 1 and hasattr(
+                    self._impl, "set_search_strict_pad_kernel"
+                ):
+                    self._impl.set_search_strict_pad_kernel(True)
                 boost_amount = _RESUME_BOOST_BASE_AMOUNT * (
                     _RESUME_BOOST_ESCALATION ** min(site_repeat_run, 6)
                 )

@@ -556,6 +556,11 @@ NB_MODULE(router_cpp, m) {
              "passable at a finite per-step penalty instead of hard, so a "
              "zero-overflow hard failure can produce a min-conflict probe "
              "path whose crossed owner nets feed the targeted rip-up.")
+        // Issue #5599: evidence-gated strict foreign-pad kernel for the A*
+        // neighbor filter (see pathfinder.hpp).  Armed by the Python resume
+        // loop after a repeated post-route clearance violation.
+        .def("set_search_strict_pad_kernel", &Pathfinder::set_search_strict_pad_kernel,
+             "enabled"_a)
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)

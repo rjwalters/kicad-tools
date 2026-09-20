@@ -203,6 +203,18 @@ public:
     bool is_foreign_pad_metal_within_radius(int x, int y, int layer, int net,
                                             int radius) const;
 
+    // Issue #5599: exact swept-edge variant used by the evidence-gated
+    // strict pad mode (``set_search_strict_pad_kernel``).  Converts the
+    // (current -> neighbour) step to world coordinates and consults
+    // ``Grid3D::edge_foreign_pad_clear`` with the per-net emit width -- the
+    // SAME geometry the post-route validator's segment-vs-pad branch uses,
+    // so a step accepted in strict mode cannot be rejected by the validator
+    // on pad clearance (and vice versa).  ``emit_trace_width`` follows the
+    // usual convention: > 0 is the per-net width, 0 falls back to
+    // ``rules_.trace_width``.
+    bool strict_edge_pad_clear(int cx, int cy, int nx, int ny, int layer,
+                               int net, float emit_trace_width) const;
+
     // Issue #3438: Relief-probe mode for zero-overflow hard failures.
     //
     // In negotiated (sharing) mode, foreign-net cells with
@@ -225,6 +237,26 @@ public:
     // net-0 static blockage remain hard in relief mode.
     void set_relief_mode(bool enabled) { relief_mode_ = enabled; }
     bool relief_mode() const { return relief_mode_; }
+
+    // Issue #5599: evidence-gated STRICT foreign-pad kernel for the A*
+    // neighbor filter.  When set, the same-net-corridor and approach-zone
+    // relaxation branches also reject any step whose trace-radius envelope
+    // would come within touching distance of FOREIGN pad metal (the same
+    // #3226 predicate the pad-exit waiver always enforces).  Default false:
+    // a fresh search keeps the historical relaxation surface exactly -- the
+    // kernel compares cell CENTERS, so it is conservative against the exact
+    // post-route geometry and can close corridors that would in fact
+    // validate.  The Python resume loop arms it ONLY after a repeated
+    // post-route clearance violation proved the relaxation keeps producing
+    // candidates the validator rejects (board 04 BOOT0's under-tip
+    // escape-stub corridor class), so healthy nets (e.g. NRST on the same
+    // board) keep their pre-#5599 search reach.  Read live at every
+    // neighbor expansion, so arming it between a resume()/restart affects
+    // the very next step.
+    void set_search_strict_pad_kernel(bool enabled) {
+        search_strict_pad_kernel_ = enabled;
+    }
+    bool search_strict_pad_kernel() const { return search_strict_pad_kernel_; }
 
     // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) the
     // search-time pairwise (HV-isolation) widening measures its widened
@@ -394,6 +426,10 @@ private:
     // can produce a min-conflict probe path through sealed escape
     // corridors instead of an instant empty-frontier abort.
     bool relief_mode_ = false;
+
+    // Issue #5599: evidence-gated strict foreign-pad kernel -- see
+    // ``set_search_strict_pad_kernel``.
+    bool search_strict_pad_kernel_ = false;
     float relief_conflict_penalty_ = 20.0f;
 
     // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) for

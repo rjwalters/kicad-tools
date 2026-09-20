@@ -900,6 +900,40 @@ inline std::pair<float, float> closest_gap_midpoint(
 
 }  // namespace
 
+// Issue #5599: exact swept-edge vs foreign-pad clearance (see the
+// declaration comment in grid.hpp).  Mirrors validate_route()'s
+// segment-vs-pad geometry branch by construction: same rect-aware distance
+// for rectangular pads, same disc projection for explicitly circular pads,
+// same per-pad ``clearance_override`` floor with the caller's scalar
+// fallback, and the same CLEARANCE_EPSILON_MM slack so a step accepted here
+// is never rejected there (and vice versa) purely on rounding.
+bool Grid3D::edge_foreign_pad_clear(
+    float ax, float ay, float bx, float by, int layer, int net,
+    float half_width, float default_clearance) const {
+    for (const auto& pad : pads_) {
+        // Same-net pad metal is the route's own copper -- always clear.
+        if (pad.net == net) continue;
+        // Skip pads on different layers (through-hole pads match all).
+        if (pad.layer_idx != -1 && pad.layer_idx != layer) continue;
+        const float required = pad.clearance_override > 0.0f
+            ? pad.clearance_override
+            : default_clearance;
+        float center_dist;
+        if (pad.is_circular) {
+            const float pad_radius = std::max(pad.width, pad.height) / 2.0f;
+            center_dist = point_to_segment_distance(pad.x, pad.y, ax, ay, bx, by)
+                - pad_radius;
+        } else {
+            center_dist = pad_rect_distance(pad, ax, ay, bx, by);
+        }
+        const float clearance = center_dist - half_width;
+        if (clearance < required - CLEARANCE_EPSILON_MM) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
                                     int partner_net, float partner_clearance) const {
     if (stored_vias_.empty()) return true;

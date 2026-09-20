@@ -447,6 +447,17 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 // matches the cached ``trace_half_width_cells_`` (the typical case --
 // callers in the A* loop pass either the default or the same per-net
 // override they passed to ``is_trace_blocked``).
+bool Pathfinder::strict_edge_pad_clear(int cx, int cy, int nx, int ny, int layer,
+                                        int net, float emit_trace_width) const {
+    const auto [ax, ay] = grid_.grid_to_world(cx, cy);
+    const auto [bx, by] = grid_.grid_to_world(nx, ny);
+    const float width = emit_trace_width > 0.0f ? emit_trace_width
+                                                : rules_.trace_width;
+    return grid_.edge_foreign_pad_clear(ax, ay, bx, by, layer, net,
+                                        width / 2.0f,
+                                        rules_.trace_clearance);
+}
+
 bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
                                                     int net, int radius) const {
     if (radius <= 0) {
@@ -1473,18 +1484,18 @@ RouteResult Pathfinder::route(
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == net) {
-                    // Same-net blocked cell - allow -- UNLESS foreign pad
-                    // metal sits within the trace radius (Issue #5599; see
-                    // the twin comment in the resumable loop).
-                    if (is_foreign_pad_metal_within_radius(
-                            nx, ny, nlayer, net, trace_radius_cells)) {
+                    // Same-net blocked cell - allow -- UNLESS the exact swept
+                    // edge fails the validator's segment-vs-pad clearance
+                    // (Issue #5599; see the twin comment in the resumable
+                    // loop).  Evidence-gated on search_strict_pad_kernel_.
+                    if (search_strict_pad_kernel_ &&
+                        !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                               nlayer, net, emit_trace_width)) {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
                                 "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
-                                "REJECT reason=same_net_corridor_foreign_pad_too_close "
-                                "radius=%d\n",
-                                current.x, current.y, current.layer, nx, ny, nlayer,
-                                trace_radius_cells);
+                                "REJECT reason=same_net_corridor_foreign_pad_too_close\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
                         }
                         continue;
                     }
@@ -1571,26 +1582,26 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
-                } else if (is_foreign_pad_metal_within_radius(
-                               nx, ny, nlayer, net, trace_radius_cells)) {
+                } else if (
+                    search_strict_pad_kernel_ &&
+                    !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                           nlayer, net, emit_trace_width)) {
                     // Issue #5599: the pad-exit/approach-zone relaxation
-                    // skips the swept-envelope check, but a step whose trace
-                    // radius brings it within touching distance of FOREIGN
-                    // pad metal produces a committed segment the post-route
+                    // skips the swept-envelope check, but a step whose exact
+                    // swept edge fails the validator's own segment-vs-pad
+                    // clearance produces a committed segment the post-route
                     // validator will ALWAYS reject (pad metal is not
                     // rippable) -- exactly the board 04 BOOT0/USER_LED
                     // under-tip diagonal class that exhausted the resume
-                    // budget and fell back to the Python A*.  The pad-exit
-                    // branch above has enforced this guard since #3226;
-                    // extend it to the approach-zone relaxation so the
-                    // SEARCH agrees with the VALIDATOR here too.
+                    // budget and fell back to the Python A*.  Evidence-gated
+                    // on search_strict_pad_kernel_ (see the setter's
+                    // comment): off for fresh searches, armed by the Python
+                    // resume loop after a repeated violation.
                     if (astar_trace_enabled()) {
                         std::fprintf(stderr,
                             "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
-                            "REJECT reason=approach_zone_foreign_pad_too_close "
-                            "radius=%d\n",
-                            current.x, current.y, current.layer, nx, ny, nlayer,
-                            trace_radius_cells);
+                            "REJECT reason=approach_zone_foreign_pad_too_close\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
                     }
                     continue;
                 }
@@ -2139,27 +2150,33 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == search_net_) {
-                    // Same-net blocked cell - allow -- UNLESS foreign pad
-                    // metal sits within the trace radius (Issue #5599).  A
-                    // same-net corridor built from this net's own escape
-                    // stub / prior copper can hug a neighbor pad closer than
-                    // the post-route validator permits (the stub was laid
-                    // with the relaxed fine-pitch escape clearance; the
-                    // validator enforces the full clearance).  Every
-                    // candidate reusing that corridor is rejected after the
-                    // search, exhausting the resume budget -- board 04's
-                    // BOOT0 under-tip diagonal class.  Same #3226 predicate
-                    // the pad-exit waiver already enforces.
-                    if (is_foreign_pad_metal_within_radius(
-                            nx, ny, nlayer, search_net_,
-                            search_trace_radius_cells_)) {
+                    // Same-net blocked cell - allow -- UNLESS the exact
+                    // swept edge fails the validator's own segment-vs-pad
+                    // clearance (Issue #5599).  A same-net corridor built
+                    // from this net's own escape stub / prior copper can hug
+                    // a neighbor pad closer than the post-route validator
+                    // permits (the stub was laid with the relaxed fine-pitch
+                    // escape clearance; the validator enforces the full
+                    // clearance).  Every candidate reusing that corridor is
+                    // rejected after the search, exhausting the resume
+                    // budget -- board 04's BOOT0 under-tip diagonal class.
+                    // EVIDENCE-GATED (search_strict_pad_kernel_): the exact
+                    // geometry is conservative against the rasterized grid
+                    // (cell-center kernels can slip a diagonal corner-cut
+                    // past an off-grid pad), so it stays off for fresh
+                    // searches and is armed by the Python resume loop only
+                    // once a clearance violation has actually repeated.
+                    if (search_strict_pad_kernel_ &&
+                        !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                               nlayer, search_net_,
+                                               search_emit_trace_width_)) {
                         if (astar_trace_enabled()) {
                             std::fprintf(stderr,
                                 "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
                                 "reason=same_net_corridor_foreign_pad_too_close "
-                                "radius=%d net=%d\n",
+                                "net=%d\n",
                                 current.x, current.y, current.layer, nx, ny, nlayer,
-                                search_trace_radius_cells_, search_net_);
+                                search_net_);
                         }
                         continue;
                     }
@@ -2250,21 +2267,24 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
-                } else if (is_foreign_pad_metal_within_radius(
-                               nx, ny, nlayer, search_net_,
-                               search_trace_radius_cells_)) {
+                } else if (
+                    search_strict_pad_kernel_ &&
+                    !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                           nlayer, search_net_,
+                                           search_emit_trace_width_)) {
                     // Issue #5599: see the twin comment in the one-shot loop
                     // -- the approach-zone relaxation must still respect the
-                    // exact foreign-pad-metal clearance the post-route
-                    // validator enforces (#3226 guard, extended from the
-                    // pad-exit waiver to the approach zone).
+                    // exact foreign-pad clearance the post-route validator
+                    // enforces (the validator's own segment-vs-pad geometry,
+                    // via Grid3D::edge_foreign_pad_clear).  Evidence-gated on
+                    // search_strict_pad_kernel_.
                     if (astar_trace_enabled()) {
                         std::fprintf(stderr,
                             "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
                             "reason=approach_zone_foreign_pad_too_close "
-                            "radius=%d net=%d\n",
+                            "net=%d\n",
                             current.x, current.y, current.layer, nx, ny, nlayer,
-                            search_trace_radius_cells_, search_net_);
+                            search_net_);
                     }
                     continue;
                 }
