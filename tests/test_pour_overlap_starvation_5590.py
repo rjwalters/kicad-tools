@@ -167,15 +167,12 @@ class TestBoard03Allocation:
         bx = [p[0] for p in vbus.polygon]
         by = [p[1] for p in vbus.polygon]
         assert (max(bx) - min(bx)) * (max(by) - min(by)) < 700.0  # mm^2
-        assert 30.0 < min(bx) and max(bx) < 58.0
-        assert 1.0 < min(by) and max(by) < 25.0
+        assert min(bx) > 30.0 and max(bx) < 58.0
+        assert min(by) > 1.0 and max(by) < 25.0
 
         # Every hand-authored zone is untouched (net, layer, priority,
         # uuid, polygon); only the VBUS entry is new.
-        after = {
-            net: (z.layer, z.priority, z.uuid, tuple(z.polygon))
-            for net, z in zones.items()
-        }
+        after = {net: (z.layer, z.priority, z.uuid, tuple(z.polygon)) for net, z in zones.items()}
         assert {k: v for k, v in after.items() if k != "VBUS"} == before
 
         # The starvation warning is gone.
