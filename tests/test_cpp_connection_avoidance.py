@@ -94,7 +94,14 @@ def test_connection_cleanup_clears_native_grid(monkeypatch, timing, outcome):
 
 
 @pytest.mark.parametrize("timing", [False, True])
-def test_default_preserves_penalties_until_caller_finishes_net(monkeypatch, timing):
+def test_default_clears_penalties_between_connections(monkeypatch, timing):
+    """The default path clears penalties -- no caller opt-in required (#5504).
+
+    Replaces the ``test_default_preserves_penalties_until_caller_finishes_net``
+    pin #5497 added while the option was gated off.  Nothing in the tree passes
+    ``clear_avoidance_after_connection`` explicitly, so this is the behaviour
+    every production ``route()`` call gets.
+    """
     from kicad_tools.router.cpp_backend import CppGrid, is_cpp_available
     from kicad_tools.router.rules import DesignRules
 
@@ -109,14 +116,13 @@ def test_default_preserves_penalties_until_caller_finishes_net(monkeypatch, timi
     def search(*args, **kwargs):
         observed.append(grid._impl.at(10, 10, 0).avoidance_cost)
         grid._impl.boost_region_cost(10, 10, 0, 2, 100.0)
+        # Penalties stay active for the remainder of THIS connection's
+        # resumable search -- only the exit clears them.
+        assert grid._impl.at(10, 10, 0).avoidance_cost > 0
         return None
 
     monkeypatch.setattr(finder, "_route_impl", search)
     finder.route(pad, pad)
     finder.route(pad, pad)
-    assert observed[0] == 0
-    assert observed[1] > 0
-    assert grid._impl.at(10, 10, 0).avoidance_cost > 0
-    # Autorouter retains ownership of net-end cleanup on the default path.
-    finder.clear_avoidance_costs()
+    assert observed == [0, 0]
     assert grid._impl.at(10, 10, 0).avoidance_cost == 0
