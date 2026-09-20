@@ -754,6 +754,119 @@ class TestNonZeroBoardOrigin:
             assert y <= y_base + 49.7 + 0.01, f"Y coord {y} too close to bottom edge"
 
 
+class TestPreExistingZoneInterop:
+    """Issue #5590 through the router entry point (``auto_pour_if_missing``).
+
+    The idempotency filter skips nets that already have zones, which used to
+    hide a hand-authored same-layer zone from the allocators entirely: the
+    newly auto-poured zone tied the incumbent's priority and kept the
+    full-board outline, so KiCad's zone-UUID tie-break decided which pour
+    starved.  The generator must now stagger the new zone's priority above
+    the incumbent and carve its outline down to the new net's pad bbox.
+    """
+
+    @pytest.fixture
+    def board_with_incumbent_vcc_pour(self, tmp_path: Path) -> Path:
+        """4-layer board: hand-authored VCC pour on In2.Cu, VBUS pads only."""
+        pcb_content = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (net 3 "VBUS")
+  (net 4 "SIG")
+  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 15 15)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd roundrect (at 0 0) (size 1.0 1.3)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25)
+      (net 3 "VBUS"))
+    (pad "2" smd roundrect (at 5 3) (size 1.0 1.3)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25)
+      (net 3 "VBUS"))
+    (pad "3" smd roundrect (at -5 -5) (size 1.0 1.3)
+      (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25)
+      (net 4 "SIG"))
+  )
+  (zone
+    (net 1)
+    (net_name "GND")
+    (layer "In1.Cu")
+    (uuid "gnd-hand-authored-uuid")
+    (hatch edge 0.5)
+    (priority 0)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.25))
+    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50)))
+  )
+  (zone
+    (net 2)
+    (net_name "VCC")
+    (layer "In2.Cu")
+    (uuid "vcc-hand-authored-uuid")
+    (hatch edge 0.5)
+    (priority 0)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.25))
+    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50)))
+  )
+  (gr_line (start 0 0) (end 50 0) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 0) (end 50 50) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 50 50) (end 0 50) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+  (gr_line (start 0 50) (end 0 0) (stroke (width 0.05) (type default)) (layer "Edge.Cuts"))
+)
+"""
+        pcb_path = tmp_path / "incumbent.kicad_pcb"
+        pcb_path.write_text(pcb_content)
+        return pcb_path
+
+    def test_new_pour_outranks_incumbent_and_claims_only_its_pads(
+        self, board_with_incumbent_vcc_pour, capsys
+    ):
+        """VBUS is poured above VCC's priority with a pad-bbox outline."""
+        from kicad_tools.router.auto_pour import auto_pour_if_missing
+        from kicad_tools.schema.pcb import PCB
+
+        count, names = auto_pour_if_missing(board_with_incumbent_vcc_pour, quiet=True)
+
+        # VCC and GND already have zones (idempotency filter), so only
+        # VBUS -- the net without a zone -- is poured, onto the VCC
+        # incumbent's layer: exactly board 03's In2.Cu collision shape.
+        assert count == 1
+        assert names == ["VBUS"]
+
+        pcb = PCB.load(str(board_with_incumbent_vcc_pour))
+        zones = {z.net_name: z for z in pcb.zones}
+        vbus, vcc = zones["VBUS"], zones["VCC"]
+        assert vbus.layer == "In2.Cu" == vcc.layer
+        assert vbus.priority > vcc.priority
+        xs = [p[0] for p in vbus.polygon]
+        ys = [p[1] for p in vbus.polygon]
+        assert (min(xs), max(xs), min(ys), max(ys)) == pytest.approx(
+            (13.5, 21.5, 13.5, 19.5), abs=0.01
+        )
+
+        # The starvation warning must be gone; the stagger note is the
+        # only zone-related stderr line quiet=True does not suppress.
+        captured = capsys.readouterr()
+        assert "zero copper" not in captured.err
+        assert "issue #5590" in captured.err
+
+
 class TestErcMarkerNetExclusion:
     """Tests for the ERC-marker (PWR_FLAG) exclusion filter (#2592).
 

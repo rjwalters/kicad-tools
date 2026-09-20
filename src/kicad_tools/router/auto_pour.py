@@ -56,6 +56,14 @@ per-net bounding-box outline (default 1.5 mm margin around the net's
 pads, clipped to the board outline), while zones that are the only zone
 on their layer keep the full board outline so return-path planes stay
 continuous.  See that function's docstring for the contract.
+
+Pre-existing zones count too (#5590): a zone already authored into the
+PCB file (the very thing this module's idempotency filter removes from
+``pour_nets``) makes its layer "shared" for the allocator, so a newly
+auto-poured zone on that layer gets a staggered priority and a carved
+pad-bbox outline instead of colliding with the incumbent at equal
+priority -- the shape that let KiCad's zone-UUID tie-break starve one of
+the two pours on board 03.
 """
 
 from __future__ import annotations

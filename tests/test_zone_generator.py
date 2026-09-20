@@ -641,6 +641,72 @@ class TestZoneOverlapDetection:
         assert "WARNING:" in captured.err
         assert "zero copper" in captured.err
 
+    # ------------------------------------------------------------------
+    # Issue #5590: distinct priorities whose loser retains meaningful
+    # exclusive territory are a safe allocation, not a starvation hazard.
+    # ------------------------------------------------------------------
+
+    def test_no_warning_distinct_priority_partial_overlap(self, sample_pcb_path):
+        """No warning when the lower-priority zone keeps exclusive copper.
+
+        The higher-priority zone only claims the contested region; the
+        loser fills everything outside it (plus clearance halos around
+        its own pads).  Measured on board 03 (KiCad 10.0.5): the
+        VCC full-board zone retains ~91% of its boundary outside the
+        carved VBUS pad-bbox zone and both zones fill with real copper.
+        """
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(
+            net="+3.3V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(0, 0), (30, 0), (30, 50), (0, 50)],
+        )
+        gen.add_zone(
+            net="+5V",
+            layer="F.Cu",
+            priority=1,
+            boundary=[(20, 0), (50, 0), (50, 50), (20, 50)],
+        )
+
+        # +3.3V (the loser) keeps (0..20)x(0..50) = 2/3 of its territory.
+        assert len(gen.warnings) == 0
+
+    def test_warning_distinct_priority_loser_fully_covered(self, sample_pcb_path):
+        """Warning when the loser's boundary is fully inside the winner's."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        # Default boundary == board outline (0..50)^2 for both zones, so
+        # the lower-priority +3.3V zone has no exclusive region at all.
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+        gen.add_zone(net="+5V", layer="F.Cu", priority=1)
+
+        assert len(gen.warnings) == 1
+        assert "other zone will get zero copper" in gen.warnings[0].message
+
+    def test_warning_equal_priority_partial_overlap(self, sample_pcb_path):
+        """Equal-priority overlaps always warn: the UUID tie-break decides."""
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(
+            net="+3.3V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(0, 0), (30, 0), (30, 50), (0, 50)],
+        )
+        gen.add_zone(
+            net="+5V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(20, 0), (50, 0), (50, 50), (20, 50)],
+        )
+
+        # Distinct territories would leave both zones copper, but the
+        # equal priority hands the decision to KiCad's UUID tie-break.
+        assert len(gen.warnings) == 1
+        assert "equal or higher priority" in gen.warnings[0].message
+
 
 class TestZoneOverlapNonzeroOrigin:
     """Tests for overlap detection on PCBs with non-zero board origin.
@@ -1135,6 +1201,85 @@ class TestAssignLayersForPourNets:
         assert len(ground_lp) == 2
         assert len(set(ground_lp)) == 2  # all distinct
 
+    # ------------------------------------------------------------------
+    # Incumbent-zone priority stagger (issue #5590): pre-existing zones on
+    # the assigned layer must push the new pour's priority strictly above
+    # the incumbents' maximum, so KiCad's fill resolver never falls back
+    # to the zone-UUID tie-break for the pair.
+    # ------------------------------------------------------------------
+
+    def test_incumbent_zone_staggers_priority(self):
+        """Single power net on an incumbent-occupied layer outranks it."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GND", NetClass.GROUND), ("VBUS", NetClass.POWER)],
+            existing_zone_priority_by_layer={"In2.Cu": 0},
+        )
+        # Board-03 shape: hand-authored VCC pour on In2.Cu at priority 0;
+        # the auto-poured VBUS zone must land strictly above it.
+        assert ("GND", "In1.Cu", 1) in result
+        assert ("VBUS", "In2.Cu", 1) in result
+
+    def test_incumbent_stagger_preserves_distinct_priorities(self):
+        """Multiple new zones on an occupied layer stay distinct above it."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            2,
+            [
+                ("GND", NetClass.GROUND),
+                ("+3.3V", NetClass.POWER),
+                ("+5V", NetClass.POWER),
+            ],
+            existing_zone_priority_by_layer={"F.Cu": 2},
+        )
+        assert ("GND", "B.Cu", 1) in result
+        fcu = [p for _, l, p in result if l == "F.Cu"]
+        # Distinct, and every one strictly above the incumbent's max (2).
+        assert len(fcu) == len(set(fcu)) == 2
+        assert min(fcu) > 2
+
+    def test_incumbent_on_other_layer_leaves_assignment_unchanged(self):
+        """An incumbent elsewhere does not disturb this layer's priority."""
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GND", NetClass.GROUND), ("VBUS", NetClass.POWER)],
+            existing_zone_priority_by_layer={"B.Cu": 4},
+        )
+        # In2.Cu has no incumbent: legacy priorities apply unchanged.
+        assert ("VBUS", "In2.Cu", 0) in result
+
+    def test_no_incumbent_map_matches_legacy_assignments(self):
+        """Without the incumbent map the legacy scheme is byte-identical."""
+        from kicad_tools.router.net_class import NetClass
+
+        pour = [("GND", NetClass.GROUND), ("VBUS", NetClass.POWER)]
+        assert _assign_layers_for_pour_nets(4, pour) == (
+            _assign_layers_for_pour_nets(4, pour, existing_zone_priority_by_layer={})
+        )
+
+    def test_split_ground_with_incumbent_on_inner_layer(self):
+        """Split-ground + pre-existing zone on an inner layer (issue #5590 edge).
+
+        Only the incumbent-occupied inner layer staggers; the other ground
+        keeps its legacy priority, and the two grounds remain conflict-free
+        because they sit on distinct layers.
+        """
+        from kicad_tools.router.net_class import NetClass
+
+        result = _assign_layers_for_pour_nets(
+            4,
+            [("GNDA", NetClass.GROUND), ("GNDD", NetClass.GROUND)],
+            existing_zone_priority_by_layer={"In1.Cu": 3},
+        )
+        assignments = {(n, l): p for n, l, p in result}
+        assert assignments[("GNDA", "In1.Cu")] == 1 + max(3 + 1, 1)
+        assert assignments[("GNDD", "In2.Cu")] == 1  # no incumbent on In2.Cu
+
 
 class TestAutoCreateZones4Layer:
     """Tests for auto_create_zones_for_pour_nets with 4-layer boards."""
@@ -1215,6 +1360,160 @@ class TestAutoCreateZones4Layer:
         # and second goes to F.Cu -- no warning expected
         captured = capsys.readouterr()
         assert "WARNING" not in captured.err
+
+
+class TestAutoCreateZonesPreExistingZoneInterop:
+    """Issue #5590: interop between new pours and pre-existing zones.
+
+    A hand-authored zone already in the PCB file used to be invisible to
+    the layer/priority and outline allocators, so a newly auto-poured zone
+    landing on the same layer tied its priority and kept the full-board
+    outline -- KiCad's UUID tie-break then decided which zone starved.
+    The generator must instead stagger the new zone's priority above the
+    incumbent's and carve its outline down to the new net's pad bbox,
+    leaving the incumbent zone untouched.
+    """
+
+    @pytest.fixture
+    def pcb_with_vcc_pour(self, tmp_path):
+        """4-layer board with a hand-authored full-board VCC pour on In2.Cu.
+
+        VBUS pads cluster around (15,15)-(20,18) via footprint U1, so the
+        carved VBUS outline (pads + 1.5 mm) must be far smaller than the
+        board while still covering every VBUS pad.
+        """
+        pcb_content = """(kicad_pcb
+  (version 20240108)
+  (generator "kicad")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (1 "In1.Cu" signal)
+    (2 "In2.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (net 1 "GND")
+  (net 2 "VCC")
+  (net 3 "VBUS")
+  (net 4 "SIG")
+  (footprint "TestLib:TestPkg" (layer "F.Cu") (at 15 15)
+    (property "Reference" "U1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 0 0) (size 1.0 1.0)
+      (layers "F.Cu") (net 3 "VBUS"))
+    (pad "2" smd rect (at 5 3) (size 1.0 1.0)
+      (layers "F.Cu") (net 3 "VBUS"))
+    (pad "3" smd rect (at -5 -5) (size 1.0 1.0)
+      (layers "F.Cu") (net 4 "SIG"))
+  )
+  (gr_rect
+    (start 0 0)
+    (end 50 50)
+    (stroke (width 0.15) (type solid))
+    (fill none)
+    (layer "Edge.Cuts")
+    (uuid "edge-uuid")
+  )
+  (zone
+    (net 2)
+    (net_name "VCC")
+    (layer "In2.Cu")
+    (uuid "vcc-hand-authored-uuid")
+    (hatch edge 0.5)
+    (priority 0)
+    (connect_pads (clearance 0.2))
+    (min_thickness 0.2)
+    (fill yes (thermal_gap 0.2) (thermal_bridge_width 0.25))
+    (polygon (pts (xy 0 0) (xy 50 0) (xy 50 50) (xy 0 50)))
+  )
+)
+"""
+        pcb_file = tmp_path / "incumbent.kicad_pcb"
+        pcb_file.write_text(pcb_content)
+        return pcb_file
+
+    @staticmethod
+    def _zones_by_net(pcb_path):
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+        return {z.net_name: z for z in pcb.zones}
+
+    def test_new_zone_staggers_priority_and_carves_outline(self, pcb_with_vcc_pour, capsys):
+        """VBUS outranks the incumbent VCC pour and claims only its pads."""
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        count = auto_create_zones_for_pour_nets(
+            pcb_with_vcc_pour, [("GND", NetClass.GROUND), ("VBUS", NetClass.POWER)]
+        )
+        assert count == 2
+
+        zones = self._zones_by_net(pcb_with_vcc_pour)
+        assert zones["GND"].layer == "In1.Cu"  # no incumbent there
+        vbus = zones["VBUS"]
+        assert vbus.layer == "In2.Cu"
+        # Strictly above the hand-authored VCC pour's priority 0.
+        assert vbus.priority > zones["VCC"].priority
+        # Carved pad-bbox outline: pads (15,15)-(20,18) + 1.5 mm margin.
+        xs = [p[0] for p in vbus.polygon]
+        ys = [p[1] for p in vbus.polygon]
+        assert min(xs) == pytest.approx(13.5, abs=0.01)
+        assert max(xs) == pytest.approx(21.5, abs=0.01)
+        assert min(ys) == pytest.approx(13.5, abs=0.01)
+        assert max(ys) == pytest.approx(19.5, abs=0.01)
+
+        captured = capsys.readouterr()
+        assert "zero copper" not in captured.err
+        assert "issue #5590" in captured.err
+
+    def test_pre_existing_zone_block_is_untouched(self, pcb_with_vcc_pour):
+        """The hand-authored VCC zone is preserved by the round-trip.
+
+        ``ZoneGenerator.save`` re-serializes the whole document, so the
+        on-disk whitespace may change; what must not change is the
+        incumbent zone's identity: net, layer, priority, UUID, and
+        boundary polygon.
+        """
+        from kicad_tools.router.net_class import NetClass
+        from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+
+        before = self._zones_by_net(pcb_with_vcc_pour)["VCC"]
+        before_fields = (
+            before.net_name,
+            before.layer,
+            before.priority,
+            before.uuid,
+            tuple(before.polygon),
+        )
+
+        auto_create_zones_for_pour_nets(pcb_with_vcc_pour, [("VBUS", NetClass.POWER)])
+
+        after = self._zones_by_net(pcb_with_vcc_pour)["VCC"]
+        assert (
+            after.net_name,
+            after.layer,
+            after.priority,
+            after.uuid,
+            tuple(after.polygon),
+        ) == before_fields
+
+    def test_legacy_equal_priority_direct_add_still_warns(self, pcb_with_vcc_pour, capsys):
+        """The starvation detector itself stays armed.
+
+        A caller that adds an equal-priority overlapping zone directly via
+        ``add_zone`` (bypassing the allocator fix) must still get the
+        "zero copper" warning -- this is the tripwire for the unfixed
+        shape, not something the fix silences.
+        """
+        gen = ZoneGenerator.from_pcb(pcb_with_vcc_pour)
+        gen.add_zone(net="VBUS", layer="In2.Cu", priority=0)
+
+        assert len(gen.warnings) == 1
+        assert "zero copper" in gen.warnings[0].message
+        captured = capsys.readouterr()
+        assert "zero copper" in captured.err
 
 
 class TestAutoCreateZonesReplaceExisting:
