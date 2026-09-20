@@ -784,6 +784,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
     _reserve_repair_uuids(text)
@@ -1270,6 +1271,18 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # blocked by a foreign trace (the B.Cu carve that splits a
             # bbox-carved pour), hop OVER it: drop a via inside each
             # copper region near the gap and cross on a different layer.
+            #
+            # Issue #5551 (the board06 port of #5507/#5549): an endpoint
+            # that ALREADY carries a plated barrel is reused rather than
+            # re-drilled.  A barrel's own copper is just its annulus, so
+            # every retreat point either misses that disc or lands inside
+            # it -- where the drill-to-drill floor rejects a second drill --
+            # and the pair was skipped for every retreat on every layer,
+            # even though the barrel already spans the stack and needs no
+            # new via at all.  ``plan_via_hop_bridge`` keeps the candidate
+            # order, the retreat set and the physical predicates below
+            # unchanged; it only stops demanding a drill where the copper
+            # stack is already bridged.
             if not merged:
                 pairs_d: list[tuple[float, int, int]] = []
                 for i in target:
@@ -1279,45 +1292,32 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         pairs_d.append((gi.distance(gj), i, j))
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
-                    gi, gj = own[i][0], own[j][0]
-                    pa, pb = nearest_points(gi, gj)
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    done = False
-                    for back_a in (0.5, 0.9, 1.4):
-                        va = (pa.x - ux * back_a, pa.y - uy * back_a)
-                        if not Point(va).intersects(gi) or not _via_ok(net, *va):
-                            continue
-                        for back_b in (0.5, 0.9, 1.4):
-                            vb = (pb.x + ux * back_b, pb.y + uy * back_b)
-                            if not Point(vb).intersects(gj) or not _via_ok(net, *vb):
-                                continue
-                            for lay in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
-                                if not _path_ok(net, va, vb, lay, BRIDGE_W):
-                                    continue
-                                _emit_via(net, *va)
-                                _emit_via(net, *vb)
-                                _emit_seg(net, va, vb, lay, BRIDGE_W)
-                                _append_own((Point(va).buffer(VIA_R), all_layers, "via"))
-                                _append_own((Point(vb).buffer(VIA_R), all_layers, "via"))
-                                _append_own(
-                                    (
-                                        LineString([va, vb]).buffer(BRIDGE_W / 2.0),
-                                        frozenset({lay}),
-                                        "seg",
-                                    )
-                                )
-                                bridges_placed += 1
-                                merged = True
-                                done = True
-                                break
-                            if done:
-                                break
-                        if done:
-                            break
-                    if done:
-                        break
+                    plan = plan_via_hop_bridge(
+                        BridgeSide(*own[i][:3]),
+                        BridgeSide(*own[j][:3]),
+                        layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
+                        retreats=(0.5, 0.9, 1.4),
+                        via_ok=lambda p, _net=net: _via_ok(_net, *p),
+                        path_ok=lambda a, b, lay, _net=net: _path_ok(_net, a, b, lay, BRIDGE_W),
+                        new_via_layers=all_layers,
+                    )
+                    if plan is None:
+                        continue
+                    va, vb = plan.source.point, plan.destination.point
+                    for vx, vy in plan.new_vias:
+                        _emit_via(net, vx, vy)
+                        _append_own((Point(vx, vy).buffer(VIA_R), all_layers, "via"))
+                    _emit_seg(net, va, vb, plan.layer, BRIDGE_W)
+                    _append_own(
+                        (
+                            LineString([va, vb]).buffer(BRIDGE_W / 2.0),
+                            frozenset({plan.layer}),
+                            "seg",
+                        )
+                    )
+                    bridges_placed += 1
+                    merged = True
+                    break
 
             # The fixed rays cannot follow a narrow corridor to primary
             # copper. An existing via may itself be on an isolated island,
