@@ -11097,6 +11097,14 @@ class Autorouter:
 
                     flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
 
+                    # Issue #5545: set by the stagnation-recovery block below
+                    # when the recovery sweep re-lands the cohort at or under
+                    # the banked best's overflow -- the iteration then holds
+                    # the recovered configuration instead of running its
+                    # residual-conflict rip-up (see the hold site at the
+                    # rip-up dispatch).
+                    recovery_hold_follow_through = False
+
                     # Issue #3438: close the PREVIOUS iteration's
                     # corridor-reservation window (if any) so this iteration
                     # starts from exact Python/C++ grid parity -- the fix for
@@ -11559,6 +11567,33 @@ class Autorouter:
                                     f"re-landed contended cell(s) carry "
                                     f"+{STAGNATION_CONGESTION_AMOUNT:.0f} congestion cost"
                                 )
+                            # Issue #5545: if the sweep already re-landed the
+                            # cohort at or under the banked best's overflow,
+                            # HOLD that configuration for the iteration
+                            # verdict instead of running the residual-conflict
+                            # rip-up.  The serial conflict reroute is the same
+                            # mechanism that stagnated, and it negotiates
+                            # blind to the crossings it is about to create
+                            # (a reroute piles onto cells that are at usage 1
+                            # -- unmarkable in advance).  Measured on board 06
+                            # (seed 42): the marked sweep re-landed at
+                            # overflow 2 (best-so-far 4), the follow-through
+                            # rip-up of the 2 residual conflict nets threw it
+                            # back up to 5, and the iteration lost to the
+                            # iter-2 snapshot.  Holding keeps the recovery
+                            # monotone in banked outcome: the verdict still
+                            # applies the full lex-tuple comparison, so a
+                            # hold can only preserve a strictly-better
+                            # candidate, never bank a worse one.
+                            if current_overflow <= best_metrics.overflow:
+                                recovery_hold_follow_through = True
+                                flush_print(
+                                    f"  Holding recovered state: post-recovery overflow "
+                                    f"({current_overflow}) is at or under the banked best "
+                                    f"(iter-{best_metrics.iteration}: overflow "
+                                    f"{best_metrics.overflow}); skipping this iteration's "
+                                    f"residual-conflict rip-up (Issue #5545)"
+                                )
                             # Update the latest overflow_history entry to reflect
                             # post-recovery state so subsequent oscillation
                             # detection sees the recovery's effect.
@@ -11751,7 +11786,25 @@ class Autorouter:
                         )
                         break
 
-                    if use_targeted_ripup:
+                    if recovery_hold_follow_through:
+                        # Issue #5545: the stagnation-recovery sweep re-landed
+                        # the cohort at or under the banked best's overflow
+                        # (decision + rationale in the recovery block above).
+                        # Skip this iteration's residual-conflict rip-up so
+                        # the serial reroute that stagnated cannot gamble the
+                        # recovered configuration away before the iteration
+                        # verdict banks it.  Refresh the loop-level overflow
+                        # view from the held state (the zero-overflow recovery
+                        # above may have further improved it) and fall
+                        # through to the common end-of-iteration bookkeeping.
+                        overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        flush_print(
+                            f"  Residual-conflict rip-up skipped: holding recovered "
+                            f"state (overflow {overflow}) into the iteration verdict "
+                            f"({elapsed_str()})"
+                        )
+                    elif use_targeted_ripup:
                         # Targeted rip-up: for each conflicting net, find its specific blockers
                         # and only rip up those instead of all conflicting nets at once
                         flush_print(
