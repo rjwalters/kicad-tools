@@ -2754,6 +2754,7 @@ def _write_access_witness_sidecar(
     from kicad_tools.router.access_witness import (
         ACCESS_WITNESS_SIDECAR_SUFFIX,
         JOURNAL_SCHEMA_VERSION,
+        witness_for_router,
     )
 
     journal = getattr(router, "commit_journal", None)
@@ -2761,11 +2762,24 @@ def _write_access_witness_sidecar(
         return
 
     sidecar_path = output_path.parent / f"{output_path.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
-    payload = {
+    payload: dict[str, Any] = {
         "schema_version": JOURNAL_SCHEMA_VERSION,
         "source": {"pcb": output_path.name},
         "journal": journal.to_dict(),
     }
+    # Issue #5517 (PR 2): the replay runs HERE, while the grid that decided the
+    # clearances is still alive.  ``net-status --why`` reads a saved board and
+    # could not reproduce it; the sidecar carries the verdict instead.  The key
+    # is omitted entirely when nothing ended unrouted -- the common case -- so a
+    # fully-routed board's sidecar is unchanged from PR 1's shape.
+    try:
+        witness = witness_for_router(router)
+    except Exception as e:  # pragma: no cover - a diagnostic never fails a route
+        witness = None
+        if not quiet:
+            print(f"  Warning: access-witness replay failed: {e}")
+    if witness:
+        payload["witness"] = witness.to_dict()
     try:
         # Compact separators, unlike the other (small, hand-read) sidecars:
         # this one carries every segment of every commit and rip-up, so
@@ -2779,6 +2793,8 @@ def _write_access_witness_sidecar(
         size_kb = sidecar_path.stat().st_size / 1024
         print(f"  Access-witness sidecar: {sidecar_path} ({size_kb:.0f} KB)")
         print(f"  {journal.summary_line()}")
+        if witness:
+            print(f"  {witness.summary_line()}")
 
 
 def _write_current_paths_sidecar(

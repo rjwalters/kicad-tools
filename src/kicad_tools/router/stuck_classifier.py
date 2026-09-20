@@ -68,6 +68,7 @@ from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.schema.physical_identity import footprint_keys
 
 if TYPE_CHECKING:
+    from kicad_tools.router.access_witness import AccessWitness
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
 
@@ -417,6 +418,16 @@ class StuckNetDiagnosis:
     # in ``tests/router/test_stuck_classifier.py``, which asserts the field
     # SET stays equal across diagnoses).
     swap_proposal: SwapProposal | None = None
+    # Issue #5517 (Epic #5508, Phase 1b): the replay-derived access witness for
+    # THIS net's terminals -- which commit closed each pad's access set, at
+    # which pass/iteration, and whose copper did it.  Populated only when a
+    # ``<stem>.access_witness.json`` sidecar sits next to the board being
+    # classified (``kct route`` writes it); ``None`` otherwise, and kept OUT of
+    # :meth:`to_dict` in that case so a board without a sidecar emits
+    # byte-identical JSON.  Unlike ``blocking_nets`` -- a Bresenham
+    # line-of-sight guess over the finished board -- this is replayed from the
+    # order copper actually landed in.
+    access_witness: AccessWitness | None = None
 
     @property
     def classification_value(self) -> str:
@@ -442,14 +453,20 @@ class StuckNetDiagnosis:
             "topology": self.topology,
             "recommendation": [a.to_dict() for a in self.recommendation],
             **({"swap_proposal": self.swap_proposal.to_dict()} if self.swap_proposal else {}),
+            **({"access_witness": self.access_witness.to_dict()} if self.access_witness else {}),
         }
 
     def one_line(self) -> str:
         pads = ", ".join(self.unconnected_pads) or "(none)"
         blockers = f" blockers=[{', '.join(self.blocking_nets)}]" if self.blocking_nets else ""
+        # Issue #5517: append the replay's verdict when a witness sidecar was
+        # found.  Absent -> the line is byte-identical to pre-#5517 output.
+        witness = ""
+        if self.access_witness:
+            witness = "".join(f"\n      witness: {p.one_line()}" for p in self.access_witness)
         return (
             f"{self.net_name}: {self.classification.value.upper()} "
-            f"({len(self.unconnected_pads)} pad(s): {pads}){blockers} -- {self.evidence}"
+            f"({len(self.unconnected_pads)} pad(s): {pads}){blockers} -- {self.evidence}{witness}"
         )
 
 
@@ -1051,6 +1068,7 @@ def classify_stuck_nets_from_pcb(
     excluded_nets: frozenset[str] = frozenset(),
     strict: bool = True,
     net_class_map: dict[str, NetClassRouting] | None = None,
+    access_witness: AccessWitness | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on *pcb* (already-loaded PCB).
 
@@ -1071,6 +1089,13 @@ def classify_stuck_nets_from_pcb(
     :data:`ORIENT_REVERSED` whose nets declare a ``swap_group`` on >= 2
     members gets a computed :class:`SwapProposal` (see
     :func:`_build_swap_proposal`).
+
+    ``access_witness`` (issue #5517, Epic #5508 Phase 1b): the replay-derived
+    witness loaded from a ``<stem>.access_witness.json`` sidecar.  Each
+    diagnosis gets the slice covering its own net's terminals.  ``None`` (the
+    default) leaves every ``StuckNetDiagnosis.access_witness`` unset, which is
+    byte-identical to pre-#5517 behavior -- a bare ``.kicad_pcb`` with no
+    sidecar can never produce one.
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -1274,6 +1299,15 @@ def classify_stuck_nets_from_pcb(
                 evidence=evidence,
             )
         )
+
+    # Issue #5517 (Epic #5508, Phase 1b): attach the replay-derived witness
+    # for each net's own terminals.  A net with no tracked terminal keeps
+    # ``access_witness is None``, so its ``to_dict()`` stays byte-identical.
+    if access_witness:
+        for diag in diagnoses:
+            per_net = access_witness.for_net(diag.net_name)
+            if per_net:
+                diag.access_witness = per_net
 
     return StuckClassifierResult(diagnoses=diagnoses)
 
@@ -1696,6 +1730,7 @@ def classify_stuck_nets(
     excluded_nets: frozenset[str] = frozenset(),
     strict: bool = True,
     net_class_map: dict[str, NetClassRouting] | None = None,
+    access_witness_path: str | Path | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on the PCB at *pcb_path*.
 
@@ -1707,12 +1742,25 @@ def classify_stuck_nets(
 
     ``net_class_map`` (issue #5522): forwarded unchanged to
     :func:`classify_stuck_nets_from_pcb` -- see its docstring.
+
+    ``access_witness_path`` (issue #5517): where to look for the
+    ``<stem>.access_witness.json`` sidecar ``kct route`` writes.  Defaults to
+    *pcb_path* itself, i.e. the sidecar is auto-discovered next to the board
+    being classified -- the same single-directory convention the
+    ``net_class_map.json`` consumers use.  An absent or unreadable sidecar
+    resolves to ``None`` and the output is byte-identical to pre-#5517.
     """
+    from kicad_tools.router.access_witness import load_access_witness_sidecar
     from kicad_tools.schema.pcb import PCB
+
+    witness = load_access_witness_sidecar(
+        pcb_path if access_witness_path is None else access_witness_path
+    )
 
     pcb = PCB.load(str(pcb_path))
     return classify_stuck_nets_from_pcb(
         pcb,
+        access_witness=witness,
         blocker_radius_mm=blocker_radius_mm,
         escape_clearance_mm=escape_clearance_mm,
         neighborhood_radius_mm=neighborhood_radius_mm,

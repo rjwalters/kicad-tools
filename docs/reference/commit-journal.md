@@ -200,8 +200,24 @@ themselves match is a real finding, not a flaky test.
 
 ## Consumers
 
-Phase 1b's second half adds `access_witness.replay(journal, router)`, which
-walks these records against `pad_access.compute_access_set` to name, for each
-pad that ended a run unrouted, the first pass at which its access set became
-empty and the committed nets responsible — surfaced in `kct net-status --why`
-and `rescue_diagnostics.format_stranding_report`.
+`access_witness.replay(journal, router)` walks these records against
+`pad_access.compute_access_set` to name, for each pad that ended a run
+unrouted, the first pass at which its access set became empty and the
+committed nets responsible. `kct route` runs the replay at the end of the
+route — while the grid that decided the clearances is still alive — and stores
+the result as a `witness` block in the same sidecar; `kct net-status --why`,
+`kct route --format json` and
+`rescue_diagnostics.format_stranding_report` render it.
+
+Two properties of the record shape are what make that replay possible, and
+both are easy to lose in a refactor:
+
+- **`added` is authoritative.** A replay that followed only `kind == "commit"`
+  would keep counting copper that was later ripped, and would attribute a
+  stranding to a route that is no longer on the board.
+- **Geometry is a snapshot.** The replay materialises each record's own
+  geometry; it never dereferences the live `Route`, which the post-route
+  optimizer mutates in place.
+
+Format reference for the replayed block:
+[`../diagnostics/access-witness.md`](../diagnostics/access-witness.md).
