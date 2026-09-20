@@ -44,6 +44,39 @@ zero copper for the failing net.  The fix adds:
 * :class:`ZonePartitionError` raised when neither fallback can produce
   disjoint outlines (e.g. truly coincident pad layouts), so the user
   sees an actionable error instead of a silent zero-copper failure.
+
+Pre-existing zones on the pour layer (#5590)
+--------------------------------------------
+
+Both allocators originally saw only the nets the caller asked to pour.
+A zone that already exists in the PCB file (e.g. board 03's hand-authored
+``VCC`` pour on ``In2.Cu``) never entered ``pour_nets`` -- callers like
+:func:`kicad_tools.router.auto_pour.auto_pour_if_missing` filter nets
+that already have zones -- so a newly auto-poured zone landing on that
+same layer tied the incumbent's priority and kept the full-board
+outline.  KiCad's fill resolver then awarded the whole contested region
+to one of the two zones, tie-breaking on the zone UUID: the loser was
+left with pad-halo slivers or nothing at all.
+
+Issue #5590 feeds the pre-existing zone inventory back into both
+allocators (:func:`_existing_zone_priority_by_layer`):
+
+* **Priority stagger** -- new zones on an incumbent-occupied layer are
+  assigned priorities strictly above the incumbents' maximum, so the
+  fill order no longer depends on the UUID tie-break.
+* **Carved outline** -- an incumbent makes the layer "shared" for
+  :func:`_compute_pour_outlines`, so the new zone gets its per-net pad
+  bbox instead of the full board outline.  The incumbent's polygon is
+  deliberately NOT subtracted from the new outline: incumbents are
+  frequently full-board planes, and subtracting one would empty every
+  carve.  Instead the (now higher-priority) new zone claims its own pad
+  region and the incumbent fills the rest of the layer.
+
+Measured on board 03 (KiCad 10.0.5, both UUID orderings): the old
+allocation gave ``VCC`` 0.289 mm² / ``VBUS`` 4624 mm² on one UUID branch
+and ``VCC`` 4627 mm² / ``VBUS`` **0** mm² on the other; the stagger+carve
+allocation gives ``VCC`` 4180 mm² / ``VBUS`` 420 mm² identically on both
+branches.
 """
 
 from __future__ import annotations
@@ -51,7 +84,7 @@ from __future__ import annotations
 import math
 import sys
 import uuid as uuid_module
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -150,6 +183,19 @@ def _content_zone_uuid(key: str) -> str:
        into the zero-copper branch.
     """
     return str(uuid_module.uuid5(_ZONE_UUID_NAMESPACE, key))
+
+
+#: Minimum fraction of a lower-priority zone's own boundary area that must
+#: remain *outside* the higher-priority zone's boundary for the overlap to
+#: be considered safe (Issue #5590).  When the loser retains at least this
+#: much exclusive territory, KiCad's fill resolver leaves it real copper
+#: (its exclusive region plus clearance halos around its own pads) and no
+#: "zero copper" warning is emitted.  Calibrated against live KiCad 10.0.5
+#: fills: board 03's fixed VCC/VBUS shape retains 91% exclusive territory
+#: and both zones fill, while a legacy inset-frame shape retains ~1.2% and
+#: the loser ends up with slivers only.  Equal-priority overlaps always
+#: warn regardless -- the UUID tie-break makes them non-deterministic.
+_OVERLAP_EXCLUSIVE_AREA_MIN_RATIO = 0.05
 
 
 @dataclass
@@ -639,6 +685,52 @@ class ZoneGenerator:
             or max(b_ys) <= min(a_ys)
         )
 
+    @staticmethod
+    def _boundary_loser_retains_copper(
+        loser: list[tuple[float, float]],
+        winner: list[tuple[float, float]],
+    ) -> bool:
+        """Would the lower-priority zone keep meaningful exclusive copper?
+
+        Issue #5590.  When two same-layer zones have *distinct* priorities,
+        KiCad's fill resolver awards the overlapping region to the
+        higher-priority zone, but the lower-priority zone still fills its
+        own boundary minus the winner's fill.  The loser is only actually
+        starved when its boundary is (almost) fully covered by the
+        winner's -- otherwise it keeps an exclusive region plus the
+        clearance halos around its own pads.
+
+        Measured on board 03 (KiCad 10.0.5): a ``VBUS`` pad-bbox zone at
+        priority 1 over the full-board ``VCC`` zone at priority 0 leaves
+        ``VCC`` 4180 of its 4627 mm² boundary area (91%) as exclusive
+        territory, and both zones fill with real copper; the legacy
+        warning text ("existing zone will get zero copper") was simply
+        false in that shape.
+
+        Returns True when the loser's boundary retains at least
+        :data:`_OVERLAP_EXCLUSIVE_AREA_MIN_RATIO` of its own area outside
+        the winner's boundary.  Conservative when Shapely is unavailable
+        (returns False so the caller keeps warning) and for degenerate
+        polygons (zero-area loser cannot retain anything).
+        """
+        if not loser or not winner:
+            return False
+        try:
+            from shapely.geometry import Polygon
+
+            loser_poly = Polygon(loser)
+            winner_poly = Polygon(winner)
+            if not loser_poly.is_valid or not winner_poly.is_valid:
+                return False
+            if loser_poly.area <= 1e-9:
+                return False
+            exclusive = loser_poly.difference(winner_poly).area
+            return exclusive >= _OVERLAP_EXCLUSIVE_AREA_MIN_RATIO * loser_poly.area
+        except ImportError:
+            # No exact geometry available: assume covered (warn), matching
+            # the conservative legacy behaviour.
+            return False
+
     def _check_overlap(
         self,
         net: str,
@@ -685,7 +777,21 @@ class ZoneGenerator:
             else:
                 existing_boundary = existing.polygon
             if self._boundaries_overlap(boundary, existing_boundary):
-                if priority <= existing.priority:
+                if priority == existing.priority:
+                    # Equal priority: KiCad tie-breaks on the zone UUID, so
+                    # the outcome is non-deterministic -- always warn
+                    # (Issue #5590's core hazard).
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"existing zone '{existing.net_name}' (priority {existing.priority}). "
+                        f"The new zone will get zero copper because the existing zone "
+                        f"has equal or higher priority."
+                    )
+                elif priority < existing.priority:
+                    if self._boundary_loser_retains_copper(boundary, existing_boundary):
+                        # Distinct priorities + the new zone keeps exclusive
+                        # territory: both zones receive real copper (#5590).
+                        continue
                     msg = (
                         f"Zone '{net}' on {layer} (priority {priority}) overlaps "
                         f"existing zone '{existing.net_name}' (priority {existing.priority}). "
@@ -693,6 +799,11 @@ class ZoneGenerator:
                         f"has equal or higher priority."
                     )
                 else:
+                    if self._boundary_loser_retains_copper(existing_boundary, boundary):
+                        # The existing zone keeps exclusive territory -- the
+                        # higher-priority newcomer only claims the contested
+                        # region (#5590's stagger+carve allocation).
+                        continue
                     msg = (
                         f"Zone '{net}' on {layer} (priority {priority}) overlaps "
                         f"existing zone '{existing.net_name}' (priority {existing.priority}). "
@@ -723,6 +834,9 @@ class ZoneGenerator:
                         f"has equal or higher priority."
                     )
                 else:
+                    if self._boundary_loser_retains_copper(queued.boundary, boundary):
+                        # Queued sibling keeps exclusive territory (#5590).
+                        continue
                     msg = (
                         f"Zone '{net}' on {layer} (priority {priority}) overlaps "
                         f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
@@ -1055,9 +1169,49 @@ def _order_ground_nets_canonically(
     return sorted_nets
 
 
+def _existing_zone_priority_by_layer(
+    pcb: PCB,
+    pour_net_names: set[str] | None = None,
+) -> dict[str, int]:
+    """Map copper layer -> highest zone priority among pre-existing pours.
+
+    Issue #5590: the layer/priority and outline allocators only ever saw
+    the nets they were asked to pour, so a zone already authored into the
+    PCB file (e.g. board 03's hand-authored ``VCC`` pour on ``In2.Cu``)
+    was invisible to them.  A newly auto-poured zone landing on that
+    layer then tied the incumbent's priority and kept the full-board
+    outline, leaving KiCad's UUID tie-break to decide which zone starves.
+
+    Zones without a net name (rule areas / keepouts) are skipped: they
+    fill no copper for a net, so zone priority is irrelevant to them.
+    Nets in *pour_net_names* are skipped because the caller is (re)pouring
+    them -- with ``replace_existing=True`` their old zones are already
+    stripped from the file, and additively they are not incumbents to
+    yield to.
+
+    Args:
+        pcb: Loaded PCB object whose ``zones`` inventory to scan.
+        pour_net_names: Net names the current call is creating zones for.
+
+    Returns:
+        Dict mapping layer name -> maximum ``priority`` among that
+        layer's pre-existing zones.  Layers without incumbents are
+        absent.
+    """
+    by_layer: dict[str, int] = {}
+    for zone in pcb.zones:
+        if not zone.net_name:
+            continue
+        if pour_net_names and zone.net_name in pour_net_names:
+            continue
+        by_layer[zone.layer] = max(by_layer.get(zone.layer, 0), zone.priority)
+    return by_layer
+
+
 def _assign_layers_for_pour_nets(
     copper_layer_count: int,
     pour_nets: list[tuple[str, NetClass]],
+    existing_zone_priority_by_layer: dict[str, int] | None = None,
 ) -> list[tuple[str, str, int]]:
     """Assign layers and priorities for pour nets based on board stackup.
 
@@ -1091,14 +1245,30 @@ def _assign_layers_for_pour_nets(
 
     See ``_order_ground_nets_canonically`` for the full rule.
 
+    Incumbent-zone priority stagger (#5590):
+
+    When *existing_zone_priority_by_layer* reports pre-existing zones on
+    a layer this function assigns a new pour to, every new priority on
+    that layer is shifted above the incumbents' maximum.  Equal
+    priorities on a shared layer make KiCad's fill resolver tie-break on
+    the zone UUID, which starves one zone non-deterministically; a
+    strictly-higher new priority makes the allocation deterministic.
+    The relative ordering among the new zones (descending schemes above)
+    is preserved by adding a uniform per-layer offset.
+
     Args:
         copper_layer_count: Number of copper layers (2, 4, 6, etc.)
         pour_nets: List of (net_name, NetClass) tuples
+        existing_zone_priority_by_layer: Layer -> max priority among
+            pre-existing zones on the board (see
+            :func:`_existing_zone_priority_by_layer`).  ``None``/empty
+            preserves the legacy behaviour.
 
     Returns:
         List of (net_name, layer, priority) tuples.  Every ground-class
         net has a *distinct* (layer, priority) pair so no ground zone
-        gets silently overridden to zero copper.
+        gets silently overridden to zero copper, and every new zone on
+        an incumbent-occupied layer strictly outranks the incumbent.
     """
     from kicad_tools.router.net_class import NetClass
 
@@ -1188,6 +1358,32 @@ def _assign_layers_for_pour_nets(
 
         for i, (net_name, _) in enumerate(power_nets):
             assignments.append((net_name, "F.Cu", len(power_nets) - i))
+
+    # Incumbent-zone priority stagger (Issue #5590): shift every new
+    # priority on an incumbent-occupied layer strictly above the
+    # incumbents' maximum so KiCad's fill resolver never falls back to
+    # the UUID tie-break for the pair.  A uniform per-layer offset keeps
+    # the distinct descending schemes above intact.
+    if existing_zone_priority_by_layer:
+        staggered_layers: dict[str, int] = {}
+        for idx, (net_name, layer, priority) in enumerate(assignments):
+            incumbent_max = existing_zone_priority_by_layer.get(layer)
+            if incumbent_max is None:
+                continue
+            # Floor the offset at 1 so a negative-priority incumbent (or a
+            # zero-priority one, the common case) still yields a new
+            # priority of at least original+1.
+            offset = max(incumbent_max + 1, 1)
+            assignments[idx] = (net_name, layer, priority + offset)
+            staggered_layers[layer] = offset
+        for layer, offset in sorted(staggered_layers.items()):
+            print(
+                f"Auto-pour: layer {layer} already hosts zone(s) up to priority "
+                f"{existing_zone_priority_by_layer[layer]}; new pour(s) assigned "
+                f"priority {offset}+ above them so both zones receive copper "
+                f"(issue #5590)",
+                file=sys.stderr,
+            )
 
     return assignments
 
@@ -1381,6 +1577,7 @@ def _compute_pour_outlines(
     assignments: list[tuple[str, str, int]],
     board_outline: list[tuple[float, float]],
     margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
+    occupied_layers: Collection[str] | None = None,
 ) -> dict[str, list[tuple[float, float]] | None]:
     """Compute per-net pour outlines for the given layer assignments.
 
@@ -1399,6 +1596,19 @@ def _compute_pour_outlines(
       **geometrically disjoint** even when pad clusters are spatially
       interleaved (as on board 06, where ``+3V3``/``+1V8``/``+1V2`` all
       feed the same BGA region).
+
+    A layer listed in *occupied_layers* (Issue #5590: it already hosts a
+    pre-existing zone the caller is not re-pouring) counts toward the
+    "shared layer" test, so the new zone gets its carved pad-bbox outline
+    instead of the full board outline.  The incumbent's own polygon is
+    deliberately NOT subtracted from the new outline: incumbents are
+    frequently full-board planes (board 03's ``VCC`` pour on ``In2.Cu``),
+    and subtracting one would empty every carve and raise
+    :class:`ZonePartitionError`.  Instead the caller staggers the new
+    zone's priority above the incumbent (see
+    :func:`_assign_layers_for_pour_nets`), so the fill resolver awards
+    the new zone its pad region deterministically and the incumbent
+    fills the rest of the layer.
 
     Without the disjoint-carve pass, real boards routinely produce raw
     bboxes that overlap each other.  KiCad's fill resolver would then
@@ -1421,14 +1631,22 @@ def _compute_pour_outlines(
             :pyattr:`ZoneGenerator.board_outline`).
         margin_mm: Margin around the pad bounding box, in mm.  Defaults to
             :data:`DEFAULT_POUR_BBOX_MARGIN_MM` (1.5 mm).
+        occupied_layers: Layers that already host pre-existing zones
+            (Issue #5590).  Each such layer is treated as shared even
+            when only one new zone lands on it.
 
     Returns:
         Dict mapping ``net_name`` -> polygon (or ``None`` for default).
     """
     # Count zones per layer so we know which assignments share a layer.
+    # Incumbent-occupied layers (#5590) count as already hosting a zone.
     layer_counts: dict[str, int] = {}
     for _, layer, _ in assignments:
         layer_counts[layer] = layer_counts.get(layer, 0) + 1
+    if occupied_layers:
+        for layer in layer_counts:
+            if layer in occupied_layers:
+                layer_counts[layer] += 1
 
     outlines: dict[str, list[tuple[float, float]] | None] = {}
 
@@ -1999,6 +2217,18 @@ def auto_create_zones_for_pour_nets(
     copper despite the file containing a zone definition for each
     (see #2771 for the board 05 reproduction).
 
+    Pre-existing zones on the pour layer (#5590)
+    -------------------------------------------
+
+    Zones already authored into the PCB file (hand-authored pours the
+    caller's idempotency filter excluded from ``pour_nets``) are treated
+    as layer occupants by both allocators: new zones landing on such a
+    layer receive priorities strictly above the incumbent's maximum and
+    a carved per-net pad-bbox outline instead of the full board outline.
+    The incumbent zone itself is never modified.  This replaces the old
+    equal-priority full-board collision whose outcome KiCad decided by
+    zone-UUID tie-break (one zone starved, non-deterministically).
+
     Nested pad clusters (#3240)
     ---------------------------
 
@@ -2076,13 +2306,26 @@ def auto_create_zones_for_pour_nets(
     gen = ZoneGenerator.from_pcb(pcb_path, edge_clearance=edge_clearance)
 
     copper_layer_count = len(gen.pcb.copper_layers)
-    assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets)
+    # Issue #5590: surface zones already authored into the PCB file to
+    # both allocators.  Without this, a pre-existing same-layer zone
+    # (e.g. board 03's hand-authored VCC pour on In2.Cu) was invisible:
+    # the new zone tied its priority, kept the full-board outline, and
+    # KiCad's UUID tie-break decided which zone starved.
+    existing_by_layer = _existing_zone_priority_by_layer(gen.pcb, {name for name, _ in pour_nets})
+    assignments = _assign_layers_for_pour_nets(copper_layer_count, pour_nets, existing_by_layer)
 
     # Outline allocator (#2771): compute per-net bounding outlines for any
     # layer that hosts more than one zone.  Sole-layer zones (typically
     # ground) get ``None`` so :meth:`ZoneGenerator.add_zone` falls back to
     # the full ``board_outline`` and keeps the return-path plane continuous.
-    pour_outlines = _compute_pour_outlines(gen.pcb, assignments, gen.board_outline)
+    # Incumbent-occupied layers (#5590) count as shared, so a new zone on
+    # such a layer gets its carved pad-bbox outline instead.
+    pour_outlines = _compute_pour_outlines(
+        gen.pcb,
+        assignments,
+        gen.board_outline,
+        occupied_layers=existing_by_layer.keys() if existing_by_layer else None,
+    )
 
     count = 0
     for net_name, layer, priority in assignments:
