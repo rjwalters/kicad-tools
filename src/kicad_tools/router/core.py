@@ -2098,6 +2098,22 @@ class Autorouter:
             )
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
 
+    @staticmethod
+    def _recovery_hold_worthy(current_overflow: int, best_overflow: int) -> bool:
+        """Whether a stagnation-recovery sweep's state should be held.
+
+        Issue #5545 / PR #5609 Judge bisect: hold only when the sweep
+        re-landed the cohort STRICTLY under the banked best's overflow.
+        Ties must fall through to the normal residual-conflict rip-up and
+        iteration verdict: at equal overflow the re-landed geometry is
+        unverified against the incumbent (overflow alone does not certify
+        geometry), and the skipped rip-up is also a repair mechanism --
+        board 01's tie-held VOUT carried a same-net
+        ``hole_to_hole_clearance`` violation the skipped rip-up had
+        historically repaired.
+        """
+        return current_overflow < best_overflow
+
     def _mark_stagnation_congestion(
         self,
         overused: list[tuple[int, int, int, int]],
@@ -11098,11 +11114,14 @@ class Autorouter:
                     flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
 
                     # Issue #5545: set by the stagnation-recovery block below
-                    # when the recovery sweep re-lands the cohort at or under
-                    # the banked best's overflow -- the iteration then holds
-                    # the recovered configuration instead of running its
-                    # residual-conflict rip-up (see the hold site at the
-                    # rip-up dispatch).
+                    # when the recovery sweep re-lands the cohort strictly
+                    # under the banked best's overflow -- the iteration then
+                    # holds the recovered configuration instead of running
+                    # its residual-conflict rip-up (see the hold site at the
+                    # rip-up dispatch).  Ties do NOT hold: at equal overflow
+                    # the re-landed geometry is unverified against the
+                    # incumbent, and the skipped rip-up is also a repair
+                    # mechanism (board 01 VOUT, Judge bisect on PR #5609).
                     recovery_hold_follow_through = False
 
                     # Issue #3438: close the PREVIOUS iteration's
@@ -11568,29 +11587,40 @@ class Autorouter:
                                     f"+{STAGNATION_CONGESTION_AMOUNT:.0f} congestion cost"
                                 )
                             # Issue #5545: if the sweep already re-landed the
-                            # cohort at or under the banked best's overflow,
-                            # HOLD that configuration for the iteration
-                            # verdict instead of running the residual-conflict
-                            # rip-up.  The serial conflict reroute is the same
-                            # mechanism that stagnated, and it negotiates
-                            # blind to the crossings it is about to create
-                            # (a reroute piles onto cells that are at usage 1
-                            # -- unmarkable in advance).  Measured on board 06
-                            # (seed 42): the marked sweep re-landed at
-                            # overflow 2 (best-so-far 4), the follow-through
-                            # rip-up of the 2 residual conflict nets threw it
-                            # back up to 5, and the iteration lost to the
-                            # iter-2 snapshot.  Holding keeps the recovery
-                            # monotone in banked outcome: the verdict still
-                            # applies the full lex-tuple comparison, so a
-                            # hold can only preserve a strictly-better
-                            # candidate, never bank a worse one.
-                            if current_overflow <= best_metrics.overflow:
+                            # cohort STRICTLY under the banked best's
+                            # overflow, HOLD that configuration for the
+                            # iteration verdict instead of running the
+                            # residual-conflict rip-up.  The serial conflict
+                            # reroute is the same mechanism that stagnated,
+                            # and it negotiates blind to the crossings it is
+                            # about to create (a reroute piles onto cells
+                            # that are at usage 1 -- unmarkable in advance).
+                            # Measured on board 06 (seed 42): the marked
+                            # sweep re-landed at overflow 2 (best-so-far 4),
+                            # the follow-through rip-up of the 2 residual
+                            # conflict nets threw it back up to 5, and the
+                            # iteration lost to the iter-2 snapshot.
+                            #
+                            # STRICTLY-better only -- ties fall through to
+                            # the normal residual-conflict rip-up and
+                            # iteration verdict.  At equal overflow the held
+                            # configuration is UNVERIFIED against the
+                            # incumbent: overflow alone does not certify
+                            # geometry, and the skipped rip-up is also a
+                            # repair mechanism.  Judge bisect, board 01
+                            # (seed 42): VOUT's recovery re-landed at
+                            # overflow 2 == banked best 2, the tie-hold kept
+                            # a same-net hole_to_hole_clearance violation
+                            # (-0.000mm VOUT/VOUT at (149.50, 86.05)) that
+                            # the skipped residual rip-up had historically
+                            # repaired, and the DRC-clean tied incumbent
+                            # never got its turn.
+                            if self._recovery_hold_worthy(current_overflow, best_metrics.overflow):
                                 recovery_hold_follow_through = True
                                 flush_print(
                                     f"  Holding recovered state: post-recovery overflow "
-                                    f"({current_overflow}) is at or under the banked best "
-                                    f"(iter-{best_metrics.iteration}: overflow "
+                                    f"({current_overflow}) is strictly under the banked "
+                                    f"best (iter-{best_metrics.iteration}: overflow "
                                     f"{best_metrics.overflow}); skipping this iteration's "
                                     f"residual-conflict rip-up (Issue #5545)"
                                 )
@@ -11788,8 +11818,9 @@ class Autorouter:
 
                     if recovery_hold_follow_through:
                         # Issue #5545: the stagnation-recovery sweep re-landed
-                        # the cohort at or under the banked best's overflow
-                        # (decision + rationale in the recovery block above).
+                        # the cohort strictly under the banked best's
+                        # overflow (decision + rationale in the recovery
+                        # block above; ties fall through to the rip-up).
                         # Skip this iteration's residual-conflict rip-up so
                         # the serial reroute that stagnated cannot gamble the
                         # recovered configuration away before the iteration

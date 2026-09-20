@@ -4911,6 +4911,27 @@ class TestStagnationRecovery:
             baseline = impl.at(gx3, gy3, 0).history_cost
             assert baseline == pytest.approx(0.0)
 
+    def test_recovery_hold_is_strictly_better_only_ties_fall_through(self):
+        """Issue #5545 / PR #5609 Judge bisect: the hold must not fire on ties.
+
+        Board 01 evidence: VOUT's recovery re-landed at overflow 2 == banked
+        best 2; the tie-hold kept a same-net ``hole_to_hole_clearance``
+        violation that the skipped residual-conflict rip-up had historically
+        repaired.  The hold predicate must therefore hold only on strictly
+        lower overflow -- equal overflow falls through to the normal rip-up
+        and iteration verdict.
+        """
+        hold = Autorouter._recovery_hold_worthy
+        # Strictly better -> hold (board 06's case: 2 < 4).
+        assert hold(2, 4) is True
+        assert hold(0, 4) is True
+        assert hold(1, 2) is True
+        # Tie -> fall through (board 01's case: 2 == 2).
+        assert hold(2, 2) is False
+        assert hold(0, 0) is False
+        # Worse -> fall through.
+        assert hold(5, 4) is False
+
     def test_stagnation_recovery_announces_congestion_mark(self, capsys):
         """When recovery fires on an oscillating cohort, the mark is logged.
 
