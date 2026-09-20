@@ -447,6 +447,20 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 // matches the cached ``trace_half_width_cells_`` (the typical case --
 // callers in the A* loop pass either the default or the same per-net
 // override they passed to ``is_trace_blocked``).
+bool Pathfinder::strict_step_in_scope(int nx, int ny) const {
+    if (!search_strict_pad_kernel_) return false;
+    if (search_strict_center_x_ < 0 || search_strict_center_y_ < 0 ||
+        search_strict_radius_ < 0) {
+        return true;  // Global scope (diagnostics / unit tests only).
+    }
+    // Issue #5599: Euclidean disc around the repeated violation site --
+    // the locality bound that keeps the strict pad check from closing
+    // relaxation-dependent corridors elsewhere on dense pad arrays.
+    const int dx = nx - search_strict_center_x_;
+    const int dy = ny - search_strict_center_y_;
+    return dx * dx + dy * dy <= search_strict_radius_ * search_strict_radius_;
+}
+
 bool Pathfinder::strict_edge_pad_clear(int cx, int cy, int nx, int ny, int layer,
                                         int net, float emit_trace_width) const {
     const auto [ax, ay] = grid_.grid_to_world(cx, cy);
@@ -1488,7 +1502,7 @@ RouteResult Pathfinder::route(
                     // edge fails the validator's segment-vs-pad clearance
                     // (Issue #5599; see the twin comment in the resumable
                     // loop).  Evidence-gated on search_strict_pad_kernel_.
-                    if (search_strict_pad_kernel_ &&
+                    if (strict_step_in_scope(nx, ny) &&
                         !strict_edge_pad_clear(current.x, current.y, nx, ny,
                                                nlayer, net, emit_trace_width)) {
                         if (astar_trace_enabled()) {
@@ -1583,7 +1597,7 @@ RouteResult Pathfinder::route(
                         continue;
                     }
                 } else if (
-                    search_strict_pad_kernel_ &&
+                    strict_step_in_scope(nx, ny) &&
                     !strict_edge_pad_clear(current.x, current.y, nx, ny,
                                            nlayer, net, emit_trace_width)) {
                     // Issue #5599: the pad-exit/approach-zone relaxation
@@ -2166,7 +2180,7 @@ RouteResult Pathfinder::run_astar_loop() {
                     // past an off-grid pad), so it stays off for fresh
                     // searches and is armed by the Python resume loop only
                     // once a clearance violation has actually repeated.
-                    if (search_strict_pad_kernel_ &&
+                    if (strict_step_in_scope(nx, ny) &&
                         !strict_edge_pad_clear(current.x, current.y, nx, ny,
                                                nlayer, search_net_,
                                                search_emit_trace_width_)) {
@@ -2268,7 +2282,7 @@ RouteResult Pathfinder::run_astar_loop() {
                         continue;
                     }
                 } else if (
-                    search_strict_pad_kernel_ &&
+                    strict_step_in_scope(nx, ny) &&
                     !strict_edge_pad_clear(current.x, current.y, nx, ny,
                                            nlayer, search_net_,
                                            search_emit_trace_width_)) {

@@ -2540,31 +2540,47 @@ class CppPathfinder:
                     last_violation_cell = violation_cell
                     site_repeat_run = 0
                 # Issue #5599: arm the evidence-gated strict foreign-pad
-                # kernel once the same violation site has repeated -- the
+                # check once the same violation site has repeated -- the
                 # relaxation surface (same-net corridors from this net's own
                 # escape stub, approach zones) keeps producing candidates the
                 # validator rejects, so the remaining resumes/restarts search
-                # under the strict #3226-style pad predicate instead.  The
-                # flag is read live per neighbor expansion, so it applies to
-                # the very next resume()/restart; it is reset at the start of
-                # every route() call (see above) so fresh nets keep the
-                # historical reach.
-                if site_repeat_run >= 1 and hasattr(
-                    self._impl, "set_search_strict_pad_kernel"
+                # with the validator's OWN segment-vs-pad geometry inside a
+                # LOCALIZED disc around the violation site.  Localization
+                # matters: the relaxation is load-bearing for C++ reach
+                # elsewhere on dense pad arrays (board 07's DDR byte bundle
+                # lost its whole search when strictness was global), so the
+                # disc is scoped to the one place the validator proved the
+                # disagreement.  The flag is read live per neighbor
+                # expansion, so it applies to the very next resume()/restart;
+                # it is reset at the start of every route() call (see above)
+                # so fresh nets keep the historical reach.
+                if (
+                    site_repeat_run >= 1
+                    and violation_cell is not None
+                    and hasattr(self._impl, "set_search_strict_pad_kernel")
+                    and os.environ.get("KCT_5599_NO_STRICT") != "1"  # DIAGNOSTIC
                 ):
-                    self._impl.set_search_strict_pad_kernel(True)
+                    strict_radius = 2 * trace_radius_cells + 6
+                    self._impl.set_search_strict_pad_kernel(
+                        True, violation_cell[0], violation_cell[1], strict_radius
+                    )
                 boost_amount = _RESUME_BOOST_BASE_AMOUNT * (
                     _RESUME_BOOST_ESCALATION ** min(site_repeat_run, 6)
                 )
-                # Issue #5599: grow the DISC as well as the amount.  A seg-pad
-                # violation is reported at the pad center; the corridor that
-                # keeps failing can lie just past the pad's own corners
-                # (Chebyshev ~half-height of the pad + a couple of cells),
-                # OUTSIDE the historical radius-3*trace disc -- in which case
-                # no amount escalation can reach it.  4 cells per repeat keeps
-                # step-0 byte-identical while covering the corner corridors
-                # from the first repeat on.
-                boost_extra_radius = 4 * site_repeat_run
+                if os.environ.get("KCT_5599_LEGACY_BOOST") == "1":  # DIAGNOSTIC
+                    boost_amount = _RESUME_BOOST_BASE_AMOUNT
+                    boost_extra_radius = 0
+                else:
+                    # Issue #5599: grow the DISC as well as the amount.  A
+                    # seg-pad violation is reported at the pad center; the
+                    # corridor that keeps failing can lie just past the pad's
+                    # own corners (Chebyshev ~half-height of the pad + a
+                    # couple of cells), OUTSIDE the historical
+                    # radius-3*trace disc -- in which case no amount
+                    # escalation can reach it.  4 cells per repeat keeps
+                    # step-0 byte-identical while covering the corner
+                    # corridors from the first repeat on.
+                    boost_extra_radius = 4 * site_repeat_run
                 self._boost_avoidance_at(
                     violation_location,
                     trace_radius_cells,
@@ -2687,7 +2703,12 @@ class CppPathfinder:
                 goal_gx = int(getattr(result, "goal_gx", -1))
                 goal_gy = int(getattr(result, "goal_gy", -1))
                 goal_layer = int(getattr(result, "goal_layer", -1))
-                if goal_gx >= 0 and goal_gy >= 0 and goal_layer >= 0:
+                if (
+                    goal_gx >= 0
+                    and goal_gy >= 0
+                    and goal_layer >= 0
+                    and os.environ.get("KCT_5599_LEGACY_REJECT") != "1"  # DIAGNOSTIC
+                ):
                     reject_gx, reject_gy, reject_layer = goal_gx, goal_gy, goal_layer
                 else:
                     last_seg = result.segments[-1] if result.segments else None
@@ -2714,7 +2735,11 @@ class CppPathfinder:
                 new_rejections: list[tuple[int, int, int]] = [
                     (reject_gx, reject_gy, reject_layer)
                 ]
-                if site_repeat_run >= 1 and violation_cell is not None:
+                if (
+                    site_repeat_run >= 1
+                    and violation_cell is not None
+                    and os.environ.get("KCT_5599_NO_BAND") != "1"  # DIAGNOSTIC
+                ):
                     try:
                         eb = end_pad_bounds
                         # Issue #5599: the failing approach's violation sits
@@ -2783,7 +2808,10 @@ class CppPathfinder:
                 strategy = "resume"
                 remaining_timeout: float | None = None
                 restart_cap = 0
-                if site_repeat_run >= 2:
+                if (
+                    site_repeat_run >= 2
+                    and os.environ.get("KCT_5599_NO_RESTART") != "1"  # DIAGNOSTIC
+                ):
                     total_spent = iterations_spent_prior + self._impl.iterations
                     if self._effective_search_iterations > 0:
                         attempts_left = max(1, max_resume_attempts - attempt)

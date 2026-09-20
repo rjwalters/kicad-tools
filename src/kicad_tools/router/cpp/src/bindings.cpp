@@ -558,9 +558,10 @@ NB_MODULE(router_cpp, m) {
              "path whose crossed owner nets feed the targeted rip-up.")
         // Issue #5599: evidence-gated strict foreign-pad kernel for the A*
         // neighbor filter (see pathfinder.hpp).  Armed by the Python resume
-        // loop after a repeated post-route clearance violation.
+        // loop after a repeated post-route clearance violation, localized to
+        // a disc around that violation site (cx/cy/radius; cx < 0 = global).
         .def("set_search_strict_pad_kernel", &Pathfinder::set_search_strict_pad_kernel,
-             "enabled"_a)
+             "enabled"_a, "cx"_a = -1, "cy"_a = -1, "radius"_a = 0)
         .def_prop_ro("relief_mode", &Pathfinder::relief_mode)
         .def("set_search_fill_clearances", &Pathfinder::set_search_fill_clearances)
         .def("set_search_partner_clearance", &Pathfinder::set_search_partner_clearance)

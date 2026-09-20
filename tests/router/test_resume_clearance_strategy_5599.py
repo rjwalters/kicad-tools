@@ -135,7 +135,7 @@ class _FakeImpl:
         self.iterations = 100_000
         self.route_resumable_calls: list[tuple[float, int]] = []
         self.resume_calls: list[tuple[int, int, int]] = []
-        self.strict_pad_kernel_calls: list[bool] = []
+        self.strict_pad_kernel_calls: list[tuple[bool, int, int, int]] = []
         self._next_goal = 100
 
     def _fresh_goal(self) -> tuple[int, int, int]:
@@ -153,8 +153,12 @@ class _FakeImpl:
     def set_search_fill_clearances(self, *args, **kwargs) -> None:
         return None
 
-    def set_search_strict_pad_kernel(self, enabled: bool) -> None:
-        self.strict_pad_kernel_calls.append(bool(enabled))
+    def set_search_strict_pad_kernel(
+        self, enabled: bool, cx: int = -1, cy: int = -1, radius: int = 0
+    ) -> None:
+        self.strict_pad_kernel_calls.append(
+            (bool(enabled), int(cx), int(cy), int(radius))
+        )
 
     def clear_search_state(self) -> None:
         return None
@@ -279,10 +283,15 @@ class TestResumeStrategy:
         # One initial search + one fresh restart per repeated-site attempt.
         assert len(fake.route_resumable_calls) == 4
         # Issue #5599: the evidence-gated strict foreign-pad kernel is reset
-        # at route() entry and armed from the first repeat on -- never armed
-        # for a fresh search.
-        assert fake.strict_pad_kernel_calls[0] is False
-        assert all(fake.strict_pad_kernel_calls[1:])
+        # at route() entry and armed -- LOCALIZED to the violation site --
+        # from the first repeat on; never armed for a fresh search.
+        assert fake.strict_pad_kernel_calls[0] == (False, -1, -1, 0)
+        for call in fake.strict_pad_kernel_calls[1:]:
+            enabled, cx, cy, radius = call
+            assert enabled is True
+            assert cx >= 0 and cy >= 0 and radius > 0, (
+                "strict mode must be localized to the repeated violation site"
+            )
 
     def test_restart_replays_every_rejected_goal_cell(self) -> None:
         pathfinder, fake, _ = self._run_always_rejecting()
@@ -392,7 +401,7 @@ class TestResumeStrategy:
         assert all(a["boost_amount"] == 20.0 for a in attempts)
         # Distinct sites never arm the strict kernel (it stays disarmed from
         # the route()-entry reset).
-        assert not any(fake.strict_pad_kernel_calls)
+        assert not any(c[0] for c in fake.strict_pad_kernel_calls)
 
     def test_recovered_route_records_non_exhausted_diagnostics(self) -> None:
         """A loop that recovers after failed attempts records exhausted=False
