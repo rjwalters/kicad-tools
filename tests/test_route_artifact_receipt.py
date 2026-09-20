@@ -6,8 +6,24 @@ import shutil
 import pytest
 
 from kicad_tools.cli import route_cmd, route_receipt
+from kicad_tools.native_concurrency import configured_limit, slot_wait_ceiling
 from kicad_tools.schema.pcb import PCB
 from tests.test_factory_object_clearance import board_fixture
+
+# Wall-clock budget for the ``finite`` parametrization (Issue #5579/#5584).
+# --------------------------------------------------------------------------
+# Composed rather than a flat literal: the invocation's own work, plus the
+# native-permit gate's own fail-open queue bound when (and only when) the gate
+# is configured. See tests/test_route_partial_placement_cli.py's
+# ``_queue_ceiling_seconds()`` for the full rationale -- the gate can charge
+# ordinary queue-wait time against this test's route budget, so the budget
+# must absorb that worst case instead of hardcoding the pre-gate 30 s.
+_ROUTE_WORK_SECONDS = 30.0
+
+
+def _queue_ceiling_seconds() -> float:
+    """Worst-case native-permit queue time this invocation can be charged."""
+    return slot_wait_ceiling() if configured_limit() is not None else 0.0
 
 
 def source_board(tmp_path):
@@ -33,7 +49,11 @@ def test_real_route_artifacts_relocate_and_detect_each_tamper(tmp_path, mode):
         )
     originals = {p: p.read_bytes() for p in tmp_path.iterdir()}
     output = tmp_path / "renamed.kicad_pcb"
-    options = ["--timeout", "30"] if mode == "finite" else []
+    options = (
+        ["--timeout", str(_ROUTE_WORK_SECONDS + _queue_ceiling_seconds())]
+        if mode == "finite"
+        else []
+    )
     if mode.startswith("complete"):
         options += ["--complete", "--route-engine", "grid"]
     code = route_cmd.main(
