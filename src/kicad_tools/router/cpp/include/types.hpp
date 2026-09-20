@@ -259,7 +259,9 @@ namespace router {
 // v40: add the Epic #5509 Phase 1b clearance-kernel bindings (KSegment/KVia/
 // KEdge, copper_gap, hole_gap, clear) -- a new bindings.cpp symbol surface, so
 // a v39 .so must be rejected rather than AttributeError inside the parity test.
-constexpr int ROUTER_CPP_BUILD_VERSION = 40;
+// v41: complete the clearance kernel with KPad / KZonePoly, make_pad and
+// pad_outline -- again new bindings.cpp symbols, so a v40 .so must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 41;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

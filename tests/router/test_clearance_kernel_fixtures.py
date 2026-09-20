@@ -24,10 +24,9 @@ leg actually re-runs ``kicad-cli pcb drc`` and is skipped when the binary is
 absent (the ``tests/test_kicad_cli_roundtrip.py:49`` idiom, applied to that
 test only rather than module-wide).
 
-Scope: Phase 1b PR A covers the three segment/via fixtures.  The fourth,
-``roundrect-corner-gap``, needs ``KPad`` and the ``pad_outline`` port and is
-covered by the follow-up PR -- it is listed here (xfail-free, explicitly
-skipped) rather than silently omitted.
+Scope: Phase 1b is complete here -- all four named fixtures, including
+``roundrect-corner-gap``, which needs ``KPad`` and the ``pad_outline`` port of
+``validate/rules/clearance.py:_pad_polygon``.
 """
 
 from __future__ import annotations
@@ -44,8 +43,9 @@ from tests.conformance.fixtures import (
     HOLE_TO_HOLE_MM,
     build_named_fixture,
     fixture_stem,
+    roundrect_corner_support,
 )
-from tests.conformance.generator import PairKind
+from tests.conformance.generator import PadSpec, PairKind
 from tests.conformance.oracle import kicad_cli_available, run_oracle
 
 requires_cpp = pytest.mark.skipif(
@@ -54,15 +54,38 @@ requires_cpp = pytest.mark.skipif(
 )
 requires_kicad_cli = pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not installed")
 
-# The fixtures this PR's kernel can model end-to-end (segments and vias only).
-SEG_VIA_FIXTURES = (
+# Every named Phase 1a fixture.  ``roundrect-corner-gap`` joined the list once
+# the pad half of the kernel landed (#5589); the other three are segment/via.
+NAMED_FIXTURES = (
     "issue5398-seg-via-0p18-order",
     "issue5410-dqs-n-halo-vs-legal-via",
     "search-vs-commit-seg-via-max",
+    "roundrect-corner-gap",
 )
 
 # F.Cu / In1.Cu / In2.Cu / B.Cu -> kernel layer index.
 _LAYER_INDEX = {"F.Cu": 0, "In1.Cu": 1, "In2.Cu": 2, "B.Cu": 3}
+
+
+def _fixture_pad(pad: PadSpec) -> ck.KPad:
+    """A fixture ``PadSpec`` as a kernel pad, through the ``_pad_polygon`` port.
+
+    The probe footprints are SMD, single-layer, and carry their shape keyword,
+    local size and roundrect ratio on ``PadSpec.shape``.  ``PadSpec.rotation``
+    is already the absolute board-frame angle (#3902).
+    """
+    shape = pad.shape
+    return ck.make_pad(
+        shape.shape,
+        shape.size[0],
+        shape.size[1],
+        0.25 if shape.roundrect_rratio is None else shape.roundrect_rratio,
+        pad.rotation,
+        pad.x,
+        pad.y,
+        _LAYER_INDEX[pad.layer],
+        0.0,
+    )
 
 
 def _shapes_by_net(name: str) -> dict[str, ck.KShape]:
@@ -80,7 +103,8 @@ def _shapes_by_net(name: str) -> dict[str, ck.KShape]:
         )
     for via in case.vias:
         shapes[via.net] = ck.KVia(x=via.x, y=via.y, diameter=via.diameter, drill=via.drill)
-    assert not case.pads, f"{name} has pads; KPad arrives in the follow-up PR"
+    for pad in case.pads:
+        shapes[pad.net] = _fixture_pad(pad)
     return shapes
 
 
@@ -89,7 +113,7 @@ def _shapes_by_net(name: str) -> dict[str, ck.KShape]:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", SEG_VIA_FIXTURES)
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
 def test_kernel_reproduces_the_fixture_gap(name: str) -> None:
     """The kernel measures the gap each fixture was analytically placed at."""
     case = build_named_fixture(name)
@@ -103,7 +127,7 @@ def test_kernel_reproduces_the_fixture_gap(name: str) -> None:
         )
 
 
-@pytest.mark.parametrize("name", SEG_VIA_FIXTURES)
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
 def test_kernel_matches_the_recorded_kicad_cli_verdict(name: str) -> None:
     """``clear()`` agrees with what kicad-cli says about each fixture pair.
 
@@ -241,7 +265,7 @@ def test_search_vs_commit_pair_is_clear_at_0p15_and_not_at_0p20() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", SEG_VIA_FIXTURES)
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
 def test_fixture_copper_clears_the_board_outline(name: str) -> None:
     """No fixture accidentally places copper near its own board edge.
 
@@ -272,7 +296,7 @@ def test_fixture_copper_clears_the_board_outline(name: str) -> None:
 
 
 @requires_kicad_cli
-@pytest.mark.parametrize("name", SEG_VIA_FIXTURES)
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
 def test_kernel_agrees_with_a_live_kicad_cli_run(name: str, tmp_path) -> None:
     """Re-run kicad-cli and compare its clearance findings to the kernel's.
 
@@ -305,19 +329,112 @@ def test_kernel_agrees_with_a_live_kicad_cli_run(name: str, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fourth fixture -- explicitly deferred, not silently omitted
+# roundrect-corner-gap -- the exact outline, not the rectangle bounds
 # ---------------------------------------------------------------------------
 
 
-def test_roundrect_corner_fixture_needs_the_pad_port() -> None:
-    """``roundrect-corner-gap`` is covered once ``KPad`` / ``pad_outline`` land.
+def test_roundrect_corner_track_is_clear_on_the_exact_outline() -> None:
+    """The kernel clears the track ``grid.cpp``'s rectangle model rejects.
 
-    Phase 1b was split by shape class (the issue's own "Sizing and split"
-    guidance): this PR ships ``KSegment`` / ``KVia`` / ``KEdge``, and the pad
-    outline port of ``validate/rules/clearance.py:_pad_polygon`` plus
-    ``KZonePoly`` follow.  The fixture is named here so the gap is visible in
-    the test report rather than inferred from an absence.
+    A 1.0 x 1.0 mm roundrect pad (``rratio`` 0.25 -> 0.25 mm corner radius)
+    rotated 45 degrees reaches ``hypot(0.25, 0.25) + 0.25`` = 0.6036 mm along
+    its corner diagonal; the *rectangle* the router models it as reaches
+    ``hypot(0.5, 0.5)`` = 0.7071 mm.  The fixture places the probe track to
+    leave 0.22 mm to the true outline, so:
+
+    * exact polygon model (``_pad_polygon``, kicad-cli, and this kernel):
+      0.22 >= 0.20 -- clean;
+    * rectangle-bounded model (``grid.cpp:537 pad_rect_distance``; "Oval and
+      roundrect pads retain conservative rectangle bounds"): 0.1164 -- rejected.
+
+    The support distance is re-derived here from
+    ``fixtures.roundrect_corner_support`` -- the fixture's own closed form --
+    rather than from the kernel, so this is an independent check and not the
+    kernel agreeing with itself.
     """
     case = build_named_fixture("roundrect-corner-gap")
-    assert case.pads, "fixture no longer has pads -- revisit this deferral"
-    pytest.skip("roundrect-corner-gap needs KPad/pad_outline (clearance kernel PR B)")
+    shapes = _shapes_by_net("roundrect-corner-gap")
+    (pair,) = case.pairs
+    assert pair.kind == PairKind.PAD_SEG
+    pad_spec = case.pads[0]
+    pad, seg = shapes[pair.net_a], shapes[pair.net_b]
+    assert isinstance(pad, ck.KPad)
+    assert isinstance(seg, ck.KSegment)
+
+    support = roundrect_corner_support(
+        pad_spec.shape.size[0],
+        pad_spec.shape.size[1],
+        pad_spec.shape.roundrect_rratio or 0.0,
+    )
+    # The track runs vertically at a known x, so the closed-form gap is the
+    # track's x minus the pad centre, minus the diagonal support and the half
+    # width -- no kernel call involved.
+    expected_gap = (seg.x1 - pad_spec.x) - support - seg.width / 2.0
+    assert expected_gap == pytest.approx(0.22, abs=1e-6)
+
+    gap = ck.copper_gap(pad, seg)
+    assert gap == pytest.approx(expected_gap, abs=1e-9), (
+        f"kernel measured {gap:.9f} mm against the closed-form {expected_gap:.9f} mm"
+    )
+
+    # Clean at the project requirement -- the verdict the rectangle model gets
+    # wrong.  And the rectangle bound really is tighter than 0.20, so the
+    # fixture is still discriminating.
+    assert pair.required_mm == pytest.approx(0.20)
+    assert pair.expect_violation is False
+    assert ck.clear(pad, seg, pair.required_mm) is True
+    assert ck.clear(seg, pad, pair.required_mm) is True
+
+    rect_support = math.hypot(pad_spec.shape.size[0] / 2.0, pad_spec.shape.size[1] / 2.0)
+    rect_gap = (seg.x1 - pad_spec.x) - rect_support - seg.width / 2.0
+    assert rect_gap < pair.required_mm, (
+        f"rectangle-bounded gap {rect_gap:.6f} mm no longer under-reports -- "
+        "the fixture has stopped discriminating between the two pad models"
+    )
+
+
+@requires_cpp
+def test_roundrect_corner_agrees_in_the_cpp_kernel_too() -> None:
+    """Same verdict from the compiled kernel, both argument orders."""
+    from kicad_tools.router import router_cpp
+
+    case = build_named_fixture("roundrect-corner-gap")
+    (pair,) = case.pairs
+    pad_spec = case.pads[0]
+    segment = case.segments[0]
+    shape = pad_spec.shape
+
+    cpp_pad = router_cpp.make_pad(
+        shape.shape,
+        shape.size[0],
+        shape.size[1],
+        shape.roundrect_rratio or 0.25,
+        pad_spec.rotation,
+        pad_spec.x,
+        pad_spec.y,
+        _LAYER_INDEX[pad_spec.layer],
+        0.0,
+    )
+    cpp_seg = router_cpp.KSegment(
+        segment.start[0],
+        segment.start[1],
+        segment.end[0],
+        segment.end[1],
+        segment.width,
+        _LAYER_INDEX[segment.layer],
+    )
+
+    py_pad = _fixture_pad(pad_spec)
+    py_seg = ck.KSegment(
+        x1=segment.start[0],
+        y1=segment.start[1],
+        x2=segment.end[0],
+        y2=segment.end[1],
+        width=segment.width,
+        layer=_LAYER_INDEX[segment.layer],
+    )
+    assert router_cpp.copper_gap(cpp_pad, cpp_seg) == pytest.approx(
+        ck.copper_gap(py_pad, py_seg), abs=1e-9
+    )
+    assert router_cpp.clear(cpp_pad, cpp_seg, pair.required_mm) is True
+    assert router_cpp.clear(cpp_seg, cpp_pad, pair.required_mm) is True
