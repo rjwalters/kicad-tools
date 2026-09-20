@@ -30,6 +30,21 @@ import json
 
 import pytest
 
+# Issue #5508 / PR #5619 Doctor cycle (fleet-Judge verdict 2026-09-20): the
+# two cached fixtures below route real boards lazily inside whichever test
+# first touches them, and the stranding variant's negotiated loop (relief
+# rescue + rip-ups) runs close to its own 60 s router budget.  pytest's
+# default per-test timeout is ALSO 60 s, so under CI's shared-runner
+# contention (-n auto bulk, KCT_NATIVE_MAX_CONCURRENCY=1) the first-touch
+# test blows the default with zero margin -- all ten Test-job failures in
+# run 35537834854 were this module timing out.  Per the repo convention
+# (.github/workflows/ci.yml ~195: every test whose estimated duration
+# exceeds ~30 s carries an explicit 300-900 s override), raise the whole
+# module's ceiling to 180 s: fast tests are unaffected (a timeout is an
+# upper bound), and both fixtures' first-touch tests get 3x the router's
+# internal budget for setup + replay + assertions.
+pytestmark = pytest.mark.timeout(180)
+
 from kicad_tools.router.access_witness import (
     ACCESS_EMPTY,
     ACCESS_NON_EMPTY,
