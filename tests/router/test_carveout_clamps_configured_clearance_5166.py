@@ -470,10 +470,14 @@ def test_validate_route_clearance_rejects_undercut_configured_override(with_via:
     own = _own_pad()
     grid.add_pad(own)
     pf = CppPathfinder(CppGrid.from_routing_grid(grid), grid.rules)
-    assert pf._validate_route_clearance(_route(DY_UNDERCUT, with_via=with_via), own, own, 1) == (
-        pad.x,
-        pad.y,
+    # Issue #5599: the validator now returns a RouteClearanceViolation
+    # (location + kind + measured gap) -- tuple-compatible with the
+    # historical (x, y) return via [:2].
+    violation = pf._validate_route_clearance(
+        _route(DY_UNDERCUT, with_via=with_via), own, own, 1
     )
+    assert tuple(violation[:2]) == (pad.x, pad.y)
+    assert violation.kind in ("seg-pad", "via-pad")
     # The same override still ACCEPTS a route that honours it at 0.10mm.
     assert pf._validate_route_clearance(_route(DY_CLEARS, with_via=with_via), own, own, 1) is None
 
