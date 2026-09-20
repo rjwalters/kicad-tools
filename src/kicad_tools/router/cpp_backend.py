@@ -2598,7 +2598,8 @@ class CppPathfinder:
                     if os.environ.get("KCT_DEBUG_5599"):
                         logger.warning(
                             "Net %s: last rejected candidate head=%s tail=%s "
-                            "(%d segments, %d vias); rejection counts=%s "
+                            "(%d segments, %d vias); raw cpp head=%s; "
+                            "rejection counts=%s "
                             "violation_cell=%s end_metal=(%d,%d)-(%d,%d) "
                             "goal_margin=%d",
                             start.net_name,
@@ -2612,6 +2613,10 @@ class CppPathfinder:
                             ],
                             len(route.segments),
                             len(route.vias),
+                            [
+                                (round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
+                                for s in list(result.segments)[:4]
+                            ],
                             [a.get("rejected_goal_count") for a in resume_attempts],
                             [a.get("violation_cell") for a in resume_attempts],
                             end_pad_bounds.metal_gx1,

@@ -1473,7 +1473,21 @@ RouteResult Pathfinder::route(
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == net) {
-                    // Same-net blocked cell - allow
+                    // Same-net blocked cell - allow -- UNLESS foreign pad
+                    // metal sits within the trace radius (Issue #5599; see
+                    // the twin comment in the resumable loop).
+                    if (is_foreign_pad_metal_within_radius(
+                            nx, ny, nlayer, net, trace_radius_cells)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=same_net_corridor_foreign_pad_too_close "
+                                "radius=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                trace_radius_cells);
+                        }
+                        continue;
+                    }
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells,
@@ -1557,6 +1571,28 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
+                } else if (is_foreign_pad_metal_within_radius(
+                               nx, ny, nlayer, net, trace_radius_cells)) {
+                    // Issue #5599: the pad-exit/approach-zone relaxation
+                    // skips the swept-envelope check, but a step whose trace
+                    // radius brings it within touching distance of FOREIGN
+                    // pad metal produces a committed segment the post-route
+                    // validator will ALWAYS reject (pad metal is not
+                    // rippable) -- exactly the board 04 BOOT0/USER_LED
+                    // under-tip diagonal class that exhausted the resume
+                    // budget and fell back to the Python A*.  The pad-exit
+                    // branch above has enforced this guard since #3226;
+                    // extend it to the approach-zone relaxation so the
+                    // SEARCH agrees with the VALIDATOR here too.
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                            "REJECT reason=approach_zone_foreign_pad_too_close "
+                            "radius=%d\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer,
+                            trace_radius_cells);
+                    }
+                    continue;
                 }
             }
 
@@ -2103,7 +2139,30 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == search_net_) {
-                    // Same-net blocked cell - allow
+                    // Same-net blocked cell - allow -- UNLESS foreign pad
+                    // metal sits within the trace radius (Issue #5599).  A
+                    // same-net corridor built from this net's own escape
+                    // stub / prior copper can hug a neighbor pad closer than
+                    // the post-route validator permits (the stub was laid
+                    // with the relaxed fine-pitch escape clearance; the
+                    // validator enforces the full clearance).  Every
+                    // candidate reusing that corridor is rejected after the
+                    // search, exhausting the resume budget -- board 04's
+                    // BOOT0 under-tip diagonal class.  Same #3226 predicate
+                    // the pad-exit waiver already enforces.
+                    if (is_foreign_pad_metal_within_radius(
+                            nx, ny, nlayer, search_net_,
+                            search_trace_radius_cells_)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=same_net_corridor_foreign_pad_too_close "
+                                "radius=%d net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_trace_radius_cells_, search_net_);
+                        }
+                        continue;
+                    }
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, search_net_,
                                          search_negotiated_mode_,
@@ -2191,6 +2250,23 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
+                } else if (is_foreign_pad_metal_within_radius(
+                               nx, ny, nlayer, search_net_,
+                               search_trace_radius_cells_)) {
+                    // Issue #5599: see the twin comment in the one-shot loop
+                    // -- the approach-zone relaxation must still respect the
+                    // exact foreign-pad-metal clearance the post-route
+                    // validator enforces (#3226 guard, extended from the
+                    // pad-exit waiver to the approach zone).
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=approach_zone_foreign_pad_too_close "
+                            "radius=%d net=%d\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer,
+                            search_trace_radius_cells_, search_net_);
+                    }
+                    continue;
                 }
             }
 
