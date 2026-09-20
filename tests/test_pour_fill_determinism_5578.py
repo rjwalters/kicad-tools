@@ -402,6 +402,39 @@ def test_generated_zone_uuids_are_unique_within_a_board(tmp_path):
     assert len(set(uuids)) == len(uuids), f"duplicate zone UUID(s) emitted: {uuids}"
 
 
+def test_generated_zone_uuid_is_unique_against_zones_already_on_board(tmp_path):
+    """A second, separately-loaded ``ZoneGenerator`` pass must not collide.
+
+    Issue #5578 follow-up (Judge review on PR #5593).  ``_deduplicate_zone_uuid``
+    only checked ``self._zones`` (the in-memory queue), never the zones already
+    saved on the loaded board.  With a content-addressed ``uuid5`` that gap is
+    reachable: adding the same GND/In2.Cu zone to a board that already carries
+    one (via two separate ``ZoneGenerator.from_pcb`` + :meth:`save` passes,
+    mirroring ``kct zones add`` run twice) derived the identical UUID both
+    times, leaving the board with two zones sharing one UUID -- ambiguous to
+    KiCad's UUID-keyed item resolution.
+    """
+    from kicad_tools.zones.generator import ZoneGenerator
+
+    target = tmp_path / "additive.kicad_pcb"
+    shutil.copy(BOARD03, target)
+
+    gen1 = ZoneGenerator.from_pcb(target)
+    gen1.add_zone(net="GND", layer="In2.Cu", priority=0)
+    gen1.save(target)
+
+    gen2 = ZoneGenerator.from_pcb(target)
+    gen2.add_zone(net="GND", layer="In2.Cu", priority=0)
+    gen2.save(target)
+
+    uuids = _zone_uuids(target)
+    assert all(uuids), "every zone must carry a uuid"
+    assert len(set(uuids)) == len(uuids), (
+        f"duplicate zone UUID(s) across two separately-loaded generator "
+        f"passes over the same board: {uuids}"
+    )
+
+
 def test_zone_generator_uuids_differ_for_distinct_zones():
     """Two zones that differ in net or layer must not derive the same UUID."""
     from kicad_tools.zones.generator import GeneratedZone, ZoneConfig

@@ -832,14 +832,16 @@ class ZoneGenerator:
         return zone
 
     def _deduplicate_zone_uuid(self, zone: GeneratedZone) -> str:
-        """Return a UUID for *zone* that no already-queued zone is using.
+        """Return a UUID for *zone* that no already-queued or on-board zone is using.
 
         Issue #5578.  Re-derives from ``content_key()`` with a ``#<n>``
         suffix until the result is free.  Deterministic by construction:
         the suffix depends only on how many identical zones precede this
-        one in the queue, which is itself deterministic.
+        one in the queue plus how many already sit on the loaded board,
+        both of which are themselves deterministic.
         """
         taken = {existing.uuid for existing in self._zones}
+        taken.update(existing.uuid for existing in self._pcb.zones if existing.uuid)
         candidate = zone.uuid
         suffix = 1
         while candidate in taken:
