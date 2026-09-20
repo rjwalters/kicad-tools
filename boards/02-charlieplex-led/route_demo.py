@@ -191,13 +191,16 @@ def main():
         # mid-search and the net lands less copper -- same seed, different
         # copper.  --deterministic-budget (#3538) disables the per-net
         # wall-clock cutoff and pins a fixed node-expansion backstop.
-        # --timeout 240 below is retained only as a SAFETY backstop.
+        # --timeout below is retained only as a SAFETY backstop -- raised
+        # from 240 to 900 (Issue #5587: 240s fired on a contended host even
+        # under --deterministic-budget, reintroducing host-load dependence
+        # via the outer wall-clock stage deadline).
         # This MUST stay in sync with generate_design.py:route_pcb()
         # (Issue #3207 no-drift guard,
         # tests/test_board02_route_demo_recipe.py).
         "--deterministic-budget",
         "--timeout",
-        "240",
+        "900",
         "--seed",
         "42",
         "--no-auto-pour",

@@ -57,7 +57,12 @@ import pytest
 # 60s alone, but under full-suite xdist CPU contention the wall-clock
 # reaper killed them spuriously.  The marker overrides the CLI default
 # with a contention-tolerant budget; it does NOT slow the happy path.
-pytestmark = pytest.mark.timeout(900)
+# Issue #5587: raised from 900 to 1200 to stay above the
+# ``route_demo_run`` fixture's own subprocess timeout (960s, itself
+# raised to track the recipe's --timeout going from 240 to 900) --
+# otherwise this module-level reaper could kill the test before the
+# subprocess's own graceful timeout ever fires.
+pytestmark = pytest.mark.timeout(1200)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -198,7 +203,10 @@ def test_route_demo_recipe_mirrors_generate_design() -> None:
     required_flag_value_pairs = [
         ("--strategy", "negotiated"),
         ("--iterations", "30"),
-        ("--timeout", "240"),
+        # Issue #5587: raised from 240 -- it fired on a contended host even
+        # under --deterministic-budget (the outer stage deadline is still
+        # wall-clock), reintroducing host-load dependence.
+        ("--timeout", "900"),
         ("--seed", "42"),
         ("--manufacturer", "jlcpcb"),
     ]
@@ -340,7 +348,9 @@ def route_demo_run(
         [sys.executable, str(ROUTE_DEMO_SCRIPT), str(input_copy), str(routed_pcb)],
         capture_output=True,
         text=True,
-        timeout=300,
+        # Issue #5587: raised from 300 (240 + 60s buffer) to 960 (900 + 60s
+        # buffer), tracking route_demo.py's --timeout going from 240 to 900.
+        timeout=960,
         check=False,
         cwd=str(BOARD_DIR),
     )
@@ -468,10 +478,10 @@ def test_route_demo_achieves_minimum_completion(route_demo_run: _RouteDemoRun) -
     ``router.route_all()`` path completed 4/8.  Post-fix the orchestrator
     path consistently completes 8/8.
 
-    A hard timeout of 300 s (in the ``route_demo_run`` fixture) guards
-    against router hangs.  Board 02 is small (~37 mm x ~22 mm) so the
-    negotiated routing typically finishes in 10-15 s; the timeout is
-    conservative.
+    A hard timeout of 960 s (in the ``route_demo_run`` fixture, Issue
+    #5587) guards against router hangs.  Board 02 is small (~37 mm x
+    ~22 mm) so the negotiated routing typically finishes in 10-15 s; the
+    timeout is conservative.
     """
     proc = route_demo_run.proc
 
