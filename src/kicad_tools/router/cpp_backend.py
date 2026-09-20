@@ -2359,7 +2359,9 @@ class CppPathfinder:
             if hasattr(self._impl, "set_search_pair_widths"):
                 self._impl.set_search_pair_widths(net_trace_width / 2.0, net_via_size / 2.0)
             if hasattr(self._impl, "set_search_fill_clearances"):
-                self._impl.set_search_fill_clearances(net_trace_clearance, self._rules.via_clearance)
+                self._impl.set_search_fill_clearances(
+                    net_trace_clearance, self._rules.via_clearance
+                )
 
             if self._grid._py_grid is not None:
                 self._sync_stored_routes(self._grid._py_grid)
@@ -2596,9 +2598,7 @@ class CppPathfinder:
                     # that exhausted the budget (no goal cell is rejected
                     # after it -- the net moves to the Python fallback).
                     resume_attempts.append(
-                        self._resume_attempt_record(
-                            attempt, violation_location, None
-                        )
+                        self._resume_attempt_record(attempt, violation_location, None)
                     )
                     resume_attempts[-1]["strategy"] = "exhausted"
                     resume_attempts[-1]["boost_amount"] = boost_amount
@@ -2612,14 +2612,7 @@ class CppPathfinder:
                     # kept failing" answer without a debugger.  Repeated
                     # exhaustions of the same net stay at DEBUG to match the
                     # #3456/#3923 noise discipline.
-                    summary = ", ".join(
-                        f"#{a['attempt']}:{a['violation_kind']}"
-                        f"@({a['violation_xy'][0]:.3f},{a['violation_xy'][1]:.3f})"
-                        f"{' gap=%.4f' % a['min_clearance'] if a['min_clearance'] is not None else ''}"
-                        f"/{a['strategy']}@{a['boost_amount']:.0f}"
-                        f"{' reject=%r' % (a['rejected_goal'],) if a['rejected_goal'] else ''}"
-                        for a in resume_attempts
-                    )
+                    summary = ", ".join(self._format_resume_attempt(a) for a in resume_attempts)
                     _exhaust_log = (
                         logger.warning
                         if start.net_name not in self._fallback_warned
@@ -2634,40 +2627,6 @@ class CppPathfinder:
                         len(resume_attempts),
                         summary,
                     )
-                    # Issue #5599 field diagnostics: under KCT_DEBUG_5599, dump
-                    # the final rejected candidate's head/tail segments so the
-                    # violating geometry (mid-path corridor vs rendered
-                    # pad-center tail) is directly readable from the log.
-                    if os.environ.get("KCT_DEBUG_5599"):
-                        logger.warning(
-                            "Net %s: last rejected candidate head=%s tail=%s "
-                            "(%d segments, %d vias); raw cpp head=%s; "
-                            "rejection counts=%s "
-                            "violation_cell=%s end_metal=(%d,%d)-(%d,%d) "
-                            "goal_margin=%d",
-                            start.net_name,
-                            [
-                                (round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
-                                for s in route.segments[:4]
-                            ],
-                            [
-                                (round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
-                                for s in route.segments[-6:]
-                            ],
-                            len(route.segments),
-                            len(route.vias),
-                            [
-                                (round(s.x1, 3), round(s.y1, 3), round(s.x2, 3), round(s.y2, 3))
-                                for s in list(result.segments)[:4]
-                            ],
-                            [a.get("rejected_goal_count") for a in resume_attempts],
-                            [a.get("violation_cell") for a in resume_attempts],
-                            end_pad_bounds.metal_gx1,
-                            end_pad_bounds.metal_gy1,
-                            end_pad_bounds.metal_gx2,
-                            end_pad_bounds.metal_gy2,
-                            2 * trace_radius_cells + 4,
-                        )
                     # Exhausted resume attempts, try Python fallback.
                     # Issue #2476: Capture failure-info before falling back
                     # so the negotiated strategy can still see the cpp-side
@@ -2706,43 +2665,27 @@ class CppPathfinder:
                 goal_gx = int(getattr(result, "goal_gx", -1))
                 goal_gy = int(getattr(result, "goal_gy", -1))
                 goal_layer = int(getattr(result, "goal_layer", -1))
-                if (
-                    goal_gx >= 0
-                    and goal_gy >= 0
-                    and goal_layer >= 0
-                ):
+                if goal_gx >= 0 and goal_gy >= 0 and goal_layer >= 0:
                     reject_gx, reject_gy, reject_layer = goal_gx, goal_gy, goal_layer
                 else:
                     last_seg = result.segments[-1] if result.segments else None
                     if last_seg is not None:
-                        reject_gx, reject_gy = self._grid._impl.world_to_grid(last_seg.x2, last_seg.y2)
+                        reject_gx, reject_gy = self._grid._impl.world_to_grid(
+                            last_seg.x2, last_seg.y2
+                        )
                         reject_layer = last_seg.layer
                     else:
                         # Fallback: use end pad grid coords
                         reject_gx, reject_gy = self._grid._impl.world_to_grid(end.x, end.y)
                         reject_layer = end_layer
 
-                # Issue #5599: LANDING-BAND REJECTION.  When the SAME
-                # violation site keeps rejecting candidates AND the site sits
-                # inside the END pad's approach zone, the failure class is the
-                # pad-approach itself (the validator keeps rejecting every
-                # landing whose approach corridor/dogleg clips the same
-                # neighbor pad -- board 04 BOOT0 rejected six consecutive
-                # landings in the pad's center band).  A single-cell rejection
-                # then only walks the landing one cell at a time through that
-                # band; rejecting the landing's neighborhood too (radius
-                # growing with the repeat run) jumps the candidate out of the
-                # failing band -- toward the pad-end approaches that DO
-                # validate -- within the fixed attempt budget.
                 # Issue #5599: LANDING-BAND REJECTION was evaluated here and
                 # REMOVED: it never fired for the observed failure class
                 # (board 04's violations sat at the START pad's neighbor,
                 # outside the end-pad margin) while aggressively consuming
                 # goal cells.  The strict localized pad check above is the
                 # mechanism that actually closes the failing class.
-                new_rejections: list[tuple[int, int, int]] = [
-                    (reject_gx, reject_gy, reject_layer)
-                ]
+                new_rejections: list[tuple[int, int, int]] = [(reject_gx, reject_gy, reject_layer)]
                 rejected_goal_cells.extend(new_rejections)
 
                 # Issue #5599: record this failed attempt (kind + location +
@@ -2789,8 +2732,7 @@ class CppPathfinder:
                         attempts_left = max(1, max_resume_attempts - attempt)
                         restart_cap = max(
                             0,
-                            (self._effective_search_iterations - total_spent)
-                            // attempts_left,
+                            (self._effective_search_iterations - total_spent) // attempts_left,
                         )
                     if route_deadline is not None:
                         remaining_timeout = route_deadline - time.monotonic()
@@ -3361,6 +3303,29 @@ class CppPathfinder:
             ),
         }
 
+    @staticmethod
+    def _format_resume_attempt(record: dict) -> str:
+        """Render one Issue #5599 resume-attempt record for the log summary.
+
+        Args:
+            record: A record built by :meth:`_resume_attempt_record` (plus the
+                ``strategy`` / ``boost_amount`` keys the resume loop annotates
+                it with).
+
+        Returns:
+            A compact one-line form, e.g.
+            ``#2:seg-pad@(12.450,9.300) gap=0.1120/restart@320 reject=[248, 186, 0]``.
+        """
+        x, y = record["violation_xy"]
+        parts = [f"#{record['attempt']}:{record['violation_kind']}@({x:.3f},{y:.3f})"]
+        gap = record.get("min_clearance")
+        if gap is not None:
+            parts.append(f" gap={gap:.4f}")
+        parts.append(f"/{record.get('strategy')}@{record.get('boost_amount', 0.0):.0f}")
+        if record.get("rejected_goal"):
+            parts.append(f" reject={record['rejected_goal']}")
+        return "".join(parts)
+
     def _validate_route_clearance(
         self,
         route: Route,
@@ -3503,9 +3468,7 @@ class CppPathfinder:
                     segment.width / 2,
                     fill_clearance,
                 ):
-                    return RouteClearanceViolation(
-                        segment.x1, segment.y1, "fixed_fill", None
-                    )
+                    return RouteClearanceViolation(segment.x1, segment.y1, "fixed_fill", None)
 
         vresult = self._grid._impl.validate_route(
             cpp_segs,
@@ -3525,9 +3488,7 @@ class CppPathfinder:
             type_code = int(getattr(vresult, "violation_type", 0))
             raw_min = getattr(vresult, "min_clearance", None)
             min_clearance = (
-                float(raw_min)
-                if raw_min is not None and math.isfinite(float(raw_min))
-                else None
+                float(raw_min) if raw_min is not None and math.isfinite(float(raw_min)) else None
             )
             return RouteClearanceViolation(
                 vresult.violation_x,
@@ -3552,9 +3513,7 @@ class CppPathfinder:
                     if not via_clears_foreign_segment(
                         via, segment, trace_clearance=self._rules.via_clearance
                     ):
-                        return RouteClearanceViolation(
-                            via.x, via.y, "via_vs_offgrid_segment", None
-                        )
+                        return RouteClearanceViolation(via.x, via.y, "via_vs_offgrid_segment", None)
 
         # Issue #3002 (PR #3006 follow-up): Python-side segment-vs-foreign-via
         # post-check.  ``validate_route`` already walks the C++ side's
@@ -3578,9 +3537,7 @@ class CppPathfinder:
                         trace_clearance=self._rules.trace_clearance,
                         hard_intersection_only=False,
                     ):
-                        return RouteClearanceViolation(
-                            via.x, via.y, "seg_vs_foreign_via", None
-                        )
+                        return RouteClearanceViolation(via.x, via.y, "seg_vs_foreign_via", None)
 
         # Issue #4431 (Phase 1): additive pairwise HV-isolation post-check on the
         # Python validation path (no C++ change in this slice).  When a
@@ -3604,9 +3561,7 @@ class CppPathfinder:
                 attach_zones=self._attach_zones,
             )
             if violation is not None:
-                return RouteClearanceViolation(
-                    violation.x, violation.y, "pairwise_hv", None
-                )
+                return RouteClearanceViolation(violation.x, violation.y, "pairwise_hv", None)
 
         return None
 

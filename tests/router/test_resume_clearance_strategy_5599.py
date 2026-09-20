@@ -156,9 +156,7 @@ class _FakeImpl:
     def set_search_strict_pad_kernel(
         self, enabled: bool, cx: int = -1, cy: int = -1, radius: int = 0
     ) -> None:
-        self.strict_pad_kernel_calls.append(
-            (bool(enabled), int(cx), int(cy), int(radius))
-        )
+        self.strict_pad_kernel_calls.append((bool(enabled), int(cx), int(cy), int(radius)))
 
     def clear_search_state(self) -> None:
         return None
@@ -246,8 +244,11 @@ class TestResumeStrategy:
                 pathfinder,
                 "_validate_route_clearance",
                 side_effect=lambda *a, **k: cpp_backend.RouteClearanceViolation(
-                    5.0, 5.0 if violation_xy is None else violation_xy[1],
-                    "seg-pad", 1, 0.1,
+                    5.0,
+                    5.0 if violation_xy is None else violation_xy[1],
+                    "seg-pad",
+                    1,
+                    0.1,
                 ),
             ) as validate,
             mock.patch.object(pathfinder, "_try_python_fallback", return_value=None),
