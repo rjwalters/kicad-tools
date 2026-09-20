@@ -2558,7 +2558,6 @@ class CppPathfinder:
                     site_repeat_run >= 1
                     and violation_cell is not None
                     and hasattr(self._impl, "set_search_strict_pad_kernel")
-                    and os.environ.get("KCT_5599_NO_STRICT") != "1"  # DIAGNOSTIC
                 ):
                     strict_radius = 2 * trace_radius_cells + 6
                     self._impl.set_search_strict_pad_kernel(
@@ -2567,20 +2566,16 @@ class CppPathfinder:
                 boost_amount = _RESUME_BOOST_BASE_AMOUNT * (
                     _RESUME_BOOST_ESCALATION ** min(site_repeat_run, 6)
                 )
-                if os.environ.get("KCT_5599_LEGACY_BOOST") == "1":  # DIAGNOSTIC
-                    boost_amount = _RESUME_BOOST_BASE_AMOUNT
-                    boost_extra_radius = 0
-                else:
-                    # Issue #5599: grow the DISC as well as the amount.  A
-                    # seg-pad violation is reported at the pad center; the
-                    # corridor that keeps failing can lie just past the pad's
-                    # own corners (Chebyshev ~half-height of the pad + a
-                    # couple of cells), OUTSIDE the historical
-                    # radius-3*trace disc -- in which case no amount
-                    # escalation can reach it.  4 cells per repeat keeps
-                    # step-0 byte-identical while covering the corner
-                    # corridors from the first repeat on.
-                    boost_extra_radius = 4 * site_repeat_run
+                # Issue #5599: grow the DISC as well as the amount.  A
+                # seg-pad violation is reported at the pad center; the
+                # corridor that keeps failing can lie just past the pad's
+                # own corners (Chebyshev ~half-height of the pad + a
+                # couple of cells), OUTSIDE the historical
+                # radius-3*trace disc -- in which case no amount
+                # escalation can reach it.  4 cells per repeat keeps
+                # step-0 byte-identical while covering the corner
+                # corridors from the first repeat on.
+                boost_extra_radius = 4 * site_repeat_run
                 self._boost_avoidance_at(
                     violation_location,
                     trace_radius_cells,
@@ -2707,7 +2702,6 @@ class CppPathfinder:
                     goal_gx >= 0
                     and goal_gy >= 0
                     and goal_layer >= 0
-                    and os.environ.get("KCT_5599_LEGACY_REJECT") != "1"  # DIAGNOSTIC
                 ):
                     reject_gx, reject_gy, reject_layer = goal_gx, goal_gy, goal_layer
                 else:
@@ -2732,42 +2726,15 @@ class CppPathfinder:
                 # growing with the repeat run) jumps the candidate out of the
                 # failing band -- toward the pad-end approaches that DO
                 # validate -- within the fixed attempt budget.
+                # Issue #5599: LANDING-BAND REJECTION was evaluated here and
+                # REMOVED: it never fired for the observed failure class
+                # (board 04's violations sat at the START pad's neighbor,
+                # outside the end-pad margin) while aggressively consuming
+                # goal cells.  The strict localized pad check above is the
+                # mechanism that actually closes the failing class.
                 new_rejections: list[tuple[int, int, int]] = [
                     (reject_gx, reject_gy, reject_layer)
                 ]
-                if (
-                    site_repeat_run >= 1
-                    and violation_cell is not None
-                    and os.environ.get("KCT_5599_NO_BAND") != "1"  # DIAGNOSTIC
-                ):
-                    try:
-                        eb = end_pad_bounds
-                        # Issue #5599: the failing approach's violation sits
-                        # against a NEIGHBOR pad of the goal pad -- up to one
-                        # pad pitch (0.5mm on board 04's QFP) plus the clearance
-                        # radius beyond the goal metal -- far outside the
-                        # +2-cell approach bbox.  Use a margin of two trace
-                        # radii + 4 cells (~ one fine pitch + clearance).
-                        goal_margin = 2 * trace_radius_cells + 4
-                        in_goal_vicinity = (
-                            eb.metal_gx1 - goal_margin
-                            <= violation_cell[0]
-                            <= eb.metal_gx2 + goal_margin
-                            and eb.metal_gy1 - goal_margin
-                            <= violation_cell[1]
-                            <= eb.metal_gy2 + goal_margin
-                        )
-                    except AttributeError:  # pragma: no cover - defensive
-                        in_goal_vicinity = False
-                    if in_goal_vicinity:
-                        rej_radius = min(site_repeat_run, 5)
-                        seen = {cell for cell in rejected_goal_cells}
-                        for dx in range(-rej_radius, rej_radius + 1):
-                            for dy in range(-rej_radius, rej_radius + 1):
-                                cell = (reject_gx + dx, reject_gy + dy, reject_layer)
-                                if cell not in seen:
-                                    seen.add(cell)
-                                    new_rejections.append(cell)
                 rejected_goal_cells.extend(new_rejections)
 
                 # Issue #5599: record this failed attempt (kind + location +
@@ -2808,10 +2775,7 @@ class CppPathfinder:
                 strategy = "resume"
                 remaining_timeout: float | None = None
                 restart_cap = 0
-                if (
-                    site_repeat_run >= 2
-                    and os.environ.get("KCT_5599_NO_RESTART") != "1"  # DIAGNOSTIC
-                ):
+                if site_repeat_run >= 2:
                     total_spent = iterations_spent_prior + self._impl.iterations
                     if self._effective_search_iterations > 0:
                         attempts_left = max(1, max_resume_attempts - attempt)
