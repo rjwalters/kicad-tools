@@ -351,6 +351,35 @@ RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 # stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
 
+# Issue #5545: congestion-mark parameters for the stagnation-recovery cohort
+# reroute.  When the negotiated loop's rip-up cohort has stagnated (same
+# cohort, overflow stuck in a narrow band), the recovery sweep needs a
+# persistent spatial cost signal to de-oscillate the contended cells.
+# Historically that signal arrived by accident: stale per-connection
+# clearance-retry penalties (``_boost_avoidance_at``'s +20-per-boost region
+# marks) leaked across connections and priced the grid the cohort reroute
+# searched.  Flipping ``clear_avoidance_after_connection`` to ``True``
+# removed the leak -- and with it the ONLY persistent per-cell congestion
+# memory the C++ A* ever saw (production never syncs Python-grid usage /
+# history onto the C++ grid, so the PathFinder present/history terms are
+# inert on the native backend; see ``Grid3D::get_negotiated_cost``).
+# The recovery therefore now derives the same class of signal from its own
+# congestion state: the cells the cohort keeps fighting over
+# (``find_overused_cells``) get a bounded tapered bump on the *history*
+# cost term of both grids (see ``_mark_stagnation_congestion``).  History
+# is the right channel: it prices negotiated-mode searches only, and no
+# production path clears it -- the per-connection cleanup zeroes
+# ``avoidance_cost`` instead, so a mark placed there would survive only
+# until the cohort sweep's first ``route()`` call exited.  Amount anchors
+# to the +20.0 the DRC-retry feedback already uses; radius adds a small
+# corridor margin so crossing the contested region is priced, not just
+# touching its centre cells.  The mark persists for the rest of the
+# negotiated loop -- bounded by ``2 * max_stagnation_recoveries`` (2
+# observation points x 2 recoveries) marks per route_all, unlike the
+# unbounded leak it replaces.
+STAGNATION_CONGESTION_AMOUNT = 20.0
+STAGNATION_CONGESTION_RADIUS_CELLS = 2
+
 
 @dataclass
 class RoutingFailure:
@@ -2127,6 +2156,95 @@ class Autorouter:
         read as ``with self._journal_stage(PASS_INITIAL): ...``.
         """
         return self._commit_journal.context(pass_name, iteration)
+
+    @staticmethod
+    def _recovery_hold_worthy(current_overflow: int, best_overflow: int) -> bool:
+        """Whether a stagnation-recovery sweep's state should be held.
+
+        Issue #5545 / PR #5609 Judge bisect: hold only when the sweep
+        re-landed the cohort STRICTLY under the banked best's overflow.
+        Ties must fall through to the normal residual-conflict rip-up and
+        iteration verdict: at equal overflow the re-landed geometry is
+        unverified against the incumbent (overflow alone does not certify
+        geometry), and the skipped rip-up is also a repair mechanism --
+        board 01's tie-held VOUT carried a same-net
+        ``hole_to_hole_clearance`` violation the skipped rip-up had
+        historically repaired.
+        """
+        return current_overflow < best_overflow
+
+    def _mark_stagnation_congestion(
+        self,
+        overused: list[tuple[int, int, int, int]],
+        *,
+        amount: float = STAGNATION_CONGESTION_AMOUNT,
+        radius_cells: int = STAGNATION_CONGESTION_RADIUS_CELLS,
+    ) -> int:
+        """Put a persistent congestion cost mark on a stagnating cohort's cells.
+
+        Issue #5545: the stagnation-recovery cohort reroute de-oscillates
+        through a persistent spatial penalty on the contended cells.  The
+        pre-#5504 router got that penalty by accident -- clearance-retry
+        boosts from an earlier connection leaked across connections and
+        priced the cohort's A* searches.  This helper replaces the leak
+        with a congestion-derived mark on the PathFinder *history* term:
+
+        * C++ grid: a tapered ``history_cost`` bump (Chebyshev radius,
+          ``amount * (1 - dist / (radius + 1))`` -- the same kernel shape
+          ``boost_region_cost`` uses) written through the bound
+          ``at(x, y, layer)`` cell reference.  History is the right
+          channel: it prices negotiated-mode searches only, and nothing
+          in production clears it -- the per-connection cleanup zeroes
+          ``avoidance_cost``, so a mark placed there would survive only
+          until the cohort sweep's first ``route()`` call exited.
+        * Python grid: ``update_history_costs(amount)`` raises history
+          cost by ``amount * (usage - 1)`` on exactly the overused cells,
+          so the pure-Python fallback A* sees the equivalent steering
+          (its negotiated cost is also ``present + history``).
+
+        Both marks persist for the remainder of the negotiated loop and
+        are bounded: the recovery applies the mark at each congestion
+        observation it makes -- before the cohort sweep (the stagnated
+        footprint) and after it re-lands (the re-landed footprint the
+        follow-through conflict reroutes inherit) -- for at most
+        ``2 * max_stagnation_recoveries`` applications per
+        ``route_all_negotiated`` call, each a single fixed-amount bump,
+        unlike the unbounded cross-connection accumulation the leak
+        produced.
+
+        Args:
+            overused: Contested cells as ``(gx, gy, layer_idx, usage)``
+                tuples from ``RoutingGrid.find_overused_cells``.
+            amount: Per-cell cost added at each mark centre (anchors to
+                the +20.0 the DRC-retry feedback uses).
+            radius_cells: Chebyshev radius around each centre that also
+                receives the (tapered) cost.
+
+        Returns:
+            Number of contended cells marked (0 when ``overused`` is
+            empty -- nothing to de-oscillate).
+        """
+        if not overused:
+            return 0
+        cpp_grid = self._cpp_grid
+        if cpp_grid is not None:
+            impl = cpp_grid._impl
+            cols, rows = cpp_grid.cols, cpp_grid.rows
+            for gx, gy, layer_idx, _usage in overused:
+                x1 = max(gx - radius_cells, 0)
+                x2 = min(gx + radius_cells, cols - 1)
+                y1 = max(gy - radius_cells, 0)
+                y2 = min(gy + radius_cells, rows - 1)
+                for y in range(y1, y2 + 1):
+                    for x in range(x1, x2 + 1):
+                        dist = max(abs(x - gx), abs(y - gy))
+                        scale = 1.0 - dist / (radius_cells + 1.0)
+                        cell = impl.at(x, y, layer_idx)
+                        cell.history_cost += amount * scale
+        # Python-grid mirror for the fallback A*: bumps history cost by
+        # amount * (usage - 1) on exactly the overused cells.
+        self.grid.update_history_costs(amount)
+        return len(overused)
 
     def _mark_route(self, route: Route) -> None:
         """Mark a route on both Python and C++ grids.
@@ -11078,6 +11196,17 @@ class Autorouter:
 
                     flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
 
+                    # Issue #5545: set by the stagnation-recovery block below
+                    # when the recovery sweep re-lands the cohort strictly
+                    # under the banked best's overflow -- the iteration then
+                    # holds the recovered configuration instead of running
+                    # its residual-conflict rip-up (see the hold site at the
+                    # rip-up dispatch).  Ties do NOT hold: at equal overflow
+                    # the re-landed geometry is unverified against the
+                    # incumbent, and the skipped rip-up is also a repair
+                    # mechanism (board 01 VOUT, Judge bisect on PR #5609).
+                    recovery_hold_follow_through = False
+
                     # Issue #3438: close the PREVIOUS iteration's
                     # corridor-reservation window (if any) so this iteration
                     # starts from exact Python/C++ grid parity -- the fix for
@@ -11440,6 +11569,23 @@ class Autorouter:
                                 f"elevated present_factor ({elapsed_str()})"
                             )
                             flush_print(f"    Cohort: {', '.join(cohort_names)}")
+                            # Issue #5545: congestion-mark the contended cells
+                            # BEFORE ripping the cohort, so both the cohort
+                            # sweep and this iteration's subsequent conflict
+                            # reroutes search a grid that prices the region
+                            # they keep fighting over.  This is the
+                            # congestion-derived replacement for the stale
+                            # per-connection clearance-retry penalty that
+                            # used to leak into these searches (see
+                            # ``_mark_stagnation_congestion``).
+                            marked_cells = self._mark_stagnation_congestion(overused)
+                            if marked_cells:
+                                flush_print(
+                                    f"    Congestion mark: {marked_cells} contended "
+                                    f"cell(s) carry +{STAGNATION_CONGESTION_AMOUNT:.0f} "
+                                    f"congestion cost (radius "
+                                    f"{STAGNATION_CONGESTION_RADIUS_CELLS} cells)"
+                                )
                             # Rip up all cohort routes (only the ones currently routed)
                             ripup_targets = [
                                 n for n in recovery_cohort if n in net_routes and net_routes[n]
@@ -11502,6 +11648,65 @@ class Autorouter:
                             # Recompute overflow & cohort tracking after recovery
                             current_overflow = self.grid.get_total_overflow()
                             overused = self.grid.find_overused_cells()
+                            # Issue #5545: the sweep moves the contention, it
+                            # does not necessarily dissolve it -- the cohort
+                            # re-lands in a configuration whose own overused
+                            # cells are NEW (unpriced) cells.  Re-mark the
+                            # post-recovery contended footprint so this
+                            # iteration's subsequent conflict reroutes (the
+                            # ``Rerouted X/Y nets`` follow-through below)
+                            # negotiate around the re-landed contention too,
+                            # not just the original stagnation footprint.
+                            # Measured on board 06 (seed 42): with only the
+                            # pre-sweep mark the sweep landed overflow 2 but
+                            # the follow-through's 2-net conflict reroute
+                            # plowed back up to overflow 5 and the iteration
+                            # still lost to the iter-2 best.
+                            remarked_cells = self._mark_stagnation_congestion(overused)
+                            if remarked_cells:
+                                flush_print(
+                                    f"    Congestion mark (post-sweep): {remarked_cells} "
+                                    f"re-landed contended cell(s) carry "
+                                    f"+{STAGNATION_CONGESTION_AMOUNT:.0f} congestion cost"
+                                )
+                            # Issue #5545: if the sweep already re-landed the
+                            # cohort STRICTLY under the banked best's
+                            # overflow, HOLD that configuration for the
+                            # iteration verdict instead of running the
+                            # residual-conflict rip-up.  The serial conflict
+                            # reroute is the same mechanism that stagnated,
+                            # and it negotiates blind to the crossings it is
+                            # about to create (a reroute piles onto cells
+                            # that are at usage 1 -- unmarkable in advance).
+                            # Measured on board 06 (seed 42): the marked
+                            # sweep re-landed at overflow 2 (best-so-far 4),
+                            # the follow-through rip-up of the 2 residual
+                            # conflict nets threw it back up to 5, and the
+                            # iteration lost to the iter-2 snapshot.
+                            #
+                            # STRICTLY-better only -- ties fall through to
+                            # the normal residual-conflict rip-up and
+                            # iteration verdict.  At equal overflow the held
+                            # configuration is UNVERIFIED against the
+                            # incumbent: overflow alone does not certify
+                            # geometry, and the skipped rip-up is also a
+                            # repair mechanism.  Judge bisect, board 01
+                            # (seed 42): VOUT's recovery re-landed at
+                            # overflow 2 == banked best 2, the tie-hold kept
+                            # a same-net hole_to_hole_clearance violation
+                            # (-0.000mm VOUT/VOUT at (149.50, 86.05)) that
+                            # the skipped residual rip-up had historically
+                            # repaired, and the DRC-clean tied incumbent
+                            # never got its turn.
+                            if self._recovery_hold_worthy(current_overflow, best_metrics.overflow):
+                                recovery_hold_follow_through = True
+                                flush_print(
+                                    f"  Holding recovered state: post-recovery overflow "
+                                    f"({current_overflow}) is strictly under the banked "
+                                    f"best (iter-{best_metrics.iteration}: overflow "
+                                    f"{best_metrics.overflow}); skipping this iteration's "
+                                    f"residual-conflict rip-up (Issue #5545)"
+                                )
                             # Update the latest overflow_history entry to reflect
                             # post-recovery state so subsequent oscillation
                             # detection sees the recovery's effect.
@@ -11694,7 +11899,26 @@ class Autorouter:
                         )
                         break
 
-                    if use_targeted_ripup:
+                    if recovery_hold_follow_through:
+                        # Issue #5545: the stagnation-recovery sweep re-landed
+                        # the cohort strictly under the banked best's
+                        # overflow (decision + rationale in the recovery
+                        # block above; ties fall through to the rip-up).
+                        # Skip this iteration's residual-conflict rip-up so
+                        # the serial reroute that stagnated cannot gamble the
+                        # recovered configuration away before the iteration
+                        # verdict banks it.  Refresh the loop-level overflow
+                        # view from the held state (the zero-overflow recovery
+                        # above may have further improved it) and fall
+                        # through to the common end-of-iteration bookkeeping.
+                        overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        flush_print(
+                            f"  Residual-conflict rip-up skipped: holding recovered "
+                            f"state (overflow {overflow}) into the iteration verdict "
+                            f"({elapsed_str()})"
+                        )
+                    elif use_targeted_ripup:
                         # Targeted rip-up: for each conflicting net, find its specific blockers
                         # and only rip up those instead of all conflicting nets at once
                         flush_print(
