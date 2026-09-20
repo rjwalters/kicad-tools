@@ -226,7 +226,11 @@ def test_late_pad_policy_refresh_reuses_pitch_cache(monkeypatch):
     assert len(calls) == count
     # Policy-only changes are detected without rebuilding geometry/pitches.
     grid.rules.strict_pad_clearance = True
-    assert pf._validate_route_clearance(route, own, own, 1) == (10, 10)
+    # Issue #5599: the validator returns a RouteClearanceViolation (location
+    # + kind) -- tuple-compatible with the historical (x, y) via [:2].
+    strict_violation = pf._validate_route_clearance(route, own, own, 1)
+    assert tuple(strict_violation[:2]) == (10, 10)
+    assert strict_violation.kind == "via-pad"
     assert len(calls) == count
 
 
