@@ -707,6 +707,54 @@ class TestZoneOverlapDetection:
         assert len(gen.warnings) == 1
         assert "equal or higher priority" in gen.warnings[0].message
 
+    # Issue #5618: the queued-vs-queued mirror of the cases above -- the
+    # LOWER-priority zone is the one added SECOND.
+    # ------------------------------------------------------------------
+
+    def test_no_warning_lower_priority_zone_added_after_retains_copper(self, sample_pcb_path):
+        """No warning when a later, lower-priority zone keeps exclusive copper.
+
+        Mirrors ``test_no_warning_distinct_priority_partial_overlap`` with
+        the ``add_zone`` calls in the opposite priority order: the
+        higher-priority zone is queued FIRST, and the new lower-priority
+        zone retains 2/3 of its boundary outside it -- a safe allocation,
+        not a starvation hazard (#5618).
+        """
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(
+            net="+5V",
+            layer="F.Cu",
+            priority=1,
+            boundary=[(20, 0), (50, 0), (50, 50), (20, 50)],
+        )
+        gen.add_zone(
+            net="+3.3V",
+            layer="F.Cu",
+            priority=0,
+            boundary=[(0, 0), (30, 0), (30, 50), (0, 50)],
+        )
+
+        # +3.3V (the new loser) keeps (0..20)x(0..50) = 2/3 of its territory.
+        assert len(gen.warnings) == 0
+
+    def test_warning_lower_priority_zone_added_after_fully_covered(self, sample_pcb_path):
+        """Warning when the later, lower-priority zone is fully covered.
+
+        Mirrors ``test_warning_distinct_priority_loser_fully_covered``'s
+        logic with the add order reversed: the higher-priority zone is
+        queued first with the default (full-board) boundary, and the new
+        lower-priority zone also defaults to the full board -- no
+        exclusive region at all (#5618).
+        """
+        gen = ZoneGenerator.from_pcb(sample_pcb_path)
+
+        gen.add_zone(net="+5V", layer="F.Cu", priority=1)
+        gen.add_zone(net="+3.3V", layer="F.Cu", priority=0)
+
+        assert len(gen.warnings) == 1
+        assert "equal or higher priority" in gen.warnings[0].message
+
 
 class TestZoneOverlapNonzeroOrigin:
     """Tests for overlap detection on PCBs with non-zero board origin.
