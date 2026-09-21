@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from tests.conformance.board import FIXTURES_DIR
-from tests.conformance.conftest import requires_cpp, requires_kicad_cli
+from tests.conformance.conftest import requires_adapter, requires_kicad_cli
 from tests.conformance.fixtures import (
     GRID_RESOLUTION_MM,
     HOLE_TO_HOLE_MM,
@@ -267,33 +267,99 @@ _ADAPTERS_BY_NAME = {adapter.name: adapter for adapter in ADAPTERS}
 
 # fixture -> ((adapter name, adapter is expected to REJECT the pair), ...)
 #
-# Verbatim from each fixture's ``notes`` and from #5533's acceptance criteria.
+# Verbatim from each fixture's ``notes``, from #5533's acceptance criteria, and
+# -- for the fourteen consumer groups #5515 (Phase 1c) wired -- from that phase's
+# own measured run.  Epic #5509 Phase 1c's criterion is that each named fixture
+# lists its disagreeing consumers *by name*; this table is that listing, and
+# because the suite drives it, the listing cannot go stale silently.
+#
+# ``True`` means "this consumer rejects the pair", whatever kicad-cli said; read
+# it against each fixture's own kicad-cli verdict in the comment above it to see
+# which direction the disagreement runs.
 _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # kicad-cli FLAGS this pair (0.18 mm against the project's 0.20 mm class).
     # Under the via-first insertion order the commit gates compare the
-    # candidate segment against ``trace_clearance`` (0.15) and accept it.
-    "issue5398-seg-via-0p18-order": (("grid_py", False), ("grid_cpp", False)),
-    # kicad-cli finds this CLEAN (0.213 mm copper, 0.513 mm drill). The grid's
-    # Chebyshev-square via halo swallows the candidate anyway.
-    "issue5410-dqs-n-halo-vs-legal-via": (("occupancy", True),),
-    # kicad-cli finds this CLEAN (project Default class is 0.15 mm here).
-    # Search-time refinement raises the bar to max(required, via_clearance).
-    "search-vs-commit-seg-via-max": (
-        ("route_halo", True),
+    # candidate segment against ``trace_clearance`` (0.15) and accept it -- and
+    # so does every other consumer whose threshold is the trace rule.  The
+    # kernel, resolving the project's own 0.20 mm, agrees with kicad-cli.
+    "issue5398-seg-via-0p18-order": (
+        ("clearance_kernel", True),
+        ("diffpair", True),
+        ("lattice", False),
         ("grid_py", False),
         ("grid_cpp", False),
+        ("via_clearance", False),
+        ("pairwise", False),
+        ("drc_nudge", False),
+        ("occupancy", True),
+        ("grid_cpp_marking", True),
+        ("cpp_blocked_kernel", True),
+        ("route_halo", True),
+        ("route_geometry_cpp", True),
+        ("optimizer_collision", True),
+        ("match_group", True),
+        ("kct_check", True),
+    ),
+    # kicad-cli finds this CLEAN (0.213 mm copper, 0.513 mm drill). The grid's
+    # Chebyshev-square via halo swallows the candidate anyway -- in both
+    # languages, and the C++ disc-kernel read side does not rescue it.
+    "issue5410-dqs-n-halo-vs-legal-via": (
+        ("clearance_kernel", False),
+        ("diffpair", False),
+        ("lattice", False),
+        ("occupancy", True),
+        ("grid_cpp_marking", True),
+        ("cpp_blocked_kernel", True),
+        ("route_halo", False),
+        ("route_geometry_cpp", False),
+        ("via_clearance", False),
+        ("grid_py", False),
+        ("grid_cpp", False),
+        ("kct_check", False),
+    ),
+    # kicad-cli finds this CLEAN (project Default class is 0.15 mm here).
+    # Search-time refinement raises the bar to max(required, via_clearance) --
+    # group 4's Python path and group 5's C++ path both do it -- while the
+    # commit gates accept.
+    "search-vs-commit-seg-via-max": (
+        ("clearance_kernel", False),
+        ("diffpair", True),
+        ("lattice", False),
+        ("route_halo", True),
+        ("route_geometry_cpp", True),
+        ("grid_py", False),
+        ("grid_cpp", False),
+        ("via_clearance", False),
+        ("pairwise", False),
+        ("drc_nudge", False),
+        ("kct_check", False),
+        ("occupancy", True),
+        ("grid_cpp_marking", True),
+        ("cpp_blocked_kernel", True),
+        ("optimizer_collision", True),
+        ("match_group", True),
     ),
     # kicad-cli finds this CLEAN (0.22 mm to the exact roundrect outline).
-    # The C++ grid models the pad as its bounding rectangle: 0.1164 mm.
-    "roundrect-corner-gap": (("grid_cpp", True), ("kct_check", False)),
+    # The C++ grid models the pad as its bounding rectangle: 0.1164 mm.  Group
+    # 6's fixed-copper predicate accepts it -- it is fed the exact polygon --
+    # and so does the kernel; the raster-based rows reject it.
+    "roundrect-corner-gap": (
+        ("clearance_kernel", False),
+        ("diffpair", True),
+        ("mesh", True),
+        ("grid_cpp", True),
+        ("grid_py", True),
+        ("occupancy", True),
+        ("optimizer_collision", True),
+        ("fixed_copper", False),
+        ("match_group", False),
+        ("pairwise", False),
+        ("kct_check", False),
+    ),
 }
 
 _ADAPTER_PARAMS = [
-    pytest.param(
-        adapter.name,
-        id=adapter.name,
-        marks=(requires_cpp,) if adapter.name == "grid_cpp" else (),
-    )
+    pytest.param(adapter.name, id=adapter.name, marks=(requires_adapter(adapter),))
     for adapter in ADAPTERS
 ]
 
@@ -303,7 +369,7 @@ _PREDICTION_PARAMS = [
         adapter_name,
         expect_reject,
         id=f"{fixture}-{adapter_name}",
-        marks=(requires_cpp,) if adapter_name == "grid_cpp" else (),
+        marks=(requires_adapter(_ADAPTERS_BY_NAME[adapter_name]),),
     )
     for fixture, predictions in _PREDICTIONS.items()
     for adapter_name, expect_reject in predictions
@@ -380,4 +446,39 @@ def test_named_fixture_adapter_agrees_with_kicad_cli(name: str, adapter_name: st
         f"{name}: `{adapter.name}` (group {adapter.group}) disagrees with kicad-cli\n"
         f"  over-rejected (consumer flags, KiCad clean): {over}\n"
         f"  under-rejected (KiCad flags, consumer clean): {under}"
+    )
+
+
+@requires_kicad_cli
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
+def test_kernel_agrees_with_kicad_cli_on_every_named_fixture(name: str) -> None:
+    """The Phase 1b kernel, on the hardest four boards we have, with no xfail.
+
+    The named fixtures are not random cases: each one was captured *because*
+    some consumer gets it wrong, so they are exactly where a unified model is
+    most likely to get it wrong too.  The kernel has to agree with kicad-cli
+    on all four, and unlike every consumer row that assertion is a **hard**
+    one -- see ``test_corpus.test_kernel_agrees_with_kicad_cli`` for why the
+    control row is the one exception to this suite's report-only rule.
+
+    This caught a real bug during Phase 1c: the kernel adapter was comparing
+    ``hole_gap``'s *one-sided* drill-to-copper reading against
+    ``min_hole_to_hole``, which flagged ``search-vs-commit-seg-via-max``'s
+    perfectly legal 0.33 mm drill-to-track distance.  The corpus seeds did not
+    expose it (their via-via drill spacing is comfortable by design); this
+    fixture did.
+    """
+    kernel = _ADAPTERS_BY_NAME["clearance_kernel"]
+    truth = _truth_pairs(name)
+    verdicts = _adapter_pairs("clearance_kernel", name)
+
+    over = sorted(sorted(p) for p in verdicts - truth)
+    under = sorted(sorted(p) for p in truth - verdicts)
+    assert not over and not under, (
+        f"{name}: the Phase 1b clearance kernel disagrees with kicad-cli "
+        "-- this is a KERNEL bug, not a consumer finding\n"
+        f"  over-rejected (kernel flags, KiCad clean): {over}\n"
+        f"  under-rejected (KiCad flags, kernel clean): {under}\n"
+        f"Capture the case and fix `{kernel.name}` through "
+        "tests/router/test_clearance_kernel_parity.py, never by relaxing this."
     )

@@ -320,6 +320,51 @@ jobs:
         # step in the routing-regression jobs below.
         run: uv run kct build-native
 
+      - name: Run clearance conformance corpus
+        env:
+          KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
+        # Epic #5509 Phase 1c: the kicad-cli-vs-consumers corpus behind
+        # docs/clearance-conformance.md. Moved out of the bulk pool for the
+        # same reason as the stitch (#5417) and zone (#5452) steps above --
+        # every item launches its own kicad-cli, and four xdist workers doing
+        # that concurrently is what exhausted the 12 GiB cgroup before. The
+        # matching `--ignore=tests/conformance` in "Run tests" below is what
+        # keeps the suite from running twice; without it this step is pure
+        # added wall time.
+        #
+        # No `-n`: the corpus is small (one item per seed, six smoke seeds)
+        # and kicad-cli fan-out is exactly the thing being avoided.
+        # --timeout=120 rather than the pool's 60 because a refilled item
+        # costs three kicad-cli invocations (refill, then DRC, plus the as-is
+        # DRC it is compared against); items are parametrised per seed, never
+        # batched, so no single item approaches even that.
+        #
+        # --basetemp doubles as the artifact source: the determinism test
+        # (test_corpus.test_report_regenerates_byte_identically) renders the
+        # conformance table into its tmp_path twice, so the generated tables
+        # land in the retained diagnostics without a second corpus run.
+        run: |
+          mkdir -p "$RUNNER_TEMP/conformance"
+          python3 scripts/ci/run_observed.py conformance -- uv run pytest tests/conformance -o addopts= --benchmark-disable --timeout=120 -m "not slow" \
+            --basetemp "$RUNNER_TEMP/conformance/pytest" \
+            --junitxml "$RUNNER_TEMP/conformance/junit.xml" \
+            2>&1 | tee "$RUNNER_TEMP/conformance/pytest.log"
+
+      - name: Retain clearance conformance evidence
+        # always(), not failure(): this suite is *report-only* by design --
+        # every consumer row is a non-strict xfail, so a green step is exactly
+        # when the measured disagreements are worth reading. Retaining only on
+        # failure would discard the evidence in the case the epic cares about.
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: clearance-conformance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/conformance/
+            docs/clearance-conformance.md
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run Board05 manufacturing regression
         env:
           KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
@@ -401,7 +446,7 @@ jobs:
           KCT_OBSERVER_CONTAINER_ID: ${{ job.container.id }}
           BOARD_07_CI_ENABLED: ${{ vars.BOARD_07_CI_ENABLED }}
         run: |
-          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py --ignore=tests/test_zones_cmd.py --ignore=tests/test_zones_hv_keepout.py)
+          test_args=(--ignore=tests/test_board_05_drc_allowlist.py --ignore=tests/test_mask_copper_native.py --ignore=tests/test_stitch_physical_completion.py --ignore=tests/test_zones_cmd.py --ignore=tests/test_zones_hv_keepout.py --ignore=tests/conformance)
           if [[ "$BOARD_07_CI_ENABLED" != "true" ]]; then
             test_args+=(--ignore=tests/test_board_07_matchgroup_test.py)
           fi

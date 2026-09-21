@@ -323,6 +323,71 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
         "fastmcp>=4,<5",
         "pyproject.toml",
     ),
+    # docs/clearance-conformance.md — Epic #5509 Phase 1c's disagreement
+    # table (#5515).  The document is GENERATED (from
+    # ``tests/conformance/report.py``'s ``NOTES`` / ``NOT_MEASURED_REASONS``),
+    # which is exactly why these rows matter rather than being redundant: the
+    # anchors live in string literals no type checker or import graph touches,
+    # so a consumer-side rename would rot the published table silently.  Each
+    # one below is the entry point a row's percentage is *about*, or the
+    # sub-entry-point a row explicitly says it does NOT cover -- the claims a
+    # reader would act on.  Regenerating the table cannot drop one without
+    # turning this test red.
+    (
+        "docs/clearance-conformance.md",
+        "find_intra_pair_clearance_violations",
+        "src/kicad_tools/router/diffpair_routing.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_fresh_committed",
+        "src/kicad_tools/router/lattice/pathfinder.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_route_with_portals",
+        "src/kicad_tools/router/mesh/pathfinder.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_keepouts",
+        "src/kicad_tools/router/mesh/pathfinder.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_route_obstacles",
+        "src/kicad_tools/router/mesh/pathfinder.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_min_clearance_to_neighbors",
+        "src/kicad_tools/router/subgrid.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_validate_segment_relaxed",
+        "src/kicad_tools/router/subgrid.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_post_insertion_clearance_detail_pair_group",
+        "src/kicad_tools/router/match_group_tuning.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_via_drill_overlaps_bbox",
+        "src/kicad_tools/router/drc_nudge.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_via_edge_sweep_clear",
+        "src/kicad_tools/router/drc_nudge.py",
+    ),
+    (
+        "docs/clearance-conformance.md",
+        "_extract_pad_arrays",
+        "src/kicad_tools/drc/cpp_backend.py",
+    ),
 )
 
 

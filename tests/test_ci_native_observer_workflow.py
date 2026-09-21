@@ -120,6 +120,13 @@ def test_existing_workflow_command_and_failure_propagation(tmp_path, group, boar
                     "test_stitch_physical_completion.py",
                     "test_zones_cmd.py",
                     "test_zones_hv_keepout.py",
+                    # Epic #5509 Phase 1c (#5515): a whole directory rather
+                    # than a file, and the only entry here whose ignore is
+                    # load-bearing for *correctness* rather than only for
+                    # resource contention -- ``tests/conformance`` has its own
+                    # dedicated step, so without this the suite runs twice and
+                    # the dedicated step is pure added wall time.
+                    "conformance",
                 ]
             ],
         ],

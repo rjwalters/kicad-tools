@@ -13,10 +13,13 @@ rather than sampling positions and hoping some land near the threshold.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from tests.conformance.generator import (
     BOUNDARY_BAND_MM,
+    PairKind,
     generate_case,
     generate_corpus,
 )
@@ -62,3 +65,51 @@ def test_corpus_probes_the_threshold_from_both_sides() -> None:
     )
     closest = min(abs(p.target_gap_mm - p.required_mm) for p in pairs)
     assert closest > BOUNDARY_BAND_MM
+
+
+def test_every_pair_kind_appears_in_a_modest_seed_range() -> None:
+    """All six kinds are placed, including ``pad-pad``.
+
+    A kind the generator never emits is a consumer group that can only ever
+    read ``not measured``, and nothing else in the suite would say so: the
+    adapter would run, find no in-scope pair, and report a confident zero
+    denominator.  ``pad-pad`` is the one at risk -- it costs both pad slots, so
+    it is only feasible when the second pick left them free.
+    """
+    kinds = {pair.kind for case in generate_corpus(range(48)) for pair in case.pairs}
+    assert kinds == set(PairKind.ALL), f"missing pair kinds: {sorted(set(PairKind.ALL) - kinds)}"
+
+
+@pytest.mark.parametrize("seed", range(48))
+def test_pad_pad_pairs_realise_their_intended_gap_exactly(seed: int) -> None:
+    """The analytic placement is exact for every drawn rotation.
+
+    ``pad-pad`` is placed along the first pad's local ``+X`` axis with the
+    second pad turned to face it (``rotation + 180``), because that is the one
+    direction where every catalogue shape's support is ``w / 2`` and the gap is
+    therefore known in closed form regardless of angle.  If that reasoning is
+    wrong -- a support that is not ``w / 2``, a rotation convention that is not
+    what KiCad renders -- group 19's row silently measures geometry the
+    generator did not intend, and the disagreement would be a harness bug wearing
+    a consumer's name.
+
+    Checked here in closed form (centre distance minus both supports), so a
+    failure points at the placement rather than at whichever consumer happens
+    to notice.  ``test_corpus_truth`` closes the same loop against kicad-cli's
+    own measurement.
+    """
+    case = generate_case(seed)
+    by_net = {pad.net: pad for pad in case.pads}
+    pad_pairs = [p for p in case.pairs if p.kind == PairKind.PAD_PAD]
+
+    for pair in pad_pairs:
+        a, b = by_net[pair.net_a], by_net[pair.net_b]
+        centre = math.dist((a.x, a.y), (b.x, b.y))
+        realised = centre - a.shape.half_extent_x - b.shape.half_extent_x
+        assert realised == pytest.approx(pair.target_gap_mm, abs=1e-6), (
+            f"seed {seed}: pad-pad pair {sorted(pair.nets)} intended a "
+            f"{pair.target_gap_mm:.6f} mm gap but the placement realises "
+            f"{realised:.6f} mm"
+        )
+        # Facing each other: the second pad's local +X points back at the first.
+        assert (a.rotation + 180.0) % 360.0 == pytest.approx(b.rotation, abs=1e-3)

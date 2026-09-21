@@ -38,6 +38,7 @@ record.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from kicad_tools.core.types import CopperLayer as Layer
@@ -58,22 +59,38 @@ __all__ = [
     "ALL_PAIR_KINDS",
     "PairContext",
     "PairObject",
+    "cpp_grid_for",
+    "cpp_segment",
+    "cpp_via",
+    "layer_indexer",
     "layer_of",
     "layer_stack_for",
     "net_ids",
+    "pad_pad_pairs",
     "pair_contexts",
+    "router_cpp_module",
     "router_grid",
     "router_pad",
     "router_rules",
     "router_segment",
     "router_via",
     "single_object_route",
+    "trace_radius_cells",
+    "via_radius_cells",
 ]
 
 PairObject = SegmentSpec | ViaSpec | PadSpec
 
-ALL_PAIR_KINDS: frozenset[str] = frozenset(PairKind.ALL)
-"""Every pair kind the generator places; the default adapter scope."""
+ALL_PAIR_KINDS: frozenset[str] = frozenset(PairKind.ROUTING)
+"""Every pair kind that has a *routing candidate*; the default adapter scope.
+
+Deliberately :attr:`~tests.conformance.generator.PairKind.ROUTING` and not
+``PairKind.ALL``: ``pad-pad`` is a placement pair with no candidate object a
+router could propose (see :func:`pair_contexts`), so an adapter that wraps a
+router-side predicate is not consulted about it in production and must not be
+scored on it.  The one consumer that *is* pad-pad-only -- group 19's
+``drc_cpp`` incremental placement check -- names that kind explicitly.
+"""
 
 _LAYER_BY_NAME: dict[str, Layer] = {layer.kicad_name: layer for layer in Layer}
 
@@ -240,8 +257,33 @@ def _objects_by_net(case: CopperCase) -> dict[str, PairObject]:
     return {obj.net: obj for obj in case.copper_objects}
 
 
+def pad_pad_pairs(case: CopperCase) -> list[tuple[PairIntent, PadSpec, PadSpec]]:
+    """Every ``pad-pad`` pair, as ``(intent, pad_a, pad_b)``.
+
+    The complement of :func:`pair_contexts`: these pairs have no routing
+    candidate (both sides are placement copper), so they are served separately
+    for the one consumer that answers a pad-vs-pad question -- Epic #5509
+    group 19's incremental placement DRC.
+    """
+    by_net = _objects_by_net(case)
+    pairs: list[tuple[PairIntent, PadSpec, PadSpec]] = []
+    for pair in case.pairs:
+        if pair.kind != PairKind.PAD_PAD:
+            continue
+        first, second = by_net[pair.net_a], by_net[pair.net_b]
+        assert isinstance(first, PadSpec) and isinstance(second, PadSpec)
+        pairs.append((pair, first, second))
+    return pairs
+
+
 def pair_contexts(case: CopperCase) -> list[PairContext]:
     """Split every close pair into (existing copper, candidate).
+
+    ``pad-pad`` pairs are **skipped** rather than split: neither side is an
+    object a router proposes, so there is no candidate to ask about.  They are
+    served by :func:`pad_pad_pairs` instead.  Every adapter filters on
+    ``pair_kinds`` anyway, so the skip is invisible to consumers that never
+    declare that kind.
 
     The split rule, in order:
 
@@ -260,6 +302,8 @@ def pair_contexts(case: CopperCase) -> list[PairContext]:
     by_net = _objects_by_net(case)
     contexts: list[PairContext] = []
     for pair in case.pairs:
+        if pair.kind == PairKind.PAD_PAD:
+            continue
         first, second = by_net[pair.net_a], by_net[pair.net_b]
         if isinstance(first, PadSpec):
             existing, candidate = first, second
@@ -274,3 +318,105 @@ def pair_contexts(case: CopperCase) -> list[PairContext]:
         assert not isinstance(candidate, PadSpec), "a pad is never a routing candidate"
         contexts.append(PairContext(pair=pair, existing=existing, candidate=candidate))
     return contexts
+
+
+# ---------------------------------------------------------------------------
+# C++ (``router_cpp``) plumbing
+# ---------------------------------------------------------------------------
+#
+# Three Phase 1c adapters -- groups 2, 3 and 5 -- drive ``router_cpp.Grid3D``
+# and ``router_cpp.Pathfinder`` directly, the way
+# ``tests/router/test_pairwise_cpp_parity.py`` does.  The translation lives
+# here for the same reason the Python one does: a difference between two rows
+# of the table must be a difference between two clearance models, never
+# between two translations of the same case.
+
+
+def router_cpp_module():
+    """The compiled router extension, or ``None`` when it is not built.
+
+    An adapter reports ``available() is False`` on ``None`` so its group
+    renders ``not measured`` rather than a zero-disagreement row -- the same
+    "no answer beats a confident wrong answer" rule the oracle applies to a
+    missing kicad-cli.
+    """
+    try:
+        from kicad_tools.router import router_cpp
+    except ImportError:  # pragma: no cover - depends on the build environment
+        return None
+    return router_cpp
+
+
+def layer_indexer(case: CopperCase):
+    """KiCad layer name -> the 0-based stack index ``Grid3D`` speaks."""
+    stack = layer_stack_for(case)
+    by_enum = {layer_of(definition.name): definition.index for definition in stack.layers}
+
+    def index(name: str) -> int:
+        return by_enum[layer_of(name)]
+
+    return index
+
+
+def cpp_grid_for(router_cpp, case: CopperCase, rules: DesignRules):
+    """A bare ``Grid3D`` in the case's own coordinate frame.
+
+    Boards are written with ``center=False`` (``tests/conformance/board.py``),
+    so the board origin is ``(0, 0)`` and the grid needs no offset.  Column /
+    row counts match ``grid_cpp.py``'s construction exactly so the two C++
+    rows share one raster.
+    """
+    resolution = rules.grid_resolution
+    cols = int(case.width / resolution) + 1
+    rows = int(case.height / resolution) + 1
+    return router_cpp.Grid3D(cols, rows, case.layers, resolution, 0.0, 0.0)
+
+
+def cpp_segment(router_cpp, spec: SegmentSpec, nets: dict[str, int], layer_index):
+    """``SegmentSpec`` -> ``router_cpp.Segment``."""
+    seg = router_segment(spec, nets)
+    out = router_cpp.Segment()
+    out.x1, out.y1 = seg.x1, seg.y1
+    out.x2, out.y2 = seg.x2, seg.y2
+    out.width = seg.width
+    out.layer = layer_index(spec.layer)
+    out.net = seg.net
+    return out
+
+
+def cpp_via(router_cpp, spec: ViaSpec, nets: dict[str, int], layer_index):
+    """``ViaSpec`` -> ``router_cpp.Via``."""
+    via = router_via(spec, nets)
+    out = router_cpp.Via()
+    out.x, out.y = via.x, via.y
+    out.drill = via.drill
+    out.diameter = via.diameter
+    out.layer_from = layer_index(spec.layers[0])
+    out.layer_to = layer_index(spec.layers[1])
+    out.net = via.net
+    return out
+
+
+def trace_radius_cells(rules: DesignRules) -> int:
+    """The trace halo radius, in cells, that the C++ search marks with.
+
+    Verbatim from the production call site --
+    ``cpp_backend.py CppPathfinder.route``, which computes
+    ``max(1, ceil((trace_width / 2 + trace_clearance) / resolution))`` and
+    hands it to ``Grid3D::mark_segment`` as ``clearance_cells``.  Re-deriving
+    it here is unavoidable (the radius is computed in Python and the marking
+    happens in C++), which is exactly why it is written once, in one place,
+    and cited.
+    """
+    return max(
+        1, math.ceil((rules.trace_width / 2 + rules.trace_clearance) / rules.grid_resolution)
+    )
+
+
+def via_radius_cells(rules: DesignRules) -> int:
+    """The via halo radius, in cells, that the C++ search marks with.
+
+    The ``mark_via`` sibling of :func:`trace_radius_cells`;
+    ``max(1, ceil((via_diameter / 2 + via_clearance) / resolution))``.
+    """
+    return max(1, math.ceil((rules.via_diameter / 2 + rules.via_clearance) / rules.grid_resolution))
