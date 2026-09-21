@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-09-21
+
+### Summary
+
+Follow-up release cut hours after 0.21.0: PyPI's per-file 100 MB limit
+rejected 0.21.0's sdist mid-publish (leaving a wheel-only release on the
+index), so 0.21.1 re-ships the same code with a slimmed sdist (127 MB →
+18 MB of board artifacts, evidence trees, and tooling copies excluded
+from the package — the wheel is unchanged) and an idempotent publish
+step. It also carries the work that landed while the release was being
+unblocked: honest routing-plan capacity (per-class pitch, plane
+exclusion, blockage), the clearance-conformance Phase 1c harness (18 of
+19 consumer groups measured), the board 05/06/07 access-loss witness
+evidence runs, board06 foreign-input refusal, the access-witness
+deadline-kill fix, and CI/router performance recoveries.
+
+
+### Fixed
+
+- `kct route --step route` on board06 now refuses a **foreign input PCB**
+  with a named, actionable error instead of routing it and emitting
+  `UNREPAIRED` lines that read like a router regression — the committed
+  unrouted input is selected by content, so stale-artifact confusion
+  (#5607) can no longer masquerade as a routing failure (Issue #5628).
+- The access-witness sidecar is now written even when a route terminates
+  on the wall-clock deadline kill, and two verdict-shape defects (an
+  empty-pads witness surfacing as a schema key on every diagnosis, and
+  net-0 paddings mislabelled in the replay) are fixed (Issue #5639,
+  follow-up to the #5508 1a/1b machinery).
+
+### Performance
+
+- CI's Test job recovers most of the `KCT_NATIVE_MAX_CONCURRENCY=1`
+  regression by raising the bound to 2 with the OOM-safe slot accounting
+  (Issue #5616); the Diff-Pair regression job's 17.6-minute re-route step
+  gets filled-polygon edge indexing plus phase-level profiling, and the
+  validation hot path rejects far copper by bounding box before the exact
+  halo distance (Issues #5617 and #5240's closing sweep).
+
 ### Changed
 
 - Make the report-only routing plan's capacity model honest (Issue #5575,
