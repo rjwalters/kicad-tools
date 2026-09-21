@@ -480,9 +480,9 @@ board-07 ×2): `find out -name '*.access_witness.json'` returns **nothing**, and
 machinery's receipts rather than the normal save path's. This is the reason
 boards 05 and 07 needed a harness at all.
 
-Two further observations from the same surface, recorded here and filed in the
-same follow-up rather than fixed (this issue's scope guard: "Do not treat a
-negative result as a reason to 'fix' the witness in this PR; file it."):
+All three observations below are filed as **#5639** rather than fixed here, per
+this issue's scope guard ("Do not treat a negative result as a reason to 'fix'
+the witness in this PR; file it."). Two further ones from the same surface:
 
 - the `empty` + non-null `first_closed_at` combination described in the
   board-07 section, which the format note's reading table does not cover; and
