@@ -882,6 +882,12 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     VIA_R = 0.225  # 0.45 mm via
     CLEAR = 0.15
+    # Issue #5608: KiCad board-setup ``hole_clearance`` floor -- FOREIGN
+    # copper must stay >= 0.25 mm from any drilled hole edge.  Same idiom
+    # as ``_legalize_signal_vias``'s HOLE_CLEAR (independent literal, per
+    # the existing three-copies convention); kct's clearance rules do not
+    # model track-vs-hole, so the repair's own path acceptance enforces it.
+    HOLE_CLEAR = 0.25
     STUB_W = 0.15
     BRIDGE_W = 0.2
     # Issue #3855: the repair via's DRILL.  Drill spacing must be enforced
@@ -952,6 +958,14 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             geom, pnet, layers = entry[:3]
             if pnet != net and layer in layers and path.distance(geom) < CLEAR:
                 return False
+        # Issue #5608: track vs foreign TH-pad HOLE (KiCad
+        # ``hole_clearance``), any layer -- the drill passes through the
+        # whole stack, so a bridge on an unrelated layer still cannot graze
+        # it.  Mirrors ``_legalize_signal_vias._leg_ok``'s pad-hole check.
+        for _geom, pnet, _layers, drill_r, center, _name, is_th, _inscribed in pad_index:
+            if pnet != net and is_th and drill_r > 0:
+                if path.distance(Point(center[0], center[1]).buffer(drill_r)) < HOLE_CLEAR:
+                    return False
         # Issue #5240: same bounding-box pre-filter as ``_via_ok`` -- the
         # net / layer / distance tests below are unchanged.
         for seg_i in seg_tree.candidates(path.bounds, CLEAR):
@@ -959,8 +973,15 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             if snet != net and lay == layer and path.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius, drill in via_index:
-            if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
-                return False
+            if vnet != net:
+                if path.distance(pt.buffer(radius)) < CLEAR:
+                    return False
+                # Issue #5608: track vs foreign via HOLE (KiCad
+                # ``hole_clearance``) -- the drill floor is stricter than
+                # the barrel radius, so a bridge hugging a small via's
+                # annulus could still land 3 um inside the hole floor.
+                if path.distance(pt.buffer(drill / 2.0)) < HOLE_CLEAR:
+                    return False
         return True
 
     directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
