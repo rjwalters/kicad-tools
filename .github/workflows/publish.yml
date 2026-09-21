@@ -60,4 +60,11 @@ jobs:
           enable-cache: false
 
       - name: Publish to PyPI
-        run: uv publish
+        # --skip-existing makes the publish idempotent per file: PyPI keeps
+        # per-file successes even when a later file in the same run fails
+        # (observed on 0.21.0: the wheel uploaded, the 127 MB sdist was
+        # rejected, and the retry then wedged on "file already exists" for
+        # the wheel). With this flag a retry uploads only what is missing.
+        # PyPI never allows content changes, so skipping an identical
+        # existing file cannot publish anything stale.
+        run: uv publish --skip-existing
