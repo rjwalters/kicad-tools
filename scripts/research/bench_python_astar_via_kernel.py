@@ -182,6 +182,70 @@ def _report(name: str, verdicts: bytes, count: int, elapsed: float) -> None:
     )
 
 
+def _route_checksum(nets: int) -> tuple[str, int, int, float]:
+    """Route ``nets`` pad-to-pad nets with the PURE-PYTHON A* and checksum them.
+
+    This is the end-to-end arm of the equivalence check: the predicate sweep
+    above proves individual verdicts are unchanged, this proves the *paths the
+    A\\* actually chooses* are unchanged, including via placement and ordering
+    effects.  The C++ backend is bypassed entirely -- ``Router`` here is the
+    pure-Python fallback the Diff-Pair job's phase 4 spends its time in.
+
+    Returns ``(checksum, segments, vias, seconds)``.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    # A pure-Python A* is 10-100x slower than the C++ search, so this arm
+    # uses a board-06-*resolution* grid over a smaller area: same kernel size
+    # (the thing #5617 changes), tractable search space.
+    rules = _rules()
+    grid = RoutingGrid(
+        width=16.0,
+        height=12.0,
+        rules=rules,
+        layer_stack=LayerStack.four_layer_all_signal(),
+    )
+    # Deterministic obstacle field: horizontal barriers with staggered gaps,
+    # so the search has to detour (and via) rather than running straight.
+    for layer in range(grid.num_layers):
+        for cy in range(60, grid.rows - 60, 60):
+            gap = (cy // 60 * 47) % (grid.cols - 120) + 60
+            for cx in range(20, grid.cols - 20):
+                if abs(cx - gap) < 24:
+                    continue
+                grid._blocked[layer, cy, cx] = True
+                grid._net[layer, cy, cx] = 99
+
+    router = Router(grid, rules)
+    router.set_net_name_to_id({f"N{i}": i for i in range(1, nets + 1)})
+
+    parts: list[str] = []
+    segments = vias = 0
+    started = time.perf_counter()
+    for i in range(1, nets + 1):
+        ax, ay = grid.grid_to_world(40 + i * 30, 30)
+        bx, by = grid.grid_to_world(70 + i * 30, grid.rows - 30)
+        layer = router._grid_layer_object(0)
+        start = Pad(x=ax, y=ay, width=0.4, height=0.4, layer=layer, net=i, net_name=f"N{i}")
+        end = Pad(x=bx, y=by, width=0.4, height=0.4, layer=layer, net=i, net_name=f"N{i}")
+        result = router.route(start, end)
+        if result is None:
+            parts.append(f"N{i}:UNROUTED")
+            continue
+        for seg in result.segments:
+            parts.append(
+                f"S {seg.x1:.6f} {seg.y1:.6f} {seg.x2:.6f} {seg.y2:.6f} "
+                f"{seg.width:.6f} {seg.layer} {seg.net}"
+            )
+            segments += 1
+        for via in result.vias:
+            parts.append(f"V {via.x:.6f} {via.y:.6f} {via.drill:.6f} {via.diameter:.6f} {via.net}")
+            vias += 1
+    elapsed = time.perf_counter() - started
+    digest = hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+    return digest, segments, vias, elapsed
+
+
 def _profile(router: Router, grid: RoutingGrid, side: int, radii: list[int], top: int) -> None:
     """cProfile attribution for the sweep -- finer than the phase table."""
     import cProfile
@@ -227,10 +291,28 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--workload",
-        choices=["kernel", "halo", "both"],
+        choices=["kernel", "halo", "both", "routes"],
         default="both",
     )
+    parser.add_argument(
+        "--routes",
+        type=int,
+        default=6,
+        help=(
+            "With ``--workload routes``: how many pad-to-pad nets to route "
+            "through the PURE-PYTHON A* and checksum (end-to-end equivalence "
+            "arm -- the paths themselves, not just the predicate verdicts)."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.workload == "routes":
+        digest, segments, vias, elapsed = _route_checksum(args.routes)
+        print(
+            f"routes   nets={args.routes:<8} segments={segments:<6} vias={vias:<5} "
+            f"time={elapsed:8.3f}s  checksum={digest}"
+        )
+        return 0
 
     print(f"grid           : {BOARD_W_MM} x {BOARD_H_MM} mm @ {RESOLUTION} mm")
     print(f"lattice        : {args.side}^2 positions, radii={args.radii}, sharing=(False, True)")
