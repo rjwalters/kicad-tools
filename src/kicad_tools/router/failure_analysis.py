@@ -28,6 +28,7 @@ Example::
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,6 +37,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .grid import RoutingGrid
 
 
@@ -547,6 +550,63 @@ class CongestionMap:
             min(self.grid.rows - 1, max_gy),
         )
 
+    def _occupied_scan_cells(
+        self, min_gx: int, min_gy: int, max_gx: int, max_gy: int, step: int
+    ) -> list[tuple[int, int, int]] | None:
+        """Pre-filter the scan window down to cells the loop can't skip.
+
+        Issue #5240: ``_build_grid`` visits every ``(layer, gy, gx)`` cell of
+        the window in pure Python, allocating a ``_CellView`` per cell, and
+        then immediately ``continue``s on the overwhelming majority of them
+        (``not blocked and usage_count == 0``).  On a 501x501x2 grid that is
+        ~500k discarded cell visits per construction even when the board is
+        essentially empty.
+
+        The two arrays that decide the skip -- ``_blocked`` and
+        ``_usage_count`` -- are dense NumPy arrays on a real
+        :class:`~kicad_tools.router.grid.RoutingGrid`, so the skip test can be
+        answered for the whole window at once.  ``np.nonzero`` returns indices
+        in C (row-major) order, which is exactly the ``layer -> gy -> gx``
+        order the nested loops walk, so the surviving cells are visited in the
+        same sequence and accumulated into ``congestion`` in the same order --
+        the float32 result is bitwise identical, not merely close.
+
+        Returns ``None`` when the fast path does not apply (fixture/mock grids
+        without the backing arrays, non-NumPy array namespaces such as a GPU
+        backend, or a shape that disagrees with the grid's own dimensions), in
+        which case the caller walks the full window as before.
+        """
+        grid = self.grid
+        blocked = getattr(grid, "_blocked", None)
+        usage = getattr(grid, "_usage_count", None)
+        if not isinstance(blocked, np.ndarray) or not isinstance(usage, np.ndarray):
+            return None
+
+        try:
+            expected = (int(grid.num_layers), int(grid.rows), int(grid.cols))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if blocked.shape != expected or usage.shape != expected:
+            return None
+
+        # Empty window (a region clamped entirely off-grid): the nested
+        # ``range`` loops would yield nothing, so neither does this.
+        if min_gx > max_gx or min_gy > max_gy:
+            return []
+
+        rows = slice(min_gy, max_gy + 1, step)
+        cols = slice(min_gx, max_gx + 1, step)
+        occupied = blocked[:, rows, cols].astype(bool, copy=False) | (usage[:, rows, cols] != 0)
+        layer_idx, y_idx, x_idx = np.nonzero(occupied)
+        return list(
+            zip(
+                layer_idx.tolist(),
+                (min_gy + y_idx * step).tolist(),
+                (min_gx + x_idx * step).tolist(),
+                strict=True,
+            )
+        )
+
     def _build_grid(self) -> np.ndarray:
         """Build congestion grid from routing grid."""
         congestion = np.zeros((self.rows, self.cols), dtype=np.float32)
@@ -554,38 +614,49 @@ class CongestionMap:
         min_gx, min_gy, max_gx, max_gy = self._scan_window()
 
         # Iterate through all layers and cells (window-clamped and
-        # stride-subsampled, #3474 R1)
+        # stride-subsampled, #3474 R1).  Issue #5240: when the routing grid
+        # exposes its NumPy backing arrays, skip straight to the cells that
+        # survive the ``blocked``/``usage_count`` test instead of visiting
+        # (and discarding) every cell in Python.  Same cells, same order.
         step = self.stride
-        for layer_idx in range(self.grid.num_layers):
-            for gy in range(min_gy, max_gy + 1, step):
-                for gx in range(min_gx, max_gx + 1, step):
-                    cell = self.grid.cell_at(layer_idx, gy, gx)
+        scan_cells: Iterable[tuple[int, int, int]] | None = self._occupied_scan_cells(
+            min_gx, min_gy, max_gx, max_gy, step
+        )
+        if scan_cells is None:
+            scan_cells = itertools.product(
+                range(self.grid.num_layers),
+                range(min_gy, max_gy + 1, step),
+                range(min_gx, max_gx + 1, step),
+            )
 
-                    if not cell.blocked and cell.usage_count == 0:
-                        continue
+        for layer_idx, gy, gx in scan_cells:
+            cell = self.grid.cell_at(layer_idx, gy, gx)
 
-                    # Convert grid coords to world coords
-                    wx, wy = self.grid.grid_to_world(gx, gy)
+            if not cell.blocked and cell.usage_count == 0:
+                continue
 
-                    # Convert to congestion grid coords
-                    cx = int((wx - self.origin_x) / self.cell_size)
-                    cy = int((wy - self.origin_y) / self.cell_size)
+            # Convert grid coords to world coords
+            wx, wy = self.grid.grid_to_world(gx, gy)
 
-                    if 0 <= cx < self.cols and 0 <= cy < self.rows:
-                        # Determine weight based on cell state
-                        if cell.is_zone:
-                            # Zones have less impact on routing
-                            weight = self.trace_weight * 0.5
-                        elif cell.blocked:
-                            # Components/pads
-                            weight = self.component_weight
-                        elif cell.usage_count > 0:
-                            # Routed traces
-                            weight = self.trace_weight * min(cell.usage_count, 3)
-                        else:
-                            weight = 0.0
+            # Convert to congestion grid coords
+            cx = int((wx - self.origin_x) / self.cell_size)
+            cy = int((wy - self.origin_y) / self.cell_size)
 
-                        congestion[cy, cx] += weight
+            if 0 <= cx < self.cols and 0 <= cy < self.rows:
+                # Determine weight based on cell state
+                if cell.is_zone:
+                    # Zones have less impact on routing
+                    weight = self.trace_weight * 0.5
+                elif cell.blocked:
+                    # Components/pads
+                    weight = self.component_weight
+                elif cell.usage_count > 0:
+                    # Routed traces
+                    weight = self.trace_weight * min(cell.usage_count, 3)
+                else:
+                    weight = 0.0
+
+                congestion[cy, cx] += weight
 
         # Normalize to 0-1 range
         max_val = congestion.max()
