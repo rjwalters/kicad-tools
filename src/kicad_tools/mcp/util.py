@@ -10,19 +10,21 @@ import logging
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+    # mcp SDK >= 2.x (#5601): FastMCP renamed to MCPServer and moved to
+    # mcp.server.mcpserver.
+    from mcp.server.mcpserver import MCPServer
 
 logger = logging.getLogger(__name__)
 
 
-MCP_DECORATOR = Callable[["FastMCP"], Callable]
+MCP_DECORATOR = Callable[["MCPServer"], Callable]
 
 
 class MCPTools:
     """Registry for MCP tools with deferred installation.
 
     Allows tools to be registered with decorators and later installed
-    into a FastMCP server instance.
+    into an SDK MCP server instance.
 
     Usage:
         analysis_tools = MCPTools()
@@ -50,7 +52,7 @@ class MCPTools:
             A decorator that registers the function.
         """
 
-        def default_decorator(mcp: FastMCP) -> Callable:
+        def default_decorator(mcp: MCPServer) -> Callable:
             return mcp.tool()
 
         if decorator is None:
@@ -62,11 +64,11 @@ class MCPTools:
 
         return decorator_wrapper
 
-    def install(self, mcp: FastMCP) -> None:
+    def install(self, mcp: MCPServer) -> None:
         """Install all registered tools into the MCP server.
 
         Args:
-            mcp: The FastMCP server instance to install tools into.
+            mcp: The SDK MCP server instance to install tools into.
         """
         for func, decorator in self._tools.items():
             d = decorator(mcp)

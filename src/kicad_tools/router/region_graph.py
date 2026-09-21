@@ -709,19 +709,35 @@ class RegionGraph:
     def get_total_overflow(self) -> int:
         """Compute total edge overflow across the graph.
 
-        Overflow on an edge is max(0, utilization - capacity).
+        Overflow on an edge is max(0, utilization - capacity). Each adjacent
+        region pair ``(a, b)`` is backed by two directed ``RegionEdge``
+        objects (``source=a, target=b`` and ``source=b, target=a``), and
+        ``update_utilization()`` only mutates the one matching a path's
+        actual traversal direction. This sums the overflow of *both*
+        directed edges for every undirected pair (visiting each pair exactly
+        once) so the result does not depend on which direction happened to
+        carry the traffic, or on `self.edges` iteration order.
 
         Returns:
-            Sum of overflow across all directed edges.
+            Sum of overflow across all undirected edge pairs.
         """
         total = 0
         seen: set[tuple[int, int]] = set()
         for edges in self.edges.values():
             for edge in edges:
                 key = (min(edge.source, edge.target), max(edge.source, edge.target))
-                if key not in seen:
-                    seen.add(key)
-                    total += edge.overflow
+                if key in seen:
+                    continue
+                seen.add(key)
+                reverse_overflow = next(
+                    (
+                        reverse_edge.overflow
+                        for reverse_edge in self.edges.get(edge.target, [])
+                        if reverse_edge.target == edge.source
+                    ),
+                    0,
+                )
+                total += edge.overflow + reverse_overflow
         return total
 
     def get_overflowed_edges(self) -> list[RegionEdge]:

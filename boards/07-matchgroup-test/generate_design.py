@@ -419,6 +419,14 @@ REQUIRE_POUR_CONNECTIVITY: bool = True
 # only costs wall time in failure scenarios.
 MAX_POUR_REPAIR_ROUNDS: int = 6
 
+# Issue #5507: plain-native-refill stability budget.  After the repair loop
+# converges under the recipe's own fill engine, the stability pass re-fills
+# a scratch copy with KiCad's native engine and repairs any split it finds
+# (the repo engine's carve model can keep a same-net pour pocket attached
+# that KiCad severs).  Each round ends on a verified-clean native refill, so
+# the cap only costs wall time when a split genuinely resists repair.
+NATIVE_REFILL_STABILITY_ROUNDS: int = 3
+
 
 # =============================================================================
 # Plane-connectivity helpers (Issue #3413 phase 4)
@@ -629,6 +637,45 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
+def _audit_pour_report(pcb_path: Path, net_names: list[str], tag: str) -> bool:
+    """Print + return the per-net copper-union audit verdict for one board.
+
+    Shared by the in-loop audit (``_run_pour_audit``), the post-quantize
+    audit and the plain-native-refill stability pass (issue #5507) so every
+    consumer prints -- and decides on -- the exact same per-net verdict.
+    """
+    ok = True
+    try:
+        audit = _audit_pour_nets(pcb_path, net_names)
+        for net in net_names:
+            info = audit[net]
+            n_pads = sum(len(g) for g in info["pad_groups"])
+            problems = []
+            if not info["connected"]:
+                problems.append(
+                    f"{len(info['pad_groups'])} disjoint pad groups "
+                    f"(largest "
+                    f"{len(info['pad_groups'][0]) if info['pad_groups'] else 0}"
+                    f"/{n_pads})"
+                )
+            if info["zero_fill_zones"]:
+                problems.append(f"{info['zero_fill_zones']} zero-fill zone(s)")
+            if problems:
+                ok = False
+                print(f"   {tag} FAIL {net}: {'; '.join(problems)}")
+                for group in info["pad_groups"][1:][:5]:
+                    print(f"        stranded: {[p for p, _ in group]}")
+            else:
+                print(f"   {tag} OK   {net}: {n_pads} pads in one copper component")
+    except ImportError as exc:
+        ok = False
+        print(f"   {tag} FAIL: audit unavailable ({exc}) -- unverifiable artifact")
+    except Exception as exc:
+        ok = False
+        print(f"   {tag} FAIL: audit crashed ({exc})")
+    return ok
+
+
 def _relocate_pad_drills(pcb_path: Path) -> int:
     """Clear partial pad/drill overlaps before repairing plane connectivity."""
     from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
@@ -775,6 +822,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
     net_id_by_name = {name: int(num) for num, name in re.findall(r'\(net (\d+) "([^"]*)"\)', text)}
@@ -870,11 +918,30 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 poly = poly.buffer(0)
             fills_by_net[m.group(1)].append((poly, lay))
 
-    # Board outline (inset 0.5 mm) from generate_pcb constants.
-    min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
-    min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
-    max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
-    max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
+    # Board outline (inset 0.5 mm).  Derived from the board's own Edge.Cuts
+    # bbox rather than ``generate_pcb`` origin/size constants so the stage's
+    # verdict is FRAME-INDEPENDENT (issue #5507): the recipe routes in the
+    # historical (100, 100) frame and translates the shipped artifact to its
+    # sheet-centered frame only at the very end, so constants matched every
+    # in-recipe call -- but any repair invoked on the shipped bytes (a
+    # refill-and-repair consumer, as the plain-native-refill stability pass
+    # below) found the real board entirely outside the constant-derived
+    # bounds and rejected every candidate for a reason that was never
+    # physical.  Boards carrying no Edge.Cuts geometry (the constructed test
+    # fixtures) keep the authored-frame constants.
+    _bbox = edge_cuts_bbox(text)
+    if _bbox is not None:
+        min_x, min_y, max_x, max_y = (
+            _bbox[0] + 0.5,
+            _bbox[1] + 0.5,
+            _bbox[2] - 0.5,
+            _bbox[3] - 0.5,
+        )
+    else:
+        min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
+        min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
+        max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
+        max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
 
     VIA_R = 0.225  # 0.45 mm via
     VIA_DRILL_R = 0.125  # 0.25 mm drill on every repair via
@@ -1039,6 +1106,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 # audit's conservative connectivity model).
                 own.append((inscribed, layers, f"pad:{name}"))
         pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
+        # Through-hole pads of this net.  Their plated barrel already spans
+        # the copper stack, so sub-stage D may terminate a bridge on one
+        # without drilling (issue #5507); an SMD pad reaches only its own
+        # layer and still needs a via placed on other own-net copper.
+        th_pads = {entry[5] for entry in pad_index if entry[1] == net and entry[6]}
 
         # Union-find over own elements, built ONCE and maintained
         # incrementally as repair geometry is appended (a full O(n^2)
@@ -1068,6 +1140,17 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 gj, lj, _ = own[j]
                 if (li & lj) and gi.intersects(gj):
                     parent[_find(len(own) - 1)] = _find(j)
+
+        def _bridge_side(idx: int) -> BridgeSide:
+            """Describe ``own[idx]`` to the shared via-hop planner.
+
+            Only a pad's kind is ambiguous about plating, so pads state it
+            explicitly and every other kind keeps the planner's own
+            ``kind``-derived default.
+            """
+            geom, layers, kind = own[idx][:3]
+            plated = kind[4:] in th_pads if kind.startswith("pad:") else None
+            return BridgeSide(geom, layers, kind, plated_through=plated)
 
         max_rounds = 40
         skipped_roots: set[int] = set()
@@ -1241,6 +1324,21 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # blocked by a foreign trace (the B.Cu carve that splits a
             # bbox-carved pour), hop OVER it: drop a via inside each
             # copper region near the gap and cross on a different layer.
+            #
+            # Issue #5507: an endpoint that ALREADY carries a plated hole is
+            # reused rather than re-drilled.  A barrel's own copper is just
+            # its annulus, so every retreat point either misses that disc or
+            # lands inside it -- where the drill-to-drill floor rejects a
+            # second drill -- and the pair was skipped for every retreat on
+            # every layer.  A through-hole PAD is the same case: ``_via_ok``
+            # bans a drill anywhere on a pad (same-net included) and holds it
+            # off that pad's own drill, so no retreat on it is ever legal
+            # either, while its barrel already spans the stack.  An SMD pad
+            # stays non-reusable -- it reaches only its own layer, so a
+            # crossing on another layer genuinely needs a new via elsewhere
+            # on the component.  ``plan_via_hop_bridge`` keeps the candidate
+            # order and the physical predicates below unchanged; it only
+            # stops demanding a drill where the stack is already bridged.
             if not merged:
                 pairs_d: list[tuple[float, int, int]] = []
                 for i in target:
@@ -1250,50 +1348,37 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         pairs_d.append((gi.distance(gj), i, j))
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
-                    gi, gj = own[i][0], own[j][0]
-                    pa, pb = nearest_points(gi, gj)
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    done = False
-                    for back_a in (0.5, 0.9, 1.4):
-                        va = (pa.x - ux * back_a, pa.y - uy * back_a)
-                        if not Point(va).intersects(gi) or not _via_ok(net, *va):
-                            continue
-                        for back_b in (0.5, 0.9, 1.4):
-                            vb = (pb.x + ux * back_b, pb.y + uy * back_b)
-                            if not Point(vb).intersects(gj) or not _via_ok(net, *vb):
-                                continue
-                            for lay in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
-                                if not _path_ok(net, va, vb, lay, BRIDGE_W):
-                                    continue
-                                _emit_via(net, *va)
-                                _emit_via(net, *vb)
-                                # Straight chord cleared above, so a
-                                # 45-aligned chord always emits; an off-angle
-                                # chord doglegs (both via barrels span all
-                                # layers, the bulge clears the same copper the
-                                # straight chord did at this short length).
-                                _emit_seg_45(net, va, vb, lay, BRIDGE_W)
-                                _append_own((Point(va).buffer(VIA_R), all_layers, "via"))
-                                _append_own((Point(vb).buffer(VIA_R), all_layers, "via"))
-                                _append_own(
-                                    (
-                                        LineString([va, vb]).buffer(BRIDGE_W / 2.0),
-                                        frozenset({lay}),
-                                        "seg",
-                                    )
-                                )
-                                bridges_placed += 1
-                                merged = True
-                                done = True
-                                break
-                            if done:
-                                break
-                        if done:
-                            break
-                    if done:
-                        break
+                    plan = plan_via_hop_bridge(
+                        _bridge_side(i),
+                        _bridge_side(j),
+                        layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
+                        retreats=(0.5, 0.9, 1.4),
+                        via_ok=lambda p, _net=net: _via_ok(_net, *p),
+                        path_ok=lambda a, b, lay, _net=net: _path_ok(_net, a, b, lay, BRIDGE_W),
+                        new_via_layers=all_layers,
+                    )
+                    if plan is None:
+                        continue
+                    va, vb = plan.source.point, plan.destination.point
+                    # The 45-aligned copper is committed FIRST: the straight
+                    # chord cleared above, but a dogleg leg need not, and a
+                    # failed bridge must not strand the drills it would have
+                    # needed.
+                    if not _emit_seg_45(net, va, vb, plan.layer, BRIDGE_W):
+                        continue
+                    for vx, vy in plan.new_vias:
+                        _emit_via(net, vx, vy)
+                        _append_own((Point(vx, vy).buffer(VIA_R), all_layers, "via"))
+                    _append_own(
+                        (
+                            LineString([va, vb]).buffer(BRIDGE_W / 2.0),
+                            frozenset({plan.layer}),
+                            "seg",
+                        )
+                    )
+                    bridges_placed += 1
+                    merged = True
+                    break
 
             if not merged:
                 names = [own[i][2] for i in target if own[i][2].startswith("pad:")]
@@ -1309,6 +1394,104 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     for msg in failed:
         print(f"   UNREPAIRED: {msg}")
     return vias_placed, bridges_placed
+
+
+def _native_refill_stability_pass(
+    output_path: Path,
+    net_names: list[str],
+    fill_argv: list[str],
+    rounds: int = NATIVE_REFILL_STABILITY_ROUNDS,
+) -> bool:
+    """Keep pour connectivity whole under a PLAIN native refill (#5507).
+
+    The recipe's in-loop fills come from the repo fill engine, whose carve
+    model can keep a same-net pour pocket attached that KiCad's own engine
+    severs -- Board07's live case is the ``+1V2`` In2.Cu pocket under the U4
+    BGA, whose only net item is ``U4.E6``'s stitching via.  Such a pad reads
+    connected on the saved output and strands the moment anything refills
+    the board natively, which is exactly the acceptance contract this board
+    carries ("on saved and plain-native-refilled outputs").
+
+    Each round: refill a scratch copy with the plain native filler
+    (``run_fill_zones`` default policy -- the board's own project/.kicad_dru
+    rules are the only authority), audit it, and when a net splits, repair
+    the scratch in place, adopt the repaired board as the artifact, and
+    restore the recipe's deterministic fills before re-auditing.  The added
+    repair copper does not depend on fill geometry, so once placed it keeps
+    the net whole under BOTH engines.  Returns True only on a round whose
+    scratch refill audited clean; degrades honestly (warning + the current
+    artifact's own audit verdict) when the native filler itself is
+    unavailable.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_fill_zones
+
+    if find_kicad_cli() is None:
+        print("   Native filler unavailable -- plain-refill stability unverified (issue #5507).")
+        return _audit_pour_report(output_path, net_names, "[native?]")
+
+    for attempt in range(1, rounds + 1):
+        scratch_dir = Path(
+            tempfile.mkdtemp(prefix="native-refill-stability-", dir=output_path.parent)
+        )
+        try:
+            scratch = scratch_dir / output_path.name
+            shutil.copy2(output_path, scratch)
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                side = output_path.with_name(output_path.stem + suffix)
+                if side.exists():
+                    shutil.copy2(side, scratch_dir / side.name)
+            result = run_fill_zones(scratch)
+            if not result.success:
+                print(
+                    "   WARNING: plain native refill failed "
+                    f"(rc={getattr(result, 'returncode', '?')}); stability "
+                    "unverified."
+                )
+                return _audit_pour_report(output_path, net_names, f"[native r{attempt}]")
+            if _audit_pour_report(scratch, net_names, f"[native r{attempt}]"):
+                return True
+
+            print(f"   Repairing the natively-refilled state (round {attempt})...")
+            try:
+                rep_vias, rep_bridges = _repair_pour_connectivity(scratch, net_names)
+                print(
+                    f"   Native-refill repair placed {rep_vias} via(s) + "
+                    f"{rep_bridges} bridge trace(s)"
+                )
+            except Exception as exc:
+                print(f"   WARNING: native-refill repair failed: {exc}")
+                return False
+            if (rep_vias, rep_bridges) == (0, 0):
+                print(
+                    "   POUR CONNECTIVITY (native refill): FAIL "
+                    "(split persists with no lawful repair)"
+                )
+                return False
+
+            # Adopt the repaired board, then restore the recipe's own
+            # deterministic fills so the shipped fill bytes keep coming from
+            # the same engine every other round used.
+            shutil.copy2(scratch, output_path)
+            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if fill_result.returncode != 0:
+                print(
+                    "   WARNING: recipe re-fill after native repair failed "
+                    f"(rc={fill_result.returncode})"
+                )
+            if not _audit_pour_report(output_path, net_names, f"[post-native r{attempt}]"):
+                return False
+        finally:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    print(
+        "   POUR CONNECTIVITY (native refill): FAIL "
+        f"(still splitting after {rounds} stability round(s))"
+    )
+    return False
 
 
 # =============================================================================
@@ -1333,14 +1516,65 @@ def create_project(output_dir: Path, project_name: str) -> Path:
     return project_path
 
 
-def create_schematic(output_dir: Path) -> Path:
+# =============================================================================
+# Committed placement-delta replay (issue #5537, Epic #5511 Phase 2b)
+# =============================================================================
+# Phase 2a applies a swap-group delta at the ROUTER-PAD level, for one routing
+# run.  This is the durable half: a committed ``placement_delta.json`` is
+# replayed into the GENERATED schematic and PCB, so the re-assignment survives
+# a full regeneration and the two views stay in lock-step (copper/label LVS
+# compares them pad-for-pad, and a one-sided swap would show up as mismatches
+# on every re-bound pad).
+#
+# Replay is EXPLICIT (``--placement-delta PATH``), never auto-discovered.  The
+# committed artifact under ``regression-fixture/`` documents a reviewed swap;
+# applying it silently on every regen would change what the CI re-route and
+# end-to-end jobs measure without anyone asking for it.  With the flag absent
+# this recipe is byte-identical (modulo UUIDs) to the pre-#5537 one.
+
+#: The reviewed, committed swap artifact for this board's legacy fixture.
+COMMITTED_PLACEMENT_DELTA = Path(__file__).parent / "regression-fixture" / "placement_delta.json"
+
+#: Filename of the change report written next to the regenerated artifacts.
+PLACEMENT_DELTA_REPORT_NAME = "placement_delta_applied.txt"
+
+
+def load_pad_overrides(delta_path: Path) -> tuple[dict[str, dict[str, str]], str]:
+    """Load ``{ref: {pad: net}}`` plus its change report from a delta artifact.
+
+    Returns ``({}, "")`` when the artifact carries no ``pad_map`` at all --
+    the rationale-only / geometry-only case.  Such a delta must not move a
+    single pin: only ``pad_map`` data re-binds a netlist here.
+    """
+    from kicad_tools.router.placement_delta import (
+        format_pad_map_report,
+        load_placement_deltas,
+        pad_map_overrides,
+    )
+
+    deltas = load_placement_deltas(delta_path)
+    return pad_map_overrides(deltas), format_pad_map_report(deltas)
+
+
+def write_placement_delta_report(output_dir: Path, delta_path: Path, report: str) -> Path:
+    """Emit the change report naming the swap and its crossing-count delta."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / PLACEMENT_DELTA_REPORT_NAME
+    report_path.write_text(f"source: {delta_path}\n{report}\n")
+    print(f"   Wrote placement-delta change report: {report_path}")
+    return report_path
+
+
+def create_schematic(
+    output_dir: Path, pad_overrides: dict[str, dict[str, str]] | None = None
+) -> Path:
     """Generate the schematic."""
     output_path = output_dir / "matchgroup_test.kicad_sch"
-    generate_schematic.create_matchgroup_schematic(output_path)
+    generate_schematic.create_matchgroup_schematic(output_path, pad_overrides)
     return output_path
 
 
-def create_pcb(output_dir: Path) -> Path:
+def create_pcb(output_dir: Path, pad_overrides: dict[str, dict[str, str]] | None = None) -> Path:
     """Generate the unrouted PCB (sheet-centered as a final text step).
 
     ``generate_pcb`` deliberately places the board in the historical
@@ -1355,7 +1589,7 @@ def create_pcb(output_dir: Path) -> Path:
     print("Creating PCB...")
     print("=" * 60)
     output_path = output_dir / "matchgroup_test.kicad_pcb"
-    pcb_content = generate_pcb.generate_pcb()
+    pcb_content = generate_pcb.generate_pcb(pad_overrides=pad_overrides)
     centered, report = center_pcb_text(pcb_content)
     output_path.write_text(centered)
     print(f"   PCB: {output_path}")
@@ -2107,36 +2341,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # zero-fill-zone audit term, so iterating just grinds repair geometry
     # against an unfillable board; mirrors board 06's #3509 short-circuit).
     def _run_pour_audit(tag: str) -> bool:
-        ok = True
-        try:
-            audit = _audit_pour_nets(output_path, skip_nets)
-            for net in skip_nets:
-                info = audit[net]
-                n_pads = sum(len(g) for g in info["pad_groups"])
-                problems = []
-                if not info["connected"]:
-                    problems.append(
-                        f"{len(info['pad_groups'])} disjoint pad groups "
-                        f"(largest "
-                        f"{len(info['pad_groups'][0]) if info['pad_groups'] else 0}"
-                        f"/{n_pads})"
-                    )
-                if info["zero_fill_zones"]:
-                    problems.append(f"{info['zero_fill_zones']} zero-fill zone(s)")
-                if problems:
-                    ok = False
-                    print(f"   {tag} FAIL {net}: {'; '.join(problems)}")
-                    for group in info["pad_groups"][1:][:5]:
-                        print(f"        stranded: {[p for p, _ in group]}")
-                else:
-                    print(f"   {tag} OK   {net}: {n_pads} pads in one copper component")
-        except ImportError as exc:
-            ok = False
-            print(f"   {tag} FAIL: audit unavailable ({exc}) -- unverifiable artifact")
-        except Exception as exc:
-            ok = False
-            print(f"   {tag} FAIL: audit crashed ({exc})")
-        return ok
+        return _audit_pour_report(output_path, skip_nets, tag)
 
     pour_ok = False
     for repair_round in range(1, MAX_POUR_REPAIR_ROUNDS + 1):
@@ -2237,6 +2442,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # route`` may have emitted next to it.
         for tmp in route_input.parent.glob(route_input.stem + "*"):
             tmp.unlink(missing_ok=True)
+
+    # Issue #5507: the artifact must stay whole under a PLAIN NATIVE refill
+    # too, not only under this recipe's own fill engine.  The in-loop audits
+    # above read the repo engine's fills, whose carve model can keep a
+    # same-net pour pocket attached that KiCad's engine severs (Board07's
+    # live case: the +1V2 In2.Cu pocket under the U4 BGA stranding U4.E6).
+    # The pass below runs AFTER the closing translation leg on purpose:
+    # KiCad's native fill engine is grid-snapped in absolute coordinates, so
+    # a marginal pour neck can survive a native refill in the historical
+    # routing frame and still sever in the shipped sheet-centered frame
+    # (measured on the fresh 2026-09-20 seed-42 run: +1V2 refilled to a
+    # single component in-frame, [7,1] with U4.E6 stranded once translated).
+    # It refills a scratch copy natively, repairs any split it finds
+    # (frame-independent since the bounds fix in
+    # ``_repair_pour_connectivity``), adopts the repaired copper, restores
+    # the recipe's fills, and re-audits -- so the verdict is proven on the
+    # artifact exactly as it ships.
+    print("\n10. Plain-native-refill stability pass (issue #5507)...")
+    native_stable = _native_refill_stability_pass(output_path, skip_nets, fill_argv)
+    print(
+        "   POUR CONNECTIVITY (plain native refill): "
+        + ("PASS" if native_stable else "FAIL (see above)")
+    )
 
     return success
 
@@ -2344,6 +2572,12 @@ def main() -> int:
 
         # Phase 4N (#2660) pattern: re-route only for the CI regression gate.
         python generate_design.py --step route --seed 42
+
+        # Epic #5511 Phase 2b (#5537): regenerate with the reviewed,
+        # committed swap-group pad re-binding applied to BOTH the schematic
+        # and the PCB before routing.
+        python generate_design.py /tmp/board07-swap \\
+            --placement-delta regression-fixture/placement_delta.json
     """
     import argparse
     import random
@@ -2367,6 +2601,20 @@ def main() -> int:
             "committed unrouted PCB into ``output/matchgroup_test_routed.kicad_pcb``  "
             "without regenerating the schematic or unrouted PCB; used by the "
             "Phase 3N CI gate to detect routing-algorithm regressions."
+        ),
+    )
+    parser.add_argument(
+        "--placement-delta",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Replay a committed ``placement_delta.json`` (issue #5537): every "
+            "recorded ``pad_map`` re-binds the named pads in BOTH the generated "
+            "schematic and the generated PCB before routing, and a change report "
+            f"is written to ``{PLACEMENT_DELTA_REPORT_NAME}``.  Opt-in only -- "
+            "omitted, this recipe generates the authored netlist unchanged.  The "
+            "reviewed artifact for this board is "
+            "``regression-fixture/placement_delta.json``."
         ),
     )
     parser.add_argument(
@@ -2402,11 +2650,46 @@ def main() -> int:
         random.seed(args.seed)
         print(f"[seed] Seeded global random with --seed {args.seed}")
 
+    # Issue #5537: replay the committed swap BEFORE anything is generated, so
+    # the schematic, the PCB and therefore the routed board all derive from the
+    # same re-bound netlist.  No classifier is run and no search happens here --
+    # the artifact's recorded ``pad_map`` is simply applied.
+    pad_overrides: dict[str, dict[str, str]] = {}
+    delta_report = ""
+    delta_path = Path(args.placement_delta).resolve() if args.placement_delta else None
+    if delta_path is not None:
+        if args.step == "route":
+            # The route step consumes an ALREADY-generated PCB; there is no
+            # netlist to re-bind here.  Say so instead of implying the swap was
+            # applied to a board that was generated without it.
+            print(
+                "[placement-delta] --step route does not regenerate the "
+                "schematic/PCB, so --placement-delta applies nothing.  Generate "
+                "with ``--step all --placement-delta ...`` (or ``--step pcb``) "
+                "first; this run routes whatever netlist the input PCB carries.",
+                file=sys.stderr,
+            )
+        try:
+            pad_overrides, delta_report = load_pad_overrides(delta_path)
+        except (OSError, ValueError) as exc:
+            print(f"Error: cannot read placement delta {delta_path}: {exc}", file=sys.stderr)
+            return 1
+        if pad_overrides:
+            print(f"[placement-delta] Replaying {delta_path}")
+            print(delta_report)
+        else:
+            print(
+                f"[placement-delta] {delta_path} carries no pad_map "
+                "-- pin assignments unchanged (rationale-only delta)."
+            )
+
     try:
         if args.step == "all":
             project_path = create_project(output_dir, "matchgroup_test")
-            sch_path = create_schematic(output_dir)
-            pcb_path = create_pcb(output_dir)
+            sch_path = create_schematic(output_dir, pad_overrides)
+            pcb_path = create_pcb(output_dir, pad_overrides)
+            if delta_path is not None and delta_report:
+                write_placement_delta_report(output_dir, delta_path, delta_report)
             routed_path = output_dir / "matchgroup_test_routed.kicad_pcb"
             route_success = route_pcb(pcb_path, routed_path)
             drc_ok = run_drc(routed_path)
@@ -2528,11 +2811,15 @@ def main() -> int:
             return gate.exit_code()
 
         if args.step == "schematic":
-            create_schematic(output_dir)
+            create_schematic(output_dir, pad_overrides)
+            if delta_path is not None and delta_report:
+                write_placement_delta_report(output_dir, delta_path, delta_report)
             return 0
 
         if args.step == "pcb":
-            create_pcb(output_dir)
+            create_pcb(output_dir, pad_overrides)
+            if delta_path is not None and delta_report:
+                write_placement_delta_report(output_dir, delta_path, delta_report)
             return 0
 
         if args.step == "route":

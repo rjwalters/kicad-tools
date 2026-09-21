@@ -256,8 +256,21 @@ namespace router {
 // v36: track current counted route occupancy through rip-up.
 // v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
 // v38: integrate the stored-via guard with current occupancy and indexed frontier.
-// Trace/via search and commit gates share the physical clearance floor.
-constexpr int ROUTER_CPP_BUILD_VERSION = 51;
+// Trace/via search and commit gates share the physical clearance floor (v39-v51).
+// v40: add the Epic #5509 Phase 1b clearance-kernel bindings (KSegment/KVia/
+// KEdge, copper_gap, hole_gap, clear) -- a new bindings.cpp symbol surface, so
+// a v39 .so must be rejected rather than AttributeError inside the parity test.
+// v41: complete the clearance kernel with KPad / KZonePoly, make_pad and
+// pad_outline -- again new bindings.cpp symbols, so a v40 .so must be rejected.
+// v42: RouteResult gains goal_gx / goal_gy / goal_layer (Issue #5599 -- the
+// accepted goal node, so the Python resume loop rejects the right cell).  New
+// struct fields, so a v41 .so must be rejected rather than AttributeError deep
+// in the resume loop.
+// v52: combine the v51 authored-clearance/Kelvin-escape trace/via search and
+// commit-gate work (developed in parallel) with the v42 clearance-kernel and
+// resume-goal bindings above; both are real, DISTINCT binding-surface
+// changes, so this is the first build carrying BOTH.
+constexpr int ROUTER_CPP_BUILD_VERSION = 52;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
@@ -442,6 +455,21 @@ struct RouteResult {
     int blocking_via_net = 0;       // Net of the offending stored via (if any).
     float failure_x = 0.0f;         // World-coord of last rejected candidate.
     float failure_y = 0.0f;
+
+    // Issue #5599: the goal node the A* actually ACCEPTED (grid coords +
+    // layer).  ``reconstruct_path`` always appends a final segment from the
+    // last path node to the END PAD CENTER (``search_end_x_/y_``), so a
+    // Python consumer cannot derive the accepted goal cell from the last
+    // segment's endpoint -- it would compute the pad-center cell for EVERY
+    // candidate, which made the reject-goal-cell resume mechanism (#2447) a
+    // no-op after its first rejection (every subsequent resume re-rejected
+    // the same center cell while the search kept accepting neighboring goal
+    // nodes whose forced center-bound final segment violated the same
+    // neighbor-pad clearance).  Populated on success; (-1, -1, -1)
+    // otherwise.
+    int goal_gx = -1;
+    int goal_gy = -1;
+    int goal_layer = -1;
 };
 
 // One joint-state node on the reconstructed coupled path (Issue #4065).

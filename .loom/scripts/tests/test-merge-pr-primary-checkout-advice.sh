@@ -106,10 +106,13 @@ eval "$(extract_fn _primary_worktree_path     "$MERGE_PR")"
 eval "$(extract_fn _is_primary_worktree_path  "$MERGE_PR")"
 eval "$(extract_fn _worktree_branch_for       "$MERGE_PR")"
 eval "$(extract_fn _find_worktree_by_branch   "$MERGE_PR")"
-# #6694: _maybe_delete_local_branch's tip-match check now delegates to this
-# shared helper (also reused by the worktree-preserve decision) — extract it
-# too so the real code path (not a stub) drives the tip-match safety check.
-eval "$(extract_fn _worktree_branch_fully_captured "$MERGE_PR")"
+# #7812: _maybe_delete_local_branch's `-d` -> `-D` safety check is now the
+# shared `branch_landed` primitive — a real library, so it is SOURCED here
+# rather than extracted. Offline: these cases exercise merge-pr.sh's local
+# branch logic, not the forge rung, and the suite must stay hermetic.
+export LOOM_BRANCH_LANDED_OFFLINE=1
+# shellcheck source=../lib/branch-landed.sh
+source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
 eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
 eval "$(extract_fn _remove_loom_worktree      "$MERGE_PR")"
 
@@ -141,6 +144,13 @@ git -C "$PRIMARY" branch -M main
 # checkout is never Loom-managed).
 PR_BRANCH="config/enable-collision-detection"
 git -C "$PRIMARY" checkout -q -b "$PR_BRANCH"
+# One commit that never reaches main, so the branch is genuinely UNLANDED
+# (#7812): the `-d` -> `-D` upgrade is keyed on whether the default branch
+# already contains the work, not on whether the caller passed a head SHA, so a
+# branch parked exactly at main's tip would now be force-deletable and this
+# test would exercise the auto-cleanup path instead of the advice path.
+echo "collision detection" >> "$PRIMARY/README.md"
+git -C "$PRIMARY" commit -q -am "unlanded work on the PR branch"
 
 # shellcheck disable=SC2034
 REPO_ROOT="$PRIMARY"
@@ -258,9 +268,9 @@ fi
 
 # --- Test 5: primary-checkout auto-cleanup when it is PROVABLY safe (#5015) ---
 #
-# Test 3 above only exercises the "print manual instructions" path because it
-# calls _maybe_delete_local_branch without an expected_head_sha, so the
-# tip-match safety check never engages. This distinguishes that case from the
+# Test 3 above only exercises the "print manual instructions" path because its
+# branch is genuinely unlanded, so the `-d` -> `-D` upgrade never engages
+# (#7812). This distinguishes that case from the
 # genuinely-safe one: a clean tree AND a tip matching the merged PR head SHA
 # completes the cleanup automatically instead of just printing advice. The
 # companion dirty-tree control confirms the two-step advice remains unchanged

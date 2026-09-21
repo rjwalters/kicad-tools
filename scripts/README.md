@@ -34,7 +34,15 @@ end-to-end checks, the mypy baseline, and route determinism:
 `check_diffpair_coverage.py`, `check_matchgroup_coverage.py`,
 `check_mypy_baseline.py`, `check_net_status.py`, `check_routed_drc.py`,
 `local-gate.sh` (local CI-equivalent gate, Actions-outage backstop),
-`net_class_map_resolver.py`.
+`net_class_map_resolver.py`, `normalize_copper.py`.
+
+`normalize_copper.py` is the routed-copper normalizer
+`board_route_determinism_smoke.sh` compares runs with: it reduces a
+`.kicad_pcb` to the sorted multiset of whole, paren-balanced
+`(segment ...)` / `(via ...)` / `(arc ...)` nodes (`uuid`/`tstamp` stripped,
+pour fills excluded), one record per line. It replaced a line-based `grep`
+that kept only the multi-line nodes' header lines and so compared element
+*counts* rather than geometry (#5580).
 
 `check_mask_copper_native.py` is the repository's mandatory native mask-to-copper
 suite gate. It probes matching KiCad 10.0.5 CLI/pcbnew and Gerbonara >=1.6.3,

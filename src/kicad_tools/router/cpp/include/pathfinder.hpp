@@ -203,6 +203,23 @@ public:
     bool is_foreign_pad_metal_within_radius(int x, int y, int layer, int net,
                                             int radius) const;
 
+    // Issue #5599: exact swept-edge variant used by the evidence-gated
+    // strict pad mode (``set_search_strict_pad_kernel``).  Converts the
+    // (current -> neighbour) step to world coordinates and consults
+    // ``Grid3D::edge_foreign_pad_clear`` with the per-net emit width -- the
+    // SAME geometry the post-route validator's segment-vs-pad branch uses,
+    // so a step accepted in strict mode cannot be rejected by the validator
+    // on pad clearance (and vice versa).  ``emit_trace_width`` follows the
+    // usual convention: > 0 is the per-net width, 0 falls back to
+    // ``rules_.trace_width``.
+    bool strict_edge_pad_clear(int cx, int cy, int nx, int ny, int layer,
+                               int net, float emit_trace_width) const;
+
+    // Issue #5599: true when the strict pad check is armed AND this step
+    // lies inside the localized strictness disc (see
+    // ``set_search_strict_pad_kernel``).
+    bool strict_step_in_scope(int nx, int ny) const;
+
     // Issue #3438: Relief-probe mode for zero-overflow hard failures.
     //
     // In negotiated (sharing) mode, foreign-net cells with
@@ -225,6 +242,32 @@ public:
     // net-0 static blockage remain hard in relief mode.
     void set_relief_mode(bool enabled) { relief_mode_ = enabled; }
     bool relief_mode() const { return relief_mode_; }
+
+    // Issue #5599: evidence-gated STRICT foreign-pad kernel for the A*
+    // neighbor filter.  When set, the same-net-corridor and approach-zone
+    // relaxation branches also reject any step whose exact swept edge would
+    // fail the post-route validator's segment-vs-pad clearance (via
+    // ``Grid3D::edge_foreign_pad_clear``).  Default false: a fresh search
+    // keeps the historical relaxation surface exactly -- the exact geometry
+    // is conservative against the rasterized grid, and on dense pad arrays
+    // (board 07's DDR byte bundle) the relaxation is LOAD-BEARING for C++
+    // reach, so arming it globally pushes whole nets out of the C++ search
+    // into the 10-100x-slower Python fallback.  STRICTNESS IS LOCALIZED:
+    // ``cx``/``cy``/``radius`` scope the strict check to a disc around the
+    // repeated VIOLATION SITE (the only place the validator proved the
+    // relaxation keeps producing rejected candidates); ``cx < 0`` means
+    // global.  The Python resume loop arms it after a repeated post-route
+    // clearance violation, centered on that violation.  Read live at every
+    // neighbor expansion, so arming it between a resume()/restart affects
+    // the very next step.
+    void set_search_strict_pad_kernel(bool enabled, int cx = -1, int cy = -1,
+                                      int radius = 0) {
+        search_strict_pad_kernel_ = enabled;
+        search_strict_center_x_ = cx;
+        search_strict_center_y_ = cy;
+        search_strict_radius_ = radius;
+    }
+    bool search_strict_pad_kernel() const { return search_strict_pad_kernel_; }
 
     // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) the
     // search-time pairwise (HV-isolation) widening measures its widened
@@ -394,6 +437,14 @@ private:
     // can produce a min-conflict probe path through sealed escape
     // corridors instead of an instant empty-frontier abort.
     bool relief_mode_ = false;
+
+    // Issue #5599: evidence-gated strict foreign-pad kernel -- see
+    // ``set_search_strict_pad_kernel``.  The localization disc (violation
+    // site + radius; radius < 0 or center < 0 means global).
+    bool search_strict_pad_kernel_ = false;
+    int search_strict_center_x_ = -1;
+    int search_strict_center_y_ = -1;
+    int search_strict_radius_ = -1;
     float relief_conflict_penalty_ = 20.0f;
 
     // Issue #4511 / Epic #4431 Phase 2b: per-net copper half-extents (mm) for

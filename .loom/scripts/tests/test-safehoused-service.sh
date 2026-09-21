@@ -159,8 +159,24 @@ fi
 # help + error handling
 # ============================================================================
 help_out="$(bash "$SVC_SCRIPT" --help 2>/dev/null)"
-assert_contains "$help_out" "OWNERSHIP DECISION" "--help documents the service-wrapper ownership decision"
 assert_contains "$help_out" "--print-plist" "--help documents the preview modes"
+
+# #7794 split the two audiences this text used to serve at once. `--help` is a
+# concise operator usage block held in the script; the #4346 OWNERSHIP DECISION
+# rationale stays in the header comment for a reader of the source and is
+# deliberately NOT printed. So the ownership-decision assertion now reads the
+# FILE, and --help is asserted to cover the flags instead.
+svc_src="$(cat "$SVC_SCRIPT")"
+assert_contains "$svc_src" "OWNERSHIP DECISION" "header comment still documents the #4346 ownership decision"
+assert_not_contains "$help_out" "OWNERSHIP DECISION" "--help does NOT reprint the design rationale (#7794)"
+
+# Every flag the argument parser accepts must appear in --help. Enumerated
+# literally (not scraped from the parser) so a flag added to one and not the
+# other fails here rather than drifting silently.
+for _svc_flag in install uninstall status --print-plist --print-unit -h --help \
+                 --bin --exec --socket --config --log --label --unit --no-launchd; do
+    assert_contains "$help_out" "$_svc_flag" "--help documents $_svc_flag"
+done
 
 badflag_rc=0
 bash "$SVC_SCRIPT" --nonsense >/dev/null 2>&1 || badflag_rc=$?

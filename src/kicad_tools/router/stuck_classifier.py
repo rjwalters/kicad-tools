@@ -68,6 +68,8 @@ from kicad_tools.router.failure_analysis import FailureCause
 from kicad_tools.schema.physical_identity import footprint_keys
 
 if TYPE_CHECKING:
+    from kicad_tools.router.access_witness import AccessWitness
+    from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
 
 
@@ -76,6 +78,7 @@ __all__ = [
     "RecommendedAction",
     "Confidence",
     "RankedAction",
+    "SwapProposal",
     "StuckNetDiagnosis",
     "StuckClassifierResult",
     "classify_stuck_nets",
@@ -314,6 +317,60 @@ class BundleOrientation:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class SwapProposal:
+    """A crossing-minimising declared-swap-group pad re-binding (issue #5522).
+
+    Computed by :func:`_build_swap_proposal` when a bundle is measured
+    :data:`ORIENT_REVERSED` AND a ``swap_group`` is declared
+    (:attr:`~kicad_tools.router.rules.NetClassRouting.swap_group`) on at
+    least two of its nets.  **Report-only**: nothing here is applied to the
+    board -- it is data surfaced on the diagnosis / ``reorder_pins`` delta
+    and in ``kct net-status --why --format json``.
+
+    Attributes:
+        target_ref: The secondary (reversed) facing component whose pads
+            ``pad_map`` re-binds.
+        swap_group: The declared swap-group name.
+        pad_map: ``{pad_number: new_net_name}`` on ``target_ref`` -- only
+            pads whose binding actually changes are present; an unchanged
+            pad is simply absent (mirrors how ``PlacementDelta.component_id``
+            is only emitted when non-empty).
+        crossings_before / crossings_after: Inversion count over the
+            DECLARED swap-group members only.
+        group_crossings_before / group_crossings_after: Inversion count over
+            the WIDER match group (declared swap-group members plus any
+            undeclared, fixed siblings sharing the same sidecar
+            ``length_match_group``) -- so residual crossings against a fixed
+            sibling (e.g. an undeclared DQS strobe) are counted and
+            attributed, never hidden.  Equal to ``crossings_before`` /
+            ``crossings_after`` when no wider match group is resolvable.
+        fixed_members: Match-group siblings that are NOT part of the
+            declared swap group, so their pad binding is left unchanged.
+    """
+
+    target_ref: str
+    swap_group: str
+    pad_map: dict[str, str]
+    crossings_before: int
+    crossings_after: int
+    group_crossings_before: int
+    group_crossings_after: int
+    fixed_members: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "target_ref": self.target_ref,
+            "swap_group": self.swap_group,
+            "pad_map": dict(self.pad_map),
+            "crossings_before": self.crossings_before,
+            "crossings_after": self.crossings_after,
+            "group_crossings_before": self.group_crossings_before,
+            "group_crossings_after": self.group_crossings_after,
+            "fixed_members": list(self.fixed_members),
+        }
+
+
 @dataclass
 class StuckNetDiagnosis:
     """Per-net classification result with supporting evidence."""
@@ -353,6 +410,24 @@ class StuckNetDiagnosis:
     # bundle topologies (SELF_CROSSING / CO_ORIENTED); ``None`` otherwise.  Kept
     # OUT of :meth:`to_dict` so existing JSON output paths are byte-unchanged.
     bundle_orientation: BundleOrientation | None = None
+    # Issue #5522 (Phase 1 of Epic #5511): the declared-swap-group crossing-
+    # minimising proposal, populated only for a verified-REVERSED bundle
+    # carrying a ``swap_group`` declaration.  ``None`` otherwise -- and kept
+    # OUT of :meth:`to_dict` in that case so a board without a declaration
+    # emits byte-identical JSON (see ``test_co_oriented_json_schema_unchanged``
+    # in ``tests/router/test_stuck_classifier.py``, which asserts the field
+    # SET stays equal across diagnoses).
+    swap_proposal: SwapProposal | None = None
+    # Issue #5517 (Epic #5508, Phase 1b): the replay-derived access witness for
+    # THIS net's terminals -- which commit closed each pad's access set, at
+    # which pass/iteration, and whose copper did it.  Populated only when a
+    # ``<stem>.access_witness.json`` sidecar sits next to the board being
+    # classified (``kct route`` writes it); ``None`` otherwise, and kept OUT of
+    # :meth:`to_dict` in that case so a board without a sidecar emits
+    # byte-identical JSON.  Unlike ``blocking_nets`` -- a Bresenham
+    # line-of-sight guess over the finished board -- this is replayed from the
+    # order copper actually landed in.
+    access_witness: AccessWitness | None = None
 
     @property
     def classification_value(self) -> str:
@@ -377,14 +452,21 @@ class StuckNetDiagnosis:
             "match_group": self.match_group,
             "topology": self.topology,
             "recommendation": [a.to_dict() for a in self.recommendation],
+            **({"swap_proposal": self.swap_proposal.to_dict()} if self.swap_proposal else {}),
+            **({"access_witness": self.access_witness.to_dict()} if self.access_witness else {}),
         }
 
     def one_line(self) -> str:
         pads = ", ".join(self.unconnected_pads) or "(none)"
         blockers = f" blockers=[{', '.join(self.blocking_nets)}]" if self.blocking_nets else ""
+        # Issue #5517: append the replay's verdict when a witness sidecar was
+        # found.  Absent -> the line is byte-identical to pre-#5517 output.
+        witness = ""
+        if self.access_witness:
+            witness = "".join(f"\n      witness: {p.one_line()}" for p in self.access_witness)
         return (
             f"{self.net_name}: {self.classification.value.upper()} "
-            f"({len(self.unconnected_pads)} pad(s): {pads}){blockers} -- {self.evidence}"
+            f"({len(self.unconnected_pads)} pad(s): {pads}){blockers} -- {self.evidence}{witness}"
         )
 
 
@@ -663,6 +745,46 @@ def _resolve_match_groups(
     return net_to_group, group_members
 
 
+def _project_facing_row(
+    pads: dict[int, list[tuple[float, float]]],
+    shared: set[int],
+    name_by_id: dict[int, str],
+) -> tuple[list, str] | None:
+    """Project one component's shared-net pad centroids onto its long axis.
+
+    Shared module-level helper for :func:`_resolve_bundle_orientation`
+    (issue #4286) and the swap-group proposal builder (:func:`_build_swap_proposal`,
+    issue #5522) so the two stay pixel-identical about which axis a facing
+    row projects onto.  Returns ``None`` for a degenerate row (all pads
+    coincide -- no order exists).
+    """
+    from kicad_tools.router.bundle_river import RowMember
+
+    centroids: dict[int, tuple[float, float]] = {}
+    for nid in shared:
+        pts = pads[nid]
+        centroids[nid] = (
+            sum(p[0] for p in pts) / len(pts),
+            sum(p[1] for p in pts) / len(pts),
+        )
+    xs = [c[0] for c in centroids.values()]
+    ys = [c[1] for c in centroids.values()]
+    spread_x = max(xs) - min(xs)
+    spread_y = max(ys) - min(ys)
+    if max(spread_x, spread_y) < 1e-6:
+        return None  # degenerate row: all pads coincide, no order exists
+    axis = "x" if spread_x >= spread_y else "y"
+    members = [
+        RowMember(
+            net_id=nid,
+            net_name=name_by_id.get(nid, str(nid)),
+            projection=c[0] if axis == "x" else c[1],
+        )
+        for nid, c in centroids.items()
+    ]
+    return members, axis
+
+
 def _resolve_bundle_orientation(
     pcb: PCB,
     group_ids: set[int],
@@ -692,7 +814,7 @@ def _resolve_bundle_orientation(
     axes (an L-shaped bundle, where crossing depends on chirality the 1-D
     projection cannot see), or a degenerate row with no spread.  Never raises.
     """
-    from kicad_tools.router.bundle_river import RowMember, compute_facing_row_inversions
+    from kicad_tools.router.bundle_river import compute_facing_row_inversions
 
     name_by_id = {nid: net.name for nid, net in pcb.nets.items() if net.name}
 
@@ -725,34 +847,8 @@ def _resolve_bundle_orientation(
             ),
         )
 
-    def _row(pads: dict[int, list[tuple[float, float]]]) -> tuple[list[RowMember], str] | None:
-        """Project one component's shared-net pad centroids onto its long axis."""
-        centroids: dict[int, tuple[float, float]] = {}
-        for nid in shared:
-            pts = pads[nid]
-            centroids[nid] = (
-                sum(p[0] for p in pts) / len(pts),
-                sum(p[1] for p in pts) / len(pts),
-            )
-        xs = [c[0] for c in centroids.values()]
-        ys = [c[1] for c in centroids.values()]
-        spread_x = max(xs) - min(xs)
-        spread_y = max(ys) - min(ys)
-        if max(spread_x, spread_y) < 1e-6:
-            return None  # degenerate row: all pads coincide, no order exists
-        axis = "x" if spread_x >= spread_y else "y"
-        members = [
-            RowMember(
-                net_id=nid,
-                net_name=name_by_id.get(nid, str(nid)),
-                projection=c[0] if axis == "x" else c[1],
-            )
-            for nid, c in centroids.items()
-        ]
-        return members, axis
-
-    row_a = _row(pads_a)
-    row_b = _row(pads_b)
+    row_a = _project_facing_row(pads_a, shared, name_by_id)
+    row_b = _project_facing_row(pads_b, shared, name_by_id)
     if row_a is None or row_b is None:
         return BundleOrientation(
             ORIENT_UNRESOLVED,
@@ -789,6 +885,176 @@ def _resolve_bundle_orientation(
     )
 
 
+# --- declared swap-group assignment (issue #5522, Phase 1 of Epic #5511) ---
+
+
+def _resolve_declared_swap_group(
+    pcb: PCB,
+    net_class_map: dict[str, NetClassRouting],
+    group_ids: set[int],
+) -> tuple[str, frozenset[str]] | None:
+    """Resolve the declared swap-group name + membership for a bundle.
+
+    DECLARED-ONLY (issue #5522): membership comes exclusively from
+    :attr:`~kicad_tools.router.rules.NetClassRouting.swap_group` entries in
+    *net_class_map* -- never inferred from net names, pins, or footprints.
+    Votes are tallied over the classifier's inferred bundle (*group_ids*) so
+    a bundle with several distinct swap-group values declared on it
+    (unusual, but not forbidden) resolves deterministically to the value
+    with the most members there, ties broken alphabetically.  Returns
+    ``None`` when fewer than two of the bundle's nets carry a ``swap_group``
+    at all.
+
+    The returned membership set is GLOBAL (every net in *net_class_map*
+    carrying that value), matching :attr:`NetClassRouting.length_match_group`
+    semantics -- not merely the subset that happens to sit in *group_ids*.
+    """
+    from kicad_tools.router.swap_groups import MIN_SWAP_GROUP_NETS
+
+    name_by_id = {nid: net.name for nid, net in pcb.nets.items() if net.name}
+    votes: dict[str, int] = {}
+    for nid in group_ids:
+        name = name_by_id.get(nid)
+        nc = net_class_map.get(name) if name else None
+        if nc is not None and nc.swap_group:
+            votes[nc.swap_group] = votes.get(nc.swap_group, 0) + 1
+    if not votes:
+        return None
+    swap_group_name = sorted(votes, key=lambda g: (-votes[g], g))[0]
+    if votes[swap_group_name] < MIN_SWAP_GROUP_NETS:
+        return None
+    members = frozenset(
+        name for name, nc in net_class_map.items() if nc.swap_group == swap_group_name
+    )
+    return swap_group_name, members
+
+
+def _pad_map_from_net_rebinding(
+    pcb: PCB,
+    secondary_ref: str,
+    net_rebinding: dict[str, str],
+) -> dict[str, str]:
+    """Resolve a net-name rebinding into a ``{pad_number: new_net_name}`` map.
+
+    Walks ``pcb.footprints`` zipped with :func:`footprint_keys` (issue #5522
+    curator correction 7) to find the footprint whose PHYSICAL key equals
+    *secondary_ref*, then maps each of its pads whose CURRENT net name is a
+    key of *net_rebinding* to the pad number.  Pad numbers are strings
+    (``"1"``, ``"11"``), matching :attr:`~kicad_tools.schema.pcb.Pad.number`.
+    """
+    footprints = list(pcb.footprints)
+    pad_map: dict[str, str] = {}
+    for key, fp in zip(footprint_keys(footprints), footprints, strict=True):
+        if key != secondary_ref:
+            continue
+        for pad in fp.pads:
+            new_name = net_rebinding.get(pad.net_name)
+            if new_name is not None:
+                pad_map[pad.number] = new_name
+        break
+    return pad_map
+
+
+def _build_swap_proposal(
+    pcb: PCB,
+    orientation: BundleOrientation,
+    group_ids: set[int],
+    net_class_map: dict[str, NetClassRouting],
+) -> SwapProposal | None:
+    """Compute the declared-swap-group :class:`SwapProposal` for a REVERSED bundle.
+
+    Only called (by :func:`classify_stuck_nets_from_pcb`) when *orientation*
+    is :data:`ORIENT_REVERSED`.  Widens the row projection to the sidecar's
+    ``length_match_group`` when resolvable (so undeclared, fixed siblings
+    like an unpaired DQS strobe are counted in the "whole group" crossing
+    figures rather than hidden); falls back to *group_ids* -- the
+    classifier's own inferred bundle -- when no wider group resolves, in
+    which case the declared and "whole group" figures coincide.
+
+    Returns ``None`` when no swap group is declared, the declared members
+    are not resolvable as a facing-row pair, or the proposed re-binding is
+    the identity (nothing to report -- the no-op guard).
+    """
+    from kicad_tools.router.swap_groups import propose_swap_assignment
+
+    declared = _resolve_declared_swap_group(pcb, net_class_map, group_ids)
+    if declared is None:
+        return None
+    swap_group_name, group_nets = declared
+
+    name_by_id = {nid: net.name for nid, net in pcb.nets.items() if net.name}
+    id_by_name = {name: nid for nid, name in name_by_id.items()}
+
+    # Widen to the sidecar's length_match_group when any declared member
+    # names one; fall back to the classifier's inferred bundle otherwise.
+    wide_ids: set[int] = set(group_ids)
+    for net_name in group_nets:
+        nc = net_class_map.get(net_name)
+        if nc is not None and nc.length_match_group:
+            wide_ids = {
+                id_by_name[n]
+                for n, other in net_class_map.items()
+                if other.length_match_group == nc.length_match_group and n in id_by_name
+            }
+            break
+
+    by_ref: dict[str, dict[int, list[tuple[float, float]]]] = {}
+    for ref, net_number, (bx, by), _size in _iter_board_pads(pcb):
+        if net_number not in wide_ids:
+            continue
+        by_ref.setdefault(ref, {}).setdefault(net_number, []).append((bx, by))
+
+    pads_a = by_ref.get(orientation.primary_ref, {})
+    pads_b = by_ref.get(orientation.secondary_ref, {})
+    shared = set(pads_a) & set(pads_b)
+    if len(shared) < 2:
+        # The widened group didn't resolve on these two facing refs (e.g. an
+        # undeclared sibling lives elsewhere) -- retry with the classifier's
+        # own inferred bundle so the declared-only figures still come through.
+        wide_ids = set(group_ids)
+        by_ref = {}
+        for ref, net_number, (bx, by), _size in _iter_board_pads(pcb):
+            if net_number not in wide_ids:
+                continue
+            by_ref.setdefault(ref, {}).setdefault(net_number, []).append((bx, by))
+        pads_a = by_ref.get(orientation.primary_ref, {})
+        pads_b = by_ref.get(orientation.secondary_ref, {})
+        shared = set(pads_a) & set(pads_b)
+        if len(shared) < 2:
+            return None
+
+    row_a = _project_facing_row(pads_a, shared, name_by_id)
+    row_b = _project_facing_row(pads_b, shared, name_by_id)
+    if row_a is None or row_b is None:
+        return None
+    members_a, _axis_a = row_a
+    members_b, _axis_b = row_b
+
+    assignment = propose_swap_assignment(
+        members_a,
+        members_b,
+        group_nets,
+        whole_group_rows=(members_a, members_b),
+    )
+    if assignment is None or not assignment.net_rebinding:
+        return None
+
+    pad_map = _pad_map_from_net_rebinding(pcb, orientation.secondary_ref, assignment.net_rebinding)
+    if not pad_map:
+        return None
+
+    return SwapProposal(
+        target_ref=orientation.secondary_ref,
+        swap_group=swap_group_name,
+        pad_map=pad_map,
+        crossings_before=assignment.crossings_before,
+        crossings_after=assignment.crossings_after,
+        group_crossings_before=assignment.group_crossings_before,
+        group_crossings_after=assignment.group_crossings_after,
+        fixed_members=assignment.fixed_members,
+    )
+
+
 def classify_stuck_nets_from_pcb(
     pcb: PCB,
     *,
@@ -801,6 +1067,8 @@ def classify_stuck_nets_from_pcb(
     max_blockers: int = 3,
     excluded_nets: frozenset[str] = frozenset(),
     strict: bool = True,
+    net_class_map: dict[str, NetClassRouting] | None = None,
+    access_witness: AccessWitness | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on *pcb* (already-loaded PCB).
 
@@ -811,6 +1079,23 @@ def classify_stuck_nets_from_pcb(
     #4557: real copper geometry when ``True``, legacy endpoint-proximity when
     ``False``) -- NOT to be confused with the "strict nets" routing-priority
     naming used for the rip-up pool below.
+
+    ``net_class_map`` (issue #5522, Phase 1 of Epic #5511): an optional
+    ``{net_name: NetClassRouting}`` sidecar map.  A bare ``.kicad_pcb`` has
+    no router config, so without it no ``swap_group`` declaration can ever
+    reach the classifier and :attr:`StuckNetDiagnosis.swap_proposal` stays
+    ``None`` for every diagnosis -- ``None`` (the default) is therefore
+    byte-identical to pre-#5522 behavior.  When supplied, a bundle measured
+    :data:`ORIENT_REVERSED` whose nets declare a ``swap_group`` on >= 2
+    members gets a computed :class:`SwapProposal` (see
+    :func:`_build_swap_proposal`).
+
+    ``access_witness`` (issue #5517, Epic #5508 Phase 1b): the replay-derived
+    witness loaded from a ``<stem>.access_witness.json`` sidecar.  Each
+    diagnosis gets the slice covering its own net's terminals.  ``None`` (the
+    default) leaves every ``StuckNetDiagnosis.access_witness`` unset, which is
+    byte-identical to pre-#5517 behavior -- a bare ``.kicad_pcb`` with no
+    sidecar can never produce one.
     """
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
 
@@ -966,6 +1251,17 @@ def classify_stuck_nets_from_pcb(
             # Surface the measured orientation (issue #4466) so the delta
             # translator need not recompute it.  ``None`` for foreign-cluster.
             diag.bundle_orientation = orientation
+            # Declared swap-group proposal (issue #5522): only for a VERIFIED
+            # reversal, and only when the caller supplied a sidecar map --
+            # declared-only, never inferred, and byte-identical to pre-#5522
+            # output when ``net_class_map`` is ``None`` (the default).
+            if net_class_map and orientation is not None and orientation.verdict == ORIENT_REVERSED:
+                try:
+                    diag.swap_proposal = _build_swap_proposal(
+                        pcb, orientation, group_ids, net_class_map
+                    )
+                except Exception:  # pragma: no cover - defensive only
+                    diag.swap_proposal = None
             confidence = _grade_confidence(target_group)
             diag.recommendation = _build_recommendation(
                 classification=diag.classification,
@@ -1003,6 +1299,15 @@ def classify_stuck_nets_from_pcb(
                 evidence=evidence,
             )
         )
+
+    # Issue #5517 (Epic #5508, Phase 1b): attach the replay-derived witness
+    # for each net's own terminals.  A net with no tracked terminal keeps
+    # ``access_witness is None``, so its ``to_dict()`` stays byte-identical.
+    if access_witness:
+        for diag in diagnoses:
+            per_net = access_witness.for_net(diag.net_name)
+            if per_net:
+                diag.access_witness = per_net
 
     return StuckClassifierResult(diagnoses=diagnoses)
 
@@ -1424,6 +1729,8 @@ def classify_stuck_nets(
     max_blockers: int = 3,
     excluded_nets: frozenset[str] = frozenset(),
     strict: bool = True,
+    net_class_map: dict[str, NetClassRouting] | None = None,
+    access_witness_path: str | Path | None = None,
 ) -> StuckClassifierResult:
     """Classify every unfinished signal net on the PCB at *pcb_path*.
 
@@ -1432,12 +1739,28 @@ def classify_stuck_nets(
 
     ``strict`` selects the ``NetStatusAnalyzer`` connectivity model (issue
     #4557); see :func:`classify_stuck_nets_from_pcb`.
+
+    ``net_class_map`` (issue #5522): forwarded unchanged to
+    :func:`classify_stuck_nets_from_pcb` -- see its docstring.
+
+    ``access_witness_path`` (issue #5517): where to look for the
+    ``<stem>.access_witness.json`` sidecar ``kct route`` writes.  Defaults to
+    *pcb_path* itself, i.e. the sidecar is auto-discovered next to the board
+    being classified -- the same single-directory convention the
+    ``net_class_map.json`` consumers use.  An absent or unreadable sidecar
+    resolves to ``None`` and the output is byte-identical to pre-#5517.
     """
+    from kicad_tools.router.access_witness import load_access_witness_sidecar
     from kicad_tools.schema.pcb import PCB
+
+    witness = load_access_witness_sidecar(
+        pcb_path if access_witness_path is None else access_witness_path
+    )
 
     pcb = PCB.load(str(pcb_path))
     return classify_stuck_nets_from_pcb(
         pcb,
+        access_witness=witness,
         blocker_radius_mm=blocker_radius_mm,
         escape_clearance_mm=escape_clearance_mm,
         neighborhood_radius_mm=neighborhood_radius_mm,
@@ -1447,4 +1770,5 @@ def classify_stuck_nets(
         max_blockers=max_blockers,
         excluded_nets=excluded_nets,
         strict=strict,
+        net_class_map=net_class_map,
     )

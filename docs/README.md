@@ -52,6 +52,7 @@ Point-in-time working documents — dated entries describe the tree as of their 
 
 | Document | Description |
 |----------|-------------|
+| [Clearance Conformance (2026-09)](clearance-conformance.md) | Per-consumer disagreement with `kicad-cli pcb drc`, measured by `tests/conformance/` (Epic #5509 Phase 1) |
 | [Website Content Audit (2026-09)](website-content-audit-2026-09.md) | kicad-tools.org content/navigation/presentation audit vs. repository evidence (#5281, Epic #5278 Phase 1) |
 | [HV Pairwise Proof: softstart rev-C (2026-08)](hv-pairwise-softstart-proof.md) | #4507 T4 manual proof run on the local-only mains HV fixture |
 | [Placement Pad-Anchoring Audit (2026-08)](placement-pad-anchoring-audit.md) | Centre- vs pad-anchored placement objective terms (#4831) |

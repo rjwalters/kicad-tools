@@ -48,8 +48,11 @@ CHAMPION_PROMO_MD="$PROMPT_DIR/champion-issue-promo.md"
 # Source the script for its pure helpers BEFORE defining our own colors - the
 # script's own `[[ -t 2 ]]` block defines RED/YELLOW/BLUE/NC, so sourcing first
 # (and setting ours last) keeps this file's output colors consistent.
-# shellcheck source=/dev/null
-source "$DDC"
+# Pin the loom-daemon this suite tests against — the subject is a thin stub over
+# `loom-daemon detect-dependency-cycle` now (epic #7810 PR 3). FATAL, not SKIP: see the helper.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "detect-dependency-cycle"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -114,45 +117,24 @@ assert_doc_contains() {
 }
 
 # =====================================================================
-# Unit tests: the real sourced helpers
+# Where the pure-helper unit tests went (epic #7810, PR 3)
 # =====================================================================
-
-echo "--- parse_dependency_refs: shared phrase vocabulary (#4508) preserved ---"
-
-out="$(parse_dependency_refs '**Blocked by:** #1 (reason), #3 (reason)' 'o/r')"
-assert_eq $'o/r#1\no/r#3' "$out" "bold+colon comma-list captures ALL refs, normalized to the citing repo"
-
-out="$(parse_dependency_refs 'Blocked by #7' 'o/r')"
-assert_eq "o/r#7" "$out" "plain Blocked by #N"
-
-out="$(parse_dependency_refs '_Depends on_ #5' 'o/r')"
-assert_eq "o/r#5" "$out" "italic-wrapped phrase"
-
-out="$(parse_dependency_refs 'Requires #9' 'o/r')"
-assert_eq "o/r#9" "$out" "plain Requires #N"
-
-out="$(parse_dependency_refs 'Mentions #9 in passing' 'o/r')"
-assert_eq "" "$out" "a bare #N with no dependency phrase is NOT an edge"
-
-echo
-echo "--- parse_dependency_refs: cross-repo reference forms ---"
-
-out="$(parse_dependency_refs 'Blocked by example-org/tool-repo#202' 'o/r')"
-assert_eq "example-org/tool-repo#202" "$out" "explicit owner/repo#N keeps its own repo"
-
-out="$(parse_dependency_refs 'Depends on https://github.com/example-org/downstream-repo/issues/101' 'o/r')"
-assert_eq "example-org/downstream-repo#101" "$out" "issue URL normalizes to owner/repo#N"
-
-out="$(parse_dependency_refs '**Blocked by:** #7 and example-org/other-repo#8' 'o/r')"
-assert_eq $'example-org/other-repo#8\no/r#7' "$out" "same-repo and cross-repo refs on one line both captured"
-
-echo
-echo "--- _cycle_segment: reports the loop, not the whole path ---"
-
-assert_eq "o/r#1 o/r#2 o/r#1" "$(_cycle_segment 'o/r#1' 'o/r#1 o/r#2')" \
-    "2-cycle through the root"
-assert_eq "o/r#2 o/r#3 o/r#2" "$(_cycle_segment 'o/r#2' 'o/r#1 o/r#2 o/r#3')" \
-    "cycle NOT through the root trims the leading approach path"
+#
+# This suite used to `source "$DDC"` and call parse_dependency_refs and
+# _cycle_segment directly. Both are now Rust —
+# `loom-daemon/src/dep_classify/refs.rs` and `cycle.rs` — with their own unit
+# tests covering the same cases: the #4508 phrase vocabulary (bold/italic/colon
+# wrappings, comma lists capturing every ref on the line, a bare #N with no
+# phrase not being an edge), the cross-repo forms, and a cycle segment that
+# reports the loop rather than the whole approach path.
+#
+# #7943 landed the refs port beside a differential test that ran the Rust
+# function and this shell function over the same fixtures and asserted they
+# agreed. That test is deleted with the shell it compared against; the evidence
+# is the merged CI run, not a fixture pinning a deleted file.
+#
+# What remains below is what can still be proven both ways: the black-box
+# assertions, written against the shell, run unchanged against the Rust CLI.
 
 # =====================================================================
 # Black-box tests: stub `gh` on PATH, run the real script

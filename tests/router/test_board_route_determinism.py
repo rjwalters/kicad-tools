@@ -75,7 +75,10 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
             "30",
             "--deterministic-budget",
             "--timeout",
-            "240",
+            # Issue #5587: raised from 240 -- it fired on a contended host
+            # even under --deterministic-budget (the outer stage deadline
+            # is still wall-clock), reintroducing host-load dependence.
+            "900",
             "--seed",
             "42",
             "--no-auto-pour",
@@ -90,14 +93,27 @@ _BOARD_CONFIG: dict[str, _BoardRoute] = {
     "04": _BoardRoute(
         directory="boards/04-stm32-devboard",
         stem="stm32_devboard",
+        # Issue #5587: this used to read `--auto-layers --auto-mfr-tier
+        # --micro-via-in-pad-fallback`, which does NOT match
+        # generate_design.py:route_pcb() (no AST equality guard ever
+        # checked this list, unlike board 02's
+        # test_board02_determinism_uses_actual_recipe_command).  Corrected
+        # to mirror the real recipe byte-for-byte.
         flags=[
             "--mfr",
             "jlcpcb-tier1",
             "--auto-fix",
-            "--auto-layers",
-            "--auto-mfr-tier",
+            "--no-auto-layers",
+            "--layers",
+            "2",
+            "--grid",
+            "0.05",
+            "--via-drill",
+            "0.15",
+            "--via-diameter",
+            "0.30",
             "--placement-feedback",
-            "--micro-via-in-pad-fallback",
+            "--no-cache",
             "--seed",
             "42",
             "--deterministic-budget",
@@ -278,8 +294,10 @@ def test_board02_route_is_reproducible(tmp_path: Path) -> None:
 
     Private cache directories guarantee the first two invocations actually
     route. The third shares only the first cache, proving cached finalization
-    has the same copper. Each invocation keeps the production 240 s deadline;
-    the existing 600 s test budget also covers subprocess and comparison work.
+    has the same copper. Each invocation keeps the production 900 s deadline
+    (Issue #5587); the existing 600 s pytest-level timeout only bounds this
+    test function, not the subprocess (``_route_once`` gives each ``kct
+    route`` call its own 1800 s wall-clock cap).
     """
     _assert_route_reproducible("02", tmp_path)
 

@@ -34,6 +34,7 @@ import base64
 import logging
 import math
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal, cast
 
@@ -895,6 +896,17 @@ class RoutingGrid:
         # Track placed routes for net assignment
         self.routes: list[Route] = []
 
+        # Issue #5517 (Epic #5508 Phase 1b): optional commit-journal observer.
+        # Set by ``Autorouter`` to
+        # ``CommitJournal.observe``; called from inside this grid's own lock
+        # at the end of every copper mutation (``mark_route``,
+        # ``unmark_route``, ``resync_route_occupancy``) so the journal's
+        # append order IS the commit order even under region-parallel
+        # routing.  The observer is a pure sink: it must never read the grid
+        # or mutate routing state, which is what makes journaling free of any
+        # effect on the routed copper.
+        self.commit_observer: Callable[[str, Route], None] | None = None
+
         # Issue #2481: Optional back-reference to a paired C++ grid.  When
         # set (by ``CppGrid.from_routing_grid``), rip-up paths invalidate
         # the C++ side's ``stored_vias_``/``stored_segments_`` snapshots so
@@ -1494,6 +1506,32 @@ class RoutingGrid:
         cx = min(gx // self.congestion_size, self.congestion_cols - 1)
         cy = min(gy // self.congestion_size, self.congestion_rows - 1)
         self._congestion[layer, cy, cx] += delta
+
+    def _release_congestion_window(self, layer: int, ay: int, ax: int, mask: np.ndarray) -> None:
+        """Vectorised ``_update_congestion(..., delta=-1)`` over one window.
+
+        Issue #5240: ``mask`` selects cells inside the ``[ay:, ax:]``-anchored
+        clearance block that a rip-up just released.  The per-cell ledger
+        (``_congestion_counted``) is honoured exactly as in
+        ``_update_congestion``: a cell that was never counted -- or was
+        already debited by an overlapping clearance window -- contributes
+        nothing, so repeated visits stay idempotent and counts never go
+        negative.  ``np.add.at`` is used because several released cells can
+        share one coarse congestion bin.
+        """
+        counted = self._congestion_counted
+        if counted is None:
+            return
+        rows, cols = mask.shape
+        window = counted[layer, ay : ay + rows, ax : ax + cols]
+        hit = mask & window
+        if not hit.any():
+            return
+        window[hit] = False
+        ys, xs = np.nonzero(hit)
+        cy = np.minimum((ys + ay) // self.congestion_size, self.congestion_rows - 1)
+        cx = np.minimum((xs + ax) // self.congestion_size, self.congestion_cols - 1)
+        np.add.at(self._congestion[layer], (cy, cx), -1)
 
     def get_congestion(self, gx: int, gy: int, layer: int) -> float:
         """Get congestion level [0, 1] for a grid cell's region."""
@@ -4775,6 +4813,11 @@ class RoutingGrid:
             # O(log V) instead of walking ``self.routes`` linearly.
             self._rtree_insert_route_vias(route)
 
+            # Issue #5517: journal the commit while still holding the lock,
+            # so append order is commit order under region-parallel routing.
+            if self.commit_observer is not None:
+                self.commit_observer("mark", route)
+
     def _mark_segment(self, seg: Segment, clearance_cells: int = 1) -> None:
         """Mark cells along a segment as blocked (with clearance buffer).
 
@@ -4797,7 +4840,7 @@ class RoutingGrid:
         has_reservations = bool(self._reserved_for_nets)
         seg_net = int(seg.net) if seg.net is not None else 0
 
-        def mark_with_clearance(gx: int, gy: int) -> None:
+        def mark_with_clearance_cells(gx: int, gy: int) -> None:
             for dy in range(-clearance_cells, clearance_cells + 1):
                 for dx in range(-clearance_cells, clearance_cells + 1):
                     nx, ny = gx + dx, gy + dy
@@ -4823,6 +4866,52 @@ class RoutingGrid:
                             cell.net = seg.net
                         # else: cell already blocked (by pad), don't change net
                         cell.blocked = True
+
+        def mark_with_clearance_window(gx: int, gy: int) -> None:
+            """Vectorised equivalent of ``mark_with_clearance_cells``.
+
+            Issue #5240: the clearance envelope of one line point is a
+            contiguous ``(2c+1)**2`` block of the occupancy planes, but the
+            scalar walk above visits it one cell at a time -- allocating a
+            ``_CellView`` and paying two NumPy scalar round-trips per cell.
+            Board 06's re-route marks/unmarks ~29M cells per run this way.
+            Writing the whole window with slice assignment is the same
+            decision, made once per block instead of once per cell:
+
+            * ``fresh`` is exactly the scalar ``if not cell.blocked`` guard,
+              so only previously-unblocked cells take ``seg.net`` and a cell
+              already blocked by a pad keeps its owner;
+            * ``self._blocked[...] = True`` is the unconditional
+              ``cell.blocked = True``;
+            * ``marked_cells`` receives the same ``(nx, ny)`` pairs.
+
+            Later line points re-read ``_blocked`` (the window is a live
+            view), so a cell first blocked by an earlier point is no longer
+            ``fresh`` for a later one -- identical to the scalar ordering.
+            """
+            ax, bx = max(0, gx - clearance_cells), min(self.cols, gx + clearance_cells + 1)
+            ay, by = max(0, gy - clearance_cells), min(self.rows, gy + clearance_cells + 1)
+            if ax >= bx or ay >= by:
+                return
+            fresh = ~self._blocked[layer_idx, ay:by, ax:bx]
+            newly = int(fresh.sum())
+            if newly:
+                self._net[layer_idx, ay:by, ax:bx][fresh] = seg.net
+                ys, xs = np.nonzero(fresh)
+                marked_cells.update(zip((xs + ax).tolist(), (ys + ay).tolist(), strict=True))
+            self._blocked[layer_idx, ay:by, ax:bx] = True
+            # Issue #4794: mirror the scalar path's per-cell bump count -- one
+            # per ``cell.blocked`` write plus one per ``cell.net`` write.
+            self._occupancy_generation += (by - ay) * (bx - ax) + newly
+
+        # Issue #5240: the reservation keep-out is a per-cell dict lookup that
+        # does not vectorise, and a non-NumPy (GPU) backend does not support
+        # the masked-assignment idiom -- both keep the original scalar walk.
+        mark_with_clearance = (
+            mark_with_clearance_cells
+            if has_reservations or self._backend is not np
+            else mark_with_clearance_window
+        )
 
         # Simple line marking
         if gx1 == gx2:  # Vertical
@@ -5211,6 +5300,14 @@ class RoutingGrid:
                 self.routes.remove(route)
                 removed = True
 
+                # Issue #5517: journal the rip-up.  Only a route that was
+                # actually in ``self.routes`` is journaled -- that list is
+                # what ``pad_access.compute_access_set`` reads as "the copper
+                # committed so far", so a no-op unmark of unknown geometry
+                # must not appear in the replay as copper going away.
+                if self.commit_observer is not None:
+                    self.commit_observer("unmark", route)
+
         # Issue #2481: After releasing the grid lock, propagate the rip-up
         # to the paired C++ grid (if any) so its ``stored_vias_`` /
         # ``stored_segments_`` no longer reference this route.  We only
@@ -5232,7 +5329,7 @@ class RoutingGrid:
         self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, False)
         static_blocked = self._static_blocked
 
-        def unmark_with_clearance(gx: int, gy: int) -> None:
+        def unmark_with_clearance_cells(gx: int, gy: int) -> None:
             for dy in range(-clearance_cells, clearance_cells + 1):
                 for dx in range(-clearance_cells, clearance_cells + 1):
                     nx, ny = gx + dx, gy + dy
@@ -5259,6 +5356,62 @@ class RoutingGrid:
                                 cell.blocked = False
                                 cell.net = 0
                                 self._update_congestion(nx, ny, layer_idx, delta=-1)
+
+        def unmark_with_clearance_window(gx: int, gy: int) -> None:
+            """Vectorised equivalent of ``unmark_with_clearance_cells``.
+
+            Issue #5240: same transformation as ``_mark_segment``'s window
+            path -- one slice assignment per clearance block instead of a
+            ``_CellView`` plus NumPy scalar round-trips per cell.  The three
+            scalar branches map onto three disjoint masks:
+
+            * ``pad``    -> restore ``original_net``, stay blocked;
+            * ``held``   -> owned by this segment but statically blocked
+              (Issue #3545 pad halo / keepout) -> restore ``original_net``;
+            * ``freed``  -> owned by this segment and not static -> release.
+
+            ``owned`` is masked by ``~pad`` because the scalar path reaches
+            the net test only through an ``elif``.  Congestion is released
+            for ``pad | owned`` exactly as the scalar path does, via the same
+            ``_congestion_counted`` ledger, so a cell visited by overlapping
+            clearance windows is still only debited once.
+            """
+            ax, bx = max(0, gx - clearance_cells), min(self.cols, gx + clearance_cells + 1)
+            ay, by = max(0, gy - clearance_cells), min(self.rows, gy + clearance_cells + 1)
+            if ax >= bx or ay >= by:
+                return
+            pad = self._pad_blocked[layer_idx, ay:by, ax:bx]
+            owned = (self._net[layer_idx, ay:by, ax:bx] == seg.net) & ~pad
+            affected = pad | owned
+            if not affected.any():
+                return
+            if static_blocked is not None:
+                held = owned & static_blocked[layer_idx, ay:by, ax:bx]
+                freed = owned & ~held
+                restore = pad | held
+            else:
+                freed = owned
+                restore = pad
+            writes = 0
+            n_restore = int(restore.sum())
+            if n_restore:
+                original = self._original_net[layer_idx, ay:by, ax:bx]
+                self._net[layer_idx, ay:by, ax:bx][restore] = original[restore]
+                writes += n_restore
+            n_freed = int(freed.sum())
+            if n_freed:
+                self._blocked[layer_idx, ay:by, ax:bx][freed] = False
+                self._net[layer_idx, ay:by, ax:bx][freed] = 0
+                writes += 2 * n_freed
+            # Issue #4794: mirror the scalar path's per-cell bump count.
+            self._occupancy_generation += writes
+            self._release_congestion_window(layer_idx, ay, ax, affected)
+
+        # Issue #5240: a non-NumPy (GPU) backend does not support the
+        # masked-assignment idiom -- keep the original scalar walk there.
+        unmark_with_clearance = (
+            unmark_with_clearance_cells if self._backend is not np else unmark_with_clearance_window
+        )
 
         if gx1 == gx2:
             for gy in range(min(gy1, gy2), max(gy1, gy2) + 1):
@@ -5661,6 +5814,23 @@ class RoutingGrid:
                     kept.append(current)
                     kept_ids.add(id(current))
             self.routes = kept
+
+            # Issue #5517: journal the resync as explicit removals then
+            # additions, so a replay reproduces this swap without needing to
+            # know WHY it happened (best-iteration rollback, optimizer
+            # geometry swap, connectivity revert).  Both sides are journaled
+            # for EVERY changed pair -- including the in-place-mutation shape
+            # ``(geometry_snapshot, live_route)``, where the object
+            # membership of ``self.routes`` is unchanged but the copper on
+            # the grid is not: the snapshot's geometry left, the live
+            # object's new geometry arrived.
+            if self.commit_observer is not None:
+                for stale, _current in changed:
+                    if stale is not None:
+                        self.commit_observer("resync_remove", stale)
+                for _stale, current in changed:
+                    if current is not None:
+                        self.commit_observer("resync_add", current)
 
             # 3. Wholesale R-tree rebuild from the refreshed routes.
             self._rebuild_segment_index()

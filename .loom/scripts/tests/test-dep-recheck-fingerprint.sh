@@ -32,6 +32,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET_SCRIPT="$HELPERS_DIR/dep-recheck-fingerprint.sh"
 
+# Pin the loom-daemon this suite tests against — the subject is a thin stub over
+# `loom-daemon dep-recheck-fingerprint` now (epic #7810 PR 4). FATAL, not SKIP:
+# see the helper for why.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "dep-recheck-fingerprint"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -313,6 +320,18 @@ jq -n '{number: 22, state: "CLOSED"}' >"$STUB_DIR/issue-22.json"
 p="$("$TARGET_SCRIPT" operator-premise --refs "20 22" --repo owner/repo)"
 assert_eq "stale-premise" "$(field "$p" VERDICT)" "T13c: live operator-premise mode checks each --refs number's state"
 
+# T13f (#8011): a non-numeric --refs token is a hard error (exit 1), not a
+# silent drop. The shell original iterated `for ref in $REFS_ARG`, tried
+# `gh issue view`/`gh pr view` on each raw token, and `_die`d 1 the moment a
+# lookup failed both ways -- which a non-numeric token always would. A prior
+# Rust port's `.filter_map(|t| t.parse().ok())` instead silently dropped it,
+# succeeding with exit 0 and a fingerprint computed over fewer references
+# than asked for.
+rc=0
+out="$("$TARGET_SCRIPT" operator-premise --refs "abc" --repo owner/repo 2>/dev/null)" || rc=$?
+assert_eq "1" "$rc" "T13f: a non-numeric --refs token exits 1 rather than silently dropping (#8011)"
+assert_eq "" "$out" "T13f: no VERDICT/REFS/CONCLUSION_HASH is emitted on the error path"
+
 # --- T14: named-dependency - a `## Dependencies` checklist item naming a
 # different, non-closing issue/PR as a prerequisite (#7314, the #6335/#6333
 # shape `dep-recheck` cannot see: #6333 never carries `Closes #6335`) --------
@@ -408,6 +427,53 @@ assert_eq "blocked" "$(field "$out_h3" VERDICT)" \
     "T15e: an H3 '### Dependencies' heading is recognized just like H2, reporting VERDICT=blocked instead of a false clear (#7503)"
 assert_eq "7496:OPEN" "$(field "$out_h3" DEPS)" \
     "T15e: DEPS includes the H3-section dependency and excludes #999 from an unrelated H3 section"
+
+# T15f (#8011): a `*` bullet, not just `-`, is accepted for a checklist item.
+# `* [ ] #N: ...` is valid GitHub task-list syntax used in hand-written
+# Curator checklists; the pre-port shell matched only a literal `-` bullet,
+# so this fixture pins the Rust port's intentionally broader match (kept, not
+# narrowed — see loom-daemon/src/dep_recheck/named.rs's `item_re` doc).
+jq -n '{body: "## Dependencies\n\n* [ ] #123: asterisk bullet\n"}' \
+    >"$STUB_DIR/issue-8011.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-123.json"
+out_star_bullet="$("$TARGET_SCRIPT" named-dependency --number 8011 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_star_bullet" VERDICT)" \
+    "T15f: a '* [ ] #N: ...' checklist item (asterisk bullet) is parsed into DEPS, reporting VERDICT=blocked for a still-OPEN reference (#8011)"
+assert_eq "123:OPEN" "$(field "$out_star_bullet" DEPS)" \
+    "T15f: DEPS reports the asterisk-bulleted reference"
+rm -f "$STUB_DIR/issue-123.json"
+
+# T15g (#8119): a checklist item written with a dependency PHRASE -
+# `Blocked by #N` / `Depends on #N` / `Requires #N` - is the most natural way
+# to write a prerequisite, and `extract-refs` already reads all three as
+# references. `named-dependency` used to drop them, producing a false
+# VERDICT=clear for a genuinely still-OPEN reference. Same vocabulary, same
+# worse-failure-direction argument as T15d/T15e.
+jq -n '{body: "## Dependencies\n\n- [ ] Blocked by #6333: prerequisite feature\n"}' \
+    >"$STUB_DIR/issue-8119.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-6333.json"
+rm -f "$STUB_DIR/pr-6333.json"
+out_phrase="$("$TARGET_SCRIPT" named-dependency --number 8119 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_phrase" VERDICT)" \
+    "T15g: a '- [ ] Blocked by #N: ...' checklist item is parsed into DEPS, reporting VERDICT=blocked for a still-OPEN reference instead of a false clear (#8119)"
+assert_eq "6333:OPEN" "$(field "$out_phrase" DEPS)" \
+    "T15g: DEPS reports the phrase-prefixed reference"
+
+# T15h (#8119): the other two phrasings behave identically, and once the named
+# reference is MERGED the same body reports clear - so the fix is not simply
+# "phrased items always block".
+jq -n '{body: "## Dependencies\n\n- [ ] Depends on #6333: a\n- [ ] Requires #100: b\n"}' \
+    >"$STUB_DIR/issue-8119.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-100.json"
+out_phrase2="$("$TARGET_SCRIPT" named-dependency --number 8119 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_phrase2" VERDICT)" \
+    "T15h: 'Depends on #N' / 'Requires #N' are recognized the same as 'Blocked by #N' (#8119)"
+jq -n '{state: "MERGED"}' >"$STUB_DIR/issue-6333.json"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/issue-100.json"
+out_phrase3="$("$TARGET_SCRIPT" named-dependency --number 8119 --repo owner/repo)"
+assert_eq "clear" "$(field "$out_phrase3" VERDICT)" \
+    "T15h: once every phrase-named reference is resolved, the same body reports VERDICT=clear"
+rm -f "$STUB_DIR/issue-100.json" "$STUB_DIR/issue-6333.json" "$STUB_DIR/issue-8119.json"
 
 # --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
 # among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
@@ -547,6 +613,28 @@ FIXTURE_LOGIN_VARIANTS="$(jq -n '{
 }')"
 out="$(echo "$FIXTURE_LOGIN_VARIANTS" | "$TARGET_SCRIPT" extract-refs --stdin)"
 assert_eq "" "$(shell_refs "$out")" "T25: login match tolerates an 'app/' prefix and a '[bot]' suffix, case-insensitively"
+
+# T25b (#8011): a declared phrase and its `#N` may be split across a line
+# break. The pre-port shell matched line-oriented (`grep -oE`), so it could
+# never see this; the Rust port's pattern runs over the whole text and `\s`
+# matches `\n`, so it does. Kept intentionally (same worse-failure-direction
+# reasoning as named-dependency's bullet-marker divergence) rather than
+# narrowed back to line-oriented matching.
+FIXTURE_NEWLINE_SPANNING='{"body": "Blocked by\n#42", "comments": []}'
+out="$(echo "$FIXTURE_NEWLINE_SPANNING" | "$TARGET_SCRIPT" extract-refs --stdin)"
+assert_eq "42" "$(shell_refs "$out")" \
+    "T25b: a phrase and its #N split across a newline is still matched (#8011, kept intentionally)"
+
+# T25c (#8011): --bot-login normalises the SAME way (lower-case, strip a
+# leading 'app/' or trailing '[bot]') on both the flag's own value and the
+# comment author, so a caller may pass either spelling. The pre-port shell
+# only normalised the comment author's side, so passing the 'app/'-prefixed
+# spelling here would never have matched a bare-login comment author (a bug
+# the port fixes, not a regression to preserve).
+FIXTURE_BOT_LOGIN_APP_PREFIX='{"body": "no blockers", "comments": [{"author": {"login": "loom-fleet-dispatch"}, "body": "Depends on #93"}]}'
+out="$(echo "$FIXTURE_BOT_LOGIN_APP_PREFIX" | "$TARGET_SCRIPT" extract-refs --stdin --bot-login "app/loom-fleet-dispatch")"
+assert_eq "" "$(shell_refs "$out")" \
+    "T25c: --bot-login \"app/<login>\" excludes a bare-login comment author, symmetric normalisation (#8011, arguably a fix over the shell)"
 
 # T26: live --number mode (stubbed gh) reproduces the #4507 shape end to end
 # via `gh issue view --json body,comments`.

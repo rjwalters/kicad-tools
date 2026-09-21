@@ -551,6 +551,7 @@ def get_routing_diagnostics_json(
     nets_to_route_ids: set[int] | None = None,
     single_pad_count: int = 0,
     min_completion: float = 1.0,
+    routing_plan: dict | None = None,
 ) -> dict:
     """Get routing diagnostics as a JSON-serializable dictionary.
 
@@ -570,6 +571,12 @@ def get_routing_diagnostics_json(
         min_completion: Routing-population threshold for the additive
             ``clean_success`` summary when placement metadata is present.
             Requested placement errors always prevent success, even at zero.
+        routing_plan: Optional ``RoutingPlan`` summary block (Issue #5519,
+            Epic #5510 Phase 1) -- typically ``{"overflow_report": ...,
+            "sidecar": "<path>"}``.  Added under the ``"routing_plan"`` key
+            when provided; the key is absent (not ``null``) when the caller
+            passes ``None`` (e.g. no dense package triggered the two-phase
+            global pass, or ``--no-routing-plan`` in a later phase).
 
     Returns:
         Dictionary with routing diagnostics in JSON-serializable format
@@ -910,7 +917,41 @@ def get_routing_diagnostics_json(
             result_dict["failure_breakdown"]["placement_invalid"] = len(blocked)
     if partially_connected:
         result_dict["partially_connected"] = partially_connected
+    if routing_plan is not None:
+        # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
+        # summary.  Absent (not null) when no plan was built -- the key
+        # signals "a plan exists"; a present-but-empty dict would be
+        # ambiguous.
+        result_dict["routing_plan"] = routing_plan
+    # Issue #5517 (Epic #5508, Phase 1b): the replay-derived access witness --
+    # which commit closed each unrouted pad's access set, and when.  This is
+    # the routing report the epic names, and it replaces the guessed
+    # PLACEMENT_BOUND / CONGESTION_SATURATED hypotheses with evidence.  Same
+    # convention as ``routing_plan``: the key is ABSENT (not null) when the
+    # run stranded nothing, so a fully-routed board's JSON is unchanged.
+    witness_block = _access_witness_block(router)
+    if witness_block is not None:
+        result_dict["access_witness"] = witness_block
     return result_dict
+
+
+def _access_witness_block(router: Autorouter) -> dict | None:
+    """The router's replay-derived access witness, or ``None``.
+
+    Never raises: a diagnostic block must not be able to fail the JSON report
+    that carries it.  ``None`` covers three cases that all mean "no witness to
+    show" -- no journal (a non-grid engine), nothing stranded, and a replay
+    that could not run.
+    """
+    try:
+        from .access_witness import witness_for_router
+
+        witness = witness_for_router(router)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not witness:
+        return None
+    return witness.to_dict()
 
 
 def print_routing_diagnostics_json(
@@ -920,6 +961,7 @@ def print_routing_diagnostics_json(
     current_strategy: str = "basic",
     nets_to_route_ids: set[int] | None = None,
     single_pad_count: int = 0,
+    routing_plan: dict | None = None,
 ) -> None:
     """Print routing diagnostics as JSON to stdout.
 
@@ -931,6 +973,8 @@ def print_routing_diagnostics_json(
             exclude this strategy since the user already tried it.
         nets_to_route_ids: Optional set of net IDs targeted for routing.
         single_pad_count: Number of single-pad nets excluded from routing.
+        routing_plan: Optional ``RoutingPlan`` summary block -- see
+            :func:`get_routing_diagnostics_json`.
     """
     diagnostics = get_routing_diagnostics_json(
         router,
@@ -939,6 +983,7 @@ def print_routing_diagnostics_json(
         current_strategy=current_strategy,
         nets_to_route_ids=nets_to_route_ids,
         single_pad_count=single_pad_count,
+        routing_plan=routing_plan,
     )
     print(json.dumps(diagnostics, indent=2))
 

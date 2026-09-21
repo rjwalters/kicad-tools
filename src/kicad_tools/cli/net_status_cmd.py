@@ -431,6 +431,75 @@ def _print_recommendation(diag: StuckNetDiagnosis) -> None:
         print(f"                    {i}. {label} ({ranked.rationale}){preferred}")
 
 
+def _discover_net_class_map(pcb_path: Path) -> dict[str, Any] | None:
+    """Auto-discover + load a ``net_class_map.json`` sidecar for *pcb_path*.
+
+    Issue #5522: scoped to *pcb_path*'s own directory only (a single-element
+    directory list to :func:`~kicad_tools.sidecars.
+    first_existing_net_class_map_sidecar`), matching the other
+    single-directory sidecar consumers (the CI merge gates, the export
+    report) rather than ``kct check``'s wider three-directory probe --
+    widening the scope is explicitly out of AC4 for that shared module.
+    Returns ``None`` (never raises) when no sidecar exists, or when one
+    exists but fails to parse -- a malformed sidecar must not break
+    ``--why`` output that worked before #5522.
+    """
+    from kicad_tools.router.rules import net_class_map_from_path
+    from kicad_tools.sidecars import first_existing_net_class_map_sidecar
+
+    sidecar_path = first_existing_net_class_map_sidecar([pcb_path.parent], pcb_path.stem)
+    if sidecar_path is None:
+        return None
+    try:
+        return net_class_map_from_path(sidecar_path, pcb_path=pcb_path)
+    except Exception:
+        return None
+
+
+def _print_access_witness(diag: Any) -> None:
+    """Render the replay-derived access witness for one diagnosis (#5517).
+
+    Prints nothing when no ``<stem>.access_witness.json`` sidecar was found,
+    which keeps ``--why`` text output byte-identical to pre-#5517 for a bare
+    ``.kicad_pcb``.
+
+    The block answers the question ``blocking nets`` only guesses at: that
+    line is a line-of-sight scan over the *finished* board, while these fields
+    are replayed from the order copper actually landed in, so they name the
+    commit -- pass, iteration and net -- that took the pad's last way out.
+    """
+    witness = getattr(diag, "access_witness", None)
+    if not witness:
+        return
+    print("  access witness:")
+    for pad in witness:
+        print(f"    {pad.label}:")
+        print(f"      access at escape end: {pad.access_at_escape_end}")
+        print(f"      access now:           {pad.final_access}")
+        if pad.first_closed_at is None:
+            # The DQ3 / #5509 category: nothing the router committed took this
+            # pad's access away, so no commit can be named as the cause.
+            print("      first closed at:      never (no commit emptied the access set)")
+            continue
+        pass_name, iteration = pad.first_closed_at
+        print(
+            f"      first closed at:      {pass_name}[{iteration}] "
+            f"(journal record #{pad.first_closed_index}, {pad.first_closed_kind})"
+        )
+        print(f"      closing nets:         {', '.join(pad.closing_nets) or '(unattributed)'}")
+        if pad.closing_refs:
+            print(f"      closing copper:       {', '.join(pad.closing_refs)}")
+        if pad.closing_copper_class:
+            print(f"      closing copper class: {', '.join(pad.closing_copper_class)}")
+        if pad.reopened:
+            print("      note:                 a later rip-up reopened this pad")
+    if witness.clearance:
+        values = ", ".join(f"{name}={mm}mm" for name, mm in witness.clearance)
+        print(f"    resolver clearances:  {values}")
+    if witness.truncated:
+        print("    note: witness truncated (journal or replay budget exhausted)")
+
+
 def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = None) -> int:
     """Classify incomplete signal nets by why they are stuck and print them.
 
@@ -448,10 +517,28 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
     Returns 2 if any (selected) stuck nets were found (matching the rest of
     net-status' exit-code convention), 0 if there are none -- so under
     ``--net`` the exit code reflects the selected net only.
+
+    Issue #5522 (Phase 1 of Epic #5511): auto-discovers a committed
+    ``net_class_map.json`` / ``<stem>.net_class_map.json`` sidecar next to
+    *pcb_path* (single-directory scope, matching the other single-directory
+    sidecar consumers per ``sidecars.py``'s AC4 note) and forwards it to the
+    classifier so a declared ``swap_group`` can surface a ``swap_proposal``
+    on a verified-reversed bundle.  No new CLI flag -- an absent sidecar
+    resolves to ``None``, which keeps this output byte-identical to
+    pre-#5522 behavior.
+
+    Issue #5517 (Epic #5508, Phase 1b): the classifier likewise auto-discovers
+    a ``<stem>.access_witness.json`` sidecar next to *pcb_path* -- the ordered
+    commit journal replayed into a per-pad verdict by ``kct route``.  When one
+    is present, each diagnosis carries the terminals of its own net and both
+    output formats render the block: which pass and iteration emptied the pad's
+    access set, and whose copper did it.  Also no new CLI flag, and also
+    byte-identical output when the sidecar is absent.
     """
     from kicad_tools.router.stuck_classifier import StuckClassifierResult, classify_stuck_nets
 
-    result = classify_stuck_nets(pcb_path, strict=strict)
+    net_class_map = _discover_net_class_map(pcb_path)
+    result = classify_stuck_nets(pcb_path, strict=strict, net_class_map=net_class_map)
 
     # --net filter (issue #4682): restrict diagnoses (and every derived
     # count) to the selected net.
@@ -517,6 +604,7 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
         print(f"  evidence:         {diag.evidence}")
         if diag.recommendation:
             _print_recommendation(diag)
+        _print_access_witness(diag)
         print()
 
     return 2

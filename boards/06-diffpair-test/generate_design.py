@@ -663,6 +663,77 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
+class _AppendOnlyBboxIndex:
+    """Bounding-box spatial index over an append-only obstacle list.
+
+    Issue #5240.  ``_repair_pour_connectivity``'s ``_via_ok`` / ``_path_ok``
+    guards validated every candidate via / stub against the board's ENTIRE
+    segment obstacle list with a shapely ``distance`` call per entry.  Board
+    06's routed PCB carries ~11.3k segment polygons and the repair pass
+    probes thousands of candidate positions (14 offsets x 8 compass rays,
+    plus 15-degree interleaves, per stranded pad per repair round), so that
+    scan alone measured ~19% of the whole ``--step route`` wall clock -- and
+    it was almost entirely far-field geometry that can never violate the
+    0.15 mm clearance.
+
+    This index answers "which entries could possibly be within ``margin`` of
+    this bounding box" using an ``STRtree``.  It is a PRE-FILTER only: the
+    caller still runs the identical exact predicate on every candidate it
+    returns, so the verdict is unchanged -- geometry whose bounding box is
+    farther than ``margin`` away simply never pays for a GEOS call.
+
+    The obstacle lists grow while the repair runs (each placed via / stub is
+    registered immediately so later placements cannot collide with it), and
+    an ``STRtree`` is immutable.  Entries appended since the last build are
+    therefore returned unconditionally (the caller's exact check still
+    decides), and the tree is rebuilt once that un-indexed tail grows past
+    :data:`_TAIL_LIMIT` so neither the tail scan nor the rebuild rate can
+    dominate.
+    """
+
+    #: Rebuild the tree once this many entries have been appended since the
+    #: last build.  Small enough that the unconditional tail stays cheap,
+    #: large enough that the O(n log n) rebuild stays amortised.
+    _TAIL_LIMIT = 64
+
+    def __init__(self, entries: list, geom_index: int = 0) -> None:
+        from shapely.geometry import box
+        from shapely.strtree import STRtree
+
+        self._entries = entries
+        self._geom_index = geom_index
+        self._box = box
+        self._strtree = STRtree
+        self._tree = None
+        self._indexed = 0
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        self._indexed = len(self._entries)
+        self._tree = (
+            self._strtree([entry[self._geom_index] for entry in self._entries[: self._indexed]])
+            if self._indexed
+            else None
+        )
+
+    def candidates(self, bounds: tuple[float, float, float, float], margin: float) -> list[int]:
+        """Indices of entries that may lie within ``margin`` of ``bounds``.
+
+        A conservative superset: every entry whose geometry is genuinely
+        within ``margin`` is included, plus some that are not.
+        """
+        if len(self._entries) - self._indexed > self._TAIL_LIMIT:
+            self._rebuild()
+        min_x, min_y, max_x, max_y = bounds
+        hits: list[int] = []
+        if self._tree is not None:
+            hits = self._tree.query(
+                self._box(min_x - margin, min_y - margin, max_x + margin, max_y + margin)
+            ).tolist()
+        hits.extend(range(self._indexed, len(self._entries)))
+        return hits
+
+
 def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int, int]:
     """Repair pour-net connectivity: offset vias + stubs + island bridges.
 
@@ -713,6 +784,7 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
     from shapely.ops import nearest_points
 
     from kicad_tools.analysis.net_status import NetStatusAnalyzer
+    from kicad_tools.zones.pour_bridge import BridgeSide, plan_via_hop_bridge
 
     text = pcb_path.read_text()
     _reserve_repair_uuids(text)
@@ -777,6 +849,14 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
         )
         seg_index.append((line.buffer(width / 2.0), id_to_name.get(nid, ""), lay))
 
+    # Issue #5240: bounding-box pre-filter over the segment obstacles.  The
+    # clearance guards below only ever reject on a *near* segment, and board
+    # 06 routes ~11.3k of them, so scanning the whole list per candidate was
+    # the single largest cost in the pour-repair pass.  ``seg_tree`` tracks
+    # the SAME list object (``_emit_seg`` keeps appending to it), so the
+    # guards stay exact -- see :class:`_AppendOnlyBboxIndex`.
+    seg_tree = _AppendOnlyBboxIndex(seg_index)
+
     # Vias: (center_point, net, radius, actual drill diameter)
     via_index: list[tuple] = []
     for via in _find_sexp_blocks(text, "\n\t(via") + _find_sexp_blocks(text, "\n  (via"):
@@ -802,6 +882,12 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
 
     VIA_R = 0.225  # 0.45 mm via
     CLEAR = 0.15
+    # Issue #5608: KiCad board-setup ``hole_clearance`` floor -- FOREIGN
+    # copper must stay >= 0.25 mm from any drilled hole edge.  Same idiom
+    # as ``_legalize_signal_vias``'s HOLE_CLEAR (independent literal, per
+    # the existing three-copies convention); kct's clearance rules do not
+    # model track-vs-hole, so the repair's own path acceptance enforces it.
+    HOLE_CLEAR = 0.25
     STUB_W = 0.15
     BRIDGE_W = 0.2
     # Issue #3855: the repair via's DRILL.  Drill spacing must be enforced
@@ -840,7 +926,12 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # edge-to-edge (drill_r is the pad's drill RADIUS).
             if drill_r > 0 and not _drills_clear(vx, vy, px, py, drill_r * 2.0):
                 return False
-        for geom, snet, _lay in seg_index:
+        # Issue #5240: identical ``distance < CLEAR`` rejection, restricted to
+        # the segments whose bounding box is within CLEAR of the via's --
+        # anything farther cannot be closer than CLEAR, so skipping it cannot
+        # change the verdict.
+        for seg_i in seg_tree.candidates(vgeom.bounds, CLEAR):
+            geom, snet, _lay = seg_index[seg_i]
             if snet != net and vgeom.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius, drill in via_index:
@@ -867,12 +958,30 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             geom, pnet, layers = entry[:3]
             if pnet != net and layer in layers and path.distance(geom) < CLEAR:
                 return False
-        for geom, snet, lay in seg_index:
+        # Issue #5608: track vs foreign TH-pad HOLE (KiCad
+        # ``hole_clearance``), any layer -- the drill passes through the
+        # whole stack, so a bridge on an unrelated layer still cannot graze
+        # it.  Mirrors ``_legalize_signal_vias._leg_ok``'s pad-hole check.
+        for _geom, pnet, _layers, drill_r, center, _name, is_th, _inscribed in pad_index:
+            if pnet != net and is_th and drill_r > 0:
+                if path.distance(Point(center[0], center[1]).buffer(drill_r)) < HOLE_CLEAR:
+                    return False
+        # Issue #5240: same bounding-box pre-filter as ``_via_ok`` -- the
+        # net / layer / distance tests below are unchanged.
+        for seg_i in seg_tree.candidates(path.bounds, CLEAR):
+            geom, snet, lay = seg_index[seg_i]
             if snet != net and lay == layer and path.distance(geom) < CLEAR:
                 return False
         for pt, vnet, radius, drill in via_index:
-            if vnet != net and path.distance(pt.buffer(radius)) < CLEAR:
-                return False
+            if vnet != net:
+                if path.distance(pt.buffer(radius)) < CLEAR:
+                    return False
+                # Issue #5608: track vs foreign via HOLE (KiCad
+                # ``hole_clearance``) -- the drill floor is stricter than
+                # the barrel radius, so a bridge hugging a small via's
+                # annulus could still land 3 um inside the hole floor.
+                if path.distance(pt.buffer(drill / 2.0)) < HOLE_CLEAR:
+                    return False
         return True
 
     directions = [(math.cos(a * math.pi / 4.0), math.sin(a * math.pi / 4.0)) for a in range(8)]
@@ -935,6 +1044,12 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 # audit's conservative connectivity model).
                 own.append((inscribed, layers, f"pad:{name}"))
         pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
+        # Through-hole pads of this net (#5606, ported from board07's
+        # sub-stage D via #5564): a plated barrel already spans the copper
+        # stack, so a via-hop bridge may terminate on one without drilling
+        # a new via; an SMD pad reaches only its own layer and still needs
+        # one placed on other own-net copper.
+        th_pads = {entry[5] for entry in pad_index if entry[1] == net and entry[6]}
 
         # Union-find over own elements, built ONCE and maintained
         # incrementally as repair geometry is appended (a full O(n^2)
@@ -960,6 +1075,19 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 gj, lj, _ = own[j]
                 if (li & lj) and gi.intersects(gj):
                     parent[_find(len(own) - 1)] = _find(j)
+
+        def _bridge_side(idx: int) -> BridgeSide:
+            """Describe ``own[idx]`` to the shared via-hop planner (#5606).
+
+            Only a pad's kind is ambiguous about plating -- ``pad:<name>``
+            cannot tell a through-hole pad from an SMD one -- so pads state
+            it explicitly via ``th_pads`` and every other kind keeps the
+            planner's own ``kind``-derived default.  Ported from board07's
+            sub-stage D (``generate_design.py``, #5564).
+            """
+            geom, layers, kind = own[idx][:3]
+            plated = kind[4:] in th_pads if kind.startswith("pad:") else None
+            return BridgeSide(geom, layers, kind, plated_through=plated)
 
         max_rounds = 40
         skipped_roots: set[int] = set()
@@ -1183,6 +1311,24 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             # blocked by a foreign trace (the B.Cu carve that splits a
             # bbox-carved pour), hop OVER it: drop a via inside each
             # copper region near the gap and cross on a different layer.
+            #
+            # Issue #5551 (the board06 port of #5507/#5549): an endpoint
+            # that ALREADY carries a plated barrel is reused rather than
+            # re-drilled.  A barrel's own copper is just its annulus, so
+            # every retreat point either misses that disc or lands inside
+            # it -- where the drill-to-drill floor rejects a second drill --
+            # and the pair was skipped for every retreat on every layer,
+            # even though the barrel already spans the stack and needs no
+            # new via at all.  ``plan_via_hop_bridge`` keeps the candidate
+            # order, the retreat set and the physical predicates below
+            # unchanged; it only stops demanding a drill where the copper
+            # stack is already bridged.
+            #
+            # Issue #5606 (port of #5564): the same reuse now extends to a
+            # through-hole PAD terminus -- its plated barrel spans the stack
+            # exactly like a via's, so the planner may terminate a bridge on
+            # it without a new drill.  SMD pads (the common case on this
+            # board) keep the planner's default drill demand untouched.
             if not merged:
                 pairs_d: list[tuple[float, int, int]] = []
                 for i in target:
@@ -1192,45 +1338,32 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         pairs_d.append((gi.distance(gj), i, j))
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
-                    gi, gj = own[i][0], own[j][0]
-                    pa, pb = nearest_points(gi, gj)
-                    vec = (pb.x - pa.x, pb.y - pa.y)
-                    norm = math.hypot(*vec) or 1.0
-                    ux, uy = vec[0] / norm, vec[1] / norm
-                    done = False
-                    for back_a in (0.5, 0.9, 1.4):
-                        va = (pa.x - ux * back_a, pa.y - uy * back_a)
-                        if not Point(va).intersects(gi) or not _via_ok(net, *va):
-                            continue
-                        for back_b in (0.5, 0.9, 1.4):
-                            vb = (pb.x + ux * back_b, pb.y + uy * back_b)
-                            if not Point(vb).intersects(gj) or not _via_ok(net, *vb):
-                                continue
-                            for lay in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
-                                if not _path_ok(net, va, vb, lay, BRIDGE_W):
-                                    continue
-                                _emit_via(net, *va)
-                                _emit_via(net, *vb)
-                                _emit_seg(net, va, vb, lay, BRIDGE_W)
-                                _append_own((Point(va).buffer(VIA_R), all_layers, "via"))
-                                _append_own((Point(vb).buffer(VIA_R), all_layers, "via"))
-                                _append_own(
-                                    (
-                                        LineString([va, vb]).buffer(BRIDGE_W / 2.0),
-                                        frozenset({lay}),
-                                        "seg",
-                                    )
-                                )
-                                bridges_placed += 1
-                                merged = True
-                                done = True
-                                break
-                            if done:
-                                break
-                        if done:
-                            break
-                    if done:
-                        break
+                    plan = plan_via_hop_bridge(
+                        _bridge_side(i),
+                        _bridge_side(j),
+                        layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
+                        retreats=(0.5, 0.9, 1.4),
+                        via_ok=lambda p, _net=net: _via_ok(_net, *p),
+                        path_ok=lambda a, b, lay, _net=net: _path_ok(_net, a, b, lay, BRIDGE_W),
+                        new_via_layers=all_layers,
+                    )
+                    if plan is None:
+                        continue
+                    va, vb = plan.source.point, plan.destination.point
+                    for vx, vy in plan.new_vias:
+                        _emit_via(net, vx, vy)
+                        _append_own((Point(vx, vy).buffer(VIA_R), all_layers, "via"))
+                    _emit_seg(net, va, vb, plan.layer, BRIDGE_W)
+                    _append_own(
+                        (
+                            LineString([va, vb]).buffer(BRIDGE_W / 2.0),
+                            frozenset({plan.layer}),
+                            "seg",
+                        )
+                    )
+                    bridges_placed += 1
+                    merged = True
+                    break
 
             # The fixed rays cannot follow a narrow corridor to primary
             # copper. An existing via may itself be on an isolated island,

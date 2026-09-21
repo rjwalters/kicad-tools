@@ -11,6 +11,9 @@
 #   2. LOOM: Block 'pip install -e' inside worktrees (issue #2495, #4079)
 #   3. LOOM: Ask before real-registry-mutating `loom-daemon workspace
 #      add|remove|set-priority` (issue #4326)
+#   4. LOOM: Deny Bash writes that edit an INSTALLED Loom file in place in a
+#      CONSUMER repo (issue #7995) — the Bash-idiom counterpart of the
+#      Edit/Write denial in guard-worktree-paths.sh
 #
 # The generic repository-hygiene guards (catastrophic denies, SQL/cloud toggles,
 # ASK patterns) live in guard-destructive.sh and are being migrated toward Repo
@@ -37,17 +40,34 @@
 
 # Determine log directory relative to this script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo ".")"
-HOOK_ERROR_LOG="${SCRIPT_DIR}/../logs/hook-errors.log"
+
+# Runtime log directory (#7882) — identical resolution to
+# guard-destructive-generic.sh, deliberately kept in lockstep so both guards
+# always write to the same place. At runtime SCRIPT_DIR is the INSTALLED hook's
+# own dir (.loom/hooks/) and ../logs is .loom/logs; when the guard is invoked
+# directly from its SOURCE location (defaults/hooks/) the same expression would
+# resolve to defaults/logs, depositing runtime telemetry inside the VENDORED
+# tree that ships to every consumer repo and that
+# scripts/check-vendored-private-refs.sh scans. Redirect that case to the repo's
+# own .loom/logs. Pure parameter expansion (no subshells) — this runs on every
+# hook invocation.
+_LOOM_HOOK_PARENT="${SCRIPT_DIR%/*}"
+if [[ "${_LOOM_HOOK_PARENT##*/}" == "defaults" ]]; then
+    HOOK_LOG_DIR="${_LOOM_HOOK_PARENT%/*}/.loom/logs"
+else
+    HOOK_LOG_DIR="${SCRIPT_DIR}/../logs"
+fi
+
+HOOK_ERROR_LOG="${HOOK_LOG_DIR}/hook-errors.log"
 
 # Decision telemetry log (issue #3771 / #3898) — a SEPARATE JSONL file from
 # HOOK_ERROR_LOG, sharing the SAME schema + stable rule tags as
 # guard-destructive.sh so a single reader (#3772 / the standing per-trigger
-# review policy) aggregates BOTH guards' fires. At runtime SCRIPT_DIR is the
-# installed hook's own dir (.loom/hooks/), so this resolves to
+# review policy) aggregates BOTH guards' fires. Resolves to
 # .loom/logs/guard-decisions.log. LOOM_GUARD_DECISION_LOG_FILE overrides the
 # path (test seam / operator override). Off by default — see
 # decision_log_enabled() below.
-DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${SCRIPT_DIR}/../logs/guard-decisions.log}"
+DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${HOOK_LOG_DIR}/guard-decisions.log}"
 
 # Shared config-tier resolver (#4063). Source defaults/scripts/lib/config-resolver.sh
 # so decision_log_enabled() below reads the full config tier chain through the
@@ -59,6 +79,18 @@ DECISION_LOG="${LOOM_GUARD_DECISION_LOG_FILE:-${SCRIPT_DIR}/../logs/guard-decisi
 if [[ -f "$SCRIPT_DIR/../scripts/lib/config-resolver.sh" ]]; then
     # shellcheck source=/dev/null
     source "$SCRIPT_DIR/../scripts/lib/config-resolver.sh" 2>/dev/null || true
+fi
+
+# Installed-managed-file write guard (#7995). Shared with the Edit/Write
+# matcher (guard-worktree-paths.sh) so both surfaces reach the SAME verdict for
+# the same target path — the whole point of the category is that an agent
+# denied on Edit/Write cannot land the identical edit through a Bash write
+# idiom instead (the #4178 threat model). Best-effort source: a missing lib
+# leaves loom_installed_write_denied undefined and the category below is
+# skipped entirely (fail open).
+if [[ -f "$SCRIPT_DIR/../scripts/lib/installed-file-guard.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/../scripts/lib/installed-file-guard.sh" 2>/dev/null || true
 fi
 
 # Log a diagnostic error message (best-effort, never fails the script)
@@ -1712,7 +1744,25 @@ if echo "$GH_PR_MERGE_SCAN_TEXT" | grep -qE 'gh\s+pr\s+merge'; then
             MERGE_SCRIPT="$REPO_ROOT/defaults/scripts/merge-pr.sh"
         fi
     fi
-    deny "Use $MERGE_SCRIPT <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors." "loom:gh-pr-merge-redirect"
+
+    # Issue #7773: mask_cat_heredoc_bodies() only neutralizes a cat-heredoc
+    # CAPTURED by a text-data-consuming command (the `-m "$(cat <<EOF ...)"`
+    # idiom) -- a heredoc redirected straight to a FILE (`cat > FILE
+    # <<'DELIM'`) is deliberately left unmasked, because #5122 showed a later
+    # command on the same line can execute that file. That is still the right
+    # call ("masking only ever narrows what this ONE check can see; it never
+    # widens what it misses" -- see the block comment above
+    # mask_cat_heredoc_bodies()), but it means writing prose that merely
+    # quotes the phrase to a file this way denies with no hint that the
+    # trigger was inert documentation, not a live invocation. When that shape
+    # is present, name it explicitly so the false-positive case (an agent
+    # documenting this very rule) isn't left guessing why an apparently-inert
+    # command was denied.
+    HEREDOC_TO_FILE_NOTE=""
+    if echo "$COMMAND" | grep -qE 'cat[[:space:]]*>>?[[:space:]]*[^<[:space:]]+[[:space:]]*<<'; then
+        HEREDOC_TO_FILE_NOTE=" If this matched inside a heredoc body being written to a file rather than executed (e.g. documenting this rule), write the file with a non-Bash tool (Write/Edit) instead -- a file-bound heredoc is deliberately left visible to this check (#7773)."
+    fi
+    deny "Use $MERGE_SCRIPT <PR_NUMBER> instead of 'gh pr merge'. The script merges via the GitHub API without local checkout, which avoids worktree errors.${HEREDOC_TO_FILE_NOTE}" "loom:gh-pr-merge-redirect"
 fi
 
 # =============================================================================
@@ -1778,6 +1828,60 @@ if echo "$COMMAND" | grep -qE '(^|[/[:space:];&|])loom-daemon[[:space:]]+workspa
         if [[ -z "${LOOM_WORKSPACES_PATH:-}" ]] && ! echo "$COMMAND" | grep -qE 'LOOM_WORKSPACES_PATH='; then
             ask "This mutates the machine-level workspace registry ('loom-daemon workspace add/remove/set-priority') — by default that is the operator's REAL ~/.loom/workspaces.json, shared across every repo/session (Issue #4326: a leaked test entry once sat at top dispatch priority for most of a day). If this is a test/verification step, prefix the command with LOOM_WORKSPACES_PATH=<scratch-file> to isolate it from the real registry. If this IS an intentional real-registry change, confirm to proceed."
         fi
+    fi
+fi
+
+# =============================================================================
+# LOOM: Deny in-place Bash writes to INSTALLED Loom files in a consumer repo
+# (issue #7995 — the Bash-idiom half of the prose rule #7883 shipped)
+#
+# `guard-worktree-paths.sh` denies the same target through the Edit/Write
+# matcher. Without this block an agent denied there could land the identical
+# edit via `>`/`>>`, `tee`, `sed -i`, or `cp`/`mv` — the exact
+# denied-on-one-tool-retry-on-the-other escape #4178 documents, and the reason
+# guard-destructive-generic.sh's write-confinement category exists at all.
+#
+# Cost control: the substring pre-check is a handful of bash pattern matches on
+# a string already in memory, and it is the FIRST thing evaluated — the
+# tokenizer, the config read, and every filesystem stat are behind it, so a
+# Bash call that never mentions a managed prefix pays nothing measurable.
+#
+# Both the repo-identity discriminator and the write-target extraction live in
+# defaults/scripts/lib/installed-file-guard.sh; see its header for the
+# discriminator rationale and the tokenizer's (deliberately permissive)
+# limitations.
+# =============================================================================
+
+if declare -F loom_installed_write_denied >/dev/null 2>&1 \
+   && loom_installed_prefix_mentioned "$COMMAND"; then
+
+    # Neutralize cat-heredoc bodies before tokenizing, for the same reason the
+    # gh-pr-merge scan above does: prose that merely QUOTES a write idiom
+    # inside a heredoc is not an invocation of it. Only the definition-site
+    # heredoc masks are applied — quoted flag values and quoted positional
+    # arguments need no masking here because loom_bash_write_targets() is
+    # itself quote-aware, and every extra mask is one more chance to mangle a
+    # real target.
+    IFW_SCAN_TEXT=$(mask_var_assigned_heredoc_bodies "$(mask_cat_heredoc_bodies "$COMMAND")")
+
+    # #7773, same shape as the gh-pr-merge redirect above: a heredoc written
+    # straight to a FILE is deliberately left unmasked, so documenting this
+    # very rule into a file can trip the scan. Name that case in the message
+    # rather than leaving the reader to guess.
+    IFW_HEREDOC_NOTE=""
+    if echo "$COMMAND" | grep -qE 'cat[[:space:]]*>>?[[:space:]]*[^<[:space:]]+[[:space:]]*<<'; then
+        IFW_HEREDOC_NOTE=" If this matched inside a heredoc BODY being written to a file rather than an actual write to the named path (e.g. documenting this rule), write that file with the Write tool instead -- a file-bound heredoc is deliberately left visible to this check (#7773)."
+    fi
+
+    if loom_installed_guard_enabled "$REPO_ROOT"; then
+        while IFS= read -r IFW_TARGET; do
+            [[ -n "$IFW_TARGET" ]] || continue
+            IFW_ABS=$(loom_ifw_normalize_abs "$IFW_TARGET" "$CWD") || continue
+            [[ -n "$IFW_ABS" ]] || continue
+            if loom_installed_write_denied "$IFW_ABS"; then
+                deny "$(loom_installed_deny_reason "$IFW_ABS" "Bash-tool write")${IFW_HEREDOC_NOTE}" "loom:installed-file-write"
+            fi
+        done < <(loom_bash_write_targets "$IFW_SCAN_TEXT")
     fi
 fi
 

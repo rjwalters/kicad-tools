@@ -12,6 +12,12 @@
 # $PATH reduced to a minimal, non-interactive default and no $LOOM_DAEMON_BIN,
 # asserting the binary is still found.
 #
+# Since #8134 it also covers the OTHER resolution this library owns —
+# loom_daemon_self_bin_override / $LOOM_DAEMON_SELF_BIN, "the binary that
+# IMPLEMENTS this caller" — including end-to-end through a real Shape-A stub,
+# because the two resolutions answer different questions and the bug was one
+# silently answering for the other (cases 17-21).
+#
 # Style matches the other lib-focused suites — plain bash, hand-rolled
 # assertions, no Bats.
 #
@@ -328,6 +334,99 @@ fi
 #                loom_locate_daemon_bin actually resolves. ----------
 assert_lockstep "\$CARGO_TARGET_DIR-redirected repo-local build" \
     PATH="$MINIMAL_PATH" HOME="$WORKDIR/t16-nohome" CARGO_TARGET_DIR="$REDIRECT13" LOCKSTEP_ROOT="$ROOT13"
+
+# ===========================================================================
+# 17-21 (#8134): $LOOM_DAEMON_BIN and $LOOM_DAEMON_SELF_BIN mean DIFFERENT
+# binaries, and a Shape-A stub must resolve the second one.
+#
+# $LOOM_DAEMON_BIN = the daemon a caller manages or PROBES (an installed
+# release whose version is compared; the endpoint loom-daemon-watchdog.sh
+# round-trips; a deliberately fake binary in a suite). $LOOM_DAEMON_SELF_BIN =
+# the daemon that IMPLEMENTS the caller. The watchdog is the first script that
+# is both a stub and a daemon-invoker, and its retained suite pins a HANGING
+# mock through LOOM_DAEMON_BIN: before this split the stub exec'd that mock as
+# the watchdog and the suite hung rather than failed.
+# ===========================================================================
+
+# ---------- 17. the override helper: hit, miss, and set-but-not-executable ----------
+BIN17="$WORKDIR/t17/self-loom-daemon"
+make_fake_bin "$BIN17"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t17-nohome" LOOM_DAEMON_SELF_BIN="$BIN17" \
+    bash -c "source '$LIB'; loom_daemon_self_bin_override" )
+assert_eq "$BIN17" "$out" "loom_daemon_self_bin_override echoes an executable \$LOOM_DAEMON_SELF_BIN"
+
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t17-nohome" \
+    bash -c "source '$LIB'; loom_daemon_self_bin_override; echo \"rc=\$?\"" )
+assert_eq "rc=1" "$out" "loom_daemon_self_bin_override returns 1 (and prints nothing) when \$LOOM_DAEMON_SELF_BIN is unset"
+
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t17-nohome" LOOM_DAEMON_SELF_BIN="$WORKDIR/t17/not-a-binary" \
+    bash -c "source '$LIB'; loom_daemon_self_bin_override; echo \"rc=\$?\"" )
+assert_eq "rc=1" "$out" "loom_daemon_self_bin_override returns 1 for a set-but-not-executable \$LOOM_DAEMON_SELF_BIN"
+
+# ---------- 18. loom_resolve_self_daemon_bin still honours the same tier 1
+#                (it now delegates to the helper, so the two cannot drift) ----------
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t18-nohome" LOOM_DAEMON_SELF_BIN="$BIN17" \
+    bash -c "source '$LIB'; loom_resolve_self_daemon_bin" )
+assert_eq "$BIN17" "$out" "loom_resolve_self_daemon_bin still resolves \$LOOM_DAEMON_SELF_BIN first (#8037 behaviour preserved)"
+
+# ---------- 19. THE #8134 FIX, end to end through a real Shape-A stub: with
+#                LOOM_DAEMON_BIN pointing at a probe MOCK and
+#                LOOM_DAEMON_SELF_BIN at the implementation, the stub execs the
+#                IMPLEMENTATION. ----------
+STUB="$(cd "$SCRIPT_DIR/.." && pwd)/strip-ansi.sh"
+if [[ ! -x "$STUB" ]]; then
+    echo -e "${RED}FATAL${NC}: stub $STUB not found" >&2
+    exit 1
+fi
+
+SELF19="$WORKDIR/t19/impl/loom-daemon"
+mkdir -p "$(dirname "$SELF19")"
+cat > "$SELF19" <<'EOF'
+#!/usr/bin/env bash
+echo "IMPL invoked: $*"
+EOF
+chmod +x "$SELF19"
+
+MOCK19="$WORKDIR/t19/mock/loom-daemon-mock"
+mkdir -p "$(dirname "$MOCK19")"
+cat > "$MOCK19" <<'EOF'
+#!/usr/bin/env bash
+echo "MOCK invoked: $*"
+EOF
+chmod +x "$MOCK19"
+
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t19-nohome" \
+    LOOM_DAEMON_BIN="$MOCK19" LOOM_DAEMON_SELF_BIN="$SELF19" \
+    bash "$STUB" </dev/null 2>/dev/null )
+assert_eq "IMPL invoked: strip-ansi" "$out" \
+    "a stub execs \$LOOM_DAEMON_SELF_BIN, NOT the \$LOOM_DAEMON_BIN a caller set to mean a probe mock (#8134)"
+
+# ---------- 20. …and with LOOM_DAEMON_SELF_BIN unset, the stub falls back to
+#                the normal resolution unchanged, so an operator can still pin
+#                the implementation with LOOM_DAEMON_BIN exactly as before. ----------
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t20-nohome" LOOM_DAEMON_BIN="$MOCK19" \
+    bash "$STUB" </dev/null 2>/dev/null )
+assert_eq "MOCK invoked: strip-ansi" "$out" \
+    "with no \$LOOM_DAEMON_SELF_BIN the stub still honours \$LOOM_DAEMON_BIN (operator pin preserved)"
+
+# ---------- 21. a set-but-not-executable LOOM_DAEMON_SELF_BIN falls through
+#                rather than hard-failing — the same contract case 2 pins for
+#                $LOOM_DAEMON_BIN, so a typo'd pin degrades identically
+#                whichever of the two variables carries it. ----------
+stdout_out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t21-nohome" \
+    LOOM_DAEMON_BIN="$MOCK19" LOOM_DAEMON_SELF_BIN="$WORKDIR/t21/not-a-binary" \
+    bash "$STUB" </dev/null 2>/dev/null )
+assert_eq "MOCK invoked: strip-ansi" "$stdout_out" \
+    "a non-executable \$LOOM_DAEMON_SELF_BIN falls through to the normal resolution, not a hard failure"
+
+# ---------- 22. the stub's not-found error names BOTH knobs, so an operator
+#                who lands there learns which one pins the implementation. ----------
+stderr_out=$( env -i PATH="$MINIMAL_PATH" HOME="$WORKDIR/t22-nohome" \
+    bash "$STUB" </dev/null 2>&1 >/dev/null )
+assert_contains "LOOM_DAEMON_SELF_BIN" "$stderr_out" \
+    "the 'loom-daemon not found' error names \$LOOM_DAEMON_SELF_BIN as the implementation knob"
+assert_contains "LOOM_DAEMON_BIN" "$stderr_out" \
+    "…and still names \$LOOM_DAEMON_BIN"
 
 # ---------- summary ----------
 echo

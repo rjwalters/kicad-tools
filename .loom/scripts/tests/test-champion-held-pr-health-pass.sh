@@ -537,6 +537,66 @@ digest_aggregate_line() {
 # (lowest-numbered) open title match instead of returning empty and letting
 # Step 4b create a duplicate digest issue.
 # =====================================================================
+# =====================================================================
+# Digest pin (#8083). The shipped line is EXTRACTED from
+# champion-pr-merge.md's Step 2 and EXECUTED here — it is deliberately not
+# copied into this file. Two properties are load-bearing and neither is
+# obvious from the one-liner:
+#   - it runs on EVERY pass, so a digest that is unpinned (never pinned in
+#     the first place, or unpinned by hand) self-heals on the next tick
+#     rather than staying invisible until someone notices;
+#   - it is best-effort. `gh issue pin` exits non-zero when the issue is
+#     already pinned, when the repo is at GitHub's 3-pin-per-repo cap, and
+#     when the token lacks push scope. The digest is reporting/visibility
+#     only, so none of those may abort the merge pass.
+#
+# #8093: the previous shape MIRRORED the line into this file and ran the
+# copy, then echoed unconditionally. That made Test 12C non-discriminating
+# in two independent, reproducible ways: deleting the pin line from
+# champion-pr-merge.md outright left the suite green (nothing here ever
+# read the shipped file), and deleting `|| true` from the mirror left it
+# green too (a failing stub could not stop the following `echo
+# "pass-continued"`, so sub-assertions (b)/(c)/(d) were vacuous). Both
+# holes are closed below: the real line is extracted from the prompt and
+# executed, and the echo standing in for "the pass continued" is gated on
+# that line's own exit status with `&&`, so a non-zero pin that the line
+# does NOT tolerate itself skips everything after it.
+#
+# This is the extract-and-execute shape #7979 asks for — the same one the
+# ~20 `test-guide-*.sh` suites already use — NOT a prose-existence
+# assertion over a role prompt. The only thing read out of the markdown is
+# a line that is then *run*; its wording is not asserted anywhere, and the
+# failures it produces are behavioural ("the pass did not continue"), not
+# "two strings no longer match".
+# =====================================================================
+DIGEST_PIN_LINE="$(grep -m1 -F 'gh issue pin "$DIGEST_ISSUE"' "$CHAMPION_MD" || true)"
+
+# `gh_pin` stands in for the real `gh issue pin`; its exit status is the
+# only thing the extracted line observes. The trailing echo represents the
+# pass carrying on to the steps that follow the pin — it is `&&`-gated on
+# the extracted line's own exit status, so it is reached only when that
+# line tolerates the failure itself. (Deliberately no `set -e` anywhere:
+# an `errexit` in this file trips scripts/check-pipefail-early-exit.sh's
+# file-global scan and un-suppresses unrelated pre-existing pipelines.)
+digest_pin() {
+    local issue="$1"
+    (
+        # Route `gh issue pin <n>` to the stub; anything else is a sign the
+        # extraction picked up the wrong line, so fail loudly rather than
+        # silently passing.
+        gh() {
+            if [[ "${1:-} ${2:-}" != "issue pin" ]]; then
+                echo "unexpected gh invocation in extracted line: $*" >&2
+                return 99
+            fi
+            gh_pin "${3:-}"
+        }
+        # shellcheck disable=SC2034  # consumed by the `eval "$DIGEST_PIN_LINE"` below
+        DIGEST_ISSUE="$issue"
+        eval "$DIGEST_PIN_LINE" && echo "pass-continued"
+    )
+}
+
 digest_issue_lookup() {
     local json="$1" marker="$2"
     printf '%s\n' "$json" | jq "([.[] | select(.body | startswith(\"$marker\"))] as \$tagged | if (\$tagged | length) > 0 then (\$tagged | min_by(.number)) else min_by(.number) end) | .number // empty"
@@ -1052,6 +1112,64 @@ assert_eq "7050" "$(digest_issue_lookup "$TAGGED_LOWER_NUMBER" "$MARKER")" \
 # (Step 4b's create-a-new-issue path still applies when nothing exists).
 assert_eq "" "$(digest_issue_lookup '[]' "$MARKER")" \
     "(c) no title match at all still returns empty, unaffected by the fallback (#7338)"
+echo
+
+# ---------------------------------------------------------------------
+echo "Test 12C: the digest issue is re-pinned every pass, best-effort (#8083, made discriminating by #8093)"
+
+# (pre) The extraction anchor. Every assertion below runs the line lifted
+# out of champion-pr-merge.md, so if the pin line is deleted from the
+# prompt the extraction yields nothing and (a) goes red on its own — this
+# check exists only so that failure reads as "the line is gone" instead of
+# "PIN:6877 missing from an empty string", exactly like the `could not
+# extract ...` guards in the test-guide-*.sh suites.
+assert_contains "$DIGEST_PIN_LINE" "gh issue pin" \
+    "(pre) the pin line is still extractable from champion-pr-merge.md — this test RUNS the shipped line, it does not mirror it"
+
+# (a) An unpinned digest is pinned by the pass itself. Before #8083 three
+# prompts and a doc described #6877 as pinned while no code path ever pinned
+# one, so `pinnedIssues` read totalCount 0 and an operator had no path to the
+# held-PR pile without already knowing the issue number.
+gh_pin() { echo "PIN:$1"; return 0; }
+PIN_OUT=$(digest_pin 6877)
+assert_contains "$PIN_OUT" "PIN:6877" \
+    "(a) an unpinned digest is pinned by the pass itself - no one-off manual action needed"
+assert_contains "$PIN_OUT" "pass-continued" \
+    "(a) a successful pin lets the pass continue"
+
+# (b) Already pinned: `gh issue pin` errors, and that is the steady state on
+# every pass after the first. It must be a no-op for the pass, and the issue
+# is still pinned afterwards either way - idempotent in effect.
+gh_pin() { echo "gh: Issue is already pinned" >&2; return 1; }
+assert_eq "pass-continued" "$(digest_pin 6877)" \
+    "(b) re-pinning an already-pinned digest does not abort the pass"
+
+# (c) GitHub caps a repository at 3 pinned issues; a repo already at the cap
+# must not lose its Champion pass over a visibility affordance.
+gh_pin() { echo "gh: over the maximum number of pinned issues" >&2; return 1; }
+assert_eq "pass-continued" "$(digest_pin 6877)" \
+    "(c) hitting GitHub's 3-pin cap does not abort Champion's merge pass"
+
+# (d) Pinning needs push access, which a rotated/scoped token may not hold.
+gh_pin() { echo "gh: HTTP 403: Resource not accessible" >&2; return 1; }
+assert_eq "pass-continued" "$(digest_pin 6877)" \
+    "(d) a pin refused for lack of push scope does not abort Champion's merge pass"
+
+# (e) The harness's own discrimination check (#8093). (b)/(c)/(d) are only
+# meaningful if a pin failure that is NOT tolerated actually stops the pass
+# — otherwise they assert an echo the harness guarantees regardless, which
+# is precisely the defect #8093 was filed for. Run the SAME extracted line
+# with its failure tolerance stripped and confirm the pass does not
+# continue. If someone later un-gates the trailing echo (making it run
+# regardless of the extracted line's exit status), or the extracted line
+# stops being the thing that is run, this goes red and says so.
+DIGEST_PIN_LINE_REAL="$DIGEST_PIN_LINE"
+DIGEST_PIN_LINE="${DIGEST_PIN_LINE_REAL/|| true/}"
+assert_eq "" "$(digest_pin 6877)" \
+    "(e) with '|| true' stripped from the extracted line, a failing pin DOES abort the pass — so (b)/(c)/(d) above are testing the tolerance, not a guaranteed echo"
+DIGEST_PIN_LINE="$DIGEST_PIN_LINE_REAL"
+
+unset -f gh_pin
 echo
 
 # ---------------------------------------------------------------------

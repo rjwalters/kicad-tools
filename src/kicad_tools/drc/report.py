@@ -552,6 +552,16 @@ def _extract_values(data: dict, message: str) -> None:
     if width_match:
         data["required_value_mm"] = float(width_match.group(1))
         data["actual_value_mm"] = float(width_match.group(2))
+        return
+
+    # Pattern: "min X.XXXX mm; actual Y.YYYY mm" (kicad-cli 10 hole-to-hole wording)
+    min_actual_match = re.search(
+        r"\bmin(?:imum)?\s+([\d.]+)\s*mm.*?actual\s+(-?[\d.]+)\s*mm", message, re.IGNORECASE
+    )
+    if min_actual_match:
+        data["required_value_mm"] = float(min_actual_match.group(1))
+        data["actual_value_mm"] = float(min_actual_match.group(2))
+        return
 
 
 def _infer_segment_via_type(vtype: ViolationType, items: list[str]) -> ViolationType:

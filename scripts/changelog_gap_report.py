@@ -82,6 +82,31 @@ _CONVENTIONAL_SUBJECT = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?!?:")
 #: the rationale) rather than padding the CHANGELOG with a non-user-visible bullet.
 INTERNAL_ISSUES: dict[int, str] = {
     4479: "board-05 CI closeout: AST guard test + CI blocking bound, no shipped surface",
+    4895: "CI unblock: reformat ruff-formatted markdown code blocks; no shipped surface",
+    4925: "test-harness path resolution for boards/external/; dev-only, no shipped surface",
+    4938: "CI ruff-format exclusion for Loom-vendored .claude/.loom markdown; repo tooling",
+    4940: "CI ruff-format exclusion for Loom-vendored .claude/.loom markdown; repo tooling",
+    4950: "CI ruff-format exclusion for Loom-vendored .claude/.loom markdown; repo tooling",
+    4962: "mypy 2.3.1 baseline diagnostic normalization; type-checker UX only",
+    4963: "Loom curator heartbeat self-perpetuation fix; orchestration tooling",
+    5027: "Cloudflare Pages deploy-guard scoping; release/deploy tooling only",
+    5044: "main-CI red repair (readiness status, ruff drift, E2E cascades); repo CI only",
+    5084: "CI fleet angle-census artifact discovery glob; repo CI only",
+    5130: "CI workflow recognizes verified Loom App issue authors; repo CI only",
+    5247: "local-gate manifest exemption for the CI changes detector; repo tooling",
+    5249: "CI content-contract behavior on docs-only PRs; repo CI only",
+    5271: "test-only stale rule-count floor replaced with a rule-name assertion; dev tests",
+    5331: "Loom publish-side yield-exclusion/lease-thrash fix; orchestration tooling",
+    5366: "CI Detect Changes nested content-only path-exclusion repair; repo CI only",
+    5535: "Loom judge draft-PR fallback exclusion; orchestration tooling",
+    5552: "restore #5535's judge exclusion after installed-surface resync; orchestration tooling",
+    5566: "CI caching of kicad-cli capability probes; repo CI runtime only",
+    5572: "CI native-slot wait credited to the waiting test's timeout; repo CI only",
+    5580: "CI determinism gate compares whole copper nodes; repo CI gate mechanics",
+    5584: "test-only finite-mode route-budget composition; dev test flake fix",
+    5586: "CI board06 smoke copper hash delegates to normalize_copper.py; repo CI only",
+    5587: "CI board02/04 determinism-smoke flag drift + timeout raise; repo CI only",
+    5597: "CI board06 determinism-smoke explicit output dir; repo CI only",
 }
 
 #: Commits (by SHA prefix) that carry a user-visible-looking subject, resolve to no

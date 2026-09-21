@@ -54,6 +54,50 @@ cat .loom/logs/hook-errors.log
 
 If the log is absent or empty and hooks aren't blocking, confirm Claude Code is invoked with `--dangerously-skip-permissions` (not `bypassPermissions`).
 
+### Every tool call is denied with "Loom hook … is not installed in this workspace" (#7761)
+
+**Symptom**: every `Bash` call (and/or every `Edit`/`Write`) is denied with a
+message naming a missing `.loom/hooks/<name>` path, and `.loom/logs/hook-errors.log`
+fills with `[hook-wiring] … is not installed`.
+
+**This is working as designed, and it is telling the truth.** Before #7761 a
+missing or non-executable guard failed open *silently*: the command ran
+unguarded with no diagnostic at all, which under `--dangerously-skip-permissions`
+means nothing at all stood between the agent and a destructive command. A
+workspace that carries a `.loom/hooks/` directory is asserting that it expects
+those hooks, so a missing one is now treated as a broken install rather than an
+opt-out. (A repo with no `.loom/` is unaffected — it still fails open silently,
+as it should.)
+
+**Diagnose and repair**:
+
+```bash
+.loom/scripts/check-guards-installed.sh          # names every offender; exit 2 = broken
+.loom/scripts/check-guards-installed.sh --fix    # restores a lost executable bit
+./scripts/install-loom.sh                        # reinstalls missing hook scripts
+```
+
+Then **restart Claude Code** — `.claude/settings.json` hook entries are read at
+session start.
+
+A *lost executable bit alone never denies*: `hook-wiring.sh` runs that hook via
+`bash` (which needs only read permission) and warns, so coverage is intact. A
+deny means the script is genuinely absent from both `.loom/hooks/` and the
+machine-level checkout.
+
+**If you need the session back before you can repair it**, set the escape hatch
+in the environment and relaunch:
+
+```bash
+LOOM_GUARD_WIRING_FAILOPEN=1 claude --dangerously-skip-permissions
+```
+
+That downgrades the deny to a loud warn-and-allow. It is an environment variable
+rather than a `guards.*` config key on purpose: a committed config key could
+restore the silent-allow hole for everyone in one PR. **Repair the install
+rather than leaving the hatch set** — with it on you are running with no guard
+and only a stderr line to tell you.
+
 ### `worktree.sh N` skips a stale post-squash-merge remote branch (#5657)
 
 `worktree.sh N` prefers reusing `refs/remotes/origin/feature/issue-N` over
@@ -69,15 +113,18 @@ where the *same* branch name `feature/issue-N` is deliberately reused across
 an issue's slices, so a squash-merged prior slice's branch can still be
 sitting on `origin` when the next slice's worktree is created.
 
-`worktree.sh` now checks the remote branch's tip against the forge (reusing
-the same `_worktree_merged_pr_head_sha` helper already used by the worktree
-**removal** path, #4889) before reusing it: if the tip matches an
-already-merged PR's head, it creates a fresh branch from the base ref instead
-and prints which PR made the old branch stale. If the forge lookup is
-unavailable (network/auth failure), it fails open to the pre-existing reuse
-behavior — a forge outage never blocks worktree creation. The #4823 in-flight
-case (remote branch exists, not yet merged, possibly diverged from base) is
-unaffected and still reused exactly as before.
+`worktree.sh` now asks the shared `branch_landed` primitive
+(`lib/branch-landed.sh`, #7812 — the same one the worktree **removal** path and
+`merge-pr.sh` use) before reusing it: if the branch has already landed, it
+creates a fresh branch from the base ref instead and prints which PR (or which
+evidence) made the old branch stale. Because that primitive checks the forge's
+PR state, plain ancestry, *and* `git merge-tree --write-tree` tree equality, it
+is correct under a squash merge, a rebase merge (SHAs rewritten) and a merge
+commit alike. If nothing can answer — forge unreachable *and* no usable tree
+comparison — the verdict is `unknown` and it fails open to the pre-existing
+reuse behavior: a forge outage never blocks worktree creation. The #4823
+in-flight case (remote branch exists, not yet merged, possibly diverged from
+base) is unaffected and still reused exactly as before.
 
 ### `git push --force-with-lease` prints a rejection for a ref update that landed (#6695)
 
@@ -2265,10 +2312,40 @@ including mid-sweep, with zero risk to the live checkout:
 ./.loom/scripts/resync-installed.sh --output /tmp/loom-resync-staging
 cd /tmp/loom-resync-staging
 git checkout -b chore/resync-installed-$(date +%Y%m%d)
-git add -A && git commit -m 'chore: resync installed Loom surfaces'
+# Never a bare `git add -A` here (#7818): `.loom/gh-config/` and
+# `.loom/gh-config-by-owner/` are the daemon-owned GH_CONFIG_DIR trees holding
+# live GitHub App installation tokens, and a bare add is exactly what swept one
+# into a public repo on 2026-08-23. The exclusions below are belt-and-braces —
+# loom-daemon's managed .gitignore block already covers both.
+git add -A -- . ':!.loom/gh-config' ':!.loom/gh-config-by-owner'
+git commit -m 'chore: resync installed Loom surfaces'
 git push -u origin HEAD   # open a PR from here
 cd - && git worktree remove /tmp/loom-resync-staging   # from the primary checkout when done
 ```
+
+Or skip the hand-rolled add entirely and let
+`./.loom/scripts/land-resync-commit.sh` stage and commit for you — it stages an
+explicit allowlist of resync-surface pathspecs (never `-A`), refuses to land if
+any unrelated dirt is present, and unconditionally excludes the two credential
+trees above even on a host whose `.gitignore` is stale.
+
+**If a credential path is already git-TRACKED, that same script stops instead
+(#8004).** Excluding it from one commit fixes nothing in that state: git applies
+no `.gitignore` rule to a path already in the index, so the credential stays
+committed and every other `git add -A` / `git add .loom` in the checkout keeps
+staging each freshly-minted token. The refusal names the remediation, which is
+the same by hand:
+
+```bash
+git rm --cached -r -- .loom/gh-config .loom/gh-config-by-owner   # untrack; files stay on disk
+loom-daemon update-gitignore                                     # restore the managed ignore block
+git commit -m 'chore: untrack GH_CONFIG_DIR credential trees'
+# then ROTATE the credential — it is in the repository's history and must be
+# assumed compromised (revoke/regenerate the GitHub App installation token).
+```
+
+To audit a host for the condition before it bites: `git ls-files | grep
+gh-config` in each managed checkout — any output at all is the tracked state.
 
 The staging worktree is a real, independent git checkout at the primary's current
 `HEAD` — not a bare file copy — so once the sync completes it is immediately a

@@ -150,16 +150,16 @@ git add <resolved-files>
 # 3. Continue the rebase
 git rebase --continue
 
-# Version-bearing-file sync gate (#7168, extended #7341): if you push here
-# directly (e.g. updating an already-open PR) rather than going through
-# create-pr.sh again, gate first -- a rebase silently absorbs whatever
-# version-bearing values origin/main already had, and a file your branch's
-# own commits never touched (in practice .loom/install-metadata.json) never
-# raises a git conflict, so it can drift invisibly until CI's "Installer
-# Integration Tests" fails. Never hand-patch VERSION/CLAUDE.md/etc. yourself
-# to fix a mismatch -- always run the printed `./scripts/version.sh` command.
+# Version-bearing-file sync gate (#7168, #7341; moot after #7743): if you push
+# here directly (updating an already-open PR) rather than through create-pr.sh
+# again, gate first. Under #7743 no PR carries a version-bearing edit, so a
+# clean rebase lands exactly origin/main's values; if the gate still fires,
+# your branch carries one (e.g. a pre-#7743 bump commit).
+# Never hand-patch VERSION/CLAUDE.md/etc. and never run `version.sh bump` (the
+# printed Fix: predates #7743) -- restore them to origin/main's values
+# (`git checkout origin/main -- <files>`), commit, re-run the gate, then push.
 if [ -x ./.loom/scripts/version-check-gate.sh ] && ! ./.loom/scripts/version-check-gate.sh --fix-hint "then push."; then
-  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - resolve before pushing"
+  echo "Version-bearing files out of sync after rebase (see BLOCKER:/Fix: above) - revert, never bump"
   exit 1
 fi
 
@@ -232,6 +232,14 @@ cd .loom/worktrees/issue-XX
   captures WIP as a patch file under
   `<worktree-root>/.snapshots/issue-<N>-<timestamp>.patch`, scoped to your own
   worktree, with no risk of collision with other builders' stashes.
+- For a "clean baseline vs. my diff" comparison — temporarily clearing your
+  fix to re-run a lint/test baseline, then restoring it — `snapshot` is *not*
+  enough (it captures a patch but does not reset the working tree). Use
+  `./.loom/scripts/worktree.sh stash-push <issue-number>`, run the baseline
+  check, then `./.loom/scripts/worktree.sh stash-pop <issue-number>` (#5217).
+  It anchors your WIP to a **per-issue** ref
+  (`refs/loom/stash-baseline/issue-<N>`), never `refs/stash`, so no concurrent
+  builder's stash can land between your push and pop.
 
 **Don't use `git push --force` without `--force-with-lease`**
 - `--force-with-lease` is safer - it fails if someone else pushed

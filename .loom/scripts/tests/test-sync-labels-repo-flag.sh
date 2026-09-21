@@ -76,31 +76,69 @@ assert_eq() {
     fi
 }
 
+# _byte_len: true BYTE count of $1, independent of the ambient locale.
+# `${#var}` counts CHARACTERS under a multibyte (e.g. UTF-8) locale, which
+# undercounts a haystack containing this file's ANSI-colored ℹ/✓/✗/⚠ output.
+# Flipping LC_ALL=C for the expansion (no subprocess -- ${#} is a bash
+# builtin operator, and LC_ALL is read directly from the exported
+# environment, not cached) makes it count raw bytes instead, matching what
+# `wc -c` would report. Used only on the (rare) failure path below.
+_byte_len() {
+    local -x LC_ALL=C
+    printf '%s' "${#1}"
+}
+
+# assert_contains / assert_not_contains: pure bash substring match -- NO
+# external process is forked to evaluate the assertion (#7819).
+#
+# The previous implementation was `printf '%s' "$haystack" | grep -F --
+# "$needle" >/dev/null`: two forked processes (printf's pipeline subshell,
+# grep) per assertion, ~161 times in one run of this suite. Under
+# run-ci-suites.sh's parallel pool -- dozens of suites forking their own
+# subprocesses at the same time -- that fork pair is exactly the kind of call
+# that can hit a transient `fork: retry: Resource temporarily unavailable`
+# (EAGAIN) on a loaded CI runner. When printf or grep fails to fork, the
+# pipeline reads as "no match" even though $haystack -- an ordinary bash
+# variable that the failed fork never touched -- still holds the needle
+# byte-for-byte. That reproduces the exact symptom reported in #7819: a FAIL
+# whose own diagnostic (a bash builtin `echo`, never forked) shows the needle
+# sitting right there in the haystack, which looks like `grep -F` lying about
+# a literal match it should never be able to miss.
+#
+# `[[ "$haystack" == *"$needle"* ]]` needs zero forks -- the quoted $needle is
+# matched as a literal substring, not a glob pattern, so this is a drop-in
+# semantic replacement for `grep -F`. Being fork-free, it cannot suffer from
+# this flake class at all. Reproduced locally (not committed as a test, to
+# avoid trading one source of CI flakiness for another): lowering `ulimit -u`
+# for an isolated subshell to just a few slots above the host's live process
+# count makes `printf | grep` throw spurious "no match" results under that
+# pressure, while this bash-builtin form never does, in the same loop, on the
+# same inputs.
 assert_contains() {
     local haystack="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "  ${GREEN}PASS${NC}: $msg"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
         echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
+        echo "    Expected substring: '$needle' ($(_byte_len "$needle") bytes)"
+        echo "    In ($(_byte_len "$haystack") bytes): '$haystack'"
     fi
 }
 
 assert_not_contains() {
     local haystack="$1" needle="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if ! printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" != *"$needle"* ]]; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "  ${GREEN}PASS${NC}: $msg"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
         echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Unexpected substring: '$needle'"
-        echo "    In: '$haystack'"
+        echo "    Unexpected substring: '$needle' ($(_byte_len "$needle") bytes)"
+        echo "    In ($(_byte_len "$haystack") bytes): '$haystack'"
     fi
 }
 

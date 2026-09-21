@@ -109,6 +109,49 @@ The gate is **opt-in**. Repos with no `buildGate` block in `.loom/config.json` s
 }
 ```
 
+### Docker-requiring toolchains (Lean, SPICE, or similar)
+
+A builder — and therefore `buildGate.command` — usually runs from a Loom
+worker container, which gets **no docker socket** (ADR-0017 Decision 3: a
+mounted `docker.sock` is host-root-equivalent, defeating the containment
+boundary). When the toolchain itself needs docker (a Lean proof checker, a
+SPICE simulator, a cross-compiler that only ships as an image), do not shell
+`docker` directly from the gate command — that assumes a socket the worker
+container does not have, and epic #6896 Phase 4's whole point is that no
+worker-container-path caller may. Wrap the invocation in
+[`run-job.sh`](../scripts/run-job.sh) instead, which ships a job spec to a
+host-level executor and passes the job's logs and exit code back verbatim
+(full contract: [`run-job-seam.md`](run-job-seam.md)):
+
+```json
+{
+  "buildGate": {
+    "command": ".loom/scripts/run-job.sh --image ghcr.io/example/lean-toolchain:pinned --mount \"$PWD\" --workdir \"$PWD\" -- bash -lc 'lake build'",
+    "realChangeGlobs": ["*.lean", "lakefile.lean"],
+    "timeoutSeconds": 1800
+  }
+}
+```
+
+`run-job.sh`'s own exit code *is* the toolchain's exit code (0–255 verbatim,
+never a fabricated result — see the seam doc's exit-code table), so the gate's
+existing `build-passes` check needs no change to consume it: a red `lake
+build`/SPICE run inside the job container still fails the gate the same way a
+red `cargo build` does. `--timeout`/`timeoutSeconds` compose independently —
+the job's own graceful-stop timeout (`run-job`'s `--timeout`) should stay
+comfortably under the gate's `timeoutSeconds`, so a hung toolchain is stopped
+by the job's own budget before the gate's step-timeout (#6192, above) would
+otherwise TERM-then-KILL the `run-job.sh` client out from under a still-running
+job container.
+
+This is the general pattern for **any** worker-container-path step that needs
+docker-backed work, not just `buildGate.command` — the same wrapping applies
+to a sim/build wrapper invoked from elsewhere in a sweep. See
+[`run-job-seam.md`](run-job-seam.md) § "Caller migration (#7854)" for the
+audit that confirmed no such caller exists in this repository today, and why
+this doc's example — rather than an in-tree script — is the concrete
+migration artifact.
+
 ### Disable without removing config
 
 ```json

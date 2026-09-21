@@ -23,6 +23,7 @@ pipeline state already lives.
 - [Entry points](#entry-points)
 - [Exit rule](#exit-rule)
 - [Current implementation](#current-implementation)
+- [Finding what is waiting on you (#8083)](#finding-what-is-waiting-on-you-8083)
 - [`loom:operator-only` sub-kinds (#5671)](#loomoperator-only-sub-kinds-5671)
 - [`loom:needs-capability` — a narrower claim than `loom:operator-only` (#5817)](#loomneeds-capability--a-narrower-claim-than-loomoperator-only-5817)
 - [Bidirectional routing: `loom:operator-only` ↔ `loom:needs-capability` (#5818)](#bidirectional-routing-loomoperator-only--loomneeds-capability-5818)
@@ -213,6 +214,55 @@ or `loom:blocked`. Re-queueing such a PR for review would silently un-park it,
 which is precisely the transition only a human may make. It still reports the
 verdict as stale, so the PR is not merged either; it simply stays exactly where
 the operator left it.
+
+## Finding what is waiting on you (#8083)
+
+`loom:operator` and `loom:operator-only` put "a human is needed" on the label
+substrate — but a state nothing points at is only half-visible. Three
+destinations answer "what is waiting on me?", cheapest first.
+
+**1. The two label queries.** Both are one call and neither was written down
+anywhere before #8083:
+
+```bash
+# PRs Champion is holding on a merge-risk or critical-file hold:
+gh pr list --state open --label loom:operator --json number --jq 'length'
+# Issues parked for an operator (see the sub-kinds below for which kind):
+gh issue list --state open --label loom:operator-only --json number --jq 'length'
+```
+
+**2. The merge-risk hold digest — [#6877](https://github.com/rjwalters/loom/issues/6877).**
+Champion's Held-PR Census (#6720 / #6851 / #7020) overwrites this issue's body
+every pass with one row per held PR — PR number, the hold's own reason, the
+`mergeable` status, and how long a conflict has been rotting — plus an
+aggregate line. It is **pinned** to the repository so it is reachable from the
+issues page without knowing the number; `champion-pr-merge.md` → "Held-PR
+Census" → "Per-PR Digest" → Step 2 re-pins it on **every** pass, so an
+unpinned digest self-heals rather than silently staying invisible (the pin is
+best-effort and never blocks a merge decision).
+
+The digest carries **both** `loom:blocked` and `loom:operator`, and that
+pairing is deliberate:
+
+- `loom:blocked` is what keeps it out of the pipeline. It is a park label
+  (`loom-daemon`'s `work_finder::PARK_LABELS`, enforced at dispatch), and the
+  digest also never carries `loom:issue`, so no work-finder or sweep path can
+  ever pick it up. **Do not remove `loom:blocked` from the digest** — it is
+  the whole park.
+- `loom:operator` is what makes it *findable*: it is the canonical
+  "a human is needed" label, so the digest now answers the same query as the
+  thing it describes. It is safe to carry on an issue because every consumer
+  of `loom:operator` is PR-scoped — the census itself reads `gh pr list
+  --label loom:operator`, so the digest can never enumerate itself, and sweep's
+  `loom:operator` handling (`sweep-wave-lifecycle.md`, `sweep-reference.md`)
+  only ever declines to route an already-`loom:pr` **PR** to merge.
+
+**3. `loom-daemon serve`'s dashboard.** Surfacing these counts in
+`loom-daemon health` and as an operator-held bucket on `GET /api/pipeline` is
+tracked separately in
+[#8091](https://github.com/rjwalters/loom/issues/8091) — note that `health`
+rolls `overall` up over *every* section, so a new section there interacts with
+the #4761 exit-code contract.
 
 ## `loom:operator-only` sub-kinds (#5671)
 
@@ -484,7 +534,7 @@ with `loom:operator-objective` available to all of them as a fourth choice
 
 | Role | Site | Sub-kind it applies |
 |---|---|---|
-| Champion | Unrevised-proposal N=2 escalation (`champion-issue-promo.md`), epic-complete-unpromoted escalation (`champion-common.md`) | `loom:operator-blocked` when the recurring finding is itself a live, open dependency; `loom:operator-decision` otherwise |
+| Champion | Unrevised-proposal N=2 escalation (`champion-issue-promo.md`), epic-complete-unpromoted escalation (`champion-common.md`) | `loom:operator-blocked` when the recurring finding is itself a live, open dependency; `loom:operator-decision` otherwise. **Exception, no label applied (#7657)**: when every recurring finding is `premise-false` (a cited path/line-range/repo-state claim, re-verified false on current `main`), Champion closes the proposal (`<!-- champion:premise-false-closed:<main-sha> -->`, `gh issue close --reason "not planned"`) instead of escalating — no `loom:operator-only` and no sub-kind, since nothing is routed to a human. Any mixed premise-false + ordinary finding set still escalates via the row above, unchanged. |
 | Champion | Dependency-cycle detector (`detect-dependency-cycle.sh`, invoked from `champion-issue-promo.md` and `champion-pr-merge.md`), capped-PR close recommendation (`champion-pr-merge.md`) | `loom:operator-decision` — matching their own rationale ("breaking a cycle is a human decision" / "the approach itself is not viable") |
 | Curator | "Applying `loom:operator-only`" (`curator.md`) — routing an issue that encodes a still-pending human decision instead of closing it | Caller's choice among all four sub-kinds |
 | Builder | "Applying `loom:operator-only`" (`builder.md`) — parking a claimed issue that turns out to need a human; `builder-complexity.md` additionally states that a *size* finding is `loom:blocked`, never this label | Caller's choice among all four sub-kinds |

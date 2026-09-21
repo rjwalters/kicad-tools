@@ -515,6 +515,40 @@ assert_eq "$(jq -r '[.hooks.PreToolUse[0].hooks[] | select(.command == $h)] | le
 # entry either — same no-duplicate contract as before this issue.
 assert_eq "$(count_marker "$HOME20/.claude/settings.json" guard-destructive.sh)" "1" "no second (Loom) entry appended alongside the hand-written one"
 
+# ── Test 21: the #7761 project wiring is recognized, not duplicated ──────────
+#
+# ensure_project_hook_wiring dedups on `.loom/hooks/<name>` while EXCLUDING any
+# command containing `defaults/hooks/` (that substring marks the MACHINE-level
+# wrapper, which embeds `$ROOT/.loom/hooks/<name>` in its own dedup probe). The
+# #7761 project wiring therefore must not carry a `defaults/hooks/` substring —
+# if it ever does, the exclude test misreads it as a machine-level entry and
+# APPENDS a second, bare project entry, double-firing every guard. That
+# constraint is invisible from the settings file itself, so it is pinned here.
+echo "Test 21: the #7761 project-level wiring is deduped, never duplicated (#7761)"
+if [[ -f "$REPO_ROOT/.claude/settings.json" ]]; then
+    TARGET21=$(mktemp -d); mkdir -p "$TARGET21/.loom/hooks" "$TARGET21/.claude"
+    for n in guard-destructive.sh guard-loom-workflow.sh guard-worktree-paths.sh \
+             skill-router.sh methodology-inject.sh guard-background-subagents.sh hook-wiring.sh; do
+        printf '#!/bin/sh\nexit 0\n' > "$TARGET21/.loom/hooks/$n"
+        chmod +x "$TARGET21/.loom/hooks/$n"
+    done
+    cp "$REPO_ROOT/.claude/settings.json" "$TARGET21/.claude/settings.json"
+    ensure_project_hook_wiring "$TARGET21" >/dev/null 2>&1 || true
+    for n in guard-destructive.sh guard-loom-workflow.sh guard-worktree-paths.sh \
+             skill-router.sh guard-background-subagents.sh; do
+        assert_eq "$(jq -r --arg n "$n" \
+            '[.. | objects | .command? // empty] | map(select(contains(".loom/hooks/" + $n))) | length' \
+            "$TARGET21/.claude/settings.json")" "1" \
+            "exactly one project entry for $n after re-asserting project wiring"
+    done
+    assert_eq "$(jq -r '[.. | objects | .command? // empty] | map(select(contains("defaults/hooks/"))) | length' \
+        "$REPO_ROOT/.claude/settings.json")" "0" \
+        "the project wiring carries no 'defaults/hooks/' substring (would defeat the dedup exclude)"
+    rm -rf "$TARGET21"
+else
+    echo "  (skipped: no $REPO_ROOT/.claude/settings.json)"
+fi
+
 echo ""
 echo "======================================"
 echo "test-provision-hooks.sh: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

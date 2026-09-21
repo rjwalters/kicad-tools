@@ -7,6 +7,446 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-21
+
+### Summary
+
+Development since `v0.20.0`: router convergence and reliability work
+(stagnation-recovery congestion marking, C++ pathfinder resume-loop fixes,
+per-connection avoidance cleanup by default), zone pour determinism and
+same-layer fairness, through-hole pad and barrel reuse in pour-bridge
+repair, the first phases of the pad-access and clearance-kernel epics
+(ordered commit journal + per-pad access witness; exact-geometry clearance
+kernel with C++/Python parity), frame-independent board07 pour repair with
+native-refill stability, a broad measured performance sweep across the
+router/validator/CLI hot paths, and board06/07 recipe and CI
+qualification advances.
+
+**Breaking (for `[mcp]` extra users):** the MCP server now requires the
+mcp 2.x SDK — `mcp.server.fastmcp.FastMCP` was renamed to
+`mcp.server.mcpserver.MCPServer` — with the `fastmcp` pin raised to
+`>=4,<5` (#5601). In-process API callers using the stdio `MCPServer`
+dataclass are unaffected.
+
+- **Routing, validation and CLI hot-path performance sweep** (#5240, with
+  #5070, #5429, #5465, #5467, #5469, #5471) — systematic removal of
+  measured hot-path overhead across the router, validator, placement and
+  CLI: `RoutingGrid.cell_at()` replaces the remaining
+  `grid[layer][y][x]` view allocations in the A\* neighbor loop,
+  congestion cost stays in scalar Python floats within a neighbor batch,
+  `CppGrid.from_routing_grid` copies only blocked cells, the
+  via-placement pad sweep and diff-pair corridor-mask dilation are
+  vectorized, and copper-clearance / match-group / net-status candidate
+  pairs are pruned by spatial bounds or AABB pre-filters before exact
+  geometry runs (`validate_routes` skips provably-far pairs; board06's
+  pour-audit and pour-repair pairwise scans prune spatially impossible
+  candidates while preserving the exact predicate). `kct build-native`
+  now installs the placement and DRC C++ extensions it already compiled
+  instead of discarding them; LVS resolves every schematic pin against
+  one shared connectivity graph; validation and rule exports resolve
+  lazily; and eager CLI/reasoning imports are deferred to cut
+  per-invocation startup. Local same-host medians: `import
+  kicad_tools` 1.46 s → 0.34 s user CPU (−77 %); the A\* neighbor-batch
+  cost 3.67 s → 0.93 s (~3.9×) with identical routes; sampled placement
+  force 1.70 s → 1.02 s (2,000 force outputs and final component states
+  exactly matched); the placement C++ path ~64 s → 0.55 s; board-05 LVS
+  pin resolution 3.5 s → 0.18 s (~20×, `kct check` 108.96 s → 75.95 s
+  instrumented, output byte-identical); the board06 pour-connectivity
+  audit 0.398 s → 0.270 s. These are local measurements — the
+  hosted-CI median comparison for the three target jobs remains open on
+  #5240.
+
+- **Legacy `(module …)` footprints are recognized by every remaining
+  tree-walk** (#4891, #4892, #4893, #4888, #4894, #4915) — completes the
+  legacy-module fix past the parser into the router/zones/DRC/LVS/panel
+  walks, the remaining CLI tree-walks, and the pcb/export/reasoning/
+  silkscreen consumers, so a KiCad-4-era board is not silently parsed to
+  zero footprints downstream of loading; `kct panel` remaps legacy
+  footprint reference text instead of dropping it; the board runner
+  restores net headers before legacy footprints load; and the corpus
+  footprints/pads metrics for all nine boards were re-pinned after the
+  fix so the regression baseline reflects the corrected counts.
+
+- **Pad rotation is honored across obstacle, clearance and thermal
+  models** (#4910, #5194) — the router's obstacle models apply
+  non-cardinal pad rotation, and every clearance and thermal consumer of
+  pad geometry reads the rotated footprint, closing the companion gap to
+  the non-cardinal pad-clearance fix (#5227) so a rotated pad is priced
+  identically everywhere.
+
+- **Copper-LVS and net-status decide on physical copper contact, not
+  zone ownership or endpoint luck** (#4982, #4986, #5031, #5060, #5061,
+  #5185, #5198, #5062) — `compare_copper_netlist()` no longer suppresses
+  a whole net's `open` findings just because the net owns a zone
+  somewhere on the board (board05's 44 unconnected power/ground pads
+  previously reported PASSED); copper contact is decided over a
+  segment's full length rather than its endpoints; duplicate physical
+  pad occurrences are preserved through LVS instead of collapsing onto
+  one symbol; same-zone fill islands require real copper contact to
+  count as connected; dangling tracks are detected by copper-cap
+  contact; strict pour chains enforce via spans; and `kct check` gains a
+  physical copper-slit detector that flags slits by geometry,
+  independently of net identity.
+
+- **Board outlines: shared authoritative bounds, robust Edge.Cuts
+  stitching, and bounded curved geometry** (#4978, #4948, #5367) —
+  routing and the schema read one authoritative outline-bounds
+  computation; `kct stitch` closes Edge.Cuts outlines across gaps and
+  multiple contours instead of failing on imperfect geometry; and the
+  router preserves bounded circle, arc and Bezier outline geometry:
+  `gr_circle` Edge.Cuts elements tessellate into a closed chord chain
+  with a certified max sagitta error (1e-5 mm — an order below the
+  1e-4 mm clearance-comparison epsilon, with the chord error explicitly
+  charged to clearance consumers so a verdict cannot flip), so boards
+  with round outlines or circular cutouts route instead of being
+  rejected outright; the pinned BeagleConnect Freedom acceptance board's
+  11 `gr_circle` elements now clear the loader.
+
+- **Via relocation and in-pad via escapes respect physical copper**
+  (#4981, #5010, #5065, #5068, #5069) — relocating stitch vias preserves
+  pad and plane contacts and commits only complete, validated stubs;
+  unassigned SMD copper acts as a relocation obstacle; project
+  hole-to-copper clearance is enforced during via relocation; and a
+  blocked in-pad via triggers a search for a safe alternate escape
+  rather than a dead end.
+
+- **Pour bridges terminate on existing same-net copper** (#5507, #5551,
+  #5606) — when a pour needs a bridge, the zones stage reuses an
+  existing same-net via barrel, an existing through-hole pad as the
+  bridge terminus (board06 sub-stage D included), instead of
+  manufacturing new copper next to copper that already bonds the pour.
+
+- **HV isolation: scoped waivers, refill-safe keepouts, signed equal
+  potential** (#4699, #5399, #5446, #5484) — the router's HV
+  attach-zone waiver is pad/layer-scoped and backed by a
+  preserved-copper audit; HV keepout clearance and authored source
+  constraints survive the native zone refill that regenerates them; and
+  equal-potential nets keep their clearance even when a zero HV
+  threshold would otherwise collapse the pairwise requirement.
+
+- **Match-group and diff-pair tuning preserve physical copper** (#4984,
+  #5289, #5290, #5293, #5408, #5496) — split-net copper survives match
+  tuning and diff-pair tuning; paired match tuning applies physical
+  context; tuning checks span physical via barrels rather than just
+  landing pads; authored gaps in differential sizing are preserved; and
+  symmetric match-group splices with mismatched host spans are rejected
+  rather than silently spliced.
+
+- **Pad-access witness infrastructure (Epic #5508, Phases 1a–1c)**
+  (#5516, #5517, #5610, #5599) — the router records every copper
+  mutation (commits, rip-ups, restores, wholesale occupancy resyncs) in
+  an ordered commit journal tagged with the pass and iteration that
+  produced it, persists it next to the routed board as
+  `<stem>.access_witness.json`, and replays it into a per-pad access
+  witness — so an offline consumer can name the commit that closed a
+  pad's access set on a saved board where the live router is long gone.
+  Pad access sets gate the search, the resume loop rejects an
+  already-accepted goal node, and a localized strict pad-parity check
+  pins the invariant.
+
+- **Exact-geometry clearance kernel (Epic #5509, Phase 1b)** (#5514,
+  #5589) — one shared exact-geometry clearance kernel over segments,
+  vias, edges, pads and zone polygons, ported line-for-line to both C++
+  (`router/cpp/clearance_kernel.*`, all-double internals to hold the
+  1e-7 mm parity bound; `ROUTER_CPP_BUILD_VERSION` 39 → 40) and pure
+  Python (`router/clearance_kernel.py` — no shapely, no `router_cpp`
+  import), covering all fifteen unordered shape pairs. `KPad` carries a
+  Minkowski decomposition (a convex core of 1–4 board-frame vertices
+  dilated by a corner radius) rather than a tessellated outline, so
+  `copper_gap(pad, X) = dist(core, X) − radius` is exact with no vertex
+  list for the two ports to disagree about. No consumer is switched
+  yet; Phases 2–4 migrate them onto the kernel.
+
+- **Declared swap groups with crossing-minimising pin assignment
+  (report-only)** (#5522) — the declaration/proposal half of the swap
+  pair the #5536 entry below executes: a designer-declared `swap_group`
+  on net-class sidecar entries plus `propose_swap_assignment()`, which
+  computes the crossing-minimising pad-to-net re-binding for a bundle
+  measured genuinely reversed and surfaces it as data
+  (`StuckNetDiagnosis.swap_proposal`, the `reorder_pins` placement
+  delta, `kct net-status --why --format json`) — nothing is applied to
+  any board at this stage.
+
+- **`kct readiness`: scripted manufacturing sign-off** (#4977, #5170,
+  #5391) — `kct readiness <board>` produces the hash-bound
+  `output/readiness.json` evidence the demo gallery validates,
+  orchestrating engines that already exist (`kct check`, `kicad-cli pcb
+  drc --refill-zones`, `kct export`, PDF exports) through an injectable
+  `Engines` bundle rather than duplicating them — previously the
+  sidecar had to be assembled by hand, gate by gate. Component-stress
+  rows are wired into readiness blockers, and finished releases are
+  verified without replacing recipe contents.
+
+- **MCP server: call observability, design-intent tools, and the 2.x
+  SDK** (#4855, #4897, #5102, #5103, #5128, #5601) — both MCP tool
+  dispatch boundaries record each call's name, duration, status and
+  error kind into a bounded ring buffer exposed by a new
+  `get_recent_calls` introspection tool, so a calling LLM can
+  self-diagnose a failing call instead of it being opaque; typed
+  session-intent tools are registered and a new `get_design_intent`
+  tool reads a project's `.kct` constraints and decisions;
+  `--transport http` host/port now actually reach the server
+  constructor; MCP clearance measurements share the validator's copper
+  geometry instead of a parallel model; and the server migrates to the
+  mcp 2.x SDK (`FastMCP` → `MCPServer`, run-kwarg transport options,
+  fastmcp 4 test client) with a guarded import that distinguishes "not
+  installed" from "API moved" — the exact misclassification that
+  previously turned mcp 2.x failures into silent test skips.
+
+- **Board-file writes are atomic and lock-aware** (#4898, #5105) — the
+  `.kicad_pcb` / `.kicad_sch` / `.kicad_pro` writers stage to a
+  temporary sibling and `os.replace` into place, so a crashed write can
+  no longer truncate a board file; and writes check KiCad's lock markers
+  first, so kct refuses to clobber a board another KiCad instance has
+  open.
+
+- **PCB editor: pad edits persist and pad identities are stable**
+  (#5049, #5057) — pad edits on newly added footprints are actually
+  written back (previously lost on save), and placing a footprint
+  assigns persistent unique pad identities so later edits address the
+  same physical pad.
+
+- **Pad identity and arc geometry survive loading** (#5112, #5368,
+  #5480) — the schema preserves footprint arc midpoints in both modern
+  and legacy writers; empty quoted pad identities round-trip instead of
+  being dropped; and repeated pad numbers retain their physical targets
+  so two same-numbered pads do not collapse onto one router target.
+
+- **Parts sourcing preflight fails honestly** (#4990, #4995, #5029,
+  #5033, #5034, #5043) — unpopulated symbols are excluded from sourcing
+  preflight; an explicit non-LCSC MPN is never auto-matched to an LCSC
+  part; incompatible resistor suggestions are rejected; an unavailable
+  lookup is distinguished from catalog absence; inventory provenance is
+  preserved and unverified availability rejected; and official API
+  error reasons and status survive into reports instead of a generic
+  failure.
+
+- **Hash-bound manufacturing submission handoffs** (#5142, #5143,
+  #5144, #5146) — offline assembly submission packages are immutable and
+  complete: submission coordinates are decimal-context independent;
+  inventory evidence is bound to verified handoffs by exact ID; the
+  factory-selected component CSV is verified rather than trusted; a
+  hash-bound human review record ships with a portable review page; and
+  raster DFM reports and OCR transcriptions are bound to the exact
+  uploads they describe.
+
+- **Offline JLC upload model with a durable ledger** (#5145) —
+  `kicad_tools.manufacturers.jlc_upload` models uploads as a state
+  machine (succeeded / failed / uncertain) over an append-only,
+  fsync-intent ledger: the published handoff, the hash-bound human
+  review and the exact Gerber bytes are re-verified immediately before
+  any request is built (a gate failure never reaches the network), and
+  the intent is persisted before sending so a crash mid-request folds
+  to "uncertain" by construction rather than double-submitting.
+
+- **Manufacturing export bundles its real inputs** (#5071, #5415) —
+  project-local symbol library dependencies are bundled into the export
+  so it opens away from its source project, and authored board rules
+  survive into the manufacturing project archive instead of being
+  dropped at packaging.
+
+- **Source-bound soldermask verification** (#5135, #5136, #5137) — the
+  validator inspects standard source-bound soldermask geometry, resolves
+  the native-exported soldermask and copper geometry, and checks
+  source-bound mask-to-copper exposure, so mask openings are judged
+  against the board's own geometry rather than assumed.
+
+- **Analog budgets reviewed with bound evidence** (#5041, #5064, #5066,
+  #5426) — the analyzer reviews weak-source and gate reservoir budgets,
+  reports explicit analog threshold and hysteresis budgets, qualifies
+  resistor operating budgets only with bound evidence, and requires
+  real resistor topology before granting impedance sense exclusions —
+  every pass names the evidence it was computed from.
+
+- **Board07 analog signal integrity is default-on and measured**
+  (#4969, #5134, #5153, #5343, #5537) — impedance-corrected MIPI/HDMI
+  sizing is the default recipe; via load derives from measured geometry
+  with DQ directions split; the total external-load capacitance gate
+  replaces per-pin accounting; the standalone board07 generator's
+  defaults are isolated so it cannot drift the repo recipe; and a
+  committed placement delta writes its netlist back, keeping schematic
+  and placed board in agreement.
+
+- **Board03/04/06 manufacturing-pipeline fixes** (#5000, #5176, #5326,
+  #5358, #5439, #5472) — board03 applies its manufacturing profile
+  before zone fill, patches the AVR core USB suspend/resume clock
+  TODOs, and connects isolated supply copper behind a gate on
+  saved-byte opens; board04 selects clearance-safe manufacturing via
+  bonds and stops emitting unsupported route-failure diagnoses; and
+  board06's pour-net audit is via-modelling layer-span aware.
+
+- **Benchmark provenance discipline** (#5072, #5280) — `kct bench`
+  distinguishes route outcome from artifact provenance so a stale
+  artifact can no longer read as a fresh result, and board09's host-bus
+  routing is measured as a benchmark with native validation.
+
+- **kicad-tools.org: dated snapshots and deployed-artifact parity**
+  (#5279, #5295, #5296, #5298, #5321, #5318) — the benchmarks page is
+  presented as a dated historical snapshot; capability discovery and the
+  shared presentation are refreshed; verified development readiness is
+  shown without a board summary; external routing outcomes carry their
+  dates and limitations; routing status is clarified with readable
+  label contrast; and post-deploy verification now catches the live
+  site serving pre-repair board copper (board05's 41 arbitrary-angle
+  bottom traces) before visitors download it.
+
+- **CLI polish** (#4688, #4689, #4690, #4751, #5028) — auto-skipped
+  pour nets join the `--net-class-map` resolution domain instead of
+  routing unclassed; the route startup banner shows the user-supplied
+  input path; grid-resolution advisories fire only for engines that
+  actually route on the grid; `--voltage-map` resolves to an absolute
+  path at parse time so it survives the subprocess working directories
+  the creepage audit runs in (previously looked up against the output
+  dir under `kct build -o <external dir>`); and suppressed format
+  defaults render correctly in `--help`.
+
+- **DRC constraint and message integrity** (#4701, #4989, #5024, #5032,
+  #5380, #5534) — the via-in-pad advisory names its resolution source
+  instead of always printing "Defaulting"; short collinear silkscreen
+  overlaps are retained as findings rather than filtered out; manifest
+  freshness is verified against PCB content rather than file metadata;
+  authored DRC constraints carry across routed-output renames; DRC
+  enforces object-specific factory clearances; and the kicad-cli 10
+  hole-to-hole wording (`min X mm; actual Y mm`) parses instead of
+  being skipped.
+
+- **Router search honors physical clearances end to end** (#4991, #5410,
+  #5434, #5450, #5454, #5455, #5458, #5482, #5495) — `_escape_radial`
+  gets board-wide foreign-pad clearance; bounded native searches run to
+  completion under physical clearances; tapered goal-via landings are
+  validated at the emitted width; negotiated physical copper demand and
+  tapered escapes replace nominal-width accounting; net-class clearance
+  holds across lattice through-vias; the final relief probe diversifies
+  its search direction; actual copper width is checked against physical
+  board edges; static partner-pad clearance is retained during native
+  search; and per-connection avoidance costs are cleared after each
+  connection so earlier nets cannot tax later ones.
+
+- **Router state survives resets, replays and budgets** (#5035, #5266,
+  #5274, #5302, #5374, #5478, #5545, #5555) — routing cleanup is bounded
+  by invocation process supervision; each search stage's budget is
+  separated from the hard total timeout so one stage cannot starve the
+  rest; grid pathfinders enforce SMD via capability; bare net names
+  survive normalization; the board-edge keepout is reinstalled across
+  trial resets and worker reconstruction; escape and two-phase routing
+  checkpoints are retained; congestion-mark stagnation recovers (board06
+  converges without the avoidance leak); and `add_obstacle` keepouts
+  persist across grid resets.
+
+- **Routed copper is preserved across replay and repair** (#5223, #5261)
+  — legal pour escapes and signal trunk widths survive post-route
+  processing, and routing cache replay no longer drops committed copper.
+
+- **Routing under placement exclusion is explicit** (#5346, #5347,
+  #5348, #5357) — the router takes a placement disposition and
+  fixed-copper handoff, preserves excluded filled copper across routing
+  engines (including actual custom-pad copper for placement-excluded
+  nets), routes the valid nets while preserving placement-invalid copper
+  instead of aborting whole-board, and reports placement-blocked routing
+  populations per attempt.
+
+- **Kelvin routing keeps physical branch separation** (#5398, #5475) —
+  Kelvin branches preserve physical isolation through the router, and
+  Kelvin destination escape copper stays reachable.
+
+- **Zones: reproducible fills and neighbor-aware allocation** (#5578,
+  #5590) — generated zone UUIDs derive from zone content so pour fills
+  are reproducible, and new pours allocate around pre-existing
+  same-layer zones instead of overlapping them.
+
+- **Schematic rail naming and wire-stub repair** (#5015, #5095) — power
+  flags stay out of rail names, and exact-grid wire stubs are repaired
+  safely.
+
+- **Analysis model corrections** (#5220, #5263, #5362) — current-path
+  analysis respects physical copper layers and graph edges; reinforce
+  preserves force-path eligibility through segment chaining; and
+  fill-stroke encoding resolves by token then file version instead of
+  guessing.
+
+- **Reporting-honesty polish** (#4736, #4752, #4967, #5287) — a vacuous
+  label-LVS leg prints a dedicated "VACUOUS (treated as FAIL)" summary
+  line instead of a misleading generic mismatch count; an exception-path
+  rollback announces where the `.failed-<ts>` forensic sidecar was kept;
+  empty `(justify …)` residue and zero-angle residue are no longer
+  emitted; the negotiated progress line counts only fully routed nets;
+  partial snapshots are labeled as current routing state rather than
+  final; rollback reports are scoped and difficulty choices derived; and
+  the benchmark error format is blessed.
+
+- **`kct build` route-skip paths run the shared creepage audit** (#4733)
+  — build's three route-skip paths gate on the same creepage audit the
+  pipeline uses (#4649), so a skipped re-route is validated against
+  existing copper instead of silently trusted.
+
+- **`kct stitch` exposes the native DRC verdict** (#4973) — stitching
+  reports the native DRC verdict for the stitched board and can gate on
+  it, instead of asserting connectivity improvements alone.
+
+- **`kct explain` gains Konnect design-review audit-parity checks**
+  (#4899) — the explain surface runs the Konnect-derived audit-parity
+  mistake checks, surfacing review-process defects (a review that claims
+  to cover a gate without showing the gate's evidence) as findings.
+
+- **Verifiable route receipts** (#5436) — `kct route` binds the final
+  board and its custom rule artifacts into a verifiable receipt,
+  rejecting stale constraints before binding, so a routed artifact and
+  the rule set that produced it are provably paired.
+
+- **RoutingPlan overflow accounting** (#5529, #5544) —
+  `RegionGraph.get_total_overflow()` no longer undercounts
+  reverse-direction edge overflow, and RoutingPlan edge entries sum both
+  edge directions, so the serialized plan's demand/overflow matches what
+  the global pass actually measured.
+
+- **`kct board-metrics` describes development boards before
+  manufacturing export** (#5055) — recovers explicit or unambiguous
+  static artifacts, preserves blocked readiness, and requires fresh
+  hash-bound native evidence for separate geometry and open counts.
+- Stackup factory constructions are named and preserve legacy
+  compatibility (#4994).
+- The executable OSH Park rules template regenerates correctly from the
+  manufacturer profile (#4999).
+- `kct render` reports unresolved component 3D models instead of
+  silently omitting them (#5008).
+
+- Run the report-only routing-plan stage on **every** default `kct route`,
+  not just the dense-package boards that reach the two-phase global router.
+  The tile-graph build + negotiated global pass + `RoutingPlan`
+  serialization moved out of `TwoPhaseRouter.route_all` into
+  `routing_plan.build_plan` / `select_plan_nets`, and the new
+  `Autorouter.plan_routing()` runs the identical stage from
+  `route_all_negotiated` -- covering all seven CLI dispatch sites (the three
+  escalation wrappers plus the fixed-layer `--layers N` / `--no-auto-layers`
+  closure), `route_with_progressive_clearance` and library callers with one
+  hook. Dense and non-dense boards now share one net-selection path, so
+  their plans agree. The stage is silent, never touches the routing grid and
+  never runs twice (guarded on `routing_plan is None`), so routed copper is
+  unchanged; the new `--no-routing-plan` flag is the only escape hatch and
+  the only flag added (Issue #5520, Phase 1b of Epic #5510). See
+  `docs/reference/routing-plan.md`.
+
+- Apply a DECLARED swap group's pad re-binding instead of only reporting it: a
+  `reorder_pins` placement delta carrying a `pad_map` is now executed by the
+  placement-delta feedback loop through the new `StrategyType.REORDER_PINS`
+  applicator (`assign_net_to_footprint_pad` on the PCB plus the router's own pad
+  list and net membership), kept only on a strict routed-net improvement and
+  otherwise reverted atomically -- pad net bindings included. A `reorder_pins`
+  delta without a declared `swap_group` stays rationale-only and is still never
+  applied, so flag-off behavior is unchanged. `boards/07-matchgroup-test/
+  ddr_bundle_isolation_repro.py --mode reversed` measures the result on a
+  reversed DDR byte: 9/11 nets reached before the swap, 11/11 after, with the
+  proposal reporting `crossings 55 -> 0` (Issue #5536, Phase 2a of Epic #5511).
+
+- Add a report-only `RoutingPlan` sidecar (`<output_stem>.routing_plan.json`)
+  serializing the tile-based global-routing pass's per-net corridor
+  assignments and per-edge demand/capacity/overflow that `kct route`'s
+  default path already computes for dense-package boards but previously
+  discarded. Text mode prints a one-line summary; `--format json` adds a
+  `routing_plan` key. Building the plan is purely a read of existing
+  `RegionGraph` state, so routed copper is unchanged (Issue #5519, Phase 1
+  of Epic #5510). See `docs/reference/routing-plan.md`.
+
 - Add transactional physical power stitching (`kct stitch --complete`), retaining
   native refill evidence and rejecting incomplete nets, broken pad bonds, or new
   native findings; use the shared stage in Board05's active recipe (#5388).

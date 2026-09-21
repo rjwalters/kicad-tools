@@ -20,6 +20,7 @@ points here.
 - [Error classification (`.loom/scripts/lib/classify-error.sh`)](#error-classification-loomscriptslibclassify-errorsh)
 - [Dispatch pauses when the whole pool is unusable (#6614)](#dispatch-pauses-when-the-whole-pool-is-unusable-6614)
 - [Role ticks pre-flight the pool instead of spawning into it (#7607)](#role-ticks-pre-flight-the-pool-instead-of-spawning-into-it-7607)
+- [Sweep dispatch pre-flights the pool too, and holds the host (#7708)](#sweep-dispatch-pre-flights-the-pool-too-and-holds-the-host-7708)
 - [Worktree handling](#worktree-handling)
 - [Shared machine-level pool fallback (#3938)](#shared-machine-level-pool-fallback-3938)
 - [Hard-fail on missing pool](#hard-fail-on-missing-pool)
@@ -657,6 +658,145 @@ issue can. Without this feed the advisory depended entirely on which discovery
 path noticed first: on a host whose work finder is idle and whose role loops
 are the only traffic, it would simply never trip.
 
+### The pool's own diagnostic used to defeat the issue-dispatch feed (#7860)
+
+The *issue-dispatch* half of the feed above almost never fires in production,
+and the symptom is a redispatch storm: the work finder re-offers the same
+candidates every tick, each attempt costing a `loom:issue` → `loom:building` →
+`loom:issue` label-flip pair.
+
+Measured on 2026-09-16 against the deployed daemon
+(`0.19.68`, commit `f2614fb`), across both live `daemon.log` generations:
+
+| Signal | Count |
+|---|---|
+| #6614 feed records from **role ticks** (#7607) | 38,958 |
+| #6614 feed records from **issue dispatches** | **6** |
+| #4689 synchronous hard-`Err` firings | **6** |
+| Token-selection deaths the **reaper** saw, misclassified as account exhaustion | **147** |
+
+That 6-vs-147 split is the whole defect: the synchronous path caught 4 % of
+these deaths, and the other 96 % were silently mislabelled. The forge-side cost
+is visible on `kicad-tools#5333` — 287 recorded label events (142 `loom:issue`,
+140 `loom:building`), 105 lease acquisitions and 12 yields across three hosts
+over ~16 h, every one of them authored by `loom-fleet-dispatch[bot]`. The same
+pattern ran **89** `loom:issue` ↔ `loom:building` label events deep on
+`rjwalters/loom#7815`.
+
+**Which executable this was, and why that matters.** Every token-selection
+death in the 2026-09-16 window logs its own deciding binary (#4643), so the
+incident binds to specific revisions rather than to whatever `origin/main`
+happened to say afterwards: `0.19.60` (`6c608ee`) for the bulk, plus
+`ebcb66d`, `8de4d92`, `084b9b6` and `f2614fb` (`0.19.68`) as the host rolled
+through the day. All post-date **#4444** (park guard, 2026-07-29) and
+**#6917** (noop-cooldown guard, 2026-08-25) — so both guards were compiled
+into the running code, and "a guard was missing from the deployment" is
+excluded as an explanation. The mutations themselves are daemon claim/release,
+not a direct wrapper or agent edit: on `#7815` all 89 `loom:issue` ↔
+`loom:building` events are authored by `loom-fleet-dispatch[bot]`, and the
+`loom:blocked` event count is **zero**. The admission decision that let each
+one through is `work_finder.rs`'s `preflight_dispatch_gate` returning `Open`,
+which is exactly what an unarmed streak produces.
+
+The cause was a text collision, not a missing guard. When `spawn-claude.sh`'s
+token-selection step finds an unusable pool it prints a diagnostic listing
+**every pooled account together with that account's stored `.bad_tokens`
+reason** — prose like `exhausted: hit your session limit`. That prose matches
+the daemon's `rate-limited` exhaustion signature verbatim, so the reaper
+classified the death as *account exhaustion* even though **no account was ever
+selected** (`token=unknown`). Under the #4122 "exhaustion wins" precedence that
+verdict is neutral: the pre-flight streak is neither incremented nor reset, so
+the one dampener built for exactly this fault never armed, and the log line
+named a per-account cause for a workspace-wide one — misdirecting two separate
+investigations (#6917, #7860).
+
+`classify_preflight_outcome` now gives the `preflight-token-selection-failed`
+signature precedence over the exhaustion match, and **only** that signature:
+every other exhaustion shape still yields to #4122, because those deaths really
+are attributable to a named spawn account. The issues stay clean either way —
+the #4122 carve-out is untouched, so a dead pool still never charges an issue's
+quarantine tally or parks it `loom:blocked`.
+
+Two things this does **not** change:
+
+- **The `.ranking` force-trip (#4644) is unaffected.** It short-circuits the
+  streak whenever the live snapshot shows zero healthy accounts. The streak
+  matters precisely when that snapshot is stale — which it was during the
+  2026-09-16 incident.
+- **The #4689 synchronous fast path still does not fire for this death.** It
+  needs the child to be confirmed dead within `TOKEN_NAME_CAPTURE_TIMEOUT`
+  (5 s), and a real token-selection death usually takes longer: across 72
+  sampled per-sweep logs, **66 (92 %)** took ≥5.0 s from the dispatch header to
+  the error line (median 10.2 s, max 10.6 s). Past the 5 s deadline
+  `poll_observability` returns with the child still alive, `try_wait` yields
+  `None`, and `immediate_preflight_death` is therefore `None` — so neither
+  #4689's hard `Err` nor #6614's issue-dispatch feed can fire, and the death
+  falls through to the reaper. The 6 fast outliers in that sample line up
+  exactly with the 6 synchronous firings in the table above. The reaper picks
+  the death up either way — which is why the classification fix lives on the
+  reaper path — but the dispatch still reports `Success` with `Token: unknown`
+  rather than the hard `Err` #4689 intended. Tracked separately.
+
+### No unauthorized `loom:blocked` removal was involved (#7860)
+
+`kicad-tools#5481` reported the storm above as a *park-guard* failure: a
+`loom:blocked` applied at 2026-09-16T02:05:30Z, then "stripped" by a dispatch
+that re-took the lease at 02:07:00Z. That premise does not survive the primary
+forge record, and no park guard was missing. Recording the reconstruction here
+because the same misreading is easy to repeat from lease-comment history alone.
+
+What the 187-comment thread on `kicad-tools#5333` actually shows:
+
+- The **02:05:30Z** stand-down comment says, verbatim, "Releasing the
+  `loom:building` claim back to `loom:issue` … **No forge state was otherwise
+  mutated**." It did not apply `loom:blocked`.
+- The **first** comment anywhere in that history claiming to apply
+  `loom:blocked` is at **02:11:18Z** — 4m18s *after* the 02:07:00Z lease it
+  supposedly preceded.
+- The **02:12:44Z** pass then wrote "the prior pass applied `loom:blocked` …
+  at 2026-09-16T02:05:30Z", conflating the 02:05:30Z release-to-`loom:issue`
+  with the 02:11:18Z park. `#5481` reproduces that sentence, and its whole
+  "stripped within ~2 minutes" finding, unchanged.
+- **Zero** lease acquisitions follow 02:11:18Z, against 105 in the preceding
+  16 h. The storm stopped dead the moment `loom:blocked` was genuinely applied:
+  the #4444 park guard held, first time, with no fix.
+
+(187 comments as of 2026-09-16, per
+`gh api repos/rjwalters/kicad-tools/issues/5333 --jq .comments`; the issue is
+still open, so re-count before relying on the figure. An earlier revision of
+this section said 1,316 — the *line* count of the concatenated comment bodies,
+`--jq '.[].body' | wc -l`, not the comment count. A re-derivation that yields
+1,316 has measured that, not a larger thread.)
+
+The code agrees, and is the part that generalizes past this one incident:
+
+- `flip_label_to_building` passes `--remove-label loom:issue` and nothing else.
+  A claim *cannot* remove a park. Even the fail-open park-probe path — where
+  #4444 is structurally blind — yields a visible dual
+  `loom:blocked` + `loom:building` state, never a silent unpark. Pinned by
+  `sweep_registry/guards_union_tests.rs`.
+- The daemon's one and only `loom:blocked` → `loom:issue` transition is the
+  startup pass in `quarantine_reconciliation.rs`, and `decide` short-circuits
+  to `Keep` unless the issue carries the daemon's own
+  `QUARANTINE_COMMENT_MARKER`. `#5333` carries none — and the #4122 carve-out
+  means an empty-pool death can never post one, so the path was doubly
+  unreachable.
+
+So the two halves of that incident are one fault, not two: the redispatch storm
+is the token-selection misclassification above, and the "blocked-label removal"
+is a reporting artifact of a sweep session misreading its predecessor's
+comment. **No separate park guard is warranted** — adding one would harden a
+mechanism the evidence shows already worked.
+
+One caveat, recorded because it bounds the claim: GitHub's label-event record
+for `#5333` is itself incomplete. Replaying all 287 recorded events yields a net
+`{loom:curated}`, while the live issue carries `{loom:curated, loom:issue}` — so
+at least one event is missing from both `/issues/N/events` and
+`/issues/N/timeline`, plausibly because the storm's own volume blew past a
+retention limit. The absence of any `loom:blocked` labeling event is therefore
+*corroborating*, not dispositive; the comment record and the code above are what
+carry the conclusion.
+
 ## Role ticks pre-flight the pool instead of spawning into it (#7607)
 
 The role runner already skipped a tick when the workspace had **no** token pool
@@ -694,6 +834,84 @@ fail-safe retry, #5629) enforces, so `usable == 0` guarantees a real selection
 would have failed. It does not model the `index.json` non-Claude exclusion
 (#5609), which can only make the real count *lower* — so this can never block a
 spawn that would have succeeded.
+
+## Sweep dispatch pre-flights the pool too, and holds the host (#7708)
+
+`#7607` above fixed **role ticks**. The work finder's **sweep dispatch** had no
+such check, and its only view of pool health was `.ranking` (`capacity::read_ranking`
+→ `available`), which does not consult `.bad_tokens` TTL marks at all. So a pool
+whose `.ranking` still reported six accounts `available` — every one of them
+carrying a live six-hour exhaustion cooldown — looked perfectly healthy to the
+dispatcher. Observed on 2026-09-15 across four fleet hosts in 4.3 h: **228**
+insta-crashes at token selection, one issue dispatched **20 times**, and **39**
+permanent `loom:lease` record comments plus 40 `loom:issue`↔`loom:building` label
+flips on a single public issue, for zero work.
+
+Why no existing brake stopped it: the #4485 dispatch-backoff ladder *did* arm on
+every death, and it is keyed **per issue** and capped at 900 s. With ~10 ready
+issues each behaving perfectly, the aggregate is still ~40 doomed spawns an hour.
+**A pool-wide fault needs a pool-wide hold; no per-issue ladder can ever damp
+one.**
+
+Every work-finder tick now resolves the pool the sweep would actually spawn
+from — the same `resolve_tokens_dir` precedence documented below — and holds all
+dispatch for that pool when `total > 0 && usable == 0`
+(`work_finder::pool_preflight`):
+
+- The hold is keyed by **resolved pool directory**, not workspace root, so every
+  registered repo resolving to one pool shares one hold and one log line. A
+  daemon owns one host, so this is the host-level hold in practice.
+- **Held means nothing happens at all** — no claim-label flip, no lease comment,
+  no worktree. The dispatch never reaches `begin_issue_dispatch`.
+- Arm/clear are logged on the **edge** (one `WARN` when a pool goes dead, one
+  `INFO` when it recovers), never once per tick.
+- Nothing is cached: the verdict is re-derived from the live pool every tick, so
+  a readmission (`loom-daemon tokens unblock`, a cooldown ageing out, the
+  `.ranking` refresher observing a reset) resumes dispatch on the **next** tick
+  with no restart — the same self-healing property #7607 relies on.
+- A hold outranks #5030's half-open recovery probe: a probe dispatched into a
+  pool with zero spawnable accounts tests nothing and costs exactly the label
+  flip and lease comment this exists to prevent.
+- **Not broadcast to peers.** Each host resolves its *own* pool (repo-local
+  shadow if it holds `.token` files, else shared — #3938/#7527), so one host's
+  exhaustion says nothing about a peer's; broadcasting it would suppress a peer
+  whose pool is healthy.
+- `total == 0` (no pool provisioned at all) is a *different* condition with a
+  different remedy (`loom-daemon tokens bootstrap`) and its own detection
+  (#4642). It never arms this hold.
+
+### `no-usable-account`: a death class that names the pool, not an account
+
+A death at token selection is now classified `no-usable-account` by
+`classify_crash`, distinct from `account-exhausted:*`, and journaled that way in
+`crash_classification`. The old label was actively misleading: `spawn-claude.sh`'s
+own "no usable accounts" diagnostic **echoes each pooled account's stored
+`.bad_tokens` reason**, prose like `exhausted: hit your session limit`, which the
+`rate-limited` exhaustion regex matches verbatim. All 228 incident deaths were
+therefore journaled `account-exhausted:rate-limited` with `token=unknown` — a
+label asserting a *named account* hit a limit, about a death in which no account
+was ever selected. That misdirected two separate investigations (#6917, #7860).
+
+Two contracts are deliberately unchanged:
+
+- **#4122 account rotation.** A genuine *mid-run* exhaustion (the CLI started,
+  ran, then hit a limit) still classifies `account-exhausted:*` and still marks
+  the spawn account bad. The classifier requires the child to have **never
+  reached `# CLAUDE_CLI_START`** before calling a death pool-level, so reaching
+  the CLI proves an account was selected and keeps the death on the account.
+- **#4644/#7860 visibility.** `death_class` still reports
+  `preflight-token-selection-failed` and still feeds the #4386 workspace
+  pre-flight streak.
+
+A `no-usable-account` death is **exempt from both arms of the #4485 per-issue
+ladder** — it neither arms it (a pool-wide fault is not that issue's fault, and
+must never be reported as "the issue's dispatch failed") nor clears it (the
+dispatch proved nothing about the issue, so an already-armed window survives).
+Instead it arms the host hold above as a post-mortem backstop, trusted over this
+daemon's own read of the same directory: the wrapper proved a spawn cannot select
+an account there. That backstop is bounded by `pool_clear_estimate`'s 900 s cap,
+so the worst case when the wrapper and the daemon disagree is one doomed dispatch
+per host per TTL, not one per tick.
 
 ## Worktree handling
 

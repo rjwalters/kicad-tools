@@ -391,6 +391,41 @@ class TestRegionGraphUtilization:
 
         assert low_cost < mid_cost < high_cost
 
+    def test_total_overflow_agrees_on_reverse_direction_traffic(self):
+        """get_total_overflow() must not undercount reverse-direction overflow.
+
+        Regression test for issue #5529: RegionGraph stores two directed
+        RegionEdge objects per adjacent region pair (a, b), and
+        update_utilization() only mutates the edge matching the path's
+        actual traversal direction. If all traffic crosses a boundary in
+        the descending-region-id direction (b -> a), the ascending
+        (source=a) edge stays at overflow == 0. get_total_overflow() used
+        to dedupe by undirected key unconditionally, so it could latch onto
+        that zero-overflow edge and never see the real overflow on the
+        source=b edge -- disagreeing with get_overflowed_edges(), which
+        finds it correctly.
+        """
+        graph = RegionGraph(
+            board_width=10.0,
+            board_height=5.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=2.0,
+            num_layers=1,
+            base_capacity=1,
+        )
+
+        # Descending-ID traversal: region 1 -> region 0.
+        for _ in range(5):
+            graph.update_utilization([1, 0], layer=0)
+
+        overflowed_edges = graph.get_overflowed_edges()
+        assert len(overflowed_edges) == 1
+        assert overflowed_edges[0].overflow == 3
+
+        # Must agree with get_overflowed_edges() -- not report 0.
+        assert graph.get_total_overflow() == 3
+
     def test_waypoint_coords_from_path(self, small_board_graph):
         """Path can be converted to waypoint coordinates."""
         graph = small_board_graph
@@ -1477,6 +1512,99 @@ class TestNegotiatedGlobalRouting:
         assert graph.get_total_overflow() == 1
         overflowed = graph.get_overflowed_edges()
         assert len(overflowed) == 1
+
+    # =========================================================================
+    # RoutingPlan sidecar (Issue #5519, Epic #5510 Phase 1)
+    # =========================================================================
+
+    @staticmethod
+    def _two_net_autorouter():
+        router = Autorouter(
+            width=20.0,
+            height=20.0,
+            rules=DesignRules(
+                trace_width=0.2,
+                trace_clearance=0.2,
+                via_drill=0.35,
+                via_diameter=0.7,
+                grid_resolution=0.1,
+            ),
+            force_python=True,
+        )
+        router.add_component(
+            ref="R1",
+            pads=[
+                {"number": "1", "x": 3.0, "y": 10.0, "net": 1, "net_name": "N1"},
+                {"number": "2", "x": 17.0, "y": 10.0, "net": 1, "net_name": "N1"},
+            ],
+        )
+        router.add_component(
+            ref="R2",
+            pads=[
+                {"number": "1", "x": 10.0, "y": 3.0, "net": 2, "net_name": "N2"},
+                {"number": "2", "x": 10.0, "y": 17.0, "net": 2, "net_name": "N2"},
+            ],
+        )
+        return router
+
+    def test_last_routing_plan_populated_after_route_all(self):
+        """TwoPhaseRouter.last_routing_plan is populated after route_all,
+        and its overflow totals match the live RegionGraph's own queries."""
+        router = self._two_net_autorouter()
+        router.route_with_escape()
+
+        assert router.routing_plan is not None
+        plan = router.routing_plan
+        assert plan.overflow_report is not None
+        assert len(plan.nets) == 2
+        assert {"N1", "N2"} == {n.name for n in plan.nets.values()}
+
+    def test_emit_routing_plan_false_yields_no_plan_byte_identical_routes(self):
+        """The ``emit_routing_plan`` switch does not change routed copper.
+
+        Building the RoutingPlan only reads ``RegionGraph`` state (see
+        ``TwoPhaseRouter``'s attribute docstring) -- this is the CI-asserted
+        fast guard for AC-3 (the full-board subprocess byte-identity sweep
+        for boards 00/03 is `slow` + env-gated, see
+        ``tests/test_routing_plan_5510.py`` and the PR body for the local
+        result).
+        """
+
+        def _route_signature(routes):
+            out = []
+            for route in routes:
+                segs = tuple(
+                    (
+                        round(s.start[0], 6),
+                        round(s.start[1], 6),
+                        round(s.end[0], 6),
+                        round(s.end[1], 6),
+                        s.layer,
+                        round(s.width, 6),
+                    )
+                    for s in route.segments
+                )
+                vias = tuple((round(v.x, 6), round(v.y, 6)) for v in route.vias)
+                out.append((route.net, segs, vias))
+            return sorted(out)
+
+        router_on = self._two_net_autorouter()
+        router_on.emit_routing_plan = True
+        routes_on = router_on.route_with_escape()
+
+        router_off = self._two_net_autorouter()
+        router_off.emit_routing_plan = False
+        routes_off = router_off.route_with_escape()
+
+        assert _route_signature(routes_on) == _route_signature(routes_off)
+        assert router_on.routing_plan is not None
+        assert router_off.routing_plan is None
+        assert router_on.routing_plan.overflow_report is not None
+        # AC-2, cross-checked directly against the hand-built-graph unit
+        # tests in tests/test_routing_plan_5510.py: a converged 2-net
+        # route on an uncongested board has zero overflow.
+        assert router_on.routing_plan.overflow_report.total_overflow == 0
+        assert router_on.routing_plan.overflow_report.overflowed_edges == 0
 
 
 # =============================================================================

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from kicad_tools.cli.progress import flush_print
 
+from ..access_witness import PASS_GRACE, PASS_INITIAL, PASS_ITERATION
 from .negotiated import (
     GRACE_PASS_BUDGET_S,
     GRACE_PASS_TIER_CAPS_S,
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
     from ..grid import RoutingGrid
     from ..pathfinder import Router
     from ..primitives import Pad, Route
+    from ..region_graph import RegionGraph
+    from ..routing_plan import RoutingPlan
     from ..rules import DesignRules
     from ..sparse import Corridor
 
@@ -71,6 +74,8 @@ class TwoPhaseRouter:
         apply_byte_lane_inner_priority: Callable[[list[int]], list[int]] | None = None,
         stall_ripup_budget: int | None = None,
         relief_rescue: Callable[..., bool] | None = None,
+        emit_routing_plan: bool = True,
+        journal_stage: Callable[[str, int], None] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -130,6 +135,36 @@ class TwoPhaseRouter:
         # TwoPhaseRouter directly) preserves legacy behaviour.
         self._relief_rescue = relief_rescue
 
+        # Issue #5517 (Epic #5508 Phase 1b): optional hook to
+        # ``Autorouter._journal_stage``, which tags every copper commit and
+        # rip-up recorded inside its ``with`` block with the stage that
+        # produced it.  This path is the default ``kct route`` entry point for
+        # any escape-routed board (``route_with_escape`` ->
+        # ``route_all_two_phase``), so without it the commit journal of a
+        # dense board would carry no stage at all.  ``None`` (a unit test
+        # constructing TwoPhaseRouter directly) makes every tag a no-op --
+        # the journal still records, it just cannot say which stage.
+        self._journal_stage = journal_stage
+
+        # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
+        # sidecar.  ``emit_routing_plan=True`` (default) builds a
+        # ``RoutingPlan`` from the already-computed global-routing result
+        # right after ``GlobalRouter.route_all`` and stashes it here;
+        # ``Autorouter.route_all_two_phase`` copies it to
+        # ``Autorouter.routing_plan``.  Building the plan only READS
+        # ``RegionGraph`` state (edges/regions + the public overflow
+        # queries) -- it never mutates utilization/history costs, so it
+        # cannot perturb subsequent routing and copper stays
+        # byte-identical regardless of this flag.  ``last_region_graph``
+        # is exposed alongside it so callers (and tests) can cross-check
+        # the plan's overflow totals against the live graph. If
+        # ``route_all`` runs more than once in a single ``kct route``
+        # invocation (relaxation/escalation retries), the LAST call's
+        # plan wins -- earlier plans are overwritten, not accumulated.
+        self.emit_routing_plan = emit_routing_plan
+        self.last_routing_plan: RoutingPlan | None = None
+        self.last_region_graph: RegionGraph | None = None
+
         # Issue #2597: Communicates the reason the negotiated outer loop in
         # ``_detailed_negotiated()`` exited.  Read by the progress-callback
         # status string in :class:`Autorouter` to distinguish ``"stagnated"``
@@ -175,6 +210,18 @@ class TwoPhaseRouter:
         # it is not a snapshot authority.
         _emit_route_checkpoint(callback, self.routes, self.grid.get_total_overflow, iteration)
 
+    def _stage(self, pass_name: str, iteration: int = 0) -> None:
+        """Tag subsequent commit-journal records with this stage (Issue #5517).
+
+        A no-op when no journal hook was threaded in, so a TwoPhaseRouter
+        constructed directly (as unit tests do) behaves exactly as before.
+        The stages below run sequentially in one function body, so this sets
+        the tag rather than scoping it -- ``Autorouter.route_all_two_phase``
+        retags everything after this router returns as post-route work.
+        """
+        if self._journal_stage is not None:
+            self._journal_stage(pass_name, iteration)
+
     def route_all(
         self,
         use_negotiated: bool = True,
@@ -209,9 +256,8 @@ class TwoPhaseRouter:
         Returns:
             List of routes (may be partial if timeout reached or some nets fail)
         """
-        from ..global_router import GlobalRouter
         from ..output import format_failed_nets_summary
-        from ..region_graph import RegionGraph
+        from ..routing_plan import build_plan, select_plan_nets
 
         if corridor_penalty is None:
             corridor_penalty = self.rules.cost_corridor_deviation
@@ -262,68 +308,22 @@ class TwoPhaseRouter:
                 )
             per_net_timeout = derived_cap
 
-        # Get nets to route in priority order
-        net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
-        net_order = [n for n in net_order if n != 0]
-
-        # Issue #1295: Filter out pour nets — they are connected via zone fills.
-        # Issue #1841: Exclude pour nets without zones (they route as signals).
-        pour_nets = []
-        signal_nets = []
-        for n in net_order:
-            net_name = self.net_names.get(n, "")
-            if net_name in self._pour_nets_without_zones:
-                signal_nets.append(n)
-                continue
-            net_class = (self.net_class_map or {}).get(net_name)
-            if net_class and net_class.is_pour_net:
-                pour_nets.append(n)
-            else:
-                signal_nets.append(n)
-        if pour_nets:
-            pour_names = [self.net_names.get(n, f"Net {n}") for n in pour_nets]
-            flush_print(
-                f"  Skipping {len(pour_nets)} pour net(s) (use zone fill instead): {pour_names}"
-            )
-        net_order = signal_nets
-
-        # Filter out single-pad nets — they are trivially connected and
-        # should not inflate the "nets routed" count.  This mirrors the
-        # filter in core.py:1082.
-        single_pad_nets = []
-        multi_pad_nets = []
-        for n in net_order:
-            if len(self.nets.get(n, [])) < 2:
-                single_pad_nets.append(n)
-            else:
-                multi_pad_nets.append(n)
-        if single_pad_nets:
-            flush_print(
-                f"  Skipping {len(single_pad_nets)} single-pad net(s) (trivially connected)"
-            )
-        net_order = multi_pad_nets
-
-        # Issue #2914: Front-load one representative per match group so
-        # no group can be fully starved by the wall-clock budget.  Without
-        # this, board 07 ADDR_BUS (priority class 2) was fully scheduled
-        # after DDR / MIPI / HDMI (class 1) and the 600 s budget was
-        # exhausted before A0..A7 received any "Routing net..." log line.
-        # The helper is threaded in from
-        # :meth:`Autorouter._create_two_phase_router` so it shares its
-        # implementation (and detection-failure fallback) with the
-        # negotiated-route path.  When unset (direct TwoPhaseRouter
-        # construction in tests) the routing order is unchanged.
-        if self._interleave_match_groups is not None:
-            net_order = self._interleave_match_groups(net_order)
-
-        # Issue #2962 / #2983 / #4051: Mirrored byte-lane escape ordering.
-        # ``_apply_byte_lane_inner_priority`` reserves inner-corner
-        # corridors (#2983) and reorders each qualifying byte-lane group
-        # by reactive escape freedom (#4051).  Applied after the
-        # starvation-fairness pass so the head-class ordering stays exact;
-        # only within-group neighbour priorities are adjusted.
-        if self._apply_byte_lane_inner_priority is not None:
-            net_order = self._apply_byte_lane_inner_priority(net_order)
+        # Get nets to route in priority order, minus pour nets (#1295 /
+        # #1841) and trivially-connected single-pad nets, then apply the
+        # match-group fairness (#2914) and byte-lane (#2962 / #2983 /
+        # #4051) ordering passes.
+        #
+        # Issue #5520 (Epic #5510, Phase 1b): this selection lives in
+        # ``routing_plan.select_plan_nets`` so ``Autorouter.plan_routing``
+        # (the plan stage on the non-two-phase path) computes the SAME net
+        # universe from the ``Autorouter``, which exposes the identical
+        # attribute names.  ``report=flush_print`` preserves this path's
+        # two diagnostic lines verbatim; the plan-only path passes no
+        # reporter and stays silent.
+        selection = select_plan_nets(self, report=flush_print)
+        net_order = selection.net_order
+        pour_nets = selection.pour_nets
+        single_pad_nets = selection.single_pad_nets
 
         total_nets = len(net_order)
 
@@ -347,53 +347,27 @@ class TwoPhaseRouter:
             if not progress_callback(0.0, "Phase 1: Global routing", True):
                 return list(self.routes)
 
-        # Compute routing pitch from design rules
-        trace_pitch = self.rules.trace_width + self.rules.trace_clearance
-        corridor_width = corridor_width_factor * self.rules.trace_clearance
-
-        # Determine tile grid size: ~10x trace pitch per tile, minimum 3x3
-        tile_size = max(trace_pitch * 10.0, 1.0)
-        num_cols = max(3, int(self.grid.width / tile_size))
-        num_rows = max(3, int(self.grid.height / tile_size))
-
-        # Build tile-based region graph with geometry-based capacity
-        region_graph = RegionGraph(
-            board_width=self.grid.width,
-            board_height=self.grid.height,
-            origin_x=self.grid.origin_x,
-            origin_y=self.grid.origin_y,
-            num_cols=num_cols,
-            num_rows=num_rows,
-            trace_pitch=trace_pitch,
-            num_layers=self.grid.num_layers,
-        )
-
-        # Register pads as obstacles for blockage-aware capacity
-        pad_list = list(self.pads.values())
-        region_graph.register_obstacles(pad_list)
-
-        stats = region_graph.get_statistics()
-        flush_print(
-            f"  Tile grid: {num_cols}x{num_rows} "
-            f"({stats['num_regions']} regions, {stats['num_edges']} edges, "
-            f"pitch={trace_pitch:.3f}mm, layers={self.grid.num_layers})"
-        )
-
-        # Run global routing with negotiated iteration
-        global_router = GlobalRouter(
-            region_graph=region_graph,
-            corridor_width=corridor_width,
-            default_layer=0,
-            negotiated=True,
-            max_iterations=15,
-            history_increment=1.0,
-        )
-
-        global_result = global_router.route_all(
-            nets=self.nets,
-            pad_dict=self.pads,
+        # Issue #5520 (Epic #5510, Phase 1b): the tile-graph build, the
+        # negotiated global pass and the Issue #5519 RoutingPlan
+        # serialization now live in ``routing_plan.build_plan`` so
+        # ``Autorouter.plan_routing`` can run the identical stage on
+        # boards that never reach this router.  ``report=flush_print``
+        # preserves this path's "Tile grid: ..." line verbatim; ``emit``
+        # forwards the #5519 switch.  The pass itself always runs here --
+        # Phase 2 needs its corridors regardless of the plan switch.
+        plan_result = build_plan(
+            self,
             net_order=net_order,
+            pour_nets=pour_nets,
+            single_pad_nets=single_pad_nets,
+            corridor_width_factor=corridor_width_factor,
+            emit=self.emit_routing_plan,
+            report=flush_print,
         )
+        region_graph = plan_result.region_graph
+        global_result = plan_result.global_result
+        self.last_region_graph = region_graph
+        self.last_routing_plan = plan_result.plan
 
         # Extract corridors from global routing result
         corridors: dict[int, Corridor] = {}
@@ -579,6 +553,9 @@ class TwoPhaseRouter:
         timed_out = False
 
         # Initial routing pass
+        # Issue #5517: every commit from here to the grace pass belongs to
+        # the initial detailed pass, which is iteration 0.
+        self._stage(PASS_INITIAL, 0)
         # Issue #3452: when the wall-clock budget expires mid-list, record
         # the starved tail for the bounded grace pass below instead of
         # silently dropping every remaining net.
@@ -640,6 +617,8 @@ class TwoPhaseRouter:
 
         if grace_nets:
             grace_start = time.monotonic()
+            # Issue #5517: still iteration 0, but a distinct stage.
+            self._stage(PASS_GRACE, 0)
 
             def _grace_route(net: int, cap: float) -> list[Route]:
                 return self._route_net_with_corridor(net, present_factor, per_net_timeout=cap)
@@ -879,6 +858,9 @@ class TwoPhaseRouter:
             present_factor_increment = 0.5
 
             for iteration in range(1, max_iterations + 1):
+                # Issue #5517: everything committed or ripped from here on
+                # belongs to this rip-up / reroute iteration.
+                self._stage(PASS_ITERATION, iteration)
                 if check_timeout():
                     flush_print(f"  ⚠ Timeout at iteration {iteration} ({elapsed_str()})")
                     timed_out = True

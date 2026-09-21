@@ -81,6 +81,20 @@ assert_contains_file() {
   fi
 }
 
+assert_not_contains_file() {
+  local file="$1" needle="$2" msg="$3"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if ! grep -qF -- "$needle" "$file" 2>/dev/null; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: $msg"
+  else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: $msg"
+    echo "    Unexpected substring: '$needle'"
+    echo "    In file: $file"
+  fi
+}
+
 # call_site_count <file> -- counts lines that both check the gate is
 # executable AND invoke it: the `[ -x .../version-check-gate.sh ] && ! ...`
 # idiom every doc recipe below uses, or the equivalent script-side
@@ -133,8 +147,8 @@ assert_ge 3 "$(call_site_count "$DOCTOR_MD")" \
 
 echo ""
 echo "Fix guidance points at the real script, not a hand-patch:"
-assert_contains_file "$DEFAULTS_DIR/scripts/version-check-gate.sh" "version.sh bump patch" \
-  "version-check-gate.sh's own Fix: message tells the caller to run version.sh, never to hand-edit files"
+assert_not_contains_file "$DEFAULTS_DIR/scripts/version-check-gate.sh" "bump patch" \
+  "version-check-gate.sh's own Fix: message never recommends a forbidden hand-bump (#7743) -- it points at reverting to origin/main's values instead"
 assert_contains_file "$JUDGE_MD" "never hand-patch the version-bearing files yourself" \
   "judge.md's DIRTY-rebase recipe explicitly steers away from a hand-patch recovery"
 assert_contains_file "$BUILDER_WORKTREE_MD" "Never hand-patch VERSION/CLAUDE.md/etc" \

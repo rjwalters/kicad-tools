@@ -151,8 +151,21 @@ remove_run_artifacts() {
 }
 
 # ---------------------------------------------------------------------------
-# Liveness (#4691)
+# Liveness (#4691, hardened by #7825)
 # ---------------------------------------------------------------------------
+
+# --- BEGIN shared pid-liveness block (#4691, #7825) ------------------------
+#
+# This block is DUPLICATED VERBATIM in `defaults/scripts/sweep-lease-renew.sh`
+# and `defaults/scripts/sweep-run-registry.sh` and MUST stay byte-identical in
+# both: `defaults/scripts/tests/test-sweep-lease-renew.sh` case (q) diffs the
+# two copies and fails the suite on any drift. It is deliberately NOT extracted
+# into `defaults/scripts/lib/`: ADR-0018 / `scripts/shell-allowlist.txt` admits
+# no category for a NEW shared shell library (`contract` is BASELINE-ONLY, and
+# a library is not bootstrap/hook-entry/vendored/stub/test), so a new lib file
+# would fail `scripts/check-shell-allowlist.sh`. The machine-checked
+# byte-identity is the substitute for `source`. Edit one copy, then run
+# `diff` — or just let case (q) tell you.
 #
 # Is `$1` a one-shot `<shell> -c …` wrapper process?
 #
@@ -179,11 +192,57 @@ is_oneshot_shell() {
     [[ "${a1:-}" == -*c* ]]
 }
 
+# Is `$1` a session/service supervisor that must NEVER serve as a liveness
+# handle for WORK (#7825, defect (c))?
+#
+# Before #7825, `resolve_liveness_pid` walked UP the process tree and returned
+# whatever it landed on with no validation whatsoever. When a sweep's own
+# intermediate ancestors have already been reaped, that walk lands on the
+# session supervisor — `systemd --user`, `launchd`, a `tmux` server, `sshd`,
+# `init` — every one of which outlives the machine's entire work queue. A
+# renewal loop pinned to one of those is immortal BY CONSTRUCTION: it keeps a
+# long-dead sweep's `loom:building` lease looking fresh forever, so no peer
+# host will ever reclaim the claim. Six such loops (oldest 18 days, mostly
+# with no worktree left behind them) were found on one worker in #7825.
+#
+# This is a DENYLIST, not an allowlist, on purpose. An allowlist of "real"
+# sweep processes would have to enumerate every runtime adapter, wrapper, and
+# future harness (`claude`, `codex`, `spawn-claude.sh`, `claude-wrapper.sh`,
+# `node`, …) and would silently start refusing legitimate handles the moment
+# one was missed. The denylist only has to name the handful of processes known
+# to outlive ALL work; anything unrecognised keeps the pre-#7825 behavior.
+is_supervisor_process() {
+    local pid="${1:-}" comm base
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    if ((pid <= 1)); then
+        return 0 # pid 1 is init/launchd by definition
+    fi
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    [[ -n "$comm" ]] || return 1
+    base="${comm##*/}"
+    base="${base#-}"
+    case "$base" in
+        init | systemd | launchd | upstart) return 0 ;;
+        tmux*) return 0 ;; # `ps -o comm=` reports the server as `tmux: server`
+        screen | sshd | login | getty) return 0 ;;
+        supervisord | s6-svscan | runsvdir | runsv | tini | docker-init | dumb-init) return 0 ;;
+        cron | crond | atd) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Resolve the PID to record as this run's liveness handle: walk up from $PPID
 # past every one-shot shell wrapper to the first ancestor that outlives a single
 # tool call (in practice the `claude -p /loom:sweep …` orchestrator). Falls back
 # to $PPID whenever `ps` is unavailable or the walk cannot proceed, which is
 # exactly the pre-#4691 behavior — never worse.
+#
+# #7825 (c): the walk now refuses to ascend INTO a supervisor, and refuses to
+# RETURN one even if $PPID already is one (a unit-file or cron invocation). When
+# no valid work-liveness handle exists, the honest answer is this script's OWN
+# short-lived PID: a caller that watches it stops within one tick and lets the
+# lease age out, which is the correct outcome. Silently substituting a process
+# that will still be running next month is not.
 resolve_liveness_pid() {
     local pid="${PPID:-$$}" parent depth=0
     while ((depth < 8)); do
@@ -193,13 +252,59 @@ resolve_liveness_pid() {
         if ! [[ "$parent" =~ ^[0-9]+$ ]] || ((parent <= 1)); then
             break
         fi
+        if is_supervisor_process "$parent"; then
+            break
+        fi
         pid="$parent"
         depth=$((depth + 1))
     done
+    if is_supervisor_process "$pid"; then
+        echo "$$"
+        return 0
+    fi
     echo "$pid"
 }
 
-# Is `$1` a live process, biased to fail SAFE (#4691)?
+# Start-time identity token for `$1` — the second half of a durable process
+# handle (#7825, defect (a)). Prints nothing and exits non-zero when it cannot
+# be determined.
+#
+# A bare PID is NOT a durable handle on a process: the kernel recycles PID
+# numbers, and on a busy worker polled over a multi-day horizon wraparound is a
+# certainty, not an edge case. Once an unrelated process inherits the watched
+# PID number, a PID-only liveness test flips back to "alive" PERMANENTLY — the
+# mechanism behind #7825's 18-day-old orphan renewal loops. Pairing the PID
+# with the process's START TIME makes the handle identifying: the pair
+# (pid, starttime) is not reused within any horizon that matters here.
+#
+# Linux: `/proc/<pid>/stat` field 22 (`starttime`, in clock ticks since boot)
+# is monotonic, cheap, and world-readable. Field 2 (`comm`) can itself contain
+# BOTH spaces and parentheses, so everything through the LAST ") " is stripped
+# first; in the remainder, field 20 is the overall field 22.
+# Elsewhere (macOS and any host without /proc): `ps -o lstart=`, whose
+# one-second granularity combined with the PID space is still overwhelmingly
+# identifying.
+pid_start_identity() {
+    local pid="${1:-}" stat_line rest ident
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    if [[ -r "/proc/$pid/stat" ]]; then
+        stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+        [[ -n "$stat_line" ]] || return 1
+        rest="${stat_line##*') '}"
+        ident=$(printf '%s\n' "$rest" | awk '{print $20}')
+        [[ -n "$ident" ]] || return 1
+        printf 'starttime:%s' "$ident"
+        return 0
+    fi
+    ident=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s '[:space:]' ' ')
+    ident="${ident# }"
+    ident="${ident% }"
+    [[ -n "$ident" ]] || return 1
+    printf 'lstart:%s' "$ident"
+}
+
+# Is `$1` a live process, biased to fail SAFE (#4691) — and, when a start-time
+# identity token is supplied as `$2`, is it still the SAME process (#7825)?
 #
 # POSIX `kill(2)` has two distinct failure modes and a bare `kill -0` conflates
 # them:
@@ -207,20 +312,43 @@ resolve_liveness_pid() {
 #   EPERM — the process EXISTS but this caller may not signal it (different UID,
 #           sandbox, namespace)    → NOT dead; pruning it destroys live state.
 # `ps -p` answers "does this PID exist?" without needing signal permission, so it
-# separates the two without parsing locale-dependent errno strings. A zombie
-# (state `Z`) has exited and is only awaiting reaping, so it counts as dead.
+# separates the two without parsing locale-dependent errno strings.
+#
+# #7825 (b): `ps` is consulted FIRST rather than behind a `kill -0` fast path.
+# A zombie (state `Z`) has exited and is only awaiting reaping, so it counts as
+# dead — but `kill -0` SUCCEEDS for a zombie, so under the pre-#7825 ordering
+# the fast path returned "alive" and the `Z` branch was UNREACHABLE. The
+# documented intent and the code now agree. `kill -0` survives only as the
+# fallback for a host with no usable `ps`, never as the whole decision.
+#
+# #7825 (a): `$2`, when non-empty, is a token previously obtained from
+# `pid_start_identity` for this same PID. It is re-probed on every call; a
+# mismatch — or an identity that can no longer be read at all — reports DEAD
+# even though the PID number is live, which is precisely the PID-reuse case.
+# Callers that pass no token keep the pre-#7825 contract unchanged.
 pid_is_live() {
-    local pid="${1:-}" state
+    local pid="${1:-}" want_ident="${2:-}" state have_ident
     if ! [[ "$pid" =~ ^[0-9]+$ ]] || ((pid <= 0)); then
         return 1
     fi
-    # Fast path: the signal would be deliverable ⇒ definitely alive.
-    kill -0 "$pid" 2>/dev/null && return 0
     state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')
-    [[ -n "$state" ]] || return 1        # ESRCH (or no usable `ps`): treat as dead.
-    [[ "${state:0:1}" == "Z" ]] && return 1
-    return 0 # EPERM and friends: the process exists — fail safe, treat as alive.
+    if [[ -n "$state" ]]; then
+        if [[ "${state:0:1}" == "Z" ]]; then
+            return 1 # exited, awaiting reaping — dead for every purpose here
+        fi
+        # Any other state: the process exists. EPERM and friends land here too,
+        # which is the #4691 fail-safe.
+    elif ! kill -0 "$pid" 2>/dev/null; then
+        return 1 # ESRCH, or no usable `ps` and no signal permission: dead.
+    fi
+    if [[ -n "$want_ident" ]]; then
+        have_ident="$(pid_start_identity "$pid" 2>/dev/null || true)"
+        [[ -n "$have_ident" ]] || return 1
+        [[ "$have_ident" == "$want_ident" ]] || return 1
+    fi
+    return 0
 }
+# --- END shared pid-liveness block (#4691, #7825) --------------------------
 
 iso_now() {
     date -u +"%Y-%m-%dT%H:%M:%SZ"

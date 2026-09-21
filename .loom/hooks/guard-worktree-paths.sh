@@ -40,6 +40,17 @@
 # category in this repo (env > config > default; pattern documented at
 # guard-destructive-generic.sh around the guards.sqlDdl toggle).
 #
+# SECOND, INDEPENDENT CATEGORY (#7995): installed-managed-file write
+# confinement. In a repo that is not Loom's own source tree,
+# `.loom/hooks|scripts|roles|docs|bin/` and `.claude/commands/loom/` are
+# resync-refreshed copies of Loom's `defaults/`, so an in-place edit there is
+# silently reverted (or orphaned) after the PR merges — the prose rule #7883
+# shipped, made mechanical. Gated by its own toggle
+# (guards.installedFileWrites / LOOM_GUARD_INSTALLED_FILE_WRITES, default
+# true) and decided by defaults/scripts/lib/installed-file-guard.sh, which
+# owns the repo-identity discriminator and fails PERMISSIVE on anything it
+# cannot positively classify as a consumer repo.
+#
 # Input (JSON on stdin):
 #   { "tool_input": { "file_path": "/path/to/file", ... }, "cwd": "/cwd" }
 #
@@ -100,6 +111,21 @@ fi
 if [[ -f "$SCRIPT_DIR/../scripts/lib/canonical-path.sh" ]]; then
     # shellcheck source=/dev/null
     source "$SCRIPT_DIR/../scripts/lib/canonical-path.sh" 2>/dev/null || true
+fi
+
+# Installed-managed-file write guard (#7995) — the repo-identity discriminator
+# plus the managed-prefix containment test that decide whether this Edit/Write
+# is an in-place edit of an INSTALLED Loom file in a CONSUMER repo. Kept in a
+# shared library rather than inlined here because the Bash-matcher sibling
+# (guard-loom-workflow.sh) must reach exactly the same verdict for the
+# equivalent Bash write idioms — a second, independently-drifting copy of the
+# discriminator is precisely what would make the two matchers disagree about
+# the same target path. Best-effort source, same contract as the two libs
+# above: a missing/unsourceable lib leaves loom_installed_write_denied
+# undefined and the category below is skipped entirely (fail open).
+if [[ -f "$SCRIPT_DIR/../scripts/lib/installed-file-guard.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/../scripts/lib/installed-file-guard.sh" 2>/dev/null || true
 fi
 
 log_hook_error() {
@@ -169,7 +195,45 @@ worktree_isolation_guard_enabled() {
     [[ "$enabled" == "true" ]]
 }
 
-if ! worktree_isolation_guard_enabled; then
+# =============================================================================
+# Guard category toggle — guards.installedFileWrites /
+# LOOM_GUARD_INSTALLED_FILE_WRITES (#7995)
+#
+# Default ON, same resolution order as worktree_isolation_guard_enabled()
+# above. Deliberately a LOCAL reader rather than the library's own
+# loom_installed_guard_enabled(): like the worktree toggle, this one is
+# consulted on EVERY Edit/Write before any structural pre-check, so it must
+# come off the once-per-invocation resolved_config() cache. The library's
+# version (which forks loom_config_get) is used by guard-loom-workflow.sh,
+# where the read only happens after a substring pre-check has already matched.
+# Both readers resolve the SAME key with the same precedence.
+# =============================================================================
+installed_file_writes_guard_enabled() {
+    local enabled=true
+    if command -v jq &>/dev/null; then
+        local raw
+        raw=$(resolved_config | jq -r 'if .guards.installedFileWrites == false then "false" else "true" end' 2>/dev/null) || raw=true
+        [[ -n "$raw" ]] && enabled="$raw"
+    fi
+    case "${LOOM_GUARD_INSTALLED_FILE_WRITES:-}" in
+        0|false|no)  enabled=false ;;
+        1|true|yes)  enabled=true ;;
+    esac
+    [[ "$enabled" == "true" ]]
+}
+
+# Two INDEPENDENT categories now live in this hook, so neither toggle may
+# short-circuit the other: worktree isolation (#4007) and installed-file write
+# confinement (#7995). Resolve both up front and exit only when BOTH are off.
+_WT_GUARD_ON=false
+worktree_isolation_guard_enabled && _WT_GUARD_ON=true
+_IFW_GUARD_ON=false
+if declare -F loom_installed_write_denied >/dev/null 2>&1 \
+   && installed_file_writes_guard_enabled; then
+    _IFW_GUARD_ON=true
+fi
+
+if [[ "$_WT_GUARD_ON" != true && "$_IFW_GUARD_ON" != true ]]; then
     exit 0
 fi
 
@@ -456,6 +520,30 @@ if declare -F loom_canonical_path >/dev/null 2>&1; then
     [[ -n "$NORM_PATH" ]] || NORM_PATH="$FILE_PATH"
 else
     NORM_PATH=$(printf '%s' "$FILE_PATH" | python3 -c "import os,sys; print(os.path.normpath(sys.stdin.read()))" 2>/dev/null) || NORM_PATH="$FILE_PATH"
+fi
+
+# --------------------------------------------------------------------------
+# Installed-managed-file write confinement (#7995)
+#
+# Runs BEFORE either worktree mechanism below, because both of them ALLOW the
+# case this category exists to catch: in a consumer repo a Builder's own issue
+# worktree contains its own `.loom/hooks|scripts|roles|docs|bin/` and
+# `.claude/commands/loom/` copies (they are tracked files), so a write there is
+# "inside a managed worktree" and exits 0 at the first allow. The verdict is
+# derived entirely from the TARGET path (see the library's header), so it is
+# correct from the main checkout and from any worktree alike.
+#
+# Fails permissive by construction: a denial requires an affirmative `consumer`
+# verdict for the checkout root implied by the target path, and an unpinned
+# target. Loom's own tree and "cannot determine" both fall through untouched.
+# --------------------------------------------------------------------------
+if [[ "$_IFW_GUARD_ON" == true ]] && loom_installed_prefix_mentioned "$NORM_PATH" \
+   && loom_installed_write_denied "$NORM_PATH"; then
+    emit_deny "$(loom_installed_deny_reason "$NORM_PATH" "Edit/Write")"
+fi
+
+if [[ "$_WT_GUARD_ON" != true ]]; then
+    exit 0
 fi
 
 if [[ -n "$WORKTREE_PATH" ]]; then

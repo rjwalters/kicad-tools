@@ -605,6 +605,14 @@ def format_stranding_report(
     (does not re-implement) the ESCAPE_BLOCKED / CONGESTION_SATURATED /
     PLACEMENT_BOUND / BUDGET_STARVED / POUR_DISCONTINUOUS taxonomy so the Phase-1
     ground-truth report and ``--why`` agree.  READ-ONLY.
+
+    Issue #5517 (Epic #5508, Phase 1b): the classifier auto-discovers a
+    ``<stem>.access_witness.json`` sidecar next to *pcb_path*, so when ``kct
+    route`` wrote one this report gains an indented ``witness:`` line per
+    stranded terminal naming the pass, iteration and nets that closed its
+    access set.  That line replaces a guess with evidence -- and it is absent
+    (report byte-identical to pre-#5517) when no sidecar exists, which is the
+    case for every hand-authored or externally-routed board.
     """
     from kicad_tools.router.stuck_classifier import classify_stuck_nets
 

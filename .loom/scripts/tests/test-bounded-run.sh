@@ -20,8 +20,50 @@
 #   5. Arguments containing spaces survive (no word-splitting through the
 #      `"$@"` forwarding).
 #
+# ## Which exit codes the wedge case may legitimately see (#7788)
+#
+# The wedge case (contract 2/4 above) is the only one whose verdict depends on a
+# child process having actually STARTED, so it is the only one with a fixture
+# precondition worth stating:
+#
+#   124      the only passing verdict. The budget elapsed and the child was
+#            signalled; the portable path normalizes 143 (TERM) / 137 (KILL) to
+#            `timeout(1)`'s own 124 so callers branch on one code.
+#   126/127  NOT a verdict about bounding — the wedged child never ran, so the
+#            budget was never in play. Both codes are what the backgrounded
+#            `"$@" &` child exits with when bash forks it but the exec fails:
+#            127 for "not found"/exec failure, 126 for "found but not
+#            executable". Bash-as-the-child prints the errno message to stderr
+#            before exiting, which is why this fixture now CAPTURES that stderr
+#            instead of discarding it. A third, narrower route exists on the
+#            portable path: `wait "$cmd_pid"` returns 127 by definition for a
+#            pid bash does not consider its own child — in which case the real
+#            child may still be alive and about to write its pid, which is what
+#            the bounded pid poll below is for.
+#
+# This is not hypothetical. CI run 35034960799 recorded exactly it (`[portable]`
+# rc 127, pid file never written, bound reported as honored) on a branch whose
+# diff touched neither bounded-run.sh nor anything it calls, while the
+# `[native]` case moments earlier exec'd the same wedge file fine — and this
+# suite runs concurrently with every other wired shell suite (#6622). Which
+# errno produced it is still unestablished, precisely because the old fixture
+# sent that message to /dev/null; note that plain fork exhaustion is NOT the
+# explanation, since a background fork bash cannot complete kills the whole
+# non-interactive shell (exit 254) rather than yielding 127 from `wait`.
+#
+# An attempt that never started the child never exercised the bound, so
+# asserting 124 on it reports a verdict the run did not measure. The fixture
+# therefore RETRIES that attempt — bounded, loudly, with the child's stderr
+# echoed — and asserts only on an attempt whose precondition held. The same
+# treatment covers the narrower race the pid handshake has always had: a 124
+# whose child was signalled before it could record its pid (bounding worked,
+# but the orphan check has no pid to check). Everything that would prove a real
+# bounding regression still fails: rc 0, an unnormalized 143/137, a return past
+# the budget, or a precondition that never holds across every attempt.
+#
 # Usage:
 #   bash defaults/scripts/tests/test-bounded-run.sh
+#   LOOM_TEST_WEDGE_MAX_ATTEMPTS=1 bash …   # one-shot (no retry) wedge case
 
 set -uo pipefail
 
@@ -42,7 +84,17 @@ fi
 source "$LIB"
 
 WORKDIR="$(mktemp -d)"
-cleanup() { rm -rf "$WORKDIR"; }
+cleanup() {
+    # Sweep any wedged child that outlived the attempt that spawned it. The
+    # in-band reap check below can only kill a child whose pid was recorded, so
+    # an attempt that got no pid handshake (#7788) could otherwise leave a
+    # forever-blocking process behind — including one this run retried past. The
+    # pattern is this run's own mktemp path, so it cannot match anything else.
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -KILL -f "$WORKDIR/wedge.sh" 2>/dev/null || true
+    fi
+    rm -rf "$WORKDIR"
+}
 trap cleanup EXIT
 
 # A "wedged" command: writes its own pid, then blocks forever — the exact shape
@@ -54,6 +106,14 @@ echo "$$" > "$1"
 while true; do sleep 1; done
 EOF
 chmod +x "$WEDGE"
+
+# How many times the wedge case may re-run an attempt that produced no pid
+# handshake (see the header). Three, not "until it passes": the cap is what keeps
+# a genuine "bounded_run can no longer launch anything" regression a hard
+# failure — it only stops ONE unscoreable attempt from being reported as a
+# verdict about bounding.
+WEDGE_MAX_ATTEMPTS="${LOOM_TEST_WEDGE_MAX_ATTEMPTS:-3}"
+(( WEDGE_MAX_ATTEMPTS >= 1 )) || WEDGE_MAX_ATTEMPTS=1   # 0/garbage still runs once
 
 echo "════════════════════════════════════════════"
 echo "  bounded-run.sh tests (#4799)"
@@ -83,23 +143,72 @@ for MODE in native portable; do
 
     # The load-bearing case: a command that never returns must be bounded, and
     # reported as timeout(1)'s 124 on either implementation.
+    #
+    # An attempt only measures that if the wedged child actually started — its
+    # pid file is the handshake that says so. An attempt that produced no pid
+    # handshake is retried rather than asserted on; see the header's "Which exit
+    # codes the wedge case may legitimately see" (#7788).
     PIDFILE="$WORKDIR/wedge-$MODE.pid"
-    rm -f "$PIDFILE"
-    START=$SECONDS
-    bounded_run 1 "$WEDGE" "$PIDFILE" >/dev/null 2>&1; rc=$?
-    ELAPSED=$((SECONDS - START))
-    assert_eq "124" "$rc" "[$MODE] a never-returning command is bounded and reports 124"
-    if (( ELAPSED <= 10 )); then
-        pass "[$MODE] the bound is honored (returned in ${ELAPSED}s, budget 1s)"
-    else
-        fail "[$MODE] the bound is honored (took ${ELAPSED}s, budget 1s)"
-    fi
+    WEDGE_ERR="$WORKDIR/wedge-$MODE.err"
+    attempt=0; rc=""; ELAPSED=0; wedge_pid=""; wedge_err=""
+    while (( attempt < WEDGE_MAX_ATTEMPTS )); do
+        attempt=$((attempt + 1))
+        rm -f "$PIDFILE"
+        : > "$WEDGE_ERR"
+        START=$SECONDS
+        # stderr is captured rather than discarded so a precondition miss can
+        # SAY why ("fork: Resource temporarily unavailable", "No such file or
+        # directory", …) instead of being a bare exit code in a CI log.
+        bounded_run 1 "$WEDGE" "$PIDFILE" >/dev/null 2>"$WEDGE_ERR"; rc=$?
+        ELAPSED=$((SECONDS - START))
 
-    # No orphan left behind: the wedged child must be dead once we return.
-    wedge_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+        # Bounded poll, not a bare `cat`. On the normal path bounded_run has
+        # already `wait`ed the child, so the pid file is there and this exits
+        # on the first iteration at the cost of one `[[ -s ]]`. The poll is for
+        # the paths where bounded_run returns WITHOUT having reaped the real
+        # child — e.g. a `wait` that returned 127 for a pid the shell does not
+        # own — where a child that is a moment from writing its pid would
+        # otherwise be misread as one that never started.
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [[ -s "$PIDFILE" ]] && break
+            sleep 0.1
+        done
+        wedge_pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+        [[ -n "$wedge_pid" ]] && break
+
+        # No pid recorded. Retry ONLY for the codes that are consistent with
+        # "this attempt never exercised the bound" — 126/127 (the child never
+        # ran at all) and 124 (bounded, but the child was signalled before it
+        # could record itself, so the orphan check below has nothing to check).
+        # Any OTHER code with no pid file is a real signal about bounded_run
+        # (0, an unnormalized 143/137, a forwarded code), so stop immediately
+        # and let the assertions below report it.
+        wedge_err="$(tr '\n' ' ' < "$WEDGE_ERR" 2>/dev/null || true)"
+        case "$rc" in
+            124|126|127) ;;
+            *) break ;;
+        esac
+        if (( attempt < WEDGE_MAX_ATTEMPTS )); then
+            echo "  NOTE: [$MODE] attempt $attempt got no pid handshake from the wedged child" \
+                 "(rc=$rc after ${ELAPSED}s, stderr: ${wedge_err:-<empty>})" \
+                 "— nothing to score a bounding verdict against, retrying (#7788)"
+            sleep 1
+        fi
+    done
+
     if [[ -z "$wedge_pid" ]]; then
-        fail "[$MODE] the wedged child recorded its pid (fixture sanity)"
+        # The precondition never held. Fail once, loudly and honestly, rather
+        # than reporting a 124/bound verdict no attempt actually measured.
+        fail "[$MODE] the wedged child recorded its pid (fixture sanity) — no pid after ${attempt} attempt(s); last rc=${rc} after ${ELAPSED}s, stderr: ${wedge_err:-<empty>}"
     else
+        assert_eq "124" "$rc" "[$MODE] a never-returning command is bounded and reports 124"
+        if (( ELAPSED <= 10 )); then
+            pass "[$MODE] the bound is honored (returned in ${ELAPSED}s, budget 1s)"
+        else
+            fail "[$MODE] the bound is honored (took ${ELAPSED}s, budget 1s)"
+        fi
+
+        # No orphan left behind: the wedged child must be dead once we return.
         pass "[$MODE] the wedged child recorded its pid (fixture sanity)"
         # Allow a beat for the KILL escalation to be reaped.
         for _ in 1 2 3 4 5 6 7 8 9 10; do

@@ -44,6 +44,17 @@ Quick Start::
     # ... use with router, DRC, export functions
 """
 
+# Issue #5501: bound simultaneous native (``kicad-cli``) subprocesses when --
+# and only when -- ``KCT_NATIVE_MAX_CONCURRENCY`` is set. 15% of the CI bulk
+# pool's native launches come from descendant ``kct``/Python processes rather
+# than from a pytest worker itself, so the gate has to install here (every such
+# descendant imports this package) and not only in the test harness. Inert by
+# default: with the variable unset this is one stdlib-only import and an
+# environment lookup, and ``subprocess`` is left untouched.
+from kicad_tools.native_concurrency import install_from_environment as _install_native_gate
+
+_install_native_gate()
+
 # Get version from package metadata (single source of truth: pyproject.toml)
 try:
     from importlib.metadata import version as _get_version

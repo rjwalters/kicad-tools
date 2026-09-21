@@ -218,9 +218,18 @@ make_fixture() {
     printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "old",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
         "$repo" > "$repo/.loom/install-metadata.json"
 
-    # A real commit so loom_commit re-stamps to an actual short sha.
+    # A real commit so loom_commit re-stamps to an actual short sha. #7864:
+    # the message deliberately matches the local-divergence protection's
+    # "safe lineage" pattern (RESYNC_COMMIT_SUBJECT_RE) -- every file this
+    # fixture drifts is meant to model ordinary, never-individually-patched
+    # installed content (the ubiquitous common case throughout this suite),
+    # not a local fix. Tests that specifically want the OTHER shape (a direct
+    # fix landed on the installed copy) layer an additional commit with a
+    # non-matching message on top -- those live in the sibling suite
+    # test-resync-installed-local-fix-guard.sh, NOT below in this file
+    # (#8165: this pointer said "below" from the start and was never right).
     git -C "$repo" add -A >/dev/null 2>&1
-    git -C "$repo" commit -qm "fixture" >/dev/null 2>&1
+    git -C "$repo" commit -qm "chore: install Loom v0.0.0" >/dev/null 2>&1
 
     echo "$repo"
 }
@@ -2801,6 +2810,10 @@ if [[ $RC -eq 0 ]] && ! grep -qi "forge label" <<<"$OUT"; then
 else
     fail "(#6716) a repo with no labels.yml unexpectedly mentioned forge labels (rc=$RC); out=$OUT"
 fi
+
+# The guard-hook install check's wiring (#7761) is covered by the sibling
+# test-resync-installed-guard-check.sh, split out to respect this file's
+# file-size ratchet (.loom/docs/file-size-policy.md).
 
 # --- summary -----------------------------------------------------------------
 echo ""

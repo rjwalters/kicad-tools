@@ -559,6 +559,25 @@
 
 set -uo pipefail
 
+# ---------- help banner: read "$0" exactly ONCE, before anything else (#7794) ----------
+# `--help` prints this file's leading comment block. Recovering that text
+# lazily -- an awk pass over "$0" from inside show_help(), after sourcing and
+# argument parsing have run -- races a same-path truncate+rewrite of this very
+# file (a resync step, a shared self-hosted-runner checkout, or an operator's
+# `git merge --ff-only` all write in place: open+truncate+write, not an atomic
+# rename-into-place), handing back a torn, incomplete banner with no I/O error
+# to catch. That has failed CI twice on unrelated PRs (#7201, PR #7768).
+# Capturing it here -- the first statement executed, before any sourcing,
+# argument parsing or subprocess -- narrows the window to this script's own
+# startup instant and lets show_help() print from memory. It narrows the
+# window, it does not close it: the permanent fix is #7810 Phase 6, where this
+# wrapper becomes an `exec` stub and clap owns `--help`. Deliberately interim,
+# and deliberately byte-identical -- awk stops at the first non-comment line
+# (the blank line above `set -uo pipefail`), so the captured text never ends in
+# a blank line and the single trailing newline `$( )` strips is exactly the one
+# show_help()'s `printf '%s\n'` puts back.
+_LOOM_HELP_BANNER="$(awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0")"
+
 # ---------- output helpers ----------
 if [[ -t 2 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -566,9 +585,8 @@ else
     RED=''; GREEN=''; YELLOW=''; NC=''
 fi
 
-show_help() {
-    awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0"
-}
+# Prints the banner captured at startup above -- no filesystem access (#7794).
+show_help() { printf '%s\n' "$_LOOM_HELP_BANNER"; }
 
 # Shared domain resolver (#4130): gui/<uid> ↦ user/<uid>, sourced verbatim so the
 # watchdog probes the daemon in the same domain the start put it in.
@@ -1521,10 +1539,13 @@ sentinel at \`$ESCALATION_SENTINEL\`, which is cleared automatically once the da
 healthy again.
 EOF
 )"
+    # --force skips create-issue.sh's duplicate backstop (#7971) on purpose:
+    # this escalation is already deduped by $ESCALATION_SENTINEL, and a
+    # similarity heuristic must never be what silences an outage alert.
     if "$issue_script" \
         --title "loom-daemon is DOWN on $hostname_str and watchdog recovery is exhausted" \
         --body "$body" \
-        --label "loom:triage" >/dev/null 2>&1; then
+        --label "loom:triage" --force >/dev/null 2>&1; then
         mkdir -p "$(dirname "$ESCALATION_SENTINEL")" 2>/dev/null || true
         date -u '+%Y-%m-%dT%H:%M:%SZ' > "$ESCALATION_SENTINEL" 2>/dev/null || true
         return 0
@@ -1743,10 +1764,12 @@ automatically (and this issue commented on + closed) once a later watchdog
 tick observes \`peer_coordination\` back to healthy.
 EOF
     local issue_url create_rc
+    # --force: deduped by $PEER_COORD_SENTINEL already; see the outage
+    # escalation above for why the #7971 backstop is skipped on alert paths.
     issue_url="$("$issue_script" \
         --title "peer-claim coordination is DEGRADED on $hostname_str (#6157 Layer 3)" \
         --body "$body" \
-        --label "loom:triage" 2>/dev/null)"
+        --label "loom:triage" --force 2>/dev/null)"
     create_rc=$?
     [[ "$create_rc" -eq 0 && -n "$issue_url" ]] || return 1
 

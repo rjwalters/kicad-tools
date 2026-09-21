@@ -395,6 +395,35 @@
 
 set -uo pipefail
 
+# ---------- help banner: read "$0" exactly ONCE, before anything else (#7794) ----------
+# `--help` prints this file's leading comment block. Recovering that text
+# lazily -- an awk pass over "$0" from inside show_help(), after sourcing and
+# argument parsing have run -- races a same-path truncate+rewrite of this very
+# file (a resync step, a shared self-hosted-runner checkout, or this script's
+# own `git merge --ff-only` sync step, #4330: all write in place --
+# open+truncate+write, not an atomic rename-into-place), handing back a torn,
+# incomplete banner with no I/O error to catch. That has failed CI twice on
+# unrelated PRs (#7201, PR #7768).
+#
+# Capturing it here -- the first statement executed, before any sourcing,
+# argument parsing or subprocess -- narrows the window to this script's own
+# startup instant and lets show_help() print from memory. It narrows the
+# window, it does not close it: the permanent fix is #7810 Phase 6, where this
+# wrapper becomes an `exec` stub and clap owns `--help`. Deliberately interim,
+# and deliberately byte-identical -- awk stops at the first non-comment line
+# (the blank line above `set -uo pipefail`), so the captured text never ends in
+# a blank line and the single trailing newline `$( )` strips is exactly the one
+# show_help()'s `printf '%s\n'` puts back.
+#
+# This replaces the #7201 mitigation that used to live in show_help(): a
+# double-read stability check with five bounded retries. That could only ever
+# narrow the same window (after five attempts it printed whatever the last pass
+# read), and it had to re-read the file five times to do it. One early read is
+# strictly fewer reads in a strictly narrower window. The concurrent-rewrite
+# regression fixture (test-loom-daemon-update.sh scenario 8b) stays as the
+# guard for that, and stays green -- see the PR for #7794.
+_LOOM_HELP_BANNER="$(awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0" 2>/dev/null)"
+
 # ---------- output helpers ----------
 if [[ -t 1 ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -405,45 +434,8 @@ err()  { echo -e "${RED}$*${NC}" >&2; }
 warn() { echo -e "${YELLOW}$*${NC}" >&2; }
 ok()   { echo -e "${GREEN}$*${NC}"; }
 
-# _read_help_banner -- one awk pass over "$0" printing the leading comment
-# banner (line 2 through the last comment line before `set -uo pipefail`),
-# stripping the leading "# ". Split out of show_help() below so it can be
-# invoked more than once for the torn-read stability check.
-_read_help_banner() {
-    awk 'NR>=2 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "$0" 2>/dev/null
-}
-
-show_help() {
-    # Reads "$0" at runtime -- fragile against a same-path truncate+rewrite
-    # of THIS exact file landing while the awk pass above is reading it (the
-    # shape `git checkout`/`cp` writes use -- open+truncate+write in place,
-    # not an atomic rename-into-place). That is not hypothetical: a shared
-    # self-hosted-runner checkout, a resync step, or an operator's own
-    # `git merge --ff-only` (this script's ff-sync step, #4330) landing on
-    # this file mid-read can all do it. There is no I/O error to catch --
-    # just a torn, incomplete banner missing whatever lines the writer had
-    # not reached yet. Confirmed reproducible locally: concurrently
-    # overwriting this file with itself during a --help loop took the
-    # failure rate from 0% to 100% (#7201).
-    #
-    # Hardened with a cheap, content-agnostic stability check instead of a
-    # hardcoded sentinel line (robust to future banner edits): read twice
-    # back-to-back and require an identical, non-empty result before
-    # trusting it -- a torn read from a write landing mid-pass is extremely
-    # unlikely to reproduce byte-for-byte on the very next pass a moment
-    # later. Bounded retries with a short backoff so a genuinely corrupted
-    # file (not a transient race) still terminates instead of looping
-    # forever -- it prints whatever the last pass read rather than hanging.
-    local banner banner2 _attempt
-    banner="$(_read_help_banner)"
-    for _attempt in 1 2 3 4 5; do
-        banner2="$(_read_help_banner)"
-        [[ -n "$banner2" && "$banner" == "$banner2" ]] && { banner="$banner2"; break; }
-        banner="$banner2"
-        sleep 0.05
-    done
-    printf '%s\n' "$banner"
-}
+# Prints the banner captured at startup above -- no filesystem access (#7794).
+show_help() { printf '%s\n' "$_LOOM_HELP_BANNER"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -510,6 +502,15 @@ else
     exit 1
 fi
 locate_daemon_bin() { loom_locate_daemon_bin "$1"; }
+
+# resolve_self_daemon_bin -- the loom-daemon that IMPLEMENTS this script's
+# ported logic, which is NOT the same binary as locate_daemon_bin's. The
+# definition moved into lib/locate-daemon-bin.sh with #8037, when
+# claude-wrapper.sh became the second caller needing that distinction; see
+# `loom_resolve_self_daemon_bin` there for the resolution order and the #7977
+# category error it exists to prevent. Wrapped under the local name this
+# script's call sites already use, the same way locate_daemon_bin is.
+resolve_self_daemon_bin() { loom_resolve_self_daemon_bin; }
 
 # Extract the short commit from `loom-daemon --version` output, e.g.
 # "loom-daemon 0.15.0 (commit ab12cd3, built 2026-07-26T12:00:00Z)" -> ab12cd3
@@ -724,260 +725,15 @@ _json_str() {
     if [[ -z "${1:-}" ]]; then printf 'null'; else printf '"%s"' "$(_json_escape "$1")"; fi
 }
 
-# resolve_release_published_at -- echo the resolved release's publishedAt
-# timestamp (ISO-8601), or "" when it cannot be read. Best-effort: an older
-# `gh`, a transient API failure, or a forge that does not report it must not
-# turn an otherwise-successful resolution into a failure.
-resolve_release_published_at() {
-    [[ -n "$FETCH_LATEST_TAG" && -n "$FETCH_REPO_SLUG" ]] || { echo ""; return 0; }
-    gh release view "$FETCH_LATEST_TAG" --json publishedAt -R "$FETCH_REPO_SLUG" \
-        --jq '.publishedAt' 2>/dev/null || echo ""
-}
 
-# resolve_release_asset_sha256 -- echo the PUBLISHED sha256 of this host's
-# release binary, read from the release's own `<bin>.sha256` asset, or "" when
-# it cannot be downloaded. This is the ~65-byte checksum asset only -- the
-# binary itself is never downloaded in this mode. The daemon compares it
-# against the installed binary's sha256 to detect the "same version, different
-# bytes" case (a host that built this version from source before the release
-# existed).
-resolve_release_asset_sha256() {
-    [[ -n "$FETCH_LATEST_TAG" && -n "$FETCH_REPO_SLUG" && -n "$FETCH_TARGET" ]] || { echo ""; return 0; }
-    command -v gh >/dev/null 2>&1 || { echo ""; return 0; }
-    local tmpdir sha_name
-    sha_name="loom-daemon-${FETCH_TARGET}.sha256"
-    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/loom-daemon-resolve.XXXXXX" 2>/dev/null)" || { echo ""; return 0; }
-    _LOOM_FETCH_TMPDIRS+=("$tmpdir")
-    if gh release download "$FETCH_LATEST_TAG" -R "$FETCH_REPO_SLUG" \
-            -p "$sha_name" -D "$tmpdir" --clobber >/dev/null 2>&1 \
-        && [[ -f "$tmpdir/$sha_name" ]]; then
-        awk 'NR==1{print $1}' "$tmpdir/$sha_name" 2>/dev/null
-    else
-        echo ""
-    fi
-}
 
-# emit_resolve_json <ok:true|false> <reason> -- print the one JSON object
-# --resolve-json contracts on, to FD 3 (stdout as it was before the mode
-# redirected the script's chatty stdout to stderr). Every field is either a
-# JSON string or `null`; no field is ever omitted, so a consumer can rely on
-# the shape.
-emit_resolve_json() {
-    local ok="$1" reason="${2:-}"
-    local published_at="" asset_sha256="" installed_sha256=""
-    if [[ "$ok" == "true" ]]; then
-        published_at="$(resolve_release_published_at)"
-        asset_sha256="$(resolve_release_asset_sha256)"
-    fi
-    installed_sha256="$(sha256_file "${STALENESS_BIN:-}")"
-    printf '{"ok":%s,"reason":%s,"repo":%s,"target":%s,"tag":%s,"version":%s,"published_at":%s,"asset_sha256":%s,"installed_bin":%s,"installed_version":%s,"installed_commit":%s,"installed_sha256":%s,"source_version":%s,"source_commit":%s}\n' \
-        "$ok" \
-        "$(_json_str "$reason")" \
-        "$(_json_str "${FETCH_REPO_SLUG:-}")" \
-        "$(_json_str "${FETCH_TARGET:-}")" \
-        "$(_json_str "${FETCH_LATEST_TAG:-}")" \
-        "$(_json_str "${FETCH_LATEST_VERSION:-}")" \
-        "$(_json_str "$published_at")" \
-        "$(_json_str "$asset_sha256")" \
-        "$(_json_str "${STALENESS_BIN:-}")" \
-        "$(_json_str "${INSTALLED_VERSION:-}")" \
-        "$(_json_str "${INSTALLED_COMMIT:-}")" \
-        "$(_json_str "$installed_sha256")" \
-        "$(_json_str "${SOURCE_VERSION:-}")" \
-        "$(_json_str "${SOURCE_COMMIT:-}")" \
-        >&3
-}
 
-# resolve_cosign_pubkey -- echo a resolvable cosign public key path, or "".
-# KEY mode only (a `.sig` published without a sibling `.pem` certificate):
-# LOOM_DAEMON_UPDATE_COSIGN_PUBKEY (env) first, else a conventional checked-in
-# path. No public key is committed to this repo, and #5054 deliberately did
-# NOT add one -- see resolve_cosign_identity_regexp for why keyless is the
-# default trust root instead. An empty result means "signature present but
-# unverifiable" -- a loud skip, never a block (see verify_artifact_signature).
-resolve_cosign_pubkey() {
-    if [[ -n "${LOOM_DAEMON_UPDATE_COSIGN_PUBKEY:-}" && -r "${LOOM_DAEMON_UPDATE_COSIGN_PUBKEY}" ]]; then
-        echo "$LOOM_DAEMON_UPDATE_COSIGN_PUBKEY"
-        return 0
-    fi
-    local candidate
-    for candidate in "$REPO_ROOT/.loom/cosign.pub" "$REPO_ROOT/defaults/cosign.pub"; do
-        [[ -r "$candidate" ]] && { echo "$candidate"; return 0; }
-    done
-    echo ""
-}
-
-# _regex_escape <literal> -- escape POSIX ERE metacharacters so a repo slug or
-# release tag can be embedded literally inside the identity regexp below
-# (`.` in `github.com` / `v0.17.0` is the one that actually matters, but the
-# whole metacharacter class is escaped so no future tag shape can widen the
-# expected identity).
-_regex_escape() {
-    printf '%s' "$1" | sed 's/[][\.^$*+?(){}|\\]/\\&/g'
-}
-
-# resolve_cosign_identity_regexp -- echo the expected KEYLESS signer identity
-# (a POSIX ERE for cosign's --certificate-identity-regexp), or "" when it
-# cannot be derived.
-#
-# WHY KEYLESS IS THE DEFAULT (#5054, the decision this function encodes):
-# Phase 2 (#5011) signed Linux artifacts with a cosign PRIVATE KEY held in an
-# Actions secret, and Phase 3 (#5020) verified them against a public key that
-# was never distributed -- so every real host loud-skipped. Distributing that
-# public key (committing `defaults/cosign.pub`) would fix the skip but pins the
-# whole fleet to one keypair: rotating it silently breaks verification on every
-# host still carrying the old key, and the key must be provisioned as a secret
-# before ANY release can be signed at all. Keyless Sigstore signing has neither
-# problem -- the signer proves its identity with the GitHub Actions OIDC token
-# the workflow already has, so signing needs NO secret to be provisioned and
-# verification needs NO key material to be distributed. The trust root becomes
-# an assertion about *who signed*, which is exactly what we care about:
-#
-#   "a workflow in the SAME repo this artifact was downloaded from, running at
-#    EXACTLY this release's tag, with a certificate issued by GitHub Actions"
-#
-# The workflow FILE is intentionally not pinned (any `[^@]+` under
-# `.github/workflows/`): pinning it would turn a future rename of
-# `release.yml` into a fleet-wide hard-abort, while adding nothing -- anything
-# able to run a workflow in this repo at this tag can already publish the
-# release assets themselves. Operators who want the stricter form set
-# LOOM_DAEMON_UPDATE_COSIGN_IDENTITY to the exact identity.
-resolve_cosign_identity_regexp() {
-    local slug="${FETCH_REPO_SLUG:-}" tag="${ARTIFACT_TAG:-}"
-    [[ -n "$slug" && -n "$tag" ]] || { echo ""; return 0; }
-    printf '^https://github\\.com/%s/\\.github/workflows/[^@]+@refs/tags/%s$' \
-        "$(_regex_escape "$slug")" "$(_regex_escape "$tag")"
-}
-
-# resolve_cosign_oidc_issuer -- echo the expected keyless certificate issuer.
-# GitHub Actions' OIDC provider by default; overridable for a self-hosted
-# forge or a differently-issued token.
-resolve_cosign_oidc_issuer() {
-    echo "${LOOM_DAEMON_UPDATE_COSIGN_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
-}
-
-# sha256_file <path> -- echo the lowercase hex sha256 of <path>, or "" when it
-# cannot be computed (unreadable file, or neither `shasum` nor `sha256sum` on
-# PATH). Shared by verify_artifact_checksum (below) and --resolve-json's
-# installed-binary checksum (#7609) so both spellings of "what is this file's
-# sha256" can never drift apart.
-sha256_file() {
-    local p="${1:-}"
-    [[ -n "$p" && -r "$p" ]] || { echo ""; return 0; }
-    if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$p" 2>/dev/null | awk '{print $1}'
-    elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$p" 2>/dev/null | awk '{print $1}'
-    else
-        echo ""
-    fi
-}
-
-# verify_artifact_checksum <bin_path> <sha256_path> -- unconditional
-# checksum verification. The `.sha256` format is `shasum -a 256` /
-# `sha256sum` output (`<hex>  <filename>`), so the hex digest is always the
-# first field.
-verify_artifact_checksum() {
-    local bin_path="$1" sha_path="$2" expected actual
-    expected="$(awk 'NR==1{print $1}' "$sha_path" 2>/dev/null)"
-    [[ -n "$expected" ]] || return 1
-    actual="$(sha256_file "$bin_path")"
-    if [[ -z "$actual" ]]; then
-        err "Could not compute a sha256 for $bin_path (neither 'shasum' nor 'sha256sum' is available, or the file is unreadable) -- cannot verify the artifact checksum."
-        return 1
-    fi
-    [[ "$expected" == "$actual" ]]
-}
-
-# verify_artifact_signature <target> <bin_path> <sig_path-or-empty>
-#                           [cert_path-or-empty] --
-# signature verification, present-only (absence always passes). Distinguishes
-# "not signed" (expected/allowed, soft-skip) from "signed but verification
-# failed" (tamper evidence, hard-fail) per the epic's design principle 2.
-#
-# On Linux the ARTIFACT's OWN SHAPE selects the verification mode -- never
-# local configuration (#5054): a `.sig` accompanied by its `.pem` signing
-# certificate was signed keylessly and is verified against the expected signer
-# identity; a bare `.sig` was signed with a private key and needs a resolvable
-# public key. Deciding by artifact shape is what makes a stale operator-set
-# LOOM_DAEMON_UPDATE_COSIGN_PUBKEY harmless against keyless releases instead of
-# a fleet-wide false "tamper" abort.
-verify_artifact_signature() {
-    local target="$1" bin_path="$2" sig_path="$3" cert_path="${4:-}"
-    case "$target" in
-        *-apple-darwin)
-            if ! command -v codesign >/dev/null 2>&1; then
-                warn "'codesign' not available -- skipping macOS signature verification (best-effort; checksum already verified)."
-                return 0
-            fi
-            local desc
-            desc="$(codesign -dv "$bin_path" 2>&1 || true)"
-            if grep -q 'code object is not signed at all' <<<"$desc"; then
-                warn "Downloaded artifact is unsigned (no Developer ID secrets were configured for this release) -- proceeding without signature verification, per design (checksum is unconditional; signature is optional)."
-                return 0
-            fi
-            if codesign --verify --strict "$bin_path" 2>/dev/null; then
-                ok "macOS codesign verification passed for $(basename "$bin_path")."
-                return 0
-            fi
-            err "macOS codesign verification FAILED for $(basename "$bin_path") -- an embedded signature is present but invalid. This is NOT the 'unsigned' case; treating as tamper evidence."
-            return 1
-            ;;
-        *-linux-*)
-            if [[ -z "$sig_path" ]]; then
-                # No .sig asset published for this release (cosign secret was
-                # not configured for it) -- absence never blocks, by design.
-                return 0
-            fi
-            if ! command -v cosign >/dev/null 2>&1; then
-                warn "A detached signature ($(basename "$sig_path")) is present for this release but 'cosign' is not installed -- SKIPPING verification (loud skip, not a block; checksum already verified)."
-                return 0
-            fi
-            # ---- keyless (Sigstore/OIDC): the default since #5054 ----
-            if [[ -n "$cert_path" ]]; then
-                local issuer identity_desc
-                local -a identity
-                issuer="$(resolve_cosign_oidc_issuer)"
-                if [[ -n "${LOOM_DAEMON_UPDATE_COSIGN_IDENTITY:-}" ]]; then
-                    identity_desc="$LOOM_DAEMON_UPDATE_COSIGN_IDENTITY"
-                    identity=(--certificate-identity "$LOOM_DAEMON_UPDATE_COSIGN_IDENTITY")
-                else
-                    identity_desc="$(resolve_cosign_identity_regexp)"
-                    if [[ -z "$identity_desc" ]]; then
-                        warn "A detached signature ($(basename "$sig_path")) and its signing certificate are present but the expected signer identity could not be derived (no release slug/tag in scope) -- SKIPPING verification (loud skip, not a block; checksum already verified)."
-                        return 0
-                    fi
-                    identity=(--certificate-identity-regexp "$identity_desc")
-                fi
-                if cosign verify-blob \
-                        --certificate "$cert_path" \
-                        --signature "$sig_path" \
-                        "${identity[@]}" \
-                        --certificate-oidc-issuer "$issuer" \
-                        "$bin_path" >/dev/null 2>&1; then
-                    ok "cosign keyless signature verification passed for $(basename "$bin_path") (signer identity ${identity_desc}, issuer ${issuer})."
-                    return 0
-                fi
-                err "cosign keyless signature verification FAILED for $(basename "$bin_path") against $(basename "$sig_path") + $(basename "$cert_path") (expected signer identity ${identity_desc}, issuer ${issuer})."
-                return 1
-            fi
-            # ---- key mode: a bare `.sig`, pre-#5054 signing ----
-            local pubkey
-            pubkey="$(resolve_cosign_pubkey)"
-            if [[ -z "$pubkey" ]]; then
-                warn "A detached signature ($(basename "$sig_path")) is present without a signing certificate (key-signed release) and no cosign public key is resolvable (set LOOM_DAEMON_UPDATE_COSIGN_PUBKEY) -- SKIPPING verification (loud skip, not a block; checksum already verified)."
-                return 0
-            fi
-            if cosign verify-blob --key "$pubkey" --signature "$sig_path" "$bin_path" >/dev/null 2>&1; then
-                ok "cosign signature verification passed for $(basename "$bin_path")."
-                return 0
-            fi
-            err "cosign signature verification FAILED for $(basename "$bin_path") against $(basename "$sig_path") using key $pubkey."
-            return 1
-            ;;
-        *) return 0 ;;
-    esac
-}
+# resolve_cosign_pubkey, _regex_escape, resolve_cosign_identity_regexp,
+# resolve_cosign_oidc_issuer, sha256_file, verify_artifact_checksum, and
+# verify_artifact_signature moved to loom-daemon (epic #7810, PR 6a): the
+# `release_fetch` module beside `release_resolve` --
+# loom-daemon/src/release_fetch/{checksum,cosign,signature,fetch}.rs. See
+# fetch_and_verify_artifact() below for the delegation this un-ports.
 
 # Temp dirs/files created by fetch_and_verify_artifact (and, since #6160,
 # the `cargo build --release --message-format=json-render-diagnostics`
@@ -994,85 +750,78 @@ _cleanup_fetch_tmpdirs() {
 trap _cleanup_fetch_tmpdirs EXIT
 
 # fetch_and_verify_artifact -- download loom-daemon-<ARTIFACT_TARGET> +
-# its .sha256 (required) + its .sig and .pem (both best-effort) for ARTIFACT_TAG from
-# FETCH_REPO_SLUG, verify checksum (unconditional) and signature (when
+# its .sha256 (required) + its .sig and .pem (both best-effort) for ARTIFACT_TAG
+# from FETCH_REPO_SLUG, verify checksum (unconditional) and signature (when
 # present), and set ARTIFACT_BIN (path to the verified binary),
 # ARTIFACT_VERSION_OUTPUT (its full `--version` string, the post-provision
-# identity) and ARTIFACT_COMMIT (its embedded commit, when resolvable) on
-# success.
+# identity), ARTIFACT_COMMIT (its embedded commit, when resolvable) and
+# ARTIFACT_SIGNATURE_HAD_AUTHORITY (macOS only, consumed by
+# verify_destination_artifact() below, #8008) on success.
+#
+# DELEGATED as of epic #7810 PR 6a, exactly as --resolve-json (#7977)
+# delegates to `loom-daemon release-resolve`. The download + checksum +
+# signature logic is `loom-daemon release-fetch`
+# (loom-daemon/src/release_fetch/); this function hands it the four things
+# only the shell knows at this point (repo root, target, repo slug, tag),
+# lets its human-facing progress/verdict lines pass straight through to OUR
+# OWN stderr (never captured -- that is what keeps them showing up in a
+# caller's `2>&1` capture unchanged, and is why the cosign/codesign wording
+# those lines carry is contract for test-loom-daemon-update-fetch.sh, not
+# merely descriptive), and parses back only the `KEY=value` lines it prints
+# on stdout.
 #
 # A checksum or signature-verification FAILURE hard-aborts the whole script
-# (exit 1) -- these are tamper/corruption signals, never soft-fallback
-# conditions (AC2/AC3). A DOWNLOAD failure (network blip, asset renamed
+# (exit 1 directly, matching the pre-port function's own `exit 1` rather than
+# a `return 1` to this function's caller) -- these are tamper/corruption
+# signals, never soft-fallback conditions (AC2/AC3). A DOWNLOAD failure
+# (no `loom-daemon` to delegate to, a network blip, an asset renamed
 # server-side after fetch_resolve_latest checked) instead returns 1 so the
 # caller can decide -- in practice this script has already committed to
 # ARTIFACT_MODE by the time this runs, so the caller also aborts, but the
-# distinction keeps this function's contract composable.
+# distinction keeps this function's contract composable exactly as before.
 fetch_and_verify_artifact() {
-    local tmpdir bin_name sha_name sig_name cert_name bin_path sha_path sig_path="" cert_path=""
-    tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/loom-daemon-fetch.XXXXXX" 2>/dev/null)" || {
-        err "Could not create a temp dir for the artifact download."
-        return 1
-    }
-    _LOOM_FETCH_TMPDIRS+=("$tmpdir")
-
-    bin_name="loom-daemon-${ARTIFACT_TARGET}"
-    sha_name="${bin_name}.sha256"
-    sig_name="${bin_name}.sig"
-    cert_name="${bin_name}.pem"
-
-    echo "Downloading ${bin_name} + ${sha_name} from ${FETCH_REPO_SLUG}@${ARTIFACT_TAG}..."
-    if ! gh release download "$ARTIFACT_TAG" -R "$FETCH_REPO_SLUG" \
-            -p "$bin_name" -p "$sha_name" -D "$tmpdir" --clobber >/dev/null 2>&1; then
-        err "Failed to download release assets (${bin_name}, ${sha_name}) for ${ARTIFACT_TAG} from ${FETCH_REPO_SLUG}."
+    local rf_bin rf_out rf_rc line key value
+    rf_bin="$(resolve_self_daemon_bin)"
+    if [[ -z "$rf_bin" ]]; then
+        err "No loom-daemon binary implementing release-fetch could be resolved (set LOOM_DAEMON_SELF_BIN, or build it: cargo build --release --package loom-daemon)."
         return 1
     fi
-    bin_path="$tmpdir/$bin_name"
-    sha_path="$tmpdir/$sha_name"
-    if [[ ! -f "$bin_path" || ! -f "$sha_path" ]]; then
-        err "Download reported success but expected files are missing under $tmpdir."
-        return 1
-    fi
-    chmod 755 "$bin_path" 2>/dev/null || true
 
-    # ---- checksum: unconditional ----
-    if ! verify_artifact_checksum "$bin_path" "$sha_path"; then
-        err "Checksum verification FAILED for $bin_name -- the downloaded artifact does not match its published $sha_name."
-        err "Aborting the update; the running daemon (if any) is left untouched."
+    # stdout is captured (the KEY=value contract below); stderr is left
+    # attached to THIS script's own stderr, so every progress/ok/warn/err line
+    # `loom-daemon release-fetch` prints reaches the caller exactly as if this
+    # function had printed it directly.
+    rf_out="$("$rf_bin" release-fetch --repo-root "$REPO_ROOT" --target "$ARTIFACT_TARGET" --repo "$FETCH_REPO_SLUG" --tag "$ARTIFACT_TAG")"
+    rf_rc=$?
+
+    if [[ "$rf_rc" -eq 1 ]]; then
+        # Verification FAILED (checksum mismatch or an invalid signature) --
+        # `loom-daemon release-fetch` already printed the specific reason plus
+        # the shared "left untouched" line to stderr; exit immediately rather
+        # than returning, matching the pre-port direct `exit 1`.
         exit 1
     fi
-    ok "Checksum verified: $bin_name matches $sha_name."
-
-    # ---- signature: best-effort download (may not exist), verify when present ----
-    if gh release download "$ARTIFACT_TAG" -R "$FETCH_REPO_SLUG" \
-            -p "$sig_name" -D "$tmpdir" --clobber >/dev/null 2>&1 \
-        && [[ -f "$tmpdir/$sig_name" ]]; then
-        sig_path="$tmpdir/$sig_name"
-        # A keyless-signed release also publishes the ephemeral signing
-        # certificate next to the signature (#5054); its presence is what
-        # selects keyless verification in verify_artifact_signature. Fetched
-        # separately (and only when there IS a signature) so a key-signed
-        # release, which publishes no `.pem`, never turns a "pattern matched
-        # nothing" download into an error.
-        if gh release download "$ARTIFACT_TAG" -R "$FETCH_REPO_SLUG" \
-                -p "$cert_name" -D "$tmpdir" --clobber >/dev/null 2>&1 \
-            && [[ -f "$tmpdir/$cert_name" ]]; then
-            cert_path="$tmpdir/$cert_name"
-        fi
-    fi
-    if ! verify_artifact_signature "$ARTIFACT_TARGET" "$bin_path" "$sig_path" "$cert_path"; then
-        err "Signature verification FAILED for $bin_name (see above)."
-        err "Aborting the update; the running daemon (if any) is left untouched."
-        exit 1
+    if [[ "$rf_rc" -ne 0 ]]; then
+        # Could not even download (rf_rc == 2), or some other unexpected
+        # failure -- soft, the caller decides (prints its own generic message
+        # and exits 1).
+        return 1
     fi
 
-    ARTIFACT_BIN="$bin_path"
-    # Captured from the VERIFIED download, before provisioning: the identity
-    # verify_destination_artifact() asserts against afterwards (see its own
-    # doc comment for why the full --version string, not the commit or a
-    # byte checksum, is the right identity here).
-    ARTIFACT_VERSION_OUTPUT="$("$bin_path" --version 2>/dev/null || true)"
-    ARTIFACT_COMMIT="$(extract_commit "$ARTIFACT_VERSION_OUTPUT")"
+    while IFS='=' read -r key value; do
+        case "$key" in
+            BIN_PATH) ARTIFACT_BIN="$value" ;;
+            TMP_DIR) [[ -n "$value" ]] && _LOOM_FETCH_TMPDIRS+=("$value") ;;
+            VERSION_OUTPUT) ARTIFACT_VERSION_OUTPUT="$value" ;;
+            COMMIT) ARTIFACT_COMMIT="$value" ;;
+            HAD_AUTHORITY) ARTIFACT_SIGNATURE_HAD_AUTHORITY="$value" ;;
+        esac
+    done <<<"$rf_out"
+
+    if [[ -z "${ARTIFACT_BIN:-}" ]]; then
+        err "release-fetch exited 0 but printed no BIN_PATH -- treating as a download failure."
+        return 1
+    fi
     return 0
 }
 
@@ -1459,6 +1208,39 @@ verify_destination_artifact() {
         exit 5
     fi
     ok "Post-provision verification: destination binary at $dest is the fetched release artifact ($dest_version)."
+
+    # ---- signature-preservation assertion (Darwin only, #8008) ----
+    # The version-string compare above proves the destination IS the fetched
+    # binary; it says nothing about whether provisioning left its SIGNATURE
+    # intact. #7932 fixed a guard in sign_daemon_binary() that had been
+    # silently ad-hoc-resigning every Developer ID-signed release artifact on
+    # provision since #5020 (a `codesign ... | grep -q` pipe form that always
+    # reported 141 under `set -o pipefail`) -- replacing the
+    # certificate-anchored designated requirement with a per-build cdhash and
+    # orphaning TCC grants on every roll. Nothing caught that regression
+    # because nothing compared the destination's signature against the
+    # verified download's. This closes that gap: only runs when the
+    # pre-provision download demonstrably carried an Authority (set by
+    # verify_artifact_signature() before provisioning); skips silently when
+    # that is unknown (Linux target, or codesign unavailable at download time).
+    if [[ "$ARTIFACT_SIGNATURE_HAD_AUTHORITY" == "true" ]]; then
+        if ! command -v codesign >/dev/null 2>&1; then
+            warn "'codesign' not available -- cannot verify the destination binary's signature survived provisioning (the verified download carried a Developer ID Authority signature)."
+        else
+            local dest_sig_desc
+            # Read-then-match (#6662/#7932): NEVER `codesign ... | grep -q`,
+            # which is exactly the pipefail bug this whole check exists to
+            # guard against (grep -q closes the pipe before codesign finishes
+            # writing, reporting 141 under `set -o pipefail`).
+            dest_sig_desc="$(codesign -dvvv "$dest" 2>&1 || true)"
+            if ! grep -q '^Authority=' <<<"$dest_sig_desc"; then
+                err "Post-provision verification FAILED: the fetched release artifact carried a Developer ID (Authority=) signature, but the provisioned destination at $dest does not."
+                err "Provisioning has DOWNGRADED the signature -- this replaces the certificate-anchored designated requirement with a per-build ad-hoc identity and orphans every TCC grant on this host (the #7932 regression class). Refusing to report success."
+                exit 5
+            fi
+            ok "Post-provision verification: destination binary at $dest retains its Developer ID Authority signature."
+        fi
+    fi
 }
 
 # verify_supervisor_matches_provisioned <provisioned_dest> — the #6009
@@ -2256,6 +2038,16 @@ ARTIFACT_TARGET=""
 ARTIFACT_BIN=""
 ARTIFACT_COMMIT=""
 ARTIFACT_VERSION_OUTPUT=""
+# Darwin-only (#8008): whether the VERIFIED download's `codesign -dv` output
+# carried an `Authority=` line, i.e. a certificate-anchored (Developer ID)
+# signature rather than an ad-hoc/unsigned one. Set by verify_artifact_signature()
+# before provisioning; verify_destination_artifact() asserts against it after,
+# so a post-provision downgrade (the #7932 incident: ad-hoc re-signing a
+# Developer ID-signed release artifact) is caught instead of going unnoticed.
+# Left "" (neither true nor false) on Linux targets and when codesign is
+# unavailable -- both cases where the pre-provision state is unknown, so the
+# post-provision check has nothing to assert against and skips.
+ARTIFACT_SIGNATURE_HAD_AUTHORITY=""
 ARTIFACT_FALLBACK_REASON=""
 # Gap-visibility (#6010): true when the newest resolved release is behind the
 # CURRENT source tree's VERSION file — independent of ARTIFACT_MODE, which
@@ -2265,13 +2057,8 @@ ARTIFACT_FALLBACK_REASON=""
 # the release was also behind source, so the real gap was invisible until a
 # forced `--fetch` hard-failed.
 FETCH_RELEASE_BEHIND_SOURCE=false
-# Whether fetch_resolve_latest() actually resolved a release artifact for this
-# host's platform this run (#7609) — distinct from ARTIFACT_MODE, which also
-# requires the resolved release to be NEWER than what is installed.
-FETCH_RESOLVED=false
 if [[ "$FETCH_MODE" != "off" ]]; then
     if fetch_resolve_latest; then
-        FETCH_RESOLVED=true
         FETCH_VERSION_CMP="$(semver_compare "$FETCH_LATEST_VERSION" "${INSTALLED_VERSION:-0.0.0}")"
         # Strictly newer wins. An EQUAL version only wins under an explicit
         # --fetch: `--force` alone keeps its established meaning ("rebuild this
@@ -2306,17 +2093,34 @@ fi
 # too: an operator who has disabled the artifact path fleet-wide gets an
 # explicit `ok:false` with that as the reason, which is what keeps the daemon's
 # artifact-first tick falling back to its source path on such a host.
+#
+# DELEGATED as of epic #7810 PR 5. The resolution logic is
+# `loom-daemon release-resolve` (Rust, loom-daemon/src/release_resolve/); this
+# mode hands it the one thing only the shell knows — which binary counts as
+# "installed" on this host, i.e. the binary the DETECTED SUPERVISOR launches
+# ($STALENESS_BIN), not merely whatever is on PATH — and passes its stdout and
+# exit code straight through.
+#
+# `exec` so the subcommand's own exit code reaches the caller unmodified: `1`
+# here means "no artifact resolved", which the daemon's tick reads as data and
+# falls back to its source path on. Remapping it would turn an ordinary
+# outcome into a failure.
+#
+# When no loom-daemon can be resolved this still answers in the mode's own
+# contract — one JSON object, ok:false, with the reason — rather than exiting
+# silently. A consumer that always gets valid JSON can report the problem; one
+# that gets an empty stdout cannot tell that from a crash.
 if [[ "$RESOLVE_JSON" == "true" ]]; then
-    if [[ "$FETCH_MODE" == "off" ]]; then
-        emit_resolve_json false "artifact-fetch is disabled on this host (--no-fetch / LOOM_DAEMON_UPDATE_FETCH=0)"
+    _rj_bin="$(resolve_self_daemon_bin)"
+    if [[ -z "$_rj_bin" ]]; then
+        printf '{"ok":false,"reason":%s,"repo":null,"target":null,"tag":null,"version":null,"published_at":null,"asset_sha256":null,"installed_bin":null,"installed_version":null,"installed_commit":null,"installed_sha256":null,"source_version":null,"source_commit":null}\n' \
+            "$(_json_str "no loom-daemon binary implementing release-resolve could be resolved (set LOOM_DAEMON_SELF_BIN, or build it: cargo build --release --package loom-daemon)")" >&3
         exit 1
     fi
-    if [[ "$FETCH_RESOLVED" == "true" ]]; then
-        emit_resolve_json true ""
-        exit 0
-    fi
-    emit_resolve_json false "${ARTIFACT_FALLBACK_REASON:-no release artifact resolved}"
-    exit 1
+    _rj_args=(release-resolve --repo-root "$REPO_ROOT")
+    [[ -n "${STALENESS_BIN:-}" ]] && _rj_args+=(--installed-bin "$STALENESS_BIN")
+    [[ "$FETCH_MODE" == "off" ]] && _rj_args+=(--no-fetch)
+    exec "$_rj_bin" "${_rj_args[@]}" >&3
 fi
 
 # ---------- --prune-stale-entry-points: standalone action, then exit (#5139) ----------

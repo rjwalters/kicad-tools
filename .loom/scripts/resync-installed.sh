@@ -294,6 +294,24 @@
 # it. One list, one meaning — "this path is the repo's, not Loom's". Full
 # ownership rule: `.loom/docs/repo-owned-files.md`.
 #
+# LOCAL-DIVERGENCE PROTECTION (#7864): sync_one() no longer overwrites an
+# installed file unconditionally. When an update would REMOVE at least one
+# non-blank line that exists in the installed copy but not in the new
+# defaults/ source, AND the installed file's most recent commit was NOT
+# routine install/resync tooling output (`chore: install Loom vX.Y.Z` or
+# `chore: resync installed Loom surfaces`, i.e. someone patched the INSTALLED
+# copy directly since the last install/resync), the file is left untouched
+# and reported as "blocked" instead of silently reverting the local fix. A
+# run with any blocked file exits 1 (real apply) or 2 (--dry-run, alongside
+# ordinary drift). Re-run with --force once you've reviewed the diff and
+# confirmed the removal is intentional (e.g. the fix landed upstream too) to
+# apply it anyway. A file with no git history has nothing to protect and is
+# never blocked; a pure-addition update (nothing removed) is never blocked
+# either — this only gates the specific shape of the incident that motivated
+# it (a resync silently reverting a merged, tested hook fix with no diff
+# review — first hit and fixed downstream at `2AMLogic/sky130-modexp`#117,
+# ported here per `2AMLogic/2am`#869).
+#
 # Usage:
 #   ./.loom/scripts/resync-installed.sh            # sync; report what changed
 #   ./.loom/scripts/resync-installed.sh --dry-run  # preview only; make no changes
@@ -309,6 +327,9 @@
 #                                                  # isolated staging worktree at <dir>
 #                                                  # instead — safe from anywhere, any
 #                                                  # time, including mid-sweep (#6106)
+#   ./.loom/scripts/resync-installed.sh --force    # also apply an update that would remove
+#                                                  # a locally-diverged installed file's own
+#                                                  # line(s) (see LOCAL-DIVERGENCE PROTECTION, #7864)
 #   ./.loom/scripts/resync-installed.sh --help     # show usage
 #
 # Environment:
@@ -318,17 +339,20 @@
 #   LOOM_RESYNC_OUTPUT=<dir>      - same as --output <dir> (for non-interactive
 #                                   callers). An explicit --output flag wins if
 #                                   both are given.
+#   LOOM_RESYNC_FORCE=1           - same as --force (for non-interactive callers).
 #
 # Exit codes:
 #   0 - Success. Sync applied (or already in sync); or --dry-run found no drift.
 #   1 - Error (not in a git repo, the source tree could not be located,
 #       invoked from a linked worktree without --allow-worktree or --output, the
 #       --output directory already exists or its staging worktree could not be
-#       created, or one or more files could not be synced — see the PARTIAL
-#       summary block, #4669).
+#       created, one or more files could not be synced — see the PARTIAL
+#       summary block, #4669 — or one or more files were BLOCKED by the
+#       local-divergence protection above and --force was not given, #7864).
 #   2 - --dry-run only: drift detected (one or more files WOULD be updated,
 #       created, or removed as a retired payload file, see RETIRED PAYLOAD
-#       FILES above).
+#       FILES above; or one or more files WOULD be blocked by the
+#       local-divergence protection, #7864).
 #       Lets callers (e.g. the #3770 warning) use --dry-run as a cheap check.
 #
 # See also: check-main-freshness.sh (#3770) — the advisory that suggests this.
@@ -358,6 +382,10 @@ QUIET=0
 # #4563: refuse to run from a linked worktree unless explicitly overridden.
 ALLOW_WORKTREE=0
 [[ "${LOOM_RESYNC_ALLOW_WORKTREE:-}" == "1" ]] && ALLOW_WORKTREE=1
+# #7864: apply an update even when it would remove line(s) unique to a
+# locally-diverged installed file (see "LOCAL-DIVERGENCE PROTECTION" above).
+FORCE=0
+[[ "${LOOM_RESYNC_FORCE:-}" == "1" ]] && FORCE=1
 # #6106: generate a complete resync in an isolated staging worktree instead of
 # writing to the primary checkout. Empty means "not requested".
 OUTPUT_DIR="${LOOM_RESYNC_OUTPUT:-}"
@@ -377,6 +405,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run|-n)     DRY_RUN=1; shift ;;
         --quiet|-q)       QUIET=1; shift ;;
         --allow-worktree) ALLOW_WORKTREE=1; shift ;;
+        --force)          FORCE=1; shift ;;
         --output)
             if [[ $# -lt 2 || -z "$2" ]]; then
                 err "--output requires a directory argument (try --help)"
@@ -726,6 +755,12 @@ INSTALLED_SCRIPTS="$WRITE_ROOT/.loom/scripts"
 LABEL_CHECK_SKIPPED=0
 LABEL_CHECK_BROKEN=0
 
+# Set when a hook wired in .claude/settings.json is missing or not executable
+# (#7761). Carried into the summary line and the exit status for the same
+# reason LABEL_CHECK_BROKEN is: a surface sync that leaves the guard hooks
+# unrunnable is not a clean bill of health, even though the sync itself worked.
+GUARD_CHECK_BROKEN=0
+
 IGNORE_FILE="$WRITE_ROOT/.loom/resync-ignore"
 
 # #6515: every distinct "$rel" ever checked against is_ignored (the "did you
@@ -887,6 +922,106 @@ record_failure() {
     FAILED_RELS+=("$1")
 }
 
+# #7864: files whose update was withheld by the local-divergence protection
+# below (never overwritten, not a copy/rename error like N_FAILED). A
+# non-empty list also makes the refresh PARTIAL and exits non-zero, exactly
+# like N_FAILED, but is reported separately so the remedy ("review the diff,
+# then --force") is not confused with a filesystem-level failure.
+N_BLOCKED=0
+BLOCKED_RELS=()
+
+record_blocked() {
+    N_BLOCKED=$((N_BLOCKED + 1))
+    BLOCKED_RELS+=("$1")
+}
+
+# ---------- local-divergence protection (#7864) ----------
+#
+# sync_one() used to overwrite an installed file unconditionally whenever it
+# differed from defaults/, with no diff review and no way to tell "upstream
+# moved forward" from "upstream's defaults/ has not caught up with a fix that
+# landed directly on the INSTALLED copy". A resync in that second state
+# silently reverted two merged, tested guard-hook fixes this way at
+# `2AMLogic/sky130-modexp` (its #98, #100) — see that repo's PR #117 for the
+# incident this protects against.
+#
+# The gate only fires when BOTH are true:
+#   1. the update would REMOVE at least one non-blank line that exists in the
+#      installed copy but not in the new source — a pure-addition update
+#      (nothing removed) is the overwhelmingly common shape of a routine
+#      upstream improvement and is never gated; and
+#   2. the installed file's own git history shows its most recent change was
+#      NOT a routine install/resync commit. Recognize the current installer
+#      subject (with optional "[skip ci]"), legacy install and resync subjects.
+#      Any other last touch means the installed content has diverged
+#      since the last time Loom's own tooling touched it, exactly the
+#      #98/#100 shape. A file whose last touch WAS one of those (or that has
+#      no git history at all — nothing to protect) is never gated, regardless
+#      of how much content changes: that is ordinary upstream evolution, and
+#      gating it would defeat the automation this script exists for.
+#
+# This intentionally does not require a diff-free match to some remembered
+# "last synced" state (no such provenance is tracked anywhere today) — it
+# only asks "would this specific write destroy content that was NOT put there
+# by Loom's own install/resync tooling", which is exactly the condition the
+# incident hinged on.
+#
+# #8098: the legacy `chore: install Loom v[0-9]` alternative below is anchored
+# with the same "optional squash suffix, then end of subject" ending
+# (`[^[:space:]]*( \(#[0-9]+\))?$`) as its two siblings. It used to be a bare,
+# unanchored prefix match, so a commit subject that merely STARTED with
+# "chore: install Loom v" but then said something else entirely — e.g.
+# "chore: install Loom v1 and also revert the guard fix" — was misclassified
+# as routine install/resync lineage (ROUTINE, silently overwritten) instead of
+# a diverged local commit (DIVERGED, protected). Low practical risk (the
+# legacy subject is not produced by any current installer path — see
+# `chore(loom): Install Loom ... orchestration framework` below for that), but
+# a real anchoring bug: an installed file's genuinely-last commit is normally
+# provided verbatim by `git log`, not hand-typed, but nothing prevented a
+# hand-amended or hand-rebased subject from taking this exact shape.
+RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9][^[:space:]]*( \(#[0-9]+\))?$|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$)'
+
+# removed_line_count <src> <dst>
+#   Count of non-blank lines present in dst but ABSENT from src (a line-SET
+#   difference, not a positional diff — a merely reordered or re-indented
+#   line is not "removed"). Deliberately coarse: this is a cheap tripwire for
+#   "content unique to the installed copy would vanish", not a full diff.
+#
+#   LC_ALL=C on the `comm` itself is load-bearing, not decoration (#8165):
+#   GNU comm validates that its inputs are sorted *in the current locale's
+#   collation*, and both inputs here are sorted under LC_ALL=C. Left in the
+#   ambient locale, comm re-reads a C-sorted stream under (say) en_US.UTF-8
+#   collation, declares it "not in sorted order", and then emits a garbage
+#   line set -- over-counting (a spurious BLOCK on a pure-addition update,
+#   recoverable only with --force) or under-counting (a silent fail-open
+#   back to the pre-#7864 revert-the-local-fix behaviour), depending on the
+#   content. Pinning the comparison to the same collation its inputs were
+#   sorted in makes the count locale-invariant.
+removed_line_count() {
+    local src="$1" dst="$2"
+    LC_ALL=C comm -23 \
+        <(grep -v '^[[:space:]]*$' "$dst" 2>/dev/null | LC_ALL=C sort -u) \
+        <(grep -v '^[[:space:]]*$' "$src" 2>/dev/null | LC_ALL=C sort -u) \
+        2>/dev/null | wc -l | tr -d '[:space:]'
+}
+
+# dst_diverged_from_resync_lineage <dst>
+#   True (0 / success) when $dst's most recent commit (in the checkout it
+#   physically lives in — WRITE_ROOT, which is either the primary checkout or
+#   a #6106 staging worktree; either way a linked worktree of the SAME repo,
+#   so both share one object database and history) is anything OTHER than a
+#   routine resync commit — i.e. this installed copy has diverged from pure
+#   upstream lineage and needs protecting. False (1) when the last commit WAS
+#   a resync, or when $dst has no git history at all (nothing to protect, so
+#   never gates).
+dst_diverged_from_resync_lineage() {
+    local dst="$1" subject
+    subject="$(git -C "$WRITE_ROOT" log -1 --format='%s' -- "$dst" 2>/dev/null)"
+    [[ -n "$subject" ]] || return 1
+    [[ "$subject" =~ $RESYNC_COMMIT_SUBJECT_RE ]] && return 1
+    return 0
+}
+
 # ---------- atomic staging + self-update deferral (#4669) ----------
 
 # Physical absolute path of a FILE (abs_path above only resolves directories).
@@ -1003,6 +1138,30 @@ sync_one() {
     if [[ ! -f "$dst" ]]; then
         verb_past="created"
         verb_pres="create"
+    fi
+
+    # #7864: local-divergence protection. Only applies to an UPDATE of an
+    # existing installed file — a brand-new create has nothing installed yet
+    # to lose.
+    if [[ "$verb_past" == "updated" ]]; then
+        local removed=0
+        removed="$(removed_line_count "$src" "$dst")"
+        if [[ "${removed:-0}" -gt 0 ]] && dst_diverged_from_resync_lineage "$dst"; then
+            if [[ "$FORCE" -eq 1 ]]; then
+                warn "$rel: forcing past local-divergence protection — this overwrite removes $removed line(s) present only in the installed copy (--force)."
+            else
+                warn "$rel: the installed copy has $removed line(s) not present in the new source, and its last change was NOT a routine resync — this looks like a local fix that this sync would silently revert."
+                warn "  Review before proceeding: diff -u '$dst' '$src'"
+                warn "  Re-run with --force once you've confirmed the removal is intentional (e.g. the fix landed upstream too)."
+                record_blocked "$rel"
+                if [[ "$DRY_RUN" -eq 1 ]]; then
+                    printf '%b\n' "  ${RED}${BOLD}blocked${NC}   $rel ${RED}(would remove $removed line(s) unique to the installed copy — needs --force)${NC}"
+                else
+                    printf '%b\n' "  ${RED}${BOLD}blocked${NC}   $rel ${RED}(local fix would be lost — rerun with --force to override)${NC}"
+                fi
+                return 0
+            fi
+        fi
     fi
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -1473,11 +1632,12 @@ apply_deferred_self_sync
 # untracked-and-unignored by construction until a consumer's installed
 # .gitignore has caught up to this fix — leaving it in place through the
 # audit would make a routine, fully successful run spuriously warn about its
-# own transient control file. A PARTIAL refresh (N_FAILED > 0) intentionally
-# skips this — the marker must survive so the crash/partial state stays
-# detectable, exactly as the final summary block does at the bottom of the
-# script.
-[[ "$DRY_RUN" -eq 1 || "$N_FAILED" -gt 0 ]] || clear_resync_marker
+# own transient control file. A PARTIAL refresh (N_FAILED > 0, or #7864:
+# N_BLOCKED > 0 — a file withheld by local-divergence protection is just as
+# incomplete a refresh as a copy failure) intentionally skips this — the
+# marker must survive so the crash/partial state stays detectable, exactly as
+# the final summary block does at the bottom of the script.
+[[ "$DRY_RUN" -eq 1 || "$N_FAILED" -gt 0 || "$N_BLOCKED" -gt 0 ]] || clear_resync_marker
 
 # ---------- targeted field edit: loom-workspace package.json version (#4285) ----------
 #
@@ -2138,6 +2298,58 @@ audit_untracked_loom_paths() {
 }
 audit_untracked_loom_paths
 
+# ---------- guard-hook install check (#7761) ----------
+#
+# The per-file sync above already `chmod +x`es every hook it writes, so a lost
+# executable bit self-heals HERE -- but only for hooks this run actually
+# touched, and only reactively. Nothing verified the end state: that every hook
+# the repo's .claude/settings.json WIRES is present and runnable. That gap is
+# what made a missing/non-executable guard invisible until the moment a guard
+# was needed and silently absent (#7761; the installed-guard surface drifting
+# from defaults/hooks/ is a demonstrated failure mode -- #7416, #7423).
+#
+# Read-only by default, and best-effort like every other post-sync check: a
+# broken guard install is reported (and carried into the exit code via
+# GUARD_CHECK_BROKEN below), never a reason to abort a resync that has already
+# fully applied. On a real (non---dry-run) resync it first tries --fix, which
+# only ever restores an executable bit on a file that is already present.
+#
+# Dispatches onto whichever copy ended up installed at
+# .loom/scripts/check-guards-installed.sh, falling back to the defaults/ source
+# for the first run after upgrading past #7761 (when the installed copy is only
+# being previewed, not yet on disk) -- the same resolution the label-drift check
+# below uses.
+GUARD_CHECK_SCRIPT="$WRITE_ROOT/.loom/scripts/check-guards-installed.sh"
+if [[ ! -x "$GUARD_CHECK_SCRIPT" && -x "$DEFAULTS_DIR/scripts/check-guards-installed.sh" ]]; then
+    GUARD_CHECK_SCRIPT="$DEFAULTS_DIR/scripts/check-guards-installed.sh"
+fi
+if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
+    guard_output=""
+    guard_rc=0
+    guard_output="$("$GUARD_CHECK_SCRIPT" --root "$WRITE_ROOT" --quiet 2>&1)" || guard_rc=$?
+
+    if [[ "$guard_rc" -ne 0 && "$DRY_RUN" -eq 0 ]]; then
+        # Retry once with --fix: a present-but-not-executable hook is
+        # repairable in place, and repairing it is strictly what this resync
+        # was for. guard_rc is RESET first -- `|| guard_rc=$?` only assigns on
+        # failure, so a successful retry would otherwise inherit the first
+        # run's non-zero status and report a repair as a failure.
+        guard_rc=0
+        guard_output="$("$GUARD_CHECK_SCRIPT" --root "$WRITE_ROOT" --quiet --fix 2>&1)" || guard_rc=$?
+    fi
+
+    case "$guard_rc" in
+        0)
+            note "  ${GREEN}unchanged${NC} guard-hook install (every hook wired in .claude/settings.json is runnable)"
+            ;;
+        *)
+            warn "BROKEN GUARD INSTALL: a hook wired in .claude/settings.json is missing or not executable. PreToolUse tool calls are DENIED in this workspace until it is repaired (#7761)."
+            printf '%b\n' "$guard_output" | sed 's/^/    /' >&2
+            GUARD_CHECK_BROKEN=1
+            ;;
+    esac
+fi
+
 # ---------- forge label drift check + safe auto-create (#6716) ----------
 #
 # .github/labels.yml is kept current by the scripts resync above, but nothing
@@ -2300,7 +2512,7 @@ suggest_commit_if_resync_only_dirt() {
         printf '%b\n' "    ${BOLD}./.loom/scripts/land-resync-commit.sh${NC}"
     fi
 }
-[[ "$DRY_RUN" -eq 1 || "$N_FAILED" -gt 0 ]] || suggest_commit_if_resync_only_dirt
+[[ "$DRY_RUN" -eq 1 || "$N_FAILED" -gt 0 || "$N_BLOCKED" -gt 0 ]] || suggest_commit_if_resync_only_dirt
 
 # ---------- next steps for output-dir staging mode (#6106) ----------
 #
@@ -2314,6 +2526,7 @@ print_output_mode_next_steps() {
     [[ -n "$OUTPUT_DIR" && "$STAGING_WORKTREE_CREATED" -eq 1 ]] || return 0
     [[ "$DRY_RUN" -eq 1 ]] && return 0
     [[ "$N_FAILED" -gt 0 ]] && return 0
+    [[ "$N_BLOCKED" -gt 0 ]] && return 0
 
     echo ""
     note "${GREEN}${BOLD}[resync] Complete resync staged — the primary checkout at $REPO_ROOT was never touched.${NC}"
@@ -2321,7 +2534,13 @@ print_output_mode_next_steps() {
     printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR${NC}"
     printf '%b\n' "    ${BOLD}git status${NC}   # confirm only expected resync output is dirty"
     printf '%b\n' "    ${BOLD}git checkout -b chore/resync-installed-$(date +%Y%m%d)${NC}"
-    printf '%b\n' "    ${BOLD}git add -A && git commit -m 'chore: resync installed Loom surfaces'${NC}"
+    # #7818: exclude the daemon-owned GH_CONFIG_DIR credential trees from the
+    # add, belt-and-braces, even though this worktree is a fresh `git worktree
+    # add --detach` checkout that would not normally carry them -- a plain
+    # `git add -A` here is exactly the shape of command that swept a live
+    # GitHub App installation token into a public repo on 2026-08-23.
+    printf '%b\n' "    ${BOLD}git add -A -- . ':!.loom/gh-config' ':!.loom/gh-config-by-owner'${NC}"
+    printf '%b\n' "    ${BOLD}git commit -m 'chore: resync installed Loom surfaces'${NC}"
     printf '%b\n' "    ${BOLD}git push -u origin HEAD${NC}   # then open a PR"
     note "When finished, remove the disposable staging worktree (from the primary checkout, not from inside it):"
     printf '%b\n' "    ${BOLD}git -C $REPO_ROOT worktree remove $OUTPUT_DIR${NC}"
@@ -2340,8 +2559,8 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     # #6106: a preview must leave no residue — remove the staging worktree
     # (created only as this preview's target) before either exit path below.
     remove_staging_worktree
-    if [[ "$N_UPDATED" -gt 0 || "$N_REMOVED" -gt 0 ]]; then
-        printf '%b\n' "${YELLOW}${BOLD}[resync] DRY RUN: ${N_UPDATED} file(s) would be updated, ${N_REMOVED} would be removed, ${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped.${NC}"
+    if [[ "$N_UPDATED" -gt 0 || "$N_REMOVED" -gt 0 || "$N_BLOCKED" -gt 0 ]]; then
+        printf '%b\n' "${YELLOW}${BOLD}[resync] DRY RUN: ${N_UPDATED} file(s) would be updated, ${N_REMOVED} would be removed, ${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped, ${N_BLOCKED} blocked (needs --force, see above).${NC}"
         printf '%b\n' "${YELLOW}Run without --dry-run to apply.${NC}"
         exit 2
     fi
@@ -2355,6 +2574,20 @@ fi
 # from — so the EXIT-trap cleanup installed above must stand down here rather
 # than remove it out from under them.
 [[ -n "$OUTPUT_DIR" ]] && KEEP_STAGING_WORKTREE=1
+
+# #7864: a blocked file ALSO makes the refresh PARTIAL — the local-divergence
+# protection deliberately withheld an update rather than silently reverting
+# what looks like a local fix. Report it distinctly from N_FAILED (this is
+# not a copy/rename error; it's a review gate) but exit non-zero either way,
+# same as N_FAILED, so nothing is silently swallowed into a success summary.
+if [[ "$N_BLOCKED" -gt 0 ]]; then
+    printf '%b\n' "${RED}${BOLD}[resync] BLOCKED: ${N_BLOCKED} file(s) look like a local fix and were NOT overwritten (see WARN above for each).${NC}"
+    printf '%b\n' "${RED}Needs your review before proceeding:${NC}"
+    for blocked_rel in "${BLOCKED_RELS[@]}"; do
+        printf '%b\n' "${RED}    $blocked_rel${NC}"
+    done
+    printf '%b\n' "${YELLOW}Review the diff for each, then re-run with --force once you've confirmed the removal is intentional (e.g. the fix landed upstream too).${NC}"
+fi
 
 # A failed file makes the refresh PARTIAL — say so explicitly and exit non-zero
 # rather than folding it into a success summary (#4669). Nothing is ever left
@@ -2375,6 +2608,15 @@ if [[ "$N_FAILED" -gt 0 ]]; then
     exit 1
 fi
 
+# #7864: same non-zero exit as N_FAILED above, once it's confirmed clean —
+# a blocked file must never fall through into the success summary below.
+if [[ "$N_BLOCKED" -gt 0 ]]; then
+    if [[ -n "$OUTPUT_DIR" && "$STAGING_WORKTREE_CREATED" -eq 1 ]]; then
+        printf '%b\n' "${YELLOW}The staging worktree at $OUTPUT_DIR was left in place (not removed) so you can inspect it.${NC}"
+    fi
+    exit 1
+fi
+
 # (the #5980 crash-detection marker was already cleared, right after N_FAILED
 # was finalized, above — this is just a defensive no-op re-assertion in case a
 # future refactor adds another early-return path between the two)
@@ -2388,6 +2630,9 @@ if [[ "$LABEL_CHECK_BROKEN" -eq 1 ]]; then
 elif [[ "$LABEL_CHECK_SKIPPED" -eq 1 ]]; then
     CHECK_NOTE=" ${YELLOW}[label check skipped -- forge unreachable]${NC}"
 fi
+if [[ "$GUARD_CHECK_BROKEN" -eq 1 ]]; then
+    CHECK_NOTE="${CHECK_NOTE} ${RED}[BROKEN GUARD INSTALL -- a wired hook cannot run]${NC}"
+fi
 
 if [[ "$N_UPDATED" -gt 0 || "$N_REMOVED" -gt 0 ]]; then
     printf '%b\n' "${GREEN}${BOLD}[resync] ${N_UPDATED} file(s) updated, ${N_REMOVED} removed, ${N_UNCHANGED} unchanged, ${N_SKIPPED} skipped.${NC}${CHECK_NOTE}"
@@ -2400,7 +2645,7 @@ fi
 # check did not execute, so this run is not a clean bill of health. A
 # benign unreachable forge still exits 0 -- resync must keep working
 # offline, which is the whole reason that case is soft.
-if [[ "$LABEL_CHECK_BROKEN" -eq 1 ]]; then
+if [[ "$LABEL_CHECK_BROKEN" -eq 1 || "$GUARD_CHECK_BROKEN" -eq 1 ]]; then
     exit 75
 fi
 exit 0

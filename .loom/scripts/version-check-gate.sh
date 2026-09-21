@@ -53,28 +53,46 @@
 # A third drop shape (#7417): `scripts/version.sh bump` (no `--tag`) only
 # rewrites the version-bearing files on disk -- the `git add`/`git commit`
 # pair lives exclusively inside `do_tag()`, which only runs when a caller
-# passes `--tag`. Doctor's rebase recipes call `version.sh bump patch` with
-# no `--tag` from this gate's own printed Fix: hint, so a caller that follows
-# that hint and pushes without also committing can push a head where the
-# bump exists on disk but never landed in the committed tree -- `version.sh
-# check` alone can't catch this because it only compares the files against
-# EACH OTHER on disk, never against git's index/HEAD. When VERSION_CHECK_SCRIPT
-# was auto-detected (case 2 above, meaning file paths are trustworthy relative
-# to a real worktree), this gate additionally fails if any version-bearing
-# file is modified/untracked-but-present relative to HEAD.
+# passes `--tag`. Before #7743/#7954 forbade it, Doctor's rebase recipes
+# would run `version.sh bump <part>` with no `--tag` from this gate's own
+# printed Fix: hint; a caller that followed that hint and pushed without
+# also committing could push a head where the bump exists on disk but never
+# landed in the committed tree -- `version.sh check` alone can't catch this
+# because it only compares the files against EACH OTHER on disk, never
+# against git's index/HEAD. When VERSION_CHECK_SCRIPT was auto-detected
+# (case 2 above, meaning file paths are trustworthy relative to a real
+# worktree), this gate additionally fails if any version-bearing file is
+# modified/untracked-but-present relative to HEAD.
+#
+# A fourth drop shape (#7705): the #7417 check above only walks
+# `$(scripts/version.sh list)`, and `list` deliberately excludes
+# `Cargo.lock`/`mcp-loom/package-lock.json` -- they're "derived artifacts" as
+# far as `/repo:release`'s use of `list` is concerned, even though
+# `version.sh check`/`bump` both DO treat them as version-bearing on disk. A
+# caller that runs `bump <part>` (regenerating both lockfiles on disk) and
+# then stages/commits only `$(scripts/version.sh list)` passes BOTH the
+# content-comparison check above AND the #7417 dirty check above cleanly --
+# every version-bearing file the gate walks agrees with itself and with git
+# HEAD -- while the lockfiles stay modified-but-uncommitted and never reach
+# the pushed branch (the #7673/#7680 symptom). This gate now walks a second,
+# fixed (Cargo.lock, mcp-loom/package-lock.json) list for the same
+# dirty-relative-to-HEAD check, kept separate from VERSION_FILES_LIST so
+# `scripts/version.sh list`'s own output contract never has to change.
 #
 # Usage:
 #   version-check-gate.sh [--fix-hint "<text appended after the bump command>"]
 #
 # Exit codes:
-#   0 = all version-bearing files agree with each other AND with git HEAD,
-#       or scripts/version.sh isn't resolvable in this checkout (nothing to
+#   0 = all version-bearing files (including Cargo.lock/mcp-loom/
+#       package-lock.json) agree with each other AND with git HEAD, or
+#       scripts/version.sh isn't resolvable in this checkout (nothing to
 #       check)
 #   1 = a mismatch (files disagree with each other) or an uncommitted bump
-#       (files agree with each other but not with git HEAD) was found; the
-#       raw `version.sh check` MISMATCH output (mismatch case) or a list of
-#       the dirty file(s) (uncommitted-bump case) is printed to stderr,
-#       followed by a BLOCKER:/Fix: message pair
+#       (files agree with each other but not with git HEAD, including a
+#       lockfile-only drop) was found; the raw `version.sh check` MISMATCH
+#       output (mismatch case) or a list of the dirty file(s)
+#       (uncommitted-bump case) is printed to stderr, followed by a
+#       BLOCKER:/Fix: message pair
 
 set -euo pipefail
 
@@ -117,7 +135,7 @@ VERSION_CHECK_OUTPUT="$(bash "$VERSION_CHECK_SCRIPT" check 2>&1)" || VERSION_CHE
 if [[ "$VERSION_CHECK_STATUS" -ne 0 ]]; then
   echo "$VERSION_CHECK_OUTPUT" >&2
   echo "version-check-gate.sh: BLOCKER: 'scripts/version.sh check' found a version mismatch -- see MISMATCH line(s) above." >&2
-  echo "version-check-gate.sh: Fix: ./scripts/version.sh bump patch   (re-syncs all version-bearing files, including .loom/install-metadata.json if present), then commit the version-bearing files ('bump' only rewrites them -- it does not commit; only 'bump --tag'/'set --tag' does), $FIX_HINT" >&2
+  echo "version-check-gate.sh: Fix: NEVER run './scripts/version.sh bump' here -- #7743 forbids a hand-bump on a PR branch and CI's defaults-version-bump-check will reject it. A clean rebase lands origin/main's own values, so a mismatch means this branch itself carries a version-bearing edit (often a pre-#7743 bump commit): revert the MISMATCH file(s) above to origin/main's values (git checkout origin/main -- <file(s)>, e.g. VERSION CLAUDE.md .loom/install-metadata.json) and commit that, $FIX_HINT" >&2
   exit 1
 fi
 
@@ -146,6 +164,40 @@ if $VERSION_CHECK_SCRIPT_AUTO_DETECTED; then
     done <<< "$DIRTY_FILES"
     echo "version-check-gate.sh: BLOCKER: a version bump exists in the worktree but was never committed -- pushing now would push code changes without the bump." >&2
     echo "version-check-gate.sh: Fix: git add -- <file(s) above> && git commit ('scripts/version.sh bump' only rewrites files; it does not commit -- only 'bump --tag'/'set --tag' does), $FIX_HINT" >&2
+    exit 1
+  fi
+
+  # Lockfile-specific uncommitted-bump check (#7705). `Cargo.lock` and
+  # `mcp-loom/package-lock.json` are DELIBERATELY excluded from
+  # `scripts/version.sh list`'s output above (list's contract is consumed by
+  # `/repo:release` and must stay unchanged), even though `version.sh
+  # check`/`bump` both treat them as version-bearing on disk. That means the
+  # DIRTY_FILES loop above never looks at them, so a `bump <part>` whose
+  # lockfile changes were regenerated on disk but never staged/committed
+  # (e.g. a caller that stages only $(./scripts/version.sh list) + commits)
+  # passed this gate cleanly -- both files agreeing with each other AND with
+  # every OTHER version-bearing file already at the new version -- and the
+  # lockfile drift only surfaced later, as CI's "Installer Integration
+  # Tests" job failing 'version.sh check' on the pushed branch. This is a
+  # distinct, fixed list (not folded into VERSION_FILES_LIST) precisely so
+  # scripts/version.sh's own `list` output never has to change.
+  LOCK_FILES="Cargo.lock"$'\n'"mcp-loom/package-lock.json"
+  DIRTY_LOCK_FILES=""
+  while IFS= read -r _lf; do
+    [[ -z "$_lf" ]] && continue
+    [[ -f "$_worktree_root/$_lf" ]] || continue
+    if [[ -n "$(cd "$_worktree_root" && git status --porcelain -- "$_lf" 2>/dev/null)" ]]; then
+      DIRTY_LOCK_FILES+="$_lf"$'\n'
+    fi
+  done <<< "$LOCK_FILES"
+  if [[ -n "$DIRTY_LOCK_FILES" ]]; then
+    echo "version-check-gate.sh: lockfile(s) are modified on disk but not committed:" >&2
+    while IFS= read -r _dlf; do
+      [[ -z "$_dlf" ]] && continue
+      echo "  $_dlf" >&2
+    done <<< "$DIRTY_LOCK_FILES"
+    echo "version-check-gate.sh: BLOCKER: a version bump regenerated Cargo.lock/mcp-loom/package-lock.json on disk but the lockfile change(s) were never committed -- pushing now would land the version-bearing files at the new version while their lockfiles stay stale." >&2
+    echo "version-check-gate.sh: Fix: git add -- <lockfile(s) above> && git commit (these are not part of 'scripts/version.sh list' and must be staged explicitly -- 'git add \$(./scripts/version.sh list)' alone will skip them), $FIX_HINT" >&2
     exit 1
   fi
 fi

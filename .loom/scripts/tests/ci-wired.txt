@@ -30,6 +30,7 @@ test-agent-destroy.sh
 test-app-permission-fallback.sh
 test-archive-transcripts.sh
 test-blame-issue.sh
+test-branch-landed.sh
 test-body-repo-affinity.sh
 test-bounded-run.sh
 test-build-gate-timeout.sh
@@ -39,9 +40,11 @@ test-cargo-target-dir-reclaim.sh
 test-cargo-test-daemon-guard.sh
 test-champion-ci-checks-no-checks-signal.sh
 test-champion-critical-file-check.sh
+test-champion-epic-escalation-respects-human-hold.sh
 test-champion-epic-phase-marker-normalization.sh
 test-champion-epic-verdict-marker-scope.sh
 test-champion-held-pr-health-pass.sh
+test-champion-premise-false-close.sh
 test-champion-standing-authorization.sh
 test-check-ci-status.sh
 test-check-config-no-host-paths.sh
@@ -50,11 +53,13 @@ test-check-conflict-markers.sh
 test-check-dependabot-labels.sh
 test-check-evaluating-staleness.sh
 test-check-git-identity.sh
+test-check-guards-installed.sh
 test-check-host-sleep.sh
 test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
 test-check-main-clean.sh
 test-check-main-freshness.sh
+test-check-pipefail-early-exit.sh
 test-check-promotion-landed.sh
 test-check-quarantine-stashes.sh
 test-check-runtime-capabilities.sh
@@ -63,7 +68,6 @@ test-check-verified-corrections-preserved.sh
 test-claim-staleness.sh
 test-classify-ac-verification.sh
 test-classify-capacity-defer.sh
-test-classify-dependency-block.sh
 test-classify-error.sh
 test-clean-stale-binary.sh
 test-clean-stale-building-labels.sh
@@ -71,13 +75,11 @@ test-cleanup-branches-pr-review-branch.sh
 test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-cpu-budget.sh
+test-create-issue-duplicate-check.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
 test-default-branch.sh
-test-dep-recheck-fingerprint.sh
 test-dependency-parse.sh
-test-detect-dependency-cycle.sh
-test-detect-startable-subset.sh
 test-detect-unlabeled-epics.sh
 test-disk-headroom.sh
 test-docs-guide-lock.sh
@@ -133,8 +135,8 @@ test-locate-daemon-bin.sh
 test-loom-daemon-launchd-plist.sh
 test-loom-daemon-quiesce.sh
 test-loom-daemon-start.sh
-test-loom-daemon-stop.sh
 test-loom-daemon-update.sh
+test-loom-daemon-stop.sh
 test-loom-daemon-watchdog-dedup.sh
 test-loom-daemon-watchdog.sh
 test-loom-dispatcher.sh
@@ -145,6 +147,7 @@ test-memory-budget.sh
 test-merge-admission-telemetry.sh
 test-merge-pr-app-permission-fallback.sh
 test-merge-pr-auto-merge-disabled-fallback.sh
+test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-auto-reconcile.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-closed-issue-cleanup.sh
@@ -180,12 +183,18 @@ test-recover-orphaned-shepherds-diagnostics.sh
 test-reconcile-stack.sh
 test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
+test-require-daemon-bin.sh
 test-resolve-tier-model.sh
+test-resync-installed-gh-config-guard.sh
+test-resync-installed-guard-check.sh
+test-resync-installed-local-fix-guard.sh
 test-resync-installed.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
 test-run-ci-suites-failure-excerpt.sh
+test-run-ci-suites-retry.sh
 test-run-ci-suites-serial-lane.sh
+test-run-job.sh
 test-safe-stash-pop.sh
 test-safehoused-service.sh
 test-spawn-generic.sh
@@ -207,6 +216,7 @@ test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
 test-verify-proposal-refs.sh
+test-version-bump-workflow-identity.sh
 test-version-check-gate-callsites.sh
 test-version-check-gate.sh
 test-warn-operator-gated.sh
@@ -214,10 +224,12 @@ test-warn-out-of-set-deps.sh
 test-worktree-base-override.sh
 test-worktree-concurrency.sh
 test-worktree-existing-dir-drift-check.sh
+test-worktree-forge-pr-check.sh
 test-worktree-hookspath.sh
 test-worktree-json-purity.sh
 test-worktree-local-branch-upstream-tracking.sh
 test-worktree-nested-symlinks.sh
+test-worktree-orphan-guard-spaces.sh
 test-worktree-race-rescue.sh
 test-worktree-remote-branch-tracking.sh
 test-worktree-remove-squash-merge.sh
@@ -234,10 +246,12 @@ tests/hooks/test-guard-destructive-dispatcher.sh
 tests/hooks/test-guard-destructive-cargo-and-perf.sh
 tests/hooks/test-guard-destructive-category-opt-ins.sh
 tests/hooks/test-guard-destructive-core.sh
+tests/hooks/test-guard-destructive-cp-mv-continuation.sh
 tests/hooks/test-guard-destructive-decision-log.sh
 tests/hooks/test-guard-destructive-force-scope.sh
 tests/hooks/test-guard-destructive-masking.sh
 tests/hooks/test-guard-destructive-matching-precision.sh
+tests/hooks/test-guard-destructive-mkdir-confinement.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
@@ -251,8 +265,10 @@ tests/hooks/test-post-worktree-target-dir.sh
 
 # defaults/hooks/tests/ — remaining unwired guard-hook suites, wired since #4451.
 defaults/hooks/tests/test-guard-background-subagents.sh
+defaults/hooks/tests/test-guard-installed-file-writes.sh
 defaults/hooks/tests/test-guard-loom-workspace.sh
 defaults/hooks/tests/test-guard-worktree-paths.sh
+defaults/hooks/tests/test-hook-wiring.sh
 defaults/hooks/tests/test-methodology-inject.sh
 defaults/hooks/tests/test-skill-router.sh
 
@@ -269,6 +285,7 @@ tests/install/test-lint-ignore-configs.sh
 tests/install/test-manifest-freshness-after-hook-wiring.sh
 tests/install/test-pnpm-runnable-check.sh
 tests/install/test-provision-daemon.sh
+tests/install/test-setup-branch-protection-required-checks.sh
 tests/install/test-setup-repository-settings-merge-method.sh
 tests/install/test-uninstall-clean-preserves-unmanaged-hooks.sh
 tests/install/test-uninstall-labels-block.sh
@@ -280,3 +297,7 @@ tests/install/test-uninstall-shim-cleanup.sh
 # guard, wired since #5275 (was previously orphaned, no CI runner at all).
 # Hermetic: python3 AST parsing over local fixtures only, no network.
 tests/hermit/test-stateless-ceremony.sh
+
+# scripts/ — repo-root tooling suites. Hermetic: builds a disposable git
+# repo under mktemp -d with its own identity, no network, no gh.
+scripts/test-changelog.sh

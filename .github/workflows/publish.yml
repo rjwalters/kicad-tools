@@ -18,7 +18,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
@@ -51,7 +51,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.0.1
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
@@ -60,4 +60,11 @@ jobs:
           enable-cache: false
 
       - name: Publish to PyPI
-        run: uv publish
+        # --check-url makes the publish idempotent per file: uv queries the
+        # simple API for already-uploaded distributions of this version and
+        # skips them (PyPI keeps per-file successes even when a later file
+        # in the same run fails -- observed on 0.21.0: the wheel uploaded,
+        # the 127 MB sdist was rejected, and the bare retry then wedged on
+        # "file already exists"). PyPI never allows content changes to an
+        # existing filename, so skipping cannot publish anything stale.
+        run: uv publish --check-url https://pypi.org/simple

@@ -65,6 +65,16 @@ This is the same file that pins a customization against being *overwritten* by
 *deleted* by the installer's clean sweep. One list, one meaning: **this path is
 the repo's, not Loom's.**
 
+Since #7995 a `PreToolUse` guard reads this list too. In a repo that is not
+Loom's own source tree, an agent writing to an **unpinned** path under
+`.loom/hooks|scripts|roles|docs|bin/` or `.claude/commands/loom/` is denied —
+through the `Edit`/`Write` tools and through the Bash write idioms alike — with
+a message naming the two dispositions above. Adding the path here is what turns
+that denial off for that one file, because the pin is the repo declaring the
+file its own. See [`guard-hooks.md`](guard-hooks.md) §"Installed-File Write
+Guard" for the discriminator that decides "consumer repo vs. Loom's own tree"
+and for the category toggle.
+
 Commit `.loom/resync-ignore` — it is repo configuration, and the installer
 never removes it.
 
@@ -83,6 +93,43 @@ never removes it.
   it does stop `resync-installed.sh` from overwriting it between installs. If
   you need a durable fork, give it a name Loom does not ship and wire that name
   up instead.
+
+## Before you hand-edit an installed file, stop
+
+An agent (Builder, Doctor, or otherwise) that finds a bug in a file under
+`.loom/hooks|scripts|roles|docs|bin/` or `.claude/commands/loom/` — in *any*
+repo, not just Loom's own source — has exactly two valid moves, never a
+third:
+
+1. **Fix it upstream**: open a PR against `rjwalters/loom`'s `defaults/` tree.
+   The fix then returns to this repo through the normal `chore: resync
+   installed Loom surfaces` flow.
+2. **Pin it**: if the change is a deliberate, repo-specific override that
+   should never resync from upstream, add its path to `.loom/resync-ignore`
+   (see "Declaring a file repo-owned" above) so the divergence is explicit and
+   durable.
+
+**Never silently hand-edit the installed copy and move on.** `resync-installed.sh`
+does now warn and block instead of silently reverting an unpinned local
+divergence it can detect (its own "LOCAL-DIVERGENCE PROTECTION" header) — but
+that is a safety net for the one shape it can recognize, not a substitute for
+either move above, and it is not foolproof (a pure-addition upstream change,
+or a resync commit that happens to land on top, both slip past it cleanly).
+Two more shapes are known, deliberate gaps rather than bugs (#8098): the gate
+reads COMMITTED git history only, so a local fix still sitting solely in the
+uncommitted working tree is invisible to it and gets silently reverted by a
+resync just like the pre-protection behavior; and the gate only trips on a
+REMOVED line, so a local fix implemented as a pure *deletion* of a broken
+upstream line (nothing added back) never arms it either, and the resync
+re-adds the broken line. Widening the gate to cover either shape changes its
+false-positive rate on a fleet-wide updater path, which is a deliberate
+tradeoff decision, not a reflexive fix — upstreaming or pinning (the two moves
+above) remains the only fully reliable protection for either.
+`2AMLogic/sky130-modexp` hit this the hard way: an installed hook fix got
+silently reverted by a resync, was hand-reapplied in place, got reverted
+again — four commits repeating that cycle — before the repo gave up and
+blocked its own resync outright rather than keep losing the fix. Upstreaming
+or pinning the first time avoids the whole loop.
 
 ## Why not just delete anything unrecognized?
 

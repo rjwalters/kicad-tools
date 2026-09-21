@@ -1,7 +1,22 @@
 #!/usr/bin/env bash
 # locate-daemon-bin.sh — Resolve the loom-daemon binary to invoke.
 #
-# Source this file (do not exec). Defines two functions:
+# Source this file (do not exec). Defines four functions — and the split
+# between the first pair and the second pair is the point (#8134):
+#
+#   $LOOM_DAEMON_BIN      the daemon a caller MANAGES or PROBES — the install
+#                         whose version is compared, the socket endpoint a
+#                         watchdog round-trips, a deliberately fake binary in a
+#                         test. Resolved by loom_locate_daemon_bin below.
+#   $LOOM_DAEMON_SELF_BIN the daemon that IMPLEMENTS the caller's own logic —
+#                         what a Shape-A stub execs its subcommand on.
+#                         Resolved by loom_daemon_self_bin_override /
+#                         loom_resolve_self_daemon_bin further down.
+#
+# One variable cannot mean both: a suite that pins $LOOM_DAEMON_BIN to a probe
+# mock would otherwise also redirect the stub into that mock (the #8134 hang).
+# Which one a new caller wants is a question about the caller, not about the
+# repo: "is this the binary I run, or the binary I inspect?"
 #
 #   loom_locate_daemon_bin <repo_root> -> echoes the absolute path to a
 #   loom-daemon binary on stdout, or an empty string if none could be
@@ -204,4 +219,75 @@ loom_daemon_bin_search_paths() {
     while IFS= read -r repo_candidate; do
         [[ -n "$repo_candidate" ]] && echo "$repo_candidate"
     done < <(_loom_daemon_repo_candidates "$root")
+}
+
+# loom_daemon_self_bin_override -- tier 1 of the IMPLEMENTATION resolution:
+# $LOOM_DAEMON_SELF_BIN, when set AND executable.
+#
+# Echoes the path and returns 0 on a hit; echoes nothing and returns 1
+# otherwise -- including "set but not executable", which falls through exactly
+# as a non-executable $LOOM_DAEMON_BIN does in loom_locate_daemon_bin's step 1,
+# so a typo'd pin degrades identically whichever variable carries it.
+#
+# Split out from loom_resolve_self_daemon_bin (#8134) because a caller that
+# must NOT adopt the rest of that chain still needs this one tier.
+#
+# A Shape-A stub uses it as `loom_daemon_self_bin_override || loom_locate_daemon_bin
+# "$root"`: tier 1, then the WHOLE normal chain. Deliberately not the rest of
+# loom_resolve_self_daemon_bin's chain -- in production the installed daemon IS
+# the implementation, $LOOM_DAEMON_BIN must keep pinning it (`loom update` and
+# an operator debugging a stub both rely on that), and hoisting a checkout-local
+# build above it would be the silent behaviour change #8134 rejected.
+loom_daemon_self_bin_override() {
+    [[ -n "${LOOM_DAEMON_SELF_BIN:-}" && -x "${LOOM_DAEMON_SELF_BIN}" ]] || return 1
+    printf '%s\n' "$LOOM_DAEMON_SELF_BIN"
+}
+
+# loom_resolve_self_daemon_bin -- the loom-daemon that IMPLEMENTS a caller's
+# ported logic, which is NOT the same binary loom_locate_daemon_bin names.
+#
+# The distinction is the whole point and it is easy to get wrong (#7977 caught
+# it in a test fixture): loom_locate_daemon_bin / $LOOM_DAEMON_BIN name the
+# INSTALLED daemon a script MANAGES -- the one whose version is compared, which
+# may be an old release with no `retry-classify` / `release-resolve`
+# subcommand at all, and which during a test is a deliberately fake binary.
+# Exec'ing a ported subcommand on that is a category error.
+#
+# Resolution order, most explicit first:
+#   1. $LOOM_DAEMON_SELF_BIN -- must be executable. The seam a test or an
+#      operator uses to name the implementation directly.
+#   2. A build in THIS checkout ($CARGO_TARGET_DIR honored, release then debug).
+#      Script-relative first: this library lives at <checkout>/defaults/scripts/lib/
+#      (or <consumer>/.loom/scripts/lib/), so the build that implements the
+#      logic THIS COPY delegates to is the one in the checkout this copy came
+#      from -- not whatever $REPO_ROOT happens to be (in a test fixture,
+#      $REPO_ROOT is the fixture, which has no build at all). $REPO_ROOT is
+#      still probed after it, for the caller that has one.
+#   3. `loom-daemon` on PATH.
+# Echoes "" when none resolves; the caller then answers in its own contract
+# (a fail-safe verdict, not a crash) rather than failing silently.
+#
+# Lives here, beside loom_locate_daemon_bin, so the two resolutions sit next to
+# each other and the distinction above is unmissable. Extracted from
+# cli/loom-daemon-update.sh by #8037, when claude-wrapper.sh became the second
+# caller that needs the IMPLEMENTATION rather than the managed install.
+loom_resolve_self_daemon_bin() {
+    loom_daemon_self_bin_override && return 0
+    local self_root
+    self_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." 2>/dev/null && pwd)" || self_root=""
+    local base candidate
+    for base in "${CARGO_TARGET_DIR:-}" "${self_root:+$self_root/target}" \
+                "${REPO_ROOT:+$REPO_ROOT/target}" \
+                "${REPO_ROOT:+$REPO_ROOT/loom-daemon/target}"; do
+        [[ -n "$base" ]] || continue
+        for candidate in "$base/release/loom-daemon" "$base/debug/loom-daemon"; do
+            if [[ -x "$candidate" ]]; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    done
+    candidate="$(command -v loom-daemon 2>/dev/null || true)"
+    [[ -n "$candidate" && -x "$candidate" ]] && printf '%s\n' "$candidate"
+    return 0
 }

@@ -41,7 +41,15 @@
 #      `.claude/commands/loom/`, and the handful of single-file targets
 #      resync-installed.sh itself resyncs), it refuses to commit ANYTHING --
 #      an unrelated (possibly operator) change must never be swept into a
-#      "chore: resync" commit.
+#      "chore: resync" commit. One exception: `.loom/gh-config/` and
+#      `.loom/gh-config-by-owner/` (live GitHub App installation-token state,
+#      #7818) are never staged, and while UNTRACKED they never block the
+#      commit either -- they are silently excluded, unconditionally, even if a
+#      host's `.gitignore` is missing the corresponding entries. A credential
+#      path that is already git-TRACKED is the opposite case and STOPS the run
+#      (#8004): no ignore rule can apply to a tracked path, so excluding it
+#      here would leave a live credential committed with nothing but a log
+#      line to say so.
 #   3. Otherwise it commits the resync-managed dirt (if any), fetches origin,
 #      and inspects every commit the primary checkout's default branch now
 #      has that origin does not:
@@ -276,6 +284,47 @@ is_resync_surface_path() {
     esac
 }
 
+# #7818: daemon-owned GH_CONFIG_DIR trees holding live GitHub App installation
+# tokens (.loom/gh-config/, .loom/gh-config-by-owner/<owner>/ -- #4458/#5401).
+# These must NEVER be staged by this script, belt-and-braces alongside the
+# loom-daemon-managed .gitignore entries (post_init.rs EPHEMERAL_PATTERNS):
+# checked UNCONDITIONALLY, before is_resync_surface_path(), so a host whose
+# .gitignore is missing or stale still cannot have this script sweep a live
+# credential into a commit. This is what let a resync commit on
+# rjwalters/anvil (2026-08-23) carry a live installation token into a public
+# repo -- is_resync_surface_path() alone was already allowlist-based (so this
+# script itself never staged the leak), but a matching path here is silently
+# EXCLUDED (like a retired pure-copy path) rather than treated as blocking
+# FOREIGN dirt, so an untracked credential file never stops an otherwise-clean
+# resync from landing.
+is_credential_leak_path() {
+    case "$1" in
+        .loom/gh-config | .loom/gh-config/* | \
+            .loom/gh-config-by-owner | .loom/gh-config-by-owner/*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# #8004: the state the #7818 incident actually left behind -- a credential path
+# that is ALREADY TRACKED. Silently excluding that one would be strictly worse
+# than the pre-#7818 behaviour: git applies no ignore rule to a tracked path
+# (by design), so the credential stays committed and every `git add -A` /
+# `git add .loom` elsewhere in this checkout keeps staging each freshly-minted
+# token -- while the only loud signal (the old FOREIGN-dirt refusal) has been
+# downgraded to a log line. So the two cases are split at classification time:
+# untracked -> excluded, non-blocking (#7818); tracked -> hard stop with
+# remediation (below). Mirrors sweep_experiment.rs's sentinel_is_tracked()
+# probe, which refuses a git-tracked canary sentinel the same way.
+# Best-effort by construction: any git failure answers "not tracked", which is
+# exactly the pre-#8004 (untracked) handling.
+is_tracked_path() {
+    git -C "$REPO_ROOT" ls-files --error-unmatch -- "$1" >/dev/null 2>&1
+}
+
 # Narrower than is_resync_surface_path(): the subset resync-installed.sh calls
 # a "pure-copy surface" -- a directory whose every file is copied verbatim
 # from a same-shaped defaults/ subdirectory (mirrors
@@ -322,6 +371,8 @@ IS_LOOM_SOURCE_REPO=0
 RESYNC_PATHS=()
 FOREIGN_PATHS=()
 RETIRED_PATHS=()
+CREDENTIAL_PATHS=()
+TRACKED_CREDENTIAL_PATHS=()
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     code="${line:0:2}"
@@ -329,6 +380,14 @@ while IFS= read -r line; do
     path="${path%\"}"
     path="${path#\"}"
     [[ "$path" == *" -> "* ]] && path="${path##* -> }"
+    if is_credential_leak_path "$path"; then
+        if is_tracked_path "$path"; then
+            TRACKED_CREDENTIAL_PATHS+=("$path")
+        else
+            CREDENTIAL_PATHS+=("$path")
+        fi
+        continue
+    fi
     if ! is_resync_surface_path "$path"; then
         FOREIGN_PATHS+=("$path")
         continue
@@ -342,6 +401,36 @@ while IFS= read -r line; do
     fi
     RESYNC_PATHS+=("$path")
 done <<< "$STATUS"
+
+if [[ "${#CREDENTIAL_PATHS[@]}" -gt 0 ]]; then
+    warn "Excluded from the commit — never staged, even if .gitignore is missing/stale (#7818):"
+    for p in "${CREDENTIAL_PATHS[@]}"; do
+        warn "    $p"
+    done
+    warn "  These are the daemon-owned GH_CONFIG_DIR credential trees (.loom/gh-config/,"
+    warn "  .loom/gh-config-by-owner/) — host-local, never committed. If they show up"
+    warn "  here your .gitignore is missing the entries loom-daemon's managed block"
+    warn "  writes (loom-daemon update-gitignore repairs it)."
+fi
+
+if [[ "${#TRACKED_CREDENTIAL_PATHS[@]}" -gt 0 ]]; then
+    err "Refusing to land: a daemon-owned GH_CONFIG_DIR credential path is already TRACKED by git (#8004):"
+    for p in "${TRACKED_CREDENTIAL_PATHS[@]}"; do
+        err "    $p"
+    done
+    err "  This is NOT the untracked case above, and excluding it from this commit"
+    err "  would fix nothing: git applies no .gitignore rule to a path that is"
+    err "  already in the index, so the credential stays committed and every other"
+    err "  'git add -A' / 'git add .loom' in this checkout keeps staging each"
+    err "  freshly-minted token. Treat the credential as COMPROMISED — it is in"
+    err "  the repository's history, which may be public."
+    err "  Remediate, then re-run:"
+    err "    1. git -C \"$REPO_ROOT\" rm --cached -r -- <path>   (untrack it; the file stays on disk)"
+    err "    2. loom-daemon update-gitignore                  (restore the managed ignore entries)"
+    err "    3. commit that removal, then ROTATE the credential (revoke/regenerate the"
+    err "       GitHub App installation token or OAuth credential it holds)."
+    exit "$EXIT_ERROR"
+fi
 
 if [[ "${#FOREIGN_PATHS[@]}" -gt 0 ]]; then
     err "Refusing to land: the working tree has non-resync dirt alongside resync output:"

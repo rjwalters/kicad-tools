@@ -125,12 +125,13 @@ assert_doc_contains() {
 
 # =====================================================================
 # guide.md's parse_dependencies — mirrors defaults/.claude/commands/loom/guide.md
-# verbatim (four alternatives incl. checkbox form; widened separator).
+# verbatim (four alternatives incl. checkbox form, UNCHECKED only per #7973;
+# widened separator).
 # =====================================================================
 guide_parse_dependencies() {
     local body="$1"
     echo "$body" \
-        | grep -E '(Blocked by|Depends on|Requires|\- \[.\])[*_:[:space:]]*#[0-9]+' \
+        | grep -E '(Blocked by|Depends on|Requires|\- \[ \])[*_:[:space:]]*#[0-9]+' \
         | grep -oE '#[0-9]+' | tr -d '#' | sort -u
 }
 
@@ -192,6 +193,15 @@ assert_eq "9" "$out" "plain Requires #N (no regression)"
 
 out="$(guide_parse_dependencies '- [ ] #12: some description')"
 assert_eq "12" "$out" "checkbox form still works (- [ ] #N)"
+
+echo
+echo "--- guide.md parse_dependencies: checked vs. unchecked checklist (#7973) ---"
+
+out="$(guide_parse_dependencies '- [x] #7431 (soak criteria + rollback path documented)')"
+assert_eq "" "$out" "a CHECKED checklist box (- [x] #N) is NOT a dependency (#7973 regression guard)"
+
+out="$(guide_parse_dependencies '- [ ] #12: some description')"
+assert_eq "12" "$out" "an UNCHECKED checklist box (- [ ] #N) still IS a dependency (no regression to #4508)"
 
 echo
 echo "--- guide.md parse_dependencies: edge case (unrelated same-line ref) ---"
@@ -262,8 +272,8 @@ echo
 echo "--- Doc pins: shipped markdown matches the mirrored functions above ---"
 
 assert_doc_contains "$GUIDE_MD" \
-    "grep -E '(Blocked by|Depends on|Requires|\- \[.\])[*_:[:space:]]*#[0-9]+'" \
-    "guide.md parse_dependencies ships the widened four-alternative pattern"
+    "grep -E '(Blocked by|Depends on|Requires|\- \[ \])[*_:[:space:]]*#[0-9]+'" \
+    "guide.md parse_dependencies ships the widened four-alternative pattern (unchecked checkbox only, #7973)"
 
 assert_doc_contains "$SWEEP_MD" \
     "grep -E '(Depends on|Requires)[*_:[:space:]]*#[0-9]+'" \

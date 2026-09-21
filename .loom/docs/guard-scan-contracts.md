@@ -89,7 +89,6 @@ COMMAND  (raw, masks nothing — implicitly catastrophic-safe)
  └─ COMMAND_NO_COMMENT           deny-safe
      └─ COMMAND_ASK_SCAN         deny-safe
          ├─ COMMAND_CLOUD_ASK_SCAN      ask-only
-         ├─ COMMAND_ASK_SCAN_PRINTENV   ask-only
          └─ COMMAND_STASH_SCAN          deny-safe
 ```
 
@@ -97,16 +96,15 @@ COMMAND  (raw, masks nothing — implicitly catastrophic-safe)
 
 | Copy | Tier | Masked out (accepted lossiness) | Why that tier |
 |---|---|---|---|
-| `COMMAND_NO_LITERAL_TEXT` | `catastrophic-safe` | for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments, flag-keyed literal text, comment lines — each masked only when provably non-executing, and spans carrying `$(`/backtick are left intact | the only copy the ungated `ALWAYS_BLOCK_PATTERNS` scan reads; deliberately does **not** get `#`-comment stripping |
+| `COMMAND_NO_LITERAL_TEXT` | `catastrophic-safe` | for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments, flag-keyed literal text, comment lines — each masked only when provably non-executing, and spans carrying a *live* (unescaped) `$(`/backtick are left intact — a backslash-escaped one is literal text and does not veto masking (#7498) | the only copy the ungated `ALWAYS_BLOCK_PATTERNS` scan reads; deliberately does **not** get `#`-comment stripping |
 | `COMMAND_RM_MKTEMP_SCAN` | `deny-safe` | inherits the above, plus selective heredoc-body masking | narrow branch feeding the `rm-*` denies only |
 | `COMMAND_WT_MKTEMP_SCAN` | `deny-safe` | inherits the above, plus selective heredoc-body masking | narrow branch feeding the write-confinement denies only |
 | `COMMAND_HEREDOC_MASKED` | `deny-safe` | closed, quoted-delimiter heredoc bodies; **interpreter-fed** bodies (`bash <<EOF`, `cat <<EOF \| sh`) stay visible (#5198) | feeds a hard deny, not the ALWAYS_BLOCK floor |
 | `COMMAND_GH_API_RAWFIELD_SCAN` | `deny-safe` | the above, plus `check-duplicate.sh` positional args and flag-keyed literal text | `gh api … -f body=@path` deny only |
 | `COMMAND_NO_COMMENT` | `deny-safe` | `#…EOL` shell comments, **quote-aware** since #6252 — a `#` inside a quoted span is never a comment start | quote-awareness is exactly what promoted this copy from ask-tier to deny-tier; under-strips rather than over-strips on an unterminated quote |
-| `COMMAND_ASK_SCAN` | `deny-safe` | the above, plus heredoc bodies (selective + unquoted-`cat` with no `$(`/backtick), `check-duplicate.sh` positional args, flag-keyed literal text | every pass masks only provably-non-executing text; a real invocation chained after a heredoc, or smuggled through `bash -c`, still reaches the deny sites |
+| `COMMAND_ASK_SCAN` | `deny-safe` | the above, plus heredoc bodies (selective + unquoted-`cat` with no live `$(`/backtick), `check-duplicate.sh` positional args, flag-keyed literal text | every pass masks only provably-non-executing text; a real invocation chained after a heredoc, or smuggled through `bash -c`, still reaches the deny sites |
 | `COMMAND_CLOUD_ASK_SCAN` | **`ask-only`** | the above, plus for-loop word lists, grep/rg/jq positional args, `NAME='…'` dead assignments | justified *because* `CLOUD_ASK_PATTERNS` is a toggleable (`guards.cloudCli`) **ask** tier, not the denial floor — the masking is more aggressive than any deny consumer may accept |
-| `COMMAND_ASK_SCAN_PRINTENV` | **`ask-only`** | the above, plus the two documented non-secret `LOOM_TOKEN_{NAME,MODE}` pointer vars (#6245) | an allowlist carve-out is a deliberate false-negative; only sound for an ask |
-| `COMMAND_STASH_SCAN` | `deny-safe` | the `COMMAND_ASK_SCAN` set, plus grep/egrep/fgrep/rg/awk quoted positional **search patterns** carrying no `$(`/backtick | search-pattern text is inert by construction; feeds the `stash-scope:create-redirect` deny as well as the stash asks |
+| `COMMAND_STASH_SCAN` | `deny-safe` | the `COMMAND_ASK_SCAN` set, plus grep/egrep/fgrep/rg/awk quoted positional **search patterns** carrying no live (unescaped) `$(`/backtick | search-pattern text is inert by construction; feeds the `stash-scope:create-redirect` deny as well as the stash asks |
 
 ### Read sites, by decision tier
 
@@ -148,10 +146,10 @@ list.
 | `ask:<pattern>` (ASK_PATTERNS loop) | `COMMAND_ASK_SCAN` |
 | `ask:<systemctl reason>` | `COMMAND_NO_COMMENT` |
 | `ask:<ssh-cat reason>` | `COMMAND_ASK_SCAN` |
-| `ask:<printenv reason>` | `COMMAND_ASK_SCAN_PRINTENV` |
-| `cargo-clean-scope-outside-repo` | `COMMAND_ASK_SCAN` |
+| `ask:<printenv reason>` | `COMMAND_ASK_SCAN` |
+| `cargo-clean-scope-outside-repo` (a **deny** since #7795) | `COMMAND_ASK_SCAN` |
 | `reversible-gh:<pattern>` | `COMMAND_ASK_SCAN` |
-| `git-read-tree` | `COMMAND_NO_COMMENT` |
+| `git-read-tree` (a **deny** since #7795) | `COMMAND_NO_COMMENT` (through `index_mutation_unisolated()` since #7923 — see the note below) |
 | `stash-scope:main-checkout` | `COMMAND_STASH_SCAN` |
 | `stash-scope:worktree-collision` | `COMMAND_STASH_SCAN` |
 | `stash-scope:cd-unresolved` | `COMMAND_NO_COMMENT`, `COMMAND_STASH_SCAN` |
@@ -174,11 +172,43 @@ the ones a future change is most likely to get wrong:
   records the promotion instead of contradicting it — and the checker enforces
   the part of the old reservation that is still live: this copy still must
   never reach the `catastrophic` floor.
-- **`COMMAND_CLOUD_ASK_SCAN` / `COMMAND_ASK_SCAN_PRINTENV` stay `ask-only`.**
-  Their extra masking is justified in-file *by the tier*: "a TOGGLEABLE tier
-  (`guards.cloudCli`), not the catastrophic tier's ungated denial floor", and an
-  explicit allowlist carve-out for two non-secret environment variables. Routing
-  either into a `deny()` is the #6252 shape and fails CI.
+- **`COMMAND_CLOUD_ASK_SCAN` stays `ask-only`.** Its extra masking is
+  justified in-file *by the tier*: "a TOGGLEABLE tier (`guards.cloudCli`), not
+  the catastrophic tier's ungated denial floor". Routing it into a `deny()` is
+  the #6252 shape and fails CI. (`COMMAND_ASK_SCAN_PRINTENV`, a third
+  `ask-only` branch, was retired in #7795 together with the `printenv` substring
+  backstop that was its only consumer — see
+  [`guard-hooks.md` § Ask-tier composition](guard-hooks.md#ask-tier-composition-7795).)
+
+### A read site may narrow *structurally* without a new scan copy (#7923)
+
+`git-read-tree` is the one site that answers the executable-vs-inert question
+with a **parse** rather than with a lossier copy. It still reads
+`COMMAND_NO_COMMENT` — its `scan-reads:` annotation and its tier are unchanged,
+so the invariant this document exists to protect is untouched — but it hands
+that string to `index_mutation_unisolated()`, which resolves simple commands,
+assignment prefixes, interpreter wrappers (`sh|bash|zsh|dash -c`, `eval`,
+`source`/`.`, a pipeline whose sink reads stdin), `$( … )`/backtick
+substitutions and heredoc ownership before deciding.
+
+It is recorded here because the tempting alternative is the one that does *not*
+work, and a future author will reach for it first: #7923 measured swapping this
+site to `COMMAND_ASK_SCAN` (contract-legal — it is `deny-safe`) and it flipped
+`printf '%s\n' 'git read-tree HEAD' > /tmp/notes.txt` to a **deny**, because no
+copy in the chain masks a quoted positional of a general non-executing command,
+while leaving both of the site's isolation-scoping holes wide open. A copy swap
+answers "which text is masked out"; this site needed "which text will a shell
+actually run, and what assignments are in force for it". Adding a new derived
+copy to model that would have widened the masking every *other*
+`COMMAND_NO_COMMENT` / `COMMAND_ASK_SCAN` consumer sees, which is exactly the
+coupling ADR-0016 warns about — so the parse lives at the single site that
+needs it and changes nothing else.
+
+Structural narrowing is **not** exempt from the tier discipline: it may only
+narrow on text that provably cannot execute, and it must fail **closed**
+(`index_mutation_unisolated()` treats an unterminated quote, an unbalanced
+`$(`, an unclosed heredoc and an over-deep recursion as executable, and falls
+back to the pre-#7923 regex pair if `awk` itself fails).
 
 ## Running it
 

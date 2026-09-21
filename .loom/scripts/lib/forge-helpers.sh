@@ -1894,13 +1894,50 @@ _forge_gitea_paginate() {
 # set, the immediate-merge path is taken; otherwise the existing UNSTABLE
 # refusal is preserved. See issue #3486.
 #
-# GitHub: GraphQL query against
-#   `repository(owner, name).ref(qualifiedName: "refs/heads/<branch>")
-#    .branchProtectionRule.requiredStatusCheckContexts`.
-#   Branches with no protection rule, or whose rule has no required contexts,
+# GitHub: TWO independent sources, unioned — GitHub has two separate backing
+#   systems for branch protection and a required check configured in one is
+#   invisible to the other's API:
+#
+#   1. **Rulesets** (the modern system): `GET /repos/{owner}/{repo}/rules/branches/{branch}`
+#      — the *effective* rules for the branch, merged across repository- and
+#      organization-level rulesets. Rulesets whose enforcement is `evaluate` or
+#      `disabled` are excluded by GitHub, which is exactly right: a rule that
+#      cannot block a merge must not make us refuse one.
+#   2. **Classic branch protection** (the legacy system): the GraphQL
+#      `ref.branchProtectionRule.requiredStatusCheckContexts` field.
+#
+#   Querying only (2) — which this helper did until #8103 — silently reports
+#   "no required checks" on any repo governed by rulesets. Verified live on
+#   rjwalters/loom (2026-09-17): its `main` is governed by an ACTIVE ruleset
+#   (id 8809610, `pull_request` + `required_linear_history` + `deletion` +
+#   `non_fast_forward` rules), and the GraphQL query still returns
+#   `branchProtectionRule: null` while `GET .../rules/branches/main` returns
+#   all four rules. Left unfixed, adding a `required_status_checks` rule to
+#   that ruleset would have changed nothing for `merge-pr.sh --auto` (every
+#   autonomous Champion merge): the empty result keeps taking the
+#   "No-required-checks fallback (#3720)" path and merging over red required
+#   checks, with no error and no signal that the new protection is being
+#   ignored. GitHub's own merge button reads the ruleset directly and would
+#   have blocked — only the API-driven merge path was exposed.
+#
+#   Branches with neither source configured, or whose rules list no contexts,
 #   yield empty output (exit 0). This is the desired behavior — "no required
 #   checks" means every failing check is informational, which is the case the
-#   UNSTABLE-fallback wants to unblock.
+#   UNSTABLE-fallback wants to unblock. An EMPTY result from a source that
+#   SUCCEEDED is therefore still "no required checks", not a failure.
+#
+#   A lookup that ERRORS is distinct from that and exits nonzero (fail-closed),
+#   matching the Gitea path and this function's documented contract — and it
+#   fails closed when EITHER source errors, not only when both do. A 403/404/
+#   network failure on the ruleset endpoint combined with an empty (but
+#   successful) classic result is indistinguishable, at the call site, from a
+#   genuinely unprotected branch: it would emit an empty list and send
+#   `merge-pr.sh --auto` down the "No-required-checks fallback (#3720)" path —
+#   reproducing exactly the blind spot this function was rewritten to close.
+#   One source erroring is not evidence that the other's rules do not exist,
+#   but neither is it evidence that the erroring source has none; the callers
+#   in merge-pr.sh already treat a nonzero lookup as "refuse to merge," which
+#   is the correct disposition for an unknown.
 #
 # Gitea: GET /api/v1/repos/{owner}/{repo}/branch_protections/{name}. Gitea's
 #   branch-protection rule carries both `enable_status_check` (boolean toggle)
@@ -1988,27 +2025,29 @@ forge_get_required_status_check_contexts() {
 
   forge_split_nwo "$nwo"
 
-  local query='query($owner: String!, $name: String!, $ref: String!) {
-    repository(owner: $owner, name: $name) {
-      ref(qualifiedName: $ref) {
-        branchProtectionRule {
-          requiredStatusCheckContexts
-        }
-      }
-    }
-  }'
-
-  # `gh api graphql --jq` with a missing path field yields `null`; pipe through
-  # jq to flatten the optional contexts array into a newline-separated list.
-  # Each step is allowed to yield empty output without failing the helper —
-  # absent protection rule or empty contexts list both mean "no required checks".
-  "$gh_cmd" api graphql \
-    -f "query=$query" \
-    -F "owner=$FORGE_OWNER" \
-    -F "name=$FORGE_REPO" \
-    -F "ref=refs/heads/$branch" \
-    --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' \
-    2>/dev/null || return 0
+  # Both queries are written as single lines rather than backslash-continued
+  # blocks: `defaults/scripts/lib/` is `contract` in scripts/shell-allowlist.txt,
+  # i.e. inside the portable pool `loom-daemon shell-budget --check` ratchets,
+  # and a continuation line is a code line there. Comments are free, so the
+  # explanation lives here instead of in the invocation.
+  #
+  # `--jq` yielding nothing is not an error in either query: `.[]?` over an
+  # empty rules array and a `null` branchProtectionRule both mean "this source
+  # configures no required checks". Only a nonzero `gh` exit — network failure,
+  # 403, 404 on the repo itself — is a lookup failure, and a failure on EITHER
+  # source fails the whole lookup closed: a surviving source's answer is a
+  # partial view, and "partial view of what is required" is not a safe input to
+  # a merge decision.
+  local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out=""
+  local query='query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { branchProtectionRule { requiredStatusCheckContexts } } } }'
+  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/${branch}" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>/dev/null)" || ruleset_rc=1
+  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>/dev/null)" || classic_rc=1
+  if [[ "$ruleset_rc" -ne 0 || "$classic_rc" -ne 0 ]]; then return 1; fi
+  # Union, order-preserving, de-duplicated: a context can legitimately be
+  # required by BOTH a ruleset and a classic rule, and the callers' `comm`
+  # set-difference needs each name once.
+  printf '%s\n%s\n' "$ruleset_out" "$classic_out" | awk 'NF && !seen[$0]++'
+  return 0
 }
 
 # Get repo NWO (name with owner).

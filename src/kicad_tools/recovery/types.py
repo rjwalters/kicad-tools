@@ -40,6 +40,7 @@ class StrategyType(Enum):
     MOVE_MULTIPLE = "move_multiple"  # Move multiple components
     ROTATE_COMPONENT = "rotate_component"  # Rotate a single component in place
     MIRROR_COMPONENT = "mirror_component"  # Flip a component to the other side (layer flip)
+    REORDER_PINS = "reorder_pins"  # Re-bind a declared swap group's pads to different nets
     ADD_VIA = "add_via"  # Add via to change layers
     CHANGE_LAYER = "change_layer"  # Route on different layer
     REROUTE_NET = "reroute_net"  # Reroute a single net

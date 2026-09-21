@@ -62,8 +62,10 @@ diagnosis, not just board-07.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kicad_tools.router.stuck_classifier import (
@@ -85,9 +87,13 @@ __all__ = [
     "MAX_TRANSLATE_MM",
     "ENDPOINT_ALIGN_ROTATIONS",
     "ENDPOINT_ALIGN_SOURCE",
+    "DELTA_ARTIFACT_SECTIONS",
     "delta_from_diagnosis",
     "deltas_from_result",
     "endpoint_align_deltas",
+    "load_placement_deltas",
+    "pad_map_overrides",
+    "format_pad_map_report",
 ]
 
 
@@ -177,6 +183,16 @@ class PlacementDelta:
     rationale: str = ""
     confidence: str = ""
     component_id: str = ""
+    # Declared swap-group proposal data (issue #5522, Phase 1 of Epic #5511).
+    # Populated ONLY when the diagnosed bundle carries a declared
+    # ``swap_group`` (:attr:`~kicad_tools.router.stuck_classifier.
+    # StuckNetDiagnosis.swap_proposal`); ``None`` otherwise -- a
+    # ``reorder_pins`` delta with no declared swap group therefore stays
+    # rationale-only, byte-identical to pre-#5522 output (emitted
+    # conditionally in :meth:`to_dict`, same style as ``component_id``).
+    pad_map: dict[str, str] | None = None
+    crossings_before: int | None = None
+    crossings_after: int | None = None
 
     @property
     def target_key(self) -> str:
@@ -195,6 +211,17 @@ class PlacementDelta:
             "rationale": self.rationale,
             "confidence": self.confidence,
             **({"component_id": self.component_id} if self.component_id else {}),
+            **({"pad_map": dict(self.pad_map)} if self.pad_map is not None else {}),
+            **(
+                {"crossings_before": self.crossings_before}
+                if self.crossings_before is not None
+                else {}
+            ),
+            **(
+                {"crossings_after": self.crossings_after}
+                if self.crossings_after is not None
+                else {}
+            ),
         }
 
     @classmethod
@@ -219,7 +246,138 @@ class PlacementDelta:
             rationale=data.get("rationale", ""),
             confidence=data.get("confidence", ""),
             component_id=data.get("component_id", ""),
+            pad_map=dict(data["pad_map"]) if data.get("pad_map") is not None else None,
+            crossings_before=(
+                int(data["crossings_before"]) if data.get("crossings_before") is not None else None
+            ),
+            crossings_after=(
+                int(data["crossings_after"]) if data.get("crossings_after") is not None else None
+            ),
         )
+
+
+# --- committed-artifact replay (issue #5537, Epic #5511 Phase 2b) -----------
+#
+# ``write_placement_delta_json`` (placement_feedback.py) emits
+# ``{"applied": [...], "proposed": [...], "reverted": [...]}``.  The helpers
+# below are the READ half of that contract: a recipe reloads a *committed*
+# artifact and replays its recorded decisions deterministically, without
+# re-running the classifier or re-searching for a proposal.
+#
+# Which section a recipe reads is a REVIEW boundary, not a detail.  ``applied``
+# holds the deltas a run (or a human, in a reviewed commit) actually kept, so
+# it is the default: replaying ``proposed`` would resurrect candidates the
+# feedback loop measured and refused.
+
+#: Sections of a ``<output>_placement_delta.json`` artifact that carry deltas.
+#: ``reverted`` entries are ``to_dict()`` payloads with extra measurement keys
+#: (``routed_before`` / ``routed_after`` / ``revert_reason``), which
+#: :meth:`PlacementDelta.from_dict` ignores, so they load too.
+DELTA_ARTIFACT_SECTIONS: tuple[str, ...] = ("applied", "proposed", "reverted")
+
+
+def load_placement_deltas(path: str | Path, *, section: str = "applied") -> list[PlacementDelta]:
+    """Load committed deltas from a ``<output>_placement_delta.json`` artifact.
+
+    The replay counterpart of
+    :func:`~kicad_tools.router.placement_feedback.write_placement_delta_json`:
+    ``section`` selects which of :data:`DELTA_ARTIFACT_SECTIONS` to read
+    (default ``"applied"`` -- the deltas that were kept, never the refused
+    ``proposed`` candidates).  A bare JSON list is also accepted so a
+    hand-authored, reviewed artifact does not have to fake the loop's section
+    structure; ``section`` is then irrelevant.
+
+    Returns ``[]`` when the named section is absent or empty.  Raises
+    ``FileNotFoundError`` when ``path`` does not exist and ``ValueError`` when
+    the payload is not a delta artifact at all -- a recipe pointed at the wrong
+    file must fail loudly, never silently route as though no swap were
+    declared.
+    """
+    if section not in DELTA_ARTIFACT_SECTIONS:
+        raise ValueError(
+            f"unknown placement-delta section {section!r}; "
+            f"expected one of {', '.join(DELTA_ARTIFACT_SECTIONS)}"
+        )
+    payload = json.loads(Path(path).read_text())
+    if isinstance(payload, list):
+        entries = payload
+    elif isinstance(payload, dict):
+        if not any(key in payload for key in DELTA_ARTIFACT_SECTIONS):
+            raise ValueError(
+                f"{path}: not a placement-delta artifact (no "
+                f"{'/'.join(DELTA_ARTIFACT_SECTIONS)} section)"
+            )
+        entries = payload.get(section) or []
+    else:
+        raise ValueError(f"{path}: not a placement-delta artifact (expected object or list)")
+    if not isinstance(entries, list):
+        raise ValueError(f"{path}: section {section!r} is not a list")
+    return [PlacementDelta.from_dict(entry) for entry in entries]
+
+
+def pad_map_overrides(deltas: list[PlacementDelta]) -> dict[str, dict[str, str]]:
+    """Merge every delta's ``pad_map`` into ``{target_key: {pad: net_name}}``.
+
+    Deltas with no ``pad_map`` contribute nothing: a rationale-only
+    ``reorder_pins`` delta (no declared swap group) and every geometry-only
+    kind (``translate`` / ``mirror`` / ``rotate_*``) leave the pad->net mapping
+    exactly as authored.  That is the Phase-2b edge case stated as an
+    acceptance criterion -- a delta artifact without a pad map must not move a
+    single pin.
+
+    Board-07's DQ3 and DQ4 diagnoses both carry the *same* ``U2`` swap, so
+    identical re-assignments merging is the normal case, not an error.  Only a
+    genuine CONTRADICTION -- two deltas binding the same pad of the same target
+    to different nets -- raises ``ValueError``; silently keeping the last one
+    would make the applied netlist depend on artifact ordering.
+    """
+    merged: dict[str, dict[str, str]] = {}
+    for delta in deltas:
+        if not delta.pad_map:
+            continue
+        target = merged.setdefault(delta.target_key, {})
+        for pad, net_name in delta.pad_map.items():
+            previous = target.get(pad)
+            if previous is not None and previous != net_name:
+                raise ValueError(
+                    f"conflicting pad_map entries for {delta.target_key} pad {pad!r}: "
+                    f"{previous!r} vs {net_name!r}"
+                )
+            target[pad] = net_name
+    return merged
+
+
+def format_pad_map_report(deltas: list[PlacementDelta]) -> str:
+    """Human-readable change report for the pad re-bindings in ``deltas``.
+
+    Names what was swapped and why: the target, the declared source action,
+    the recorded ``crossings_before`` -> ``crossings_after`` evidence, and the
+    full pad -> net assignment.  Emitted by a recipe that replays a committed
+    artifact so the netlist change is auditable from the build log rather than
+    only from a diff of the generated files.  Returns ``""`` when no delta
+    carries a pad map (nothing changed, so there is nothing to report).
+    """
+    carriers = [d for d in deltas if d.pad_map]
+    if not carriers:
+        return ""
+    lines = [f"Pad re-binding applied from committed placement delta ({len(carriers)} delta(s)):"]
+    for delta in carriers:
+        pad_map = delta.pad_map or {}
+        crossings = ""
+        if delta.crossings_before is not None and delta.crossings_after is not None:
+            crossings = f", crossings {delta.crossings_before} -> {delta.crossings_after}"
+        lines.append(
+            f"  {delta.target_key}: {delta.kind} for net {delta.net_name} "
+            f"(source_action={delta.source_action or 'n/a'}{crossings})"
+        )
+        for pad in sorted(pad_map, key=_pad_sort_key):
+            lines.append(f"    pad {pad} -> {pad_map[pad]}")
+    return "\n".join(lines)
+
+
+def _pad_sort_key(pad: str) -> tuple[int, int, str]:
+    """Sort pad numbers naturally: ``2`` before ``10``, ``A1`` before ``B2``."""
+    return (0, int(pad), "") if pad.isdigit() else (1, 0, pad)
 
 
 def delta_from_diagnosis(pcb: PCB, diag: StuckNetDiagnosis) -> PlacementDelta | None:
@@ -270,12 +428,35 @@ def deltas_from_result(
     behaviour, and only reaches an alignment candidate once the ladder's own
     proposal has been probed.  ``fixed_refs`` names parts the caller has
     anchored; they are never proposed for rotation.
+
+    Issue #5522 (Phase 1 of Epic #5511): when a diagnosis carries a computed
+    ``swap_proposal`` (a declared swap group on a VERIFIED-reversed bundle)
+    and the primary delta is NOT already the ``reorder_pins`` kind (e.g. the
+    top-ranked action was ``DE_REVERSE_BUNDLE``, so the primary delta is
+    ``mirror``), a ``reorder_pins`` delta carrying the proposal's ``pad_map``
+    / crossing counts is APPENDED after the primary delta -- same append,
+    never replace, precedent as #4968: a caller that takes the first
+    applyable delta is unaffected.  This is what gets the proposal into the
+    ``proposed`` list of the ``_placement_delta.json`` artifact even when
+    rung 1 is ``mirror``.  Since Phase 2a (#5536) ``_select_delta`` APPLIES
+    such a delta when it carries a ``pad_map``; a ``reorder_pins`` delta
+    without one (no declared swap group) is still rationale-only and is
+    still skipped.
     """
     out: list[PlacementDelta] = []
     for diag in result.diagnoses:
         delta = delta_from_diagnosis(pcb, diag)
         if delta is not None:
             out.append(delta)
+        if diag.swap_proposal is not None and (delta is None or delta.kind != "reorder_pins"):
+            rung = next(
+                (r for r in diag.recommendation if r.action is RecommendedAction.REORDER_PINS),
+                None,
+            )
+            if rung is not None:
+                extra = _reorder_pins_delta(diag, rung.confidence.value, rung.rationale)
+                if extra is not None:
+                    out.append(extra)
         if include_endpoint_alignment:
             out.extend(endpoint_align_deltas(pcb, diag, fixed_refs=fixed_refs))
     return out
@@ -319,15 +500,21 @@ def _mirror_delta(
 def _reorder_pins_delta(
     diag: StuckNetDiagnosis, confidence: str, rationale: str
 ) -> PlacementDelta | None:
-    """REORDER_PINS -> a rationale-only delta (no geometry in Phase 1).
+    """REORDER_PINS -> rationale-only, or a declared-swap-group proposal.
 
-    A pad-level re-map applicator does not exist yet, so this carries no
-    ``(dx, dy, rotation)`` -- it names the part whose pin order should change
-    (the reversed facing part when known) and defers the mechanics to a future
-    phase.
+    Issue #5522 (Phase 1 of Epic #5511) adds a data payload -- the pad-level
+    re-map Phase 2a (#5536) applies -- when the diagnosed bundle carries a
+    declared ``swap_group``: :attr:`StuckNetDiagnosis.swap_proposal` computed
+    the crossing-minimising ``pad_map`` at the classifier level, so this
+    builder only needs to copy it onto the delta.  Without a declared swap
+    group ``diag.swap_proposal`` is ``None`` and this stays exactly the
+    pre-#5522 rationale-only delta (byte-identical ``to_dict`` output --
+    ``pad_map`` / ``crossings_before`` / ``crossings_after`` stay unset and
+    are therefore omitted, same as ``component_id``).
     """
     orientation = diag.bundle_orientation
     target_ref = orientation.secondary_ref if orientation else ""
+    proposal = diag.swap_proposal
     return PlacementDelta(
         net_name=diag.net_name,
         target_ref=target_ref,
@@ -335,6 +522,9 @@ def _reorder_pins_delta(
         source_action=RecommendedAction.REORDER_PINS.value,
         rationale=rationale,
         confidence=confidence,
+        pad_map=dict(proposal.pad_map) if proposal is not None else None,
+        crossings_before=proposal.crossings_before if proposal is not None else None,
+        crossings_after=proposal.crossings_after if proposal is not None else None,
     )
 
 

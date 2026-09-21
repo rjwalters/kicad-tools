@@ -47,6 +47,33 @@
 #   LOOM_CI_PARALLELISM=4 …          # concurrent suites (default: logical core count)
 #   LOOM_CI_SERIAL_SUITES='a.sh b.sh'
 #                                    # override the serial lane (empty disables it)
+#   LOOM_CI_RETRY_LOG=<path>         # durable retry record location (default:
+#                                      /tmp/ci-suite-retry-log.tsv, see below)
+#
+# ## Retry-once-and-record (#7791)
+#
+# A single flaky assertion anywhere among 223 suites fails the whole job,
+# which blocks every concurrent PR — not just the one that happened to run.
+# #7287 and its 2026-09-16 recurrence (#7789/#7791) established this as a
+# fleet-wide tax, not a one-off. So: a suite that fails its first attempt is
+# re-run exactly ONCE (never the whole job — that would re-roll every other
+# suite's dice for no reason). A suite that fails BOTH attempts still fails
+# the job exactly as before.
+#
+# The retry is never silent. A quiet retry would turn a visible flake into an
+# invisible one — the same fail-open pattern #7745/#7761/#7755/#7743 already
+# burned this repo on — so every retry is recorded twice:
+#   1. In the human-readable report below, as "PASS (retried once, first
+#      exit N)" — visibly distinct from a plain "PASS" so a zero-retry run
+#      can never be confused with one that stepped over a flake.
+#   2. In a durable, machine-readable record (LOOM_CI_RETRY_LOG, default
+#      /tmp/ci-suite-retry-log.tsv) naming every retried suite, its first and
+#      retry exit codes, and its outcome — plus a $GITHUB_STEP_SUMMARY entry
+#      when running under Actions. This is the data #7789 needs to decide
+#      which suites are worth quarantining, rather than arguing from a
+#      hand-categorization of issue titles. Cross-run quarantine tracking
+#      (a rolling per-suite counter) is an explicit fast-follow, not this
+#      record's job — it needs state that outlives one CI run.
 #
 # ## Live-daemon guard (#6386)
 #
@@ -332,8 +359,21 @@ trap 'rm -rf "$RESULTS_DIR"' EXIT
 # unchanged from the old sequential loop) and records its outcome. Runs in a
 # background subshell (see the dispatch loop below), so it must not rely on
 # anything surviving past its own exit other than the result file it writes.
+#
+# Retry-once-and-record (#7791): a non-zero first attempt is re-run exactly
+# once, under the SAME per-suite timeout (a suite that times out is not a
+# different case — it is just another non-zero exit, retried the same way).
+# The result file now carries 5 space-separated fields instead of 2:
+#   <final_rc> <duration_seconds> <retried:0|1> <first_rc> <retry_rc>
+# where <final_rc> is the retry's exit code when retried=1, else the first
+# attempt's; <retry_rc> is "-" when retried=0 (no retry happened). This is
+# the cross-process handoff the parallel-pool dispatch loop below relies on
+# (a background subshell's locals vanish when it exits), and the serial
+# lane's foreground loop and the daemon-guard's skip path both funnel through
+# this same function, so the retry logic applies uniformly across all three
+# dispatch paths without separate handling.
 run_suite() {
-    local suite="$1" path log_name start dur rc
+    local suite="$1" path log_name start dur rc first_rc retried retry_rc
     if [[ "$suite" == */* ]]; then
         path="$REPO_ROOT/$suite"
     else
@@ -341,7 +381,7 @@ run_suite() {
     fi
     log_name="${suite//\//_}"
     if [[ ! -f "$path" ]]; then
-        printf 'MISSING 0\n' >"$RESULTS_DIR/$log_name.result"
+        printf 'MISSING 0 0 - -\n' >"$RESULTS_DIR/$log_name.result"
         return 0
     fi
     start=$(date +%s)
@@ -351,8 +391,25 @@ run_suite() {
         bash "$path" >"/tmp/ci-suite-$log_name.log" 2>&1
     fi
     rc=$?
+    first_rc="$rc"
+    retried=0
+    retry_rc="-"
+    if [[ "$rc" -ne 0 ]]; then
+        retried=1
+        {
+            echo
+            echo "=== RETRY (#7791): attempt 1 failed with exit $first_rc — re-running once ==="
+        } >>"/tmp/ci-suite-$log_name.log"
+        if [[ -n "$timeout_cmd" ]]; then
+            "$timeout_cmd" "$PER_SUITE_TIMEOUT" bash "$path" >>"/tmp/ci-suite-$log_name.log" 2>&1
+        else
+            bash "$path" >>"/tmp/ci-suite-$log_name.log" 2>&1
+        fi
+        retry_rc=$?
+        rc="$retry_rc"
+    fi
     dur=$(( $(date +%s) - start ))
-    printf '%s %s\n' "$rc" "$dur" >"$RESULTS_DIR/$log_name.result"
+    printf '%s %s %s %s %s\n' "$rc" "$dur" "$retried" "$first_rc" "$retry_rc" >"$RESULTS_DIR/$log_name.result"
 }
 
 printf '\n=== Running %d CI-wired shell suites (parallelism %d, timeout %ss each) ===\n\n' \
@@ -415,6 +472,13 @@ done
 # Report pass: walk the manifest IN ORDER (not completion order) so the
 # printed report — and its ordering/totals format — is identical to the old
 # sequential run regardless of which suite happened to finish first.
+#
+# retried_records accumulates one tab-separated "<suite>\t<first_rc>\t<retry_rc>\t<outcome>"
+# entry per RETRIED suite (#7791), consumed once below — after every suite's
+# outcome is known — to emit the durable record. It is built here (in-memory,
+# during the loop) but WRITTEN only once, after the loop, so the artifact is a
+# single well-formed record rather than N interleaved fragments.
+retried_records=()
 for suite in "${suites[@]}"; do
     if suite_is_daemon_guarded "$suite"; then
         printf 'SKIP  %-52s     (live-daemon guard, #6386)\n' "$suite"
@@ -429,16 +493,28 @@ for suite in "${suites[@]}"; do
         printf 'FAIL  %-52s     (no result recorded)\n' "$suite"
         failed=$((failed + 1)); failed_names+=("$suite"); continue
     fi
-    read -r rc dur <"$result_file"
+    read -r rc dur retried first_rc retry_rc <"$result_file"
     if [[ "$rc" == "MISSING" ]]; then
         echo "FAIL  $suite (missing file)"
         failed=$((failed + 1)); failed_names+=("$suite"); continue
     fi
     if [[ "$rc" -eq 0 ]]; then
-        printf 'PASS  %-52s %3ss\n' "$suite" "$dur"
+        if [[ "$retried" == "1" ]]; then
+            printf 'PASS  %-52s %3ss (retried once — first exit %s, #7791)\n' \
+                "$suite" "$dur" "$first_rc"
+            retried_records+=("$suite"$'\t'"$first_rc"$'\t'"$retry_rc"$'\t'"PASS")
+        else
+            printf 'PASS  %-52s %3ss\n' "$suite" "$dur"
+        fi
         passed=$((passed + 1))
     else
-        printf 'FAIL  %-52s %3ss (exit %s)\n' "$suite" "$dur" "$rc"
+        if [[ "$retried" == "1" ]]; then
+            printf 'FAIL  %-52s %3ss (failed both attempts — first exit %s, retry exit %s)\n' \
+                "$suite" "$dur" "$first_rc" "$retry_rc"
+            retried_records+=("$suite"$'\t'"$first_rc"$'\t'"$retry_rc"$'\t'"FAIL")
+        else
+            printf 'FAIL  %-52s %3ss (exit %s)\n' "$suite" "$dur" "$rc"
+        fi
         failed=$((failed + 1)); failed_names+=("$suite")
         print_suite_failure_excerpt "$suite" "/tmp/ci-suite-$log_name.log"
     fi
@@ -451,6 +527,53 @@ printf '\n=== Summary: %d passed, %d failed, %d skipped of %d wired suites in %s
 if [[ "$skipped" -ne 0 ]]; then
     printf 'Skipped (live-daemon guard, #6386 — NOT validated on this host): %s\n' \
         "${skipped_names[*]}" >&2
+fi
+
+# ---------- durable retry record (#7791) ----------
+# Emitted ONCE, here, after every suite's outcome is known — never per-suite
+# mid-run, so this is one well-formed record rather than N interleaved lines
+# from concurrent workers. A silent retry would turn a visible flake into an
+# invisible one (the same fail-open pattern #7745/#7761/#7755/#7743 already
+# cost this repo), so a run with zero retries must be distinguishable — in
+# both the printed report above AND this file — from one with several.
+#
+# This is a SINGLE-RUN record. Cross-run quarantine tracking ("retried more
+# than N times across a rolling window") needs state that outlives one CI
+# run and is an explicit fast-follow (#7789), not this record's job.
+RETRY_LOG_FILE="${LOOM_CI_RETRY_LOG:-/tmp/ci-suite-retry-log.tsv}"
+RETRY_RUN_ID="${GITHUB_RUN_ID:-local}"
+RETRY_BRANCH="${GITHUB_REF_NAME:-$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
+{
+    printf '# CI suite retry log (#7791) — run_id=%s branch=%s retried_count=%d\n' \
+        "$RETRY_RUN_ID" "$RETRY_BRANCH" "${#retried_records[@]}"
+    printf '# suite\tfirst_exit\tretry_exit\toutcome\n'
+    for rec in ${retried_records[@]+"${retried_records[@]}"}; do
+        printf '%s\n' "$rec"
+    done
+} >"$RETRY_LOG_FILE"
+
+if [[ "${#retried_records[@]}" -gt 0 ]]; then
+    printf '\nRetried suites (%d, see %s):\n' "${#retried_records[@]}" "$RETRY_LOG_FILE"
+    for rec in "${retried_records[@]}"; do
+        printf '  %s\n' "$rec" | tr '\t' ' '
+    done
+fi
+
+if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+        echo "### CI suite retries (#7791)"
+        echo
+        if [[ "${#retried_records[@]}" -eq 0 ]]; then
+            echo "No suite required a retry this run."
+        else
+            echo "| suite | first exit | retry exit | outcome |"
+            echo "|---|---|---|---|"
+            for rec in "${retried_records[@]}"; do
+                IFS=$'\t' read -r rec_suite rec_first rec_retry rec_outcome <<<"$rec"
+                echo "| $rec_suite | $rec_first | $rec_retry | $rec_outcome |"
+            done
+        fi
+    } >>"$GITHUB_STEP_SUMMARY"
 fi
 
 if [[ "$failed" -ne 0 ]]; then

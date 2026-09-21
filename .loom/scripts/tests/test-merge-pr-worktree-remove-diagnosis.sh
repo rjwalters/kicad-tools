@@ -106,8 +106,13 @@ loom_record_worktree_removal() { :; }  # no-op stub; ledger writes are out of sc
 
 eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
 eval "$(extract_fn _worktree_branch_for   "$MERGE_PR")"
-# #6694: _maybe_delete_local_branch delegates its tip-match check here.
-eval "$(extract_fn _worktree_branch_fully_captured "$MERGE_PR")"
+# #7812: _maybe_delete_local_branch's `-d` -> `-D` safety check is now the
+# shared `branch_landed` primitive — a real library, so it is SOURCED here
+# rather than extracted. Offline: these cases exercise merge-pr.sh's local
+# branch logic, not the forge rung, and the suite must stay hermetic.
+export LOOM_BRANCH_LANDED_OFFLINE=1
+# shellcheck source=../lib/branch-landed.sh
+source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
 eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
 eval "$(extract_fn _remove_loom_worktree  "$MERGE_PR")"
 

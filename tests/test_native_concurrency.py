@@ -1,0 +1,854 @@
+"""Tests for the native-subprocess concurrency gate (Issue #5501).
+
+The gate has to hold across *processes* (four xdist workers plus the ``kct``
+children they spawn), so the enforcement tests launch real fake-native
+executables from real subprocesses and reconstruct the overlap from timestamps
+the fake executable itself writes. A control run with the gate disabled proves
+the same workload really does overlap, so a passing bounded run is evidence and
+not a scheduling accident.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import json
+import os
+import signal
+import subprocess
+import sys
+import textwrap
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from kicad_tools import native_concurrency
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+FAKE_NATIVE = """\
+#!{python}
+import fcntl, os, sys, time
+log = os.environ["FAKE_NATIVE_LOG"]
+hold = float(os.environ.get("FAKE_NATIVE_HOLD", "0.4"))
+exit_code = int(os.environ.get("FAKE_NATIVE_EXIT", "0"))
+
+
+def mark(kind):
+    with open(log, "a") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        stream.write("%s %.6f\\n" % (kind, time.monotonic()))
+
+
+mark("start")
+time.sleep(hold)
+mark("end")
+sys.exit(exit_code)
+"""
+
+LAUNCHER = """\
+import subprocess, sys, threading
+from kicad_tools.native_concurrency import install_from_environment
+
+install_from_environment()
+executable, count = sys.argv[1], int(sys.argv[2])
+errors = []
+
+
+def launch():
+    try:
+        subprocess.run([executable], check=False)
+    except Exception as exc:  # pragma: no cover - surfaced through exit status
+        errors.append(repr(exc))
+
+
+threads = [threading.Thread(target=launch) for _ in range(count)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join()
+if errors:
+    print("\\n".join(errors), file=sys.stderr)
+    sys.exit(3)
+"""
+
+
+def _load_observer_module():
+    """Load the standalone CI observer, which is not an importable package."""
+    path = REPO_ROOT / "scripts" / "ci" / "native_observer.py"
+    spec = importlib.util.spec_from_file_location("native_observer_for_tests", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_analyzer_module():
+    path = REPO_ROOT / "scripts" / "ci" / "analyze_native_observations.py"
+    spec = importlib.util.spec_from_file_location("analyze_native_observations_for_tests", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def fake_native(tmp_path):
+    """An executable literally named ``kicad-cli`` that records its lifetime."""
+    directory = tmp_path / "bin"
+    directory.mkdir()
+    script = directory / "kicad-cli"
+    script.write_text(FAKE_NATIVE.format(python=sys.executable))
+    script.chmod(0o755)
+    return script
+
+
+def _overlap(log: Path) -> int:
+    """Maximum number of fake-native executions alive at the same instant."""
+    events = []
+    for line in log.read_text().splitlines():
+        kind, stamp = line.split()
+        events.append((float(stamp), 1 if kind == "start" else -1))
+    # An end that shares a timestamp with a start must not read as an overlap.
+    events.sort(key=lambda item: (item[0], item[1]))
+    live = peak = 0
+    for _stamp, delta in events:
+        live += delta
+        peak = max(peak, live)
+    return peak
+
+
+def _run_workload(fake_native, tmp_path, *, processes, per_process, limit, hold="0.4", **extra):
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(LAUNCHER)
+    log = tmp_path / f"native-{limit or 'off'}-{time.monotonic_ns()}.log"
+    environment = {
+        **os.environ,
+        "FAKE_NATIVE_LOG": str(log),
+        "FAKE_NATIVE_HOLD": hold,
+        native_concurrency.ENV_SLOT_DIR: str(tmp_path / "slots"),
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(REPO_ROOT / "src"), os.environ.get("PYTHONPATH")])
+        ),
+        **extra,
+    }
+    environment.pop(native_concurrency.ENV_LIMIT, None)
+    environment.pop(native_concurrency.ENV_HELD, None)
+    if limit is not None:
+        environment[native_concurrency.ENV_LIMIT] = str(limit)
+    children = [
+        subprocess.Popen(
+            [sys.executable, str(launcher), str(fake_native), str(per_process)],
+            env=environment,
+            stderr=subprocess.PIPE,
+        )
+        for _ in range(processes)
+    ]
+    for child in children:
+        _stdout, stderr = child.communicate(timeout=120)
+        assert child.returncode == 0, stderr.decode()
+    return log
+
+
+@pytest.mark.parametrize("limit", [1, 2])
+def test_gate_bounds_native_launches_across_processes(fake_native, tmp_path, limit):
+    log = _run_workload(fake_native, tmp_path, processes=3, per_process=2, limit=limit)
+    assert len(log.read_text().splitlines()) == 12  # every launch still ran
+    assert _overlap(log) <= limit
+
+
+def test_control_workload_really_overlaps_without_the_gate(fake_native, tmp_path):
+    """Negative control: the same workload exceeds the bound when ungated."""
+    log = _run_workload(fake_native, tmp_path, processes=3, per_process=2, limit=None)
+    assert len(log.read_text().splitlines()) == 12
+    assert _overlap(log) > 2
+
+
+def test_gate_is_inert_without_configuration(monkeypatch):
+    monkeypatch.delenv(native_concurrency.ENV_LIMIT, raising=False)
+    assert native_concurrency.configured_limit() is None
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "0")
+    assert native_concurrency.configured_limit() is None
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "not-a-number")
+    assert native_concurrency.configured_limit() is None
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "3")
+    assert native_concurrency.configured_limit() == 3
+
+
+def test_install_does_not_patch_subprocess_when_unconfigured(tmp_path):
+    """A default (non-CI) interpreter must keep the stdlib ``Popen``."""
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import subprocess, sys
+            import kicad_tools  # installs the gate only when configured
+            from kicad_tools.native_concurrency import install_from_environment
+            print(subprocess.Popen.__module__ == "subprocess", install_from_environment())
+            """
+        )
+    )
+    environment = {**os.environ}
+    environment.pop(native_concurrency.ENV_LIMIT, None)
+    result = subprocess.run(
+        [sys.executable, str(probe)], env=environment, capture_output=True, text=True, timeout=180
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "True False"
+
+
+@pytest.mark.parametrize(
+    ("argv", "native"),
+    [
+        (["kicad-cli", "pcb", "drc"], True),
+        (["/usr/bin/kicad-cli", "pcb", "export", "svg"], True),
+        (["python3", "/x/kicad_tools/zones/_fixed_fill_worker.py", "board"], True),
+        (["python3.12", "-m", "kicad_tools.cli", "route"], False),
+        (["python3", "-c", "print(1)"], False),
+        (["uv", "run", "pytest"], False),
+        (["kicad-cli-wrapper"], False),
+        ([], False),
+        ("kicad-cli pcb drc", False),
+        # Capability/version probes never load a board (Issue #5603): they
+        # must not take a permit sized for real board-loading launches.
+        (["kicad-cli", "pcb", "drc", "--help"], False),
+        (["kicad-cli", "pcb", "fill-zones", "--help"], False),
+        (["/opt/kicad/bin/kicad-cli", "--version"], False),
+        # "version" (no dashes) is a real subcommand, not the "--version"
+        # flag, and a launch that also names a board must still be gated
+        # even if some other flag happens to be present.
+        (["/opt/kicad/bin/kicad-cli", "version"], True),
+        (
+            ["kicad-cli", "pcb", "drc", "--output", "report.json", "board.kicad_pcb"],
+            True,
+        ),
+    ],
+)
+def test_native_classification(argv, native):
+    assert native_concurrency.is_native_launch(argv) is native
+
+
+def test_classification_matches_the_independent_observer():
+    """The gate and the /proc observer must never disagree about 'native'."""
+    observer = _load_observer_module()
+    cases = [
+        ["kicad-cli", "pcb", "drc"],
+        ["/opt/kicad/bin/kicad-cli", "version"],
+        ["python3", "/x/kicad_tools/zones/_fixed_fill_worker.py"],
+        ["python3.12", "-m", "kicad_tools.cli", "route"],
+        ["python3", "-c", "pass"],
+        ["uv", "run", "pytest"],
+        ["git", "status"],
+        ["kicad-cli", "pcb", "drc", "--help"],
+        ["kicad-cli", "pcb", "fill-zones", "--help"],
+        ["/opt/kicad/bin/kicad-cli", "--version"],
+    ]
+    for argv in cases:
+        expected = observer.category(argv) in ("kicad-cli", "kicad-python-fill")
+        assert native_concurrency.is_native_launch(argv) is expected, argv
+
+
+def test_capability_probe_category_is_distinct_from_native_categories():
+    """The observer must bucket probes out of the analyzer's NATIVE_CATEGORIES.
+
+    ``scripts/ci/analyze_native_observations.py``'s memory/simulate-bound
+    analysis filters on ``category in NATIVE_CATEGORIES`` (currently
+    ``("kicad-cli", "kicad-python-fill")``); a probe that stayed classified
+    as plain ``"kicad-cli"`` would keep counting toward that population even
+    though it no longer takes a permit.
+    """
+    observer = _load_observer_module()
+    analyzer = _load_analyzer_module()
+    assert observer.category(["kicad-cli", "pcb", "drc", "--help"]) == "kicad-cli-probe"
+    assert observer.category(["kicad-cli", "--version"]) == "kicad-cli-probe"
+    assert "kicad-cli-probe" not in analyzer.NATIVE_CATEGORIES
+    # A real launch is unaffected and stays in both places.
+    assert observer.category(["kicad-cli", "pcb", "drc", "board.kicad_pcb"]) == "kicad-cli"
+    assert "kicad-cli" in analyzer.NATIVE_CATEGORIES
+
+
+def test_executable_keyword_is_classified(tmp_path):
+    assert native_concurrency.is_native_launch(["ignored"], executable="/usr/bin/kicad-cli")
+
+
+def _hold_every_slot(directory: Path, limit: int):
+    """Hold the whole semaphore from this process, as a peer worker would."""
+    import fcntl
+
+    directory.mkdir(parents=True, exist_ok=True)
+    handles = []
+    for index in range(limit):
+        # Deliberately not a context manager: the flock must outlive this
+        # function, exactly as a peer worker's held permit would.
+        handle = open(directory / f"slot-{index}", "a+")  # noqa: SIM115
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        handles.append(handle)
+    return handles
+
+
+def test_nested_native_launch_reuses_the_subtree_permit(fake_native, tmp_path, monkeypatch):
+    """A permitted child's own native launch must not deadlock behind itself."""
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    try:
+        monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+        monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+        monkeypatch.setenv(native_concurrency.ENV_HELD, "1")
+        monkeypatch.setenv("FAKE_NATIVE_LOG", str(tmp_path / "nested.log"))
+        monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+        started = time.monotonic()
+        with native_concurrency._GatedPopen([str(fake_native)]) as child:
+            child.wait(timeout=30)
+        assert child.returncode == 0
+        assert time.monotonic() - started < 10
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def test_non_native_launch_is_never_gated(tmp_path, monkeypatch):
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    try:
+        monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+        monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+        monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+        started = time.monotonic()
+        with native_concurrency._GatedPopen([sys.executable, "-c", "pass"]) as child:
+            child.wait(timeout=30)
+        assert child.returncode == 0
+        assert time.monotonic() - started < 10
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def test_capability_probe_launch_is_never_gated(fake_native, tmp_path, monkeypatch):
+    """A ``kicad-cli --help``-shaped launch must not wait behind a full pool.
+
+    Issue #5603: probes never load a board, so serialising them behind the
+    permit sized for real launches wastes wall-clock time on work that could
+    have run immediately. ``fake_native`` is literally named ``kicad-cli``,
+    so this exercises the same classifier branch a real ``--help`` probe
+    would hit, not a substitute for it.
+    """
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    try:
+        monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+        monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+        monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+        monkeypatch.setenv("FAKE_NATIVE_LOG", str(tmp_path / "probe.log"))
+        monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+        started = time.monotonic()
+        with native_concurrency._GatedPopen([str(fake_native), "--help"]) as child:
+            child.wait(timeout=30)
+        assert child.returncode == 0
+        # Every slot is held for the whole test; a gated launch would block
+        # for the full ``KCT_NATIVE_SLOT_WAIT_SECONDS`` fail-open ceiling
+        # (120s default) instead of returning almost immediately.
+        assert time.monotonic() - started < 10
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def test_permit_is_released_after_failure_timeout_and_kill(fake_native, tmp_path, monkeypatch):
+    """Every terminal path must return the slot, or the pool drains to zero."""
+    slots = tmp_path / "slots"
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "5")
+    monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+    monkeypatch.setenv("FAKE_NATIVE_LOG", str(tmp_path / "terminal.log"))
+
+    monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+    monkeypatch.setenv("FAKE_NATIVE_EXIT", "7")
+    with native_concurrency._GatedPopen([str(fake_native)]) as failed:
+        assert failed.wait(timeout=30) == 7
+
+    monkeypatch.setenv("FAKE_NATIVE_HOLD", "30")
+    monkeypatch.setenv("FAKE_NATIVE_EXIT", "0")
+    original = subprocess.Popen
+    subprocess.Popen = native_concurrency._GatedPopen
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run([str(fake_native)], timeout=0.5)
+    finally:
+        subprocess.Popen = original
+
+    killed = native_concurrency._GatedPopen([str(fake_native)])
+    killed.kill()
+    killed.wait(timeout=30)
+
+    # All three terminal paths returned their slot, so this still acquires
+    # quickly instead of burning the 5s fail-open ceiling.
+    monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+    started = time.monotonic()
+    with native_concurrency._GatedPopen([str(fake_native)]) as last:
+        assert last.wait(timeout=30) == 0
+    assert time.monotonic() - started < 4
+
+
+def test_wait_ceiling_launches_unbounded_instead_of_hanging(fake_native, tmp_path, monkeypatch):
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    log = tmp_path / "records"
+    try:
+        monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+        monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+        monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "0.5")
+        monkeypatch.setenv(native_concurrency.ENV_LOG, str(log))
+        monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+        monkeypatch.setenv("FAKE_NATIVE_LOG", str(tmp_path / "ceiling.log"))
+        monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+        started = time.monotonic()
+        with native_concurrency._GatedPopen([str(fake_native)]) as child:
+            assert child.wait(timeout=30) == 0
+        waited = time.monotonic() - started
+    finally:
+        for handle in handles:
+            handle.close()
+    assert 0.5 <= waited < 20
+    records = [
+        json.loads(line)
+        for path in log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert [r["reason"] for r in records if r["event"] == "unbounded"] == ["wait_ceiling"]
+
+
+def test_slot_wait_ceiling_is_the_public_queue_bound(monkeypatch):
+    """Callers with a wall-clock budget size it against this, not a literal.
+
+    Issue #5579: the gate can inject up to this much queue time into a caller
+    that launches a native workload, and that time is charged to whatever
+    budget the caller runs under. The accessor is public so such a caller
+    (``tests/test_route_partial_placement_cli.py``) tracks the gate's own
+    configuration instead of hardcoding 120.
+    """
+    monkeypatch.delenv(native_concurrency.ENV_WAIT_SECONDS, raising=False)
+    assert native_concurrency.slot_wait_ceiling() == native_concurrency.DEFAULT_WAIT_SECONDS
+
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "45")
+    assert native_concurrency.slot_wait_ceiling() == 45.0
+    # An explicit environ wins over the process environment.
+    assert native_concurrency.slot_wait_ceiling({"KCT_NATIVE_SLOT_WAIT_SECONDS": "7"}) == 7.0
+
+    # Unusable values fall back rather than shrinking the bound to nothing.
+    for unusable in ("", "0", "-1", "not-a-number"):
+        monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, unusable)
+        assert native_concurrency.slot_wait_ceiling() == native_concurrency.DEFAULT_WAIT_SECONDS
+
+
+def test_permit_records_are_written_and_redacted(fake_native, tmp_path, monkeypatch):
+    log = tmp_path / "records"
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(tmp_path / "slots"))
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(log))
+    monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+    monkeypatch.setenv("FAKE_NATIVE_LOG", str(tmp_path / "records.log"))
+    monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_x[secret-token] (call)")
+    with native_concurrency._GatedPopen([str(fake_native)]) as child:
+        assert child.wait(timeout=30) == 0
+    records = [
+        json.loads(line)
+        for path in log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert [record["event"] for record in records] == ["acquire", "release"]
+    assert all("secret-token" not in json.dumps(record) for record in records)
+    assert records[0]["owner"].startswith("tests/t.py::test_x[redacted-")
+
+
+def test_native_slot_context_manager_is_reentrant_and_inert(tmp_path, monkeypatch):
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(tmp_path / "slots"))
+    monkeypatch.delenv(native_concurrency.ENV_LIMIT, raising=False)
+    with native_concurrency.native_slot() as permit:
+        assert permit.bounded is False
+    monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+    with native_concurrency.native_slot() as permit:
+        assert permit.bounded is True
+        monkeypatch.setenv(native_concurrency.ENV_HELD, "1")
+        with native_concurrency.native_slot() as nested:
+            assert nested.bounded is False
+
+
+@contextlib.contextmanager
+def _own_the_alarm(seconds: float | None):
+    """Stand in for pytest-timeout's signal method for the duration of a block.
+
+    The ambient deadline (this suite really does run under ``--timeout`` in CI)
+    is saved and put back on the way out, minus the time the block consumed, so
+    a test that borrows ``ITIMER_REAL`` cannot quietly disarm its own timeout.
+    """
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_remaining, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
+    fired: list[float] = []
+    signal.signal(signal.SIGALRM, lambda *_: fired.append(time.monotonic()))
+    if seconds is not None:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield fired
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_remaining:
+            left = previous_remaining - (time.monotonic() - started)
+            # A non-positive remainder means the borrowed-from deadline really
+            # did expire; firing immediately is the honest restoration.
+            signal.setitimer(signal.ITIMER_REAL, max(left, 0.000001), previous_interval)
+
+
+def _release_after(handles, delay: float) -> threading.Timer:
+    timer = threading.Timer(delay, lambda: [handle.close() for handle in handles])
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def test_slot_wait_is_credited_back_to_the_waiting_tests_deadline(tmp_path, monkeypatch):
+    """Issue #5572: the deadline measures the test's work, not its queue time."""
+    slots = tmp_path / "slots"
+    log = tmp_path / "records"
+    handles = _hold_every_slot(slots, 1)
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "30")
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(log))
+    monkeypatch.delenv(native_concurrency.ENV_CREDIT_SECONDS, raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_credit (call)")
+    timer = _release_after(handles, 0.4)
+    permit = None
+    try:
+        with _own_the_alarm(10.0) as fired:
+            permit = native_concurrency._acquire(1, os.environ)
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+            # ``bounded`` reads the live fd, so sample it before releasing.
+            bounded = permit.bounded
+    finally:
+        timer.cancel()
+        if permit is not None:
+            permit.release()
+        for handle in handles:
+            with contextlib.suppress(Exception):
+                handle.close()
+    records = [
+        json.loads(line)
+        for path in log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    assert [record["event"] for record in records] == ["acquire", "release"]
+    assert records[0]["credited_s"] == pytest.approx(permit.waited_s, abs=0.01)
+    assert bounded is True
+    assert permit.waited_s >= 0.3
+    assert not fired
+    # Without the credit the deadline would read 10 - waited; with it the test
+    # is left with (very nearly) the whole budget it started with.
+    assert remaining > 10.0 - 0.2
+    assert remaining <= 10.0 + permit.waited_s
+
+
+def test_credit_is_capped_per_test_and_reset_for_the_next_test(monkeypatch):
+    monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, "0.5")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_a (call)")
+    with _own_the_alarm(30.0):
+        assert native_concurrency._credit_wait(0.4, os.environ) == pytest.approx(0.4)
+        # Same item, now over the cap: only the remainder is granted.
+        assert native_concurrency._credit_wait(0.4, os.environ) == pytest.approx(0.1)
+        assert native_concurrency._credit_wait(0.4, os.environ) == 0.0
+        # A later phase of the same item shares one budget, as pytest-timeout
+        # arms one timer across setup/call/teardown.
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_a (teardown)")
+        assert native_concurrency._credit_wait(0.4, os.environ) == 0.0
+        # The next item starts fresh.
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_b (call)")
+        assert native_concurrency._credit_wait(0.4, os.environ) == pytest.approx(0.4)
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert remaining > 30.0
+
+
+@pytest.mark.parametrize(
+    ("credit_seconds", "current_test"),
+    [
+        ("0", "tests/t.py::test_disabled (call)"),  # crediting switched off
+        ("120", None),  # not running under pytest at all
+    ],
+)
+def test_credit_is_inert_when_disabled_or_outside_a_test(monkeypatch, credit_seconds, current_test):
+    monkeypatch.setenv(native_concurrency.ENV_CREDIT_SECONDS, credit_seconds)
+    if current_test is None:
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    else:
+        monkeypatch.setenv("PYTEST_CURRENT_TEST", current_test)
+    with _own_the_alarm(10.0):
+        assert native_concurrency._credit_wait(1.0, os.environ) == 0.0
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert remaining <= 10.0
+
+
+def test_credit_never_arms_a_deadline_that_was_not_already_running(monkeypatch):
+    """No armed timer means nobody charged the wait -- and none is created."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_unarmed (call)")
+    with _own_the_alarm(None):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        assert native_concurrency._credit_wait(1.0, os.environ) == 0.0
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_credit_is_skipped_off_the_main_thread(monkeypatch):
+    """``setitimer`` is main-thread only; an off-thread launch is left alone."""
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_thread (call)")
+    granted: list[float] = []
+    with _own_the_alarm(10.0):
+        worker = threading.Thread(
+            target=lambda: granted.append(native_concurrency._credit_wait(1.0, os.environ))
+        )
+        worker.start()
+        worker.join(timeout=10)
+        remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert granted == [0.0]
+    assert remaining <= 10.0
+
+
+def test_wait_ceiling_fallback_still_credits_and_records(tmp_path, monkeypatch):
+    """The fail-open path is a defect signal, not work the test should pay for."""
+    slots = tmp_path / "slots"
+    log = tmp_path / "records"
+    handles = _hold_every_slot(slots, 1)
+    monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+    monkeypatch.setenv(native_concurrency.ENV_WAIT_SECONDS, "0.5")
+    monkeypatch.setenv(native_concurrency.ENV_LOG, str(log))
+    monkeypatch.delenv(native_concurrency.ENV_CREDIT_SECONDS, raising=False)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/t.py::test_ceiling (call)")
+    try:
+        with _own_the_alarm(10.0):
+            permit = native_concurrency._acquire(1, os.environ)
+            remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    finally:
+        for handle in handles:
+            handle.close()
+    assert permit.bounded is False
+    assert remaining > 10.0 - 0.2
+    records = [
+        json.loads(line)
+        for path in log.glob("slots-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    fallback = [record for record in records if record["event"] == "unbounded"]
+    assert [record["reason"] for record in fallback] == ["wait_ceiling"]
+    assert fallback[0]["credited_s"] >= 0.5
+
+
+def _write_group(root: Path, name: str, *, samples, events):
+    directory = root / name
+    directory.mkdir(parents=True)
+    with (directory / "processes.jsonl").open("w") as stream:
+        for sample in samples:
+            stream.write(json.dumps({"event": "process_sample", **sample}) + "\n")
+    with (directory / "observer.jsonl").open("w") as stream:
+        memory = {
+            "available": True,
+            "memory.current": 1 << 30,
+            "memory.peak": 2 << 30,
+            "memory.max": 12 << 30,
+            "memory.events": events,
+        }
+        stream.write(json.dumps({"time_ns": 0, "event": "memory_sample", "memory": memory}) + "\n")
+        stream.write(
+            json.dumps(
+                {
+                    "time_ns": 1,
+                    "event": "finish",
+                    "exit_code": 0,
+                    "memory": memory,
+                    "memory_events_delta": events,
+                    "diagnostics_degraded": False,
+                }
+            )
+            + "\n"
+        )
+    return directory
+
+
+def _native_sample(pid, time_ns, owner):
+    return {
+        "time_ns": time_ns,
+        "pid": pid,
+        "start_ticks": pid,
+        "ppid": 1,
+        "rss_bytes": 2 << 30,
+        "sampled_peak_rss_bytes": 2 << 30,
+        "category": "kicad-cli",
+        "owner": owner,
+        "worker": "gw0",
+    }
+
+
+NO_EVENTS = {"low": 0, "high": 0, "max": 0, "oom": 0, "oom_kill": 0, "oom_group_kill": 0}
+
+
+def test_analyzer_flags_overlap_oom_and_passes_a_bounded_run(tmp_path, capsys):
+    analyzer = _load_analyzer_module()
+    root = tmp_path / "native-observer"
+    # Two native processes whose sample windows overlap.
+    _write_group(
+        root,
+        "bulk",
+        samples=[
+            _native_sample(11, 1_000_000_000, "tests/a.py::test_a (call)"),
+            _native_sample(11, 3_000_000_000, "tests/a.py::test_a (call)"),
+            _native_sample(12, 2_000_000_000, "tests/b.py::test_b (call)"),
+            _native_sample(12, 4_000_000_000, "tests/b.py::test_b (call)"),
+        ],
+        events=NO_EVENTS,
+    )
+    assert analyzer.main([str(root), "--max-concurrency", "1"]) == 1
+    assert "exceeds the configured bound 1" in capsys.readouterr().err
+    assert analyzer.main([str(root), "--max-concurrency", "2"]) == 0
+
+    # Serialised windows pass at a bound of 1, and an OOM kill never does.
+    serial = tmp_path / "serial"
+    _write_group(
+        serial,
+        "bulk",
+        samples=[
+            _native_sample(11, 1_000_000_000, "tests/a.py::test_a (call)"),
+            _native_sample(11, 2_000_000_000, "tests/a.py::test_a (call)"),
+            _native_sample(12, 3_000_000_000, "tests/b.py::test_b (call)"),
+            _native_sample(12, 4_000_000_000, "tests/b.py::test_b (call)"),
+        ],
+        events=NO_EVENTS,
+    )
+    assert analyzer.main([str(serial), "--max-concurrency", "1"]) == 0
+    killed = tmp_path / "killed"
+    _write_group(
+        killed,
+        "bulk",
+        samples=[_native_sample(11, 1_000_000_000, "tests/a.py::test_a (call)")],
+        events={**NO_EVENTS, "oom_kill": 1},
+    )
+    assert analyzer.main([str(killed), "--max-concurrency", "1"]) == 1
+    assert "oom_kill" in capsys.readouterr().err
+
+
+def test_analyzer_reports_attribution_and_unbounded_gate_launches(tmp_path):
+    analyzer = _load_analyzer_module()
+    root = tmp_path / "native-observer"
+    directory = _write_group(
+        root,
+        "bulk",
+        samples=[
+            _native_sample(11, 1_000_000_000, "tests/a.py::test_a (call)"),
+            _native_sample(11, 2_000_000_000, "tests/a.py::test_a (call)"),
+        ],
+        events=NO_EVENTS,
+    )
+    (directory / "slots-99.jsonl").write_text(
+        json.dumps(
+            {
+                "time_ns": 1,
+                "pid": 99,
+                "event": "acquire",
+                "slot": 0,
+                "waited_s": 0.5,
+                "credited_s": 0.5,
+                "owner": "tests/a.py::test_a (call)",
+            }
+        )
+        + "\n"
+        + json.dumps({"time_ns": 2, "pid": 99, "event": "release", "slot": 0})
+        + "\n"
+        + json.dumps(
+            {
+                "time_ns": 3,
+                "pid": 99,
+                "event": "unbounded",
+                "reason": "wait_ceiling",
+                "credited_s": 0.25,
+                "owner": "tests/b.py::test_b (call)",
+            }
+        )
+        + "\n"
+    )
+    out = tmp_path / "attribution.json"
+    assert analyzer.main([str(root), "--max-concurrency", "1", "--json", str(out)]) == 1
+    summary = json.loads(out.read_text())
+    group = summary["groups"][0]
+    assert group["native_processes"] == 1
+    assert group["top_modules_by_native_seconds"][0]["module"] == "tests/a.py"
+    assert group["top_tests_by_native_processes"][0]["nodeid"] == "tests/a.py::test_a (call)"
+    assert group["memory"]["memory_max"] == [12 << 30]
+    assert group["gate"]["unbounded_launches"] == 1
+    assert group["gate"]["wait_seconds_max"] == 0.5
+    # Issue #5572: queue time handed back, summed overall and per worst test.
+    assert group["gate"]["timeout_credit_seconds_total"] == 0.75
+    assert group["gate"]["timeout_credit_seconds_max_test"] == 0.5
+
+
+def _worker_sample(pid, time_ns, owner, worker):
+    return {**_native_sample(pid, time_ns, owner), "worker": worker}
+
+
+def test_analyzer_simulates_what_a_bound_would_have_cost(tmp_path):
+    """The bound was chosen from this model, so the model itself is tested.
+
+    Two workers each run one 1 s native process at the same instant. A bound of
+    2 costs nothing; a bound of 1 must serialise them, adding exactly one
+    process' duration of wait and the same amount of span.
+    """
+    analyzer = _load_analyzer_module()
+    root = tmp_path / "native-observer"
+    second = 1_000_000_000
+    _write_group(
+        root,
+        "bulk",
+        samples=[
+            _worker_sample(11, 10 * second, "tests/a.py::test_a (call)", "gw0"),
+            _worker_sample(11, 11 * second, "tests/a.py::test_a (call)", "gw0"),
+            _worker_sample(12, 10 * second, "tests/b.py::test_b (call)", "gw1"),
+            _worker_sample(12, 11 * second, "tests/b.py::test_b (call)", "gw1"),
+        ],
+        events=NO_EVENTS,
+    )
+    out = tmp_path / "attribution.json"
+    # --max-concurrency 2 passes (the observations really do show 2), while the
+    # simulation independently reports what 1 would have cost that same run.
+    assert (
+        analyzer.main(
+            [str(root), "--max-concurrency", "2", "--simulate-bound", "1", "--json", str(out)]
+        )
+        == 0
+    )
+    group = json.loads(out.read_text())["groups"][0]
+    (model,) = group["simulated_bounds"]
+    assert model["bound"] == 1
+    assert model["observed_native_span_seconds"] == pytest.approx(1.0)
+    assert model["simulated_native_span_seconds"] == pytest.approx(2.0)
+    assert model["added_span_seconds"] == pytest.approx(1.0)
+    assert model["total_added_wait_seconds"] == pytest.approx(1.0)
+    assert model["longest_single_wait_seconds"] == pytest.approx(1.0)
+    assert model["worst_tests_by_added_wait"][0]["added_wait_seconds"] == pytest.approx(1.0)
+
+    # The bound the run already satisfied must cost nothing in the model.
+    assert analyzer.main([str(root), "--simulate-bound", "2", "--json", str(out)]) == 0
+    (unconstrained,) = json.loads(out.read_text())["groups"][0]["simulated_bounds"]
+    assert unconstrained["added_span_seconds"] == pytest.approx(0.0)
+    assert unconstrained["total_added_wait_seconds"] == pytest.approx(0.0)
+
+
+def test_analyzer_rejects_a_non_positive_simulated_bound(tmp_path):
+    analyzer = _load_analyzer_module()
+    with pytest.raises(SystemExit):
+        analyzer.main([str(tmp_path), "--simulate-bound", "0"])
+
+
+def test_analyzer_requires_observations(tmp_path, capsys):
+    analyzer = _load_analyzer_module()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert analyzer.main([str(empty)]) == 2
+    assert "no observer output" in capsys.readouterr().err

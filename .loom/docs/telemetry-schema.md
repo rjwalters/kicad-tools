@@ -29,7 +29,7 @@ Every record is transmitted inside a versioned envelope:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "emitted_at": "2026-07-30T12:00:00Z",
   "host_id": "fleet-host-abc",
   "record": {
@@ -41,7 +41,7 @@ Every record is transmitted inside a versioned envelope:
 
 | Field            | Type              | Notes |
 |------------------|-------------------|-------|
-| `schema_version` | integer (`u32`)   | Current value: **1** (`CURRENT_SCHEMA_VERSION`). |
+| `schema_version` | integer (`u32`)   | Current value: **2** (`CURRENT_SCHEMA_VERSION`) — bumped from `1` by Issue #8056's new `role_tick.outcome` record kind. |
 | `emitted_at`     | RFC 3339 datetime | When the daemon produced the envelope. |
 | `host_id`        | string            | Stable identifier for the emitting host. Opaque to the schema. |
 | `record`         | object            | The record payload, internally tagged on `kind` (see below). |
@@ -58,6 +58,13 @@ only on a **breaking** wire change to the record shapes below. A backend should:
   can (unknown fields are additive) or route it to a dead-letter path otherwise;
 - **never** silently coerce a missing `schema_version` to `0` — a record with no
   `schema_version` is malformed.
+
+**Version history**
+
+| Version | Change | Compatibility |
+|---|---|---|
+| `1` | The original six record kinds (`sweep.started`, `sweep.phase`, `sweep.completed`, `sweep.outcome`, `tokens.snapshot`, `host.health`). | — |
+| `2` | Adds the `role_tick.outcome` record kind (Issue #8056). | **Every `1`-era record shape is byte-identical in `2`.** The bump exists solely because a backend that pattern-matches exhaustively on `kind` has no arm for the new one. A `2` envelope carrying any of the original six kinds is still parseable by a `1`-era reader; a `1` envelope is still parseable by the current daemon (the version is read, never validated, on the read path). Issue #8056's *additive* fields on `sweep.outcome` — `failure_class`, `models_used`, `doctor_cycles` — shipped under `1` and did **not** bump it, exactly as this section prescribes: a new optional field is not a breaking change, a new record kind is. |
 
 ## `/ingest` response (the bound-`host_id` echo)
 
@@ -127,6 +134,13 @@ The `record` object is internally tagged on `kind`. The tag values reuse the
 frozen SSE `sweep.*` topic vocabulary where they overlap, plus the epic's added
 kinds. Records that reference a repository carry `repo` + `visibility`; host-level
 records (`tokens.snapshot`, `host.health`) do not.
+
+| `kind` | Scope | Emitted per |
+|---|---|---|
+| `sweep.started` / `sweep.phase` / `sweep.completed` | repo | sweep lifecycle moment |
+| `sweep.outcome` | repo | terminal sweep transition |
+| `role_tick.outcome` | repo | role-runner tick (Issue #8056) |
+| `tokens.snapshot` / `host.health` | host | sampling interval |
 
 ### `sweep.started`
 
@@ -282,14 +296,17 @@ processed and lines changed. (A distinct type from the daemon's internal
       "cache_write_1h": 1500,
       "output": 6120
     }
-  ]
+  ],
+  "models_used": ["claude-sonnet-5"],
+  "doctor_cycles": 0
 }
 ```
 
 `config` (free-form string map), `phase_durations`, `model`, `effort`,
-`pr_number`, `tokens_in`, `tokens_out`, `lines_added`, `lines_deleted`, and
-`tokens_by_model` are omitted when empty/unset. `config` is a map — not fixed
-fields — so operator-tunable knobs can be captured without a schema bump.
+`pr_number`, `tokens_in`, `tokens_out`, `lines_added`, `lines_deleted`,
+`tokens_by_model`, `failure_class`, `models_used`, and `doctor_cycles` are
+omitted when empty/unset. `config` is a map — not fixed fields — so
+operator-tunable knobs can be captured without a schema bump.
 
 `tokens_by_model` (Issue #6384) is the same per-model breakdown documented
 under `sweep.completed` above — the same aggregation
@@ -317,6 +334,150 @@ Neither pair is added to the public (unauthenticated, private-repo) redaction
 allowlist — like `pr_number`, they are workload detail about a private repo
 and stay behind the same authenticated-only boundary (see
 `dashboard/src/redaction.ts`).
+
+#### Completeness fields (Issue #8056)
+
+Three more **independently optional** fields, added additively (no
+`schema_version` bump — none of them is a new record kind). Each answers a
+question that previously required joining the sibling `sweep-outcomes.jsonl`
+by `sweep_id`, or could not be answered at all.
+
+| Field | Type | Source | Notes |
+|---|---|---|---|
+| `failure_class` | string | The paired `sweep_outcomes::OutcomeRecord`'s own classification for the same terminal transition: `death_class` when the pre-flight classifier derived one (`preflight-token-selection-failed`, `preflight-no-cli-start`, …), otherwise `crash_classification` (`account-exhausted:model-credits-exhausted`, `no-usable-account`, …). | Copied at emit time in the same function that writes the sibling record — never a post-hoc joiner. Lets a consumer separate real build failures from sub-60s spawn deaths from this journal alone. The sibling record still carries both classifier fields separately; this is the single most canonical label, not a replacement. Omitted entirely when nothing classified the transition — including on every success. |
+| `models_used` | string array | The distinct `model` ids in `tokens_by_model`, sorted and deduped. | The top-level "did this sweep run more than one model?" signal. `model` names the **dispatched** model, so a sweep that escalated to `claude-opus-5` through the Doctor ladder still reports `model: "sonnet"`; `models_used` is what makes the escalation visible. Inherits `tokens_by_model`'s contract exactly: omitted (never `[]`) when no attributable transcript was found. |
+| `doctor_cycles` | integer | Count of Doctor phases in the sampled phase-transition history — the same history `phase_durations` is built from. | **Interim proxy.** The reaper samples the on-disk checkpoint on a ~30s tick, so a Doctor phase that opens and closes between two ticks is not counted: treat this as a lower bound until label-event sourcing lands. `0` means "the lifecycle was observed and no Doctor phase appeared"; an **absent** key means no phase history was sampled at all (a sweep that died before the first tick). |
+
+All three follow the established "unknown != zero" contract: `0` / a
+one-element array is an observation, an absent key is not. A consumer that
+coerces a missing `doctor_cycles` to `0` reports "no Doctor phase happened"
+about a sweep nobody watched.
+
+None of the three is added to the public redaction allowlist, for the same
+reason as the work-output fields above.
+
+`config.token_account` (Issue #8056) is now resolved from three sources at
+emit time rather than one: the live registry entry, then a re-parse of the
+sweep's own per-sweep log for the account-selection line `spawn-claude.sh`
+wrote (the same parser restart adoption uses), then `"unknown"`. The middle
+step is what makes the value real: the entry is absent for a sweep
+reconstructed after a daemon restart, and carries a literal `"unknown"` when
+the 5s dispatch-time capture window closed before the wrapper logged its
+selection. `"unknown"` now means genuinely unknowable — no attribution
+anywhere — not "nobody looked twice".
+
+`model` / `effort` likewise survive a daemon restart: the dispatch stamps both
+into the claim lock's `owner.json` (alongside the child pid and process
+group), and `reconstruct` restores them onto the adopted entry. A pre-#8056
+`owner.json` has neither key and still parses; a dispatch that requested no
+explicit model/effort still reports `null` — the honest "inherited the
+session default", never a fabricated value.
+
+### `role_tick.outcome`
+
+One role-runner tick (Issue #8056) — the per-`(root, role)` counterpart of
+`sweep.outcome`, and the record kind that moved `schema_version` to `2`.
+
+Role ticks were, by measurement, roughly 60% of fleet token spend and emitted
+**no** durable record at all. The daemon's only trace was an in-memory
+`RoleTickRecord` — `{root, role, at, ok, detail, pool_exhausted}` — in a
+process-global 2,048-entry ring that is lost on daemon restart and carries no
+model, effort, duration, or token counts. Nothing about a role tick was
+gradeable by a model or prompt experiment.
+
+```json
+{
+  "kind": "role_tick.outcome",
+  "repo": "rjwalters/loom",
+  "visibility": "public",
+  "role": "judge",
+  "started_at": "2026-07-30T12:00:00Z",
+  "duration_sec": 137,
+  "result": "success",
+  "model": "claude-sonnet-5",
+  "effort": "high",
+  "tokens_by_model": [
+    { "model": "claude-sonnet-5", "speed": "standard", "service_tier": "standard",
+      "input": 1200, "cache_read": 40000, "cache_write_5m": 900,
+      "cache_write_1h": 0, "output": 3400 }
+  ],
+  "models_used": ["claude-sonnet-5"],
+  "actions": { "issues_labeled": 3, "prs_merged": 1, "comments_posted": 4 }
+}
+```
+
+| Field | Type | Always present | Notes |
+|---|---|---|---|
+| `repo` | string | yes | `owner/repo` from the checkout's `origin` remote (a local `git` call, never a forge round trip). Falls back to the workspace-root path when no GitHub remote resolves — same fallback `sweep.outcome` uses. |
+| `visibility` | `"public"` / `"private"` | yes | Same private-by-default contract as every other repo-scoped record. |
+| `role` | string | yes | `champion`, `curator`, `judge`, `doctor`, `auditor`, `hermit`, `guide`, `architect` — the `/loom:<role>` slash command the tick invoked. |
+| `started_at` | RFC 3339 | yes | When the invocation began (not the interval boundary that scheduled it). |
+| `duration_sec` | integer | yes | Wall-clock seconds to the outcome, including the pre-spawn preflights. A skip is typically sub-second; the value is real, so it is not optional. |
+| `result` | enum (below) | yes | How the tick ended. |
+| `model` | string | no | The model the runner **actually resolved and launched with**, including the #7894 unpinned-model reconciliation — not a re-read of config, so it cannot disagree with what ran. Omitted for a skip that bailed out before model resolution. |
+| `effort` | string | no | The resolved reasoning-effort level (#8054). Omitted when unconfigured — the honest "inherited the runtime default", never a fabricated `"medium"`. |
+| `detail` | string | no | The failure / skip detail, matching what the in-memory ring carries. Always absent for `success`. |
+| `tokens_by_model` | array | no | Same grouped, raw (not cost-weighted) shape as `sweep.outcome`'s `tokens_by_model`, summed from the tick's own transcripts. |
+| `models_used` | string array | no | The distinct model ids in `tokens_by_model`, sorted and deduped — "did this tick's session escalate past the model it was launched with?" |
+| `actions` | object | no | Forge-mutating work observed in the transcripts: `issues_labeled`, `prs_merged`, `comments_posted`. |
+
+#### `result` — seven values, and why a skip is not a failure
+
+| Value | Spawned a session? | Meaning |
+|---|---|---|
+| `success` | yes | Ran to completion, exit `0`. |
+| `failure` | yes | Ran (or failed to start) and reported failure. |
+| `skipped_load` | yes | Terminated at the wall-clock ceiling while the host was measurably saturated (#6637) — a starved tick, not a broken role. |
+| `runtime_rejected` | no | Fail-closed runtime-admission rejection. |
+| `skipped_no_token_pool` | no | No token pool provisioned for this workspace (#4642). |
+| `skipped_pool_exhausted` | no | A pool exists but has zero spawnable accounts (#7607). |
+| `skipped_model_runtime_mismatch` | no | The resolved model provably conflicts with the admitted runtime (#5028). |
+
+Folding the skips into `failure` is the exact mis-read #7607 documents: one
+fleet-wide exhausted pool produces hundreds of identical exit-78 skips, which
+must not read as hundreds of broken roles. Consumers computing a role failure
+rate should use `failure` alone as the numerator and state whether skips are in
+the denominator.
+
+#### Reading an absent `tokens_by_model` / `actions`
+
+The same "unknown != zero" contract as `sweep.outcome`: an unobserved
+measurement is an **absent key**, never `0` / `[]` / `null`. For this record
+the *reason* for an absence is recoverable from `result`:
+
+- **A `result` that did not spawn** (the four rows above) has no transcript
+  because no session ever existed. An absent `tokens_by_model` there means
+  "correctly nothing", and the record deliberately refuses to attribute even a
+  neighbouring session's transcript to it.
+- **A `result` that did spawn** and still has no `tokens_by_model` means
+  genuinely *unknown* — a pruned transcript directory, a `$CLAUDE_CONFIG_DIR`
+  the daemon cannot read, or a session that flushed outside the attribution
+  window.
+
+`actions` is optional as a **whole object**, not per count: a present `actions`
+with `"prs_merged": 0` means the transcript was read and no merge command
+appeared in it, while an absent `actions` means no transcript was read at all.
+
+#### Attribution is time-and-role scoped, and its limits are documented
+
+A role tick has no issue number to key on the way a sweep does. A transcript is
+attributed to a tick when all three hold: it lives under the workspace root's
+Claude Code project directory, its first user message names `/loom:<role>`, and
+its mtime falls inside the tick's own `[started_at, ended_at]` window widened by
+5 minutes (`ROLE_TICK_WINDOW_SLACK` — deliberately far tighter than the sweep
+path's 2 hours, which can afford a wide skirt because the issue number already
+disambiguates). The role runner's run guard makes two concurrent ticks of the
+same `(root, role)` impossible, so the one realistic ambiguity is an operator
+running the same slash command by hand, on the same checkout, in the same
+window.
+
+`actions` counts are a **lower bound** by construction: they come from scanning
+the transcript's `tool_use` blocks for the shell commands that perform each
+action (`gh issue edit --add-label`, `gh pr comment`, `merge-pr.sh`, `gh api …
+/merge`, …), so an action taken through a path the scanner does not recognize
+is not counted, and a single command chaining several such invocations counts
+once per bucket. Under-counting is preferred to over-counting: a compound
+command must never inflate the number a fleet decision is made on.
 
 ### `tokens.snapshot`
 
@@ -519,6 +680,40 @@ reserved for a human-decision blocker; the daemon does not yet emit it, because
 the blocker signal (`sweep.issue.{N}.blocker`) and the post-Builder build gate
 are both child-side and are not routed into the registry.
 
+### Persistence: `role_tick.outcome` (Issue #8056)
+
+Written to its **own** journal, `<workspace_root>/.loom/logs/role-tick-telemetry.jsonl`
+(override via `LOOM_ROLE_TICK_TELEMETRY_JOURNAL_PATH`), by
+`loom-daemon/src/role_tick_telemetry.rs`'s `emit_for_tick`, once per completed
+role-runner tick of any outcome. Read back with
+`sweep_outcomes::read_all_role_tick_outcomes`.
+
+**Why a separate file rather than the `sweep.outcome` journal.** A role tick is
+a far higher-frequency emitter. Using the role runner's own published sizing
+derivation (`ROLE_TICK_RING_CAPACITY`): the eight default roles' intervals sum
+to ~59 ticks/hour **per registered root**, and a 20-root host — the one that
+filed #6239 — therefore produces ~1,180 ticks/hour, about 20 MB/day of records.
+Sharing the 5 MiB per-sweep journal would rotate thousands of sweep records out
+of existence roughly every six hours on such a host, destroying the history
+#8056 exists to preserve. The role-tick journal instead rotates at
+`ROLE_TICK_MAX_JOURNAL_BYTES` (64 MiB — ~3 days live plus ~3 more in the single
+`.1` backup on that worst-case host), under the same 30-day age ceiling every
+telemetry journal shares.
+
+The write is best-effort like its siblings: a failure is logged and swallowed,
+and can never change whether a role keeps ticking. The emit runs inside the
+tick's existing blocking task, costs one local `git remote get-url origin`, the
+300s-TTL-memoized visibility probe, and a single pass over the tick's own
+transcripts (folding token usage and forge actions together rather than reading
+each file twice).
+
+**Not exported.** This journal is local-durability only today: the
+observability backfill path (`observability::backfill`) reads the
+`sweep.outcome` journal, so no `role_tick.outcome` record reaches the Phase-2
+backend or the dashboard yet. The OTLP mapping does carry an arm for the kind
+(as a log record, `Info` for every skip class) so an operator running that
+exporter is not silently missing it.
+
 ### Local inspection: `loom-daemon sweep-outcomes`
 
 ```bash
@@ -537,5 +732,71 @@ loom-daemon sweep-outcomes --json
 
 Purely file-based (like `loom-daemon calibrate`) — no running daemon required.
 `--workspace PATH` selects a different repo root (default `.`).
+
+### Fleet-wide: `loom-daemon sweep-outcomes summary`
+
+The `summary` sub-verb (Issue #8057) is a **documented superset** of the
+by-model summary above. The bare command is *not* superseded and its output is
+unchanged — the two deliberately use different names for different things:
+
+| | bare `sweep-outcomes` | `sweep-outcomes summary` |
+|---|---|---|
+| scope | one workspace | every workspace in `~/.loom/workspaces.json` (see below) |
+| grouping | model only | `arm` \| `model` \| `repo` \| `host` \| `day` |
+| failure metric | `success_rate` over every record | `real_failure_rate`, spawn deaths discounted |
+
+Do not compare the two numbers directly.
+
+```bash
+# The arm-vs-arm question, fleet-wide, spawn deaths removed:
+loom-daemon sweep-outcomes summary --since 7d --group-by arm --exclude-spawn-deaths
+
+# Machine-readable, with the rate card and arm provenance named:
+loom-daemon sweep-outcomes summary --since 7d --group-by model --json
+
+# Skip the forge merge join (merged counts then report as unavailable, not 0):
+loom-daemon sweep-outcomes summary --since 7d --no-merge-join
+```
+
+Per group: sweeps; success/failure/cancelled/blocked; real failure rate;
+median and p75 duration **of successes only**; doctor-phase rate; merged PRs;
+cost-weighted tokens; merges per weighted token; and lines added/deleted per
+merged PR.
+
+Four properties worth knowing before reading the numbers:
+
+- **The all-workspaces default is scoped to this sub-verb.** Run from a
+  registered workspace, `summary` reads every registered workspace;
+  `--this-workspace` restores the single-workspace read. The pre-existing
+  `sweep-outcomes` paths always read exactly one workspace, unchanged.
+- **`--group-by host` is degenerate on a local read.** [`TelemetryEnvelope`]
+  stamps the *emitting* host, so every journal this host wrote carries one
+  `host_id` — one bucket. The grouping is meaningful only over a
+  pooled/exported corpus. The report says so in its notes.
+- **`--group-by arm` is inferred until #8055.** The only arm on a record today
+  is derived from the dispatched model, which conflates "arm A" with "arm B
+  escalated to Opus via the ladder" and with an explicit `--model` pin. Every
+  row carries `arm_source` (`explicit` | `inferred` | `unknown`); unstamped
+  records land in an `unknown` bucket rather than being dropped, so the group
+  counts always sum to `records_grouped`.
+- **Weighted tokens price through a named, known-stale rate card.**
+  `ModelPricing::for_model`'s rates are the Jan-2025 set (#8060 tracks the
+  refresh), and `claude-fable-*` is deliberately priced at the Opus rate. Both
+  the human header and the JSON name the card and its as-of date. "Merges per
+  weighted-token" is exactly as trustworthy as that card.
+
+`--exclude-spawn-deaths` drops runs that died before doing any work: a
+classified `preflight-token-selection-failed` / `account-exhausted:*` (joined
+by `sweep_id` to the sibling `sweep-outcomes.jsonl` until #8056 puts
+`failure_class` on the telemetry record), or — with no class available — a
+sub-60-second non-success. The number dropped is always reported, never
+silently applied.
+
+The merged-PR join (`pr_number` -> `gh pr view --json mergedAt`) is cached at
+`~/.loom/cache/pr-merge-state.json`; a merged answer never expires, a
+not-yet-merged one is re-checked after 6h. **A forge failure reports the
+affected groups' merged counts as unavailable (`null` / `n/a`), never as `0`**
+— the same "unknown != zero" contract `tokens_in`/`tokens_by_model` use — and
+one failure latches, so a dead forge costs one subprocess, not one per PR.
 
 [`TelemetryEnvelope`]: #envelope

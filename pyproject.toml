@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-tools"
-version = "0.20.0"
+version = "0.21.0"
 description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
 readme = "README.md"
 license = "MIT"
@@ -139,7 +139,7 @@ ipc = [
 ]
 # MCP server for AI agent integration
 mcp = [
-    "fastmcp>=2.0,<4",
+    "fastmcp>=4,<5",
     "pydantic>=2.0",
 ]
 # C++ native router acceleration (requires C++ compiler)
@@ -188,7 +188,7 @@ all = [
     "pdfplumber>=0.10.0",
     "PyMuPDF>=1.23.0",
     "pyyaml>=6.0",
-    "fastmcp>=2.0,<4",
+    "fastmcp>=4,<5",
     "pydantic>=2.0",
     "cupy-cuda12x>=13.0",
     "mlx>=0.5",
@@ -215,14 +215,14 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",
     "pytest-timeout>=2.3",
-    "ruff==0.16.6",
+    "ruff==0.16.8",
     "mypy>=1.0",
     "rtree>=1.0",
     "numpy>=1.24",
     "requests>=2.28",
     "responses>=0.23.0",
     "pyyaml>=6.0",
-    "fastmcp>=2.0,<4",
+    "fastmcp>=4,<5",
     "pydantic>=2.0",
     "cmaes>=0.12.0",
     "matplotlib>=3.5",
@@ -240,7 +240,31 @@ packages = ["src/kicad_tools"]
 # boards/external holds local-only symlinks to sibling repos (chorus,
 # softstart) that point outside the repository; newer uv/hatchling
 # versions hard-fail sdist builds on external symlinks.
-exclude = ["boards/external"]
+#
+# Release 0.21.0 size fix: the committed board artifacts (manufacturing
+# bundles, readiness/engineering/diagnostics evidence, the site tree) and
+# the installed Loom tooling copies grew the sdist to 127 MB compressed --
+# over PyPI's 100 MB per-file limit for this project (the 0.21.0 publish
+# was rejected server-side with "400 File too large"). None of these are
+# build inputs: the wheel packages only src/kicad_tools, and the recipes'
+# committed unrouted PCBs stay packaged. Excluded classes:
+#   - **/manufacturing.zip + boards/*/output/manufacturing|readiness/
+#       (generated fab bundles/PDFs -- "verified gallery releases")
+#   - boards/*/diagnostics/ + boards/*/engineering/ (investigation evidence)
+#   - .loom/.claude/.agents (Loom orchestration tooling copies)
+#   - site/ (the documentation site sources)
+exclude = [
+    "boards/external",
+    "site",
+    ".loom",
+    ".claude",
+    ".agents",
+    "**/manufacturing.zip",
+    "boards/*/output/manufacturing",
+    "boards/*/output/readiness",
+    "boards/*/diagnostics",
+    "boards/*/engineering",
+]
 
 [tool.ruff]
 line-length = 100
@@ -359,6 +383,11 @@ warn_return_any = true
 dev = [
     "pytest-cov>=7.0.0",
     "jinja2>=3.1",
+    # HTTP client for the MCP streamable-http smoke test
+    # (tests/test_mcp_http.py::TestHTTPTransportSmoke). fastmcp < 4 pulled
+    # httpx transitively; fastmcp 4 (#5601) dropped it, which would have
+    # silently skipped the only end-to-end HTTP transport test.
+    "httpx>=0.27",
     # Figure rendering for `kct export` reports (issue #3583): without
     # cairosvg in the default sync, worktree exports silently shipped
     # bundles with no images/ (per-layer renders, assembly views).

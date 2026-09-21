@@ -1399,6 +1399,42 @@ class NetClassRouting:
     consumes it via the future ``match_group_length_skew`` DRC rule.
     """
 
+    # Declared swap group (Issue #5522, Phase 1 of Epic #5511).
+    swap_group: str | None = None
+    """Designer-declared swap group for a within-bundle pin re-assignment.
+
+    When set, declares this net class's nets are members of the named
+    swap group (e.g. ``"DDR_BYTE0"``).  Membership = every net carrying
+    the same ``swap_group`` value; nets that do not carry the key are
+    fixed by omission.  This is a SEPARATE, narrower channel than
+    :attr:`length_match_group`: a match group says "these nets must
+    arrive length-matched" (may include nets whose *pin binding* is
+    fixed, e.g. a DQS strobe); a swap group says "these nets' pad
+    bindings on the secondary component MAY be re-assigned among
+    themselves to reduce facing-row crossings."  Only one channel
+    exists -- there is no separate top-level ``swap_groups`` block.
+
+    DECLARED-ONLY: swappability is never inferred from net names, pin
+    functions, or footprints -- the absence of this key means "fixed",
+    full stop.
+
+    A swap is modelled as pad-to-net RE-BINDING on the secondary
+    reference's pads (the future applicator is
+    :meth:`~kicad_tools.schema.pcb.PCB.assign_net_to_footprint_pad`),
+    NEVER net renaming: match groups, :attr:`diffpair_partner` and
+    :attr:`length_match_reference` are all keyed by net name, and a
+    rename would silently break each of those.
+
+    Phase 1 (#5522) was report-only: :func:`~kicad_tools.router.
+    swap_groups.propose_swap_assignment` computes the crossing-minimising
+    pad permutation and surfaces it as data (``kct net-status --why``,
+    the ``reorder_pins`` delta).  Phase 2a (#5536) added the applicator:
+    a ``reorder_pins`` delta carrying that proposal's ``pad_map`` is now
+    applied by the placement-delta feedback loop (pads re-bound on the
+    PCB *and* on the router's own pad list), kept only on a strict
+    routed-net improvement, and otherwise reverted atomically.
+    """
+
     def effective_intra_pair_clearance(self) -> float:
         """Return the clearance to apply to within-pair diff-pair edges.
 
@@ -1568,6 +1604,7 @@ class NetClassRouting:
         - ``escape_clearance`` (Issue #3371 / P_FP1)
         - ``length_match_group`` / ``length_match_reference`` /
           ``length_match_tolerance_mm`` (Phase 1A / #2687, Epic #2661)
+        - ``swap_group`` (Phase 1 / #5522, Epic #5511)
 
         Nested ``LengthConstraint`` is serialized via its own
         :meth:`LengthConstraint.to_dict` (``None`` is preserved as ``None``).
@@ -1618,6 +1655,7 @@ class NetClassRouting:
             "length_match_group": self.length_match_group,
             "length_match_reference": self.length_match_reference,
             "length_match_tolerance_mm": self.length_match_tolerance_mm,
+            "swap_group": self.swap_group,
         }
 
     @classmethod
@@ -1707,6 +1745,7 @@ class NetClassRouting:
             length_match_group=data.get("length_match_group"),
             length_match_reference=data.get("length_match_reference"),
             length_match_tolerance_mm=data.get("length_match_tolerance_mm"),
+            swap_group=data.get("swap_group"),
         )
 
 

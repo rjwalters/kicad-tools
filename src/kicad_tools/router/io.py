@@ -2326,49 +2326,73 @@ def validate_routes(
     def _resolve_net_name(net_id: int) -> str:
         return net_names.get(net_id, f"Net {net_id}")
 
-    # Issue #5240: cheap circle-based lower-bound rejection.  Both loops
-    # below are O(segments x pads) / O(segments^2) with no spatial
-    # pruning, so this function dominates the "Re-route + check
+    # Issue #5240: cheap circle-based lower-bound rejection.  The
+    # segment-to-pad / segment-to-segment / segment-to-via loops below are
+    # O(segments x pads) / O(segments^2) / O(segments x vias) with no
+    # spatial pruning, so this function dominates the "Re-route + check
     # coverage" / DRC-nudge repair loop's CI time on boards with a few
-    # hundred segments.  A segment's centerline is fully contained in a
+    # thousand segments.  A segment's centerline is fully contained in a
     # circle at its midpoint with radius = half its length; a pad's
     # rectangle (at any rotation) is fully contained in a circle at its
-    # center with radius = its half-diagonal.  Center-to-center distance
-    # minus both radii (and both trace half-widths, where applicable) is
-    # therefore a mathematically guaranteed LOWER BOUND on the true
-    # copper-to-copper gap -- when that bound already meets the required
-    # clearance, the expensive exact rectangle/segment distance call
-    # below is provably >= the clearance and would never register a
-    # violation, so it is skipped.  This changes no violation, no
-    # ordering, and no distance value ever reported; it only elides
-    # geometry calls whose outcome is already decided.  Results are
-    # cached by object identity since the same Segment/Pad is compared
-    # against many partners within one ``validate_routes`` call.
-    _seg_reach_cache: dict[int, tuple[float, float, float]] = {}
-    _pad_radius_cache: dict[int, float] = {}
-
-    def _seg_reach(seg: Segment) -> tuple[float, float, float]:
-        """Return (mid_x, mid_y, half_length) for ``seg``'s centerline."""
-        key = id(seg)
-        cached = _seg_reach_cache.get(key)
-        if cached is not None:
-            return cached
-        mid_x = (seg.x1 + seg.x2) / 2.0
-        mid_y = (seg.y1 + seg.y2) / 2.0
-        half_len = math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) / 2.0
-        result = (mid_x, mid_y, half_len)
-        _seg_reach_cache[key] = result
-        return result
-
+    # center with radius = its half-diagonal; a via is a disc about its
+    # center.  Center-to-center distance minus both radii (and both trace
+    # half-widths, where applicable) is therefore a mathematically
+    # guaranteed LOWER BOUND on the true copper-to-copper gap -- when that
+    # bound already meets the required clearance, the expensive exact
+    # rectangle/segment/point distance call below is provably >= the
+    # clearance and would never register a violation, so it is skipped.
+    # This changes no violation, no ordering, and no distance value ever
+    # reported; it only elides geometry calls whose outcome is already
+    # decided.
+    #
+    # Issue #5240 (follow-up): every quantity that rejection needs is
+    # loop-INVARIANT with respect to the pair under test -- a segment's
+    # midpoint/half-length depends only on that segment, a pad's reach and
+    # its effective clearance only on (pad, route net), and the per-net-pair
+    # clearance only on the two net ids.  Computing them inside the
+    # innermost loop cost three Python-level helper calls (each an
+    # ``id()`` plus a dict probe) for every one of the ~760k segment/pad
+    # and ~1.9M segment/segment pairs one board-05 / board-03 validation
+    # walks.  They are hoisted into the precomputed tables below and
+    # consumed as plain tuple unpacks, so the inner loops do one
+    # ``math.hypot`` and one comparison per pair.  Every hoisted step is a
+    # pure function of data that is fixed for the whole call and every
+    # retained filter is order-preserving, so the returned violation list
+    # is identical, element for element, to the un-hoisted form.
     def _pad_radius(pad: Pad) -> float:
         """Return the pad's bounding half-diagonal (its worst-case reach)."""
-        key = id(pad)
-        cached = _pad_radius_cache.get(key)
+        return math.hypot(pad.width / 2.0, pad.height / 2.0)
+
+    # Per-segment geometry for every route, in ``router.routes`` order:
+    # (segment, layer, half_width, mid_x, mid_y, half_length).
+    _route_seg_geom: list[list[tuple[Segment, Layer, float, float, float, float]]] = [
+        [
+            (
+                seg,
+                seg.layer,
+                seg.width / 2,
+                (seg.x1 + seg.x2) / 2.0,
+                (seg.y1 + seg.y2) / 2.0,
+                math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) / 2.0,
+            )
+            for seg in route.segments
+        ]
+        for route in router.routes
+    ]
+
+    # Memoized per-net-pair clearance.  ``max()`` is symmetric, so
+    # ``_get_pair_clearance(a, b, ...) == _get_pair_clearance(b, a, ...)``;
+    # keying by the sorted pair lets both call orders share one entry.
+    _pair_clearance_cache: dict[tuple[int, int], float] = {}
+
+    def _pair_clearance(net_a: int, net_b: int) -> float:
+        key = (net_a, net_b) if net_a <= net_b else (net_b, net_a)
+        cached = _pair_clearance_cache.get(key)
         if cached is not None:
             return cached
-        radius = math.hypot(pad.width / 2.0, pad.height / 2.0)
-        _pad_radius_cache[key] = radius
-        return radius
+        value = _get_pair_clearance(net_a, net_b, clearance, net_names, ncm)
+        _pair_clearance_cache[key] = value
+        return value
 
     # Issue #3545: NET-AWARE component_inherent classification.  A
     # same-component FOREIGN-net pad violation is only "inherent" (and
@@ -2476,68 +2500,164 @@ def validate_routes(
                             )
                         )
 
+    # Issue #5240: per-route-net pad obstacle table.  The segment-to-pad
+    # loop below re-derived all of this -- the same-net skip, the
+    # unconnected-pad skip, the skipped-pour-net class lookup and the
+    # effective pair clearance -- once per (segment, pad) pair, even
+    # though none of it depends on the segment.  Building it once per
+    # distinct route net (there are a few dozen at most) and reusing it
+    # for every segment of every route on that net keeps the inner loop
+    # to a layer test plus the circle rejection.  ``router.pads`` is not
+    # mutated during validation and the two skips are order-preserving,
+    # so the surviving pads are visited in exactly the original
+    # ``router.pads.items()`` order.
+    _pad_obstacles_by_net: dict[int, list[tuple[str, Pad, bool, Layer, float, float, float, float]]]
+    _pad_obstacles_by_net = {}
+
+    def _pad_obstacles(
+        route_net: int,
+    ) -> list[tuple[str, Pad, bool, Layer, float, float, float, float]]:
+        """Pads that are clearance obstacles for a route on ``route_net``.
+
+        Each entry is ``(ref, pad, through_hole, layer, x, y, reach,
+        pair_clear)``, where ``reach`` is the pad's bounding half-diagonal
+        and ``pair_clear`` the effective required clearance for this net
+        pair.
+        """
+        cached = _pad_obstacles_by_net.get(route_net)
+        if cached is not None:
+            return cached
+        entries: list[tuple[str, Pad, bool, Layer, float, float, float, float]] = []
+        for (ref, _num), pad in router.pads.items():
+            # Skip pads on the same net
+            if pad.net == route_net:
+                continue
+
+            # Skip truly unconnected pads -- pads with net == 0 AND no
+            # net name are unconnected mechanical pads / pour leftovers
+            # and do not represent copper that needs clearance from
+            # routed traces.
+            #
+            # Issue #2757: pads with net == 0 but a non-empty net_name
+            # are obstacles from *skipped* pour nets (GND, +3V3, +1V2,
+            # etc.) -- ``load_pcb_for_routing`` rewrites their net to 0
+            # so the autorouter doesn't try to route them, but they
+            # are real pad copper that segments must keep clearance
+            # from.  Surfacing these as violations lets
+            # ``drc_verify_and_nudge`` repair them and lets the
+            # ``format_clearance_violations`` summary report them so
+            # users can see "trace XYZ grazes U2.A1 (GND)" instead of
+            # silently emitting a routed PCB that fails ``kct check``.
+            if pad.net == 0 and not pad.net_name:
+                continue
+
+            # For skipped-pour-net pads, look up the clearance under the
+            # named net (GND, +3V3, ...) rather than net 0, so the
+            # per-class clearance map is honoured.  Falls through to
+            # ``clearance`` when no class match is found.
+            pad_class_clear = clearance
+            if pad.net == 0 and pad.net_name and ncm is not None:
+                pad_class = ncm.get(pad.net_name)
+                if pad_class is not None:
+                    pad_class_clear = pad_class.clearance
+            pair_clear = max(_pair_clearance(route_net, pad.net), pad_class_clear)
+
+            entries.append(
+                (
+                    ref,
+                    pad,
+                    pad.through_hole,
+                    pad.layer,
+                    pad.x,
+                    pad.y,
+                    _pad_radius(pad),
+                    pair_clear,
+                )
+            )
+        _pad_obstacles_by_net[route_net] = entries
+        return entries
+
+    # Component refs connected to a net, memoized: the segment loop below
+    # rebuilt this set once per SEGMENT even though it depends only on the
+    # route's net (Issue #5240).
+    _component_refs_by_net: dict[int, set[str]] = {}
+
+    def _component_refs(route_net: int) -> set[str]:
+        cached = _component_refs_by_net.get(route_net)
+        if cached is not None:
+            return cached
+        refs: set[str] = set()
+        if route_net in router.nets:
+            for r, _p in router.nets[route_net]:
+                refs.add(r)
+        _component_refs_by_net[route_net] = refs
+        return refs
+
+    # Via obstacles for a route net, memoized: the segment-to-via loop
+    # below re-chained ``router.routes`` + ``existing_routes`` and
+    # re-derived ``via.diameter / 2`` once per SEGMENT even though the
+    # list of other-net vias depends only on the route's net (Issue
+    # #5240). Built once per distinct route net and iterated in the same
+    # chain(router.routes, existing_routes) order the original per-segment
+    # loop walked, so the surviving vias are visited identically.
+    _via_obstacles_by_net: dict[int, list[tuple[int, float, float, float]]] = {}
+
+    def _via_obstacles(route_net: int) -> list[tuple[int, float, float, float]]:
+        """Vias from other-net routes, as ``(net, x, y, radius)`` tuples."""
+        cached = _via_obstacles_by_net.get(route_net)
+        if cached is not None:
+            return cached
+        entries: list[tuple[int, float, float, float]] = []
+        for other_route in itertools.chain(router.routes, getattr(router, "existing_routes", [])):
+            if other_route.net == route_net:
+                continue
+            for via in other_route.vias:
+                entries.append((other_route.net, via.x, via.y, via.diameter / 2))
+        _via_obstacles_by_net[route_net] = entries
+        return entries
+
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
         route_net = route.net
 
-        for seg_idx, segment in enumerate(route.segments):
-            seg_half_width = segment.width / 2
+        # Build set of component refs that this route's net connects to
+        route_component_refs = _component_refs(route_net)
+        pad_obstacles = _pad_obstacles(route_net)
+        via_obstacles = _via_obstacles(route_net)
+
+        for seg_idx, seg_geom in enumerate(_route_seg_geom[route_idx]):
+            (
+                segment,
+                seg_layer,
+                seg_half_width,
+                seg_mid_x,
+                seg_mid_y,
+                seg_half_len,
+            ) = seg_geom
 
             # --- Segment-to-pad checks ---
-            # Build set of component refs that this route's net connects to
-            route_component_refs: set[str] = set()
-            if route_net in router.nets:
-                for r, _p in router.nets[route_net]:
-                    route_component_refs.add(r)
-
-            for (ref, num), pad in router.pads.items():
-                # Skip pads on the same net
-                if pad.net == route_net:
-                    continue
-
-                # Skip truly unconnected pads -- pads with net == 0 AND no
-                # net name are unconnected mechanical pads / pour leftovers
-                # and do not represent copper that needs clearance from
-                # routed traces.
-                #
-                # Issue #2757: pads with net == 0 but a non-empty net_name
-                # are obstacles from *skipped* pour nets (GND, +3V3, +1V2,
-                # etc.) -- ``load_pcb_for_routing`` rewrites their net to 0
-                # so the autorouter doesn't try to route them, but they
-                # are real pad copper that segments must keep clearance
-                # from.  Surfacing these as violations lets
-                # ``drc_verify_and_nudge`` repair them and lets the
-                # ``format_clearance_violations`` summary report them so
-                # users can see "trace XYZ grazes U2.A1 (GND)" instead of
-                # silently emitting a routed PCB that fails ``kct check``.
-                if pad.net == 0 and not pad.net_name:
-                    continue
-
+            for (
+                ref,
+                pad,
+                pad_through_hole,
+                pad_layer,
+                pad_x,
+                pad_y,
+                pad_reach,
+                pair_clear,
+            ) in pad_obstacles:
                 # Skip SMD pads on a different layer than the segment
-                if not pad.through_hole and pad.layer != segment.layer:
+                if not pad_through_hole and pad_layer != seg_layer:
                     continue
-
-                # For skipped-pour-net pads, look up the clearance under the
-                # named net (GND, +3V3, ...) rather than net 0, so the
-                # per-class clearance map is honoured.  Falls through to
-                # ``clearance`` when no class match is found.
-                pad_class_clear = clearance
-                if pad.net == 0 and pad.net_name and ncm is not None:
-                    pad_class = ncm.get(pad.net_name)
-                    if pad_class is not None:
-                        pad_class_clear = pad_class.clearance
-                pair_clear = max(
-                    _get_pair_clearance(route_net, pad.net, clearance, net_names, ncm),
-                    pad_class_clear,
-                )
 
                 # Cheap lower-bound rejection (Issue #5240): see the
-                # module-level comment above ``_seg_reach``/``_pad_radius``.
-                # Skips the exact rectangle/segment distance below only
-                # when it is mathematically guaranteed to clear.
-                seg_mid_x, seg_mid_y, seg_half_len = _seg_reach(segment)
-                center_dist = math.hypot(pad.x - seg_mid_x, pad.y - seg_mid_y)
-                gap_lower_bound = center_dist - seg_half_len - _pad_radius(pad) - seg_half_width
+                # note above ``_pad_radius``.  Skips the exact
+                # rectangle/segment distance below only when it is
+                # mathematically guaranteed to clear.  The subtraction
+                # order matches the pre-hoist form exactly so the
+                # floating-point result is bit-identical.
+                center_dist = math.hypot(pad_x - seg_mid_x, pad_y - seg_mid_y)
+                gap_lower_bound = center_dist - seg_half_len - pad_reach - seg_half_width
                 if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
                     continue
 
@@ -2611,32 +2731,39 @@ def validate_routes(
             # --- Segment-to-segment checks ---
             # Check against segments from other routes on the same layer.
             # Only check routes with higher index to avoid duplicate violations.
-            for other_route_idx, other_route in enumerate(router.routes):
-                if other_route_idx <= route_idx or other_route.net == route_net:
+            for other_route_idx in range(route_idx + 1, len(router.routes)):
+                other_route = router.routes[other_route_idx]
+                if other_route.net == route_net:
                     continue
 
-                for other_seg in other_route.segments:
+                # Issue #5240: the required clearance depends only on the
+                # two nets, so resolve it once per route pair instead of
+                # once per segment pair.
+                pair_clear = _pair_clearance(route_net, other_route.net)
+                pair_limit = pair_clear - _CLEARANCE_EPSILON_MM
+
+                for (
+                    other_seg,
+                    other_layer,
+                    other_half_width,
+                    other_mid_x,
+                    other_mid_y,
+                    other_half_len,
+                ) in _route_seg_geom[other_route_idx]:
                     # Skip segments on different layers
-                    if other_seg.layer != segment.layer:
+                    if other_layer != seg_layer:
                         continue
 
-                    # Edge-to-edge clearance (both segment half-widths)
-                    other_half_width = other_seg.width / 2
-
-                    pair_clear = _get_pair_clearance(
-                        route_net, other_route.net, clearance, net_names, ncm
-                    )
-
                     # Cheap lower-bound rejection (Issue #5240): see the
-                    # module-level comment above ``_seg_reach``.  Both
-                    # centerlines are contained in their midpoint +
-                    # half-length circles, so center-to-center distance
-                    # minus both radii and both half-widths is a
-                    # guaranteed lower bound on the true gap -- skip the
-                    # exact (and much costlier) segment-to-segment
-                    # distance call only when that bound already clears.
-                    seg_mid_x, seg_mid_y, seg_half_len = _seg_reach(segment)
-                    other_mid_x, other_mid_y, other_half_len = _seg_reach(other_seg)
+                    # note above ``_pad_radius``.  Both centerlines are
+                    # contained in their midpoint + half-length circles, so
+                    # center-to-center distance minus both radii and both
+                    # half-widths is a guaranteed lower bound on the true
+                    # gap -- skip the exact (and much costlier)
+                    # segment-to-segment distance call only when that bound
+                    # already clears.  The subtraction order matches the
+                    # pre-hoist form exactly so the floating-point result
+                    # is bit-identical.
                     center_dist = math.hypot(other_mid_x - seg_mid_x, other_mid_y - seg_mid_y)
                     gap_lower_bound = (
                         center_dist
@@ -2645,7 +2772,7 @@ def validate_routes(
                         - seg_half_width
                         - other_half_width
                     )
-                    if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
+                    if gap_lower_bound >= pair_limit:
                         continue
 
                     dist = _segment_to_segment_distance(
@@ -2685,42 +2812,45 @@ def validate_routes(
                         )
 
             # --- Segment-to-via checks ---
-            # Include pre-existing routes so new segments are checked against old vias.
-            _all_routes_for_via = itertools.chain(
-                router.routes, getattr(router, "existing_routes", [])
-            )
-            for other_route in _all_routes_for_via:
-                if other_route.net == route_net:
+            # Include pre-existing routes so new segments are checked
+            # against old vias.  Issue #5240: the obstacle list depends
+            # only on the route's net, so it is built once per net (see
+            # ``_via_obstacles``) rather than re-chained per segment, and
+            # each candidate first gets the circle lower-bound test --
+            # ``_point_to_segment_distance`` is ~8x the cost of one
+            # ``math.hypot`` and almost never finds a violation.
+            for other_net, via_x, via_y, via_radius in via_obstacles:
+                center_dist = math.hypot(via_x - seg_mid_x, via_y - seg_mid_y)
+                if center_dist - seg_half_len - seg_half_width - via_radius >= (
+                    via_clear - _CLEARANCE_EPSILON_MM
+                ):
                     continue
 
-                for via in other_route.vias:
-                    via_radius = via.diameter / 2
+                dist = _point_to_segment_distance(
+                    via_x, via_y, segment.x1, segment.y1, segment.x2, segment.y2
+                )
 
-                    dist = _point_to_segment_distance(
-                        via.x, via.y, segment.x1, segment.y1, segment.x2, segment.y2
-                    )
+                effective_dist = dist - seg_half_width - via_radius
 
-                    effective_dist = dist - seg_half_width - via_radius
-
-                    if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
-                        violations.append(
-                            ClearanceViolation(
-                                segment_index=seg_idx,
-                                x1=segment.x1,
-                                y1=segment.y1,
-                                x2=segment.x2,
-                                y2=segment.y2,
-                                net=route_net,
-                                obstacle_type="via",
-                                obstacle_net=other_route.net,
-                                distance=effective_dist,
-                                required=via_clear,
-                                net_name=_resolve_net_name(route_net),
-                                obstacle_net_name=_resolve_net_name(other_route.net),
-                                location=(via.x, via.y),
-                                layer=segment.layer,
-                            )
+                if effective_dist < via_clear - _CLEARANCE_EPSILON_MM:
+                    violations.append(
+                        ClearanceViolation(
+                            segment_index=seg_idx,
+                            x1=segment.x1,
+                            y1=segment.y1,
+                            x2=segment.x2,
+                            y2=segment.y2,
+                            net=route_net,
+                            obstacle_type="via",
+                            obstacle_net=other_net,
+                            distance=effective_dist,
+                            required=via_clear,
+                            net_name=_resolve_net_name(route_net),
+                            obstacle_net_name=_resolve_net_name(other_net),
+                            location=(via_x, via_y),
+                            layer=segment.layer,
                         )
+                    )
 
     # --- Via-to-pad checks ---
     # Include pre-existing routes so old vias are checked against pads.

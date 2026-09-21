@@ -1859,13 +1859,18 @@ managed repo, fetched *after* the IPC round-trip completes:
   dispatch is a separate follow-up from `/loom:sweep`'s skip parity, see
   "Park-label dispatch guard" below), open `loom:building`
   (claimed), open PRs by `loom:review-requested` / `loom:changes-requested` /
-  `loom:pr`, and PRs merged in the last 24h (`gh pr list --state merged
-  --search "merged:>=<24h-ago RFC3339>"`).
+  `loom:pr`, PRs merged in the last 24h (`gh pr list --state merged
+  --search "merged:>=<24h-ago RFC3339>"`), and — since Issue #8091 — the
+  operator-attention bucket: open PRs labeled `loom:operator`
+  (`operator_held`, plus `operator_held_conflicting` — the `mergeable:
+  CONFLICTING` subset — and `operator_held_oldest_days`, all three from one
+  `gh pr list --label loom:operator --json number,mergeable,createdAt` call)
+  and open issues labeled `loom:operator-only` (`operator_only_issues`).
 - **Module** — `loom_daemon::pipeline_snapshot`: `PipelineSource` is the forge
   abstraction (mirrors `work_finder::WorkSource` / `GhWorkSource`),
-  `GhPipelineSource` is the `gh`-backed implementation (six `gh` invocations
-  per repo, `current_dir(root)` so `gh` auto-detects that repo's own remote —
-  same convention as `GhWorkSource::for_root`), and
+  `GhPipelineSource` is the `gh`-backed implementation (up to nine `gh`
+  invocations per repo, `current_dir(root)` so `gh` auto-detects that repo's
+  own remote — same convention as `GhWorkSource::for_root`), and
   `collect_pipeline_snapshots` fans the per-repo fetch out onto Tokio's
   blocking-thread pool so N managed repos cost roughly one repo's worth of
   wall-clock latency.
@@ -1873,20 +1878,28 @@ managed repo, fetched *after* the IPC round-trip completes:
   a failed metric renders as `?` (`RepoPipelineSnapshot::error` names the
   first failure) without blocking the other metrics for that repo or any
   sibling repo's snapshot — the same per-workspace error-isolation rule the
-  work-finder's `tick_multi` already applies to dispatch.
+  work-finder's `tick_multi` already applies to dispatch. The
+  operator-attention trio (`operator_held`/`operator_held_conflicting`/
+  `operator_held_oldest_days`) is fetched together from one `gh` call and
+  fails together: a bad read leaves all three `None`, never a fabricated `0`.
 - **Output** — `loom-daemon status --pipeline` adds a "Forge pipeline" table
   below the existing "Managed repos" table (same row order); `--json
   --pipeline` adds a `pipeline` array (`null` when `--pipeline` was not
   passed, so a consumer can distinguish "not requested" from "requested but
-  empty"). Terminal-friendly and safe to `watch -n 60`.
-- **Why opt-in** — six `gh` calls per managed repo is too slow to bundle into
-  the default view (which is used for frequent, low-latency operator checks);
-  `--pipeline` trades that latency for the queue-depth picture on demand.
+  empty"). Terminal-friendly and safe to `watch -n 60`. The same row shape —
+  including the operator-attention fields — is what `GET /api/pipeline`
+  (below) and the dashboard's pipeline table render.
+- **Why opt-in** — up to nine `gh` calls per managed repo is too slow to
+  bundle into the default view (which is used for frequent, low-latency
+  operator checks); `--pipeline` trades that latency for the queue-depth
+  picture on demand.
 - **Metric mask (#4761)** — `GhPipelineSource::with_metrics(PipelineMetrics)`
-  selects which of the six counts to fetch (each is one `gh` call, run
+  selects which of the nine counts to fetch (each is one `gh` call, run
   sequentially within a repo). `PipelineMetrics::ALL` is the default and what
   `status --pipeline` / the dashboard use; `PipelineMetrics::HEALTH` (queued +
-  merged) is what `loom-daemon health` uses to stay inside its latency budget.
+  the review-side axes + merged + the two #8091 operator-attention axes, minus
+  `building`) is what `loom-daemon health` uses to stay inside its latency
+  budget.
   `with_merge_window(Duration)` widens/narrows the merge-throughput window from
   its 24h default. A masked-off metric is left `None`; a caller that masks a
   metric off simply must not read it.
@@ -1908,7 +1921,11 @@ without parsing anything:
 | `2` | the daemon is genuinely dead |
 | `3` | busy, not confirmed unhealthy — see "Busy vs degraded" (#6191) below |
 
-Seven sections, one line each (or the full structured payload with `--json`):
+Several sections, one line each (or the full structured payload with `--json`);
+the table below is not exhaustive — `peer_coordination` (#6157), `stale_sweeps`
+(#7529), `auto_update` (#7584), `worktree_reaper` (#7590), and `pool_hold`
+(#7708/#7990) also always render, each documented at its own point in this
+file:
 
 | section | what it reports | source |
 |---------|-----------------|--------|
@@ -1919,6 +1936,7 @@ Seven sections, one line each (or the full structured payload with `--json`):
 | `role_liveness` | roles configured to tick that have gone **silent** — no tick at all in `>= 4x` their own interval (#6201) | `role_runner::last_role_tick_snapshot()` + each root's `role_runner_enabled`/`role_runner_roles` |
 | `queues` | per-root ready (`loom:issue`) counts **plus the review-side axes** (`loom:review-requested` / `loom:changes-requested` / `loom:pr`), and a per-repo *review stall* verdict | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
 | `throughput` | merges across managed repos inside the window | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
+| `operator_attention` | fleet-wide open PRs labeled `loom:operator` (the first-class, re-evaluable "a human is needed" hold, #5502) — count, `CONFLICTING`-mergeable sub-count, oldest age in days — plus open issues labeled `loom:operator-only` (the hard park). **Always `GREEN`** (#8091): held work is normal steady state, not a fault, so this section can never move `health`'s exit code — see "`operator_attention` is always GREEN" below | `pipeline_snapshot` (`PipelineMetrics::HEALTH`) |
 
 #### `queues`: the review-stall rule (#5021)
 
@@ -1933,6 +1951,26 @@ cannot be masked by the fleet-wide `total_ready` sum. An axis that was not
 observed (forge query failed, or the caller masked the metric off) is reported
 as `null`/`?`, never as `0`, and never produces a stall verdict in either
 direction.
+
+#### `operator_attention` is always GREEN (#8091)
+
+`assess`'s `overall` roll-up is `all(sections, is_green)`, and `exit_code()`
+maps `overall` straight to the process exit code — so any section that can
+ever render non-Green changes `health`'s exit code. A fleet carrying several
+`loom:operator` PRs is normal steady state, not a fault (this repo alone
+typically has some): "a human is needed" is a routing fact about work, not a
+statement that the fleet is unhealthy, the same distinction
+`.github/labels.yml` draws between `loom:operator` and an actual failure. So
+`operator_attention`'s verdict is **unconditionally** `Verdict::Green`, never
+gated on a count or a threshold — `health/operator_attention.rs`'s test
+`with_held_prs_does_not_change_the_exit_code` pins a fleet with held PRs and
+everything else green at `exit_code() == EXIT_HEALTHY`, in the style of
+`build_skew_alone_does_not_change_the_exit_code`. A forge-read failure (a
+missing `gh`, or one repo's query erroring) renders `?`/`held: null` rather
+than a fabricated `0 held` — `crate::pipeline_snapshot::format_count` — and,
+because the verdict is unconditionally Green either way, cannot itself move
+the exit code; `queues`/`throughput` still degrade on the same input, per
+their own (unrelated) contract.
 
 ### Liveness precedence: pgrep + pid-file first, launchd NEVER alone
 
@@ -2066,7 +2104,12 @@ an operator checks:
 2. The paired `autonomous.roleRunner.roleModels.<role>` pin that made that
    runtime usable is later removed, so the model falls back to the
    Claude-shaped built-in default (`sonnet`) while the admitted runtime stays
-   `codex`.
+   `codex`. (**Since #7894 this exact step no longer skips** — an *unpinned*
+   model that conflicts with the admitted runtime degrades to the runtime
+   CLI's own default instead of being refused. Only an explicitly *pinned*
+   mismatch still reaches step 3; the walkthrough is kept verbatim because it
+   is the recorded incident, and every other pre-spawn bail-out below still
+   produces the same silence.)
 3. Every subsequent tick trips the #5028 model/runtime mismatch preflight and
    returns `RoleTickOutcome::ModelRuntimeMismatch` — **before**
    `run_role_with_timeout`, the only writer of `.loom/logs/role-<role>.log`,
@@ -2083,7 +2126,7 @@ make the artifact operators actually read honest — all five pre-spawn bail-out
 `ModelRuntimeMismatch`) now append a dated line to `role-<role>.log`:
 
 ```
-==== loom-daemon role_runner: 2026-08-14T16:45:51+00:00 role=curator SKIPPED BEFORE SPAWN (#6201): model/runtime mismatch: runtime "codex" only accepts Codex models, but the resolved model "sonnet" is a Claude model (model source=default); set autonomous.roleRunner.roleModels.curator to a model the codex runtime accepts, or point this role back at a Claude runtime ====
+==== loom-daemon role_runner: 2026-08-14T16:45:51+00:00 role=curator SKIPPED BEFORE SPAWN (#6201): model/runtime mismatch: runtime "codex" only accepts Codex models, but the resolved model "sonnet" is a Claude model (model source=autonomous.roleRunner.roleModels.curator); set autonomous.roleRunner.roleModels.curator to a model the codex runtime accepts — or to "default" to pass through to the codex CLI's own default model, which is the only working shape on a seat that rejects an explicit pin (e.g. a ChatGPT-plan Codex account) — or point this role back at a Claude runtime ====
 ```
 
 A role stuck this way now shows a growing, timestamped, self-diagnosing trail
@@ -3958,11 +4001,11 @@ knobs not yet audited here.
 | *(host-local tiers only — see below)* | `LOOM_ROLE_RUNNER_SHARD_INDEX` | *(unset)* | **This host's** 0-based role-runner shard index (#6374). Must **differ** per host, so it belongs in the service unit next to `LOOM_ROLE_RUNNER`, never in the tracked `.loom/config.json` — a committed `autonomous.roleRunner.shardIndex` gives every host the same index and leaves every other slice with zero owners fleet-wide, so the daemon **refuses** it (logs `error!`, falls back to unsharded). Requires `shardCount`; out-of-range/malformed → unsharded. See [Role-runner host sharding](#role-runner-host-sharding-6374) |
 | `autonomous.roleRunner.shardCount` | `LOOM_ROLE_RUNNER_SHARD_COUNT` | *(unset)* | Fleet-wide number of role-runner shards (#6374) — must be **identical** on every host, which is why the tracked config is a fine home for it. `0`/`1`/malformed → unsharded (every host rotates every workspace, the pre-#6374 behavior). Requires `shardIndex` |
 | `autonomous.roleRunner.shardKey` | *(config only)* | `owner/repo` from `origin`, else the root's basename | Explicit cross-host-stable key hashed to pick a workspace's owning shard (#6374). Must be identical fleet-wide. Set it when the derived key would diverge between hosts — the basename fallback does exactly that if two hosts cloned the same repo into differently-named directories. `status` reports the resolved key and its tier so two hosts can be diffed |
-| `autonomous.roleRunner.roster.enabled` | `LOOM_ROLE_RUNNER_ROSTER` | `false` | Opt-in publish of this host's roster comment (Issue #7690, Phase A of #6704). Off ⇒ zero extra forge calls, `status` byte-identical to pre-#7690. **Observational only** — does not affect `role_shard::decide()`'s verdict; see [Role-runner host roster](#role-runner-host-roster-7690-phase-a-of-6704) |
+| `autonomous.roleRunner.roster.enabled` | `LOOM_ROLE_RUNNER_ROSTER` | `false` | Opt-in: publish this host's roster comment **and** derive its role-runner ring from the live roster, generation-fenced (#6704). Off ⇒ zero extra forge calls and a `decide()` verdict byte-identical to the static #6374 ring. On ⇒ a dead host's slice is reassigned within `ttl + settle + one interval`, and any membership disagreement yields rather than duplicates. A static `LOOM_ROLE_RUNNER_SHARD_INDEX` + `shardCount` pair still outranks it. See [Role-runner host roster](#role-runner-host-roster-6704-phases-a-and-b) |
 | `autonomous.roleRunner.roster.issue` | `LOOM_ROLE_RUNNER_ROSTER_ISSUE` | *(unset)* | `owner/repo#N` of the designated roster issue. Fleet-wide, so the tracked config is a fine home (same argument as `shardCount`). `enabled: true` with this unset/invalid ⇒ one `error!` and no roster (never a panic) |
 | `autonomous.roleRunner.roster.heartbeatSecs` | `LOOM_ROLE_RUNNER_ROSTER_HEARTBEAT_SECS` | `300` | This host's roster-comment refresh cadence |
 | `autonomous.roleRunner.roster.ttlSecs` | `LOOM_ROLE_RUNNER_ROSTER_TTL_SECS` | `900` | Liveness TTL — floored at 3x `heartbeatSecs` regardless of a smaller configured value, so a single missed round-trip can never look like a death |
-| `autonomous.roleRunner.roster.settleSecs` | `LOOM_ROLE_RUNNER_ROSTER_SETTLE_SECS` | `900` | Quiet period a new ring must survive before anyone acts under it. Unused in Phase A (no ring consumes the roster yet); reserved for Phase B's fencing rule |
+| `autonomous.roleRunner.roster.settleSecs` | `LOOM_ROLE_RUNNER_ROSTER_SETTLE_SECS` | `900` | Quiet period a new ring must survive before **any** host acts under it — floored at `ttlSecs`, without which a host holding a stale view could still be acting when the rest of the fleet resumes |
 | `autonomous.idleExit.enabled` | `LOOM_AUTONOMOUS_IDLE_EXIT_ENABLED` | `false` | End the daemon cleanly after the idle window so a host guard can take over. Independent of Work Finder; never invokes a power command |
 | `autonomous.idleExit.idleMinutes` | `LOOM_AUTONOMOUS_IDLE_EXIT_MINUTES` | `60` | Continuous idle/starvation window. Zero/invalid → default |
 | `autonomous.idleExit.onTokenStarvation` | `LOOM_AUTONOMOUS_IDLE_EXIT_ON_TOKEN_STARVATION` | `true` | Also exit after zero healthy accounts for the full window with no sweep in flight, even if roles keep cycling |
@@ -4747,16 +4790,36 @@ being logged/counted. When enabled, just before the label flip the registry
 reads the issue's **pre-flip** label state (`gh issue view <N> --json labels`)
 and classifies it:
 
-- `loom:issue` already gone **or** `loom:building` already present → **collision**
-  (a peer host claimed it first). A diagnostic record is logged at `warn` — issue
-  number, repo/workspace, this host's identity (`LOOM_HOST_ID` → `$HOSTNAME` →
-  `hostname` → `unknown-host`), timestamp, and the observed pre-flip label set —
-  a per-registry cumulative counter is incremented, and (#5789) the dispatch
-  backs off instead of proceeding.
-- `loom:issue` present and `loom:building` absent → **clean** (this host is first).
+- a **claim label** (`loom:building`, `loom:reviewing`, `loom:treating`) already
+  present → **collision** (a peer host claimed it first), whether or not
+  `loom:issue` is still alongside it. A diagnostic record is logged at `warn` —
+  issue number, repo/workspace, this host's identity (`LOOM_HOST_ID` →
+  `$HOSTNAME` → `hostname` → `unknown-host`), timestamp, the observed claim
+  label(s), and the full pre-flip label set — a per-registry cumulative counter
+  is incremented, and (#5789) the dispatch backs off instead of proceeding.
+- no claim label, `loom:issue` present → **clean** (this host is first).
+- no claim label, no `loom:issue` → **not yet approved**. Logged at `info`, not
+  counted, **not** refused (#7873): an issue that is unlabeled or still at
+  `loom:triage` / `loom:curating` / `loom:curated` was never promoted by anyone,
+  so its missing `loom:issue` evidences no peer. Dispatch proceeds and the child
+  sweep's own pre-flight curates and promotes it, exactly as an operator
+  `/loom:sweep N` does.
 - gh timeout / non-zero exit / unparseable JSON → **unknown**. **Fail-closed:**
   an unverifiable read is never counted as a collision, so the baseline is never
   inflated.
+
+> **Why absence of `loom:issue` is not evidence (#7873).** The original
+> predicate collided on `!has_issue || has_building`; the `!has_issue` half was
+> meant to catch a peer that had already *removed* `loom:issue` as part of its
+> own flip. But the probe reads a label **snapshot**, not a diff, so that test
+> is equally true for an issue that never carried `loom:issue` at all. The work
+> finder only ever offers `loom:issue` candidates so it never tripped this, but
+> every explicit `dispatch_sweep` / `loom-daemon dispatch <N>` of an unpromoted
+> issue was refused as a cross-host collision naming a peer that did not exist
+> (observed on #7743, #7812, #7849). Only the *presence* of a claim label —
+> applied by the claimant itself — evidences a peer, so that is what the guard
+> keys on. `loom:curating` / `loom:evaluating` are deliberately **not** claim
+> labels here: both are pre-dispatch lifecycle states, not a competing sweep.
 
 **How to read the count.** The running total is surfaced on the work-finder's
 per-tick summary line as the trailing `N cross-host-collision(s)` field, e.g.:
@@ -5056,56 +5119,106 @@ line naming the owning shard, the key, and the key's tier. Unconfigured
 single-host installs print neither. `--json` carries the same under
 `role_runner_shard` (report-level) and `per_repo[].role_runner_shard`.
 
-**Still static in this phase.** The assignment consumed by `decide()` /
-`owns()` above still comes from `(shardIndex, shardCount)`, never from the
-roster below — see the next section for what has actually shipped.
+**Static unless the roster is enabled.** By default the assignment consumed by
+`decide()` / `owns()` above comes from `(shardIndex, shardCount)` and nothing
+else: killing a host does **not** reassign its slice. The next section is the
+opt-in that makes the ring dynamic.
 
-### Role-runner host roster (#7690, Phase A of #6704)
+### Role-runner host roster (#6704, phases A and B)
 
 The design record — [`role-runner-roster.md`](role-runner-roster.md) — picked
 a **forge-backed roster** (one marker comment per host on a designated roster
 issue, liveness from the comment's forge-assigned `updated_at`, as with lease
-records) plus a **generation-fenced ring** for a *future* phase to consume.
-Phase A, described here, ships only the write side and `status` rendering:
-**it does not change `decide()`'s verdict at all.** Killing a host still does
-**not** reassign its slice automatically — that is Phase B, gated entirely
-behind `roster.enabled` staying off by default (see the config table above,
-`autonomous.roleRunner.roster.*`).
+records) plus a **generation-fenced ring**. Both halves have shipped, behind
+`autonomous.roleRunner.roster.enabled`, **which defaults to `false`**: with it
+off, `decide()` is byte-identical to the static ring above and the daemon
+makes zero extra forge calls.
 
-**What Phase A does.** With `roster.enabled: true` and a valid `roster.issue`
-(`owner/repo#N`), each daemon runs ONE per-daemon (not per-workspace)
-heartbeat loop that:
+**The heartbeat (Phase A).** With `roster.enabled: true` and a valid
+`roster.issue` (`owner/repo#N`), each daemon runs ONE per-daemon (not
+per-workspace) loop that:
 
 1. Reads back every roster comment on the issue (REST — `gh api
    repos/{owner}/{repo}/issues/{n}/comments`, never GraphQL, #5047).
 2. Locates this host's own comment (by its opaque id — the same
    `opaque_host_id(host_identity())` lease records publish, #6322) — or, on a
    fleet host's very first cycle, has none to find.
-3. `PATCH`es it (or `POST`s a new one) with a fresh body advertising the
-   `fnv1a64` digest of every currently-registered, role-runner-enabled
-   workspace's shard key, sorted ascending. The body is regenerated wholesale
-   every cycle (there is no user prose to preserve), so its own trailing
-   timestamp guarantees the "PATCH must change something" contract
-   (`lease-renewal.md`) on every call, `serves` change or not.
+3. Publishes a body advertising the `fnv1a64` digest of every
+   currently-registered, role-runner-enabled workspace's shard key, sorted
+   ascending, and caches the read-back for `status` and the fence below.
+
+   It **`PATCH`es in place** while its record is live and its `serves` set is
+   unchanged (the body is regenerated wholesale, so its trailing timestamp
+   satisfies `lease-renewal.md`'s "a PATCH must change something" on every
+   call). It **replaces** the record — `DELETE` + `POST` — when the record had
+   expired (a rejoin) or when `serves` changed, so the new `created_at`
+   becomes a membership boundary every host observes identically. Do not edit
+   or delete these comments by hand.
 
 At the default 300s cadence that is ~24 REST calls/hour/host, budgeted in the
-design record. With `roster.enabled: false` (the default) the loop never
-spawns and the daemon makes zero extra forge calls.
+design record.
 
-**Membership and generation are pure functions of `(comment set, instant)`** —
-`role_shard::roster::members`/`ring`/`generation` — exactly as the design
-record specifies, and are the basis for Phase B's fencing rule. Nothing in the
-daemon calls them for ownership yet; `status` is their only consumer so far
-(next paragraph).
+**The ring and its fence (Phase B).** Membership and generation are pure
+functions of `(comment set, instant)` —
+`role_shard::roster::members`/`ring`/`generation`, the design record's
+formulas verbatim. With the roster enabled and no static shard index set,
+`role_shard::decide()` derives `(index, count)` from `ring(C, t, k)` — this
+host's ordinal among the live members serving that workspace's key, and how
+many there are — and `status` reports the source as `roster`. A role tick is
+admitted only when **all five** fence conditions hold, in this order:
+
+1. **Self-liveness** — this host's own record was refreshed within `ttlSecs`.
+2. **Generation monotonicity** — never act under a generation older than the
+   newest this process has observed (a stale/cached read is discarded).
+3. **Settle** — `now - gen >= settleSecs`. A ring that just changed is not
+   actionable by anyone; because `gen` is a forge-assigned instant, every host
+   computes the same absolute deadline regardless of when it read.
+4. **Join fence** — a new member waits a full `ttlSecs` before acting.
+5. **Ownership** — the ordinary `fnv1a64(shardKey) % count == index`.
+
+**The fail-safe direction inverts here, deliberately.** Above, every ambiguity
+duplicates; a roster ambiguity **yields** (this host runs no role tick), because
+a brief gap is one idempotent periodic pass running an interval later while a
+brief duplicate is two `claude` sessions racing the same forge queue. The one
+exception is "this host never got a roster at all" — an unreachable or
+unconfigured roster *at startup* keeps the static fallback, so a typo in
+`roster.issue` cannot silently stop role rotation fleet-wide. Only a host that
+successfully joined and then lost the roster yields.
+
+**Reassignment window (the number to quote).** From a host's death to a
+survivor running its slice: `ttlSecs` (its last heartbeat expires) +
+`settleSecs` (the new ring must be quiet) + one role interval (tick
+alignment). At the defaults — 900 + 900 + 300–900 — that is **30–45 minutes**.
+A dead host's role rotation resumes elsewhere within ~45 minutes, not "never".
+`settleSecs` is floored at `ttlSecs` (as `ttlSecs` is floored at 3×
+`heartbeatSecs`): the no-overlap argument needs it, since a host with a stale
+view keeps acting until its own record expires.
+
+**Escape-hatch precedence**, highest first: `LOOM_ROLE_RUNNER=0` >
+`LOOM_ROLE_RUNNER_SHARD_INDEX` + `shardCount` > roster > unsharded. A resolved
+static pair **beats an enabled roster** — that is the documented way to pin a
+deterministic ring during a roster outage or on a deliberately partitioned
+fleet — and the blunt kill switch is still checked before any of it.
+
+**Blast radius: the dispatcher.** `role_shard::decide(root).owned` is also
+`work_finder`'s preferred repo slice ([`dispatcher-repo-sharding.md`](dispatcher-repo-sharding.md),
+#6243). A fence **yield** deliberately does *not* reach it: `owned` keeps the
+pre-roster verdict and only the role runner's `admits_role_tick()` flips, so a
+host having forge trouble pauses role rotation without also starving its own
+dispatch. When the fence *admits*, the dispatcher does follow the roster ring
+— a preference reshuffle with a work-conserving fallback, never a dropped
+dispatch.
 
 **Visibility.** `loom-daemon status` extends the `Role runner (sharding): …`
 header (when the roster has completed at least one heartbeat cycle) with a
 roster block naming the issue, live/seen member counts, the current
-generation and how long it has been settled, and one line per member:
+generation and how long it has been settled, the fence verdict, and one line
+per member:
 
 ```
-Role runner (sharding): shard 1 of 3 (index from env, count from config)
+Role runner (sharding): shard 1 of 3 (index from roster, count from roster)
   Roster: issue owner/repo#1234 · 3 live / 4 seen · gen 2026-09-15T09:41:07Z (settled 22m)
+  Fence: admitted — acting under the ring settled at generation 2026-09-15T09:41:07Z
     host-a3f9c1d2   fresh   (last beat 41s ago)   serves 27
     host-d9142cf3   fresh   (last beat 2m ago)    serves 27   ← this host
     host-e1d4c843   EXPIRED (last beat 31m ago)   serves 27
@@ -5113,11 +5226,18 @@ Role runner (sharding): shard 1 of 3 (index from env, count from config)
 
 An EXPIRED member is always rendered, never dropped — silence about a dead
 host is exactly how the pre-#6374 `LOOM_ROLE_RUNNER=0` mitigation became
-invisible. `status` never triggers its own forge read for this: it renders
-only whatever the heartbeat task's own last successful read cached, so a
-roster that has never completed a cycle (including the always-off default)
-renders nothing. `--json` carries the identical section under
+invisible, and the `Fence:` line exists for the same reason: a *yielding* host
+runs no role ticks at all, which would otherwise look identical to a healthy
+host that owns no slice. `status` never triggers its own forge read for this:
+it renders only whatever the heartbeat task's own last successful read cached,
+so a roster that has never completed a cycle (including the always-off
+default) renders nothing. `--json` carries the identical section under
 `role_runner_shard.roster`.
+
+**Field instrument.** `role_collision.rs` (#4623) counts cross-host role-tick
+collisions. Enabling roster mode must not raise that counter above its
+static-ring baseline; if it does, the fence is not holding and the fleet
+should fall back to the static env pair while it is investigated.
 
 ### Completion narration → public fleet feed (#4426)
 
@@ -5430,6 +5550,37 @@ stops a host running sweeps at all).
 | `LOOM_WORKTREE_REAPER_INTERVAL_SECS` | `autonomous.worktreeReaper.intervalSecs` | env > config > default | `900` (15 min) |
 | — | `autonomous.worktreeReaper.gracePeriodSecs` | config > default | `600` (10 min) |
 | `LOOM_WORKTREE_REAPER_DISK_WARN_GB` | `autonomous.worktreeReaper.diskWarnFreeGb` | env > config > default | `20` |
+| `LOOM_WORKTREE_ACTIVITY_WINDOW_MINUTES` | — | env > default | `30` (see below) |
+
+#### Activity gate on the artifact-reclaim pass (#8116)
+
+The artifact-reclaim pass (#5187/#5939) deletes `target/`/`node_modules/` from
+every worktree the removal pass is *keeping* but that nothing appears to be
+using. "Appears to be using" used to mean only what the registry can see: a live
+claim-lock, a `.loom-in-use` marker, or a process whose **cwd** is inside the
+worktree.
+
+An **in-session Task-tool builder** — an operator spawning `/loom:builder`
+subagents directly rather than through `/loom:sweep` — has none of those. Each
+of its shell commands is a fresh one-shot subshell that exits immediately, so
+between commands (i.e. nearly always) the process table shows nothing in the
+worktree at all. Such a worktree classified as "kept, idle" and had its
+`target/` deleted mid-`cargo`: on 2026-09-17 that happened twice to one issue in
+a six-builder wave, each loss costing a full Rust rebuild.
+
+The reaper now also asks the filesystem, which the process table cannot
+contradict: **a worktree with any write in the last `N` minutes is live**,
+whatever the registry thinks. The probe reads the worktree's gitdir refs
+(`HEAD`/`index`/`logs/HEAD` — the only place a *commit* is observable, since
+committing touches no working-tree file), the build-artifact directories at
+depth 1 (a running `cargo` rewrites `target/debug/` constantly), and a bounded
+walk of the source tree, stopping at the first recent entry.
+
+Set `LOOM_WORKTREE_ACTIVITY_WINDOW_MINUTES=0` to disable the gate and restore
+the pre-#8116 behavior. A worktree the daemon cannot read is never reclaimed
+from — absent evidence is not evidence of absence, as everywhere else in the
+reaper. The gate only defers the *artifact* reclaim; whole-worktree removal is
+unaffected (it is already gated on the issue being closed).
 
 #### Pressure-triggered deep clean (#5919)
 
@@ -5625,6 +5776,17 @@ investigating, not an expected baseline. `docker` being unreachable (not
 installed, permission error) is treated as "unknown", never "zero images" —
 the pass skips rather than guesses. See
 `loom-daemon/src/docker_image_clean.rs`.
+
+**Fleet-side `audit-smoke`/`audit-test` automation should rely on this pass
+too.** Any script outside this repo that cleans up a locally-built
+`loom-worker`/`loom-worker-session` test image after an Auditor-role docker
+smoke test should not call tag-targeted `docker rmi <tag>` directly — that
+matches the `cloud-cli` guard's `docker rmi` ASK pattern
+(`defaults/hooks/guard-destructive-generic.sh`) and blocks indefinitely in a
+headless run with no human to answer the prompt. Either leave the superseded
+image for this reaper to reclaim on its next tick, or run `docker image prune
+-f` for immediate reclaim — it only removes dangling (untagged) images and is
+not gated by the guard.
 
 #### Eager (out-of-cycle) reclaim from the dispatch loop (#7512)
 
@@ -6133,6 +6295,8 @@ leaves the daemon's behavior byte-for-byte unchanged:
 | — | `autonomous.roleRunner.roles` | config only | the 7 interval-default roles (`architect` excluded, #5656) |
 | — | `autonomous.roleRunner.onIdle` | config only | `[]` (none; may name any of the 8 shipped roles, `architect` included) |
 | — | `autonomous.roleRunner.model` | config only (`roleRunner.model` > `autonomous.model` > default) | `sonnet` (`DEFAULT_DISPATCH_MODEL`) |
+| — | `autonomous.roleRunner.effort` | config only (`roleRunner.roleEfforts.<role>` > `roleRunner.effort` > unset) | *(unset ⇒ **no** `--effort` argument; the runtime CLI's own session default, #8054)* |
+| — | `autonomous.roleRunner.roleEfforts` | config only — a `{"<role>": "<level>"}` object occupying the tier **above** `roleRunner.effort`, exactly as `roleModels` sits above `model` | `{}` (every role falls through to the global tier) |
 | `LOOM_ARCHITECT_MAX_PROPOSALS` | `autonomous.roleRunner.architectMaxProposals` | env > config > default | `5` (per-invocation architect proposal cap, #5656) |
 | `LOOM_ROLE_RUNNER_DETECT_COLLISIONS` | `autonomous.roleRunner.collisionDetection` | env > config > `autonomous.collisionDetection.enabled` > default | `false` (off) |
 | `LOOM_ROLE_RUNNER_COLLISION_WINDOW_SECS` | `autonomous.roleRunner.collisionWindowSecs` | env > config > default | that role's tick interval, clamped to `[60, 3600]` |
@@ -6153,12 +6317,58 @@ sweeps use, including the #3982 logical-tier aliases (`opus` → `claude-opus-5`
 with `autonomous.roleRunner.model` occupying the explicit-request tier. Blank
 values are treated as unset at every tier (`--model ""` is never emitted). The
 resolved model and the tier that supplied it are recorded in the per-role log
-header: `==== loom-daemon role_runner: <ts> role=<role> model=<m> (source=<tier>) ====`.
+header, alongside the resolved effort (#8054):
+`==== loom-daemon role_runner: <ts> role=<role> model=<m> (source=<tier>) effort=<e> (source=<tier>) ====`.
+
+**Role children can also pin reasoning effort — but nothing is pinned by
+default (#8054).** Until #8054 the role-runner path emitted no `--effort` at
+all; the flag existed only on the sweep-dispatch path (#3716). Two config keys
+now reach it, in this order:
+
+**`autonomous.roleRunner.roleEfforts.<role>` > `autonomous.roleRunner.effort` >
+unset**
+
+- **Unset is the shipped state and stays byte-identical.** There is deliberately
+  **no** default effort and no fall-through to a shared `autonomous.*` key: with
+  neither key configured the resolver returns the empty string, the spawn emits
+  **no `--effort` token at all**, and the runtime CLI's own session-default
+  effort survives end-to-end — exactly the pre-#8054 argv. The asymmetry with
+  `--model` (which always pins) is intentional: an inherited *model* was a live
+  incident (#4501), an inherited *effort* is the status quo every workspace
+  already has.
+- **Blanks are unset at both tiers.** A blank/whitespace/non-string value is
+  dropped at parse time — per-entry for `roleEfforts` (one typo never disables
+  the rest of the object), whole-field for `effort` — so a blank per-role entry
+  falls through to the global key and a blank global key falls through to unset.
+  `--effort ""` is never emitted: it would clobber the session default with
+  nothing.
+- **Values are forwarded opaquely.** The level is trimmed but not lower-cased
+  and not validated against a vocabulary — the runtime owns that list (the
+  sweep-dispatch path forwards `effort` the same way), so a bad level fails the
+  tick loudly at the CLI instead of being silently dropped.
+- **Keys are trimmed + lower-cased**, matching `roleModels`/`onIdleMaxWait`, so
+  a `"Judge"` config key matches the `judge` role the runner dispatches under.
+- **Logged per tick** in the header line above as
+  `effort=<level> (source=autonomous.roleRunner.roleEfforts.judge)`, with the
+  unconfigured case rendered `effort=<runtime CLI default> (source=unset)` —
+  the same placecard the model field uses for its own pass-through, so a header
+  never reads like its own bug.
+
+```json
+{
+  "autonomous": {
+    "roleRunner": {
+      "effort": "medium",
+      "roleEfforts": { "curator": "low", "guide": "low" }
+    }
+  }
+}
+```
 
 **A pinned model can still be the wrong provider family for the admitted
-runtime (#5028).** `runtimes.roles.<role> = "codex"` with no matching
-`autonomous.roleRunner.roleModels.<role>` override resolves the Claude-shaped
-default model above and forwards it to the Codex adapter, which 400s — before
+runtime (#5028).** `runtimes.roles.<role> = "codex"` with
+`autonomous.roleRunner.roleModels.<role> = "sonnet"` forwards a Claude-shaped
+model to the Codex adapter, which 400s — before
 #5028 this retried identically, at full cost, on every tick forever. Runtime
 admission now resolves before the model, and a confidently-known
 Claude-vs-Codex mismatch is refused pre-spawn as `RoleTickOutcome::
@@ -6168,6 +6378,20 @@ directly via the outcome's `detail()` (no spawn transcript needed), and the
 per-root log warns once on the edge and downgrades to `DEBUG` on repeat. Full
 mechanism and the `spawn-codex.sh`-side counterpart:
 [`runtime-adapters.md` § "Model/runtime mismatch refusal (#5028)"](runtime-adapters.md#modelruntime-mismatch-refusal-5028).
+
+**The refusal applies to an explicit pin only (#7894).** An *unpinned* role —
+`runtimes.roles.<role> = "codex"` with no `roleModels.<role>` entry at all —
+used to resolve the shipped Claude-shaped default and get refused every tick,
+forever (453+ consecutive skips on the host that filed #6565), with no way out:
+a ChatGPT-plan Codex seat rejects an explicit model pin too, so "no pin" was
+simultaneously the only correct configuration and permanently unadmittable.
+The role runner now degrades that case to the runtime CLI's own default — no
+`--model` argument is emitted at all, the tick launches, and the log header
+records `model=<runtime CLI default> (source=default (CLI default for codex))`.
+The same pass-through can be requested deliberately with
+`autonomous.roleRunner.roleModels.<role> = "default"` (or the global
+`autonomous.roleRunner.model`); see
+[`runtime-adapters.md` § "Per-role model override"](runtime-adapters.md#per-role-model-override-autonomousrolerunnerrolemodels).
 
 `roles` restricts the dispatched subset (an explicit empty array runs none;
 unknown names are ignored with a warning). **It is an allowlist, not an
@@ -6435,12 +6659,64 @@ Two valid ways to flip a root on, with very different blast radii:
   root that does not set `roleRunner.enabled` itself. This is the right lever for
   a fleet of repos you own that should all behave the same way. Because it is the
   lowest-priority tier, any repo that wants to opt back out can simply set
-  `enabled: false` in its own config and win.
+  `enabled: false` in its own config and win. **Tier 1 is live code, not a
+  future phase** — `resolve_effective_config` merges it on every read; what is
+  absent by default is only the *file*. See the recipe immediately below.
 - **Per-repo (tier 2/3/4)** — one edit per *repo*, in that repo's own checkout.
   Use this when a root needs a different `roles`/`onIdle` set than the host
   default, or when the repo's maintainers should see the setting in review.
 
-Either way the JSON block is the same shape as the example above:
+##### One file, fleet-wide: the machine-level defaults tier
+
+Any `autonomous.*` key — not just `enabled` — can be set once per host in tier
+1 and picked up by **every** workspace the daemon manages, with each repo's own
+`.loom/config.json` still layering on top. Nothing creates that file, so on a
+host that has never written one the tier contributes an empty object and looks
+like it does not exist; the fix is to write it, not to edit N repos.
+
+```bash
+mkdir -p ~/.local/share/loom/config
+cat > ~/.local/share/loom/config/defaults.json <<'JSON'
+{
+  "autonomous": {
+    "model": "sonnet",
+    "roleRunner": {
+      "roleModels": { "judge": "sonnet", "curator": "haiku" },
+      "effort": "medium",
+      "roleEfforts": { "curator": "low", "guide": "low" }
+    }
+  }
+}
+JSON
+```
+
+That single file pins the per-role model and reasoning effort for **every**
+workspace on the host at once — no per-repo commit, and nothing for
+`fleet-resync` to carry. On a host managing dozens of workspaces this is the
+difference between one edit and dozens. Notes:
+
+- **`$LOOM_CONFIG_DEFAULTS_FILE` overrides the path** (set it *empty* to
+  disable the tier entirely — the escape hatch a test or a one-off run uses).
+  Point it at a temp file to rehearse a change against one daemon before
+  writing the real one.
+- **It is the lowest-priority tier**, so any repo that disagrees wins by
+  setting the same key in its own `.loom/config.json` / `.loom-project/` /
+  `.loom-local/`. Fleet default below, per-repo exception above.
+- **Env vars still outrank all four tiers** for the knobs that have one
+  (`LOOM_ROLE_RUNNER`, `LOOM_ROLE_RUNNER_INTERVAL_SECS`, …) — a service unit
+  that exports one will not be overridden by this file.
+- **Not tracked by any repo, and per-host.** Two hosts do not share it; a key
+  that must be identical fleet-wide (e.g. `roleRunner.shardCount`) still
+  belongs in the tracked config. When a role tick's resolved value looks
+  surprising, check this file before re-reading the repo's own config — the
+  boot log names the winning tier, e.g.
+  `source=config:autonomous.roleRunner.intervalSecs from private/shared
+  defaults (/path/to/defaults.json)`.
+- Full tier semantics and the deep-merge rules:
+  [`docs/design/config-resolution-tiers.md`](https://github.com/rjwalters/loom/blob/main/docs/design/config-resolution-tiers.md).
+
+Either way — machine-level or per-repo — the JSON block is the same shape as
+the example above:
 
 ```json
 {
@@ -8881,7 +9157,7 @@ loom-daemon serve --peers http://host2:7420,http://host3:7420   # multihost flee
 | `GET /` | The embedded single-page dashboard (plain HTML/CSS/vanilla JS, no build toolchain, compiled into the binary) |
 | `GET /api/status` | JSON status snapshot: the same `DaemonStatusReport` `loom-daemon status --json` aggregates, flattened with a `hostname` field |
 | `GET /api/events` | `text/event-stream` (SSE) tail of the daemon's event bus |
-| `GET /api/pipeline` | Forge-side queue counts per managed repo (same source `status --pipeline` uses), fronted by a 20s in-process cache |
+| `GET /api/pipeline` | Forge-side queue counts per managed repo (same source `status --pipeline` uses, including the #8091 operator-attention bucket — `operator_held`/`operator_held_conflicting`/`operator_held_oldest_days`/`operator_only_issues`), fronted by a 20s in-process cache |
 | `GET /api/tokens` | Per-account rows (name / status / 5h utilization) read from the resolved token pool's `.ranking` file |
 | `GET /api/peers` | The configured `--peers` list, verbatim — this daemon never fetches a peer itself; the browser fetches each peer's own `/api/status`/`/api/events` directly |
 
