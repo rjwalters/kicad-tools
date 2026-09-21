@@ -2064,6 +2064,9 @@ _interrupt_state: dict[str, Any] = {
     "pcb_path": None,
     "quiet": False,
     "best_completed_attempt": False,
+    # #5639: path of the ``.access_witness.json`` the last partial save wrote,
+    # so the deadline handler can name it in the ``.timeout.json`` receipt.
+    "access_witness_path": None,
 }
 
 
@@ -2154,6 +2157,7 @@ def _process_state_guard() -> "Iterator[None]":
         _interrupt_state["output_path"] = None
         _interrupt_state["pcb_path"] = None
         _interrupt_state["interrupted"] = False
+        _interrupt_state["access_witness_path"] = None
 
 
 def _save_partial_results() -> bool:
@@ -2218,6 +2222,19 @@ def _save_partial_results() -> bool:
             from .route_receipt import record_publication
 
             record_publication(save_path)
+
+            # Issue #5639: the deadline / SIGINT save path is the ONLY save
+            # path a deadline-killed run ever reaches -- the normal save path
+            # (and its ``_write_access_witness_sidecar`` call) is downstream of
+            # a route that returned.  Those runs are precisely the ones where
+            # "did a commit strand this pad?" is being asked, so the witness
+            # has to be serialized here too, beside the partial board.  The
+            # write is best-effort by construction (the helper swallows its own
+            # errors) and the journal dump measures well under the 5 s
+            # SIGTERM -> SIGKILL grace window the supervisor allows.
+            _interrupt_state["access_witness_path"] = _write_access_witness_sidecar(
+                cast(Path, save_path), router, quiet=quiet, journal_first=True
+            )
 
             if not quiet:
                 stats = router.get_statistics()
@@ -2718,7 +2735,8 @@ def _write_access_witness_sidecar(
     output_path: Path,
     router: object | None,
     quiet: bool = False,
-) -> None:
+    journal_first: bool = False,
+) -> Path | None:
     """Persist the router's ordered commit journal next to the routed PCB (#5517).
 
     Writes ``<output_stem>.access_witness.json`` -- e.g.
@@ -2748,6 +2766,20 @@ def _write_access_witness_sidecar(
             empty journal -- an empty witness reads as "nothing was committed",
             which is never true of a routed board.
         quiet: If True, suppress the confirmation line.
+        journal_first: Write the journal-only payload BEFORE running the
+            witness replay, then rewrite with the witness attached.  For the
+            deadline / interrupt save path (#5639), where a SIGKILL can land
+            mid-replay: the journal dump is milliseconds, the replay is up to
+            :data:`~kicad_tools.router.access_witness.MAX_WITNESS_EVALUATIONS`
+            geometric sweeps, and a journal that survived beats a witness that
+            did not.  The normal save path leaves this off -- it is not racing
+            a signal, and one write beats two.
+
+    Returns:
+        The sidecar path when one was written, else ``None`` (no journal,
+        empty journal, or a blocked write).  The deadline path (#5639) records
+        that path in its ``.timeout.json`` receipt, since its own output is
+        suppressed.
     """
     import json
 
@@ -2759,7 +2791,7 @@ def _write_access_witness_sidecar(
 
     journal = getattr(router, "commit_journal", None)
     if journal is None or not len(journal):
-        return
+        return None
 
     sidecar_path = output_path.parent / f"{output_path.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
     payload: dict[str, Any] = {
@@ -2767,6 +2799,23 @@ def _write_access_witness_sidecar(
         "source": {"pcb": output_path.name},
         "journal": journal.to_dict(),
     }
+
+    def dump() -> bool:
+        try:
+            # Compact separators, unlike the other (small, hand-read) sidecars:
+            # this one carries every segment of every commit and rip-up, so
+            # pretty-printing it doubles a dense board's file for no reader.
+            sidecar_path.write_text(json.dumps(payload, separators=(",", ":")))
+        except (OSError, TypeError, ValueError) as e:
+            if not quiet:
+                print(f"  Warning: could not write access-witness sidecar: {e}")
+            return False
+        return True
+
+    # #5639: on the interrupt/deadline path the journal lands first, so a
+    # SIGKILL during the replay below still leaves the commit order on disk.
+    if journal_first and not dump():
+        return None
     # Issue #5517 (PR 2): the replay runs HERE, while the grid that decided the
     # clearances is still alive.  ``net-status --why`` reads a saved board and
     # could not reproduce it; the sidecar carries the verdict instead.  The key
@@ -2780,21 +2829,18 @@ def _write_access_witness_sidecar(
             print(f"  Warning: access-witness replay failed: {e}")
     if witness:
         payload["witness"] = witness.to_dict()
-    try:
-        # Compact separators, unlike the other (small, hand-read) sidecars:
-        # this one carries every segment of every commit and rip-up, so
-        # pretty-printing it doubles a dense board's file for no reader.
-        sidecar_path.write_text(json.dumps(payload, separators=(",", ":")))
-    except (OSError, TypeError, ValueError) as e:
-        if not quiet:
-            print(f"  Warning: could not write access-witness sidecar: {e}")
-        return
+        if not dump():
+            # The journal-only sidecar from the first pass (if any) stands.
+            return sidecar_path if journal_first else None
+    elif not journal_first and not dump():
+        return None
     if not quiet:
         size_kb = sidecar_path.stat().st_size / 1024
         print(f"  Access-witness sidecar: {sidecar_path} ({size_kb:.0f} KB)")
         print(f"  {journal.summary_line()}")
         if witness:
             print(f"  {witness.summary_line()}")
+    return sidecar_path
 
 
 def _write_current_paths_sidecar(
@@ -13288,7 +13334,20 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
                 if saved and isinstance(output, Path)
                 else None
             )
-            record_stage("partial-save", snapshot_saved=saved, snapshot=snapshot)
+            # #5639: the sidecar the partial save just wrote is the deadline
+            # path's only witness -- name it in the receipt AND on stderr,
+            # because ``quiet`` above suppresses the helper's own line and a
+            # deadline-killed run is exactly where a reader goes looking.
+            witness_sidecar = _interrupt_state.get("access_witness_path")
+            witness_arg = str(witness_sidecar) if witness_sidecar is not None else None
+            if witness_arg:
+                print(f"  Access-witness sidecar: {witness_arg}", file=sys.stderr)
+            record_stage(
+                "partial-save",
+                snapshot_saved=saved,
+                snapshot=snapshot,
+                access_witness=witness_arg,
+            )
             return TIMEOUT_EXIT
 
 

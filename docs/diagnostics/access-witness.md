@@ -42,6 +42,14 @@ routed board, as a `witness` key beside the `journal` key:
 }
 ```
 
+A run that is **deadline-killed** (`kct route --timeout`, exit 124) writes one
+too, beside its partial snapshot — `<stem>_partial.access_witness.json` (#5639).
+Those runs are precisely the ones where "did a commit strand this pad?" is being
+asked, so the interrupt save path serializes the journal first and attaches the
+witness second: if the SIGTERM → SIGKILL grace window closes mid-replay, the
+commit order still survives. The path is named in the run's `.timeout.json`
+receipt under `access_witness`.
+
 The two `schema_version` fields are deliberately independent: the journal's
 record shape and the witness's verdict shape can move separately, and a reader
 of one should not have to care about the other. An unrecognised version is a
@@ -55,10 +63,10 @@ hard error on load, never a silent partial parse.
 | `net`, `net_name` | Its net |
 | `access_at_escape_end` | `non-empty` / `empty` / `not-evaluated` at the end of the escape pre-phase — the replay's baseline, and Epic #5508 Phase 2's reference point |
 | `final_access` | The same vocabulary, after the last journal record |
-| `first_closed_at` | `{"pass": ..., "iteration": ...}` of the record that first emptied the access set, or `null` |
+| `first_closed_at` | `{"pass": ..., "iteration": ...}` of the record that first *took the access set from non-empty to empty*, or `null` — a pad that was already empty before the first record is never attributed to a later one (#5639) |
 | `first_closed_index` | That record's index in `journal.records`, so it can be read verbatim |
 | `first_closed_kind` | That record's kind: `commit`, `rip`, `restore` or `rollback` |
-| `closing_nets` | Net names of the copper that rejected every remaining candidate |
+| `closing_nets` | Net names of the copper that rejected every remaining candidate. Copper that belongs to no net (the board outline, a keepout, an unconnected pad — KiCad net 0) is reported as the sentinel `<no-net>`, never as a synthetic `net0` (#5639); `closing_copper_class` and `closing_refs` say which it was |
 | `closing_refs` | The same items as `ref.pin` labels (`ref` alone for route copper) |
 | `closing_copper_class` | Phase 1a's classification: `foreign_pad`, `route_segment`, `route_via`, `fixed_fill`, `keepout`, `reserved_hard`, `kelvin_isolated`, `board_edge` |
 | `closing_markings` | Raster markings read at that copper — **descriptive labels only**, never part of the legality decision |
@@ -66,7 +74,7 @@ hard error on load, never a silent partial parse.
 
 ## Reading it correctly
 
-Three combinations mean genuinely different things, and conflating them is the
+Four combinations mean genuinely different things, and conflating them is the
 mistake the witness exists to prevent:
 
 | `access_at_escape_end` | `first_closed_at` | `final_access` | Verdict |
@@ -74,8 +82,16 @@ mistake the witness exists to prevent:
 | `non-empty` | set | `empty` | **A commit stranded the pad.** The named record is the culprit |
 | `non-empty` | `null` | `non-empty` | **Nothing stranded it.** The pad was reachable throughout and the search declined to reach it — issue #5509's category, not this epic's |
 | `empty` | `null` | `empty` | **Placement stranded it.** The pad had no legal first move before the search committed anything; no commit can be blamed |
+| `empty` | set | `empty` | **Placement stranded it, a rip-up briefly freed it, and a later commit closed it again.** The named record is a real closure — of the *re-opened* access set, not of the original one — so the pad's first cause is still placement |
 
-A `reopened: true` entry is the fourth case: the pad *was* stranded at
+The last row is narrow and was, until #5639, also produced spuriously: a pad
+that was already empty before the search began got the first record that
+merely *re-evaluated* it recorded as its closure (board-07's `U5.1`..`U5.8`
+were "closed" by `board_edge` copper, which no commit can place). Attribution
+now requires an observed non-empty → empty transition, so the row means only
+what it says.
+
+A `reopened: true` entry is a further case: the pad *was* stranded at
 `first_closed_at`, a later rip-up freed it, and the closing record must not be
 presented as the final cause. This is why rip-ups are journaled at all — a
 commit-only journal would keep counting ripped copper and report a stranding

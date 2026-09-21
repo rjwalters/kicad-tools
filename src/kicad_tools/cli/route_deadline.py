@@ -20,6 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from kicad_tools.router.access_witness import ACCESS_WITNESS_SIDECAR_SUFFIX
 from kicad_tools.router.reporting import RouteAttemptResult
 
 DEADLINE_ENV = "KCT_ROUTE_INVOCATION_DEADLINE"
@@ -255,6 +256,24 @@ def _supervise(
                             sidecars.append(str(destination))
                         except OSError as exc:
                             state.setdefault("quarantine_context_errors", []).append(str(exc))
+                # Issue #5639: the access-witness sidecar is stem-keyed, so it
+                # names the board it describes.  MOVE it with the quarantined
+                # checkpoint -- left behind under the canonical stem it would
+                # describe an output that no longer exists, and a reader
+                # discovering it from the quarantined board would find nothing.
+                witness_source = output.parent / f"{output.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+                if witness_source.exists():
+                    quarantined = Path(name)
+                    witness_target = (
+                        quarantined.parent / f"{quarantined.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+                    )
+                    try:
+                        os.replace(witness_source, witness_target)
+                        sidecars.append(str(witness_target))
+                        if state.get("access_witness") == str(witness_source):
+                            state["access_witness"] = str(witness_target)
+                    except OSError as exc:
+                        state.setdefault("quarantine_context_errors", []).append(str(exc))
                 state["unverified_sidecars"] = sidecars
             report = output.with_suffix(".timeout.json")
             report.parent.mkdir(parents=True, exist_ok=True)

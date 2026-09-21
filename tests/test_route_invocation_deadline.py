@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_tools.cli import route_cmd, route_deadline
+from kicad_tools.router.access_witness import ACCESS_WITNESS_SIDECAR_SUFFIX
 
 
 @pytest.mark.parametrize("adaptive_handler", [False, True])
@@ -302,3 +303,112 @@ def test_interruption_hard_kills_group_only_once_after_reaping(tmp_path, monkeyp
         route_deadline._supervise(["worker"], 1, tmp_path / "control.json", save_seconds=0.1) == 130
     )
     assert calls == [False, True]
+
+
+def test_deadline_killed_route_still_writes_the_access_witness_sidecar(tmp_path):
+    """Issue #5639: the witness must survive a deadline kill, not just a clean save.
+
+    ``_write_access_witness_sidecar`` used to be reachable only from the normal
+    save path, downstream of a route that returned -- so all six deadline-killed
+    runs in the Phase 1c evidence package wrote ``.route.json`` /
+    ``.timeout.json`` receipts and NO ``.access_witness.json``.  Those runs are
+    exactly the ones where "did a commit strand this pad?" is the question.
+    """
+    source = tmp_path / "input.kicad_pcb"
+    source.write_text("(kicad_pcb (version 20240108))")
+    output = tmp_path / "output.kicad_pcb"
+    script = f"""
+from pathlib import Path
+import os, signal, threading, time
+from types import SimpleNamespace
+from kicad_tools.cli import route_cmd, route_deadline
+from kicad_tools.router.access_witness import CommitJournal
+from kicad_tools.router.layers import Layer
+from kicad_tools.router.primitives import Route, Segment
+signal.signal(signal.SIGTERM, route_deadline._deadline_signal)
+journal = CommitJournal()
+route = Route(
+    net=1,
+    net_name="N1",
+    segments=[Segment(x1=0.0, y1=0.0, x2=1.0, y2=0.0, width=0.2, layer=Layer.F_CU, net=1, net_name="N1")],
+    vias=[],
+)
+with journal.context("routing", 0):
+    journal.observe("mark", route)
+def work(argv):
+    route_deadline.configure_output(SimpleNamespace(pcb={str(source)!r}, output={str(output)!r}))
+    route_cmd._interrupt_state.update(
+        router=SimpleNamespace(
+            routes=[1],
+            commit_journal=journal,
+            to_sexp=lambda **kw: '(segment (start 0 0) (end 1 1) (width 0.2) (layer "F.Cu") (net 1))',
+        ),
+        output_path=Path({str(output)!r}),
+        pcb_path=Path({str(source)!r}),
+        best_completed_attempt=False,
+    )
+    route_deadline.record_stage("routing")
+    timer = threading.Timer(1.0, os.kill, args=(os.getpid(), signal.SIGTERM))
+    timer.daemon = True
+    timer.start()
+    while True:
+        time.sleep(0.05)
+route_cmd._main_impl = work
+raise SystemExit(route_cmd._in_process_main([]))
+"""
+    assert (
+        route_deadline._supervise(
+            [sys.executable, "-c", script], 30, tmp_path / "control.json", save_seconds=5
+        )
+        == 124
+    )
+
+    report = json.loads(output.with_suffix(".timeout.json").read_text())
+    assert report["status"] == "partial"
+    assert report["snapshot_saved"] is True
+
+    snapshot = Path(report["snapshot"])
+    sidecar = snapshot.parent / f"{snapshot.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+    assert sidecar.is_file(), "no access-witness sidecar beside the quarantined snapshot"
+    payload = json.loads(sidecar.read_text())
+    assert payload["journal"]["records"], "sidecar journal must not be empty"
+    assert payload["source"]["pcb"] == snapshot.name
+    # The receipt names it, because the deadline path suppresses stdout.
+    assert report["access_witness"] == str(sidecar)
+
+
+def test_quarantine_moves_the_access_witness_sidecar_with_the_board(tmp_path):
+    """#5639: a stem-keyed sidecar must not describe a board that was retired.
+
+    The supervisor renames a pre-existing canonical output out of the way so it
+    cannot masquerade as this invocation's result; its witness sidecar has to
+    travel with it, or a reader discovering the sidecar from the quarantined
+    board finds nothing and a reader finding the sidecar under the canonical
+    stem reads a description of a file that no longer exists.
+    """
+    output = tmp_path / "output.kicad_pcb"
+    output.write_text("previous successful output")
+    sidecar = tmp_path / f"output{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+    sidecar.write_text('{"schema_version":1,"journal":{"records":[]}}')
+    script = f"""
+import json, os, signal, time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(os.environ["KCT_ROUTE_DEADLINE_CONTROL"]).write_text(
+    json.dumps(dict(stage="routing", output={str(output)!r}, snapshot_saved=False))
+)
+while True: time.sleep(10)
+"""
+    assert (
+        route_deadline._supervise(
+            [sys.executable, "-c", script], 0.4, tmp_path / "control.json", save_seconds=0.2
+        )
+        == 124
+    )
+
+    report = json.loads(output.with_suffix(".timeout.json").read_text())
+    quarantined = Path(report["unverified_output"])
+    moved = quarantined.parent / f"{quarantined.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+    assert not sidecar.exists(), "sidecar left behind under the retired canonical stem"
+    assert moved.is_file()
+    assert str(moved) in report["unverified_sidecars"]
