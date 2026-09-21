@@ -348,17 +348,18 @@ NOTES: dict[int, str] = {
         "`_shadow_foreign_universe` is `None` and the gate short-circuits to "
         "`(0.0, None)`, so an unarmed run would have reported a confident zero "
         "for a third of this row. **Not measured**: "
-        "`find_intra_pair_clearance_violations` (`diffpair_routing.py:1198`) "
+        "`find_intra_pair_clearance_violations` (`router/diffpair_routing.py`) "
         "scores a P/N pair against *itself*, and this corpus declares no diff "
         "pairs -- every object carries its own independent net so a kicad-cli "
         "row maps onto a pair by net alone."
     ),
     9: (
-        "`CommittedCopper.seg_clear` / `via_clear` -- the epic's `:583` / "
-        "`:709` citations land on `CommittedCopper`, not "
-        "`LatticeObstacleModel`, so the row needs no board file and no "
-        "`from_board`: the five derived gap values are copied from the model's "
-        "one production call site (`lattice/pathfinder.py:252-258`, `:460`). "
+        "`CommittedCopper.seg_clear` / `via_clear` -- the epic's group 9 line "
+        "citations land on `CommittedCopper`, not `LatticeObstacleModel`, so "
+        "the row needs no board file and no `from_board`: the five derived gap "
+        "values are copied from the model's one production call site "
+        "(`LatticePathfinder.__init__` plus `_fresh_committed` in "
+        "`router/lattice/pathfinder.py`). "
         "Routed copper only -- none of the three predicates consults a pad "
         "(pad keep-outs gate *site availability* on "
         "`LatticeObstacleModel.node_pads`, which is group 9's masking half, not "
@@ -368,8 +369,9 @@ NOTES: dict[int, str] = {
     ),
     10: (
         "`ObstacleModel.is_clear`, constructed directly as "
-        "`mesh/pathfinder.py:303-313` does: other-net pads as keep-out rects "
-        "inflated by the agent radius, committed traces as capsule polygons "
+        "`MeshPathfinder._route_with_portals` does: other-net pads as keep-out "
+        "rects inflated by the agent radius (`_keepouts`), committed traces as "
+        "capsule polygons "
         "inflated by a **full** `trace_width + clearance` (`_route_obstacles`' "
         "own over-approximation, square end-caps included). Seg-candidate "
         "pairs only -- `is_clear(a, b)` takes two points and no width, and a "
@@ -381,8 +383,8 @@ NOTES: dict[int, str] = {
     ),
     11: (
         "`via_clearance.py`'s four pure predicates. **Not measured**: "
-        "`subgrid.py:550 _min_clearance_to_neighbors` and `:1063 "
-        "_validate_segment_relaxed` are private `SubGridRouter` internals "
+        "`_min_clearance_to_neighbors` and `_validate_segment_relaxed` "
+        "(`router/subgrid.py`) are private `SubGridRouter` internals "
         "needing a live sub-grid escape context (parent grid, pad-cluster box, "
         "per-pad overrides) -- escape router's Phase 3 PR."
     ),
@@ -407,7 +409,7 @@ NOTES: dict[int, str] = {
     ),
     16: (
         "**Not measured**: `_post_insertion_clearance_detail_pair_group` "
-        "(`match_group_tuning.py:2404`) needs a mirrored diff-pair candidate "
+        "(`router/match_group_tuning.py`) needs a mirrored diff-pair candidate "
         "with declared P/N net ids, which the generator does not place. Group "
         "8's row does not close this: it drives the coupled *constructor's* "
         "gates over ordinary pairs, so the missing ingredient is a corpus pair "
@@ -415,9 +417,9 @@ NOTES: dict[int, str] = {
     ),
     17: (
         "The destination gate's foreign-via clearance check. **Not measured**: "
-        "`_via_drill_overlaps_bbox` (`:1173`) is an overlap detector with no "
+        "`_via_drill_overlaps_bbox` is an overlap detector with no "
         "clearance term (every corpus pair has a positive gap, so it would be "
-        "a meaningless zero), and `_via_edge_sweep_clear` (`:2204`) is a "
+        "a meaningless zero), and `_via_edge_sweep_clear` is a "
         "displacement certificate against the board outline needing a "
         "before/after position pair and a copper-to-edge pair kind."
     ),
@@ -432,7 +434,8 @@ NOTES: dict[int, str] = {
     ),
     19: (
         "Every pad is a disc of `max(w, h) / 2` "
-        "(`drc/cpp_backend.py:96`), which can over-reject but never "
+        "(`_extract_pad_arrays` in `drc/cpp_backend.py`), which can over-reject "
+        "but never "
         "under-reject. **Not measured**: the corpus probes the one axis where "
         "that envelope is tight (each probe shape's long side is its local X "
         "side, so `max(w, h) / 2` is the true support there) -- quantifying "
