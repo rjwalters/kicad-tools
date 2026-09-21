@@ -224,6 +224,30 @@ def test_board_spanning_edge_overflow_is_still_exact():
         ), (x, y)
 
 
+def test_degenerate_query_falls_back_to_a_full_ring_scan_and_stays_exact(pour_points):
+    """A threshold huge relative to the cell size takes the full-scan branch.
+
+    ``edges_in_box`` bails out to ``range(n)`` once the query box spans more
+    than ``_POLYGON_INDEX_MAX_QUERY_CELLS`` cells; that branch must still
+    return the same verdict as the linear scan (it is the linear scan).
+    """
+    index = _PolygonIndex(pour_points)
+    # Pick a threshold that provably overflows the cap for this cell size.
+    threshold = index.cell * (stitch_cmd._POLYGON_INDEX_MAX_QUERY_CELLS**0.5 + 4.0)
+    span_cells = (2.0 * threshold / index.cell + 1.0) ** 2
+    assert span_cells > stitch_cmd._POLYGON_INDEX_MAX_QUERY_CELLS
+    scanned = index.edges_in_box(-threshold, -threshold, threshold, threshold)
+    assert len(scanned) == len(pour_points)
+
+    rng = random.Random(0xDEC0DE)
+    for _ in range(50):
+        x = rng.uniform(-3.0, 43.0)
+        y = rng.uniform(-3.0, 33.0)
+        assert index.has_edge_within_point(x, y, threshold) == _linear_edge_within_point(
+            pour_points, x, y, threshold
+        ), (x, y)
+
+
 # --- predicate-level equivalence (indexed vs. forced-linear) -----------------
 
 
