@@ -828,7 +828,24 @@ class ZoneGenerator:
                 continue
 
             if self._boundaries_overlap(boundary, queued.boundary):
-                if priority <= queued.config.priority:
+                if priority == queued.config.priority:
+                    # Equal priority: KiCad tie-breaks on the zone UUID, so
+                    # the outcome is non-deterministic -- always warn
+                    # (Issue #5590's core hazard), same as the existing-zone
+                    # loop above.
+                    msg = (
+                        f"Zone '{net}' on {layer} (priority {priority}) overlaps "
+                        f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
+                        f"The new zone will get zero copper because the other zone "
+                        f"has equal or higher priority."
+                    )
+                elif priority < queued.config.priority:
+                    if self._boundary_loser_retains_copper(boundary, queued.boundary):
+                        # Distinct priorities + the new, lower-priority zone
+                        # keeps exclusive territory: both zones receive real
+                        # copper (#5590 / #5618 -- the queued-vs-queued mirror
+                        # of the existing-zone loop's `<` arm).
+                        continue
                     msg = (
                         f"Zone '{net}' on {layer} (priority {priority}) overlaps "
                         f"queued zone '{queued.config.net}' (priority {queued.config.priority}). "
