@@ -79,8 +79,8 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
@@ -248,8 +248,7 @@ def annotate_error(file: str, message: str) -> None:
 _PHASE_HEADER_RE = re.compile(r"^(\d+[a-z]?)\.\s+(\S.*)$")
 
 
-@dataclass(frozen=True)
-class PhaseTiming:
+class PhaseTiming(NamedTuple):
     """One numbered recipe phase and the wall time attributed to it."""
 
     label: str

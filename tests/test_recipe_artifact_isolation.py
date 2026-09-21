@@ -100,7 +100,19 @@ def test_recipe_uses_its_own_pcb_and_sidecar(tmp_path, monkeypatch, gate_name):
         commands.append(command)
         return SimpleNamespace(returncode=0)
 
+    class FakePopen:
+        """Stand-in for ``subprocess.Popen`` (Issue #5617's streaming re-route)."""
+
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+            self.stdout = iter(())
+            self.returncode = 0
+
+        def wait(self):
+            return self.returncode
+
     monkeypatch.setattr(gate.subprocess, "run", run)
+    monkeypatch.setattr(gate.subprocess, "Popen", FakePopen)
     assert gate.re_route_board(board, 42)
     assert commands[0][2] == str(board / "regression-output")
     routed = gate.find_routed_pcb(board)
