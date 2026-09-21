@@ -1284,6 +1284,109 @@ class TestGeometryBasedCapacity:
         )
         assert graph.get_edge_count() == 0
 
+    # --- Pitch-weighted utilisation (Issue #5575) -------------------------
+    #
+    # Capacity stays in BASE-pitch units; what changed is that a net's demand
+    # on an edge is ``class_pitch / base_pitch`` rather than a flat 1.  The
+    # default weight is 1.0, so every assertion above this line is unaffected.
+
+    def test_utilization_defaults_to_one_unit_per_net(self):
+        """AC-6: omitting the new kwargs keeps the integer net-count model."""
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=1,
+        )
+        graph.update_utilization([0, 1])
+        graph.update_utilization([0, 1])
+        edge = graph._edge_lookup[(0, 1)]
+        assert edge.utilization == 2
+        assert graph.demand_weight(7) == 1.0
+
+    def test_wide_class_consumes_proportionally_more_capacity(self):
+        """A 2.8 mm-pitch net costs 7 tracks on a 0.4 mm-pitch graph."""
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=1,
+            pitch_for_net=lambda net: 2.8 if net == 1 else 0.4,
+        )
+        edge = graph._edge_lookup[(0, 1)]
+        capacity = edge.capacity  # int(5.0 / 0.4) == 12
+
+        graph.update_utilization([0, 1], weight=graph.demand_weight(1))
+        assert edge.utilization == pytest.approx(7.0)
+        assert edge.remaining_capacity == pytest.approx(capacity - 7.0)
+        assert edge.overflow == 0
+
+        graph.update_utilization([0, 1], weight=graph.demand_weight(1))
+        assert edge.utilization == pytest.approx(14.0)
+        assert edge.overflow == 14 - capacity
+
+    def test_fractional_excess_counts_as_one_whole_track(self):
+        """Overflow stays an integer: half a track's copper still does not fit."""
+        edge = RegionEdge(source=0, target=1, capacity=10, utilization=10.5)
+        assert edge.overflow == 1
+        # ... but an exactly-at-capacity float sum must not round up.
+        edge.utilization = 10.0
+        assert edge.overflow == 0
+
+    def test_release_must_use_the_placing_weight(self):
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=1,
+            pitch_for_net=lambda net: 2.8,
+        )
+        edge = graph._edge_lookup[(0, 1)]
+        weight = graph.demand_weight(1)
+        graph.update_utilization([0, 1], weight=weight)
+        graph.release_utilization([0, 1], weight=weight)
+        assert edge.utilization == pytest.approx(0.0)
+
+    def test_per_layer_utilization_is_weighted_too(self):
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=2,
+            pitch_for_net=lambda net: 1.2,
+        )
+        edge = graph._edge_lookup[(0, 1)]
+        graph.update_utilization([0, 1], layer=1, weight=graph.demand_weight(1))
+        assert edge.layer_utilization[1] == pytest.approx(3.0)
+        assert edge.layer_utilization[0] == pytest.approx(0.0)
+        assert edge.utilization == pytest.approx(3.0)
+
+    def test_plane_layers_get_no_capacity(self):
+        """``signal_layer_indices`` confines capacity to routable layers."""
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=4,
+            signal_layer_indices=[0, 3],
+        )
+        edge = graph._edge_lookup[(0, 1)]
+        per_layer = int(5.0 / 0.4)
+        assert sorted(edge.layer_capacity) == [0, 3]
+        assert edge.capacity == per_layer * 2  # not * 4
+        assert edge.remaining_capacity_on_layer(1) == 0
+        assert graph.num_signal_layers == 2
+
 
 # =============================================================================
 # Negotiated Global Routing Tests (Issue #2276)

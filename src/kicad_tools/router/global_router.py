@@ -157,8 +157,15 @@ class GlobalRouter:
         if region_path is None:
             return None
 
-        # Update utilization
-        self.region_graph.update_utilization(region_path, layer=layer)
+        # Update utilization.  Issue #5575: demand is measured in base-pitch
+        # units, so a wide net-class consumes proportionally more of an
+        # edge's capacity than a minimum-width signal.  The rip-up path in
+        # ``route_all`` releases with the SAME weight.
+        self.region_graph.update_utilization(
+            region_path,
+            layer=layer,
+            weight=self.region_graph.demand_weight(net),
+        )
 
         # Convert region path to waypoints
         waypoint_coords = self._build_waypoint_coords(region_path, src_pos, tgt_pos)
@@ -230,11 +237,23 @@ class GlobalRouter:
             if len(positions) >= 2:
                 net_pad_positions[net_id] = positions
 
-        # Choose layer for each net (simple round-robin across layers)
+        # Choose layer for each net (simple round-robin across layers).
+        #
+        # Issue #5575: round-robin over the SIGNAL layers, not over every
+        # layer in the stack.  On a sig/gnd/pwr/sig stack the plane layers
+        # carry zero capacity, so ``i % num_layers`` put every other net on
+        # a zero-capacity index and overflowed it instantly.  The heuristic
+        # itself is unchanged (Phase 2 owns replacing it) -- it just indexes
+        # into the routable list now.
         net_layers: dict[int, int] = {}
         num_layers = self.region_graph.num_layers
+        signal_indices = getattr(self.region_graph, "signal_layer_indices", None)
         for i, net_id in enumerate(net_order):
-            if net_id in net_pad_positions:
+            if net_id not in net_pad_positions:
+                continue
+            if signal_indices:
+                net_layers[net_id] = signal_indices[i % len(signal_indices)]
+            else:
                 net_layers[net_id] = i % num_layers if num_layers > 1 else self.default_layer
 
         # --- Iteration 0: greedy routing ---
@@ -290,7 +309,13 @@ class GlobalRouter:
                 for net_id in nets_to_reroute:
                     assign = assignments[net_id]
                     layer = assign.layer
-                    self.region_graph.release_utilization(assign.region_path, layer=layer)
+                    # Issue #5575: release the SAME weight ``route_net``
+                    # placed, or a wide net leaks demand on every rip-up.
+                    self.region_graph.release_utilization(
+                        assign.region_path,
+                        layer=layer,
+                        weight=self.region_graph.demand_weight(net_id),
+                    )
                     del assignments[net_id]
 
                 # Reroute them

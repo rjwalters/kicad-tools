@@ -1,10 +1,10 @@
 # RoutingPlan sidecar (`<output_stem>.routing_plan.json`)
 
-> Issue #5519, Phase 1 of 4 of Epic #5510 ("capacity-aware routing plan on
-> the default path — layer assignment, hard corridors, and an
-> infeasibility certificate"). This phase is **report-only**: the sidecar
-> serializes state the tile-based global router already computes; it
-> never changes which copper `kct route` produces.
+> Issue #5519 / #5520 / #5575, Phase 1 of 4 of Epic #5510
+> ("capacity-aware routing plan on the default path — layer assignment,
+> hard corridors, and an infeasibility certificate"). This phase is
+> **report-only**: the sidecar serializes state the tile-based global
+> router computes; it never changes which copper `kct route` produces.
 
 > **Not to be confused with** `boards/03-usb-joystick/routing_plan.py` /
 > `boards/03-usb-joystick/routing-plan.json`, an unrelated board-03
@@ -190,9 +190,9 @@ built -- absent, not `null`, otherwise):
   },
   "edges": [
     {
-      "a": 17, "b": 18, "capacity": 9, "demand": 14, "overflow": 5,
+      "a": 17, "b": 18, "capacity": 9, "demand": 14.0, "overflow": 5,
       "blockage_mm": 1.2, "nets": [12, 13, 14],
-      "layers": { "0": { "capacity": 5, "demand": 8 }, "3": { "capacity": 4, "demand": 6 } }
+      "layers": { "0": { "capacity": 5, "demand": 8.0 }, "3": { "capacity": 4, "demand": 6.0 } }
     }
   ],
   "overflow_report": {
@@ -209,11 +209,18 @@ built -- absent, not `null`, otherwise):
   i.e. `null`, when a `RoutingPlan` is built and inspected in-process
   without going through `write_sidecar`). `tile_mm` / `cols` / `rows`
   describe the coarse tile grid the plan was computed on.
-- **`layers.signal` / `layers.plane`** -- layer indices by role
-  (`LayerStack.signal_layers` / `plane_layers`), for reporting only. In
-  this phase capacity still counts every grid layer including planes, and
-  the round-robin layer assignment may land nets on a plane layer; a
-  later phase reserves plane layers from routing.
+- **`layers.signal` / `layers.plane`** -- layer indices by role, and since
+  Issue #5575 **the set capacity is actually allocated on**. `signal` is
+  deliberately *not* `LayerStack.signal_layers`: that property filters on
+  `LayerDefinition.is_routable`, which returns `True` unconditionally --
+  PLANE layers included, by design (#5014). The plan uses the stricter
+  "routable **and** not a plane" set
+  (`routing_plan.signal_layer_indices()`), so a `sig/gnd/pwr/sig` stack
+  reports `"signal": [0, 3]` and the two planes carry **zero** capacity on
+  every edge (they get no `layers` row at all). The round-robin layer
+  assignment indexes into this same list, so no net is ever planned onto a
+  plane. This is a *planning* restriction only -- what the detailed router
+  is allowed to do is still `--reserve-plane-layers`' business.
 - **`regions`** -- bounds (mm) for every coarse-grid region referenced by
   at least one net's `region_path`. Regions the plan never touches are
   omitted to keep the sidecar bounded on large tile grids.
@@ -247,7 +254,16 @@ built -- absent, not `null`, otherwise):
   ID) alone, because they are symmetric across the pair by construction.
   `layers` gives the same capacity/demand split per layer index (`demand`
   likewise summed across both directions; empty `{}` on a single-layer
-  graph).
+  graph, and never a row for a PLANE layer).
+
+  **`demand` is measured in base-pitch units, not net count** (Issue
+  #5575). The base pitch is `DesignRules.trace_width + trace_clearance`;
+  a net whose class pitch (`NetClassRouting.trace_width + clearance`) is
+  `k` times the base pitch contributes `k`, so a 2.6 mm power trunk on a
+  0.4 mm-pitch board costs `2.8 / 0.4 = 7` tracks rather than 1. `demand`
+  is consequently a float in the JSON (`15.0`, not `15`); `capacity` and
+  `overflow` stay integers, with `overflow` rounding any fractional
+  excess **up** (half a track's worth of copper still does not fit).
 - **`overflow_report`** -- named `overflow_report`, never "certificate":
   that word is owned by `monotone_certificate.py`'s planarity proof.
   This block is a report of measured congestion, not a proof of
@@ -258,17 +274,80 @@ built -- absent, not `null`, otherwise):
 - **`relief`** -- always `[]` in this phase; reserved for a later phase's
   relief-corridor data.
 
+## The capacity model (Issue #5575)
+
+Capacity on a tile boundary is geometric:
+
+```
+capacity(edge) = sum over SIGNAL layers l of
+                 floor( (edge_length - pad_blockage - rect_blockage[l]) / base_pitch )
+```
+
+and a net's demand against it is `class_pitch / base_pitch`. Three
+independent inputs, each of which the pre-#5575 model got wrong:
+
+### 1. Per-class pitch
+
+`RegionGraph(pitch_for_net=...)` maps a net id to its class pitch
+(`NetClassRouting.trace_width + clearance`, resolved through
+`Autorouter.net_class_map`, which is keyed by net *name*). `RegionGraph.
+demand_weight(net)` turns that into base-pitch units, and
+`GlobalRouter.route_net` places -- and the rip-up path releases -- that
+same weight. Nets with no net-class entry weigh exactly `1.0`, so a board
+with no `--net-class-map` behaves exactly as it did before.
+
+### 2. Plane-layer exclusion
+
+`RegionGraph(signal_layer_indices=...)` restricts which layer indices get
+capacity at all (see `layers.signal` above). `GlobalRouter.route_all`'s
+round-robin indexes into the same list -- without that one-line change,
+every other net on a `sig/gnd/pwr/sig` board would be assigned to a
+zero-capacity plane index and overflow instantly.
+
+### 3. Blockage beyond pads
+
+`RegionGraph.register_blockage_rects(rects, layers)` subtracts, per layer,
+the length of the boundary segment each rectangle covers. Two sources
+(`routing_plan.collect_blockage_rects`):
+
+| Source | Rectangle |
+| --- | --- |
+| **Keepout rule areas** | Each track/via-blocking `(zone … (keepout …))`'s polygon **bounding box** (conservative). Parsed once by `Autorouter._keepout_rule_area_polygons()`, the helper the lattice engine's `_lattice_keepout_projection` also consumes, so there is no second reader of `pcb.rule_areas` to drift. |
+| **Preserved copper** (`--preserve-existing` / `--nets` / `--complete`) | Each `Segment`'s axis-aligned bbox padded by `width/2 + trace_clearance`; each `Via` a square of `diameter + clearance` on every signal layer. |
+
+Three deliberate exclusions:
+
+- **Copper pours are NOT blockage.** Zones are never loaded into the
+  routing grid on the `kct route` path -- pours are filled *after* routing
+  and flow around finished traces -- so counting them would make the plan
+  stricter than the router it describes and report overflow the detailed
+  router never experiences.
+- **`spatial_keepouts` per-class filters are ignored** for capacity. A
+  per-class exemption cannot be expressed as a scalar edge blockage, so
+  the plan treats a filtered rule area as blocking for everyone (the
+  conservative direction). Those filters remain fully in force in the
+  lattice search, which is what they were built for.
+- **The blockage model is boundary-based.** A rectangle strictly inside a
+  tile blocks nothing, because capacity is only ever counted *across* tile
+  boundaries. Only a rectangle that straddles a boundary reduces it. (This
+  is why `tests/test_routing_plan_5510.py`'s channel fixture places its
+  walls at `x_boundary ± 0.5`.)
+
+The existing `max(1, …)` floor on an edge's total capacity is kept for the
+**pad heuristic** (which estimates blockage from pad sizes and can
+overshoot, so flooring keeps the graph connected) but is **not** applied to
+an edge carrying measured rectangle blockage: a boundary fully covered by a
+keepout or by preserved copper really does have zero capacity, and flooring
+it to 1 would let the plan report a net squeezing through a wall.
+
 ## Non-goals of this phase
 
 - No per-board corridor / tile-size / keepout configuration.
-- **Capacity is not yet honest.** It still uses one global pitch
-  (`DesignRules.trace_width + trace_clearance`) for every net regardless
-  of net class, counts *every* grid layer including PLANE layers as
-  signal capacity, and treats only pads as blockage (keepout rule areas
-  and preserved copper do not reduce it). Per-class pitch, plane-layer
-  exclusion and blockage beyond pads are the next slice of Epic #5510
-  (Issue #5575), which is why `layers.signal` /
-  `layers.plane` below are still reporting-only.
+- Still **report-only**: the plan reserves nothing, gates nothing, exits
+  zero regardless of overflow, and computes no relief. Hard corridors are
+  Phase 3 of Epic #5510; gating / relief is Phase 1c (#5521).
+- The round-robin layer *heuristic* is unchanged -- Issue #5575 only made
+  it index into the signal-layer list. Replacing it is Phase 2.
 - Building the plan never mutates `RegionGraph` state (utilization,
   history costs) and never changes routed copper -- see the byte-identity
   tests in `tests/test_routing_plan_5510.py` and

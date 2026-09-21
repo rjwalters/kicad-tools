@@ -41,6 +41,29 @@ SCHEMA_VERSION = 1
 NET_STATUS_VALUES = frozenset({"assigned", "failed", "pour_skipped", "single_pad", "no_endpoints"})
 
 
+def signal_layer_indices(layer_stack: LayerStack) -> list[int]:
+    """Indices of the layers that may carry signal capacity (Issue #5575).
+
+    **Not** ``LayerStack.signal_layers``: that property filters on
+    ``LayerDefinition.is_routable``, which returns ``True`` unconditionally
+    -- PLANE layers included, by design (#5014).  Counting a ``sig/gnd/
+    pwr/sig`` stack's two planes as routing capacity makes the plan
+    advertise 2x the capacity the board has, so the plan's capacity model
+    uses this stricter "routable AND not a plane" set instead.
+
+    This is a *planning* restriction only.  It does not change what the
+    detailed router is allowed to do (``--reserve-plane-layers`` owns
+    that); it changes what the report-only plan claims is available.
+
+    Args:
+        layer_stack: The grid's layer stack.
+
+    Returns:
+        Ascending list of non-plane layer indices.
+    """
+    return [i for i in range(layer_stack.num_layers) if not layer_stack.is_plane_layer(i)]
+
+
 @dataclass
 class RegionInfo:
     """Spatial bounds of one coarse-grid region (mirrors ``Region``)."""
@@ -144,29 +167,35 @@ class EdgePlanEntry:
     Attributes:
         a: Smaller region ID of the pair.
         b: Larger region ID of the pair.
-        capacity: Scalar per-direction capacity (summed across layers).
-        demand: Scalar utilization (summed across layers AND across both
-            traversal directions of the pair).
-        overflow: Sum of ``max(0, utilization - capacity)`` over both
+        capacity: Scalar per-direction capacity (summed across the graph's
+            SIGNAL layers -- plane layers carry none since Issue #5575).
+        demand: Scalar utilization in **base-pitch units**, not net count
+            (Issue #5575): a net whose class pitch is ``k`` times the base
+            pitch contributes ``k``.  Summed across layers AND across both
+            traversal directions of the pair.
+        overflow: Sum of ``ceil(max(0, utilization - capacity))`` over both
             directed edges of the pair -- NOT ``max(0, demand - capacity)``,
             since each direction is measured against the same capacity
             independently (matching ``RegionGraph.get_total_overflow()``).
-        blockage_mm: Obstacle blockage length along the boundary (mm).
+        blockage_mm: Pad blockage length along the boundary (mm).  Rule-area
+            and preserved-copper blockage is tracked per layer on the graph
+            (``RegionEdge.layer_blockage``) and shows up here as reduced
+            ``capacity``.
         nets: Net IDs whose corridor crosses this edge.
-        layers: Per-layer ``{"capacity": int, "demand": int}`` rows, keyed
+        layers: Per-layer ``{"capacity": int, "demand": float}`` rows, keyed
             by the string layer index; ``demand`` likewise sums both
             directions.  Empty when the graph has no per-layer data
-            (``num_layers <= 1``).
+            (``num_layers <= 1``).  A PLANE layer has no row at all.
     """
 
     a: int
     b: int
     capacity: int
-    demand: int
+    demand: float
     overflow: int
     blockage_mm: float
     nets: list[int]
-    layers: dict[str, dict[str, int]] = field(default_factory=dict)
+    layers: dict[str, dict[str, float]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -404,7 +433,7 @@ class RoutingPlan:
             reverse_utilization = reverse.utilization if reverse is not None else 0
             reverse_overflow = reverse.overflow if reverse is not None else 0
             reverse_layer_utilization = reverse.layer_utilization if reverse is not None else {}
-            layers_block: dict[str, dict[str, int]] = {}
+            layers_block: dict[str, dict[str, float]] = {}
             layer_indices = (
                 set(edge.layer_capacity)
                 | set(edge.layer_utilization)
@@ -414,8 +443,8 @@ class RoutingPlan:
                 layers_block[str(layer_idx)] = {
                     "capacity": edge.layer_capacity.get(layer_idx, 0),
                     "demand": (
-                        edge.layer_utilization.get(layer_idx, 0)
-                        + reverse_layer_utilization.get(layer_idx, 0)
+                        edge.layer_utilization.get(layer_idx, 0.0)
+                        + reverse_layer_utilization.get(layer_idx, 0.0)
                     ),
                 }
             edges.append(
@@ -456,7 +485,13 @@ class RoutingPlan:
             elapsed_s=elapsed_s,
         )
 
-        signal_layers = [layer.index for layer in layer_stack.signal_layers]
+        # Issue #5575: ``LayerStack.signal_layers`` filters on
+        # ``is_routable``, which is unconditionally True -- PLANE layers
+        # included (#5014).  Reporting those as signal capacity is exactly
+        # the dishonesty this phase removes, so derive the signal set as
+        # "routable AND not a plane" and keep it in lockstep with the
+        # ``signal_layer_indices`` the RegionGraph allocates capacity on.
+        signal_layers = signal_layer_indices(layer_stack)
         plane_layers = [layer.index for layer in layer_stack.plane_layers]
 
         from kicad_tools import __version__ as kct_version
@@ -699,6 +734,133 @@ def select_plan_nets(
     )
 
 
+#: Type of one blockage rectangle: ``(min_x, min_y, max_x, max_y)`` in mm.
+BlockageRect = tuple[float, float, float, float]
+
+
+def _segment_layer_index(grid: Any, segment: Any) -> int | None:
+    """Resolve a ``Segment``'s layer to a grid layer index.
+
+    Router segments carry a ``Layer`` enum (whose ``.value`` is a KiCad
+    layer id, NOT a stack index), but some library callers build them with
+    a bare integer index.  Both are accepted; an unresolvable layer returns
+    ``None`` so the caller can fall back to "every signal layer".
+    """
+    layer = getattr(segment, "layer", None)
+    if layer is None:
+        return None
+    value = getattr(layer, "value", layer)
+    try:
+        return int(grid.layer_to_index(int(value)))
+    except Exception:
+        if isinstance(value, int) and 0 <= value < int(getattr(grid, "num_layers", 0)):
+            return int(value)
+        return None
+
+
+def collect_blockage_rects(router: Any) -> list[tuple[BlockageRect, list[int] | None]]:
+    """Blockage beyond pads, as ``(rect, layers)`` pairs (Issue #5575).
+
+    Two sources, both of which the detailed router already honours but
+    which the plan's capacity model was blind to:
+
+    1. **Keepout rule areas** -- ``(zone ... (keepout ...))`` areas that
+       block tracks and/or vias, via the router's
+       ``_keepout_rule_area_polygons()`` hook.  Each polygon contributes
+       its *bounding box* (conservative: a convex hull would be tighter,
+       but over-blocking a boundary only under-reports capacity).  The
+       ``spatial_keepouts`` per-class read/exempt filters are deliberately
+       IGNORED here: a per-class exemption cannot be expressed as a scalar
+       edge blockage, so the plan treats such an area as blocking for
+       everyone (the conservative direction).
+    2. **Preserved copper** -- ``router.existing_routes``, populated under
+       ``--preserve-existing`` / ``--nets`` / ``--complete``.  Each
+       ``Segment`` becomes its axis-aligned bbox padded by
+       ``width / 2 + trace_clearance``; each ``Via`` a square of
+       ``diameter + clearance`` on every signal layer.
+
+    Copper **pours are deliberately excluded**: zones are never loaded into
+    the routing grid on the ``kct route`` path (pours are filled *after*
+    routing and flow around traces), so counting them would make the plan
+    stricter than the router it describes and report overflow the router
+    never experiences.
+
+    Args:
+        router: ``Autorouter`` or ``TwoPhaseRouter``.  Both hooks are read
+            with ``getattr``, so a caller exposing neither (a bare unit-test
+            router) simply contributes no blockage.
+
+    Returns:
+        List of ``(rect, layers)``; ``layers is None`` means "every signal
+        layer".
+    """
+    out: list[tuple[BlockageRect, list[int] | None]] = []
+
+    # --- 1. Keepout rule areas -------------------------------------------
+    provider = getattr(router, "_keepout_rule_area_polygons", None)
+    if callable(provider):
+        try:
+            areas = provider() or []
+        except Exception:  # defensive: a bad board must not fail the plan
+            areas = []
+        for area in areas:
+            polygon = getattr(area, "polygon", None)
+            if not polygon:
+                continue
+            xs = [float(p[0]) for p in polygon]
+            ys = [float(p[1]) for p in polygon]
+            layers = getattr(area, "layers", None)
+            out.append(
+                (
+                    (min(xs), min(ys), max(xs), max(ys)),
+                    sorted(layers) if layers else None,
+                )
+            )
+
+    # --- 2. Preserved copper ---------------------------------------------
+    routes = getattr(router, "existing_routes", None) or []
+    if routes:
+        grid = router.grid
+        clearance = float(router.rules.trace_clearance)
+        for route in routes:
+            for segment in getattr(route, "segments", ()):
+                pad = float(segment.width) / 2.0 + clearance
+                x_lo, x_hi = sorted((float(segment.x1), float(segment.x2)))
+                y_lo, y_hi = sorted((float(segment.y1), float(segment.y2)))
+                index = _segment_layer_index(grid, segment)
+                out.append(
+                    (
+                        (x_lo - pad, y_lo - pad, x_hi + pad, y_hi + pad),
+                        None if index is None else [index],
+                    )
+                )
+            for via in getattr(route, "vias", ()):
+                half = (float(via.diameter) + clearance) / 2.0
+                out.append(
+                    (
+                        (
+                            float(via.x) - half,
+                            float(via.y) - half,
+                            float(via.x) + half,
+                            float(via.y) + half,
+                        ),
+                        None,  # a via pierces the stack: block every signal layer
+                    )
+                )
+
+    return out
+
+
+def _register_blockage(region_graph: RegionGraph, router: Any) -> None:
+    """Feed :func:`collect_blockage_rects` into the graph, batched by layer set."""
+    grouped: dict[tuple[int, ...] | None, list[BlockageRect]] = {}
+    for rect, layers in collect_blockage_rects(router):
+        key = None if layers is None else tuple(layers)
+        grouped.setdefault(key, []).append(rect)
+    for key, rects in grouped.items():
+        region_graph.register_blockage_rects(rects, layers=None if key is None else list(key))
+
+
 def build_plan(
     router: Any,
     *,
@@ -756,6 +918,24 @@ def build_plan(
     num_cols = max(MIN_TILE_DIM, int(grid.width / tile_size))
     num_rows = max(MIN_TILE_DIM, int(grid.height / tile_size))
 
+    # Issue #5575: only non-PLANE layers advertise capacity.  ``grid.
+    # num_layers`` is still passed so the graph knows the stack depth, but
+    # capacity (and the GlobalRouter's round-robin layer choice) is
+    # confined to these indices.
+    plan_signal_layers = signal_layer_indices(grid.layer_stack)
+
+    # Issue #5575: per-class pitch.  ``Autorouter.net_class_map`` is keyed
+    # by net NAME, so the lambda resolves id -> name -> class; nets with no
+    # class entry fall back to the design-rule pitch (weight 1.0).
+    net_class_map = getattr(router, "net_class_map", None) or {}
+    net_names = router.net_names
+
+    def _pitch_for_net(net_id: int) -> float:
+        ncr = net_class_map.get(net_names.get(net_id, ""))
+        if ncr is None:
+            return float(trace_pitch)
+        return float(ncr.trace_width) + float(ncr.clearance)
+
     region_graph = RegionGraph(
         board_width=grid.width,
         board_height=grid.height,
@@ -765,17 +945,24 @@ def build_plan(
         num_rows=num_rows,
         trace_pitch=trace_pitch,
         num_layers=grid.num_layers,
+        signal_layer_indices=plan_signal_layers,
+        pitch_for_net=_pitch_for_net,
     )
 
     # Register pads as obstacles for blockage-aware capacity.
     region_graph.register_obstacles(list(router.pads.values()))
+    # Issue #5575: blockage beyond pads -- keepout rule areas and preserved
+    # copper.  Read-only with respect to the router (see
+    # ``collect_blockage_rects``); it only mutates the fresh RegionGraph.
+    _register_blockage(region_graph, router)
 
     if report is not None:
         stats = region_graph.get_statistics()
         report(
             f"  Tile grid: {num_cols}x{num_rows} "
             f"({stats['num_regions']} regions, {stats['num_edges']} edges, "
-            f"pitch={trace_pitch:.3f}mm, layers={grid.num_layers})"
+            f"pitch={trace_pitch:.3f}mm, signal layers={len(plan_signal_layers)}"
+            f"/{grid.num_layers})"
         )
 
     global_router = GlobalRouter(
