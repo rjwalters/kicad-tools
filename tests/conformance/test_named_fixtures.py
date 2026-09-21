@@ -268,7 +268,7 @@ _ADAPTERS_BY_NAME = {adapter.name: adapter for adapter in ADAPTERS}
 # fixture -> ((adapter name, adapter is expected to REJECT the pair), ...)
 #
 # Verbatim from each fixture's ``notes``, from #5533's acceptance criteria, and
-# -- for the eleven consumer groups #5515 (Phase 1c) wired -- from that phase's
+# -- for the fourteen consumer groups #5515 (Phase 1c) wired -- from that phase's
 # own measured run.  Epic #5509 Phase 1c's criterion is that each named fixture
 # lists its disagreeing consumers *by name*; this table is that listing, and
 # because the suite drives it, the listing cannot go stale silently.
@@ -284,6 +284,8 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # kernel, resolving the project's own 0.20 mm, agrees with kicad-cli.
     "issue5398-seg-via-0p18-order": (
         ("clearance_kernel", True),
+        ("diffpair", True),
+        ("lattice", False),
         ("grid_py", False),
         ("grid_cpp", False),
         ("via_clearance", False),
@@ -303,6 +305,8 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # languages, and the C++ disc-kernel read side does not rescue it.
     "issue5410-dqs-n-halo-vs-legal-via": (
         ("clearance_kernel", False),
+        ("diffpair", False),
+        ("lattice", False),
         ("occupancy", True),
         ("grid_cpp_marking", True),
         ("cpp_blocked_kernel", True),
@@ -319,6 +323,8 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # commit gates accept.
     "search-vs-commit-seg-via-max": (
         ("clearance_kernel", False),
+        ("diffpair", True),
+        ("lattice", False),
         ("route_halo", True),
         ("route_geometry_cpp", True),
         ("grid_py", False),
@@ -339,6 +345,8 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # and so does the kernel; the raster-based rows reject it.
     "roundrect-corner-gap": (
         ("clearance_kernel", False),
+        ("diffpair", True),
+        ("mesh", True),
         ("grid_cpp", True),
         ("grid_py", True),
         ("occupancy", True),

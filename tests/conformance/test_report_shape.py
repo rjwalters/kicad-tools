@@ -186,15 +186,15 @@ def test_adapters_are_registered_for_the_wired_groups() -> None:
     Succeeds ``test_phase_1a_registers_no_adapters`` (#5513 / PR #5532), which
     pinned ``ADAPTERS == ()`` while only the truth side existed, and the
     five-group pin that replaced it in #5533.  Each was a *phase* assertion:
-    Phase 1c wires eleven more consumer groups plus the Phase 1b kernel, and
-    the remaining four (7-10) are stated gaps.
+    Phase 1c wires fourteen more consumer groups plus the Phase 1b kernel,
+    leaving group 7 -- an unexposed C++ lambda -- as the sole stated gap.
 
     The invariant the original test really protected -- that the harness does
     not import the code it measures -- is unchanged and still enforced, one
     test down, by ``test_truth_side_does_not_import_the_code_it_measures``.
     """
     consumer_groups = {adapter.group for adapter in ADAPTERS} - {KERNEL_GROUP}
-    assert consumer_groups == {1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+    assert consumer_groups == {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
     assert consumer_groups | set(NOT_MEASURED_REASONS) == {g.number for g in GROUPS}, (
         "every group is either wired or has a stated reason -- no group may be both or neither"
     )

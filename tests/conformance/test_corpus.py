@@ -49,11 +49,14 @@ _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 CI_SEEDS = (0, 1, 2)
 
 # The Epic #5509 section-1 groups Phase 1c leaves unmeasured, with their
-# reasons recorded in ``report.NOT_MEASURED_REASONS``: 7 is unexposed (a
-# lambda inside the C++ coupled search), and 8-10 need engine plumbing
-# (``Autorouter`` + ``DiffPairRouter``, ``LatticePathfinder.from_board``,
-# ``MeshPathfinder.from_board``) that is this phase's deferred slice.
-UNWIRED_GROUPS = {7, 8, 9, 10}
+# reasons recorded in ``report.NOT_MEASURED_REASONS``.  Exactly one: group 7's
+# ``CoupledPathfinder::rail_clear`` is a lambda inside the C++ coupled search
+# loop, so no Python entry point exists to wrap.  That is the single
+# *unexposed* entry the epic's acceptance criterion permits, and keeping this
+# set a literal ``{7}`` is what makes "only one" a test rather than a claim --
+# wiring a group without removing it here, or losing a group's adapter, both
+# fail ``test_adapters_cover_the_wired_groups``.
+UNWIRED_GROUPS = {7}
 
 # Every group row the table measures, plus the Phase 1b kernel's control row.
 WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GROUP}

@@ -21,6 +21,9 @@ module                     group  consumer
 ``route_halo``               4    ``RouteHaloGeometry.clear`` refinement
 ``route_geometry_cpp``       5    ``Grid3D::route_*_geometry_clear``
 ``fixed_copper``             6    ``FixedFillObstacles`` + ``fixed_fill_clear``
+``diffpair``                 8    the coupled constructor's three gates
+``lattice``                  9    ``CommittedCopper.seg_clear`` / ``via_clear``
+``mesh``                    10    ``ObstacleModel.is_clear`` (per-leg consult)
 ``via_clearance``           11    ``via_clearance.py``'s four pure predicates
 ``grid_py``                 12    Python commit gate (``validate_*_clearance``)
 ``grid_cpp``                13    C++ commit gate (``Grid3D::validate_route``)
@@ -33,8 +36,11 @@ module                     group  consumer
 ``kernel``                   0    the Phase 1b kernel -- the **control** row
 =========================  =====  ==============================================
 
-Groups 7-10 have no adapter; ``report.NOT_MEASURED_REASONS`` states why for
-each, and the table renders that reason in its ``notes`` column.  The kernel's
+Group 7 is the only group with no adapter -- ``CoupledPathfinder::rail_clear``
+is a lambda inside the C++ coupled search loop and is unreachable from Python.
+``report.NOT_MEASURED_REASONS`` states that, and the table renders it in the
+``notes`` column; ``test_corpus.UNWIRED_GROUPS`` pins it to exactly that one
+group.  The kernel's
 ``group`` is the :data:`~tests.conformance.adapters.kernel.KERNEL_GROUP`
 sentinel ``0``: it is not one of the epic's nineteen consumer groups, it is the
 model they are to be unified onto, so it renders in its own section.

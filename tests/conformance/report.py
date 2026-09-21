@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tests.conformance.adapters import ConsumerAdapter
+from tests.conformance.adapters.diffpair import DiffPairAdapter
 from tests.conformance.adapters.drc_cpp import DrcCppAdapter
 from tests.conformance.adapters.drc_nudge import DrcNudgeAdapter
 from tests.conformance.adapters.fixed_copper import FixedCopperAdapter
@@ -63,7 +64,9 @@ from tests.conformance.adapters.grid_cpp_occupancy import (
 from tests.conformance.adapters.grid_py import GridPyAdapter
 from tests.conformance.adapters.kct_check import KctCheckAdapter
 from tests.conformance.adapters.kernel import KERNEL_GROUP, KernelAdapter
+from tests.conformance.adapters.lattice import LatticeAdapter
 from tests.conformance.adapters.match_group import MatchGroupAdapter
+from tests.conformance.adapters.mesh import MeshAdapter
 from tests.conformance.adapters.occupancy import OccupancyAdapter
 from tests.conformance.adapters.optimizer import OptimizerCollisionAdapter
 from tests.conformance.adapters.pairwise import PairwiseAdapter
@@ -277,6 +280,9 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
     RouteHaloAdapter(),
     RouteGeometryCppAdapter(),
     FixedCopperAdapter(),
+    DiffPairAdapter(),
+    LatticeAdapter(),
+    MeshAdapter(),
     ViaClearanceAdapter(),
     GridPyAdapter(),
     GridCppAdapter(),
@@ -290,11 +296,9 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 
 
 # Why a group has no adapter.  A bare ``not measured`` is indistinguishable
-# from "nobody looked"; every gap here states which of three kinds it is --
-# *unexposed* (no Python entry point at all, and by the epic's acceptance
-# criterion group 7 is the only one permitted), *needs engine plumbing* (a
-# measurable consumer whose construction is this phase's deferred slice), or
-# *out of corpus scope*.
+# from "nobody looked"; every gap here states its kind.  Group 7 is the only
+# entry, and it is the *unexposed* kind -- no Python entry point exists at all,
+# which is exactly the one exception the epic's acceptance criterion permits.
 NOT_MEASURED_REASONS: dict[int, str] = {
     7: (
         "**unexposed**: `CoupledPathfinder::rail_clear` "
@@ -302,27 +306,6 @@ NOT_MEASURED_REASONS: dict[int, str] = {
         "loop -- not a method, so `bindings.cpp` cannot reach it and no Python "
         "caller exists. Measured in its own Phase 3 PR, which can add the "
         "binding; this phase adds no C++."
-    ),
-    8: (
-        "**needs engine plumbing**: `_segment_cells_clear` "
-        "(`diffpair_routing.py:4505`) takes the *Python* `CoupledPathfinder`, "
-        "and `_segment_pad_clear` / `_route_via_clear` read "
-        "`self.autorouter.grid`, so the row needs a live `Autorouter` + "
-        "`DiffPairRouter`. Deferred with groups 9/10 to this phase's PR B "
-        "(see the PR description)."
-    ),
-    9: (
-        "**needs engine plumbing**: `LatticeObstacleModel` "
-        "(`lattice/obstacles.py:583`) is built by "
-        "`LatticePathfinder.from_board` and keys nets by integer id. Deferred "
-        "to this phase's PR B."
-    ),
-    10: (
-        "**needs engine plumbing**: `ObstacleModel.is_clear` "
-        "(`mesh/obstacles.py:118`) is built by `MeshPathfinder.from_board` and "
-        "sees fixed fills, the outline and keepouts only -- no routed copper "
-        "and no pads, so its scope is seg-vs-zone / seg-vs-edge, which needs a "
-        "zone or edge pair kind. Deferred to this phase's PR B."
     ),
 }
 
@@ -356,6 +339,46 @@ NOTES: dict[int, str] = {
         "reference model, so the row measures group 6's arithmetic, not a "
         "harness approximation."
     ),
+    8: (
+        "Three gates in series (`_segment_cells_clear` raster walk through the "
+        "**Python** `CoupledPathfinder._is_cell_blocked`, the #4571 exact "
+        "`_segment_pad_clear`, the #4575 `_route_via_clear`); flagged when any "
+        "refuses. The via gate is driven inside the consumer's own "
+        "`_shadow_foreign_copper` context manager -- outside it "
+        "`_shadow_foreign_universe` is `None` and the gate short-circuits to "
+        "`(0.0, None)`, so an unarmed run would have reported a confident zero "
+        "for a third of this row. **Not measured**: "
+        "`find_intra_pair_clearance_violations` (`diffpair_routing.py:1198`) "
+        "scores a P/N pair against *itself*, and this corpus declares no diff "
+        "pairs -- every object carries its own independent net so a kicad-cli "
+        "row maps onto a pair by net alone."
+    ),
+    9: (
+        "`CommittedCopper.seg_clear` / `via_clear` -- the epic's `:583` / "
+        "`:709` citations land on `CommittedCopper`, not "
+        "`LatticeObstacleModel`, so the row needs no board file and no "
+        "`from_board`: the five derived gap values are copied from the model's "
+        "one production call site (`lattice/pathfinder.py:252-258`, `:460`). "
+        "Routed copper only -- none of the three predicates consults a pad "
+        "(pad keep-outs gate *site availability* on "
+        "`LatticeObstacleModel.node_pads`, which is group 9's masking half, not "
+        "its clearance arithmetic). Centreline answers, so no mm gap is "
+        "reported. `pairwise` left `None`, the only path reachable without "
+        "`--voltage-map` (Phase 2's corpus)."
+    ),
+    10: (
+        "`ObstacleModel.is_clear`, constructed directly as "
+        "`mesh/pathfinder.py:303-313` does: other-net pads as keep-out rects "
+        "inflated by the agent radius, committed traces as capsule polygons "
+        "inflated by a **full** `trace_width + clearance` (`_route_obstacles`' "
+        "own over-approximation, square end-caps included). Seg-candidate "
+        "pairs only -- `is_clear(a, b)` takes two points and no width, and a "
+        "committed via is not in this model at all (`_route_via_injection` "
+        "handles those). `fixed_fills` left `None`: group 6 already measures "
+        "`FixedFillObstacles` on both its halves. **Not measured**: the `pours` "
+        "zone branch and the `outline` containment branch need a zone and an "
+        "edge pair kind, which the generator does not place -- tracked as #5644."
+    ),
     11: (
         "`via_clearance.py`'s four pure predicates. **Not measured**: "
         "`subgrid.py:550 _min_clearance_to_neighbors` and `:1063 "
@@ -385,8 +408,10 @@ NOTES: dict[int, str] = {
     16: (
         "**Not measured**: `_post_insertion_clearance_detail_pair_group` "
         "(`match_group_tuning.py:2404`) needs a mirrored diff-pair candidate "
-        "with declared P/N net ids -- the diff-pair slice (group 8) has that "
-        "geometry."
+        "with declared P/N net ids, which the generator does not place. Group "
+        "8's row does not close this: it drives the coupled *constructor's* "
+        "gates over ordinary pairs, so the missing ingredient is a corpus pair "
+        "kind, not a live `DiffPairRouter`."
     ),
     17: (
         "The destination gate's foreign-via clearance check. **Not measured**: "
@@ -401,8 +426,9 @@ NOTES: dict[int, str] = {
         "One scalar `min_clearance_mm` for every pair, so it cannot reproduce "
         "groups 12/13's order asymmetry. **Not measured**: "
         "`SegmentZoneClearanceRule` / `ViaZoneClearanceRule` / "
-        "`physical_gap.py` / `EdgeClearanceRule` need zone and edge pair kinds "
-        "on refilled runs -- this phase's PR B."
+        "`physical_gap.py` / `EdgeClearanceRule` need a zone and an edge pair "
+        "kind on refilled runs, which the generator does not place -- tracked "
+        "as #5644."
     ),
     19: (
         "Every pad is a disc of `max(w, h) / 2` "

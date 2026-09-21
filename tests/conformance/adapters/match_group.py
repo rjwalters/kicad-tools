@@ -25,9 +25,11 @@ under this harness's via-first order.
 The paired sibling ``_post_insertion_clearance_detail_pair_group``
 (``:2404``) needs a *pair* of mirrored candidate segments with declared P/N
 net ids -- a diff-pair candidate the generator does not place -- so it is
-recorded as a ``not measured`` sub-note on this row and belongs to the
-diff-pair slice (Epic #5509 group 8, this phase's PR B) that already builds
-coupled geometry.
+recorded as a ``not measured`` sub-note on this row.  Note that group 8's
+``diffpair`` adapter does **not** close it either: that row drives the coupled
+*constructor's* gates over ordinary corpus pairs, and the missing ingredient
+here is a declared P/N candidate in the **generator**, not a live
+``DiffPairRouter``.
 """
 
 from __future__ import annotations
