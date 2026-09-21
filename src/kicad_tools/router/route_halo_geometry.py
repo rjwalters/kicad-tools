@@ -17,6 +17,13 @@ if TYPE_CHECKING:
     from .primitives import Segment, Via
 
 
+#: Reject nearby copper by an axis-aligned bounding-box gap before paying for
+#: the exact GEOS distance (issue #5240). Kept as a module-level switch so the
+#: exhaustive pre-#5240 scan stays reachable as a test oracle; flipping it off
+#: must never change a verdict, only the amount of work done to reach it.
+_PRUNE_BY_BOUNDS = True
+
+
 class RouteHaloGeometry:
     """A conservative mark is refinable only when its actual copper is known.
 
@@ -33,6 +40,9 @@ class RouteHaloGeometry:
         self._complete = False
         self._cells = np.zeros((0, 0, 0), dtype=np.int32)
         self._objects: list[tuple] = []
+        # Axis-aligned (minx, miny, maxx, maxy) of each object's centreline,
+        # parallel to ``_objects`` -- the prune's lower-bound input.
+        self._bounds: list[tuple[float, float, float, float]] = []
         self._bins: dict[tuple[int, int], set[int]] = defaultdict(set)
 
     def segment_key(self, seg: Segment) -> tuple:
@@ -67,6 +77,7 @@ class RouteHaloGeometry:
             return
         self._generation = self.grid.occupancy_generation
         self._objects = []
+        self._bounds = []
         self._bins.clear()
         registered = set()
         for route in self.grid.routes:
@@ -84,6 +95,7 @@ class RouteHaloGeometry:
         )
         for index, (_, shape, half) in enumerate(self._objects):
             x1, y1, x2, y2 = shape.bounds
+            self._bounds.append((x1, y1, x2, y2))
             for bucket in self._bins_in((x1 - half, y1 - half, x2 + half, y2 + half)):
                 self._bins[bucket].add(index)
         net_plane = to_numpy(self.grid._net)
@@ -154,11 +166,17 @@ class RouteHaloGeometry:
             return False
         is_trace = isinstance(candidate, Segment)
         if is_trace:
-            shape = LineString(((candidate.x1, candidate.y1), (candidate.x2, candidate.y2)))
+            cax, cay = candidate.x1, candidate.y1
+            cbx, cby = candidate.x2, candidate.y2
             half = candidate.width / 2
             layer = candidate.layer
         else:
-            shape, half, layer = Point(candidate.x, candidate.y), candidate.diameter / 2, None
+            cax = cbx = candidate.x
+            cay = cby = candidate.y
+            half, layer = candidate.diameter / 2, None
+        # Built on first use: a call whose neighbours are all pruned below
+        # never needs a shapely geometry at all.
+        shape = None
         names = router._route_halo_names
         own_name = names.get(candidate.net, "")
         nc = router._halo_net_class(candidate.net)
@@ -178,12 +196,13 @@ class RouteHaloGeometry:
             router.rules.min_hole_to_hole,
             router.rules.min_drill_clearance,
         )
-        x1, y1, x2, y2 = shape.bounds
+        x1, x2 = (cax, cbx) if cax <= cbx else (cbx, cax)
+        y1, y2 = (cay, cby) if cay <= cby else (cby, cay)
         indices: set[int] = set()
         for bucket in self._bins_in((x1 - margin, y1 - margin, x2 + margin, y2 + margin)):
             indices.update(self._bins.get(bucket, ()))
         for index in sorted(indices):
-            other, other_shape, _ = self._objects[index]
+            other, other_shape, other_radius = self._objects[index]
             other_trace = isinstance(other, Segment)
             same_net = other.net == candidate.net
             if is_trace and same_net:
@@ -199,6 +218,30 @@ class RouteHaloGeometry:
                     <= indices_span[-1]
                 ):
                     continue
+            if _PRUNE_BY_BOUNDS:
+                # Conservative axis-aligned reject. Both ``return False``
+                # branches below need ``distance`` under some threshold, and
+                # every one of those thresholds is bounded by
+                # ``margin + other_radius``:
+                #   * ``half``/``candidate.drill / 2`` <= ``radius`` and every
+                #     ``required``/``floor`` term (scalar, partner, pairwise
+                #     ``widen``, via, hole-to-hole, drill) is inside the
+                #     ``max(...)`` ``margin`` was built from, so
+                #     ``half + required <= margin``;
+                #   * ``other.width / 2`` / ``other.diameter / 2`` /
+                #     ``other.drill / 2`` are all <= ``other_radius``.
+                # The gap between two bounding boxes is a lower bound on the
+                # distance between the geometries inside them, so a box gap at
+                # or above that limit proves neither branch can fire -- without
+                # measuring the exact distance.
+                obx1, oby1, obx2, oby2 = self._bounds[index]
+                gapx = obx1 - x2 if obx1 > x2 else (x1 - obx2 if x1 > obx2 else 0.0)
+                gapy = oby1 - y2 if oby1 > y2 else (y1 - oby2 if y1 > oby2 else 0.0)
+                limit = margin + other_radius
+                if gapx * gapx + gapy * gapy >= limit * limit:
+                    continue
+            if shape is None:
+                shape = LineString(((cax, cay), (cbx, cby))) if is_trace else Point(cax, cay)
             distance = shape.distance(other_shape)
             if not is_trace and not other_trace:
                 if (
