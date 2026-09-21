@@ -22,12 +22,22 @@ from pathlib import Path
 TOKEN = "KCT_NATIVE_OBSERVER_TOKEN"
 OUTPUT = "KCT_NATIVE_OBSERVER_OUTPUT"
 
+#: Kept in exact agreement with
+#: ``kicad_tools.native_concurrency._CAPABILITY_PROBE_FLAGS`` by
+#: ``tests/test_native_concurrency.py`` (Issue #5603) -- a ``--help``/
+#: ``--version`` invocation never loads a board and is not gated by the
+#: concurrency permit, so it must not be classified into the same bucket
+#: as a real board-loading launch here either.
+_CAPABILITY_PROBE_FLAGS = frozenset({"--help", "--version"})
+
 
 def category(argv):
     """Classify without persisting user-controlled command text or paths."""
     words = [os.fsdecode(x) for x in argv] if isinstance(argv, (list, tuple)) else []
     executable = Path(words[0]).name if words else ""
     if executable == "kicad-cli":
+        if not _CAPABILITY_PROBE_FLAGS.isdisjoint(words[1:]):
+            return "kicad-cli-probe"
         return "kicad-cli"
     if executable.startswith("python"):
         if any(Path(x).name == "_fixed_fill_worker.py" for x in words[1:]):

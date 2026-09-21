@@ -211,6 +211,19 @@ def test_install_does_not_patch_subprocess_when_unconfigured(tmp_path):
         (["kicad-cli-wrapper"], False),
         ([], False),
         ("kicad-cli pcb drc", False),
+        # Capability/version probes never load a board (Issue #5603): they
+        # must not take a permit sized for real board-loading launches.
+        (["kicad-cli", "pcb", "drc", "--help"], False),
+        (["kicad-cli", "pcb", "fill-zones", "--help"], False),
+        (["/opt/kicad/bin/kicad-cli", "--version"], False),
+        # "version" (no dashes) is a real subcommand, not the "--version"
+        # flag, and a launch that also names a board must still be gated
+        # even if some other flag happens to be present.
+        (["/opt/kicad/bin/kicad-cli", "version"], True),
+        (
+            ["kicad-cli", "pcb", "drc", "--output", "report.json", "board.kicad_pcb"],
+            True,
+        ),
     ],
 )
 def test_native_classification(argv, native):
@@ -228,10 +241,32 @@ def test_classification_matches_the_independent_observer():
         ["python3", "-c", "pass"],
         ["uv", "run", "pytest"],
         ["git", "status"],
+        ["kicad-cli", "pcb", "drc", "--help"],
+        ["kicad-cli", "pcb", "fill-zones", "--help"],
+        ["/opt/kicad/bin/kicad-cli", "--version"],
     ]
     for argv in cases:
         expected = observer.category(argv) in ("kicad-cli", "kicad-python-fill")
         assert native_concurrency.is_native_launch(argv) is expected, argv
+
+
+def test_capability_probe_category_is_distinct_from_native_categories():
+    """The observer must bucket probes out of the analyzer's NATIVE_CATEGORIES.
+
+    ``scripts/ci/analyze_native_observations.py``'s memory/simulate-bound
+    analysis filters on ``category in NATIVE_CATEGORIES`` (currently
+    ``("kicad-cli", "kicad-python-fill")``); a probe that stayed classified
+    as plain ``"kicad-cli"`` would keep counting toward that population even
+    though it no longer takes a permit.
+    """
+    observer = _load_observer_module()
+    analyzer = _load_analyzer_module()
+    assert observer.category(["kicad-cli", "pcb", "drc", "--help"]) == "kicad-cli-probe"
+    assert observer.category(["kicad-cli", "--version"]) == "kicad-cli-probe"
+    assert "kicad-cli-probe" not in analyzer.NATIVE_CATEGORIES
+    # A real launch is unaffected and stays in both places.
+    assert observer.category(["kicad-cli", "pcb", "drc", "board.kicad_pcb"]) == "kicad-cli"
+    assert "kicad-cli" in analyzer.NATIVE_CATEGORIES
 
 
 def test_executable_keyword_is_classified(tmp_path):
@@ -284,6 +319,36 @@ def test_non_native_launch_is_never_gated(tmp_path, monkeypatch):
         with native_concurrency._GatedPopen([sys.executable, "-c", "pass"]) as child:
             child.wait(timeout=30)
         assert child.returncode == 0
+        assert time.monotonic() - started < 10
+    finally:
+        for handle in handles:
+            handle.close()
+
+
+def test_capability_probe_launch_is_never_gated(fake_native, tmp_path, monkeypatch):
+    """A ``kicad-cli --help``-shaped launch must not wait behind a full pool.
+
+    Issue #5603: probes never load a board, so serialising them behind the
+    permit sized for real launches wastes wall-clock time on work that could
+    have run immediately. ``fake_native`` is literally named ``kicad-cli``,
+    so this exercises the same classifier branch a real ``--help`` probe
+    would hit, not a substitute for it.
+    """
+    slots = tmp_path / "slots"
+    handles = _hold_every_slot(slots, 1)
+    try:
+        monkeypatch.setenv(native_concurrency.ENV_LIMIT, "1")
+        monkeypatch.setenv(native_concurrency.ENV_SLOT_DIR, str(slots))
+        monkeypatch.delenv(native_concurrency.ENV_HELD, raising=False)
+        monkeypatch.setenv("FAKE_NATIVE_LOG", str(tmp_path / "probe.log"))
+        monkeypatch.setenv("FAKE_NATIVE_HOLD", "0.05")
+        started = time.monotonic()
+        with native_concurrency._GatedPopen([str(fake_native), "--help"]) as child:
+            child.wait(timeout=30)
+        assert child.returncode == 0
+        # Every slot is held for the whole test; a gated launch would block
+        # for the full ``KCT_NATIVE_SLOT_WAIT_SECONDS`` fail-open ceiling
+        # (120s default) instead of returning almost immediately.
         assert time.monotonic() - started < 10
     finally:
         for handle in handles:
