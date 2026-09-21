@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-21
+
+### Summary
+
+Development since `v0.20.0`: router convergence and reliability work
+(stagnation-recovery congestion marking, C++ pathfinder resume-loop fixes,
+per-connection avoidance cleanup by default), zone pour determinism and
+same-layer fairness, through-hole pad and barrel reuse in pour-bridge
+repair, the first phases of the pad-access and clearance-kernel epics
+(ordered commit journal + per-pad access witness; exact-geometry clearance
+kernel with C++/Python parity), frame-independent board07 pour repair with
+native-refill stability, a broad measured performance sweep across the
+router/validator/CLI hot paths, and board06/07 recipe and CI
+qualification advances.
+
+**Breaking (for `[mcp]` extra users):** the MCP server now requires the
+mcp 2.x SDK — `mcp.server.fastmcp.FastMCP` was renamed to
+`mcp.server.mcpserver.MCPServer` — with the `fastmcp` pin raised to
+`>=4,<5` (#5601). In-process API callers using the stdio `MCPServer`
+dataclass are unaffected.
+
 - **Routing, validation and CLI hot-path performance sweep** (#5240, with
   #5070, #5429, #5465, #5467, #5469, #5471) — systematic removal of
   measured hot-path overhead across the router, validator, placement and
