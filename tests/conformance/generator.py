@@ -227,15 +227,28 @@ class ZoneSpec:
 
 
 class PairKind:
-    """The close-pair shapes the generator knows how to place analytically."""
+    """The close-pair shapes the generator knows how to place analytically.
+
+    :attr:`ROUTING` is the subset whose second object is something a router
+    could *propose* -- a segment or a via.  ``PAD_PAD`` is not: two pads are
+    placement output, and the only in-tree consumer that answers a pad-vs-pad
+    question is the incremental placement DRC (Epic #5509 group 19,
+    ``drc/cpp_backend.py check_pair_clearance_cpp``), which takes two whole
+    footprints and nothing else.  Keeping the split explicit is what lets
+    every router-side adapter default to :data:`ROUTING` (via
+    ``_support.ALL_PAIR_KINDS``) and be scored only on pairs it is really
+    consulted for.
+    """
 
     SEG_SEG = "seg-seg"
     SEG_VIA = "seg-via"
     VIA_VIA = "via-via"
     PAD_SEG = "pad-seg"
     PAD_VIA = "pad-via"
+    PAD_PAD = "pad-pad"
 
-    ALL = (SEG_SEG, SEG_VIA, VIA_VIA, PAD_SEG, PAD_VIA)
+    ROUTING = (SEG_SEG, SEG_VIA, VIA_VIA, PAD_SEG, PAD_VIA)
+    ALL = (*ROUTING, PAD_PAD)
 
 
 @dataclass(frozen=True)
@@ -566,6 +579,42 @@ class _CaseBuilder:
         )
         self._record(PairKind.PAD_VIA, pad.net, net_via, gap, required)
 
+    def add_pad_pad(self, centre: tuple[float, float], layer: str) -> None:
+        """Two pads facing each other at an exactly-known copper gap.
+
+        The only pair kind whose *both* objects are static placement copper.
+        It exists for Epic #5509 group 19 (``drc/cpp_backend.py``
+        ``check_pair_clearance_cpp``), whose entry point takes two whole
+        footprints and therefore cannot be measured on any other kind.
+
+        **Both pads are rotated, but anti-parallel.**  The gap is realised
+        along the first pad's local ``+X`` axis, where every shape in
+        :data:`PAD_SHAPES` has support ``w / 2`` (see
+        :attr:`PadShape.half_extent_x`).  Giving the second pad
+        ``rotation + 180`` points *its* local ``+X`` back along the same axis,
+        so its support towards the first pad is ``w / 2`` as well and the
+        edge-to-edge gap is exactly ``gap`` -- for any drawn rotation.  Both
+        facing extremities are centred on that axis, so no corner of either
+        pad comes closer than its own mid-edge / apex does.
+        """
+        del layer  # pads are on F.Cu
+        required = self.rules.project_clearance
+        gap = _draw_gap(self.rng, required)
+        pad_a = self._place_pad(centre)
+        ux, uy = pad_a.local_x_axis()
+        shape_b = self.rng.choice(PAD_SHAPES)
+        d = pad_a.shape.half_extent_x + gap + shape_b.half_extent_x
+        pad_b = PadSpec(
+            net=self.next_net(),
+            reference=self.next_pad_ref(),
+            footprint=shape_b.name,
+            x=round(pad_a.x + ux * d, 6),
+            y=round(pad_a.y + uy * d, 6),
+            rotation=round((pad_a.rotation + 180.0) % 360.0, 3),
+        )
+        self.pads.append(pad_b)
+        self._record(PairKind.PAD_PAD, pad_a.net, pad_b.net, gap, required)
+
 
 _PAIR_PLACERS = {
     PairKind.SEG_SEG: ("add_seg_seg", 2, 0, 0),
@@ -573,6 +622,7 @@ _PAIR_PLACERS = {
     PairKind.VIA_VIA: ("add_via_via", 0, 2, 0),
     PairKind.PAD_SEG: ("add_pad_seg", 1, 0, 1),
     PairKind.PAD_VIA: ("add_pad_via", 0, 1, 1),
+    PairKind.PAD_PAD: ("add_pad_pad", 0, 0, 2),
 }
 
 # Object-count envelope from the phase spec: 2-6 segments, 1-3 vias, 1-2 pads.

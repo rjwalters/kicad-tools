@@ -9,18 +9,35 @@ package, ``import kicad_tools.router`` / ``import kicad_tools.validate`` is
 exactly the point.
 
 *This module itself* still imports no consumer: it holds only the vocabulary
-(:class:`Verdict`) and the contract (:class:`ConsumerAdapter`).  The five
-concrete adapters live in sibling modules:
+(:class:`Verdict`) and the contract (:class:`ConsumerAdapter`).  The concrete
+adapters live in sibling modules:
 
-===============  =====  ==========================================
-module           group  consumer
-===============  =====  ==========================================
-``occupancy``      1    Python grid occupancy (halo cell marking)
-``route_halo``     4    ``RouteHaloGeometry.clear`` refinement
-``grid_py``       12    Python commit gate (``validate_*_clearance``)
-``grid_cpp``      13    C++ commit gate (``Grid3D::validate_route``)
-``kct_check``     18    ``kct check``'s ``ClearanceRule``
-===============  =====  ==========================================
+=========================  =====  ==============================================
+module                     group  consumer
+=========================  =====  ==============================================
+``occupancy``                1    Python grid occupancy (halo cell marking)
+``grid_cpp_occupancy``       2    C++ ``mark_segment`` / ``mark_via`` (write side)
+``grid_cpp_occupancy``       3    C++ ``is_trace_blocked`` disc kernel (read side)
+``route_halo``               4    ``RouteHaloGeometry.clear`` refinement
+``route_geometry_cpp``       5    ``Grid3D::route_*_geometry_clear``
+``fixed_copper``             6    ``FixedFillObstacles`` + ``fixed_fill_clear``
+``via_clearance``           11    ``via_clearance.py``'s four pure predicates
+``grid_py``                 12    Python commit gate (``validate_*_clearance``)
+``grid_cpp``                13    C++ commit gate (``Grid3D::validate_route``)
+``pairwise``                14    ``PairwiseClearanceTable.path_is_clear``
+``optimizer``               15    optimizer ``*CollisionChecker.path_is_clear``
+``match_group``             16    ``match_group_tuning`` post-insertion detail
+``drc_nudge``               17    ``drc_nudge``'s destination foreign-via gate
+``kct_check``               18    ``kct check``'s ``ClearanceRule``
+``drc_cpp``                 19    incremental placement ``check_pair_clearance``
+``kernel``                   0    the Phase 1b kernel -- the **control** row
+=========================  =====  ==============================================
+
+Groups 7-10 have no adapter; ``report.NOT_MEASURED_REASONS`` states why for
+each, and the table renders that reason in its ``notes`` column.  The kernel's
+``group`` is the :data:`~tests.conformance.adapters.kernel.KERNEL_GROUP`
+sentinel ``0``: it is not one of the epic's nineteen consumer groups, it is the
+model they are to be unified onto, so it renders in its own section.
 
 Each drives an **unmodified** consumer through
 :mod:`tests.conformance.adapters._support`, which is the single translation

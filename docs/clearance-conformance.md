@@ -10,9 +10,11 @@ Epic [#5509](https://github.com/rjwalters/kicad-tools/issues/5509) (*one clearan
 
 ## Status
 
-5 of 19 consumer groups are wrapped by an adapter and measured below (groups 1, 4, 12, 13, 18). The rest read `not measured`.
+15 of 19 consumer groups are wrapped by an adapter and measured below (groups 1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16, 17, 18, 19). The rest read `not measured`.
 
 Each adapter drives an **unmodified** consumer: no rule value, heuristic or consumer was changed to produce these numbers. Two things shape the denominators and are worth reading before the percentages. First, a consumer is only compared on the pair kinds it is actually consulted for in production (`ConsumerAdapter.pair_kinds`) -- the route-halo refinement, for instance, never sees pad copper, so pad pairs are out of its scope rather than counted against it. Second, the commit gates are measured under one named insertion order, **via-first**; #5398 is the observation that the other order gives a different answer for the same two objects, and the `issue5398-seg-via-0p18-order` fixture is where that is recorded.
+
+Every group that is still `not measured` carries its reason in the `notes` column, and so does every group that *is* measured but whose entry-point list this phase could not cover in full. A bare "not measured" reads the same as "nobody looked"; naming the gap is what keeps the next phase honest about what it inherits.
 
 ## How to read the table
 
@@ -20,46 +22,63 @@ Each adapter drives an **unmodified** consumer: no rule value, heuristic or cons
 - **under-reject** -- the consumer accepts a pair kicad-cli flags. This is the failure mode that makes a route "complete" and then fail the final DRC gate (#5398, #3803).
 - **boundary** -- pairs whose gap is within 1 um of the requirement. Counted separately and never as a disagreement: at that distance the two models are arguing about rounding, not about geometry (kct's `CLEARANCE_EPSILON_MM` is 1e-4 mm; KiCad works in integer nanometres).
 - **fill state** -- whether zones were refilled (`kicad-cli pcb drc --refill-zones`) before measuring. Zone verdicts are only meaningful against fresh fills, so they are dropped from unrefilled runs.
-- **not measured** -- no adapter wraps that consumer yet. The row is kept rather than omitted: an omitted row reads as "agrees", and we do not know that.
+- **not measured** -- no adapter wraps that consumer yet. The row is kept rather than omitted: an omitted row reads as "agrees", and we do not know that. The `notes` column says *why* in every case.
+- **notes** -- for a measured row, the sub-entry-points the row does **not** cover, so the percentage cannot imply more coverage than it has. For an unmeasured row, the reason.
 
 ## Conformance by consumer group
 
 Groups are Epic #5509 section 1's inventory of implementations that carry their own clearance arithmetic (19 of them, across two native extensions and Python).
 
 <!-- clearance-conformance:table:begin -->
-| adapter | corpus (seed range) | over-reject % | under-reject % | boundary | fill state |
-|---|---|---|---|---|---|
-| 1. Python grid halo marking — `occupancy` | 200 cases (seeds 0-199) | 53.2% (634/1192) | 0.0% (0/1192) | 0 | as-is, refilled |
-| 2. C++ grid halo marking — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 3. C++ A* blocked-cell kernel — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 4. Python route-halo geometry — `route_halo` | 200 cases (seeds 0-199) | 0.0% (0/840) | 16.0% (134/840) | 0 | as-is, refilled |
-| 5. C++ route geometry — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 6. Fixed-copper predicate — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 7. C++ coupled rail check — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 8. Python coupled / diff-pair predicates — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 9. Lattice engine obstacles — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 10. Mesh engine obstacles — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 11. Escape router / stitcher — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 12. Python commit gate — `grid_py` | 200 cases (seeds 0-199) | 0.0% (0/1192) | 44.6% (532/1192) | 0 | as-is, refilled |
-| 13. C++ commit gate — `grid_cpp` | 200 cases (seeds 0-199) | 0.0% (0/1192) | 44.6% (532/1192) | 0 | as-is, refilled |
-| 14. Pairwise net-class matrix — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 15. Optimizer collision checks — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 16. Match-group tuning — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 17. DRC nudge repair — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
-| 18. kct check ClearanceRule — `kct_check` | 200 cases (seeds 0-199) | 5.9% (70/1192) | 0.0% (0/1192) | 0 | as-is, refilled |
-| 19. Incremental placement DRC (drc_cpp) — *(no adapter)* | not measured | not measured | not measured | not measured | not measured |
+| adapter | corpus (seed range) | over-reject % | under-reject % | boundary | fill state | notes |
+|---|---|---|---|---|---|---|
+| 1. Python grid halo marking — `occupancy` | 200 cases (seeds 0-199) | 53.6% (626/1168) | 0.0% (0/1168) | 0 | as-is, refilled | Cell-set answer, so no mm gap is reported; square Chebyshev halo (#5410). |
+| 2. C++ grid halo marking — `grid_cpp_marking` | 200 cases (seeds 0-199) | 56.2% (460/818) | 0.0% (0/818) | 0 | as-is, refilled | Write side: `mark_segment` / `mark_via` square halo. Routed copper only -- the C++ grid never marks pads itself (`CppGrid.from_routing_grid` copies the Python blocked plane), so pad pairs would re-measure group 1. |
+| 3. C++ A* blocked-cell kernel — `cpp_blocked_kernel` | 200 cases (seeds 0-199) | 56.2% (460/818) | 0.0% (0/818) | 0 | as-is, refilled | Read side: the Euclidean-disc acceptance kernel (#3229), narrower than group 2's square by construction. Via candidates go through the sibling `is_via_blocked`. |
+| 4. Python route-halo geometry — `route_halo` | 200 cases (seeds 0-199) | 0.0% (0/818) | 14.2% (116/818) | 0 | as-is, refilled | Raises the requirement to `max(required, via_clearance)` for trace-vs-via. |
+| 5. C++ route geometry — `route_geometry_cpp` | 200 cases (seeds 0-199) | 0.0% (0/818) | 14.2% (116/818) | 0 | as-is, refilled | Measures the `Grid3D` predicate; the `Pathfinder` wrappers (`trace_halo_cell_clear`, `via_route_geometry_clear`) are unbound and add only cell-to-world conversion, per-net `search_fill_*` overrides and a `route_cell_has_geometry` pre-check -- no arithmetic. |
+| 6. Fixed-copper predicate — `fixed_copper` | 200 cases (seeds 0-199) | 0.0% (0/350) | 38.3% (134/350) | 0 | as-is, refilled | Both halves driven (Python `FixedFillObstacles` + native `Grid3D::fixed_fill_clear`); a pair is flagged when either refuses. The fill polygon is the pad's exact outline via the `_pad_polygon` reference model, so the row measures group 6's arithmetic, not a harness approximation. |
+| 7. C++ coupled rail check — *(no adapter)* | not measured | not measured | not measured | not measured | not measured | **unexposed**: `CoupledPathfinder::rail_clear` (`coupled_pathfinder.cpp:627`) is a lambda inside the coupled search loop -- not a method, so `bindings.cpp` cannot reach it and no Python caller exists. Measured in its own Phase 3 PR, which can add the binding; this phase adds no C++. |
+| 8. Python coupled / diff-pair predicates — *(no adapter)* | not measured | not measured | not measured | not measured | not measured | **needs engine plumbing**: `_segment_cells_clear` (`diffpair_routing.py:4505`) takes the *Python* `CoupledPathfinder`, and `_segment_pad_clear` / `_route_via_clear` read `self.autorouter.grid`, so the row needs a live `Autorouter` + `DiffPairRouter`. Deferred with groups 9/10 to this phase's PR B (see the PR description). |
+| 9. Lattice engine obstacles — *(no adapter)* | not measured | not measured | not measured | not measured | not measured | **needs engine plumbing**: `LatticeObstacleModel` (`lattice/obstacles.py:583`) is built by `LatticePathfinder.from_board` and keys nets by integer id. Deferred to this phase's PR B. |
+| 10. Mesh engine obstacles — *(no adapter)* | not measured | not measured | not measured | not measured | not measured | **needs engine plumbing**: `ObstacleModel.is_clear` (`mesh/obstacles.py:118`) is built by `MeshPathfinder.from_board` and sees fixed fills, the outline and keepouts only -- no routed copper and no pads, so its scope is seg-vs-zone / seg-vs-edge, which needs a zone or edge pair kind. Deferred to this phase's PR B. |
+| 11. Escape router / stitcher — `via_clearance` | 200 cases (seeds 0-199) | 3.2% (20/630) | 36.5% (230/630) | 0 | as-is, refilled | `via_clearance.py`'s four pure predicates. **Not measured**: `subgrid.py:550 _min_clearance_to_neighbors` and `:1063 _validate_segment_relaxed` are private `SubGridRouter` internals needing a live sub-grid escape context (parent grid, pad-cluster box, per-pad overrides) -- escape router's Phase 3 PR. |
+| 12. Python commit gate — `grid_py` | 200 cases (seeds 0-199) | 0.0% (0/1168) | 44.5% (520/1168) | 0 | as-is, refilled | Via-first insertion order only; the other order is #5398's fixture. |
+| 13. C++ commit gate — `grid_cpp` | 200 cases (seeds 0-199) | 0.0% (0/1168) | 44.5% (520/1168) | 0 | as-is, refilled | Via-first insertion order only. Pads carry no roundrect/oval flag -- `Grid3D::add_pad` takes `is_circular` and a rotation and nothing else, which is the `roundrect-corner-gap` mechanism. |
+| 14. Pairwise net-class matrix — `pairwise` | 200 cases (seeds 0-199) | 0.0% (0/1168) | 46.4% (542/1168) | 0 | as-is, refilled | Scalar (`dru`) behaviour: every net at 0 V, so no creepage widening applies and the HV `max()` can only tighten from here. **Not measured**: `Grid3D::pairwise_required_clearance` (`grid.cpp:751`) is dormant until `set_pairwise_domains` installs a domain matrix, so it would return a meaningless 0.0 -- it needs an HV corpus (Phase 2). |
+| 15. Optimizer collision checks — `optimizer_collision` | 200 cases (seeds 0-199) | 38.3% (392/1024) | 11.3% (116/1024) | 0 | as-is, refilled | `VectorCollisionChecker`, which delegates to `GridCollisionChecker` when the per-layer R-tree is unpopulated, so both citations are exercised by this row. `ignore_overflow` left at its stricter default. |
+| 16. Match-group tuning — `match_group` | 200 cases (seeds 0-199) | 0.0% (0/1024) | 24.4% (250/1024) | 0 | as-is, refilled | **Not measured**: `_post_insertion_clearance_detail_pair_group` (`match_group_tuning.py:2404`) needs a mirrored diff-pair candidate with declared P/N net ids -- the diff-pair slice (group 8) has that geometry. |
+| 17. DRC nudge repair — `drc_nudge` | 200 cases (seeds 0-199) | 0.0% (0/486) | 45.3% (220/486) | 0 | as-is, refilled | The destination gate's foreign-via clearance check. **Not measured**: `_via_drill_overlaps_bbox` (`:1173`) is an overlap detector with no clearance term (every corpus pair has a positive gap, so it would be a meaningless zero), and `_via_edge_sweep_clear` (`:2204`) is a displacement certificate against the board outline needing a before/after position pair and a copper-to-edge pair kind. |
+| 18. kct check ClearanceRule — `kct_check` | 200 cases (seeds 0-199) | 6.3% (74/1168) | 0.0% (0/1168) | 0 | as-is, refilled | Exact polygon pad model -- the other half of `roundrect-corner-gap`. One scalar `min_clearance_mm` for every pair, so it cannot reproduce groups 12/13's order asymmetry. **Not measured**: `SegmentZoneClearanceRule` / `ViaZoneClearanceRule` / `physical_gap.py` / `EdgeClearanceRule` need zone and edge pair kinds on refilled runs -- this phase's PR B. |
+| 19. Incremental placement DRC (drc_cpp) — `drc_cpp` | 200 cases (seeds 0-199) | 0.0% (0/24) | 50.0% (12/24) | 0 | as-is, refilled | Every pad is a disc of `max(w, h) / 2` (`drc/cpp_backend.py:96`), which can over-reject but never under-reject. **Not measured**: the corpus probes the one axis where that envelope is tight (each probe shape's long side is its local X side, so `max(w, h) / 2` is the true support there) -- quantifying the off-axis over-approximation needs a short-side pad pair kind (Phase 4). |
 <!-- clearance-conformance:table:end -->
+
+## The kernel, measured as a consumer
+
+The row the rest of the table is *for*. Epic #5509's plan is to move every consumer above onto one exact-geometry kernel (`router/clearance_kernel.py` plus its `router_cpp` twin, Phase 1b), and that plan is only sound if the kernel itself can agree with `kicad-cli` everywhere. So the kernel is measured by the same harness, on the same corpus, and its acceptance criterion is a hard **0 % / 0 %**.
+
+It is not one of the nineteen groups -- it is the model they are to be unified onto -- which is why it sits in its own table. It is also the only row whose `required_mm` comes from the `.kicad_pro` netclass rather than from the consumer's own rule values: the kernel carries no rule values at all (Phase 2's resolver owns that), so its row isolates the **geometry** question from the **rule-resolution** question. A non-zero cell here is a Phase 1b bug -- capture a fixture and fix it through `tests/router/test_clearance_kernel_parity.py`, never by loosening this measurement.
+
+<!-- clearance-conformance:kernel:begin -->
+| adapter | corpus (seed range) | over-reject % | under-reject % | boundary | fill state | notes |
+|---|---|---|---|---|---|---|
+| Phase 1b clearance kernel — `clearance_kernel` | 200 cases (seeds 0-199) | 0.0% (0/1192) | 0.0% (0/1192) | 0 | as-is, refilled | Control row, not a consumer group: both ports (`clearance_kernel.py` and `router_cpp`) driven, flagged when either flags. `required_mm` is the `.kicad_pro` `Default` netclass value kicad-cli applies, because the kernel carries no rule values of its own -- Phase 2's resolver owns that. Any non-zero cell is a Phase 1b bug: capture a fixture and fix it through `test_clearance_kernel_parity.py`, never here. |
+<!-- clearance-conformance:kernel:end -->
 
 ## Corpus
 
 - Seed range: `0-199` (200 generated cases)
 - Analytic close pairs placed: 596
-- Pairs kicad-cli flagged: 279
+- Pairs kicad-cli flagged: 277
 - Pairs in the boundary band: 0
 - Fill states measured: as-is, refilled
 - kicad-cli invocations: 400
 
 Cases are generated by `tests/conformance/generator.py` with `random.Random(seed)` -- no `hypothesis` dependency. Each case places 2-6 segments, 1-3 vias and up to 2 pads (rect / circle / oval / roundrect, rotated), optionally one zone, with **every object on its own net** so a kicad-cli finding maps onto a pair by net alone. Close pairs are placed *analytically* at a gap drawn near the requirement, rather than by sampling random positions and hoping some land near the threshold -- otherwise the corpus would almost never probe the boundary and every rate below would be vacuously zero.
+
+Six pair kinds are placed: `seg-seg`, `seg-via`, `via-via`, `pad-seg`, `pad-via` and `pad-pad`. The first five each have a *routing candidate* -- a segment or a via a router could propose -- and are what the router-side rows are scored on. `pad-pad` has none (both sides are placement copper) and exists for group 19, the incremental placement DRC, whose entry point takes two whole footprints and can answer nothing else.
+
+This document regenerates byte-identically from its seed range: `uv run python -m tests.conformance.report --seeds 0-199 --out docs/clearance-conformance.md`. A generating-commit SHA is deliberately **not** stamped into the header -- it would make byte-identical regeneration impossible by construction, and the seed range plus the pinned generator is what actually makes the numbers reproducible.
 
 ## Named fixtures
 
@@ -74,8 +93,8 @@ Committed under `tests/fixtures/conformance/` as `<name>-seed<N>.kicad_pcb` + `.
 
 ## Scope and known gaps
 
-- Adapters wired: 1, 4, 12, 13, 18.
-- Groups still `not measured`: 2, 3, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 19.
+- Adapters wired: 1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16, 17, 18, 19.
+- Groups still `not measured`: 7, 8, 9, 10.
 - Same-net drill spacing (`validate_same_net_drill_spacing`) is out of scope: pair identity here is by net, so a same-net finding has no two-net key. It needs its own harness.
 - Verdict identity is `(kind, {net_a, net_b})` only. Gaps and required values are recorded for this table but never compared across models -- each model computes its own gap, and comparing those would measure arithmetic noise instead of the question under test (*did this model flag this pair at all?*).
 - `shorting_items` rows are dropped: that is a connectivity conclusion about copper that already overlaps, not a clearance measurement, and no adapter models it.

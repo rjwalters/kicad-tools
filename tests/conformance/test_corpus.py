@@ -35,25 +35,31 @@ from pathlib import Path
 import pytest
 
 from tests.conformance.adapters import ConsumerAdapter, Verdict
+from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.board import write_case
-from tests.conformance.conftest import requires_cpp, requires_kicad_cli
+from tests.conformance.conftest import requires_adapter, requires_kicad_cli
 from tests.conformance.generator import PairKind, generate_case
 from tests.conformance.oracle import run_oracle
-from tests.conformance.report import ADAPTERS
+from tests.conformance.report import ADAPTERS, main
+
+_ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 
 # Kept smaller than ``test_corpus_truth.CI_SEEDS``: this module multiplies its
-# seeds by five adapters, and every item launches its own kicad-cli.
+# seeds by every wired adapter, and every item launches its own kicad-cli.
 CI_SEEDS = (0, 1, 2)
 
-# The groups Epic #5509 section 1 assigns to the five wired consumers.
-WIRED_GROUPS = {1, 4, 12, 13, 18}
+# The Epic #5509 section-1 groups Phase 1c leaves unmeasured, with their
+# reasons recorded in ``report.NOT_MEASURED_REASONS``: 7 is unexposed (a
+# lambda inside the C++ coupled search), and 8-10 need engine plumbing
+# (``Autorouter`` + ``DiffPairRouter``, ``LatticePathfinder.from_board``,
+# ``MeshPathfinder.from_board``) that is this phase's deferred slice.
+UNWIRED_GROUPS = {7, 8, 9, 10}
+
+# Every group row the table measures, plus the Phase 1b kernel's control row.
+WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GROUP}
 
 _ADAPTER_PARAMS = [
-    pytest.param(
-        adapter,
-        id=adapter.name,
-        marks=(requires_cpp,) if adapter.name == "grid_cpp" else (),
-    )
+    pytest.param(adapter, id=adapter.name, marks=(requires_adapter(adapter),))
     for adapter in ADAPTERS
 ]
 
@@ -63,8 +69,14 @@ _ADAPTER_PARAMS = [
 # ---------------------------------------------------------------------------
 
 
-def test_adapters_cover_the_five_wired_groups() -> None:
-    """``ADAPTERS`` wires exactly the groups this phase set out to measure."""
+def test_adapters_cover_the_wired_groups() -> None:
+    """``ADAPTERS`` wires exactly the groups this phase set out to measure.
+
+    Both directions matter.  A *missing* group is coverage that quietly went
+    away; an *extra* one is a group wired without a row in the epic's
+    inventory, which the report's 19-row invariant would then have nowhere to
+    put.
+    """
     assert {adapter.group for adapter in ADAPTERS} == WIRED_GROUPS
     assert len({adapter.name for adapter in ADAPTERS}) == len(ADAPTERS)
 
@@ -77,6 +89,23 @@ def test_adapter_satisfies_the_protocol(adapter: ConsumerAdapter) -> None:
     assert adapter.pair_kinds <= frozenset(PairKind.ALL)
     assert adapter.pair_kinds, f"{adapter.name} declares no pair kinds at all"
     assert isinstance(adapter.available(), bool)
+
+
+def test_only_the_kernel_answers_pad_pad_pairs() -> None:
+    """``pad-pad`` is placement copper: no router-side consumer sees it.
+
+    The kind exists for group 19's incremental placement DRC, whose entry
+    point takes two whole footprints.  Any *other* adapter claiming it would
+    be scored on pairs its consumer is never consulted about in production,
+    which is the exact error ``ConsumerAdapter.pair_kinds`` exists to prevent
+    -- and the reason ``_support.ALL_PAIR_KINDS`` is ``PairKind.ROUTING``
+    rather than ``PairKind.ALL``.
+    """
+    claimants = {a.group for a in ADAPTERS if PairKind.PAD_PAD in a.pair_kinds}
+    assert claimants == {19, KERNEL_GROUP}, (
+        "pad-pad may only be claimed by group 19 (drc_cpp) and the kernel "
+        f"control row; also claimed by groups {sorted(claimants - {19, KERNEL_GROUP})}"
+    )
 
 
 @pytest.mark.parametrize("adapter", _ADAPTER_PARAMS)
@@ -156,6 +185,104 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
         f"  over-rejected (consumer flags, KiCad clean): {over}\n"
         f"  under-rejected (KiCad flags, consumer clean): {under}\n"
         f"{result.describe()}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The kernel is NOT report-only -- it is a hard gate
+# ---------------------------------------------------------------------------
+
+
+@requires_kicad_cli
+@pytest.mark.parametrize("seed", CI_SEEDS)
+def test_kernel_agrees_with_kicad_cli(seed: int, tmp_path: Path) -> None:
+    """The Phase 1b kernel, against ground truth, with **no** ``xfail``.
+
+    Every consumer row above is deliberately non-strict-xfailed: a measured
+    disagreement is evidence for a later phase, not a broken build.  The
+    kernel is the exception, and the asymmetry is the point.  It is not a
+    consumer awaiting migration -- it is the model every consumer is to be
+    migrated *onto*, so a disagreement here is not a finding about a consumer,
+    it is a **Phase 1b bug**: unifying onto a model that cannot match
+    kicad-cli would replace nineteen wrong answers with one.
+
+    Deliberately redundant with the ``consumer``-marked item above (the kernel
+    is in ``ADAPTERS`` and is measured there too, for the table).  The
+    duplicate costs no extra kicad-cli process worth caring about and buys the
+    one thing the xfailed item cannot: a **red** build if the control row
+    stops being zero.
+
+    Per Epic #5509's scope guard, the fix for a failure here is a fixture
+    under ``tests/fixtures/conformance/`` plus a kernel PR through
+    ``tests/router/test_clearance_kernel_parity.py`` -- never a patch to the
+    kernel from inside this phase, and never a relaxation of this assertion.
+    """
+    kernel = _ADAPTERS_BY_GROUP[KERNEL_GROUP]
+    case = generate_case(seed)
+    board = write_case(case, tmp_path)
+    result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
+
+    truth = {v.nets for v in result.without_zones()}
+    verdicts = {v.nets for v in kernel.verdicts(case)}
+
+    over: list[str] = []
+    under: list[str] = []
+    for pair in case.pairs:
+        if pair.boundary:
+            continue
+        in_truth = pair.nets in truth
+        in_kernel = pair.nets in verdicts
+        if in_kernel and not in_truth:
+            over.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
+        elif in_truth and not in_kernel:
+            under.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
+
+    assert not over and not under, (
+        f"the Phase 1b clearance kernel disagrees with kicad-cli on seed {seed} "
+        "-- this is a KERNEL bug, not a consumer finding\n"
+        f"  over-rejected (kernel flags, KiCad clean): {over}\n"
+        f"  under-rejected (KiCad flags, kernel clean): {under}\n"
+        f"{result.describe()}\n"
+        "Capture this seed as a fixture under tests/fixtures/conformance/ and "
+        "fix the kernel in its own PR through "
+        "tests/router/test_clearance_kernel_parity.py."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The published table regenerates deterministically
+# ---------------------------------------------------------------------------
+
+
+@requires_kicad_cli
+def test_report_regenerates_byte_identically(tmp_path: Path) -> None:
+    """Two runs over the same seed range produce identical bytes.
+
+    Epic #5509 Phase 1c's determinism criterion, asserted **inside the
+    suite**.  It cannot be a post-hoc diff of a CI artifact against
+    ``docs/``: ``ci.yml``'s ``code`` path filter excludes ``docs/**`` and
+    ``**/*.md`` (``:57-66``), so a PR that only regenerates the table never
+    runs the ``test`` job at all and the diff would never be computed.  A
+    check that does not run on the change it guards is not a gate.
+
+    Kept to two seeds -- this is a determinism property of the generator, the
+    oracle and every adapter, and it either holds on two cases or it does not
+    hold at all.  Widening the range would multiply kicad-cli processes for no
+    extra discrimination.
+    """
+    seeds = range(0, 2)
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+
+    for out in (first, second):
+        rc = main(["--seeds", f"{seeds.start}-{seeds.stop - 1}", "--out", str(out)])
+        assert rc == 0, "the report generator refused to write"
+
+    assert first.read_text(encoding="utf-8") == second.read_text(encoding="utf-8"), (
+        "the conformance report is not reproducible: two runs over seeds "
+        f"{seeds.start}-{seeds.stop - 1} produced different documents. Either an "
+        "adapter, the generator or the oracle has run-to-run variation, and the "
+        "committed table stops being evidence anyone can reproduce."
     )
 
 

@@ -8,12 +8,29 @@ than quietly omitted.  An omitted row reads as "fine"; a ``not measured`` row
 reads as "unknown", which is the truth and is what keeps later phases honest
 about their own coverage.
 
-:data:`ADAPTERS` wires one adapter per measured group (1, 4, 12, 13, 18); the
-other fourteen groups have no adapter and render ``not measured``.  Each
-adapter drives an **unmodified** consumer, and an adapter that cannot run on
-this machine (e.g. ``grid_cpp`` without the compiled router extension) is
-skipped so its group reads ``not measured`` rather than contributing a
-confidently-wrong zero-disagreement row.
+:data:`ADAPTERS` wires one adapter per measured group.  Each adapter drives an
+**unmodified** consumer, and an adapter that cannot run on this machine (e.g.
+``grid_cpp`` without the compiled router extension) is skipped so its group
+reads ``not measured`` rather than contributing a confidently-wrong
+zero-disagreement row.
+
+A group with no adapter is never silently omitted, and never merely stamped
+``not measured`` either: :data:`NOT_MEASURED_REASONS` gives each one a stated
+reason, rendered in the table's ``notes`` column.  ``not measured`` with no
+reason is indistinguishable from "nobody looked", which is the failure mode
+the whole document exists to prevent -- and it is what the epic means by
+"group 7 is the only permitted *unexposed* entry": exactly one consumer is
+unreachable from Python, and every other gap has to justify itself.
+
+:data:`NOTES` carries the same column for *measured* rows, where it records
+the sub-entry-points a row does **not** cover (the C++ pairwise threshold, the
+sub-grid escape internals, the diff-pair variant of the match-group check),
+so a measured row cannot imply more coverage than it has.
+
+The Phase 1b **kernel** is measured too, by ``adapters/kernel.py``, but it is
+not one of the nineteen groups -- it is the model they are to be unified onto
+-- so it renders in its own section under the key
+:data:`~tests.conformance.adapters.kernel.KERNEL_GROUP` (``0``).
 
 Run as a module (``tests`` is a package and pytest's ``pythonpath`` only adds
 ``src``, so invoking this file by path cannot import its own package)::
@@ -35,11 +52,24 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tests.conformance.adapters import ConsumerAdapter
+from tests.conformance.adapters.drc_cpp import DrcCppAdapter
+from tests.conformance.adapters.drc_nudge import DrcNudgeAdapter
+from tests.conformance.adapters.fixed_copper import FixedCopperAdapter
 from tests.conformance.adapters.grid_cpp import GridCppAdapter
+from tests.conformance.adapters.grid_cpp_occupancy import (
+    CppTraceBlockedAdapter,
+    GridCppMarkingAdapter,
+)
 from tests.conformance.adapters.grid_py import GridPyAdapter
 from tests.conformance.adapters.kct_check import KctCheckAdapter
+from tests.conformance.adapters.kernel import KERNEL_GROUP, KernelAdapter
+from tests.conformance.adapters.match_group import MatchGroupAdapter
 from tests.conformance.adapters.occupancy import OccupancyAdapter
+from tests.conformance.adapters.optimizer import OptimizerCollisionAdapter
+from tests.conformance.adapters.pairwise import PairwiseAdapter
+from tests.conformance.adapters.route_geometry_cpp import RouteGeometryCppAdapter
 from tests.conformance.adapters.route_halo import RouteHaloAdapter
+from tests.conformance.adapters.via_clearance import ViaClearanceAdapter
 from tests.conformance.board import write_case
 from tests.conformance.generator import (
     BOUNDARY_BAND_MM,
@@ -58,15 +88,24 @@ from tests.conformance.oracle import (
 __all__ = [
     "ADAPTERS",
     "GROUPS",
+    "KERNEL_GROUP",
+    "NOTES",
+    "NOT_MEASURED",
+    "NOT_MEASURED_REASONS",
     "TABLE_BEGIN",
     "TABLE_END",
+    "KERNEL_TABLE_BEGIN",
+    "KERNEL_TABLE_END",
+    "TABLE_COLUMNS",
     "AdapterMeasurement",
     "CorpusStats",
     "Group",
-    "NOT_MEASURED",
+    "adapter_for_group",
     "main",
     "measure_corpus",
+    "not_measured_reason",
     "render_document",
+    "render_kernel_table",
     "render_table",
 ]
 
@@ -74,6 +113,9 @@ NOT_MEASURED = "not measured"
 
 TABLE_BEGIN = "<!-- clearance-conformance:table:begin -->"
 TABLE_END = "<!-- clearance-conformance:table:end -->"
+
+KERNEL_TABLE_BEGIN = "<!-- clearance-conformance:kernel:begin -->"
+KERNEL_TABLE_END = "<!-- clearance-conformance:kernel:end -->"
 
 DOC_PATH = Path(__file__).resolve().parents[2] / "docs" / "clearance-conformance.md"
 
@@ -228,12 +270,158 @@ assert len(GROUPS) == 19, "Epic #5509 section 1 inventories nineteen groups"
 # generator, the board writer and the oracle -- the truth side proper -- still
 # import nothing from the code under test.
 ADAPTERS: tuple[ConsumerAdapter, ...] = (
+    KernelAdapter(),  # group 0 -- the Phase 1b control row, not a consumer group
     OccupancyAdapter(),
+    GridCppMarkingAdapter(),
+    CppTraceBlockedAdapter(),
     RouteHaloAdapter(),
+    RouteGeometryCppAdapter(),
+    FixedCopperAdapter(),
+    ViaClearanceAdapter(),
     GridPyAdapter(),
     GridCppAdapter(),
+    PairwiseAdapter(),
+    OptimizerCollisionAdapter(),
+    MatchGroupAdapter(),
+    DrcNudgeAdapter(),
     KctCheckAdapter(),
+    DrcCppAdapter(),
 )
+
+
+# Why a group has no adapter.  A bare ``not measured`` is indistinguishable
+# from "nobody looked"; every gap here states which of three kinds it is --
+# *unexposed* (no Python entry point at all, and by the epic's acceptance
+# criterion group 7 is the only one permitted), *needs engine plumbing* (a
+# measurable consumer whose construction is this phase's deferred slice), or
+# *out of corpus scope*.
+NOT_MEASURED_REASONS: dict[int, str] = {
+    7: (
+        "**unexposed**: `CoupledPathfinder::rail_clear` "
+        "(`coupled_pathfinder.cpp:627`) is a lambda inside the coupled search "
+        "loop -- not a method, so `bindings.cpp` cannot reach it and no Python "
+        "caller exists. Measured in its own Phase 3 PR, which can add the "
+        "binding; this phase adds no C++."
+    ),
+    8: (
+        "**needs engine plumbing**: `_segment_cells_clear` "
+        "(`diffpair_routing.py:4505`) takes the *Python* `CoupledPathfinder`, "
+        "and `_segment_pad_clear` / `_route_via_clear` read "
+        "`self.autorouter.grid`, so the row needs a live `Autorouter` + "
+        "`DiffPairRouter`. Deferred with groups 9/10 to this phase's PR B "
+        "(see the PR description)."
+    ),
+    9: (
+        "**needs engine plumbing**: `LatticeObstacleModel` "
+        "(`lattice/obstacles.py:583`) is built by "
+        "`LatticePathfinder.from_board` and keys nets by integer id. Deferred "
+        "to this phase's PR B."
+    ),
+    10: (
+        "**needs engine plumbing**: `ObstacleModel.is_clear` "
+        "(`mesh/obstacles.py:118`) is built by `MeshPathfinder.from_board` and "
+        "sees fixed fills, the outline and keepouts only -- no routed copper "
+        "and no pads, so its scope is seg-vs-zone / seg-vs-edge, which needs a "
+        "zone or edge pair kind. Deferred to this phase's PR B."
+    ),
+}
+
+# What a *measured* row does not cover.  Every sub-entry-point named in the
+# epic's group inventory that this phase could not score is recorded here, so
+# a measured row cannot imply more coverage than it has.
+NOTES: dict[int, str] = {
+    1: "Cell-set answer, so no mm gap is reported; square Chebyshev halo (#5410).",
+    2: (
+        "Write side: `mark_segment` / `mark_via` square halo. Routed copper "
+        "only -- the C++ grid never marks pads itself "
+        "(`CppGrid.from_routing_grid` copies the Python blocked plane), so "
+        "pad pairs would re-measure group 1."
+    ),
+    3: (
+        "Read side: the Euclidean-disc acceptance kernel (#3229), narrower "
+        "than group 2's square by construction. Via candidates go through the "
+        "sibling `is_via_blocked`."
+    ),
+    4: "Raises the requirement to `max(required, via_clearance)` for trace-vs-via.",
+    5: (
+        "Measures the `Grid3D` predicate; the `Pathfinder` wrappers "
+        "(`trace_halo_cell_clear`, `via_route_geometry_clear`) are unbound and "
+        "add only cell-to-world conversion, per-net `search_fill_*` overrides "
+        "and a `route_cell_has_geometry` pre-check -- no arithmetic."
+    ),
+    6: (
+        "Both halves driven (Python `FixedFillObstacles` + native "
+        "`Grid3D::fixed_fill_clear`); a pair is flagged when either refuses. "
+        "The fill polygon is the pad's exact outline via the `_pad_polygon` "
+        "reference model, so the row measures group 6's arithmetic, not a "
+        "harness approximation."
+    ),
+    11: (
+        "`via_clearance.py`'s four pure predicates. **Not measured**: "
+        "`subgrid.py:550 _min_clearance_to_neighbors` and `:1063 "
+        "_validate_segment_relaxed` are private `SubGridRouter` internals "
+        "needing a live sub-grid escape context (parent grid, pad-cluster box, "
+        "per-pad overrides) -- escape router's Phase 3 PR."
+    ),
+    12: "Via-first insertion order only; the other order is #5398's fixture.",
+    13: (
+        "Via-first insertion order only. Pads carry no roundrect/oval flag -- "
+        "`Grid3D::add_pad` takes `is_circular` and a rotation and nothing else, "
+        "which is the `roundrect-corner-gap` mechanism."
+    ),
+    14: (
+        "Scalar (`dru`) behaviour: every net at 0 V, so no creepage widening "
+        "applies and the HV `max()` can only tighten from here. **Not "
+        "measured**: `Grid3D::pairwise_required_clearance` "
+        "(`grid.cpp:751`) is dormant until `set_pairwise_domains` installs a "
+        "domain matrix, so it would return a meaningless 0.0 -- it needs an HV "
+        "corpus (Phase 2)."
+    ),
+    15: (
+        "`VectorCollisionChecker`, which delegates to `GridCollisionChecker` "
+        "when the per-layer R-tree is unpopulated, so both citations are "
+        "exercised by this row. `ignore_overflow` left at its stricter default."
+    ),
+    16: (
+        "**Not measured**: `_post_insertion_clearance_detail_pair_group` "
+        "(`match_group_tuning.py:2404`) needs a mirrored diff-pair candidate "
+        "with declared P/N net ids -- the diff-pair slice (group 8) has that "
+        "geometry."
+    ),
+    17: (
+        "The destination gate's foreign-via clearance check. **Not measured**: "
+        "`_via_drill_overlaps_bbox` (`:1173`) is an overlap detector with no "
+        "clearance term (every corpus pair has a positive gap, so it would be "
+        "a meaningless zero), and `_via_edge_sweep_clear` (`:2204`) is a "
+        "displacement certificate against the board outline needing a "
+        "before/after position pair and a copper-to-edge pair kind."
+    ),
+    18: (
+        "Exact polygon pad model -- the other half of `roundrect-corner-gap`. "
+        "One scalar `min_clearance_mm` for every pair, so it cannot reproduce "
+        "groups 12/13's order asymmetry. **Not measured**: "
+        "`SegmentZoneClearanceRule` / `ViaZoneClearanceRule` / "
+        "`physical_gap.py` / `EdgeClearanceRule` need zone and edge pair kinds "
+        "on refilled runs -- this phase's PR B."
+    ),
+    19: (
+        "Every pad is a disc of `max(w, h) / 2` "
+        "(`drc/cpp_backend.py:96`), which can over-reject but never "
+        "under-reject. **Not measured**: the corpus probes the one axis where "
+        "that envelope is tight (each probe shape's long side is its local X "
+        "side, so `max(w, h) / 2` is the true support there) -- quantifying "
+        "the off-axis over-approximation needs a short-side pad pair kind "
+        "(Phase 4)."
+    ),
+    KERNEL_GROUP: (
+        "Control row, not a consumer group: both ports (`clearance_kernel.py` "
+        "and `router_cpp`) driven, flagged when either flags. `required_mm` is "
+        "the `.kicad_pro` `Default` netclass value kicad-cli applies, because "
+        "the kernel carries no rule values of its own -- Phase 2's resolver "
+        "owns that. Any non-zero cell is a Phase 1b bug: capture a fixture and "
+        "fix it through `test_clearance_kernel_parity.py`, never here."
+    ),
+}
 
 
 def _adapter_available(adapter: ConsumerAdapter) -> bool:
@@ -292,6 +480,72 @@ class AdapterMeasurement:
         return self._pct(self.under_reject)
 
 
+TABLE_COLUMNS: tuple[str, ...] = (
+    "adapter",
+    "corpus (seed range)",
+    "over-reject %",
+    "under-reject %",
+    "boundary",
+    "fill state",
+    "notes",
+)
+"""The table's columns, in order.
+
+The ``notes`` column is what makes the "every row is measured *or* states its
+reason" criterion checkable rather than aspirational: it carries
+:data:`NOT_MEASURED_REASONS` for an unmeasured group and :data:`NOTES` -- the
+sub-entry-points a row does not cover -- for a measured one.
+"""
+
+
+def adapter_for_group(number: int) -> ConsumerAdapter | None:
+    """The adapter registered for a group, if any."""
+    for adapter in ADAPTERS:
+        if adapter.group == number:
+            return adapter
+    return None
+
+
+def not_measured_reason(number: int) -> str:
+    """Why group ``number`` has no measurement, always a stated reason.
+
+    Three cases, in order.  A group with **no registered adapter** must carry
+    an explicit :data:`NOT_MEASURED_REASONS` entry; that is a static
+    invariant, asserted by
+    ``test_report_shape.test_every_unwired_group_states_its_reason`` rather
+    than only at render time, so the gap is caught by a unit test on a laptop
+    with no KiCad installed.  A group that *has* an adapter but is still
+    unmeasured was skipped at runtime because ``available()`` said no -- a
+    machine fact, not a coverage decision, and reported as such.  The final
+    fallback exists only so rendering can never crash mid-document; reaching
+    it means the invariant test is missing a case.
+    """
+    explicit = NOT_MEASURED_REASONS.get(number)
+    if explicit is not None:
+        return explicit
+    adapter = adapter_for_group(number)
+    if adapter is not None:
+        return (
+            f"adapter `{adapter.name}` is wired but could not run on the "
+            "machine that generated this document (most often: the compiled "
+            "extension is not built -- `uv run kct build-native`). A skipped "
+            "adapter deliberately renders `not measured` rather than a "
+            "zero-disagreement row."
+        )
+    return "no adapter registered and no reason recorded -- this is a harness bug."
+
+
+def _escape_cell(text: str) -> str:
+    """Make a note safe inside a markdown table cell.
+
+    Only ``|`` needs handling: it would end the cell.  Newlines cannot occur
+    (every note is a single string literal), and asserting that keeps a future
+    multi-line note from silently corrupting the table.
+    """
+    assert "\n" not in text, f"table notes must be single-line: {text!r}"
+    return text.replace("|", "\\|")
+
+
 def _rows(
     stats: CorpusStats,
     measurements: dict[int, AdapterMeasurement],
@@ -300,6 +554,7 @@ def _rows(
     for group in GROUPS:
         m = measurements.get(group.number)
         if m is None:
+            reason = not_measured_reason(group.number)
             rows.append(
                 (
                     f"{group.number}. {group.label} — *(no adapter)*",
@@ -308,6 +563,7 @@ def _rows(
                     NOT_MEASURED,
                     NOT_MEASURED,
                     NOT_MEASURED,
+                    _escape_cell(reason),
                 )
             )
             continue
@@ -319,34 +575,77 @@ def _rows(
                 m.under_reject_cell,
                 str(m.boundary),
                 ", ".join(m.fill_states) or NOT_MEASURED,
+                _escape_cell(NOTES.get(group.number, "")),
             )
         )
     return rows
+
+
+def _kernel_row(
+    stats: CorpusStats,
+    measurements: dict[int, AdapterMeasurement],
+) -> tuple[str, ...] | None:
+    """The Phase 1b kernel's row, or ``None`` when it was not measured."""
+    m = measurements.get(KERNEL_GROUP)
+    if m is None:
+        return None
+    return (
+        f"Phase 1b clearance kernel — `{m.adapter_name}`",
+        stats.corpus_cell,
+        m.over_reject_cell,
+        m.under_reject_cell,
+        str(m.boundary),
+        ", ".join(m.fill_states) or NOT_MEASURED,
+        _escape_cell(NOTES[KERNEL_GROUP]),
+    )
+
+
+def _markdown_table(rows: list[tuple[str, ...]]) -> list[str]:
+    header = "| " + " | ".join(TABLE_COLUMNS) + " |"
+    sep = "|" + "---|" * len(TABLE_COLUMNS)
+    body = ["| " + " | ".join(row) + " |" for row in rows]
+    for row in rows:
+        assert len(row) == len(TABLE_COLUMNS), f"row has {len(row)} cells: {row}"
+    return [header, sep, *body]
 
 
 def render_table(
     stats: CorpusStats,
     measurements: dict[int, AdapterMeasurement] | None = None,
 ) -> str:
-    """Render the 19-row conformance table (delimited by begin/end markers).
+    """Render the 19-row consumer-group table (delimited by begin/end markers).
+
+    The kernel is deliberately **not** in here -- it is not one of the epic's
+    nineteen consumer groups, and mixing it in would make the row count stop
+    being a checkable invariant.  :func:`render_kernel_table` renders it.
 
     Args:
         stats: Corpus provenance for the measured rows.
         measurements: Per-group adapter results; groups absent from the map
-            render as ``not measured``.
+            render as ``not measured`` plus their stated reason.
 
     Returns:
         Markdown, including the ``TABLE_BEGIN`` / ``TABLE_END`` markers that
         let the doc test count rows without parsing prose.
     """
     measurements = measurements or {}
-    header = (
-        "| adapter | corpus (seed range) | over-reject % | under-reject % | boundary | fill state |"
-    )
-    sep = "|---|---|---|---|---|---|"
-    body = ["| " + " | ".join(row) + " |" for row in _rows(stats, measurements)]
-    assert len(body) == len(GROUPS)
-    return "\n".join([TABLE_BEGIN, header, sep, *body, TABLE_END])
+    rows = _rows(stats, measurements)
+    assert len(rows) == len(GROUPS)
+    return "\n".join([TABLE_BEGIN, *_markdown_table(rows), TABLE_END])
+
+
+def render_kernel_table(
+    stats: CorpusStats,
+    measurements: dict[int, AdapterMeasurement] | None = None,
+) -> str:
+    """Render the kernel's one-row table, or a ``not measured`` note."""
+    row = _kernel_row(stats, measurements or {})
+    if row is None:
+        return (
+            f"The kernel row is `{NOT_MEASURED}`: its adapter could not run on "
+            "the machine that generated this document."
+        )
+    return "\n".join([KERNEL_TABLE_BEGIN, *_markdown_table([row]), KERNEL_TABLE_END])
 
 
 def render_document(
@@ -355,7 +654,7 @@ def render_document(
 ) -> str:
     """Render the full ``docs/clearance-conformance.md`` body."""
     measurements = measurements or {}
-    measured = sorted(measurements)
+    measured = sorted(g for g in measurements if g != KERNEL_GROUP)
     unmeasured = [g.number for g in GROUPS if g.number not in measurements]
 
     lines: list[str] = [
@@ -417,6 +716,13 @@ def render_document(
                 "for the same two objects, and the "
                 "`issue5398-seg-via-0p18-order` fixture is where that is "
                 "recorded.",
+                "",
+                "Every group that is still `not measured` carries its reason "
+                "in the `notes` column, and so does every group that *is* "
+                "measured but whose entry-point list this phase could not "
+                'cover in full. A bare "not measured" reads the same as '
+                '"nobody looked"; naming the gap is what keeps the next phase '
+                "honest about what it inherits.",
             ]
         ),
         "",
@@ -440,7 +746,10 @@ def render_document(
         "unrefilled runs.",
         "- **not measured** -- no adapter wraps that consumer yet. The row is "
         'kept rather than omitted: an omitted row reads as "agrees", and we '
-        "do not know that.",
+        "do not know that. The `notes` column says *why* in every case.",
+        "- **notes** -- for a measured row, the sub-entry-points the row does "
+        "**not** cover, so the percentage cannot imply more coverage than it "
+        "has. For an unmeasured row, the reason.",
         "",
         "## Conformance by consumer group",
         "",
@@ -449,6 +758,28 @@ def render_document(
         "two native extensions and Python).",
         "",
         render_table(stats, measurements),
+        "",
+        "## The kernel, measured as a consumer",
+        "",
+        "The row the rest of the table is *for*. Epic #5509's plan is to move "
+        "every consumer above onto one exact-geometry kernel "
+        "(`router/clearance_kernel.py` plus its `router_cpp` twin, Phase 1b), "
+        "and that plan is only sound if the kernel itself can agree with "
+        "`kicad-cli` everywhere. So the kernel is measured by the same harness, "
+        "on the same corpus, and its acceptance criterion is a hard "
+        "**0 % / 0 %**.",
+        "",
+        "It is not one of the nineteen groups -- it is the model they are to be "
+        "unified onto -- which is why it sits in its own table. It is also the "
+        "only row whose `required_mm` comes from the `.kicad_pro` netclass "
+        "rather than from the consumer's own rule values: the kernel carries no "
+        "rule values at all (Phase 2's resolver owns that), so its row isolates "
+        "the **geometry** question from the **rule-resolution** question. A "
+        "non-zero cell here is a Phase 1b bug -- capture a fixture and fix it "
+        "through `tests/router/test_clearance_kernel_parity.py`, never by "
+        "loosening this measurement.",
+        "",
+        render_kernel_table(stats, measurements),
         "",
         "## Corpus",
         "",
@@ -468,6 +799,22 @@ def render_document(
         "rather than by sampling random positions and hoping some land near "
         "the threshold -- otherwise the corpus would almost never probe the "
         "boundary and every rate below would be vacuously zero.",
+        "",
+        "Six pair kinds are placed: `seg-seg`, `seg-via`, `via-via`, "
+        "`pad-seg`, `pad-via` and `pad-pad`. The first five each have a "
+        "*routing candidate* -- a segment or a via a router could propose -- "
+        "and are what the router-side rows are scored on. `pad-pad` has none "
+        "(both sides are placement copper) and exists for group 19, the "
+        "incremental placement DRC, whose entry point takes two whole "
+        "footprints and can answer nothing else.",
+        "",
+        "This document regenerates byte-identically from its seed range: "
+        "`uv run python -m tests.conformance.report --seeds "
+        f"{stats.seed_range} --out docs/clearance-conformance.md`. A "
+        "generating-commit SHA is deliberately **not** stamped into the "
+        "header -- it would make byte-identical regeneration impossible by "
+        "construction, and the seed range plus the pinned generator is what "
+        "actually makes the numbers reproducible.",
         "",
         "## Named fixtures",
         "",

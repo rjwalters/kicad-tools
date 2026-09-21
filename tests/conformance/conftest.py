@@ -45,6 +45,31 @@ rendered ``not measured`` -- one answer, not two.  Build it with
 ``uv run kct build-native``.
 """
 
+
+def requires_adapter(adapter: object) -> pytest.MarkDecorator:
+    """Skip mark derived from *this* adapter's own capability probe.
+
+    The generalisation of :data:`requires_cpp` to every adapter, and the
+    reason Phase 1c does not accumulate one hand-written ``skipif`` per
+    native consumer.  Three adapters now need a compiled extension and they
+    do not all need the *same* one -- ``drc_cpp`` probes
+    ``drc/cpp_backend.is_cpp_available`` while the grid adapters probe
+    ``router_cpp`` -- so hard-coding a single router-extension mark would
+    skip the wrong rows on a half-built tree.
+
+    Keeping the probe as ``adapter.available()`` preserves the invariant that
+    matters: a row the *report* would render ``not measured`` is exactly a row
+    the *suite* skips.  One answer, not two.
+    """
+    probe = getattr(adapter, "available", None)
+    available = True if probe is None else bool(probe())
+    name = getattr(adapter, "name", repr(adapter))
+    return pytest.mark.skipif(
+        not available,
+        reason=f"adapter {name} is unavailable here (run `uv run kct build-native`)",
+    )
+
+
 CONSUMER_XFAIL_REASON = "consumer verdict is report-only until that consumer's epic phase (#5509)"
 
 

@@ -123,7 +123,15 @@ job_typecheck() {
 
 job_test() {
   uv run kct build-native
-  uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow"
+  # Epic #5509 Phase 1c: the clearance-conformance corpus runs as its own
+  # line, mirroring the dedicated `Run clearance conformance corpus` step in
+  # ci.yml's `test` job -- every item launches its own kicad-cli, which is
+  # what must not happen under four concurrent xdist workers. The matching
+  # `--ignore` below is what stops the suite running twice. Skips itself
+  # without kicad-cli (module skipif), exactly as in CI.
+  uv run pytest tests/conformance -o addopts= --benchmark-disable --timeout=120 -m "not slow"
+  uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+    --ignore=tests/conformance
 }
 
 job_cpp_build_check() {
