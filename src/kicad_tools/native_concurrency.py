@@ -127,6 +127,12 @@ _MAX_POLL_SECONDS = 0.05
 # observer can never disagree about what counts as a native workload.
 _NATIVE_EXECUTABLE = "kicad-cli"
 _NATIVE_PYTHON_WORKER = "_fixed_fill_worker.py"
+#: A ``kicad-cli`` invocation carrying one of these flags is a pure
+#: capability/version probe -- it never loads a board and exits almost
+#: immediately, so it does not need (and should not wait for) a permit
+#: sized for the ~2.3-2.7 GiB board-loading launches this gate protects
+#: against (Issue #5603).
+_CAPABILITY_PROBE_FLAGS = frozenset({"--help", "--version"})
 
 _installed = False
 
@@ -156,13 +162,27 @@ def is_native_launch(args: Any, executable: Any = None) -> bool:
     Recognises the ``kicad-cli`` binary and the KiCad Python zone-fill worker
     launched by :mod:`kicad_tools.zones.placement_fill`, which is a native
     ``pcbnew.ZONE_FILLER`` workload despite running under ``python``.
+
+    A ``kicad-cli`` invocation carrying ``--help`` or ``--version`` is a pure
+    capability probe rather than a board-loading workload (Issue #5603):
+    :func:`kicad_tools.cli.runner._kicad_cli_has_fill_zones` and
+    :func:`kicad_tools.cli.runner._kicad_drc_supports_refill` each launch one
+    per process to detect installed-``kicad-cli`` feature support, and other
+    call sites use ``["kicad-cli", "--version"]`` the same way. None of them
+    ever open a board file, so none of them need to queue for the permit this
+    gate sizes for real ``pcb drc`` / ``pcb fill-zones`` launches -- doing so
+    anyway serialises fast, cheap probes behind slow, memory-heavy ones for no
+    correctness benefit. Excluded here rather than at the call site so every
+    current and future ``kicad-cli --help``/``--version`` invocation is
+    covered, and kept in lockstep with ``scripts/ci/native_observer.category``
+    (see the module comment above) so the independent CI observer agrees.
     """
     words = _words(args, executable)
     if not words:
         return False
     name = Path(words[0]).name
     if name == _NATIVE_EXECUTABLE:
-        return True
+        return _CAPABILITY_PROBE_FLAGS.isdisjoint(words[1:])
     if name.startswith("python"):
         return any(Path(word).name == _NATIVE_PYTHON_WORKER for word in words[1:])
     return False
