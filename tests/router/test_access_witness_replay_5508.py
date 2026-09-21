@@ -49,6 +49,7 @@ from kicad_tools.router.access_witness import (
     ACCESS_EMPTY,
     ACCESS_NON_EMPTY,
     ACCESS_WITNESS_SIDECAR_SUFFIX,
+    NO_NET_LABEL,
     WITNESS_SCHEMA_VERSION,
     AccessWitness,
     CommitJournal,
@@ -776,3 +777,189 @@ class TestRoutingDiagnosticsJson:
         router = _routed_kelvin()
         payload = get_routing_diagnostics_json(router, {"ISENSE_A+": 1, "COMP": 2, "FOREIGN": 3}, 3)
         assert "access_witness" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Issue #5639: verdict shapes the format note has to be able to explain
+# ---------------------------------------------------------------------------
+
+
+def _walled_by_the_board_edge(width: float, height: float) -> Autorouter:
+    """One pad on a board too small for its own exit stubs.
+
+    ``compute_access_set`` rejects every one of the eight stub directions as
+    out-of-bounds, so the access set is empty with ``board_edge`` closing
+    copper (KiCad net 0, ``<board-edge>``) -- the exact shape board-07's
+    ``U5.1``..``U5.8`` reported in the Phase 1c evidence package.
+    """
+    router = Autorouter(width, height, rules=_rules(), force_python=True, physics_enabled=False)
+    _add_pad(router, "U1", "1", 0.75, 0.75, 7, "A0")
+    return router
+
+
+def _commit_other_net(
+    router: Autorouter, seg: Segment, *, pass_name="routing", iteration=0
+) -> None:
+    route = Route(net=9, net_name="OTHER", segments=[seg], vias=[])
+    with router.commit_journal.context(pass_name, iteration):
+        router.grid.mark_route(route)
+
+
+class TestPlacementStrandingIsNeverBlamedOnACommit:
+    """#5639 defect 2: ``empty`` / non-null / ``empty`` was not a real verdict.
+
+    A pad with no way out *before the search committed anything* is stranded by
+    placement.  The replay used to record the first record whose envelope
+    happened to bring such a pad up for re-evaluation as its closure -- which
+    is how board-07 reported eight pads "closed" by the board outline, copper
+    no commit can place.
+    """
+
+    def _tiny_board_with_one_later_commit(self) -> Autorouter:
+        router = _walled_by_the_board_edge(1.5, 1.5)
+        # Precondition: the pad is already stranded with NO copper committed.
+        from kicad_tools.router.pad_access import compute_access_set
+
+        before = compute_access_set(router.pads[("U1", "1")], router.grid, router.rules)
+        assert before.is_empty()
+        assert [c.kind for c in before.closing_copper] == ["board_edge"]
+
+        # A record from another net, whose envelope covers the pad's access
+        # bbox -- i.e. the record that used to be blamed.
+        _commit_other_net(
+            router,
+            Segment(
+                x1=0.1, y1=0.1, x2=1.4, y2=0.1, width=0.2, layer=Layer.F_CU, net=9, net_name="OTHER"
+            ),
+        )
+        assert len(router.commit_journal) == 1
+        return router
+
+    def test_a_pad_stranded_before_the_first_record_blames_no_commit(self):
+        router = self._tiny_board_with_one_later_commit()
+
+        pad = replay(router.commit_journal, router, pad_keys=[("U1", "1")]).for_pad("U1", "1")
+
+        assert pad is not None
+        # Row 3 of the format note: empty / null / empty = placement stranded.
+        assert pad.access_at_escape_end == ACCESS_EMPTY
+        assert pad.final_access == ACCESS_EMPTY
+        assert pad.first_closed_at is None
+        assert pad.first_closed_index is None
+        assert pad.first_closed_kind is None
+        assert pad.closing_nets == ()
+        assert pad.reopened is False
+
+    def test_the_one_line_rendering_says_placement_not_refused_copper(self):
+        router = self._tiny_board_with_one_later_commit()
+        pad = replay(router.commit_journal, router, pad_keys=[("U1", "1")]).for_pad("U1", "1")
+        assert pad is not None
+        assert "stranded before the first commit" in pad.one_line()
+
+    def test_a_real_non_empty_to_empty_transition_is_still_attributed(self):
+        """The fix must not silence the verdict the epic exists to produce."""
+        router = _walled_by_the_board_edge(2.6, 1.5)
+        from kicad_tools.router.pad_access import compute_access_set
+
+        before = compute_access_set(router.pads[("U1", "1")], router.grid, router.rules)
+        assert not before.is_empty(), "fixture must leave exactly one way out"
+
+        _commit_other_net(
+            router,
+            Segment(
+                x1=1.45,
+                y1=0.2,
+                x2=1.45,
+                y2=1.3,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=9,
+                net_name="OTHER",
+            ),
+        )
+        pad = replay(router.commit_journal, router, pad_keys=[("U1", "1")]).for_pad("U1", "1")
+
+        assert pad is not None
+        assert pad.access_at_escape_end == ACCESS_NON_EMPTY
+        assert pad.final_access == ACCESS_EMPTY
+        assert pad.first_closed_at == ("routing", 0)
+        assert pad.first_closed_index == 0
+        assert "OTHER" in pad.closing_nets
+
+
+class TestNetlessClosingCopperIsNotANet:
+    """#5639 defect 3: ``closing_nets: ["net0"]`` for board-outline copper."""
+
+    def test_board_edge_copper_reports_the_sentinel_not_net0(self):
+        router = _walled_by_the_board_edge(2.6, 1.5)
+        _commit_other_net(
+            router,
+            Segment(
+                x1=1.45,
+                y1=0.2,
+                x2=1.45,
+                y2=1.3,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=9,
+                net_name="OTHER",
+            ),
+        )
+        pad = replay(router.commit_journal, router, pad_keys=[("U1", "1")]).for_pad("U1", "1")
+
+        assert pad is not None
+        assert "board_edge" in pad.closing_copper_class
+        assert "<board-edge>" in pad.closing_refs
+        # The information the net-name field must NOT invent:
+        assert "net0" not in pad.closing_nets
+        assert NO_NET_LABEL in pad.closing_nets
+        # ...while a real net beside it is still named normally.
+        assert "OTHER" in pad.closing_nets
+
+    def test_no_closing_net_looks_like_a_synthetic_net_index(self):
+        """A script filtering ``closing_nets`` must not see a fabricated name."""
+        import re
+
+        router = _walled_by_the_board_edge(2.6, 1.5)
+        _commit_other_net(
+            router,
+            Segment(
+                x1=1.45,
+                y1=0.2,
+                x2=1.45,
+                y2=1.3,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=9,
+                net_name="OTHER",
+            ),
+        )
+        pad = replay(router.commit_journal, router, pad_keys=[("U1", "1")]).for_pad("U1", "1")
+
+        assert pad is not None
+        assert not [n for n in pad.closing_nets if re.fullmatch(r"net0+", n)]
+
+    def test_net_commit_order_labels_netless_copper_the_same_way(self):
+        journal = CommitJournal()
+        with journal.context("fixed", 0):
+            journal.observe(
+                "mark",
+                Route(
+                    net=0,
+                    net_name="",
+                    segments=[
+                        Segment(
+                            x1=0.0,
+                            y1=0.0,
+                            x2=1.0,
+                            y2=0.0,
+                            width=0.2,
+                            layer=Layer.F_CU,
+                            net=0,
+                            net_name="",
+                        )
+                    ],
+                    vias=[],
+                ),
+            )
+        assert journal.net_commit_order() == [NO_NET_LABEL]

@@ -97,6 +97,7 @@ __all__ = [
     "MAX_JOURNAL_RECORDS",
     "MAX_WITNESS_EVALUATIONS",
     "MAX_WITNESS_PADS",
+    "NO_NET_LABEL",
     "WITNESS_SCHEMA_VERSION",
     "AccessWitness",
     "CommitJournal",
@@ -126,6 +127,30 @@ ACCESS_WITNESS_SIDECAR_SUFFIX = ".access_witness.json"
 
 #: Bumped when the serialized record shape changes incompatibly.
 JOURNAL_SCHEMA_VERSION = 1
+
+#: Net label for copper that belongs to **no net at all** -- the board outline,
+#: a keepout, an unconnected pad: KiCad net 0 with an empty net name.  Issue
+#: #5639: the previous fallback spelled this ``net0``, which a reader (or a
+#: script filtering ``closing_nets`` for real net names) cannot tell apart from
+#: a net actually called ``net0``.  Angle-bracketed to match ``<board-edge>``
+#: in ``closing_refs``, a spelling KiCad's own net names never take.
+NO_NET_LABEL = "<no-net>"
+
+
+def _net_label(net: int, net_name: str) -> str:
+    """Human/reader-safe label for a piece of copper's net.
+
+    A named net is its own label.  An *unnamed but real* net (a nonzero index
+    whose name did not survive into the router, e.g. numeric-dialect input)
+    keeps the ``net<N>`` spelling, which is unambiguous because the index is
+    real.  Net 0 is not a net -- it gets :data:`NO_NET_LABEL`.
+    """
+    if net_name:
+        return net_name
+    if net:
+        return f"net{net}"
+    return NO_NET_LABEL
+
 
 #: Soft cap on retained records.  A dense board's negotiated loop commits and
 #: rips a few thousand routes; this is two orders of magnitude above that, so
@@ -503,7 +528,7 @@ class CommitJournal:
         for record in self.records:
             if not record.added:
                 continue
-            name = record.net_name or f"net{record.net}"
+            name = _net_label(record.net, record.net_name)
             if name not in seen:
                 seen.add(name)
                 order.append(name)
@@ -664,11 +689,18 @@ class PadWitness:
     The fields answer, in order: *did this pad ever lose every way out*, *when*,
     and *whose copper did it*.
 
-    ``first_closed_at`` is ``None`` when the access set never emptied -- which
-    is a real and important answer, not a missing one: a pad that ends the run
-    unrouted with a non-empty access set was not stranded by committed copper
-    at all, so no commit can be blamed for it (the #5509 category, and the
-    negative control the epic requires).
+    ``first_closed_at`` is ``None`` when no journal record ever took this pad
+    from a non-empty access set to an empty one -- which is a real and
+    important answer, not a missing one.  It covers two cases:
+
+    * the access set never emptied: a pad that ends the run unrouted with a
+      non-empty access set was not stranded by committed copper at all, so no
+      commit can be blamed for it (the #5509 category, and the negative
+      control the epic requires);
+    * the access set was **already** empty before the first record landed:
+      placement stranded the pad, and again no commit can be blamed (#5639 --
+      attributing the first record that merely re-evaluated such a pad is what
+      produced the impossible ``empty`` / non-null / ``empty`` verdict).
     """
 
     ref: str
@@ -693,7 +725,11 @@ class PadWitness:
     """That record's :attr:`CommitRecord.kind` (normally ``"commit"``)."""
 
     closing_nets: tuple[str, ...] = ()
-    """Net names of the copper that rejected every remaining candidate."""
+    """Net names of the copper that rejected every remaining candidate.
+
+    Copper that belongs to no net (the board outline, a keepout) is reported
+    as :data:`NO_NET_LABEL`, never as a synthetic ``net0`` a reader could
+    mistake for a real net name (#5639)."""
 
     closing_refs: tuple[str, ...] = ()
     """``ref.pin`` labels of that copper (``ref`` alone for route copper)."""
@@ -728,10 +764,16 @@ class PadWitness:
     def one_line(self) -> str:
         """Compact human rendering, e.g. ``U3.1: closed at initial[0] by COMP``."""
         if self.first_closed_at is None:
-            return (
-                f"{self.label}: access {self.final_access}, no commit closed it "
-                "(search refused legal copper)"
+            # #5639: an empty access set with nothing to blame is the
+            # placement-stranded case, not the #5509 "refused legal copper"
+            # one -- saying the latter of a pad that never had a way out
+            # misreads the verdict in the one place a human reads it.
+            reason = (
+                "stranded before the first commit"
+                if self.final_access == ACCESS_EMPTY
+                else "search refused legal copper"
             )
+            return f"{self.label}: access {self.final_access}, no commit closed it ({reason})"
         pass_name, iteration = self.first_closed_at
         nets = ", ".join(self.closing_nets) or "(unattributed)"
         suffix = " (reopened by a later rip-up)" if self.reopened else ""
@@ -967,7 +1009,9 @@ def _closing_summary(access: AccessSet) -> dict[str, tuple[str, ...]]:
     kinds: set[str] = set()
     markings: set[str] = set()
     for item in access.closing_copper:
-        nets.add(item.net_name or f"net{item.net}")
+        # #5639: board-edge / keepout copper is net 0 with no name; it must not
+        # be reported as a net called "net0".
+        nets.add(_net_label(item.net, item.net_name))
         refs.add(f"{item.ref}.{item.pin}" if item.pin else item.ref)
         kinds.add(item.kind)
         markings.update(item.marking)
@@ -1099,8 +1143,22 @@ def replay(
                     truncated = True
                     break
                 access = evaluate(key)
+                previous = state.get(key)
                 state[key] = access
-                if access.is_empty() and key not in first_closed:
+                # #5639: attribute a record only on a genuine non-empty ->
+                # empty TRANSITION.  A pad that was already empty when this
+                # record landed was not closed by it -- the record merely
+                # happened to be the first one whose envelope brought the pad
+                # back up for re-evaluation.  Blaming it produced the
+                # impossible ``empty`` / non-null / ``empty`` verdict seen on
+                # board-07's U5.1..U5.8, where the "closing copper" was the
+                # board outline (which no commit can place).
+                if (
+                    access.is_empty()
+                    and key not in first_closed
+                    and previous is not None
+                    and not previous.is_empty()
+                ):
                     first_closed[key] = (record, _closing_summary(access))
         if not seen_search_pass:
             baseline = {k: _state_label(a) for k, a in state.items()}
