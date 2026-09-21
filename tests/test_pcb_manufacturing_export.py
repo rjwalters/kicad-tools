@@ -411,6 +411,25 @@ class TestGenerateReport:
             assert len(content) > 0
 
 
+# Issue #5556: CI's `Test` job runs `pytest -n auto -o addopts=
+# --benchmark-disable --timeout=60` (ci.yml "Run tests"); `-o addopts=` means
+# coverage is OFF in CI, so the comparable local baseline is that same command.
+# Every test in this class drives a real weasyprint/pango PDF render through
+# `_generate_report`.  Measured serially on an unloaded 18-core host using CI's
+# exact flags (2026-09-18): 4.92 s, 4.92 s, 4.90 s and 4.90 s -- all four within
+# 0.02 s of each other.  That is why the marker is class-scoped rather than
+# naming only the three tests observed failing so far
+# (test_render_pdf_falls_back_to_md and
+# test_render_pdf_swallows_libgobject_oserror on runs 35326256453/35377430154,
+# test_render_pdf_produces_pdf_when_available on 35396782236): the remaining
+# sibling is indistinguishable in cost and would be reaped next.
+#
+# Crossing 60 s from a 4.9 s baseline implies >=12.2x inflation from `-n auto`
+# contention plus a cold container font/pango cache; 180 s (~37x) keeps ~3x
+# margin over the worst inflation observed, at the repo's existing override
+# value (tests/test_board_06_diffpair_test.py uses the same class-scoped 180 s
+# form).
+@pytest.mark.timeout(180)
 class TestRenderReportPdf:
     """Tests for ManufacturingPackage._render_report_pdf integration."""
 

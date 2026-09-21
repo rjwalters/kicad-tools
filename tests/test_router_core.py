@@ -4858,6 +4858,117 @@ class TestStagnationRecovery:
                 "Stalls were detected without stagnation recovery firing.\n" + captured.out[-2000:]
             )
 
+    def test_stagnation_recovery_marks_contended_cells_with_congestion_cost(self):
+        """Issue #5545: recovery must congestion-mark the contended cells.
+
+        The stagnation-recovery cohort reroute relies on a persistent
+        spatial cost signal to de-oscillate: historically the only such
+        signal reaching the C++ A* was the stale per-connection
+        clearance-retry penalty that leaked across connections (removed
+        by the ``clear_avoidance_after_connection`` default flip).  The
+        recovery now derives that signal from its own congestion state:
+        the cells the cohort keeps fighting over (Python-grid
+        ``usage_count > 1``) receive a bounded, persistent cost mark on
+        both grids before the cohort sweep runs.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+
+        # Fabricate the contested footprint directly: two overused cells
+        # (usage 3 and 2) plus a third cell at usage 1 that must NOT be
+        # marked.  ``find_overused_cells`` / ``update_history_costs``
+        # both key on ``usage_count > 1``.
+        usage = router.grid._usage_count
+        gx1, gy1 = router.grid.world_to_grid(5.0, 5.0)
+        gx2, gy2 = router.grid.world_to_grid(10.0, 10.0)
+        gx3, gy3 = router.grid.world_to_grid(15.0, 15.0)
+        usage[0, gy1, gx1] = 3
+        usage[0, gy2, gx2] = 2
+        usage[0, gy3, gx3] = 1
+
+        overused = router.grid.find_overused_cells()
+        assert len(overused) == 2, f"expected 2 overused cells, got {overused}"
+
+        history_before = float(router.grid._history_cost.sum())
+        marked = router._mark_stagnation_congestion(overused)
+
+        assert marked == 2
+        history_after = float(router.grid._history_cost.sum())
+        # Python mirror: history grows on overused cells by
+        # amount * (usage - 1) -> 20*(3-1) + 20*(2-1) = 60.
+        assert history_after - history_before == pytest.approx(60.0)
+        assert router.grid._history_cost[0, gy1, gx1] == pytest.approx(40.0)
+        assert router.grid._history_cost[0, gy3, gx3] == pytest.approx(0.0)
+
+        # C++ mirror (only when the native backend is available): the
+        # same cells carry a positive *history* cost -- the negotiated
+        # cost term that prices the native A* and that the
+        # per-connection avoidance cleanup does NOT clear.
+        cpp_grid = router._cpp_grid
+        if cpp_grid is not None:
+            impl = cpp_grid._impl
+            boosted = sum(impl.at(gx, gy, 0).history_cost for gx, gy in ((gx1, gy1), (gx2, gy2)))
+            assert boosted > 0.0, "C++ grid did not receive the congestion mark"
+            baseline = impl.at(gx3, gy3, 0).history_cost
+            assert baseline == pytest.approx(0.0)
+
+    def test_recovery_hold_is_strictly_better_only_ties_fall_through(self):
+        """Issue #5545 / PR #5609 Judge bisect: the hold must not fire on ties.
+
+        Board 01 evidence: VOUT's recovery re-landed at overflow 2 == banked
+        best 2; the tie-hold kept a same-net ``hole_to_hole_clearance``
+        violation that the skipped residual-conflict rip-up had historically
+        repaired.  The hold predicate must therefore hold only on strictly
+        lower overflow -- equal overflow falls through to the normal rip-up
+        and iteration verdict.
+        """
+        hold = Autorouter._recovery_hold_worthy
+        # Strictly better -> hold (board 06's case: 2 < 4).
+        assert hold(2, 4) is True
+        assert hold(0, 4) is True
+        assert hold(1, 2) is True
+        # Tie -> fall through (board 01's case: 2 == 2).
+        assert hold(2, 2) is False
+        assert hold(0, 0) is False
+        # Worse -> fall through.
+        assert hold(5, 4) is False
+
+    def test_stagnation_recovery_announces_congestion_mark(self, capsys):
+        """When recovery fires on an oscillating cohort, the mark is logged.
+
+        Reuses the shared PHASE_A/B/C pin-field fixture: when the loop
+        reports ``Stagnation recovery #N:`` the same run must also report
+        the congestion mark line, so operators can see the de-oscillation
+        signal being applied.
+        """
+        router = Autorouter(width=20.0, height=20.0)
+        for i in range(3):
+            router.add_component(
+                f"Q{i + 1}",
+                [
+                    {
+                        "number": "1",
+                        "x": 2.0,
+                        "y": 5.0 + i * 4.0,
+                        "net": i + 1,
+                        "net_name": f"PHASE_{chr(ord('A') + i)}",
+                    },
+                ],
+            )
+        router.add_component(
+            "J1",
+            [
+                {"number": "1", "x": 18.0, "y": 6.0, "net": 1, "net_name": "PHASE_A"},
+                {"number": "2", "x": 18.0, "y": 6.5, "net": 2, "net_name": "PHASE_B"},
+                {"number": "3", "x": 18.0, "y": 7.0, "net": 3, "net_name": "PHASE_C"},
+            ],
+        )
+        router.route_all_negotiated(max_iterations=12, timeout=30.0)
+        captured = capsys.readouterr()
+        if "Stagnation recovery #" in captured.out:
+            assert "congestion cost" in captured.out, (
+                "Recovery fired without announcing the congestion mark:\n" + captured.out[-2000:]
+            )
+
 
 class TestRecordRoutingDecisionRationale:
     """Regression tests for the routing-rationale builder (Issue #4305).

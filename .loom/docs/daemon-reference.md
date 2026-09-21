@@ -5550,6 +5550,37 @@ stops a host running sweeps at all).
 | `LOOM_WORKTREE_REAPER_INTERVAL_SECS` | `autonomous.worktreeReaper.intervalSecs` | env > config > default | `900` (15 min) |
 | — | `autonomous.worktreeReaper.gracePeriodSecs` | config > default | `600` (10 min) |
 | `LOOM_WORKTREE_REAPER_DISK_WARN_GB` | `autonomous.worktreeReaper.diskWarnFreeGb` | env > config > default | `20` |
+| `LOOM_WORKTREE_ACTIVITY_WINDOW_MINUTES` | — | env > default | `30` (see below) |
+
+#### Activity gate on the artifact-reclaim pass (#8116)
+
+The artifact-reclaim pass (#5187/#5939) deletes `target/`/`node_modules/` from
+every worktree the removal pass is *keeping* but that nothing appears to be
+using. "Appears to be using" used to mean only what the registry can see: a live
+claim-lock, a `.loom-in-use` marker, or a process whose **cwd** is inside the
+worktree.
+
+An **in-session Task-tool builder** — an operator spawning `/loom:builder`
+subagents directly rather than through `/loom:sweep` — has none of those. Each
+of its shell commands is a fresh one-shot subshell that exits immediately, so
+between commands (i.e. nearly always) the process table shows nothing in the
+worktree at all. Such a worktree classified as "kept, idle" and had its
+`target/` deleted mid-`cargo`: on 2026-09-17 that happened twice to one issue in
+a six-builder wave, each loss costing a full Rust rebuild.
+
+The reaper now also asks the filesystem, which the process table cannot
+contradict: **a worktree with any write in the last `N` minutes is live**,
+whatever the registry thinks. The probe reads the worktree's gitdir refs
+(`HEAD`/`index`/`logs/HEAD` — the only place a *commit* is observable, since
+committing touches no working-tree file), the build-artifact directories at
+depth 1 (a running `cargo` rewrites `target/debug/` constantly), and a bounded
+walk of the source tree, stopping at the first recent entry.
+
+Set `LOOM_WORKTREE_ACTIVITY_WINDOW_MINUTES=0` to disable the gate and restore
+the pre-#8116 behavior. A worktree the daemon cannot read is never reclaimed
+from — absent evidence is not evidence of absence, as everywhere else in the
+reaper. The gate only defers the *artifact* reclaim; whole-worktree removal is
+unaffected (it is already gated on the issue being closed).
 
 #### Pressure-triggered deep clean (#5919)
 

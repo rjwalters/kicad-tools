@@ -209,7 +209,7 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
     """
     import random as _random
 
-    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.core import Autorouter, install_serialized_obstacles
     from kicad_tools.router.layers import Layer
     from kicad_tools.router.rules import DesignRules
 
@@ -310,6 +310,11 @@ def _run_evolutionary_trial(config: dict) -> tuple[list, float, int]:
         router._edge_clearance = edge_clearance
         if edge_segments and edge_clearance:
             router.grid.add_edge_keepout(edge_segments, edge_clearance)
+
+    # Issue #5555: ``add_obstacle`` keepouts have the same problem -- they
+    # only reach this worker through the "obstacles" key of the serialized
+    # config, so replay them onto the worker's own grid before routing.
+    install_serialized_obstacles(router, config)
 
     # Route using the chromosome's net order
     routes = router.route_all(net_order)

@@ -965,16 +965,41 @@ record_blocked() {
 # only asks "would this specific write destroy content that was NOT put there
 # by Loom's own install/resync tooling", which is exactly the condition the
 # incident hinged on.
-RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9]|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$)'
+#
+# #8098: the legacy `chore: install Loom v[0-9]` alternative below is anchored
+# with the same "optional squash suffix, then end of subject" ending
+# (`[^[:space:]]*( \(#[0-9]+\))?$`) as its two siblings. It used to be a bare,
+# unanchored prefix match, so a commit subject that merely STARTED with
+# "chore: install Loom v" but then said something else entirely — e.g.
+# "chore: install Loom v1 and also revert the guard fix" — was misclassified
+# as routine install/resync lineage (ROUTINE, silently overwritten) instead of
+# a diverged local commit (DIVERGED, protected). Low practical risk (the
+# legacy subject is not produced by any current installer path — see
+# `chore(loom): Install Loom ... orchestration framework` below for that), but
+# a real anchoring bug: an installed file's genuinely-last commit is normally
+# provided verbatim by `git log`, not hand-typed, but nothing prevented a
+# hand-amended or hand-rebased subject from taking this exact shape.
+RESYNC_COMMIT_SUBJECT_RE='^(chore: install Loom v[0-9][^[:space:]]*( \(#[0-9]+\))?$|chore: resync installed Loom surfaces( \(#[0-9]+\))?$|(\[skip ci\] )?chore\(loom\): Install Loom [^[:space:]]+ orchestration framework( \(#[0-9]+\))?$)'
 
 # removed_line_count <src> <dst>
 #   Count of non-blank lines present in dst but ABSENT from src (a line-SET
 #   difference, not a positional diff — a merely reordered or re-indented
 #   line is not "removed"). Deliberately coarse: this is a cheap tripwire for
 #   "content unique to the installed copy would vanish", not a full diff.
+#
+#   LC_ALL=C on the `comm` itself is load-bearing, not decoration (#8165):
+#   GNU comm validates that its inputs are sorted *in the current locale's
+#   collation*, and both inputs here are sorted under LC_ALL=C. Left in the
+#   ambient locale, comm re-reads a C-sorted stream under (say) en_US.UTF-8
+#   collation, declares it "not in sorted order", and then emits a garbage
+#   line set -- over-counting (a spurious BLOCK on a pure-addition update,
+#   recoverable only with --force) or under-counting (a silent fail-open
+#   back to the pre-#7864 revert-the-local-fix behaviour), depending on the
+#   content. Pinning the comparison to the same collation its inputs were
+#   sorted in makes the count locale-invariant.
 removed_line_count() {
     local src="$1" dst="$2"
-    comm -23 \
+    LC_ALL=C comm -23 \
         <(grep -v '^[[:space:]]*$' "$dst" 2>/dev/null | LC_ALL=C sort -u) \
         <(grep -v '^[[:space:]]*$' "$src" 2>/dev/null | LC_ALL=C sort -u) \
         2>/dev/null | wc -l | tr -d '[:space:]'

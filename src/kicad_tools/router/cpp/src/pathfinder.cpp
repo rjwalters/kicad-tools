@@ -453,6 +453,31 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
 // matches the cached ``trace_half_width_cells_`` (the typical case --
 // callers in the A* loop pass either the default or the same per-net
 // override they passed to ``is_trace_blocked``).
+bool Pathfinder::strict_step_in_scope(int nx, int ny) const {
+    if (!search_strict_pad_kernel_) return false;
+    if (search_strict_center_x_ < 0 || search_strict_center_y_ < 0 ||
+        search_strict_radius_ < 0) {
+        return true;  // Global scope (diagnostics / unit tests only).
+    }
+    // Issue #5599: Euclidean disc around the repeated violation site --
+    // the locality bound that keeps the strict pad check from closing
+    // relaxation-dependent corridors elsewhere on dense pad arrays.
+    const int dx = nx - search_strict_center_x_;
+    const int dy = ny - search_strict_center_y_;
+    return dx * dx + dy * dy <= search_strict_radius_ * search_strict_radius_;
+}
+
+bool Pathfinder::strict_edge_pad_clear(int cx, int cy, int nx, int ny, int layer,
+                                        int net, float emit_trace_width) const {
+    const auto [ax, ay] = grid_.grid_to_world(cx, cy);
+    const auto [bx, by] = grid_.grid_to_world(nx, ny);
+    const float width = emit_trace_width > 0.0f ? emit_trace_width
+                                                : rules_.trace_width;
+    return grid_.edge_foreign_pad_clear(ax, ay, bx, by, layer, net,
+                                        width / 2.0f,
+                                        rules_.trace_clearance);
+}
+
 bool Pathfinder::is_foreign_pad_metal_within_radius(int x, int y, int layer,
                                                     int net, int radius) const {
     if (radius <= 0) {
@@ -1378,6 +1403,10 @@ RouteResult Pathfinder::route(
                                           emit_trace_width, emit_via_diameter,
                                           emit_via_drill);
                 result.success = true;
+                // Issue #5599: report the accepted goal node (grid coords).
+                result.goal_gx = current.x;
+                result.goal_gy = current.y;
+                result.goal_layer = current.layer;
                 return result;
             }
         }
@@ -1477,7 +1506,21 @@ RouteResult Pathfinder::route(
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == net) {
-                    // Same-net blocked cell - allow
+                    // Same-net blocked cell - allow -- UNLESS the exact swept
+                    // edge fails the validator's segment-vs-pad clearance
+                    // (Issue #5599; see the twin comment in the resumable
+                    // loop).  Evidence-gated on search_strict_pad_kernel_.
+                    if (strict_step_in_scope(nx, ny) &&
+                        !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                               nlayer, net, emit_trace_width)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                                "REJECT reason=same_net_corridor_foreign_pad_too_close\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer);
+                        }
+                        continue;
+                    }
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, net, negotiated_mode,
                                          trace_radius_cells,
@@ -1561,6 +1604,28 @@ RouteResult Pathfinder::route(
                         }
                         continue;
                     }
+                } else if (
+                    strict_step_in_scope(nx, ny) &&
+                    !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                           nlayer, net, emit_trace_width)) {
+                    // Issue #5599: the pad-exit/approach-zone relaxation
+                    // skips the swept-envelope check, but a step whose exact
+                    // swept edge fails the validator's own segment-vs-pad
+                    // clearance produces a committed segment the post-route
+                    // validator will ALWAYS reject (pad metal is not
+                    // rippable) -- exactly the board 04 BOOT0/USER_LED
+                    // under-tip diagonal class that exhausted the resume
+                    // budget and fell back to the Python A*.  Evidence-gated
+                    // on search_strict_pad_kernel_ (see the setter's
+                    // comment): off for fresh searches, armed by the Python
+                    // resume loop after a repeated violation.
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*/one-shot] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) "
+                            "REJECT reason=approach_zone_foreign_pad_too_close\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer);
+                    }
+                    continue;
                 }
             }
 
@@ -1995,6 +2060,13 @@ RouteResult Pathfinder::run_astar_loop() {
                                               search_emit_via_diameter_,
                                               search_emit_via_drill_);
                     result.success = true;
+                    // Issue #5599: report the goal node actually accepted so
+                    // the Python resume loop rejects THIS cell (not the pad
+                    // center the reconstruction's final segment always ends
+                    // at).
+                    result.goal_gx = current.x;
+                    result.goal_gy = current.y;
+                    result.goal_layer = current.layer;
                     return result;
                 }
                 // Goal rejected, continue searching from open set
@@ -2100,7 +2172,36 @@ RouteResult Pathfinder::run_astar_loop() {
                 if (is_in_start_metal || is_in_end_metal) {
                     // Allow entry into own pad's metal area
                 } else if (cell.net == search_net_) {
-                    // Same-net blocked cell - allow
+                    // Same-net blocked cell - allow -- UNLESS the exact
+                    // swept edge fails the validator's own segment-vs-pad
+                    // clearance (Issue #5599).  A same-net corridor built
+                    // from this net's own escape stub / prior copper can hug
+                    // a neighbor pad closer than the post-route validator
+                    // permits (the stub was laid with the relaxed fine-pitch
+                    // escape clearance; the validator enforces the full
+                    // clearance).  Every candidate reusing that corridor is
+                    // rejected after the search, exhausting the resume
+                    // budget -- board 04's BOOT0 under-tip diagonal class.
+                    // EVIDENCE-GATED (search_strict_pad_kernel_): the exact
+                    // geometry is conservative against the rasterized grid
+                    // (cell-center kernels can slip a diagonal corner-cut
+                    // past an off-grid pad), so it stays off for fresh
+                    // searches and is armed by the Python resume loop only
+                    // once a clearance violation has actually repeated.
+                    if (strict_step_in_scope(nx, ny) &&
+                        !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                               nlayer, search_net_,
+                                               search_emit_trace_width_)) {
+                        if (astar_trace_enabled()) {
+                            std::fprintf(stderr,
+                                "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                                "reason=same_net_corridor_foreign_pad_too_close "
+                                "net=%d\n",
+                                current.x, current.y, current.layer, nx, ny, nlayer,
+                                search_net_);
+                        }
+                        continue;
+                    }
                 } else if (cell.net == 0) {
                     if (is_trace_blocked(nx, ny, nlayer, search_net_,
                                          search_negotiated_mode_,
@@ -2188,6 +2289,26 @@ RouteResult Pathfinder::run_astar_loop() {
                         }
                         continue;
                     }
+                } else if (
+                    strict_step_in_scope(nx, ny) &&
+                    !strict_edge_pad_clear(current.x, current.y, nx, ny,
+                                           nlayer, search_net_,
+                                           search_emit_trace_width_)) {
+                    // Issue #5599: see the twin comment in the one-shot loop
+                    // -- the approach-zone relaxation must still respect the
+                    // exact foreign-pad clearance the post-route validator
+                    // enforces (the validator's own segment-vs-pad geometry,
+                    // via Grid3D::edge_foreign_pad_clear).  Evidence-gated on
+                    // search_strict_pad_kernel_.
+                    if (astar_trace_enabled()) {
+                        std::fprintf(stderr,
+                            "[A*] cur=(%d,%d,L%d) nbr=(%d,%d,L%d) REJECT "
+                            "reason=approach_zone_foreign_pad_too_close "
+                            "net=%d\n",
+                            current.x, current.y, current.layer, nx, ny, nlayer,
+                            search_net_);
+                    }
+                    continue;
                 }
             }
 

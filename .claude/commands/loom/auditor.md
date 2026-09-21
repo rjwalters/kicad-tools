@@ -285,24 +285,24 @@ directly, on a live fleet host).
 hazard (#6554) — Step D1's own Node+Rust guidance can walk you into it.**
 This repo's root `package.json` `test` script is the plain `cargo test
 --workspace ...` invocation, not nextest — Step D1's "package.json ->
-node/pnpm/npm build+test" fallback and CI's own "full-stack check" job both
-run it via `npm run check:all`, independently of whatever `$TEST_CMD` the
-Rust-extraction steps above computed. In THIS repo that script is now itself
-guarded: it is `defaults/scripts/tests/cargo-test-daemon-guard.sh "cargo test
+node/pnpm/npm build+test" fallback runs it via `pnpm check:all`,
+independently of whatever `$TEST_CMD` the Rust-extraction steps above
+computed. (Root has no `package-lock.json`; CI's Node/TS jobs —
+`mcp-build`, `dashboard-tests` — skip root.) Here that script is guarded:
+it is `defaults/scripts/tests/cargo-test-daemon-guard.sh "cargo test
 --workspace ..."`, which applies the same live-daemon detection and — when a
 daemon pid file is found — excludes `integration_security`/
 `integration_factory_reset` (splitting the invocation across
 `--exclude loom-daemon` plus a `-p loom-daemon` re-run with those two targets
 left out of an explicit `--test` allowlist, since plain `cargo test` has no
-nextest-style `-E` filter). So running `npm run check:all` / `pnpm test`
+nextest-style `-E` filter). So running `pnpm check:all` / `pnpm test`
 directly in this repo is safe as shipped — you do not need to route it
 through anything yourself. **In another Node+Rust repo you are auditing**,
-this guard is Loom-specific and will not exist: before running that repo's
-own `package.json` `test`/`check:all` script, check whether it wraps `cargo
-test`/`cargo nextest` against a package with daemon/service/shared-state
-integration tests, the same way you would vet any other Rust test group in
-Step D5 above — a Node wrapper script is not evidence of hermeticity by
-itself.
+this guard is Loom-specific and will not exist: before running its own
+`package.json` `test`/`check:all` script, check whether it wraps `cargo
+test`/`cargo nextest` against daemon/service/shared-state integration
+tests, as you would vet any Rust test group in Step D5 above — a Node
+wrapper script is not evidence of hermeticity by itself.
 
 ### CI-Aware Validation
 

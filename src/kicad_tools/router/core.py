@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
     from .io import FineZone
     from .pathfinder import Router
+    from .region_graph import RegionGraph
     from .routing_plan import RoutingPlan
     from .stub_terminals import StubTerminal
 
@@ -34,6 +35,18 @@ logger = logging.getLogger(__name__)
 import contextlib
 
 from . import via_conflict as _via_conflict_module
+from .access_witness import (
+    PASS_ESCAPE,
+    PASS_FIXED,
+    PASS_GRACE,
+    PASS_INITIAL,
+    PASS_ITERATION,
+    PASS_POST,
+    PASS_RELIEF,
+    PASS_RESET,
+    PASS_ROUTING,
+    CommitJournal,
+)
 from .adaptive import AdaptiveAutorouter, RoutingResult
 from .adaptive_grid import AdaptiveGridRouter
 from .algorithms import (
@@ -337,6 +350,35 @@ RELIEF_RESCUE_TXN_FLOOR_S = 90.0
 # worth reopening is board 07's INPUTS -- a rescue that cannot spend ~46% of a
 # stage budget and roll back (issue #4781) -- not another A/B of this flag.
 DETERMINISTIC_RESCUE_DEFAULT = False
+
+# Issue #5545: congestion-mark parameters for the stagnation-recovery cohort
+# reroute.  When the negotiated loop's rip-up cohort has stagnated (same
+# cohort, overflow stuck in a narrow band), the recovery sweep needs a
+# persistent spatial cost signal to de-oscillate the contended cells.
+# Historically that signal arrived by accident: stale per-connection
+# clearance-retry penalties (``_boost_avoidance_at``'s +20-per-boost region
+# marks) leaked across connections and priced the grid the cohort reroute
+# searched.  Flipping ``clear_avoidance_after_connection`` to ``True``
+# removed the leak -- and with it the ONLY persistent per-cell congestion
+# memory the C++ A* ever saw (production never syncs Python-grid usage /
+# history onto the C++ grid, so the PathFinder present/history terms are
+# inert on the native backend; see ``Grid3D::get_negotiated_cost``).
+# The recovery therefore now derives the same class of signal from its own
+# congestion state: the cells the cohort keeps fighting over
+# (``find_overused_cells``) get a bounded tapered bump on the *history*
+# cost term of both grids (see ``_mark_stagnation_congestion``).  History
+# is the right channel: it prices negotiated-mode searches only, and no
+# production path clears it -- the per-connection cleanup zeroes
+# ``avoidance_cost`` instead, so a mark placed there would survive only
+# until the cohort sweep's first ``route()`` call exited.  Amount anchors
+# to the +20.0 the DRC-retry feedback already uses; radius adds a small
+# corridor margin so crossing the contested region is priced, not just
+# touching its centre cells.  The mark persists for the rest of the
+# negotiated loop -- bounded by ``2 * max_stagnation_recoveries`` (2
+# observation points x 2 recoveries) marks per route_all, unlike the
+# unbounded leak it replaces.
+STAGNATION_CONGESTION_AMOUNT = 20.0
+STAGNATION_CONGESTION_RADIUS_CELLS = 2
 
 
 @dataclass
@@ -662,6 +704,51 @@ def _should_flush_oscillation_msgs(
     return bool(deferred_msgs) and stranded_net_count > 0
 
 
+def install_serialized_obstacles(router: Autorouter, config: dict) -> None:
+    """Replay ``add_obstacle`` keepouts carried by a worker config dict.
+
+    Issue #5555: ``Autorouter._obstacles`` never crosses a
+    ``ProcessPoolExecutor`` boundary on its own -- it only reaches a worker
+    through :meth:`Autorouter._serialize_for_parallel`'s ``"obstacles"`` key.
+    Without this replay a worker's A* search routes straight through cells
+    the parent process had blocked.  Registrations are restored on the
+    worker's ``_obstacles`` list too, so a reset inside the worker
+    (``_reset_for_new_trial``) keeps them as well.
+
+    A config dict with no ``"obstacles"`` key (an older payload) is a strict
+    no-op, mirroring how the edge-keepout restore treats absent geometry.
+
+    Args:
+        router: The worker's freshly reconstructed ``Autorouter``.
+        config: The serialized parent state the worker was handed.
+    """
+    for obs_data in config.get("obstacles") or ():
+        layer_data = obs_data.get("layer", Layer.F_CU)
+        if isinstance(layer_data, Layer):
+            obs_layer = layer_data
+        elif isinstance(layer_data, str):
+            try:
+                obs_layer = Layer.from_kicad_name(layer_data)
+            except ValueError:
+                obs_layer = Layer.F_CU
+        else:
+            try:
+                obs_layer = Layer(layer_data)
+            except ValueError:
+                obs_layer = Layer.F_CU
+
+        obstacle = Obstacle(
+            obs_data["x"],
+            obs_data["y"],
+            obs_data["width"],
+            obs_data["height"],
+            obs_layer,
+            obs_data.get("clearance", 0.0),
+        )
+        router._obstacles.append(obstacle)
+        router.grid.add_obstacle(obstacle)
+
+
 def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
     """Run a single Monte Carlo trial in a worker process.
 
@@ -806,6 +893,10 @@ def _run_monte_carlo_trial(config: dict) -> tuple[list, float, int]:
         router._edge_clearance = edge_clearance
         if edge_segments and edge_clearance:
             router.grid.add_edge_keepout(edge_segments, edge_clearance)
+
+    # Issue #5555: same treatment for ``add_obstacle`` keepouts -- they only
+    # reach this worker via the "obstacles" key of the serialized config.
+    install_serialized_obstacles(router, config)
 
     # Shuffle net order (first trial uses base order)
     if trial_num == 0:
@@ -1499,11 +1590,21 @@ class Autorouter:
         # ``_release_routing_engine_state`` nulling ``_lattice_pathfinder``.
         self._lattice_failure_reasons: dict[object, str] = {}
 
+        # Issue #5517 (Epic #5508 Phase 1b): ordered commit journal.  A pure
+        # observer on the routing grid -- see
+        # :mod:`kicad_tools.router.access_witness` -- recording every copper
+        # commit / rip-up in order so an offline replay can name the commit
+        # that stranded an unrouted pad.  Always on: the per-mutation cost is
+        # an append plus one shallow geometry copy, which is why Epic #5508's
+        # scope guard forbids a knob for it.
+        self._commit_journal = CommitJournal()
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
+        self._attach_commit_journal()
 
         self.pads: dict[tuple[str, str], Pad] = {}
         # Every physical shape, including explicitly jumpered same-number
@@ -1645,6 +1746,16 @@ class Autorouter:
         # so the post-route nudge pass can repair traces that violate the
         # edge keepout (Issue #2743).
         self._edge_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None
+
+        # Keepouts registered through :meth:`add_obstacle` (Issue #5555).
+        # Sibling of ``_edge_segments`` / ``_edge_clearance`` above: the
+        # blocked cells live on the *grid*, which ``_reset_for_new_trial``
+        # throws away and rebuilds, so the registrations have to be
+        # persisted on ``self`` to be re-stamped onto the new grid.  Without
+        # this list every rip-up/reroute iteration in
+        # ``route_all_negotiated`` (and every Monte Carlo / evolutionary
+        # trial reset) silently reopened the grid at those cells.
+        self._obstacles: list[Obstacle] = []
 
         # Shapely-based board geometry for accurate non-rectangular edge
         # clearance (Issue #2340).  Set by load_pcb_for_routing() when
@@ -1812,16 +1923,25 @@ class Autorouter:
         # Issue #5519 (Epic #5510, Phase 1): report-only RoutingPlan
         # sidecar.  ON by default -- building the plan only reads
         # RegionGraph state (see TwoPhaseRouter's own attribute docstring),
-        # so it cannot perturb the copper this run produces.  No CLI flag
-        # exists yet to flip this (``--no-routing-plan`` is 1b); it is
-        # exposed here so tests / future CLI wiring can opt out.
-        # ``routing_plan`` is populated by ``route_all_two_phase`` (every
-        # ``kct route`` entry point that reaches ``route_all_two_phase``
-        # -- ``route_with_escape``, ``route_with_escape_and_diffpairs``,
-        # and the non-dense ``--two-phase`` path -- goes through it) once
-        # the two-phase router's global pass has run; ``None`` otherwise.
+        # so it cannot perturb the copper this run produces.
+        #
+        # Issue #5520 (Phase 1b): ``routing_plan`` is now populated on
+        # EVERY default route, not only the ones that reach
+        # ``route_all_two_phase`` (``route_with_escape`` /
+        # ``route_with_escape_and_diffpairs`` / ``--two-phase``):
+        # :meth:`route_all_negotiated` runs :meth:`plan_routing` up front
+        # when this flag is on and no plan has been built yet, which
+        # covers the non-dense CLI paths (all seven ``route_all_negotiated``
+        # dispatch sites in ``route_cmd.py``, including the fixed-layer
+        # ``--layers N`` / ``--no-auto-layers`` closure) plus library
+        # callers.  ``kct route --no-routing-plan`` flips the flag off.
         self.emit_routing_plan: bool = True
         self.routing_plan: RoutingPlan | None = None
+        # Issue #5520: the RegionGraph the last plan stage was computed on
+        # (report-only; kept so callers/tests can cross-check the plan's
+        # overflow totals against the live graph, mirroring
+        # ``TwoPhaseRouter.last_region_graph``).
+        self.plan_region_graph: RegionGraph | None = None
 
     def enable_sub_problem_cache(
         self,
@@ -1999,6 +2119,132 @@ class Autorouter:
                 + 1
             )
             cpp_grid.mark_via(gx, gy, via.net, radius_cells)
+
+    # ------------------------------------------------------------------
+    # Commit journal (Epic #5508 Phase 1b, issue #5517)
+    # ------------------------------------------------------------------
+
+    @property
+    def commit_journal(self) -> CommitJournal:
+        """Ordered record of every copper commit / rip-up in this run.
+
+        See :mod:`kicad_tools.router.access_witness`.  The journal is
+        populated by an observer installed on ``self.grid``, so it captures
+        the commit paths that bypass :meth:`_mark_route` as well -- the escape
+        pre-pass (``EscapeRouter.apply_escape_routes``) and the negotiated
+        rip-up paths (``NegotiatedRouter``), both of which call the grid
+        directly.
+        """
+        return self._commit_journal
+
+    def _attach_commit_journal(self) -> None:
+        """(Re-)install the journal observer on the current ``self.grid``.
+
+        ``self.grid`` is replaced in three places -- ``__init__``, the
+        region-parallel thread-safe rebuild in :meth:`route_all_negotiated`,
+        and :meth:`_reset_for_new_trial` -- and each new grid starts with no
+        observer, so every one of them must call this.
+        """
+        journal = getattr(self, "_commit_journal", None)
+        if journal is not None:
+            journal.attach(self.grid)
+
+    def _journal_stage(self, pass_name: str, iteration: int = 0):
+        """Tag every commit recorded inside the ``with`` block.
+
+        Returns the :meth:`CommitJournal.context` context manager, so callers
+        read as ``with self._journal_stage(PASS_INITIAL): ...``.
+        """
+        return self._commit_journal.context(pass_name, iteration)
+
+    @staticmethod
+    def _recovery_hold_worthy(current_overflow: int, best_overflow: int) -> bool:
+        """Whether a stagnation-recovery sweep's state should be held.
+
+        Issue #5545 / PR #5609 Judge bisect: hold only when the sweep
+        re-landed the cohort STRICTLY under the banked best's overflow.
+        Ties must fall through to the normal residual-conflict rip-up and
+        iteration verdict: at equal overflow the re-landed geometry is
+        unverified against the incumbent (overflow alone does not certify
+        geometry), and the skipped rip-up is also a repair mechanism --
+        board 01's tie-held VOUT carried a same-net
+        ``hole_to_hole_clearance`` violation the skipped rip-up had
+        historically repaired.
+        """
+        return current_overflow < best_overflow
+
+    def _mark_stagnation_congestion(
+        self,
+        overused: list[tuple[int, int, int, int]],
+        *,
+        amount: float = STAGNATION_CONGESTION_AMOUNT,
+        radius_cells: int = STAGNATION_CONGESTION_RADIUS_CELLS,
+    ) -> int:
+        """Put a persistent congestion cost mark on a stagnating cohort's cells.
+
+        Issue #5545: the stagnation-recovery cohort reroute de-oscillates
+        through a persistent spatial penalty on the contended cells.  The
+        pre-#5504 router got that penalty by accident -- clearance-retry
+        boosts from an earlier connection leaked across connections and
+        priced the cohort's A* searches.  This helper replaces the leak
+        with a congestion-derived mark on the PathFinder *history* term:
+
+        * C++ grid: a tapered ``history_cost`` bump (Chebyshev radius,
+          ``amount * (1 - dist / (radius + 1))`` -- the same kernel shape
+          ``boost_region_cost`` uses) written through the bound
+          ``at(x, y, layer)`` cell reference.  History is the right
+          channel: it prices negotiated-mode searches only, and nothing
+          in production clears it -- the per-connection cleanup zeroes
+          ``avoidance_cost``, so a mark placed there would survive only
+          until the cohort sweep's first ``route()`` call exited.
+        * Python grid: ``update_history_costs(amount)`` raises history
+          cost by ``amount * (usage - 1)`` on exactly the overused cells,
+          so the pure-Python fallback A* sees the equivalent steering
+          (its negotiated cost is also ``present + history``).
+
+        Both marks persist for the remainder of the negotiated loop and
+        are bounded: the recovery applies the mark at each congestion
+        observation it makes -- before the cohort sweep (the stagnated
+        footprint) and after it re-lands (the re-landed footprint the
+        follow-through conflict reroutes inherit) -- for at most
+        ``2 * max_stagnation_recoveries`` applications per
+        ``route_all_negotiated`` call, each a single fixed-amount bump,
+        unlike the unbounded cross-connection accumulation the leak
+        produced.
+
+        Args:
+            overused: Contested cells as ``(gx, gy, layer_idx, usage)``
+                tuples from ``RoutingGrid.find_overused_cells``.
+            amount: Per-cell cost added at each mark centre (anchors to
+                the +20.0 the DRC-retry feedback uses).
+            radius_cells: Chebyshev radius around each centre that also
+                receives the (tapered) cost.
+
+        Returns:
+            Number of contended cells marked (0 when ``overused`` is
+            empty -- nothing to de-oscillate).
+        """
+        if not overused:
+            return 0
+        cpp_grid = self._cpp_grid
+        if cpp_grid is not None:
+            impl = cpp_grid._impl
+            cols, rows = cpp_grid.cols, cpp_grid.rows
+            for gx, gy, layer_idx, _usage in overused:
+                x1 = max(gx - radius_cells, 0)
+                x2 = min(gx + radius_cells, cols - 1)
+                y1 = max(gy - radius_cells, 0)
+                y2 = min(gy + radius_cells, rows - 1)
+                for y in range(y1, y2 + 1):
+                    for x in range(x1, x2 + 1):
+                        dist = max(abs(x - gx), abs(y - gy))
+                        scale = 1.0 - dist / (radius_cells + 1.0)
+                        cell = impl.at(x, y, layer_idx)
+                        cell.history_cost += amount * scale
+        # Python-grid mirror for the fallback A*: bumps history cost by
+        # amount * (usage - 1) on exactly the overused cells.
+        self.grid.update_history_costs(amount)
+        return len(overused)
 
     def _mark_route(self, route: Route) -> None:
         """Mark a route on both Python and C++ grids.
@@ -2394,8 +2640,16 @@ class Autorouter:
     def add_obstacle(
         self, x: float, y: float, width: float, height: float, layer: Layer = Layer.F_CU
     ):
-        """Add an obstacle (keepout area, mounting hole, etc.)."""
+        """Add an obstacle (keepout area, mounting hole, etc.).
+
+        Issue #5555: the obstacle is also recorded on ``self._obstacles`` so
+        it survives a grid rebuild.  ``_reset_for_new_trial`` discards the
+        whole :class:`RoutingGrid` -- the blocked cells live there, not on
+        ``self`` -- and replays the persisted registrations onto the new
+        grid, exactly as it does for the board-edge keepout (Issue #5374).
+        """
         obs = Obstacle(x, y, width, height, layer)
+        self._obstacles.append(obs)
         self.grid.add_obstacle(obs)
 
     def register_block(self, block: PCBBlock) -> None:
@@ -5709,6 +5963,17 @@ class Autorouter:
         returns ``None`` because no ``diffpair_partner`` is set anywhere,
         which is bit-for-bit identical to pre-Phase-1C behavior.
         """
+        # Issue #5517 (Epic #5508 Phase 1b): this is the one place every
+        # ``route_all_*`` entry point passes through, so it is where the
+        # commit journal stops calling copper "fixed".  The journal starts
+        # tagged PASS_FIXED, which is true only of the preserved input copper
+        # marked before any routing began; once a routing entry point starts,
+        # its commits must not inherit that label.  The instrumented paths
+        # (``route_all_negotiated``, ``route_all_two_phase``) immediately
+        # refine this to PASS_INITIAL / PASS_ITERATION / ...; the rest report
+        # an honest "some routing entry point, stage unknown".
+        self._commit_journal.set_context(PASS_ROUTING, 0)
+
         # 0. Engage impedance-driven sizing (Issue #2672 / Epic #2556
         #    Phase 3K-cont).  When any net class declares
         #    ``target_diff_impedance`` or ``target_single_impedance``,
@@ -9272,6 +9537,82 @@ class Autorouter:
                 )
         return all_non_starved, labels
 
+    def plan_routing(self) -> RoutingPlan | None:
+        """Run the report-only tile-based plan stage (Issue #5520).
+
+        Builds the coarse :class:`~kicad_tools.router.region_graph.RegionGraph`,
+        runs the negotiated global pass over it and serializes the result
+        into a :class:`~kicad_tools.router.routing_plan.RoutingPlan`, which
+        is stored on :attr:`routing_plan` (and the graph on
+        :attr:`plan_region_graph`).
+
+        This is the same stage ``TwoPhaseRouter.route_all`` runs as its
+        Phase 1 -- both go through ``routing_plan.build_plan`` /
+        ``routing_plan.select_plan_nets``, so a board's plan does not
+        depend on whether it happened to take the dense (two-phase) or the
+        non-dense (negotiated) path.
+
+        **Report-only and silent.**  It never touches ``self.grid`` (no
+        corridor preferences, no obstacle marking) and prints nothing, so
+        it cannot change routed copper and cannot perturb the stdout the
+        CLI / tests assert on.  The text summary line and the JSON sidecar
+        remain the CLI's job (Issue #5519).
+
+        Returns:
+            The freshly built plan, or ``None`` when the board has no
+            routable nets (nothing to plan).
+        """
+        from .routing_plan import build_plan, select_plan_nets
+
+        selection = select_plan_nets(self)
+        if not selection.net_order:
+            self.routing_plan = None
+            self.plan_region_graph = None
+            return None
+        result = build_plan(
+            self,
+            net_order=selection.net_order,
+            pour_nets=selection.pour_nets,
+            single_pad_nets=selection.single_pad_nets,
+            emit=True,
+        )
+        self.routing_plan = result.plan
+        self.plan_region_graph = result.region_graph
+        return result.plan
+
+    def _run_routing_plan_stage(self) -> None:
+        """Build the routing plan ahead of a negotiated route (Issue #5520).
+
+        Called from :meth:`route_all_negotiated` so that **every** default
+        ``kct route`` -- not just the dense-package boards that reach
+        ``route_all_two_phase`` -- emits the Epic #5510 plan artifact.
+        Hooking the core method (rather than each CLI dispatch site)
+        covers all seven ``route_all_negotiated`` call sites in
+        ``route_cmd.py``, the escalation wrappers, and library callers at
+        once.
+
+        Two guards keep this cheap and side-effect free:
+
+        - ``emit_routing_plan`` (``--no-routing-plan``) skips it entirely.
+        - ``routing_plan is None`` means a board that already planned --
+          e.g. ``route_with_escape`` -> ``route_all_two_phase`` -> a later
+          negotiated fallback on the SAME ``Autorouter`` -- does not run
+          the pass twice.  Each layer-escalation attempt builds a fresh
+          ``Autorouter`` via ``load_pcb_for_routing``, so every attempt
+          still gets its own plan.
+
+        A failure here is never fatal: the plan is a diagnostic artifact,
+        so an unexpected error degrades to "no sidecar" plus one warning
+        line rather than aborting the route.
+        """
+        if not self.emit_routing_plan or self.routing_plan is not None:
+            return
+        try:
+            self.plan_routing()
+        except Exception as e:  # pragma: no cover - defensive
+            self.routing_plan = None
+            flush_print(f"  Warning: routing-plan stage skipped ({type(e).__name__}: {e})")
+
     def route_all_negotiated(
         self,
         max_iterations: int = 10,
@@ -9574,6 +9915,13 @@ class Autorouter:
         # production boards.
         self._prepare_routing()
 
+        # Issue #5520 (Epic #5510, Phase 1b): run the report-only plan
+        # stage before any copper is committed, at the same relative point
+        # ``route_all_two_phase`` reaches its Phase 1 global pass.  Silent,
+        # grid-untouching, and skipped when a plan already exists -- see
+        # ``_run_routing_plan_stage``.
+        self._run_routing_plan_stage()
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         self._run_subgrid_prepass()
 
@@ -9867,6 +10215,9 @@ class Autorouter:
                 self.grid.bump_occupancy_generation()
                 # Update router to use new grid
                 self.router.grid = self.grid
+                # Issue #5517: the thread-safe rebuild above discarded the
+                # grid the journal observer was installed on.
+                self._attach_commit_journal()
                 neg_router = NegotiatedRouter(
                     self.grid,
                     self.router,
@@ -10009,6 +10360,11 @@ class Autorouter:
             return f"{elapsed:.1f}s"
 
         flush_print("\n--- Iteration 0: Initial routing with sharing ---")
+        # Issue #5517: tag every commit from here to the grace pass as the
+        # initial negotiated pass.  Set (rather than ``with``-scoped) because
+        # the stages below run sequentially in this one function body; the
+        # final tag is reset to PASS_POST after the rip-up loop returns.
+        self._commit_journal.set_context(PASS_INITIAL, 0)
         if progress_callback is not None:
             if not progress_callback(0.0, "Initial routing pass", True):
                 # Issue #2657 / Epic #2556 Phase 3H-cont: post-route
@@ -10104,6 +10460,8 @@ class Autorouter:
 
             if grace_nets:
                 grace_start = time.time()
+                # Issue #5517: still iteration 0, but a distinct stage.
+                self._commit_journal.set_context(PASS_GRACE, 0)
 
                 def _grace_route(net: int, cap: float) -> list[Route]:
                     return self._route_net_negotiated(net, present_factor, per_net_timeout=cap)
@@ -10603,6 +10961,9 @@ class Autorouter:
         try:
             if not timed_out:
                 for iteration in range(1, max_iterations + 1):
+                    # Issue #5517: everything committed or ripped from here on
+                    # belongs to this rip-up / reroute iteration.
+                    self._commit_journal.set_context(PASS_ITERATION, iteration)
                     full_reorder_used_this_iter = False
                     if check_timeout():
                         print(f"\n  ⚠ Timeout reached at iteration {iteration} ({elapsed_str()})")
@@ -10834,6 +11195,17 @@ class Autorouter:
                             break
 
                     flush_print(f"\n--- Iteration {iteration}: Rip-up and reroute ---")
+
+                    # Issue #5545: set by the stagnation-recovery block below
+                    # when the recovery sweep re-lands the cohort strictly
+                    # under the banked best's overflow -- the iteration then
+                    # holds the recovered configuration instead of running
+                    # its residual-conflict rip-up (see the hold site at the
+                    # rip-up dispatch).  Ties do NOT hold: at equal overflow
+                    # the re-landed geometry is unverified against the
+                    # incumbent, and the skipped rip-up is also a repair
+                    # mechanism (board 01 VOUT, Judge bisect on PR #5609).
+                    recovery_hold_follow_through = False
 
                     # Issue #3438: close the PREVIOUS iteration's
                     # corridor-reservation window (if any) so this iteration
@@ -11197,6 +11569,23 @@ class Autorouter:
                                 f"elevated present_factor ({elapsed_str()})"
                             )
                             flush_print(f"    Cohort: {', '.join(cohort_names)}")
+                            # Issue #5545: congestion-mark the contended cells
+                            # BEFORE ripping the cohort, so both the cohort
+                            # sweep and this iteration's subsequent conflict
+                            # reroutes search a grid that prices the region
+                            # they keep fighting over.  This is the
+                            # congestion-derived replacement for the stale
+                            # per-connection clearance-retry penalty that
+                            # used to leak into these searches (see
+                            # ``_mark_stagnation_congestion``).
+                            marked_cells = self._mark_stagnation_congestion(overused)
+                            if marked_cells:
+                                flush_print(
+                                    f"    Congestion mark: {marked_cells} contended "
+                                    f"cell(s) carry +{STAGNATION_CONGESTION_AMOUNT:.0f} "
+                                    f"congestion cost (radius "
+                                    f"{STAGNATION_CONGESTION_RADIUS_CELLS} cells)"
+                                )
                             # Rip up all cohort routes (only the ones currently routed)
                             ripup_targets = [
                                 n for n in recovery_cohort if n in net_routes and net_routes[n]
@@ -11259,6 +11648,65 @@ class Autorouter:
                             # Recompute overflow & cohort tracking after recovery
                             current_overflow = self.grid.get_total_overflow()
                             overused = self.grid.find_overused_cells()
+                            # Issue #5545: the sweep moves the contention, it
+                            # does not necessarily dissolve it -- the cohort
+                            # re-lands in a configuration whose own overused
+                            # cells are NEW (unpriced) cells.  Re-mark the
+                            # post-recovery contended footprint so this
+                            # iteration's subsequent conflict reroutes (the
+                            # ``Rerouted X/Y nets`` follow-through below)
+                            # negotiate around the re-landed contention too,
+                            # not just the original stagnation footprint.
+                            # Measured on board 06 (seed 42): with only the
+                            # pre-sweep mark the sweep landed overflow 2 but
+                            # the follow-through's 2-net conflict reroute
+                            # plowed back up to overflow 5 and the iteration
+                            # still lost to the iter-2 best.
+                            remarked_cells = self._mark_stagnation_congestion(overused)
+                            if remarked_cells:
+                                flush_print(
+                                    f"    Congestion mark (post-sweep): {remarked_cells} "
+                                    f"re-landed contended cell(s) carry "
+                                    f"+{STAGNATION_CONGESTION_AMOUNT:.0f} congestion cost"
+                                )
+                            # Issue #5545: if the sweep already re-landed the
+                            # cohort STRICTLY under the banked best's
+                            # overflow, HOLD that configuration for the
+                            # iteration verdict instead of running the
+                            # residual-conflict rip-up.  The serial conflict
+                            # reroute is the same mechanism that stagnated,
+                            # and it negotiates blind to the crossings it is
+                            # about to create (a reroute piles onto cells
+                            # that are at usage 1 -- unmarkable in advance).
+                            # Measured on board 06 (seed 42): the marked
+                            # sweep re-landed at overflow 2 (best-so-far 4),
+                            # the follow-through rip-up of the 2 residual
+                            # conflict nets threw it back up to 5, and the
+                            # iteration lost to the iter-2 snapshot.
+                            #
+                            # STRICTLY-better only -- ties fall through to
+                            # the normal residual-conflict rip-up and
+                            # iteration verdict.  At equal overflow the held
+                            # configuration is UNVERIFIED against the
+                            # incumbent: overflow alone does not certify
+                            # geometry, and the skipped rip-up is also a
+                            # repair mechanism.  Judge bisect, board 01
+                            # (seed 42): VOUT's recovery re-landed at
+                            # overflow 2 == banked best 2, the tie-hold kept
+                            # a same-net hole_to_hole_clearance violation
+                            # (-0.000mm VOUT/VOUT at (149.50, 86.05)) that
+                            # the skipped residual rip-up had historically
+                            # repaired, and the DRC-clean tied incumbent
+                            # never got its turn.
+                            if self._recovery_hold_worthy(current_overflow, best_metrics.overflow):
+                                recovery_hold_follow_through = True
+                                flush_print(
+                                    f"  Holding recovered state: post-recovery overflow "
+                                    f"({current_overflow}) is strictly under the banked "
+                                    f"best (iter-{best_metrics.iteration}: overflow "
+                                    f"{best_metrics.overflow}); skipping this iteration's "
+                                    f"residual-conflict rip-up (Issue #5545)"
+                                )
                             # Update the latest overflow_history entry to reflect
                             # post-recovery state so subsequent oscillation
                             # detection sees the recovery's effect.
@@ -11451,7 +11899,26 @@ class Autorouter:
                         )
                         break
 
-                    if use_targeted_ripup:
+                    if recovery_hold_follow_through:
+                        # Issue #5545: the stagnation-recovery sweep re-landed
+                        # the cohort strictly under the banked best's
+                        # overflow (decision + rationale in the recovery
+                        # block above; ties fall through to the rip-up).
+                        # Skip this iteration's residual-conflict rip-up so
+                        # the serial reroute that stagnated cannot gamble the
+                        # recovered configuration away before the iteration
+                        # verdict banks it.  Refresh the loop-level overflow
+                        # view from the held state (the zero-overflow recovery
+                        # above may have further improved it) and fall
+                        # through to the common end-of-iteration bookkeeping.
+                        overflow = self.grid.get_total_overflow()
+                        overused = self.grid.find_overused_cells()
+                        flush_print(
+                            f"  Residual-conflict rip-up skipped: holding recovered "
+                            f"state (overflow {overflow}) into the iteration verdict "
+                            f"({elapsed_str()})"
+                        )
+                    elif use_targeted_ripup:
                         # Targeted rip-up: for each conflicting net, find its specific blockers
                         # and only rip up those instead of all conflicting nets at once
                         flush_print(
@@ -12628,6 +13095,12 @@ class Autorouter:
             # (follow-up to #3488).  No-op when no window is open.
             self._flush_corridor_reservation(net_routes)
 
+            # Issue #5517: the rip-up loop is over; everything the caller does
+            # next (best-state restore, optimizer, DRC nudge, clearance
+            # correction) is post-route, and must not be attributed to the
+            # last iteration.
+            self._commit_journal.set_context(PASS_POST, 0)
+
         # Issue #3942: flush buffered oscillation/escape diagnostics only when
         # the route did NOT fully succeed.  These intermediate local-minimum
         # messages describe a state the negotiated loop hit mid-way; when a
@@ -13315,6 +13788,47 @@ class Autorouter:
         )
 
     def _relief_rescue(
+        self,
+        failed_net: int,
+        neg_router: NegotiatedRouter,
+        net_routes: dict[int, list[Route]],
+        pads_by_net: dict[int, list[Pad]],
+        present_factor: float,
+        per_net_timeout: float | None,
+        flush_print_fn,
+        elapsed_fn,
+        depth: int = 0,
+        deadline: float | None = None,
+        deterministic_rescue: bool = DETERMINISTIC_RESCUE_DEFAULT,
+        txn_deadline: float | None = None,
+    ) -> bool:
+        """Journal-tagged entry point for :meth:`_relief_rescue_txn` (#5517).
+
+        The rescue is a transaction that rips victims, probes, commits and
+        (on failure) restores -- all of which are copper mutations the
+        commit journal must attribute to the *relief* stage rather than to
+        the enclosing rip-up iteration, so a witness can say "the relief
+        rescue for net N took that copper away".  The iteration number is
+        carried through unchanged.  Behaviour is otherwise identical: this
+        only sets a label.
+        """
+        with self._journal_stage(PASS_RELIEF, self._commit_journal.iteration):
+            return self._relief_rescue_txn(
+                failed_net,
+                neg_router,
+                net_routes,
+                pads_by_net,
+                present_factor,
+                per_net_timeout,
+                flush_print_fn,
+                elapsed_fn,
+                depth=depth,
+                deadline=deadline,
+                deterministic_rescue=deterministic_rescue,
+                txn_deadline=txn_deadline,
+            )
+
+    def _relief_rescue_txn(
         self,
         failed_net: int,
         neg_router: NegotiatedRouter,
@@ -14929,6 +15443,12 @@ class Autorouter:
             # ``Autorouter``, so this is the only way it learns whether to
             # build the sidecar plan.
             emit_routing_plan=self.emit_routing_plan,
+            # Issue #5517 (Epic #5508 Phase 1b): let the detailed-routing
+            # loop tag the commit journal with its own stage boundaries.
+            # ``kct route`` sends every escape-routed board here, so without
+            # this the journal of a dense board would record the right
+            # commits in the right order under no stage at all.
+            journal_stage=self._commit_journal.set_context,
         )
 
     def route_all_two_phase(
@@ -15033,6 +15553,10 @@ class Autorouter:
             max_iterations=max_iterations,
             checkpoint_callback=checkpoint_callback,
         )
+        # Issue #5517: the detailed-routing loop is over; whatever the
+        # caller does next (optimizer, DRC nudge, clearance correction) is
+        # post-route and must not be attributed to the last iteration.
+        self._commit_journal.set_context(PASS_POST, 0)
         # Issue #5519 (Epic #5510, Phase 1): copy the report-only
         # RoutingPlan the two-phase router built (or ``None`` when
         # ``emit_routing_plan`` is off) onto the Autorouter so CLI callers
@@ -15228,11 +15752,27 @@ class Autorouter:
 
         fixed_fills = self.grid.fixed_fills
 
+        # Issue #5517: the grid below is discarded wholesale, taking every
+        # committed route with it.  Journal that as an explicit removal of
+        # each route rather than letting the copper vanish silently -- a
+        # replay that missed this would carry the previous trial's copper
+        # forward and blame the wrong commit for a stranded pad.
+        with self._journal_stage(PASS_RESET):
+            for route in list(self.grid.routes):
+                self._commit_journal.observe("resync_remove", route)
+
         # Recreate grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
             width, height, origin_x, origin_y
         )
+        # Issue #5517: fresh grid, fresh observer install.  The journal itself
+        # is NOT cleared -- a Monte Carlo / evolutionary trial reset is part
+        # of the same run, and the witness needs to see the whole history.
+        # The re-marking below (pads, keepouts, preserved input copper) is the
+        # fixed baseline again, not routing output.
+        self._attach_commit_journal()
+        self._commit_journal.set_context(PASS_FIXED, 0)
 
         self.grid.install_fixed_fills(fixed_fills)
 
@@ -15246,6 +15786,17 @@ class Autorouter:
         # board-edge exclusion zone for the next search.
         if self._edge_segments and self._edge_clearance:
             self.grid.add_edge_keepout(self._edge_segments, self._edge_clearance)
+
+        # Issue #5555: same reasoning for keepouts registered through
+        # ``add_obstacle`` (component bodies, mechanical exclusions,
+        # courtyards).  They only ever existed as blocked cells on the grid
+        # discarded above, so without this replay every rip-up/reroute
+        # iteration reopened them and the A* search could cross an obstacle
+        # no DRC stage in the loop is looking for.  Re-stamped *before* the
+        # pads below so pad cells keep their own-net ownership, matching the
+        # ordering ``register_block`` documents for the initial install.
+        for obstacle in self._obstacles:
+            self.grid.add_obstacle(obstacle)
 
         # Issue #1778: Pass component pitch so fine-pitch pads get reduced clearance
         pitches = self.component_pitches
@@ -15372,6 +15923,23 @@ class Autorouter:
             if self._edge_segments is not None
             else [],
             "edge_clearance": self._edge_clearance,
+            # Issue #5555: keepouts registered through ``add_obstacle``.
+            # Same rationale as the edge geometry above -- a worker process
+            # builds its own Autorouter from this dict and would otherwise
+            # route straight through obstacles the parent had blocked.
+            # Plain dicts (layer as its KiCad name) keep the payload
+            # transport-safe and isolated from later parent-side edits.
+            "obstacles": [
+                {
+                    "x": obs.x,
+                    "y": obs.y,
+                    "width": obs.width,
+                    "height": obs.height,
+                    "layer": obs.layer.value if hasattr(obs.layer, "value") else str(obs.layer),
+                    "clearance": obs.clearance,
+                }
+                for obs in self._obstacles
+            ],
         }
 
     def route_all_monte_carlo(
@@ -17911,30 +18479,36 @@ class Autorouter:
 
         all_routes: list[Route] = []
 
-        for package in packages:
-            escapes = self._escape.generate_escapes(package)
-            routes = self._escape.apply_escape_routes(escapes)
-            all_routes.extend(routes)
+        # Issue #5517: the escape pre-phase is the replay's baseline -- "access
+        # at escape-prephase end" is the reference point Epic #5508's Phase 2
+        # measures against.  ``EscapeRouter.apply_escape_routes`` marks the
+        # stubs straight onto ``self.grid`` (bypassing ``_mark_route``), so the
+        # grid-level observer is what catches them; this only supplies the tag.
+        with self._journal_stage(PASS_ESCAPE):
+            for package in packages:
+                escapes = self._escape.generate_escapes(package)
+                routes = self._escape.apply_escape_routes(escapes)
+                all_routes.extend(routes)
 
-            # Track these routes
-            self.routes.extend(routes)
+                # Track these routes
+                self.routes.extend(routes)
 
-            # Issue #2401: Build virtual pads at escape endpoints so the
-            # main routing pipeline routes between escape endpoints instead
-            # of original pad centers.  Also mark escape nets as protected
-            # so their stub segments are not ripped up.
-            for escape in escapes:
-                pad = escape.pad
-                pad_key = pad.key
-                if pad_key in self.pads:
-                    self._escape_pad_overrides[pad_key] = self._build_escape_endpoint_pad(
-                        pad, escape
-                    )
+                # Issue #2401: Build virtual pads at escape endpoints so the
+                # main routing pipeline routes between escape endpoints instead
+                # of original pad centers.  Also mark escape nets as protected
+                # so their stub segments are not ripped up.
+                for escape in escapes:
+                    pad = escape.pad
+                    pad_key = pad.key
+                    if pad_key in self.pads:
+                        self._escape_pad_overrides[pad_key] = self._build_escape_endpoint_pad(
+                            pad, escape
+                        )
 
-            print(
-                f"  Escape routes: {package.ref} ({package.package_type.name})"
-                f" - {len(escapes)} pins escaped"
-            )
+                print(
+                    f"  Escape routes: {package.ref} ({package.package_type.name})"
+                    f" - {len(escapes)} pins escaped"
+                )
 
         if self._escape_pad_overrides:
             print(

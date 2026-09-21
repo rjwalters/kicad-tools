@@ -21,7 +21,8 @@ copper is routed (Phase 1 of the epic is explicitly byte-identical).
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -131,23 +132,31 @@ class NetPlanEntry:
 class EdgePlanEntry:
     """Per-undirected-edge demand/capacity/overflow.
 
-    One row per undirected region-graph edge (never per directed edge --
-    see :meth:`RoutingPlan.from_global_result` for why the forward-direction
-    ``(min(a, b), max(a, b))`` edge is the canonical source of ``capacity``
-    / ``demand`` / ``overflow`` here, matching ``RegionGraph.
-    get_total_overflow()`` / ``get_overflowed_edges()`` exactly).
+    One row per undirected region-graph edge (never per directed edge).
+    The region graph backs each pair with two directed ``RegionEdge``
+    objects; ``demand`` / ``overflow`` sum **both** directions so they agree
+    with ``RegionGraph.get_total_overflow()`` regardless of which direction
+    carried the traffic (Issue #5544), while ``capacity`` / ``blockage_mm``
+    are read from the ascending ``(min(a, b), max(a, b))`` edge alone
+    because they are symmetric across the pair by construction.  See
+    :meth:`RoutingPlan.from_global_result` for the full rationale.
 
     Attributes:
         a: Smaller region ID of the pair.
         b: Larger region ID of the pair.
-        capacity: Scalar capacity (summed across layers).
-        demand: Scalar utilization (summed across layers).
-        overflow: ``max(0, demand - capacity)``.
+        capacity: Scalar per-direction capacity (summed across layers).
+        demand: Scalar utilization (summed across layers AND across both
+            traversal directions of the pair).
+        overflow: Sum of ``max(0, utilization - capacity)`` over both
+            directed edges of the pair -- NOT ``max(0, demand - capacity)``,
+            since each direction is measured against the same capacity
+            independently (matching ``RegionGraph.get_total_overflow()``).
         blockage_mm: Obstacle blockage length along the boundary (mm).
         nets: Net IDs whose corridor crosses this edge.
         layers: Per-layer ``{"capacity": int, "demand": int}`` rows, keyed
-            by the string layer index.  Empty when the graph has no
-            per-layer data (``num_layers <= 1``).
+            by the string layer index; ``demand`` likewise sums both
+            directions.  Empty when the graph has no per-layer data
+            (``num_layers <= 1``).
     """
 
     a: int
@@ -371,30 +380,51 @@ class RoutingPlan:
         edges: list[EdgePlanEntry] = []
         edge_lookup = getattr(graph, "_edge_lookup", {})
         for (a, b), net_ids in sorted(edge_nets.items()):
-            # ``get_total_overflow`` / ``get_overflowed_edges`` dedupe an
-            # undirected pair onto the edge object stored in the SMALLER
-            # region's outgoing list -- i.e. the (a, b) directed edge with
-            # a < b, since region graph construction always makes the
-            # neighbor ID larger than the source.  Reading from the same
-            # directed edge here keeps the two totals derivable by
-            # construction (asserted in tests).
+            # Every adjacent region pair is backed by TWO directed
+            # ``RegionEdge`` objects (``source=a, target=b`` and
+            # ``source=b, target=a``), and ``update_utilization()`` only
+            # bumps the one matching a path's actual traversal direction.
+            # ``RegionGraph.get_total_overflow()`` sums both directions per
+            # undirected pair (Issue #5529 / PR #5540), so the traffic
+            # counters here must be summed the same way -- reading only the
+            # ascending (a, b) edge reported ``overflow=0`` for a pair whose
+            # traffic ran descending-only (Issue #5544).
             edge = edge_lookup.get((a, b))
             if edge is None:
                 continue
+            reverse = edge_lookup.get((b, a))
+            # ``capacity`` / ``layer_capacity`` / ``blockage`` are symmetric
+            # across the pair by construction: ``RegionGraph._build_edges``
+            # builds both directed edges from the same ``edge_capacity`` /
+            # ``layer_cap``, and ``register_obstacles`` (via
+            # ``_accumulate_edge_blockage``) recomputes both from the same
+            # (order-independent) region-blockage average.  Only the
+            # utilization-derived fields differ per direction, so only those
+            # are combined.
+            reverse_utilization = reverse.utilization if reverse is not None else 0
+            reverse_overflow = reverse.overflow if reverse is not None else 0
+            reverse_layer_utilization = reverse.layer_utilization if reverse is not None else {}
             layers_block: dict[str, dict[str, int]] = {}
-            layer_indices = set(edge.layer_capacity) | set(edge.layer_utilization)
+            layer_indices = (
+                set(edge.layer_capacity)
+                | set(edge.layer_utilization)
+                | set(reverse_layer_utilization)
+            )
             for layer_idx in sorted(layer_indices):
                 layers_block[str(layer_idx)] = {
                     "capacity": edge.layer_capacity.get(layer_idx, 0),
-                    "demand": edge.layer_utilization.get(layer_idx, 0),
+                    "demand": (
+                        edge.layer_utilization.get(layer_idx, 0)
+                        + reverse_layer_utilization.get(layer_idx, 0)
+                    ),
                 }
             edges.append(
                 EdgePlanEntry(
                     a=a,
                     b=b,
                     capacity=edge.capacity,
-                    demand=edge.utilization,
-                    overflow=edge.overflow,
+                    demand=edge.utilization + reverse_utilization,
+                    overflow=edge.overflow + reverse_overflow,
                     blockage_mm=edge.blockage,
                     nets=sorted(net_ids),
                     layers=layers_block,
@@ -523,3 +553,270 @@ class RoutingPlan:
                 print(f"  Warning: could not write routing-plan sidecar: {e}")
             return False
         return True
+
+
+# =============================================================================
+# Plan stage (Issue #5520, Epic #5510 Phase 1b)
+#
+# The tile-graph build + global pass below was previously inlined in
+# ``TwoPhaseRouter.route_all`` (``algorithms/two_phase.py``), so only boards
+# that reach the two-phase path (dense packages, or an explicit
+# ``--two-phase``) produced a plan.  Factoring it here lets
+# ``Autorouter.plan_routing`` run the SAME stage ahead of
+# ``route_all_negotiated`` -- i.e. on every default ``kct route`` -- without
+# switching non-dense boards onto the two-phase router (which would be a
+# behaviour change).  ``TwoPhaseRouter`` calls these helpers too, so dense
+# and non-dense boards share one implementation and cannot drift.
+# =============================================================================
+
+#: Tile size heuristic: ~10x the routing pitch per tile, minimum 1 mm.
+#: Unchanged from the pre-#5520 inline two-phase code.
+TILE_PITCH_FACTOR = 10.0
+
+#: Minimum coarse-grid dimension (3x3), matching the inline two-phase code.
+MIN_TILE_DIM = 3
+
+#: Negotiated-iteration budget for the global pass (pre-#5520 constant).
+GLOBAL_MAX_ITERATIONS = 15
+
+#: History-cost increment per overflowed edge per iteration (pre-#5520).
+GLOBAL_HISTORY_INCREMENT = 1.0
+
+
+@dataclass
+class PlanNetSelection:
+    """The net universe a plan is computed over.
+
+    Attributes:
+        net_order: Nets handed to ``GlobalRouter.route_all`` (priority
+            order, pour / single-pad nets already removed).
+        pour_nets: Nets filtered out as pour nets (zone-filled).
+        single_pad_nets: Nets filtered out as trivially connected.
+    """
+
+    net_order: list[int]
+    pour_nets: list[int]
+    single_pad_nets: list[int]
+
+
+@dataclass
+class PlanBuildResult:
+    """Everything one plan stage produced.
+
+    ``plan`` is ``None`` when the caller passed ``emit=False``; the graph
+    and the global-routing result are always returned so the two-phase
+    router can keep using them for corridor extraction.
+    """
+
+    plan: RoutingPlan | None
+    region_graph: RegionGraph
+    global_result: GlobalRoutingResult
+    tile_mm: float
+    elapsed_s: float
+
+
+def select_plan_nets(
+    router: Any,
+    *,
+    report: Callable[[str], None] | None = None,
+) -> PlanNetSelection:
+    """Reproduce the two-phase global-pass net filter.
+
+    Args:
+        router: Anything exposing ``nets`` / ``net_names`` /
+            ``net_class_map`` / ``_get_net_priority`` and (optionally)
+            ``_pour_nets_without_zones`` / ``_interleave_match_groups`` /
+            ``_apply_byte_lane_inner_priority``.  Both
+            :class:`~kicad_tools.router.algorithms.two_phase.TwoPhaseRouter`
+            and :class:`~kicad_tools.router.core.Autorouter` qualify --
+            deliberately, so a dense board's plan and the same board's
+            plan built from the ``Autorouter`` agree on ``nets``.
+        report: Optional sink for the two "Skipping N ..." diagnostic
+            lines.  ``None`` (the default) keeps the selection SILENT,
+            which is what the ``route_all_negotiated`` hook needs: the
+            plan stage must not add stdout to the many unit tests that
+            call it directly.
+
+    Returns:
+        A :class:`PlanNetSelection`.
+    """
+    nets = router.nets
+    net_names = router.net_names
+    net_class_map = getattr(router, "net_class_map", None) or {}
+    pour_without_zones = getattr(router, "_pour_nets_without_zones", None) or set()
+
+    def _emit(message: str) -> None:
+        if report is not None:
+            report(message)
+
+    net_order = sorted(nets.keys(), key=lambda n: router._get_net_priority(n))
+    net_order = [n for n in net_order if n != 0]
+
+    # Issue #1295: pour nets are connected via zone fills.
+    # Issue #1841: pour nets WITHOUT zones route as ordinary signals.
+    pour_nets: list[int] = []
+    signal_nets: list[int] = []
+    for n in net_order:
+        net_name = net_names.get(n, "")
+        if net_name in pour_without_zones:
+            signal_nets.append(n)
+            continue
+        net_class = net_class_map.get(net_name)
+        if net_class and net_class.is_pour_net:
+            pour_nets.append(n)
+        else:
+            signal_nets.append(n)
+    if pour_nets:
+        pour_names = [net_names.get(n, f"Net {n}") for n in pour_nets]
+        _emit(f"  Skipping {len(pour_nets)} pour net(s) (use zone fill instead): {pour_names}")
+    net_order = signal_nets
+
+    # Single-pad nets are trivially connected (mirrors core.py's filter).
+    single_pad_nets: list[int] = []
+    multi_pad_nets: list[int] = []
+    for n in net_order:
+        if len(nets.get(n, [])) < 2:
+            single_pad_nets.append(n)
+        else:
+            multi_pad_nets.append(n)
+    if single_pad_nets:
+        _emit(f"  Skipping {len(single_pad_nets)} single-pad net(s) (trivially connected)")
+    net_order = multi_pad_nets
+
+    # Issue #2914 / #2962 / #2983 / #4051: fairness + byte-lane ordering
+    # passes, when the caller exposes them.
+    interleave = getattr(router, "_interleave_match_groups", None)
+    if interleave is not None:
+        net_order = interleave(net_order)
+    byte_lane = getattr(router, "_apply_byte_lane_inner_priority", None)
+    if byte_lane is not None:
+        net_order = byte_lane(net_order)
+
+    return PlanNetSelection(
+        net_order=net_order,
+        pour_nets=pour_nets,
+        single_pad_nets=single_pad_nets,
+    )
+
+
+def build_plan(
+    router: Any,
+    *,
+    net_order: Iterable[int],
+    pour_nets: Iterable[int] = (),
+    single_pad_nets: Iterable[int] = (),
+    corridor_width_factor: float = 2.0,
+    emit: bool = True,
+    report: Callable[[str], None] | None = None,
+) -> PlanBuildResult:
+    """Run one tile-based global-routing pass and (optionally) plan it.
+
+    This is the stage factored out of ``TwoPhaseRouter.route_all``: build
+    the coarse :class:`~kicad_tools.router.region_graph.RegionGraph` with
+    geometry-based capacity, register pads as blockage, run
+    :class:`~kicad_tools.router.global_router.GlobalRouter` with negotiated
+    iteration, and serialize the outcome into a :class:`RoutingPlan`.
+
+    **Report-only.**  Nothing here touches ``router.grid``: no
+    ``set_corridor_preference``, no obstacle marking, no RNG draw.  The
+    only mutated object is the freshly-constructed ``RegionGraph``.  That
+    is what lets ``Autorouter.route_all_negotiated`` run the stage on
+    boards that never reach the two-phase router while keeping the routed
+    copper byte-identical (Epic #5510 Phase 1 is report-only).
+
+    Args:
+        router: ``TwoPhaseRouter`` or ``Autorouter`` (needs ``grid``,
+            ``rules``, ``nets``, ``net_names``, ``net_class_map``,
+            ``pads``).
+        net_order: Pre-filtered net order (see :func:`select_plan_nets`).
+        pour_nets: Nets filtered out as pour nets, for plan reporting.
+        single_pad_nets: Nets filtered out as single-pad, for reporting.
+        corridor_width_factor: Corridor half-width as a multiple of the
+            design-rule clearance (two-phase default 2.0).
+        emit: When ``False``, run the pass but skip building the
+            ``RoutingPlan`` (``PlanBuildResult.plan is None``).  The
+            two-phase router still needs the corridors, so the pass
+            itself always runs there.
+        report: Optional sink for the one-line tile-grid diagnostic.
+            ``None`` keeps the stage silent.
+
+    Returns:
+        A :class:`PlanBuildResult`.
+    """
+    from .global_router import GlobalRouter
+    from .region_graph import RegionGraph
+
+    grid = router.grid
+    rules = router.rules
+
+    # Routing pitch and tile sizing -- identical to the pre-#5520 inline code.
+    trace_pitch = rules.trace_width + rules.trace_clearance
+    corridor_width = corridor_width_factor * rules.trace_clearance
+    tile_size = max(trace_pitch * TILE_PITCH_FACTOR, 1.0)
+    num_cols = max(MIN_TILE_DIM, int(grid.width / tile_size))
+    num_rows = max(MIN_TILE_DIM, int(grid.height / tile_size))
+
+    region_graph = RegionGraph(
+        board_width=grid.width,
+        board_height=grid.height,
+        origin_x=grid.origin_x,
+        origin_y=grid.origin_y,
+        num_cols=num_cols,
+        num_rows=num_rows,
+        trace_pitch=trace_pitch,
+        num_layers=grid.num_layers,
+    )
+
+    # Register pads as obstacles for blockage-aware capacity.
+    region_graph.register_obstacles(list(router.pads.values()))
+
+    if report is not None:
+        stats = region_graph.get_statistics()
+        report(
+            f"  Tile grid: {num_cols}x{num_rows} "
+            f"({stats['num_regions']} regions, {stats['num_edges']} edges, "
+            f"pitch={trace_pitch:.3f}mm, layers={grid.num_layers})"
+        )
+
+    global_router = GlobalRouter(
+        region_graph=region_graph,
+        corridor_width=corridor_width,
+        default_layer=0,
+        negotiated=True,
+        max_iterations=GLOBAL_MAX_ITERATIONS,
+        history_increment=GLOBAL_HISTORY_INCREMENT,
+    )
+
+    net_order_list = list(net_order)
+    started = time.time()
+    global_result = global_router.route_all(
+        nets=router.nets,
+        pad_dict=router.pads,
+        net_order=net_order_list,
+    )
+    elapsed_s = time.time() - started
+
+    plan: RoutingPlan | None = None
+    if emit:
+        plan = RoutingPlan.from_global_result(
+            global_result,
+            region_graph,
+            net_order=net_order_list,
+            net_names=router.net_names,
+            net_class_map=getattr(router, "net_class_map", None),
+            layer_stack=grid.layer_stack,
+            tile_mm=tile_size,
+            elapsed_s=elapsed_s,
+            default_trace_width=rules.trace_width,
+            default_trace_clearance=rules.trace_clearance,
+            pour_skipped=pour_nets,
+            single_pad=single_pad_nets,
+        )
+
+    return PlanBuildResult(
+        plan=plan,
+        region_graph=region_graph,
+        global_result=global_result,
+        tile_mm=tile_size,
+        elapsed_s=elapsed_s,
+    )

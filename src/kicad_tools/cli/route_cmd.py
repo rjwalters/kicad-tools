@@ -2714,6 +2714,89 @@ def _write_routing_plan_sidecar(
         print(f"  {routing_plan.summary_line()}")
 
 
+def _write_access_witness_sidecar(
+    output_path: Path,
+    router: object | None,
+    quiet: bool = False,
+) -> None:
+    """Persist the router's ordered commit journal next to the routed PCB (#5517).
+
+    Writes ``<output_stem>.access_witness.json`` -- e.g.
+    ``simple_led_routed.access_witness.json`` next to
+    ``simple_led_routed.kicad_pcb``.  Follows the ``.routing_plan.json``
+    contract (#5519) exactly, including its reason for needing no
+    collision-avoidance rule: the stem-keyed derived name can never match a
+    user-authored input file, because no CLI flag reads one.
+
+    ``net-status --why`` (:func:`~kicad_tools.cli.net_status_cmd.output_why`)
+    classifies a *saved board*: it loads a ``.kicad_pcb`` and has no live
+    :class:`~kicad_tools.router.core.Autorouter`, so the commit order that
+    explains *why* a pad ended unrouted is gone by the time anyone asks.  This
+    sidecar is what carries it across that boundary -- the same shape as the
+    ``net_class_map.json`` sidecar carrying net classes into ``kct check``.
+
+    A blocked write (read-only or missing output directory) is a non-fatal
+    warning, exactly like every other post-route sidecar: the route step must
+    never fail because a diagnostic could not be written.
+
+    Args:
+        output_path: Path to the routed PCB file.  The sidecar is written to
+            the same directory, stem-keyed off this file's name.
+        router: The :class:`~kicad_tools.router.core.Autorouter` that produced
+            the board, or ``None``.  A router without a ``commit_journal``
+            (a non-grid engine, a stub in a test) is a silent no-op, as is an
+            empty journal -- an empty witness reads as "nothing was committed",
+            which is never true of a routed board.
+        quiet: If True, suppress the confirmation line.
+    """
+    import json
+
+    from kicad_tools.router.access_witness import (
+        ACCESS_WITNESS_SIDECAR_SUFFIX,
+        JOURNAL_SCHEMA_VERSION,
+        witness_for_router,
+    )
+
+    journal = getattr(router, "commit_journal", None)
+    if journal is None or not len(journal):
+        return
+
+    sidecar_path = output_path.parent / f"{output_path.stem}{ACCESS_WITNESS_SIDECAR_SUFFIX}"
+    payload: dict[str, Any] = {
+        "schema_version": JOURNAL_SCHEMA_VERSION,
+        "source": {"pcb": output_path.name},
+        "journal": journal.to_dict(),
+    }
+    # Issue #5517 (PR 2): the replay runs HERE, while the grid that decided the
+    # clearances is still alive.  ``net-status --why`` reads a saved board and
+    # could not reproduce it; the sidecar carries the verdict instead.  The key
+    # is omitted entirely when nothing ended unrouted -- the common case -- so a
+    # fully-routed board's sidecar is unchanged from PR 1's shape.
+    try:
+        witness = witness_for_router(router)
+    except Exception as e:  # pragma: no cover - a diagnostic never fails a route
+        witness = None
+        if not quiet:
+            print(f"  Warning: access-witness replay failed: {e}")
+    if witness:
+        payload["witness"] = witness.to_dict()
+    try:
+        # Compact separators, unlike the other (small, hand-read) sidecars:
+        # this one carries every segment of every commit and rip-up, so
+        # pretty-printing it doubles a dense board's file for no reader.
+        sidecar_path.write_text(json.dumps(payload, separators=(",", ":")))
+    except (OSError, TypeError, ValueError) as e:
+        if not quiet:
+            print(f"  Warning: could not write access-witness sidecar: {e}")
+        return
+    if not quiet:
+        size_kb = sidecar_path.stat().st_size / 1024
+        print(f"  Access-witness sidecar: {sidecar_path} ({size_kb:.0f} KB)")
+        print(f"  {journal.summary_line()}")
+        if witness:
+            print(f"  {witness.summary_line()}")
+
+
 def _write_current_paths_sidecar(
     output_path: Path,
     current_path_specs: "Sequence[CurrentPathSpec] | None",
@@ -3050,6 +3133,7 @@ def run_post_route_drc(
     current_paths_input_path: Path | None = None,
     preserve_filled_copper: bool = False,
     routing_plan: "RoutingPlan | None" = None,
+    router: object | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -3113,6 +3197,12 @@ def run_post_route_drc(
             sidecars here).  ``None`` (the default -- no dense package
             triggered the two-phase pass, or a caller opted out) is a
             silent no-op.
+        router: The :class:`~kicad_tools.router.core.Autorouter` that
+            produced the board (Issue #5517, Epic #5508 Phase 1b).  Its
+            ordered commit journal is serialized to
+            ``<output_stem>.access_witness.json`` next to the routed PCB so
+            ``kct net-status --why`` can explain a stranded pad from a saved
+            board.  ``None`` is a silent no-op.
 
     Returns:
         Tuple of (error_count, warning_count)
@@ -3153,6 +3243,16 @@ def run_post_route_drc(
     _write_routing_plan_sidecar(
         output_path,
         routing_plan,
+        quiet=quiet,
+    )
+
+    # Issue #5517 (Epic #5508, Phase 1b): persist the ordered commit journal
+    # next to the routed PCB.  ``net-status --why`` classifies a SAVED board
+    # and has no live router, so without this sidecar the commit order that
+    # explains a stranded pad is gone by the time anyone asks.
+    _write_access_witness_sidecar(
+        output_path,
+        router,
         quiet=quiet,
     )
 
@@ -4724,6 +4824,26 @@ def _apply_ripup_budget_override(router: "Autorouter", args) -> None:
         return
     router._route_all_max_ripups_per_net = budget
     router.stall_ripup_budget = budget
+
+
+def _apply_routing_plan_flag(router: "Autorouter", args) -> None:
+    """Apply ``--no-routing-plan`` to a freshly loaded router (Issue #5520).
+
+    The report-only routing-plan stage (Epic #5510) is ON by default:
+    ``Autorouter.route_all_negotiated`` and ``route_all_two_phase`` both
+    build a ``RoutingPlan``, and ``run_post_route_drc`` writes it next to
+    the routed PCB.  ``--no-routing-plan`` sets ``argparse``'s
+    ``routing_plan`` dest to ``False``, which this helper forwards onto
+    the router.
+
+    Called right after every ``load_pcb_for_routing`` return (the only
+    place an ``Autorouter`` is constructed on the CLI path), so all
+    escalation wrappers and the fixed-layer closure are covered by one
+    line each.  A no-op when the flag is absent (library callers, older
+    ``Namespace`` objects in tests), which preserves the default-on
+    behaviour.
+    """
+    router.emit_routing_plan = bool(getattr(args, "routing_plan", True))
 
 
 def _apply_rescue_pass_override(router: "Autorouter", args) -> None:
@@ -7390,6 +7510,8 @@ def route_with_layer_escalation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #5520: --no-routing-plan (report-only plan stage).
+        _apply_routing_plan_flag(router, args)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -8107,6 +8229,10 @@ def route_with_layer_escalation(
             # RoutingPlan so it is serialized to
             # <output_stem>.routing_plan.json next to the routed PCB.
             routing_plan=getattr(final_result.router, "routing_plan", None),
+            # Issue #5517 (Epic #5508, Phase 1b): thread the router so its
+            # ordered commit journal is serialized to
+            # <output_stem>.access_witness.json next to the routed PCB.
+            router=final_result.router,
         )
 
         # Auto-fix DRC violations if requested
@@ -8483,6 +8609,8 @@ def route_with_rule_relaxation(
         _apply_net_class_map_sidecar(router, args, quiet=quiet)
         # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
         _apply_pairwise_clearance(router, args, quiet=quiet)
+        # Issue #5520: --no-routing-plan (report-only plan stage).
+        _apply_routing_plan_flag(router, args)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -8981,6 +9109,10 @@ def route_with_rule_relaxation(
             # RoutingPlan so it is serialized to
             # <output_stem>.routing_plan.json next to the routed PCB.
             routing_plan=getattr(final_result.router, "routing_plan", None),
+            # Issue #5517 (Epic #5508, Phase 1b): thread the router so its
+            # ordered commit journal is serialized to
+            # <output_stem>.access_witness.json next to the routed PCB.
+            router=final_result.router,
         )
 
         # Auto-fix DRC violations if requested
@@ -10821,6 +10953,8 @@ def route_with_combined_escalation(
             _apply_net_class_map_sidecar(router, args, quiet=quiet)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(router, args, quiet=quiet)
+            # Issue #5520: --no-routing-plan (report-only plan stage).
+            _apply_routing_plan_flag(router, args)
             # Issue #3470: thread --max-ripups-per-net into the destructive
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
@@ -11359,6 +11493,10 @@ def route_with_combined_escalation(
             # RoutingPlan so it is serialized to
             # <output_stem>.routing_plan.json next to the routed PCB.
             routing_plan=getattr(final_result.router, "routing_plan", None),
+            # Issue #5517 (Epic #5508, Phase 1b): thread the router so its
+            # ordered commit journal is serialized to
+            # <output_stem>.access_witness.json next to the routed PCB.
+            router=final_result.router,
         )
 
         # Auto-fix DRC violations if requested
@@ -14762,6 +14900,26 @@ def _route_parser() -> argparse.ArgumentParser:
             "Only effective with --two-phase."
         ),
     )
+    # Issue #5520 (Epic #5510, Phase 1b): the report-only routing-plan
+    # stage runs on EVERY default route.  This is the only escape hatch --
+    # there is deliberately no positive opt-in flag, because the plan is
+    # on by default.
+    parser.add_argument(
+        "--no-routing-plan",
+        action="store_false",
+        dest="routing_plan",
+        default=True,
+        help=(
+            "Skip the report-only routing-plan stage (Epic #5510). By "
+            "default every route runs a coarse tile-graph global pass "
+            "before detailed routing and writes "
+            "<output_stem>.routing_plan.json next to the routed PCB. The "
+            "stage never changes routed copper -- it only reports "
+            "per-edge capacity/demand/overflow -- so this flag exists to "
+            "save its wall-clock time (and suppress the sidecar), not to "
+            "change routing behaviour."
+        ),
+    )
     parser.add_argument(
         "--batch-routing",
         action="store_true",
@@ -16032,6 +16190,8 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_net_class_map_sidecar(router, args, quiet=quiet)
     # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
     _apply_pairwise_clearance(router, args, quiet=quiet)
+    # Issue #5520: --no-routing-plan (report-only plan stage).
+    _apply_routing_plan_flag(router, args)
     # Issue #3470: thread --max-ripups-per-net into the destructive
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
@@ -16092,6 +16252,8 @@ def _run_main_impl(args, parser, argv) -> int:
             _apply_net_class_map_sidecar(fresh, args, quiet=True)
             # Issue #4431: attach the --voltage-map HV pairwise-clearance table.
             _apply_pairwise_clearance(fresh, args, quiet=True)
+            # Issue #5520: --no-routing-plan (report-only plan stage).
+            _apply_routing_plan_flag(fresh, args)
             _apply_analog_net_class(fresh, args, quiet=True)
             return fresh
 
@@ -17775,6 +17937,10 @@ def _run_main_impl(args, parser, argv) -> int:
             # RoutingPlan so it is serialized to
             # <output_stem>.routing_plan.json next to the routed PCB.
             routing_plan=getattr(router, "routing_plan", None),
+            # Issue #5517 (Epic #5508, Phase 1b): thread the router so its
+            # ordered commit journal is serialized to
+            # <output_stem>.access_witness.json next to the routed PCB.
+            router=router,
         )
 
         # Auto-fix DRC violations if requested

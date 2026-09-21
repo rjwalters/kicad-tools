@@ -3771,6 +3771,25 @@ def _add_route_parser(subparsers) -> None:
             "flag for the raw negotiated result (e.g. A/B comparison)."
         ),
     )
+    # Issue #5520 (Epic #5510, Phase 1b): the report-only routing-plan
+    # stage runs on EVERY default route.  This is the only escape hatch --
+    # there is deliberately no positive opt-in flag, because the plan is
+    # on by default.  Mirrored in ``route_cmd._route_parser`` (the
+    # supervisor/worker parser) so both entry points accept it.
+    route_parser.add_argument(
+        "--no-routing-plan",
+        action="store_false",
+        dest="routing_plan",
+        default=True,
+        help=(
+            "Skip the report-only routing-plan stage (Epic #5510).  ON by "
+            "default: every route first runs a coarse tile-graph global "
+            "pass and writes <output_stem>.routing_plan.json next to the "
+            "routed PCB, reporting per-edge capacity/demand/overflow.  The "
+            "stage never changes routed copper, so this flag only saves its "
+            "wall-clock time and suppresses the sidecar."
+        ),
+    )
     route_parser.add_argument(
         "--cross-package-pair-corridor",
         action="store_true",

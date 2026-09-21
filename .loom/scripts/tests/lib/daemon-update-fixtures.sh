@@ -73,6 +73,29 @@ EOF
     ( cd "$root" && git init -q && git -c user.email=test@test -c user.name=test commit -q --allow-empty -m init )
 }
 
+# new_fixture_with_origin <root> <bare_dir> (#4330) — builds on new_fixture(),
+# adding a local BARE repo as `origin` so the ff-first sync path (which
+# resolves the default branch via refs/remotes/origin/HEAD, then fetches and
+# compares against origin/<branch>) has a real remote to talk to — entirely
+# offline (a plain filesystem path, no network). Forces the branch name to
+# `main` (deterministic regardless of the test host's init.defaultBranch) and
+# sets refs/remotes/origin/HEAD via `git remote set-head origin -a` so
+# loom_default_branch() resolves it the same way a real clone would.
+#
+# Shared with the fetch sibling (#8028): the local-checkout-divergence
+# scenario needs a real origin remote exactly like the parent suite's own
+# ff-sync tests do, and this repo's convention is one definition, not two
+# copies that can drift (see the module docs above).
+new_fixture_with_origin() {
+    local root="$1" bare="$2"
+    new_fixture "$root"
+    ( cd "$root" && git branch -q -M main )
+    git init -q --bare "$bare"
+    ( cd "$root" && git remote add origin "$bare" && git push -q origin HEAD:refs/heads/main )
+    git -C "$bare" symbolic-ref HEAD refs/heads/main
+    ( cd "$root" && git remote set-head origin -a >/dev/null 2>&1 )
+}
+
 # Writes a fake "release artifact" binary at $1 reporting version $2 / commit
 # $3 on --version, otherwise behaving like write_fake_daemon (rejects unknown
 # subcommands, loops forever on a normal run) — standing in for a downloaded
@@ -229,5 +252,179 @@ write_fake_gh_unreachable() {
 echo "gh: failed to fetch release: dial tcp: lookup api.github.com: no such host" >&2
 exit 1
 FAKEGH
+    chmod +x "$path"
+}
+
+# ---------------------------------------------------------------------------
+# write_fake_daemon / write_fake_codesign* / write_fake_cosign* -- moved here
+# from test-loom-daemon-update.sh by #8028 (epic #7810 PR 6a) when the
+# artifact-fetch scenarios (tests A-V) split into the sibling suite
+# test-loom-daemon-update-fetch.sh: write_fake_daemon is used by BOTH suites
+# (every fetch scenario provisions an "installed" binary with it), and the
+# codesign/cosign fixtures are needed only by the fetch sibling but belong
+# beside the other fake-forge fixtures rather than duplicated into a suite of
+# their own.
+# ---------------------------------------------------------------------------
+
+# Writes a fake daemon binary at $1 that reports commit $2 on --version and,
+# on a normal run, appends its inherited LOOM_WORK_FINDER / LOOM_MAIN_HEALTH_GATE
+# to marker file $3 before looping forever (so it stays alive for kill -0).
+#
+# `calibrate` is handled explicitly (#4799) and exits immediately with no
+# output: this fixture has no real calibrate implementation, and every
+# successful loom-daemon-start.sh run (nohup/launchd/systemd, all three
+# reached by this suite's restart scenarios) calls `$DAEMON_BIN calibrate
+# --workspace ... --json` via print_calibrate_hint(). Before this fix, that
+# call fell through to the `while true` loop below and hung forever inside
+# print_calibrate_hint()'s blocking `$(...)` -- the exact hang
+# ci-excluded.txt documented. print_calibrate_hint() is bounded independently
+# now (lib/bounded-run.sh), but this fixture also short-circuits so the suite
+# stays fast rather than eating that timeout on every restart.
+#
+# GENERALIZED (#4799 CI hang): `calibrate` was only one instance of a whole
+# CLASS of wedge. ANY *subcommand* the lifecycle scripts dispatch that this
+# fixture does not recognize used to fall through to the `while true` daemon
+# body IN THE FOREGROUND and block its caller forever -- which is precisely how
+# the CI run hung: with a real `systemctl --user` reachable, the update script
+# resolved DAEMON_MANAGER=systemd and ran `"$PROVISION_TARGET" restart`, and
+# this fixture (no `restart` handler) looped instead of answering. So the
+# catch-all below exits non-zero for any unrecognized NON-FLAG first argument
+# (a real daemon rejects an unknown subcommand; it does not daemonize). A
+# leading `-`/`--` still falls through to the daemon body, because the
+# supervisors DO launch the daemon proper with flags.
+write_fake_daemon() {
+    local path="$1" commit="$2" marker="$3"
+    cat > "$path" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+    echo "loom-daemon 0.15.0 (commit ${commit}, built 2026-07-26T00:00:00Z)"
+    exit 0
+fi
+if [[ "\${1:-}" == "calibrate" ]]; then
+    exit 1
+fi
+if [[ -n "\${1:-}" && "\${1:-}" != -* ]]; then
+    echo "fake loom-daemon: unsupported subcommand: \$*" >&2
+    exit 1
+fi
+echo "FAKE_DAEMON WF=[\${LOOM_WORK_FINDER:-}] HG=[\${LOOM_MAIN_HEALTH_GATE:-}]" > "${marker}"
+while true; do sleep 1; done
+EOF
+    chmod +x "$path"
+}
+
+# Writes a fake `codesign` at $1 emulating one of three macOS states, so the
+# darwin signature branch of verify_artifact_signature() is testable on ANY
+# host (including a Linux CI runner, which has no codesign at all):
+#   unsigned    -- `-dv` reports "code object is not signed at all" (expected
+#                  for a release built with no Developer ID secrets: soft-skip)
+#   signed-ok   -- `-dv` reports an Authority, `--verify` succeeds
+#   signed-bad  -- `-dv` reports an Authority, `--verify` FAILS (tamper
+#                  evidence: must abort, NOT be confused with "unsigned")
+write_fake_codesign() {
+    local path="$1" mode="$2"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+MODE="$mode"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    if [[ "$MODE" == "unsigned" ]]; then
+        echo "$target: code object is not signed at all" >&2
+        exit 1
+    fi
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    [[ "$MODE" == "signed-ok" ]] && exit 0
+    echo "$target: invalid signature (code or signature have been modified)" >&2
+    exit 1
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
+# Writes a fake `codesign` at $1 that reports a Developer ID Authority for
+# every target EXCEPT the exact path $2 (the eventual provisioning
+# destination), which it reports as ad-hoc-signed (no `Authority=` line,
+# `--verify` still succeeds -- an ad-hoc signature IS a valid signature, just
+# not a certificate-anchored one). Simulates the #7932 regression class this
+# test (#8008) guards against: a verified download that demonstrably carried
+# a Developer ID signature, whose post-provision destination does not.
+write_fake_codesign_signature_downgrade() {
+    local path="$1" downgraded_target="$2"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+DOWNGRADED_TARGET="$downgraded_target"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        if [[ "$target" == "$DOWNGRADED_TARGET" ]]; then
+            echo "Signature=adhoc"
+        else
+            echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+        fi
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    exit 0
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
+# Writes a fake `cosign` at $1 whose `verify-blob` exits $2 — the Linux
+# detached-signature branch of verify_artifact_signature().
+write_fake_cosign() {
+    local path="$1" rc="$2"
+    cat > "$path" <<FAKECOSIGN
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "verify-blob" ]]; then
+    if [[ "$rc" -eq 0 ]]; then
+        echo "Verified OK" >&2
+        exit 0
+    fi
+    echo "Error: failed to verify signature" >&2
+    exit 1
+fi
+exit 0
+FAKECOSIGN
+    chmod +x "$path"
+}
+
+# Writes a fake `cosign` at $1 whose `verify-blob` exits $2 AND appends its full
+# argv to the log file at $3 (#5054). Recording the argv is the point: the
+# keyless cases below assert not just "verification ran" but that it ran with
+# the DERIVED signer identity + OIDC issuer, which is the whole security
+# property — a fake cosign that always exits 0 would otherwise "pass" even if
+# the script silently verified against nothing.
+write_fake_cosign_recording() {
+    local path="$1" rc="$2" argslog="$3"
+    cat > "$path" <<FAKECOSIGN
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$argslog"
+if [[ "\${1:-}" == "verify-blob" ]]; then
+    if [[ "$rc" -eq 0 ]]; then
+        echo "Verified OK" >&2
+        exit 0
+    fi
+    echo "Error: failed to verify signature" >&2
+    exit 1
+fi
+exit 0
+FAKECOSIGN
     chmod +x "$path"
 }

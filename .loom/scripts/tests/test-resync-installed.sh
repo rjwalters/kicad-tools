@@ -225,8 +225,9 @@ make_fixture() {
     # installed content (the ubiquitous common case throughout this suite),
     # not a local fix. Tests that specifically want the OTHER shape (a direct
     # fix landed on the installed copy) layer an additional commit with a
-    # non-matching message on top -- see the "(#7864) local-divergence
-    # protection" test group below.
+    # non-matching message on top -- those live in the sibling suite
+    # test-resync-installed-local-fix-guard.sh, NOT below in this file
+    # (#8165: this pointer said "below" from the start and was never right).
     git -C "$repo" add -A >/dev/null 2>&1
     git -C "$repo" commit -qm "chore: install Loom v0.0.0" >/dev/null 2>&1
 

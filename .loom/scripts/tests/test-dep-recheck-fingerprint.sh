@@ -443,6 +443,38 @@ assert_eq "123:OPEN" "$(field "$out_star_bullet" DEPS)" \
     "T15f: DEPS reports the asterisk-bulleted reference"
 rm -f "$STUB_DIR/issue-123.json"
 
+# T15g (#8119): a checklist item written with a dependency PHRASE -
+# `Blocked by #N` / `Depends on #N` / `Requires #N` - is the most natural way
+# to write a prerequisite, and `extract-refs` already reads all three as
+# references. `named-dependency` used to drop them, producing a false
+# VERDICT=clear for a genuinely still-OPEN reference. Same vocabulary, same
+# worse-failure-direction argument as T15d/T15e.
+jq -n '{body: "## Dependencies\n\n- [ ] Blocked by #6333: prerequisite feature\n"}' \
+    >"$STUB_DIR/issue-8119.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-6333.json"
+rm -f "$STUB_DIR/pr-6333.json"
+out_phrase="$("$TARGET_SCRIPT" named-dependency --number 8119 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_phrase" VERDICT)" \
+    "T15g: a '- [ ] Blocked by #N: ...' checklist item is parsed into DEPS, reporting VERDICT=blocked for a still-OPEN reference instead of a false clear (#8119)"
+assert_eq "6333:OPEN" "$(field "$out_phrase" DEPS)" \
+    "T15g: DEPS reports the phrase-prefixed reference"
+
+# T15h (#8119): the other two phrasings behave identically, and once the named
+# reference is MERGED the same body reports clear - so the fix is not simply
+# "phrased items always block".
+jq -n '{body: "## Dependencies\n\n- [ ] Depends on #6333: a\n- [ ] Requires #100: b\n"}' \
+    >"$STUB_DIR/issue-8119.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-100.json"
+out_phrase2="$("$TARGET_SCRIPT" named-dependency --number 8119 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_phrase2" VERDICT)" \
+    "T15h: 'Depends on #N' / 'Requires #N' are recognized the same as 'Blocked by #N' (#8119)"
+jq -n '{state: "MERGED"}' >"$STUB_DIR/issue-6333.json"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/issue-100.json"
+out_phrase3="$("$TARGET_SCRIPT" named-dependency --number 8119 --repo owner/repo)"
+assert_eq "clear" "$(field "$out_phrase3" VERDICT)" \
+    "T15h: once every phrase-named reference is resolved, the same body reports VERDICT=clear"
+rm -f "$STUB_DIR/issue-100.json" "$STUB_DIR/issue-6333.json" "$STUB_DIR/issue-8119.json"
+
 # --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
 # among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
 # — none of them a superseding-block label — with no merge-state change must

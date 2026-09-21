@@ -13,6 +13,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
@@ -405,11 +406,22 @@ def run_netlist_export(
         return KiCadCLIResult(success=False, stderr=f"Failed to export netlist: {e}")
 
 
+@lru_cache(maxsize=8)
 def _kicad_cli_has_fill_zones(kicad_cli: Path) -> bool:
     """Check whether the installed kicad-cli supports 'pcb fill-zones'.
 
     This subcommand does not exist in KiCad 8, 9, or 10 but may be
     added in a future release.
+
+    Memoised per ``kicad_cli`` path (Issue #5566): support for a
+    subcommand is a fixed property of the installed binary, so a fresh
+    ``--help`` subprocess on every call is pure repetition. A single
+    zone-fill-then-thermal-remediation pass already probes this (and its
+    ``--refill-zones`` sibling below) up to twice each; under the CI
+    native-concurrency gate (``KCT_NATIVE_MAX_CONCURRENCY=1``) every one of
+    those probe launches queues behind genuinely slow native DRC/fill work,
+    so repeating a probe whose answer cannot change multiplies a test's
+    wait-tail for no benefit.
     """
     try:
         result = subprocess.run(
@@ -796,11 +808,19 @@ def _run_fill_zones_native(
         return KiCadCLIResult(success=False, stderr=f"Failed to fill zones: {e}")
 
 
+@lru_cache(maxsize=8)
 def _kicad_drc_supports_refill(kicad_cli: Path) -> bool:
     """Check whether ``kicad-cli pcb drc`` supports ``--refill-zones``.
 
     KiCad 10+ added explicit ``--refill-zones`` and ``--save-board`` flags.
     Earlier versions (8, 9) always refill zones as part of DRC.
+
+    Memoised per ``kicad_cli`` path (Issue #5566) for the same reason as
+    :func:`_kicad_cli_has_fill_zones`: flag support cannot change between
+    calls in the same process, but this probe is otherwise re-run once per
+    :func:`_run_fill_zones_via_drc` call *and* once per
+    :func:`_remediate_starved_thermal` refill pass -- each an independent,
+    gated ``kicad-cli`` launch under ``KCT_NATIVE_MAX_CONCURRENCY``.
     """
     try:
         result = subprocess.run(

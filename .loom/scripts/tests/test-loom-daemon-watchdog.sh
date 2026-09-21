@@ -214,7 +214,10 @@ make_daemon_stub() { # <mode> [sleep_secs]
         slow-ok)
             printf '#!/usr/bin/env bash\nsleep %s\necho "no active quarantines"\nexit 0\n' "$secs" > "$dir/loom-daemon-mock" ;;
         hang)
-            printf '#!/usr/bin/env bash\nwhile true; do sleep 1; done\n' > "$dir/loom-daemon-mock" ;;
+            # Records its own invocation (touch "$dir/was-invoked") before
+            # blocking forever, so callers can assert "never invoked" by the
+            # marker's absence rather than by a wall-clock budget (#8168).
+            printf '#!/usr/bin/env bash\ntouch "%s/was-invoked"\nwhile true; do sleep 1; done\n' "$dir" > "$dir/loom-daemon-mock" ;;
         unreachable)
             printf '#!/usr/bin/env bash\necho "Could not reach loom-daemon at /tmp/x.sock: round-trip timed out after 5s" >&2\nexit 1\n' > "$dir/loom-daemon-mock" ;;
         usage)
@@ -1399,10 +1402,10 @@ run_watchdog PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=0 \
 elapsed=$(( $(date +%s) - t0 ))
 kill "$LIVE_PID" 2>/dev/null || true
 assert_rc 0 "$RC" "LOOM_WATCHDOG_IPC_PROBE=0: probe disabled, exits 0"
-if (( elapsed < 2 )); then
-    pass "LOOM_WATCHDOG_IPC_PROBE=0: the probe binary is never invoked (${elapsed}s)"
+if [[ -f "$STUB20/was-invoked" ]]; then
+    fail "LOOM_WATCHDOG_IPC_PROBE=0: the probe binary was invoked (${elapsed}s)"
 else
-    fail "LOOM_WATCHDOG_IPC_PROBE=0: took ${elapsed}s — the probe appears to have run"
+    pass "LOOM_WATCHDOG_IPC_PROBE=0: the probe binary is never invoked (${elapsed}s)"
 fi
 rm -rf "$PS_STUB_DIR" "$STUB20"
 

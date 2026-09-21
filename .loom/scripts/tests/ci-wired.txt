@@ -183,6 +183,7 @@ test-recover-orphaned-shepherds-diagnostics.sh
 test-reconcile-stack.sh
 test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
+test-require-daemon-bin.sh
 test-resolve-tier-model.sh
 test-resync-installed-gh-config-guard.sh
 test-resync-installed-guard-check.sh

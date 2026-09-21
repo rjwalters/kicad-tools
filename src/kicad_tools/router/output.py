@@ -923,7 +923,35 @@ def get_routing_diagnostics_json(
         # signals "a plan exists"; a present-but-empty dict would be
         # ambiguous.
         result_dict["routing_plan"] = routing_plan
+    # Issue #5517 (Epic #5508, Phase 1b): the replay-derived access witness --
+    # which commit closed each unrouted pad's access set, and when.  This is
+    # the routing report the epic names, and it replaces the guessed
+    # PLACEMENT_BOUND / CONGESTION_SATURATED hypotheses with evidence.  Same
+    # convention as ``routing_plan``: the key is ABSENT (not null) when the
+    # run stranded nothing, so a fully-routed board's JSON is unchanged.
+    witness_block = _access_witness_block(router)
+    if witness_block is not None:
+        result_dict["access_witness"] = witness_block
     return result_dict
+
+
+def _access_witness_block(router: Autorouter) -> dict | None:
+    """The router's replay-derived access witness, or ``None``.
+
+    Never raises: a diagnostic block must not be able to fail the JSON report
+    that carries it.  ``None`` covers three cases that all mean "no witness to
+    show" -- no journal (a non-grid engine), nothing stranded, and a replay
+    that could not run.
+    """
+    try:
+        from .access_witness import witness_for_router
+
+        witness = witness_for_router(router)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not witness:
+        return None
+    return witness.to_dict()
 
 
 def print_routing_diagnostics_json(

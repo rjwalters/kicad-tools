@@ -120,14 +120,36 @@ integer, so local runs, releases and every other CI job are unaffected.
 | `KCT_NATIVE_SLOT_DIR` | Slot-file directory (default `<tempdir>/kct-native-slots`). |
 | `KCT_NATIVE_SLOT_HELD` | Set in a permitted child; its own native descendants reuse the subtree's permit. |
 | `KCT_NATIVE_SLOT_WAIT_SECONDS` | Fail-open ceiling on one wait (default 120 s). |
+| `KCT_NATIVE_SLOT_CREDIT_SECONDS` | Per-test cap on wait time credited back to an armed pytest-timeout deadline (default 120 s; `0` disables). |
 | `KCT_NATIVE_SLOT_LOG` | Permit-record directory; defaults to `KCT_NATIVE_OBSERVER_OUTPUT`. |
 
 `flock` is released by the kernel when the holding fd closes *or* the holding
-process dies, so a killed worker cannot strand a permit. Waiting is ordinary
-wall-clock time inside the calling test: no pytest-timeout marker, `--timeout`
-value or `subprocess` timeout is changed, extended or re-armed. A wait past the
+process dies, so a killed worker cannot strand a permit. A wait past the
 ceiling launches unbounded and records the event rather than hanging; the audit
 step treats any such fallback as a failure.
+
+### Timeout credit (Issue #5572)
+
+Queue time is wall-clock time inside the waiting test, and `pytest-timeout`
+charged it to that test's budget — so under the bound a test's effective
+deadline was its own work *plus* a queue wait for a shared resource, and any
+native-using test whose baseline plus a slot wait crossed the job's `--timeout`
+became the next flake (`#5556`, then a fourth previously-unimplicated test on
+PR #5573).
+
+The gate therefore adds the measured wait back to the deadline that is already
+armed. It touches only an armed one-shot `ITIMER_REAL` owned by a live Python
+`SIGALRM` handler — pytest-timeout's signal method, its default wherever
+`SIGALRM` exists — and only from the main thread; the thread method, an
+unarmed timer and non-pytest use are all left alone. `subprocess` timeouts and
+`pytest.mark.timeout` values are never rewritten.
+
+Hang detection stays bounded: the credit is per test, equal to the wait that
+was actually observed, and capped by `KCT_NATIVE_SLOT_CREDIT_SECONDS`, so the
+worst case for a genuinely hung test is its own timeout plus that cap — and
+only tests that queued pay anything. Each permit record carries `credited_s`,
+and `analyze_native_observations.py` reports
+`timeout_credit_seconds_total` / `timeout_credit_seconds_max_test` per group.
 
 ### Auditing and choosing the bound
 

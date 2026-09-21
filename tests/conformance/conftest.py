@@ -18,16 +18,32 @@ not a convention -- a future adapter test cannot accidentally turn a *measured*
 disagreement into a red build before its consumer has been switched to the
 shared kernel in its own epic phase.  kicad-cli-truth assertions carry no such
 marker and are hard failures.
+
+``test_corpus.py``'s ``test_every_consumer_item_carries_xfail`` asserts the
+hook actually fired over the whole collected suite, so the mechanism is itself
+under test rather than assumed.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from tests.conformance.adapters.grid_cpp import GridCppAdapter
 from tests.conformance.oracle import kicad_cli_available
 
 requires_kicad_cli = pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not installed")
 """Module-level gate for tests that need ``kicad-cli`` as ground truth."""
+
+requires_cpp = pytest.mark.skipif(
+    not GridCppAdapter().available(), reason="C++ router backend not built"
+)
+"""Gate for rows that drive ``router_cpp.Grid3D`` (the ``grid_cpp`` adapter).
+
+The capability probe is the adapter's own :meth:`available`, so a machine
+where the extension is missing skips exactly the rows the report would have
+rendered ``not measured`` -- one answer, not two.  Build it with
+``uv run kct build-native``.
+"""
 
 CONSUMER_XFAIL_REASON = "consumer verdict is report-only until that consumer's epic phase (#5509)"
 

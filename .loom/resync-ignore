@@ -1,0 +1,25 @@
+# .loom/resync-ignore — paths Loom must not overwrite or delete on resync.
+#
+# See .loom/docs/repo-owned-files.md for the full rule. Each entry below
+# pins a deliberate, repo-specific divergence from the upstream rjwalters/loom
+# defaults/ tree — a fix landed directly in this repo's installed copy
+# because it was not (yet) upstreamed.
+
+# #5552: restores the isDraft/exit-13 draft-PR exclusion from PR #5543
+# (commit 0560777c), which a routine "chore: resync installed Loom surfaces"
+# pass (4b4523e4) silently reverted ~2.5 hours after it merged, because the
+# fix was a direct edit to the vendored copy rather than an upstream change.
+# Pin these four paths so a future resync is blocked-and-explicit (or
+# skipped once pinned) instead of silently reverting the fix a second time.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+#
+# NOTE: entries use the ".loom/"-relative report form (per the convention
+# documented in resync-installed.sh's header comment), NOT the repo-relative
+# spelling, for the .claude/commands/loom/ entry below — is_ignored()'s
+# fallback normalization only strips a leading "./" and ".loom/", so
+# ".claude/commands/loom/judge.md" would NOT match the "commands/loom/judge.md"
+# rel it is compared against; only the unprefixed form does.
+scripts/judge-fallback-guard.sh
+scripts/tests/test-judge-fallback-cap.sh
+commands/loom/judge.md
+roles/judge.md

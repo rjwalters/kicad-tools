@@ -28,7 +28,11 @@ def _copper(text: str) -> list[str]:
     )
 
 
-@pytest.mark.timeout(600)
+# Issue #5587: raised from 600 to 2100 -- two sequential ``kct route``
+# calls each now carry a 960s subprocess timeout (tracking the board-02
+# recipe's --timeout going from 240 to 900), so the module-level reaper
+# must stay above 2x that plus comparison overhead.
+@pytest.mark.timeout(2100)
 def test_board02_cache_replays_complete_copper(tmp_path):
     if find_kicad_cli() is None:
         pytest.skip("Native KiCad is required for the final copper comparison")
@@ -53,7 +57,10 @@ def test_board02_cache_replays_complete_copper(tmp_path):
             "30",
             "--deterministic-budget",
             "--timeout",
-            "240",
+            # Issue #5587: mirrors the board-02 recipe's --timeout, raised
+            # from 240 to 900 (240s fired on a contended host even under
+            # --deterministic-budget).
+            "900",
             "--seed",
             "42",
             "--no-auto-pour",
@@ -70,7 +77,9 @@ def test_board02_cache_replays_complete_copper(tmp_path):
                 env=env,
                 stdout=stream,
                 stderr=subprocess.STDOUT,
-                timeout=280,
+                # Issue #5587: raised from 280 (240 + 40s buffer) to 960
+                # (900 + 60s buffer), tracking the recipe's --timeout.
+                timeout=960,
                 check=False,
             )
         evidence = log.read_text()

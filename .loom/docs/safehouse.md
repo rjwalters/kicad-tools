@@ -818,6 +818,14 @@ what feeds the public fleet feed. Loom is the producer:
     > across 76 published completions, every one of them `tokens: null`. Source 2
     > exists because of this; do not diagnose a `tokens: null` feed record by
     > looking for missing rollup rows.
+    >
+    > **Amended by #8059**: `resource_usage` now has a dispatch-path writer —
+    > `loom-daemon ingest-transcripts`, plus an opt-in periodic daemon pass
+    > (`LOOM_TRANSCRIPT_INGEST=1`), which ingests these same transcripts (see
+    > [`transcript-token-ingest.md`](transcript-token-ingest.md)). Source 1 is
+    > unaffected either way: it is `get_cost_by_issue`, whose join also needs
+    > `prompt_github`, which ingestion deliberately does not write. Source 2
+    > remains this feed's real source.
 
     The transcript source locates a sweep's session by content, since nothing
     records a sweep-id → session-uuid mapping: a sweep runs `claude -p
@@ -835,6 +843,20 @@ what feeds the public fleet feed. Loom is the producer:
     magnitude and unevenly between sweeps. Set
     `LOOM_SAFEHOUSE_TRANSCRIPT_TOKENS=0` to opt out of the transcript scan
     entirely (the key is then simply omitted on dispatch-driven hosts).
+
+    > **`tokens` is a raw block-sum, not deduped on `message.id` (#8186).** A
+    > streamed assistant message is written to the transcript once per chunk,
+    > and every chunk repeats the same `message.id` carrying that message's
+    > **cumulative** usage, not a delta — `sum_transcript_usage`/
+    > `sum_transcript_usage_by_model` (the functions behind both `tokens` and
+    > `tokens_by_model` below) sum every block without folding on that id.
+    > Measured 2026-09-18 (24h window, 2,330 transcripts): 51% of usage blocks
+    > are repeats, so both figures run roughly 2x high versus a per-message
+    > total. This is long-standing, deliberately-left-alone behaviour (existing
+    > consumers are calibrated against it) — not a bug. For a deduped total,
+    > use `activity.db`'s ingestion path (`activity::transcript_parse`, #8059,
+    > see [`transcript-token-ingest.md`](transcript-token-ingest.md)) instead
+    > of this feed.
   - **`tokens_by_model` (#5740)** is a per-`(model, speed, service_tier)`
     breakdown of the same transcript scan, because `tokens`' single sum
     cannot be priced: it merges five quantities (`input`, `cache_read`, the

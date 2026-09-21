@@ -419,6 +419,14 @@ REQUIRE_POUR_CONNECTIVITY: bool = True
 # only costs wall time in failure scenarios.
 MAX_POUR_REPAIR_ROUNDS: int = 6
 
+# Issue #5507: plain-native-refill stability budget.  After the repair loop
+# converges under the recipe's own fill engine, the stability pass re-fills
+# a scratch copy with KiCad's native engine and repairs any split it finds
+# (the repo engine's carve model can keep a same-net pour pocket attached
+# that KiCad severs).  Each round ends on a verified-clean native refill, so
+# the cap only costs wall time when a split genuinely resists repair.
+NATIVE_REFILL_STABILITY_ROUNDS: int = 3
+
 
 # =============================================================================
 # Plane-connectivity helpers (Issue #3413 phase 4)
@@ -634,6 +642,45 @@ def _audit_pour_nets(pcb_path: Path, net_names: list[str]) -> dict:
     return results
 
 
+def _audit_pour_report(pcb_path: Path, net_names: list[str], tag: str) -> bool:
+    """Print + return the per-net copper-union audit verdict for one board.
+
+    Shared by the in-loop audit (``_run_pour_audit``), the post-quantize
+    audit and the plain-native-refill stability pass (issue #5507) so every
+    consumer prints -- and decides on -- the exact same per-net verdict.
+    """
+    ok = True
+    try:
+        audit = _audit_pour_nets(pcb_path, net_names)
+        for net in net_names:
+            info = audit[net]
+            n_pads = sum(len(g) for g in info["pad_groups"])
+            problems = []
+            if not info["connected"]:
+                problems.append(
+                    f"{len(info['pad_groups'])} disjoint pad groups "
+                    f"(largest "
+                    f"{len(info['pad_groups'][0]) if info['pad_groups'] else 0}"
+                    f"/{n_pads})"
+                )
+            if info["zero_fill_zones"]:
+                problems.append(f"{info['zero_fill_zones']} zero-fill zone(s)")
+            if problems:
+                ok = False
+                print(f"   {tag} FAIL {net}: {'; '.join(problems)}")
+                for group in info["pad_groups"][1:][:5]:
+                    print(f"        stranded: {[p for p, _ in group]}")
+            else:
+                print(f"   {tag} OK   {net}: {n_pads} pads in one copper component")
+    except ImportError as exc:
+        ok = False
+        print(f"   {tag} FAIL: audit unavailable ({exc}) -- unverifiable artifact")
+    except Exception as exc:
+        ok = False
+        print(f"   {tag} FAIL: audit crashed ({exc})")
+    return ok
+
+
 def _relocate_pad_drills(pcb_path: Path, *, native_refill: bool = False) -> int:
     """Clear partial pad/drill overlaps before repairing plane connectivity."""
     from kicad_tools.cli.relocate_in_pad_vias import relocate_in_pad_vias
@@ -818,11 +865,30 @@ def _repair_pour_connectivity(
                 poly = poly.buffer(0)
             fills_by_net[m.group(1)].append((poly, lay))
 
-    # Board outline (inset 0.5 mm) from generate_pcb constants.
-    min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
-    min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
-    max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
-    max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
+    # Board outline (inset 0.5 mm).  Derived from the board's own Edge.Cuts
+    # bbox rather than ``generate_pcb`` origin/size constants so the stage's
+    # verdict is FRAME-INDEPENDENT (issue #5507): the recipe routes in the
+    # historical (100, 100) frame and translates the shipped artifact to its
+    # sheet-centered frame only at the very end, so constants matched every
+    # in-recipe call -- but any repair invoked on the shipped bytes (a
+    # refill-and-repair consumer, as the plain-native-refill stability pass
+    # below) found the real board entirely outside the constant-derived
+    # bounds and rejected every candidate for a reason that was never
+    # physical.  Boards carrying no Edge.Cuts geometry (the constructed test
+    # fixtures) keep the authored-frame constants.
+    _bbox = edge_cuts_bbox(text)
+    if _bbox is not None:
+        min_x, min_y, max_x, max_y = (
+            _bbox[0] + 0.5,
+            _bbox[1] + 0.5,
+            _bbox[2] - 0.5,
+            _bbox[3] - 0.5,
+        )
+    else:
+        min_x = generate_pcb.BOARD_ORIGIN_X + 0.5
+        min_y = generate_pcb.BOARD_ORIGIN_Y + 0.5
+        max_x = generate_pcb.BOARD_ORIGIN_X + generate_pcb.BOARD_WIDTH - 0.5
+        max_y = generate_pcb.BOARD_ORIGIN_Y + generate_pcb.BOARD_HEIGHT - 0.5
 
     VIA_R = 0.225  # 0.45 mm via
     VIA_DRILL_R = 0.125  # 0.25 mm drill on every repair via
@@ -989,6 +1055,11 @@ def _repair_pour_connectivity(
                 # audit's conservative connectivity model).
                 own.append((inscribed, layers, f"pad:{name}"))
         pad_center = {entry[5]: entry[4] for entry in pad_index if entry[1] == net}
+        # Through-hole pads of this net.  Their plated barrel already spans
+        # the copper stack, so sub-stage D may terminate a bridge on one
+        # without drilling (issue #5507); an SMD pad reaches only its own
+        # layer and still needs a via placed on other own-net copper.
+        th_pads = {entry[5] for entry in pad_index if entry[1] == net and entry[6]}
 
         # Union-find over own elements, built ONCE and maintained
         # incrementally as repair geometry is appended (a full O(n^2)
@@ -1020,6 +1091,17 @@ def _repair_pour_connectivity(
                 gj, lj, _ = own[j]
                 if (li & lj) and gi.intersects(gj):
                     parent[_find(len(own) - 1)] = _find(j)
+
+        def _bridge_side(idx: int) -> BridgeSide:
+            """Describe ``own[idx]`` to the shared via-hop planner.
+
+            Only a pad's kind is ambiguous about plating, so pads state it
+            explicitly and every other kind keeps the planner's own
+            ``kind``-derived default.
+            """
+            geom, layers, kind = own[idx][:3]
+            plated = kind[4:] in th_pads if kind.startswith("pad:") else None
+            return BridgeSide(geom, layers, kind, plated_through=plated)
 
         max_rounds = 40
         skipped_roots: set[int] = set()
@@ -1195,14 +1277,20 @@ def _repair_pour_connectivity(
             # bbox-carved pour), hop OVER it: drop a via inside each
             # copper region near the gap and cross on a different layer.
             #
-            # Issue #5507: an endpoint that is ALREADY a same-net barrel is
+            # Issue #5507: an endpoint that ALREADY carries a plated hole is
             # reused rather than re-drilled.  A barrel's own copper is just
             # its annulus, so every retreat point either misses that disc or
             # lands inside it -- where the drill-to-drill floor rejects a
             # second drill -- and the pair was skipped for every retreat on
-            # every layer.  ``plan_via_hop_bridge`` keeps the candidate order
-            # and the physical predicates below unchanged; it only stops
-            # demanding a drill where the stack is already bridged.
+            # every layer.  A through-hole PAD is the same case: ``_via_ok``
+            # bans a drill anywhere on a pad (same-net included) and holds it
+            # off that pad's own drill, so no retreat on it is ever legal
+            # either, while its barrel already spans the stack.  An SMD pad
+            # stays non-reusable -- it reaches only its own layer, so a
+            # crossing on another layer genuinely needs a new via elsewhere
+            # on the component.  ``plan_via_hop_bridge`` keeps the candidate
+            # order and the physical predicates below unchanged; it only
+            # stops demanding a drill where the stack is already bridged.
             if not merged:
                 pairs_d: list[tuple[float, int, int]] = []
                 for i in target:
@@ -1213,8 +1301,8 @@ def _repair_pour_connectivity(
                 pairs_d.sort(key=lambda x: x[0])
                 for _d, i, j in pairs_d[:14]:
                     plan = plan_via_hop_bridge(
-                        BridgeSide(*own[i][:3]),
-                        BridgeSide(*own[j][:3]),
+                        _bridge_side(i),
+                        _bridge_side(j),
                         layers=("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"),
                         retreats=(0.5, 0.9, 1.4),
                         via_ok=lambda p, _net=net: _via_ok(_net, *p),
@@ -1473,6 +1561,104 @@ def _try_local_pour_detour(pcb_path: Path, net_names: list[str]) -> bool:
         )
         print(f"   Validated local detour: {plan.signal_net} frees {context['net']}")
         return True
+    return False
+
+
+def _native_refill_stability_pass(
+    output_path: Path,
+    net_names: list[str],
+    fill_argv: list[str],
+    rounds: int = NATIVE_REFILL_STABILITY_ROUNDS,
+) -> bool:
+    """Keep pour connectivity whole under a PLAIN native refill (#5507).
+
+    The recipe's in-loop fills come from the repo fill engine, whose carve
+    model can keep a same-net pour pocket attached that KiCad's own engine
+    severs -- Board07's live case is the ``+1V2`` In2.Cu pocket under the U4
+    BGA, whose only net item is ``U4.E6``'s stitching via.  Such a pad reads
+    connected on the saved output and strands the moment anything refills
+    the board natively, which is exactly the acceptance contract this board
+    carries ("on saved and plain-native-refilled outputs").
+
+    Each round: refill a scratch copy with the plain native filler
+    (``run_fill_zones`` default policy -- the board's own project/.kicad_dru
+    rules are the only authority), audit it, and when a net splits, repair
+    the scratch in place, adopt the repaired board as the artifact, and
+    restore the recipe's deterministic fills before re-auditing.  The added
+    repair copper does not depend on fill geometry, so once placed it keeps
+    the net whole under BOTH engines.  Returns True only on a round whose
+    scratch refill audited clean; degrades honestly (warning + the current
+    artifact's own audit verdict) when the native filler itself is
+    unavailable.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    from kicad_tools.cli.runner import find_kicad_cli, run_fill_zones
+
+    if find_kicad_cli() is None:
+        print("   Native filler unavailable -- plain-refill stability unverified (issue #5507).")
+        return _audit_pour_report(output_path, net_names, "[native?]")
+
+    for attempt in range(1, rounds + 1):
+        scratch_dir = Path(
+            tempfile.mkdtemp(prefix="native-refill-stability-", dir=output_path.parent)
+        )
+        try:
+            scratch = scratch_dir / output_path.name
+            shutil.copy2(output_path, scratch)
+            for suffix in (".kicad_pro", ".kicad_dru"):
+                side = output_path.with_name(output_path.stem + suffix)
+                if side.exists():
+                    shutil.copy2(side, scratch_dir / side.name)
+            result = run_fill_zones(scratch)
+            if not result.success:
+                print(
+                    "   WARNING: plain native refill failed "
+                    f"(rc={getattr(result, 'returncode', '?')}); stability "
+                    "unverified."
+                )
+                return _audit_pour_report(output_path, net_names, f"[native r{attempt}]")
+            if _audit_pour_report(scratch, net_names, f"[native r{attempt}]"):
+                return True
+
+            print(f"   Repairing the natively-refilled state (round {attempt})...")
+            try:
+                rep_vias, rep_bridges = _repair_pour_connectivity(scratch, net_names)
+                print(
+                    f"   Native-refill repair placed {rep_vias} via(s) + "
+                    f"{rep_bridges} bridge trace(s)"
+                )
+            except Exception as exc:
+                print(f"   WARNING: native-refill repair failed: {exc}")
+                return False
+            if (rep_vias, rep_bridges) == (0, 0):
+                print(
+                    "   POUR CONNECTIVITY (native refill): FAIL "
+                    "(split persists with no lawful repair)"
+                )
+                return False
+
+            # Adopt the repaired board, then restore the recipe's own
+            # deterministic fills so the shipped fill bytes keep coming from
+            # the same engine every other round used.
+            shutil.copy2(scratch, output_path)
+            fill_result = subprocess.run(fill_argv, capture_output=True, text=True)
+            if fill_result.returncode != 0:
+                print(
+                    "   WARNING: recipe re-fill after native repair failed "
+                    f"(rc={fill_result.returncode})"
+                )
+            if not _audit_pour_report(output_path, net_names, f"[post-native r{attempt}]"):
+                return False
+        finally:
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    print(
+        "   POUR CONNECTIVITY (native refill): FAIL "
+        f"(still splitting after {rounds} stability round(s))"
+    )
     return False
 
 
@@ -2323,36 +2509,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # zero-fill-zone audit term, so iterating just grinds repair geometry
     # against an unfillable board; mirrors board 06's #3509 short-circuit).
     def _run_pour_audit(tag: str) -> bool:
-        ok = True
-        try:
-            audit = _audit_pour_nets(output_path, skip_nets)
-            for net in skip_nets:
-                info = audit[net]
-                n_pads = sum(len(g) for g in info["pad_groups"])
-                problems = []
-                if not info["connected"]:
-                    problems.append(
-                        f"{len(info['pad_groups'])} disjoint pad groups "
-                        f"(largest "
-                        f"{len(info['pad_groups'][0]) if info['pad_groups'] else 0}"
-                        f"/{n_pads})"
-                    )
-                if info["zero_fill_zones"]:
-                    problems.append(f"{info['zero_fill_zones']} zero-fill zone(s)")
-                if problems:
-                    ok = False
-                    print(f"   {tag} FAIL {net}: {'; '.join(problems)}")
-                    for group in info["pad_groups"][1:][:5]:
-                        print(f"        stranded: {[p for p, _ in group]}")
-                else:
-                    print(f"   {tag} OK   {net}: {n_pads} pads in one copper component")
-        except ImportError as exc:
-            ok = False
-            print(f"   {tag} FAIL: audit unavailable ({exc}) -- unverifiable artifact")
-        except Exception as exc:
-            ok = False
-            print(f"   {tag} FAIL: audit crashed ({exc})")
-        return ok
+        return _audit_pour_report(output_path, skip_nets, tag)
 
     pour_ok = False
     for repair_round in range(1, MAX_POUR_REPAIR_ROUNDS + 1):
@@ -2461,6 +2618,29 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # route`` may have emitted next to it.
         for tmp in route_input.parent.glob(route_input.stem + "*"):
             tmp.unlink(missing_ok=True)
+
+    # Issue #5507: the artifact must stay whole under a PLAIN NATIVE refill
+    # too, not only under this recipe's own fill engine.  The in-loop audits
+    # above read the repo engine's fills, whose carve model can keep a
+    # same-net pour pocket attached that KiCad's engine severs (Board07's
+    # live case: the +1V2 In2.Cu pocket under the U4 BGA stranding U4.E6).
+    # The pass below runs AFTER the closing translation leg on purpose:
+    # KiCad's native fill engine is grid-snapped in absolute coordinates, so
+    # a marginal pour neck can survive a native refill in the historical
+    # routing frame and still sever in the shipped sheet-centered frame
+    # (measured on the fresh 2026-09-20 seed-42 run: +1V2 refilled to a
+    # single component in-frame, [7,1] with U4.E6 stranded once translated).
+    # It refills a scratch copy natively, repairs any split it finds
+    # (frame-independent since the bounds fix in
+    # ``_repair_pour_connectivity``), adopts the repaired copper, restores
+    # the recipe's fills, and re-audits -- so the verdict is proven on the
+    # artifact exactly as it ships.
+    print("\n10. Plain-native-refill stability pass (issue #5507)...")
+    native_stable = _native_refill_stability_pass(output_path, skip_nets, fill_argv)
+    print(
+        "   POUR CONNECTIVITY (plain native refill): "
+        + ("PASS" if native_stable else "FAIL (see above)")
+    )
 
     return success
 

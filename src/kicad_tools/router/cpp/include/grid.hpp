@@ -467,6 +467,24 @@ public:
     // refuses placements the post-route validator would later reject.
     const std::vector<StoredVia>& stored_vias() const { return stored_vias_; }
 
+    // Issue #5599: exact swept-edge vs foreign-pad clearance, mirroring
+    // validate_route()'s segment-vs-pad branch (rect-aware
+    // ``pad_rect_distance`` for rectangles, point-to-segment for explicit
+    // circular pads, ``pad.clearance_override`` as the required floor with
+    // ``default_clearance`` as fallback, same CLEARANCE_EPSILON_MM slack).
+    // Used by the A* neighbor filter's evidence-gated STRICT pad mode
+    // (``Pathfinder::set_search_strict_pad_kernel``) so that once a net's
+    // post-route validation has repeatedly rejected candidates, the SEARCH
+    // refuses the same steps the VALIDATOR would reject -- instead of the
+    // historical cell-center kernels, which an off-grid pad (board 04's
+    // 0.01mm QFP shift) can slip a diagonal corner-cut past.  Deliberately
+    // does NOT reproduce the validator's same-component carve-outs: strict
+    // mode is armed only for nets whose candidates the validator keeps
+    // rejecting, where conservative is the point.
+    bool edge_foreign_pad_clear(
+        float ax, float ay, float bx, float by, int layer, int net,
+        float half_width, float default_clearance) const;
+
 private:
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +

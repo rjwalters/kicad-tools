@@ -40,7 +40,7 @@ def test_opt_in_and_resources_and_artifact_retention():
         assert step["env"]["KCT_OBSERVER_CONTAINER_ID"] == "${{ job.container.id }}"
     artifact = steps["Retain native workload observations"]
     assert artifact["if"] == "${{ always() && env.KCT_NATIVE_DIAGNOSTICS == 'true' }}"
-    assert artifact["uses"] == "actions/upload-artifact@v4"
+    assert artifact["uses"] == "actions/upload-artifact@v7"
     assert artifact["with"]["path"] == "${{ runner.temp }}/native-observer/"
 
 

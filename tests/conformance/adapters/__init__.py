@@ -1,14 +1,30 @@
-"""Consumer-adapter protocol and the canonical :class:`Verdict` type.
+"""Consumer-adapter protocol, the canonical :class:`Verdict`, and the adapters.
 
-Epic #5509 Phase 1a ships **only** the vocabulary: the ``Verdict`` a clearance
-model emits and the ``ConsumerAdapter`` protocol a model is wrapped in.  The
-concrete adapters (Python grid, C++ grid, ``kct check``'s ``ClearanceRule``,
-route-halo geometry, grid occupancy) land in the follow-up adapter PR --
-deliberately, so that *this* package stays free of any
-``import kicad_tools.router`` / ``import kicad_tools.validate``.  That keeps
-the truth side of the harness independent of the code it is measuring.
+This package is the **split line** of Epic #5509's conformance harness.  Every
+module *outside* it -- generator, board writer, oracle, fixtures, report -- is
+consumer-free by construction (``test_report_shape.py``'s
+``test_truth_side_does_not_import_the_code_it_measures`` enforces it), so the
+truth side cannot drift towards the implementations it measures.  Inside this
+package, ``import kicad_tools.router`` / ``import kicad_tools.validate`` is
+exactly the point.
 
-Nothing in this module imports a consumer.
+*This module itself* still imports no consumer: it holds only the vocabulary
+(:class:`Verdict`) and the contract (:class:`ConsumerAdapter`).  The five
+concrete adapters live in sibling modules:
+
+===============  =====  ==========================================
+module           group  consumer
+===============  =====  ==========================================
+``occupancy``      1    Python grid occupancy (halo cell marking)
+``route_halo``     4    ``RouteHaloGeometry.clear`` refinement
+``grid_py``       12    Python commit gate (``validate_*_clearance``)
+``grid_cpp``      13    C++ commit gate (``Grid3D::validate_route``)
+``kct_check``     18    ``kct check``'s ``ClearanceRule``
+===============  =====  ==========================================
+
+Each drives an **unmodified** consumer through
+:mod:`tests.conformance.adapters._support`, which is the single translation
+from the harness's ``CopperCase`` into the objects those consumers speak.
 """
 
 from __future__ import annotations
@@ -142,7 +158,8 @@ class ConsumerAdapter(Protocol):
     reports that by simply not emitting verdicts of that kind and the report
     marks the cell accordingly.
 
-    Implementations live in sibling modules added by the adapter PR.
+    Implementations live in the sibling modules listed in this package's
+    module docstring.
     """
 
     #: Short stable identifier used as the table row key (e.g. ``"grid_py"``).
@@ -150,6 +167,25 @@ class ConsumerAdapter(Protocol):
 
     #: The Epic #5509 section-1 implementation group this adapter measures.
     group: int
+
+    #: The :class:`tests.conformance.generator.PairKind` values this consumer
+    #: is *consulted for* in production.  It is a scope declaration, not a
+    #: results filter: a pair kind outside this set is not compared at all,
+    #: because counting it would measure the absence of a check somewhere else
+    #: in the pipeline rather than a disagreement in *this* model.  Every
+    #: adapter must state why it narrows the set, in its module docstring.
+    pair_kinds: frozenset[str]
+
+    def available(self) -> bool:
+        """Whether this adapter can run on this machine.
+
+        ``False`` (e.g. the C++ router extension is not built) makes the
+        adapter's group render ``not measured`` rather than silently
+        contributing a zero-disagreement row -- the same "no answer beats a
+        confident wrong answer" rule the oracle applies to a missing
+        kicad-cli.
+        """
+        ...
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
         """Return the set of pairs this consumer considers too close."""

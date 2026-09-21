@@ -14,7 +14,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+    # mcp SDK >= 2.x (#5601): ``FastMCP`` was renamed to ``MCPServer`` and
+    # moved from ``mcp.server.fastmcp`` to ``mcp.server.mcpserver``.  Aliased
+    # here because this module already defines its own stdio ``MCPServer``
+    # dataclass above.
+    from mcp.server.mcpserver import MCPServer as SDKMCPServer
 
 from jsonschema import validate  # type: ignore[import-untyped]  # Upstream has no inline types.
 
@@ -223,55 +227,104 @@ def create_fastmcp_server(
     http_mode: bool = False,
     host: str | None = None,
     port: int | None = None,
-) -> FastMCP:
-    """Create a FastMCP server with all tools registered from the unified registry.
+) -> SDKMCPServer:
+    """Create an SDK MCP server with all tools registered from the unified registry.
 
     Args:
-        http_mode: If True, creates server in stateless HTTP mode.
-        host: Bind address for HTTP transports. FastMCP's own default
-            (``127.0.0.1``) is used when omitted. ``host``/``port`` are
-            constructor arguments in the MCP SDK -- ``FastMCP.run()`` does not
-            accept them -- so they must be supplied here.
-        port: Bind port for HTTP transports. FastMCP's own default (``8000``)
+        http_mode: If True, the server runs in stateless HTTP mode (the
+            ``stateless_http`` run option is recorded for the caller).
+        host: Bind address for HTTP transports. The SDK's own default
+            (``127.0.0.1``) is used when omitted. Since mcp 2.x (#5601),
+            ``host``/``port``/``stateless_http`` are no longer constructor
+            settings -- they are ``run(transport=...)`` keyword arguments --
+            so they are recorded on the returned instance as
+            ``http_run_options`` for whatever call site invokes ``run()``.
+        port: Bind port for HTTP transports. The SDK's own default (``8000``)
             is used when omitted.
 
     Returns:
-        Configured FastMCP server instance.
+        Configured SDK ``MCPServer`` instance carrying an
+        ``http_run_options`` dict to splat into ``run()``.
 
     Raises:
-        ImportError: If fastmcp is not installed.
+        ImportError: If the MCP SDK is not installed, or is a version
+            without ``mcp.server.mcpserver.MCPServer`` (mcp 1.x still named
+            it ``mcp.server.fastmcp.FastMCP``).
     """
     try:
-        from mcp.server.fastmcp import FastMCP
+        from mcp.server.mcpserver import MCPServer as SDKMCPServer
     except ImportError as e:
+        # Distinguish "not installed" from "installed but the API moved"
+        # (#5601): a missing top-level ``mcp`` package is a genuine install
+        # gap; any other import failure means an SDK version without the
+        # renamed class -- surfacing that as "not installed" is exactly the
+        # misclassification that turned the mcp 2.x CI failures into silent
+        # test skips.
+        if isinstance(e, ModuleNotFoundError) and e.name == "mcp":
+            raise ImportError(
+                "The MCP SDK is required for HTTP transport. "
+                "Install with: pip install 'kicad-tools[mcp]'"
+            ) from e
         raise ImportError(
-            "FastMCP is required for HTTP transport. Install with: pip install 'kicad-tools[mcp]'"
+            "An MCP SDK >= 2 is required (FastMCP was renamed to MCPServer in "
+            "mcp 2.x, issue #5601); the installed SDK does not provide "
+            "mcp.server.mcpserver.MCPServer."
         ) from e
 
-    settings: dict[str, Any] = {}
-    if host is not None:
-        settings["host"] = host
-    if port is not None:
-        settings["port"] = port
-
-    class RegistryFastMCP(FastMCP):
+    class RegistrySDKServer(SDKMCPServer):
         """Use the registry's JSON schemas and dict handlers without a kwargs shim.
 
-        FastMCP registers these public overrides with its low-level protocol
-        server (with low-level input validation disabled). Shared dispatch owns
-        validation and recording, including failures before a handler runs.
+        The SDK server registers these public overrides with its low-level
+        protocol server (with low-level input validation disabled). Shared
+        dispatch owns validation and recording, including failures before a
+        handler runs.
         """
+
+        # Set by create_fastmcp_server after construction (see run_server):
+        # mcp 2.x host/port/stateless_http are run()-time options.
+        http_run_options: dict[str, Any]
 
         async def list_tools(self) -> list[Any]:
             from mcp.types import Tool
 
             return [Tool(**item) for item in dispatcher.get_tools_list()]
 
-        async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            return dispatcher.call_tool(name, arguments)
+        async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+            # ``context`` is supplied positionally by the 2.x protocol layer
+            # (mcp 1.x never passed it); registry dispatch does not use it.
+            from mcp.types import CallToolResult, TextContent
+
+            # mcp 2.x contract: call_tool returns a complete CallToolResult
+            # (the 1.x framework used to wrap raw dict returns itself).
+            # Registry-dispatch failures (unknown tool, schema validation)
+            # are recorded by ``record_call`` before they propagate; surface
+            # them as isError results rather than letting an SDK-foreign
+            # exception type escape the override.
+            try:
+                result = dispatcher.call_tool(name, arguments)
+            except Exception as e:
+                return CallToolResult(
+                    content=[TextContent(type="text", text=str(e))],
+                    is_error=True,
+                )
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(result, indent=2))],
+                structured_content=result,
+                is_error=False,
+            )
 
     dispatcher = MCPServer()
-    return RegistryFastMCP("kicad-tools", stateless_http=http_mode, **settings)
+    server = RegistrySDKServer("kicad-tools")
+    # mcp 2.x (#5601): host/port/stateless moved from constructor Settings
+    # to run(transport=...) kwargs; remember the caller's intent so the run
+    # site (run_server below, or any direct caller) can splat them in.
+    http_run_options: dict[str, Any] = {"stateless_http": http_mode}
+    if host is not None:
+        http_run_options["host"] = host
+    if port is not None:
+        http_run_options["port"] = port
+    server.http_run_options = http_run_options
+    return server
 
 
 def run_server(
@@ -301,11 +354,18 @@ def run_server(
         server = create_server()
         server.run()
     elif transport == "http":
-        # Use FastMCP for HTTP transport. host/port are constructor arguments
-        # in the MCP SDK; FastMCP.run() only accepts transport/mount_path.
+        # Use the SDK server for HTTP transport. Since mcp 2.x (#5601),
+        # host/port/stateless_http are run() keyword arguments -- recorded on
+        # the instance by create_fastmcp_server as http_run_options.
         mcp = create_fastmcp_server(http_mode=True, host=host, port=port)
         logger.info(f"Starting HTTP MCP server on {host}:{port}")
-        mcp.run(transport="streamable-http")
+        # The recorded options are typed via getattr (the declared return type
+        # is the SDK base class, which does not carry the attribute). The
+        # kwargs all match run_streamable_http_async's signature; the wiring
+        # is exercised live by TestHTTPTransportSmoke and the run_server
+        # unit tests.
+        run_options: dict[str, Any] = getattr(mcp, "http_run_options", {"stateless_http": True})
+        mcp.run(transport="streamable-http", **run_options)
     else:
         raise ValueError(f"Unknown transport: {transport}. Use 'stdio' or 'http'.")
 

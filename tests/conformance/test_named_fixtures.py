@@ -14,17 +14,22 @@ Two classes of assertion:
 2. *Rule values* -- each fixture still carries exactly the constants it was
    built to probe. A later change that silences a disagreement by relaxing the
    fixture's clearance instead of fixing the consumer must fail loudly here.
+
+Consumer comparisons live at the bottom of the file, clearly separated: they
+carry ``@pytest.mark.consumer`` and are auto-``xfail``ed, because a measured
+disagreement is this epic's *output*, not a broken build.
 """
 
 from __future__ import annotations
 
 import math
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tests.conformance.board import FIXTURES_DIR
-from tests.conformance.conftest import requires_kicad_cli
+from tests.conformance.conftest import requires_cpp, requires_kicad_cli
 from tests.conformance.fixtures import (
     GRID_RESOLUTION_MM,
     HOLE_TO_HOLE_MM,
@@ -38,6 +43,7 @@ from tests.conformance.fixtures import (
 )
 from tests.conformance.generator import pad_shape
 from tests.conformance.oracle import run_oracle
+from tests.conformance.report import ADAPTERS
 
 pytestmark = requires_kicad_cli
 
@@ -235,4 +241,143 @@ def test_oracle_runs_leave_the_fixture_directory_untouched() -> None:
     assert board.read_bytes() == before_bytes, "an oracle run mutated the committed fixture board"
     assert sorted(p.name for p in directory.iterdir()) == before_listing, (
         "an oracle run wrote a new file into the committed fixture directory"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Consumer rows -- report-only, auto-xfail
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is a hard assertion about kicad-cli. Everything
+# below compares an in-tree consumer against it, carries
+# ``@pytest.mark.consumer``, and is therefore turned into
+# ``xfail(strict=False)`` by ``conftest.py``. A disagreement recorded here is
+# evidence for Epic #5509's table, not a build failure: the consumer becomes a
+# merge gate only in its own epic phase.
+#
+# The ``notes`` on each fixture in ``fixtures.py`` predict *which* consumer
+# disagrees and *in which direction*. Those predictions are hypotheses, not
+# assertions (curator note on #5533 section 7): a prediction that does not
+# reproduce must show up as an xfail with the real answer in the message, and
+# the published table records what actually happened -- never a green tick for
+# a disagreement that has quietly gone away.
+
+
+_ADAPTERS_BY_NAME = {adapter.name: adapter for adapter in ADAPTERS}
+
+# fixture -> ((adapter name, adapter is expected to REJECT the pair), ...)
+#
+# Verbatim from each fixture's ``notes`` and from #5533's acceptance criteria.
+_PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
+    # kicad-cli FLAGS this pair (0.18 mm against the project's 0.20 mm class).
+    # Under the via-first insertion order the commit gates compare the
+    # candidate segment against ``trace_clearance`` (0.15) and accept it.
+    "issue5398-seg-via-0p18-order": (("grid_py", False), ("grid_cpp", False)),
+    # kicad-cli finds this CLEAN (0.213 mm copper, 0.513 mm drill). The grid's
+    # Chebyshev-square via halo swallows the candidate anyway.
+    "issue5410-dqs-n-halo-vs-legal-via": (("occupancy", True),),
+    # kicad-cli finds this CLEAN (project Default class is 0.15 mm here).
+    # Search-time refinement raises the bar to max(required, via_clearance).
+    "search-vs-commit-seg-via-max": (
+        ("route_halo", True),
+        ("grid_py", False),
+        ("grid_cpp", False),
+    ),
+    # kicad-cli finds this CLEAN (0.22 mm to the exact roundrect outline).
+    # The C++ grid models the pad as its bounding rectangle: 0.1164 mm.
+    "roundrect-corner-gap": (("grid_cpp", True), ("kct_check", False)),
+}
+
+_ADAPTER_PARAMS = [
+    pytest.param(
+        adapter.name,
+        id=adapter.name,
+        marks=(requires_cpp,) if adapter.name == "grid_cpp" else (),
+    )
+    for adapter in ADAPTERS
+]
+
+_PREDICTION_PARAMS = [
+    pytest.param(
+        fixture,
+        adapter_name,
+        expect_reject,
+        id=f"{fixture}-{adapter_name}",
+        marks=(requires_cpp,) if adapter_name == "grid_cpp" else (),
+    )
+    for fixture, predictions in _PREDICTIONS.items()
+    for adapter_name, expect_reject in predictions
+]
+
+
+@cache
+def _truth_pairs(name: str) -> frozenset[frozenset[str]]:
+    """Net pairs kicad-cli flags on a committed fixture (cached per session).
+
+    No named fixture carries a zone (``test_no_named_fixture_carries_a_zone``),
+    so one unrefilled run is the whole answer and twenty consumer rows cost
+    four kicad-cli processes instead of twenty.
+    """
+    result = run_oracle(_fixture_board(name), refill=False)
+    return frozenset(v.nets for v in result.without_zones())
+
+
+@cache
+def _adapter_pairs(adapter_name: str, fixture_name: str) -> frozenset[frozenset[str]]:
+    """Net pairs one adapter's consumer rejects on a fixture (cached)."""
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(fixture_name)
+    return frozenset(v.nets for v in adapter.verdicts(case))
+
+
+@pytest.mark.consumer
+@pytest.mark.parametrize("fixture,adapter_name,expect_reject", _PREDICTION_PARAMS)
+def test_named_fixture_reproduces_its_predicted_disagreement(
+    fixture: str, adapter_name: str, expect_reject: bool
+) -> None:
+    """The consumer behaviour each fixture's ``notes`` predict, still happens.
+
+    This is the acceptance criterion that keeps the evidence alive: a fixture
+    whose predicted disagreement has stopped reproducing is no longer showing
+    what it claims to show, and that has to be visible rather than silent.
+    """
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(fixture)
+    (pair,) = case.pairs
+    rejected = pair.nets in _adapter_pairs(adapter_name, fixture)
+
+    verb = "REJECT" if expect_reject else "ACCEPT"
+    got = "rejected" if rejected else "accepted"
+    assert rejected is expect_reject, (
+        f"{fixture}: predicted that `{adapter.name}` (group {adapter.group}) "
+        f"would {verb} {sorted(pair.nets)}, but it {got} it. The prediction is "
+        f"a hypothesis -- if the consumer has genuinely changed, update the "
+        f"fixture's notes and this table rather than the fixture's geometry."
+    )
+
+
+@pytest.mark.consumer
+@pytest.mark.parametrize("adapter_name", _ADAPTER_PARAMS)
+@pytest.mark.parametrize("name", NAMED_FIXTURES)
+def test_named_fixture_adapter_agrees_with_kicad_cli(name: str, adapter_name: str) -> None:
+    """Each adapter against ground truth on each fixture.
+
+    The predictions above say what *should* disagree; this says what does, for
+    every adapter/fixture combination, which is what fills the table's cells
+    for the named-fixture half of the corpus.
+    """
+    adapter = _ADAPTERS_BY_NAME[adapter_name]
+    case = build_named_fixture(name)
+    if not any(pair.kind in adapter.pair_kinds for pair in case.pairs):
+        pytest.skip(f"{adapter.name} is not consulted for {case.pairs[0].kind} pairs")
+
+    truth = _truth_pairs(name)
+    consumer = _adapter_pairs(adapter_name, name)
+
+    over = sorted(sorted(p) for p in consumer - truth)
+    under = sorted(sorted(p) for p in truth - consumer)
+    assert not over and not under, (
+        f"{name}: `{adapter.name}` (group {adapter.group}) disagrees with kicad-cli\n"
+        f"  over-rejected (consumer flags, KiCad clean): {over}\n"
+        f"  under-rejected (KiCad flags, consumer clean): {under}"
     )

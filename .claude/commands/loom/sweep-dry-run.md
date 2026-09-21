@@ -25,6 +25,8 @@
 
 If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs after printing the plan. The dry-run gate is the single inviolable contract of `--dry-run`: no label edits, no `worktree.sh` invocation, no `gh pr create`, no `merge-pr.sh`, no daemon-state writes, no Task/subagent dispatch. This contract is uniform across Modes A, B, and C.
 
+**`--dry-run --yes` needs no special-case code.** This stage runs and EXITs *before* the mandatory confirmation-gate machinery (see "`--yes` (non-interactive confirmation)" in `sweep-arguments.md`) is ever reached, so `--dry-run` always wins regardless of whether `--yes` is also present — as long as `--yes` is parsed as an ordinary bare flag token, stripped before mode classification like every other flag, `--dry-run --yes` "just works" with zero bespoke interaction handling.
+
 ### Procedure — Modes A and B (issue-set)
 
 1. **Survey each candidate (read-only).** For every deduplicated, validated issue number `N` in the candidate list:
@@ -65,8 +67,9 @@ If `--dry-run` was supplied, **this stage runs before any mutation** and EXITs a
     #125  "Refactor baz module"           labels: loom:building                 → would skip (already in flight)
     #126  "Document quux"                 labels: (none)                        → would curate, build
     #198  "Polish frobnicator"            labels: loom:issue                    → would merge (existing PR #201 already loom:pr)
+    #197  "Rework the widget pipeline"    labels: loom:issue                    → would skip (existing PR #202 is draft/unlabeled)
 
-Total: 3 would-build, 1 would-route-to-judge, 1 would-merge, 1 would-skip. No issues were modified.
+Total: 3 would-build, 1 would-route-to-judge, 1 would-merge, 2 would-skip. No issues were modified.
 ```
 
 When `--builders-per-wave` was passed explicitly, the header shows the number without `auto` and the "Wave sizing" line reads `explicit --builders-per-wave=N` (no mechanism/disk reason). A disk- or candidate-clamped auto run reads e.g. `(wave size 3, auto; mechanism=in-session subagent)` with `Wave sizing: reduced to 3 (only 6 GB free on /Volumes/scratch/loom)`.
@@ -75,7 +78,7 @@ When `--builders-per-wave` was passed explicitly, the header shows the number wi
 - Issue number
 - Title (truncated reasonably if very long)
 - Current labels (comma-separated, or `(none)`)
-- Planned action (`would build`, `would curate, build`, `would skip (<reason>)`, `would route to Judge (existing PR #X in flight)`, `would merge (existing PR #X already loom:pr)`, `would skip (PR #X held by loom:operator)` — the linked PR is `loom:pr` but also carries `loom:operator`, per #6398). Under the `all` sentinel (`SWEEP_ALL_AGGRESSIVE=true`) the aggressive actions also appear: `would reclaim (stale loom:building), build`, `would unblock (#N merged), build`, `would skip (still blocked by #N)`, `would skip (explicit hold: "<phrase>")`, `would expand epic (→ #a #b)`, `would skip (needs decomposition)`, `would reclaim (stale loom:abort), build`, `would skip (abort flag set)`, `would skip (operator-only)`, `would skip (needs-capability)`, `would propose (mechanical lane, holds: <caps>)`, `would skip (mechanical: missing capability <name>)` (#6893).
+- Planned action (`would build`, `would curate, build`, `would skip (<reason>)`, `would route to Judge (existing PR #X in flight)`, `would merge (existing PR #X already loom:pr)`, `would skip (PR #X held by loom:operator)` — the linked PR is `loom:pr` but also carries `loom:operator`, per #6398; `would skip (existing PR #X is draft/unlabeled)` — the one open linked PR is a draft and/or has no actionable label, so neither Judge nor Builder is dispatched, per #8160). Under the `all` sentinel (`SWEEP_ALL_AGGRESSIVE=true`) the aggressive actions also appear: `would reclaim (stale loom:building), build`, `would unblock (#N merged), build`, `would skip (still blocked by #N)`, `would skip (explicit hold: "<phrase>")`, `would expand epic (→ #a #b)`, `would skip (needs decomposition)`, `would reclaim (stale loom:abort), build`, `would skip (abort flag set)`, `would skip (operator-only)`, `would skip (needs-capability)`, `would propose (mechanical lane, holds: <caps>)`, `would skip (mechanical: missing capability <name>)` (#6893).
 - Wave assignment (shown via the `Wave N:` group header)
 - **Operator-gate annotation (only under the `all` sentinel, appended, never replacing the planned action — #5137)**: when step 1c matched, append `⚠ body declares operator-gating: "<phrase>"` and/or `⚠ depends on #A, which is loom:operator-only` (or `loom:needs-capability`) after the planned action, one per matched signal. No match → no suffix, row unchanged from today.
 
