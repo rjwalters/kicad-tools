@@ -176,9 +176,15 @@ class _FakeImpl:
 class TestBindingSurfaceGoalFields:
     def test_build_version_bumped_both_sides(self) -> None:
         """v42 (goal_gx/goal_gy/goal_layer) must be pinned in BOTH
-        ``types.hpp`` (via the compiled .so) and ``cpp_backend.py``."""
-        assert int(router_cpp.BUILD_VERSION) == 42
-        assert _REQUIRED_CPP_BUILD_VERSION == 42
+        ``types.hpp`` (via the compiled .so) and ``cpp_backend.py``.
+
+        The pinned value has since moved past 42 (v52 combines this surface
+        with the parallel Kelvin-escape/authored-clearance bindings, #5502) --
+        assert the two locations agree with each other rather than hardcoding
+        the number, so a later combining bump doesn't re-break this test.
+        """
+        assert int(router_cpp.BUILD_VERSION) == _REQUIRED_CPP_BUILD_VERSION
+        assert _REQUIRED_CPP_BUILD_VERSION >= 42
 
     def test_route_result_carries_goal_fields_defaulting_to_sentinel(self) -> None:
         result = router_cpp.RouteResult()
