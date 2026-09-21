@@ -240,7 +240,31 @@ packages = ["src/kicad_tools"]
 # boards/external holds local-only symlinks to sibling repos (chorus,
 # softstart) that point outside the repository; newer uv/hatchling
 # versions hard-fail sdist builds on external symlinks.
-exclude = ["boards/external"]
+#
+# Release 0.21.0 size fix: the committed board artifacts (manufacturing
+# bundles, readiness/engineering/diagnostics evidence, the site tree) and
+# the installed Loom tooling copies grew the sdist to 127 MB compressed --
+# over PyPI's 100 MB per-file limit for this project (the 0.21.0 publish
+# was rejected server-side with "400 File too large"). None of these are
+# build inputs: the wheel packages only src/kicad_tools, and the recipes'
+# committed unrouted PCBs stay packaged. Excluded classes:
+#   - **/manufacturing.zip + boards/*/output/manufacturing|readiness/
+#       (generated fab bundles/PDFs -- "verified gallery releases")
+#   - boards/*/diagnostics/ + boards/*/engineering/ (investigation evidence)
+#   - .loom/.claude/.agents (Loom orchestration tooling copies)
+#   - site/ (the documentation site sources)
+exclude = [
+    "boards/external",
+    "site",
+    ".loom",
+    ".claude",
+    ".agents",
+    "**/manufacturing.zip",
+    "boards/*/output/manufacturing",
+    "boards/*/output/readiness",
+    "boards/*/diagnostics",
+    "boards/*/engineering",
+]
 
 [tool.ruff]
 line-length = 100
