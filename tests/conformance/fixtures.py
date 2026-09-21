@@ -235,7 +235,7 @@ def build_search_vs_commit_seg_via_max() -> CopperCase:
 
     * ``RouteHaloGeometry.clear`` raises the requirement to
       ``max(required, rules.via_clearance)`` for a trace-vs-via pair
-      (``route_halo_geometry.py:235``; C++ twin ``grid.cpp:957``), i.e. 0.20 --
+      (``route_halo_geometry.py:278``; C++ twin ``grid.cpp:957``), i.e. 0.20 --
       so A* **refuses** this candidate;
     * the commit validators compare the same pair against ``trace_clearance``
       (0.15) and **accept** it (``grid.cpp:1394``).
