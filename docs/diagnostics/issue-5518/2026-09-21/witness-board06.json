@@ -1,0 +1,400 @@
+{
+  "schema_version": 1,
+  "board": "06",
+  "runs": {
+    "on-1": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1",
+      "present": true,
+      "times": [
+        "START 2026-09-21T06:46:09Z arm=on repeat=1",
+        "END 2026-09-21T06:57:26Z RC=0"
+      ],
+      "harness_captures": [
+        {
+          "file": "witness-board06-on-1.atexit.03.json",
+          "marker": "atexit",
+          "captured_at": "2026-09-21T06:57:22Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 177,
+            "commits": 100,
+            "rips": 77,
+            "truncated": false,
+            "summary_line": "Commit journal: 177 record(s) -- 100 commit(s), 77 rip(s), across 6 stage(s)"
+          },
+          "targeted_witness": {
+            "U2.B1": {
+              "ref": "U2",
+              "pin": "B1",
+              "net": 0,
+              "net_name": "GND",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.05,
+            "trace_width": 0.15,
+            "trace_clearance": 0.15,
+            "via_drill": 0.25,
+            "via_diameter": 0.45,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "min_trace_width": 0.1016,
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [],
+          "error": null,
+          "default_witness": null,
+          "default_witness_note": "witness_for_router() returned None -- the default tracked set (failed nets + routing-failure terminals) was empty at this capture point, so no stranding witness is emitted"
+        },
+        {
+          "file": "witness-board06-on-1.diffpair-return.02.json",
+          "marker": "diffpair-return",
+          "captured_at": "2026-09-21T06:53:05Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 137,
+            "commits": 80,
+            "rips": 57,
+            "truncated": false,
+            "summary_line": "Commit journal: 137 record(s) -- 80 commit(s), 57 rip(s), across 5 stage(s)"
+          },
+          "targeted_witness": {
+            "U2.B1": {
+              "ref": "U2",
+              "pin": "B1",
+              "net": 0,
+              "net_name": "GND",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.05,
+            "trace_width": 0.15,
+            "trace_clearance": 0.15,
+            "via_drill": 0.25,
+            "via_diameter": 0.45,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "min_trace_width": 0.1016,
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [],
+          "error": null,
+          "default_witness": null,
+          "default_witness_note": "witness_for_router() returned None -- the default tracked set (failed nets + routing-failure terminals) was empty at this capture point, so no stranding witness is emitted"
+        },
+        {
+          "file": "witness-board06-on-1.negotiated-return.01.json",
+          "marker": "negotiated-return",
+          "captured_at": "2026-09-21T06:53:02Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 137,
+            "commits": 80,
+            "rips": 57,
+            "truncated": false,
+            "summary_line": "Commit journal: 137 record(s) -- 80 commit(s), 57 rip(s), across 5 stage(s)"
+          },
+          "targeted_witness": {
+            "U2.B1": {
+              "ref": "U2",
+              "pin": "B1",
+              "net": 0,
+              "net_name": "GND",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.05,
+            "trace_width": 0.15,
+            "trace_clearance": 0.15,
+            "via_drill": 0.25,
+            "via_diameter": 0.45,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "min_trace_width": 0.1016,
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [],
+          "error": null,
+          "default_witness": null,
+          "default_witness_note": "witness_for_router() returned None -- the default tracked set (failed nets + routing-failure terminals) was empty at this capture point, so no stranding witness is emitted"
+        }
+      ],
+      "routed_artifacts": [
+        "diffpair_test_routed.kicad_pcb"
+      ],
+      "net_status_why": {
+        "source": "captured:board06-on-1.json",
+        "payload": {
+          "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1/diffpair_test_routed.kicad_pcb",
+          "connectivity_model": "strict",
+          "summary": {
+            "stuck_nets": 0,
+            "counts": {
+              "escape_blocked": 0,
+              "congestion_saturated": 0,
+              "placement_bound": 0,
+              "budget_starved": 0,
+              "pour_discontinuous": 0
+            }
+          },
+          "nets": []
+        }
+      },
+      "kct_route_sidecars": [],
+      "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
+    },
+    "on-2": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-2",
+      "present": true,
+      "times": [
+        "START 2026-09-21T06:58:38Z arm=on repeat=2",
+        "END 2026-09-21T07:09:35Z RC=0"
+      ],
+      "harness_captures": [
+        {
+          "file": "witness-board06-on-2.atexit.03.json",
+          "marker": "atexit",
+          "captured_at": "2026-09-21T07:09:31Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 177,
+            "commits": 100,
+            "rips": 77,
+            "truncated": false,
+            "summary_line": "Commit journal: 177 record(s) -- 100 commit(s), 77 rip(s), across 6 stage(s)"
+          },
+          "targeted_witness": {
+            "U2.B1": {
+              "ref": "U2",
+              "pin": "B1",
+              "net": 0,
+              "net_name": "GND",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.05,
+            "trace_width": 0.15,
+            "trace_clearance": 0.15,
+            "via_drill": 0.25,
+            "via_diameter": 0.45,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "min_trace_width": 0.1016,
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [],
+          "error": null,
+          "default_witness": null,
+          "default_witness_note": "witness_for_router() returned None -- the default tracked set (failed nets + routing-failure terminals) was empty at this capture point, so no stranding witness is emitted"
+        },
+        {
+          "file": "witness-board06-on-2.diffpair-return.02.json",
+          "marker": "diffpair-return",
+          "captured_at": "2026-09-21T07:05:22Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 137,
+            "commits": 80,
+            "rips": 57,
+            "truncated": false,
+            "summary_line": "Commit journal: 137 record(s) -- 80 commit(s), 57 rip(s), across 5 stage(s)"
+          },
+          "targeted_witness": {
+            "U2.B1": {
+              "ref": "U2",
+              "pin": "B1",
+              "net": 0,
+              "net_name": "GND",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.05,
+            "trace_width": 0.15,
+            "trace_clearance": 0.15,
+            "via_drill": 0.25,
+            "via_diameter": 0.45,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "min_trace_width": 0.1016,
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [],
+          "error": null,
+          "default_witness": null,
+          "default_witness_note": "witness_for_router() returned None -- the default tracked set (failed nets + routing-failure terminals) was empty at this capture point, so no stranding witness is emitted"
+        },
+        {
+          "file": "witness-board06-on-2.negotiated-return.01.json",
+          "marker": "negotiated-return",
+          "captured_at": "2026-09-21T07:05:20Z",
+          "forced_avoidance_leak_calls": 0,
+          "journal_summary": {
+            "records": 137,
+            "commits": 80,
+            "rips": 57,
+            "truncated": false,
+            "summary_line": "Commit journal: 137 record(s) -- 80 commit(s), 57 rip(s), across 5 stage(s)"
+          },
+          "targeted_witness": {
+            "U2.B1": {
+              "ref": "U2",
+              "pin": "B1",
+              "net": 0,
+              "net_name": "GND",
+              "access_at_escape_end": "non-empty",
+              "final_access": "non-empty",
+              "first_closed_at": null,
+              "first_closed_index": null,
+              "first_closed_kind": null,
+              "closing_nets": [],
+              "closing_refs": [],
+              "closing_copper_class": [],
+              "closing_markings": [],
+              "reopened": false
+            }
+          },
+          "rules": {
+            "grid_resolution": 0.05,
+            "trace_width": 0.15,
+            "trace_clearance": 0.15,
+            "via_drill": 0.25,
+            "via_diameter": 0.45,
+            "via_clearance": 0.2,
+            "min_hole_to_hole": 0.5,
+            "manufacturer": "jlcpcb",
+            "min_trace_width": 0.1016,
+            "neck_down_distance": 1.0,
+            "neck_down_threshold": 0.8
+          },
+          "failed_nets_at_capture": [],
+          "error": null,
+          "default_witness": null,
+          "default_witness_note": "witness_for_router() returned None -- the default tracked set (failed nets + routing-failure terminals) was empty at this capture point, so no stranding witness is emitted"
+        }
+      ],
+      "routed_artifacts": [
+        "diffpair_test_routed.kicad_pcb"
+      ],
+      "net_status_why": {
+        "source": "captured:board06-on-1.json",
+        "payload": {
+          "pcb": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-on-1/diffpair_test_routed.kicad_pcb",
+          "connectivity_model": "strict",
+          "summary": {
+            "stuck_nets": 0,
+            "counts": {
+              "escape_blocked": 0,
+              "congestion_saturated": 0,
+              "placement_bound": 0,
+              "budget_starved": 0,
+              "pour_discontinuous": 0
+            }
+          },
+          "nets": []
+        }
+      },
+      "kct_route_sidecars": [],
+      "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
+    },
+    "off-1": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-off-1",
+      "present": true,
+      "times": [
+        "START 2026-09-21T09:04:59Z arm=off repeat=1",
+        "TERMINATED-BY-BUILDER 2026-09-21T10:50:24Z after 01:45:26 elapsed (END-START); still inside the pure-Python A* fallback on net 5/5 USB3_RX1- (no log output since 2026-09-21T09:37Z); evidence budget reached, control arm recorded INCOMPLETE",
+        "END 2026-09-21T10:50:25Z RC=143"
+      ],
+      "harness_captures": [],
+      "routed_artifacts": [],
+      "kct_route_sidecars": [],
+      "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
+    },
+    "off-2": {
+      "out_dir": "/Users/rwalters/GitHub/kicad-tools/.loom/worktrees/issue-5518/5508-1c-scratch/out/06-off-2",
+      "present": true,
+      "times": [
+        "START 2026-09-21T09:05:09Z arm=off repeat=2",
+        "TERMINATED-BY-BUILDER 2026-09-21T10:50:24Z after 01:45:16 elapsed (END-START); still inside the pure-Python A* fallback on net 5/5 USB3_RX1- (no log output since 2026-09-21T09:37Z); evidence budget reached, control arm recorded INCOMPLETE",
+        "END 2026-09-21T10:50:25Z RC=143"
+      ],
+      "harness_captures": [],
+      "routed_artifacts": [],
+      "kct_route_sidecars": [],
+      "kct_route_sidecar_note": "no <stem>.access_witness.json written for this run"
+    }
+  },
+  "repeat_identity": {
+    "on-1 vs on-2": {
+      "comparable": true,
+      "uuid_normalized_identical": true,
+      "bytes": [
+        1460028,
+        1460028
+      ]
+    },
+    "off-1 vs off-2": {
+      "comparable": false,
+      "reason": "missing artifact (diffpair_test_routed.kicad_pcb)"
+    }
+  }
+}
