@@ -32,6 +32,35 @@ def _load_helper_module():
     return module
 
 
+def test_module_execs_without_sys_modules_registration():
+    """The script must import when exec'd *without* a ``sys.modules`` entry.
+
+    ``tests/test_recipe_artifact_isolation.py`` loads every ``scripts/ci``
+    helper with ``module_from_spec`` + ``exec_module`` and never registers the
+    result.  Under ``from __future__ import annotations`` the ``@dataclass``
+    machinery resolves each string annotation via
+    ``sys.modules.get(cls.__module__).__dict__``, which is ``None`` for such a
+    module -- so a single dataclass in this file raises ``AttributeError`` at
+    *definition* time and takes that whole suite down (which is exactly what
+    happened on the first #5617 push: four failures, three of them in tests
+    unrelated to this change).  ``PhaseTiming`` is a ``NamedTuple`` for that
+    reason; this test is the guard that keeps it one.
+
+    ``_load_helper_module`` above *does* register the module, so it cannot
+    catch this -- hence the deliberate duplication here.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "check_diffpair_coverage_unregistered", HELPER_SCRIPT_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    assert "check_diffpair_coverage_unregistered" not in sys.modules
+    spec.loader.exec_module(module)
+
+    timing = module.PhaseTiming(label="4", title="Routing nets...", start=1.0, duration=2.0)
+    assert timing == module.PhaseTiming("4", "Routing nets...", 1.0, 2.0)
+
+
 class _FakeClock:
     """A monotonic clock driven by an explicit list of tick values."""
 
