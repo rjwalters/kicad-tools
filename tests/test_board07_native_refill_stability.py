@@ -39,6 +39,16 @@ from pathlib import Path
 
 import pytest
 
+# Issue #5507 / PR #5622 Doctor-style fix: the stability tests run real
+# KiCad native refills (plus the repair loop) on the retained fixture, and
+# the split-repair test alone runs multiple refill rounds -- ~50 s for the
+# whole module locally, and over pytest's 60 s default for that one test
+# under CI's shared-runner contention (KCT_NATIVE_MAX_CONCURRENCY=1
+# serialization).  Per the repo convention (ci.yml ~195: every test whose
+# estimated duration exceeds ~30 s carries an explicit override), raise the
+# module ceiling to 180 s.
+pytestmark = pytest.mark.timeout(180)
+
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.pcb.center_sheet import edge_cuts_bbox, translate_pcb_text
 
