@@ -4209,6 +4209,104 @@ def export_manufacturing_bundle(routed_path: Path, output_dir: Path) -> bool:
     return False
 
 
+# =============================================================================
+# ``--step route`` input-board identity check (Issue #5628)
+# =============================================================================
+# ``--step route`` routes whatever ``<output_dir>/diffpair_test.kicad_pcb``
+# the caller happens to have staged.  That is deliberate (it is the Phase 4N
+# CI re-route hook), but it means the recipe can be handed a board it did NOT
+# generate -- and until this check, it did so SILENTLY.
+#
+# How that bites (the #5628 investigation, 2026-09-21): step 9's zone plan is
+# a fixed five-zone assignment over ``POUR_NETS``.  ``ZoneGenerator`` raises
+# when a planned net is absent from the PCB, and the whole block is wrapped in
+# ``except Exception`` -- so ONE missing net silently drops ALL FIVE zones,
+# leaving a board with no recipe pours at all.  Everything downstream then
+# reports on that un-poured board: ``kct zones fill`` has nothing of ours to
+# fill, ``_repair_pour_connectivity`` sees each pad as its own component, and
+# the run emits a long ``UNREPAIRED:`` list plus ``POUR CONNECTIVITY: FAIL``.
+# Those lines look exactly like a router/pour-repair regression; they are not.
+#
+# The concrete trap: ``boards/06-diffpair-test/output/`` has not tracked this
+# recipe since ``d95b6eff`` (2026-09-10, "prepare real demo boards") replaced
+# it with a DIFFERENT design -- U1-U8 / C1-C17 / R1-R8 / J1-J3, 16 signal
+# nets, no ``VBUS_USB`` (issue #5607 records the divergence as staleness; it
+# is in fact a design swap).  Seeding a scratch dir from that tree and running
+# ``--step route`` therefore routes a foreign board, while BOTH CI gates route
+# the recipe's own board (``board-06-end-to-end`` via ``--step all``;
+# ``diffpair-routing-regression`` via ``regression-fixture/``).  Comparing the
+# two produced a phantom "UNREPAIRED regression" (#5628) that cost a full
+# bisection across #5619/#5620 before the input mismatch was found.
+#
+# Hence a check at the point of use rather than another README paragraph:
+# advisory by default (L1 -- a loud, attributable banner naming the missing
+# nets, so the same log can never again be read as a routing regression) and a
+# hard gate under ``KCT_BOARD06_REQUIRE_RECIPE_BOARD=1`` (L2), mirroring the
+# ``require_spec`` / ``KCT_REQUIRE_SPEC`` convention this recipe already uses.
+#
+# Advisory-by-default is LOAD-BEARING, not timidity: ``scripts/ci/
+# board06_determinism_smoke.sh`` and ``tests/test_board06_determinism.py``
+# (#5585/#5597/#4536) both route that committed ``output/`` board ON PURPOSE.
+# They compare two runs against each other, so board identity is irrelevant to
+# what they measure -- a hard default would break them for no gain.
+# =============================================================================
+
+
+def _pcb_net_names(pcb_path: Path) -> set[str]:
+    """Net names declared anywhere in *pcb_path*.
+
+    Uses the same ``(net <id> "<name>")`` scan ``_audit_pour_nets`` relies on
+    (the net table and every pad's net reference share that spelling), so this
+    needs no parser and cannot disagree with the audit about what a net is.
+    """
+    import re
+
+    return {name for _nid, name in re.findall(r'\(net (\d+) "([^"]*)"\)', pcb_path.read_text())}
+
+
+def _recipe_board_pour_nets_missing(pcb_path: Path) -> list[str]:
+    """``POUR_NETS`` entries absent from *pcb_path*, in declaration order.
+
+    Empty means the input carries this recipe's full plane-net contract, i.e.
+    step 9's zone plan can be applied to it.  Non-empty means the caller
+    staged a board this recipe does not generate.
+    """
+    present = _pcb_net_names(pcb_path)
+    return [net for net in POUR_NETS if net not in present]
+
+
+def check_route_input_is_recipe_board(pcb_path: Path) -> list[str]:
+    """Warn (or fail) when ``--step route`` is handed a foreign board.
+
+    Returns the missing pour nets (empty when the input is this recipe's
+    board).  Prints an attributable banner when non-empty; raises
+    ``RuntimeError`` instead when ``KCT_BOARD06_REQUIRE_RECIPE_BOARD=1``.
+    """
+    missing = _recipe_board_pour_nets_missing(pcb_path)
+    if not missing:
+        return missing
+
+    detail = (
+        f"input PCB {pcb_path} is NOT the board this recipe generates: "
+        f"it does not declare the pour net(s) {missing} that POUR_NETS "
+        f"({POUR_NETS}) requires.  Step 9's zone plan covers all five nets "
+        "in one try/except, so a single missing net drops EVERY recipe pour "
+        "-- this run's zone fills, POUR CONNECTIVITY verdict and UNREPAIRED "
+        "lines will describe an un-poured board and are NOT comparable to "
+        "this recipe's baselines or to CI (issue #5628).  The recipe's own "
+        "board comes from '--step all' (regenerate) or "
+        "'boards/06-diffpair-test/regression-fixture/' (the frozen unrouted "
+        "fixture CI re-routes); 'boards/06-diffpair-test/output/' has carried "
+        "a different design since d95b6eff (issue #5607)."
+    )
+    if os.environ.get("KCT_BOARD06_REQUIRE_RECIPE_BOARD") == "1":
+        raise RuntimeError(detail)
+    print("\n" + "!" * 72)
+    print(f"   WARNING: {detail}")
+    print("!" * 72)
+    return missing
+
+
 def main() -> int:
     """Entry point.
 
@@ -4437,6 +4535,12 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # Issue #5628: the caller -- not this recipe -- chose the board
+            # about to be routed.  Say so LOUDLY when it is not ours, before
+            # any of the downstream pour output that a reader would otherwise
+            # mistake for a routing regression.  See the block above
+            # ``_pcb_net_names`` for the full incident rationale.
+            check_route_input_is_recipe_board(pcb_path)
             routed_path = output_dir / "diffpair_test_routed.kicad_pcb"
             # PARTIAL is the expected outcome today (USB3_TX1+/- blocked by
             # the BGA partner-via escape, tracked in #2677).  As long as the
