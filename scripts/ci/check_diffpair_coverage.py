@@ -74,8 +74,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -222,6 +226,112 @@ def annotate_error(file: str, message: str) -> None:
 # --- script-specific logic ----------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Issue #5617 -- phase-level wall-clock attribution for the re-route step.
+#
+# The ``Re-route board + check diff-pair coverage`` CI step is ~96 % of its
+# job, and essentially all of that is the ``generate_design.py --step route``
+# subprocess below.  Board recipes announce their pipeline phases with a
+# numbered header (``4. Routing nets...``, ``10. Pad-aware post-route
+# stitching...``).  Before this instrumentation the only way to attribute the
+# step's cost to a phase was to diff Actions log timestamps by hand, which is
+# both laborious and unavailable for a local run.
+#
+# ``PhaseTimeline`` turns those headers into a measured breakdown that the job
+# log carries itself: each header is annotated with the elapsed time at which
+# it started, and a sorted summary table is printed once the subprocess exits.
+# It is pure observation -- no routing input, seed, or ordering is touched.
+# ---------------------------------------------------------------------------
+
+#: A board-recipe phase header: a line beginning with ``<n>.`` or ``<n><a>.``
+#: (recipes use ``6b.`` / ``9b.`` for interstitial passes) followed by a space.
+_PHASE_HEADER_RE = re.compile(r"^(\d+[a-z]?)\.\s+(\S.*)$")
+
+
+@dataclass(frozen=True)
+class PhaseTiming:
+    """One numbered recipe phase and the wall time attributed to it."""
+
+    label: str
+    title: str
+    start: float
+    duration: float
+
+
+class PhaseTimeline:
+    """Attribute elapsed wall time to a recipe's numbered pipeline phases.
+
+    Feed the subprocess's output lines in order.  A line matching
+    :data:`_PHASE_HEADER_RE` closes the previous phase and opens a new one;
+    every other line is returned unchanged so the CI log keeps its existing
+    shape (log greps and ``::error::`` annotations are unaffected).
+
+    The clock is injectable so tests can drive a deterministic timeline
+    without sleeping.
+    """
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._clock = clock
+        self._start = clock()
+        self._phases: list[PhaseTiming] = []
+        self._open: tuple[str, str, float] | None = None
+
+    @property
+    def elapsed(self) -> float:
+        """Seconds since the timeline was created."""
+        return self._clock() - self._start
+
+    def _close_open(self, now: float) -> None:
+        if self._open is None:
+            return
+        label, title, start = self._open
+        self._phases.append(
+            PhaseTiming(label=label, title=title, start=start, duration=now - start)
+        )
+        self._open = None
+
+    def feed(self, line: str) -> str:
+        """Record ``line`` and return the text to emit for it.
+
+        Phase headers are annotated with their start offset; all other lines
+        pass through byte-for-byte.
+        """
+        now = self._clock() - self._start
+        match = _PHASE_HEADER_RE.match(line.strip())
+        if match is None:
+            return line
+        self._close_open(now)
+        label, title = match.group(1), match.group(2)
+        self._open = (label, title, now)
+        return f"[phase {label} @ {now:.1f}s] {line}"
+
+    def finish(self) -> list[PhaseTiming]:
+        """Close the final open phase and return every recorded phase."""
+        self._close_open(self._clock() - self._start)
+        return list(self._phases)
+
+    def summary_lines(self, total: float | None = None) -> list[str]:
+        """Render a slowest-first breakdown of the recorded phases."""
+        phases = self.finish()
+        if not phases:
+            return []
+        span = self.elapsed if total is None else total
+        out = ["", f"[phase-profile] re-route phase breakdown (total {span:.1f}s):"]
+        for phase in sorted(phases, key=lambda p: p.duration, reverse=True):
+            share = (phase.duration / span * 100.0) if span > 0 else 0.0
+            title = phase.title if len(phase.title) <= 64 else phase.title[:61] + "..."
+            out.append(
+                f"[phase-profile]   {phase.label:>3}. {title:<64} "
+                f"{phase.duration:8.1f}s  ({share:4.1f}%)"
+            )
+        accounted = sum(p.duration for p in phases)
+        out.append(
+            f"[phase-profile]   {'':>3}  {'(unattributed: startup + pre-phase-1)':<64} "
+            f"{max(0.0, span - accounted):8.1f}s"
+        )
+        return out
+
+
 def re_route_board(board_dir: Path, seed: int) -> bool:
     """Re-route the board's PCB from scratch using ``generate_design.py``.
 
@@ -235,10 +345,15 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
         True on success (return code 0), False otherwise.
 
     Notes:
-        Runs ``python generate_design.py --step route --seed N`` via
-        ``subprocess.run`` so the route logic runs in a fresh process
-        (no inherited state).  Stdout/stderr are streamed to the
-        CI log for diagnostic visibility.
+        Runs ``python generate_design.py --step route --seed N`` in a fresh
+        process (no inherited state).  The child's merged stdout/stderr is
+        streamed to the CI log line-by-line so the log keeps its existing
+        diagnostic value, and (Issue #5617) each numbered phase header is
+        annotated with its start offset, with a slowest-first breakdown
+        printed when the child exits.  ``PYTHONUNBUFFERED`` is forced on so
+        the child's ``print`` calls are not block-buffered by the pipe --
+        without it every phase header would surface at flush time and the
+        attribution would be meaningless.
     """
     script = board_dir / "generate_design.py"
     if not script.is_file():
@@ -258,10 +373,33 @@ def re_route_board(board_dir: Path, seed: int) -> bool:
         str(seed),
     ]
     print(f"\n[re-route] Running: {' '.join(cmd)}", flush=True)
-    proc = subprocess.run(cmd, capture_output=False, text=True, check=False)
-    if proc.returncode != 0:
+
+    child_env = dict(os.environ)
+    child_env["PYTHONUNBUFFERED"] = "1"
+
+    timeline = PhaseTimeline()
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=child_env,
+    )
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        print(timeline.feed(raw.rstrip("\n")), flush=True)
+    returncode = proc.wait()
+    total = time.monotonic() - started
+
+    for line in timeline.summary_lines(total=total):
+        print(line, flush=True)
+    print(f"[phase-profile] re-route subprocess wall time: {total:.1f}s", flush=True)
+
+    if returncode != 0:
         print(
-            f"::error::Re-route failed for {board_dir} (exit code {proc.returncode}).",
+            f"::error::Re-route failed for {board_dir} (exit code {returncode}).",
             flush=True,
         )
         return False

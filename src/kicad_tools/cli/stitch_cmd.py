@@ -1830,9 +1830,15 @@ def _point_on_same_net_fill(
             or py > fp.max_y + radius
         ):
             continue
-        if point_in_polygon(px, py, fp.points) and _point_has_edge_margin(
-            px, py, fp.points, radius
-        ):
+        # Issue #5617: use the cached edge index for the containment parity
+        # too (``_point_has_edge_margin`` indexes itself).  Same points list,
+        # same cached index -- so the parity is bit-identical to
+        # ``point_in_polygon``.
+        index = _polygon_index(fp.points)
+        inside = (
+            index.contains(px, py) if index is not None else point_in_polygon(px, py, fp.points)
+        )
+        if inside and _point_has_edge_margin(px, py, fp.points, radius):
             return True
     return False
 
@@ -3368,6 +3374,224 @@ def find_same_net_filled_polygons(sexp: SExp, net_numbers: set[int]) -> list[Fil
     return polygons
 
 
+# ---------------------------------------------------------------------------
+# Issue #5617 -- uniform-grid edge index for filled-polygon geometry queries.
+#
+# The pad-aware stitch pass (phase 10 of the board recipes) is 18-30 % of the
+# Board 06 diff-pair regression job's dominant re-route step.  A cProfile run
+# of that pass attributes essentially all of its time to four predicates that
+# walk EVERY edge of EVERY ``filled_polygon`` for EVERY candidate position:
+#
+#   * :func:`_check_point_filled_polygon_clearance`
+#   * :func:`_check_segment_filled_polygon_clearance`
+#   * :func:`_point_has_edge_margin`
+#   * :func:`_point_on_same_net_fill` (via ``point_in_polygon`` + the above)
+#
+# A KiCad zone fill on a routed 4-layer board is a handful of polygons with
+# thousands of vertices each (the pour retreats around every trace, pad and
+# via), while the placement cascade tries many via candidates per pad before
+# it even reaches the dog-leg / extended-escape strategies -- so the cost
+# scales as ``pads x candidates x total_fill_vertices``.
+#
+# :class:`_PolygonIndex` bins each edge into a uniform grid so a distance
+# query only examines edges whose bounding box can possibly satisfy the
+# predicate, and bins each edge into horizontal rows so the even-odd
+# containment ray cast only examines edges that straddle the query's scanline.
+#
+# **The predicates' semantics are unchanged.**  Each returns a bool that is
+# either an existential ("some edge is closer than t") or an XOR parity, so
+# visiting the relevant edges in a different order yields a bit-identical
+# answer.  The index is a pure candidate filter: an edge is skipped only when
+# its own bounding box, expanded by the query threshold, cannot reach the
+# query geometry -- exactly the condition under which the distance test
+# provably could not have fired.  See
+# ``tests/test_stitch_polygon_index_5617.py``, which pins every indexed answer
+# to the linear one on randomised geometry (including keyhole voids and a
+# board-spanning overflow edge).
+# ---------------------------------------------------------------------------
+
+#: Polygons below this vertex count are checked with the plain linear scan --
+#: building an index for them costs more than it saves.
+_POLYGON_INDEX_MIN_POINTS = 64
+
+#: An edge whose bounding box spans more than this many grid cells (or rows)
+#: is kept in an always-checked overflow list instead of being binned, so a
+#: single board-spanning outline edge cannot blow up the index.
+_POLYGON_INDEX_MAX_SPAN = 256
+
+#: A query box spanning more cells than this falls back to a full ring scan --
+#: still exact, but without the grid-walk overhead of a degenerate query.
+_POLYGON_INDEX_MAX_QUERY_CELLS = 4096
+
+#: Cap on the number of distinct point lists cached at once.  A stitch run
+#: touches a handful of fill polygons; the cap only guards a long-lived
+#: process (the test suite) against unbounded growth.
+_POLYGON_INDEX_CACHE_LIMIT = 512
+
+#: ``id(points) -> (points, index)``.  The cached tuple keeps a strong
+#: reference to the list so an ``id`` can never be recycled behind the cache.
+#: ``FilledPolygon.points`` lists are built once by
+#: :func:`find_all_filled_polygons` and never mutated in place, so identity is
+#: a sound cache key here.
+_POLYGON_INDEX_CACHE: dict[int, tuple[list[tuple[float, float]], "_PolygonIndex"]] = {}
+
+
+class _PolygonIndex:
+    """Uniform-grid edge index over one closed polygon's vertex ring.
+
+    Edge ``i`` runs from ``points[i]`` to ``points[(i + 1) % n]`` -- the same
+    ring the linear predicates walk.
+    """
+
+    __slots__ = ("points", "cell", "_cells", "_big", "_rows", "_big_rows")
+
+    def __init__(self, points: list[tuple[float, float]]) -> None:
+        self.points = points
+        n = len(points)
+
+        min_x = min(p[0] for p in points)
+        max_x = max(p[0] for p in points)
+        min_y = min(p[1] for p in points)
+        max_y = max(p[1] for p in points)
+        width = max(max_x - min_x, 1e-6)
+        height = max(max_y - min_y, 1e-6)
+        # Target ~4 edges per occupied cell.  The floor keeps a pathologically
+        # dense, tiny ring from producing a cell so small that one query box
+        # would span thousands of cells; the ceiling keeps a sparse ring from
+        # degenerating into a single bucket.
+        self.cell: float = min(max(math.sqrt(width * height * 4.0 / n), 0.1), 10.0)
+
+        cells: dict[tuple[int, int], list[int]] = {}
+        big: list[int] = []
+        rows: dict[int, list[int]] = {}
+        big_rows: list[int] = []
+        inv = 1.0 / self.cell
+
+        for i in range(n):
+            x1, y1 = points[i]
+            x2, y2 = points[(i + 1) % n]
+            cx0 = int(math.floor(min(x1, x2) * inv))
+            cx1 = int(math.floor(max(x1, x2) * inv))
+            cy0 = int(math.floor(min(y1, y2) * inv))
+            cy1 = int(math.floor(max(y1, y2) * inv))
+
+            if (cy1 - cy0 + 1) > _POLYGON_INDEX_MAX_SPAN:
+                big_rows.append(i)
+            else:
+                for cy in range(cy0, cy1 + 1):
+                    rows.setdefault(cy, []).append(i)
+
+            if (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > _POLYGON_INDEX_MAX_SPAN:
+                big.append(i)
+                continue
+            for cx in range(cx0, cx1 + 1):
+                for cy in range(cy0, cy1 + 1):
+                    cells.setdefault((cx, cy), []).append(i)
+
+        self._cells = cells
+        self._big = big
+        self._rows = rows
+        self._big_rows = big_rows
+
+    def edges_in_box(self, min_x: float, min_y: float, max_x: float, max_y: float) -> list[int]:
+        """Edge indices whose bounding box may intersect the query box.
+
+        A superset of the edges that could satisfy a distance predicate over
+        that box -- never a subset, which is what makes the callers exact.
+        """
+        inv = 1.0 / self.cell
+        cx0 = int(math.floor(min_x * inv))
+        cx1 = int(math.floor(max_x * inv))
+        cy0 = int(math.floor(min_y * inv))
+        cy1 = int(math.floor(max_y * inv))
+        if (cx1 - cx0 + 1) * (cy1 - cy0 + 1) > _POLYGON_INDEX_MAX_QUERY_CELLS:
+            # Degenerate query (threshold far larger than the cell size) --
+            # walking the grid would cost more than walking the ring.
+            return list(range(len(self.points)))
+        cells = self._cells
+        out: list[int] = list(self._big)
+        seen: set[int] = set(out)
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                bucket = cells.get((cx, cy))
+                if bucket is None:
+                    continue
+                for i in bucket:
+                    if i not in seen:
+                        seen.add(i)
+                        out.append(i)
+        return out
+
+    def contains(self, x: float, y: float) -> bool:
+        """Even-odd containment test, identical to :func:`point_in_polygon`.
+
+        Only an edge that straddles the scanline ``y`` can flip the parity,
+        and every such edge is binned into the row containing ``y`` (or, for
+        an edge spanning more rows than the cap, into the always-checked
+        overflow list).
+        """
+        points = self.points
+        n = len(points)
+        inside = False
+        row = int(math.floor(y / self.cell))
+        for bucket in (self._rows.get(row, ()), self._big_rows):
+            for i in bucket:
+                xi, yi = points[i]
+                xj, yj = points[(i + 1) % n]
+                if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+                    inside = not inside
+        return inside
+
+    def has_edge_within_point(self, x: float, y: float, threshold: float) -> bool:
+        """True if some edge is strictly closer than ``threshold`` to ``(x, y)``."""
+        points = self.points
+        n = len(points)
+        for i in self.edges_in_box(x - threshold, y - threshold, x + threshold, y + threshold):
+            xi, yi = points[i]
+            xj, yj = points[(i + 1) % n]
+            if point_to_segment_distance(x, y, xi, yi, xj, yj) < threshold:
+                return True
+        return False
+
+    def has_edge_within_segment(
+        self, sx: float, sy: float, ex: float, ey: float, threshold: float
+    ) -> bool:
+        """True if some edge is strictly closer than ``threshold`` to the segment."""
+        points = self.points
+        n = len(points)
+        for i in self.edges_in_box(
+            min(sx, ex) - threshold,
+            min(sy, ey) - threshold,
+            max(sx, ex) + threshold,
+            max(sy, ey) + threshold,
+        ):
+            xi, yi = points[i]
+            xj, yj = points[(i + 1) % n]
+            if segment_to_segment_distance(sx, sy, ex, ey, xi, yi, xj, yj) < threshold:
+                return True
+        return False
+
+
+def _polygon_index(points: list[tuple[float, float]]) -> "_PolygonIndex | None":
+    """Return a cached edge index for ``points``, or ``None`` to scan linearly.
+
+    ``None`` means "this ring is too small to be worth indexing"; every caller
+    keeps its original linear scan for that case, so behaviour is unchanged
+    for the small zone-outline polygons the rest of this module works with.
+    """
+    if len(points) < _POLYGON_INDEX_MIN_POINTS:
+        return None
+    key = id(points)
+    hit = _POLYGON_INDEX_CACHE.get(key)
+    if hit is not None and hit[0] is points:
+        return hit[1]
+    if len(_POLYGON_INDEX_CACHE) >= _POLYGON_INDEX_CACHE_LIMIT:
+        _POLYGON_INDEX_CACHE.clear()
+    index = _PolygonIndex(points)
+    _POLYGON_INDEX_CACHE[key] = (points, index)
+    return index
+
+
 def _check_point_filled_polygon_clearance(
     px: float,
     py: float,
@@ -3395,6 +3619,18 @@ def _check_point_filled_polygon_clearance(
             or py + required < fp.min_y
             or py - required > fp.max_y
         ):
+            continue
+
+        # Issue #5617: on a fill-sized ring the index answers both the
+        # containment parity and the edge-proximity existential from a
+        # strict superset of the relevant edges, so the verdict is identical
+        # to the linear scan below.
+        index = _polygon_index(fp.points)
+        if index is not None:
+            if index.contains(px, py):
+                return False
+            if index.has_edge_within_point(px, py, required):
+                return False
             continue
 
         # Check if point is inside the filled polygon (immediate violation)
@@ -3593,6 +3829,16 @@ def _check_segment_filled_polygon_clearance(
         if seg_max_y < fp.min_y or seg_min_y > fp.max_y:
             continue
 
+        # Issue #5617: indexed fast path -- same superset-filter argument as
+        # in _check_point_filled_polygon_clearance above.
+        index = _polygon_index(fp.points)
+        if index is not None:
+            if index.contains(sx, sy) or index.contains(ex, ey):
+                return False
+            if index.has_edge_within_segment(sx, sy, ex, ey, required):
+                return False
+            continue
+
         # Check if either endpoint is inside the polygon
         if point_in_polygon(sx, sy, fp.points) or point_in_polygon(ex, ey, fp.points):
             return False
@@ -3705,6 +3951,13 @@ def _point_has_edge_margin(
     Returns:
         True if the point is at least `margin` from all edges
     """
+    # Issue #5617: an existential over the ring -- the index returns a strict
+    # superset of the edges that could be within ``margin``, so the negation
+    # below is identical to the linear scan's.
+    index = _polygon_index(polygon)
+    if index is not None:
+        return not index.has_edge_within_point(x, y, margin)
+
     n = len(polygon)
     for i in range(n):
         j = (i + 1) % n
