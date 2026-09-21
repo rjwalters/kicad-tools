@@ -192,14 +192,25 @@ built -- absent, not `null`, otherwise):
     {
       "a": 17, "b": 18, "capacity": 9, "demand": 14.0, "overflow": 5,
       "blockage_mm": 1.2, "nets": [12, 13, 14],
-      "layers": { "0": { "capacity": 5, "demand": 8.0 }, "3": { "capacity": 4, "demand": 6.0 } }
+      "layers": { "0": { "capacity": 5, "demand": 8.0 }, "3": { "capacity": 4, "demand": 6.0 } },
+      "refs_a": ["U1", "C4"], "refs_b": ["U3"]
     }
   ],
   "overflow_report": {
     "iterations": 15, "total_overflow": 5, "overflowed_edges": 1,
     "failed_nets": [], "feasible": false, "elapsed_s": 0.4
   },
-  "relief": []
+  "relief": [
+    { "edge": [17, 18], "kind": "move_component", "ref": "U3",
+      "dx": 2.0, "dy": 0.0, "expected_overflow": 0 },
+    { "edge": [17, 18], "kind": "add_signal_layer", "layer_index": 1,
+      "expected_overflow": 1 },
+    { "edge": [17, 18], "kind": "swap_pins", "deferred": "#5511" }
+  ],
+  "relief_meta": {
+    "candidates_evaluated": 9, "elapsed_s": 1.25, "truncated": false,
+    "baseline_overflow": 5, "budget_s": 5.0
+  }
 }
 ```
 
@@ -256,6 +267,14 @@ built -- absent, not `null`, otherwise):
   likewise summed across both directions; empty `{}` on a single-layer
   graph, and never a row for a PLANE layer).
 
+  `refs_a` / `refs_b` (Issue #5521) name the component refs with at least
+  one pad in region `a` / `b`, ranked by how many of *this edge's*
+  crossing nets they touch (ties broken lexically). They are populated
+  **only on overflowed edges** — the ranking is what names the "nearest
+  component on each side" in the report text and what seeds the relief
+  search, and indexing every edge would bloat the sidecar on a large tile
+  grid for no reader. A feasible board carries `[]` on every edge.
+
   **`demand` is measured in base-pitch units, not net count** (Issue
   #5575). The base pitch is `DesignRules.trace_width + trace_clearance`;
   a net whose class pitch (`NetClassRouting.trace_width + clearance`) is
@@ -271,8 +290,11 @@ built -- absent, not `null`, otherwise):
   computed from `RegionGraph.get_total_overflow()` /
   `get_overflowed_edges()` directly (never a hand-summed value), so they
   can never drift from what the graph itself reports.
-- **`relief`** -- always `[]` in this phase; reserved for a later phase's
-  relief-corridor data.
+- **`relief`** / **`relief_meta`** -- the measured relief candidates and
+  the bookkeeping of the search that produced them (Issue #5521). Both
+  are empty on a feasible board: the search runs only when
+  `total_overflow` is non-zero, so boards 00-06 pay nothing for it. See
+  [Computed relief](#computed-relief-issue-5521) below.
 
 ## The capacity model (Issue #5575)
 
@@ -340,12 +362,115 @@ an edge carrying measured rectangle blockage: a boundary fully covered by a
 keepout or by preserved copper really does have zero capacity, and flooring
 it to 1 would let the plan report a net squeezing through a wall.
 
+## The overflow report text (Issue #5521)
+
+`RoutingPlan.format_overflow_report()` turns the `edges` / `relief` data
+above into the text a human acts on. It reads **only the plan object**, so
+it produces identical output from a plan just built in-process and from one
+loaded out of a sidecar with `RoutingPlan.from_dict` — that is what lets a
+later consumer (`kct net-status --why`, Phase 1c PR 2) print the same
+wording the gate does without re-running anything.
+
+One block per overflowed edge, worst first:
+
+```
+Routing plan: overflow 5 on 1 edge(s) -- NOT feasible
+corridor U1 -> U3 (tiles 17-18, layer 0): demand 14.0 tracks, capacity 9, overflow 5
+  tile 17: (20.000, 12.000)-(24.000, 16.000)
+  tile 18: (24.000, 12.000)-(28.000, 16.000)
+  nets: /DQ0 /DQ1 /DQ2
+  relief: move U3 +2.0/+0.0 mm -> total overflow 0 | add signal layer 1 (currently a plane) -> total overflow 1 | swap_pins deferred (#5511)
+  relief search: 9 candidate(s) in 1.2s
+```
+
+- **`corridor A -> B`** names the top-ranked ref from `refs_a` and `refs_b`.
+  A region with no ref of its own prints its centre instead
+  (`tile 17 @ (22.000, 14.000)`), so the block always says *where*.
+- **`layer N`** lists only the layer indices whose own demand exceeds their
+  own capacity. A single-layer graph carries no per-layer rows at all and
+  prints `all layers`.
+- The net list is elided after 8 names (a DDR byte stays whole) with a
+  `... (N total)` count.
+
+### Computed relief (Issue #5521)
+
+Every relief candidate is **measured, never guessed**: it re-runs the exact
+same global pass under one hypothetical change and records the resulting
+board-wide `expected_overflow`. Only candidates that beat the baseline are
+kept, sorted best-first.
+
+| `kind` | Change evaluated | Keys |
+| --- | --- | --- |
+| `move_component` | One adjacent component shifted by a single 2.0 mm step in one of the four axis directions | `ref`, `dx`, `dy`, `expected_overflow` |
+| `add_signal_layer` | One PLANE index treated as a signal layer | `layer_index`, `expected_overflow` |
+| `swap_pins` | **Nothing** — a deferred stub for Issue #5511 | `deferred` |
+
+Three properties this design buys, all of which the tests pin:
+
+- **Nothing is ever moved.** A `move_component` candidate re-plans against
+  a *copy* of the pad dict (`dataclasses.replace`), so the router, the grid
+  and the PCB are untouched by construction — "placement is restored
+  exactly" is a property of the design rather than of a restore path that
+  an exception could skip. Relief is **advice**; acting on it is the user's
+  call.
+- **`add_signal_layer` is advice about capacity**, not a claim that the
+  plane can be deleted. It answers "does this board need another routing
+  layer's worth of room here?", nothing more.
+- **`swap_pins` is a stub only.** No evaluation, no `expected_overflow`, no
+  import from the #5511 line. #5522 is the first concrete slice that will
+  replace it.
+
+The search is bounded on two axes, because each candidate costs a full
+global pass (≈ the plan stage itself):
+
+1. A deterministic cap — at most `RELIEF_MAX_EDGES` (3) overflowed edges ×
+   `RELIEF_MAX_REFS` (3) adjacent refs × 4 unit steps, plus at most one
+   `add_signal_layer` candidate per plane index.
+2. A `RELIEF_BUDGET_S` (5.0 s) wall-clock budget, checked **before** each
+   re-plan. Exhausting it stops the search and records
+   `relief_meta.truncated = true` rather than reporting a partial search as
+   a complete one.
+
+Both are module constants in `router/routing_plan_relief.py`, deliberately
+**not** CLI flags — this slice adds exactly one flag (`--plan-gate`).
+
+## `--plan-gate` (Issue #5521)
+
+Off by default; the plan stage stays report-only unless you ask for the
+gate. With `--plan-gate`, `kct route` builds the plan, and if
+`overflow_report.feasible` is false it prints the report above and exits
+**9** *before any detailed routing* — on both the negotiated and the dense
+two-phase paths, because the gate is a CLI preflight that runs before the
+router picks a path at all.
+
+```bash
+kct route board.kicad_pcb --plan-gate          # exit 9 + report when infeasible
+kct route board.kicad_pcb --plan-gate --force  # route anyway
+```
+
+Exit 9 is shared with `--census-advisory-gate` (#4799); the stderr prefix
+(`[plan-gate]` vs `[crosstail-gate]`) says which fired, and the difference
+in what was spent is real — the census gate refuses before any router or
+component loading, the plan gate after the (sub-5 s) plan stage.
+
+The override is the **existing** `--force`, not a second flag. Note that
+`--force` also disables grid/DRC validation: to simply not gate, omit
+`--plan-gate` rather than adding `--force`.
+
+The plan the gate builds is discarded afterwards, so the sidecar a
+`--plan-gate --force` run writes is still the one the normal in-route stage
+produces. That costs one extra plan pass on that path, and buys the
+guarantee that the flag cannot change what lands in the sidecar.
+
 ## Non-goals of this phase
 
 - No per-board corridor / tile-size / keepout configuration.
-- Still **report-only**: the plan reserves nothing, gates nothing, exits
-  zero regardless of overflow, and computes no relief. Hard corridors are
-  Phase 3 of Epic #5510; gating / relief is Phase 1c (#5521).
+- The plan still **reserves nothing** and does not change routed copper.
+  Since Issue #5521 it computes relief and can *gate* a run on request
+  (`--plan-gate`), but the default path is unchanged: report-only, exit
+  zero regardless of overflow. Hard corridors are Phase 3 of Epic #5510.
+- Relief is **advice only** — no component is moved, no layer is
+  reassigned, no pin is swapped (`swap_pins` is #5511/#5522).
 - The round-robin layer *heuristic* is unchanged -- Issue #5575 only made
   it index into the signal-layer list. Replacing it is Phase 2.
 - Building the plan never mutates `RegionGraph` state (utilization,
@@ -368,3 +493,11 @@ are the expensive case (the pass then runs all 15 negotiated iterations,
 rerouting every net through the hot edge); `elapsed_s` records that cost
 rather than gating on it. `--no-routing-plan` is the escape hatch if the
 stage is ever unwelcome.
+
+The relief search (Issue #5521) is the only thing that can multiply that
+cost, and it runs **only when the board actually overflows** — every fleet
+board that reports `total_overflow == 0` pays exactly 0 s for it, which is
+why the numbers above are unchanged. When it does run, its own
+`RELIEF_BUDGET_S = 5.0` wall-clock budget caps it, and
+`relief_meta.elapsed_s` / `relief_meta.truncated` record what it actually
+spent.

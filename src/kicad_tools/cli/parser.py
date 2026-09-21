@@ -3790,6 +3790,22 @@ def _add_route_parser(subparsers) -> None:
             "wall-clock time and suppresses the sidecar."
         ),
     )
+    # Issue #5521 (Epic #5510, Phase 1c): opt-in pre-route gate on the
+    # report-only plan above.  Mirrored in ``route_cmd._route_parser``;
+    # the override is the EXISTING ``--force``, never a second flag.
+    route_parser.add_argument(
+        "--plan-gate",
+        action="store_true",
+        default=False,
+        help=(
+            "Refuse to start detailed routing (exit 9) when the "
+            "report-only routing plan reports overflow, printing the "
+            "per-edge overflow report and its computed relief first.  OFF "
+            "by default (the plan stays report-only).  --force overrides "
+            "the gate -- but note --force also disables grid/DRC "
+            "validation, so to simply not gate, omit --plan-gate."
+        ),
+    )
     route_parser.add_argument(
         "--cross-package-pair-corridor",
         action="store_true",
