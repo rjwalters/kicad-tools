@@ -14,13 +14,15 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
-from kicad_tools.router.core import Autorouter
-from kicad_tools.router.global_router import CorridorAssignment, GlobalRoutingResult
-from kicad_tools.router.layers import LayerStack
+from kicad_tools.router.core import Autorouter, KeepoutRuleArea
+from kicad_tools.router.global_router import CorridorAssignment, GlobalRouter, GlobalRoutingResult
+from kicad_tools.router.layers import LayerDefinition, LayerStack, LayerType
+from kicad_tools.router.primitives import Layer, Route, Segment, Via
 from kicad_tools.router.region_graph import RegionGraph
 from kicad_tools.router.routing_plan import (
     EdgePlanEntry,
@@ -29,7 +31,9 @@ from kicad_tools.router.routing_plan import (
     RegionInfo,
     RoutingPlan,
     build_plan,
+    collect_blockage_rects,
     select_plan_nets,
+    signal_layer_indices,
 )
 from kicad_tools.router.rules import DesignRules, NetClassRouting
 from kicad_tools.router.sparse import Corridor, Waypoint
@@ -473,7 +477,10 @@ def _route_signature(routes) -> list:
     return sorted(out)
 
 
-def _plain_autorouter(with_single_pad_net: bool = False) -> Autorouter:
+def _plain_autorouter(
+    with_single_pad_net: bool = False,
+    layer_stack: LayerStack | None = None,
+) -> Autorouter:
     """A small NON-dense board: no BGA/fine-pitch package, so ``kct route``
     would take the plain ``route_all_negotiated`` path, never the two-phase
     router that Issue #5519 hooked."""
@@ -487,6 +494,7 @@ def _plain_autorouter(with_single_pad_net: bool = False) -> Autorouter:
             via_diameter=0.7,
             grid_resolution=0.1,
         ),
+        **({"layer_stack": layer_stack} if layer_stack is not None else {}),
         force_python=True,
     )
     router.add_component(
@@ -715,6 +723,653 @@ class TestNoRoutingPlanFlag:
         args = self._outer_parser().parse_args(["route", "board.kicad_pcb"])
         run_route_command(args)
         assert "--no-routing-plan" not in captured[0]
+
+
+# =============================================================================
+# Honest plan capacity (Issue #5575, Epic #5510 Phase 1b -- #5520 PR-B)
+#
+# Three ways the pre-#5575 capacity model lied, and the fixtures that pin the
+# fix:
+#
+#   1. One global pitch      -> per-class pitch, demand in base-pitch units.
+#   2. Planes counted        -> signal_layer_indices excludes PLANE layers.
+#   3. Blockage = pads only  -> keepout rule areas + preserved copper.
+#
+# Everything here is still REPORT-ONLY: no test below routes detailed copper,
+# and the channel fixture asserts that explicitly.
+# =============================================================================
+
+
+#: A 2-layer stack whose back copper is a PLANE, i.e. exactly ONE signal layer.
+#: Used by the channel fixture so capacity is ``(N-1)``, not ``layers x (N-1)``.
+_ONE_SIGNAL_LAYER_STACK = LayerStack(
+    name="1-Signal-1-Plane",
+    description="F.Cu signal over a solid B.Cu GND plane",
+    layers=[
+        LayerDefinition("F.Cu", 0, LayerType.SIGNAL, is_outer=True),
+        LayerDefinition("B.Cu", 1, LayerType.PLANE, plane_net="GND", is_outer=True),
+    ],
+)
+
+#: Design rules shared by the #5575 fixtures: base pitch 0.2 + 0.2 = 0.4 mm,
+#: so ``TILE_PITCH_FACTOR`` gives 4 mm tiles.
+_PITCH_04_RULES = DesignRules(
+    trace_width=0.2,
+    trace_clearance=0.2,
+    via_drill=0.35,
+    via_diameter=0.7,
+    grid_resolution=0.1,
+)
+
+
+def make_channel_board(
+    n_nets: int = 6,
+    channel_width_mm: float | None = None,
+    *,
+    board_mm: float = 40.0,
+    boundary_x: float = 20.0,
+) -> Autorouter:
+    """N two-pin nets that must funnel through a channel fitting N-1.
+
+    Geometry (all mm, base pitch 0.4 -> 4 mm tiles -> a 10x10 tile grid on
+    the default 40 mm board):
+
+    - ``n_nets`` two-pad nets running left (x=2) to right (x=38), all inside
+      the SAME tile row, so every one of them must cross the vertical tile
+      boundary at ``boundary_x``.
+    - Two preserved-copper "walls" that **straddle** that boundary
+      (``boundary_x +- 0.5`` once padded by ``width/2 + clearance``), leaving
+      a gap of exactly ``channel_width_mm`` (default ``(N-1) * pitch``).
+      Straddling is load-bearing: the blockage model is boundary-based, so a
+      wall strictly inside a tile blocks nothing at all.
+    - ONE signal layer (``_ONE_SIGNAL_LAYER_STACK``), otherwise the boundary's
+      capacity would be ``layers x (N-1)`` and N nets would fit.
+
+    The result: the channel edge has capacity ``N-1`` against a demand of
+    ``N`` -> overflow 1, while every other crossing of that boundary is
+    walled to capacity 0.
+    """
+    pitch = _PITCH_04_RULES.trace_width + _PITCH_04_RULES.trace_clearance
+    if channel_width_mm is None:
+        channel_width_mm = (n_nets - 1) * pitch
+
+    router = Autorouter(
+        width=board_mm,
+        height=board_mm,
+        rules=_PITCH_04_RULES,
+        layer_stack=_ONE_SIGNAL_LAYER_STACK,
+        force_python=True,
+    )
+
+    # Centre the gap inside one tile row (row 5 spans y = 20..24 on a 40 mm
+    # board with 4 mm tiles), and put every net's pads inside that gap.
+    gap_lo = 21.0
+    gap_hi = gap_lo + channel_width_mm
+    span = gap_hi - gap_lo
+    for i in range(n_nets):
+        net = i + 1
+        y = gap_lo + span * (i + 0.5) / n_nets
+        router.add_component(
+            ref=f"L{net}",
+            pads=[{"number": "1", "x": 2.0, "y": y, "net": net, "net_name": f"N{net}"}],
+        )
+        router.add_component(
+            ref=f"R{net}",
+            pads=[{"number": "1", "x": board_mm - 2.0, "y": y, "net": net, "net_name": f"N{net}"}],
+        )
+
+    # Walls as preserved copper.  Padding is width/2 + trace_clearance = 0.5,
+    # so a 0.6 mm-wide segment on the boundary line spans boundary_x +- 0.5
+    # (straddling) and its ends pull back by 0.5 from the gap edges.
+    wall_width = 0.6
+    pad = wall_width / 2 + _PITCH_04_RULES.trace_clearance
+    router.existing_routes = [
+        Route(
+            net=0,
+            net_name="WALL",
+            segments=[
+                Segment(
+                    x1=boundary_x,
+                    y1=-2.0,
+                    x2=boundary_x,
+                    y2=gap_lo - pad,
+                    width=wall_width,
+                    layer=Layer.F_CU,
+                    net=0,
+                ),
+                Segment(
+                    x1=boundary_x,
+                    y1=gap_hi + pad,
+                    x2=boundary_x,
+                    y2=board_mm + 2.0,
+                    width=wall_width,
+                    layer=Layer.F_CU,
+                    net=0,
+                ),
+            ],
+        )
+    ]
+    return router
+
+
+def _boundary_edge(graph: RegionGraph, row: int, col: int):
+    """The ascending directed edge crossing the vertical boundary right of *col*."""
+    a = graph._region_grid[row][col]
+    b = graph._region_grid[row][col + 1]
+    return graph._edge_lookup[(a, b)]
+
+
+class TestPlaneLayerExclusion:
+    """AC-1: PLANE layers advertise no routing capacity."""
+
+    def test_signal_layer_indices_excludes_planes(self):
+        """``LayerStack.signal_layers`` is ``is_routable``, which includes
+        PLANE (#5014) -- the plan must not use it for capacity."""
+        stack = LayerStack.four_layer_sig_gnd_pwr_sig()
+        assert [layer.index for layer in stack.signal_layers] == [0, 1, 2, 3]
+        assert signal_layer_indices(stack) == [0, 3]
+        # Stacks without planes are unaffected.
+        assert signal_layer_indices(LayerStack.two_layer()) == [0, 1]
+        assert signal_layer_indices(LayerStack.four_layer_all_signal()) == [0, 1, 2, 3]
+
+    def test_four_layer_sig_gnd_pwr_sig_plan_has_no_plane_capacity(self):
+        """AC-1: sidecar ``layers.signal == [0, 3]``; layers 1 and 2 zero."""
+        router = _plain_autorouter(layer_stack=LayerStack.four_layer_sig_gnd_pwr_sig())
+        assert router.grid.num_layers == 4
+
+        plan = router.plan_routing()
+        assert plan is not None
+        assert plan.layers["signal"] == [0, 3]
+        assert plan.layers["plane"] == [1, 2]
+
+        graph = router.plan_region_graph
+        assert graph.signal_layer_indices == [0, 3]
+        edge = next(iter(next(iter(graph.edges.values()))))
+        assert sorted(edge.layer_capacity) == [0, 3]
+        # The planes carry NO capacity -- not a reduced one, none.
+        assert edge.layer_capacity.get(1, 0) == 0
+        assert edge.layer_capacity.get(2, 0) == 0
+        assert edge.remaining_capacity_on_layer(1) == 0
+        assert edge.remaining_capacity_on_layer(2) == 0
+        # Capacity is 2 signal layers' worth, not 4.
+        assert edge.capacity == edge.layer_capacity[0] + edge.layer_capacity[3]
+
+        # ... and no net was planned onto a plane layer.
+        assigned = [n for n in plan.nets.values() if n.status == "assigned"]
+        assert assigned
+        for net in assigned:
+            assert set(net.layer_set) <= {0, 3}
+
+    def test_round_robin_indexes_into_the_signal_layer_list(self):
+        """The mandatory one-line consequence: without this, every other net
+        lands on a zero-capacity plane index and overflows instantly."""
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=4,
+            signal_layer_indices=[0, 3],
+        )
+        pads = {}
+        nets = {}
+        for net in (1, 2, 3, 4):
+            y = 2.0 + 4.0 * net
+            pads[(f"R{net}", "1")] = _channel_pad(net, 2.0, y, f"R{net}", "1")
+            pads[(f"R{net}", "2")] = _channel_pad(net, 18.0, y, f"R{net}", "2")
+            nets[net] = [(f"R{net}", "1"), (f"R{net}", "2")]
+
+        router = GlobalRouter(region_graph=graph, corridor_width=0.5, negotiated=False)
+        result = router.route_all(nets=nets, pad_dict=pads)
+
+        layers_used = {a.layer for a in result.assignments.values()}
+        assert layers_used == {0, 3}
+        assert 1 not in layers_used and 2 not in layers_used
+        # Round-robin still alternates -- only the index set changed.
+        assert [result.assignments[n].layer for n in (1, 2, 3, 4)] == [0, 3, 0, 3]
+
+    def test_legacy_graph_without_signal_indices_is_unchanged(self):
+        """AC-6: omitting the new kwargs reproduces the pre-#5575 graph."""
+        graph = RegionGraph(
+            board_width=20.0,
+            board_height=20.0,
+            num_cols=4,
+            num_rows=4,
+            trace_pitch=0.4,
+            num_layers=2,
+        )
+        assert graph.signal_layer_indices is None
+        assert graph.num_signal_layers == 2
+        edge = graph.edges[0][0]
+        assert sorted(edge.layer_capacity) == [0, 1]
+        assert edge.capacity == edge.layer_capacity[0] + edge.layer_capacity[1]
+        assert graph.demand_weight(1) == 1.0
+
+
+def _channel_pad(net: int, x: float, y: float, ref: str, pin: str):
+    from kicad_tools.router.primitives import Pad
+
+    return Pad(
+        x=x,
+        y=y,
+        width=0.5,
+        height=0.5,
+        net=net,
+        net_name=f"N{net}",
+        ref=ref,
+        pin=pin,
+        layer=Layer.F_CU,
+    )
+
+
+class TestPerClassPitch:
+    """AC-2: demand is measured in base-pitch units, not net count."""
+
+    def test_demand_weight_is_class_pitch_over_base_pitch(self):
+        # Base pitch 0.2 + 0.2 = 0.4.  A trace_width=2.6, clearance=0.2 class
+        # is 2.8 mm of pitch -> 2.8 / 0.4 = 7.0 base-pitch units.
+        pitches = {1: 2.8, 2: 2.8, 3: 0.4}
+        graph = RegionGraph(
+            board_width=12.0,
+            board_height=6.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=0.4,
+            num_layers=1,
+            pitch_for_net=lambda net: pitches[net],
+        )
+        assert graph.demand_weight(1) == pytest.approx(7.0)
+        assert graph.demand_weight(3) == pytest.approx(1.0)
+
+    def test_two_wide_nets_and_one_signal_demand_fifteen_not_three(self):
+        """The exact arithmetic from the acceptance criterion.
+
+        Class parameters, stated explicitly:
+          - base pitch        = 0.2 (width) + 0.2 (clearance) = 0.4 mm
+          - POWER class pitch = 2.6 (width) + 0.2 (clearance) = 2.8 mm
+          - SIGNAL class      = the base pitch, 0.4 mm
+        so a POWER net weighs 2.8 / 0.4 = 7.0 and the edge demand for two
+        POWER nets plus one SIGNAL net is 2 x 7 + 1 = 15 -- NOT the net
+        count, 3.
+        """
+        classes = {
+            1: NetClassRouting(name="POWER", priority=1, trace_width=2.6, clearance=0.2),
+            2: NetClassRouting(name="POWER", priority=1, trace_width=2.6, clearance=0.2),
+            3: NetClassRouting(name="SIGNAL", priority=5, trace_width=0.2, clearance=0.2),
+        }
+        graph = RegionGraph(
+            board_width=12.0,
+            board_height=6.0,  # the 6 mm edge from the AC
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=0.4,
+            num_layers=1,
+            pitch_for_net=lambda net: classes[net].trace_width + classes[net].clearance,
+        )
+        edge = graph._edge_lookup[(0, 1)]
+        assert edge.capacity == int(6.0 / 0.4) == 15
+
+        for net in (1, 2, 3):
+            graph.update_utilization([0, 1], layer=0, weight=graph.demand_weight(net))
+
+        assert edge.utilization == pytest.approx(15.0)
+        assert edge.utilization != 3
+        # Exactly at capacity -- the float sum must not round up into a
+        # spurious overflow.
+        assert edge.overflow == 0
+        assert graph.get_total_overflow() == 0
+
+        # One more minimum-width net is the 16th track and DOES overflow.
+        graph.update_utilization([0, 1], layer=0, weight=1.0)
+        assert edge.overflow == 1
+
+    def test_ripup_releases_the_same_weight_it_placed(self):
+        """A wide net that is ripped up must not leak demand on the edge."""
+        graph = RegionGraph(
+            board_width=12.0,
+            board_height=6.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=0.4,
+            num_layers=1,
+            pitch_for_net=lambda net: 2.8,
+        )
+        router = GlobalRouter(region_graph=graph, corridor_width=0.5, negotiated=False)
+        assignment = router.route_net(net=1, pad_positions=[(1.0, 3.0), (11.0, 3.0)])
+        assert assignment is not None
+        edge = graph._edge_lookup[(0, 1)]
+        assert edge.utilization == pytest.approx(7.0)
+
+        graph.release_utilization(
+            assignment.region_path, layer=assignment.layer, weight=graph.demand_weight(1)
+        )
+        assert edge.utilization == pytest.approx(0.0)
+
+    def test_build_plan_resolves_the_class_pitch_by_net_name(self):
+        router = _plain_autorouter()
+        router.net_class_map = {
+            "N1": NetClassRouting(name="POWER", priority=1, trace_width=2.6, clearance=0.2)
+        }
+        plan = router.plan_routing()
+        assert plan is not None
+        graph = router.plan_region_graph
+        n1 = next(n for n, entry in plan.nets.items() if entry.name == "N1")
+        n2 = next(n for n, entry in plan.nets.items() if entry.name == "N2")
+        assert graph.demand_weight(n1) == pytest.approx(2.8 / 0.4)
+        assert graph.demand_weight(n2) == pytest.approx(1.0)
+        # The per-net pitch the sidecar already reported now actually drives
+        # the capacity model.
+        assert plan.nets[n1].pitch_mm == pytest.approx(2.8)
+
+
+class TestBlockageBeyondPads:
+    """AC-3: keepouts and preserved copper reduce tile-boundary capacity."""
+
+    @staticmethod
+    def _graph() -> RegionGraph:
+        # 2x1 tiles of 5 mm x 5 mm; the (0, 1) boundary is the vertical
+        # segment x = 5, y in [0, 5].
+        return RegionGraph(
+            board_width=10.0,
+            board_height=5.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=0.5,
+            num_layers=1,
+        )
+
+    def test_keepout_straddling_a_boundary_lowers_capacity_by_overlap_over_pitch(self):
+        graph = self._graph()
+        edge = graph._edge_lookup[(0, 1)]
+        before = edge.capacity
+        assert before == int(5.0 / 0.5) == 10
+
+        # A 2 mm-tall keepout straddling x = 5 (4.5 .. 5.5).
+        graph.register_blockage_rects([(4.5, 1.0, 5.5, 3.0)])
+
+        assert edge.layer_blockage[0] == pytest.approx(2.0)
+        assert edge.capacity == before - int(2.0 / 0.5) == 6
+        # Symmetric across the pair.
+        assert graph._edge_lookup[(1, 0)].capacity == 6
+
+    def test_keepout_covering_the_whole_boundary_zeroes_capacity(self):
+        graph = self._graph()
+        graph.register_blockage_rects([(4.5, -1.0, 5.5, 6.0)])
+        assert graph._edge_lookup[(0, 1)].capacity == 0
+
+    def test_a_rect_strictly_inside_a_tile_blocks_nothing(self):
+        """The model is boundary-based -- this is why the channel fixture's
+        walls must straddle a column boundary, not sit inside a tile."""
+        graph = self._graph()
+        before = graph._edge_lookup[(0, 1)].capacity
+        graph.register_blockage_rects([(1.0, 1.0, 3.0, 3.0)])
+        assert graph._edge_lookup[(0, 1)].capacity == before
+        assert graph._edge_lookup[(0, 1)].layer_blockage == {}
+
+    def test_blockage_is_confined_to_the_named_layers(self):
+        graph = RegionGraph(
+            board_width=10.0,
+            board_height=5.0,
+            num_cols=2,
+            num_rows=1,
+            trace_pitch=0.5,
+            num_layers=2,
+        )
+        edge = graph._edge_lookup[(0, 1)]
+        graph.register_blockage_rects([(4.5, 1.0, 5.5, 3.0)], layers=[1])
+        assert edge.layer_capacity[0] == 10
+        assert edge.layer_capacity[1] == 6
+        assert edge.capacity == 16
+
+    def test_preserved_copper_is_collected_as_padded_rects(self):
+        router = _plain_autorouter()
+        router.existing_routes = [
+            Route(
+                net=9,
+                net_name="FIXED",
+                segments=[
+                    Segment(x1=5.0, y1=4.0, x2=5.0, y2=12.0, width=0.4, layer=Layer.F_CU, net=9)
+                ],
+                vias=[
+                    Via(
+                        x=8.0,
+                        y=8.0,
+                        drill=0.35,
+                        diameter=0.7,
+                        layers=(Layer.F_CU, Layer.B_CU),
+                        net=9,
+                    )
+                ],
+            )
+        ]
+        rects = collect_blockage_rects(router)
+        # width/2 + trace_clearance = 0.2 + 0.2 = 0.4 padding on the segment.
+        assert ((4.6, 3.6, 5.4, 12.4), [0]) in rects
+        # A via is a square of diameter + clearance = 0.9, on every layer.
+        via_rect = next(r for r, layers in rects if layers is None)
+        assert via_rect == pytest.approx((7.55, 7.55, 8.45, 8.45))
+
+    def test_keepout_rule_areas_are_collected_as_bounding_boxes(self):
+        router = _plain_autorouter()
+        router._keepout_rule_area_polygons = lambda: [
+            KeepoutRuleArea(
+                polygon=((3.0, 4.0), (9.0, 4.0), (6.0, 11.0)),
+                layers=frozenset({0}),
+                blocks_tracks=True,
+                blocks_vias=True,
+                name="KO1",
+            )
+        ]
+        assert collect_blockage_rects(router) == [((3.0, 4.0, 9.0, 11.0), [0])]
+
+    def test_only_the_two_documented_sources_are_read(self):
+        """Copper pours are deliberately NOT a blockage source: zones are
+        filled AFTER routing and flow around traces, so counting them would
+        make the plan stricter than the router it describes and report
+        overflow the detailed router never experiences."""
+        router = _plain_autorouter()
+        assert collect_blockage_rects(router) == []
+        # Only ``_keepout_rule_area_polygons`` and ``existing_routes`` are
+        # consulted -- removing both silences the collector entirely.
+        router._keepout_rule_area_polygons = lambda: []
+        router.existing_routes = []
+        assert collect_blockage_rects(router) == []
+
+    def test_a_router_exposing_neither_hook_contributes_nothing(self):
+        assert collect_blockage_rects(object()) == []
+
+
+class TestKeepoutRuleAreaParseRefactor:
+    """``_keepout_rule_area_polygons`` is the shared parse (Issue #5575)."""
+
+    #: Board rect (100, 100)..(130, 116) with one track-blocking rule area and
+    #: one pour-void-only area.  Deliberately NOT at sheet origin so the
+    #: board-relative -> sheet-absolute shift is exercised (#4603).
+    _BOARD = """(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (net 0 "")
+  (gr_rect (start 100 100) (end 130 116)
+    (stroke (width 0.1) (type default))
+    (fill none)
+    (layer "Edge.Cuts")
+  )
+  (zone
+    (net 0) (net_name "") (name "KO_TRACKS") (layers "F.Cu")
+    (uuid "cccccccc-0000-0000-0000-000000000001")
+    (hatch edge 0.5)
+    (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour allowed))
+    (polygon (pts (xy 110 104) (xy 116 104) (xy 116 112) (xy 110 112)))
+  )
+  (zone
+    (net 0) (net_name "") (name "POUR_VOID") (layers "F.Cu")
+    (uuid "cccccccc-0000-0000-0000-000000000002")
+    (hatch edge 0.5)
+    (keepout (tracks allowed) (vias allowed) (pads allowed) (copperpour not_allowed))
+    (polygon (pts (xy 102 102) (xy 106 102) (xy 106 106) (xy 102 106)))
+  )
+)
+"""
+
+    def _router_on_board(self, tmp_path) -> Autorouter:
+        pcb = tmp_path / "keepout.kicad_pcb"
+        pcb.write_text(self._BOARD)
+        router = _plain_autorouter()
+        router._pairwise_attach_zone_pcb_path = str(pcb)
+        return router
+
+    def test_only_track_or_via_blocking_areas_are_returned(self, tmp_path):
+        areas = self._router_on_board(tmp_path)._keepout_rule_area_polygons()
+        assert [a.name for a in areas] == ["KO_TRACKS"]
+        assert areas[0].blocks_tracks is True
+        assert areas[0].layers == frozenset({0})
+
+    def test_polygons_are_shifted_to_sheet_absolute_coordinates(self, tmp_path):
+        """``PCB.load`` exposes zone polygons board-relative (#4416/#4603)."""
+        area = self._router_on_board(tmp_path)._keepout_rule_area_polygons()[0]
+        min_x, min_y, max_x, max_y = area.bbox
+        assert (max_x - min_x, max_y - min_y) == pytest.approx((6.0, 8.0))
+        # The shift landed the area inside the board rect, not near the origin.
+        assert min_x >= 100.0 and min_y >= 100.0
+
+    def test_result_is_cached(self, tmp_path):
+        router = self._router_on_board(tmp_path)
+        first = router._keepout_rule_area_polygons()
+        assert router._keepout_rule_area_polygons() is first
+
+    def test_no_recorded_board_yields_no_areas(self):
+        assert _plain_autorouter()._keepout_rule_area_polygons() == []
+
+    def test_lattice_projection_still_sees_the_same_area(self, tmp_path):
+        """The lattice engine consumes the refactored parse unchanged."""
+        mask = self._router_on_board(tmp_path)._lattice_keepout_projection()
+        assert mask is not None
+        assert [a.name for a in mask.areas] == ["KO_TRACKS"]
+
+
+class TestChannelFixture:
+    """AC-4: N nets through an (N-1)-wide channel overflow the channel edge."""
+
+    def test_channel_edge_overflows_without_running_detailed_routing(self):
+        n_nets = 6
+        router = make_channel_board(n_nets)
+
+        started = time.perf_counter()
+        plan = router.plan_routing()
+        elapsed_s = time.perf_counter() - started
+
+        assert plan is not None
+        assert elapsed_s < 5.0
+
+        graph = router.plan_region_graph
+        # The gap sits in tile row 5, between columns 4 and 5.
+        channel = _boundary_edge(graph, row=5, col=4)
+        assert channel.capacity == n_nets - 1
+        assert channel.utilization == pytest.approx(float(n_nets))
+        assert channel.overflow >= 1
+
+        # Every other crossing of that boundary is walled shut.
+        for row in range(graph.num_rows):
+            if row == 5:
+                continue
+            assert _boundary_edge(graph, row=row, col=4).capacity == 0
+
+        # AC-7: the sidecar's total is the graph's own query, unchanged.
+        assert plan.overflow_report.total_overflow == graph.get_total_overflow() >= 1
+        assert plan.overflow_report.feasible is False
+        assert plan.overflow_report.elapsed_s < 5.0
+
+        # REPORT-ONLY: no detailed routing ran.
+        assert router.routes == []
+
+    def test_no_detailed_router_is_constructed(self, monkeypatch):
+        """Spy form of the same criterion, so a future refactor that starts
+        routing copper inside the plan stage fails loudly."""
+        from kicad_tools.router import core as core_module
+
+        def _forbidden(*args, **kwargs):
+            raise AssertionError("the plan stage must not run detailed routing")
+
+        monkeypatch.setattr(core_module.NegotiatedRouter, "__init__", _forbidden)
+        assert make_channel_board(6).plan_routing() is not None
+
+    def test_widening_the_channel_removes_the_overflow(self):
+        """Control: the overflow comes from the channel's WIDTH, not from the
+        fixture merely having walls in it."""
+        n_nets = 6
+        pitch = 0.4
+        router = make_channel_board(n_nets, channel_width_mm=(n_nets + 2) * pitch)
+        plan = router.plan_routing()
+        assert plan is not None
+        channel = _boundary_edge(router.plan_region_graph, row=5, col=4)
+        assert channel.capacity >= n_nets
+        assert channel.overflow == 0
+
+    def test_walls_are_what_creates_the_overflow(self):
+        """Second control: the same nets with no walls overflow nothing."""
+        router = make_channel_board(6)
+        router.existing_routes = []
+        plan = router.plan_routing()
+        assert plan is not None
+        assert plan.overflow_report.total_overflow == 0
+        assert _boundary_edge(router.plan_region_graph, row=5, col=4).capacity == int(4.0 / 0.4)
+
+
+class TestRudyNegativeControl:
+    """AC-5: the plan's demand is geometry, not bounding-box density.
+
+    ``CongestionEstimator`` (RUDY, #4871) has no obstacle input at all: its
+    demand is mm of HPWL per tile, distributed over each net's bounding box.
+    On the channel fixture it therefore cannot see the walls -- the estimate
+    is bit-for-bit identical with and without them, while the plan's own
+    capacity model reports overflow only WITH them.  That contrast is what
+    makes the plan a geometric instrument rather than a density heuristic.
+
+    Note: ``CongestionEstimator.from_board`` does not exist, and RUDY's
+    demand is not a normalised utilisation, so a "no tile above 1.0"
+    threshold would be unit-mismatched.  This control compares two
+    estimates instead, which needs no units at all.
+    """
+
+    @staticmethod
+    def _estimate(router: Autorouter):
+        from kicad_tools.router.congestion_estimator import CongestionEstimator
+
+        return CongestionEstimator.from_nets(
+            nets=router.nets,
+            pads=router.pads,
+            board_origin_x=router.grid.origin_x,
+            board_origin_y=router.grid.origin_y,
+            board_width=router.grid.width,
+            board_height=router.grid.height,
+        )
+
+    def test_rudy_cannot_see_the_channel_walls(self):
+        walled = make_channel_board(6)
+        open_board = make_channel_board(6)
+        open_board.existing_routes = []
+
+        assert (
+            self._estimate(walled).get_demand_grid() == self._estimate(open_board).get_demand_grid()
+        )
+
+        # ... while the plan's capacity model tells the two apart.
+        assert walled.plan_routing().overflow_report.total_overflow >= 1
+        assert open_board.plan_routing().overflow_report.total_overflow == 0
+
+    def test_rudy_exposes_no_overflow_notion(self):
+        estimator = self._estimate(make_channel_board(6))
+        assert not hasattr(estimator, "get_total_overflow")
+        assert not hasattr(estimator, "get_overflowed_edges")
+        assert not hasattr(estimator, "overflow")
+        # It reports demand only -- no capacity to compare it against.
+        assert not hasattr(estimator, "capacity")
 
 
 # --- Full-board evidence (slow) ----------------------------------------------

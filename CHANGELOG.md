@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Make the report-only routing plan's capacity model honest (Issue #5575,
+  Phase 1b of Epic #5510). The plan stage now runs everywhere (#5520) but
+  its overflow numbers were computed three ways that did not describe the
+  board:
+  - **Per-class pitch.** Edge demand is measured in base-pitch units
+    rather than net count: a net whose class pitch
+    (`NetClassRouting.trace_width + clearance`) is `k` times the board's
+    base pitch now consumes `k` units of an edge's capacity, so a 2.6 mm
+    power trunk no longer costs the same as a 0.2 mm signal.
+    `RegionGraph` gained `pitch_for_net` / `demand_weight()`, and
+    `GlobalRouter` places and rips up with the same weight. Nets with no
+    net-class entry weigh exactly `1.0`, so boards without a
+    `--net-class-map` are numerically unchanged.
+  - **Plane-layer exclusion.** `RegionGraph(signal_layer_indices=...)`
+    allocates capacity only on non-PLANE layers, so a 4-layer
+    `sig/gnd/pwr/sig` stack no longer advertises 2x the capacity it has.
+    The sidecar's `layers.signal` reports the same set (`[0, 3]`, not
+    `LayerStack.signal_layers`, which includes planes by design -- #5014),
+    and `GlobalRouter.route_all`'s round-robin indexes into that list so
+    no net is planned onto a zero-capacity plane.
+  - **Blockage beyond pads.** `RegionGraph.register_blockage_rects()`
+    subtracts keepout rule areas (each polygon's bounding box, from the
+    new shared `Autorouter._keepout_rule_area_polygons()` parse that
+    `_lattice_keepout_projection` also consumes) and preserved copper
+    (`--preserve-existing` / `--nets` / `--complete`) from tile-boundary
+    capacity. Copper pours are deliberately **not** counted -- they are
+    filled after routing and flow around traces, so counting them would
+    report overflow the detailed router never experiences.
+
+  Sidecar shape change (additive-compatible): `edges[].demand` and
+  `edges[].layers.<i>.demand` are now floats in base-pitch units;
+  `capacity` / `overflow` stay integers, with overflow rounding any
+  fractional excess up. `schema_version` stays `1`.
+
+  Still report-only: the stage reserves nothing, gates nothing and never
+  touches `Autorouter.grid`, so routed copper is unchanged. See
+  `docs/reference/routing-plan.md`.
+
 ## [0.21.0] - 2026-09-21
 
 ### Summary

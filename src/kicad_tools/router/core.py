@@ -455,6 +455,41 @@ class MSTEdgeInfo:
 
 
 @dataclass(frozen=True)
+class KeepoutRuleArea:
+    """One resolved ``(zone ... (keepout ...))`` rule area (Issue #5575).
+
+    The engine-neutral product of
+    :meth:`Autorouter._keepout_rule_area_polygons`: polygon already shifted
+    board-relative -> sheet-absolute, layer names already resolved to stack
+    indices.  The lattice engine wraps this into a
+    ``lattice.obstacles.KeepoutArea`` (adding its per-class ``only`` /
+    ``exempt`` net-id sets); the routing plan's capacity model consumes the
+    bounding box.
+
+    Attributes:
+        polygon: Sheet-absolute ``(x, y)`` vertices in mm.
+        layers: Stack indices the area applies to.
+        blocks_tracks: ``True`` when the area forbids tracks.
+        blocks_vias: ``True`` when the area forbids vias.
+        name: The zone's name, when it has one (used to join the
+            ``spatial_keepouts`` sidecar filter).
+    """
+
+    polygon: tuple[tuple[float, float], ...]
+    layers: frozenset[int]
+    blocks_tracks: bool
+    blocks_vias: bool
+    name: str = ""
+
+    @property
+    def bbox(self) -> tuple[float, float, float, float]:
+        """Axis-aligned ``(min_x, min_y, max_x, max_y)`` of the polygon."""
+        xs = [p[0] for p in self.polygon]
+        ys = [p[1] for p in self.polygon]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+
+@dataclass(frozen=True)
 class IterationMetrics:
     """Per-iteration scalar metrics for the negotiated routing loop
     (Issue #2803).
@@ -1388,6 +1423,17 @@ class Autorouter:
         # router by ``_lattice_keepout_projection``).
         self._lattice_keepouts_cache: Any = None
         self._lattice_keepouts_resolved: bool = False
+        # Issue #5575: memoised shared parse of the board's track/via-blocking
+        # rule areas (``_keepout_rule_area_polygons``), consumed by BOTH the
+        # lattice projection above and the routing-plan capacity model.
+        # ``_keepout_rule_area_zone_names`` is ``(kept, all-on-board)``, which
+        # the #4672 spatial_keepouts warning pass needs.
+        self._keepout_rule_areas_cache: list[KeepoutRuleArea] = []
+        self._keepout_rule_areas_resolved: bool = False
+        self._keepout_rule_area_zone_names: tuple[frozenset[str], frozenset[str]] = (
+            frozenset(),
+            frozenset(),
+        )
         # Issue #2610: stored so _create_grid_and_routers can pass it to
         # create_hybrid_router on the initial construction.
         self._max_search_iterations = int(max_search_iterations) if max_search_iterations else 0
@@ -3388,41 +3434,42 @@ class Autorouter:
                 name_to_id[route_name] = int(route_net)
         return name_to_id
 
-    def _lattice_keepout_projection(self) -> Any:
-        """Keepout rule-area mask for the lattice engine (issue #4605).
+    def _keepout_rule_area_polygons(self) -> list[KeepoutRuleArea]:
+        """Track/via-blocking keepout rule areas, resolved (Issue #5575).
 
-        Reads the board's ``(zone ... (keepout ...))`` rule areas from the
-        source PCB (the same recorded path the #4506 attach-zone resolver
-        uses), keeps only areas that block tracks and/or vias (a
-        ``copperpour not_allowed``-only area -- the ``kct zones hv-keepout``
-        output -- is the zone filler's business and must never affect
-        routing), shifts their polygons board-relative -> sheet-absolute
-        (``PCB.load`` exposes zone polygons board-relative, the lattice works
-        sheet-absolute -- the #4416/#4603 offset), resolves their layer specs
-        against the real copper stack, and joins the optional
-        ``spatial_keepouts`` sidecar filter (class names -> net-id sets).
+        Factored out of :meth:`_lattice_keepout_projection` so the
+        report-only routing-plan capacity model can consume the SAME parse
+        the lattice engine does, rather than growing a second, drifting
+        reader of ``pcb.rule_areas``.  Performs exactly the steps that
+        method used to do inline:
 
-        The pathfinder stays geometry-only: it receives resolved polygons,
-        lattice layer indices, and net-id applicability sets -- never names
-        (#4597 discipline).  Returns ``None`` when the board declares no
-        track/via-blocking rule areas, the dormant signal that keeps the
-        lattice search byte-identical to the pre-#4605 path.
+        - load the recorded source PCB (the #4506 attach-zone path),
+        - keep only areas that block tracks and/or vias (a ``copperpour
+          not_allowed``-only area -- ``kct zones hv-keepout`` output -- is
+          the zone filler's business and must never affect routing),
+        - shift polygons board-relative -> sheet-absolute by
+          ``pcb.board_origin`` (the #4416/#4603 offset),
+        - resolve layer specs (``*.Cu`` / ``F&B.Cu`` / ``*.In.Cu`` /
+          explicit names) against the real copper stack.
 
-        Raises:
-            ValueError: a ``spatial_keepouts`` filter names a net class that
-                exists nowhere in the router's net-class map (fail loud: a
-                typo here would silently widen or narrow a safety constraint).
+        Deliberately does NOT apply the ``spatial_keepouts`` per-class
+        filters: those are a lattice-search concern (they narrow WHICH nets
+        an area applies to), and the routing plan's scalar edge capacity
+        cannot express a per-class exemption.  Callers that need them use
+        :meth:`_lattice_keepout_projection`.
+
+        Returns:
+            Resolved areas (empty when the board declares none, or when no
+            source PCB path was recorded).  Cached after the first call.
         """
-        if self._lattice_keepouts_resolved:
-            return self._lattice_keepouts_cache
-        self._lattice_keepouts_resolved = True
-        self._lattice_keepouts_cache = None
+        if self._keepout_rule_areas_resolved:
+            return self._keepout_rule_areas_cache
+        self._keepout_rule_areas_resolved = True
+        self._keepout_rule_areas_cache = []
 
         pcb_path = self._pairwise_attach_zone_pcb_path
         if pcb_path is None:
-            return None
-
-        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+            return self._keepout_rule_areas_cache
 
         try:
             from kicad_tools.schema.pcb import PCB as _SchemaPCB
@@ -3436,7 +3483,8 @@ class Autorouter:
                 f"({type(exc).__name__}: {exc}); rule areas will not constrain routing.",
                 file=_sys.stderr,
             )
-            return None
+            self._keepout_rule_area_zone_names = (frozenset(), frozenset())
+            return self._keepout_rule_areas_cache
 
         raw_areas = [
             zone
@@ -3445,42 +3493,14 @@ class Autorouter:
             and (not zone.keepout.tracks_allowed or not zone.keepout.vias_allowed)
             and len(zone.polygon) >= 3
         ]
-
-        # Issue #4672: a ``spatial_keepouts`` entry naming a nonexistent zone
-        # is conservative (the filter is simply never consulted) but a typo'd
-        # zone name would silently drop a per-class narrowing -- warn, naming
-        # the entry and the known rule-area zone names.  A key matching a rule
-        # area that was FILTERED OUT of ``raw_areas`` (a pour-void-only area,
-        # the ``kct zones hv-keepout`` output, or a <3-point polygon) gets a
-        # distinct message: that zone exists but never constrains routing.
-        filters = self._spatial_keepout_filters or {}
-        if filters:
-            import sys as _sys
-
-            kept_names = {zone.name for zone in raw_areas if zone.name}
-            all_names = {zone.name for zone in pcb.rule_areas if zone.name}
-            for key in sorted(filters):
-                if key in kept_names:
-                    continue
-                if key in all_names:
-                    print(
-                        f"Warning: spatial_keepouts entry {key!r} matches a rule "
-                        "area that does not block tracks or vias (e.g. a "
-                        "'kct zones hv-keepout' pour void); it will not "
-                        "constrain routing.",
-                        file=_sys.stderr,
-                    )
-                else:
-                    print(
-                        f"Warning: spatial_keepouts entry {key!r} matches no "
-                        "rule-area zone name on the board (known rule areas: "
-                        f"{', '.join(sorted(kept_names)) or 'none'}); it will "
-                        "be ignored.",
-                        file=_sys.stderr,
-                    )
-
+        # Zone-name sets the ``spatial_keepouts`` warning pass in
+        # ``_lattice_keepout_projection`` needs: (kept, all-on-board).
+        self._keepout_rule_area_zone_names = (
+            frozenset(zone.name for zone in raw_areas if zone.name),
+            frozenset(zone.name for zone in pcb.rule_areas if zone.name),
+        )
         if not raw_areas:
-            return None
+            return self._keepout_rule_areas_cache
 
         from .layers import LayerStack as _LayerStack
 
@@ -3505,6 +3525,97 @@ class Autorouter:
                     if layer_def is not None:
                         indices.add(layer_def.index)
             return frozenset(indices)
+
+        ox, oy = pcb.board_origin
+        resolved: list[KeepoutRuleArea] = []
+        for zone in raw_areas:
+            layer_names = zone.layers or ([zone.layer] if zone.layer else [])
+            layer_indices = _resolve_layers(layer_names)
+            if not layer_indices:
+                continue  # rule area on no routable copper layer
+            assert zone.keepout is not None  # filtered above
+            resolved.append(
+                KeepoutRuleArea(
+                    polygon=tuple((x + ox, y + oy) for x, y in zone.polygon),
+                    layers=layer_indices,
+                    blocks_tracks=not zone.keepout.tracks_allowed,
+                    blocks_vias=not zone.keepout.vias_allowed,
+                    name=zone.name or "",
+                )
+            )
+        self._keepout_rule_areas_cache = resolved
+        return resolved
+
+    def _lattice_keepout_projection(self) -> Any:
+        """Keepout rule-area mask for the lattice engine (issue #4605).
+
+        Takes the resolved rule areas from
+        :meth:`_keepout_rule_area_polygons` (Issue #5575 factored the
+        ``pcb.rule_areas`` read, the board-origin shift and the layer-spec
+        resolution out there, so the routing-plan capacity model reads the
+        same parse) and joins the optional ``spatial_keepouts`` sidecar
+        filter (class names -> net-id sets) on top.
+
+        The pathfinder stays geometry-only: it receives resolved polygons,
+        lattice layer indices, and net-id applicability sets -- never names
+        (#4597 discipline).  Returns ``None`` when the board declares no
+        track/via-blocking rule areas, the dormant signal that keeps the
+        lattice search byte-identical to the pre-#4605 path.
+
+        Raises:
+            ValueError: a ``spatial_keepouts`` filter names a net class that
+                exists nowhere in the router's net-class map (fail loud: a
+                typo here would silently widen or narrow a safety constraint).
+        """
+        if self._lattice_keepouts_resolved:
+            return self._lattice_keepouts_cache
+        self._lattice_keepouts_resolved = True
+        self._lattice_keepouts_cache = None
+
+        if self._pairwise_attach_zone_pcb_path is None:
+            return None
+
+        from .lattice.obstacles import KeepoutArea, LatticeKeepoutMask
+
+        # Issue #5575: the ``pcb.rule_areas`` read, the board-origin shift and
+        # the layer-spec resolution now live in the shared helper.
+        raw_areas = self._keepout_rule_area_polygons()
+        kept_names, all_names = self._keepout_rule_area_zone_names
+
+        # Issue #4672: a ``spatial_keepouts`` entry naming a nonexistent zone
+        # is conservative (the filter is simply never consulted) but a typo'd
+        # zone name would silently drop a per-class narrowing -- warn, naming
+        # the entry and the known rule-area zone names.  A key matching a rule
+        # area that was FILTERED OUT of the track/via-blocking set (a
+        # pour-void-only area, the ``kct zones hv-keepout`` output, or a
+        # <3-point polygon) gets a distinct message: that zone exists but never
+        # constrains routing.
+        filters = self._spatial_keepout_filters or {}
+        if filters:
+            import sys as _sys
+
+            for key in sorted(filters):
+                if key in kept_names:
+                    continue
+                if key in all_names:
+                    print(
+                        f"Warning: spatial_keepouts entry {key!r} matches a rule "
+                        "area that does not block tracks or vias (e.g. a "
+                        "'kct zones hv-keepout' pour void); it will not "
+                        "constrain routing.",
+                        file=_sys.stderr,
+                    )
+                else:
+                    print(
+                        f"Warning: spatial_keepouts entry {key!r} matches no "
+                        "rule-area zone name on the board (known rule areas: "
+                        f"{', '.join(sorted(kept_names)) or 'none'}); it will "
+                        "be ignored.",
+                        file=_sys.stderr,
+                    )
+
+        if not raw_areas:
+            return None
 
         # Class-name -> net-id resolution for the sidecar filter (``filters``
         # bound above, before the unknown-zone-name warning pass).
@@ -3531,14 +3642,9 @@ class Autorouter:
                             )
                         class_ids[cls_name] = frozenset(by_class.get(cls_name, set()))
 
-        ox, oy = pcb.board_origin
         areas: list[KeepoutArea] = []
-        for zone in raw_areas:
-            layer_names = zone.layers or ([zone.layer] if zone.layer else [])
-            layer_indices = _resolve_layers(layer_names)
-            if not layer_indices:
-                continue  # rule area on no routable copper layer
-            entry = filters.get(zone.name) if zone.name else None
+        for area in raw_areas:
+            entry = filters.get(area.name) if area.name else None
             only: frozenset[int] | None = None
             exempt: frozenset[int] = frozenset()
             if entry:
@@ -3552,16 +3658,15 @@ class Autorouter:
                     for cls_name in entry["except_classes"]:
                         ids.update(class_ids.get(cls_name, frozenset()))
                     exempt = frozenset(ids)
-            assert zone.keepout is not None  # filtered above
             areas.append(
                 KeepoutArea(
-                    polygon=tuple((x + ox, y + oy) for x, y in zone.polygon),
-                    layers=layer_indices,
-                    blocks_tracks=not zone.keepout.tracks_allowed,
-                    blocks_vias=not zone.keepout.vias_allowed,
+                    polygon=area.polygon,
+                    layers=area.layers,
+                    blocks_tracks=area.blocks_tracks,
+                    blocks_vias=area.blocks_vias,
                     only=only,
                     exempt=exempt,
-                    name=zone.name,
+                    name=area.name,
                 )
             )
         mask = LatticeKeepoutMask(areas)
@@ -15443,6 +15548,16 @@ class Autorouter:
             # ``Autorouter``, so this is the only way it learns whether to
             # build the sidecar plan.
             emit_routing_plan=self.emit_routing_plan,
+            # Issue #5575 (Epic #5510, Phase 1b): the plan's capacity model
+            # subtracts keepout rule areas and preserved copper from tile
+            # boundaries.  Both live on the ``Autorouter``, which
+            # ``TwoPhaseRouter`` never sees, so forward them explicitly --
+            # otherwise a dense board's plan would silently use a weaker
+            # capacity model than the same board's plan on the negotiated
+            # path.  ``routing_plan.collect_blockage_rects`` reads both by
+            # the same attribute names on either router.
+            keepout_rule_area_polygons=self._keepout_rule_area_polygons,
+            existing_routes=self.existing_routes,
             # Issue #5517 (Epic #5508 Phase 1b): let the detailed-routing
             # loop tag the commit journal with its own stage boundaries.
             # ``kct route`` sends every escape-routed board here, so without

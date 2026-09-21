@@ -76,6 +76,8 @@ class TwoPhaseRouter:
         relief_rescue: Callable[..., bool] | None = None,
         emit_routing_plan: bool = True,
         journal_stage: Callable[[str, int], None] | None = None,
+        keepout_rule_area_polygons: Callable[[], list[Any]] | None = None,
+        existing_routes: list[Route] | None = None,
     ):
         self.grid = grid
         self.router = router
@@ -164,6 +166,17 @@ class TwoPhaseRouter:
         self.emit_routing_plan = emit_routing_plan
         self.last_routing_plan: RoutingPlan | None = None
         self.last_region_graph: RegionGraph | None = None
+
+        # Issue #5575 (Epic #5510, Phase 1b): blockage sources for the plan's
+        # capacity model, threaded in from ``Autorouter._create_two_phase_
+        # router`` under the SAME attribute names
+        # ``routing_plan.collect_blockage_rects`` reads off an ``Autorouter``,
+        # so a dense board's plan and a non-dense board's plan subtract the
+        # same keepout / preserved-copper blockage.  ``None`` / empty (a unit
+        # test constructing TwoPhaseRouter directly) simply contributes no
+        # blockage, exactly as before.
+        self._keepout_rule_area_polygons = keepout_rule_area_polygons
+        self.existing_routes: list[Route] = existing_routes if existing_routes is not None else []
 
         # Issue #2597: Communicates the reason the negotiated outer loop in
         # ``_detailed_negotiated()`` exited.  Read by the progress-callback
@@ -352,7 +365,8 @@ class TwoPhaseRouter:
         # serialization now live in ``routing_plan.build_plan`` so
         # ``Autorouter.plan_routing`` can run the identical stage on
         # boards that never reach this router.  ``report=flush_print``
-        # preserves this path's "Tile grid: ..." line verbatim; ``emit``
+        # keeps this path's "Tile grid: ..." diagnostic (Issue #5575 widened
+        # its layer field to ``signal/total``); ``emit``
         # forwards the #5519 switch.  The pass itself always runs here --
         # Phase 2 needs its corridors regardless of the plan switch.
         plan_result = build_plan(
