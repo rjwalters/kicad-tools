@@ -36,7 +36,15 @@ oddities in those entries are recorded there and filed.
 Consequences for the epic, stated plainly:
 
 - **#5398 (board-05 `ISENSE_A-`) is not reproduced as an access-loss instance**
-  under the 1a/1b predicate on this tree. Four independent runs agree.
+  under the 1a/1b predicate on this tree. Be precise about the evidence base:
+  the predicate was evaluated on **two** of the four runs — `run3` and `run4`,
+  the instrumented pair; `witness-board05.json`'s `runs.run1` / `runs.run2`
+  carry `harness_dumps: []` and `offline_replays: []` and contribute only
+  wall-time and artifact rows. Across those two runs the six offline replays
+  agree. All four runs *do* agree on the **router-side** picture (identical
+  failed-net set, identical `blocked_path` causes, `Total nets routed: 41`) —
+  but that agreement is read from the recipe logs, which this package
+  deliberately does not commit, so it is not checkable from these JSON files.
 - **#5504 (board-06 `U2.B1`) is not an access-loss instance** in the option-ON
   arm (2 repeats, byte-identical copper). The option-OFF control did **not
   finish** — see "Incomplete work" below; that row is PARTIAL, not clean.
@@ -59,7 +67,7 @@ boards — with the board-06 OFF control still owed.
 | # | Criterion | Status | Evidence |
 |---|---|---|---|
 | 1 | `kct build-native --check` reports `available` before any board run | **PASS** | verbatim output under "Provenance" (re-verified after the runs; identical) |
-| 2 | Board-05 `ISENSE_A-` witness; PASS only if `closing_nets ⊇ {U3.43, U3.45, their vias, B-}` **and** closure is post-prephase | **FAIL (recorded verbatim)** | `witness-board05.json`; `closing_nets == []` in 4 replays across 2 instrumented runs and both layer-escalation attempts. Also: U3.43/U3.45 are not on `ISENSE_A-` on this tree |
+| 2 | Board-05 `ISENSE_A-` witness; PASS only if `closing_nets ⊇ {U3.43, U3.45, their vias, B-}` **and** closure is post-prephase | **FAIL (recorded verbatim)** | `witness-board05.json`; `closing_nets == []` in all 6 offline replays across 2 instrumented runs and both layer-escalation attempts. Also: U3.43/U3.45 are not on `ISENSE_A-` on this tree |
 | 3 | Board-06 `U2.B1` witness with `clear_avoidance_after_connection=True`; named set cross-posted for #5504 | **PASS (option-ON arm); control PARTIAL** | `witness-board06.json`; the named set is the **empty set**. The kwarg is `True` by default on the run tree (#5609), so the ON arm is plain `main`. The OFF control did not finish — see "Incomplete work" |
 | 4 | Board-07 `U4.C2` recorded as one of the outcomes, with a recommendation for #5507 | **PASS** | `witness-board07.json`; outcome = **non-empty** (the issue's second outcome). Recommendation: redirect #5507 to the recipe-local pour-escape model |
 | 5 | Board-07 `DQ3` negative control: access non-empty **and** `closing_nets == []` | **PASS** | `witness-board07.json`, both `DQ3` terminals (U1.28, U2.4). No 1a/1b defect filed on this account |
@@ -234,6 +242,12 @@ no closure event.
 
 ### Router-side facts the witness sits on (all 4 runs agree)
 
+*Provenance of this subsection, stated so a reader does not mistake it for AC
+evidence: every line below is quoted from the four `board05-run*.log` recipe
+logs, which are retained in the run worktree's `5508-1c-scratch/` and are **not
+committed** here (see "Files"). Unlike the witness verdicts above, these
+quotations are not checkable against this package's JSON.*
+
 - Failed-net set at attempt-1 completion is **identical in all four runs**:
   `ISENSE_A-`, `ISENSE_A+`, `ISENSE_C-`, `SWCLK`, all `blocked_path`
   (`Failure causes: {'blocked_path': 8}` across the two attempts).
@@ -298,9 +312,10 @@ legal exit.
 **None — the control did not produce one.** Both repeats were terminated
 incomplete; see "Incomplete work" at the top of this file for the stall, the
 three attempts it took, and what that costs the reading. `witness-board06.json`
-records the `off-1` / `off-2` entries with `present: true` but no routed
-artifact, no harness capture and no `.times` END line, so the absence is legible
-in the data and not only in this prose.
+records the `off-1` / `off-2` entries with `present: true`, no routed artifact
+and no harness capture, and with a `.times` END line that records
+`END 2026-09-21T10:50:25Z RC=143` — a builder termination, not a completed run —
+so the absence is legible in the data and not only in this prose.
 
 The control is not an acceptance criterion for #5518 (the AC names the option-ON
 witness for `U2.B1`), but it *is* what would have turned the ON-arm result into a
@@ -543,7 +558,7 @@ Headline counts:
 | board-06 `diffpair_test_routed` ON (2 repeats) | 563 / 561 | 0 |
 | board-06 `diffpair_test_routed` OFF (2 repeats) | *not gated — no artifact produced* | — |
 | board-07 `matchgroup_test_routed_partial` (`run2`) | 223 | 167 |
-| board-07 `*_timeout_unverified_*` (`run1`) | 24 | 190 |
+| board-07 `*_timeout_unverified_*` (`run1` and `run2`) | 24 each | 190 each |
 
 ## Files
 

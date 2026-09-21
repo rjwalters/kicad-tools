@@ -3,7 +3,7 @@
   "collected_at": "2026-09-21T11:11:24Z",
   "git_sha": "63c43938e92bd36a614b72c37074ed5a25ad298a",
   "files": {
-    "README.md": "0962577601f7dad72c4020b9194b1e122ecd7776cfeadbebaa83ad3bb0ae37f6",
+    "README.md": "57770049f7163ee97b417bf9580e015ff0e02e8eb8be959d1e1a51c33d90bfb0",
     "captured-scripts.tar.gz": "cbc402b886a7ed5de7d9f3391c53e9e4aa4a43b92e90d00e72c6dafed880c8f4",
     "drc-summary.json": "d674804b4fadc3d275ffe99966b626df3650b630c512a02e335f5588ecafbf75",
     "witness-board05.json": "69fe294d30bfd2782555bb33561e19bd61acf8411c7f335ec8d090dcd6fde897",
@@ -12,7 +12,7 @@
   },
   "provenance": {
     "issue": 5518,
-    "run_date": "2026-09-20",
+    "run_date": "2026-09-21",
     "git_sha": "37171ac08263f973bdad5df349f8f8c9c8f80086",
     "branch_base": "origin/main @ 37171ac0 (perf(ci): exclude kicad-cli --help/--version probes from the native permit gate (#5624))",
     "pr_5497": {
