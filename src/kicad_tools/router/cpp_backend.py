@@ -2257,17 +2257,28 @@ class CppPathfinder:
         # continue to see the wider ``trace_radius_cells`` radius.  When
         # ``partner_net == -1`` (the dormant default) the C++ side preserves
         # pre-#2559 behavior identically.
+        #
+        # Issue #5613: the override is engaged ONLY when it is genuinely
+        # tighter than the clearance this search would otherwise apply --
+        # see :meth:`_resolve_intra_pair_override`.
         partner_net_id = -1
         intra_pair_radius_cells = 0
+        search_intra_pair_clearance = -1.0
         if net_class is not None and net_class.diffpair_partner is not None:
             partner_id = self._net_name_to_id.get(net_class.diffpair_partner)
             if partner_id is not None:
-                partner_net_id = int(partner_id)
-                intra_pair_clearance = net_class.effective_intra_pair_clearance()
-                intra_pair_radius_cells = max(
-                    1,
-                    math.ceil((net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution),
+                intra_pair_clearance = self._resolve_intra_pair_override(
+                    net_class, net_trace_clearance
                 )
+                if intra_pair_clearance is not None:
+                    partner_net_id = int(partner_id)
+                    search_intra_pair_clearance = intra_pair_clearance
+                    intra_pair_radius_cells = max(
+                        1,
+                        math.ceil(
+                            (net_trace_width / 2 + intra_pair_clearance) / self._grid.resolution
+                        ),
+                    )
 
         # Issue #2427: Compute pad metal bounds and approach zones.
         # This mirrors the Python pathfinder's _get_pad_metal_bounds() logic
@@ -2367,9 +2378,7 @@ class CppPathfinder:
                 self._sync_stored_routes(self._grid._py_grid)
             self._impl.set_search_partner_clearance(
                 partner_net_id,
-                net_class.effective_intra_pair_clearance()
-                if net_class and partner_net_id >= 0
-                else -1.0,
+                search_intra_pair_clearance if partner_net_id >= 0 else -1.0,
             )
             return self._impl.route_resumable(
                 start.x,
@@ -3326,6 +3335,67 @@ class CppPathfinder:
             parts.append(f" reject={record['rejected_goal']}")
         return "".join(parts)
 
+    def _resolve_intra_pair_override(
+        self,
+        net_class: NetClassRouting | None,
+        default_clearance: float,
+    ) -> float | None:
+        """Resolve the within-pair clearance override, honoring its contract.
+
+        Issue #2559 / Epic #2556 Phase 1C introduced ``partner_net`` +
+        ``intra_pair_clearance`` so the C++ search and validator do not
+        reject the two legs of a differential pair for sitting at the
+        **tighter** within-pair distance the pair's coupling requires.
+        ``Grid3D::validate_route`` states that contract explicitly: "the
+        partner branch is active when ``partner_net`` is a real net id and
+        ``intra_pair_clearance`` is a *tighter* (non-negative) override".
+
+        Issue #5613: nothing enforced the "tighter" half of that contract on
+        the Python side.  ``effective_intra_pair_clearance()`` reports the
+        pair's *coupling gap*, which the impedance resolver
+        (:func:`diffpair_impedance.resolve_impedance_for_net_classes`) writes
+        from the solver.  When a class declares a differential target but no
+        authored ``intra_pair_clearance``, the unconstrained branch solves
+        the width from Z0/2 and then the gap for the differential target --
+        which lands in the essentially-uncoupled regime and yields gaps of
+        several millimetres (``apply_impedance_driven_sizing`` documents the
+        "~8mm gap" pathology directly).  Passed through unchecked, that
+        coupling target became a HARD floor: the C++ validator demanded
+        8.425 mm between DQS_P and DQS_N on board 07's DDR byte, rejecting
+        every candidate route for a pair whose pads are 0.8 mm apart.
+
+        A coupling gap is not a clearance floor.  Refuse an override that
+        exceeds ``default_clearance`` and return ``None``, so the caller
+        leaves ``partner_net`` dormant and the partner is checked like any
+        other foreign net at the normal clearance.  The comparison is
+        deliberately STRICT: an override equal to the default is kept
+        engaged, which is byte-identical to passing it through (both make
+        the partner's required clearance ``default_clearance``) and keeps
+        boards that author the two to the same value -- e.g. board 03's
+        0.15 mm USB D+/D- sidecar against the 0.15 mm ``HighSpeed``
+        class -- on exactly their historical code path.
+
+        Args:
+            net_class: Net class of the net being routed / validated.
+            default_clearance: Clearance the caller applies to every other
+                foreign net in the same C++ call.
+
+        Returns:
+            The override in mm when it does not exceed ``default_clearance``,
+            else ``None``.
+        """
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        try:
+            intra = float(net_class.effective_intra_pair_clearance())
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+        if not math.isfinite(intra) or intra < 0.0:
+            return None
+        if intra > float(default_clearance):
+            return None
+        return intra
+
     def _validate_route_clearance(
         self,
         route: Route,
@@ -3434,13 +3504,20 @@ class CppPathfinder:
         # net so the C++ validator does not reject within-pair edges of a
         # legitimate diff pair.  Defaults preserve pre-#2559 behavior
         # identically (partner_net == -1 -> no relaxation).
+        #
+        # Issue #5613: the override is engaged ONLY when it is genuinely
+        # tighter than ``rules.trace_clearance`` -- the clearance this call
+        # enforces against every other foreign net.  See
+        # :meth:`_resolve_intra_pair_override`.
         partner_net_id = -1
         intra_pair_clearance = 0.0
         if net_class is not None and net_class.diffpair_partner is not None:
             partner_id = self._net_name_to_id.get(net_class.diffpair_partner)
             if partner_id is not None:
-                partner_net_id = int(partner_id)
-                intra_pair_clearance = float(net_class.effective_intra_pair_clearance())
+                override = self._resolve_intra_pair_override(net_class, self._rules.trace_clearance)
+                if override is not None:
+                    partner_net_id = int(partner_id)
+                    intra_pair_clearance = override
 
         # Issue #4510 / Epic #4431 Phase 2a: install the pairwise (HV) domain
         # matrix and the net-id-translated rated-footprint attach zones on the
