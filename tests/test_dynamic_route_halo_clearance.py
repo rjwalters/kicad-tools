@@ -2,7 +2,17 @@
 
 Issue #5410: the measured Board07 via separation is five by four cells on a
 0.127 mm grid. Two 0.6 mm vias at that separation have 0.213 mm copper gap
-and 0.513 mm drill gap, but the six-cell marking square rejects them.
+and 0.513 mm drill gap, but the six-cell marking *square* rejected them.
+
+Issue #5660 (Epic #5509 Phase 3a) retired that square: the halo is now the
+clearance kernel's exact disc, and ``sqrt(41) = 6.40`` cells is outside a
+six-cell disc, so the #5410 pair is no longer marked at all -- see
+``test_captured_board07_dq3_via_with_original_pad_geometry``, which now pins
+exactly that.  The *refinement* machinery this module exercises is still
+live for the band that remains conservative, so ``_context`` marks with
+:data:`HALO_RADIUS_CELLS` = 7 to keep the probe cell inside it.  Widening the
+marking radius cannot move a physical verdict: every predicate under test
+reads rule values, never the marking radius.
 """
 
 import math
@@ -15,6 +25,10 @@ from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.rules import DesignRules
 
 pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="native router required")
+
+#: Marking radius that keeps the ``(-5, -4)`` probe inside the exact halo
+#: (``ceil(hypot(5, 4)) == 7``) -- see the module docstring (#5660).
+HALO_RADIUS_CELLS = math.ceil(math.hypot(5, 4))
 
 
 def _context():
@@ -33,9 +47,8 @@ def _context():
     native = CppGrid.from_routing_grid(grid)
     x, y = grid.grid_to_world(60, 60)
     native._impl.add_stored_via(x, y, 0.3, 0.6, 2)
-    radius = math.ceil((0.3 + 0.2 + 0.1) / grid.resolution) + 1
-    assert radius == 6
-    native._impl.mark_via(60, 60, 2, radius)
+    assert HALO_RADIUS_CELLS == 7
+    native._impl.mark_via(60, 60, 2, HALO_RADIUS_CELLS)
     pathfinder = CppPathfinder(native, rules, diagonal_routing=True)
     pathfinder.set_routable_layers(native.get_routable_indices())
     return grid, native, pathfinder
@@ -137,14 +150,14 @@ def test_route_geometry_coverage_tracks_missing_and_overlapping_marks():
 
 def test_route_geometry_coverage_preserves_repeated_marks():
     grid, native, _ = _context()
-    native._impl.mark_via(60, 60, 2, 6)
-    native._impl.unmark_via(60, 60, 2, 6)
+    native._impl.mark_via(60, 60, 2, HALO_RADIUS_CELLS)
+    native._impl.unmark_via(60, 60, 2, HALO_RADIUS_CELLS)
     native._impl.clear_stored_routes()
     assert not native._impl.route_geometry_complete()
     x, y = grid.grid_to_world(60, 60)
     native._impl.add_stored_via(x, y, 0.3, 0.6, 2)
     assert native._impl.route_geometry_complete()
-    native._impl.unmark_via(60, 60, 2, 6)
+    native._impl.unmark_via(60, 60, 2, HALO_RADIUS_CELLS)
     assert not native._impl.route_geometry_complete()
 
 
@@ -254,7 +267,7 @@ def test_dynamic_refinement_uses_authored_partner_gap():
 
 def test_trace_refinement_checks_swept_step_not_only_endpoints():
     grid, native, pathfinder = _context()
-    native._impl.unmark_via(60, 60, 2, 6)
+    native._impl.unmark_via(60, 60, 2, HALO_RADIUS_CELLS)
     native._impl.clear_stored_routes()
     x, y = grid.grid_to_world(55, 56)
     vx, vy = x + grid.resolution / 2, y + 0.574
@@ -346,7 +359,12 @@ def test_captured_board07_dq3_via_with_original_pad_geometry(backend):
         router = CppPathfinder(native, rules)
         router._impl.set_search_pair_widths(0.075, 0.3)
         router._impl.set_search_fill_clearances(0.1, 0.2)
-        assert native._impl.route_cell_has_geometry(gx, gy, 2)
+        # Issue #5660: the exact halo does not reach the DQ3 candidate at
+        # all.  ``sqrt(41) = 6.40`` cells is outside the six-cell disc DQS_N
+        # marks, where the six-cell *square* covered it at its corner -- so
+        # the search no longer needs the geometry refinement to rescue this
+        # placement, it was never a candidate for rejection.
+        assert not native._impl.at(gx, gy, 2).blocked
         assert not router._impl.is_via_blocked(gx, gy, 7, False, 4)
         assert router._impl.is_via_blocked(gx + 1, gy, 7, False, 4)
     else:
@@ -363,7 +381,8 @@ def test_captured_board07_dq3_via_with_original_pad_geometry(backend):
             },
         )
         router.set_net_name_to_id({"DQ3": 7, "DQS_N": 14})
-        assert grid._route_halo.cell_known(gx, gy, 2)
+        # Issue #5660: same story on the Python grid -- see the C++ branch.
+        assert not grid.cell_at(2, gy, gx).blocked
         assert not router._is_via_blocked(gx, gy, 2, 7, False, radius=4)
         assert router._is_via_blocked(gx + 1, gy, 2, 7, False, radius=4)
 

@@ -11,9 +11,16 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 326.73mm total
+- **Deterministic output**: 22 routes / 23 vias / 322.77mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (327.93mm before the 2026-09-10 #5009
+  has fully converged.  (24 vias / 326.73mm before the 2026-09-22
+  #5660 re-baseline, which switched the grid halo from a Chebyshev
+  square to the clearance kernel's exact disc: strictly less copper
+  is marked, so one escape via that the square's diagonal corner had
+  fenced off is now reachable by trace.  Reach is UNCHANGED at 8/8 --
+  see the #5660 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (327.93mm before the 2026-09-10 #5009
   re-baseline: ``jlcpcb-tier1`` 2-layer declares no orderable via-in-pad
   process, so the #3112 via-in-pad sweep now relocates the escape vias
   off the SMT lands they clipped -- same 22 routes / 24 vias / 8/8
@@ -693,7 +700,32 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     #   containerized run is authoritative for both.  Do not restate
     #   either as a blanket "the board is DRC-clean".
     EXPECTED_ROUTES = 22
-    EXPECTED_VIAS = 24
+    #
+    # Re-baselined 2026-09-22 for Issue #5660 (Epic #5509 Phase 3a:
+    # grid halo marking switched to the clearance kernel).  The halo's
+    # *reach* is untouched -- ``radius_cells`` is still exactly what
+    # every caller computed before -- but its *shape* changes from the
+    # Chebyshev square to the kernel's exact disc, so the marked cell
+    # set becomes a strict SUBSET of the previous one: cells near the
+    # square's diagonal corners, at up to ``sqrt(2) * r`` where the
+    # geometry only asks for ``r``, stop being blocked.
+    #
+    # Seeds 42/43/44 all yield (22, 227, 23, 322.77), bit-identical
+    # across seeds.  Routes (22) and reach (8/8) are UNCHANGED, which
+    # is the AC the epic's scope guard #2 asks for; vias move 24 -> 23
+    # and length 326.73 -> 322.77 (-3.96 mm) because one escape that
+    # previously had to drop through a via now has a lateral path
+    # through cells the square was over-blocking.  Fewer vias and less
+    # copper on unchanged reach is an improvement, not a regression --
+    # and it cannot be under-blocking, because a subset of the
+    # previously-marked cells cannot mark anything new.
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors
+    # at the tier1 profile on this output (same scope caveat as the
+    # "SCOPE OF THE CLEANLINESS CLAIM" note: pure-Python checker at
+    # jlcpcb-tier1; CI's containerized kicad-cli run is authoritative
+    # for the live board).
+    # Prior pin (22, 226-segment-era, 24, 326.73).
+    EXPECTED_VIAS = 23
     # Re-measured at ff96e855 after local halo-coverage refinement:
     # seeds 42/43/44 yield (22, 226, 24, 326.73), identical copper
     # geometry, 34 preserved/bound pads, and zero native refill/all-track
@@ -702,7 +734,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # the physical delta is a 1.981623mm shorter NODE_C route.
     # Retained evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
     # Keep exact length and cross-seed guards; no tolerance changes.
-    EXPECTED_LENGTH = 326.73
+    EXPECTED_LENGTH = 322.77
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -761,6 +793,8 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # regression, and they are untouched.
     # #5410: retain the existing band. Local halo refinement measures
     # macOS 226 / Linux CI 224; exact routes/vias/length are pinned above.
+    # #5660: retain the band unchanged -- the kernel-disc halo measures
+    # 227 on Linux-x86_64, comfortably inside it.
     EXPECTED_SEGMENTS_RANGE = (220, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)

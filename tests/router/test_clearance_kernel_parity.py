@@ -754,53 +754,83 @@ def test_cpp_kernel_present_in_ci() -> None:
         pytest.fail("router_cpp not built in CI test job -- kernel parity silently skipped")
 
 
-def test_no_consumer_switched_to_the_kernel() -> None:
-    """Phase 1b adds the kernel; it must not wire it into any consumer.
+# Epic #5509 switches consumers onto the kernel one phase at a time, and this
+# module is the ledger of which ones have been switched so far.  A phase that
+# wires a new consumer in MUST add it here in the same PR, with the issue
+# number, so "which consumers are on the kernel" is a fact the suite knows
+# rather than something a reader has to reconstruct from git history.
+#
+# Phase 3a (#5660): groups 1 and 2 -- the Python and C++ grid halo marking.
+SWITCHED_PY_CONSUMERS = {
+    "router/grid.py",  # #5660: _mark_segment / _mark_via halo geometry
+}
+SWITCHED_CPP_CONSUMERS = {
+    "src/grid.cpp",  # #5660: Grid3D::mark_segment / mark_via halo geometry
+}
 
-    Phases 2-4 switch consumers over deliberately, one at a time, each with
-    its own before/after measurement.  An accidental import here would make
-    that measurement impossible -- so the acceptance criterion is a test, not
-    a grep someone remembers to run.
+
+def test_only_the_declared_phases_switched_a_python_consumer() -> None:
+    """Consumers reach the kernel by an explicit phase, never by accident.
+
+    Phase 1b shipped the kernel with **no** consumer on it; phases 2-4 switch
+    them over deliberately, one at a time, each with its own before/after
+    measurement.  An import that appears without a matching entry in
+    :data:`SWITCHED_PY_CONSUMERS` would make that measurement impossible --
+    so the acceptance criterion is a test, not a grep someone remembers to
+    run.  Both directions are asserted: an *undeclared* import fails, and so
+    does a declared consumer that has quietly stopped using the kernel.
     """
     repo_root = Path(__file__).resolve().parents[2]
     src = repo_root / "src" / "kicad_tools"
-    hits: list[str] = []
+    hits: set[str] = set()
     for path in sorted(src.rglob("*.py")):
         rel = path.relative_to(src).as_posix()
         if rel == "router/clearance_kernel.py":
             continue
         if "clearance_kernel" in path.read_text(encoding="utf-8"):
-            hits.append(rel)
-    assert hits == [], (
-        f"clearance_kernel is referenced by a consumer, but Phase 1b switches none: {hits}"
+            hits.add(rel)
+    assert hits == SWITCHED_PY_CONSUMERS, (
+        "the set of Python consumers on the clearance kernel has drifted from "
+        f"the declared ledger.\n  unexpected: {sorted(hits - SWITCHED_PY_CONSUMERS)}\n"
+        f"  declared but no longer switched: {sorted(SWITCHED_PY_CONSUMERS - hits)}"
     )
 
 
-def test_cpp_kernel_is_not_referenced_outside_its_own_translation_units() -> None:
-    """The C++ kernel is likewise only registered, never called by the router."""
+def test_only_the_declared_phases_switched_a_cpp_consumer() -> None:
+    """The C++ ledger, mirroring the Python one above."""
     repo_root = Path(__file__).resolve().parents[2]
     cpp = repo_root / "src" / "kicad_tools" / "router" / "cpp"
-    allowed = {"include/clearance_kernel.hpp", "src/clearance_kernel.cpp", "src/bindings.cpp"}
-    hits = [
+    registered = {"include/clearance_kernel.hpp", "src/clearance_kernel.cpp", "src/bindings.cpp"}
+    hits = {
         p.relative_to(cpp).as_posix()
         for p in sorted([*cpp.rglob("*.cpp"), *cpp.rglob("*.hpp")])
         if "third_party" not in p.parts
-        and p.relative_to(cpp).as_posix() not in allowed
+        and p.relative_to(cpp).as_posix() not in registered
         and ("clearance_kernel" in p.read_text(encoding="utf-8"))
-    ]
-    assert hits == [], f"C++ clearance kernel referenced by a consumer: {hits}"
+    }
+    assert hits == SWITCHED_CPP_CONSUMERS, (
+        "the set of C++ consumers on the clearance kernel has drifted from the "
+        f"declared ledger.\n  unexpected: {sorted(hits - SWITCHED_CPP_CONSUMERS)}\n"
+        f"  declared but no longer switched: {sorted(SWITCHED_CPP_CONSUMERS - hits)}"
+    )
 
 
 def test_ripgrep_acceptance_criterion() -> None:
-    """The issue's ``rg`` acceptance criterion, run as a test.
+    """Phase 1b's ``rg`` acceptance criterion, narrowed by the phase ledger.
 
-    The issue writes the command as ``rg "clearance_kernel" src/kicad_tools
-    --glob '!router/clearance_kernel.py' --glob '!router/cpp/**'``.  Run from
-    the repo root that excludes nothing: ripgrep anchors a glob containing a
-    ``/`` to the **working directory**, not to the search path, so those two
-    globs would have to read ``src/kicad_tools/router/...``.  Running from
-    ``src/kicad_tools`` instead keeps the globs exactly as the issue wrote
-    them and makes them mean what they say.
+    The original issue wrote the command as ``rg "clearance_kernel"
+    src/kicad_tools --glob '!router/clearance_kernel.py' --glob
+    '!router/cpp/**'``.  Run from the repo root that excludes nothing:
+    ripgrep anchors a glob containing a ``/`` to the **working directory**,
+    not to the search path, so those two globs would have to read
+    ``src/kicad_tools/router/...``.  Running from ``src/kicad_tools`` instead
+    keeps the globs exactly as the issue wrote them and makes them mean what
+    they say.
+
+    Phase 3a (#5660) switched the two grid-marking consumers on, so the
+    command's expected output is no longer *empty* -- it is exactly the
+    declared ledger.  Excluding those paths in the command itself would make
+    the check unfalsifiable; comparing the files it names keeps it honest.
 
     Skipped where ``rg`` is unavailable; the two structural tests above cover
     the same property without depending on the binary.
@@ -816,6 +846,7 @@ def test_ripgrep_acceptance_criterion() -> None:
                 "!router/clearance_kernel.py",
                 "--glob",
                 "!router/cpp/**",
+                "--files-with-matches",
             ],
             cwd=src,
             capture_output=True,
@@ -824,4 +855,5 @@ def test_ripgrep_acceptance_criterion() -> None:
         )
     except FileNotFoundError:  # pragma: no cover - environment dependent
         pytest.skip("rg not installed")
-    assert proc.stdout.strip() == "", f"unexpected consumer references:\n{proc.stdout}"
+    named = {line.removeprefix("./") for line in proc.stdout.split() if line}
+    assert named == SWITCHED_PY_CONSUMERS, f"unexpected consumer references:\n{proc.stdout}"

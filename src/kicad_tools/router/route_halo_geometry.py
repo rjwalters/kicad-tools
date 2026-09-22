@@ -75,6 +75,10 @@ class RouteHaloGeometry:
     def _refresh(self) -> None:
         if self._generation == self.grid.occupancy_generation:
             return
+        # Deferred import: ``grid`` imports this module, so the kernel-derived
+        # halo geometry (Issue #5660) can only be reached from inside a call.
+        from .grid import halo_mask
+
         self._generation = self.grid.occupancy_generation
         self._objects = []
         self._bounds = []
@@ -108,17 +112,29 @@ class RouteHaloGeometry:
             err = dx - dy
             while True:
                 layers = range(self.grid.num_layers) if kind else (layer,)
+                # Issue #5660: the coverage map is the marking's twin, so it
+                # walks the same kernel-derived halo ``_mark_segment`` /
+                # ``_mark_via`` stamped.  A square window here would claim
+                # coverage over the diagonal cells the exact halo no longer
+                # marks -- and, for an *unknown* mark, would veto refinement
+                # over cells that mark never touched.
+                r = max(0, radius)
                 for plane in layers:
-                    ax, bx = max(0, x - radius), min(self.grid.cols, x + radius + 1)
-                    ay, by = max(0, y - radius), min(self.grid.rows, y + radius + 1)
+                    ax, bx = max(0, x - r), min(self.grid.cols, x + r + 1)
+                    ay, by = max(0, y - r), min(self.grid.rows, y + r + 1)
                     if ax >= bx or ay >= by:
                         continue
+                    disc = halo_mask(radius)[
+                        ay - (y - r) : by - (y - r), ax - (x - r) : bx - (x - r)
+                    ]
                     region = self._cells[plane, ay:by, ax:bx]
                     if not known:
                         # Do not let a later known mark hide an unknown overlap.
-                        region[:] = -1
+                        region[disc] = -1
                     else:
-                        region[(region != -1) & (net_plane[plane, ay:by, ax:bx] == net)] = net
+                        region[disc & (region != -1) & (net_plane[plane, ay:by, ax:bx] == net)] = (
+                            net
+                        )
                 if (x, y) == (x2, y2):
                     break
                 twice = 2 * err

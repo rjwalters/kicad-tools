@@ -5,11 +5,69 @@
 
 #include "grid.hpp"
 #include "geometry.hpp"
+#include "clearance_kernel.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace router {
+
+namespace {
+
+// Issue #5660 (Epic #5509 Phase 3a): the exact halo, straight from the
+// clearance kernel.
+//
+// ``mark_segment`` / ``mark_via`` (and their ``unmark_*`` twins) used to
+// stamp a Chebyshev **square** -- ``for dy in [-r, r]: for dx in [-r, r]`` --
+// around each rastered cell.  A square circumscribes the disc it stands for,
+// so the marked region reached ``sqrt(2) * r`` at the diagonals where the
+// geometry only asks for ``r``.  That excess is the root cause of #5410: on a
+// 0.127 mm grid a six-cell via halo swallowed a candidate ``(5, 4)`` cells
+// away -- Chebyshev distance 5 (inside the square) but Euclidean distance
+// ``sqrt(41) = 6.40`` cells (outside the disc), on copper kicad-cli calls
+// legal.
+//
+// Membership is the kernel's own ``copper_gap`` between two zero-extent
+// points, queried in *grid-cell* units (the kernel is pure geometry and
+// carries no unit assumption).  Keeping the query in cells is what makes the
+// answer bit-identical to the Python sibling ``router/grid.py:halo_offsets``:
+// both feed integers into double arithmetic, with no ``float`` grid
+// ``resolution`` in between to diverge on.
+//
+// **The reach is unchanged.**  ``radius_cells`` is still exactly what the
+// caller computed; only the shape changes, from the circumscribing square to
+// the exact disc, so the marked set is a strict subset of the previous one.
+const std::vector<std::pair<int, int>>& halo_offsets(int radius_cells) {
+    static std::mutex cache_mutex;
+    // ``unordered_map`` guarantees reference stability across rehashes, so a
+    // reference handed out here stays valid when a later radius is inserted.
+    static std::unordered_map<int, std::vector<std::pair<int, int>>> cache;
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = cache.find(radius_cells);
+    if (it != cache.end()) return it->second;
+
+    const int r = std::max(0, radius_cells);
+    const clearance::KShape centre = clearance::KVia{0.0, 0.0, 0.0, 0.0};
+    std::vector<std::pair<int, int>> offsets;
+    for (int dy = -r; dy <= r; ++dy) {
+        for (int dx = -r; dx <= r; ++dx) {
+            const clearance::KShape probe = clearance::KVia{
+                static_cast<double>(dx), static_cast<double>(dy), 0.0, 0.0};
+            if (clearance::copper_gap(centre, probe) <=
+                r + clearance::CLEARANCE_EPSILON_MM) {
+                offsets.emplace_back(dx, dy);
+            }
+        }
+    }
+    return cache.emplace(radius_cells, std::move(offsets)).first->second;
+}
+
+}  // namespace
 
 void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings) {
     if (rings.empty() || rings.front().empty()) return;
@@ -153,28 +211,28 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
     // Issue #4079: fast-path the reservation consult behind the grid-wide
     // flag so unreserved boards pay zero extra cost (byte-identical).
     const bool check_reservations = has_reservations_;
+    // Issue #5660: exact kernel halo, not the circumscribing square.
+    const auto& offsets = halo_offsets(clearance_cells);
     auto mark_with_clearance = [&](int gx, int gy) {
-        for (int dy = -clearance_cells; dy <= clearance_cells; ++dy) {
-            for (int dx = -clearance_cells; dx <= clearance_cells; ++dx) {
-                int nx = gx + dx, ny = gy + dy;
-                if (is_valid(nx, ny, layer)) {
-                    // Issue #4079: skip cells reserved for a net set that
-                    // EXCLUDES ``net`` (lateral-trace keep-out, mirrors
-                    // Python ``_mark_segment`` and the ``mark_via`` skip).
-                    if (check_reservations &&
-                        is_reserved_excluding(nx, ny, layer, net)) {
-                        continue;
-                    }
-                    auto& cell = at(nx, ny, layer);
-                    if (!cell.blocked) {
-                        cell.net = net;
-                        if (!cell.congestion_counted) {
-                            update_congestion(nx, ny, layer, 1);
-                            cell.congestion_counted = true;
-                        }
-                    }
-                    cell.blocked = true;
+        for (const auto& [dx, dy] : offsets) {
+            int nx = gx + dx, ny = gy + dy;
+            if (is_valid(nx, ny, layer)) {
+                // Issue #4079: skip cells reserved for a net set that
+                // EXCLUDES ``net`` (lateral-trace keep-out, mirrors
+                // Python ``_mark_segment`` and the ``mark_via`` skip).
+                if (check_reservations &&
+                    is_reserved_excluding(nx, ny, layer, net)) {
+                    continue;
                 }
+                auto& cell = at(nx, ny, layer);
+                if (!cell.blocked) {
+                    cell.net = net;
+                    if (!cell.congestion_counted) {
+                        update_congestion(nx, ny, layer, 1);
+                        cell.congestion_counted = true;
+                    }
+                }
+                cell.blocked = true;
             }
         }
     };
@@ -226,33 +284,34 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
 void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
     record_route_mark(via_mark_key(x, y, net, radius_cells), true);
     const bool check_reservations = has_reservations_;
+    // Issue #5660: exact kernel halo -- the square this replaces is what
+    // rejected #5410's legal candidate at ``(5, 4)`` cells.
+    const auto& offsets = halo_offsets(radius_cells);
     for (int layer = 0; layer < layers_; ++layer) {
-        for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
-            for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
-                int nx = x + dx, ny = y + dy;
-                if (is_valid(nx, ny, layer)) {
-                    auto& cell = at(nx, ny, layer);
-                    // Issue #4071: skip cells reserved for a net set that
-                    // excludes ``net`` (matches Python ``_mark_via``).
-                    if (check_reservations && cell.reserved_count > 0) {
-                        bool owned = false;
-                        for (int i = 0; i < cell.reserved_count; ++i) {
-                            if (cell.reserved_nets[i] == net) {
-                                owned = true;
-                                break;
-                            }
+        for (const auto& [dx, dy] : offsets) {
+            int nx = x + dx, ny = y + dy;
+            if (is_valid(nx, ny, layer)) {
+                auto& cell = at(nx, ny, layer);
+                // Issue #4071: skip cells reserved for a net set that
+                // excludes ``net`` (matches Python ``_mark_via``).
+                if (check_reservations && cell.reserved_count > 0) {
+                    bool owned = false;
+                    for (int i = 0; i < cell.reserved_count; ++i) {
+                        if (cell.reserved_nets[i] == net) {
+                            owned = true;
+                            break;
                         }
-                        if (!owned) continue;
                     }
-                    if (!cell.blocked) {
-                        if (!cell.congestion_counted) {
-                            update_congestion(nx, ny, layer, 1);
-                            cell.congestion_counted = true;
-                        }
-                        cell.net = net;
-                    }
-                    cell.blocked = true;
+                    if (!owned) continue;
                 }
+                if (!cell.blocked) {
+                    if (!cell.congestion_counted) {
+                        update_congestion(nx, ny, layer, 1);
+                        cell.congestion_counted = true;
+                    }
+                    cell.net = net;
+                }
+                cell.blocked = true;
             }
         }
     }
@@ -307,35 +366,35 @@ int Grid3D::reserved_cell_count() const {
 void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                             int clearance_cells) {
     record_route_mark(segment_mark_key(x1, y1, x2, y2, layer, net, clearance_cells), false);
+    // Issue #5660: rip-up clears exactly the cells ``mark_segment`` claimed.
+    const auto& offsets = halo_offsets(clearance_cells);
     auto unmark_with_clearance = [&](int gx, int gy) {
-        for (int dy = -clearance_cells; dy <= clearance_cells; ++dy) {
-            for (int dx = -clearance_cells; dx <= clearance_cells; ++dx) {
-                int nx = gx + dx, ny = gy + dy;
-                if (is_valid(nx, ny, layer)) {
-                    auto& cell = at(nx, ny, layer);
-                    if ((cell.pad_blocked || cell.net == net) &&
-                        cell.congestion_counted) {
-                        update_congestion(nx, ny, layer, -1);
-                        cell.congestion_counted = false;
-                    }
-                    if (cell.pad_blocked) {
+        for (const auto& [dx, dy] : offsets) {
+            int nx = gx + dx, ny = gy + dy;
+            if (is_valid(nx, ny, layer)) {
+                auto& cell = at(nx, ny, layer);
+                if ((cell.pad_blocked || cell.net == net) &&
+                    cell.congestion_counted) {
+                    update_congestion(nx, ny, layer, -1);
+                    cell.congestion_counted = false;
+                }
+                if (cell.pad_blocked) {
+                    cell.net = cell.original_net;
+                } else if (cell.net == net) {
+                    // Issue #3545: STATICALLY blocked cells (pad
+                    // clearance halos, keepouts) must survive
+                    // rip-up.  Pre-fix, ripping a route whose
+                    // clearance envelope overlapped its own pads'
+                    // halo cells erased them (blocked=false,
+                    // net=0), after which foreign nets routed
+                    // straight through the halo and shipped
+                    // sub-clearance copper.  Restore the static
+                    // owner instead of freeing.
+                    if (cell.static_blocked) {
                         cell.net = cell.original_net;
-                    } else if (cell.net == net) {
-                        // Issue #3545: STATICALLY blocked cells (pad
-                        // clearance halos, keepouts) must survive
-                        // rip-up.  Pre-fix, ripping a route whose
-                        // clearance envelope overlapped its own pads'
-                        // halo cells erased them (blocked=false,
-                        // net=0), after which foreign nets routed
-                        // straight through the halo and shipped
-                        // sub-clearance copper.  Restore the static
-                        // owner instead of freeing.
-                        if (cell.static_blocked) {
-                            cell.net = cell.original_net;
-                        } else {
-                            cell.blocked = false;
-                            cell.net = 0;
-                        }
+                    } else {
+                        cell.blocked = false;
+                        cell.net = 0;
                     }
                 }
             }
@@ -368,29 +427,29 @@ void Grid3D::unmark_segment(int x1, int y1, int x2, int y2, int layer, int net,
 
 void Grid3D::unmark_via(int x, int y, int net, int radius_cells) {
     record_route_mark(via_mark_key(x, y, net, radius_cells), false);
+    // Issue #5660: same kernel halo ``mark_via`` stamped.
+    const auto& offsets = halo_offsets(radius_cells);
     for (int layer = 0; layer < layers_; ++layer) {
-        for (int dy = -radius_cells; dy <= radius_cells; ++dy) {
-            for (int dx = -radius_cells; dx <= radius_cells; ++dx) {
-                int nx = x + dx, ny = y + dy;
-                if (is_valid(nx, ny, layer)) {
-                    auto& cell = at(nx, ny, layer);
-                    if ((cell.pad_blocked || cell.net == net) &&
-                        cell.congestion_counted) {
-                        update_congestion(nx, ny, layer, -1);
-                        cell.congestion_counted = false;
-                    }
-                    if (cell.pad_blocked) {
+        for (const auto& [dx, dy] : offsets) {
+            int nx = x + dx, ny = y + dy;
+            if (is_valid(nx, ny, layer)) {
+                auto& cell = at(nx, ny, layer);
+                if ((cell.pad_blocked || cell.net == net) &&
+                    cell.congestion_counted) {
+                    update_congestion(nx, ny, layer, -1);
+                    cell.congestion_counted = false;
+                }
+                if (cell.pad_blocked) {
+                    cell.net = cell.original_net;
+                } else if (cell.net == net) {
+                    // Issue #3545: restore static halo / keepout
+                    // cells instead of freeing them (see
+                    // ``unmark_segment`` for rationale).
+                    if (cell.static_blocked) {
                         cell.net = cell.original_net;
-                    } else if (cell.net == net) {
-                        // Issue #3545: restore static halo / keepout
-                        // cells instead of freeing them (see
-                        // ``unmark_segment`` for rationale).
-                        if (cell.static_blocked) {
-                            cell.net = cell.original_net;
-                        } else {
-                            cell.blocked = false;
-                            cell.net = 0;
-                        }
+                    } else {
+                        cell.blocked = false;
+                        cell.net = 0;
                     }
                 }
             }
@@ -585,18 +644,21 @@ bool Grid3D::route_geometry_complete() const {
             const bool known = registered_route_geometry_.count(geometry_key) != 0;
             if (!known) route_coverage_complete_ = false;
             const auto [kind, net, layer, x1, y1, x2, y2, radius] = key;
+            // Issue #5660: the coverage map is the marking's twin, so it must
+            // walk the same kernel-derived halo ``mark_segment`` / ``mark_via``
+            // stamped.  A square window here would claim coverage over the
+            // diagonal cells the exact halo no longer marks.
+            const auto& offsets = halo_offsets(radius);
             auto mark = [&](int x, int y, int l) {
-                for (int dy = -radius; dy <= radius; ++dy) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
-                        const int cx = x + dx, cy = y + dy;
-                        if (!is_valid(cx, cy, l)) continue;
-                        auto& coverage = route_geometry_cells_[index(cx, cy, l)];
-                        // Unknown overlap remains hard regardless of mark order
-                        // or which net currently owns the cell.
-                        if (!known) coverage = -1;
-                        else if (coverage != -1 && at(cx, cy, l).net == net)
-                            coverage = net;
-                    }
+                for (const auto& [dx, dy] : offsets) {
+                    const int cx = x + dx, cy = y + dy;
+                    if (!is_valid(cx, cy, l)) continue;
+                    auto& coverage = route_geometry_cells_[index(cx, cy, l)];
+                    // Unknown overlap remains hard regardless of mark order
+                    // or which net currently owns the cell.
+                    if (!known) coverage = -1;
+                    else if (coverage != -1 && at(cx, cy, l).net == net)
+                        coverage = net;
                 }
             };
             if (kind == 1) {

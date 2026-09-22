@@ -17,7 +17,10 @@ Two classes of assertion:
 
 Consumer comparisons live at the bottom of the file, clearly separated: they
 carry ``@pytest.mark.consumer`` and are auto-``xfail``ed, because a measured
-disagreement is this epic's *output*, not a broken build.
+disagreement is this epic's *output*, not a broken build -- **unless** the
+consumer's group appears in ``conftest.SWITCHED_GROUPS``, in which case its
+phase has landed and its rows are gated against
+:data:`FIXTURE_QUANTISATION_LEDGER` instead.
 """
 
 from __future__ import annotations
@@ -29,7 +32,12 @@ from pathlib import Path
 import pytest
 
 from tests.conformance.board import FIXTURES_DIR
-from tests.conformance.conftest import requires_adapter, requires_kicad_cli
+from tests.conformance.conftest import (
+    SWITCHED_GROUPS,
+    assert_switched_group_matches_ledger,
+    requires_adapter,
+    requires_kicad_cli,
+)
 from tests.conformance.fixtures import (
     GRID_RESOLUTION_MM,
     HOLE_TO_HOLE_MM,
@@ -300,9 +308,19 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("match_group", True),
         ("kct_check", True),
     ),
-    # kicad-cli finds this CLEAN (0.213 mm copper, 0.513 mm drill). The grid's
-    # Chebyshev-square via halo swallows the candidate anyway -- in both
-    # languages, and the C++ disc-kernel read side does not rescue it.
+    # kicad-cli finds this CLEAN (0.213 mm copper, 0.513 mm drill). The grid
+    # occupancy rows reject the candidate anyway -- in both languages, and the
+    # C++ disc-kernel read side does not rescue it.
+    #
+    # #5660 (Phase 3a) changed the *reason* without changing the prediction,
+    # and the distinction matters for anyone reading this row as #5410
+    # evidence.  DQS_N's own via halo no longer covers the DQ3 candidate cell:
+    # it is Euclidean 6.40 cells away, outside the six-cell disc the kernel
+    # now stamps, where the Chebyshev square covered it at a corner (pinned in
+    # `tests/router/test_halo_kernel_geometry.py`).  This adapter still says
+    # REJECT because its rule dilates the *candidate* as well, and two
+    # six-cell discs 6.40 cells apart still intersect.  Flipping this to
+    # ACCEPT is Phase 3b's refinement work (groups 4/5), not halo geometry.
     "issue5410-dqs-n-halo-vs-legal-via": (
         ("clearance_kernel", False),
         ("diffpair", False),
@@ -357,6 +375,53 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("kct_check", False),
     ),
 }
+
+# The named-fixture half of ``test_corpus.QUANTISATION_LEDGER``: what a
+# *switched* group (``conftest.SWITCHED_GROUPS``) is still allowed to
+# over-reject on each committed fixture, keyed ``(group, fixture)``.  Entries
+# are the ``sorted(pair)`` list the failure message prints.
+#
+# Groups 1 and 2 answer with a cell set, and the adapter's rejection rule
+# dilates both the existing copper *and* the candidate before intersecting
+# them, so every entry below is two halo radii of outward rounding, not the
+# Chebyshev corner #5660 removed.  The #5410 row is the one worth reading
+# twice: after Phase 3a DQS_N's via halo genuinely no longer covers the DQ3
+# candidate *cell* -- ``tests/router/test_halo_kernel_geometry.py`` pins that
+# in both backends, and it is the search-time rejection the issue reported --
+# but the adapter also grows DQ3's own 6-cell halo, and two 6-cell discs
+# 6.40 cells apart still touch.  Closing this row needs the refinement pass
+# (groups 4/5, Phase 3b), not a finer halo.
+FIXTURE_QUANTISATION_LEDGER: dict[tuple[int, str], tuple[str, ...]] = {
+    # kicad-cli FLAGS this pair, and both grids reject it: agreement, not a
+    # disagreement, so the ledger is empty.
+    (1, "issue5398-seg-via-0p18-order"): (),
+    (2, "issue5398-seg-via-0p18-order"): (),
+    (1, "issue5410-dqs-n-halo-vs-legal-via"): ("['DQ3', 'DQS_N']",),
+    (2, "issue5410-dqs-n-halo-vs-legal-via"): ("['DQ3', 'DQS_N']",),
+    (1, "search-vs-commit-seg-via-max"): ("['COMMIT_VIA', 'SEARCH_TRACK']",),
+    (2, "search-vs-commit-seg-via-max"): ("['COMMIT_VIA', 'SEARCH_TRACK']",),
+    (1, "roundrect-corner-gap"): ("['CORNER_TRACK', 'PAD_ROUNDRECT']",),
+    # Group 2 never sees a pad pair (`ROUTED_COPPER_KINDS`), so this row skips
+    # before the ledger is consulted; kept for the coverage assertion below.
+    (2, "roundrect-corner-gap"): (),
+}
+
+
+def test_the_fixture_quantisation_ledger_covers_every_switched_row() -> None:
+    """Every switched ``(group, fixture)`` is recorded, and nothing else is.
+
+    Same contract as ``test_corpus.test_the_quantisation_ledger_covers_every_switched_row``:
+    a missing key would surface as a ``KeyError`` that reads like a harness
+    bug, and a stale one would sit there looking authoritative after its group
+    stopped being switched.
+    """
+    expected = {(group, name) for group in SWITCHED_GROUPS for name in NAMED_FIXTURES}
+    assert set(FIXTURE_QUANTISATION_LEDGER) == expected, (
+        "the fixture ledger and SWITCHED_GROUPS x NAMED_FIXTURES have drifted.\n"
+        f"  missing: {sorted(expected - set(FIXTURE_QUANTISATION_LEDGER))}\n"
+        f"  stale:   {sorted(set(FIXTURE_QUANTISATION_LEDGER) - expected)}"
+    )
+
 
 _ADAPTER_PARAMS = [
     pytest.param(adapter.name, id=adapter.name, marks=(requires_adapter(adapter),))
@@ -442,6 +507,17 @@ def test_named_fixture_adapter_agrees_with_kicad_cli(name: str, adapter_name: st
 
     over = sorted(sorted(p) for p in consumer - truth)
     under = sorted(sorted(p) for p in truth - consumer)
+
+    if adapter.group in SWITCHED_GROUPS:
+        assert_switched_group_matches_ledger(
+            adapter,
+            over=[str(pair) for pair in over],
+            under=[str(pair) for pair in under],
+            expected=FIXTURE_QUANTISATION_LEDGER[adapter.group, name],
+            what=f"fixture {name}",
+        )
+        return
+
     assert not over and not under, (
         f"{name}: `{adapter.name}` (group {adapter.group}) disagrees with kicad-cli\n"
         f"  over-rejected (consumer flags, KiCad clean): {over}\n"

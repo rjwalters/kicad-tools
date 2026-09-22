@@ -8,9 +8,12 @@
  * "is that at least `required_mm`".  Rule resolution (which number is
  * `required_mm` for a given pair) belongs to the Phase 2 resolver.
  *
- * Nothing in the shipped router calls this yet -- Phase 1b adds the kernel and
- * its parity/fixture evidence only (see the "no consumer switched" test in
- * tests/router/test_clearance_kernel_parity.py).
+ * Consumers arrive one epic phase at a time.  Phase 1b added the kernel with
+ * nothing wired to it; Phase 3a (#5660) switched the first -- `Grid3D`'s
+ * route-copper halo marking in src/grid.cpp, and its Python sibling in
+ * router/grid.py.  tests/router/test_clearance_kernel_parity.py keeps the
+ * ledger of who is on the kernel and fails on an include that appears without
+ * an entry, so each phase's before/after measurement stays attributable.
  *
  * PORT CONTRACT
  * -------------

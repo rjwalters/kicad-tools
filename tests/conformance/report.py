@@ -314,17 +314,29 @@ NOT_MEASURED_REASONS: dict[int, str] = {
 # epic's group inventory that this phase could not score is recorded here, so
 # a measured row cannot imply more coverage than it has.
 NOTES: dict[int, str] = {
-    1: "Cell-set answer, so no mm gap is reported; square Chebyshev halo (#5410).",
+    1: (
+        "Cell-set answer, so no mm gap is reported. **Switched to the "
+        "clearance kernel** by #5660 (Epic #5509 Phase 3a): the halo is the "
+        "kernel's exact dilation, not the Chebyshev square that swallowed "
+        "#5410's legal via at a corner. The rate is unchanged by that switch "
+        "-- the residual is outward *rounding* along the pair axis "
+        "(`int(...) + 1`, doubled because this row's rejection rule dilates "
+        "the candidate as well as the existing copper), not the square's "
+        "diagonal excess. Retired by groups 4/5's refinement, not by a finer "
+        "halo. This row is now a merge gate, not report-only."
+    ),
     2: (
-        "Write side: `mark_segment` / `mark_via` square halo. Routed copper "
-        "only -- the C++ grid never marks pads itself "
+        "Write side: `mark_segment` / `mark_via`, **switched to the clearance "
+        "kernel** by #5660 alongside group 1 and gated the same way. Routed "
+        "copper only -- the C++ grid never marks pads itself "
         "(`CppGrid.from_routing_grid` copies the Python blocked plane), so "
         "pad pairs would re-measure group 1."
     ),
     3: (
-        "Read side: the Euclidean-disc acceptance kernel (#3229), narrower "
-        "than group 2's square by construction. Via candidates go through the "
-        "sibling `is_via_blocked`."
+        "Read side: the Euclidean-disc acceptance kernel (#3229). Since #5660 "
+        "the group 1/2 write side stamps a disc too, so read and write finally "
+        "describe the same shape. Via candidates go through the sibling "
+        "`is_via_blocked`."
     ),
     4: "Raises the requirement to `max(required, via_clearance)` for trace-vs-via.",
     5: (
@@ -898,8 +910,11 @@ def render_document(
         "**accept** when the via is inserted first, **reject** when the "
         "segment is (#5398) |",
         "| `issue5410-dqs-n-halo-vs-legal-via` | clean (0.213 mm copper, "
-        "0.513 mm drill vs 0.20 / 0.50) | grid occupancy **rejects** -- "
-        "six-cell Chebyshev square halo on a 0.127 mm grid (#5410) |",
+        "0.513 mm drill vs 0.20 / 0.50) | grid occupancy **rejects**. Since "
+        "#5660 DQS_N's own halo no longer covers the DQ3 cell (Euclidean "
+        "6.40 cells against a six-cell disc, where the Chebyshev square "
+        "covered it at its corner); this row still rejects because the "
+        "adapter grows DQ3's halo too and the two discs touch (#5410) |",
         "| `search-vs-commit-seg-via-max` | clean (project `Default` class "
         "0.15 mm) | route-halo geometry **rejects** via "
         "`max(required, via_clearance)`; commit gates **accept** |",
