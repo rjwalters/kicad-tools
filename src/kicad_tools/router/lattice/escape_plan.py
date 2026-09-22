@@ -1,4 +1,15 @@
-"""Bounded reservations for two widened, tapered pads on one footprint."""
+"""Bounded reservations for two widened, tapered pads on one footprint.
+
+Epic #5509 Phase 3d: this module owns no clearance arithmetic of its own.
+Every clearance-relevant path here -- :meth:`EscapeChoice.clears`,
+:func:`chosen_stub`, and the per-option gate inside
+:func:`plan_tapered_escapes` -- asks :class:`~.obstacles.CommittedCopper` and
+:class:`~.escape_boundary.EscapeBoundary`, both of which now measure through
+the shared exact-geometry kernel (:mod:`.kernel_adapter`).  The only numbers
+compared here are *widths* (``width >= 2 * half``, the taper gate), which are
+not a clearance question, so this module is switched by delegation rather
+than by an edit.
+"""
 
 from __future__ import annotations
 

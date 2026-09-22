@@ -18,6 +18,17 @@ Dormancy contract: when no ``--voltage-map`` was supplied the projection is
 ``None`` and every lattice predicate runs its pre-#4602 code byte-for-byte.
 :func:`build_lattice_pairwise` also returns ``None`` when nothing resolves
 to a widening pair on this board, keeping the fast path for such runs.
+
+Epic #5509 Phase 3d: this module carries **requirements**, never geometry.
+:meth:`LatticePairwise.required` answers "how many mm does this id pair
+need", and the ``exempt_*`` helpers locate a #4506 attach-zone *probe point*
+(the closest-gap midpoint the #4588 post-route gate probes, so the two agree
+by construction).  Neither is a gap measurement, so there is no predicate
+here to move onto the kernel -- the pair requirements this module supplies
+are consumed by :mod:`.obstacles`, whose gaps are kernel-measured as of that
+phase.  Widening the *rule* side onto Epic #5509's Phase 2 resolver is a
+separate step: that resolver is keyed by net **name**, and the lattice is
+name-free by design (the #4597 discipline this module exists to preserve).
 """
 
 from __future__ import annotations

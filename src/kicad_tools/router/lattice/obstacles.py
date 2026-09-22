@@ -12,11 +12,22 @@ per copper layer:
   resolves net membership at query time (no per-net rebuild).
 
 * **Committed copper** (:class:`CommittedCopper`) -- the dynamic model a
-  negotiation pass accumulates.  Checks are geometric (segment-segment /
-  segment-point distance against real gaps), not merely discrete
+  negotiation pass accumulates.  Checks are geometric (real edge-to-edge
+  copper gaps against the applicable clearance), not merely discrete
   node-occupancy: adjacent fine-lattice rows can sit closer than the
   copper gap, so occupancy alone could ship a clearance violation.  This
   is the #3906 "consult the obstacle model, never blind-fit" lesson.
+
+Epic #5509 Phase 3d: :meth:`CommittedCopper.seg_clear`, :meth:`~CommittedCopper.node_clear`
+and :meth:`~CommittedCopper.via_clear` no longer carry their own distance
+arithmetic.  Every gap is measured by the shared exact-geometry clearance
+kernel through :mod:`.kernel_adapter`, which projects the lattice's integer
+net-id copper onto the kernel's net-agnostic shapes.  Only the *geometry*
+moved: the thresholds, the negotiation order and the #4506/#4602 exemption
+paths are untouched.  The pad-mask half of this module
+(:class:`LatticeObstacleModel`, :class:`LatticeKeepoutMask`) gates *site
+availability* against inflated keep-out rectangles rather than measuring a
+clearance, so it keeps its rectangle arithmetic.
 """
 
 from __future__ import annotations
@@ -27,6 +38,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from ..primitives import Pad, pad_half_extents
+from . import kernel_adapter as ka
 from .geometry import (
     Pt,
     Rect,
@@ -37,7 +49,6 @@ from .geometry import (
     seg_near_polygon,
     seg_pt_dist,
     seg_rect_intersect,
-    seg_seg_dist,
 )
 from .quadtree import EdgeKey, NodeKey, OctilinearLattice
 
@@ -603,12 +614,16 @@ class CommittedCopper:
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
         pad = own_half + max(own_clr, pw_reach) + 0.5
+        # Epic #5509 Phase 3d: every gap below is the KERNEL's edge-to-edge
+        # answer, measured once per obstacle and compared against the
+        # clearance alone (the old form composed a centreline gap and
+        # compared distances -- algebraically the same comparison).
+        probe = ka.LatticeProbe(ka.trace(a, b, own_half, layer), net)
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(a, b, pad=pad):
-            if cnet == net:
+            if not probe.foreign(cnet):
                 continue
-            gap = own_half + hw + max(own_clr, iclr)
-            d_cc = seg_seg_dist(a, b, c, d)
-            if d_cc < gap - 1e-9:
+            edge_gap = probe.gap(ka.trace(c, d, hw, layer))
+            if not ka.satisfies(edge_gap, max(own_clr, iclr)):
                 return False
             # Issue #4602: pair term.  The gap widens to the PAIR requirement
             # (never a per-net scalar); a scalar-passing hit inside the
@@ -617,28 +632,26 @@ class CommittedCopper:
             if pw is not None:
                 req = pw.required(net, cnet)
                 if req > max(own_clr, iclr):
-                    if d_cc < own_half + hw + req - 1e-9 and not pw.exempt_seg_seg(
+                    if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_seg(
                         a, b, c, d, net, cnet, layer
                     ):
                         return False
         # Issue #4597: honor the STORED via's class clearance the same way the
         # copper loop above honors a stored segment's -- a preserved HV via must
         # be cleared at its own class gap, not merely at the querying net's.
-        # ``max`` can only grow the gap, so a via stored at the global floor
-        # takes the precomputed ``own_via_gap`` and is byte-identical.
-        own_via_gap = self.via_radius + own_half + own_clr
+        # ``max`` can only grow the requirement, so a via stored at the global
+        # floor is cleared at ``own_clr`` and is byte-identical.
         for point, vnet, vclr in self.vias:
-            if vnet != net:
-                via_gap = own_via_gap if vclr <= own_clr else self.via_radius + own_half + vclr
-                d_vp = seg_pt_dist(a, b, point)
-                if d_vp < via_gap - 1e-9:
+            if probe.foreign(vnet):
+                via_gap = probe.gap(ka.site(point, self.via_radius))
+                if not ka.satisfies(via_gap, max(own_clr, vclr)):
                     return False
                 # Issue #4602: a committed via is copper too -- the pair
                 # requirement spaces the trace from its barrel edge.
                 if pw is not None:
                     req = pw.required(net, vnet)
                     if req > max(own_clr, vclr):
-                        if d_vp < self.via_radius + own_half + req - 1e-9 and not pw.exempt_seg_pt(
+                        if not ka.satisfies(via_gap, req) and not pw.exempt_seg_pt(
                             a, b, point, net, vnet, layer
                         ):
                             return False
@@ -674,33 +687,33 @@ class CommittedCopper:
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
         pad = own_half + max(own_clr, pw_reach) + 0.5
+        # Epic #5509 Phase 3d: the node site is a disc of the querying copper's
+        # own half-width, and every gap below is the kernel's (see ``seg_clear``).
+        probe = ka.LatticeProbe(ka.site(point, own_half), net)
         for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
-            if cnet == net:
+            if not probe.foreign(cnet):
                 continue
-            gap = own_half + hw + max(own_clr, iclr)
-            d_cc = seg_pt_dist(c, d, point)
-            if d_cc < gap - 1e-9:
+            edge_gap = probe.gap(ka.trace(c, d, hw, layer))
+            if not ka.satisfies(edge_gap, max(own_clr, iclr)):
                 return False
             if pw is not None:
                 req = pw.required(net, cnet)
                 if req > max(own_clr, iclr):
-                    if d_cc < own_half + hw + req - 1e-9 and not pw.exempt_seg_pt(
+                    if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
                         c, d, point, net, cnet, layer
                     ):
                         return False
         # Issue #4597: ``max(own_clr, stored_via_clr)`` -- see ``seg_clear``.
-        own_via_gap = self.via_radius + own_half + own_clr
         for vpt, vnet, vclr in self.vias:
-            if vnet == net:
+            if not probe.foreign(vnet):
                 continue
-            via_gap = own_via_gap if vclr <= own_clr else self.via_radius + own_half + vclr
-            d_vp = dist(point, vpt)
-            if d_vp < via_gap - 1e-9:
+            via_gap = probe.gap(ka.site(vpt, self.via_radius))
+            if not ka.satisfies(via_gap, max(own_clr, vclr)):
                 return False
             if pw is not None:
                 req = pw.required(net, vnet)
                 if req > max(own_clr, vclr):
-                    if d_vp < self.via_radius + own_half + req - 1e-9 and not pw.exempt_pt_pt(
+                    if not ka.satisfies(via_gap, req) and not pw.exempt_pt_pt(
                         point, vpt, net, vnet, layer
                     ):
                         return False
@@ -737,21 +750,30 @@ class CommittedCopper:
         pw = self.pairwise
         pw_reach = pw.max_required_for(net) if pw is not None else 0.0
         pad = self.via_radius + own_clr + self.trace_half + 2.0 + pw_reach
+        # Epic #5509 Phase 3d: the candidate is a through-via barrel, and
+        # every gap below is the kernel's (see ``seg_clear``).
+        probe = ka.LatticeProbe(ka.site(point, self.via_radius), net)
         for layer in range(self.num_layers):
             for c, d, cnet, hw, iclr in self.copper[layer].query_seg(point, point, pad=pad):
-                if cnet == net:
+                if not probe.foreign(cnet):
                     continue
-                gap = self.via_radius + hw + max(own_clr, iclr)
-                d_cc = seg_pt_dist(c, d, point)
-                if d_cc < gap - 1e-9:
+                edge_gap = probe.gap(ka.trace(c, d, hw, layer))
+                if not ka.satisfies(edge_gap, max(own_clr, iclr)):
                     return False
                 if pw is not None:
                     req = pw.required(net, cnet)
                     if req > max(own_clr, iclr):
-                        if d_cc < self.via_radius + hw + req - 1e-9 and not pw.exempt_seg_pt(
+                        if not ka.satisfies(edge_gap, req) and not pw.exempt_seg_pt(
                             c, d, point, net, cnet, layer
                         ):
                             return False
+        # The via-to-via requirements below are composed CENTRE-to-centre by
+        # the pathfinder (``via_via_gap`` is a via diameter plus a clearance;
+        # ``same_net_via_gap`` is a drill diameter plus the hole-to-hole
+        # floor), so each is re-expressed as the edge-to-edge requirement the
+        # kernel answers by subtracting the two barrel radii.  Same arithmetic,
+        # same verdict -- only the frame of reference moves.
+        two_radii = 2.0 * self.via_radius
         for vpt, vnet, vclr in self.vias:
             # Cross-net vias must honor BOTH the copper gap (via_via_gap =
             # via diameter + clearance, centre-to-centre) AND the drill
@@ -760,26 +782,26 @@ class CommittedCopper:
             # two 0.3mm drills only 0.45mm hole-edge-to-edge -- under the
             # 0.5mm floor (issue #4291: 16 hole_to_hole DRC warnings on the
             # softstart P4 run of record).
-            if vnet != net:
+            if probe.foreign(vnet):
                 # Derive the copper gap from the larger of the querying
                 # and stored class clearances. Keep
                 # the original global copper gap and drill floor as lower
                 # bounds, including when either class is unspecified.
-                gap = max(
-                    self.via_via_gap,
-                    2.0 * self.via_radius + max(own_clr, vclr),
-                    self.same_net_via_gap,
+                required = max(
+                    self.via_via_gap - two_radii,
+                    max(own_clr, vclr),
+                    self.same_net_via_gap - two_radii,
                 )
             else:
-                gap = self.same_net_via_gap
-            d_vv = dist(point, vpt)
-            if d_vv < gap - 1e-9:
+                required = self.same_net_via_gap - two_radii
+            barrel_gap = probe.gap(ka.site(vpt, self.via_radius))
+            if not ka.satisfies(barrel_gap, required):
                 return False
             # Issue #4602: barrel-to-barrel pair requirement for cross-net vias.
-            if pw is not None and vnet != net:
+            if pw is not None and probe.foreign(vnet):
                 req = pw.required(net, vnet)
                 if req > 0.0:
-                    if d_vv < 2.0 * self.via_radius + req - 1e-9 and not pw.exempt_pt_pt(
+                    if not ka.satisfies(barrel_gap, req) and not pw.exempt_pt_pt(
                         point, vpt, net, vnet
                     ):
                         return False
