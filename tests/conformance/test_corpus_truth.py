@@ -30,9 +30,10 @@ from pathlib import Path
 
 import pytest
 
+from tests.conformance.adapters import KIND_CLEARANCE, KIND_COPPER_EDGE
 from tests.conformance.board import write_case
 from tests.conformance.conftest import requires_kicad_cli
-from tests.conformance.generator import BOUNDARY_BAND_MM, generate_case
+from tests.conformance.generator import BOUNDARY_BAND_MM, PairKind, generate_case
 from tests.conformance.oracle import run_oracle
 
 pytestmark = requires_kicad_cli
@@ -50,6 +51,11 @@ CI_SEEDS = tuple(range(6))
 # kicad-cli invocations (refill, then DRC, plus the as-is DRC it is compared
 # against) and the CI ``test`` job reaps at ``--timeout=60``.
 REFILL_SEEDS = (0,)
+
+# One seed per zone pair kind: seed 7 draws a ``via-zone`` pair and seed 22 a
+# ``seg-zone`` one. Pinned rather than searched for, so a regeneration that
+# stopped placing a kind fails loudly here instead of quietly skipping.
+ZONE_PAIR_SEEDS = (7, 22)
 
 
 @pytest.mark.parametrize("seed", CI_SEEDS)
@@ -73,8 +79,15 @@ def test_kicad_cli_reproduces_the_intended_geometry(seed: int, tmp_path: Path) -
     board = write_case(case, tmp_path)
     result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
 
-    expected = {p.nets for p in case.pairs if p.expect_violation}
-    actual = {v.nets for v in result.without_zones() if v.kind == "clearance"}
+    # Split by verdict kind: a ``copper-edge`` pair is reported by kicad-cli as
+    # a one-sided ``copper_edge_clearance`` row against a *different* rule
+    # value (``min_copper_to_edge``), so folding the two kinds together would
+    # compare each intent against the wrong ground-truth family.
+    edge_kinds = set(PairKind.EDGE)
+    expected = {p.nets for p in case.pairs if p.expect_violation and p.kind not in edge_kinds}
+    actual = {v.nets for v in result.without_zones() if v.kind == KIND_CLEARANCE}
+    expected_edge = {p.nets for p in case.pairs if p.expect_violation and p.kind in edge_kinds}
+    actual_edge = {v.nets for v in result.without_zones() if v.kind == KIND_COPPER_EDGE}
 
     assert actual == expected, (
         f"seed {seed}: kicad-cli disagrees with the generator's own geometry.\n"
@@ -82,12 +95,21 @@ def test_kicad_cli_reproduces_the_intended_geometry(seed: int, tmp_path: Path) -
         f"  kicad-cli flagged:   {sorted(sorted(n) for n in actual)}\n"
         f"{result.describe()}"
     )
+    assert actual_edge == expected_edge, (
+        f"seed {seed}: kicad-cli disagrees with the generator's copper-to-edge "
+        "geometry.\n"
+        f"  intended violations: {sorted(sorted(n) for n in expected_edge)}\n"
+        f"  kicad-cli flagged:   {sorted(sorted(n) for n in actual_edge)}\n"
+        f"{result.describe()}"
+    )
     assert not result.dropped, (
         f"seed {seed}: clearance rows that could not be mapped to a net pair "
         f"(harness gap, not a consumer disagreement): {result.dropped}"
     )
 
-    by_pair = {v.nets: v for v in result.without_zones() if v.kind == "clearance"}
+    by_pair = {
+        v.nets: v for v in result.without_zones() if v.kind in (KIND_CLEARANCE, KIND_COPPER_EDGE)
+    }
     checked = 0
     for pair in case.pairs:
         verdict = by_pair.get(pair.nets)
@@ -123,3 +145,63 @@ def test_non_zone_verdicts_are_fill_state_independent(seed: int, tmp_path: Path)
         f"refilled: {sorted(v.describe() for v in refilled.without_zones())}"
     )
     assert as_is.refill is False and refilled.refill is True
+
+
+@pytest.mark.parametrize("seed", ZONE_PAIR_SEEDS)
+def test_refilled_fill_realises_the_intended_zone_gap(seed: int, tmp_path: Path) -> None:
+    """The zone half of the harness self-check, closed against KiCad's filler.
+
+    ``test_generator`` asserts the probe sits at the intended gap from the
+    pour's *declared boundary*. That is not the geometry the zone rules read:
+    ``SegmentZoneClearanceRule`` / ``ViaZoneClearanceRule`` /
+    ``physical_gap.py`` all consume committed ``filled_polygon`` copper, and
+    the filler is free to put that copper somewhere else -- it knocks the pour
+    back around foreign objects by the applied clearance. This is what says
+    the two agree: where the probe is drawn clear of the requirement, the
+    filler leaves the boundary alone and the fill realises the declared gap.
+
+    It also pins the property that forces the one-sided draw (see
+    ``generator._draw_clear_gap``): a refilled pour is *never* closer to
+    foreign copper than the requirement, so kicad-cli reports no zone finding
+    for a corpus zone pair, and a zone row can only ever show over-rejection.
+    """
+    from shapely.geometry import LineString, Point, Polygon
+
+    from kicad_tools.schema.pcb import PCB
+
+    case = generate_case(seed)
+    zone_pairs = [p for p in case.pairs if p.kind in PairKind.ZONE]
+    assert zone_pairs, f"seed {seed} no longer carries a zone pair -- re-pin ZONE_PAIR_SEEDS"
+    assert case.zone is not None
+
+    board = write_case(case, tmp_path)
+    refilled = run_oracle(board.pcb_path, refill=True, work_dir=tmp_path)
+
+    flagged = {v.nets for v in refilled.verdicts if v.zone}
+    assert not (flagged & {p.nets for p in zone_pairs}), (
+        f"seed {seed}: kicad-cli flagged a zone pair the generator placed "
+        f"above the requirement\n{refilled.describe()}"
+    )
+
+    pcb = PCB.load(refilled.pcb_path)
+    fills = [
+        Polygon(points) for zone in pcb.zones for points in zone.filled_polygons if len(points) >= 3
+    ]
+    assert fills, f"seed {seed}: the refilled board carries no zone fill to measure against"
+
+    segments = {s.net: s for s in case.segments}
+    vias = {v.net: v for v in case.vias}
+    for pair in zone_pairs:
+        net = next(n for n in pair.nets if n != case.zone.net)
+        if pair.kind == PairKind.SEG_ZONE:
+            seg = segments[net]
+            probe, half = LineString([seg.start, seg.end]), seg.width / 2.0
+        else:
+            via = vias[net]
+            probe, half = Point(via.x, via.y), via.diameter / 2.0
+        realised = min(probe.distance(fill) for fill in fills) - half
+        assert realised == pytest.approx(pair.target_gap_mm, abs=BOUNDARY_BAND_MM), (
+            f"seed {seed}, pair {pair.kind} {sorted(pair.nets)}: generator "
+            f"intended a {pair.target_gap_mm:.4f} mm gap to the pour, the "
+            f"refilled fill realises {realised:.4f} mm"
+        )

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conformance.adapters import ConsumerAdapter, Verdict
+from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.board import write_case
 from tests.conformance.conftest import requires_adapter, requires_kicad_cli
@@ -111,6 +111,35 @@ def test_only_the_kernel_answers_pad_pad_pairs() -> None:
     )
 
 
+def test_only_zone_and_edge_aware_consumers_answer_those_pairs() -> None:
+    """The #5644 kinds are claimed by the two groups that model them, and no more.
+
+    A consumer with no zone-fill or board-outline term in its arithmetic is
+    never consulted about one in production, so scoring it on those pairs
+    would manufacture an under-rejection rate out of a question nobody asks
+    it -- the same error ``pair_kinds`` exists to prevent for ``pad-pad``.
+    Group 18 drives four rules that really read that geometry; group 10's
+    ``is_clear`` really has a ``pours`` and an ``outline`` branch (and no via
+    candidate, which is why it claims ``seg-zone`` but not ``via-zone``).
+    """
+    zone_claimants = {a.group for a in ADAPTERS if set(PairKind.ZONE) & a.pair_kinds}
+    edge_claimants = {a.group for a in ADAPTERS if set(PairKind.EDGE) & a.pair_kinds}
+    assert zone_claimants == {10, 18}, sorted(zone_claimants)
+    assert edge_claimants == {10, 18}, sorted(edge_claimants)
+
+    mesh = next(a for a in ADAPTERS if a.group == 10)
+    assert PairKind.VIA_ZONE not in mesh.pair_kinds, (
+        "ObstacleModel.is_clear takes two points and no width, so it has no "
+        "via candidate to answer about"
+    )
+    kernel = _ADAPTERS_BY_GROUP[KERNEL_GROUP]
+    assert not (set(PairKind.ZONE) | set(PairKind.EDGE)) & kernel.pair_kinds, (
+        "the kernel control row is scored on the same copper the consumer "
+        "rows are; modelling a pour by its declared boundary while kicad-cli "
+        "measures the filled polygon would make its 0%/0% criterion fiction"
+    )
+
+
 @pytest.mark.parametrize("adapter", _ADAPTER_PARAMS)
 def test_adapter_is_deterministic(adapter: ConsumerAdapter) -> None:
     """Two runs over the same case give the same answer.
@@ -133,7 +162,11 @@ def test_adapter_only_speaks_about_declared_nets(adapter: ConsumerAdapter) -> No
     """
     for seed in CI_SEEDS:
         case = generate_case(seed)
-        declared = set(case.nets)
+        # ``BOARD_EDGE`` is the one name that is legitimately not a declared
+        # net: it is the reserved pseudo-net both the oracle and the adapters
+        # pair a one-sided ``copper_edge_clearance`` finding with, so that
+        # every verdict stays a symmetric two-element set.
+        declared = set(case.nets) | {BOARD_EDGE}
         for verdict in adapter.verdicts(case):
             assert isinstance(verdict, Verdict)
             assert verdict.nets <= declared, (
@@ -163,6 +196,12 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     excluded: within 1 um of the requirement the two models are arguing about
     rounding.  This mirrors ``report.measure_corpus`` exactly, so a red (well,
     xfailed) item here corresponds to a non-zero cell in the published table.
+
+    Zone pairs are the one exception, and for the same reason the report
+    scores them only on its refilled run: this item measures the *as-is* board,
+    where an unfilled pour contributes no copper to kicad-cli at all, so a zone
+    comparison here would score the fill state rather than the model.
+    :func:`test_zone_pairs_are_measured_on_a_refilled_run` covers them.
     """
     case = generate_case(seed)
     board = write_case(case, tmp_path)
@@ -176,6 +215,8 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     for pair in case.pairs:
         if pair.kind not in adapter.pair_kinds or pair.boundary:
             continue
+        if pair.kind in PairKind.ZONE:
+            continue
         in_truth = pair.nets in truth
         in_consumer = pair.nets in consumer
         if in_consumer and not in_truth:
@@ -188,6 +229,66 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
         f"  over-rejected (consumer flags, KiCad clean): {over}\n"
         f"  under-rejected (KiCad flags, consumer clean): {under}\n"
         f"{result.describe()}"
+    )
+
+
+#: One seed per consumer that claims a zone kind, chosen so each one really
+#: carries a zone pair: seed 7 draws a ``via-zone`` pair (group 18 only) and
+#: seed 22 a ``seg-zone`` one (groups 18 and 10).  Pinned rather than searched
+#: for, so a generator change that stopped placing a kind fails loudly instead
+#: of silently skipping the only item that measures it.
+ZONE_PAIR_SEEDS = (7, 22)
+
+
+@requires_kicad_cli
+@pytest.mark.consumer
+@pytest.mark.parametrize("seed", ZONE_PAIR_SEEDS)
+def test_zone_pairs_are_measured_on_a_refilled_run(seed: int, tmp_path: Path) -> None:
+    """The zone half of the table, exercised end to end on one seed per kind.
+
+    Everything the report does differently for a zone pair is here: the oracle
+    runs with ``refill=True``, ground truth comes from the verdicts that
+    *involve* zone copper (rather than from ``without_zones()``), and only the
+    adapters that claim a zone kind are asked.  Without this item the whole
+    refilled-run path would be exercised only by the out-of-band table
+    regeneration, which no PR runs.
+
+    Report-only like every other consumer row -- a disagreement is evidence
+    for group 18's or group 10's own epic phase, not a red build.
+    """
+    case = generate_case(seed)
+    zone_pairs = [p for p in case.pairs if p.kind in PairKind.ZONE]
+    assert zone_pairs, f"seed {seed} no longer carries a zone pair -- re-pin ZONE_PAIR_SEEDS"
+
+    board = write_case(case, tmp_path)
+    result = run_oracle(board.pcb_path, refill=True, work_dir=tmp_path)
+    truth = {v.nets for v in result.verdicts if v.zone}
+
+    findings: list[str] = []
+    measured = 0
+    for adapter in ADAPTERS:
+        in_scope = [p for p in zone_pairs if p.kind in adapter.pair_kinds and not p.boundary]
+        if not in_scope or not adapter.available():
+            continue
+        consumer = {v.nets for v in adapter.verdicts(case)}
+        for pair in in_scope:
+            measured += 1
+            in_truth = pair.nets in truth
+            in_consumer = pair.nets in consumer
+            if in_consumer != in_truth:
+                direction = "over" if in_consumer else "under"
+                findings.append(
+                    f"{adapter.name} (group {adapter.group}) {direction}-rejects "
+                    f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}"
+                )
+
+    assert measured, (
+        f"seed {seed}: no adapter claimed a zone pair -- the zone cells of the "
+        "published table would be an empty denominator"
+    )
+    assert not findings, (
+        f"zone-pair disagreements with kicad-cli on seed {seed} "
+        f"(refilled):\n  " + "\n  ".join(findings) + f"\n{result.describe()}"
     )
 
 
@@ -231,7 +332,10 @@ def test_kernel_agrees_with_kicad_cli(seed: int, tmp_path: Path) -> None:
     over: list[str] = []
     under: list[str] = []
     for pair in case.pairs:
-        if pair.boundary:
+        if pair.boundary or pair.kind not in kernel.pair_kinds:
+            # The zone and edge kinds are out of this row's scope (#5644):
+            # see ``KernelAdapter.pair_kinds`` on why widening it needs a
+            # fill-aware kernel shape rather than a wider comparison here.
             continue
         in_truth = pair.nets in truth
         in_kernel = pair.nets in verdicts

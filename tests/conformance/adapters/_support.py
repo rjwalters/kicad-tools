@@ -46,6 +46,7 @@ from kicad_tools.router.grid import RoutingGrid
 from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
+from tests.conformance.adapters import BOARD_EDGE
 from tests.conformance.generator import (
     CopperCase,
     PadSpec,
@@ -53,10 +54,13 @@ from tests.conformance.generator import (
     PairKind,
     SegmentSpec,
     ViaSpec,
+    ZoneSpec,
 )
 
 __all__ = [
     "ALL_PAIR_KINDS",
+    "BOARD_EDGE_REF",
+    "BoardEdgeRef",
     "PairContext",
     "PairObject",
     "cpp_grid_for",
@@ -79,7 +83,27 @@ __all__ = [
     "via_radius_cells",
 ]
 
-PairObject = SegmentSpec | ViaSpec | PadSpec
+
+@dataclass(frozen=True)
+class BoardEdgeRef:
+    """The board outline, standing in as a pair's *existing* side.
+
+    ``copper-edge`` pairs have no second copper object -- the counterpart is
+    the ``Edge.Cuts`` outline -- but :class:`PairContext` is a two-sided
+    structure and every adapter's ``existing`` branch is written as an
+    ``isinstance`` chain.  A sentinel keeps that shape intact and carries the
+    same :data:`~tests.conformance.adapters.BOARD_EDGE` pseudo-net the oracle
+    keys a one-sided ``copper_edge_clearance`` row with.
+    """
+
+    net: str = BOARD_EDGE
+
+
+BOARD_EDGE_REF = BoardEdgeRef()
+"""The singleton :class:`BoardEdgeRef` every ``copper-edge`` context carries."""
+
+
+PairObject = SegmentSpec | ViaSpec | PadSpec | ZoneSpec | BoardEdgeRef
 
 ALL_PAIR_KINDS: frozenset[str] = frozenset(PairKind.ROUTING)
 """Every pair kind that has a *routing candidate*; the default adapter scope.
@@ -90,6 +114,12 @@ router could propose (see :func:`pair_contexts`), so an adapter that wraps a
 router-side predicate is not consulted about it in production and must not be
 scored on it.  The one consumer that *is* pad-pad-only -- group 19's
 ``drc_cpp`` incremental placement check -- names that kind explicitly.
+
+The #5644 zone and edge kinds are excluded for the same reason: a consumer
+with no zone-fill or board-outline term in its arithmetic would be scored on
+a question it is never asked in production.  The two groups that *do* consult
+those branches -- 18 (`kct_check`) and 10 (`mesh`) -- name the kinds
+explicitly.
 """
 
 _LAYER_BY_NAME: dict[str, Layer] = {layer.kicad_name: layer for layer in Layer}
@@ -235,7 +265,10 @@ class PairContext:
 
     Attributes:
         pair: The generator's record of what it placed.
-        existing: The object treated as already-committed copper.
+        existing: The object treated as already-committed copper -- a segment,
+            via or pad, or (for the #5644 kinds) the case's
+            :class:`~tests.conformance.generator.ZoneSpec` pour or the
+            :data:`BOARD_EDGE_REF` outline sentinel.
         candidate: The object the consumer is asked about.  Never a pad: a
             pad is placement output, not something a router proposes.
     """
@@ -276,6 +309,28 @@ def pad_pad_pairs(case: CopperCase) -> list[tuple[PairIntent, PadSpec, PadSpec]]
     return pairs
 
 
+def _one_sided_context(
+    case: CopperCase,
+    pair: PairIntent,
+    by_net: dict[str, PairObject],
+) -> PairContext:
+    """The :class:`PairContext` for a ``seg-zone`` / ``via-zone`` / ``copper-edge`` pair.
+
+    Exactly one side is a copper object the case declares; the other is the
+    pour or the outline.  Which *slot* of the intent holds the copper net is
+    not assumed -- it is looked up -- so a future placer that records the pair
+    the other way round cannot silently produce a context with the two sides
+    swapped.
+    """
+    copper = by_net.get(pair.net_a) or by_net.get(pair.net_b)
+    assert copper is not None, f"{pair.kind} pair {sorted(pair.nets)} declares no copper object"
+    assert isinstance(copper, SegmentSpec | ViaSpec), "a pad is never a routing candidate"
+    if pair.kind in PairKind.EDGE:
+        return PairContext(pair=pair, existing=BOARD_EDGE_REF, candidate=copper)
+    assert case.zone is not None, f"{pair.kind} pair on a case with no pour"
+    return PairContext(pair=pair, existing=case.zone, candidate=copper)
+
+
 def pair_contexts(case: CopperCase) -> list[PairContext]:
     """Split every close pair into (existing copper, candidate).
 
@@ -287,6 +342,10 @@ def pair_contexts(case: CopperCase) -> list[PairContext]:
 
     The split rule, in order:
 
+    0. **A zone or edge pair has exactly one copper object**, and that object
+       is always the candidate: the pour and the board outline are both
+       pre-existing board features a router routes *around* (#5644).  Their
+       ``existing`` side is the case's ``ZoneSpec`` or :data:`BOARD_EDGE_REF`.
     1. **A pad is always existing copper.**  Placement puts pads down before
        routing starts; no consumer here is ever asked "may I add this pad?".
     2. **A segment/via pair commits the via first.**  This is the *named*
@@ -303,6 +362,9 @@ def pair_contexts(case: CopperCase) -> list[PairContext]:
     contexts: list[PairContext] = []
     for pair in case.pairs:
         if pair.kind == PairKind.PAD_PAD:
+            continue
+        if pair.kind in PairKind.ZONE or pair.kind in PairKind.EDGE:
+            contexts.append(_one_sided_context(case, pair, by_net))
             continue
         first, second = by_net[pair.net_a], by_net[pair.net_b]
         if isinstance(first, PadSpec):
