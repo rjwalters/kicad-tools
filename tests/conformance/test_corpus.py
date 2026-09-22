@@ -5,14 +5,25 @@ generator intends is the geometry KiCad measures.  This module is the layer
 above it -- the same seeded cases, but now asking each in-tree clearance
 consumer the question kicad-cli already answered.
 
-**Every adapter-vs-truth row is report-only.**  Each carries
-``@pytest.mark.consumer``, and ``conftest.py``'s collection hook turns that
-into ``xfail(strict=False)``.  A measured disagreement must not redden the
-build: consumers are switched to the shared kernel in their own Epic #5509
-phase, and only then does a row become a merge gate.  That mechanism landed
-untested in PR #5532 (there were no consumer items to exercise it), so
-:func:`test_every_consumer_item_carries_xfail` asserts it over the whole
-collected suite.
+**An adapter-vs-truth row is report-only until its consumer is switched.**
+Each carries ``@pytest.mark.consumer``, and ``conftest.py``'s collection hook
+turns that into ``xfail(strict=False)``.  A measured disagreement must not
+redden the build: consumers are switched to the shared kernel in their own
+Epic #5509 phase, and only then does a row become a merge gate.  That
+mechanism landed untested in PR #5532 (there were no consumer items to
+exercise it), so :func:`test_every_unmigrated_consumer_item_carries_xfail`
+asserts it over the whole collected suite.
+
+**A row whose group is in ``report.MIGRATED_GROUPS`` is a merge gate.**  Its
+consumer has had its Phase 3/4 PR, the hook leaves the item un-``xfail``\\ ed,
+and :func:`test_adapter_agrees_with_kicad_cli` asserts agreement for real.
+The gated reading drives that same unmodified consumer at the clearance
+**kicad-cli itself applies** (``adapter.verdicts_at_project_rules``), so the
+gate fails on a geometry disagreement -- what a migration changes -- and not
+on the rule value the consumer resolves, which is Phase 2's axis and stays
+measured by the published table.
+:func:`test_migrated_consumer_items_are_hard_gates` asserts the flip really
+reached the collected items.
 
 **Hard assertions here are about the adapters, not the consumers.**  An
 adapter must satisfy the protocol, must be deterministic, and must only ever
@@ -37,10 +48,10 @@ import pytest
 from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.board import write_case
-from tests.conformance.conftest import requires_adapter, requires_kicad_cli
+from tests.conformance.conftest import item_group, requires_adapter, requires_kicad_cli
 from tests.conformance.generator import PairKind, generate_case
 from tests.conformance.oracle import run_oracle
-from tests.conformance.report import ADAPTERS, main
+from tests.conformance.report import ADAPTERS, MIGRATED_GROUPS, main
 
 _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 
@@ -176,8 +187,35 @@ def test_adapter_only_speaks_about_declared_nets(adapter: ConsumerAdapter) -> No
 
 
 # ---------------------------------------------------------------------------
-# The measurement itself -- report-only, auto-xfail
+# The measurement itself -- report-only until the consumer is switched
 # ---------------------------------------------------------------------------
+
+
+def _consumer_verdicts(adapter: ConsumerAdapter, case) -> set[frozenset[str]]:
+    """The reading this item scores the adapter on.
+
+    An **unmigrated** group is read exactly as the published table reads it:
+    the consumer at its own rule values, with the result xfailed.  Both halves
+    of a disagreement -- geometry and rule selection -- are evidence for that
+    consumer's own phase, and separating them there would be premature.
+
+    A **migrated** group is read at the clearance kicad-cli itself applies.
+    Its migration PR changed *geometry* and nothing else (Epic #5509 scope
+    guard #1 forbids touching a rule value), so gating it on the consumer's
+    own resolved clearance would redden this build for the rule defect
+    #5398 / #5654 tracks, which no Phase 3 PR is allowed to fix.  Pinning the
+    rule axis to ground truth's own value is what makes the gate a statement
+    about the thing the migration actually moved.
+    """
+    if adapter.group in MIGRATED_GROUPS:
+        at_project = getattr(adapter, "verdicts_at_project_rules", None)
+        assert at_project is not None, (
+            f"{adapter.name} (group {adapter.group}) is in MIGRATED_GROUPS but "
+            "does not implement verdicts_at_project_rules(case); a gated row "
+            "must be drivable at kicad-cli's own rule value"
+        )
+        return {v.nets for v in at_project(case)}
+    return {v.nets for v in adapter.verdicts(case)}
 
 
 @requires_kicad_cli
@@ -194,8 +232,14 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     Only the pairs the adapter declares itself in scope for
     (``ConsumerAdapter.pair_kinds``) are compared, and boundary-band pairs are
     excluded: within 1 um of the requirement the two models are arguing about
-    rounding.  This mirrors ``report.measure_corpus`` exactly, so a red (well,
-    xfailed) item here corresponds to a non-zero cell in the published table.
+    rounding.  For an unmigrated group this mirrors ``report.measure_corpus``
+    exactly, so a red (well, xfailed) item here corresponds to a non-zero cell
+    in the published table.
+
+    For a **migrated** group (``report.MIGRATED_GROUPS``) the item carries no
+    ``xfail`` -- that is the flip its epic phase exists to make -- and the
+    consumer is driven at kicad-cli's own rule value; see
+    :func:`_consumer_verdicts` for why the two readings differ.
 
     Zone pairs are the one exception, and for the same reason the report
     scores them only on its refilled run: this item measures the *as-is* board,
@@ -208,15 +252,17 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
 
     truth = {v.nets for v in result.without_zones()}
-    consumer = {v.nets for v in adapter.verdicts(case)}
+    consumer = _consumer_verdicts(adapter, case)
 
     over: list[str] = []
     under: list[str] = []
+    compared = 0
     for pair in case.pairs:
         if pair.kind not in adapter.pair_kinds or pair.boundary:
             continue
         if pair.kind in PairKind.ZONE:
             continue
+        compared += 1
         in_truth = pair.nets in truth
         in_consumer = pair.nets in consumer
         if in_consumer and not in_truth:
@@ -224,8 +270,24 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
         elif in_truth and not in_consumer:
             under.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
 
+    if adapter.group in MIGRATED_GROUPS:
+        # A gate over an empty denominator is green for the wrong reason.  An
+        # xfailed row can afford to be vacuous (the published table carries
+        # the real denominator); a gated one cannot, because "no in-scope pair
+        # on this seed" and "this consumer agrees" would look identical.
+        assert compared, (
+            f"{adapter.name} (group {adapter.group}) is gated but seed {seed} "
+            f"offered no in-scope pair to compare (pair_kinds={sorted(adapter.pair_kinds)}) "
+            "-- the gate is vacuous; re-pin CI_SEEDS or widen the scope"
+        )
+
+    gated = (
+        " (GATED: this consumer is on the shared kernel)"
+        if adapter.group in MIGRATED_GROUPS
+        else ""
+    )
     assert not over and not under, (
-        f"{adapter.name} (group {adapter.group}) disagrees with kicad-cli on seed {seed}\n"
+        f"{adapter.name} (group {adapter.group}) disagrees with kicad-cli on seed {seed}{gated}\n"
         f"  over-rejected (consumer flags, KiCad clean): {over}\n"
         f"  under-rejected (KiCad flags, consumer clean): {under}\n"
         f"{result.describe()}"
@@ -394,36 +456,96 @@ def test_report_regenerates_byte_identically(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The auto-xfail mechanism is itself under test
+# The auto-xfail mechanism -- and its migrated-group exception -- under test
 # ---------------------------------------------------------------------------
 
 
-def test_every_consumer_item_carries_xfail(request: pytest.FixtureRequest) -> None:
+def test_migrated_groups_are_wired_and_drivable_at_ground_truths_rule_value() -> None:
+    """``MIGRATED_GROUPS`` names real, gated, project-rule-drivable adapters.
+
+    Three static properties, none of which needs kicad-cli, so a migration
+    registered without the plumbing to back it fails on any laptop:
+
+    * every migrated group is one of the epic's nineteen (never the kernel
+      control row, which was never a consumer to migrate);
+    * every migrated group actually has an adapter -- listing an unwired group
+      would flip a gate that has no row to gate;
+    * that adapter implements ``verdicts_at_project_rules``, the reading
+      ``_consumer_verdicts`` gates on.  Without it the gate would silently
+      fall back to the consumer's own rule values and start failing for the
+      #5654 rule defect instead of for a geometry disagreement.
+    """
+    consumer_groups = {g for g in WIRED_GROUPS if g != KERNEL_GROUP}
+    assert not (MIGRATED_GROUPS - consumer_groups), (
+        "MIGRATED_GROUPS names groups that are not wired consumer groups: "
+        f"{sorted(MIGRATED_GROUPS - consumer_groups)}"
+    )
+    for group in sorted(MIGRATED_GROUPS):
+        adapter = _ADAPTERS_BY_GROUP[group]
+        assert hasattr(adapter, "verdicts_at_project_rules"), (
+            f"{adapter.name} (group {group}) is migrated but cannot be driven "
+            "at the project netclass clearance"
+        )
+
+
+def _consumer_items(request: pytest.FixtureRequest) -> list[pytest.Item]:
+    items = [
+        item for item in request.session.items if item.get_closest_marker("consumer") is not None
+    ]
+    if not items:
+        pytest.skip(
+            "no @pytest.mark.consumer items were collected -- this assertion "
+            "is only meaningful for a whole-suite run (uv run pytest tests/conformance)"
+        )
+    return items
+
+
+def test_every_unmigrated_consumer_item_carries_xfail(request: pytest.FixtureRequest) -> None:
     """``conftest.pytest_collection_modifyitems`` really fired.
 
     The hook is the *only* thing standing between a measured disagreement and
     a red build, and it shipped with no item to exercise it.  This walks the
     session's collected items rather than trusting the marker: every
-    ``@pytest.mark.consumer`` item must also carry an ``xfail``, and that
-    ``xfail`` must be non-strict (a strict one would fail the moment a
-    consumer starts agreeing, which is the outcome the epic is working
-    towards).
+    ``@pytest.mark.consumer`` item whose group is not yet migrated must also
+    carry an ``xfail``, and that ``xfail`` must be non-strict (a strict one
+    would fail the moment a consumer starts agreeing, which is the outcome the
+    epic is working towards).
     """
-    consumer_items = [
-        item for item in request.session.items if item.get_closest_marker("consumer") is not None
-    ]
-    if not consumer_items:
-        pytest.skip(
-            "no @pytest.mark.consumer items were collected -- this assertion "
-            "is only meaningful for a whole-suite run (uv run pytest tests/conformance)"
-        )
+    candidates = [i for i in _consumer_items(request) if item_group(i) not in MIGRATED_GROUPS]
 
-    missing = [item.nodeid for item in consumer_items if item.get_closest_marker("xfail") is None]
+    missing = [item.nodeid for item in candidates if item.get_closest_marker("xfail") is None]
     assert not missing, f"consumer items collected without an auto-xfail: {missing}"
 
     strict = [
         item.nodeid
-        for item in consumer_items
+        for item in candidates
         if item.get_closest_marker("xfail").kwargs.get("strict") is not False
     ]
     assert not strict, f"consumer items whose xfail is strict: {strict}"
+
+
+def test_migrated_consumer_items_are_hard_gates(request: pytest.FixtureRequest) -> None:
+    """The flip reached the collected items, not just the registry.
+
+    The mirror image of the test above, and the assertion that makes "group N
+    is no longer report-only" checkable rather than declared.  Registering a
+    group in ``MIGRATED_GROUPS`` while the hook still xfails its items would
+    leave the epic's Phase 3/4 acceptance criterion unmet *and* invisible --
+    the suite would stay green either way.
+
+    Skips rather than fails when the whole suite was not collected: with
+    ``-k`` or a single-module run there may be no migrated item present, which
+    says nothing about the mechanism.
+    """
+    gated = [i for i in _consumer_items(request) if item_group(i) in MIGRATED_GROUPS]
+    if not gated:
+        pytest.skip(
+            "no migrated-group consumer items collected -- run the whole "
+            "module (uv run pytest tests/conformance/test_corpus.py)"
+        )
+
+    still_xfailed = [item.nodeid for item in gated if item.get_closest_marker("xfail") is not None]
+    assert not still_xfailed, (
+        "these consumer items belong to a group in MIGRATED_GROUPS but are "
+        f"still auto-xfailed, so their disagreement cannot redden a build: {still_xfailed}"
+    )

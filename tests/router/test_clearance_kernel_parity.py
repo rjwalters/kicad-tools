@@ -754,25 +754,62 @@ def test_cpp_kernel_present_in_ci() -> None:
         pytest.fail("router_cpp not built in CI test job -- kernel parity silently skipped")
 
 
-def test_no_consumer_switched_to_the_kernel() -> None:
-    """Phase 1b adds the kernel; it must not wire it into any consumer.
+MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
+    {
+        # Epic #5509 Phase 3d (#5663), consumer group 9: the lattice engine.
+        # The adapter is the package's single import site on purpose -- the
+        # lattice is geometry-only in an integer net-id space and the kernel is
+        # net-agnostic, so one module owns the projection and every predicate
+        # in ``router/lattice/`` goes through it.
+        "router/lattice/kernel_adapter.py",
+    }
+)
+"""Python modules allowed to reference the kernel, one entry per migration.
 
-    Phases 2-4 switch consumers over deliberately, one at a time, each with
-    its own before/after measurement.  An accidental import here would make
-    that measurement impossible -- so the acceptance criterion is a test, not
-    a grep someone remembers to run.
+Phases 2-4 switch consumers over **deliberately, one at a time**, each with
+its own before/after measurement.  This set is what keeps "deliberately"
+checkable: a module that starts calling the kernel without being added here
+fails :func:`test_only_migrated_consumers_reference_the_kernel`, and an entry
+added without a migration is dead weight a reviewer can see.
+
+Keep it in step with ``tests/conformance/report.MIGRATED_GROUPS``, which flips
+the same migration's conformance rows from report-only to gated.
+"""
+
+
+def test_only_migrated_consumers_reference_the_kernel() -> None:
+    """The kernel reaches a consumer only where a phase deliberately wired it.
+
+    Succeeds ``test_no_consumer_switched_to_the_kernel`` (Phase 1b, when the
+    right answer was "none at all").  The property is unchanged -- an
+    *accidental* import would destroy a consumer's before/after measurement --
+    but the expected set is now an enumerated allowlist rather than the empty
+    set, because Phase 3d really did switch one.
     """
     repo_root = Path(__file__).resolve().parents[2]
     src = repo_root / "src" / "kicad_tools"
     hits: list[str] = []
     for path in sorted(src.rglob("*.py")):
         rel = path.relative_to(src).as_posix()
-        if rel == "router/clearance_kernel.py":
+        if rel == "router/clearance_kernel.py" or rel in MIGRATED_KERNEL_CALLERS:
             continue
         if "clearance_kernel" in path.read_text(encoding="utf-8"):
             hits.append(rel)
     assert hits == [], (
-        f"clearance_kernel is referenced by a consumer, but Phase 1b switches none: {hits}"
+        "clearance_kernel is referenced by a consumer that no epic phase has "
+        f"switched; add it to MIGRATED_KERNEL_CALLERS with its phase, or revert: {hits}"
+    )
+
+    stale = sorted(rel for rel in MIGRATED_KERNEL_CALLERS if not (src / rel).exists())
+    assert stale == [], f"MIGRATED_KERNEL_CALLERS names modules that no longer exist: {stale}"
+    silent = sorted(
+        rel
+        for rel in MIGRATED_KERNEL_CALLERS
+        if "clearance_kernel" not in (src / rel).read_text(encoding="utf-8")
+    )
+    assert silent == [], (
+        "MIGRATED_KERNEL_CALLERS names modules that do not reference the "
+        f"kernel at all -- the migration was reverted or never landed: {silent}"
     )
 
 
@@ -802,10 +839,18 @@ def test_ripgrep_acceptance_criterion() -> None:
     ``src/kicad_tools`` instead keeps the globs exactly as the issue wrote
     them and makes them mean what they say.
 
+    One glob per entry in :data:`MIGRATED_KERNEL_CALLERS` is appended, for the
+    same reason the structural test carries an allowlist: since Phase 3d the
+    criterion is "nothing *unplanned* references the kernel", and a deliberate
+    migration is not a violation of it.
+
     Skipped where ``rg`` is unavailable; the two structural tests above cover
     the same property without depending on the binary.
     """
     src = Path(__file__).resolve().parents[2] / "src" / "kicad_tools"
+    migrated_globs: list[str] = []
+    for rel in sorted(MIGRATED_KERNEL_CALLERS):
+        migrated_globs += ["--glob", f"!{rel}"]
     try:
         proc = subprocess.run(
             [
@@ -816,6 +861,7 @@ def test_ripgrep_acceptance_criterion() -> None:
                 "!router/clearance_kernel.py",
                 "--glob",
                 "!router/cpp/**",
+                *migrated_globs,
             ],
             cwd=src,
             capture_output=True,

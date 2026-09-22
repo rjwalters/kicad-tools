@@ -93,6 +93,7 @@ __all__ = [
     "ADAPTERS",
     "GROUPS",
     "KERNEL_GROUP",
+    "MIGRATED_GROUPS",
     "NOTES",
     "NOT_MEASURED",
     "NOT_MEASURED_REASONS",
@@ -296,6 +297,33 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
+MIGRATED_GROUPS: frozenset[int] = frozenset({9})
+"""Consumer groups already switched onto the shared clearance kernel.
+
+The single registry behind Epic #5509's scope guard #5 (*report-only until
+switched*).  Every group **not** listed here has its adapter-vs-kicad-cli row
+auto-``xfail``\\ ed by ``conftest.pytest_collection_modifyitems``, so a
+measured disagreement is evidence for that consumer's own Phase 3/4 PR and
+never a red build.  A group listed here has had that Phase 3/4 PR: its rows
+are a hard gate, and a disagreement fails the suite.
+
+Adding a group here is the *last* step of its migration, not a convenience --
+``test_corpus`` asserts the flip really happened (the items carry no
+``xfail``) and that the adapter can be driven at ground truth's own rule
+value, and ``tests/router/test_clearance_kernel_parity.py`` asserts the
+consumer really imports the kernel.
+
+Migrated so far:
+
+* **9** -- the lattice engine (``router/lattice/``), Phase 3d.
+"""
+
+_MIGRATION_PHASE: dict[int, str] = {
+    9: "3d",
+}
+"""Which epic phase switched each migrated group, for the table's notes."""
+
+
 # Why a group has no adapter.  A bare ``not measured`` is indistinguishable
 # from "nobody looked"; every gap here states its kind.  Group 7 is the only
 # entry, and it is the *unexposed* kind -- no Python entry point exists at all,
@@ -364,9 +392,14 @@ NOTES: dict[int, str] = {
         "Routed copper only -- none of the three predicates consults a pad "
         "(pad keep-outs gate *site availability* on "
         "`LatticeObstacleModel.node_pads`, which is group 9's masking half, not "
-        "its clearance arithmetic). Centreline answers, so no mm gap is "
-        "reported. `pairwise` left `None`, the only path reachable without "
-        "`--voltage-map` (Phase 2's corpus)."
+        "its clearance arithmetic). The predicates return a bool and no gap, so "
+        "no mm gap is reported. `pairwise` left `None`, the only path reachable "
+        "without `--voltage-map` (Phase 2's corpus). The under-rejection cell is "
+        "a **rule** reading, not a geometry one: this row drives the consumer at "
+        "the router's own `trace_clearance` (0.15 mm), so every under-rejected "
+        "pair sits in the 0.15-0.20 mm band the project's `Default` netclass "
+        "requires and the router does not -- the #5398 / #5654 defect, which "
+        "Phase 3d does not touch."
     ),
     10: (
         "`ObstacleModel.is_clear`, constructed directly as "
@@ -580,6 +613,32 @@ def not_measured_reason(number: int) -> str:
     return "no adapter registered and no reason recorded -- this is a harness bug."
 
 
+def _row_note(number: int) -> str:
+    """The ``notes`` cell for a *measured* row, migration status included.
+
+    A migrated group's row is no longer report-only, and a reader of the table
+    must be able to tell that from the table -- otherwise a non-zero cell on a
+    gated row reads like every other outstanding finding.  The prefix also
+    records *which* reading is gated, because for a migrated group the two are
+    deliberately different: the percentages here come from the consumer's own
+    rule values (so the row keeps measuring the rule gap for its own issue),
+    while the merge gate drives the same consumer at the clearance kicad-cli
+    applies, isolating the geometry this epic actually unified.
+    """
+    note = NOTES.get(number, "")
+    if number not in MIGRATED_GROUPS:
+        return note
+    prefix = (
+        f"**Switched to the shared kernel in Phase {_MIGRATION_PHASE[number]} -- "
+        "no longer report-only.** The merge gate "
+        "(`test_corpus.test_adapter_agrees_with_kicad_cli`) drives this same "
+        "consumer at the project netclass clearance kicad-cli itself applies, "
+        "so it fails on a **geometry** disagreement in either direction; the "
+        "percentages in this row keep the consumer's own rule values."
+    )
+    return f"{prefix} {note}".strip()
+
+
 def _escape_cell(text: str) -> str:
     """Make a note safe inside a markdown table cell.
 
@@ -620,7 +679,7 @@ def _rows(
                 m.under_reject_cell,
                 str(m.boundary),
                 ", ".join(m.fill_states) or NOT_MEASURED,
-                _escape_cell(NOTES.get(group.number, "")),
+                _escape_cell(_row_note(group.number)),
             )
         )
     return rows
@@ -718,11 +777,29 @@ def render_document(
         "seeded random copper configurations plus four named fixtures "
         "reproducing known disagreements.",
         "",
-        "**This document is report-only.** A disagreement here is evidence, "
-        "not a bug report and not a patch: consumers are switched to the "
-        "shared kernel in their own epic phase, and only then do their rows "
-        "become a merge gate.",
+        "**A row is report-only until its consumer is switched.** A "
+        "disagreement on an unswitched row is evidence, not a bug report and "
+        "not a patch: consumers move onto the shared kernel in their own epic "
+        "phase, and only then does that row become a merge gate.",
         "",
+        *(
+            [
+                "Already switched, and therefore **gated** rather than "
+                "report-only: "
+                + ", ".join(
+                    f"group {n} (Phase {_MIGRATION_PHASE[n]})" for n in sorted(MIGRATED_GROUPS)
+                )
+                + ". A gated row's merge gate drives that consumer at the "
+                "project netclass clearance kicad-cli itself applies, so it "
+                "fails on a **geometry** disagreement and not on the rule "
+                "value the consumer happens to resolve -- rule selection is "
+                "Phase 2's axis, and the percentages below deliberately keep "
+                "measuring it.",
+                "",
+            ]
+            if MIGRATED_GROUPS
+            else []
+        ),
         "## Status",
         "",
         *(

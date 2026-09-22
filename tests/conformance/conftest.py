@@ -11,16 +11,26 @@ Modules that genuinely do not need the tool -- the canonicaliser unit test
 against a checked-in report, the table renderer, the determinism check -- run
 everywhere, including on a laptop with no KiCad installed.
 
-**Consumer rows are automatically ``xfail(strict=False)``.**  Every
-adapter-vs-truth test carries ``@pytest.mark.consumer``; the collection hook
-below attaches a non-strict ``xfail`` to each of them.  That is the mechanism,
-not a convention -- a future adapter test cannot accidentally turn a *measured*
-disagreement into a red build before its consumer has been switched to the
-shared kernel in its own epic phase.  kicad-cli-truth assertions carry no such
-marker and are hard failures.
+**Consumer rows are automatically ``xfail(strict=False)`` -- until their
+consumer is switched.**  Every adapter-vs-truth test carries
+``@pytest.mark.consumer``; the collection hook below attaches a non-strict
+``xfail`` to each of them.  That is the mechanism, not a convention -- a
+future adapter test cannot accidentally turn a *measured* disagreement into a
+red build before its consumer has been switched to the shared kernel in its
+own epic phase.  kicad-cli-truth assertions carry no such marker and are hard
+failures.
 
-``test_corpus.py``'s ``test_every_consumer_item_carries_xfail`` asserts the
-hook actually fired over the whole collected suite, so the mechanism is itself
+The hook's **one exception** is a group listed in
+:data:`~tests.conformance.report.MIGRATED_GROUPS`: that consumer has had its
+Phase 3/4 PR, so its rows are deliberately left un-``xfail``\\ ed and a
+disagreement reddens the build.  The exception is keyed off the item's own
+``adapter`` parameter rather than off a second marker, so a migrated group
+cannot be flipped in one place and forgotten in the other -- there is exactly
+one registry.
+
+``test_corpus.py`` asserts both halves over the whole collected suite
+(``test_every_unmigrated_consumer_item_carries_xfail`` and
+``test_migrated_consumer_items_are_hard_gates``), so the mechanism is itself
 under test rather than assumed.
 """
 
@@ -30,6 +40,7 @@ import pytest
 
 from tests.conformance.adapters.grid_cpp import GridCppAdapter
 from tests.conformance.oracle import kicad_cli_available
+from tests.conformance.report import MIGRATED_GROUPS
 
 requires_kicad_cli = pytest.mark.skipif(not kicad_cli_available(), reason="kicad-cli not installed")
 """Module-level gate for tests that need ``kicad-cli`` as ground truth."""
@@ -73,17 +84,41 @@ def requires_adapter(adapter: object) -> pytest.MarkDecorator:
 CONSUMER_XFAIL_REASON = "consumer verdict is report-only until that consumer's epic phase (#5509)"
 
 
+def item_group(item: pytest.Item) -> int | None:
+    """The Epic #5509 group an item measures, from its ``adapter`` parameter.
+
+    ``None`` for an item that is not parametrised by a single adapter -- the
+    refilled-zone row, for instance, loops over every adapter inside one item,
+    so it belongs to no single group and stays report-only regardless.
+
+    Exported (rather than private) because ``test_corpus.py`` walks the
+    collected session with the *same* rule to assert the hook fired; two
+    different notions of "which group is this item" would let the assertion
+    pass while the gate it checks was never applied.
+    """
+    callspec = getattr(item, "callspec", None)
+    if callspec is None:
+        return None
+    group = getattr(callspec.params.get("adapter"), "group", None)
+    return group if isinstance(group, int) else None
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "consumer: an adapter-vs-kicad-cli comparison; report-only, auto-xfail",
+        "consumer: an adapter-vs-kicad-cli comparison; report-only (auto-xfail) "
+        "unless its group is in report.MIGRATED_GROUPS",
     )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Attach a non-strict ``xfail`` to every ``@pytest.mark.consumer`` item."""
+    """Auto-``xfail`` every ``consumer`` item whose group is not yet migrated."""
     del config
     for item in items:
         if item.get_closest_marker("consumer") is None:
+            continue
+        if item_group(item) in MIGRATED_GROUPS:
+            # Switched to the kernel in its own epic phase: the whole point of
+            # that phase is that this row stops being allowed to disagree.
             continue
         item.add_marker(pytest.mark.xfail(strict=False, reason=CONSUMER_XFAIL_REASON))

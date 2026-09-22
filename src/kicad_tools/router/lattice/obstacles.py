@@ -446,13 +446,16 @@ class CommittedCopper:
 
     Geometric per-layer model: traces live in per-layer :class:`SegHash`
     structures, vias in a flat list (a through-via blocks EVERY layer).
-    All clearance predicates are centreline distances against the real
-    gaps supplied by the pathfinder.
+    Every clearance predicate measures a real **edge-to-edge copper gap**
+    through the shared clearance kernel (Epic #5509 Phase 3d, via
+    :mod:`.kernel_adapter`) and compares it against the applicable
+    clearance.
 
     Issue #4271 (net-class widths): every committed segment carries its TRUE
     ``half_width`` and its class ``clearance``, and every predicate takes the
-    querying connection's own ``half`` / ``clearance``.  The required
-    centreline gap between two traces is::
+    querying connection's own ``half`` / ``clearance``.  The requirement
+    between two traces is ``max(own_clearance, stored_clearance)`` of
+    edge-to-edge gap -- equivalently, before Phase 3d, a *centreline* gap of::
 
         own_half + stored_half + max(own_clearance, stored_clearance)
 
@@ -463,8 +466,9 @@ class CommittedCopper:
     board-global trace geometry -- the pre-#4271 behavior, byte-for-byte.
 
     Issue #4597 (preserved copper): committed VIAS carry a stored clearance
-    too, so ``seg_clear`` / ``node_clear`` space a trace from a via at
-    ``via_radius + own_half + max(own_clearance, stored_via_clearance)``.
+    too, so ``seg_clear`` / ``node_clear`` require
+    ``max(own_clearance, stored_via_clearance)`` between a trace's copper edge
+    and the via's barrel edge.
     That is what lets ``--preserve-existing`` copper seeded from an earlier
     routing step keep its net-class-map clearance across the pass boundary
     instead of collapsing to the board-global floor.
@@ -472,9 +476,9 @@ class CommittedCopper:
     Issue #4602 (search-time HV pairwise clearance): ``pairwise`` is the
     optional net-id-space projection of ``rules.pairwise_clearance``
     (:class:`~kicad_tools.router.lattice.pairwise.LatticePairwise`).  When
-    set, every cross-net predicate widens its gap to
-    ``own_half + stored_half + max(own_clr, stored_clr, pairwise(query,
-    stored))`` -- the required clearance depends on the PAIR, never on a
+    set, every cross-net predicate widens its requirement to
+    ``max(own_clr, stored_clr, pairwise(query, stored))`` of edge-to-edge
+    gap -- the required clearance depends on the PAIR, never on a
     widened per-net scalar (widening the scalar is exactly the inadequate
     workaround #4431 documents: it would force LV<->LV spacing to HV<->LV
     distances).  A hit that satisfies the scalar gap but falls inside the
