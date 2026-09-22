@@ -55,6 +55,15 @@ except ImportError:
 # Based on Parkour's empirical threshold for spatial index break-even.
 RTREE_SEGMENT_THRESHOLD = 32
 
+# Issue #5240: minimum number of tombstoned (lazily deleted) segment entries
+# before a layer's R-tree is compacted.  Below this, the stale entries cost
+# less than a rebuild; above it, compaction is amortised against the live
+# segment count (see ``_rtree_remove_segment``).
+RTREE_TOMBSTONE_MIN_COMPACT = 64
+
+# Axis-aligned (min_x, min_y, max_x, max_y) envelope as stored in the R-tree.
+_SegEnvelope = tuple[float, float, float, float]
+
 # Issue #5166: strength of the NET-AWARE same-component clearance carve-out.
 #
 #   "none"  -- no carve-out; the foreign same-component pad is validated at
@@ -994,6 +1003,13 @@ class RoutingGrid:
         self._seg_rtree: dict[int, Any] = {}  # layer_idx -> rtree Index
         self._seg_rtree_items: dict[int, dict[int, Segment]] = {}  # layer_idx -> id -> Segment
         self._seg_rtree_count: int = 0  # total indexed segments across all layers
+        # Issue #5240: envelope each segment was inserted with, plus the
+        # entries that have been logically removed but are still physically
+        # present in the tree ("tombstones").  libspatialindex deletion walks
+        # the index, so rip-up-heavy routing pays O(index size) per removed
+        # segment; ``_rtree_remove_segment`` defers that work instead.
+        self._seg_rtree_envelopes: dict[int, dict[int, _SegEnvelope]] = {}
+        self._seg_rtree_pending: dict[int, dict[int, tuple[Segment, _SegEnvelope]]] = {}
         self._rtree_available = RTREE_AVAILABLE
 
         # Issue #2960: Via R-tree spatial index.
@@ -1300,6 +1316,8 @@ class RoutingGrid:
         # Spatial indices (only populated on dense boards).
         self._seg_rtree = {}
         self._seg_rtree_items = {}
+        self._seg_rtree_envelopes = {}
+        self._seg_rtree_pending = {}
         self._seg_rtree_count = 0
         self._via_rtree = None
         self._via_rtree_items = {}
@@ -4419,6 +4437,8 @@ class RoutingGrid:
             p.dimension = 2
             self._seg_rtree[layer_idx] = rtree_index.Index(properties=p)
             self._seg_rtree_items[layer_idx] = {}
+            self._seg_rtree_envelopes[layer_idx] = {}
+            self._seg_rtree_pending[layer_idx] = {}
         return self._seg_rtree[layer_idx]
 
     @staticmethod
@@ -4462,8 +4482,24 @@ class RoutingGrid:
             return
         seg_id = id(seg)
         envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
+        pending = self._seg_rtree_pending.get(layer_idx)
+        if pending is not None and seg_id in pending:
+            # Issue #5240: this segment was lazily removed and its entry is
+            # still in the tree.  Re-marking the same Segment object (the
+            # rip-up / re-route cycle) can therefore resurrect the existing
+            # entry instead of paying an insert -- but only when the envelope
+            # is unchanged; in-place geometry mutation (Issue #3507) must
+            # drop the stale entry first.
+            _, stale_envelope = pending.pop(seg_id)
+            if stale_envelope == envelope:
+                self._seg_rtree_items[layer_idx][seg_id] = seg
+                self._seg_rtree_envelopes[layer_idx][seg_id] = envelope
+                self._seg_rtree_count += 1
+                return
+            idx.delete(seg_id, stale_envelope)
         idx.insert(seg_id, envelope)
         self._seg_rtree_items[layer_idx][seg_id] = seg
+        self._seg_rtree_envelopes[layer_idx][seg_id] = envelope
         self._seg_rtree_count += 1
 
     def _rtree_remove_segment(self, seg: Segment, layer_idx: int) -> None:
@@ -4477,13 +4513,83 @@ class RoutingGrid:
             return
         if layer_idx not in self._seg_rtree:
             return
+        items = self._seg_rtree_items.get(layer_idx)
         seg_id = id(seg)
-        if seg_id not in self._seg_rtree_items.get(layer_idx, {}):
+        if items is None or seg_id not in items:
             return
-        envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
-        self._seg_rtree[layer_idx].delete(seg_id, envelope)
-        del self._seg_rtree_items[layer_idx][seg_id]
+        del items[seg_id]
         self._seg_rtree_count = max(0, self._seg_rtree_count - 1)
+
+        # Issue #5240: ``rtree.Index.delete`` searches the whole index for the
+        # matching (id, envelope) pair, so an eager delete costs O(index size)
+        # and dominated board 06's route step (10.7 s of a 221 s cProfile run,
+        # ~51k deletes).  Tombstone the entry instead: every query site maps
+        # candidate ids through ``_seg_rtree_items`` and skips unknown ids, so
+        # a stale entry can only produce an extra broad-phase candidate that
+        # the narrow phase discards -- never a missed one.  The Segment is
+        # retained by the tombstone so CPython cannot recycle its ``id()``
+        # while an entry keyed on it is still in the tree.
+        #
+        # What DOES change is the *order* in which surviving candidates come
+        # back from ``intersection`` (extra ids in the stream; a compacted
+        # layer is bulk-loaded rather than incrementally inserted).  That is
+        # safe for everything ``validate_segment_clearance`` certifies:
+        # ``is_valid`` is a disjunction and ``actual_clearance`` a minimum,
+        # both order-independent.  The third element, ``violation_loc``, is
+        # assigned by whichever violating candidate is visited LAST, so it
+        # can name a different (equally valid) violating pair than before --
+        # exactly as the R-tree and brute-force branches of that method
+        # already name different pairs as each other on unmodified code.  It
+        # is a representative location for diagnostics, never a certified
+        # output; no caller may depend on which violation it names.
+        envelope = self._seg_rtree_envelopes.get(layer_idx, {}).pop(seg_id, None)
+        if envelope is None:
+            # Defensive: entry indexed before the envelope ledger existed (or
+            # cleared out of band) -- fall back to the eager delete.
+            self._seg_rtree[layer_idx].delete(
+                seg_id, self._segment_envelope(seg, self._rtree_clearance_inflation)
+            )
+            return
+        pending = self._seg_rtree_pending.setdefault(layer_idx, {})
+        pending[seg_id] = (seg, envelope)
+        if len(pending) >= max(RTREE_TOMBSTONE_MIN_COMPACT, len(items)):
+            self._compact_segment_index(layer_idx)
+
+    def _compact_segment_index(self, layer_idx: int) -> None:
+        """Rebuild one layer's segment R-tree, dropping tombstoned entries.
+
+        Issue #5240: bulk (STR) loading costs ~1 us per entry against ~6-200 us
+        for a single incremental delete, so rebuilding from the live entries
+        once per ``max(RTREE_TOMBSTONE_MIN_COMPACT, live)`` removals is far
+        cheaper than deleting eagerly.  Envelopes come from the insert-time
+        ledger, so the rebuilt index is entry-for-entry identical to the one
+        it replaces minus the tombstones.
+
+        Every live entry in ``_seg_rtree_items`` is re-indexed: a live segment
+        whose ledger envelope is somehow missing is re-enveloped from its
+        current geometry (the same thing :meth:`_rebuild_segment_index` does)
+        rather than dropped, because a dropped entry would be a *missed*
+        broad-phase candidate -- the one failure mode tombstoning must never
+        introduce.
+        """
+        if not self._rtree_available:
+            return
+        items = self._seg_rtree_items.get(layer_idx, {})
+        envelopes = self._seg_rtree_envelopes.setdefault(layer_idx, {})
+        p = rtree_index.Property()
+        p.dimension = 2
+        stream = []
+        for seg_id, seg in items.items():
+            envelope = envelopes.get(seg_id)
+            if envelope is None:
+                envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
+                envelopes[seg_id] = envelope
+            stream.append((seg_id, envelope, None))
+        if stream:
+            self._seg_rtree[layer_idx] = rtree_index.Index(iter(stream), properties=p)
+        else:
+            self._seg_rtree[layer_idx] = rtree_index.Index(properties=p)
+        self._seg_rtree_pending[layer_idx] = {}
 
     def _rtree_insert_route(self, route: Route) -> None:
         """Insert all segments of a route into the R-tree index."""
@@ -4650,6 +4756,8 @@ class RoutingGrid:
         # Clear the R-tree structures.
         self._seg_rtree.clear()
         self._seg_rtree_items.clear()
+        self._seg_rtree_envelopes.clear()
+        self._seg_rtree_pending.clear()
         self._seg_rtree_count = 0
 
         # Update inflation from (possibly changed) design rules.
@@ -5601,6 +5709,8 @@ class RoutingGrid:
             return
         self._seg_rtree.clear()
         self._seg_rtree_items.clear()
+        self._seg_rtree_envelopes.clear()
+        self._seg_rtree_pending.clear()
         self._seg_rtree_count = 0
         for route in self.routes:
             self._rtree_insert_route(route)
