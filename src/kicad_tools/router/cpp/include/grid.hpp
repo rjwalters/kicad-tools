@@ -29,6 +29,7 @@ public:
     struct FillEdge { double ax, ay, bx, by; };
     struct FixedFill {
         int layer;
+        int source_net = -1;
         double clearance;
         std::vector<FillRing> rings;
         double minx, miny, maxx, maxy;
@@ -39,9 +40,9 @@ public:
         std::map<std::pair<int, int>, std::vector<size_t>> bins;
     };
     void clear_fixed_fills() { fixed_fills_.clear(); }
-    void add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings);
+    void add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings, int source_net = -1);
     bool fixed_fill_clear(double ax, double ay, double bx, double by,
-                          int layer, double half, double reach) const;
+                          int layer, double half, double reach, int net = -1) const;
     bool has_fixed_fills() const { return !fixed_fills_.empty(); }
 
     // Cell access - inline for performance
@@ -94,7 +95,7 @@ public:
     // mirroring the Python grid's ``_pad_blocked[metal_slice] = True``
     // at ``grid.py:4458``.
     void mark_blocked(int x, int y, int layer, int net, bool is_obstacle = false,
-                      bool pad_blocked = false);
+                      bool pad_blocked = false, bool pad_geometry = false);
     void mark_rect_blocked(int x1, int y1, int x2, int y2, int layer, int net,
                            bool is_obstacle = false);
 
@@ -289,6 +290,11 @@ public:
     bool route_cell_has_geometry(int x, int y, int layer) const;
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
                                     int partner_net, float partner_clearance, float via_clearance) const;
+    // Authored floors are hard even without matching raster coverage.
+    bool authored_trace_geometry_clear(const Segment& segment) const;
+    void clear_pad_geometry_cell(int x, int y, int layer);
+    bool pad_cell_has_geometry(int x, int y, int layer) const;
+    bool pad_trace_geometry_clear(const Segment& segment) const;
     // Hard constraint for negotiated traces; foreign trace copper remains soft.
     bool trace_stored_vias_clear(const Segment& segment, float clearance,
                                  int partner_net, float partner_clearance) const;
@@ -407,6 +413,8 @@ public:
     // Passing empty containers returns the grid to the dormant state.
     void set_pairwise_domains(const std::vector<int>& net_to_domain,
                               const std::vector<std::vector<float>>& matrix);
+    void set_net_clearance_floors(const std::map<int, float>& floors);
+    float net_clearance_floor(int net_a, int net_b) const;
 
     // Install the rated-footprint attach zones (Issue #4506) used to waive
     // the pairwise widening (never the scalar floor) inside a domain-bridging
@@ -414,13 +422,13 @@ public:
     // session on the Python side; passing an empty vector clears them.
     void set_attach_zones(const std::vector<AttachZone>& zones);
 
-    // True once a non-empty domain matrix has been installed.
-    bool pairwise_active() const { return pairwise_active_; }
+    // True when domain widening or authored electrical floors are active.
+    bool pairwise_active() const { return pairwise_active_ || max_net_clearance_floor_ > 0.0f; }
     size_t attach_zone_count() const { return attach_zones_.size(); }
 
-    // Required pairwise clearance (mm) between two net ids.  Returns 0.0 when
-    // the matrix is dormant, when either net id is out of range, or when
-    // either net has no domain -- so ``max(scalar, this)`` is the scalar.
+    // Maximum of domain widening and the two authored electrical floors.
+    // Domain-less pairs still retain their authored floors. Attach zones
+    // may waive only the domain component, never net_clearance_floor().
     float pairwise_required_clearance(int net_a, int net_b) const;
 
     // Issue #4511: the largest widening value in the installed domain matrix
@@ -428,7 +436,7 @@ public:
     // (``Pathfinder``) sizes its widened blocking kernel from this bound so
     // it never scans further than any domain pair could ever require.  Cached
     // by ``set_pairwise_domains`` -- an O(1) read on the A* hot path.
-    float max_pairwise_clearance() const { return max_pairwise_clearance_; }
+    float max_pairwise_clearance() const { return std::max(max_pairwise_clearance_, max_net_clearance_floor_); }
 
     // True when an installed attach zone contains ``(x, y)`` AND has BOTH
     // ``net_a`` and ``net_b`` among its member net ids.
@@ -486,6 +494,7 @@ public:
         float half_width, float default_clearance) const;
 
 private:
+    bool pad_trace_geometry_clear_impl(const Segment& segment, bool authored_only) const;
     inline size_t index(int x, int y, int layer) const {
         return static_cast<size_t>(layer) * rows_ * cols_ +
                static_cast<size_t>(y) * cols_ +
@@ -524,6 +533,9 @@ private:
     std::vector<std::array<float, 5>> component_holes_;
     GeometryBins route_segment_bins_;
     GeometryBins route_via_bins_;
+    GeometryBins pad_geometry_bins_;
+    std::set<size_t> pad_geometry_cells_;
+    float max_pad_clearance_ = 0.0f;
     static void index_route_geometry(GeometryBins& bins, size_t index,
                                      float minx, float miny, float maxx, float maxy);
 
@@ -545,6 +557,8 @@ private:
     // Issue #4511: cached max widening across the installed matrix (mm); 0.0
     // when dormant.  Consumed by the search-time widened kernel sizing.
     float max_pairwise_clearance_ = 0.0f;
+    std::map<int, float> net_clearance_floors_;
+    float max_net_clearance_floor_ = 0.0f;
 };
 
 }  // namespace router

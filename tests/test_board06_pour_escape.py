@@ -340,3 +340,44 @@ def test_repair_escapes_pad_with_existing_via_on_isolated_fill(tmp_path, pour_re
             block in after_text for block in pour_recipe._find_sexp_blocks(before_text, f"({kind}")
         )
     assert project.read_bytes() == before_rules
+
+
+@pytest.mark.parametrize("layer", ["F.Cu", "In1.Cu"])
+def test_distant_primary_uses_fixed_budget_for_forward_progress(layer):
+    """A wide free area must not spend the whole budget expanding sideways."""
+    primary = box(39.5, -1, 40.5, 1)
+    result = escape.find_escape(
+        (0, 0),
+        "power",
+        "F.Cu",
+        [],
+        [],
+        [],
+        [(primary, {layer}, "fill")],
+        (-45, -45, 45, 45),
+        escape.EscapeRules(),
+        node_budget=10_000,
+    )
+    assert result is not None
+    assert result.via == (layer != "F.Cu")
+    assert result.points[0] == (0, 0)
+    endpoint = Point(result.points[-1])
+    contact = endpoint.buffer(result.rules.diameter / 2) if result.via else endpoint
+    assert primary.intersects(contact)
+
+
+def test_missing_primary_returns_no_repair():
+    assert (
+        escape.find_escape(
+            (0, 0),
+            "power",
+            "F.Cu",
+            [],
+            [],
+            [],
+            [],
+            (-1, -1, 1, 1),
+            escape.EscapeRules(),
+        )
+        is None
+    )

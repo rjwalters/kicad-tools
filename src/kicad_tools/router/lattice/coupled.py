@@ -108,6 +108,9 @@ def pads_block_segment_grown(
     nets: set[int],
     extra: float,
     exempt: frozenset[int] | None = None,
+    *,
+    floors: dict[int, float] | None = None,
+    base_clearance: float = 0.0,
 ) -> bool:
     """True if segment ``a-b`` enters any foreign pad keep-out on ``layer``
     after growing the keep-out rects by ``extra``.
@@ -122,9 +125,12 @@ def pads_block_segment_grown(
     laid straight over it (the board-06 USB2 B-row lesson).  Purely a query
     against the static model -- no mask rebuild.
     """
+    floors = floors or {}
+    own_floor = max((floors.get(net, 0.0) for net in nets), default=0.0)
+    reach = extra + max(0.0, max(floors.values(), default=0.0) - base_clearance)
     x0, x1 = min(a[0], b[0]), max(a[0], b[0])
     y0, y1 = min(a[1], b[1]), max(a[1], b[1])
-    for idx in obstacles.pads_near(x0 - extra, y0 - extra, x1 + extra, y1 + extra):
+    for idx in obstacles.pads_near(x0 - reach, y0 - reach, x1 + reach, y1 + reach):
         if exempt is not None:
             if idx in exempt:
                 continue
@@ -133,7 +139,12 @@ def pads_block_segment_grown(
         if layer not in obstacles.pad_layer_indices[idx]:
             continue
         r = obstacles.pad_rects[idx]
-        grown: Rect = (r[0] - extra, r[1] - extra, r[2] + extra, r[3] + extra)
+        grow = extra + max(
+            0.0,
+            own_floor - base_clearance,
+            floors.get(obstacles.pads[idx].net, 0.0) - base_clearance,
+        )
+        grown: Rect = (r[0] - grow, r[1] - grow, r[2] + grow, r[3] + grow)
         if seg_rect_intersect(a, b, grown):
             return True
     return False
@@ -146,10 +157,16 @@ def pads_block_point_grown(
     nets: set[int],
     extra: float,
     exempt: frozenset[int] | None = None,
+    *,
+    floors: dict[int, float] | None = None,
+    base_clearance: float = 0.0,
 ) -> bool:
     """Point flavour of :func:`pads_block_segment_grown`."""
+    floors = floors or {}
+    own_floor = max((floors.get(net, 0.0) for net in nets), default=0.0)
+    reach = extra + max(0.0, max(floors.values(), default=0.0) - base_clearance)
     for idx in obstacles.pads_near(
-        point[0] - extra, point[1] - extra, point[0] + extra, point[1] + extra
+        point[0] - reach, point[1] - reach, point[0] + reach, point[1] + reach
     ):
         if exempt is not None:
             if idx in exempt:
@@ -159,7 +176,12 @@ def pads_block_point_grown(
         if layer not in obstacles.pad_layer_indices[idx]:
             continue
         r = obstacles.pad_rects[idx]
-        grown: Rect = (r[0] - extra, r[1] - extra, r[2] + extra, r[3] + extra)
+        grow = extra + max(
+            0.0,
+            own_floor - base_clearance,
+            floors.get(obstacles.pads[idx].net, 0.0) - base_clearance,
+        )
+        grown: Rect = (r[0] - grow, r[1] - grow, r[2] + grow, r[3] + grow)
         if pt_in_rect(point, grown):
             return True
     return False
@@ -197,18 +219,35 @@ def committed_seg_clear_grown(
         layer,
         committed.trace_half + extra,
         committed.clearance,
+        net=max(nets, key=lambda net: committed.net_clearance_floors.get(net, 0.0), default=None),
+        net_clearance_floors=committed.net_clearance_floors,
     ):
         return False
-    pad = committed.trace_half + committed.clearance + extra + 0.5
+    own_floor = max((committed.net_clearance_floors.get(net, 0.0) for net in nets), default=0.0)
+    reach = max(committed.net_clearance_floors.values(), default=0.0)
+    pad = committed.trace_half + max(committed.clearance, reach) + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(a, b, pad=pad):
-        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
+        gap = (
+            committed.trace_half
+            + hw
+            + max(
+                committed.clearance, iclr, own_floor, committed.net_clearance_floors.get(cnet, 0.0)
+            )
+            + extra
+        )
         if cnet not in nets and seg_seg_dist(a, b, c, d) < gap - _EPS:
             return False
     # Issue #4597: honor the stored via's class clearance, mirroring the
     # ``max(clearance, iclr)`` the copper loop above already applies.
     base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
     for point, vnet, vclr in committed.vias:
-        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
+        vgap = (
+            base_vgap
+            - committed.clearance
+            + max(
+                committed.clearance, vclr, own_floor, committed.net_clearance_floors.get(vnet, 0.0)
+            )
+        )
         if vnet not in nets and seg_pt_dist(a, b, point) < vgap - _EPS:
             return False
     return True
@@ -228,18 +267,35 @@ def committed_point_clear_grown(
         layer,
         committed.trace_half + extra,
         committed.clearance,
+        net=max(nets, key=lambda net: committed.net_clearance_floors.get(net, 0.0), default=None),
+        net_clearance_floors=committed.net_clearance_floors,
     ):
         return False
-    pad = committed.trace_half + committed.clearance + extra + 0.5
+    own_floor = max((committed.net_clearance_floors.get(net, 0.0) for net in nets), default=0.0)
+    reach = max(committed.net_clearance_floors.values(), default=0.0)
+    pad = committed.trace_half + max(committed.clearance, reach) + extra + 0.5
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(point, point, pad=pad):
-        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
+        gap = (
+            committed.trace_half
+            + hw
+            + max(
+                committed.clearance, iclr, own_floor, committed.net_clearance_floors.get(cnet, 0.0)
+            )
+            + extra
+        )
         if cnet not in nets and seg_pt_dist(c, d, point) < gap - _EPS:
             return False
     # Issue #4597: honor the stored via's class clearance (see
     # ``committed_seg_clear_grown``).
     base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
     for vpt, vnet, vclr in committed.vias:
-        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
+        vgap = (
+            base_vgap
+            - committed.clearance
+            + max(
+                committed.clearance, vclr, own_floor, committed.net_clearance_floors.get(vnet, 0.0)
+            )
+        )
         if vnet not in nets and dist(point, vpt) < vgap - _EPS:
             return False
     return True

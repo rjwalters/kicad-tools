@@ -649,7 +649,8 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             const auto& cell = grid_.at(cx, cy, layer);
             // Only foreign real-net copper can trip a cross-domain rule; net 0
             // (pour / unconnected convention) never carries a domain.
-            if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+            if (!cell.blocked || cell.net == net ||
+                (cell.net == 0 && grid_.net_clearance_floor(net, cell.net) <= 0.0f)) continue;
             const float required = grid_.pairwise_required_clearance(net, cell.net);
             if (required <= 0.0f) continue;  // same domain / no widening
             // Widened radius for THIS specific pair (<= wide_radius).  A cell
@@ -667,7 +668,20 @@ bool Pathfinder::cross_domain_trace_blocked(int x, int y, int layer, int net,
             const auto fw = grid_.grid_to_world(cx, cy);
             const float mx = (cw.first + fw.first) * 0.5f;
             const float my = (cw.second + fw.second) * 0.5f;
-            if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+            if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) {
+                const float floor = grid_.net_clearance_floor(net, cell.net);
+                const int floor_r = static_cast<int>(std::ceil((half_mm + floor) / res));
+                if (floor <= 0.0f || dist_sq > floor_r * floor_r) continue;
+            }
+            // A pad halo already includes pad clearance. Refine widening
+            // only when every mark on this cell has known pad provenance.
+            if (grid_.pad_cell_has_geometry(cx, cy, layer)) {
+                Segment point;
+                point.x1 = point.x2 = cw.first;
+                point.y1 = point.y2 = cw.second;
+                point.width = 2 * half_mm; point.layer = layer; point.net = net;
+                if (grid_.pad_trace_geometry_clear(point)) continue;
+            }
             // Issue #4507: name the blocker so a drained search can report
             // FAILURE_PAIRWISE_BLOCKED instead of a bare NO_PATH.  Diagnostic
             // only -- the verdict below is unchanged.
@@ -701,7 +715,8 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 const int cx = x + dx, cy = y + dy;
                 if (!grid_.is_valid(cx, cy, layer)) continue;
                 const auto& cell = grid_.at(cx, cy, layer);
-                if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+                if (!cell.blocked || cell.net == net ||
+                (cell.net == 0 && grid_.net_clearance_floor(net, cell.net) <= 0.0f)) continue;
                 const float required =
                     grid_.pairwise_required_clearance(net, cell.net);
                 if (required <= 0.0f) continue;
@@ -714,7 +729,11 @@ bool Pathfinder::cross_domain_via_blocked(int x, int y, int net) const {
                 // Issue #4507: the candidate via's barrel meets this copper ON
                 // ``layer``, so the waiver is scoped to it (a via passing a
                 // rated SMD part's pad field on an inner layer is not exempt).
-                if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) continue;
+                if (grid_.attach_zone_exempts(mx, my, net, cell.net, layer)) {
+                const float floor = grid_.net_clearance_floor(net, cell.net);
+                const int floor_r = static_cast<int>(std::ceil((half_mm + floor) / res));
+                if (floor <= 0.0f || dist_sq > floor_r * floor_r) continue;
+            }
                 // Issue #4507: record the blocker (diagnostic only).
                 note_pairwise_block(cell.net, cw.first, cw.second);
                 return true;
@@ -807,7 +826,8 @@ float Pathfinder::pairwise_avoidance_cost(int x, int y, int layer,
         const int cx = x + off.dx, cy = y + off.dy;
         if (!grid_.is_valid(cx, cy, layer)) continue;
         const auto& cell = grid_.at(cx, cy, layer);
-        if (!cell.blocked || cell.net == net || cell.net == 0) continue;
+        if (!cell.blocked || cell.net == net ||
+                (cell.net == 0 && grid_.net_clearance_floor(net, cell.net) <= 0.0f)) continue;
         if (grid_.pairwise_required_clearance(net, cell.net) <= 0.0f) continue;
         return rules_.cost_straight * off.frac;
     }
@@ -851,7 +871,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         const double reach = half + (search_fill_via_clearance_ >= 0
             ? search_fill_via_clearance_ : rules_.via_clearance);
         for (int layer = 0; layer < grid_.layers(); ++layer)
-            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach)) return true;
+            if (!grid_.fixed_fill_clear(wx, wy, wx, wy, layer, half, reach, net)) return true;
     }
 
     if (!rules_.allow_smd_vias) {
@@ -1039,7 +1059,7 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
         // cross-domain (HV) pair, mirroring ``validate_route``'s via-via
         // widening (grid.cpp) -- attach-zone exemption at the gap midpoint
         // waives only the widening, never the scalar ``via_clearance``.
-        float required = clearance_required;
+        float required = std::max(clearance_required, grid_.net_clearance_floor(net, sv.net));
         if (grid_.pairwise_active()) {
             const float pair_req =
                 grid_.pairwise_required_clearance(net, sv.net);
@@ -1432,8 +1452,10 @@ RouteResult Pathfinder::route(
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = emit_trace_width > 0 ? emit_trace_width : rules_.trace_width;
                 edge.layer = nlayer; edge.net = net;
+                if (!grid_.authored_trace_geometry_clear(edge)) continue;
                 if (!grid_.trace_stored_vias_clear(edge,
-                        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                        std::max(search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                                 search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
                         physical_partner_net_, physical_partner_clearance_)) continue;
             }
 
@@ -1444,7 +1466,7 @@ RouteResult Pathfinder::route(
                     ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
                 const double reach = half + (search_fill_trace_clearance_ >= 0
                     ? search_fill_trace_clearance_ : rules_.trace_clearance);
-                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach, net)) continue;
             }
 
             if (!grid_.is_valid(nx, ny, nlayer)) {
@@ -2096,8 +2118,10 @@ RouteResult Pathfinder::run_astar_loop() {
                 edge.x1 = ax; edge.y1 = ay; edge.x2 = bx; edge.y2 = by;
                 edge.width = search_emit_trace_width_ > 0 ? search_emit_trace_width_ : rules_.trace_width;
                 edge.layer = nlayer; edge.net = search_net_;
+                if (!grid_.authored_trace_geometry_clear(edge)) continue;
                 if (!grid_.trace_stored_vias_clear(edge,
-                        search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                        std::max(search_fill_trace_clearance_ >= 0 ? search_fill_trace_clearance_ : rules_.trace_clearance,
+                                 search_fill_via_clearance_ >= 0 ? search_fill_via_clearance_ : rules_.via_clearance),
                         physical_partner_net_, physical_partner_clearance_)) continue;
             }
 
@@ -2108,7 +2132,7 @@ RouteResult Pathfinder::run_astar_loop() {
                     ? search_trace_half_width_mm_ : rules_.trace_width / 2.0;
                 const double reach = half + (search_fill_trace_clearance_ >= 0
                     ? search_fill_trace_clearance_ : rules_.trace_clearance);
-                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach)) continue;
+                if (!grid_.fixed_fill_clear(ax, ay, bx, by, nlayer, half, reach, search_net_)) continue;
             }
 
             if (!grid_.is_valid(nx, ny, nlayer)) {

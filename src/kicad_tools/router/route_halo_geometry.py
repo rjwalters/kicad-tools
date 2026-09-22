@@ -149,7 +149,14 @@ class RouteHaloGeometry:
         return bool(self._cells[layer, y, x] == cell.net)
 
     def clear(
-        self, candidate, router, *, partner_net=None, partner_clearance=None, require_geometry=True
+        self,
+        candidate,
+        router,
+        *,
+        partner_net=None,
+        partner_clearance=None,
+        require_geometry=True,
+        authored_only=False,
     ) -> bool:
         """Check known copper and drills using the effective routing rules.
 
@@ -157,6 +164,8 @@ class RouteHaloGeometry:
         Callers must check cell_known for every blocked cell they refine.
         With require_geometry=False, absent geometry is clear; use that mode
         only to reject known conflicts, never to authorize raster relaxation.
+        authored_only checks mandatory electrical floors without
+        imposing scalar rules that may have legitimate local relief.
         """
         from .pairwise_clearance import _attach_zone_exempts
         from .primitives import Segment
@@ -193,6 +202,7 @@ class RouteHaloGeometry:
             router.rules.via_clearance,
             partner_clearance or 0,
             widen,
+            max(router.rules.net_clearance_floors.values(), default=0.0),
             router.rules.min_hole_to_hole,
             router.rules.min_drill_clearance,
         )
@@ -257,6 +267,12 @@ class RouteHaloGeometry:
                     return False
                 if same_net:
                     continue
+            if authored_only:
+                required = router.rules.clearance_for_nets(candidate.net, other.net, 0.0)
+                other_half = other.width / 2 if other_trace else other.diameter / 2
+                if required > 0 and distance - half - other_half < required - 1e-9:
+                    return False
+                continue
             required = scalar
             if is_trace and other.net == partner_net and partner_clearance is not None:
                 required = partner_clearance
@@ -274,8 +290,12 @@ class RouteHaloGeometry:
                         shared_layer,
                     ):
                         required = pair
-            if is_trace and not other_trace:
-                required = max(required, router.rules.via_clearance)
+            if not is_trace or not other_trace:
+                required = max(required, router.rules.trace_clearance, router.rules.via_clearance)
+            # Authored electrical minima survive both partner relief and HV
+            # attachment exceptions. The broad-phase margin above includes
+            # these floors even when the copper index predates a rule change.
+            required = router.rules.clearance_for_nets(candidate.net, other.net, required)
             other_half = other.width / 2 if other_trace else other.diameter / 2
             if distance - half - other_half < required - 1e-4:
                 return False

@@ -8,13 +8,14 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 
 namespace router {
 
-void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings) {
+void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillRing>& rings, int source_net) {
     if (rings.empty() || rings.front().empty()) return;
     FixedFill fill;
-    fill.layer = layer; fill.clearance = clearance; fill.rings = rings;
+    fill.layer = layer; fill.clearance = clearance; fill.rings = rings; fill.source_net = source_net;
     fill.minx = fill.maxx = rings.front().front().first;
     fill.miny = fill.maxy = rings.front().front().second;
     for (const auto& ring : rings) {
@@ -39,10 +40,17 @@ void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillR
 // Exact physical predicates; bins only reject edges that cannot affect a
 // query. Even-odd containment includes holes without scanning every vertex.
 bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
-                             int layer, double half, double reach) const {
+                             int layer, double half, double reach, int net) const {
     for (const auto& fill : fixed_fills_) {
         if (fill.layer != layer) continue;
-        const double required = std::max(reach, half + fill.clearance);
+        // Placement-invalid copper remains an obstacle to its own source net.
+        // Do not use the same-net exemption from the routed-copper predicate.
+        const auto own = net_clearance_floors_.find(net);
+        const auto source = net_clearance_floors_.find(fill.source_net);
+        const double own_floor = own == net_clearance_floors_.end() ? 0.0 : own->second;
+        const double source_floor = source == net_clearance_floors_.end() ? 0.0 : source->second;
+        const double required = std::max({reach, half + fill.clearance,
+                                          half + own_floor, half + source_floor});
         double x0 = std::min(ax,bx)-required, x1 = std::max(ax,bx)+required;
         double y0 = std::min(ay,by)-required, y1 = std::max(ay,by)+required;
         if (x1 < fill.minx || x0 > fill.maxx || y1 < fill.miny || y0 > fill.maxy) continue;
@@ -98,9 +106,14 @@ Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
 }
 
 void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
-                          bool pad_blocked) {
+                          bool pad_blocked, bool pad_geometry) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
+    const size_t key = index(x, y, layer);
+    if (pad_geometry && (!cell.blocked || pad_geometry_cells_.count(key)))
+        pad_geometry_cells_.insert(key);
+    else
+        pad_geometry_cells_.erase(key);
     if (cell.congestion_counted) {
         update_congestion(x, y, layer, -1);
         cell.congestion_counted = false;
@@ -173,6 +186,7 @@ void Grid3D::mark_segment(int x1, int y1, int x2, int y2, int layer, int net,
                             cell.congestion_counted = true;
                         }
                     }
+                    pad_geometry_cells_.erase(index(nx, ny, layer));
                     cell.blocked = true;
                 }
             }
@@ -251,6 +265,7 @@ void Grid3D::mark_via(int x, int y, int net, int radius_cells) {
                         }
                         cell.net = net;
                     }
+                    pad_geometry_cells_.erase(index(nx, ny, layer));
                     cell.blocked = true;
                 }
             }
@@ -523,6 +538,9 @@ void Grid3D::add_pad(float x, float y, float width, float height,
                      int net, int layer_idx, uint32_t ref_hash,
                      float clearance_override, bool is_plane_net, float rotation,
                      bool is_circular) {
+    const float extent = std::hypot(width, height) / 2;
+    index_route_geometry(pad_geometry_bins_, pads_.size(), x-extent, y-extent, x+extent, y+extent);
+    max_pad_clearance_ = std::max(max_pad_clearance_, clearance_override);
     pads_.push_back({x, y, width, height, net, layer_idx, ref_hash,
                      clearance_override, is_plane_net, rotation, clearance_override, false, is_circular});
 }
@@ -548,6 +566,50 @@ static float pad_rect_distance(const PadInfo& pad, float x1, float y1,
         0.0f, 0.0f, pad.width, pad.height,
         c * dx1 - s * dy1, s * dx1 + c * dy1,
         c * dx2 - s * dy2, s * dx2 + c * dy2);
+}
+
+void Grid3D::clear_pad_geometry_cell(int x, int y, int layer) {
+    if (is_valid(x, y, layer)) pad_geometry_cells_.erase(index(x, y, layer));
+}
+
+bool Grid3D::pad_cell_has_geometry(int x, int y, int layer) const {
+    if (!is_valid(x, y, layer)) return false;
+    const auto& cell = at(x, y, layer);
+    return cell.blocked && cell.static_blocked && cell.usage_count == 0 &&
+        cell.reserved_count == 0 && !pads_.empty() &&
+        pad_geometry_cells_.count(index(x, y, layer)) != 0;
+}
+
+bool Grid3D::pad_trace_geometry_clear(const Segment& s) const {
+    return pad_trace_geometry_clear_impl(s, false);
+}
+
+bool Grid3D::pad_trace_geometry_clear_impl(const Segment& s, bool authored_only) const {
+    const float reach = s.width / 2 + (authored_only ? max_net_clearance_floor_
+        : std::max(max_pad_clearance_, max_pairwise_clearance()));
+    std::set<size_t> seen;
+    for (int bx = std::floor((std::min(s.x1,s.x2)-reach)/2);
+         bx <= std::floor((std::max(s.x1,s.x2)+reach)/2); ++bx) {
+        for (int by = std::floor((std::min(s.y1,s.y2)-reach)/2);
+             by <= std::floor((std::max(s.y1,s.y2)+reach)/2); ++by) {
+            auto bin = pad_geometry_bins_.find({bx, by});
+            if (bin == pad_geometry_bins_.end()) continue;
+            for (size_t i : bin->second) {
+                if (!seen.insert(i).second) continue;
+                const auto& pad = pads_[i];
+                if (pad.net == s.net || (pad.layer_idx != -1 && pad.layer_idx != s.layer)) continue;
+                const float required = authored_only ? net_clearance_floor(s.net, pad.net)
+                    : std::max(pad.clearance_override, pairwise_required_clearance(s.net, pad.net));
+                if (authored_only && required <= 0.0f) continue;
+                const float distance = pad.is_circular
+                    ? point_to_segment_distance(pad.x,pad.y,s.x1,s.y1,s.x2,s.y2)
+                        - std::max(pad.width,pad.height)/2
+                    : pad_rect_distance(pad,s.x1,s.y1,s.x2,s.y2);
+                if (distance - s.width/2 < required - CLEARANCE_EPSILON_MM) return false;
+            }
+        }
+    }
+    return true;
 }
 
 Grid3D::RouteMarkKey Grid3D::segment_mark_key(
@@ -690,6 +752,9 @@ void Grid3D::add_stored_via(float x, float y, float drill, float diameter, int n
 
 void Grid3D::clear_validation_data() {
     pads_.clear();
+    pad_geometry_bins_.clear();
+    pad_geometry_cells_.clear();
+    max_pad_clearance_ = 0.0f;
     clear_component_holes();
     stored_segments_.clear();
     stored_vias_.clear();
@@ -748,16 +813,38 @@ void Grid3D::set_attach_zones(const std::vector<AttachZone>& zones) {
     attach_zones_ = zones;
 }
 
+void Grid3D::set_net_clearance_floors(const std::map<int, float>& floors) {
+    float maximum = 0.0f;
+    for (const auto& [net, value] : floors) {
+        if (net < 0 || !std::isfinite(value) || value < 0.0f)
+            throw std::invalid_argument("Invalid authored net clearance floor");
+        maximum = std::max(maximum, value);
+    }
+    net_clearance_floors_ = floors;
+    max_net_clearance_floor_ = maximum;
+}
+
+float Grid3D::net_clearance_floor(int net_a, int net_b) const {
+    if (net_a == net_b) return 0.0f;
+    float result = 0.0f;
+    for (int net : {net_a, net_b}) {
+        const auto found = net_clearance_floors_.find(net);
+        if (found != net_clearance_floors_.end()) result = std::max(result, found->second);
+    }
+    return result;
+}
+
 float Grid3D::pairwise_required_clearance(int net_a, int net_b) const {
-    if (!pairwise_active_) return 0.0f;
-    if (net_a < 0 || net_b < 0) return 0.0f;
+    const float floor = net_clearance_floor(net_a, net_b);
+    if (!pairwise_active_) return floor;
+    if (net_a < 0 || net_b < 0) return floor;
     const size_t n = net_domain_.size();
-    if (static_cast<size_t>(net_a) >= n || static_cast<size_t>(net_b) >= n) return 0.0f;
+    if (static_cast<size_t>(net_a) >= n || static_cast<size_t>(net_b) >= n) return floor;
     const int da = net_domain_[static_cast<size_t>(net_a)];
     const int db = net_domain_[static_cast<size_t>(net_b)];
-    if (da < 0 || db < 0 || da >= domain_count_ || db >= domain_count_) return 0.0f;
-    return domain_matrix_[static_cast<size_t>(da) * static_cast<size_t>(domain_count_) +
-                          static_cast<size_t>(db)];
+    if (da < 0 || db < 0 || da >= domain_count_ || db >= domain_count_) return floor;
+    return std::max(floor, domain_matrix_[static_cast<size_t>(da) * static_cast<size_t>(domain_count_) +
+                          static_cast<size_t>(db)]);
 }
 
 namespace {
@@ -937,7 +1024,7 @@ bool Grid3D::edge_foreign_pad_clear(
 bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
                                     int partner_net, float partner_clearance) const {
     if (stored_vias_.empty()) return true;
-    const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
+    const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance()});
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
@@ -945,14 +1032,11 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
         const auto& via = stored_vias_[i];
         if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
         const auto cp = closest_point_on_segment(via.x, via.y, s.x1, s.y1, s.x2, s.y2);
-        float required = clearance;
-        if (via.net == partner_net && partner_clearance >= 0) {
-            required = partner_clearance;
-        } else {
-            const float pair = pairwise_required_clearance(s.net, via.net);
-            if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
-                    (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
-        }
+        float required = std::max(clearance, net_clearance_floor(s.net, via.net));
+        // Pair spacing exemptions cover trace/trace, never drilled barrels.
+        const float pair = pairwise_required_clearance(s.net, via.net);
+        if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
+                (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
         const float gap = std::hypot(via.x - cp.first, via.y - cp.second)
             - (s.width + via.diameter) / 2;
         if (gap < required - CLEARANCE_EPSILON_MM) return false;
@@ -960,18 +1044,46 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
     return true;
 }
 
-bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
-                                       int partner_net, float partner_clearance, float via_clearance) const {
-    const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance_});
+bool Grid3D::authored_trace_geometry_clear(const Segment& s) const {
+    if (max_net_clearance_floor_ <= 0.0f) return true;
+    // Pad-exit/approach occupancy exemptions cannot waive authored floors.
+    // Check swept copper against indexed physical pads before those exemptions,
+    // including pads hidden by another net's overlapping raster halo.
+    if (!pad_trace_geometry_clear_impl(s, true)) return false;
+    const float margin = s.width / 2 + max_net_clearance_floor_;
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
-    auto required = [&](int other_net, std::pair<float, float> point) {
-        if (other_net == partner_net && partner_clearance >= 0) return partner_clearance;
+    for (size_t i : candidates.first) {
+        const auto& other = stored_segments_[i];
+        if (other.net == s.net || other.layer_idx != s.layer) continue;
+        const float required = net_clearance_floor(s.net, other.net);
+        // Preserve legacy negotiated crossings for pairs without authored rules.
+        if (required <= 0.0f) continue;
+        const float gap = segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2,
+            other.x1, other.y1, other.x2, other.y2) - (s.width + other.width) / 2;
+        if (gap < required - CLEARANCE_EPSILON_MM) return false;
+    }
+    return true;
+}
+
+bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
+                                       int partner_net, float partner_clearance, float via_clearance) const {
+    const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance()});
+    const auto candidates = route_geometry_candidates(
+        std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
+        std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
+    auto required = [&](int other_net, std::pair<float, float> point, bool trace_pair = true) {
+        const float floor = net_clearance_floor(s.net, other_net);
+        if (trace_pair && other_net == partner_net && partner_clearance >= 0) return std::max(partner_clearance, floor);
+        // A partner exception may reduce trace-to-trace spacing, but cannot
+        // reduce the barrel floor. A larger authored partner gap still applies.
+        const float base = std::max({clearance, floor,
+            !trace_pair && other_net == partner_net ? partner_clearance : 0.0f});
         const float pair = pairwise_required_clearance(s.net, other_net);
-        if (pair > clearance && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
+        if (pair > base && !attach_zone_exempts(point.first, point.second, s.net, other_net, s.layer))
             return pair;
-        return clearance;
+        return base;
     };
     for (size_t i : candidates.first) {
         const auto& other = stored_segments_[i];
@@ -988,7 +1100,7 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
         const auto cp = closest_point_on_segment(other.x, other.y, s.x1, s.y1, s.x2, s.y2);
         const float gap = std::hypot(other.x - cp.first, other.y - cp.second)
             - (s.width + other.diameter) / 2;
-        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}))
+        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}, false))
                   - CLEARANCE_EPSILON_MM) return false;
     }
     return true;
@@ -1030,13 +1142,14 @@ bool Grid3D::component_holes_clear(float x, float y, float drill, float clearanc
 bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
                                      float hole_clearance, float same_net_drill_clearance) const {
     const float margin = std::max(v.diameter, v.drill) / 2
-        + std::max({clearance, hole_clearance, same_net_drill_clearance, max_pairwise_clearance_});
+        + std::max({clearance, hole_clearance, same_net_drill_clearance, max_pairwise_clearance()});
     const auto candidates = route_geometry_candidates(v.x - margin, v.y - margin, v.x + margin, v.y + margin);
     auto required = [&](int other_net, int layer, std::pair<float, float> point) {
+        const float base = std::max(clearance, net_clearance_floor(v.net, other_net));
         const float pair = pairwise_required_clearance(v.net, other_net);
-        if (pair > clearance && !attach_zone_exempts(point.first, point.second, v.net, other_net, layer))
+        if (pair > base && !attach_zone_exempts(point.first, point.second, v.net, other_net, layer))
             return pair;
-        return clearance;
+        return base;
     };
     for (size_t i : candidates.first) {
         const auto& s = stored_segments_[i];
@@ -1081,7 +1194,7 @@ ValidationResult Grid3D::validate_route(
 
     for (const auto& seg : segments) {
         if (!fixed_fill_clear(seg.x1, seg.y1, seg.x2, seg.y2, seg.layer,
-                              seg.width / 2.0, seg.width / 2.0 + trace_clearance)) {
+                              seg.width / 2.0, seg.width / 2.0 + trace_clearance, seg.net)) {
             result.valid = false;
             result.min_clearance = 0;
             result.violation_x = seg.x1;
@@ -1106,7 +1219,7 @@ ValidationResult Grid3D::validate_route(
         for (int layer = std::min(via.layer_from, via.layer_to);
              layer <= std::max(via.layer_from, via.layer_to); ++layer) {
             if (!fixed_fill_clear(via.x, via.y, via.x, via.y, layer,
-                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance)) {
+                                  via.diameter / 2.0, via.diameter / 2.0 + via_clearance, via.net)) {
                 result.valid = false;
                 result.min_clearance = 0;
                 result.violation_x = via.x;
@@ -1145,6 +1258,7 @@ ValidationResult Grid3D::validate_route(
     // then rejected, thrashing the negotiator.
     const bool pairwise_on = pairwise_active_;
     auto widen = [&](float base, int foreign_net, int zone_layer, auto&& gap_point) -> float {
+        base = std::max(base, net_clearance_floor(exclude_net, foreign_net));
         if (!pairwise_on) return base;
         const float required = pairwise_required_clearance(exclude_net, foreign_net);
         if (required <= base) return base;
@@ -1301,7 +1415,8 @@ ValidationResult Grid3D::validate_route(
             // there would make the configured relaxation unroutable rather
             // than merely enforced.  With an empty clamp set this condition
             // is identical to the pre-#5166 ``(clearance >= 0 || net == 0)``.
-            if (same_component_signal_carveout &&
+            const float authored_floor = net_clearance_floor(exclude_net, pad.net);
+            if ((authored_floor == 0.0f || clearance >= authored_floor) && same_component_signal_carveout &&
                 (pad.net == 0 ||
                  (clearance >= 0.0f && !is_clamped_ref(pad.ref_hash)))) {
                 continue;
@@ -1382,6 +1497,7 @@ ValidationResult Grid3D::validate_route(
             // partner only.  All other foreign nets keep the wider rule.
             const bool is_partner = partner_active && other.net == partner_net;
             float effective_clearance = is_partner ? intra_pair_clearance : trace_clearance;
+            effective_clearance = std::max(effective_clearance, net_clearance_floor(exclude_net, other.net));
 
             // Issue #4510: the partner branch keeps PRECEDENCE -- it tightens
             // *within* a declared pair, whereas the matrix widens *across*
@@ -1423,20 +1539,14 @@ ValidationResult Grid3D::validate_route(
                 result.min_clearance = clearance;
             }
 
-            // Issue #2559 / Phase 1C: tighter clearance for the partner.
-            const bool is_partner = partner_active && sv.net == partner_net;
-            float effective_clearance = is_partner ? intra_pair_clearance : trace_clearance;
-
-            // Issue #4510: cross-domain widening (partner branch wins).
-            if (!is_partner) {
-                // #4507: the barrel crosses the candidate segment's layer.
-                effective_clearance = widen(effective_clearance, sv.net, seg.layer, [&]() {
-                    const auto cp = closest_point_on_segment(
-                        sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
-                    return std::pair<float, float>((sv.x + cp.first) / 2.0f,
-                                                   (sv.y + cp.second) / 2.0f);
-                });
-            }
+            // Via copper uses the same floor in either insertion order;
+            // differential trace spacing cannot relax a drilled barrel.
+            const float effective_clearance = widen(std::max(trace_clearance, via_clearance), sv.net, seg.layer, [&]() {
+                const auto cp = closest_point_on_segment(
+                    sv.x, sv.y, seg.x1, seg.y1, seg.x2, seg.y2);
+                return std::pair<float, float>((sv.x + cp.first) / 2.0f,
+                                               (sv.y + cp.second) / 2.0f);
+            });
 
             if (clearance < effective_clearance - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
@@ -1481,9 +1591,10 @@ ValidationResult Grid3D::validate_route(
             // skipping.  Corridor-relief refs (#2452) keep the full skip.
             if (!pad.is_plane_net && pad.via_carveout_eligible &&
                 is_excluded_ref(pad.ref_hash) && !is_clamped_ref(pad.ref_hash) &&
-                clearance >= 0.0f) continue;
+                clearance >= net_clearance_floor(exclude_net, pad.net)) continue;
             result.min_clearance = std::min(result.min_clearance, clearance);
-            if (clearance < pad.via_clearance_override - CLEARANCE_EPSILON_MM) {
+            if (clearance < std::max(pad.via_clearance_override,
+                    net_clearance_floor(exclude_net, pad.net)) - CLEARANCE_EPSILON_MM) {
                 result.valid = false;
                 result.violation_x = pad.x;
                 result.violation_y = pad.y;
@@ -1512,7 +1623,7 @@ ValidationResult Grid3D::validate_route(
             // stored foreign segment (no diff-pair partner branch here).
             // #4507: the shared layer is the stored segment's (the candidate
             // via's barrel spans it -- the loop above already checked that).
-            const float effective_clearance = widen(via_clearance, seg.net, seg.layer_idx, [&]() {
+            const float effective_clearance = widen(std::max(trace_clearance, via_clearance), seg.net, seg.layer_idx, [&]() {
                 const auto cp = closest_point_on_segment(
                     via.x, via.y, seg.x1, seg.y1, seg.x2, seg.y2);
                 return std::pair<float, float>((via.x + cp.first) / 2.0f,

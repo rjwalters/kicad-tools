@@ -106,7 +106,7 @@ class _PairwiseSearchState:
 _PAIRWISE_MASK_CACHE_MAX = 64
 
 
-@dataclass(frozen=True)
+@dataclass
 class _SegmentAdapter:
     """Adapter exposing :class:`Segment` with the ``start_x/start_y/end_x/end_y``
     attribute names expected by :func:`point_clear_of_copper`.
@@ -122,6 +122,7 @@ class _SegmentAdapter:
     end_x: float
     end_y: float
     width: float
+    net: int = 0
 
 
 @dataclass
@@ -416,6 +417,7 @@ class Router:
         # last remaining via-clearance bug pattern for non-square pads).
         self._foreign_pad_tuples: list[tuple[float, float, float, float, int]] = []
         self._foreign_track_adapters: list[_SegmentAdapter] = []
+        self._foreign_via_pads: list[Pad] = []
 
         # Issue #3002: Symmetric to ``_foreign_pad_tuples`` /
         # ``_foreign_track_adapters`` (Issue #2947), but for the OPPOSITE
@@ -1158,9 +1160,11 @@ class Router:
                         end_x=s.x2,
                         end_y=s.y2,
                         width=s.width,
+                        net=s.net,
                     )
                 )
 
+        self._foreign_via_pads = list(foreign_pads or [])
         self._foreign_pad_tuples = pad_tuples
         self._foreign_track_adapters = track_adapters
 
@@ -1553,18 +1557,33 @@ class Router:
 
         return (gx1, gy1, gx2, gy2)
 
-    def _fixed_step_clear(self, current, nx, ny, layer, net_name):
-        if not self.grid.fixed_fills:
+    def _physical_step_clear(self, current, nx, ny, layer, net_name, net):
+        if not self.grid.fixed_fills and not self.rules.net_clearance_floors:
             return True
-        net_class = self._get_net_class(net_name)
+        net_class = self._halo_net_class(net)
         half = (net_class.trace_width if net_class else self.rules.trace_width) / 2
         clearance = net_class.clearance if net_class else self.rules.trace_clearance
+        if self.rules.net_clearance_floors:
+            copper_layer = self._grid_layer_object(layer)
+            if copper_layer is None:
+                return False
+            x1, y1 = self.grid.grid_to_world(current.x, current.y)
+            x2, y2 = self.grid.grid_to_world(nx, ny)
+            segment = Segment(x1, y1, x2, y2, half * 2, copper_layer, net, net_name)
+            if not self.grid.authored_segment_pads_clear(segment):
+                return False
+            if not self.grid._route_halo.clear(
+                segment, self, require_geometry=False, authored_only=True
+            ):
+                return False
         return self.grid.fixed_fills.segment_clear(
             self.grid.grid_to_world(current.x, current.y),
             self.grid.grid_to_world(nx, ny),
             layer,
             half,
             clearance,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
         )
 
     def _halo_net_class(self, net: int) -> NetClassRouting | None:
@@ -1993,6 +2012,61 @@ class Router:
 
         return False
 
+    def _authored_via_clear(self, gx: int, gy: int, net: int) -> bool:
+        """Check mandatory geometry before cached or plane-layer exemptions."""
+        if not self.rules.net_clearance_floors:
+            return True
+        x, y = self.grid.grid_to_world(gx, gy)
+        net_class = self._halo_net_class(net)
+        diameter = net_class.via_size if net_class else self.rules.via_diameter
+        first = self._grid_layer_object(0)
+        last = self._grid_layer_object(self.grid.num_layers - 1)
+        if first is None or last is None:
+            return False
+        return self._authored_via_geometry_clear(
+            Via(x, y, self.rules.via_drill, diameter, (first, last), net)
+        )
+
+    def _authored_via_geometry_clear(self, candidate: Via) -> bool:
+        """Validate actual emitted geometry, including unsnapped endpoints."""
+        if not self.rules.net_clearance_floors:
+            return True
+        x, y, diameter, net = candidate.x, candidate.y, candidate.diameter, candidate.net
+        endpoints = sorted(self.grid.layer_to_index(layer.value) for layer in candidate.layers)
+        physical_layers = tuple(range(endpoints[0], endpoints[-1] + 1))
+        layers = [self._grid_layer_object(layer) for layer in physical_layers]
+        for layer in layers:
+            if layer is None:
+                return False
+            # A zero-length capsule is the emitted via's copper disc. This
+            # reuses the exact circle/rotated-pad distance predicate.
+            disc = Segment(x, y, x, y, diameter, layer, net)
+            if not self.grid.authored_segment_pads_clear(disc):
+                return False
+            if not self.grid.authored_segment_pads_clear(disc, self._foreign_via_pads):
+                return False
+        for track in self._foreign_track_adapters:
+            required = self.rules.clearance_for_nets(net, track.net, 0.0)
+            if required <= 0:
+                continue
+            distance = self.grid._point_to_segment_distance(
+                x, y, track.start_x, track.start_y, track.end_x, track.end_y
+            )
+            if distance - (diameter + track.width) / 2 < required - 1e-9:
+                return False
+        if not self.grid._route_halo.clear(
+            candidate, self, require_geometry=False, authored_only=True
+        ):
+            return False
+        return self.grid.fixed_fills.via_clear(
+            (x, y),
+            physical_layers,
+            diameter / 2,
+            0.0,
+            net=net,
+            net_clearance_floors=self.rules.net_clearance_floors,
+        )
+
     def _is_via_blocked(
         self,
         gx: int,
@@ -2016,6 +2090,8 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
+        if not self._authored_via_clear(gx, gy, net):
+            return True
         wx, wy = self.grid.grid_to_world(gx, gy)
         if not self.grid._component_hole_index.clear(
             wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
@@ -2039,6 +2115,8 @@ class Router:
                 tuple(range(self.grid.num_layers)),
                 half,
                 self.rules.via_clearance,
+                net=net,
+                net_clearance_floors=self.rules.net_clearance_floors,
             ):
                 return True
 
@@ -2962,6 +3040,8 @@ class Router:
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
         """
+        if not self._authored_via_clear(gx, gy, net):
+            return False
         wx, wy = self.grid.grid_to_world(gx, gy)
         if not self.grid._component_hole_index.clear(
             wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
@@ -3037,16 +3117,14 @@ class Router:
             # Net is at index 4 for the 5-tuple (x, y, w, h, net) shape
             # populated by ``set_via_foreign_context`` (Issue #2951).
             other_pads = [p for p in self._foreign_pad_tuples if p[4] != net]
-            # Track adapter does not carry net id; the caller
-            # (``Autorouter``) is responsible for excluding same-net
-            # segments before populating the context.  This matches
-            # ``EscapeRouter``'s pattern at the boundary.
+            # Preserve the setter's any-net contract even for a caller that
+            # supplies a superset; identity also carries authored minima.
             if not point_clear_of_copper(
                 x=wx,
                 y=wy,
                 via_size=eff_diameter,
                 clearance=self.rules.via_clearance,
-                other_net_tracks=self._foreign_track_adapters,
+                other_net_tracks=[s for s in self._foreign_track_adapters if s.net != net],
                 other_net_pads=other_pads,
             ):
                 if self._via_cache_enabled and not allow_sharing:
@@ -3963,7 +4041,9 @@ class Router:
             for neighbor_idx, (dx, dy, _dlayer, neighbor_cost_mult) in enumerate(self.neighbors_2d):
                 nx, ny = current.x + dx, current.y + dy
                 nlayer = current.layer
-                if not self._fixed_step_clear(current, nx, ny, nlayer, start.net_name):
+                if not self._physical_step_clear(
+                    current, nx, ny, nlayer, start.net_name, start.net
+                ):
                     continue
 
                 # Check bounds and obstacles - account for trace width
@@ -4927,6 +5007,8 @@ class Router:
         # reconstruction or legalization. Component holes are physical on
         # every net/layer; copper-sharing exceptions cannot waive their floor.
         for via in route.vias:
+            if not self._authored_via_geometry_clear(via):
+                return False
             if not self.grid._component_hole_index.clear(
                 via.x, via.y, via.drill, self.rules.min_hole_to_hole
             ):
@@ -4960,7 +5042,11 @@ class Router:
                     if not segment_clears_foreign_via(
                         seg,
                         via,
-                        trace_clearance=self.rules.trace_clearance,
+                        trace_clearance=self.rules.clearance_for_nets(
+                            exclude_net,
+                            via.net,
+                            max(self.rules.trace_clearance, self.rules.via_clearance),
+                        ),
                         hard_intersection_only=False,
                     ):
                         return False
@@ -5656,7 +5742,9 @@ class Router:
         for dx, dy, _dlayer, neighbor_cost_mult in self.neighbors_2d:
             nx, ny = current.x + dx, current.y + dy
             nlayer = current.layer
-            if not self._fixed_step_clear(current, nx, ny, nlayer, source_pad.net_name):
+            if not self._physical_step_clear(
+                current, nx, ny, nlayer, source_pad.net_name, source_pad.net
+            ):
                 continue
 
             # Check bounds
@@ -6003,11 +6091,16 @@ class Router:
         # Collect backward path (end -> meeting point), then reverse
         backward_path: list[tuple[float, float, int, bool]] = []
         backward_node = backward_nodes.get(meeting_point)
+        # Reversing an edge moves its incoming-via flag to the other endpoint.
+        # Keeping the flag on the original node shifts the emitted barrel by
+        # one grid step, away from the position that passed the physical gate.
+        incoming_via = backward_node.via_from_parent if backward_node else False
         if backward_node:
             backward_node = backward_node.parent  # Skip meeting point (already in forward)
         while backward_node:
             wx, wy = self.grid.grid_to_world(backward_node.x, backward_node.y)
-            backward_path.append((wx, wy, backward_node.layer, backward_node.via_from_parent))
+            backward_path.append((wx, wy, backward_node.layer, incoming_via))
+            incoming_via = backward_node.via_from_parent
             backward_node = backward_node.parent
         # backward_path is now from meeting -> end, which is what we want
 

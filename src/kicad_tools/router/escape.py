@@ -35,7 +35,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from .grid import RoutingGrid
     from .rules import DesignRules, NetClassRouting
@@ -711,7 +711,7 @@ def _is_column_aligned_connector(smt_pads: list[Pad], tol: float = 0.05) -> bool
     # records the set of nets and the pad count it carries.
     columns: dict[int, tuple[set[int], int]] = {}
     for p in smt_pads:
-        if not p.net or p.net <= 0:
+        if p.obstacle_only or not p.net or p.net <= 0:
             continue
         coord = p.x if horizontal else p.y
         key = round(coord / tol) if tol > 0 else 0
@@ -1985,7 +1985,7 @@ class EscapeRouter:
                 escape.via_pos = self._clamp_to_edge_clearance(*escape.via_pos)
                 if escape.via is not None:
                     clamped_x, clamped_y = escape.via_pos
-                    escape.via = Via(
+                    escape.via = self._make_escape_via(
                         x=clamped_x,
                         y=clamped_y,
                         drill=escape.via.drill,
@@ -2098,7 +2098,7 @@ class EscapeRouter:
         # unique-per-net so this is the correct degenerate behaviour.
         net_to_pad: dict[str, Pad] = {}
         for pad in package.pads:
-            if pad.net_name and pad.net_name not in net_to_pad:
+            if not pad.obstacle_only and pad.net_name and pad.net_name not in net_to_pad:
                 net_to_pad[pad.net_name] = pad
 
         # Track already-paired net names so we don't emit two paired
@@ -2119,12 +2119,16 @@ class EscapeRouter:
             return self.rules.trace_clearance
 
         for pad in package.pads:
-            if pad.net_name in already_paired:
+            if pad.obstacle_only or pad.net_name in already_paired:
                 continue
             partner_name = self.diff_pair_map.get(pad.net_name)
             if not partner_name:
                 continue
             partner_pad = net_to_pad.get(partner_name)
+            if partner_pad is None and any(
+                p.obstacle_only and p.net_name == partner_name for p in package.pads
+            ):
+                continue
             if partner_pad is None:
                 # Partner net does not appear on this package.  The leg
                 # defers to the per-package dispatcher (single-ended
@@ -3448,7 +3452,7 @@ class EscapeRouter:
         # via escapes.  Generating escapes for them wastes the BGA perimeter
         # channel that the signal nets need -- mirrors the equivalent filter
         # in ``_escape_qfp_alternating`` (Issue #2513).
-        routable_pads = [p for p in package.pads if p.net != 0]
+        routable_pads = [p for p in package.pads if not p.obstacle_only and p.net != 0]
 
         # Group pads by ring (distance from center)
         rings = self._group_pads_by_ring(routable_pads, center_x, center_y)
@@ -3594,7 +3598,7 @@ class EscapeRouter:
             )
 
             # Create via
-            via = Via(
+            via = self._make_escape_via(
                 x=via_x,
                 y=via_y,
                 drill=self.rules.via_drill,
@@ -3678,7 +3682,7 @@ class EscapeRouter:
             # routing space (a TQFP-32 MCU may have 19/32 pins on plane nets;
             # without this filter the escape phase blocks the perimeter for
             # the actual signal nets that need to escape).
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
 
             if abs(pad.y - max_y) < edge_margin:
@@ -3778,6 +3782,8 @@ class EscapeRouter:
             (west_pads, EscapeDirection.WEST, EscapeDirection.NORTH, EscapeDirection.SOUTH),
         ]:
             for i, pad in enumerate(pads):
+                if pad.obstacle_only:
+                    continue
                 if use_perpendicular_only or i % 2 == 0:
                     direction = primary_dir
                 else:
@@ -4252,7 +4258,7 @@ class EscapeRouter:
             if abs(pad.x - center_x) < edge_margin and abs(pad.y - center_y) < edge_margin:
                 continue
             # Skip plane-net pads -- they don't escape, they connect via plane stitching
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
 
             if abs(pad.y - max_y) < edge_margin:
@@ -4332,6 +4338,8 @@ class EscapeRouter:
                 edge_with_plane.sort(key=lambda p: p.y)
 
             for i, pad in enumerate(pads):
+                if pad.obstacle_only:
+                    continue
                 if use_perpendicular_only or i % 2 == 0:
                     direction = primary_dir
                 else:
@@ -4349,9 +4357,17 @@ class EscapeRouter:
                     for idx, p in enumerate(edge_with_plane):
                         if p.key != pad_key:
                             continue
-                        if idx > 0 and edge_with_plane[idx - 1].net != 0:
+                        if (
+                            idx > 0
+                            and not edge_with_plane[idx - 1].obstacle_only
+                            and edge_with_plane[idx - 1].net != 0
+                        ):
                             neighbour_signal = True
-                        if idx < len(edge_with_plane) - 1 and edge_with_plane[idx + 1].net != 0:
+                        if (
+                            idx < len(edge_with_plane) - 1
+                            and not edge_with_plane[idx + 1].obstacle_only
+                            and edge_with_plane[idx + 1].net != 0
+                        ):
                             neighbour_signal = True
                         break
 
@@ -4979,6 +4995,8 @@ class EscapeRouter:
         skipped_count = 0
 
         for i, pad in enumerate(pads):
+            if pad.obstacle_only:
+                continue
             # Issue #3278: per-pad escape width, sized for THIS pad's
             # own net class.  Only the geometry that must remain a
             # row-scope constant (``lateral_offset``) uses
@@ -5124,7 +5142,7 @@ class EscapeRouter:
                     continue
 
                 # Create via
-                via = Via(
+                via = self._make_escape_via(
                     x=via_x,
                     y=via_y,
                     drill=self.rules.via_drill,
@@ -5852,7 +5870,7 @@ class EscapeRouter:
         # Steps 1-4: collect far-consumer candidates.
         candidates: list[tuple[float, int, Pad]] = []
         for i, pad in enumerate(pads):
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
             positions = self.net_target_positions.get(pad.net) or []
             off_package = [(x, y) for x, y, ref in positions if ref != package.ref]
@@ -6180,6 +6198,8 @@ class EscapeRouter:
         stagger_offset = self.via_spacing / 2
 
         for i, pad in enumerate(pads):
+            if pad.obstacle_only:
+                continue
             # Stagger: odd pins get extra offset (two via rows)
             is_odd = i % 2 == 1
             escape_dist = base_escape_dist + (stagger_offset if is_odd else 0)
@@ -6259,7 +6279,7 @@ class EscapeRouter:
             )
 
             # Create via
-            via = Via(
+            via = self._make_escape_via(
                 x=via_x,
                 y=via_y,
                 drill=self.rules.via_drill,
@@ -6487,6 +6507,8 @@ class EscapeRouter:
             dx, dy = self._direction_to_vector(direction)
 
             for i, pad in enumerate(row_pads):
+                if pad.obstacle_only:
+                    continue
                 trace_width = self._get_trace_width_for_net(pad.net_name)
 
                 if is_outer:
@@ -6631,7 +6653,7 @@ class EscapeRouter:
                         ),
                     ]
 
-                    via = Via(
+                    via = self._make_escape_via(
                         x=via_x,
                         y=via_y,
                         drill=self.rules.via_drill,
@@ -6788,7 +6810,7 @@ class EscapeRouter:
         for pad in package.pads:
             # Issue #2513: Skip plane-net pads (net=0) -- they are stitched
             # via planes, not routed via escapes.
-            if pad.net == 0:
+            if pad.obstacle_only or pad.net == 0:
                 continue
 
             direction = self._get_quadrant_direction(pad.x, pad.y, center_x, center_y)
@@ -6913,6 +6935,8 @@ class EscapeRouter:
 
         for row_idx, row in enumerate(rows):
             for col_idx, pad in enumerate(row):
+                if pad.obstacle_only:
+                    continue
                 # Offset based on row and column parity
                 offset_x = (col_idx % 2) * stagger
                 offset_y = (row_idx % 2) * stagger
@@ -6934,7 +6958,7 @@ class EscapeRouter:
                     foreign_tracks=foreign_tracks,
                     existing_drills=existing_drills,
                 ):
-                    via = Via(
+                    via = self._make_escape_via(
                         x=via_x,
                         y=via_y,
                         drill=self.rules.via_drill,
@@ -7831,6 +7855,8 @@ class EscapeRouter:
             infeasible, or (when ``skip_on_clearance_violation=True``)
             the rescue would introduce a foreign-pad clearance violation.
         """
+        if pad.obstacle_only:
+            return None
         if not self.via_in_pad_supported:
             return None
 
@@ -8176,7 +8202,7 @@ class EscapeRouter:
         # the via barrel itself.
         offset = via_diameter / 2 + effective_clearance + self.rules.trace_width
 
-        in_pad_via = Via(
+        in_pad_via = self._make_escape_via(
             x=via_x,
             y=via_y,
             drill=via_drill,
@@ -8324,6 +8350,7 @@ class EscapeRouter:
         max_offset_mm: float | None = None,
         step_mm: float = 0.05,
         existing_escapes: list[EscapeRoute] | None = None,
+        candidate_validator: Callable[[EscapeRoute], bool] | None = None,
     ) -> EscapeRoute | None:
         """Probe off-pad via candidates along the pin's escape direction.
 
@@ -8402,6 +8429,10 @@ class EscapeRouter:
                 drop from the refused in-pad via to its lateral replacement.
                 ``None`` (legacy callers / unit fixtures) disables the
                 sibling check, preserving byte-for-byte behaviour.
+
+            candidate_validator: Optional full-route physical predicate. A
+                rejection continues the existing bounded offset search; legacy
+                callers without a predicate retain their original behavior.
 
         Returns:
             An ``EscapeRoute`` with the laterally-offset via and the
@@ -8603,7 +8634,7 @@ class EscapeRouter:
                 # Via from surface to inner escape layer.  ``in_pad=False``
                 # because the via is geometrically OFF the pad copper
                 # (that's the whole point of the lateral offset).
-                lateral_via = Via(
+                lateral_via = self._make_escape_via(
                     x=cand_x,
                     y=cand_y,
                     drill=via_drill,
@@ -8632,6 +8663,19 @@ class EscapeRouter:
                     net_name=pad.net_name,
                 )
 
+                candidate = EscapeRoute(
+                    pad=pad,
+                    direction=direction,
+                    escape_point=(escape_x, escape_y),
+                    escape_layer=escape_layer,
+                    via_pos=(cand_x, cand_y),
+                    segments=[surface_seg, inner_seg],
+                    via=lateral_via,
+                    ring_index=0,
+                )
+                if candidate_validator is not None and not candidate_validator(candidate):
+                    continue
+
                 logger.info(
                     "Lateral via-escape rescue for pad %s (ref=%s pin=%s): "
                     "in-pad deferred; off-pad via at (%.3f, %.3f) "
@@ -8650,16 +8694,7 @@ class EscapeRouter:
                     escape_layer.kicad_name,
                 )
 
-                return EscapeRoute(
-                    pad=pad,
-                    direction=direction,
-                    escape_point=(escape_x, escape_y),
-                    escape_layer=escape_layer,
-                    via_pos=(cand_x, cand_y),
-                    segments=[surface_seg, inner_seg],
-                    via=lateral_via,
-                    ring_index=0,
-                )
+                return candidate
 
         # No candidate in the budget passed.  Caller (dispatcher) will
         # treat this as "defer to main router" -- the same outcome the
@@ -8677,6 +8712,43 @@ class EscapeRouter:
             direction.name,
         )
         return None
+
+    def _make_escape_via(
+        self,
+        *,
+        x: float,
+        y: float,
+        drill: float,
+        diameter: float,
+        layers: tuple[Layer, Layer],
+        net: int = 0,
+        net_name: str = "",
+        in_pad: bool = False,
+        is_micro: bool = False,
+    ) -> Via:
+        """Represent the drilled barrel, independently of the escape landing.
+
+        This router selects ordinary through-hole processing unless it explicitly
+        enables its microvia fallback. Like C++ route conversion, ordinary escape
+        vias must expose the entire stack to physical validators before acceptance.
+        The escape's selected landing layer remains on EscapeRoute and its stub.
+        """
+        if not is_micro:
+            layers = (
+                Layer(self.grid.index_to_layer(0)),
+                Layer(self.grid.index_to_layer(self.grid.num_layers - 1)),
+            )
+        return Via(
+            x=x,
+            y=y,
+            drill=drill,
+            diameter=diameter,
+            layers=layers,
+            net=net,
+            net_name=net_name,
+            in_pad=in_pad,
+            is_micro=is_micro,
+        )
 
     def _select_inner_escape_layer(self, surface_layer: Layer) -> Layer:
         """Select the best inner layer for via escape routing.
@@ -8872,6 +8944,7 @@ class EscapeRouter:
             the main router picks up the pad cleanly from the original
             pad position rather than from a clipped escape endpoint.
         """
+        escapes[:] = [escape for escape in escapes if not escape.pad.obstacle_only]
         routes: list[Route] = []
 
         # Issue #2998: trace_clearance used for the segment-vs-foreign-via

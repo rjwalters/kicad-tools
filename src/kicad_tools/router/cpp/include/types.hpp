@@ -256,6 +256,7 @@ namespace router {
 // v36: track current counted route occupancy through rip-up.
 // v37: coalesce obsolete XYZ frontier entries without changing useful ordering.
 // v38: integrate the stored-via guard with current occupancy and indexed frontier.
+// Trace/via search and commit gates share the physical clearance floor (v39-v51).
 // v40: add the Epic #5509 Phase 1b clearance-kernel bindings (KSegment/KVia/
 // KEdge, copper_gap, hole_gap, clear) -- a new bindings.cpp symbol surface, so
 // a v39 .so must be rejected rather than AttributeError inside the parity test.
@@ -265,7 +266,11 @@ namespace router {
 // accepted goal node, so the Python resume loop rejects the right cell).  New
 // struct fields, so a v41 .so must be rejected rather than AttributeError deep
 // in the resume loop.
-constexpr int ROUTER_CPP_BUILD_VERSION = 42;
+// v52: combine the v51 authored-clearance/Kelvin-escape trace/via search and
+// commit-gate work (developed in parallel) with the v42 clearance-kernel and
+// resume-goal bindings above; both are real, DISTINCT binding-surface
+// changes, so this is the first build carrying BOTH.
+constexpr int ROUTER_CPP_BUILD_VERSION = 52;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

@@ -2479,6 +2479,7 @@ class Autorouter:
                 width=pad_info.get("width", 0.5),
                 height=pad_info.get("height", 0.5),
                 net=pad_info.get("net", 0),
+                obstacle_only=pad_info.get("obstacle_only", False),
                 net_name=pad_info.get("net_name", ""),
                 layer=pad_info.get("layer", Layer.F_CU),
                 ref=ref,
@@ -18599,10 +18600,27 @@ class Autorouter:
         # measures against.  ``EscapeRouter.apply_escape_routes`` marks the
         # stubs straight onto ``self.grid`` (bypassing ``_mark_route``), so the
         # grid-level observer is what catches them; this only supplies the tag.
+        from .kelvin_escape import recover_kelvin_escapes
+
+        physical_pads = self.all_pads or list(self.pads.values())
         with self._journal_stage(PASS_ESCAPE):
             for package in packages:
                 escapes = self._escape.generate_escapes(package)
+                original_escapes = {id(escape) for escape in escapes}
+                escapes = recover_kelvin_escapes(
+                    self._escape,
+                    package,
+                    escapes,
+                    physical_pads,
+                    edge_segments=self._edge_segments,
+                    edge_clearance=self._edge_clearance or 0.0,
+                )
+                recovered_escapes = {id(escape) for escape in escapes} - original_escapes
                 routes = self._escape.apply_escape_routes(escapes)
+                # Only committed recoveries gain protection from sibling rip-up.
+                self._in_pad_escape_protected_nets.update(
+                    escape.pad.net for escape in escapes if id(escape) in recovered_escapes
+                )
                 all_routes.extend(routes)
 
                 # Track these routes
