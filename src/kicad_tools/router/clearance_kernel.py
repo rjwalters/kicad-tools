@@ -60,9 +60,11 @@ __all__ = [
     "KZonePoly",
     "clear",
     "copper_gap",
+    "copper_gap_ring_edge",
     "hole_gap",
     "make_pad",
     "pad_outline",
+    "ring_edge_crosses_ray",
 ]
 
 CLEARANCE_EPSILON_MM = 1e-4
@@ -520,7 +522,10 @@ def _point_in_rings(rings: tuple[KRing, ...], px: float, py: float) -> bool:
         for i in range(1, len(ring)):
             ax, ay = ring[i - 1]
             bx, by = ring[i]
-            if (ay > py) != (by > py) and px < (bx - ax) * (py - ay) / (by - ay) + ax:
+            # One shared crossing test with the indexed consumers (Phase 3f):
+            # ``fixed_copper_kernel`` walks the same parity over the edges a
+            # row index selects instead of over whole rings.
+            if ring_edge_crosses_ray(px, py, ax, ay, bx, by):
                 inside = not inside
     return inside
 
@@ -1031,3 +1036,67 @@ def clear(a: KShape, b: KShape, required_mm: float) -> bool:
         True when the pair satisfies ``required_mm``.
     """
     return copper_gap(a, b) >= required_mm - CLEARANCE_EPSILON_MM
+
+
+# ---------------------------------------------------------------------------
+# Indexed-consumer primitives (Epic #5509, Phase 3f)
+# ---------------------------------------------------------------------------
+#
+# :func:`copper_gap` on a ``KZonePoly`` walks every edge of every ring.  A
+# consumer that owns a *spatial index* over a pour's boundary edges --
+# ``Grid3D``'s 1 mm bins, and their Python twin in
+# :mod:`kicad_tools.router.fixed_copper_kernel` -- cannot hand the whole zone
+# over without throwing that index away: on a 2000-vertex pour the indexed walk
+# is orders of magnitude cheaper, and the fixed-copper predicate sits in the A*
+# step loop (``pathfinder._fixed_step_clear``).
+#
+# These are not a second model.  Taking the minimum of
+# :func:`copper_gap_ring_edge` over every edge of a ring set, with containment
+# from :func:`ring_edge_crosses_ray` parity over those same edges, reproduces
+# ``copper_gap(seg, KZonePoly(rings))`` exactly -- asserted over random pours by
+# ``tests/router/test_clearance_kernel_parity.py``.
+
+
+def copper_gap_ring_edge(s: KSegment, ax: float, ay: float, bx: float, by: float) -> float:
+    """Edge-to-edge copper gap between a segment and ONE ring edge.
+
+    The single-edge step of ``copper_gap(KSegment, KZonePoly)``.  A pour
+    carries no width of its own -- the filled polygon *is* the copper -- so
+    only the segment's half width is subtracted, exactly as
+    :func:`_copper_gap_zone_seg` does.  A ring edge carries no layer either:
+    the caller has already established that this pour and this segment share
+    one (the layer gate :func:`copper_gap` applies).
+
+    Args:
+        s: The querying track segment (centreline plus copper width).
+        ax: Ring-edge start x.
+        ay: Ring-edge start y.
+        bx: Ring-edge end x.
+        by: Ring-edge end y.
+
+    Returns:
+        The gap in mm, negative when the segment's copper overlaps the edge.
+    """
+    return segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2, ax, ay, bx, by) - s.width / 2.0
+
+
+def ring_edge_crosses_ray(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> bool:
+    """Does the ``+x`` ray from ``(px, py)`` cross this ring edge?
+
+    The single-edge step of :func:`_point_in_rings`.  A caller that toggles a
+    parity flag across every edge of a ring set -- or across every edge that
+    can possibly straddle ``py``, which is what a row index selects --
+    reproduces the kernel's own "is this point inside the copper" answer.
+
+    Args:
+        px: Query point x.
+        py: Query point y.
+        ax: Ring-edge start x.
+        ay: Ring-edge start y.
+        bx: Ring-edge end x.
+        by: Ring-edge end y.
+
+    Returns:
+        True when the ray crosses the edge.
+    """
+    return (ay > py) != (by > py) and px < (bx - ax) * (py - ay) / (by - ay) + ax

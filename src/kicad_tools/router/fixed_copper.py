@@ -3,13 +3,25 @@
 AABB bounds only accelerate queries; copper distance is evaluated against the
 actual repaired polygon, including interior rings. Source identities are kept
 for diagnostics but never grant same-net reuse of placement-invalid copper.
+
+The clearance predicates themselves are the Phase 1b exact-geometry kernel's
+(Epic #5509 Phase 3f, consumer group 6): :mod:`.fixed_copper_kernel` projects
+each fill's copper onto the kernel's shapes and owns the spatial index the
+query path needs. The engines reach these predicates through
+``FixedFillObstacles.segment_clear`` / ``via_clear`` and nowhere else --
+``pathfinder._fixed_step_clear``, ``diffpair_routing``, ``pad_access`` and
+``cpp_backend``'s route validation all delegate here rather than composing a
+gap of their own, so they are switched by delegation.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
+
+from .fixed_copper_kernel import KernelFill, fixed_fill_clear, kernel_fill, polygon_rings
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,23 @@ class FixedFillObstacles:
     def __bool__(self) -> bool:
         return bool(self.fills)
 
+    @cached_property
+    def kernel_fills(self) -> tuple[KernelFill, ...]:
+        """This copper as indexed kernel shapes, built once per obstacle set.
+
+        One entry per multipolygon lobe, from exactly the rings
+        :meth:`native_polygons` hands ``Grid3D::add_fixed_fill`` -- so the
+        Python and native halves of consumer group 6 judge the same copper.
+        Built lazily because a set with no query is common (every engine holds
+        an empty :class:`FixedFillObstacles` when the board has no preserved
+        copper) and the walk is proportional to the pour's vertex count.
+        """
+        return tuple(
+            indexed
+            for layer, clearance, rings in self.native_polygons()
+            if (indexed := kernel_fill(layer, clearance, rings)) is not None
+        )
+
     def segment_clear(
         self,
         a: tuple[float, float],
@@ -58,27 +87,21 @@ class FixedFillObstacles:
         half: float,
         clearance: float,
     ) -> bool:
+        """Is a candidate trace (or, for ``a == b``, a via) clear of this copper?
+
+        The same loop ``Grid3D::validate_route`` runs natively: every fill on
+        the query's layer, each judged by the clearance kernel through
+        :func:`~kicad_tools.router.fixed_copper_kernel.fixed_fill_clear`.  A
+        fill's own clearance floor can only raise the caller's requirement,
+        never lower it.
+        """
         if not self.fills:
             return True
-        from shapely.geometry import LineString, Point  # type: ignore[import-untyped]
-
-        query = Point(a) if a == b else LineString((a, b))
-        for fill in self.fills:
-            if fill.layer != layer:
-                continue
-            required = half + max(clearance, fill.clearance)
-            x0, y0, x1, y1 = fill.geometry.bounds
-            if (
-                max(a[0], b[0]) + required < x0
-                or min(a[0], b[0]) - required > x1
-                or max(a[1], b[1]) + required < y0
-                or min(a[1], b[1]) - required > y1
-            ):
-                continue
-            # Intersections remain forbidden even for a zero-width query.
-            if query.intersects(fill.geometry) or query.distance(fill.geometry) < required - 1e-4:
-                return False
-        return True
+        reach = half + clearance
+        return all(
+            fixed_fill_clear(fill, a[0], a[1], b[0], b[1], layer, half, reach)
+            for fill in self.kernel_fills
+        )
 
     def via_clear(
         self,
@@ -92,20 +115,8 @@ class FixedFillObstacles:
     def native_polygons(self):
         """Simple polygons with holes; preserve every lobe of a multipolygon."""
         for fill in self.fills:
-            geometries = (
-                fill.geometry.geoms
-                if fill.geometry.geom_type == "MultiPolygon"
-                else (fill.geometry,)
-            )
-            for geometry in geometries:
-                yield (
-                    fill.layer,
-                    fill.clearance,
-                    [
-                        list(geometry.exterior.coords),
-                        *[list(ring.coords) for ring in geometry.interiors],
-                    ],
-                )
+            for rings in polygon_rings(fill.geometry):
+                yield (fill.layer, fill.clearance, rings)
 
 
 # Outward rounding for polygonal circle approximations: a tessellated disc
@@ -129,7 +140,10 @@ def _refuse(reference: str, pad_number: str, detail: str) -> ValueError:
 
 def _primitive_polygon(node, reference: str, pad_number: str):
     """Actual copper of one supported primitive, in the pad's local frame."""
-    from shapely.geometry import Polygon
+    # shapely ships no stubs; the module's first import carries the ignore
+    # (it used to sit in ``segment_clear``, which no longer needs shapely --
+    # the clearance predicate is the kernel's now, Epic #5509 Phase 3f).
+    from shapely.geometry import Polygon  # type: ignore[import-untyped]
 
     if node.name != "gr_poly":
         raise _refuse(reference, pad_number, f"unsupported primitive {node.name!r}")
