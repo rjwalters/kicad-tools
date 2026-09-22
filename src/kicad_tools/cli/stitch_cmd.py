@@ -49,6 +49,7 @@ from kicad_tools.cli.format_options import (
     stdout_to_stderr_when,
 )
 from kicad_tools.core.sexp_file import load_pcb, save_pcb, verify_pcb_write
+from kicad_tools.router.track_index import TrackSpatialIndex, build_track_index
 from kicad_tools.router.via_clearance import drill_hole_to_hole_clear
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
@@ -1860,6 +1861,7 @@ def calculate_via_position(
     min_hole_to_hole: float = 0.5,
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
+    other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
 ) -> tuple[float, float] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -1907,6 +1909,13 @@ def calculate_via_position(
             exactly as before.
         same_net_fill_layer: Target layer the via bonds to.  Only same-net
             fill on this layer counts toward the containment gate.
+        other_net_track_index: Issue #5240 -- optional prebuilt
+            :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
+            ``other_net_tracks``, so a caller running several placement
+            strategies against the same obstacle pool pays for the index
+            once.  Built on demand when omitted, and a pure superset
+            pre-filter either way: the exact per-segment distance tests
+            below are unchanged, so the accepted position is identical.
     """
     if other_net_tracks is None:
         other_net_tracks = []
@@ -1918,6 +1927,8 @@ def calculate_via_position(
         other_net_filled_polygons = []
     if other_net_drills is None:
         other_net_drills = []
+    if other_net_track_index is None:
+        other_net_track_index = build_track_index(other_net_tracks)
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
@@ -1979,8 +1990,17 @@ def calculate_via_position(
                     (via_drill / 2 + KICAD_HOLE_TO_COPPER_CLEARANCE) - (via_radius + clearance),
                 )
 
-            # Check for conflicts with other-net track segments
-            for seg in other_net_tracks:
+            # Check for conflicts with other-net track segments.  Issue
+            # #5240: the index narrows the scan to the segments whose copper
+            # bbox is within the clearance halo of this candidate; every
+            # segment the exact test below could reject is still visited.
+            if other_net_track_index is None:
+                via_track_candidates: list[TrackSegment] = other_net_tracks
+            else:
+                via_track_candidates = other_net_track_index.near_point(
+                    via_x, via_y, via_radius + clearance + hole_extra
+                )
+            for seg in via_track_candidates:
                 dist = point_to_segment_distance(
                     via_x, via_y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
                 )
@@ -2058,7 +2078,13 @@ def calculate_via_position(
             # Check connecting trace path (pad center -> via center) for clearance
             if trace_width > 0:
                 # Check trace path against other-net track segments
-                for seg in other_net_tracks:
+                if other_net_track_index is None:
+                    path_track_candidates: list[TrackSegment] = other_net_tracks
+                else:
+                    path_track_candidates = other_net_track_index.near_segment(
+                        pad.x, pad.y, via_x, via_y, trace_half_width + clearance
+                    )
+                for seg in path_track_candidates:
                     dist = segment_to_segment_distance(
                         pad.x,
                         pad.y,
@@ -2178,12 +2204,18 @@ def _check_dogleg_path_clearance(
     other_net_pads: list[tuple[float, float, float, int]],
     clearance: float,
     other_net_filled_polygons: list[FilledPolygon] | None = None,
+    other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
 ) -> bool:
     """Check if a dog-leg (L-shaped) trace path has adequate clearance.
 
     The path consists of two segments:
     1. Pad center -> intermediate point (first leg)
     2. Intermediate point -> via center (second leg)
+
+    ``other_net_track_index`` (Issue #5240) is an optional prebuilt
+    :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
+    ``other_net_tracks``; it only narrows which segments reach the exact
+    distance test below, so the verdict is unchanged.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2198,7 +2230,13 @@ def _check_dogleg_path_clearance(
 
     for leg_sx, leg_sy, leg_ex, leg_ey in legs:
         # Check against other-net track segments
-        for seg in other_net_tracks:
+        if other_net_track_index is None:
+            leg_track_candidates: list[TrackSegment] = other_net_tracks
+        else:
+            leg_track_candidates = other_net_track_index.near_segment(
+                leg_sx, leg_sy, leg_ex, leg_ey, trace_half_width + clearance
+            )
+        for seg in leg_track_candidates:
             dist = segment_to_segment_distance(
                 leg_sx,
                 leg_sy,
@@ -2259,6 +2297,7 @@ def calculate_dogleg_via_position(
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
+    other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -2310,6 +2349,8 @@ def calculate_dogleg_via_position(
         other_net_filled_polygons = []
     if other_net_drills is None:
         other_net_drills = []
+    if other_net_track_index is None:
+        other_net_track_index = build_track_index(other_net_tracks)
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
@@ -2420,7 +2461,14 @@ def calculate_dogleg_via_position(
                         )
 
                     # Check other-net track clearance at via position
-                    for seg in other_net_tracks:
+                    # (Issue #5240: index-narrowed superset; exact test below.)
+                    if other_net_track_index is None:
+                        dogleg_track_candidates: list[TrackSegment] = other_net_tracks
+                    else:
+                        dogleg_track_candidates = other_net_track_index.near_point(
+                            via_x, via_y, via_radius + clearance + hole_extra
+                        )
+                    for seg in dogleg_track_candidates:
                         dist = point_to_segment_distance(
                             via_x, via_y, seg.start_x, seg.start_y, seg.end_x, seg.end_y
                         )
@@ -2507,6 +2555,7 @@ def calculate_dogleg_via_position(
                             other_net_pads,
                             clearance,
                             other_net_filled_polygons,
+                            other_net_track_index,
                         ):
                             continue
 
@@ -2522,10 +2571,16 @@ def _check_multileg_path_clearance(
     other_net_vias: list[tuple[float, float, float, int]],
     other_net_pads: list[tuple[float, float, float, int]],
     clearance: float,
+    other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
 ) -> bool:
     """Check if a multi-segment trace path has adequate clearance.
 
     The path consists of segments between consecutive points in the list.
+
+    ``other_net_track_index`` (Issue #5240) is an optional prebuilt
+    :class:`~kicad_tools.router.track_index.TrackSpatialIndex` over
+    ``other_net_tracks``; it only narrows which segments reach the exact
+    distance test below, so the verdict is unchanged.
 
     Returns True if path is clear, False if there's a conflict.
     """
@@ -2534,7 +2589,13 @@ def _check_multileg_path_clearance(
         leg_ex, leg_ey = points[i + 1]
 
         # Check against other-net track segments
-        for seg in other_net_tracks:
+        if other_net_track_index is None:
+            leg_track_candidates: list[TrackSegment] = other_net_tracks
+        else:
+            leg_track_candidates = other_net_track_index.near_segment(
+                leg_sx, leg_sy, leg_ex, leg_ey, trace_half_width + clearance
+            )
+        for seg in leg_track_candidates:
             dist = segment_to_segment_distance(
                 leg_sx,
                 leg_sy,
@@ -2582,6 +2643,7 @@ def calculate_extended_escape_position(
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
     same_net_filled_polygons: list[FilledPolygon] | None = None,
     same_net_fill_layer: str | None = None,
+    other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -2636,6 +2698,8 @@ def calculate_extended_escape_position(
         other_net_pads = []
     if other_net_drills is None:
         other_net_drills = []
+    if other_net_track_index is None:
+        other_net_track_index = build_track_index(other_net_tracks)
 
     via_radius = via_size / 2
     trace_half_width = trace_width / 2
@@ -2712,7 +2776,14 @@ def calculate_extended_escape_position(
                 return False
 
         # Check other-net track clearance
-        for seg in other_net_tracks:
+        # (Issue #5240: index-narrowed superset; exact test unchanged.)
+        if other_net_track_index is None:
+            escape_track_candidates: list[TrackSegment] = other_net_tracks
+        else:
+            escape_track_candidates = other_net_track_index.near_point(
+                vx, vy, via_radius + clearance + hole_extra
+            )
+        for seg in escape_track_candidates:
             dist = point_to_segment_distance(vx, vy, seg.start_x, seg.start_y, seg.end_x, seg.end_y)
             if dist < via_radius + seg.width / 2 + clearance + hole_extra:
                 return False
@@ -2793,6 +2864,7 @@ def calculate_extended_escape_position(
                             other_net_vias,
                             other_net_pads,
                             clearance,
+                            other_net_track_index,
                         ):
                             continue
 
@@ -2836,6 +2908,7 @@ def calculate_extended_escape_position(
                             other_net_vias,
                             other_net_pads,
                             clearance,
+                            other_net_track_index,
                         ):
                             continue
 
@@ -2888,6 +2961,7 @@ def calculate_extended_escape_position(
                                 other_net_vias,
                                 other_net_pads,
                                 clearance,
+                                other_net_track_index,
                             ):
                                 continue
 
@@ -2914,6 +2988,10 @@ def calculate_extended_escape_position(
     # (vias span F.Cu through B.Cu).
     trace_layer = pad.layer
     same_layer_tracks = [seg for seg in other_net_tracks if seg.layer == trace_layer]
+    # Issue #5240: the layer-filtered pool needs its own index (it is a
+    # different segment set from ``other_net_tracks``).  Built lazily on
+    # first use so pads that never reach strategy 4 do not pay for it.
+    same_layer_index: list[TrackSpatialIndex[TrackSegment] | None] = []
 
     def _check_path_layer_aware(pts: list[tuple[float, float]]) -> bool:
         """Path clearance using only tracks on the pad's layer.
@@ -2925,10 +3003,19 @@ def calculate_extended_escape_position(
         """
         if trace_width <= 0:
             return True
+        if not same_layer_index:
+            same_layer_index.append(build_track_index(same_layer_tracks))
+        layer_index = same_layer_index[0]
         for i in range(len(pts) - 1):
             sx, sy = pts[i]
             ex, ey = pts[i + 1]
-            for seg in same_layer_tracks:
+            if layer_index is None:
+                layer_track_candidates: list[TrackSegment] = same_layer_tracks
+            else:
+                layer_track_candidates = layer_index.near_segment(
+                    sx, sy, ex, ey, trace_half_width + clearance
+                )
+            for seg in layer_track_candidates:
                 dist = segment_to_segment_distance(
                     sx,
                     sy,
@@ -5119,6 +5206,11 @@ def run_stitch(
     # placement helpers treat their ``other_net_*`` arguments as flat
     # obstacle lists (no internal net filtering), so we filter by net here
     # when assembling the per-pad augmented lists.
+    # Issue #5240: the pre-existing foreign-net track pool never changes
+    # during the pad loop, so index it once here; per-pad pools that add
+    # just-placed cross-net stitch geometry get their own index below.
+    base_track_index = build_track_index(other_net_tracks)
+
     placed_stitch_tracks: list[TrackSegment] = []
     placed_stitch_vias: list[tuple[float, float, float, int]] = []
 
@@ -5142,6 +5234,7 @@ def run_stitch(
         eff_other_net_tracks: list[TrackSegment],
         eff_other_net_vias: list[tuple[float, float, float, int]],
         enforce_fill_gate: bool = True,
+        eff_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     ) -> (
         tuple[
             tuple[float, float] | None,
@@ -5183,6 +5276,7 @@ def run_stitch(
             via_drill=drill,
             same_net_filled_polygons=fill_gate,
             same_net_fill_layer=terminus_layer,
+            other_net_track_index=eff_track_index,
         )
 
         # Track if we're using dog-leg or extended escape routing
@@ -5209,6 +5303,7 @@ def run_stitch(
                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
                 same_net_filled_polygons=fill_gate,
                 same_net_fill_layer=terminus_layer,
+                other_net_track_index=eff_track_index,
             )
 
             if dogleg_pos is None:
@@ -5231,6 +5326,7 @@ def run_stitch(
                     min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
                     same_net_filled_polygons=fill_gate,
                     same_net_fill_layer=terminus_layer,
+                    other_net_track_index=eff_track_index,
                 )
 
                 if extended_pos is None:
@@ -5253,6 +5349,7 @@ def run_stitch(
                             via_drill=micro_via_drill,
                             same_net_filled_polygons=fill_gate,
                             same_net_fill_layer=terminus_layer,
+                            other_net_track_index=eff_track_index,
                         )
                         if micro_pos is None:
                             # Also try dogleg with micro-via size
@@ -5272,6 +5369,7 @@ def run_stitch(
                                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
+                                other_net_track_index=eff_track_index,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
@@ -5293,6 +5391,7 @@ def run_stitch(
                                 min_hole_to_hole=MIN_HOLE_TO_HOLE_CLEARANCE,
                                 same_net_filled_polygons=fill_gate,
                                 same_net_fill_layer=terminus_layer,
+                                other_net_track_index=eff_track_index,
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -5318,6 +5417,14 @@ def run_stitch(
         cross_net_stitch_vias = [v for v in placed_stitch_vias if v[3] != pad.net_number]
         eff_other_net_tracks = other_net_tracks + cross_net_stitch_tracks
         eff_other_net_vias = other_net_vias + cross_net_stitch_vias
+        # Issue #5240: index the foreign-net track pool once per pad and
+        # share it across every placement strategy this pad tries.  When no
+        # cross-net stitch geometry has been placed yet the pool's contents
+        # are the pre-existing list, so the pre-built base index is reused
+        # (it yields the same segment objects in the same order).
+        eff_track_index = (
+            build_track_index(eff_other_net_tracks) if cross_net_stitch_tracks else base_track_index
+        )
 
         # Check if already connected (legacy proximity heuristic), then let
         # the strict copper-contact model VETO a "connected" skip for filled
@@ -5353,7 +5460,9 @@ def run_stitch(
         # Attempt placement against the cross-net-augmented obstacle lists
         # (issue #3633): just-placed foreign-net stitch geometry participates
         # so a stitch via on net B clears net A's just-placed stitch trace.
-        placement_result = _attempt_placement(pad, eff_other_net_tracks, eff_other_net_vias)
+        placement_result = _attempt_placement(
+            pad, eff_other_net_tracks, eff_other_net_vias, eff_track_index=eff_track_index
+        )
 
         if placement_result is None:
             # Every cross-net-clearing strategy is exhausted for this pad.
@@ -5370,7 +5479,9 @@ def run_stitch(
             # obstacle pool).  This restores the load-bearing via that existed
             # before the co-check tightened, accepting the marginal cross-net
             # band intrusion rather than leaving the pad disconnected.
-            fallback_result = _attempt_placement(pad, other_net_tracks, other_net_vias)
+            fallback_result = _attempt_placement(
+                pad, other_net_tracks, other_net_vias, eff_track_index=base_track_index
+            )
             if fallback_result is None:
                 # Issue #4432: distinguish an OFF-FILL failure from a genuine
                 # clearance obstruction.  Re-run placement against the same
@@ -5386,6 +5497,7 @@ def run_stitch(
                         other_net_tracks,
                         other_net_vias,
                         enforce_fill_gate=False,
+                        eff_track_index=base_track_index,
                     )
                     is not None
                 ):
