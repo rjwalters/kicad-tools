@@ -198,6 +198,18 @@ class RouteHaloGeometry:
         )
         x1, x2 = (cax, cbx) if cax <= cbx else (cbx, cax)
         y1, y2 = (cay, cby) if cay <= cby else (cby, cay)
+        # Issue #5617: the through-via layer-span test below rebuilt
+        # ``sorted(self.grid.layer_to_index(l.value) for l in candidate.layers)``
+        # once per surviving halo OBJECT, even though ``candidate.layers`` and
+        # ``self.grid`` are both loop-invariant for the whole call.  A py-spy
+        # profile of the pure-Python A* fallback (board 06, the ``USB3_RX1-``
+        # resume-exhaustion net) attributed ~11% of the fallback's total wall
+        # time to that one generator+``sorted`` rebuild and its per-layer enum
+        # ``.value`` lookups.  Cache it per call, LAZILY, so a call that never
+        # reaches the branch still pays nothing -- same values, same
+        # comparison, same verdict, byte-identical routing output.
+        candidate_layer_span: tuple[int, int] | None = None
+        layer_to_index = self.grid.layer_to_index
         indices: set[int] = set()
         for bucket in self._bins_in((x1 - margin, y1 - margin, x2 + margin, y2 + margin)):
             indices.update(self._bins.get(bucket, ()))
@@ -211,11 +223,13 @@ class RouteHaloGeometry:
                 continue
             if not is_trace and other_trace and other.layer not in candidate.layers:
                 # Through vias list outer endpoints, but span every inner layer.
-                indices_span = sorted(self.grid.layer_to_index(l.value) for l in candidate.layers)
+                if candidate_layer_span is None:
+                    indices_span = sorted(layer_to_index(l.value) for l in candidate.layers)
+                    candidate_layer_span = (indices_span[0], indices_span[-1])
                 if (
-                    not indices_span[0]
-                    <= self.grid.layer_to_index(other.layer.value)
-                    <= indices_span[-1]
+                    not candidate_layer_span[0]
+                    <= layer_to_index(other.layer.value)
+                    <= candidate_layer_span[1]
                 ):
                     continue
             if _PRUNE_BY_BOUNDS:

@@ -363,6 +363,14 @@ class Router:
         # batch costs.  A plain list of tuples lets the hot loop below avoid
         # allocating ~7 temporary NumPy arrays per call.
         self._via_offsets: list[tuple[int, int]] = via_offsets
+        # Issue #5617: memo table for :meth:`_via_kernel`, keyed by via radius
+        # in grid cells.  Values are ``(offsets, reach, mask)`` -- see that
+        # method for what each form is for.  The per-net-class radius override
+        # in ``_is_via_blocked`` used to rebuild its ``(2r+1)**2``
+        # comprehension on EVERY via-placement check; the constructor kernel
+        # is seeded here so the default radius is a memo hit too.
+        self._via_kernel_cache: dict[int, tuple[list[tuple[int, int]], int, np.ndarray]] = {}
+        self._via_kernel_cache[via_r] = self._build_via_kernel_entry(via_offsets)
 
         # Layer priority cache for via checks: check most-congested layers first
         # This enables faster rejection when via is blocked on congested layer
@@ -1993,6 +2001,68 @@ class Router:
 
         return False
 
+    def _via_kernel(self, radius: int | None) -> tuple[list[tuple[int, int]], int, np.ndarray]:
+        """Return ``(offsets, reach, mask)`` for a via-clearance kernel.
+
+        Issue #1692 / #3234: a per-net-class via radius override needs the
+        Euclidean-disc offset list for ITS radius rather than the
+        constructor-built ``_via_offsets`` (see the construction comment in
+        ``__init__`` for why the kernel is a disc and not a Chebyshev square).
+
+        Issue #5617: ``_is_via_blocked`` rebuilt that ``(2r+1)**2``
+        comprehension on EVERY call with an override active -- and on board 06
+        the override is always active, because ``NetClass.via_size`` defaults
+        to 0.6 mm while the board's ``DesignRules.via_diameter`` is 0.45 mm, so
+        every net-classed net asks for radius 10 against a constructor kernel
+        of radius 9.  At that size the rebuild walks 441 candidate offsets per
+        call.  The kernel is a pure function of ``radius``, so memoize it --
+        identical offsets, identical order, computed once per distinct radius.
+
+        The three returned forms are all views of the same disc:
+
+        ``offsets``
+            The historical ``(dx, dy)`` list, in ``for dy: for dx:`` (row
+            major) order.
+        ``reach``
+            The kernel's exact ``max(|dx|, |dy|)``.  Because the disc contains
+            ``(+-reach, 0)`` and ``(0, +-reach)`` and every offset is within
+            ``[-reach, reach]`` on both axes, "some kernel cell falls outside
+            the grid" is exactly "the kernel's bounding box leaves the grid" --
+            which lets the caller replace a per-cell bounds test with one box
+            test without changing the verdict.
+        ``mask``
+            A ``(2*reach+1, 2*reach+1)`` boolean disc-membership array aligned
+            with that bounding box, so the caller can intersect the kernel with
+            a NumPy window slice instead of walking the offsets in Python.
+            ``np.nonzero`` on the intersection yields hits in row-major order
+            -- the same order the ``offsets`` walk produced.
+        """
+        key = self._via_half_cells if radius is None else radius
+        cached = self._via_kernel_cache.get(key)
+        if cached is not None:
+            return cached
+        via_r_sq = key * key
+        offsets = [
+            (dx, dy)
+            for dy in range(-key, key + 1)
+            for dx in range(-key, key + 1)
+            if dx * dx + dy * dy <= via_r_sq
+        ]
+        entry = self._build_via_kernel_entry(offsets)
+        self._via_kernel_cache[key] = entry
+        return entry
+
+    @staticmethod
+    def _build_via_kernel_entry(
+        offsets: list[tuple[int, int]],
+    ) -> tuple[list[tuple[int, int]], int, np.ndarray]:
+        """Derive ``(offsets, reach, mask)`` from a kernel's offset list."""
+        reach = max((max(abs(dx), abs(dy)) for dx, dy in offsets), default=0)
+        mask = np.zeros((2 * reach + 1, 2 * reach + 1), dtype=bool)
+        for dx, dy in offsets:
+            mask[dy + reach, dx + reach] = True
+        return offsets, reach, mask
+
     def _is_via_blocked(
         self,
         gx: int,
@@ -2054,36 +2124,58 @@ class Router:
         # this filter the override path would silently revert to the
         # legacy Chebyshev kernel, reintroducing the diagonal-corner gap
         # for nets with custom via diameters.
-        if radius is not None and radius != self._via_half_cells:
-            via_r = radius
-            via_r_sq = via_r * via_r
-            via_offsets = [
-                (dx, dy)
-                for dy in range(-via_r, via_r + 1)
-                for dx in range(-via_r, via_r + 1)
-                if dx * dx + dy * dy <= via_r_sq
-            ]
-        else:
-            via_offsets = self._via_offsets
+        # Issue #5617: memoized (see :meth:`_via_kernel`) instead of rebuilt
+        # per call when a per-net-class radius override is active -- which, on
+        # board 06, is every call.
+        _, via_reach, via_mask = self._via_kernel(radius)
 
-        # Issue #5240: walk the (small, fixed-size) via kernel as a plain
-        # Python loop instead of building NumPy coordinate/bounds/blocked
-        # arrays every call.  Semantically identical to the prior vectorized
-        # form (same bounds check, same "any blocked cell" short circuit,
-        # same per-cell rules below) -- see the profiling note on
-        # ``_via_offsets`` above for why this is a net win at this size.
+        # Issue #5240 walked the via kernel as a plain Python loop over
+        # ``_via_offsets``, replacing an older NumPy form; at the 13-49 offsets
+        # that issue measured (via_half_cells 2-4) the per-call NumPy dispatch
+        # cost dominated a tiny loop.  Issue #5617: board 06 runs the SAME loop
+        # at radius 10 -- 317 offsets, each a Python iteration plus a NumPy
+        # scalar index -- inside the pure-Python A* fallback that owns most of
+        # phase 4 of the Diff-Pair regression job.  At that size the tradeoff
+        # inverts, so the scan goes back to NumPy, in a form that keeps every
+        # verdict (and the ORDER of ``blocked_cells``) identical:
+        #
+        #   * bounds: the four per-cell comparisons collapse into ONE bounding
+        #     box test.  ``via_reach`` is the kernel's exact max |dx| / |dy|
+        #     and the disc contains ``(+-reach, 0)`` / ``(0, +-reach)``, so
+        #     "some kernel cell is out of bounds" and "the kernel's bounding
+        #     box leaves the grid" are the same predicate; both answer True.
+        #     Pinned by ``test_router_via_kernel_memo_5617.py``.
+        #   * scan: with the box in bounds, the kernel's cells are exactly the
+        #     ``mask``-selected entries of one ``(2r+1)^2`` window VIEW of
+        #     ``grid._blocked[layer]``.  ``window.any()`` rejects the common
+        #     "nothing blocked anywhere near this candidate" case in one C
+        #     pass; only when something IS blocked do we intersect with the
+        #     disc mask and materialise the hits.  ``np.nonzero`` enumerates
+        #     row major -- the same order the ``for dy: for dx:`` offset list
+        #     produced -- so downstream short-circuits see the same first cell.
         grid = self.grid
-        cols = grid.cols
-        rows = grid.rows
-        blocked_grid = grid._blocked
+        if (
+            gx - via_reach < 0
+            or gy - via_reach < 0
+            or gx + via_reach >= grid.cols
+            or gy + via_reach >= grid.rows
+        ):
+            return True  # Some cells out of bounds
+        window = grid._blocked[
+            layer,
+            gy - via_reach : gy + via_reach + 1,
+            gx - via_reach : gx + via_reach + 1,
+        ]
         blocked_cells: list[tuple[int, int]] = []
-        for dx, dy in via_offsets:
-            cx = gx + dx
-            cy = gy + dy
-            if cx < 0 or cx >= cols or cy < 0 or cy >= rows:
-                return True  # Some cells out of bounds
-            if blocked_grid[layer, cy, cx]:
-                blocked_cells.append((cx, cy))
+        if window.any():
+            hit_ys, hit_xs = np.nonzero(window & via_mask)
+            if hit_ys.size:
+                x0 = gx - via_reach
+                y0 = gy - via_reach
+                blocked_cells = [
+                    (x0 + hx, y0 + hy)
+                    for hy, hx in zip(hit_ys.tolist(), hit_xs.tolist(), strict=True)
+                ]
 
         known_cells = [
             (cx, cy)
