@@ -490,6 +490,186 @@ class TestCongestionMap:
         assert cmap.via_weight == 0.5
 
 
+@pytest.fixture
+def small_grid(design_rules: DesignRules, two_layer_stack: LayerStack) -> RoutingGrid:
+    """A small routing grid so the legacy full scan stays cheap in tests."""
+    return RoutingGrid(
+        width=5.0,
+        height=5.0,
+        rules=design_rules,
+        origin_x=0.0,
+        origin_y=0.0,
+        layer_stack=two_layer_stack,
+    )
+
+
+def _occupy(grid: RoutingGrid, fraction: float, seed: int) -> None:
+    """Deterministically mark a fraction of cells blocked / used / zoned."""
+    rng = np.random.default_rng(seed)
+    draw = rng.random(grid._blocked.shape)
+    grid._blocked[draw < fraction * 0.4] = True
+    grid._usage_count[(draw >= fraction * 0.4) & (draw < fraction * 0.8)] = rng.integers(
+        1, 5, size=grid._usage_count.shape, dtype=np.int16
+    )[(draw >= fraction * 0.4) & (draw < fraction * 0.8)]
+    zone_sel = (draw >= fraction * 0.8) & (draw < fraction)
+    grid._blocked[zone_sel] = True
+    grid._is_zone[zone_sel] = True
+
+
+def _build_without_prefilter(
+    monkeypatch: pytest.MonkeyPatch, grid: RoutingGrid, **kwargs: object
+) -> np.ndarray:
+    """Build a CongestionMap with the #5240 pre-filter disabled."""
+    monkeypatch.setattr(
+        CongestionMap,
+        "_occupied_scan_cells",
+        lambda *args, **kw: None,
+    )
+    return CongestionMap(grid, **kwargs).to_array()
+
+
+class TestCongestionMapScanPrefilter:
+    """Issue #5240: the vectorized scan pre-filter must be a pure speedup.
+
+    ``_occupied_scan_cells`` only decides *which* routing-grid cells the
+    accumulation loop visits.  It must select exactly the cells the legacy
+    nested-``range`` walk would not ``continue`` past, in exactly the same
+    ``layer -> gy -> gx`` order, so the float32 congestion grid comes out
+    bitwise identical -- these tests assert the raw bytes, not a tolerance.
+    """
+
+    @pytest.mark.parametrize("fraction", [0.0, 0.01, 0.25, 0.9, 1.0])
+    def test_prefilter_result_is_bitwise_identical(
+        self,
+        small_grid: RoutingGrid,
+        design_rules: DesignRules,
+        two_layer_stack: LayerStack,
+        monkeypatch: pytest.MonkeyPatch,
+        fraction: float,
+    ):
+        """Fast path and legacy full scan agree byte for byte."""
+        _occupy(small_grid, fraction, seed=1234)
+
+        fast = CongestionMap(small_grid).to_array()
+        legacy = _build_without_prefilter(monkeypatch, small_grid)
+
+        assert fast.dtype == legacy.dtype == np.float32
+        assert fast.tobytes() == legacy.tobytes()
+
+    @pytest.mark.parametrize("stride", [1, 2, 3, 7])
+    def test_prefilter_bitwise_identical_under_stride(
+        self,
+        small_grid: RoutingGrid,
+        monkeypatch: pytest.MonkeyPatch,
+        stride: int,
+    ):
+        """Subsampled scans select the same subsampled cells."""
+        _occupy(small_grid, 0.3, seed=99)
+
+        fast = CongestionMap(small_grid, stride=stride).to_array()
+        legacy = _build_without_prefilter(monkeypatch, small_grid, stride=stride)
+
+        assert fast.tobytes() == legacy.tobytes()
+
+    @pytest.mark.parametrize(
+        "region",
+        [
+            Rectangle(0.0, 0.0, 5.0, 5.0),
+            Rectangle(1.0, 1.5, 3.5, 4.0),
+            Rectangle(3.0, 3.0, 1.0, 1.0),  # inverted corners
+            Rectangle(-10.0, -10.0, -5.0, -5.0),  # entirely off-grid
+            Rectangle(100.0, 100.0, 200.0, 200.0),  # entirely past the grid
+        ],
+    )
+    def test_prefilter_bitwise_identical_under_region(
+        self,
+        small_grid: RoutingGrid,
+        monkeypatch: pytest.MonkeyPatch,
+        region: Rectangle,
+    ):
+        """Region-clamped windows (including empty ones) agree exactly."""
+        _occupy(small_grid, 0.4, seed=7)
+
+        fast = CongestionMap(small_grid, region=region).to_array()
+        legacy = _build_without_prefilter(monkeypatch, small_grid, region=region)
+
+        assert fast.tobytes() == legacy.tobytes()
+
+    def test_prefilter_bitwise_identical_with_custom_weights(
+        self,
+        small_grid: RoutingGrid,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Non-default weights accumulate in the same order, so still exact."""
+        _occupy(small_grid, 0.35, seed=31337)
+        kwargs = {
+            "cell_size": 0.37,
+            "component_weight": 1.3,
+            "trace_weight": 0.7,
+            "via_weight": 0.11,
+        }
+
+        fast = CongestionMap(small_grid, **kwargs).to_array()
+        legacy = _build_without_prefilter(monkeypatch, small_grid, **kwargs)
+
+        assert fast.tobytes() == legacy.tobytes()
+
+    def test_prefilter_selects_exactly_the_unskipped_cells_in_order(self, small_grid: RoutingGrid):
+        """The selected (layer, gy, gx) triples match a reference filter."""
+        _occupy(small_grid, 0.2, seed=2026)
+        cmap = CongestionMap(small_grid)
+
+        min_gx, min_gy, max_gx, max_gy = cmap._scan_window()
+        selected = cmap._occupied_scan_cells(min_gx, min_gy, max_gx, max_gy, 2)
+        assert selected is not None
+
+        expected = [
+            (layer, gy, gx)
+            for layer in range(small_grid.num_layers)
+            for gy in range(min_gy, max_gy + 1, 2)
+            for gx in range(min_gx, max_gx + 1, 2)
+            if small_grid.cell_at(layer, gy, gx).blocked
+            or small_grid.cell_at(layer, gy, gx).usage_count != 0
+        ]
+
+        assert selected == expected
+        assert selected, "fixture should leave some occupied cells"
+
+    def test_prefilter_falls_back_when_backing_arrays_are_absent(self, small_grid: RoutingGrid):
+        """Mock/fixture grids without NumPy arrays keep the legacy scan."""
+        cmap = CongestionMap(small_grid)
+
+        class _NoArrays:
+            num_layers = 2
+            rows = 3
+            cols = 3
+
+        cmap.grid = _NoArrays()  # type: ignore[assignment]
+        assert cmap._occupied_scan_cells(0, 0, 2, 2, 1) is None
+
+    def test_prefilter_falls_back_on_shape_disagreement(self, small_grid: RoutingGrid):
+        """A grid whose arrays disagree with its dimensions is not trusted."""
+        cmap = CongestionMap(small_grid)
+
+        class _Mismatched:
+            num_layers = 2
+            rows = 3
+            cols = 3
+            _blocked = np.zeros((2, 4, 4), dtype=np.bool_)
+            _usage_count = np.zeros((2, 4, 4), dtype=np.int16)
+
+        cmap.grid = _Mismatched()  # type: ignore[assignment]
+        assert cmap._occupied_scan_cells(0, 0, 2, 2, 1) is None
+
+    def test_prefilter_returns_empty_list_for_empty_window(self, small_grid: RoutingGrid):
+        """An inverted/off-grid window selects nothing (not a fallback)."""
+        _occupy(small_grid, 0.5, seed=5)
+        cmap = CongestionMap(small_grid)
+
+        assert cmap._occupied_scan_cells(5, 0, 1, 4, 1) == []
+        assert cmap._occupied_scan_cells(0, 5, 4, 1, 1) == []
+
+
 class TestRootCauseAnalyzer:
     """Tests for RootCauseAnalyzer class."""
 
