@@ -913,6 +913,41 @@ def copper_gap(a: KShape, b: KShape) -> float:
     Returns:
         Signed edge-to-edge distance in mm, or :data:`NO_INTERACTION`.
     """
+    # Fast path (issue #5672): segment-segment and segment/via-via are the
+    # only pair kinds the lattice engine's ``CommittedCopper`` predicates
+    # issue (Epic #5509 Phase 3d) -- and they sit inside the A* inner loop,
+    # evaluated once per candidate per nearby obstacle.  An exact ``type()``
+    # check on both arguments (cheaper than the ``isinstance`` chain below,
+    # since these are frozen dataclasses with no subclasses to consider)
+    # reaches the real distance call directly, skipping the rank-sort dict
+    # lookups and the multi-branch ``isinstance`` walk the general path
+    # below still needs for the other twelve pair kinds.  Every other
+    # combination -- pads, edges, zones, or anything not matched here --
+    # falls through unchanged to the general dispatch, so this can only ever
+    # narrow which line answers a query, never change the answer itself.
+    # The check is written directly against ``a`` / ``b`` (never hoisted into
+    # an intermediate ``type(a)`` variable) so mypy narrows each to its exact
+    # class in every branch below -- the same reason ``isinstance`` narrows
+    # but a stored ``type()`` result would not.
+    if type(a) is KSegment:
+        if type(b) is KSegment:
+            # Inline ``_layers_interact`` for the one pair kind where the
+            # layer test is not trivially always-true (see below).
+            if a.layer != ALL_LAYERS and b.layer != ALL_LAYERS and a.layer != b.layer:
+                return NO_INTERACTION
+            return _copper_gap_seg_seg(a, b)
+        if type(b) is KVia:
+            # A via has no ``layer`` field -- ``_shape_layer`` reports
+            # :data:`ALL_LAYERS` for it unconditionally, so a segment/via
+            # pair always interacts and the layer test can be skipped
+            # outright rather than inlined.
+            return _copper_gap_seg_via(a, b)
+    elif type(a) is KVia:
+        if type(b) is KSegment:
+            return _copper_gap_seg_via(b, a)
+        if type(b) is KVia:
+            return _copper_gap_via_via(a, b)
+
     if not _layers_interact(a, b):
         return NO_INTERACTION
 
