@@ -100,6 +100,22 @@ deadline-kill fix, and CI/router performance recoveries.
   gets filled-polygon edge indexing plus phase-level profiling, and the
   validation hot path rejects far copper by bounding box before the exact
   halo distance (Issues #5617 and #5240's closing sweep).
+- The pure-Python A* fallback stops recomputing one route-halo via probe
+  per non-plane layer, per candidate cell (Issue #5617).
+  `Router._is_via_blocked` opens with
+  `_via_halo_clear([], layer, gx, gy, net, require_geometry=False)`, which
+  ignores `layer` entirely (empty `cells`, and the probe via always spans
+  layer 0 to layer n-1), so `_check_via_placement_cached`'s per-layer loop
+  was asking the same question repeatedly — and the sibling `_via_cache`
+  could not absorb it, because that cache is bypassed whenever
+  `allow_sharing` is set, i.e. in exactly the negotiated mode the fallback
+  runs in. The probe is now memoised on `(gx, gy, net)` against a new
+  `RouteHaloGeometry.state_version` token (bumped on every halo rebuild,
+  which any `record()` or grid-occupancy change forces) and dropped by
+  `clear_via_cache()`, so a stale verdict can never be served. Measured
+  locally on `boards/06-diffpair-test --seed 42`: phase 4 ("Routing nets")
+  831.1 s -> 550.0 s, the probe's own inclusive cost 112.3 s -> 10.7 s, and
+  the routed artifacts byte-identical to the pre-change run.
 
 ### Changed
 

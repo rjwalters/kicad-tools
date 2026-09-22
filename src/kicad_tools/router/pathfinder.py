@@ -382,6 +382,18 @@ class Router:
         self._via_cache: dict[tuple[int, int, int, int], bool] = {}
         self._via_cache_enabled: bool = True
 
+        # Issue #5617: memo for the route-halo via probe that opens
+        # ``_is_via_blocked`` (``_via_halo_clear([], layer, gx, gy, net,
+        # require_geometry=False)``).  See ``_via_halo_clear_cached`` for the
+        # soundness argument; ``_via_halo_cache_token`` holds the
+        # ``RouteHaloGeometry.state_version`` the entries were computed
+        # against, so a halo rebuild drops them wholesale.  Also cleared by
+        # ``clear_via_cache`` -- the same per-route trigger the sibling
+        # ``_via_cache`` uses -- so a change to the router's own rule
+        # configuration between routes cannot be served from it either.
+        self._via_halo_cache: dict[tuple[int, int, int], bool] = {}
+        self._via_halo_cache_token: int | None = None
+
         # Issue #5240: vectorized geometry for the non-through-hole pad
         # sweep in ``_check_via_placement_cached`` (the ``not
         # self._allow_smd_vias`` branch -- the default for jlcpcb and any
@@ -1631,6 +1643,59 @@ class Router:
         )
         return halo.clear(via, self, require_geometry=require_geometry)
 
+    #: Entry cap for ``_via_halo_cache`` (issue #5617).  Purely a memory
+    #: backstop: dropping memo entries can only cost work, never change a
+    #: verdict, because every miss recomputes the same pure function.
+    _VIA_HALO_CACHE_MAX = 500_000
+
+    def _via_halo_clear_cached(self, halo, layer: int, gx: int, gy: int, net: int) -> bool:
+        """Memoised form of ``_via_halo_clear([], layer, gx, gy, net, False)``.
+
+        Issue #5617.  A py-spy profile of the Diff-Pair regression job's
+        re-route step attributed **18.2 % of phase 4** ("Routing nets...",
+        itself 66.5 % of the step) to this one probe: ``_is_via_blocked``
+        spends essentially all of its time here, and ``_check_via_placement_cached``
+        calls ``_is_via_blocked`` once per non-plane layer.  The sibling
+        ``_via_cache`` cannot absorb any of it -- that cache is bypassed
+        whenever ``allow_sharing`` is set, which is exactly the negotiated
+        mode the pure-Python fallback runs in.
+
+        Why memoising is verdict-preserving, not an approximation:
+
+        * **The probe does not depend on ``layer``.**  It passes an EMPTY
+          ``cells`` list (so ``halo.cell_known`` is never consulted) and builds
+          a ``Via`` whose layer span is always ``(layer 0, layer n-1)``.  The
+          ``layer`` argument is dead on this path, so the per-layer loop in
+          ``_check_via_placement_cached`` was recomputing one identical
+          answer once per non-plane layer.
+        * **Everything else it reads is keyed or pinned.**  The rest of the
+          inputs are ``(gx, gy)`` (world position), ``net`` (halo name, net
+          class, via size/drill) -- both in the key -- plus the router's rule
+          configuration and ``RouteHaloGeometry``'s rebuilt snapshot.  The
+          snapshot is tracked by ``halo.state_version``: a ``record()`` or any
+          grid-occupancy change forces a rebuild and bumps it, and a token
+          mismatch drops every entry here.  The rule configuration is pinned
+          by ``clear_via_cache()``, which also clears this memo and runs at
+          the start of every route / A* search and on every foreign-context
+          change.
+
+        Entries are therefore only ever served when recomputing would return
+        the same bool -- the routed output is byte-identical, which
+        ``test_router_via_halo_memo_5617.py`` pins against the uncached path.
+        """
+        token = halo.state_version
+        if self._via_halo_cache_token != token:
+            self._via_halo_cache.clear()
+            self._via_halo_cache_token = token
+        key = (gx, gy, net)
+        hit = self._via_halo_cache.get(key)
+        if hit is None:
+            hit = self._via_halo_clear([], layer, gx, gy, net, require_geometry=False)
+            if len(self._via_halo_cache) >= self._VIA_HALO_CACHE_MAX:
+                self._via_halo_cache.clear()
+            self._via_halo_cache[key] = hit
+        return hit
+
     def _is_trace_blocked(
         self,
         gx: int,
@@ -2094,9 +2159,7 @@ class Router:
         halo = getattr(self.grid, "_route_halo", None)
         geometry_complete = halo is not None and halo.complete
         # Partial raster coverage cannot waive clearance to known copper.
-        if halo is not None and not self._via_halo_clear(
-            [], layer, gx, gy, net, require_geometry=False
-        ):
+        if halo is not None and not self._via_halo_clear_cached(halo, layer, gx, gy, net):
             return True
         if self.grid.fixed_fills:
             name = next(
@@ -3165,6 +3228,13 @@ class Router:
         reusing a single ``Router`` for the whole feedback loop.
         """
         self._via_cache.clear()
+        # Issue #5617: the route-halo via memo shares this invalidation
+        # trigger, so a rule-configuration change between routes (net-class
+        # names, attach zones, pairwise clearance table) can never be served
+        # from a stale entry -- the halo's own ``state_version`` covers
+        # geometry changes, this covers everything else ``clear`` reads.
+        self._via_halo_cache.clear()
+        self._via_halo_cache_token = None
         self.invalidate_pad_geometry_cache()
 
     def invalidate_pad_geometry_cache(self) -> None:
