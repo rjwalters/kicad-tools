@@ -24,6 +24,21 @@
 #   3. The forge lookup is unavailable (no working `gh`) -> fails open to the
 #      pre-existing reuse behavior, never blocking worktree creation.
 #
+# #8280 added Tests 4-5 below: the SIBLING "a LOCAL ref already exists" arm
+# never had this check at all — a stale local feature/issue-N left from an
+# earlier slice was reused even after its PR had already merged, producing a
+# worktree tens of commits behind main on a merged PR's branch, and a PR that
+# re-proposed already-merged code with no CI run against it (a surviving
+# local ref is the NORMAL state on a host that built the earlier slice, which
+# is exactly the partial-increment case #5657 targets). Unlike Test 1, the
+# local arm cannot silently fall through to a fresh branch on `landed` — the
+# name is already taken locally — so it must refuse outright instead:
+#   4. LOCAL feature/issue-N's tip IS the head of an already-merged PR ->
+#      worktree.sh refuses (nonzero exit, no worktree created) rather than
+#      hand back a worktree on it.
+#   5. The forge lookup is unavailable for a LOCAL branch -> fails open to
+#      reuse, the same contract as Test 3's remote-arm case.
+#
 # Companion to test-worktree-remote-branch-tracking.sh (#4823, must keep
 # passing unmodified) — follows the same throwaway-bare-origin harness, plus
 # the fake-forge-binary pattern from test-worktree-remove-squash-merge.sh
@@ -87,6 +102,41 @@ cleanup_repo() {
     local repo="$1"
     [[ -z "$repo" ]] && return 0
     rm -rf "$(dirname "$repo")"
+}
+
+# Like setup_repo, but KEEPS the local feature/issue-78 branch instead of
+# deleting it after push — the #8280 incident shape: a host that built an
+# earlier slice still has feature/issue-N checked out locally when the next
+# slice's worktree.sh N runs, selecting the LOCAL-ref reuse arm instead of the
+# remote-only one setup_repo exercises.
+setup_local_repo() {
+    local name="${1:-stalelocalrepo}"
+    local tmp
+    tmp=$(mktemp -d /tmp/loom-wtstalelocal.XXXXXX)
+    git init -q -b main "$tmp/origin.git" --bare
+    git init -q -b main "$tmp/$name"
+    (
+        cd "$tmp/$name"
+        git config user.email t@t
+        git config user.name t
+        git commit --allow-empty -q -m init
+        git remote add origin "$tmp/origin.git"
+        git push -q origin main
+        mkdir -p .loom/scripts/lib .loom/hooks
+        cp "$WORKTREE_SH" .loom/scripts/worktree.sh
+        if [[ -d "$SCRIPTS_DIR/lib" ]]; then
+            cp -R "$SCRIPTS_DIR"/lib/* .loom/scripts/lib/ 2>/dev/null || true
+        fi
+        chmod +x .loom/scripts/worktree.sh
+
+        git checkout -q -b feature/issue-78
+        echo "pr-artifact" > pr-file.txt
+        git add pr-file.txt
+        git commit -q -m "pr: add artifact from existing PR branch"
+        git push -q origin feature/issue-78
+        git checkout -q main
+    )
+    echo "$tmp/$name"
 }
 
 # A minimal `gh` stand-in on PATH, modeling
@@ -195,6 +245,61 @@ if [[ -f "$REPO/.loom/worktrees/issue-77/pr-file.txt" ]]; then
     pass "worktree contains the branch's artifact (forge unavailable -> fail open to reuse)"
 else
     fail "worktree is missing the branch's artifact — forge-unavailable case incorrectly blocked reuse"
+    cat "$OUT_LOG"
+fi
+cleanup_repo "$REPO"
+rm -f "$OUT_LOG"
+
+# --- Test 4 (#8280): LOCAL feature/issue-78's tip IS an already-merged PR's head ---
+echo ""
+echo "Test 4 (#8280): LOCAL feature/issue-78 is the head of an already-merged PR -> worktree.sh refuses to reuse it"
+REPO=$(setup_local_repo stalelocalrepo1)
+FAKE_BIN=$(install_fake_gh "$REPO")
+OUT_LOG="/tmp/wtstalelocal-merged.$$"
+RC=0
+(
+    cd "$REPO"
+    PATH="$FAKE_BIN:$PATH" FAKE_GH_MODE=merged ./.loom/scripts/worktree.sh 78 >"$OUT_LOG" 2>&1
+) || RC=$?
+if [[ "$RC" -ne 0 ]]; then
+    pass "worktree.sh exits non-zero rather than hand back a worktree on the already-landed local branch"
+else
+    fail "worktree.sh exited 0 - it must refuse rather than silently reuse the landed branch"
+    cat "$OUT_LOG"
+fi
+if [[ ! -d "$REPO/.loom/worktrees/issue-78" ]]; then
+    pass "no worktree was created on the already-merged local branch"
+else
+    fail "a worktree was created despite the local branch already having landed"
+fi
+if grep -qi "already-merged PR #999" "$OUT_LOG"; then
+    pass "output names the already-merged PR and explains the refusal"
+else
+    fail "output does not explain the refusal (see $OUT_LOG)"
+    cat "$OUT_LOG"
+fi
+if git -C "$REPO" show-ref --verify --quiet refs/heads/feature/issue-78; then
+    pass "the local branch itself is left alone (refusal, not deletion)"
+else
+    fail "the local branch was unexpectedly deleted - refusal must not be destructive"
+fi
+cleanup_repo "$REPO"
+rm -f "$OUT_LOG"
+
+# --- Test 5 (#8280): forge lookup unavailable for a LOCAL branch -> fails open ---
+echo ""
+echo "Test 5 (#8280): forge lookup unavailable for a LOCAL branch -> worktree.sh still reuses it"
+REPO=$(setup_local_repo stalelocalrepo2)
+FAKE_BIN=$(install_fake_gh "$REPO")
+OUT_LOG="/tmp/wtstalelocal-unavailable.$$"
+(
+    cd "$REPO"
+    PATH="$FAKE_BIN:$PATH" FAKE_GH_MODE=off ./.loom/scripts/worktree.sh 78 >"$OUT_LOG" 2>&1 || { echo "FAILED"; cat "$OUT_LOG"; }
+)
+if [[ -f "$REPO/.loom/worktrees/issue-78/pr-file.txt" ]]; then
+    pass "worktree contains the local branch's artifact (forge unavailable -> fails open to reuse, same as the remote arm's Test 3)"
+else
+    fail "worktree is missing the local branch's artifact - forge-unavailable case incorrectly blocked local reuse"
     cat "$OUT_LOG"
 fi
 cleanup_repo "$REPO"

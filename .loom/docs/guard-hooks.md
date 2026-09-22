@@ -872,6 +872,34 @@ This does not touch `guard-worktree-paths.sh` (the `Edit|Write` matcher):
 every role on the allowlist above structurally has no Write/Edit tool to
 begin with, so that guard was never reachable for them.
 
+**An unquoted heredoc body is not literal (issue #8035).** `cat > /tmp/x
+<<EOF` does **not** make its body inert: the shell performs command
+substitution on an *unquoted*-delimiter body *before* the sink reads a byte,
+so a `cp` / `mv` / `mkdir` / `sed -i` hidden in a `$( … )` or backtick span
+there really executes. The masker already knew this (`<<EOF` bodies keep
+their live spans visible, #7421), but nothing downstream did: every write
+idiom is keyed on the **command word** of a `;`/`&`/`|`-delimited segment,
+and `$(`/`)` is not a segment boundary — the whole heredoc invocation is one
+segment whose command word is `cat`, so the escaping write was never scored
+as a write target at all. `extract_write_targets()` now runs a **second,
+independent pass** over the inner text of each such span
+(`heredoc_unquoted_subst_spans()`), which makes that `cp` the command word of
+its own segment and denies exactly as the bare `cp …` control does. Same
+shape, same discriminator, and the same deliberate quote-blindness as the
+index-mutation side's `im_hd_expand()` (#8003): quote characters carry no
+quoting meaning inside a heredoc body, so a span wrapped in quotes expands
+like a bare one, and only a **backslash** suppresses it (`\$( … )` stays
+inert). A **quoted** delimiter (`<<'EOF'` / `<<"EOF"`) is skipped entirely —
+that body genuinely is literal, which is the whole reason the masker may
+blank it. The pass is purely additive (a separate awk process, never sharing
+lexer state with the primary scan), so it can turn an allow into a deny and
+never the reverse; an unbalanced `$(`, an unterminated backtick, or
+recursion past depth 5 yields **no** span, i.e. the pre-#8035 not-covered
+behaviour rather than a new false positive on prose. The sibling
+`extract_rm_targets()` scan had the same structural blind spot; it was closed
+the same way by #8217 — see § "Same-command literal declaration" → "An unquoted
+heredoc body is not literal here either" below.
+
 The guard is **on by default**. It is resolved in this order (highest precedence first):
 
 1. **`LOOM_GUARD_WORKTREE_ISOLATION` env var** — `0`/`false`/`no` disables the guard; `1`/`true`/`yes` forces it on. Overrides the config value.
@@ -984,6 +1012,29 @@ and an unassigned name stays unresolved. Heredoc bodies are masked before the
 scan, so an inert decoy assignment inside one cannot launder a real
 unresolved target (#6549).
 
+**One exception to the two-assignment rule (#7986)**, shared by the mktemp fast
+path above and its write-confinement sibling `wt_write_mktemp_same_command_safe()`
+(#6949): a `NAME=$(mktemp -d)` / `NAME=$(mktemp)` assignment may be followed by
+**exactly one** self-referential canonicalization of the **same** variable,
+whose entire RHS is exactly `$(realpath "$NAME")` (optionally double-quoted) —
+the routine way to resolve a symlinked temp root (`/tmp` → `/private/tmp`)
+before use. That second assignment cannot escape the directory the first one
+already proved safe: `realpath` either fails (the substitution captures
+nothing and `NAME` becomes empty) or prints the canonical path of that same
+directory. Everything else still fails closed — a third assignment, the
+reverse order, `${NAME}` inside the `realpath` call, a canonicalization of a
+*different* variable, or any prefix/suffix around the admitted form.
+
+**`$(cd "$NAME" && pwd -P)` is deliberately NOT admitted**, even though it
+looks like an equally safe canonicalization of the same shape: `cd ""` is a
+documented no-op *success* on bash 3.2 (macOS stock `/bin/bash`), zsh, and
+`/bin/sh`, so when `mktemp` fails and `NAME` is empty, a `;`/newline-joined
+`NAME=$(cd "$NAME" && pwd -P)` still runs and resolves to the **caller's
+cwd** instead of staying empty — converting a benign `mktemp`-failure no-op
+into `rm -rf <cwd>` or a write into `<cwd>`. `realpath` has no such
+shell-builtin special case for an empty path, so it fails safely on every
+join style.
+
 Because the literal fast path re-runs the ordinary checks on the *resolved*
 path, it is a false-positive refinement rather than a relaxation:
 `WT=/etc/foo; rm -rf "$WT/.snapshots"` still denies as out-of-scope,
@@ -995,6 +1046,36 @@ previously denied at the catastrophic tier purely because the target was
 spelled through a variable.
 
 Anything outside those two shapes still requires an explicit literal path.
+
+**An unquoted heredoc body is not literal here either (issue #8217).** The
+rm-scope analogue of #8035 above (and of #8003 before it — the same structural
+blind spot, third scanner over). `cat > /tmp/x <<EOF` ⏎ `$( rm -rf /opt/vendor )`
+⏎ `EOF` really deletes that directory: the shell expands the *unquoted*-delimiter
+body before `cat` reads a byte. `extract_rm_targets()` keys a local `rm` on the
+**command word** of a `;`/`&`/`|`-delimited segment, and `$(`/`)` is not a
+segment boundary — so the whole invocation was one segment whose command word is
+`cat`, and the target was never scored at all (measured **allow**, where the bare
+`rm -rf /opt/vendor` control denies). It now runs the **same scanner a second,
+independent time** over the inner text of each such span, reusing #8035's
+`heredoc_unquoted_subst_spans()` so the two passes can never disagree about which
+text bash will expand. All of #8035's discriminators carry over unchanged: a
+**quoted** delimiter (`<<'EOF'` / `<<"EOF"`) is skipped entirely, a
+backslash-escaped `\$( … )` stays inert, and an unbalanced `$(` / unterminated
+backtick / recursion past depth 5 yields **no** span — not-covered rather than a
+new false positive on prose.
+
+One rm-specific rule comes with it: a target found inside a span does **not** get
+the two same-command fast paths in the table above. Both prove a claim about the
+*current* shell's binding of a name by scanning a copy with every heredoc body
+masked (#6549), while a `$( … )` span is a subshell whose own assignments live
+inside that masked text — so an assignment outside the heredoc must never vouch
+for a name the span rebinds inside it (`V=$(mktemp -d)` … `$( V=/etc; rm -rf
+"$V" )`). A `$`-rooted span target therefore fails closed on
+`rm-scope-unresolved-var`, whose message names the span explicitly. Stated cost:
+a span target whose variable genuinely *is* mktemp-rooted outside the heredoc
+denies too. That text was entirely unscanned before #8217, so this is a new deny
+on previously-unexamined input rather than a relaxation, and the remedy is the
+one the message already gives — use an explicit literal path.
 
 ### Installed-File Write Guard (`guards.installedFileWrites` / `LOOM_GUARD_INSTALLED_FILE_WRITES`)
 
@@ -1084,6 +1165,135 @@ The guard is **on by default**. It is resolved in this order (highest precedence
 3. **Default** — `true` (guard on).
 
 The config read is best-effort: a missing, empty, or malformed `.loom/config.json` falls through to guard-ON and never causes the hook to exit non-zero; a missing/unreadable/unparseable transcript, or a missing `jq`, also fails open (allow the stop) rather than wedging the session.
+
+### Uncommitted-Work Stop Guard (`guards.uncommittedWork` / `LOOM_GUARD_UNCOMMITTED_WORK`)
+
+`loom-daemon worktree-state stop-hook` (issue #8267) is the sibling of the
+guard above, on the other turn-end hazard. That one blocks a turn that ends
+**too early** (children still running); this one blocks a turn that ends with
+the work **still only on this machine's disk** — an agent reporting success
+while its entire deliverable sits uncommitted in its worktree.
+
+The reported failure, twice in one session: an agent ran a long investigation,
+committed nothing (**zero commits on its branch**), and left six probe scripts
+untracked — recovered by hand only because the files happened to still be on
+disk; and a second agent left a 52 KB tool untracked, then left a further fix
+uncommitted *after reporting done*. In both cases **the completion notification
+was indistinguishable** from one where everything had been committed. Loom does
+not own the harness's `<usage>` completion block, so the fix lives at the turn
+boundary it does own.
+
+It is wired on **both** `Stop` (a headless role agent, whose whole process is
+one turn) and `SubagentStop` (a `Task`-tool Builder/Doctor inside an
+orchestrator session), and it decides in three steps:
+
+1. **Ownership.** It acts only on a worktree this session actually wrote into:
+   the payload `cwd` when that is a `.loom-managed` worktree, otherwise the most
+   recent `Edit`/`Write`/`MultiEdit`/`NotebookEdit` `file_path` in the
+   transcript that lands inside one. A `Bash` command *mentioning* a worktree
+   path is deliberately not ownership — the orchestrator's own transcript is
+   full of those (`check-main-clean.sh --label issue=N`, checkpoint writes), and
+   blocking an orchestrator for a Builder's mess would block a turn that cannot
+   fix it. The primary checkout is never a subject: it legitimately holds an
+   operator's WIP, and `check-main-clean.sh` already covers contamination there.
+2. **Measurement.** `git rev-list --count <base>..HEAD` for commits, plus
+   `git status --porcelain=v1 -z` for working-tree changes, minus the same
+   scratch exclusions `buildGate` documents (`.loom-*` runtime markers, `*.log`,
+   `.no-changes-needed`, `.snapshots/`). A Builder that deliberately concluded
+   "no changes needed" leaves exactly one excluded marker file and is never
+   flagged for it.
+3. **Verdict.** `uncommitted` (deliverable-shaped changes not committed) blocks;
+   `committed`, `unpushed` and `empty` do not. An unverifiable push state
+   renders as `unpushed`, never as `committed` — the same
+   "existence treated as evidence of a property" trap #8265 names.
+
+On a block the reason names the counts, up to 8 at-risk paths (`+N more` beyond
+that) and the three ways out: commit and push, restate explicitly that the files
+are intermediate, or write `.no-changes-needed`. It blocks **at most once per
+stop sequence** (`stop_hook_active`, exactly as the background-subagent guard
+does): the second stop downgrades to a `systemMessage` advisory that still
+records the state, so a deliberate judgement costs one extra turn and can never
+wedge a session. A clean completion **with commits** also emits an advisory —
+that is the "surface repo state in the completion notification" half: a turn
+that ends well says so with evidence rather than an assertion. A session that
+produced nothing at all stays silent.
+
+Read the same numbers directly at any time:
+
+```bash
+loom-daemon worktree-state report --issue 8267        # one key=value line
+loom-daemon worktree-state report --worktree "$PWD" --json
+# exit 0 = nothing at risk · exit 3 = unsaved deliverables (check-main-clean.sh's code)
+```
+
+This is also the executable home of `buildGate`'s documented **has-commits**
+primitive (see [`build-gate.md`](build-gate.md)) — anything else that needs to
+ask "did this agent actually commit anything?" calls it rather than growing a
+second commit-counter.
+
+The guard is **on by default**, resolved highest-precedence-first:
+
+1. **`LOOM_GUARD_UNCOMMITTED_WORK` env var** — `0`/`false`/`no`/`off` disables;
+   `1`/`true`/`yes`/`on` forces on.
+2. **`.loom/config.json`** — `guards.uncommittedWork` (default `true` when
+   absent):
+   ```json
+   {
+     "guards": {
+       "uncommittedWork": false
+     }
+   }
+   ```
+3. **Default** — `true` (guard on).
+
+The config is read from the **main checkout**, resolved from the worktree via
+`git rev-parse --git-common-dir`, not from the worktree itself: the host-local
+override tier (`.loom-local/local.json`) is gitignored and exists only there,
+and an uncommitted edit to the main checkout's `.loom/config.json` is likewise
+invisible inside a worktree. Reading the worktree's own copy would mean an
+operator's opt-out silently did nothing — the same main-checkout-only config
+trap `forge_cmd` hit in #4273.
+
+Every failure path allows the stop: an unreadable payload, a missing transcript,
+an absent `git`, a worktree that no longer exists, or a daemon binary the
+wiring cannot resolve all resolve to "allow, say nothing". A guard that wedges a
+headless sweep on its own parse bug would be worse than the loss it prevents.
+
+**The shell wrapper has to fail open too, and originally did not (#8377).** That
+"always allow" contract is implemented in Rust — but the `bash -c` wrapper in
+`.claude/settings.json` runs *before* any Rust code does, and it used to end in a
+bare `exec "$B" worktree-state stop-hook`. On a host whose installed
+`loom-daemon` predated the `worktree-state` subcommand, clap rejected the unknown
+subcommand with **usage-error exit code 2** — and `exec` made that the *hook's*
+exit code, which Claude Code reads as "block this turn from ending". Every turn
+on such a host wedged, headless sweeps included. The wrapper now ends in
+
+```bash
+"$B" worktree-state stop-hook || exit 0
+```
+
+so **"binary too old to know this subcommand" is treated exactly like "binary
+absent": both exit 0.** Swallowing the exit code costs nothing, because a block
+is signalled by printing `{"decision":"block","reason":"…"}` on **stdout** with
+exit 0 — never by an exit code — so the guard's verdicts still reach Claude Code
+intact while every genuine failure (usage error, panic, missing binary) allows
+the stop. `defaults/scripts/tests/test-stop-hook-subcommand-skew.sh` asserts both
+halves against stub binaries, for both `Stop` and `SubagentStop`. Any future hook
+wrapper that `exec`s a versioned `loom-daemon` subcommand inherits this hazard and
+needs the same `|| exit 0`.
+
+**Where it is wired (deliberately narrow for now).** The `Stop` /`SubagentStop`
+entries live in this repository's project-level `.claude/settings.json` only.
+Consumer repos get their guard hooks from the user-scope wiring
+`scripts/install/provision-hooks.sh` installs, whose set is the six
+`defaults/hooks/*.sh` scripts — this guard is a `loom-daemon` subcommand, not one
+of them, so it does **not** fire in consumer repos yet. That is a choice, not an
+oversight: this is a new *blocking* turn-end guard, and the only other one
+(`guard-background-subagents.sh`) needed eight follow-up corrections
+(#4389/#4462/#4696/#5013/#5086/#5976/#6175/#6645) before its false-positive rate
+was acceptable fleet-wide. It is dogfooded here — where every Loom sweep in this
+repo exercises it — before being offered to every installed workspace at once.
+Issue #8372 tracks the consumer-repo wiring.
 
 ### Workspace Registry Guard (`guards.workspaceRegistry` / `LOOM_GUARD_WORKSPACE_REGISTRY`)
 

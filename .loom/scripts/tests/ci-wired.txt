@@ -33,6 +33,7 @@ test-blame-issue.sh
 test-branch-landed.sh
 test-body-repo-affinity.sh
 test-bounded-run.sh
+test-build-gate-runner.sh
 test-build-gate-timeout.sh
 test-build-rs-watchset.sh
 test-build-slot.sh
@@ -44,11 +45,11 @@ test-champion-epic-escalation-respects-human-hold.sh
 test-champion-epic-phase-marker-normalization.sh
 test-champion-epic-verdict-marker-scope.sh
 test-champion-held-pr-health-pass.sh
+test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-premise-false-close.sh
 test-champion-standing-authorization.sh
 test-check-ci-status.sh
 test-check-config-no-host-paths.sh
-test-check-duplicate.sh
 test-check-conflict-markers.sh
 test-check-dependabot-labels.sh
 test-check-evaluating-staleness.sh
@@ -75,7 +76,6 @@ test-cleanup-branches-pr-review-branch.sh
 test-config-resolver.sh
 test-config-tiers-cli-migration.sh
 test-cpu-budget.sh
-test-create-issue-duplicate-check.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
 test-default-branch.sh
@@ -126,20 +126,16 @@ test-install-pr-markers.sh
 test-install-source-guard.sh
 test-install-stash-scope.sh
 test-install-sync-labels.sh
+test-jq-reserved-word-args.sh
 test-judge-fallback-cap.sh
 test-judge-fanout-experiment.sh
-test-label-preflight.sh
+test-judge-payload-drop-guard.sh
+test-judge-tdd-merge-base.sh
 test-land-resync-commit.sh
 test-live-state-sandbox.sh
 test-locate-daemon-bin.sh
-test-loom-daemon-launchd-plist.sh
 test-loom-daemon-quiesce.sh
-test-loom-daemon-start.sh
-test-loom-daemon-update.sh
 test-loom-daemon-stop.sh
-test-loom-daemon-watchdog-dedup.sh
-test-loom-daemon-watchdog.sh
-test-loom-dispatcher.sh
 test-loom-status.sh
 test-mcp-config.sh
 test-mcp-pnpm-selfrepair.sh
@@ -151,6 +147,7 @@ test-merge-pr-auto-queued-stacked-children.sh
 test-merge-pr-auto-reconcile.sh
 test-merge-pr-check-runs-404-fallback.sh
 test-merge-pr-closed-issue-cleanup.sh
+test-merge-pr-daemon-version-floor.sh
 test-merge-pr-defaults-version-bump-collision.sh
 test-merge-pr-dirty-worktree-guard.sh
 test-merge-pr-head-mismatch.sh
@@ -158,7 +155,6 @@ test-merge-pr-help.sh
 test-merge-pr-local-branch-cleanup.sh
 test-merge-pr-loom-pr-label-guard.sh
 test-merge-pr-merge-ordering-guard.sh
-test-merge-pr-partial-increment.sh
 test-merge-pr-primary-checkout-advice.sh
 test-merge-pr-primary-worktree-guard.sh
 test-merge-pr-rate-limit-fallback.sh
@@ -180,7 +176,6 @@ test-random-file.sh
 test-rebase-stacked-children.sh
 test-record-noop-release.sh
 test-recover-orphaned-shepherds-diagnostics.sh
-test-reconcile-stack.sh
 test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
 test-require-daemon-bin.sh
@@ -197,11 +192,11 @@ test-run-ci-suites-serial-lane.sh
 test-run-job.sh
 test-safe-stash-pop.sh
 test-safehoused-service.sh
-test-spawn-generic.sh
-test-spawn-worker.sh
+test-script-helper-version-floor.sh
+test-spawn-codex-session-exec.sh
 test-stale-claim-standdown-suppression.sh
+test-stop-hook-subcommand-skew.sh
 test-sweep-auto-stack.sh
-test-sweep-checkpoint.sh
 test-sweep-lease-convergence.sh
 test-sweep-experiment.sh
 test-sweep-lease-fence.sh
@@ -211,6 +206,7 @@ test-sweep-lease-renew.sh
 test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
 test-sync-labels-check.sh
+test-token-cache-affinity.sh
 test-sync-labels-repo-flag.sh
 test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
@@ -237,9 +233,7 @@ test-worktree-remove.sh
 test-worktree-root-override.sh
 test-worktree-sentinel-reinvoke.sh
 test-worktree-sentinel.sh
-test-worktree-snapshot.sh
 test-worktree-stale-merged-branch.sh
-test-worktree-stash-baseline.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
 tests/hooks/test-guard-destructive-dispatcher.sh
@@ -249,9 +243,11 @@ tests/hooks/test-guard-destructive-core.sh
 tests/hooks/test-guard-destructive-cp-mv-continuation.sh
 tests/hooks/test-guard-destructive-decision-log.sh
 tests/hooks/test-guard-destructive-force-scope.sh
+tests/hooks/test-guard-destructive-heredoc-subst.sh
 tests/hooks/test-guard-destructive-masking.sh
 tests/hooks/test-guard-destructive-matching-precision.sh
 tests/hooks/test-guard-destructive-mkdir-confinement.sh
+tests/hooks/test-guard-destructive-mktemp-canon.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
@@ -285,6 +281,7 @@ tests/install/test-lint-ignore-configs.sh
 tests/install/test-manifest-freshness-after-hook-wiring.sh
 tests/install/test-pnpm-runnable-check.sh
 tests/install/test-provision-daemon.sh
+tests/install/test-setup-branch-protection-bypass-actors.sh
 tests/install/test-setup-branch-protection-required-checks.sh
 tests/install/test-setup-repository-settings-merge-method.sh
 tests/install/test-uninstall-clean-preserves-unmanaged-hooks.sh

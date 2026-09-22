@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # locate-daemon-bin.sh — Resolve the loom-daemon binary to invoke.
 #
-# Source this file (do not exec). Defines four functions — and the split
-# between the first pair and the second pair is the point (#8134):
+# Source this file (do not exec). Defines the two resolution pairs below —
+# and the split between the first pair and the second pair is the point
+# (#8134) — plus the capability/version questions about whatever they resolved
+# (loom_daemon_model_select_flag, #8058; loom_daemon_version_preflight /
+# loom_daemon_exec_checked, #8385):
 #
 #   $LOOM_DAEMON_BIN      the daemon a caller MANAGES or PROBES — the install
 #                         whose version is compared, the socket endpoint a
@@ -290,4 +293,223 @@ loom_resolve_self_daemon_bin() {
     candidate="$(command -v loom-daemon 2>/dev/null || true)"
     [[ -n "$candidate" && -x "$candidate" ]] && printf '%s\n' "$candidate"
     return 0
+}
+
+# loom_daemon_model_select_flag <daemon_bin> <model> -- echo `--model <model>`
+# (two words) when per-model-class token selection is BOTH wanted and
+# supported, or nothing at all otherwise. Issue #8058.
+#
+# Lives here, next to the binary resolver, because it answers a question about
+# the RESOLVED BINARY: a daemon mid-roll that predates #8058 has no `--model`
+# on `tokens select`, and clap rejects an unknown argument outright -- which
+# would turn a routine binary/script version skew into a hard spawn failure on
+# every dispatch. Same capability-probe idiom `spawn-claude.sh` already applies
+# to `--auto-unpin` (#4228), and the same reason.
+#
+# Echoes nothing when:
+#   * <model> is empty (session default -- selection stays account-wide), or
+#   * the resolved binary's `tokens select --help` does not advertise `--model`.
+#
+# The caller splits the output on whitespace, so a model containing spaces is
+# not supported -- no Claude model alias or pinned ID has ever contained one.
+loom_daemon_model_select_flag() {
+    local daemon_bin="$1" model="${2:-}" help_text
+    [[ -n "$daemon_bin" && -n "$model" ]] || return 0
+    # Captured into a variable rather than piped into `grep -q`: an early-exit
+    # pipe consumer under `set -o pipefail` can SIGPIPE the producer and report
+    # the whole pipeline as failed (see scripts/check-pipefail-early-exit.sh).
+    help_text="$("$daemon_bin" tokens select --help 2>&1 || true)"
+    [[ "$help_text" == *"--model"* ]] || return 0
+    printf '%s %s' "--model" "$model"
+}
+
+# ---------------------------------------------------------------------------
+# MARKER-DRIVEN DAEMON-VERSION PREFLIGHT (#8385, follow-up to #8285)
+# ---------------------------------------------------------------------------
+#
+# A stub whose only statement is `exec "$bin" <sub>` has no version guard at
+# all: against a binary that predates its subcommand, clap's own
+#
+#     error: unrecognized subcommand 'skip-labels'
+#
+# is the entire signal -- it names neither the version to roll to nor the
+# command to roll with. That is exactly what happened to `skip-labels.sh` on
+# 2026-09-19 against this repo's own installed 0.19.179. #8285 gave merge-pr.sh
+# an actionable refusal for the same class; the functions below are the shared
+# version, for `loom_exec_script_helper` and for any stub that execs a
+# subcommand on a binary this file just resolved.
+#
+# WHY HERE and not in lib/script-helper.sh. This answers a question about the
+# RESOLVED BINARY -- "is the thing I just found new enough to serve this call?"
+# -- which is the same question `loom_daemon_model_select_flag` above already
+# answers for `tokens select --model` (#8058), and it sits one line downstream
+# of the resolution it depends on. It is also `bootstrap` work by definition:
+# the binary being diagnosed is precisely the one too old to host the check as
+# a subcommand, the same circularity `check-daemon-subcommand-versions.sh`
+# argues for itself in scripts/shell-allowlist.txt. Putting it in the
+# `contract` helper instead would have added portable shell that epic #7810 is
+# retiring, to do a job that can never leave shell.
+#
+# OPT-IN BY DECLARATION, not by flag. The preflight fires only when the CALLING
+# stub carries a `# requires-daemon: <this subcommand> >= <version>` marker --
+# the same marker `scripts/check-daemon-subcommand-versions.sh` already
+# enforces and `merge-pr.sh` already reads back at refusal time. A stub that
+# declares nothing, declares `optional` (it probes and degrades), or declares a
+# floor for a DIFFERENT subcommand is byte-identically unaffected, so this can
+# be adopted one file at a time across the eleven-stub family. The marker is
+# read out of the caller's own source, so the floor in the message, the floor
+# the CI gate checks, and the floor a reviewer sees are one string.
+#
+# FAILS OPEN, deliberately -- the opposite of merge-pr.sh's guards, for a
+# reason worth stating. Those guards fail CLOSED because an empty answer there
+# is indistinguishable from a real one and would silently close an unfinished
+# issue. This is not a safety gate: its only job is to turn an unactionable
+# error into an actionable one. So when the floor cannot be read, `--version`
+# cannot be parsed, or the subcommand name is not marker-shaped, it does
+# NOTHING and the exec proceeds -- reproducing today's behaviour exactly, with
+# the subcommand itself still refusing correctly when it is genuinely absent.
+# Refusing on an unreadable version would invent a brand-new failure mode on a
+# host whose binary is probably fine, which is a strictly worse trade.
+#
+# LOOM_SKIP_DAEMON_VERSION_PREFLIGHT=1 disables it wholesale, for a harness
+# that deliberately pins an old binary.
+
+# _loom_daemon_declared_floor <caller-file> <subcommand> -- echo the declared
+# minimum version for <subcommand>, or nothing.
+#
+# The grammar is check-daemon-subcommand-versions.sh's, narrowed to the one
+# subcommand asked about: `# requires-daemon: <sub> >= <major.minor.patch>`,
+# optionally indented, optionally followed by a free-text note. An `optional`
+# declaration deliberately does not match -- it is a statement that the stub
+# copes without the subcommand, so there is no floor to enforce.
+#
+# `sed` with an early `q` rather than a bash read loop: one cheap subprocess
+# that stops at the first marker, instead of iterating 3300 lines of
+# worktree.sh in-shell on every WIP verb. <subcommand> is validated against
+# ^[a-z][a-z0-9-]*$ by the caller BEFORE it reaches this interpolation, so no
+# regex metacharacter can enter the script.
+_loom_daemon_declared_floor() {
+    local caller="$1" sub="$2"
+    [[ -n "$caller" && -r "$caller" ]] || return 0
+    sed -n "/^[[:space:]]*#[[:space:]]*requires-daemon:[[:space:]]*${sub}[[:space:]][[:space:]]*>=/{
+                s/^[[:space:]]*#[[:space:]]*requires-daemon:[[:space:]]*${sub}[[:space:]][[:space:]]*>=[[:space:]]*\([0-9][0-9.]*\).*$/\1/p
+                q
+            }" "$caller" 2>/dev/null || true
+}
+
+# _loom_daemon_reported_version <bin> -- echo the semver `loom-daemon
+# --version` reports, or nothing when it cannot be read. Never non-zero: every
+# caller runs under `set -e`, and a best-effort diagnostic must not be able to
+# abort the thing it is decorating (the same `|| true` discipline
+# merge-pr.sh's hint documents).
+_loom_daemon_reported_version() {
+    local bin="$1" out=""
+    [[ -n "$bin" && -x "$bin" ]] || return 0
+    out="$("$bin" --version 2>/dev/null || true)"
+    out="${out%%$'\n'*}"
+    if [[ "$out" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+    return 0
+}
+
+# _loom_daemon_version_lt <have> <want> -- true when have < want, compared
+# NUMERICALLY per component. A string compare would read 0.19.9 as newer than
+# 0.19.10 and 0.19.100 as older than 0.19.99, i.e. it would be wrong in both
+# directions on exactly the two-digit-to-three-digit rollover this fleet lives
+# on. Pure bash (no `sort -V` subprocess) and bash-3.2-clean, like every other
+# helper here. A non-numeric component returns "not less" -- fail open.
+_loom_daemon_version_lt() {
+    local h="$1" w="$2" hp wp
+    for _ in 1 2 3; do
+        hp="${h%%.*}"
+        wp="${w%%.*}"
+        [[ "$hp" =~ ^[0-9]+$ && "$wp" =~ ^[0-9]+$ ]] || return 1
+        (( 10#$hp < 10#$wp )) && return 0
+        (( 10#$hp > 10#$wp )) && return 1
+        case "$h" in *.*) h="${h#*.}" ;; *) h="0" ;; esac
+        case "$w" in *.*) w="${w#*.}" ;; *) w="0" ;; esac
+    done
+    return 1
+}
+
+# _loom_daemon_version_preflight <caller-file> <subcommand> <bin>
+#
+# Returns 0 (proceed to the exec) in every case except one: the caller declares
+# a floor, the binary reports a version, and that version is below the floor --
+# then it prints the refusal and EXITS.
+#
+# The exit code is LOOM_SCRIPT_HELPER_MISSING_RC, the code each entry point
+# already reserves for "could not run", never a fresh one. That is load-bearing
+# and not stylistic: several of these subcommands use non-zero codes as DATA
+# (`resolve-model --tier` exits 3 for "no mapping", `detect-dependency-cycle`
+# exits 1 for "cycle found"), so a refusal wearing one of those codes would be
+# read by the caller as an ANSWER -- the precise reason that variable exists.
+_loom_daemon_version_preflight() {
+    local caller="$1" sub="$2" bin="$3"
+    local floor="" have="" caller_dir rc="${LOOM_SCRIPT_HELPER_MISSING_RC:-1}"
+
+    [[ "${LOOM_SKIP_DAEMON_VERSION_PREFLIGHT:-0}" == "1" ]] && return 0
+    [[ "$sub" =~ ^[a-z][a-z0-9-]*$ ]] || return 0
+
+    floor="$(_loom_daemon_declared_floor "$caller" "$sub")"
+    [[ -n "$floor" ]] || return 0
+
+    have="$(_loom_daemon_reported_version "$bin")"
+    [[ -n "$have" ]] || return 0
+
+    _loom_daemon_version_lt "$have" "$floor" || return 0
+
+    caller_dir="$(cd "$(dirname "$caller")" 2>/dev/null && pwd)" || caller_dir="."
+    {
+        printf '[ERROR] the resolved loom-daemon is too old to run `loom-daemon %s`.\n\n' "$sub"
+        printf '  Required:  >= %s\n' "$floor"
+        printf '  Resolved:  %s (reports %s)\n' "$bin" "$have"
+        printf '  Declared by %s:\n      # requires-daemon: %s >= %s\n\n' "$caller" "$sub" "$floor"
+        printf 'Refused BEFORE the call, so you get the floor and the fix rather than the\n'
+        printf 'binary'"'"'s own bare argument-parser error, which names neither (#8285/#8385).\n\n'
+        printf 'Roll THIS host, artifact-first:\n\n'
+        printf '    %s/cli/loom-daemon-update.sh --fetch\n\n' "$caller_dir"
+        printf '…which resolves the newest published release >= the installed version, verifies\n'
+        printf 'its checksum (and signature when present), provisions it, and restarts the daemon\n'
+        printf 'under its supervisor.\n\n'
+        printf 'If no release artifact carries %s yet — releases are cut at fleet-rollable\n' "$floor"
+        printf 'boundaries, not on every VERSION bump (.loom/docs/release-cadence.md) — build it:\n\n'
+        printf '    cargo build --release -p loom-daemon\n'
+        printf '    export LOOM_DAEMON_BIN=<repo>/target/release/loom-daemon\n\n'
+        printf '…or pin LOOM_DAEMON_BIN (or LOOM_DAEMON_SELF_BIN) to an existing build that\n'
+        printf 'already has `%s`. Confirm before re-running:\n\n' "$sub"
+        printf '    %s --version && %s %s --help\n\n' "$bin" "$bin" "$sub"
+        printf 'Exiting %s — this entry point'"'"'s "could not run" code, never an answer.\n' "$rc"
+    } >&2
+    exit "$rc"
+}
+
+# loom_daemon_version_preflight <subcommand> <resolved-bin>
+#
+# The PUBLIC, standalone form, for a stub that does its own resolution and its
+# own `exec`. `skip-labels.sh` is the first: it is a Shape-A `stub` in
+# scripts/shell-allowlist.txt, a category machine-checked on the requirement
+# that its LAST code line IS the `exec` (scripts/check-shell-allowlist.sh), so
+# it cannot hand the exec to a helper without forfeiting that category. One
+# call one line above its own exec gets it the identical guard.
+#
+# ${BASH_SOURCE[1]} is the calling stub -- which is what lets the marker live
+# in the stub that owns the dependency rather than in this library.
+loom_daemon_version_preflight() {
+    _loom_daemon_version_preflight "${BASH_SOURCE[1]:-$0}" "${1:-}" "${2:-}"
+}
+
+# loom_daemon_exec_checked <caller-file> <bin> <subcommand> [args...]
+#
+# Preflight, then `exec`. The form for a caller that resolves on behalf of
+# somebody else -- `loom_exec_script_helper` in lib/script-helper.sh -- and so
+# cannot let ${BASH_SOURCE[1]} name the stub whose marker matters. Never
+# returns: either the preflight exits, or the exec replaces this shell, which
+# is what keeps the subcommand's own exit code reaching the caller unmodified.
+loom_daemon_exec_checked() {
+    local caller="$1" bin="$2" sub="$3"
+    shift 3
+    _loom_daemon_version_preflight "$caller" "$sub" "$bin"
+    exec "$bin" "$sub" "$@"
 }

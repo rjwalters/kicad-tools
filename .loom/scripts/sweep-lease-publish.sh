@@ -354,7 +354,7 @@ cmd_publish() {
     # scan below for why a publish-side peer check needs the yield records
     # too (Issue #5331).
     local comments_ndjson read_ok=1
-    if ! comments_ndjson="$(gh api "${repo_args[@]}" "repos/{owner}/{repo}/issues/${issue}/comments" \
+    if ! comments_ndjson="$(gh api "${repo_args[@]+"${repo_args[@]}"}" "repos/{owner}/{repo}/issues/${issue}/comments" \
         --paginate --jq \
         ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body}" \
         2>&1)"; then
@@ -502,7 +502,7 @@ cmd_publish() {
     # (#6320, the same trap fixed in sweep-lease-renew.sh).
     local post_out
     if ! post_out="$(printf '%s' "$lease_body" \
-        | gh api "${repo_args[@]}" --method POST "repos/{owner}/{repo}/issues/${issue}/comments" -F body=@- 2>&1)"; then
+        | gh api "${repo_args[@]+"${repo_args[@]}"}" --method POST "repos/{owner}/{repo}/issues/${issue}/comments" -F body=@- 2>&1)"; then
         echo "ERROR: failed to publish lease comment on issue #${issue}: ${post_out}" >&2
         echo "Proceeding without a lease is safe but degrades reclaim evidence (best-effort, mirrors #6179's fail-open dispatch write)." >&2
         exit 2

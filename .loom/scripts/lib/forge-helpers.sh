@@ -1584,6 +1584,28 @@ forge_gh_remove_label_rl_safe() {
 # Usage: forge_gh_create_issue_rl_safe NWO TITLE BODY [LABEL...]
 # Stdout: the new issue's URL (both paths).
 # Returns 0 on success (either path), 1 on failure (message on stderr).
+#
+# NEVER returns silently (#8289). "No URL and no error text" was a reachable
+# outcome here, reproduced with a stubbed forge on 2026-09-19 in three shapes,
+# all of which leave the caller unable to tell a refusal from a crash:
+#   1. `gh issue create` exits non-zero with EMPTY stderr (killed by a signal,
+#      OOM, a wrapper that exits without writing) -> `echo "$err" >&2` printed
+#      one BLANK LINE and returned 1.
+#   2. it exits non-zero with its error text on STDOUT instead -> that text
+#      was captured into $out and dropped on the failure path; stderr empty.
+#   3. it exits ZERO with empty stdout -> the caller was handed an empty
+#      "URL" and a success return, i.e. a filing that silently did nothing.
+# All three now land on one always-populated error line, which quotes the
+# forge's own text when there is any and synthesizes one (exit code + stray
+# stdout) when there is not. (3) returns 1 rather than a bogus success, and
+# the message says the issue MAY exist: "created but URL not reported" and
+# "not created" are indistinguishable from here, so a caller must LOOK before
+# retrying rather than blind-retry into a real duplicate.
+#
+# Implemented as two MODIFIED lines, no added ones, on purpose: this file is
+# frozen by scripts/check-file-size-budget.sh, and a "never silent" guarantee
+# belongs at the point of failure, not in a sibling module the one caller
+# would have to remember to route through.
 forge_gh_create_issue_rl_safe() {
   local nwo="$1" title="$2" body="$3"
   shift 3
@@ -1607,7 +1629,11 @@ forge_gh_create_issue_rl_safe() {
   err=$(cat "$err_file" 2>/dev/null || true)
   rm -f "$err_file"
 
-  if [[ $rc -eq 0 ]]; then
+  # The `-n "$out"` half is load-bearing (#8289): exit 0 with empty stdout is
+  # NOT a success to pass on -- it hands the caller an empty "URL" and a zero
+  # return, i.e. a filing that silently did nothing. Falling through instead
+  # lands on the final, always-populated error line below.
+  if [[ $rc -eq 0 && -n "${out//[[:space:]]/}" ]]; then
     printf '%s\n' "$out"
     return 0
   fi
@@ -1636,7 +1662,13 @@ forge_gh_create_issue_rl_safe() {
     return 1
   fi
 
-  echo "$err" >&2
+  # The forge's own words when it gave any; otherwise a message synthesized
+  # from what we DO know -- exit code, plus whatever it wrote to stdout (an
+  # error routed to the wrong stream, or the empty "URL" of the exit-0 case
+  # above). `$err` is command-substituted, so a stderr of nothing but a
+  # newline arrives here as the empty string and takes the default too. This
+  # line is never allowed to print nothing: that WAS the silent exit (#8289).
+  echo "${err:-gh issue create produced no error text (exit $rc) and no usable issue URL (stdout: ${out:-<empty>}) -- killed, or a wrapper that failed silently? The issue MAY exist; check the forge before re-filing rather than blind-retrying.}" >&2
   return 1
 }
 

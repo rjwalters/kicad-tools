@@ -1172,6 +1172,8 @@ This is the Doctor-side counterpart of the orchestrator guardrail in `sweep.md` 
 - **Headless (`claude -p` sweep, daemon dispatch)**: ending your turn *terminates the process*. The watcher dies with it, the CI result is never read, and the PR is stranded mid-treatment — still `loom:treating`, never handed back to Judge, with nobody left to release the claim.
 - **Interactive (Task-tool subagent)**: the re-invocation never arrives; the sweep stalls until a human nudges you (incident #5659 — roughly eight manual nudges in one sweep).
 
+This rule is about *when your own turn may end*, not about *whether someone else is already running the same check*. For that second, separate question — a coordinator re-verifying what you already verified, or a sibling subagent duplicating your suite — see `.loom/docs/verification-ownership.md` → "Reconciling the two background-work rules already in force" (#8268) and `loom-daemon inflight claim` before you launch a long one.
+
 **There are exactly two safe paths when CI has not settled:**
 
 1. **You have made the fix and pushed it: hand back to Judge instead of waiting.** This is the correct default. Verifying the final CI verdict is **Judge's** gate — complete the `loom:changes-requested` → `loom:review-requested` transition, state in your PR comment that CI was still running at hand-off, and finish your turn. A later Judge pass re-evaluates once CI settles.
@@ -1306,6 +1308,14 @@ Read the full review, not just individual comments; check what the reviewer alre
 ### Make Focused Changes
 
 Address exactly what was requested — no new features or refactoring beyond the feedback (see "Scope Discipline"). Keep commits focused and well-described, and run tests after each change.
+
+### Fixing a Role Prompt or Dispatch Brief
+
+If the feedback you're addressing is on a role prompt (`.loom/roles/*.md`) or
+an operator dispatch brief, don't just patch the wording — pressure-test the
+fixed version against the scenario that exposed the defect and audit it
+against rules it can collide with before pushing. See
+`.loom/docs/role-prompt-authoring.md`.
 
 ### Communicate Clearly
 

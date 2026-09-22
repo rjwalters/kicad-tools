@@ -78,7 +78,15 @@ Invariants a future edit must preserve:
   ruling" here.** Belt and braces meanwhile: `OPERATOR_RULED=yes` also requires
   `BOT_UNESCALATABLE=no` (that marker absent from the epic), so an issue carrying
   both `loom:epic` and a proposal label could not stand the ladder down on the
-  bot's own label removal.
+  bot's own label removal. **`champion-issue-promo.md`'s port of this guard
+  (#8245) deliberately does NOT copy `BOT_UNESCALATABLE`**: on the proposal path
+  `<!-- champion:proposal-escalated -->` is present by construction on every
+  escalated proposal, so a presence check would make `OPERATOR_RULED` dead code
+  there. It attributes by *time* instead — `UNPARKED_AT` must be newer than
+  `BOT_UNESCALATED_AT`, the newest `champion:proposal-unescalated[-facts]:`
+  marker comment, which `classify-dependency-block.sh --apply` posts right after
+  removing the label. Same invariant, two spellings, because the two paths stand
+  in different relations to that one marker.
 - **Both unknown inputs fail open (#7965).** `OPERATOR_RULED=yes` also requires a
   non-empty `VERDICT_CREATED_AT`: `PRIOR_REJECTIONS ≥ 1` already proves a verdict
   exists, so an empty read is a failed REST re-read — and `[[ "$UNPARKED_AT" > "" ]]`
@@ -99,4 +107,6 @@ single-writer rule and Step 0.5 routing),
 `test-epic-label-preserved-on-escalation.sh` (#6715, the escalation edit is
 add-only), and `test-champion-epic-escalation-respects-human-hold.sh` (#7734 /
 #7921 / #7965, the hold labels, the un-park check, and its two fail-open
-preconditions).
+preconditions). The proposal-side port has its own suite,
+`test-champion-issue-promo-escalation-respects-human-hold.sh` (#8245), which
+additionally *executes* that prompt's guard block against stubbed forge reads.

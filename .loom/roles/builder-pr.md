@@ -270,7 +270,7 @@ Local verification:
 - [ ] Commits are signed off if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` requirement — `git commit --signoff`; see "DCO sign-off" above)
 - [ ] Relevant tests pass
 - [ ] Each criterion has explicit verification (not "I think it works")
-- [ ] Ran the "defaults/ Version-Bearing-Files Gate" command block below (not just read it) — exited 0. It fails if this PR hand-edits any version-bearing file's value (`package.json`, `mcp-loom/package.json`, `Cargo.toml`, `CLAUDE.md`, `VERSION`) — those are now bumped automatically at merge time (#7743), never by hand in a feature PR.
+- [ ] Ran the "defaults/ Version-Bearing-Files Gate" command block below (not just read it) — exited 0. It fails if this PR hand-edits any version-bearing file's value (`package.json`, `mcp-loom/package.json`, `Cargo.toml`, `VERSION`) — those are now bumped automatically at merge time (#7743), never by hand in a feature PR.
 ```
 
 **Run the defaults/ Version-Bearing-Files Gate locally — an actual command, not a checklist bullet to read (#6675, recurring Judge rejection: #6598, #6599, #6610, #6611, #6630, #6668 all hit this in CI because it was never run pre-PR). A single automated workflow (`.github/workflows/version-bump-on-merge.yml`, #7743) now owns bumping `VERSION` and the other version-bearing files, once, right after any merge that touched `defaults/` — a feature PR must not carry its own edit to any of them. `./.loom/scripts/create-pr.sh` also runs a version-bearing-file consistency check (`version-check-gate.sh`, #6730) before creating the PR, so running the block below by hand is defense-in-depth, not the only line of defense; still run it locally to catch a hand-edit before pushing rather than at CI time:**
@@ -288,7 +288,7 @@ MERGE_BASE="$(git merge-base origin/main HEAD)"
 
 # Exit 0 = no version-bearing file's VALUE changed anywhere in your diff;
 # exit 1 = your PR hand-edits one of package.json/mcp-loom/package.json/
-# Cargo.toml/CLAUDE.md/VERSION. Do NOT "fix" a failure here by running
+# Cargo.toml/VERSION. Do NOT "fix" a failure here by running
 # ./scripts/version.sh bump patch -- that command is now exclusively the
 # post-merge workflow's job; a Builder should never run it. Revert the
 # edit(s) to the flagged file(s) instead.

@@ -156,3 +156,18 @@ A `/loom:sweep` run sharing a repo with an active role-runner Champion can there
 
 **Coexistence behavior:** `/loom:sweep` does not pause, stop, or coordinate with a role-runner Champion — same no-daemon-state-writes posture as the legacy-daemon case above. Instead, the two re-verification defenses catch the drift: per-issue pre-flight (step 1 of the Wave Lifecycle) re-reads live state for each candidate immediately before it is dispatched, and "8a. Wave-boundary candidate re-verification" (Wave Lifecycle, #4884) re-reads the **entire remaining candidate list** at every wave boundary specifically because a role-runner Champion can complete several candidates between waves, not just between pre-flight and dispatch of one issue. A candidate found already merged/closed by either check is logged and surfaced in the Summary Output as `completed externally (daemon/champion)`, distinct from a sweep-driven `merged`/`blocked`/`skipped` outcome (see "Summary Output" above). Detecting whether a role-runner Champion is active: a reachable `loom-daemon` (Stage -1's `PROBE_DAEMON`, reused if already probed this run) whose resolved `.loom/config.json` has `autonomous.roleRunner.enabled=true` with `champion` in `roleRunner.roles` or `roleRunner.onIdle`. As with the legacy-daemon and peer-`/loom:sweep` cases, this is **loud but non-blocking**: warn once (naming which mechanism was detected — legacy PID-file vs. modern role-runner), never auto-stop the daemon or Champion, never block the sweep.
 
+### In-flight verification coexistence (#8268)
+
+> **A fourth, narrower coexistence case: not "another orchestrator is running," but "another agent may already be running the same verification command against this tree."** The three cases above are about two *orchestrators* racing for the same issue/PR queue. This one is about a *sweep child* (or the sweep itself) duplicating a *subagent's* work — a Builder ends its turn on a background build (correctly, per `builder.md`'s same-turn rule), the coordinator later re-runs the identical check to confirm the hand-off, and both copies of a 15-30 minute suite run to completion for one answer.
+
+Before launching a long verification command (`buildGate.command`, `pnpm check:ci`, `cargo test --workspace`, …) against a tree/branch a subagent may already be checking, consult the machine-wide in-flight registry:
+
+```bash
+loom-daemon inflight check --command "<the command>" --branch "$(git branch --show-current)"
+loom-daemon inflight list   # everything currently in flight on this host
+```
+
+Same posture as every other case in this section: **loud but non-blocking**. A `check` hit is advisory — surface it ("already running: <summary>") and let the caller decide whether to wait, skip, or proceed anyway; never auto-skip the verification and never block the sweep on it. `check` alone cannot close the check-then-launch race (two callers can both see clear and both launch); a caller that wants the race actually closed should `claim` instead of `check` before it launches — see [`verification-ownership.md`](../../../.loom/docs/verification-ownership.md) for the `claim`/`release` verbs, the fingerprint (command, tree, branch), and why the race is accepted as best-effort at the `check`/`list` layer rather than fixed there.
+
+This is a different failure than staleness or ownership disputes: nobody is misbehaving, and no orchestrator-vs-orchestrator race is in play — it is simply that a coordinator and its subagent, or two sibling subagents, have no shared visibility into what the other is running. `verification-ownership.md` is the full reference for the mechanism and the rule it complements.
+

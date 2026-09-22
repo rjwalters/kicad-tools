@@ -1285,6 +1285,117 @@ else
 fi
 
 
+# ------------------------------------------------------------
+# X. (#8197) A release that PUBLISHES a `.sig` it cannot serve must refuse the
+#    artifact (exit 1) rather than silently degrade to checksum-only
+#    verification, and must leave the running daemon untouched. The twin of
+#    test A above: there the `.sig` is genuinely absent and the update
+#    proceeds; here it is listed-but-unfetchable and the update stops. Both
+#    directions are asserted because a fix in one alone would either break
+#    every unsigned release or leave the downgrade open.
+# ------------------------------------------------------------
+WX="$BASE_WORKDIR/w-fetch-x"
+new_fixture "$WX"
+write_fake_daemon "$WX/installed-loom-daemon" "oldc0mm" "$WX/marker"
+installedX_before="$("$WX/installed-loom-daemon" --version 2>/dev/null)"
+
+WX_ASSETS="$WX/gh-assets"
+mkdir -p "$WX_ASSETS"
+WX_BIN_NAME="loom-daemon-x86_64-unknown-linux-gnu"
+write_fake_artifact_daemon "$WX_ASSETS/$WX_BIN_NAME" "0.16.0" "artifacx"
+sha256_of "$WX_ASSETS/$WX_BIN_NAME" > "$WX_ASSETS/$WX_BIN_NAME.sha256"
+
+WX_FAKEBIN="$WX/fakebin"
+mkdir -p "$WX_FAKEBIN"
+# The `.sig` is LISTED by the release but never written to the assets dir, so
+# every download of it fails -- a 500, a timeout, a truncated transfer.
+write_fake_gh "$WX_FAKEBIN/gh" "v0.16.0" "$WX_ASSETS" "$WX_BIN_NAME.sig"
+
+outX=$( cd "$WX" && PATH="$WX_FAKEBIN:$TEST_PATH" \
+    LOOM_DAEMON_BIN="$WX/installed-loom-daemon" \
+    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
+    LOOM_DAEMON_UPDATE_TARGET="x86_64-unknown-linux-gnu" \
+    bash "$UPDATE_SCRIPT" --no-restart 2>&1; echo "EXIT=$?" )
+rcX=$(echo "$outX" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
+assert_eq "1" "$rcX" "published-but-unfetchable .sig: aborts the update (exit 1)"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'UNAVAILABLE, not absent' <<<"$outX"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} published-but-unfetchable .sig: says the signature is unavailable, not absent"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} published-but-unfetchable .sig: says the signature is unavailable, not absent"
+    echo "  output: $outX"
+fi
+
+installedX_after="$("$WX/installed-loom-daemon" --version 2>/dev/null)"
+assert_eq "$installedX_before" "$installedX_after" "published-but-unfetchable .sig leaves the destination binary untouched"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q 'Rebuilding loom-daemon (cargo build' <<<"$outX"; then
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} published-but-unfetchable .sig: refusal is never a source-build fallback"
+    echo "  output: $outX"
+else
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} published-but-unfetchable .sig: refusal is never a source-build fallback"
+fi
+
+# ------------------------------------------------------------
+# Y. (#8197) The `KEY=value` stdout contract itself, asserted against
+#    `release-fetch` directly rather than through the wrapper: the new
+#    SIGNATURE= key is present AND every pre-existing key a consumer already
+#    parses is still there, in a release that publishes no signature at all.
+#    Additive-only is the contract; this is what proves it.
+# ------------------------------------------------------------
+# shellcheck source=../lib/locate-daemon-bin.sh
+source "$LOOM_REPO_ROOT/defaults/scripts/lib/locate-daemon-bin.sh"
+RF_BIN="$(loom_resolve_self_daemon_bin)"
+
+WY="$BASE_WORKDIR/w-fetch-y"
+new_fixture "$WY"
+WY_ASSETS="$WY/gh-assets"
+mkdir -p "$WY_ASSETS"
+WY_BIN_NAME="loom-daemon-x86_64-unknown-linux-gnu"
+write_fake_artifact_daemon "$WY_ASSETS/$WY_BIN_NAME" "0.16.0" "artifacy"
+sha256_of "$WY_ASSETS/$WY_BIN_NAME" > "$WY_ASSETS/$WY_BIN_NAME.sha256"
+WY_FAKEBIN="$WY/fakebin"
+mkdir -p "$WY_FAKEBIN"
+write_fake_gh "$WY_FAKEBIN/gh" "v0.16.0" "$WY_ASSETS"
+
+outY=$( cd "$WY" && PATH="$WY_FAKEBIN:$TEST_PATH" "$RF_BIN" release-fetch \
+    --repo-root "$WY" --target "x86_64-unknown-linux-gnu" \
+    --repo "test-owner/test-repo" --tag "v0.16.0" 2>/dev/null )
+rcY=$?
+assert_eq "0" "$rcY" "release-fetch stdout contract: an unsigned release still exits 0"
+
+for key in BIN_PATH TMP_DIR VERSION_OUTPUT COMMIT HAD_AUTHORITY; do
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -q "^${key}=" <<<"$outY"; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "${GREEN}✓${NC} release-fetch stdout contract: pre-existing key ${key}= is unaffected"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "${RED}✗${NC} release-fetch stdout contract: pre-existing key ${key}= is unaffected"
+        echo "  stdout: $outY"
+    fi
+done
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -q '^SIGNATURE=skipped$' <<<"$outY"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} release-fetch stdout contract: reports SIGNATURE=skipped for an unsigned release"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} release-fetch stdout contract: reports SIGNATURE=skipped for an unsigned release"
+    echo "  stdout: $outY"
+fi
+
+# release-fetch deliberately hands its scratch dir to the caller (the wrapper's
+# EXIT trap owns it in production); this suite is that caller here.
+rm -rf "$(grep '^TMP_DIR=' <<<"$outY" | cut -d= -f2-)"
+
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]] || exit 1

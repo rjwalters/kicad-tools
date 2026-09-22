@@ -28,6 +28,16 @@
 #      therefore dispatches byte-identically to today.
 #
 # Prints ONLY the model id on stdout; diagnostics go to stderr.
+#
+# Side effect (#8543, load-gated on TYPESAFE_API_KEY, off by default): the
+# `resolve-model.sh --tier` call at the bottom of this script carries
+# `LOOM_JEV_SHADOW_ISSUE` (below), which lets its native backend fire a
+# shadow-mode Jev (TypeSafe) classification of the SAME issue and record it on
+# that issue's sweep checkpoint, for later comparison against the Curator's
+# `$tier`. All of it lives in `loom-daemon` (`jev_tier.rs`'s module doc, and
+# `shadow_sample_from_env` for why an env var rather than a flag): telemetry
+# only, never a routing input, and structurally unable to change this script's
+# `$tier`/`$model` resolution or exit code.
 set -uo pipefail
 
 ISSUE="${1:-}"
@@ -148,7 +158,18 @@ case "$tier" in
 esac
 
 # --tier mode returns "" + exit 3 when the runtime/tier has no mapping.
-if model="$("$SCRIPT_DIR/resolve-model.sh" \
+#
+# `LOOM_JEV_SHADOW_ISSUE` (#8543) names the issue whose tier was just resolved
+# above, so `loom-daemon resolve-model --tier`'s native backend can take a
+# shadow-mode Jev classification of it beside the Curator's marker. It is set
+# unconditionally, scoped to this one command, and costs nothing unless
+# `TYPESAFE_API_KEY` is also set (absent by default: two env reads in the
+# daemon, no `gh` call, no network
+# call, no checkpoint write — byte-identical to before #8543). An env var, not
+# a flag, precisely so a `loom-daemon` older than #8543 ignores it instead of
+# failing on an unknown argument and taking THIS script's resolution down with
+# it; see `jev_tier::shadow_sample_from_env`.
+if model="$(LOOM_JEV_SHADOW_ISSUE="$ISSUE" "$SCRIPT_DIR/resolve-model.sh" \
               --tier "$tier" --runtime "$RUNTIME" --config "$CONFIG" 2>/dev/null)" \
    && [[ -n "$model" ]]; then
   echo "resolve-tier-model: repo=$REPO issue=$ISSUE runtime=$RUNTIME tier=$tier model=$model" >&2

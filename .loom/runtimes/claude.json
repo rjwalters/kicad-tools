@@ -6,6 +6,7 @@
     "subagents": "yes",
     "hooks": "yes",
     "skills": "yes",
-    "worktreeIsolation": "yes"
+    "worktreeIsolation": "yes",
+    "loomControl": "yes"
   }
 }

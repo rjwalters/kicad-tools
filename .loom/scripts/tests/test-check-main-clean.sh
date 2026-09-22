@@ -39,6 +39,10 @@
 #   - the breadcrumb comment never contains the raw machine hostname — it is
 #     redacted behind a short, stable, non-reversible `host-<hash>` identifier
 #     (#6189)
+#   - the host-local config overlay `.loom-local/local.json` is Loom-owned: a
+#     tree whose only untracked path is that overlay reports clean and survives
+#     `--quarantine` untouched, even in a repo whose .gitignore predates the fix
+#     (#8075)
 #
 # Usage:
 #   ./.loom/scripts/tests/test-check-main-clean.sh
@@ -1039,6 +1043,73 @@ else
     fail "expected no raw hostname in the posted body and a stable host-<hash> id, got rc1=$RC1 rc2=$RC2 raw_host='$RAW_HOST' body1='$BODY1' body2='$BODY2' out1='$out1' out2='$out2'"
 fi
 rm -rf "$GHDIR" "$REPO"
+
+# ========================================================================
+# The host-local config overlay is Loom-owned, never quarantine fodder (#8075)
+# ========================================================================
+# `.loom-local/local.json` is the highest-precedence config tier and is ungitted
+# by design. In a consumer repo whose installed loom-managed .gitignore block
+# predates #8075 it surfaces as `?? .loom-local/` — untracked dirt that
+# `--quarantine` would stash away between sweep waves, silently reverting
+# whatever the operator overrode there (e.g. a per-repo model pin) with no
+# signal anywhere. The internal LOOM_OWNED_PREFIXES filter must exclude it
+# regardless of the consumer's .gitignore currency, exactly as it does for
+# `.loom/sweep-checkpoint/` above.
+
+echo "Test 45: .loom-local/ overlay survives --quarantine and reports clean (#8075)"
+# make_repo_stale_gitignore's .gitignore ignores ONLY .loom/worktrees/, so this
+# fixture reproduces a consumer repo that has not yet re-synced the fixed block.
+REPO=$(make_repo_stale_gitignore)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-loomlocal.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -ne 0 ]]; then fail "Test 45 setup: --snapshot expected 0, got $RC"; fi
+
+# The operator writes the overlay AFTER the baseline snapshot — i.e. it is new
+# dirt as far as the baseline is concerned, which is the dangerous case.
+mkdir -p "$REPO/.loom-local"
+OVERLAY="$REPO/.loom-local/local.json"
+printf '{"autonomous":{"model":"opus"}}\n' > "$OVERLAY"
+OVERLAY_CONTENT=$(cat "$OVERLAY")
+
+# Sanity: git really does see it as untracked dirt in this fixture.
+RAW_STATUS=$(git -C "$REPO" status --porcelain)
+if ! grep -q '\.loom-local' <<<"$RAW_STATUS"; then
+    fail "Test 45 setup: expected an untracked .loom-local/ in a stale-gitignore repo"
+fi
+
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+       --label "run=RUNID-8075 issue=8075" 2>&1 ); RC=$?
+STASH_COUNT=$(git -C "$REPO" stash list | wc -l | tr -d ' ')
+
+if [[ "$RC" -eq 0 ]] \
+   && [[ -f "$OVERLAY" ]] \
+   && [[ "$(cat "$OVERLAY")" == "$OVERLAY_CONTENT" ]] \
+   && [[ "$STASH_COUNT" -eq 0 ]] \
+   && ! grep -q '\.loom-local' <<<"$out"; then
+    pass "--quarantine reports clean and leaves .loom-local/local.json in place"
+else
+    fail "expected rc=0, overlay intact, no stash; got rc=$RC exists=$([[ -f "$OVERLAY" ]] && echo y || echo n) stashes=$STASH_COUNT out=$out"
+fi
+
+# The same must hold for plain detection mode (no baseline, no quarantine).
+( cd "$REPO" && "$SCRIPT" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -eq 0 && -f "$OVERLAY" ]]; then
+    pass "plain detection also treats .loom-local/ as Loom-owned (exit 0)"
+else
+    fail "expected 0 from plain detection with the overlay still present, got rc=$RC overlay_exists=$([[ -f "$OVERLAY" ]] && echo y || echo n)"
+fi
+
+# ...and a real stray alongside the overlay is still caught, naming only itself.
+echo "def widget(): return 42" > "$REPO/leaked_module.py"
+out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
+if [[ "$RC" -eq 3 ]] \
+   && grep -q "leaked_module.py" <<<"$out" \
+   && ! grep -q '\.loom-local' <<<"$out"; then
+    pass "a real stray beside the overlay is still flagged, the overlay is not"
+else
+    fail "expected 3 naming only leaked_module.py, got rc=$RC; out=$out"
+fi
+rm -rf "$REPO"
 
 # -------- Summary --------
 echo ""

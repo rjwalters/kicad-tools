@@ -123,8 +123,10 @@ boards/*/*/output/*.kct.json
 .loom/metrics/
 .loom/usage-cache.json
 .loom/claude-config/
+.loom/native-tools/
 .loom/tokens/
 .loom/accounts.env
+.loom/api-keys/
 .loom/account-health.json
 .loom/account-health.lock
 .loom/CANARY
@@ -137,6 +139,7 @@ boards/*/*/output/*.kct.json
 .loom/.resync-in-progress
 .loom/gh-config/
 .loom/gh-config-by-owner/
+.loom-local/
 # <<< loom-managed <<<
 
 # pytest-benchmark storage

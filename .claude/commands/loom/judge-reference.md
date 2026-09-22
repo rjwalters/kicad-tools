@@ -10,19 +10,15 @@ Read the relevant section when `judge.md` points you here.
 
 ## Scoped Test Execution
 
-When running quality checks (step 7), use **scoped test execution** to run only the tests relevant to changed files. This reduces evaluation time while maintaining confidence that changed code is correct.
+When running quality checks (step 7), use **scoped test execution** to run only the tests relevant to changed files. This cuts evaluation time while keeping confidence that changed code is correct.
 
 ### Step 1: Detect Changed Files
 
 ```bash
-# Use gh API to list changed files — avoids local git dependency and
-# exit-128 errors when the branch is checked out in a worktree or when
-# concurrent builder operations hold a git lock. (issue #2828)
+# gh, not local git: avoids exit-128 when the branch is checked out in a
+# worktree or a concurrent builder holds the git lock (#2828).
 CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only 2>/dev/null)
-if [ -z "$CHANGED_FILES" ]; then
-    echo "Warning: Could not detect changed files via gh pr diff — running full test suite"
-    # Fall through to full suite
-fi
+# Empty result = detection failed; fall through to the full suite.
 echo "$CHANGED_FILES"
 ```
 
@@ -56,54 +52,32 @@ Classify the changed files to determine which scoped test strategies to apply:
 
 #### Python Repositories
 
-**Important**: Always use `python3`, never bare `python` — `python` is not in PATH on macOS or most modern Linux systems.
+**Important**: use `python3`, never bare `python` (not in PATH on macOS or modern Linux).
 
-**CRITICAL: Use `./.loom/scripts/run-tests.sh` instead of bare `python3 -m pytest` in worktrees**
+**CRITICAL: Use `./.loom/scripts/run-tests.sh` instead of bare `python3 -m pytest` in worktrees.**
+With an editable install (`pip install -e .`) the `.pth` entry points at the *main* checkout, so
+`python3 -m pytest` inside `.loom/worktrees/issue-N` imports main's code, not the PR's —
+results that describe the wrong tree (observed in PR #2818). `run-tests.sh` detects the worktree
+and prepends its source root(s) to `PYTHONPATH` first. Use it everywhere you would call pytest.
 
-When a repo's package is installed in editable mode (`pip install -e .`) from the main checkout,
-the `.pth` entry points at the *main* checkout's source tree. So when you `cd` into an issue
-worktree (`.loom/worktrees/issue-N`) and run `python3 -m pytest`, Python imports the *main
-branch's* code — not the code the PR actually changed — producing test results that describe the
-wrong tree. (Observed in PR #2818 review.)
-
-`./.loom/scripts/run-tests.sh` detects the worktree automatically and prepends that worktree's
-source root(s) to `PYTHONPATH` before invoking pytest, ensuring tests import the worktree's
-version. Use it everywhere you would otherwise call `python3 -m pytest`.
-
-> **Loom's own repo is not a Python repo — and has no Python at all.** Epic #4081 Phase 4 (#4557)
-> retired the `loom-tools` package's core, and #4970 finished the job by retiring its last
-> residue, the opt-in `loom-search` carve-out (per the operator's RETIRE decision on #4608).
-> Loom's orchestration layer is the native `loom-daemon` binary plus bash. When reviewing a Loom
-> PR, the relevant suites are `cargo test --workspace` and the bash suites under
+> **Loom's own repo is not a Python repo — and has no Python at all** (epic #4081 Phase 4 /
+> #4557 / #4970). Its orchestration layer is the `loom-daemon` binary plus bash, so on a Loom PR
+> the relevant suites are `cargo test --workspace` and the bash suites under
 > `defaults/scripts/tests/` + `scripts/test-installer.sh`. This "Python Repositories" section
 > applies to the other repos Loom orchestrates, not to Loom's own repo.
 
 **Preferred: Use `pytest-testmon` when available**
 
 ```bash
-# Use run-tests.sh wrapper — sets PYTHONPATH automatically when inside a worktree
-if ./.loom/scripts/run-tests.sh --co --testmon 2>/dev/null; then
-    # Check if .testmondata exists and is reasonably current
-    if [ -f .testmondata ]; then
-        TESTMON_AGE=$(( $(date +%s) - $(stat -f %m .testmondata 2>/dev/null || stat -c %Y .testmondata 2>/dev/null) ))
-        if [ "$TESTMON_AGE" -lt 86400 ]; then
-            echo "Using pytest-testmon for scoped test execution"
-            ./.loom/scripts/run-tests.sh --testmon -x -q
-            SCOPED_STRATEGY="pytest-testmon"
-        else
-            echo "Testmon data is stale (>24h) — falling back to full pytest"
-            ./.loom/scripts/run-tests.sh -x -q
-            SCOPED_STRATEGY="full-pytest (stale testmon data)"
-        fi
-    else
-        echo "No .testmondata found — running full pytest (consider installing pytest-testmon)"
-        ./.loom/scripts/run-tests.sh -x -q
-        SCOPED_STRATEGY="full-pytest (no testmon data)"
-    fi
+# run-tests.sh sets PYTHONPATH automatically when inside a worktree.
+# Use testmon only when its data exists and is <24h old; otherwise full pytest.
+if ./.loom/scripts/run-tests.sh --co --testmon 2>/dev/null && [ -f .testmondata ] &&
+   [ $(( $(date +%s) - $(stat -f %m .testmondata 2>/dev/null || stat -c %Y .testmondata) )) -lt 86400 ]; then
+    ./.loom/scripts/run-tests.sh --testmon -x -q
+    SCOPED_STRATEGY="pytest-testmon"
 else
-    echo "pytest-testmon not available — running full pytest"
     ./.loom/scripts/run-tests.sh -x -q
-    SCOPED_STRATEGY="full-pytest (testmon not installed)"
+    SCOPED_STRATEGY="full-pytest (testmon missing/stale/not installed)"
 fi
 ```
 
@@ -112,24 +86,16 @@ Note in evaluation comment: "Consider installing `pytest-testmon` (`pip install 
 
 #### JavaScript/TypeScript Repositories
 
-**Detect and use the project's test runner:**
+**Detect the project's test runner:**
 
 ```bash
-# Check for Jest
 if npx jest --version 2>/dev/null; then
-    echo "Using Jest with --changedSince for scoped tests"
     npx jest --changedSince=origin/main
     SCOPED_STRATEGY="jest --changedSince"
-
-# Check for Vitest
 elif npx vitest --version 2>/dev/null; then
-    echo "Using Vitest with --changed for scoped tests"
     npx vitest run --changed origin/main
     SCOPED_STRATEGY="vitest --changed"
-
-# Fallback: run whatever test script is configured
-else
-    echo "No Jest or Vitest detected — running configured test script"
+else   # no scoping tool — run whatever test script is configured
     npm test 2>/dev/null || pnpm test 2>/dev/null || yarn test 2>/dev/null
     SCOPED_STRATEGY="full-test-script (no scoping tool detected)"
 fi
@@ -140,32 +106,18 @@ fi
 **Scope to changed crates in workspace projects:**
 
 ```bash
-# Check if this is a Cargo workspace
-if grep -q '^\[workspace\]' Cargo.toml 2>/dev/null; then
-    # Find which crates have changed files
-    CHANGED_CRATES=$(echo "$CHANGED_FILES" | grep '\.rs$' | \
-        sed 's|/.*||' | sort -u | \
-        while read dir; do
-            if [ -f "$dir/Cargo.toml" ]; then
-                grep '^name' "$dir/Cargo.toml" | head -1 | sed 's/name *= *"\(.*\)"/\1/'
-            fi
-        done)
+# Map each changed .rs file to its crate name; fall back to the full workspace.
+CHANGED_CRATES=$(echo "$CHANGED_FILES" | grep '\.rs$' | sed 's|/.*||' | sort -u |
+    while read -r dir; do
+        [ -f "$dir/Cargo.toml" ] && sed -n 's/^name *= *"\(.*\)"/\1/p' "$dir/Cargo.toml" | head -1
+    done)
 
-    if [ -n "$CHANGED_CRATES" ]; then
-        echo "Scoping Rust tests to changed crates: $CHANGED_CRATES"
-        for crate in $CHANGED_CRATES; do
-            cargo test -p "$crate"
-        done
-        SCOPED_STRATEGY="cargo test -p ($(echo $CHANGED_CRATES | tr '\n' ', '))"
-    else
-        echo "Changed Rust files not in identifiable crates — running full cargo test"
-        cargo test --workspace
-        SCOPED_STRATEGY="full-cargo-test"
-    fi
+if grep -q '^\[workspace\]' Cargo.toml 2>/dev/null && [ -n "$CHANGED_CRATES" ]; then
+    for crate in $CHANGED_CRATES; do cargo test -p "$crate"; done
+    SCOPED_STRATEGY="cargo test -p ($(echo "$CHANGED_CRATES" | tr '\n' ','))"
 else
-    # Single-crate project, just run tests
-    cargo test
-    SCOPED_STRATEGY="cargo-test (single crate)"
+    cargo test --workspace   # single crate, or changed files not in an identifiable one
+    SCOPED_STRATEGY="full-cargo-test"
 fi
 ```
 
@@ -194,31 +146,50 @@ SCOPED_STRATEGY="full-suite (fallback)"
 ```markdown
 ## Test Scoping
 
-**Strategy**: `pytest-testmon`
+**Strategy**: `pytest-testmon`   <!-- or: `full-suite` (config files changed) -->
 **Changed files**: 3 Python files in `src/utils/`
 **Scoped result**: 12 tests selected, all passed
 **Note**: Full suite has 847 tests; scoped execution covered tests affected by changes.
+**Recommendation**: (only when a scoping tool is missing) install `pytest-testmon`.
 ```
 
-Or when falling back:
+When falling back, give the reason on the Strategy line (`full-suite` (config files changed), `full-pytest` (testmon not installed), …) and report the full-suite result instead of a scoped one.
 
-```markdown
-## Test Scoping
+### Merge-Base Run for a `TDD: yes` Claim
 
-**Strategy**: `full-suite` (config files changed)
-**Reason**: PR modifies `pyproject.toml` — full test suite required
-**Result**: 847 tests, all passed
+`judge.md` → "Test-First (TDD) Claim Verification" requires a `TDD: yes — <path>` claim to be *falsified*, not just path-matched: the referenced test must **fail on the merge-base tree**. Build that tree with `git archive` (no checkout, no stash, no `git worktree` — safe while the PR branch is checked out elsewhere), lay the PR's test file on top, and run it.
+
+```bash
+# tdd_merge_base_run <base-ref> <test-path> <run command...>   (#8265)
+# Run from the PR head. Echoes VERIFIED / CONTRADICTED / UNRUNNABLE.
+# Exit 0 = verified (failed at base), 1 = contradicted (passed), 3 = unrunnable.
+tdd_merge_base_run() {
+    local base="$1" test_path="$2"; shift 2
+    local tree out rc
+    tree=$(mktemp -d)
+    # The test file is the ONE thing taken from head, so a test needing other
+    # new files reports UNRUNNABLE rather than a false VERIFIED. pipefail:
+    # git archive's failure must not be masked by tar's exit status.
+    if ! (set -o pipefail; git archive "$base" | tar -x -C "$tree") 2>/dev/null ||
+       ! (set -o pipefail; git archive HEAD -- "$test_path" | tar -x -C "$tree") 2>/dev/null; then
+        rm -rf "$tree"
+        echo "UNRUNNABLE: cannot build $base tree + $test_path"; return 3
+    fi
+    out=$(cd "$tree" && "$@" 2>&1); rc=$?
+    rm -rf "$tree"
+    printf '%s\n' "$out" | tail -5
+    if [ "$rc" -eq 0 ]; then
+        echo "CONTRADICTED: $test_path passes at $base — it does not test the fix"; return 1
+    elif [ "$rc" -ge 126 ]; then
+        echo "UNRUNNABLE: command exited $rc at $base (harness/env limit, not a test failure)"; return 3
+    fi
+    echo "VERIFIED: $test_path fails at $base (exit $rc)"
+}
 ```
 
-Or when recommending a missing tool:
+The run command is the Step 4 scoped one narrowed to that path (`run-tests.sh <path>`, `npx vitest run <path>`, `cargo test --test <name>`, `bash <path>`).
 
-```markdown
-## Test Scoping
-
-**Strategy**: `full-pytest` (testmon not installed)
-**Result**: 847 tests, all passed
-**Recommendation**: Consider installing `pytest-testmon` for faster scoped test execution in future reviews.
-```
+**Reading the result.** `VERIFIED` is necessary, not sufficient: check the tail output and confirm it failed *for the reason the fix addresses*, not on an unrelated import error. `CONTRADICTED` is the blocking row; `UNRUNNABLE` is the advisory one — name what blocked the run, and never record it as verified.
 
 ### Edge Cases
 
@@ -227,11 +198,10 @@ Or when recommending a missing tool:
 | PR touches only docs/markdown | Skip test execution entirely (no code changes) |
 | PR touches files in multiple languages | Run scoped tests for each language independently |
 | Scoped tests pass but you suspect missed coverage | Note in evaluation; do not block approval |
-| `pytest-testmon` DB is from wrong branch | Fall back to full pytest (check DB age) |
 | No test framework detected | Note absence in evaluation; check if project has tests at all |
 | PR touches shared utilities | Scoped tools may miss downstream tests — note this risk in evaluation |
 
-**Key principle**: Scoped execution is an optimization, not a replacement for CI. The full test suite still runs in CI (step 8 verifies CI status). Scoped execution gives the Judge faster local feedback during evaluation — see [`judge-reference-rationale.md`](../../../.loom/docs/judge-reference-rationale.md) for the full duration/confidence comparison.
+**Key principle**: Scoped execution is an optimization, not a replacement for CI — the full suite still runs there (step 8 verifies CI status); this just gives the Judge faster local feedback. Duration/confidence comparison: `.loom/docs/judge-reference-rationale.md`.
 
 ---
 

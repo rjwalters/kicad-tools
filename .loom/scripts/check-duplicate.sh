@@ -42,6 +42,52 @@
 #   PR #<number>: <title> (similarity: <percent>%)
 #   ...
 #
+# Near-match band (#8289, re-landed as a daemon port by #8360), OPT-IN via
+# --warn-threshold N and OPEN ISSUES ONLY. Candidates scoring in
+# [N, --threshold) are reported as CONTEXT, never as a verdict: they do not
+# set the exit code, are not counted toward NON_DISCRIMINATIVE, and appear
+# under their own marker so no caller can mistake them for a DUPLICATE_FOUND
+# row:
+#   NEAR_DUPLICATE (context only, not a duplicate verdict)
+#   NEAR #<number>: <title> (similarity: <percent>%)
+# Why the band exists: below --threshold the scorer used to say NOTHING AT
+# ALL, so create-issue.sh's backstop was a cliff -- a hard, unexplained
+# refusal at threshold and total silence one point below it (#8289). The
+# band turns that cliff into a gradient without moving the block line.
+#
+# Title corroboration at low block scores (#8591). The shipped defaults:
+#
+#   --threshold          18   block line (the #4409 calibration, unmoved)
+#   --title-threshold    18   the title-only Jaccard a low block must reach
+#   --corroborate-below  25   ceiling of the region where that is required
+#
+# Only --threshold is a flag of THIS script; the other two are constants of
+# `loom-daemon duplicate-scan` (flags of that subcommand, defined once in
+# loom-daemon/src/cli/duplicate_scan.rs) and are not re-exposed here.
+#
+# An OPEN-issues candidate whose full-text score lands in [18, 25) blocks
+# only if its TITLE-only Jaccard also reaches 18%. Two long issues in the
+# same subsystem share enough jargon to clear 18% on full text alone: #8561
+# (a Kimi CLI harness adapter) was refused as a duplicate of #8505 (an
+# OpenCode metered-runtime budget bug) at exactly that floor on 2026-09-21,
+# on one shared title keyword ("runtime"). Titles are short and specific, so
+# they are the cheap second opinion: the confirmed pair #3550/#3551 scores
+# 19% on bodies but 26% on titles and still blocks; #8561/#8505 scores 3% and
+# no longer does. This is a calibration, not a disable -- and an
+# uncorroborated candidate is DEMOTED to a NEAR row (annotated with the title
+# overlap that fell short), never silently dropped. At/above 25% the body
+# overlap stands on its own. Pass --corroborate-below 0 for the old behaviour.
+#
+# Since #8360 the similarity scan itself (keyword extraction, true-Jaccard
+# scoring, threshold banding, degenerate detection) is
+# `loom-daemon duplicate-scan` (loom-daemon/src/cli/duplicate_scan.rs), per
+# .loom/docs/shell-language-policy.md: this file is a `contract`-category
+# entry whose allowlist line says new logic goes behind it into loom-daemon.
+# What stays here is the forge fetch (with its rate-limit REST fallback,
+# #4526) and the three-pool output aggregation. Without a loom-daemon binary
+# the scan cannot run: each pool reports "incomplete" and the script exits 2
+# (create-issue.sh fails open on that, as it always has on a broken check).
+#
 # Degraded-coverage marker lines (#4526), appended after the match list when
 # GraphQL rate-limiting forced a degraded search. Both are informational: they
 # are not matches, and the --json parser reports them as `search_incomplete`
@@ -63,13 +109,9 @@
 set -euo pipefail
 
 # Minimum number of scanned candidates before degenerate-result
-# self-detection (#4409) kicks in. Below this, "more than half matched" is
-# not a meaningful signal -- e.g. with only 1 candidate scanned, a single
-# real match is trivially ">50%" even though nothing about the scorer is
-# actually broken. 4 is a low floor chosen to still catch the reported
-# failure mode (dozens of candidates ~all scoring at/above threshold) while
-# not misfiring on small candidate pools.
-readonly MIN_SCANNED_FOR_DEGENERATE=4
+# self-detection (#4409) kicks in now lives in the daemon port
+# (loom-daemon/src/cli/duplicate_scan.rs, MIN_SCANNED_FOR_DEGENERATE), like
+# the rest of the scan since #8360.
 
 # Forge-agnostic issue/PR operations via the native `loom-daemon forge`
 # subcommand (port of the retired `loom-forge`). On GitHub it is a byte-identical
@@ -84,6 +126,19 @@ else
     fi
     FORGE="gh"
 fi
+
+# The similarity scan is `loom-daemon duplicate-scan` (#8360). The pool
+# functions below exec it through lib/script-helper.sh's standard resolution
+# ($LOOM_DAEMON_SELF_BIN first, then the locate-daemon-bin chain), so a test
+# harness pins the binary with the same seam every ported stub uses.
+# LOOM_SCRIPT_HELPER_MISSING_RC is load-bearing: with no binary the helper
+# must fail as "could not run" (2) — for the open-issues pool, its default
+# exit 1 would read as a duplicate VERDICT, the worst possible lie a
+# duplicate check can tell.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib/script-helper.sh
+source "$SCRIPT_DIR/lib/script-helper.sh"
+export LOOM_SCRIPT_HELPER_MISSING_RC=2
 
 # Colors for output (only when stderr is a terminal)
 if [[ -t 2 ]]; then
@@ -142,6 +197,23 @@ OPTIONS:
                              bodies (a second real duplicate pair scored only
                              13%, indistinguishable from unrelated) -- treat
                              a miss as inconclusive, not proof of no overlap.
+                             Which is also why a match between this line and
+                             25% needs >= 18% TITLE overlap to block (#8591);
+                             an uncorroborated one is demoted to a NEAR row.
+    --warn-threshold NUM    Also report OPEN issues scoring in the
+                             [NUM, --threshold) band as NEAR_DUPLICATE
+                             context rows (#8289). Off by default, so every
+                             existing caller's output and exit code are
+                             unchanged. Near matches NEVER affect the exit
+                             code and never count toward NON_DISCRIMINATIVE.
+                             Calibration, from the same #4409 data as
+                             --threshold: 13 is both the TOP of the observed
+                             unrelated-issue range (4-13%) and the score of a
+                             second CONFIRMED duplicate pair -- i.e. [13, 18)
+                             is the band where real duplicates and unrelated
+                             issues are known to be indistinguishable, which
+                             is why it warns rather than blocks. Ignored when
+                             0 or >= --threshold.
     --include-merged-prs    Also check recently merged PRs and closed issues
     --issue N               Also probe for OPEN issues/PRs that cross-reference
                              issue N (GitHub timeline API). Curator use --
@@ -203,89 +275,13 @@ INTEGRATION:
 EOF
 }
 
-# Extract keywords from text (removes common words, punctuation)
-extract_keywords() {
-    local text="$1"
-
-    # Convert to lowercase, remove punctuation, split into words
-    # Filter out common stop words and short words
-    echo "$text" | \
-        tr '[:upper:]' '[:lower:]' | \
-        tr -cs '[:alnum:]' '\n' | \
-        grep -v '^$' | \
-        grep -v -E '^(the|a|an|is|are|was|were|be|been|being|have|has|had|do|does|did|will|would|could|should|may|might|must|shall|can|need|dare|ought|used|to|of|in|for|on|with|at|by|from|up|about|into|over|after|beneath|under|above|and|but|or|nor|so|yet|both|either|neither|not|only|own|same|than|too|very|just|also|now|here|there|when|where|why|how|all|each|every|both|few|more|most|other|some|such|no|any|this|that|these|those|what|which|who|whom|whose|it|its|i|me|my|we|our|you|your|he|him|his|she|her|they|them|their|add|fix|update|remove|change|make|get|set|new|use|work|file|code|test|error|bug|feature|issue|pr|pull|request)$' | \
-        grep -E '.{3,}' | \
-        sort -u
-}
-
-# Calculate word overlap percentage between two keyword sets
-calculate_similarity() {
-    local keywords1="$1"
-    local keywords2="$2"
-
-    # Convert the newline-delimited keyword lists (one keyword per line, from
-    # extract_keywords' `sort -u`) into arrays. NOTE (#4409): `read -ra arr <<<
-    # "$multiline_str"` looks like it splits on all IFS whitespace, but `read`
-    # only ever consumes a SINGLE LINE of its input -- everything after the
-    # first newline is silently discarded. Since each keyword already sits on
-    # its own line, that made arr1/arr2 collapse to a ONE-ELEMENT array (just
-    # the alphabetically-first keyword) for any multi-keyword input, turning
-    # every comparison into a coin flip on that one token (0% or 100%) instead
-    # of a real set comparison -- this is bash's `read` semantics in every
-    # version, not a bash-3.2-only quirk. `mapfile`/`readarray` would fix it
-    # but require bash 4+, which macOS's shipped `/bin/bash` (3.2) doesn't
-    # have; splitting on IFS=$'\n' via an unquoted array assignment works on
-    # both and keeps this script bash-3.2-safe.
-    # The unquoted array assignments below are the intended word split (one
-    # array element per keyword line) -- `set -f` around them neutralizes the
-    # linter's other concern (accidental pathname/glob expansion) even though
-    # extract_keywords' alnum-only filter already guarantees no keyword can
-    # contain a glob metacharacter.
-    local -a arr1
-    local -a arr2
-    local old_ifs="$IFS"
-    IFS=$'\n'
-    set -f
-    # shellcheck disable=SC2206 # unquoted-intentionally, see comment above
-    arr1=($keywords1)
-    # shellcheck disable=SC2206 # unquoted-intentionally, see comment above
-    arr2=($keywords2)
-    set +f
-    IFS="$old_ifs"
-
-    # Handle empty arrays
-    if [[ ${#arr1[@]} -eq 0 ]] || [[ ${#arr2[@]} -eq 0 ]]; then
-        echo "0"
-        return
-    fi
-
-    # Count matches
-    local matches=0
-    for word1 in "${arr1[@]}"; do
-        for word2 in "${arr2[@]}"; do
-            if [[ "$word1" == "$word2" ]]; then
-                ((matches++)) || true
-                break
-            fi
-        done
-    done
-
-    # True Jaccard similarity: matches / |union| = matches / (|A|+|B|-matches).
-    # (Previously normalized by the SMALLER set: percent = matches*100/min(|A|,|B|).
-    # That normalization saturates near 100% whenever one set is much larger
-    # than the other -- e.g. a full issue body (hundreds of keywords) compared
-    # against a short candidate title+body: matches approaches |B| regardless
-    # of actual relatedness. True Jaccard is symmetric and bounded by the
-    # union, so a large query set dilutes rather than saturates. See #4409.)
-    local union=$(( ${#arr1[@]} + ${#arr2[@]} - matches ))
-    if [[ $union -eq 0 ]]; then
-        echo "0"
-        return
-    fi
-
-    local percent=$((matches * 100 / union))
-    echo "$percent"
-}
+# Keyword extraction, Jaccard similarity, threshold banding and the
+# degenerate-result detector now live in `loom-daemon duplicate-scan`
+# (loom-daemon/src/cli/duplicate_scan.rs, #8360). They were shell functions
+# here from #4409 until that port; the port is behaviour-identical (the
+# black-box suite's hand-checkable percentages run against the daemon now),
+# and this file keeps the forge fetch + aggregation because that is I/O with
+# its own degradation contract (#4526), not decision logic.
 
 # Detect a GitHub rate-limit rejection in captured `gh` output (stdout+stderr
 # merged via `2>&1`). GraphQL and REST draw on independent quotas (confirmed
@@ -355,21 +351,17 @@ get_repo_nwo() {
     echo "$nwo"
 }
 
-# Search for similar issues
+# Search for similar issues. The fetch (with its #4526 REST fallback) stays
+# here; the scan is `loom-daemon duplicate-scan` (#8360), exec'd through
+# script-helper's standard resolution so the subcommand's stdout/exit code
+# reach this function's caller unchanged.
 search_similar_issues() {
     local title="$1"
     local body="${2:-}"
     local threshold="${3:-18}"
     local self_issue="${4:-}"
-
-    # Extract keywords from new issue
-    local new_keywords
-    new_keywords=$(extract_keywords "$title $body")
-
-    if [[ -z "$new_keywords" ]]; then
-        print_warning "No significant keywords extracted from title/body"
-        return 0
-    fi
+    # Empty (or 0, or >= threshold) disables the near-match band (#8289).
+    local warn_threshold="${5:-}"
 
     # Search open issues. On a GraphQL rate-limit failure, retry via REST
     # (an independent quota, #4526) before giving up.
@@ -397,83 +389,31 @@ search_similar_issues() {
         fi
     fi
 
-    # Process each issue for similarity
-    local scanned=0
-    local matched=0
-    local duplicates=""
-
-    while IFS= read -r issue; do
-        local num title_text body_text
-        num=$(echo "$issue" | jq -r '.number')
-        title_text=$(echo "$issue" | jq -r '.title')
-        body_text=$(echo "$issue" | jq -r '.body // ""')
-
-        # Skip if no number
-        [[ -z "$num" || "$num" == "null" ]] && continue
-
-        # Skip the issue being curated/probed itself (#4662): it is always
-        # in the open-issues pool it's being checked against, and always
-        # scores ~100% similarity against its own title/body -- a guaranteed
-        # false DUPLICATE_FOUND on every curation pass of an existing issue.
-        # No-op when --issue was not given (self_issue empty).
-        [[ -n "$self_issue" && "$num" == "$self_issue" ]] && continue
-
-        scanned=$((scanned + 1))
-
-        # Extract keywords from existing issue
-        local existing_keywords
-        existing_keywords=$(extract_keywords "$title_text $body_text")
-
-        # Calculate similarity
-        local similarity
-        similarity=$(calculate_similarity "$new_keywords" "$existing_keywords")
-
-        if [[ $similarity -ge $threshold ]]; then
-            matched=$((matched + 1))
-            duplicates+="#${num}: ${title_text} (similarity: ${similarity}%)"$'\n'
-        fi
-    done < <(echo "$issues" | jq -c '.[]')
-
-    if [[ $matched -eq 0 ]]; then
-        return 0
+    local scan_args=(--pool open-issues --title "$title" --body "$body" --threshold "$threshold")
+    [[ -n "$self_issue" ]] && scan_args+=(--self-issue "$self_issue")
+    if [[ -n "$warn_threshold" ]] && (( warn_threshold > 0 )) && (( warn_threshold < threshold )); then
+        scan_args+=(--warn-threshold "$warn_threshold")
     fi
-
-    # Degenerate-result self-detection (#4409): if more than half of the
-    # scanned candidates exceed threshold, the similarity scores aren't
-    # discriminating anything for this query -- warn instead of dumping a
-    # wall of "duplicates" that's really just noise.
-    if [[ $scanned -ge $MIN_SCANNED_FOR_DEGENERATE ]] && (( matched * 2 > scanned )); then
-        echo "NON_DISCRIMINATIVE (open issues): ${matched} of ${scanned} candidates scored >= ${threshold}% similarity -- not discriminative, fall back to manual review (e.g. gh issue list --search)."
-        return 1
-    fi
-
-    # Degraded-mode labeling (#4526): a REST-sourced result set ranks
-    # candidates differently than GraphQL's, so a Curator reading the output
-    # needs to know the basis changed. Callers matching on "DUPLICATE_FOUND"
-    # must match a prefix, not exact-equals (see main()'s --json parser below).
+    # --near-file is passed UNCONDITIONALLY, not only with --warn-threshold
+    # (#8591): the scan also uses that channel to report a candidate DEMOTED
+    # out of the block band for want of title corroboration. Gating the file
+    # on the opt-in warn band would make those demotions vanish instead of
+    # merely stop blocking -- strictly worse than the false positive.
+    [[ -n "${NEAR_MATCH_FILE:-}" ]] && scan_args+=(--near-file "${NEAR_MATCH_FILE}")
     if $rest_fallback; then
-        echo "DUPLICATE_FOUND (REST fallback -- similarity ranking basis differs from GraphQL)"
-    else
-        echo "DUPLICATE_FOUND"
+        scan_args+=(--rest-fallback)
     fi
-    echo -n "$duplicates"
-    return 1
+    loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$issues"
 }
 
-# Search for similar recently merged PRs
+# Search for similar recently merged PRs. Fetch here, scan in the daemon
+# requires-daemon: duplicate-scan >= 0.19.224  #8412 — the scan port; without it the helper exits 2 (pool incomplete) and create-issue fails open
+# (#8360) -- same split as search_similar_issues().
 search_merged_prs() {
     local title="$1"
     local body="${2:-}"
     local threshold="${3:-18}"
     local self_issue="${4:-}"
-
-    # Extract keywords from new issue
-    local new_keywords
-    new_keywords=$(extract_keywords "$title $body")
-
-    if [[ -z "$new_keywords" ]]; then
-        return 0
-    fi
 
     # Search recently merged PRs. On a GraphQL rate-limit failure, retry via
     # REST (#4526). REST has no `state=merged` filter, so fetch closed PRs
@@ -498,74 +438,21 @@ search_merged_prs() {
         fi
     fi
 
-    # Process each PR for similarity
-    local scanned=0
-    local matched=0
-    local duplicates=""
-
-    while IFS= read -r pr; do
-        local num title_text body_text
-        num=$(echo "$pr" | jq -r '.number')
-        title_text=$(echo "$pr" | jq -r '.title')
-        body_text=$(echo "$pr" | jq -r '.body // ""')
-
-        # Skip if no number
-        [[ -z "$num" || "$num" == "null" ]] && continue
-
-        # Skip the probed issue's own linked PR, once merged (#4662) -- same
-        # self-match false positive as search_similar_issues(), reached via a
-        # different pool. No-op when --issue was not given.
-        [[ -n "$self_issue" && "$num" == "$self_issue" ]] && continue
-
-        scanned=$((scanned + 1))
-
-        # Extract keywords from existing PR
-        local existing_keywords
-        existing_keywords=$(extract_keywords "$title_text $body_text")
-
-        # Calculate similarity
-        local similarity
-        similarity=$(calculate_similarity "$new_keywords" "$existing_keywords")
-
-        if [[ $similarity -ge $threshold ]]; then
-            matched=$((matched + 1))
-            duplicates+="PR #${num}: ${title_text} (similarity: ${similarity}%)"$'\n'
-        fi
-    done < <(echo "$prs" | jq -c '.[]')
-
-    if [[ $matched -eq 0 ]]; then
-        return 0
-    fi
-
-    # Degenerate-result self-detection (#4409), same as search_similar_issues.
-    if [[ $scanned -ge $MIN_SCANNED_FOR_DEGENERATE ]] && (( matched * 2 > scanned )); then
-        echo "NON_DISCRIMINATIVE (merged PRs): ${matched} of ${scanned} candidates scored >= ${threshold}% similarity -- not discriminative, fall back to manual review."
-        return 0
-    fi
-
-    # A leading sentinel line (stripped by main(), never shown to the user)
-    # so the caller can label the umbrella DUPLICATE_FOUND header when this
-    # pool's result came from the REST fallback (#4526).
+    local scan_args=(--pool merged-prs --title "$title" --body "$body" --threshold "$threshold")
+    [[ -n "$self_issue" ]] && scan_args+=(--self-issue "$self_issue")
     if $rest_fallback; then
-        echo "RATE_LIMIT_FALLBACK"
+        scan_args+=(--rest-fallback)
     fi
-    echo -n "$duplicates"
+    loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$prs"
 }
 
-# Search for similar recently closed issues
+# Search for similar recently closed issues. Fetch here, scan in the daemon
+# (#8360) -- same split as search_similar_issues().
 search_closed_issues() {
     local title="$1"
     local body="${2:-}"
     local threshold="${3:-18}"
     local self_issue="${4:-}"
-
-    # Extract keywords from new issue
-    local new_keywords
-    new_keywords=$(extract_keywords "$title $body")
-
-    if [[ -z "$new_keywords" ]]; then
-        return 0
-    fi
 
     # Search recently closed issues. On a GraphQL rate-limit failure, retry
     # via REST (#4526).
@@ -590,58 +477,12 @@ search_closed_issues() {
         fi
     fi
 
-    # Process each issue for similarity
-    local scanned=0
-    local matched=0
-    local duplicates=""
-
-    while IFS= read -r issue; do
-        local num title_text body_text
-        num=$(echo "$issue" | jq -r '.number')
-        title_text=$(echo "$issue" | jq -r '.title')
-        body_text=$(echo "$issue" | jq -r '.body // ""')
-
-        # Skip if no number
-        [[ -z "$num" || "$num" == "null" ]] && continue
-
-        # Skip the probed issue itself, in case it (or a stale cache of it)
-        # shows up in the recently-closed pool (#4662) -- same self-match
-        # false positive as search_similar_issues(). No-op when --issue was
-        # not given.
-        [[ -n "$self_issue" && "$num" == "$self_issue" ]] && continue
-
-        scanned=$((scanned + 1))
-
-        # Extract keywords from existing issue
-        local existing_keywords
-        existing_keywords=$(extract_keywords "$title_text $body_text")
-
-        # Calculate similarity
-        local similarity
-        similarity=$(calculate_similarity "$new_keywords" "$existing_keywords")
-
-        if [[ $similarity -ge $threshold ]]; then
-            matched=$((matched + 1))
-            duplicates+="Closed #${num}: ${title_text} (similarity: ${similarity}%)"$'\n'
-        fi
-    done < <(echo "$issues" | jq -c '.[]')
-
-    if [[ $matched -eq 0 ]]; then
-        return 0
-    fi
-
-    # Degenerate-result self-detection (#4409), same as search_similar_issues.
-    if [[ $scanned -ge $MIN_SCANNED_FOR_DEGENERATE ]] && (( matched * 2 > scanned )); then
-        echo "NON_DISCRIMINATIVE (closed issues): ${matched} of ${scanned} candidates scored >= ${threshold}% similarity -- not discriminative, fall back to manual review."
-        return 0
-    fi
-
-    # See search_merged_prs()'s matching comment: leading sentinel line,
-    # stripped by main(), never shown to the user (#4526).
+    local scan_args=(--pool closed-issues --title "$title" --body "$body" --threshold "$threshold")
+    [[ -n "$self_issue" ]] && scan_args+=(--self-issue "$self_issue")
     if $rest_fallback; then
-        echo "RATE_LIMIT_FALLBACK"
+        scan_args+=(--rest-fallback)
     fi
-    echo -n "$duplicates"
+    loom_exec_script_helper duplicate-scan "${scan_args[@]}" <<< "$issues"
 }
 
 # Probe for OPEN issues/PRs whose bodies or comments cross-reference the given
@@ -717,6 +558,7 @@ main() {
     local title=""
     local body=""
     local threshold=18
+    local warn_threshold=""
     local json_output=false
     local include_merged_prs=false
     local issue=""
@@ -751,6 +593,10 @@ main() {
                 --threshold)
                     shift
                     threshold="$1"
+                    ;;
+                --warn-threshold)
+                    shift
+                    warn_threshold="$1"
                     ;;
                 --include-merged-prs)
                     include_merged_prs=true
@@ -809,6 +655,20 @@ main() {
         exit 2
     fi
 
+    # Validate --warn-threshold, when given (#8289). A value at/above
+    # --threshold cannot describe a band BELOW it, so it disables the band
+    # rather than silently reinterpreting the caller's intent.
+    if [[ -n "$warn_threshold" ]]; then
+        if ! [[ "$warn_threshold" =~ ^[0-9]+$ ]]; then
+            print_error "Warn threshold must be a number"
+            exit 2
+        fi
+        if (( warn_threshold >= threshold )); then
+            print_warning "--warn-threshold ${warn_threshold} is not below --threshold ${threshold}; near-match band disabled"
+            warn_threshold=""
+        fi
+    fi
+
     # Validate --issue is a number, when given
     if [[ -n "$issue" ]] && ! [[ "$issue" =~ ^[0-9]+$ ]]; then
         print_error "--issue must be a number"
@@ -850,10 +710,20 @@ main() {
     local fallback_pools=""
     local header_labeled_rest=false
 
+    # Near-match side channel (#8289). Allocated on EVERY invocation since
+    # #8591: the band is still opt-in, but a title-corroboration demotion
+    # rides the same channel and is not. Inherited by the
+    # command-substitution subshell below without export (same process tree);
+    # the daemon writes it only when there is at least one row to report, so
+    # -s is the "there is context to show" signal.
+    NEAR_MATCH_FILE=$(mktemp) || NEAR_MATCH_FILE=""
+    # shellcheck disable=SC2064 # expand NEAR_MATCH_FILE now, not at exit
+    [[ -n "$NEAR_MATCH_FILE" ]] && trap 'rm -f "'"$NEAR_MATCH_FILE"'"' EXIT
+
     # Search for similar issues
     local result
     local exit_code=0
-    result=$(search_similar_issues "$title" "$body" "$threshold" "$issue") || exit_code=$?
+    result=$(search_similar_issues "$title" "$body" "$threshold" "$issue" "$warn_threshold") || exit_code=$?
     if [[ $exit_code -eq 1 ]]; then
         duplicate_found=true
     elif [[ $exit_code -eq 2 ]]; then
@@ -998,6 +868,28 @@ main() {
         fi
     fi
 
+    # Near-match band (#8289): context only. Read here so both output modes
+    # below can surface it regardless of the verdict -- including exit 0,
+    # which is the whole point (a sub-threshold match used to be invisible).
+    # Text rows and the --json field are rendered from the same JSON array
+    # the daemon wrote, so the two modes cannot drift apart.
+    local near_output=""
+    local near_json="[]"
+    if [[ -n "$NEAR_MATCH_FILE" && -s "$NEAR_MATCH_FILE" ]]; then
+        near_json=$(jq -c 'map(. + {type: "near_match"})' "$NEAR_MATCH_FILE" 2>/dev/null || echo '[]')
+        # The header no longer quotes the band arithmetic: since #8591 a row
+        # here can ALSO be a candidate demoted out of the block band for want
+        # of title corroboration, whose score is at/above --threshold. Each
+        # row carries its own score, and a demoted one names the title
+        # overlap that fell short, so the numbers are still all present.
+        # The bar a demoted row failed is a daemon-side constant, so it is NOT
+        # restated here -- one definition, in duplicate_scan.rs, not two that
+        # can drift.
+        near_output=$(jq -r \
+            '"NEAR_DUPLICATE (context only, not a duplicate verdict)", (.[] | "NEAR #\(.number): \(.title) (similarity: \(.similarity)%" + (if .title_similarity then ", title overlap only \(.title_similarity)% -- not corroborated, so not a block" else "" end) + ")")' \
+            "$NEAR_MATCH_FILE" 2>/dev/null || true)
+    fi
+
     if $json_output; then
         if [[ $exit_code -eq 2 ]]; then
             echo '{"error": "Failed to check duplicates"}'
@@ -1066,14 +958,21 @@ main() {
                 matches=$(echo "$matches" | jq --argjson extra "$cross_matches" '. + $extra')
             fi
 
+            # Near matches ride their own field (#8289), NEVER folded into
+            # `matches` and never reflected in `duplicate_found` -- those two
+            # stay driven by --threshold alone, so a caller that ignores this
+            # field behaves exactly as it did before the band existed.
             if [[ "$matches" == "[]" ]]; then
-                echo "{\"duplicate_found\": false, \"degenerate\": $degenerate, \"search_incomplete\": $search_incomplete, \"matches\": []}"
+                echo "{\"duplicate_found\": false, \"degenerate\": $degenerate, \"search_incomplete\": $search_incomplete, \"matches\": [], \"near_matches\": $near_json}"
             else
-                echo "{\"duplicate_found\": true, \"degenerate\": $degenerate, \"search_incomplete\": $search_incomplete, \"matches\": $matches}"
+                echo "{\"duplicate_found\": true, \"degenerate\": $degenerate, \"search_incomplete\": $search_incomplete, \"matches\": $matches, \"near_matches\": $near_json}"
             fi
         fi
     else
         if [[ $exit_code -eq 0 ]]; then
+            # Near matches print even here -- exit 0 with a silent
+            # sub-threshold match is the gap #8289 exists to close.
+            [[ -n "$near_output" ]] && echo "$near_output"
             print_success "No duplicates found"
         else
             echo "$result"
@@ -1081,6 +980,7 @@ main() {
                 echo "RELATED_OPEN_WORK"
                 format_related_open_work "$issue" "$related_json"
             fi
+            [[ -n "$near_output" ]] && echo "$near_output"
         fi
     fi
 

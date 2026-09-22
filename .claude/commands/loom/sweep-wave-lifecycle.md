@@ -252,20 +252,21 @@ For each issue `N` in the wave, before any role skill is invoked:
 
 For each surviving issue `N` in the wave:
 
-- **Checkpoint skip.** If `CHECKPOINT_PHASE` is one of `curator-done`, `builder-done`, `judge-rejected`, `judge-done`, `doctor-done`, skip the curator phase entirely (it already completed in a prior sweep run). Do NOT re-invoke the curator skill — re-curating is wasted work and can produce churn on an issue that's already mid-lifecycle.
+- **Premise gate, BEFORE any Curator dispatch (#8396).** `./.loom/scripts/premise-check.sh --issue N` — `0` proceeds; anything else means **do not dispatch a Curator for this issue**. On `11`, comment the disagreement axis and `gh issue edit N --add-label "loom:operator-only,loom:operator-decision"`; on `10`/`12`/`13`/`1`, drop it from the wave, with the reason. After enrichment a reversal is already scoped and Champion is the next place it can be caught (#7855). Contract: `.loom/docs/premise-gate.md`.
+- **Checkpoint skip.** If `CHECKPOINT_PHASE` is one of `curator-done`, `builder-done`, `judge-rejected`, `judge-done`, `doctor-done`, skip the curator phase entirely (it already completed in a prior sweep run). Do NOT re-invoke the curator skill: re-curating churns an issue that is already mid-lifecycle.
 - Otherwise (no checkpoint, or `CHECKPOINT_PHASE` is empty): if the issue does not already have `loom:curated` or `loom:issue`, run the curator skill on it.
-  - Load and follow the instructions in `.claude/commands/loom/curator.md` for issue `N`.
+  - Load and follow `.claude/commands/loom/curator.md` for issue `N`.
   - Expected exit state: issue has `loom:curated`.
-- If the issue already has `loom:curated` or `loom:issue`, skip the curator skill invocation but still write the checkpoint below (so future sweep runs can skip the redundant label probe).
-- **On successful completion** (curator ran, or curator-skip-because-already-curated), write the checkpoint:
+- If the issue already has `loom:curated` or `loom:issue`, skip the curator skill but still write the checkpoint below (so later runs skip the redundant label probe).
+- **On successful completion** (curator ran, or was skipped as already-curated), write the checkpoint:
   ```bash
   # Append --model <resolved> when you passed a model param to the curator subagent (#3482).
   ./.loom/scripts/sweep-checkpoint.sh write N curator-done --task-id "$RUN_ID"
   ```
 
-Curator runs sequentially per-issue within wave setup — it is cheap and does not benefit from parallelism here. **Await each Curator's completion explicitly** (a bounded, non-blocking `TaskOutput` poll — see the context-safe recipe, #6168) before advancing — the harness may launch the subagent async even with `run_in_background: false`, so the sequencing here depends on an explicit await, not the dispatch flag (see "Subagent dispatch is async-only", #3822).
+Curator runs sequentially per-issue within wave setup — it is cheap and gains nothing from parallelism. **Await each Curator's completion explicitly** (a bounded, non-blocking `TaskOutput` poll, #6168): the harness may launch the subagent async even with `run_in_background: false`, so sequencing depends on the await, not the dispatch flag ("Subagent dispatch is async-only", #3822).
 
-> **The `check-main-clean.sh` backstop (see "Backstop: verify the main worktree is clean after EACH builder returns" under the Builder phase below) is orchestrator-side only and does not cover the Curator phase.** It runs from *this* sweep skill, after each Builder's `TaskOutput`, and catches contamination a Builder subagent left in main. A Curator running in the main checkout (e.g. reproducing a measurement/board pipeline while re-baselining an issue) gets **no equivalent check here** — and a bare Champion cron tick or an interactive Curator session outside `/loom:sweep` gets none at all, orchestrator or not. Curators must self-enforce the worktree-or-restore rule in `curator.md` § "Running Measurement / Board-Pipeline Reproductions" (#4991) rather than rely on this backstop catching a missed restore.
+> **The `check-main-clean.sh` backstop (Builder phase, below) does NOT cover the Curator phase.** It runs after each Builder's `TaskOutput`, so a Curator working in the main checkout (e.g. reproducing a measurement while re-baselining an issue) gets no equivalent check — and a cron Curator outside `/loom:sweep` gets none at all. Curators self-enforce the worktree-or-restore rule in `curator.md` § "Running Measurement / Board-Pipeline Reproductions" (#4991).
 
 ### 3. Approval gate (per-issue)
 

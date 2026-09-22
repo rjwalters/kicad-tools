@@ -197,7 +197,19 @@ EXIT_QUARANTINED=4
 LOOM_OWNED_PREFIXES=(
     ".loom/sweep-checkpoint/"
     ".loom/sweep-run/"
-    ".loom/tokens/"
+    # The two per-host credential pools, never committed and never quarantined:
+    # the Claude OAuth token pool and the provider-neutral API-key account pool
+    # (#8401). They share one physical line, and the reason is not stylistic:
+    # this file is `contract` in scripts/shell-allowlist.txt, so epic #7810's
+    # shell-budget ratchet counts code LINES and refuses a new one here. Putting
+    # the second entry on the existing line makes that count read +0. Nothing
+    # was removed elsewhere to pay for it, so this is NOT the ratchet's option 2
+    # -- it sidesteps the line count, because the gate offers no path for a pure
+    # data row. Whether that is acceptable is an open policy question raised on
+    # PR #8428; do not treat this line as precedent for adding further entries.
+    # The Rust mirror (loom-daemon/src/main_health_gate/owned_paths.rs) is under
+    # no such budget and lists them one per line.
+    ".loom/tokens/" ".loom/api-keys/"
     ".loom/accounts.env"
     ".loom/exit-codes/"
     ".loom/stats/"
@@ -209,6 +221,16 @@ LOOM_OWNED_PREFIXES=(
     ".loom/logs/"
     ".loom/worktrees/"
     ".loom-managed"
+    # Host-local config overlay (#4039 / Epic #3835 Phase 2; listed here for
+    # #8075). `.loom-local/local.json` is the highest-precedence config tier and
+    # is ungitted BY DESIGN — so in a consumer repo whose managed .gitignore
+    # block predates #8075 it surfaces as `?? .loom-local/` and was eligible for
+    # `--quarantine`'s `git stash push --include-untracked`. Stashing it
+    # silently reverts whatever the operator overrode (e.g. a per-repo model
+    # pin) with no signal anywhere. It is never source a builder writes to main,
+    # so filtering it cannot mask contamination. Independent of the .gitignore
+    # fix, which only reaches a consumer repo after a resync.
+    ".loom-local/"
 )
 
 # ---- Loom-owned stash producers (#5185) ----------------------------------

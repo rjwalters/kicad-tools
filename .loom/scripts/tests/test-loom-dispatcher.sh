@@ -67,6 +67,10 @@ if [[ ! -f "$PROVISION_LIB" ]]; then
     exit 0
 fi
 
+# Pin the native dispatcher while leaving daemon-management mocks independent.
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$REPO_ROOT/defaults/scripts" spawn-worker
+
 # Build a fake machine-level checkout with stub daemon-lifecycle scripts and a
 # real copy of the config resolver. Echoes the checkout path.
 make_checkout() {
@@ -127,15 +131,15 @@ EOF
 }
 
 # Build a fake consumer repo whose .loom/scripts carries a REAL spawn-worker.sh
-# + config-resolver.sh, plus stub spawn-<runtime>.sh runners that just echo
-# their own name and argv (no real claude/codex, no live tokens) — the pattern
-# test-spawn-worker.sh uses. Exercises `loom sweep`'s runtime routing (#4480).
+# + its resolver libraries, plus stub spawn-<runtime>.sh runners that echo
+# their own name and argv (no real claude/codex, no live tokens).
+# Exercises `loom sweep`'s runtime routing (#4480).
 # Echoes the repo path.
 make_sweep_repo() {
     local r; r="$(mktemp -d)"
     mkdir -p "$r/.loom/scripts/lib"
     cp "$REAL_SPAWN_WORKER" "$r/.loom/scripts/spawn-worker.sh"
-    cp "$REAL_RESOLVER" "$r/.loom/scripts/lib/config-resolver.sh"
+    cp "$REPO_ROOT/defaults/scripts/lib/"{locate-daemon-bin,loom-tools}.sh "$r/.loom/scripts/lib/"
     # Stub runners: each announces which runtime ran and forwards its argv so a
     # test can assert on both the selected runner and the passthrough flags.
     cat > "$r/.loom/scripts/spawn-claude.sh" <<'EOF'
@@ -634,8 +638,14 @@ else
 fi
 
 echo "Test 22: 'loom sweep' with an unknown runtime exits 78 naming runtime, source, and runners present"
+# Pin the bare-env resolution tier this test's wording assertion describes
+# (#8430): an inherited LOOM_ROLE (every daemon-launched shell — a Builder
+# running build-gate.sh carries LOOM_ROLE=sweep-lifecycle) reroutes
+# spawn-worker through runtime_admission's role binding, which renders the
+# same LOOM_RUNTIME var as the RuntimeSource label "global-environment"
+# instead of the dispatcher-era label "env (LOOM_RUNTIME)" asserted below.
 set +e
-out=$(cd "$SWEEPREPO" && LOOM_RUNTIME=nonexistent LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
+out=$(cd "$SWEEPREPO" && env -u LOOM_ROLE LOOM_RUNTIME=nonexistent LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
 rc=$?
 set -e 2>/dev/null || true
 assert_eq "$rc" "78" "unknown runtime exits 78 (EX_CONFIG)"

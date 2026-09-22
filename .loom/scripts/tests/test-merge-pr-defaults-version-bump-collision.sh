@@ -254,14 +254,16 @@ run_guard
 assert_eq "0" "$LAST_RC" "Failed fetch keeps skip contract"
 
 # Non-defaults edits of each other canonical value are forbidden too.
-for file in package.json mcp-loom/package.json Cargo.toml CLAUDE.md; do
+# CLAUDE.md is deliberately absent: #8147 removed it from the version-bearing
+# set (it is injected into every agent session's prompt prefix, so it carries
+# no version stamp at all any more) -- the case below asserts the inverse.
+for file in package.json mcp-loom/package.json Cargo.toml; do
     case_fixture
     git -C "$LOCAL" checkout -q -b feature/value
     mkdir -p "$(dirname "$LOCAL/$file")"
     case "$file" in
         *.json) printf '{"version":"2.0.0"}\n' > "$LOCAL/$file" ;;
         *.toml) printf 'version = "2.0.0"\n' > "$LOCAL/$file" ;;
-        CLAUDE.md) printf '**Loom Version**: 2.0.0\n' > "$LOCAL/$file" ;;
     esac
     git -C "$LOCAL" add "$file"
     git -C "$LOCAL" commit -q -m 'manual version value'
@@ -284,12 +286,115 @@ PR_HEAD_SHA="$(git -C "$LOCAL" rev-parse HEAD)"
 run_guard
 assert_eq 0 "$LAST_RC" "Prose in version-bearing file passes with unchanged value"
 
+# #8147: a CLAUDE.md edit that DOES rewrite a `**Loom Version**:` line is no
+# longer a hand-edit at all -- the file left the version-bearing set with the
+# stamp. Without this the PR that removed the stamp could not have merged.
+case_fixture
+git -C "$LOCAL" checkout -q -b feature/claude-version-line
+printf '**Loom Version**: 2.0.0\n' > "$LOCAL/CLAUDE.md"
+git -C "$LOCAL" add CLAUDE.md
+git -C "$LOCAL" commit -q -m 'CLAUDE.md version-looking line'
+git -C "$LOCAL" push --quiet origin feature/claude-version-line
+PR_BRANCH=feature/claude-version-line
+PR_HEAD_SHA="$(git -C "$LOCAL" rev-parse HEAD)"
+run_guard
+assert_eq 0 "$LAST_RC" "CLAUDE.md is no longer version-bearing (#8147)"
+
 case_fixture
 make_pr_branch "1.0.0"
 printf '#!/bin/sh\nexit 2\n' > "$LOCAL/defaults/scripts/check-defaults-version-bump.sh"
 run_guard
 assert_eq 0 "$LAST_RC" "Checker usage/internal fault retains skip contract"
 assert_contains "$LAST_OUT" "exited 2" "Internal checker failure is diagnosed"
+
+# --- #8284: which ref's checker is the oracle -------------------------------
+#
+# merge-pr.sh runs from a primary checkout sitting on the DEFAULT BRANCH, so
+# $REPO_ROOT's on-disk checker is main's copy while the PR's own copy exists
+# only as a git object. Every case below depends on that distinction, which
+# make_pr_branch deliberately does not model (it leaves the local checkout on
+# the PR branch), so these build the branch and then return to main.
+start_pr_branch() {
+    git -C "$LOCAL" fetch --quiet origin
+    git -C "$LOCAL" checkout -q -B "$1" "origin/main"
+}
+finish_pr_branch() {
+    git -C "$LOCAL" add -A
+    git -C "$LOCAL" commit -q -m "$2"
+    git -C "$LOCAL" push --quiet origin "$1"
+    PR_BRANCH="$1"
+    PR_HEAD_SHA="$(git -C "$LOCAL" rev-parse HEAD)"
+    git -C "$LOCAL" checkout -q main
+}
+
+# Drops "VERSION" from the working copy's version-bearing set, mirroring what
+# #8190 did to CLAUDE.md. Rewrites via a temp file so the edit works the same
+# on BSD and GNU userlands (no `sed -i` portability split).
+shrink_version_bearing_set() {
+    grep -v '^  "VERSION"$' "$LOCAL/defaults/scripts/check-defaults-version-bump.sh" > "$WORKDIR/checker.new"
+    mv "$WORKDIR/checker.new" "$LOCAL/defaults/scripts/check-defaults-version-bump.sh"
+    chmod +x "$LOCAL/defaults/scripts/check-defaults-version-bump.sh"
+}
+
+# The #8190 shape: the PR removes a file from the version-bearing set AND
+# changes that file's value in the same commit. main's checker still encodes the
+# old set and reports a hand-edit; the PR head's checker (what CI runs) does
+# not. Without the head-ref oracle such a PR can never pass this guard.
+case_fixture
+start_pr_branch feature/shrink-version-set
+shrink_version_bearing_set
+echo "9.9.9" > "$LOCAL/VERSION"
+finish_pr_branch feature/shrink-version-set 'drop VERSION from the version-bearing set'
+run_guard
+assert_eq 0 "$LAST_RC" "PR that shrinks the version-bearing set is judged by its own checker (#8284)"
+assert_contains "$LAST_OUT" "the PR head ($PR_HEAD_SHA)" "Guard names the PR head as the oracle it used"
+
+# The head oracle is not a bypass: touching the machinery does not excuse a
+# hand-bump the head's OWN checker still forbids (VERSION stays in its set).
+case_fixture
+start_pr_branch feature/touch-version-sh
+mkdir -p "$LOCAL/scripts"
+printf '#!/usr/bin/env bash\n# unrelated edit to the version helper\n' > "$LOCAL/scripts/version.sh"
+echo "1.0.1" > "$LOCAL/VERSION"
+finish_pr_branch feature/touch-version-sh 'touch scripts/version.sh and hand-bump VERSION'
+run_guard
+assert_eq 1 "$LAST_RC" "PR head's own checker still blocks a hand-bump it forbids (#8284)"
+assert_contains "$LAST_OUT" "hand-edit" "Head-oracle block still identifies the policy violation"
+
+# Fail closed on a lookup error: a PR that deletes the checker at its head
+# touches the machinery, so the head oracle is attempted, but `git show` finds
+# nothing. That must fall back to main's checker (which blocks the hand-bump),
+# never silently pass.
+case_fixture
+start_pr_branch feature/delete-checker
+git -C "$LOCAL" rm -q defaults/scripts/check-defaults-version-bump.sh
+echo "1.0.1" > "$LOCAL/VERSION"
+finish_pr_branch feature/delete-checker 'delete the checker and hand-bump VERSION'
+run_guard
+assert_eq 1 "$LAST_RC" "Unreadable PR-head checker falls back to main's, not a free pass (#8284)"
+assert_contains "$LAST_OUT" "'main' (" "Fallback names the default branch as the oracle actually used"
+
+# Unchanged for every other PR: main's checker, no mention of the head oracle.
+case_fixture
+make_pr_branch "1.0.1"
+run_guard
+assert_eq 1 "$LAST_RC" "Ordinary hand-bump still blocks under main's checker"
+assert_not_contains "$LAST_OUT" "version-policy machinery" "Ordinary PR keeps main's checker as the oracle"
+
+# Base-branch drift must not flip the oracle: the machinery-touch test is scoped
+# to merge-base..head, so a concurrent merge that touches scripts/version.sh on
+# main leaves this PR (which touches nothing of the sort) on main's checker.
+case_fixture
+start_pr_branch feature/untouched-machinery
+echo "changed by PR" >> "$LOCAL/defaults/scripts/foo.md"
+finish_pr_branch feature/untouched-machinery 'ordinary defaults change'
+mkdir -p "$ORIGIN/scripts"
+printf '#!/usr/bin/env bash\n# concurrent edit on main\n' > "$ORIGIN/scripts/version.sh"
+git -C "$ORIGIN" add -A
+git -C "$ORIGIN" commit -q -m 'concurrent machinery change on main'
+run_guard
+assert_eq 0 "$LAST_RC" "Concurrent machinery change on main does not block the PR"
+assert_not_contains "$LAST_OUT" "version-policy machinery" "Main-side machinery drift does not flip the oracle"
 
 # The guard must remain before either merge path.
 guard_line="$(grep -n '^_check_defaults_version_bump_collision$' "$MERGE_PR_SRC" | head -1 | cut -d: -f1)"

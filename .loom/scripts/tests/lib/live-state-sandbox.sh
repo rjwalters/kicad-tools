@@ -23,6 +23,17 @@
 #      the operator's real stop" was unchanged) — sandboxing paths does not
 #      sandbox SUPERVISOR IDENTITY, which is a different axis entirely. See
 #      "Supervisor IDENTITY" below.
+#   5. #8077 — a builder SWEEP's test run leaked into the live host twice over:
+#      17 test-spawned daemons wrote full boot blocks into the PRODUCTION
+#      `~/.loom/daemon.log` (and one of them adopted the real host's in-flight
+#      sweep claim out of the machine sweep journal), and a real-systemd
+#      regression block ran 32 × `systemctl --user daemon-reload` against the
+#      live user manager supervising that same daemon. Root cause: the daemon's
+#      own systemd unit exports `LOOM_SOCKET_PATH=$HOME/.loom/loom-daemon.sock`,
+#      every sweep worker the daemon spawns INHERITS it, and `resolve_loom_dir()`
+#      takes that variable's PARENT as the loom dir — so a test daemon resolves
+#      the production `daemon.log`/`sweeps.json` even when the test sandboxed
+#      `$HOME`. See "The #8077 live-host leak guard" below.
 #
 # The recurring root cause is not "one more variable was forgotten"; it is that
 # a Loom agent session EXPORTS the live paths into every child process it
@@ -44,6 +55,21 @@
 #                             daemon's `loom_dir`, so the heartbeat, machine-level
 #                             logs and every `resolve_loom_dir()` consumer follow)
 #   LOOM_DAEMON_BIN_DIR    -> <dir>/machine-level-bin-sandbox (#4381)
+#   LOOM_DAEMON_LOG        -> <dir>/daemon.log           (#8077: the HIGHEST-
+#                             precedence log override, ahead of the
+#                             LOOM_SOCKET_PATH-derived default, so a daemon
+#                             spawned with a per-invocation socket pin of its
+#                             own still cannot reach ~/.loom/daemon.log)
+#   LOOM_SHARED_TOKENS_DIR -> <dir>/tokens               (#8077: else the pool
+#                             defaults to $HOME/.loom/tokens)
+#   LOOM_WORKSPACES_PATH   -> <dir>/workspaces.json      (#8077/#4556: the real
+#                             registry lists the operator's 48 repos, so an
+#                             un-pinned test daemon reconciles against them)
+#   LOOM_SWEEPS_JOURNAL_PATH -> <dir>/sweeps.json        (#8077/#4556: the MACHINE
+#                             sweep journal — a test daemon that reads it adopts
+#                             the real host's in-flight sweep claims)
+#   LOOM_WATCHES_PATH      -> <dir>/watches.json         (#4556)
+#   LOOM_WATCH_RESULTS_LOG -> <dir>/watch-results.log    (#4556)
 #   LOOM_DAEMON_BIN        -> UNSET  (#4902: the ambient value names the REAL binary)
 #   LOOM_WORKSPACE         -> UNSET  (pid-file tier 3; each sub-invocation must
 #                             resolve its OWN fixture repo root instead)
@@ -91,6 +117,34 @@
 # `sweeps.json` and `activity.db` are deliberately excluded because a live
 # daemon updates them on its own cadence, which would make the guard flap.
 #
+# ## The #8077 live-host leak guard
+#
+# `live_host_leak_snapshot` / `live_host_leak_assert_unchanged` are a SECOND,
+# independent pair, usable on their own (run-ci-suites.sh drives them around the
+# WHOLE shell-suite run, where the state-path pair above would flap on a
+# supervised daemon restart). They watch the three surfaces #8077 actually
+# damaged, each fingerprinted at a granularity a healthy daemon does not move:
+#
+#   1. daemon.log BOOT COUNT — the number of `Daemon logging initialized` lines.
+#      A daemon writes exactly one per process start, so the count is constant
+#      for a running daemon however much it appends. This is why counting boots
+#      works where a size/mtime/sha fingerprint of `daemon.log` cannot.
+#   2. The supervised unit's restart identity (`NRestarts` +
+#      `ExecMainStartTimestampMonotonic`). auto_update legitimately rolls the
+#      daemon every ~90 min, which DOES add a boot line — so a boot-count growth
+#      is only reported as a FAILURE when the unit's identity is unchanged (no
+#      supervised restart could account for it). That is the exact #8077
+#      signature: 17 boot blocks, zero unit restarts. When the unit did restart,
+#      the growth is reported as ADVISORY instead of failing, because it cannot
+#      be attributed either way — a guard that flaps every 90 min gets disabled,
+#      which is worse than one that occasionally says "unattributable".
+#   3. The `$HOME/.config/systemd/user` unit-file NAME SET and the
+#      `$HOME/.loom/tokens` `*.token` NAME SET. Both are deterministic: the
+#      daemon rewrites unit-file CONTENT on an auto_update roll and rewrites
+#      `.ranking` continuously, but neither adds or removes a name. A test that
+#      drops real unit files into the live manager's search path (#4862's MX
+#      block) or writes a token into the live pool is caught here.
+#
 # ## Usage (source it)
 #
 #   source "$SCRIPT_DIR/lib/live-state-sandbox.sh"
@@ -99,10 +153,22 @@
 #   live_state_sandbox_init "$BASE_WORKDIR/live-state"
 #   ... run the suite ...
 #   live_state_sandbox_assert_untouched              # rc 0 = clean, 1 = leaked
+#
+# …or, for a run that must NOT install a sandbox (an outer runner wrapping many
+# suites), the #8077 pair on its own:
+#
+#   live_host_leak_snapshot
+#   ... run everything ...
+#   live_host_leak_assert_unchanged                  # rc 0 = clean, 1 = leaked
 
 # State files that identify/steer a daemon and are written only at lifecycle
 # transitions — safe to compare before/after even while a real daemon runs.
 LIVE_STATE_SANDBOX_GUARDED_FILES=".daemon.pid .daemon.flags autonomy-desired"
+
+# The systemd --user unit name the production daemon is supervised by. Used by
+# the #8077 leak guard below to tell an EXPECTED supervised restart (auto_update
+# rolls the daemon every ~90 min) apart from a test-spawned daemon.
+LIVE_STATE_SANDBOX_PRODUCTION_SYSTEMD_UNIT="${LIVE_STATE_SANDBOX_PRODUCTION_SYSTEMD_UNIT:-loom-daemon}"
 
 # The real production supervisor identities (#5501). ANY test that resolves
 # either of these while a live-state sandbox is active can reach out and
@@ -115,6 +181,11 @@ LIVE_STATE_SANDBOX_PRODUCTION_WATCHDOG_LABEL="com.rjwalters.loom-daemon-watchdog
 # live_state_sandbox_snapshot. Empty until the snapshot runs.
 _LSS_SNAPSHOT=""
 _LSS_SNAPSHOT_TAKEN=0
+
+# Newline-separated "<kind>:<key><TAB><fingerprint>" records captured by
+# live_host_leak_snapshot (#8077). Empty until that snapshot runs.
+_LSS_LEAK_SNAPSHOT=""
+_LSS_LEAK_SNAPSHOT_TAKEN=0
 
 # ---------------------------------------------------------------------------
 # internals
@@ -157,6 +228,83 @@ _lss_fingerprint() {
     local size
     size=$(wc -c < "$path" 2>/dev/null | tr -d ' ')
     echo "size=${size:-?} mtime=$(_lss_mtime "$path") sha=$(_lss_checksum "$path")"
+}
+
+# ---- #8077 live-host leak fingerprints -------------------------------------
+
+# Print the number of daemon BOOT BLOCKS in <log>: `<absent>` when the file does
+# not exist, else the count of `Daemon logging initialized` lines. The daemon
+# writes exactly one of those per process start (daemon_service.rs
+# `setup_logging`), so this number does NOT move while a daemon runs, however
+# much it appends — which is precisely why `daemon.log` can be guarded this way
+# when a size/mtime/sha fingerprint of it would flap every second.
+_lss_daemon_log_boots() {
+    local path="$1" n
+    [[ -f "$path" ]] || { printf '%s' '<absent>'; return 0; }
+    # `grep -c` exits 1 on zero matches, so its rc is deliberately ignored; the
+    # digits-only validation below is what rejects a genuinely failed read.
+    n=$(grep -c 'Daemon logging initialized' "$path" 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) n='?' ;; esac
+    printf '%s' "$n"
+}
+
+# Print (one per line) every `daemon.log` a daemon spawned from the CURRENT
+# environment could resolve — the ambient LOOM_DAEMON_LOG, the $HOME default,
+# and the LOOM_SOCKET_PATH-derived one. The last of these is the #8077 path: a
+# sweep worker inherits the production daemon's own `LOOM_SOCKET_PATH` from its
+# systemd unit, so the "default" a forgetful test gets is the LIVE log.
+_lss_enumerate_live_daemon_logs() {
+    {
+        printf '%s\n' "${LOOM_DAEMON_LOG:-}"
+        printf '%s\n' "$HOME/.loom/daemon.log"
+        if [[ -n "${LOOM_SOCKET_PATH:-}" ]]; then
+            printf '%s\n' "$(dirname "$LOOM_SOCKET_PATH")/daemon.log"
+        fi
+    } | awk 'NF' | sort -u
+}
+
+# Print the live systemd --user unit's restart identity, or a `<...>` reason
+# token when no user manager is reachable (Darwin, a CI runner with no user
+# session/bus, or no systemctl at all). `NRestarts` alone is not enough — it
+# counts only AUTOMATIC restarts, not an explicit `systemctl restart` — so the
+# main-process start timestamp is carried alongside it.
+# shellcheck disable=SC2120  # <unit> is an override seam for this lib's own test suite; in-repo callers take the default.
+_lss_systemd_unit_identity() {
+    local unit="${1:-$LIVE_STATE_SANDBOX_PRODUCTION_SYSTEMD_UNIT}" restarts started
+    command -v systemctl >/dev/null 2>&1 || { printf '%s' '<no-systemctl>'; return 0; }
+    [[ -n "${XDG_RUNTIME_DIR:-}" ]] || { printf '%s' '<no-user-manager>'; return 0; }
+    restarts=$(systemctl --user show -p NRestarts --value "$unit" 2>/dev/null)
+    started=$(systemctl --user show -p ExecMainStartTimestampMonotonic --value "$unit" 2>/dev/null)
+    case "$restarts" in ''|*[!0-9]*) restarts='?' ;; esac
+    case "$started" in ''|*[!0-9]*) started='?' ;; esac
+    printf 'restarts=%s started=%s' "$restarts" "$started"
+}
+
+# Print the sorted NAME SET of a directory's entries (matching <glob>, default
+# everything), or `<absent>`. Names only: the daemon rewrites unit-file CONTENT
+# on an auto_update roll and rewrites the token pool's `.ranking` continuously,
+# so a content fingerprint would flap — but neither operation ADDS or REMOVES a
+# name, which is the thing a leaking test does.
+#
+# An empty match set prints as `<absent>` too, whether or not the directory
+# itself exists — a `mkdir -p` that a test's OWN cleanup leaves behind (e.g.
+# the #4862 MX block creating `$HOME/.config/systemd/user` before writing,
+# then removing, its unit files) is not a leak. A leak is a NAME appearing
+# that was not there before; the directory's own existence is not the thing
+# being guarded (#8077 CI false positive: before=`<absent>`, after=`names=`).
+_lss_dir_name_set() {
+    local dir="$1" glob="${2:-*}" names
+    [[ -d "$dir" ]] || { printf '%s' '<absent>'; return 0; }
+    names=$(
+        cd "$dir" 2>/dev/null || exit 0
+        # shellcheck disable=SC2086  # deliberate glob expansion of the caller's pattern
+        for entry in $glob; do
+            [[ -e "$entry" ]] || continue
+            printf '%s\n' "$entry"
+        done | sort | tr '\n' ','
+    )
+    [[ -z "$names" ]] && { printf '%s' '<absent>'; return 0; }
+    printf 'names=%s' "$names"
 }
 
 # Walk up from <dir> to the nearest repo root, mirroring the `find_repo_root()`
@@ -267,6 +415,104 @@ live_state_sandbox_snapshot() {
         _LSS_SNAPSHOT="${_LSS_SNAPSHOT}${path}"$'\t'"$(_lss_fingerprint "$path")"$'\n'
     done < <(_lss_enumerate_live_paths | sort -u)
     _LSS_SNAPSHOT_TAKEN=1
+    # The #8077 surfaces are a different fingerprint granularity (boot counts,
+    # supervisor identity, directory name sets), so they get their own snapshot
+    # — taken here too, so every existing caller of this function is covered
+    # without a second call site to forget.
+    live_host_leak_snapshot
+}
+
+# Fingerprint the live-HOST surfaces #8077 damaged: every reachable
+# `daemon.log`'s boot count, the supervised unit's restart identity, the
+# systemd --user unit-file name set, and the shared token pool's name set.
+# MUST be called before the run under test starts (and, when used together with
+# live_state_sandbox_init, before it — init deliberately repoints
+# LOOM_DAEMON_LOG, which changes what "reachable" means).
+live_host_leak_snapshot() {
+    local path
+    _LSS_LEAK_SNAPSHOT=""
+    while IFS= read -r path; do
+        [[ -n "$path" ]] || continue
+        _LSS_LEAK_SNAPSHOT="${_LSS_LEAK_SNAPSHOT}daemon-log:${path}"$'\t'"$(_lss_daemon_log_boots "$path")"$'\n'
+    done < <(_lss_enumerate_live_daemon_logs)
+    _LSS_LEAK_SNAPSHOT="${_LSS_LEAK_SNAPSHOT}systemd-unit:$LIVE_STATE_SANDBOX_PRODUCTION_SYSTEMD_UNIT"$'\t'"$(_lss_systemd_unit_identity)"$'\n'
+    _LSS_LEAK_SNAPSHOT="${_LSS_LEAK_SNAPSHOT}systemd-units-dir:${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"$'\t'"$(_lss_dir_name_set "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user")"$'\n'
+    _LSS_LEAK_SNAPSHOT="${_LSS_LEAK_SNAPSHOT}token-pool:$HOME/.loom/tokens"$'\t'"$(_lss_dir_name_set "$HOME/.loom/tokens" '*.token')"$'\n'
+    _LSS_LEAK_SNAPSHOT_TAKEN=1
+}
+
+# Print how many live-host surfaces the #8077 snapshot covers (0 before one).
+live_host_leak_snapshot_size() {
+    [[ -n "$_LSS_LEAK_SNAPSHOT" ]] || { echo 0; return 0; }
+    printf '%s' "$_LSS_LEAK_SNAPSHOT" | grep -c ''
+}
+
+# Re-fingerprint the #8077 surfaces. Returns 0 when nothing a test could have
+# done has changed, 1 when it has — naming each offender on stderr.
+#
+# The one non-obvious rule is the daemon.log boot count. A boot line appearing
+# while the supervised unit ALSO restarted is an auto_update roll, not a leak:
+# reported as ADVISORY on stderr, rc unaffected. A boot line appearing with the
+# unit's restart identity UNCHANGED is a daemon nothing supervised started —
+# the #8077 signature (17 boot blocks, zero unit restarts) — and fails. A log
+# that was ABSENT and now exists always fails: nothing legitimate creates the
+# operator's daemon log during a test run, and that is the only direction a CI
+# runner (no daemon, no user manager) can observe.
+live_host_leak_assert_unchanged() {
+    local line key before after dirty=0 unit_moved=0
+    if [[ "$_LSS_LEAK_SNAPSHOT_TAKEN" != "1" ]]; then
+        echo "live-state-sandbox: no #8077 leak snapshot taken — call live_host_leak_snapshot first" >&2
+        return 1
+    fi
+    # Resolve the supervised-restart verdict FIRST: it decides how a boot-count
+    # growth below is classified, so it cannot be discovered mid-loop.
+    while IFS= read -r line; do
+        [[ "$line" == systemd-unit:* ]] || continue
+        before="${line#*$'\t'}"
+        after="$(_lss_systemd_unit_identity)"
+        [[ "$before" != "$after" ]] && unit_moved=1
+    done <<< "$_LSS_LEAK_SNAPSHOT"
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        key="${line%%$'\t'*}"
+        before="${line#*$'\t'}"
+        case "$key" in
+            daemon-log:*)
+                after="$(_lss_daemon_log_boots "${key#daemon-log:}")"
+                [[ "$before" == "$after" ]] && continue
+                if [[ "$before" != "<absent>" && "$unit_moved" == "1" ]]; then
+                    printf 'live-state-sandbox: ADVISORY — %s gained boot block(s) (%s -> %s) while the supervised unit ALSO restarted; unattributable, not failing (#8077)\n' \
+                        "${key#daemon-log:}" "$before" "$after" >&2
+                    continue
+                fi
+                dirty=1
+                printf 'live-state-sandbox: a daemon that nothing supervised started wrote into the LIVE daemon log: %s\n' "${key#daemon-log:}" >&2
+                printf '    boot blocks before: %s   after: %s   (supervised unit restart: no)\n' "$before" "$after" >&2
+                printf '    A test spawned a real loom-daemon without pinning LOOM_DAEMON_LOG / LOOM_SOCKET_PATH.\n' >&2
+                printf '    Note the sweep environment INHERITS the production LOOM_SOCKET_PATH, so omitting an\n' >&2
+                printf '    override yields the LIVE path, not a neutral default (#8077).\n' >&2
+                ;;
+            systemd-units-dir:*)
+                after="$(_lss_dir_name_set "${key#systemd-units-dir:}")"
+                [[ "$before" == "$after" ]] && continue
+                dirty=1
+                printf 'live-state-sandbox: the LIVE systemd --user unit directory gained/lost unit files during this run: %s\n' "${key#systemd-units-dir:}" >&2
+                printf '    before: %s\n    after:  %s\n' "$before" "$after" >&2
+                printf '    A test wrote real unit files into the search path of the live manager; gate it behind\n' >&2
+                printf '    LOOM_TEST_ALLOW_SYSTEMD=1 instead (#8077).\n' >&2
+                ;;
+            token-pool:*)
+                after="$(_lss_dir_name_set "${key#token-pool:}" '*.token')"
+                [[ "$before" == "$after" ]] && continue
+                dirty=1
+                printf 'live-state-sandbox: the LIVE shared token pool gained/lost token files during this run: %s\n' "${key#token-pool:}" >&2
+                printf '    before: %s\n    after:  %s\n' "$before" "$after" >&2
+                printf '    Pin LOOM_SHARED_TOKENS_DIR at a scratch directory (#8077).\n' >&2
+                ;;
+        esac
+    done <<< "$_LSS_LEAK_SNAPSHOT"
+    return "$dirty"
 }
 
 # Redirect every live state path into <dir>. Exports are inherited by every
@@ -294,6 +540,32 @@ live_state_sandbox_init() {
     export LOOM_AUTONOMY_MARKER="$dir/autonomy-desired"
     export LOOM_SOCKET_PATH="$dir/loom-daemon.sock"
     export LOOM_DAEMON_BIN_DIR="$dir/machine-level-bin-sandbox"
+
+    # #8077. LOOM_SOCKET_PATH above already redirects the daemon's `loom_dir`,
+    # and with it the default log path — but only for a daemon that inherits
+    # THIS value. A case that pins its own per-invocation socket (many do) gets
+    # its own loom_dir back, and a case that pins neither inherits the
+    # production socket path from the sweep environment. LOOM_DAEMON_LOG is the
+    # daemon's HIGHEST-precedence log tier (`resolve_log_path`, ahead of the
+    # socket-derived default), so setting it here closes both holes at once.
+    # The remaining four are the machine-level files the Rust harness's
+    # `isolate_daemon_state()` already pins (#4556) and this one did not: the
+    # workspace registry (the real one lists the operator's repos, so an
+    # un-pinned test daemon reconciles and dispatches against them) and the
+    # MACHINE SWEEP JOURNAL (a test daemon that reads it ADOPTS the real host's
+    # in-flight sweep claims — observed in #8077's evidence).
+    export LOOM_DAEMON_LOG="$dir/daemon.log"
+    export LOOM_SHARED_TOKENS_DIR="$dir/tokens"
+    export LOOM_WORKSPACES_PATH="$dir/workspaces.json"
+    export LOOM_SWEEPS_JOURNAL_PATH="$dir/sweeps.json"
+    export LOOM_WATCHES_PATH="$dir/watches.json"
+    export LOOM_WATCH_RESULTS_LOG="$dir/watch-results.log"
+
+    # #8077 AC2: a sandboxed suite never gets to drive the LIVE `systemctl
+    # --user` manager implicitly. Blocks stay opt-in even here; an operator who
+    # really wants them exports the var themselves ahead of the sandbox, which
+    # this deliberately preserves rather than overwrites.
+    export LOOM_TEST_ALLOW_SYSTEMD="${LOOM_TEST_ALLOW_SYSTEMD:-0}"
 
     # Unset (not re-pointed): each sub-invocation must resolve these from its
     # OWN fixture. An ambient value here silently outranks the fixture — that
@@ -329,6 +601,13 @@ live_state_sandbox_describe() {
     printf 'LOOM_AUTONOMY_MARKER=%s\n' "${LOOM_AUTONOMY_MARKER:-}"
     printf 'LOOM_SOCKET_PATH=%s\n' "${LOOM_SOCKET_PATH:-}"
     printf 'LOOM_DAEMON_BIN_DIR=%s\n' "${LOOM_DAEMON_BIN_DIR:-}"
+    printf 'LOOM_DAEMON_LOG=%s\n' "${LOOM_DAEMON_LOG:-}"
+    printf 'LOOM_SHARED_TOKENS_DIR=%s\n' "${LOOM_SHARED_TOKENS_DIR:-}"
+    printf 'LOOM_WORKSPACES_PATH=%s\n' "${LOOM_WORKSPACES_PATH:-}"
+    printf 'LOOM_SWEEPS_JOURNAL_PATH=%s\n' "${LOOM_SWEEPS_JOURNAL_PATH:-}"
+    printf 'LOOM_WATCHES_PATH=%s\n' "${LOOM_WATCHES_PATH:-}"
+    printf 'LOOM_WATCH_RESULTS_LOG=%s\n' "${LOOM_WATCH_RESULTS_LOG:-}"
+    printf 'LOOM_TEST_ALLOW_SYSTEMD=%s\n' "${LOOM_TEST_ALLOW_SYSTEMD:-<unset>}"
     printf 'LOOM_WORKSPACE=%s\n' "${LOOM_WORKSPACE:-<unset>}"
     printf 'LOOM_MACHINE_CHECKOUT=%s\n' "${LOOM_MACHINE_CHECKOUT:-<unset>}"
     printf 'LOOM_DAEMON_BIN=%s\n' "${LOOM_DAEMON_BIN:-<unset>}"
@@ -366,6 +645,13 @@ live_state_sandbox_assert_untouched() {
     # says nothing about whether a label-scoped launchctl/systemctl call
     # reached the real job).
     if ! live_state_sandbox_assert_supervisor_scoped; then
+        dirty=1
+    fi
+    # #8077: the live-HOST surfaces (daemon-log boot counts, the systemd --user
+    # unit-file set, the shared token pool). Kept a separate pair because they
+    # are a different fingerprint granularity, but asserted here so every
+    # existing caller is covered without a second call site to forget.
+    if ! live_host_leak_assert_unchanged; then
         dirty=1
     fi
     return "$dirty"

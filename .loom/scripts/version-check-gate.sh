@@ -135,7 +135,7 @@ VERSION_CHECK_OUTPUT="$(bash "$VERSION_CHECK_SCRIPT" check 2>&1)" || VERSION_CHE
 if [[ "$VERSION_CHECK_STATUS" -ne 0 ]]; then
   echo "$VERSION_CHECK_OUTPUT" >&2
   echo "version-check-gate.sh: BLOCKER: 'scripts/version.sh check' found a version mismatch -- see MISMATCH line(s) above." >&2
-  echo "version-check-gate.sh: Fix: NEVER run './scripts/version.sh bump' here -- #7743 forbids a hand-bump on a PR branch and CI's defaults-version-bump-check will reject it. A clean rebase lands origin/main's own values, so a mismatch means this branch itself carries a version-bearing edit (often a pre-#7743 bump commit): revert the MISMATCH file(s) above to origin/main's values (git checkout origin/main -- <file(s)>, e.g. VERSION CLAUDE.md .loom/install-metadata.json) and commit that, $FIX_HINT" >&2
+  echo "version-check-gate.sh: Fix: NEVER run './scripts/version.sh bump' here -- #7743 forbids a hand-bump on a PR branch and CI's defaults-version-bump-check will reject it. A clean rebase lands origin/main's own values, so a mismatch means this branch itself carries a version-bearing edit (often a pre-#7743 bump commit): revert the MISMATCH file(s) above to origin/main's values (git checkout origin/main -- <file(s)>, e.g. VERSION package.json .loom/install-metadata.json) and commit that, $FIX_HINT" >&2
   exit 1
 fi
 

@@ -95,6 +95,8 @@ export LOOM_SYSTEMD_UNIT="loom-daemon-update-test-$$.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(cd "$SCRIPT_DIR/../cli" && pwd)"
 UPDATE_SCRIPT="$CLI_DIR/loom-daemon-update.sh"
+# Which binary implements the loom-daemon-start.sh stub (#8134/#8087) is pinned
+# by lib/daemon-update-fixtures.sh, sourced below — see its header.
 
 # Shared launchd sandbox (#4078). Belt-and-braces on top of LOOM_DAEMON_LAUNCHD=0:
 #   - a scratch LOOM_LAUNCHD_LABEL so any launchd lookup that DID fire could not

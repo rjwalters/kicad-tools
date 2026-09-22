@@ -347,12 +347,12 @@ _emit_evaluation() {
             --argjson standdown "${STANDDOWN_COUNT:-0}" \
             --argjson stale_minutes "$STALE_MINUTES" \
             --argjson max_streak "$MAX_STREAK" \
-            --arg label "$LABEL" \
+            --arg claim_label "$LABEL" \
             --arg extra_key "$extra_key" \
             --arg extra_val "$extra_val" \
             '{
                claim_state: $state,
-               label: $label,
+               label: $claim_label,
                claimed_at: $claimed_at,
                last_activity_at: $last_activity_at,
                claim_age_minutes: $claim_age,

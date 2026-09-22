@@ -820,8 +820,10 @@ what feeds the public fleet feed. Loom is the producer:
     > looking for missing rollup rows.
     >
     > **Amended by #8059**: `resource_usage` now has a dispatch-path writer —
-    > `loom-daemon ingest-transcripts`, plus an opt-in periodic daemon pass
-    > (`LOOM_TRANSCRIPT_INGEST=1`), which ingests these same transcripts (see
+    > `loom-daemon ingest-transcripts`, plus a periodic daemon pass — **on by
+    > default since #8477**; `LOOM_TRANSCRIPT_INGEST=0` /
+    > `autonomous.transcriptIngest.enabled: false` opts a host out — which
+    > ingests these same transcripts (see
     > [`transcript-token-ingest.md`](transcript-token-ingest.md)). Source 1 is
     > unaffected either way: it is `get_cost_by_issue`, whose join also needs
     > `prompt_github`, which ingestion deliberately does not write. Source 2
@@ -1200,6 +1202,60 @@ logged (once) and **dispatch proceeds normally**. The outbound advertisement is 
 bounded, non-blocking `try_send` off the dispatch path; a `Full`/`Closed` channel
 drops the ad. `safehouse.enabled` false/absent is a **byte-for-byte no-op**: no
 view, no channel, no coordination task, no socket.
+
+### Coordination-health tuning: the flapping-vs-false-positive investigation (#8276)
+
+`PeerClaimView::evaluate_coordination` (Issue #6157) flips `peer_coordination`
+DEGRADED once `LOOM_PEER_COORDINATION_DEGRADE_GRACE_SECS` elapses with no
+genuine inbound peer-claim receive, and clears it once
+`LOOM_PEER_COORDINATION_RECOVERY_THRESHOLD` consecutive receives land —
+see [`DEFAULT_COORDINATION_DEGRADE_GRACE`]/[`DEFAULT_COORDINATION_RECOVERY_THRESHOLD`]
+in `loom-daemon/src/peer_claims.rs` for the exact decision rule.
+
+Recurring flap escalations on this check (`#8276`/`#8303`, both auto-filed by
+the watchdog `#6222`, deduped by `#7664`) were investigated against two
+hypotheses:
+
+- **Hypothesis A** (from `anvil#1270`, a fleet-wide investigation of this
+  flapping class): a RAM/disk-throttled host's own `advertised` counter
+  stalling somehow prevents recovery. **Refuted** — code tracing shows
+  recovery gates solely on *received* peer ads (`observe_at`/
+  `evaluate_coordination`), never on `self.counters.advertised`, and the
+  three flap episodes on `#8276` each showed this host continuing to
+  advertise heavily (150+ dispatches per data point) throughout its own
+  "degraded" window — the opposite of a host too throttled to advertise.
+- **Hypothesis B** (partially confirmed): fleet-wide peer-claim-ad traffic
+  has natural quiet stretches that occasionally exceeded the grace window
+  even though nothing was broken. The crossing-to-recovery intervals
+  recovered from the three watchdog comments are 1089s, 3579s, and 8792s
+  (18m/60m/147m) — **not** the ~700-825s originally estimated here, which
+  conflated `degraded_for_secs` (the age of the DEGRADED state at the
+  moment the watchdog happened to poll) with the time from crossing grace
+  to recovery. These intervals are themselves only an *upper bound* on the
+  true genuine-receive quiet gap: `evaluate_coordination` doesn't re-check
+  the gap once already DEGRADED, it just accumulates a count of consecutive
+  receives, so the true gap could be anywhere from just over 600s up to
+  these values — not cleanly recoverable from the three terse watchdog
+  comments this investigation had to work from.
+
+**Fix**: `DEFAULT_COORDINATION_DEGRADE_GRACE` was raised from 600s (10m) to
+1200s (20m). Because the true quiet-gap range straddles 1200s, this is a
+pragmatic, evidence-informed compromise rather than a value derived from a
+clean measurement — it may not have prevented DEGRADED on all three
+observed episodes, only delayed it, but it does reduce the false-positive
+rate for shorter flaps while keeping a large (~60×) margin below the
+reference incident this check exists for (2026-08-13: `received=0` across
+2510 advertisements, sustained for ~21h at the 30s reaper cadence — still
+caught in 20 minutes). `DEFAULT_COORDINATION_RECOVERY_THRESHOLD` (3
+consecutive receives) was left unchanged — the observed false positives
+were about the check tripping too eagerly, not about recovery being too
+slow once tripped. A live-poll investigation during an active flap (the
+issue's original acceptance criteria) would be needed to measure the true
+gap and justify a more precise number. See #8276 for the full data points
+and reasoning, and `anvil#1270` (the fleet-wide investigation this closes the
+loop on) for background — closed 2026-09-16 as obsolete once the automated
+per-episode dedup (`#7664`/`#7680`) replaced the need for it as a manual
+duplicate-closing anchor.
 
 ### Fleet-wide completion dedup: reusing the peer-claim channel (#6352)
 
@@ -1639,7 +1695,7 @@ steering must land where the operator actually is.
   shares one enablement decision with the rest of the daemon's room presence.
 
 > A sibling module rather than a `safehouse::` submodule because `safehouse.rs`
-> is frozen by the file-size ratchet (`.loom/docs/file-size-policy.md`) — new
+> is frozen by the file-size ratchet ([file-size-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/file-size-policy.md)) — new
 > code lands in a new module, which is exactly what the ratchet is for.
 
 **Two structural properties a refactor must not quietly drop** (recorded because

@@ -21,6 +21,7 @@
 - [Per-workspace registry pool (`WorkspacePool`, #3928/#3929)](#per-workspace-registry-pool-workspacepool-39283929)
 - [Delegated daemon administration (`daemon.delegatedTo`, #5345)](#delegated-daemon-administration-daemondelegatedto-5345)
 - [Fleet — operator-triggered multi-host worker fanout (`fleet`, #4340)](#fleet--operator-triggered-multi-host-worker-fanout-fleet-4340)
+- [Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)](#fleet-model-ab--sweep-experiment-plan-8055-phase-1)
 - [Token pool provisioning for managed repos (#3938)](#token-pool-provisioning-for-managed-repos-3938)
 - [Per-repo status breakdown + per-repo main-health gate (#3930 — phase d)](#per-repo-status-breakdown--per-repo-main-health-gate-3930--phase-d)
 - [Gate verdicts: VERIFIED_RED vs UNEVALUATED (#3974)](#gate-verdicts-verified_red-vs-unevaluated-3974)
@@ -1331,6 +1332,85 @@ CURRENT`; non-zero if any host is `FAILED`/`UNREACHABLE`, or `--all` was given
 against an empty fleet registry (mirrors `fleet status`'s #5060 "empty roster
 never reads as healthy" policy).
 
+## Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)
+
+`loom-daemon sweep-experiment` already randomizes **per issue**, by parity
+(`assign-arm`), on the dispatch path of a single repo. Asking whether a model
+earns its per-token weight across a *managed fleet* needs the other unit of
+assignment: the **workspace**. `plan` is that surface — and it is deliberately
+the read-only half of the trio, so an operator can run it against a live fleet
+before deciding anything.
+
+```bash
+loom-daemon sweep-experiment plan \
+  --arms opus,sonnet --stratify merges14d,kind --seed 7 [--out plan.json] [--offline] [--json]
+```
+
+It reads the machine-level workspace registry (`~/.loom/workspaces.json`, or
+`LOOM_WORKSPACES_PATH`), measures each registered workspace, assigns every one
+of them an arm, and prints the table. These are **sub-actions on the existing
+`sweep-experiment` verb**, not a second top-level `experiment` verb: that verb
+already owns the arm vocabulary (`assign_arm` / `arm_model` /
+`resolved_arm_model`), and a parallel verb speaking the same vocabulary is how
+the two would drift on what "an arm" means.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--arms A,B` | `opus,sonnet` | Comma-separated arms, at least two. An arm's name **is** the model alias `start` would write into the overlay |
+| `--stratify DIMS` | `merges14d,kind` | Stratification dimensions; `none` disables stratification (one `all` stratum) |
+| `--seed N` | `0` | Assignment seed — the only thing that varies the assignment for a fixed fleet |
+| `--out PATH` | *(none)* | The **only** thing `plan` ever writes. `start --plan <file>` consumes it |
+| `--offline` | off | Skip the `gh` merge-count query entirely (`merges14d` degrades to its alphabetical fallback) |
+| `--json` | off | Print the plan document instead of the operator table |
+
+**Writes nothing.** Without `--out`, a `plan` run leaves the filesystem
+byte-for-byte as it found it — the workspace roots, the registry, and `~/.loom`
+included; in particular it never creates `~/.loom/experiments/` (only `start`
+may). That is a property of the *command*, not merely of the assignment
+function, so it is asserted at the process boundary over a whole temp fixture
+by `loom-daemon/tests/sweep_experiment_plan_writes_nothing.rs` (#8244), with the
+`--out` case as the control proving the harness can see a write.
+
+**Deterministic by construction.** `build_plan` is a pure function of
+`(seed, sorted workspace list, strata, arms, now)`: SHA-256 shuffle keys — not
+`DefaultHasher`, whose output is explicitly unstable across Rust releases, so a
+re-plan on an upgraded host would silently reassign arms — strata grouped in a
+`BTreeMap`, and no wall clock beyond the injected `now`. The same seed, fleet
+and strata therefore produce a byte-identical assignment on any host and any
+release; a different seed produces a different one.
+
+**Stratification** pairs comparable repos so an arm difference is not
+confounded by one arm drawing all the busy Rust repos:
+
+| Dimension | How it is measured |
+|---|---|
+| `merges14d` | Merged PRs in the last 14 days (`gh pr list --state merged --search merged:>=<cutoff>`), median split into `high`/`low`. **One** unmeasurable repo degrades the whole dimension to the documented alphabetical fallback (`alpha-a`/`alpha-b`) — degrading wholesale keeps stratum labels comparable instead of dropping every unreachable repo into one bucket |
+| `kind` | First-match-wins build-manifest heuristic at the repo root: `Cargo.toml`→`rust`, `package.json`→`node`, `pyproject.toml`/`setup.py`/`requirements.txt`→`python`, `go.mod`→`go`, a `scripts/` dir→`shell`, else `docs`. Filesystem-only, so it is identical on every host |
+
+**Balance.** Within each stratum members are ordered by shuffle key and dealt
+round-robin, and the deal counter **continues across strata** (visited in
+`BTreeMap` order) rather than restarting in each one. Restarting would balance
+each stratum while handing the leftover member of every odd-sized stratum to
+the same arm — exactly the failure mode of a fleet of mostly singleton strata.
+Continuing it bounds arm sizes to differ by at most one *both* within each
+stratum and fleet-wide.
+
+**Output.** `--json` (and `--out`) emit the plan document `start` consumes:
+
+| Field | Meaning |
+|---|---|
+| `experiment_id` | `exp-<YYYYMMDD>-<hash8>`; the hash covers the seed, arms, strata and the full assignment, so two different assignments can never share an id |
+| `created_at` | When the plan was built (`%Y-%m-%dT%H:%M:%SZ`) |
+| `seed`, `arms`, `stratify` | The inputs the assignment is reproducible from |
+| `workspaces[]` | `path` (the key), `repo` (`owner/name`, else the basename — reporting only), `arm`, `stratum`; ordered by `path` |
+
+`start --plan <file>` / `stop --id <id>` (#8055 phase 2) are the mutating half:
+`start` deep-merges the arm's model into each workspace's `.loom-local/local.json`
+overlay and records the experiment under `~/.loom/experiments/`
+(`LOOM_EXPERIMENTS_DIR`); `stop` reverses exactly the keys `start` wrote.
+`status` / drift reporting, `--scope dispatch|pipeline`, pool-preflight refusal
+and authoritative arm stamping in outcome records remain tracked on #8055.
+
 ## Token pool provisioning for managed repos (#3938)
 
 The multi-workspace work finder measures the token pool **once per tick from the
@@ -1923,9 +2003,11 @@ without parsing anything:
 
 Several sections, one line each (or the full structured payload with `--json`);
 the table below is not exhaustive — `peer_coordination` (#6157), `stale_sweeps`
-(#7529), `auto_update` (#7584), `worktree_reaper` (#7590), and `pool_hold`
-(#7708/#7990) also always render, each documented at its own point in this
-file:
+(#7529), `auto_update` (#7584), `worktree_reaper` (#7590), `pool_hold`
+(#7708/#7990), and `transcript_ingest` (#8477) also always render, each
+documented at its own point in this file. `tmpfs_visibility` (#8572, split
+from #8512) is **conditional** — see "tmpfs/`shared`-RAM + OOM-kill
+visibility" below:
 
 | section | what it reports | source |
 |---------|-----------------|--------|
@@ -2047,15 +2129,21 @@ success is **transient** (reported as a count only). Recording happens *before*
 the log-dedup decision, so #4349's DEBUG-downgraded repeat failures are still
 fully visible to a health check.
 
-A third, **disjoint** bucket exists: `pool_exhausted` (#7607). A tick whose
-latest record is a `RoleTickOutcome::PoolExhausted` skip — the token pool was
-present but had **zero spawnable accounts** — is neither persistent nor
-transient, and is never escalated. It renders as its own call-out, `pool
+A third, **disjoint** bucket exists: `pool_exhausted` (#7607), but since #8444
+it holds only the **self-healing** hold. A tick whose latest record is a
+`RoleTickOutcome::PoolExhausted` skip — the credential pool was present but had
+**zero spawnable accounts** (`PoolHold::SelfHealing`) — is neither persistent
+nor transient, and is never escalated. It renders as its own call-out, `pool
 exhausted (N role(s) held)`, so a fleet-wide dry pool stops reading as N broken
 roles (the incident behind #7607 saw 693 identical exit-78s masking every real
 role failure). The verdict is still `Degraded` — an exhausted pool is real,
 operator-actionable information — but the summary line never says "PERSISTENT
-failure(s)" for it.
+failure(s)" for it. The two *permanent* holds escalate instead:
+`PoolHold::Unprovisioned` (nothing provisioned for the role's admitted runtime)
+and `PoolHold::Unreadable(_)` (an unreadable `.loom/accounts.json` /
+`.loom/account-health.json`) are routed to `persistent` like `NoTokenPool`
+(#8444) — a pool that is dry because it was never provisioned or cannot be
+read is a configuration fault, not fleet dryness.
 
 ### Role liveness: "is it ticking at all" (#6201)
 
@@ -2605,8 +2693,17 @@ api` read):
 
 - **Safe** (child issue not `loom:building`): invokes
   `./.loom/scripts/reconcile-stack.sh <child-pr> feature/issue-<parent>`
-  (`git rebase --onto <default> <parent-branch> <child-branch>` +
-  `--force-with-lease` + `gh pr edit --base <default>`).
+  (`git rebase --onto <the FETCHED default-branch commit> <parent-ref>
+  <child-branch>` + `--force-with-lease` + `gh pr edit --base <default>`).
+  The destination is the commit that run fetched from the remote, never the
+  local branch of the same name: the local default branch is normally stale at
+  exactly this moment (the parent merged on the forge), and rebasing onto it
+  silently dropped the just-merged parent's implementation whenever the child's
+  files did not overlap the parent's (#8583). That resolution — fetch, pin,
+  route to the worktree holding the child branch, resolve the parent ref with
+  the #7982 pin fallback and its #8010 ancestry check, then rebase — is
+  `loom-daemon reconcile-stack`; a failed fetch or an unresolvable target
+  refuses (exit 1, nothing mutated) rather than degrading to the stale branch.
 - **Unsafe** (child issue still `loom:building`): a live Builder likely holds
   the child branch checked out, so the auto-rebase is **skipped** and a comment
   is posted on the child PR flagging deferred reconciliation. A later
@@ -3613,13 +3710,33 @@ so the same account on a cheaper model still works. That matters on the in-sessi
 picks a `model` at every dispatch — see `sweep.md` → "Credit-exhaustion fallback"
 for the one-rung-down recovery, backed by `resolve-model.sh --downgrade`
 (`fable → opus → sonnet → haiku`, exit 3 at the cheapest rung).
-For the daemon/wrapper path the new category is a pure **rename**:
+For the daemon/wrapper path the new category started as a pure **rename**:
 `is_account_exhaustion` accepts it alongside `TOKEN_EXHAUSTED` (rotate + mark
 bad), `classification_is_transient` keeps it retryable, and
-`tokens_pool::health` records the identical `PlanExhausted` reason and cooldown.
-The pool has no per-model account state, so it must stay that way — the distinct
-name exists for the orchestrator's remedy choice and for forensics, not for a
-different pool policy.
+`tokens_pool::health` recorded the identical `PlanExhausted` reason and cooldown.
+The justification was that the pool had no per-model account state to narrow
+into — the distinct name existed for the orchestrator's remedy choice and for
+forensics, not for a different pool policy.
+
+**That justification expired with #8058.** The pool now *does* carry per-model
+account state, so the distinct name buys a distinct policy wherever the mark
+names a class:
+
+- Phase 1 (#8090) gave `.bad_tokens` a `[model-class:<class>]` marker, and
+  `tokens select --model` skips only the named class — an Opus ceiling no
+  longer starves Sonnet on the same account.
+- Phase 2 (#8241) gave `tokens_pool::health` the same shape for every
+  non-Claude provider: a class-naming `MODEL_CREDITS_EXHAUSTED` records a hold
+  in `AccountHealth::class_cooldowns` instead of an account-wide
+  `PlanExhausted` cooldown.
+- Phase 3 (#8242) made it visible: `loom-daemon health`'s `tokens` section and
+  `loom-daemon status`'s `Token capacity:` block break the healthy count down
+  per class (`tokens.healthy_by_class` / `capacity.healthy_accounts_by_class`
+  on the `--json` surfaces).
+
+A **class-less** `MODEL_CREDITS_EXHAUSTED` — no model known at mark time — is
+still the account-wide over-approximation described above, unchanged. See
+[`token-pool.md`](token-pool.md) → "Per-class observability".
 
 **Monthly spend-limit kill (#5631/#6518).** "You've hit your monthly spend
 limit" was already widened into the `TOKEN_EXHAUSTED` regex by #5631 — on the
@@ -3922,6 +4039,11 @@ concurrency ceiling 5" and share it with the team:
       "intervalSecs": 30,
       "reviewStall": true,
       "reviewStallTimeoutSecs": 2700
+    },
+    "transcriptIngest": {
+      "enabled": true,
+      "intervalSecs": 900,
+      "windowHours": 24
     }
   }
 }
@@ -4023,7 +4145,7 @@ knobs not yet audited here.
 | `autonomous.collisionDetection.enabled` | `LOOM_DETECT_COLLISIONS` | `false` | Cross-host dispatch-collision detection and enforcement (#4085, upgraded from detection-only by #5789). Off by default — adds one extra `gh issue view --json labels` round-trip per dispatch. When enabled, a confirmed pre-flip collision backs off the dispatch instead of only logging/counting it |
 | `safehouse.enabled` | `LOOM_SAFEHOUSE_ENABLED` | `false` | Enables safehouse fleet-comms (#3997) **and** cross-host soft-claim coordination (#4028). Off by default — a byte-for-byte no-op (no socket, no coordination task) when unset |
 | `safehouse.peerClaimTtlSecs` | `LOOM_PEER_CLAIM_TTL_SECS` | `120` | Peer-claim TTL, in seconds (#4028) — how long a peer's soft claim suppresses local dispatch (measured against local receipt, not the advertiser's clock). Default = 2× the 60s work-finder tick. Since #4431 live claims are re-advertised every reaper tick, so the TTL only bounds how long a **crashed** host's claim lingers |
-| *(env-only)* | `LOOM_PEER_COORDINATION_DEGRADE_GRACE_SECS` | `600` (10m) | How long this host may advertise peer claims with **no** receive before peer coordination is judged DEGRADED (#6157), in whole seconds. 20× the 30s reaper re-advertisement cadence, so a handful of missed room round-trips never trips it while a genuinely one-way transport is caught in single-digit minutes. Zero/unparseable → default. A DEGRADED verdict surfaces as `loom-daemon health`'s `peer_coordination` section — diagnostic only since Epic #6165 Phase 4 (#6317): it no longer freezes stale-claim reclamation, which now gates solely on the lease record (#6286) |
+| *(env-only)* | `LOOM_PEER_COORDINATION_DEGRADE_GRACE_SECS` | `1200` (20m, raised from 10m by #8276) | How long this host may advertise peer claims with **no** receive before peer coordination is judged DEGRADED (#6157), in whole seconds. Raised from the original 10-minute default (Issue #8276, 2026-09-19): three independent flap episodes each crossed the (then-)600s grace and later recovered, within 1089s/3579s/8792s of crossing — an upper bound on, not a clean measurement of, the true genuine-peer-traffic quiet gap (see `DEFAULT_COORDINATION_DEGRADE_GRACE`'s doc comment in `peer_claims.rs` for the full derivation). 1200s is a pragmatic compromise — it may not have prevented DEGRADED on all three episodes, only delayed it — that reduces the false-positive rate for shorter flaps while staying a ~60× margin below the reference incident (2026-08-13, ~21h). Zero/unparseable → default. A DEGRADED verdict surfaces as `loom-daemon health`'s `peer_coordination` section — diagnostic only since Epic #6165 Phase 4 (#6317): it no longer freezes stale-claim reclamation, which now gates solely on the lease record (#6286) |
 | *(env-only)* | `LOOM_PEER_COORDINATION_RECOVERY_THRESHOLD` | `3` | How many **consecutive** genuine peer receives must land while coordination is DEGRADED before it is judged recovered (#6157). Self-advertisements never count, so a single stray ad cannot clear a verdict whose whole point was sustained receive absence. Zero/unparseable → default |
 | `safehouse.rooms.signal` | `LOOM_SAFEHOUSE_ROOM_SIGNAL` | *(falls back to `safehouse.room`)* | Attention-class routing (#4225): the **signal** room id (`loom-fleet`) — operator conversation, every `handoff`, terminal `ack`/`completion`. Absent **and** no `byRepo` ⇒ single-room mode, byte-identical to pre-#4225 |
 | `safehouse.rooms.byRepo` | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` (`repo=room,…`) | `{}` | Attention-class routing (#4225): per-repo **firehose** room ids keyed by workspace-root basename — `task`/`chat` narration. A repo absent from the map is created lazily as `fleet-<repo>`; a refused creation degrades that repo to the signal room with one `warn!`. The env form replaces the whole map |
@@ -4032,7 +4154,10 @@ knobs not yet audited here.
 | `autonomous.autoUpdate.enabled` | `LOOM_AUTO_UPDATE` | `false` | Autonomous self-update loop on/off (#4055). **Opt-in** (it rebuilds + restarts the daemon process). Exactly one loop per daemon, not a per-workspace fan-out. See [Autonomous self-update loop](#autonomous-self-update-loop-4055) below |
 | `autonomous.autoUpdate.intervalSecs` | `LOOM_AUTO_UPDATE_INTERVAL_SECS` | `900` | Cadence between staleness checks. Zero/invalid → default |
 | `autonomous.autoUpdate.settleSecs` | `LOOM_AUTO_UPDATE_SETTLE_SECS` | `600` | Settle window: wait this long after first observing a stale commit — resetting on every further commit — before rolling, so a burst of merges collapses into one roll. Zero/invalid → default |
-| `autonomous.autoUpdate.deferDeadlineSecs` | `LOOM_AUTO_UPDATE_DEFER_DEADLINE_SECS` | `21600` (6h) | Bound on the build-stampede gate (#4929): after this much **continuous** deferral for in-flight sweeps, the rebuild runs anyway at reduced CPU priority (`nice 19`) instead of deferring forever. Any check that sees zero in-flight sweeps — or a new source commit, or a completed rebuild — re-arms the clock, so short busy bursts never reach it. Zero/invalid → default; there is deliberately no "defer forever" value (set a very large one instead) |
+| `autonomous.transcriptIngest.enabled` | `LOOM_TRANSCRIPT_INGEST` | **`true`** | Periodic transcript token/cost ingestion into `~/.loom/activity.db` (#8059, flipped default-on by #8477). **The one `autonomous.*` knob that defaults ON against the FLAGS-OFF convention**, deliberately: it generates no work (a passive, ledgered, idempotent telemetry writer), while default-*off* silently destroyed data — Claude Code deletes transcripts after `cleanupPeriodDays` (default 30), so every host that never hand-set the env var lost its cost history permanently. Env `0`/`false`/`no`/`off` opts out; an unrecognized value falls through to config/default rather than silently disabling. **Restart required** — resolved once before the thread is spawned. See [`transcript-token-ingest.md`](transcript-token-ingest.md) |
+| `autonomous.transcriptIngest.intervalSecs` | `LOOM_TRANSCRIPT_INGEST_INTERVAL` | `900` | Seconds between ingestion passes. Zero/invalid → default. **Restart required** |
+| `autonomous.transcriptIngest.windowHours` | `LOOM_TRANSCRIPT_INGEST_WINDOW_HOURS` | `24` | How far back each pass looks; `0` = full history (the unchanged-file ledger keeps that cheap after the first pass). **Restart required** |
+| `autonomous.autoUpdate.deferDeadlineSecs` | `LOOM_AUTO_UPDATE_DEFER_DEADLINE_SECS` | `21600` (6h) | Bound on the build-stampede gate (#4929): after this much **continuous** deferral for in-flight sweeps, the rebuild runs anyway at reduced CPU priority (`nice 19`) instead of deferring forever. Any check that sees zero in-flight sweeps — or a new source commit, or a completed rebuild — re-arms the clock, so short busy bursts never reach it. **Bounds the rebuild/source path only (#8252)** — a resolved release artifact is fetched immediately regardless of in-flight sweeps (niced, not deferred), so this deadline never delays an artifact roll. Zero/invalid → default; there is deliberately no "defer forever" value (set a very large one instead) |
 
 ### Idle exit for remote hosts (#4467)
 
@@ -5712,7 +5837,8 @@ digest — into one unit) and:
 1. Removes every **dangling** image (no tag points at it) outright — always
    safe, since nothing can be "using" an unreferenced image by name.
 2. For each **tracked** repository (default: `loom-worker`,
-   `loom-worker-session`, and their `ghcr.io/rjwalters/...` aliases), keeps
+   `loom-worker-session`, `loom-worker-native`, and their
+   `ghcr.io/rjwalters/...` aliases), keeps
    only the `keepLastN` (default 2) most-recently-built tagged images and
    removes the rest **by image ID**, so every alias tag riding on that ID goes
    with it in one `docker rmi` call.
@@ -5763,7 +5889,7 @@ flows outside GitHub-hosted CI (see `docker/worker/README.md` and
 | `LOOM_DOCKER_IMAGE_RETENTION` | `autonomous.dockerImageRetention.enabled` | env > config > default | `true` (on) |
 | `LOOM_DOCKER_IMAGE_RETENTION_KEEP_N` | `autonomous.dockerImageRetention.keepLastN` | env > config > default | `2` |
 | `LOOM_DOCKER_IMAGE_RETENTION_MIN_INTERVAL_SECS` | `autonomous.dockerImageRetention.minIntervalSecs` | env > config > default | `1800` (30 min) |
-| — | `autonomous.dockerImageRetention.trackedRepos` | config > default | `loom-worker`, `loom-worker-session`, and their `ghcr.io/rjwalters/...` aliases |
+| — | `autonomous.dockerImageRetention.trackedRepos` | config > default | `loom-worker`, `loom-worker-session`, `loom-worker-native`, and their `ghcr.io/rjwalters/...` aliases |
 | — | `autonomous.dockerImageRetention.allowlist` | config > default | `[]` (empty — a shared long-lived image must be opted in explicitly) |
 
 **Expected steady-state footprint.** On a container-enabled host running these
@@ -5787,6 +5913,136 @@ headless run with no human to answer the prompt. Either leave the superseded
 image for this reaper to reclaim on its next tick, or run `docker image prune
 -f` for immediate reclaim — it only removes dangling (untagged) images and is
 not gated by the guard.
+
+#### tmpfs scratch reclaim (#8512)
+
+**The leak this doesn't share with either pass above.** Both reclaim passes so
+far free **disk**. A build or agent that redirects its scratch onto a
+RAM-backed mount — `CARGO_TARGET_DIR=/dev/shm/cargo-target-<issue>`,
+`TMPDIR=/dev/shm/tmp-issue<N>` — is instead consuming **memory**, and nothing
+in-tree had ever looked at `/dev/shm` or any other `tmpfs`/`ramfs` mount. A
+fleet worker measured **6.2 GB pinned in RAM for 2.5 days** after the owning
+worktree was removed (2026-09-19 → 21): `free` reported `shared 6487 MB` on a
+15.7 GiB host with no swap, and the kernel OOM-killed unrelated `rustc`/
+`pytest` processes on a loop — every one of them a sweep that failed for a
+reason unrelated to its own issue. `df`/`du` over the repo tree showed nothing
+wrong, because the bytes never touched disk.
+
+**Why nothing existing could reclaim it.** The per-worktree cargo-target
+reclaim (#7239, see `troubleshooting.md` → "Redirected cargo target dirs are
+reclaimed with their worktree") deliberately **never** deletes on a
+name/pattern match: a `CARGO_TARGET_DIR` exported only inside a build
+environment cannot be proven to belong to the worktree being removed. That
+invariant is load-bearing and stays — but it is exactly why an orphan whose
+worktree is already gone has nothing left to attribute it to.
+
+**What it does.** As a third sibling pass from the same reaper tick, the daemon
+enumerates every `tmpfs`/`ramfs` mount from `/proc/mounts` (never a hardcoded
+`/dev/shm` prefix), lists the **direct children** of each one whose name
+matches a recognized Loom scratch pattern (`cargo-target-*`, `tmp-issue*`), and
+removes those that satisfy **all four** signals:
+
+1. a recognized Loom scratch-name pattern (a symlink never qualifies — only a
+   real directory),
+2. a mount this pass already classified `tmpfs`/`ramfs`,
+3. no live process holding a file open underneath it (the same
+   `find_processes_using_directory` evidence check the worktree reaper uses),
+   and
+4. a newest recursive mtime at least `stalenessSecs` (default 6h) old.
+
+Failing to establish any one of them keeps the directory. An unreadable
+`/proc/mounts` (non-Linux host, unusual sandbox) yields an empty mount list —
+a clean no-op, never an error. Like the Docker pass, the `minIntervalSecs`
+cooldown is **host-wide**, since a tmpfs mount is not scoped to any one
+registered repo.
+
+**Manual/cron front-end** — `loom-daemon tmpfs-scratch-gc`, which resolves the
+same config the reaper does (so a manual run can never act on a broader
+pattern set than the configured automatic one):
+
+```bash
+loom-daemon tmpfs-scratch-gc --dry-run          # report candidates + sizes, delete nothing
+loom-daemon tmpfs-scratch-gc --dry-run --json   # same, machine-readable
+loom-daemon tmpfs-scratch-gc                    # the real run
+```
+
+```json
+{
+  "autonomous": {
+    "tmpfsScratchGc": {
+      "enabled": true,
+      "stalenessSecs": 21600,
+      "minIntervalSecs": 1800,
+      "namePatterns": ["cargo-target-*", "tmp-issue*"]
+    }
+  }
+}
+```
+
+| Env var | Config key | Precedence | Default |
+|---------|-----------|------------|---------|
+| `LOOM_TMPFS_SCRATCH_GC` | `autonomous.tmpfsScratchGc.enabled` | env > config > default | `true` (on) |
+| `LOOM_TMPFS_SCRATCH_GC_STALENESS_SECS` | `autonomous.tmpfsScratchGc.stalenessSecs` | env > config > default | `21600` (6h) |
+| `LOOM_TMPFS_SCRATCH_GC_MIN_INTERVAL_SECS` | `autonomous.tmpfsScratchGc.minIntervalSecs` | env > config > default | `1800` (30 min) |
+| — | `autonomous.tmpfsScratchGc.namePatterns` | config > default | `cargo-target-*`, `tmp-issue*` |
+
+**This is a backstop, not a licence.** The fix for the underlying behaviour is
+to not park build scratch in RAM at all — see `troubleshooting.md` →
+"tmpfs/ramfs scratch reclaim" for the sanctioned on-disk location. See
+`loom-daemon/src/tmpfs_reclaim.rs`.
+
+#### tmpfs/`shared`-RAM + OOM-kill visibility (#8572, split from #8512)
+
+**The gap this closes.** The #8512 incident above was invisible for 2.5 days
+to every signal the fleet already had: `health` reported a low RAM-headroom
+number with no attribution, the work finder's `ram=` budget looked exactly
+like a smaller host, and nothing counted `Out of memory: Killed process …`.
+[`loom_daemon::tmpfs_visibility`] is the read-only counterpart to the reclaim
+pass above — it never deletes anything, it only surfaces the two numbers that
+would have named the problem immediately: `Shmem` from `/proc/meminfo` (the
+same figure `free -h`'s `shared` column reports) and the cumulative kernel
+OOM-kill count from `/proc/vmstat`'s `oom_kill` line.
+
+**`loom-daemon health` gains a conditional `tmpfs_visibility` section** — a
+memory-detail line with total/available/`shared` bytes, the per-mount tmpfs
+breakdown (reusing [`crate::tmpfs_reclaim::ram_backed_mount_points`] rather
+than re-parsing `/proc/mounts`, filtered to mounts holding at least 64 MiB),
+and the OOM-kill count. Degrades **silently** — no section at all, never a
+fabricated `0` — on a host with nothing measurable (macOS, which has no
+`/proc` at all); a `Degraded` verdict fires only on a non-zero cumulative
+OOM-kill count, the single most diagnostic number in the #8512 incident.
+
+**The work finder emits a bounded, non-spammy `WARN`** when `shmem / total`
+crosses a configured fraction (default 15%), naming the largest offending
+mount and the `tmpfs-scratch-gc --dry-run` recipe. **Warning only — it never
+gates dispatch**, unlike the disk/RAM headroom axes above: a host with a
+legitimately large tmpfs (a shared-memory-heavy workload) must not be starved
+of work, and the reclaim pass already removes the Loom-caused case on its own.
+A process-global cooldown (`LOOM_TMPFS_VISIBILITY_WARN_INTERVAL_SECS`, default
+1800s, host-wide like the reclaim pass's own cooldown) bounds the repeat rate
+independent of the 60s work-finder tick interval.
+
+```json
+{
+  "autonomous": {
+    "tmpfsVisibility": {
+      "warnEnabled": true,
+      "warnFractionPercent": 15
+    }
+  }
+}
+```
+
+| Env var | Config key | Precedence | Default |
+|---------|-----------|------------|---------|
+| `LOOM_TMPFS_VISIBILITY_WARN` | `autonomous.tmpfsVisibility.warnEnabled` | env > config > default | `true` (on) — gates the work-finder warning only; `health`'s memory-detail line is unconditional |
+| `LOOM_TMPFS_VISIBILITY_WARN_FRACTION_PERCENT` | `autonomous.tmpfsVisibility.warnFractionPercent` | env > config > default | `15` (percent) |
+| `LOOM_TMPFS_VISIBILITY_WARN_INTERVAL_SECS` | — | env > default | `1800` (30 min) — repeat-rate cooldown, not exposed as a config knob (there is no legitimate reason to want a *noisier* warning) |
+| `LOOM_TMPFS_VISIBILITY_MEMINFO_FILE` / `LOOM_TMPFS_VISIBILITY_VMSTAT_FILE` | — | env only | `/proc/meminfo` / `/proc/vmstat` — test-fixture overrides, mirrors `tmpfs_reclaim`'s own `LOOM_TMPFS_RECLAIM_MOUNTS_FILE` |
+
+See `loom-daemon/src/tmpfs_visibility.rs`,
+`loom-daemon/src/health/tmpfs_visibility_section.rs`, and
+`loom-daemon/src/work_finder/tmpfs_warning.rs`.
 
 #### Eager (out-of-cycle) reclaim from the dispatch loop (#7512)
 
@@ -8613,7 +8869,7 @@ seams):
 | Variable | Purpose |
 |----------|---------|
 | `LOOM_DAEMON_UPDATE_FETCH` | `1`/`true`/`yes` ⇒ force (`--fetch`); `0`/`false`/`no` ⇒ off (`--no-fetch`); unset ⇒ auto |
-| `LOOM_DAEMON_UPDATE_GH_REPO` | Override the `owner/repo` slug used for release resolution (default: parsed from the `origin` remote) |
+| `LOOM_DAEMON_UPDATE_GH_REPO` | Override the `owner/repo` slug used for release resolution. Highest priority in the daemon's resolution order (see [Which repo's releases are queried](#artifact-first-auto-update-ticks-7609)); this script itself otherwise parses its own `origin` remote |
 | `LOOM_DAEMON_UPDATE_TARGET` | Override the detected release target triple |
 | `LOOM_DAEMON_UPDATE_COSIGN_PUBKEY` | Path to the cosign public key used to verify a **key-signed** Linux `.sig` (one published without a `.pem`) |
 | `LOOM_DAEMON_UPDATE_COSIGN_IDENTITY` | Pin one exact expected keyless signer identity instead of the derived regexp |
@@ -8855,8 +9111,40 @@ consulted on this path at all**:
 | artifact version **>** installed version | fetch the artifact (never `cargo build`) | `artifact 0.19.24 > installed 0.19.21 → fetching` |
 | artifact version **==** installed, published sha256 **≠** installed binary's | fetch the artifact (converge onto the released bytes) | `artifact 0.19.24 == installed 0.19.24 but sha differs (published … vs installed …) → fetching` |
 | artifact version **==** installed, sha matches | nothing to do | `artifact 0.19.24: artifact == installed, sha matches → up to date` |
-| latest release is **older** than installed | nothing to do | `artifact 0.19.20: latest release … is OLDER than the installed … → up to date` |
+| latest release is **older** than installed | nothing to fetch, but **WARN** — a probable wrong-repo resolution (#8513) | `resolved release 0.1.0 from <owner/repo> is OLDER than the installed 0.19.24 — probable wrong-repo resolution (queried <owner/repo>); nothing to fetch` |
 | **no** artifact resolves at all | fall through to the source path below, unchanged | `no artifact (<reason>) → source path: <source reason>` |
+
+**Which repo's releases are queried (#8513).** The daemon binary is released
+from exactly one project, so the *workspace's* `origin` remote — whatever repo
+this daemon happens to be managing — is the **last** resort, not the default:
+
+1. `LOOM_DAEMON_UPDATE_GH_REPO`
+2. the `origin` of `LOOM_MACHINE_CHECKOUT`, when set
+3. the repo **compiled into the binary** at build time (Cargo's `repository`
+   field — the checkout the release was actually built from)
+4. the workspace's own `origin`
+
+The incident behind the order: a host deliberately running with its workspace
+pointed at a *consumer* repo asked **that** project for `loom-daemon-<target>`
+assets, found none (its own latest release was `v0.11.0`), and logged the soft
+"no artifact for this platform" every tick for hours — one release short of a
+feature it needed, with nothing escalating. Two consequences fall out of it:
+
+- Every "no artifact" reason **names the repo it queried**
+  (`release v0.11.0 of owner/repo has no artifact for target …`), so a wrong
+  repository can no longer read like an unbuilt platform.
+- A release **older** than the installed version is logged at **WARN**, not
+  folded into the soft "up to date" line, and after
+  3 consecutive such ticks `loom-daemon health` reports the
+  `auto_update` section `degraded` with
+  `auto_update has made no progress for N ticks — the release resolved from
+  <owner/repo> is OLDER than the installed version`. The streak and the repo
+  are also in `loom-daemon status --json` /
+  `health --json` as `auto_update_stale_repo_ticks` /
+  `auto_update_stale_repo`.
+- The roll itself is pinned to the same answer: the artifact fetch exports the
+  resolved repo to `loom-daemon-update.sh` as `LOOM_DAEMON_UPDATE_GH_REPO`, so
+  the download can never target a different project than the resolution did.
 
 Why: on a four-host fleet on 2026-09-13 the source gate was shut on *every*
 host — two for "no source checkout / staleness undecidable" (a
@@ -8884,13 +9172,25 @@ anything about whether a newer signed binary exists.
   still-differing local sha afterwards is reported and left alone. If **either**
   checksum is unknown, the tick treats the artifact as converged rather than
   guessing — a wrong "differs" is far more costly than a missed convergence.
-- **Every gate below applies to an artifact roll exactly as to a rebuild** —
-  settle window (including the #6261 ceiling), the in-flight-sweep stampede
-  gate and its defer deadline, exponential backoff, and terminal state. The
-  settle window tracks an `artifact:<version>:<sha>` identity on this path in
-  place of the source commit, so a host that switches paths mid-streak (a
-  release appears) restarts its settle window exactly as it would for a new
-  commit.
+- **Every gate below applies to an artifact roll exactly as to a rebuild,
+  except the in-flight-sweep stampede gate (#8252)** — the settle window
+  (including the #6261 ceiling), exponential backoff, and terminal state all
+  apply unchanged. The settle window tracks an `artifact:<version>:<sha>`
+  identity on this path in place of the source commit, so a host that switches
+  paths mid-streak (a release appears) restarts its settle window exactly as it
+  would for a new commit.
+- **An artifact fetch is never deferred for in-flight sweeps (#8252).** The
+  stampede gate and its `deferDeadlineSecs` bound exist to keep an unattended
+  `cargo build --release` off a saturated host; downloading a signed asset,
+  verifying its checksum, and relaunching under the supervisor is not a build.
+  Coupling them cost real availability: on 2026-09-18 a host sat on a resolved
+  `0.19.168` artifact for ~1.5h (with up to ~4.5h of deferral still to run)
+  while every `merge-pr.sh` invocation on it failed closed against a subcommand
+  the stale binary lacked, and the operator rolled by hand in ~40s. A busy host
+  now fetches on the tick the decision is made, merely niced (`nice 19`) so it
+  yields CPU to the in-flight sweeps. Only the source/rebuild path still defers,
+  and `loom-daemon status` says which: `deferring the source rebuild …` versus
+  `fetched release artifact …`.
 - **Reported, not just logged.** `loom-daemon status` (human and `--json`) and
   `loom-daemon health` report `artifact_available` (`version`, `published_at`;
   `null` when none resolved) next to the installed version, so fleet-wide
@@ -9159,12 +9459,14 @@ loom-daemon serve --peers http://host2:7420,http://host3:7420   # multihost flee
 | `GET /api/events` | `text/event-stream` (SSE) tail of the daemon's event bus |
 | `GET /api/pipeline` | Forge-side queue counts per managed repo (same source `status --pipeline` uses, including the #8091 operator-attention bucket — `operator_held`/`operator_held_conflicting`/`operator_held_oldest_days`/`operator_only_issues`), fronted by a 20s in-process cache |
 | `GET /api/tokens` | Per-account rows (name / status / 5h utilization) read from the resolved token pool's `.ranking` file |
+| `GET /api/api-keys` | Per-account rows for the provider-neutral **API-key** pool (#8447): provider namespace, account **name**, eligibility state (`selectable`/`disabled`/`exhausted`/`unusable`/`withheld`/`unreadable`) and the pool directory it resolved from. Built from the same secret-free `api_keys_pool::health` call `api-keys health --json` renders, so it can never carry key material; a provider directory that exists but cannot be read renders as `unreadable`, never as an empty pool |
 | `GET /api/peers` | The configured `--peers` list, verbatim — this daemon never fetches a peer itself; the browser fetches each peer's own `/api/status`/`/api/events` directly |
 
 The dashboard page renders: the in-flight sweep registry, the dynamic
-concurrency cap/capacity breakdown, per-token usage bars, the per-repo
-main-health gate state, per-repo pipeline queue counts, configured fleet
-peers, and a live event tail — each panel backed by one of the routes above.
+concurrency cap/capacity breakdown, per-token usage bars, the API-key pool's
+per-provider account rows, the per-repo main-health gate state, per-repo
+pipeline queue counts, configured fleet peers, and a live event tail — each
+panel backed by one of the routes above.
 
 ### Event tail topics
 
@@ -9289,9 +9591,16 @@ what Phase 3 deletes vs preserves".
   precedence, and how it composes with `env > config > default`:
   [`docs/design/config-resolution-tiers.md`](https://github.com/rjwalters/loom/blob/main/docs/design/config-resolution-tiers.md)
   (upstream Loom repo — not shipped to consumer installs).
+- **`loom-daemon inflight` (#8268)**: a separate, no-daemon-required CLI
+  surface — a machine-wide registry that lets a coordinator and any
+  subagent/worktree it spawns see "is a long-running verification command
+  already running against this tree/branch" before launching a duplicate.
+  Not part of the IPC/MCP surface documented above (it needs no running
+  daemon process). Full reference: [`verification-ownership.md`](verification-ownership.md).
 - **Source** (upstream Loom repo — not shipped to consumer installs):
   - [`loom-daemon/src/types.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/types.rs) — IPC types.
   - [`loom-daemon/src/sweep_registry.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/sweep_registry.rs) — registry + reaper.
   - [`loom-daemon/src/event_bus.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/event_bus.rs) — pub/sub bus.
   - [`loom-daemon/src/ipc.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/ipc.rs) — request dispatcher.
   - [`mcp-loom/src/tools/sweeps.ts`](https://github.com/rjwalters/loom/blob/main/mcp-loom/src/tools/sweeps.ts) — MCP tool definitions.
+  - [`loom-daemon/src/inflight.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/inflight.rs) — the in-flight registry.

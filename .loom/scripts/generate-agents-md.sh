@@ -104,9 +104,10 @@ if [[ -z "${extracted//[[:space:]]/}" ]]; then
 fi
 
 # Assemble the file: static framing header, the extracted body, static footer.
-# The heredocs are single-quoted so `{{LOOM_VERSION}}` / `{{INSTALL_DATE}}`
-# placeholders and backticks survive verbatim (substituted at install time by
-# loom-daemon's scaffolding, exactly like the CLAUDE.md template).
+# The heredocs are single-quoted so the `{{INSTALL_DATE}}` placeholder and the
+# backticks survive verbatim (substituted at install time by loom-daemon's
+# scaffolding, exactly like the CLAUDE.md template). `{{LOOM_VERSION}}` is
+# deliberately NOT emitted here any more (#8147) — see the header text below.
 emit() {
   cat <<'HEADER'
 <!-- GENERATED FILE — DO NOT EDIT DIRECTLY.
@@ -121,7 +122,6 @@ emit() {
 
 This repository uses **Loom** for AI-powered development orchestration.
 
-**Loom Version**: {{LOOM_VERSION}}
 **Installation Date**: {{INSTALL_DATE}}
 
 > **Dual-runtime status**: this file is the runtime-neutral instruction anchor

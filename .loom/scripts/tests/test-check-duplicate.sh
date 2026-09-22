@@ -30,7 +30,15 @@
 # exact and checkable by hand (see comments at each candidate).
 #
 # Usage:
+#   cargo build --package loom-daemon
 #   ./.loom/scripts/tests/test-check-duplicate.sh
+#
+# Needs a BUILT loom-daemon: since #8360 the similarity scan under test is
+# `loom-daemon duplicate-scan`, reached through check-duplicate.sh — so this
+# suite is wired in the "Native Port Suites" CI job (#7952 family), not
+# shell-suite-tests, which builds no binary. The exact-percentage assertions
+# below (33%, 25%, 26%…) are the equivalence evidence that the Rust port
+# reproduces the shell scorer's arithmetic to the digit.
 
 set -uo pipefail
 
@@ -100,11 +108,22 @@ fi
 STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
-# --- Stub loom-daemon: present on PATH but deliberately non-functional, so
-# check-duplicate.sh's `loom-daemon --version` probe fails and it falls back
-# to the `gh` stub below (byte-for-byte the documented fallback path,
-# defaults/scripts/check-duplicate.sh). Keeps this test independent of
-# whether a real loom-daemon happens to be installed on the host.
+# --- The scan under test is `loom-daemon duplicate-scan` (#8360), so this
+# suite needs a BUILT daemon -- pinned through the standard harness seam so
+# every invocation of check-duplicate.sh execs the binary built from this
+# tree, never whatever loom-daemon the host happens to have installed
+# (#8176). Fails (never skips) when no binary resolves: the assertions below
+# are the equivalence evidence for the port.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "duplicate-scan"
+
+# --- Stub loom-daemon on PATH: deliberately non-functional, so
+# check-duplicate.sh's `loom-daemon --version` FORGE probe fails and the
+# fetch falls back to the `gh` stub below (byte-for-byte the documented
+# fallback path, defaults/scripts/check-duplicate.sh). The SCORER is
+# unaffected: it resolves through $LOOM_DAEMON_SELF_BIN (set by the harness
+# above), which script-helper.sh checks before any PATH lookup.
 #
 # NOT renamed per #5548's "test fixtures should not be named `loom-daemon`"
 # fix, unlike the fixtures in test-loom-status.sh / test-gh-cached.sh /
@@ -568,6 +587,132 @@ assert_contains "$OUT" "#3550" "(o) Real historical duplicate pair (#3550/#3551)
 assert_contains "$OUT" "(similarity: 26%)" "(o) Real historical duplicate pair scores the expected 26% true-Jaccard"
 
 echo ""
+echo "Testing check-duplicate.sh near-match band via --warn-threshold (issue #8289, #8360)..."
+
+# Below --threshold the scorer used to say NOTHING AT ALL, which made
+# create-issue.sh's backstop a cliff: a hard refusal at threshold, total
+# silence one point below it. --warn-threshold reports the [warn, threshold)
+# band as CONTEXT -- never as a verdict. Fixtures reuse the NATO-word scheme
+# so every percentage is checkable by hand. Query {alpha,bravo,charlie,delta}
+# (4 keywords), --threshold 30 --warn-threshold 20:
+#   #701 {alpha,bravo,echo,foxtrot}                 -> 2/(4+4-2)  = 33% BLOCK
+#   #702 {alpha,bravo,echo,foxtrot,golf,hotel}      -> 2/(4+6-2)  = 25% NEAR
+#   #703 {yankee,zulu,xray,whiskey}                 -> 0/(4+4-0)  =  0% silent
+
+# (nb1) Near match ALONE: exit code stays 0 (it is not a duplicate verdict),
+# but the row is now visible instead of silently dropped.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[
+  {"number": 702, "title": "Alpha Bravo Echo Foxtrot Golf Hotel", "body": ""},
+  {"number": 703, "title": "Yankee Zulu Xray Whiskey", "body": ""}
+]
+EOF
+run_cds --threshold 30 --warn-threshold 20 --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$RC" "(nb1) A near match alone does NOT change the exit code"
+assert_contains "$OUT" "NEAR_DUPLICATE" "(nb1) The near-match band announces itself under its own marker"
+assert_contains "$OUT" "NEAR #702: Alpha Bravo Echo Foxtrot Golf Hotel (similarity: 25%)" \
+  "(nb1) The sub-threshold candidate is listed with its score"
+assert_not_contains "$OUT" "DUPLICATE_FOUND" "(nb1) A near match is never dressed up as a duplicate"
+assert_not_contains "$OUT" "#703" "(nb1) Below the warn floor stays silent, as before"
+
+# (nb2) WITHOUT --warn-threshold the same fixture is byte-identical to the
+# pre-#8289 behaviour: off by default, so no existing caller sees a change.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[
+  {"number": 702, "title": "Alpha Bravo Echo Foxtrot Golf Hotel", "body": ""},
+  {"number": 703, "title": "Yankee Zulu Xray Whiskey", "body": ""}
+]
+EOF
+run_cds --threshold 30 --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$RC" "(nb2) Without --warn-threshold -> exit 0"
+assert_not_contains "$OUT" "NEAR" "(nb2) The band is opt-in: no near rows without --warn-threshold"
+
+# (nb3) Block + near together: the blocking verdict is unchanged and the near
+# row rides alongside it as context, in its own block.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[
+  {"number": 701, "title": "Alpha Bravo Echo Foxtrot", "body": ""},
+  {"number": 702, "title": "Alpha Bravo Echo Foxtrot Golf Hotel", "body": ""},
+  {"number": 703, "title": "Yankee Zulu Xray Whiskey", "body": ""}
+]
+EOF
+run_cds --threshold 30 --warn-threshold 20 --title "Alpha Bravo Charlie Delta"
+assert_eq "1" "$RC" "(nb3) An at/above-threshold match still exits 1"
+assert_contains "$OUT" "DUPLICATE_FOUND" "(nb3) The real match still gets its header"
+assert_contains "$OUT" "#701: Alpha Bravo Echo Foxtrot (similarity: 33%)" "(nb3) The real match is listed"
+assert_contains "$OUT" "NEAR #702" "(nb3) The near match is listed separately as context"
+
+# (nb4) --json: near matches get their OWN field. `matches` and
+# `duplicate_found` stay driven by --threshold alone, so a caller that ignores
+# the new field behaves exactly as it did before.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[{"number": 702, "title": "Alpha Bravo Echo Foxtrot Golf Hotel", "body": ""}]
+EOF
+run_cds --threshold 30 --warn-threshold 20 --title "Alpha Bravo Charlie Delta" --json
+assert_eq "0" "$RC" "(nb4) --json near-only result -> exit 0"
+assert_eq "false" "$(echo "$OUT" | jq -r '.duplicate_found')" "(nb4) --json duplicate_found stays false for a near match"
+assert_eq "0" "$(echo "$OUT" | jq -r '.matches | length')" "(nb4) --json matches never absorbs a near match"
+assert_eq "1" "$(echo "$OUT" | jq -r '.near_matches | length')" "(nb4) --json reports the near match in its own array"
+assert_eq "702" "$(echo "$OUT" | jq -r '.near_matches[0].number')" "(nb4) --json near match carries its number"
+assert_eq "25" "$(echo "$OUT" | jq -r '.near_matches[0].similarity')" "(nb4) --json near match carries its score"
+assert_eq "near_match" "$(echo "$OUT" | jq -r '.near_matches[0].type')" "(nb4) --json near match is typed distinctly"
+
+# (nb5) A warn floor at or above --threshold cannot describe a band below it:
+# the band is disabled with a warning rather than silently reinterpreted.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[{"number": 702, "title": "Alpha Bravo Echo Foxtrot Golf Hotel", "body": ""}]
+EOF
+run_cds --threshold 30 --warn-threshold 30 --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$RC" "(nb5) --warn-threshold == --threshold -> exit 0, band disabled"
+assert_contains "$ERR" "near-match band disabled" "(nb5) Disabling the inverted band is announced on stderr"
+assert_not_contains "$OUT" "NEAR" "(nb5) No near rows emitted once the band is disabled"
+
+# (nb6) A non-numeric warn threshold is an argument error, like --threshold.
+reset_state
+run_cds --warn-threshold high --title "Alpha Bravo Charlie Delta"
+assert_eq "2" "$RC" "(nb6) Non-numeric --warn-threshold -> exit 2"
+assert_contains "$ERR" "Warn threshold must be a number" "(nb6) …with a specific message"
+
+# (nb7) A degenerate (#4409) result suppresses the band entirely: when the
+# scorer is not separating anything at the BLOCK threshold, more
+# low-confidence rows are the last thing a caller needs. Same fixture as (m).
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[
+  {"number": 601, "title": "Quantum flux widget", "body": ""},
+  {"number": 602, "title": "Capacitor reactor system", "body": ""},
+  {"number": 603, "title": "Completely unrelated banana fruit basket", "body": ""},
+  {"number": 604, "title": "Core module driver suite", "body": ""}
+]
+EOF
+run_cds --warn-threshold 1 --title "Quantum Flux Capacitor Reactor Core Module Driver"
+assert_eq "1" "$RC" "(nb7) Degenerate result still exits 1"
+assert_contains "$OUT" "NON_DISCRIMINATIVE" "(nb7) …and still self-announces as non-discriminative"
+assert_not_contains "$OUT" "NEAR" "(nb7) …with no near-match rows piled on top"
+
+# (nb8) Near matches never tip the degenerate detector: the band is scored
+# outside $matched, so a pool where MOST candidates sit in the band (but only
+# one clears the block line) is NOT degenerate.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[
+  {"number": 701, "title": "Alpha Bravo Echo Foxtrot", "body": ""},
+  {"number": 702, "title": "Alpha Bravo Echo Foxtrot Golf Hotel", "body": ""},
+  {"number": 705, "title": "Alpha Bravo Echo Foxtrot Golf India", "body": ""},
+  {"number": 706, "title": "Alpha Bravo Echo Foxtrot Golf Juliet", "body": ""}
+]
+EOF
+run_cds --threshold 30 --warn-threshold 20 --title "Alpha Bravo Charlie Delta"
+assert_eq "1" "$RC" "(nb8) One real match among three near matches -> exit 1"
+assert_contains "$OUT" "DUPLICATE_FOUND" "(nb8) The real match keeps its header"
+assert_not_contains "$OUT" "NON_DISCRIMINATIVE" "(nb8) Near matches do not count toward the degenerate detector"
+
+echo ""
 echo "Testing check-duplicate.sh self-match exclusion via --issue (issue #4662)..."
 
 # check-duplicate.sh never excluded the issue being curated from its own
@@ -1007,6 +1152,70 @@ run_cds --include-merged-prs --threshold 50 --title "Alpha Bravo Charlie Delta" 
 assert_eq "3" "$(echo "$OUT" | jq -r '.matches | length')" "(z3) --json parses all three pool matches separately"
 assert_eq "801 901 1001" "$(echo "$OUT" | jq -r '[.matches[].number] | join(" ")')" "(z3) --json recovers every match number, none swallowed by a splice"
 assert_eq "issue pr closed_issue" "$(echo "$OUT" | jq -r '[.matches[].type] | join(" ")')" "(z3) --json assigns each match its correct pool type"
+
+echo ""
+echo "Testing title corroboration at low block scores (issue #8591)..."
+
+# At the DEFAULT threshold (18) a full-text match between 18% and 25% must
+# also reach 18% similarity on TITLES ALONE before it blocks. The fixtures
+# below keep every percentage hand-checkable: the query is the 4-keyword
+# title {alpha,bravo,charlie,delta} with no body, so a 9-keyword candidate
+# sharing 2 keywords scores 2/(4+9-2) = 18% -- exactly the floor #8561 hit.
+
+# (tc1) Uncorroborated: the 18% comes entirely from the candidate's BODY, its
+# title shares nothing. This is the #8561-vs-#8505 shape -- same-subsystem
+# jargon in two long bodies, unrelated titles. It must NOT block, and must
+# not vanish either: it is demoted to an annotated NEAR row.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[{"number": 8505, "title": "Zulu Yankee Xray Whiskey", "body": "alpha bravo kilo lima mike"}]
+EOF
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "0" "$RC" "(tc1) An uncorroborated floor-score match is not a duplicate verdict"
+assert_not_contains "$OUT" "DUPLICATE_FOUND" "(tc1) …and gets no DUPLICATE_FOUND header"
+assert_contains "$OUT" "NEAR #8505" "(tc1) …but is still reported, as context"
+assert_contains "$OUT" "not corroborated" "(tc1) …annotated with WHY it did not block"
+assert_contains "$OUT" "title overlap only 0%" "(tc1) …naming the title overlap that fell short"
+
+# (tc2) Corroborated: the same 18% full-text score, but carried by the
+# candidate's TITLE, so the titles agree at 18% too. A calibration, not a
+# disable -- this still blocks.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[{"number": 3550, "title": "Alpha Bravo Kilo Lima Mike November Oscar Papa Quebec", "body": ""}]
+EOF
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "1" "$RC" "(tc2) A corroborated floor-score match still blocks"
+assert_contains "$OUT" "DUPLICATE_FOUND" "(tc2) …under the ordinary duplicate header"
+assert_contains "$OUT" "#3550: Alpha Bravo Kilo Lima Mike November Oscar Papa Quebec (similarity: 18%)" \
+  "(tc2) …listed with its score"
+assert_not_contains "$OUT" "NEAR #3550" "(tc2) …and not also as a near row"
+
+# (tc3) --json: a demoted row lands in near_matches, never in matches, and
+# carries the title_similarity that explains it.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[{"number": 8505, "title": "Zulu Yankee Xray Whiskey", "body": "alpha bravo kilo lima mike"}]
+EOF
+run_cds --title "Alpha Bravo Charlie Delta" --json
+assert_eq "false" "$(echo "$OUT" | jq -r '.duplicate_found')" "(tc3) --json duplicate_found stays false for a demoted match"
+assert_eq "0" "$(echo "$OUT" | jq -r '.matches | length')" "(tc3) --json matches never absorbs a demoted match"
+assert_eq "8505" "$(echo "$OUT" | jq -r '.near_matches[0].number')" "(tc3) --json reports the demotion in near_matches"
+assert_eq "18" "$(echo "$OUT" | jq -r '.near_matches[0].similarity')" "(tc3) --json demoted row keeps its full-text score"
+assert_eq "0" "$(echo "$OUT" | jq -r '.near_matches[0].title_similarity')" "(tc3) --json demoted row carries title_similarity"
+
+# (tc4) The rule is scoped to the low-confidence region: raise the candidate's
+# body overlap above the 25% ceiling and it blocks on body text alone, titles
+# still disagreeing: the candidate's 9 keywords share 3 of the query's 4, so
+# 3/(4+9-3) = 30%, clear of the 25% ceiling.
+reset_state
+cat > "$STUB_DIR/issues-open.json" <<'EOF'
+[{"number": 8506, "title": "Zulu Yankee Xray Whiskey", "body": "alpha bravo charlie kilo lima"}]
+EOF
+run_cds --title "Alpha Bravo Charlie Delta"
+assert_eq "1" "$RC" "(tc4) Above the corroboration ceiling, body overlap stands on its own"
+assert_contains "$OUT" "DUPLICATE_FOUND" "(tc4) …and blocks as before"
+assert_not_contains "$OUT" "NEAR #8506" "(tc4) …with no demotion"
 
 # --- Summary ---
 echo ""

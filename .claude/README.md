@@ -75,10 +75,12 @@ MCP server(s); it is unrelated to Loom's user-scope registration and this
 README's Loom-specific guidance below is unaffected either way.
 Representative tools by category:
 
-**Log tools**:
-- `tail_daemon_log` - View daemon logs (`~/.loom/daemon.log`)
-- `list_terminal_logs` - List terminal output files
-- `tail_terminal_log` - View specific terminal output
+**Sweep dispatch** (front the Rust `loom-daemon` over its Unix-socket IPC):
+- `dispatch_sweep` - Dispatch a `/loom:sweep <N>` for an issue
+- `list_sweeps` / `get_sweep_status` - Enumerate and inspect running sweeps
+- `cancel_sweep` - Cancel a running sweep (never hand-`kill` its pids)
+- `tail_sweep_log` - Tail a per-sweep log file
+- `publish_event` / `subscribe_to_events` / `tail_event_bus` - Sweep-lifecycle event bus
 
 **Terminal tools**:
 - `list_terminals` - List all active terminals
@@ -88,18 +90,19 @@ Representative tools by category:
 - `create_terminal` / `configure_terminal` / `restart_terminal` - Manage terminal sessions
 
 **UI / state tools**:
-- `read_console_log` - View browser console output (JavaScript errors, console.log statements)
-- `read_state_file` - Read current application state (.loom/state.json)
-- `read_config_file` - Read terminal configurations (.loom/config.json)
+- `get_ui_state` - Comprehensive UI state (workspace, config, terminals) — this
+  replaced the removed per-file readers
+- `get_heartbeat` - Check whether the Loom app is running
 - `trigger_start` - Trigger workspace start with confirmation dialog
 - `trigger_force_start` - Trigger force start without confirmation (immediate reset)
+- `stop_engine` - Stop all terminals
 
-**Label State Machine Reset**: When the workspace is started (via `trigger_start` or `trigger_force_start`), the `reset_github_labels` daemon command automatically resets the GitHub label state machine:
-- Removes `loom:building` from all open issues (workers can reclaim them)
-- Replaces `loom:reviewing` with `loom:review-requested` on all open PRs (reviewer can re-review)
-- This ensures a clean state when restarting the workspace with fresh agent terminals
+**Durable watches**: `register_watch` / `list_watches` / `remove_watch` — operator
+watches on issue/PR terminal state that survive the registering session.
 
-See the mcp-loom package README for the full tool catalog.
+This is a summary, not the catalog. The mcp-loom package README carries the full
+tool list **and a "Removed Tools" table** naming each retired tool alongside its
+replacement — consult it before assuming a tool you remember still exists.
 
 **Note**: Because the server is registered at user scope, it is available
 automatically in every Loom-installed project on this machine — there is no
@@ -117,6 +120,7 @@ see #3345):
 
 | Command | Role | Purpose |
 |---------|------|---------|
+| `/loom:sweep` | Sweep | Drives one issue through the full Curator → Builder → Judge → Doctor → Merge lifecycle |
 | `/loom:builder` | Builder | Implements features for `loom:issue` issues and creates PRs |
 | `/loom:judge` | Judge | Reviews PRs with `loom:review-requested` label |
 | `/loom:curator` | Curator | Enhances issues and marks them as `loom:curated` |
@@ -125,8 +129,16 @@ see #3345):
 | `/loom:doctor` | Doctor | Addresses PR feedback and resolves conflicts |
 | `/loom:guide` | Guide | Triages issues and applies `loom:urgent` to top 3 |
 | `/loom:champion` | Champion | Auto-merges approved PRs with `loom:pr` label |
+| `/loom:auditor` | Auditor | Validates that `main` builds and runs; files findings |
 | `/loom:help` | Help | Read-only overview of the installed `/loom:*` commands; `/loom:help <command>` describes one |
 | `/loom:help <topic>` | Help | Comprehensive help guide with sub-topics (roles, workflow, commands, etc.) |
+
+> **This table is a subset, not the catalog.** `.claude/commands/loom/` installs
+> many more command files than the rows above — role commands, operator commands
+> (`/loom:watch`, `/loom:epic`, `/loom:bump`, `/loom:imagine`, …), and shared
+> `*-reference` / `*-patterns` fragments that other commands include rather than
+> being invoked directly. Run **`/loom:help`** for the authoritative list of what
+> is actually installed in this repo, and `/loom:help <command>` for one command.
 
 ### How Slash Commands Work
 
@@ -165,11 +177,19 @@ To create a custom slash command:
 2. Include role purpose, workflow guidelines, and iteration instructions
 3. Use it with `/your-command` (or `/your-namespace/command`)
 
-**Note**: `.loom/roles/` contains file copies of the role prompts (kept in
-sync with `.claude/commands/loom/` by `loom update` / `resync-installed.sh`)
-for backward compatibility with tooling that expects role definitions under
-`.loom/roles/`. The single source of truth for all Loom role definitions is
-`.claude/commands/loom/`.
+**Note — where role definitions actually live**: the single source of truth for
+every Loom role prompt is **`.claude/commands/loom/<role>.md`**. `.loom/roles/`
+is the compatibility surface for tooling (and the daemon) that reads role files
+from there: in this repo each `.loom/roles/<role>.md` is a git-tracked *symlink*
+to `../.claude/commands/loom/<role>.md`, and in a consumer install it is a copy
+refreshed by `loom update` / `resync-installed.sh`. Either way both paths resolve
+to the **same prompt text**, which is why CLAUDE.md can say "Full definitions:
+`.loom/roles/<name>.md`" without contradicting this file — that is the stable
+*read* path; `.claude/commands/loom/` is the *edit* path. To change a role, edit
+`.claude/commands/loom/<role>.md` (in the Loom repo itself, its source under
+`defaults/.claude/commands/loom/`), never the `.loom/roles/` side. `.loom/roles/`
+additionally holds each role's `<role>.json` metadata, which has no counterpart
+under `.claude/commands/loom/`. See `.loom/roles/README.md` for the role catalog.
 
 ## Custom Subagents
 

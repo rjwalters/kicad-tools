@@ -702,6 +702,27 @@ loom-daemon accounts remove codex alice       # recoverable quarantine
 loom-daemon accounts remove codex alice --purge
 ```
 
+**Which registry a verb acts on (issue #8540).** The account registry is a
+`<workspace>/.loom/accounts.json` file, and there are two of them on a typical
+host: the repo-local one belonging to a checkout, and the **shared**
+machine-level one at `~/.loom/accounts.json` (override the root with
+`LOOM_SHARED_ACCOUNTS_ROOT`; an explicitly empty value disables it). Resolution:
+
+- An explicit `--workspace <path>` is honoured literally.
+- Otherwise the nearest enclosing Loom workspace (the first ancestor directory
+  holding a `.loom/`) wins, so running from a subdirectory of a checkout still
+  acts on that checkout's registry.
+- A cwd inside no Loom workspace resolves to the shared registry rather than
+  failing — the case that used to report `Codex profile root must not be
+  repository-local` from `$HOME`, which named the profile root although the cwd
+  was what had changed.
+
+Every verb prints the registry in effect on stderr (`Registry: repo: <path>` /
+`Registry: shared: <path>`), and says so when the repo-local registry holds an
+account of the same name as the shared one — a `disable` there leaves the
+shared entry enabled. Manage a shadowed shared account with
+`--workspace ~` (or whatever `LOOM_SHARED_ACCOUNTS_ROOT` names).
+
 `add` and `reauth` inherit the terminal for browser/device login. Import accepts
 only an explicit non-empty regular file, installs it atomically with mode
 `0600`, and never parses or prints it. Codex also supports `codex login

@@ -174,6 +174,35 @@ net, not a fix** — run the repair command above (or re-import with
 `-T /usr/bin/codesign`) to actually get the TCC-grant-survives-rebuilds
 benefit this doc exists for.
 
+### `health` over non-interactive ssh is not the check to use (Issue #8286)
+
+Both the import step above and its repair command
+(`security set-key-partition-list …`) **must run in an interactive session**
+— they unlock and modify the login keychain, and macOS will not grant that
+non-interactively. If you run them over ssh you are already in the wrong
+context; do them at the machine's own console, in a GUI Terminal, or over
+`ssh -Y`/screen-sharing into an actual logged-in session, not a bare
+non-interactive ssh command.
+
+The same non-interactive-context problem shows up again, easy to miss, when
+*verifying* the fix: `loom-daemon health`'s `codesign_identity` finding runs
+its preflight probe **entirely inside the `health` CLI process itself** — it
+never asks the running daemon (which typically signs from a `launchd`
+-supervised, logged-in GUI session with an unlocked keychain) what *it*
+would get. Run `health` over a non-interactive ssh session and the login
+keychain routinely refuses `codesign` access there regardless of whether the
+identity is actually fixed and regardless of whether the daemon itself can
+sign fine — so `codesign_identity` reports DEGRADED **every time**, even
+right after a correct repair. This cost three verification rounds on
+example-org/tool-repo#202 before the DEGRADED reading was recognized as
+an artifact of running the check over ssh, not evidence the fix hadn't
+taken. The DEGRADED message itself now says so explicitly (it names its own
+invocation context and points at re-running from a tty), but the takeaway
+is the same either way: **treat a `codesign_identity` DEGRADED seen over ssh
+as inconclusive, and re-verify from an interactive/tty session** (a real
+console login, or `ssh` into a session where the login keychain is already
+unlocked) before concluding the identity itself is broken.
+
 ## Using it
 
 ```bash

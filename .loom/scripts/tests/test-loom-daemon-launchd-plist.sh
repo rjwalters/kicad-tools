@@ -40,6 +40,23 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_SCRIPT="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-daemon-start.sh"
 
+# WHICH BINARY IMPLEMENTS THE STUB (#8134, epic #7810 / #8087)
+#
+# loom-daemon-start.sh is a thin stub over `loom-daemon daemon-start`, so every
+# `--print-plist` below renders from the Rust unless the stub execs the binary
+# built from this working tree. `--self-only` is mandatory: every case here
+# pins $LOOM_DAEMON_BIN to a FAKE daemon binary so the rendered
+# ProgramArguments is deterministic, and $LOOM_DAEMON_BIN means "the daemon
+# this caller manages or probes" — not "the binary that implements me".
+# Without the split the stub would exec the fake as itself and print its
+# output instead of a plist.
+#
+# This is a HARNESS change, not an assertion change: every expectation below is
+# byte-for-byte what it was against the shell (verification-recipes.md §6).
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" daemon-start
+
 # #6387: strip the ambient LOOM_* pointers that a daemon-dispatched agent
 # inherits (loom-daemon-start.sh exports LOOM_PID_FILE, and a spawned sweep's
 # environment additionally carries LOOM_LAUNCHD_LABEL / LOOM_SOCKET_PATH /

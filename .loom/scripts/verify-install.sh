@@ -616,13 +616,18 @@ cmd_generate() {
     local generated_at
     generated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    # Detect loom version from CLAUDE.md and commit from install-metadata.json
+    # Detect loom version and commit from install-metadata.json — the
+    # authoritative, non-prompt-injected record of what is installed. Before
+    # #8147 the version was read out of root CLAUDE.md's `**Loom Version**`
+    # header; that header no longer exists (a per-release token in a
+    # prompt-prefix-injected file invalidated every agent's cached prefix on
+    # every bump), so install-metadata.json is the only source now. It is
+    # written at install time and refreshed by resync-installed.sh, so it is
+    # also fresher than the header ever was.
     local loom_version=""
     local loom_commit=""
-    if [[ -f "$root/CLAUDE.md" ]]; then
-        loom_version=$(grep -o 'Loom Version.*: .*' "$root/CLAUDE.md" | head -1 | sed 's/.*: //' | sed 's/\*//g' | tr -d '[:space:]' || true)
-    fi
     if [[ -f "$root/.loom/install-metadata.json" ]]; then
+        loom_version=$(grep -o '"loom_version": "[^"]*"' "$root/.loom/install-metadata.json" | head -1 | sed 's/.*: "//; s/"//' || true)
         loom_commit=$(grep -o '"loom_commit": "[^"]*"' "$root/.loom/install-metadata.json" | head -1 | sed 's/.*: "//; s/"//' || true)
     fi
 

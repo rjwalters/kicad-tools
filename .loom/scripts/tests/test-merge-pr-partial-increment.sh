@@ -52,9 +52,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
+# #8191: the ref extractors now delegate to `loom-daemon merge-pr-refs`. Pin
+# the binary they exec and verify it HAS that subcommand — the same harness the
+# epic's five other ported suites use. Without the subcommand check, a stale
+# binary would make every extractor return empty, and "no references found" is
+# the reading that closes an unfinished issue.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" merge-pr-refs
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -73,6 +83,18 @@ assert_eq() {
         echo "    Expected: '$expected'"
         echo "    Actual:   '$actual'"
     fi
+}
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why, and what proves
+# the property now. Counted as run so the totals stay honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
 }
 
 assert_contains() {
@@ -136,9 +158,20 @@ source "$HELPERS_DIR/lib/forge-helpers.sh"
 #      post-merge reset/reopen pass.
 # Both spans contain only function definitions plus comments (harmless when
 # sourced).
+#
+# Two lines are pulled in from OUTSIDE both spans: the one-line
+# `_mp_daemon_roll_hint` (which `_mp_refs`'s refusal path calls, and which is
+# defined above span 1 because the verdict-label guard needs it earlier) and
+# every `# requires-daemon:` marker comment (which that function reads back out
+# of ${BASH_SOURCE[0]} — i.e. out of THIS extracted file, so the markers have to
+# travel with it). #8285's own suite,
+# test-merge-pr-daemon-version-floor.sh, is what asserts on that message; here
+# they exist only so the refusal path is not a dangling call.
 FUNCS_FILE="$(mktemp)"
 trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" 2>/dev/null || true' EXIT
 awk '
+  /^# requires-daemon:/                                  { print; next }
+  /^_mp_daemon_roll_hint\(\) \{/                         { print; next }
   /^_strip_fenced_code_blocks\(\) \{/                    { capture=1 }
   /^_check_partial_increment_close_conflict \|\| true/   { capture=0 }
   /^_reset_one_partial_issue\(\) \{/                    { capture=1 }
@@ -777,8 +810,10 @@ echo "Testing merge-pr.sh source guards..."
 src="$(cat "$MERGE_PR_SRC")"
 assert_contains "$src" "_reset_partial_increment_labels" \
   "merge-pr.sh defines and calls _reset_partial_increment_labels"
-assert_contains "$src" "(Part of|Contributes to)" \
-  "merge-pr.sh matches the non-closing partial-increment keywords"
+retired "merge-pr.sh's source contains the (Part of|Contributes to) alternation" \
+    "the non-closing partial-increment vocabulary must not be silently narrowed or dropped by a refactor -- a dropped keyword means a declared partial increment is read as a plain close" \
+    "the alternation is no longer in this file; it is a Rust pattern in loom-daemon/src/merge_pr/refs.rs, so no grep of merge-pr.sh can pass" \
+    "merge_pr::refs::tests::a_line_leading_declaration_is_still_read pins all nine accepted spellings, and tests/merge_pr_refs_differential.rs proves the port agrees with the RETIRED shell byte-for-byte on a 29-entry corpus (frozen fixture). A scan checks the text is present; the differential checks the behaviour is identical, which subsumes it."
 # The label swap / reopen / comment mutations route through the #4856
 # rate-limit-safe wrappers in lib/forge-helpers.sh, so the source guards assert
 # on the WRAPPER call sites (with their label/issue arguments) rather than the
@@ -800,16 +835,20 @@ assert_contains "$src" 'forge_gh_reopen_issue_rl_safe "$REPO_NWO" "$issue_num"' 
   "merge-pr.sh reverts a premature auto-close via the rate-limit-safe reopen wrapper (#4856)"
 assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$issue_num" "$comment"' \
   "merge-pr.sh posts the partial-increment / premature-close comments via the rate-limit-safe wrapper (#4856)"
-assert_contains "$src" 'close[sd]?|fix(e[sd])?|resolve[sd]?' \
-  "merge-pr.sh matches the canonical GitHub closing-keyword set"
+retired "merge-pr.sh's source contains the closing-keyword alternation" \
+    "the GitHub closing-keyword set (and its \\b guard, which is what stops 'Discloses #N' matching) must not drift from the one forge_pr_close_targets uses" \
+    "the alternation is now a Rust pattern; the grep cannot pass against this file" \
+    "merge_pr::refs::tests::every_documented_closing_keyword_form_is_recognised pins all ten forms and a_keyword_substring_does_not_match pins the boundary; the differential confirms agreement with the retired shell."
 assert_contains "$src" 'repos/$REPO_NWO/pulls/$PR_NUMBER/commits' \
   "merge-pr.sh reads the PR's commit messages for closing keywords (#4595)"
 assert_contains "$src" '--paginate' \
   "merge-pr.sh paginates the commits fetch (>30-commit PRs are not truncated)"
 assert_contains "$src" '_strip_fenced_code_blocks' \
   "merge-pr.sh strips fenced code blocks before matching a partial-increment declaration (#5234)"
-assert_contains "$src" "sed -E 's/\`[^\`]*\`//g'" \
-  "merge-pr.sh blanks inline code spans before matching a partial-increment declaration (#5234)"
+retired "merge-pr.sh's source contains the inline-code-span strip" \
+    "inline code spans are blanked before the line-leading anchor runs, so the anchor sees the text a reader sees rather than the raw markup. (The #5234 incident itself is caught by the ANCHOR, not by this strip: its mention is mid-sentence. On a single line the strip only ever ADDS matches -- measured, 0 of 29 corpus entries change without it.)" \
+    "the strip is now blank_inline_code() in Rust; this file no longer runs sed" \
+    "merge_pr::refs::tests::the_inline_code_strip_changes_the_answer_and_this_pins_which_way, which asserts the one single-line shape where the strip is load-bearing (\"\`x\` Part of #5\" -> [5]) and would fail if the strip were removed -- the property the original successor did NOT pin."
 assert_contains "$src" '_partial_increment_ref_snippets' \
   "merge-pr.sh quotes the matched partial-increment declaration text in the pre-merge warning (#5234 AC #4)"
 
