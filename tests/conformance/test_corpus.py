@@ -5,14 +5,20 @@ generator intends is the geometry KiCad measures.  This module is the layer
 above it -- the same seeded cases, but now asking each in-tree clearance
 consumer the question kicad-cli already answered.
 
-**Every adapter-vs-truth row is report-only.**  Each carries
+**An unswitched adapter-vs-truth row is report-only.**  Each carries
 ``@pytest.mark.consumer``, and ``conftest.py``'s collection hook turns that
 into ``xfail(strict=False)``.  A measured disagreement must not redden the
 build: consumers are switched to the shared kernel in their own Epic #5509
 phase, and only then does a row become a merge gate.  That mechanism landed
 untested in PR #5532 (there were no consumer items to exercise it), so
-:func:`test_every_consumer_item_carries_xfail` asserts it over the whole
-collected suite.
+:func:`test_every_unswitched_consumer_item_carries_xfail` asserts it over the
+whole collected suite.
+
+**A switched row is a gate.**  Groups listed in ``conftest.SWITCHED_GROUPS``
+have had their phase land, so their rows are exempted from the auto-xfail and
+held to :data:`QUANTISATION_LEDGER` instead: zero under-rejection, and exactly
+the recorded residual over-rejection.  ``#5660`` (Phase 3a) is the first PR to
+use it, for groups 1 and 2.
 
 **Hard assertions here are about the adapters, not the consumers.**  An
 adapter must satisfy the protocol, must be deterministic, and must only ever
@@ -37,7 +43,13 @@ import pytest
 from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.board import write_case
-from tests.conformance.conftest import requires_adapter, requires_kicad_cli
+from tests.conformance.conftest import (
+    SWITCHED_GROUPS,
+    assert_switched_group_matches_ledger,
+    group_of_item,
+    requires_adapter,
+    requires_kicad_cli,
+)
 from tests.conformance.generator import PairKind, generate_case
 from tests.conformance.oracle import run_oracle
 from tests.conformance.report import ADAPTERS, main
@@ -60,6 +72,35 @@ UNWIRED_GROUPS = {7}
 
 # Every group row the table measures, plus the Phase 1b kernel's control row.
 WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GROUP}
+
+# The residual over-rejection a switched group is still allowed, per
+# ``(group, seed)``.  Entries use the same string form the failure message
+# prints, so re-pinning is a copy-paste rather than a transcription.
+#
+# Every entry below is cell quantisation, and it survives Phase 3a by
+# construction rather than by oversight.  Groups 1 and 2 answer with a *cell
+# set*, and the adapter's rejection rule dilates **both** sides -- the existing
+# copper's halo and the candidate's own -- so two objects whose copper is a
+# comfortable 0.23 mm apart still share a marked cell once each has been grown
+# by a radius that rounds outwards (``int(...) + 1``, plus a second ``+ 1`` for
+# a segment).  #5660 replaced the halo's *shape* (Chebyshev square -> the
+# kernel's exact disc), which removes the sqrt(2) diagonal excess; it does not
+# and cannot remove the outward rounding along the pair axis, which is where
+# every entry here sits.  Measured before and after the switch over seeds
+# 0-49: group 1 73/153 both ways, group 2 56/115 both ways.
+#
+# These are retired by search-time *refinement* (Epic #5509 groups 4 and 5,
+# Phase 3b), which re-reads the exact geometry of a cell the halo marked -- not
+# by making the halo itself finer, which would spend the grid-quantisation
+# safety margin (#1666, #1692, #1797) that keeps the marking conservative.
+QUANTISATION_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
+    (1, 0): ("pad-seg ['N3', 'N4'] gap=0.2468",),
+    (1, 1): ("seg-seg ['N3', 'N4'] gap=0.2289",),
+    (1, 2): ("seg-via ['N1', 'N2'] gap=0.2336",),
+    (2, 0): (),
+    (2, 1): ("seg-seg ['N3', 'N4'] gap=0.2289",),
+    (2, 2): ("seg-via ['N1', 'N2'] gap=0.2336",),
+}
 
 _ADAPTER_PARAMS = [
     pytest.param(adapter, id=adapter.name, marks=(requires_adapter(adapter),))
@@ -223,6 +264,17 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
             over.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
         elif in_truth and not in_consumer:
             under.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
+
+    if adapter.group in SWITCHED_GROUPS:
+        assert_switched_group_matches_ledger(
+            adapter,
+            over=over,
+            under=under,
+            expected=QUANTISATION_LEDGER[adapter.group, seed],
+            what=f"seed {seed}",
+            context=result.describe(),
+        )
+        return
 
     assert not over and not under, (
         f"{adapter.name} (group {adapter.group}) disagrees with kicad-cli on seed {seed}\n"
@@ -398,32 +450,94 @@ def test_report_regenerates_byte_identically(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_every_consumer_item_carries_xfail(request: pytest.FixtureRequest) -> None:
+def _collected_consumer_items(
+    request: pytest.FixtureRequest,
+) -> list[tuple[pytest.Item, int | None]]:
+    """Session-collected ``consumer`` items paired with the group they measure."""
+    group_by_name = {adapter.name: adapter.group for adapter in ADAPTERS}
+    return [
+        (item, group_of_item(item, group_by_name))
+        for item in request.session.items
+        if item.get_closest_marker("consumer") is not None
+    ]
+
+
+def test_every_unswitched_consumer_item_carries_xfail(request: pytest.FixtureRequest) -> None:
     """``conftest.pytest_collection_modifyitems`` really fired.
 
     The hook is the *only* thing standing between a measured disagreement and
     a red build, and it shipped with no item to exercise it.  This walks the
     session's collected items rather than trusting the marker: every
-    ``@pytest.mark.consumer`` item must also carry an ``xfail``, and that
-    ``xfail`` must be non-strict (a strict one would fail the moment a
-    consumer starts agreeing, which is the outcome the epic is working
-    towards).
+    ``@pytest.mark.consumer`` item whose group is not yet switched must also
+    carry an ``xfail``, and that ``xfail`` must be non-strict (a strict one
+    would fail the moment a consumer starts agreeing, which is the outcome the
+    epic is working towards).
     """
-    consumer_items = [
-        item for item in request.session.items if item.get_closest_marker("consumer") is not None
+    collected = [
+        (item, group)
+        for item, group in _collected_consumer_items(request)
+        if group not in SWITCHED_GROUPS
     ]
-    if not consumer_items:
+    if not collected:
         pytest.skip(
-            "no @pytest.mark.consumer items were collected -- this assertion "
-            "is only meaningful for a whole-suite run (uv run pytest tests/conformance)"
+            "no unswitched @pytest.mark.consumer items were collected -- this "
+            "assertion is only meaningful for a whole-suite run "
+            "(uv run pytest tests/conformance)"
         )
 
-    missing = [item.nodeid for item in consumer_items if item.get_closest_marker("xfail") is None]
+    missing = [item.nodeid for item, _ in collected if item.get_closest_marker("xfail") is None]
     assert not missing, f"consumer items collected without an auto-xfail: {missing}"
 
     strict = [
         item.nodeid
-        for item in consumer_items
+        for item, _ in collected
         if item.get_closest_marker("xfail").kwargs.get("strict") is not False
     ]
     assert not strict, f"consumer items whose xfail is strict: {strict}"
+
+
+def test_switched_group_items_are_not_xfailed(request: pytest.FixtureRequest) -> None:
+    """The other half of scope guard #5: "report-only **until switched**".
+
+    Without this, ``SWITCHED_GROUPS`` would be a comment.  An xfail left on a
+    switched group's row makes the row unfalsifiable in both directions at
+    once -- a regression xfails, an improvement xpasses, and neither is a
+    signal -- which is exactly the state Phase 3a set out to leave behind for
+    groups 1 and 2.
+    """
+    collected = [
+        (item, group)
+        for item, group in _collected_consumer_items(request)
+        if group in SWITCHED_GROUPS
+    ]
+    if not collected:
+        pytest.skip(
+            "no switched-group consumer items were collected -- this assertion "
+            "is only meaningful for a whole-suite run (uv run pytest tests/conformance)"
+        )
+
+    xfailed = [
+        f"{item.nodeid} (group {group})"
+        for item, group in collected
+        if item.get_closest_marker("xfail") is not None
+    ]
+    assert not xfailed, (
+        "these rows belong to a consumer that has been switched to the "
+        f"clearance kernel, so they must be gates, not report-only: {xfailed}"
+    )
+
+
+def test_the_quantisation_ledger_covers_every_switched_row() -> None:
+    """No switched ``(group, seed)`` may be missing from the ledger.
+
+    A ``KeyError`` inside the measurement item would read as a harness bug
+    rather than as the gate doing its job, and a *stale* entry for a group that
+    was never switched would sit there looking authoritative.  Asserted as an
+    exact set so both directions are covered.
+    """
+    expected = {(group, seed) for group in SWITCHED_GROUPS for seed in CI_SEEDS}
+    assert set(QUANTISATION_LEDGER) == expected, (
+        "the quantisation ledger and SWITCHED_GROUPS x CI_SEEDS have drifted.\n"
+        f"  missing: {sorted(expected - set(QUANTISATION_LEDGER))}\n"
+        f"  stale:   {sorted(set(QUANTISATION_LEDGER) - expected)}"
+    )

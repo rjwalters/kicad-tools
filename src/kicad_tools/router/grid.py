@@ -89,6 +89,15 @@ from kicad_tools.acceleration import (
 )
 from kicad_tools.exceptions import RoutingError
 
+from .clearance_kernel import (
+    CLEARANCE_EPSILON_MM as _KERNEL_EPSILON_MM,
+)
+from .clearance_kernel import (
+    KVia as _KVia,
+)
+from .clearance_kernel import (
+    copper_gap as _kernel_copper_gap,
+)
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
 )
@@ -101,6 +110,98 @@ from .geometry import (
 from .layers import Layer, LayerStack
 from .primitives import Obstacle, Pad, Route, Segment, Via, pad_half_extents
 from .rules import DesignRules
+
+# ---------------------------------------------------------------------------
+# Halo geometry -- Epic #5509 Phase 3a (Issue #5660)
+# ---------------------------------------------------------------------------
+#
+# Every route-copper halo on this grid (``_mark_segment``, ``_mark_via`` and
+# their ``_unmark_*`` twins) used to stamp a Chebyshev **square** --
+# ``for dy in range(-r, r + 1): for dx in range(-r, r + 1)`` -- around each
+# rastered cell.  A square circumscribes the disc it stands for, so the marked
+# region reached ``sqrt(2) * r`` at the diagonals where the geometry only
+# asks for ``r``.  That excess is the root cause of #5410: on a 0.127 mm grid
+# DQS_N's six-cell via halo swallowed a DQ3 candidate sitting ``(5, 4)`` cells
+# away -- Chebyshev distance 5 (inside the square) but Euclidean distance
+# ``sqrt(41) = 6.40`` cells (outside the disc), on copper kicad-cli calls legal.
+#
+# The offsets below come from :mod:`kicad_tools.router.clearance_kernel`
+# itself: the halo membership of every cell is the kernel's own
+# ``copper_gap`` between two zero-extent points, so the write-side occupancy
+# model and the kernel share one geometry rather than two.  The query is in
+# *grid-cell* units -- the kernel is pure geometry and carries no unit
+# assumption -- which keeps the answer bit-identical to the C++ sibling
+# ``halo_offsets`` in ``cpp/src/grid.cpp`` (both feed integers into double
+# arithmetic, with no ``float`` grid ``resolution`` in between to diverge on).
+#
+# **The reach is unchanged.**  ``radius_cells`` is still exactly what each
+# caller computed before -- every grid-quantisation safety margin (#1666,
+# #1692, #1797) is retained.  Only the *shape* changes, from the
+# circumscribing square to the exact disc, so the marked set is a strict
+# subset of the previous one: this can remove over-blocking, never add
+# under-blocking.
+
+_HALO_OFFSETS: dict[int, tuple[tuple[int, int], ...]] = {}
+_HALO_MASKS: dict[int, np.ndarray] = {}
+
+
+def halo_offsets(radius_cells: int) -> tuple[tuple[int, int], ...]:
+    """Cell offsets inside the exact clearance halo of ``radius_cells``.
+
+    The kernel decides membership: a cell at offset ``(dx, dy)`` is inside
+    the halo iff ``clearance_kernel.copper_gap`` between the halo's centre
+    and that cell -- both modelled as zero-extent points -- is at most
+    ``radius_cells``.  Offsets are cached per radius because a board marks
+    the same handful of radii millions of times.
+
+    Args:
+        radius_cells: Halo reach in grid cells.  Non-positive collapses to
+            the single centre cell.
+
+    Returns:
+        ``(dx, dy)`` offsets, in row-major order so the traversal order
+        matches the square loop it replaces.
+    """
+    cached = _HALO_OFFSETS.get(radius_cells)
+    if cached is not None:
+        return cached
+    r = max(0, radius_cells)
+    centre = _KVia(x=0.0, y=0.0, diameter=0.0, drill=0.0)
+    offsets = tuple(
+        (dx, dy)
+        for dy in range(-r, r + 1)
+        for dx in range(-r, r + 1)
+        if _kernel_copper_gap(centre, _KVia(x=float(dx), y=float(dy), diameter=0.0, drill=0.0))
+        <= r + _KERNEL_EPSILON_MM
+    )
+    _HALO_OFFSETS[radius_cells] = offsets
+    return offsets
+
+
+def halo_mask(radius_cells: int) -> np.ndarray:
+    """The :func:`halo_offsets` set as a ``(2r+1, 2r+1)`` boolean mask.
+
+    Built *from* the offsets rather than from a second inequality, so the
+    vectorised window path and the scalar path can never describe different
+    halos.  Indexed ``mask[dy + r, dx + r]``.
+
+    Args:
+        radius_cells: Halo reach in grid cells.
+
+    Returns:
+        A cached, shared read-only mask -- callers must not mutate it.
+    """
+    cached = _HALO_MASKS.get(radius_cells)
+    if cached is not None:
+        return cached
+    r = max(0, radius_cells)
+    mask = np.zeros((2 * r + 1, 2 * r + 1), dtype=np.bool_)
+    for dx, dy in halo_offsets(radius_cells):
+        mask[dy + r, dx + r] = True
+    mask.flags.writeable = False
+    _HALO_MASKS[radius_cells] = mask
+    return mask
+
 
 # Issue #2908: Plane-net name patterns for same-component validator carve-out.
 #
@@ -1442,11 +1543,15 @@ class RoutingGrid:
             yield
 
     def _get_clearance_mask(self, radius: int) -> np.ndarray:
-        """Get or create a circular clearance mask for given radius."""
+        """Get or create a circular clearance mask for given radius.
+
+        Issue #5660 (Epic #5509 Phase 3a): the mask now comes from
+        :func:`halo_mask`, so it is the *kernel's* halo rather than a second
+        in-lined inequality that could drift from it.  The shape is
+        unchanged -- this helper was already circular.
+        """
         if radius not in self._clearance_masks:
-            y, x = np.ogrid[-radius : radius + 1, -radius : radius + 1]
-            mask = x * x + y * y <= radius * radius
-            self._clearance_masks[radius] = mask
+            self._clearance_masks[radius] = halo_mask(radius)
         return self._clearance_masks[radius]
 
     def layer_to_index(self, layer_enum_value: int) -> int:
@@ -4741,32 +4846,36 @@ class RoutingGrid:
         has_reservations = bool(self._reserved_for_nets)
         seg_net = int(seg.net) if seg.net is not None else 0
 
+        # Issue #5660 (Epic #5509 Phase 3a): the halo is the kernel's exact
+        # dilation, not the circumscribing Chebyshev square.  Same reach,
+        # exact shape -- see ``halo_offsets``.
+        offsets = halo_offsets(clearance_cells)
+
         def mark_with_clearance_cells(gx: int, gy: int) -> None:
-            for dy in range(-clearance_cells, clearance_cells + 1):
-                for dx in range(-clearance_cells, clearance_cells + 1):
-                    nx, ny = gx + dx, gy + dy
-                    if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        # Issue #4079: skip cells HARD-reserved for a net set
-                        # that excludes seg.net (lateral-trace keep-out,
-                        # mirrors _mark_via + C++ ``is_reserved_excluding``).
-                        # A SOFT reservation (attractor-only) does NOT fence
-                        # foreign traces -- the cell is claimed normally.
-                        if has_reservations:
-                            rkey = (layer_idx, ny, nx)
-                            owners = self._reserved_for_nets.get(rkey)
-                            if (
-                                owners is not None
-                                and seg_net not in owners
-                                and rkey not in self._soft_reservations
-                            ):
-                                continue
-                        cell = self.cell_at(layer_idx, ny, nx)
-                        if not cell.blocked:
-                            # First time blocking - this is a route cell
-                            marked_cells.add((nx, ny))
-                            cell.net = seg.net
-                        # else: cell already blocked (by pad), don't change net
-                        cell.blocked = True
+            for dx, dy in offsets:
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    # Issue #4079: skip cells HARD-reserved for a net set
+                    # that excludes seg.net (lateral-trace keep-out,
+                    # mirrors _mark_via + C++ ``is_reserved_excluding``).
+                    # A SOFT reservation (attractor-only) does NOT fence
+                    # foreign traces -- the cell is claimed normally.
+                    if has_reservations:
+                        rkey = (layer_idx, ny, nx)
+                        owners = self._reserved_for_nets.get(rkey)
+                        if (
+                            owners is not None
+                            and seg_net not in owners
+                            and rkey not in self._soft_reservations
+                        ):
+                            continue
+                    cell = self.cell_at(layer_idx, ny, nx)
+                    if not cell.blocked:
+                        # First time blocking - this is a route cell
+                        marked_cells.add((nx, ny))
+                        cell.net = seg.net
+                    # else: cell already blocked (by pad), don't change net
+                    cell.blocked = True
 
         def mark_with_clearance_window(gx: int, gy: int) -> None:
             """Vectorised equivalent of ``mark_with_clearance_cells``.
@@ -4789,21 +4898,30 @@ class RoutingGrid:
             Later line points re-read ``_blocked`` (the window is a live
             view), so a cell first blocked by an earlier point is no longer
             ``fresh`` for a later one -- identical to the scalar ordering.
+
+            Issue #5660: the window is still the enclosing ``(2c+1)**2``
+            block, but every write is now masked by ``halo_mask`` -- the same
+            kernel-derived cell set ``mark_with_clearance_cells`` iterates --
+            so the two paths mark exactly the same cells.
             """
-            ax, bx = max(0, gx - clearance_cells), min(self.cols, gx + clearance_cells + 1)
-            ay, by = max(0, gy - clearance_cells), min(self.rows, gy + clearance_cells + 1)
+            r = max(0, clearance_cells)
+            ax, bx = max(0, gx - r), min(self.cols, gx + r + 1)
+            ay, by = max(0, gy - r), min(self.rows, gy + r + 1)
             if ax >= bx or ay >= by:
                 return
-            fresh = ~self._blocked[layer_idx, ay:by, ax:bx]
+            disc = halo_mask(clearance_cells)[
+                ay - (gy - r) : by - (gy - r), ax - (gx - r) : bx - (gx - r)
+            ]
+            fresh = ~self._blocked[layer_idx, ay:by, ax:bx] & disc
             newly = int(fresh.sum())
             if newly:
                 self._net[layer_idx, ay:by, ax:bx][fresh] = seg.net
                 ys, xs = np.nonzero(fresh)
                 marked_cells.update(zip((xs + ax).tolist(), (ys + ay).tolist(), strict=True))
-            self._blocked[layer_idx, ay:by, ax:bx] = True
+            self._blocked[layer_idx, ay:by, ax:bx] |= disc
             # Issue #4794: mirror the scalar path's per-cell bump count -- one
             # per ``cell.blocked`` write plus one per ``cell.net`` write.
-            self._occupancy_generation += (by - ay) * (bx - ax) + newly
+            self._occupancy_generation += int(disc.sum()) + newly
 
         # Issue #5240: the reservation keep-out is a per-cell dict lookup that
         # does not vectorise, and a non-NumPy (GPU) backend does not support
@@ -4898,29 +5016,34 @@ class RoutingGrid:
         has_reservations = bool(self._reserved_for_nets)
         via_net = int(via.net) if via.net is not None else 0
 
+        # Issue #5660 (Epic #5509 Phase 3a): exact dilation, not a square.
+        # The six-cell Chebyshev square this replaces is what rejected
+        # #5410's legal DQ3 candidate at ``(5, 4)`` cells -- Euclidean
+        # distance ``sqrt(41) = 6.40`` cells, outside the disc of radius 6.
+        offsets = halo_offsets(radius)
+
         for layer_idx in range(self.num_layers):
-            for dy in range(-radius, radius + 1):
-                for dx in range(-radius, radius + 1):
-                    nx, ny = gx + dx, gy + dy
-                    if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        # Issue #2677: Skip cells HARD-reserved for a different
-                        # net (or net set that excludes via.net).  Issue #4079:
-                        # a SOFT reservation (attractor-only) does NOT fence
-                        # foreign vias -- the cell is claimed normally.
-                        if has_reservations:
-                            rkey = (layer_idx, ny, nx)
-                            owners = self._reserved_for_nets.get(rkey)
-                            if (
-                                owners is not None
-                                and via_net not in owners
-                                and rkey not in self._soft_reservations
-                            ):
-                                continue
-                        cell = self.cell_at(layer_idx, ny, nx)
-                        if not cell.blocked:
-                            self._update_congestion(nx, ny, layer_idx)
-                            cell.net = via.net
-                        cell.blocked = True
+            for dx, dy in offsets:
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    # Issue #2677: Skip cells HARD-reserved for a different
+                    # net (or net set that excludes via.net).  Issue #4079:
+                    # a SOFT reservation (attractor-only) does NOT fence
+                    # foreign vias -- the cell is claimed normally.
+                    if has_reservations:
+                        rkey = (layer_idx, ny, nx)
+                        owners = self._reserved_for_nets.get(rkey)
+                        if (
+                            owners is not None
+                            and via_net not in owners
+                            and rkey not in self._soft_reservations
+                        ):
+                            continue
+                    cell = self.cell_at(layer_idx, ny, nx)
+                    if not cell.blocked:
+                        self._update_congestion(nx, ny, layer_idx)
+                        cell.net = via.net
+                    cell.blocked = True
 
     # ------------------------------------------------------------------
     # Issue #2677: Corridor reservation API
@@ -5230,33 +5353,36 @@ class RoutingGrid:
         self._route_halo.record(self._route_halo.segment_key(seg), clearance_cells, False)
         static_blocked = self._static_blocked
 
+        # Issue #5660: rip-up must clear exactly the cells ``_mark_segment``
+        # claimed, so the unmark walks the same kernel-derived halo.
+        offsets = halo_offsets(clearance_cells)
+
         def unmark_with_clearance_cells(gx: int, gy: int) -> None:
-            for dy in range(-clearance_cells, clearance_cells + 1):
-                for dx in range(-clearance_cells, clearance_cells + 1):
-                    nx, ny = gx + dx, gy + dy
-                    if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        cell = self.cell_at(layer_idx, ny, nx)
-                        if cell.pad_blocked:
-                            # Don't unblock pad cells, just restore original net
+            for dx, dy in offsets:
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    cell = self.cell_at(layer_idx, ny, nx)
+                    if cell.pad_blocked:
+                        # Don't unblock pad cells, just restore original net
+                        cell.net = cell.original_net
+                        self._update_congestion(nx, ny, layer_idx, delta=-1)
+                    elif cell.net == seg.net:
+                        # Issue #3545: STATICALLY blocked cells (pad
+                        # clearance halos, keepouts) must survive
+                        # rip-up.  Pre-fix, ripping a route whose
+                        # clearance envelope overlapped its OWN pads'
+                        # halo cells erased those cells outright
+                        # (blocked=False, net=0), after which foreign
+                        # nets could route straight through the halo
+                        # and ship sub-clearance copper.  Restore the
+                        # static owner instead of freeing.
+                        if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
                             cell.net = cell.original_net
                             self._update_congestion(nx, ny, layer_idx, delta=-1)
-                        elif cell.net == seg.net:
-                            # Issue #3545: STATICALLY blocked cells (pad
-                            # clearance halos, keepouts) must survive
-                            # rip-up.  Pre-fix, ripping a route whose
-                            # clearance envelope overlapped its OWN pads'
-                            # halo cells erased those cells outright
-                            # (blocked=False, net=0), after which foreign
-                            # nets could route straight through the halo
-                            # and ship sub-clearance copper.  Restore the
-                            # static owner instead of freeing.
-                            if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
-                                cell.net = cell.original_net
-                                self._update_congestion(nx, ny, layer_idx, delta=-1)
-                            else:
-                                cell.blocked = False
-                                cell.net = 0
-                                self._update_congestion(nx, ny, layer_idx, delta=-1)
+                        else:
+                            cell.blocked = False
+                            cell.net = 0
+                            self._update_congestion(nx, ny, layer_idx, delta=-1)
 
         def unmark_with_clearance_window(gx: int, gy: int) -> None:
             """Vectorised equivalent of ``unmark_with_clearance_cells``.
@@ -5276,13 +5402,21 @@ class RoutingGrid:
             for ``pad | owned`` exactly as the scalar path does, via the same
             ``_congestion_counted`` ledger, so a cell visited by overlapping
             clearance windows is still only debited once.
+
+            Issue #5660: masked by the same kernel-derived ``halo_mask`` the
+            mark side writes through, so rip-up releases exactly the cells
+            ``_mark_segment`` claimed and no more.
             """
-            ax, bx = max(0, gx - clearance_cells), min(self.cols, gx + clearance_cells + 1)
-            ay, by = max(0, gy - clearance_cells), min(self.rows, gy + clearance_cells + 1)
+            r = max(0, clearance_cells)
+            ax, bx = max(0, gx - r), min(self.cols, gx + r + 1)
+            ay, by = max(0, gy - r), min(self.rows, gy + r + 1)
             if ax >= bx or ay >= by:
                 return
-            pad = self._pad_blocked[layer_idx, ay:by, ax:bx]
-            owned = (self._net[layer_idx, ay:by, ax:bx] == seg.net) & ~pad
+            disc = halo_mask(clearance_cells)[
+                ay - (gy - r) : by - (gy - r), ax - (gx - r) : bx - (gx - r)
+            ]
+            pad = self._pad_blocked[layer_idx, ay:by, ax:bx] & disc
+            owned = (self._net[layer_idx, ay:by, ax:bx] == seg.net) & disc & ~pad
             affected = pad | owned
             if not affected.any():
                 return
@@ -5358,27 +5492,28 @@ class RoutingGrid:
         self._route_halo.record(self._route_halo.via_key(via), radius, False)
 
         static_blocked = self._static_blocked
+        # Issue #5660: same kernel-derived halo ``_mark_via`` stamped.
+        offsets = halo_offsets(radius)
         for layer_idx in range(self.num_layers):
-            for dy in range(-radius, radius + 1):
-                for dx in range(-radius, radius + 1):
-                    nx, ny = gx + dx, gy + dy
-                    if 0 <= nx < self.cols and 0 <= ny < self.rows:
-                        cell = self.cell_at(layer_idx, ny, nx)
-                        if cell.pad_blocked:
-                            # Don't unblock pad cells, just restore original net
+            for dx, dy in offsets:
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    cell = self.cell_at(layer_idx, ny, nx)
+                    if cell.pad_blocked:
+                        # Don't unblock pad cells, just restore original net
+                        cell.net = cell.original_net
+                        self._update_congestion(nx, ny, layer_idx, delta=-1)
+                    elif cell.net == via.net:
+                        # Issue #3545: restore static halo / keepout
+                        # cells instead of freeing them (see
+                        # ``_unmark_segment`` for rationale).
+                        if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
                             cell.net = cell.original_net
                             self._update_congestion(nx, ny, layer_idx, delta=-1)
-                        elif cell.net == via.net:
-                            # Issue #3545: restore static halo / keepout
-                            # cells instead of freeing them (see
-                            # ``_unmark_segment`` for rationale).
-                            if static_blocked is not None and static_blocked[layer_idx, ny, nx]:
-                                cell.net = cell.original_net
-                                self._update_congestion(nx, ny, layer_idx, delta=-1)
-                            else:
-                                cell.blocked = False
-                                cell.net = 0
-                                self._update_congestion(nx, ny, layer_idx, delta=-1)
+                        else:
+                            cell.blocked = False
+                            cell.net = 0
+                            self._update_congestion(nx, ny, layer_idx, delta=-1)
 
     def find_relief_conflict_nets(self, route: Route, net: int) -> set[int]:
         """Owner nets of foreign static cells conflicting with ``route``.
@@ -6415,6 +6550,12 @@ class RoutingGrid:
         ``(dx - r)**2 + (dy - r)**2 <= r**2``.  Cached per-radius on the
         grid instance so multiple ``_dilate_blocked`` calls within a
         single ``route()`` invocation (one per net) do not rebuild it.
+
+        Issue #5660 (Epic #5509 Phase 3a): the disc is now
+        :func:`halo_mask`'s -- the same kernel-derived structuring element
+        ``_mark_segment`` / ``_mark_via`` stamp with, so the read side
+        (this dilation) and the write side share one geometry instead of
+        two independently-written inequalities.  The set is unchanged.
         """
         cache = getattr(self, "_disc_kernel_cache", None)
         if cache is None:
@@ -6422,10 +6563,7 @@ class RoutingGrid:
             self._disc_kernel_cache = cache
         disc = cache.get(radius)
         if disc is None:
-            kernel_size = 2 * radius + 1
-            yy, xx = np.ogrid[:kernel_size, :kernel_size]
-            disc = ((xx - radius) ** 2 + (yy - radius) ** 2) <= radius * radius
-            disc = disc.astype(np.bool_)
+            disc = halo_mask(radius)
             cache[radius] = disc
         return disc
 
