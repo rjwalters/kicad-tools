@@ -16904,6 +16904,23 @@ def _run_main_impl(args, parser, argv) -> int:
                 return 1
 
     if cached_result is not None:
+        # Issue #5651: the routing-plan sidecar (Issue #5520) is normally
+        # built by ``_run_routing_plan_stage`` from INSIDE
+        # ``route_all_negotiated`` -- but a cache hit skips the entire
+        # routing dispatch (the ``else`` branch below, which is the only
+        # call site reached from this function), so that hook never ran
+        # and ``<stem>.routing_plan.json`` silently vanished from every
+        # cache-hit run even though an uncached run of the SAME board
+        # produces it.  Run the identical pre-route stage here, in the
+        # same relative position the skipped call would have used it from
+        # (before any cached copper is restored to the grid), so the plan
+        # is built from the same pristine pre-route state a cache MISS
+        # would see.  ``_run_routing_plan_stage`` already no-ops when
+        # ``--no-routing-plan`` is set and never touches ``router.grid``,
+        # so this cannot perturb the restored copper below.
+        router._prepare_routing()
+        router._run_routing_plan_stage()
+
         # Applying geometry can fail after partial mutation. Never turn that
         # into a fresh search with a contaminated grid or publish its copper.
         try:

@@ -1483,9 +1483,13 @@ def _normalized_copper(path: Path) -> str:
     return "\n".join(_copper_elements(path))
 
 
-def _route(pcb: Path, out: Path, *extra: str) -> None:
+def _route(
+    pcb: Path, out: Path, *extra: str, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ, PYTHONHASHSEED="0")
-    subprocess.run(
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
         [
             sys.executable,
             "-m",
@@ -1577,6 +1581,74 @@ def test_board_copper_unchanged_by_plan_stage(tmp_path, pcb_rel, extra):
         "test_deterministic_flags_make_the_route_reproducible is also red, "
         "fix the determinism protocol first; the comparison is meaningless "
         "while a stage-off route cannot reproduce itself."
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.timeout(600)
+def test_cache_hit_still_emits_routing_plan_sidecar(tmp_path):
+    """Regression test for Issue #5651.
+
+    A routing-cache HIT short-circuits ``Autorouter.route_all_negotiated``
+    entirely, and ``_run_routing_plan_stage`` (Issue #5520) was hooked
+    INSIDE that method -- so before the fix, a cache hit produced a route
+    with no ``<stem>.routing_plan.json`` sidecar (and no "Routing-plan
+    sidecar:" log line) even though the identical uncached run produced
+    both.  This is exactly the scenario that made
+    ``test_board_copper_unchanged_by_plan_stage`` order-dependent: whichever
+    param ran first warmed the cache for a later param routing the same
+    board.
+
+    Uses an isolated ``XDG_CACHE_HOME`` (Issue #5651 fix note: the routing
+    cache is a persistent SQLite db under the user's real cache directory
+    by default) so this test's cache state can neither leak into, nor be
+    polluted by, any other test or a developer's real cache.
+    """
+    pcb = REPO_ROOT / "boards/00-simple-led/output/simple_led.kicad_pcb"
+    cache_home = tmp_path / "xdg-cache"
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a = a_dir / "on.kicad_pcb"
+    b = b_dir / "on.kicad_pcb"
+
+    extra_env = {"XDG_CACHE_HOME": str(cache_home)}
+
+    # Issue #5651 root cause: the routing cache is only consulted on the
+    # NON-escalation single-shot path (``--no-auto-layers``) --
+    # ``route_with_layer_escalation`` (the ``--auto-layers`` default) never
+    # touches the ``RoutingCache`` at all, since one cached layer-count
+    # result must never silently satisfy a different layer-count attempt.
+    # ``--no-auto-layers`` is required here to exercise the cache-hit code
+    # path this test targets; it is also what the issue's own repro used.
+    first = _route(pcb, a, "--no-auto-layers", extra_env=extra_env)
+    assert "Cache MISS" in first.stdout, (
+        f"expected the first route into an isolated cache dir to MISS; stdout:\n{first.stdout}"
+    )
+    assert (a_dir / "on.routing_plan.json").exists(), (
+        f"cache-MISS run did not emit the routing-plan sidecar; stdout:\n{first.stdout}"
+    )
+
+    second = _route(pcb, b, "--no-auto-layers", extra_env=extra_env)
+    assert "Cache HIT" in second.stdout, (
+        "expected the second identical route (same pcb, flags and cache dir) "
+        f"to HIT the cache warmed by the first; stdout:\n{second.stdout}"
+    )
+    assert (b_dir / "on.routing_plan.json").exists(), (
+        "cache-HIT run must ALSO emit the routing-plan sidecar (Issue #5651) "
+        f"-- stdout:\n{second.stdout}"
+    )
+
+    # The plan stage now runs on the cache-HIT path too (before the cached
+    # copper is restored to the grid) -- confirm it is still the report-only
+    # no-op Epic #5510 Phase 1 requires: the HIT run's copper must match the
+    # MISS run's exactly.
+    assert _copper_elements(a), f"no copper parsed from {a} -- the instrument is broken"
+    assert _copper_elements(a) == _copper_elements(b), (
+        "cache-HIT copper differs from the cache-MISS copper it was restored "
+        "from -- running the routing-plan stage before grid restore must not "
+        "perturb the restored copper"
     )
 
 
