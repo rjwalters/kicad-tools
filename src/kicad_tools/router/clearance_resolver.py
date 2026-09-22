@@ -121,11 +121,14 @@ two arguments by construction:
    whose keys are already order-independent (sorted, ``/``-stripped).
 9. **Trace/via symmetry** -- when *either* side of the pair is a via, the
    requirement rises to ``via_clearance``.  This is the asymmetry #5398
-   recorded: ``DesignRules`` ships ``trace_clearance=0.15`` next to
-   ``via_clearance=0.20``, and consumers disagreed about which applied to a
-   trace-vs-via pair depending on which object they were called *about*.
-   Here it is a property of the unordered pair, so it cannot depend on
-   argument order.
+   recorded: ``kct route`` builds its ``DesignRules`` with
+   ``trace_clearance`` set from ``route_cmd.DEFAULT_ROUTE_CLEARANCE_MM``
+   (0.15mm) while ``via_clearance`` keeps the dataclass default of 0.20mm
+   (:mod:`kicad_tools.router.rules` ships *both* fields at 0.2 -- the 0.15
+   never comes from the dataclass), and consumers disagreed about which
+   applied to a trace-vs-via pair depending on which object they were called
+   *about*.  Here it is a property of the unordered pair, so it cannot depend
+   on argument order.
 
 Order symmetry
 --------------

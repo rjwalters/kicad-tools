@@ -6577,8 +6577,10 @@ def _decide_route_clearance(
             passed.
         declared: The board's own declared rules
             (:class:`~kicad_tools.router.clearance_resolver.DeclaredClearanceRules`),
-            or ``None`` when nothing was read (an explicit ``--clearance``
-            short-circuits the read).
+            or ``None`` when nothing was read.  Since #5656 the CLI reads them
+            on every invocation, including an explicit ``--clearance`` -- the
+            explicit value still wins, but the resolver needs the declared
+            rules to say so when it undercuts one.
 
     Returns:
         ``(value, source, banner, warning)``.  ``banner`` is ``None`` when no
@@ -6672,11 +6674,15 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
     explicit_clearance = _flag_passed_explicitly(argv, ("--clearance",))
     explicit_manufacturer = _flag_passed_explicitly(argv, ("--manufacturer", "--mfr"))
 
-    declared = None
-    if not explicit_clearance:
-        declared = read_declared_clearance_rules(
-            pcb_path, board_net_classes=_board_declared_net_classes(pcb_path)
-        )
+    # Read the board's declared rules unconditionally -- including when
+    # ``--clearance`` was passed (#5656).  The value is still the operator's
+    # (the resolver returns the explicit target untouched), but the resolver
+    # can only build its "explicit --clearance undercuts a declared rule"
+    # advisory when it has something to compare against; skipping the read on
+    # the explicit path made that warning unreachable from the shipped CLI.
+    declared = read_declared_clearance_rules(
+        pcb_path, board_net_classes=_board_declared_net_classes(pcb_path)
+    )
 
     value, source, banner, warning = _decide_route_clearance(
         clearance=float(getattr(args, "clearance", DEFAULT_ROUTE_CLEARANCE_MM)),

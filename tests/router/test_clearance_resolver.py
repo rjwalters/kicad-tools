@@ -105,8 +105,9 @@ def test_issue5398_resolves_to_020_for_every_pair_kind(kind_a, kind_b) -> None:
     """
     declared = read_declared_clearance_rules(ISSUE5398_PCB)
     base = resolve_base_clearance(target_mm=ROUTE_TARGET_MM, declared=declared)
-    # via_clearance is the DesignRules default (0.20) -- the same value #5398
-    # recorded next to trace_clearance=0.15, so no kind can drop below it.
+    # via_clearance is the DesignRules default (0.20) -- the value #5398
+    # recorded against the CLI's 0.15mm trace target, so no kind can drop
+    # below it.
     resolver = ClearanceResolver(ClearanceRuleSet(base=base, via_mm=0.20))
 
     required = resolver.required_mm(net_a="/SENSE_A", net_b="/GND", kind_a=kind_a, kind_b=kind_b)
@@ -163,6 +164,61 @@ def test_issue5398_explicit_clearance_still_wins_but_warns() -> None:
     assert resolved.source is RuleSource.EXPLICIT_TARGET
     assert resolved.warning is not None
     assert "0.2mm this board declares" in resolved.warning
+
+
+def test_issue5398_explicit_clearance_warns_through_the_route_cli(capsys) -> None:
+    """Issue #5656: the advisory above must reach the shipped CLI's stderr.
+
+    The case one line up exercises :func:`resolve_base_clearance` directly.
+    ``kct route`` used to skip reading the board's declared rules whenever
+    ``--clearance`` was passed, so ``declared`` reached the resolver as
+    ``None`` and the warning branch could never fire on the path an operator
+    actually runs -- the value was right and the advisory was silently lost.
+    """
+    from kicad_tools.cli.route_cmd import _resolve_route_clearance
+
+    args = SimpleNamespace(clearance=ROUTE_TARGET_MM, manufacturer="jlcpcb", quiet=True)
+    resolved = _resolve_route_clearance(
+        args,
+        ISSUE5398_PCB,
+        [str(ISSUE5398_PCB), "--clearance", str(ROUTE_TARGET_MM)],
+        quiet=True,
+    )
+
+    # The value is untouched: ``--clearance`` is still the one deliberate waiver.
+    assert resolved == pytest.approx(ROUTE_TARGET_MM)
+    assert args.clearance == pytest.approx(ROUTE_TARGET_MM)
+    assert args._clearance_rule_source == "flag"
+
+    captured = capsys.readouterr()
+    assert "WARNING: explicit --clearance" in captured.err
+    assert "0.2mm this board declares" in captured.err
+
+
+def test_explicit_clearance_at_or_above_the_declared_rule_stays_silent(capsys) -> None:
+    """No false positive: nothing is undercut, so nothing is warned about."""
+    from kicad_tools.cli.route_cmd import _resolve_route_clearance
+
+    above = ISSUE5398_REQUIRED_MM + 0.05
+    args = SimpleNamespace(clearance=above, manufacturer="jlcpcb", quiet=True)
+    resolved = _resolve_route_clearance(
+        args, ISSUE5398_PCB, [str(ISSUE5398_PCB), "--clearance", str(above)], quiet=True
+    )
+
+    assert resolved == pytest.approx(above)
+    assert capsys.readouterr().err == ""
+
+    # And on the exact tie, where the operator matched the board's own rule.
+    args = SimpleNamespace(clearance=ISSUE5398_REQUIRED_MM, manufacturer="jlcpcb", quiet=True)
+    resolved = _resolve_route_clearance(
+        args,
+        ISSUE5398_PCB,
+        [str(ISSUE5398_PCB), "--clearance", str(ISSUE5398_REQUIRED_MM)],
+        quiet=True,
+    )
+
+    assert resolved == pytest.approx(ISSUE5398_REQUIRED_MM)
+    assert capsys.readouterr().err == ""
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +397,12 @@ def _via_symmetry_resolver() -> ClearanceResolver:
 def test_a_via_on_either_side_raises_the_requirement(other) -> None:
     """#5398's trace-vs-via asymmetry, resolved once for the unordered pair.
 
-    ``DesignRules`` ships ``trace_clearance=0.15`` next to
-    ``via_clearance=0.20``; consumers disagreed about which applied depending
-    on which object they were called *about*.
+    ``kct route`` builds its ``DesignRules`` with ``trace_clearance`` set from
+    ``route_cmd.DEFAULT_ROUTE_CLEARANCE_MM`` (0.15mm) while ``via_clearance``
+    keeps the dataclass default of 0.20mm -- ``router/rules.py`` ships *both*
+    fields at 0.2, so the 0.15 is the CLI's target, never a ``DesignRules``
+    default.  Consumers disagreed about which of the two applied depending on
+    which object they were called *about*.
     """
     resolver = _via_symmetry_resolver()
 
