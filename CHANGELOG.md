@@ -116,6 +116,23 @@ deadline-kill fix, and CI/router performance recoveries.
   locally on `boards/06-diffpair-test --seed 42`: phase 4 ("Routing nets")
   831.1 s -> 550.0 s, the probe's own inclusive cost 112.3 s -> 10.7 s, and
   the routed artifacts byte-identical to the pre-change run.
+- Zone filling no longer launches `kicad-cli` twice in a row for the same
+  fill (Issue #5617). `run_fill_zones()` fills via
+  `kicad-cli pcb drc --refill-zones --save-board` — the only branch any
+  KiCad 8/9/10 takes, since `pcb fill-zones` does not exist — and then
+  handed that freshly filled, saved board straight to the post-fill thermal
+  remediation pass, whose pass 0 opened by running *the same command again*
+  against a file nothing had touched in between. That second launch is now
+  skipped in exactly the case where the caller can prove it redundant (the
+  DRC-fallback branch **and** `--refill-zones` support); the native
+  `fill-zones` branch, a kicad-cli whose DRC lacks `--refill-zones`, and
+  every remediation pass after 0 — where `force_solid_on_pads_by_uuid` has
+  actually mutated the board and the refill is load-bearing — all keep the
+  original unconditional refill. Real `kicad-cli` launches per
+  `run_fill_zones()` call drop from 3 to 2, reproduced across three sessions
+  and three source revisions, with all 13 filled boards byte-identical
+  (`54af132f…6065`). The Diff-Pair regression job makes five such calls
+  (phases `9b`, `10c`x2, `12b`, `13b` — 105.4 s / 16.2 % of the step).
 
 ### Changed
 
