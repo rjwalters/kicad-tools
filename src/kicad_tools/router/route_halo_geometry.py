@@ -37,6 +37,9 @@ class RouteHaloGeometry:
         self.grid = grid
         self.marks: Counter[tuple] = Counter()
         self._generation = -1
+        #: Monotone token bumped on every actual rebuild in :meth:`_refresh`
+        #: (issue #5617).  See :attr:`state_version`.
+        self._version = 0
         self._complete = False
         self._cells = np.zeros((0, 0, 0), dtype=np.int32)
         self._objects: list[tuple] = []
@@ -76,6 +79,7 @@ class RouteHaloGeometry:
         if self._generation == self.grid.occupancy_generation:
             return
         self._generation = self.grid.occupancy_generation
+        self._version += 1
         self._objects = []
         self._bounds = []
         self._bins.clear()
@@ -133,6 +137,26 @@ class RouteHaloGeometry:
     def complete(self) -> bool:
         self._refresh()
         return self._complete
+
+    @property
+    def state_version(self) -> int:
+        """Monotone token identifying the geometry :meth:`clear` will read.
+
+        Issue #5617.  :meth:`clear`'s verdict is a pure function of its
+        arguments, the router's (per-route constant) rule configuration, and
+        the snapshot ``_refresh`` rebuilds -- ``_objects`` / ``_bounds`` /
+        ``_bins`` / ``_cells`` / ``marks``.  That snapshot is rebuilt exactly
+        when ``_refresh`` observes a new ``grid.occupancy_generation`` or the
+        ``-1`` sentinel :meth:`record` writes, so a caller that memoises a
+        ``clear`` verdict can key on this token and be certain a stale entry
+        is never served: any ``record`` or grid-occupancy change between two
+        reads forces a rebuild, and every rebuild bumps the counter.
+
+        Reading it refreshes first, so the token a caller sees is the one the
+        immediately-following ``clear`` call will itself use.
+        """
+        self._refresh()
+        return self._version
 
     def cell_known(self, x: int, y: int, layer: int) -> bool:
         grid = self.grid
