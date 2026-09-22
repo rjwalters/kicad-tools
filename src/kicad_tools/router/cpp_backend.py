@@ -1413,6 +1413,28 @@ class CppPathfinder:
         # via ``fallback_stats['resume_diagnostics']``.
         self._resume_diagnostics: dict[str, dict] = {}
 
+        # Issue #5617: aggregate wall-clock attribution for the post-route
+        # clearance-validation resume loop and the Python fallback it can
+        # trigger.  Pure timing telemetry (no search/threshold behaviour
+        # changes) -- added to answer the issue's own question ("are the
+        # exhausted resume attempts genuinely converging, or is this time
+        # provably thrown away?") with a whole-board measurement instead of
+        # the single hand-picked net a prior profiling pass inspected.
+        # ``_resume_loop_exhausted_seconds`` sums the wall time spent inside
+        # ``_route_impl``'s resume loop for every net that burned the full
+        # ``max_resume_attempts`` budget before falling back (the "gave up"
+        # path) -- that entire span's search work is discarded.
+        # ``_python_fallback_seconds_by_reason`` sums the wall time spent in
+        # ``_try_python_fallback`` itself, bucketed by whether the fallback
+        # was triggered by resume-loop exhaustion (bucket
+        # ``"resume_exhaustion"``, matching the ``"resume attempts"``
+        # substring check already used at the #3923 short-circuit site) or by
+        # any other reason (bucket ``"other"``).  Both reset per
+        # ``CppPathfinder`` instance (i.e. per board route), matching the
+        # existing ``_fallback_count`` / ``_resume_diagnostics`` lifetime.
+        self._resume_loop_exhausted_seconds: float = 0.0
+        self._python_fallback_seconds_by_reason: dict[str, float] = {}
+
         # Issue #3545: lazy cache for ``compute_component_pitches`` used
         # by the net-aware same-component carve-out gate in
         # ``_same_component_carveout_eligible``.
@@ -2488,6 +2510,12 @@ class CppPathfinder:
             iterations_spent_prior = 0
             last_violation_cell: tuple[int, int] | None = None
             site_repeat_run = 0
+            # Issue #5617: wall-clock start of this net's resume loop, so an
+            # exhausted run (below) can attribute its span to
+            # ``_resume_loop_exhausted_seconds``.  Pure measurement -- read
+            # once here and once at the exhaustion exit, never compared
+            # against a budget.
+            _resume_loop_t0 = time.monotonic()
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, end, net_class)
 
@@ -2611,6 +2639,15 @@ class CppPathfinder:
                     )
                     resume_attempts[-1]["strategy"] = "exhausted"
                     resume_attempts[-1]["boost_amount"] = boost_amount
+                    # Issue #5617: attribute this net's ENTIRE resume-loop
+                    # span (every attempt above, all discarded once the
+                    # Python fallback takes over) to the aggregate.  Recorded
+                    # on the per-attempt dict too so a caller inspecting one
+                    # net's ``resume_diagnostics`` entry does not need the
+                    # pathfinder-level aggregate for a single-net answer.
+                    _resume_loop_seconds = time.monotonic() - _resume_loop_t0
+                    resume_attempts[-1]["resume_loop_seconds"] = _resume_loop_seconds
+                    self._resume_loop_exhausted_seconds += _resume_loop_seconds
                     self._resume_diagnostics[start.net_name] = {
                         "attempts": resume_attempts,
                         "exhausted": True,
@@ -4017,6 +4054,17 @@ class CppPathfinder:
         )
         dt = time.monotonic() - t0
 
+        # Issue #5617: aggregate this fallback's wall time by WHY it ran --
+        # ``_resume_exhausted`` (computed above) is the exact "case 1"
+        # substring test the #3923 short-circuit already uses, so the
+        # bucketing is consistent with that guard's own classification
+        # rather than a new, possibly-drifting heuristic.  Pure
+        # measurement: does not affect ``route`` or control flow.
+        _fallback_bucket = "resume_exhaustion" if _resume_exhausted else "other"
+        self._python_fallback_seconds_by_reason[_fallback_bucket] = (
+            self._python_fallback_seconds_by_reason.get(_fallback_bucket, 0.0) + dt
+        )
+
         if route is not None:
             self._fallback_count += 1
             self._fallback_nets.append(net_name)
@@ -4073,6 +4121,25 @@ class CppPathfinder:
                   record carries the per-attempt violation kind + location
                   and the rejected goal cell, plus ``exhausted`` /
                   ``resume_failed`` markers for how the loop ended.
+                - resume_loop_exhausted_seconds: Issue #5617.  Summed
+                  wall-clock time spent inside the post-route
+                  clearance-validation resume loop (all attempts) across
+                  every net whose loop burned the full ``max_resume_attempts``
+                  budget before handing off to the Python fallback -- i.e.
+                  work that is provably discarded (a search that never
+                  produced a committed route). ``0.0`` when no net exhausted
+                  its resume budget this run.
+                - python_fallback_seconds_by_reason: Issue #5617.  Summed
+                  wall-clock time spent inside ``_try_python_fallback``
+                  itself, bucketed under ``"resume_exhaustion"`` (the fallback
+                  was triggered by the case-1 clearance-exhaustion path this
+                  issue profiles -- the same ``"resume attempts" in reason``
+                  test the #3923 short-circuit uses) or ``"other"`` (every
+                  other fallback trigger: initial-search dead end,
+                  resume-after-rejected-goal-cell failure, etc).  Distinct
+                  from ``resume_loop_exhausted_seconds`` -- that aggregate is
+                  the discarded C++ search time *before* the fallback is
+                  even invoked; this one is the fallback's own run time.
         """
         return {
             "fallback_count": self._fallback_count,
@@ -4085,6 +4152,8 @@ class CppPathfinder:
                 }
                 for net, record in self._resume_diagnostics.items()
             },
+            "resume_loop_exhausted_seconds": self._resume_loop_exhausted_seconds,
+            "python_fallback_seconds_by_reason": dict(self._python_fallback_seconds_by_reason),
         }
 
     @property
