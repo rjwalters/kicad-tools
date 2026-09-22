@@ -19,6 +19,7 @@ from .layers import Layer, LayerStack
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
 
+    from .clearance_resolver import ClearanceResolver
     from .pairwise_clearance import PairwiseClearanceTable
 
 logger = logging.getLogger(__name__)
@@ -460,6 +461,49 @@ class DesignRules:
         if pairwise is not None:
             clearances.append(pairwise.max_required_clearance())
         return max(clearances)
+
+    def clearance_resolver(
+        self,
+        net_classes: "Mapping[str, NetClassRouting] | None" = None,
+    ) -> "ClearanceResolver":
+        """The one clearance-rule resolver for these design rules (#5645).
+
+        Epic #5509 Phase 2.  Every clearance requirement these rules imply --
+        the scalar :attr:`trace_clearance` base, the trace/via
+        :attr:`via_clearance` asymmetry, the per-class
+        :attr:`NetClassRouting.clearance` overrides and the #4431
+        :attr:`pairwise_clearance` matrix -- is composed by
+        :class:`~kicad_tools.router.clearance_resolver.ClearanceResolver` in
+        one deterministic, order-symmetric precedence rather than re-derived
+        at each call site.
+
+        Construct it **once** per run (it is cheap, but re-deriving it in a
+        hot loop is not) and query it per pair::
+
+            resolver = rules.clearance_resolver(net_class_map)
+            required = resolver.required_mm(
+                net_a="/HV", net_b="/GND", kind_b=CopperKind.VIA
+            )
+
+        Nothing in the shipped search or validation path calls this yet:
+        search-time consumers move onto it in Phase 3 and post-route
+        consumers in Phase 4.  ``kct route``'s board-wide base already
+        resolves through the same module
+        (:func:`~kicad_tools.router.clearance_resolver.resolve_base_clearance`,
+        via ``cli/route_cmd.py``), so :attr:`trace_clearance` is already the
+        project-DRU-aware value by the time it reaches here.
+
+        Args:
+            net_classes: ``{net_name: NetClassRouting}`` as
+                :func:`create_net_class_map` produces it.  ``None`` omits the
+                per-class layer entirely.
+
+        Returns:
+            The resolver.
+        """
+        from .clearance_resolver import ClearanceResolver, ClearanceRuleSet
+
+        return ClearanceResolver(ClearanceRuleSet.from_design_rules(self, net_classes=net_classes))
 
     def stitch_via_halo_radius(self) -> float:
         """Return the foreign-net clearance halo to reserve around plane-net pads.
