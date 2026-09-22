@@ -182,21 +182,61 @@ def test_fleet_board_declares_no_legacy_net_class(board_dir: str, stem: str, _ex
 
 
 #: Which precedence layer each fleet board's resolution is attributed to
-#: (issue #5645).  The *value* is 0.15mm for every board either way; boards
-#: 06 and 07 additionally declare a ``.kicad_pro`` board minimum equal to that
-#: target, so the unified resolver names that layer rather than the bare
-#: default.  Boards 05 / 07 route from historical fixtures with no sibling
-#: project file, so nothing is declared for them at all.
+#: (issues #5645, #5654).  The *value* is 0.15mm for every board however it is
+#: attributed -- every assertion in this file depends on that, not on the
+#: token.  What the token records is which declaration the resolver credited:
+#:
+#: * ``project-net-class`` -- boards 00-04 declare a ``.kicad_pro`` ``Default``
+#:   netclass at the route target.  #5654 made the project writer emit the
+#:   clearance the board is actually routed at instead of KiCad's stock 0.20mm
+#:   template value, and promoted the field to a resolver floor; before that
+#:   these boards declared nothing the resolver would read and resolved as
+#:   ``default``.
+#: * ``project-min-clearance`` -- board 06 additionally declares a board
+#:   minimum equal to that target, and the board minimum outranks the netclass
+#:   on an exact tie (``RuleSource`` declaration order).
+#: * ``default`` -- boards 05 / 07 route from historical fixtures with no
+#:   sibling project file at all, so nothing is declared for them.
 FLEET_RULE_SOURCE: dict[str, str] = {
-    "00-simple-led": "default",
-    "01-voltage-divider": "default",
-    "02-charlieplex-led": "default",
-    "03-usb-joystick": "default",
-    "04-stm32-devboard": "default",
+    "00-simple-led": "project-net-class",
+    "01-voltage-divider": "project-net-class",
+    "02-charlieplex-led": "project-net-class",
+    "03-usb-joystick": "project-net-class",
+    "04-stm32-devboard": "project-net-class",
     "05-bldc-motor-controller": "default",
     "06-diffpair-test": "project-min-clearance",
     "07-matchgroup-test": "default",
 }
+
+
+#: No fleet board may declare KiCad's stock 0.20mm template netclass (#5654).
+#: That value is what made the field unreadable as a rule in the first place;
+#: if one comes back, the floor above starts re-spacing a board for a
+#: statement nobody made.
+_STOCK_KICAD_TEMPLATE_CLEARANCE_MM = 0.2
+
+
+@pytest.mark.parametrize("board_dir,stem,_expected", FLEET)
+def test_fleet_board_declares_no_stock_template_netclass(
+    board_dir: str, stem: str, _expected: bool
+) -> None:
+    """Issue #5654: the promoted netclass floor must never be a template default."""
+    from kicad_tools.router.clearance_resolver import read_declared_clearance_rules
+
+    pcb = _input_pcb(board_dir, stem)
+    if not pcb.exists():
+        pytest.skip(f"input PCB not committed: {pcb}")
+
+    declared = read_declared_clearance_rules(pcb)
+    if declared.net_class_clearance_mm is None:
+        return  # no sibling project file (boards 05 / 07 historical fixtures)
+
+    assert declared.net_class_clearance_mm != _STOCK_KICAD_TEMPLATE_CLEARANCE_MM, (
+        f"{board_dir} declares KiCad's stock 0.20mm Default netclass. Since "
+        "#5654 that value is a resolver floor, so it would re-space the board "
+        "away from the 0.15mm default every assertion here is keyed to."
+    )
+    assert declared.net_class_clearance_mm <= ROUTE_DEFAULT_CLEARANCE
 
 
 @pytest.mark.parametrize("board_dir,stem,_expected", FLEET)

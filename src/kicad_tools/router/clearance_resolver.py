@@ -39,21 +39,31 @@ them, every one of them a track-vs-via record where the two consumers also
 disagreed about whether ``trace_clearance`` or ``via_clearance`` applied
 (step 9 below).
 
-What is deliberately **not** read
----------------------------------
-``.kicad_pro`` ``net_settings.classes[].clearance``.  KiCad's stock project
-template ships ``Default`` at ``0.20`` mm and every project this repo
-generates inherits it verbatim, so it is a template default rather than a
-statement about the board: promoting it to a hard requirement re-spaces the
-whole demo fleet for no DRC benefit (the fleet's *routed* project and
-``.kicad_dru`` are rewritten from the fab tier, which is what the final gate
-measures).  Measured on board 04 at ``--mfr jlcpcb-tier1``: honouring it
-moved the post-route violation count from 24 to 28 while connecting the same
-9/9 nets.  ``rules.min_clearance`` / ``defaults.clearance_min`` do **not**
-have that problem -- KiCad leaves them unset unless a board states them, and
-they are set on exactly the boards that mean them (05, 06, 07, and the
-``#5398`` fixture).  Promoting the netclass is tracked in #5654; it needs the
-project writer to emit the clearance the board is actually routed at first.
+The project netclass, and why it took two steps (#5654)
+-------------------------------------------------------
+``.kicad_pro`` ``net_settings.classes[].clearance`` is the value KiCad's own
+``clearance`` DRC test measures a copper-to-copper violation against, so a
+board routed below it fails its own gate.  Phase 2 nonetheless shipped
+without reading it: KiCad's stock project template ships ``Default`` at
+``0.20`` mm and every project this repo wrote inherited it verbatim, making
+the field a *template default* rather than a statement about the board.
+Honouring it then would have re-spaced the whole demo fleet for no DRC
+benefit -- measured on board 04 at ``--mfr jlcpcb-tier1``, the post-route
+violation count moved from 24 to 28 while connecting the same 9/9 nets.
+
+#5654 closed that gap from the writer end first: ``core/project_file.py``
+now emits ``DEFAULT_NETCLASS_CLEARANCE_MM`` (the ``kct route`` target the
+board is actually routed at, ``0.15`` mm) rather than the stock ``0.20`` mm,
+and the manufacturer-profile rewrite path has always emitted the fab tier's
+own floor (``manufacturers/project_generator.build_default_netclass``).  With
+the field carrying information, it is read here -- as a **floor**, on exactly
+the same "raise, never replace" footing as ``rules.min_clearance``
+(:attr:`DeclaredClearanceRules.net_class_clearance_mm`), which is what keeps
+a board that declares *less* than the router's target from being loosened.
+
+What is still deliberately **not** read: ``.kicad_dru`` rules carrying a
+``(condition …)`` (see :attr:`DeclaredClearanceRules.dru_mm`), and KiCad's
+``physical_clearance`` constraint, which is a different rule family.
 
 Precedence
 ----------
@@ -71,9 +81,11 @@ deterministic order.  ``target_mm`` is the router's own spacing target
    never writes it, so only pre-6 imports reach this layer.
 3. The **project-derived minima** then apply as ``max`` floors, never as
    replacements: the board's ``.kicad_dru`` unconditional
-   ``(constraint clearance (min …))``, and the ``.kicad_pro`` board minimum
+   ``(constraint clearance (min …))``, the ``.kicad_pro`` board minimum
    (``design_settings.rules.min_clearance``, or the ``defaults.clearance_min``
-   KiCad writes alongside it).  Both layers are new in Phase 2, and both are
+   KiCad writes alongside it), and the applied ``.kicad_pro`` netclass
+   (``net_settings.classes[].clearance``, added by #5654 -- see "The project
+   netclass" above).  The first two layers are new in Phase 2; all three are
    *minima* in KiCad's own model, which is why they can only raise the
    requirement: flooring rather than replacing is what keeps a board whose
    project declares **less** than the router's target from being silently
@@ -189,6 +201,7 @@ class RuleSource(Enum):
     PROJECT_DRU = "project-dru"
     BOARD_NET_CLASS = "board-net-class"
     PROJECT_MIN_CLEARANCE = "project-min-clearance"
+    PROJECT_NET_CLASS = "project-net-class"
     FAB_FLOOR = "fab-floor"
     MANUFACTURER_OVERRIDE = "manufacturer-override"
     TARGET_DEFAULT = "target-default"
@@ -228,6 +241,17 @@ class DeclaredClearanceRules:
             ``design_settings.defaults.clearance_min``) -- KiCad's hard board
             minimum, which clamps every netclass upward.  This is the layer
             the ``#5398`` board declares ``0.20`` mm in.
+        net_class_clearance_mm: The applied ``.kicad_pro``
+            ``net_settings.classes[].clearance`` -- ``Default`` when the
+            project declares one, else the strictest named class (see
+            :func:`strictest_net_class_clearance`).  This is the value KiCad's
+            own ``clearance`` DRC test measures a copper-to-copper violation
+            against, so a board routed below it fails its own DRC gate.
+            Promoted to a rule input by #5654, once the project writer stopped
+            emitting KiCad's stock ``0.20`` mm template value for it (see
+            ``core/project_file.py:DEFAULT_NETCLASS_CLEARANCE_MM``); before
+            that it carried no information on this repo's own fleet.
+        net_class_name: The class :attr:`net_class_clearance_mm` came from.
         board_net_class_mm: Strictest positive clearance across the legacy
             top-level ``(net_class …)`` blocks of the ``.kicad_pcb`` (#4875).
         board_net_class_name: The class :attr:`board_net_class_mm` came from.
@@ -235,6 +259,8 @@ class DeclaredClearanceRules:
 
     dru_mm: float | None = None
     project_min_clearance_mm: float | None = None
+    net_class_clearance_mm: float | None = None
+    net_class_name: str | None = None
     board_net_class_mm: float | None = None
     board_net_class_name: str | None = None
 
@@ -242,9 +268,12 @@ class DeclaredClearanceRules:
         """The winning **project-derived** minimum, or ``None`` when there is none.
 
         Precedence within this layer: the ``.kicad_dru`` rule when the board
-        ships one, otherwise :attr:`project_min_clearance_mm`; whichever
-        applies is then raised by the other if the other is stricter, since
-        both are minima and KiCad enforces both.
+        ships one, then :attr:`project_min_clearance_mm`, then
+        :attr:`net_class_clearance_mm`.  Whichever applies is raised by any
+        other that is stricter -- all three are minima and KiCad enforces all
+        three, so the largest wins and the declaration order above is only the
+        tie-break (it matches :class:`RuleSource`'s own order, which is what
+        keeps provenance stable across runs).
 
         Every source here is a *minimum* in KiCad's own model, which is why
         :func:`resolve_base_clearance` applies the result as a **floor** on
@@ -259,11 +288,15 @@ class DeclaredClearanceRules:
         if self.dru_mm is not None:
             winner = (self.dru_mm, RuleSource.PROJECT_DRU, None)
 
-        floor = self.project_min_clearance_mm
-        if floor is None or floor <= 0:
-            return winner
-        if winner is None or floor > winner[0] + RESOLVER_TIE_EPSILON_MM:
-            return (floor, RuleSource.PROJECT_MIN_CLEARANCE, None)
+        candidates: tuple[tuple[float | None, RuleSource, str | None], ...] = (
+            (self.project_min_clearance_mm, RuleSource.PROJECT_MIN_CLEARANCE, None),
+            (self.net_class_clearance_mm, RuleSource.PROJECT_NET_CLASS, self.net_class_name),
+        )
+        for value, source, label in candidates:
+            if value is None or value <= 0:
+                continue
+            if winner is None or value > winner[0] + RESOLVER_TIE_EPSILON_MM:
+                winner = (value, source, label)
         return winner
 
     def board_requirement(self) -> tuple[float, RuleSource, str | None] | None:
@@ -614,24 +647,32 @@ def strictest_net_class_clearance(
     return min(candidates, key=lambda item: (item[1], item[0]))
 
 
-def _read_project_minimum(project_path: Path) -> float | None:
-    """The ``.kicad_pro`` board minimum clearance, or ``None``.
+def _read_project_clearances(
+    project_path: Path,
+) -> tuple[float | None, tuple[str, float] | None]:
+    """Both ``.kicad_pro`` clearance layers, from one read of the file.
 
-    Reads ``board.design_settings.rules.min_clearance``, falling back to the
-    ``board.design_settings.defaults.clearance_min`` KiCad writes beside it.
+    Returns ``(board_minimum_mm, (net_class_name, net_class_mm))``, either
+    half ``None`` when the project does not declare it:
+
+    * the board minimum is ``board.design_settings.rules.min_clearance``,
+      falling back to the ``board.design_settings.defaults.clearance_min``
+      KiCad writes beside it;
+    * the netclass is ``net_settings.classes[]``, resolved by
+      :func:`strictest_net_class_clearance` (``Default`` wins when present).
+      This is what KiCad's own ``clearance`` DRC test measures against, and
+      is a rule input since #5654 -- see :class:`DeclaredClearanceRules`.
+
     Rule derivation is an enhancement, never a new failure mode: an
-    unreadable or malformed project yields ``None`` and the caller falls back
-    to the router's own target.
-
-    ``net_settings.classes`` is deliberately not consulted -- see the module
-    docstring's "What is deliberately not read".
+    unreadable or malformed project yields ``(None, None)`` and the caller
+    falls back to the router's own target.
     """
     try:
         data = json.loads(project_path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return None
+        return (None, None)
     if not isinstance(data, dict):
-        return None
+        return (None, None)
 
     minimum: float | None = None
     board = data.get("board")
@@ -646,7 +687,34 @@ def _read_project_minimum(project_path: Path) -> float | None:
                 if candidate is not None and candidate > 0:
                     minimum = candidate if minimum is None else max(minimum, candidate)
 
-    return minimum
+    return (minimum, _project_net_class(data))
+
+
+def _project_net_class(data: dict) -> tuple[str, float] | None:
+    """The applied ``net_settings.classes[]`` clearance of a parsed project.
+
+    KiCad stores the classes as a *list* of objects each carrying its own
+    ``name``; :func:`strictest_net_class_clearance` takes a name-keyed
+    mapping, so the list is re-keyed here.  A malformed or classless
+    ``net_settings`` contributes nothing.
+    """
+    net_settings = data.get("net_settings")
+    if not isinstance(net_settings, dict):
+        return None
+    classes = net_settings.get("classes")
+    if not isinstance(classes, list):
+        return None
+    by_name: dict[str, object] = {}
+    for entry in classes:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        by_name[name] = entry
+    if not by_name:
+        return None
+    return strictest_net_class_clearance(by_name)
 
 
 def _read_dru_clearance(dru_path: Path) -> float | None:
@@ -739,7 +807,7 @@ def read_declared_clearance_rules(
     """
     path = Path(pcb_path)
 
-    project_minimum = _read_project_minimum(path.with_suffix(".kicad_pro"))
+    project_minimum, project_net_class = _read_project_clearances(path.with_suffix(".kicad_pro"))
     dru_mm = _read_dru_clearance(path.with_suffix(".kicad_dru"))
 
     board_net_class = (
@@ -749,6 +817,8 @@ def read_declared_clearance_rules(
     return DeclaredClearanceRules(
         dru_mm=dru_mm,
         project_min_clearance_mm=project_minimum,
+        net_class_clearance_mm=project_net_class[1] if project_net_class else None,
+        net_class_name=project_net_class[0] if project_net_class else None,
         board_net_class_mm=board_net_class[1] if board_net_class else None,
         board_net_class_name=board_net_class[0] if board_net_class else None,
     )
