@@ -52,7 +52,7 @@ from __future__ import annotations
 
 from tests.conformance.adapters import KIND_CLEARANCE, KIND_HOLE_TO_HOLE, Verdict
 from tests.conformance.adapters._support import layer_indexer, router_cpp_module
-from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec, ViaSpec
+from tests.conformance.generator import CopperCase, PadSpec, PairKind, SegmentSpec, ViaSpec
 
 __all__ = ["KERNEL_GROUP", "KernelAdapter"]
 
@@ -65,10 +65,22 @@ class KernelAdapter:
 
     name = "clearance_kernel"
     group = KERNEL_GROUP
-    #: Every kind the generator places.  The kernel has no notion of "which
-    #: object existed first" -- that absence is the fix for #5398 -- and no
-    #: shape it cannot express, so there is nothing to narrow.
-    pair_kinds = frozenset({"seg-seg", "seg-via", "via-via", "pad-seg", "pad-via", "pad-pad"})
+    #: Every *copper-to-copper* kind the generator places.  The kernel has no
+    #: notion of "which object existed first" -- that absence is the fix for
+    #: #5398 -- and no copper shape it cannot express, so there is nothing to
+    #: narrow there.
+    #:
+    #: The #5644 zone and edge kinds are out of scope, and deliberately so.
+    #: The kernel *does* carry ``KZonePoly`` / ``KEdge`` shapes (they are
+    #: exercised by ``test_clearance_kernel_parity.py``), but this row's job is
+    #: to answer one question -- can one exact-geometry model agree with
+    #: kicad-cli? -- against *the same copper the consumers are scored on*.
+    #: Scoring it on a pour would mean modelling the pour as its declared
+    #: boundary while kicad-cli measures the *filled* polygon, so a
+    #: disagreement would be the harness's fiction rather than a kernel bug.
+    #: Widening this set needs a fill-aware kernel shape first; the control
+    #: row's 0 %/0 % criterion is not a licence to guess.
+    pair_kinds = frozenset({*PairKind.ROUTING, PairKind.PAD_PAD})
 
     def available(self) -> bool:
         return True
@@ -84,6 +96,11 @@ class KernelAdapter:
         found: set[Verdict] = set()
 
         for pair in case.pairs:
+            if pair.kind not in self.pair_kinds:
+                # A zone or edge pair: one side is not a declared copper
+                # object, so there is nothing in ``by_net`` to shape.  Out of
+                # this row's scope -- see ``pair_kinds``.
+                continue
             a = _kernel_shape(ck, by_net[pair.net_a], layer_index)
             b = _kernel_shape(ck, by_net[pair.net_b], layer_index)
 

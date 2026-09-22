@@ -77,6 +77,7 @@ from tests.conformance.board import write_case
 from tests.conformance.generator import (
     BOUNDARY_BAND_MM,
     CopperCase,
+    PairKind,
     generate_corpus,
     parse_seed_range,
 )
@@ -377,9 +378,17 @@ NOTES: dict[int, str] = {
         "pairs only -- `is_clear(a, b)` takes two points and no width, and a "
         "committed via is not in this model at all (`_route_via_injection` "
         "handles those). `fixed_fills` left `None`: group 6 already measures "
-        "`FixedFillObstacles` on both its halves. **Not measured**: the `pours` "
-        "zone branch and the `outline` containment branch need a zone and an "
-        "edge pair kind, which the generator does not place -- tracked as #5644."
+        "`FixedFillObstacles` on both its halves. The `pours` branch is driven "
+        "by `seg-zone` pairs (pour outlines, verbatim, as `_route_obstacles` "
+        "passes them) and the `outline` branch by `copper-edge` pairs (#5644); "
+        "both are pure containment tests with **no clearance term**, so a leg "
+        "that merely comes close to a pour or to `Edge.Cuts` is accepted and "
+        "the under-rejection on those kinds is the consumer's own arithmetic. "
+        "In production the engine keeps legs off the outline through the "
+        "navmesh triangulation rather than through this predicate. "
+        "**Not measured**: `via-zone`, excluded for the same reason `seg-via` "
+        "is -- `is_clear(a, b)` takes two points and no width, so a via "
+        "candidate has no call to make."
     ),
     11: (
         "`via_clearance.py`'s four pure predicates. **Not measured**: "
@@ -426,11 +435,18 @@ NOTES: dict[int, str] = {
     18: (
         "Exact polygon pad model -- the other half of `roundrect-corner-gap`. "
         "One scalar `min_clearance_mm` for every pair, so it cannot reproduce "
-        "groups 12/13's order asymmetry. **Not measured**: "
-        "`SegmentZoneClearanceRule` / `ViaZoneClearanceRule` / "
-        "`physical_gap.py` / `EdgeClearanceRule` need a zone and an edge pair "
-        "kind on refilled runs, which the generator does not place -- tracked "
-        "as #5644."
+        "groups 12/13's order asymmetry. Five entry points driven as "
+        "`validate/checker.py` registers them: `ClearanceRule`, "
+        "`EdgeClearanceRule` (on `copper-edge` pairs), "
+        "`SegmentZoneClearanceRule` / `ViaZoneClearanceRule` and "
+        "`physical_gap.py`'s `check_physical_copper_gap` (on `seg-zone` / "
+        "`via-zone` pairs) -- the last three read committed `filled_polygon` "
+        "copper, so this row **refills the board** (`kicad-cli pcb drc "
+        "--refill-zones`) on every case that carries a pour and its zone cells "
+        "are scored on the refilled run only (#5644). A fresh fill is backed "
+        "off from foreign copper by the applied clearance, so a zone pair can "
+        "only be placed above the threshold: those pairs can show "
+        "over-rejection and cannot show under-rejection."
     ),
     19: (
         "Every pad is a disc of `max(w, h) / 2` "
@@ -829,13 +845,36 @@ def render_document(
         "the threshold -- otherwise the corpus would almost never probe the "
         "boundary and every rate below would be vacuously zero.",
         "",
-        "Six pair kinds are placed: `seg-seg`, `seg-via`, `via-via`, "
-        "`pad-seg`, `pad-via` and `pad-pad`. The first five each have a "
-        "*routing candidate* -- a segment or a via a router could propose -- "
-        "and are what the router-side rows are scored on. `pad-pad` has none "
-        "(both sides are placement copper) and exists for group 19, the "
-        "incremental placement DRC, whose entry point takes two whole "
-        "footprints and can answer nothing else.",
+        "Nine pair kinds are placed: `seg-seg`, `seg-via`, `via-via`, "
+        "`pad-seg`, `pad-via`, `pad-pad`, `seg-zone`, `via-zone` and "
+        "`copper-edge`. The first five each have a *routing candidate* -- a "
+        "segment or a via a router could propose -- and are what the "
+        "router-side rows are scored on. `pad-pad` has none (both sides are "
+        "placement copper) and exists for group 19, the incremental placement "
+        "DRC, whose entry point takes two whole footprints and can answer "
+        "nothing else.",
+        "",
+        "The last three exist for the board features a consumer routes "
+        "*around* rather than proposes. `seg-zone` / `via-zone` place copper "
+        "at a known gap outside the pour boundary and are scored **only on "
+        "the refilled run**: an unfilled pour contributes no copper to KiCad "
+        "at all, so a zone verdict from an unrefilled run would measure the "
+        "fill state instead of the clearance model. `copper-edge` places a "
+        "track at a known gap inside `Edge.Cuts` and pairs it with the "
+        "`<board-edge>` pseudo-net, the same key the oracle gives a one-sided "
+        "`copper_edge_clearance` row.",
+        "",
+        "**Zone pairs are drawn above the requirement, and that is KiCad's "
+        "property rather than the generator's choice.** A freshly refilled "
+        "pour is backed off from every piece of foreign copper by the applied "
+        "clearance (measured at 0.2005 mm for a 0.20 mm netclass on "
+        "kicad-cli 10, independent of the zone's own local clearance value), "
+        "so fill copper can never be closer than the requirement and a "
+        "sub-threshold zone pair does not exist on a refilled board. "
+        "Manufacturing one would need a stale fill, which measures the fill. "
+        "Zone rows can therefore show over-rejection and cannot show "
+        "under-rejection; `copper-edge` has no such restriction and probes "
+        "both sides.",
         "",
         "This document regenerates byte-identically from its seed range: "
         "`uv run python -m tests.conformance.report --seeds "
@@ -977,6 +1016,12 @@ def measure_corpus(
             verdict_cache: dict[str, set[frozenset[str]]] = {}
             for case, result in results:
                 truth = {v.nets for v in result.without_zones()}
+                # Zone verdicts are only meaningful against a fresh fill, so
+                # they are read from the refilled run and only from there
+                # (#5644).  An unfilled pour contributes no copper at all to
+                # kicad-cli, so scoring a zone pair on the as-is run would
+                # measure the fill state rather than the clearance model.
+                zone_truth = {v.nets for v in result.verdicts if v.zone} if result.refill else set()
                 consumer = verdict_cache.get(case.name)
                 if consumer is None:
                     consumer = {v.nets for v in adapter.verdicts(case)}
@@ -988,11 +1033,14 @@ def measure_corpus(
                         # record the absence of a check elsewhere in the
                         # pipeline, not a disagreement in this model.
                         continue
+                    is_zone_pair = pair.kind in PairKind.ZONE
+                    if is_zone_pair and not result.refill:
+                        continue
                     if pair.boundary:
                         boundary_hits += 1
                         continue
                     compared += 1
-                    in_truth = pair.nets in truth
+                    in_truth = pair.nets in (zone_truth if is_zone_pair else truth)
                     in_consumer = pair.nets in consumer
                     if in_consumer and not in_truth:
                         over += 1

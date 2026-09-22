@@ -26,7 +26,28 @@ via counterpart is not in the model at all -- committed vias are handled by
 ``_route_via_injection``, never by the per-leg consult -- so ``seg-via`` and
 ``via-via`` are excluded.  And the *candidate* is always a straight leg
 centreline (``is_clear(a, b)`` takes two points and no width), so a via
-candidate has no call to make.  That leaves ``{seg-seg, pad-seg}``.
+candidate has no call to make.  That rules out ``via-zone`` for the same
+reason it rules out ``seg-via``.
+
+**The `pours` and `outline` branches are measured too (#5644).**  They are the
+other half of ``is_clear`` and, until the generator could place a zone and an
+edge pair, they were dead code as far as this row was concerned:
+
+* ``seg-zone`` reaches the ``pours`` branch.  Production passes pour
+  *outlines* (``_route_obstacles``), so that is what this adapter passes, and
+  the predicate is a bare ``segment_intersects_polygon`` -- **no clearance
+  term at all**.  A leg that merely comes close to a pour is accepted.
+* ``copper-edge`` reaches the ``outline`` branch, which is a
+  ``point_in_polygon`` containment test on the leg's two endpoints against the
+  *un-inset* board outline -- again with no clearance term.  Copper 0.1 mm
+  inside the edge is "inside the board", so the branch accepts it.
+
+Both readings are the consumer's own arithmetic, faithfully driven; the
+under-rejection they produce on those kinds is the finding, not a harness
+approximation.  In production the mesh engine keeps legs away from the outline
+through the *navmesh triangulation* rather than through this predicate -- but
+the epic's group 10 citation is ``is_clear``, and what ``is_clear`` does with
+a pour and an outline is now measured instead of assumed.
 
 **The inflation radii are the consumer's own, and they are the interesting
 part of this row.**  A pad keep-out grows by ``trace_width / 2 + clearance``
@@ -50,8 +71,9 @@ feeding it here would re-measure that row under this one's name.
 
 from __future__ import annotations
 
-from tests.conformance.adapters import KIND_CLEARANCE, Verdict
+from tests.conformance.adapters import KIND_CLEARANCE, KIND_COPPER_EDGE, Verdict
 from tests.conformance.adapters._support import (
+    BoardEdgeRef,
     layer_indexer,
     net_ids,
     pair_contexts,
@@ -59,14 +81,22 @@ from tests.conformance.adapters._support import (
     router_rules,
     router_segment,
 )
-from tests.conformance.generator import CopperCase, PadSpec, PairKind, SegmentSpec
+from tests.conformance.generator import CopperCase, PadSpec, PairKind, SegmentSpec, ZoneSpec
 
 __all__ = ["LEG_PAIR_KINDS", "MeshAdapter"]
 
 #: The kinds ``is_clear`` can answer: a straight-leg candidate against pad
-#: keep-outs or a committed trace's capsule.  See the module docstring on why
-#: every via kind is excluded.
-LEG_PAIR_KINDS = frozenset({PairKind.SEG_SEG, PairKind.PAD_SEG})
+#: keep-outs, a committed trace's capsule, a pour outline or the board
+#: outline.  See the module docstring on why every via *candidate* kind is
+#: excluded -- including ``via-zone``.
+LEG_PAIR_KINDS = frozenset(
+    {
+        PairKind.SEG_SEG,
+        PairKind.PAD_SEG,
+        PairKind.SEG_ZONE,
+        PairKind.COPPER_EDGE,
+    }
+)
 
 
 class MeshAdapter:
@@ -114,15 +144,26 @@ class MeshAdapter:
                 net_a, net_b = context.nets
                 found.add(
                     Verdict.pair(
-                        KIND_CLEARANCE,
+                        _kind_for(context.kind),
                         net_a,
                         net_b,
                         # A polygon-containment answer, not a distance one.
                         gap_mm=None,
                         required_mm=rules.trace_clearance,
+                        zone=context.kind in PairKind.ZONE,
                     )
                 )
         return found
+
+
+def _kind_for(pair_kind: str) -> str:
+    """The verdict kind a flagged pair of this pair kind reports.
+
+    Verdict identity is ``(kind, nets)`` and the report compares on nets
+    alone, so this only has to be *honest* rather than load-bearing: a
+    ``copper-edge`` refusal is a copper-to-outline finding and says so.
+    """
+    return KIND_COPPER_EDGE if pair_kind in PairKind.EDGE else KIND_CLEARANCE
 
 
 def _board_outline(case: CopperCase) -> list[tuple[float, float]]:
@@ -146,12 +187,26 @@ def _obstacles_for(existing, nets: dict[str, int], agent_radius: float, capsule_
     minus the 1e-3 poly2tri margin).  A segment becomes one inflated capsule
     polygon (``_route_obstacles``, ``:917``), built by the consumer's own
     ``_segment_capsule`` so the vertex arithmetic is not restated here.
+
+    A **pour** becomes its declared boundary, verbatim and *un*-inflated --
+    that is exactly what ``_route_obstacles`` passes (``pour_outlines``), and
+    inflating it here would be this adapter inventing a clearance term the
+    consumer does not have.  The **board edge** contributes no obstacle at
+    all: ``is_clear`` answers it through the ``outline`` argument, which every
+    call already carries.
     """
     from kicad_tools.router.mesh.pathfinder import _segment_capsule
     from kicad_tools.router.primitives import pad_half_extents
 
     keepouts: list[tuple[float, float, float, float]] = []
     pours: list[list[tuple[float, float]]] = []
+
+    if isinstance(existing, BoardEdgeRef):
+        return keepouts, pours
+
+    if isinstance(existing, ZoneSpec):
+        pours.append([(x, y) for x, y in existing.boundary])
+        return keepouts, pours
 
     if isinstance(existing, PadSpec):
         pad = router_pad(existing, nets)
