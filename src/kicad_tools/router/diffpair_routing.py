@@ -4688,8 +4688,8 @@ class DiffPairRouter:
         * **Every blocking cell must be attributable** to copper the grid
           can name exactly -- either committed route copper
           (:meth:`RouteHaloGeometry.cell_known`, the same authorisation the
-          single-ended path uses) or a registered pad's marked envelope
-          (:meth:`RoutingGrid.pad_envelope_covers`).  A cell blocked by a
+          single-ended path uses) or a cell a registered pad's marking pass
+          wrote (:meth:`RoutingGrid.pad_marked_cell`).  A cell blocked by a
           static obstacle, a reservation, or a mark whose copper the grid
           cannot name is *not* refinable and the span is declined exactly as
           before.
@@ -4704,8 +4704,7 @@ class DiffPairRouter:
         for cx, cy in blocked:
             if halo is not None and halo.cell_known(cx, cy, layer_idx):
                 continue
-            wx, wy = grid.grid_to_world(cx, cy)
-            if grid.pad_envelope_covers(wx, wy, layer_idx):
+            if grid.pad_marked_cell(cx, cy, layer_idx):
                 continue
             return False
 

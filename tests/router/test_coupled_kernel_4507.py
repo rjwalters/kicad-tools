@@ -335,3 +335,90 @@ def test_segment_cells_clear_still_refuses_unattributable_blocks() -> None:
     pathfinder = CoupledPathfinder(router.grid, router.rules, 2)
 
     assert not dpr._segment_cells_clear(pathfinder, 4.0, 5.0, 6.0, 5.0, 0, OWN_NET)
+
+
+def test_pad_marked_cell_attributes_every_cell_the_pad_marked() -> None:
+    """Attribution reproduces the marking rectangle, not a containment test.
+
+    ``_add_pad_unsafe`` rounds each envelope corner to a cell index and then
+    blocks the whole inclusive rectangle, so a border cell can be marked while
+    its **centre** lies up to half a resolution outside the continuous
+    envelope.  An attribution built as "is this cell centre inside the
+    envelope" therefore leaves exactly those border cells unexplained -- and
+    an unexplained cell declines the span, which is the over-rejection
+    Epic #5509 Phase 3c set out to remove (it was the whole of group 8's
+    residual ``pad-seg`` over-rejection against kicad-cli).
+
+    Every cell the pad marked must be attributable to it, so the property is
+    asserted over the pad's whole neighbourhood rather than at one hand-picked
+    coordinate.  The counted border cells make the test fail loudly if a
+    future change makes the rectangle so tight that the interesting case
+    stops being exercised.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    router, _dpr = _router()
+    grid = router.grid
+    pad = Pad(
+        x=5.0,
+        y=5.0,
+        width=0.9,
+        height=0.55,
+        layer=Layer.F_CU,
+        net=FOREIGN_NET,
+        net_name="FOREIGN",
+        ref="U1",
+        pin="1",
+    )
+    grid.add_pad(pad)
+
+    cx, cy = grid.world_to_grid(pad.x, pad.y)
+    reach = int(2.0 / RESOLUTION)
+    marked = 0
+    for gy in range(cy - reach, cy + reach + 1):
+        for gx in range(cx - reach, cx + reach + 1):
+            if not (0 <= gx < grid.cols and 0 <= gy < grid.rows):
+                continue
+            if not grid.cell_at(0, gy, gx).blocked:
+                continue
+            marked += 1
+            assert grid.pad_marked_cell(gx, gy, 0), (
+                f"cell ({gx}, {gy}) is blocked by the only pad on the board but "
+                "pad_marked_cell cannot attribute it -- a span crossing it would "
+                "be refused with no copper to justify the refusal"
+            )
+    assert marked > 0, "setup guard: the pad must actually block something"
+
+
+def test_pad_marked_cell_does_not_attribute_distant_cells() -> None:
+    """The control: attribution is not a blanket yes.
+
+    Reproducing the marking rectangle is safe precisely because it is
+    bounded by that rectangle.  A cell well outside every pad's halo must
+    stay unattributed, or the refinement would authorise bypassing occupancy
+    whose cause it never identified.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    router, _dpr = _router()
+    grid = router.grid
+    grid.add_pad(
+        Pad(
+            x=5.0,
+            y=5.0,
+            width=0.9,
+            height=0.55,
+            layer=Layer.F_CU,
+            net=FOREIGN_NET,
+            net_name="FOREIGN",
+            ref="U1",
+            pin="1",
+        )
+    )
+
+    far_gx, far_gy = grid.world_to_grid(1.0, 1.0)
+    assert not grid.pad_marked_cell(far_gx, far_gy, 0)
+    # A through-hole pad marks every layer; this SMD one must not.
+    cx, cy = grid.world_to_grid(5.0, 5.0)
+    assert grid.pad_marked_cell(cx, cy, 0)
+    assert not grid.pad_marked_cell(cx, cy, 1)

@@ -6176,14 +6176,8 @@ class RoutingGrid:
 
         return best_ref
 
-    #: Slack on the pad-envelope containment test (Epic #5509 Phase 3c).  The
-    #: same 1 um tolerance the clearance kernel compares under, so a cell
-    #: centre sitting exactly on the marked envelope boundary is attributed
-    #: rather than left unexplained by floating-point noise.
-    _PAD_ENVELOPE_EPSILON_MM = 1e-4
-
-    def pad_envelope_covers(self, wx: float, wy: float, layer_idx: int) -> bool:
-        """Is this world point inside some pad's blocking envelope?
+    def pad_marked_cell(self, gx: int, gy: int, layer_idx: int) -> bool:
+        """Did a registered pad's marking pass write to this cell?
 
         Epic #5509 Phase 3c (#5662).  The boolean sibling of
         :meth:`find_pad_ref_at`, and the *attribution* half of a kernel
@@ -6191,33 +6185,62 @@ class RoutingGrid:
         exact geometry first has to know **what** blocked it, or it would be
         bypassing occupancy it cannot account for.
 
-        Deliberately built from ``pad_half_extents`` and
-        ``_clearance_for_pin_pitch`` -- the two inputs ``_add_pad_unsafe``
-        itself marks with -- rather than from ``find_pad_ref_at``'s
-        un-rotated ``pad.width`` / ``pad.height`` box.  The rotated AABB is
-        the one the raster actually blocked, so this answers "a pad marked
-        this cell" exactly, with no envelope the marking pass did not use.
+        Answered in **cell** coordinates, and by reproducing
+        ``_add_pad_unsafe``'s own loop bounds rather than by testing the cell
+        centre against the continuous envelope.  That distinction is
+        load-bearing: the marking pass rounds each envelope corner to a cell
+        index (``world_to_grid``) and then blocks the whole inclusive
+        rectangle, so a border cell can be marked while its centre lies up to
+        half a resolution *outside* the envelope.  A containment test would
+        leave exactly those cells unattributed -- and therefore leave a legal
+        span refused on a pad halo the pad's real copper does not justify,
+        which is the over-rejection this phase exists to remove.  Reproducing
+        the rectangle instead can only ever attribute cells the pad really
+        did mark.
 
         Args:
-            wx: World x-coordinate (mm), normally a cell centre.
-            wy: World y-coordinate (mm).
-            layer_idx: Layer index; through-hole pads ignore it.
+            gx: Cell x index.
+            gy: Cell y index.
+            layer_idx: Layer index; through-hole pads mark every layer.
 
         Returns:
-            True when at least one registered pad's marked envelope covers
-            the point.
+            True when at least one registered pad marked this cell.
         """
         for pad in self._pads:
             if not pad.through_hole and self.layer_to_index(pad.layer.value) != layer_idx:
                 continue
             clearance = self._clearance_for_pin_pitch(self._pad_pin_pitch.get(id(pad)), pad=pad)
             half_w, half_h = pad_half_extents(pad)
-            if (
-                abs(wx - pad.x) <= half_w + clearance + self._PAD_ENVELOPE_EPSILON_MM
-                and abs(wy - pad.y) <= half_h + clearance + self._PAD_ENVELOPE_EPSILON_MM
-            ):
+            if pad.through_hole and not (pad.width > 0 and pad.height > 0):
+                # ``_add_pad_unsafe``'s drill-only / bare fallbacks.
+                side = (pad.drill + 0.7) if pad.drill > 0 else 1.7
+                half_w = half_h = side / 2.0
+
+            # The halo rectangle, exactly as the marking pass derives it.
+            gx1, gy1 = self.world_to_grid(pad.x - half_w - clearance, pad.y - half_h - clearance)
+            gx2, gy2 = self.world_to_grid(pad.x + half_w + clearance, pad.y + half_h + clearance)
+
+            # Issue #3233's half-resolution-inflated metal rectangle, which
+            # ``_add_pad_unsafe`` unions into the same loop bounds so a
+            # fine-pitch pad whose shrunk halo is narrower than the inflation
+            # still marks every cell whose extent touches pad copper.
+            half_res = self.resolution / 2.0
+            gx1 = min(gx1, self._ceil_cell(pad.x - half_w - half_res, self.origin_x))
+            gy1 = min(gy1, self._ceil_cell(pad.y - half_h - half_res, self.origin_y))
+            gx2 = max(gx2, self._floor_cell(pad.x + half_w + half_res, self.origin_x))
+            gy2 = max(gy2, self._floor_cell(pad.y + half_h + half_res, self.origin_y))
+
+            if gx1 <= gx <= gx2 and gy1 <= gy <= gy2:
                 return True
         return False
+
+    def _ceil_cell(self, world: float, origin: float) -> int:
+        """``ceil`` of a world coordinate in cell units (marking-pass idiom)."""
+        return int(math.ceil((world - origin) / self.resolution))
+
+    def _floor_cell(self, world: float, origin: float) -> int:
+        """``floor`` of a world coordinate in cell units (marking-pass idiom)."""
+        return int(math.floor((world - origin) / self.resolution))
 
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts).
