@@ -43,9 +43,37 @@ The pairwise projection is left ``None`` -- the default, and always the case
 without ``--voltage-map``.  With it set the predicates widen to an HV pair
 requirement, which is Phase 2's corpus (group 14's row says the same about
 ``set_pairwise_domains``).
+
+Two rule settings, one consumer (Epic #5509 Phase 3d)
+-----------------------------------------------------
+Group 9 is switched onto the shared clearance kernel in Phase 3d, so its rows
+stop being report-only.  That flip needs the *geometry* question separated
+from the *rule-resolution* question, because only the first one moved:
+
+* :meth:`LatticeAdapter.verdicts` -- unchanged, and still the table's row.
+  It drives the consumer at the **router's** own numbers
+  (``rules.trace_clearance`` = 0.15 mm in this corpus), which is why that row
+  reports a large under-rejection rate: every one of those pairs sits in the
+  0.15-0.20 mm band where the router requires less than the project's
+  ``Default`` netclass does.  That is the #5398 / #5654 rule defect, measured
+  on purpose, and it is not Phase 3d's to fix.
+* :meth:`LatticeAdapter.verdicts_at_project_rules` -- the **gated** reading.
+  Same unmodified consumer, same entry points, driven at the clearance
+  kicad-cli itself applies (``case.rules.project_clearance``).  With the rule
+  axis pinned to ground truth's own value, a disagreement can only be
+  geometry -- exactly what this phase changed -- so
+  ``test_corpus.test_adapter_agrees_with_kicad_cli`` asserts it hard for this
+  group instead of xfailing it.
+
+Neither reading patches or relaxes the consumer: the adapter has always
+chosen which rule values to hand ``CommittedCopper``, and this is the same
+choice made twice.
 """
 
 from __future__ import annotations
+
+import dataclasses
+from typing import TYPE_CHECKING
 
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
@@ -57,6 +85,9 @@ from tests.conformance.adapters._support import (
     router_via,
 )
 from tests.conformance.generator import CopperCase, PairKind, SegmentSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = ["LatticeAdapter", "ROUTED_COPPER_KINDS"]
 
@@ -76,8 +107,29 @@ class LatticeAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
-        nets = net_ids(case)
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same consumer, driven at the clearance kicad-cli applies.
+
+        The gated reading (see the module docstring).  Only the two copper
+        clearances move onto ``project_clearance``; ``min_hole_to_hole`` and
+        the via geometry stay the case's own, because those feed a *different*
+        requirement (the drill floor) that kicad-cli scores under a different
+        verdict kind and this row does not claim.
+        """
         rules = router_rules(case)
+        return self._verdicts(
+            case,
+            dataclasses.replace(
+                rules,
+                trace_clearance=case.rules.project_clearance,
+                via_clearance=case.rules.project_clearance,
+            ),
+        )
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
+        nets = net_ids(case)
         layer_index = layer_indexer(case)
         found: set[Verdict] = set()
 
@@ -113,11 +165,12 @@ class LatticeAdapter:
                         KIND_CLEARANCE,
                         net_a,
                         net_b,
-                        # Centreline predicates: they answer yes/no against a
-                        # centreline gap, never an edge-to-edge distance, so
-                        # there is no mm gap to report without re-deriving one
-                        # here -- which would be this harness's arithmetic
-                        # wearing the consumer's name.
+                        # The predicates answer yes/no and nothing else.
+                        # Since Phase 3d they measure an edge-to-edge gap
+                        # internally (through the kernel), but none of it is
+                        # returned, so reporting a number here would mean
+                        # re-deriving one -- this harness's arithmetic wearing
+                        # the consumer's name.
                         gap_mm=None,
                         required_mm=required,
                     )
