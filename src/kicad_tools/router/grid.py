@@ -1902,6 +1902,19 @@ class RoutingGrid:
         with self._acquire_lock():
             self._add_pad_unsafe(pad, pin_pitch=pin_pitch)
 
+    @property
+    def pads(self) -> tuple[Pad, ...]:
+        """Every registered pad, read-only.
+
+        Epic #5509 Phase 3c (#5662): the clearance consumers being migrated
+        onto the shared kernel need the pad registry to shape it, and reaching
+        into ``grid._pads`` from another module is how two consumers end up
+        holding a mutable list they can append to.  A tuple snapshot gives
+        them the geometry and nothing else -- ``add_pad`` remains the only way
+        in.
+        """
+        return tuple(self._pads)
+
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
         # Store pad geometry for geometric clearance validation (Issue #750)
@@ -6162,6 +6175,49 @@ class RoutingGrid:
                     best_ref = pad.component_key
 
         return best_ref
+
+    #: Slack on the pad-envelope containment test (Epic #5509 Phase 3c).  The
+    #: same 1 um tolerance the clearance kernel compares under, so a cell
+    #: centre sitting exactly on the marked envelope boundary is attributed
+    #: rather than left unexplained by floating-point noise.
+    _PAD_ENVELOPE_EPSILON_MM = 1e-4
+
+    def pad_envelope_covers(self, wx: float, wy: float, layer_idx: int) -> bool:
+        """Is this world point inside some pad's blocking envelope?
+
+        Epic #5509 Phase 3c (#5662).  The boolean sibling of
+        :meth:`find_pad_ref_at`, and the *attribution* half of a kernel
+        refinement: a consumer that wants to re-decide a blocked cell with
+        exact geometry first has to know **what** blocked it, or it would be
+        bypassing occupancy it cannot account for.
+
+        Deliberately built from ``pad_half_extents`` and
+        ``_clearance_for_pin_pitch`` -- the two inputs ``_add_pad_unsafe``
+        itself marks with -- rather than from ``find_pad_ref_at``'s
+        un-rotated ``pad.width`` / ``pad.height`` box.  The rotated AABB is
+        the one the raster actually blocked, so this answers "a pad marked
+        this cell" exactly, with no envelope the marking pass did not use.
+
+        Args:
+            wx: World x-coordinate (mm), normally a cell centre.
+            wy: World y-coordinate (mm).
+            layer_idx: Layer index; through-hole pads ignore it.
+
+        Returns:
+            True when at least one registered pad's marked envelope covers
+            the point.
+        """
+        for pad in self._pads:
+            if not pad.through_hole and self.layer_to_index(pad.layer.value) != layer_idx:
+                continue
+            clearance = self._clearance_for_pin_pitch(self._pad_pin_pitch.get(id(pad)), pad=pad)
+            half_w, half_h = pad_half_extents(pad)
+            if (
+                abs(wx - pad.x) <= half_w + clearance + self._PAD_ENVELOPE_EPSILON_MM
+                and abs(wy - pad.y) <= half_h + clearance + self._PAD_ENVELOPE_EPSILON_MM
+            ):
+                return True
+        return False
 
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts).

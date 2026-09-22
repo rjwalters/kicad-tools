@@ -59,15 +59,19 @@ _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 # seeds by every wired adapter, and every item launches its own kicad-cli.
 CI_SEEDS = (0, 1, 2)
 
-# The Epic #5509 section-1 groups Phase 1c leaves unmeasured, with their
-# reasons recorded in ``report.NOT_MEASURED_REASONS``.  Exactly one: group 7's
-# ``CoupledPathfinder::rail_clear`` is a lambda inside the C++ coupled search
-# loop, so no Python entry point exists to wrap.  That is the single
-# *unexposed* entry the epic's acceptance criterion permits, and keeping this
-# set a literal ``{7}`` is what makes "only one" a test rather than a claim --
-# wiring a group without removing it here, or losing a group's adapter, both
-# fail ``test_adapters_cover_the_wired_groups``.
-UNWIRED_GROUPS = {7}
+# The Epic #5509 section-1 groups with no adapter, whose reasons are recorded
+# in ``report.NOT_MEASURED_REASONS``.
+#
+# EMPTY since Phase 3c (#5662).  Phase 1c left exactly one entry -- group 7's
+# ``CoupledPathfinder::rail_clear``, a lambda inside the C++ coupled search
+# loop with no Python entry point to wrap, the single *unexposed* gap the
+# epic's acceptance criterion permitted.  Phase 3c promoted it to a bound
+# method as part of migrating it onto the clearance kernel, so ``coupled.py``
+# measures it and all nineteen groups are wired.  Keeping this an explicit set
+# is what makes "all nineteen" a test rather than a claim: dropping a group's
+# adapter without recording it here fails
+# ``test_adapters_cover_the_wired_groups``.
+UNWIRED_GROUPS: set[int] = set()
 
 # Every group row the table measures, plus the Phase 1b kernel's control row.
 WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GROUP}

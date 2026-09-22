@@ -32,6 +32,15 @@ one registry.
 (``test_every_unmigrated_consumer_item_carries_xfail`` and
 ``test_migrated_consumer_items_are_hard_gates``), so the mechanism is itself
 under test rather than assumed.
+
+What hardens for a migrated group is exactly Epic #5509's Phase 3 goal: *a
+search-time reject of a candidate the validator accepts must become a test
+failure*.  The rule axis does not harden with it -- the gated reading drives
+the consumer at ``case.rules.project_clearance``, kicad-cli's own value, so a
+disagreement can only be geometry.  An under-rejection at the consumer's
+*own* ``trace_clearance`` is a rule-resolution gap Phase 2's resolver owns,
+and one a migration phase may not close by changing a rule value (scope guard
+#1); it stays in the published table's percentages rather than in the gate.
 """
 
 from __future__ import annotations
