@@ -807,6 +807,8 @@ Common flags (the full surface lives in `kct route --help`):
 | `--auto-fix` / `--auto-fix-passes N` | Run `kct fix-drc` after routing on DRC failure |
 | `--skip-drc` | Skip post-route DRC validation |
 | `--no-routing-plan` | Skip the report-only routing-plan stage (on by default; see [`routing-plan.md`](routing-plan.md)) |
+| `--plan-gate` | Refuse to start detailed routing (exit 9) when the routing plan reports overflow, printing the per-edge overflow report and its computed relief first. Off by default. Overridden by `--force` |
+| `--force` | Route even when the grid resolution exceeds clearance — **and** override `--plan-gate`. Also disables grid/DRC validation, so to simply not gate, omit `--plan-gate` rather than adding `--force` |
 
 #### Post-route sidecars
 
@@ -1538,6 +1540,32 @@ key, with `pads[]` carrying `access_at_escape_end`, `final_access`,
 key is **absent** (not null) when no sidecar was found. Full format reference:
 [`../diagnostics/access-witness.md`](../diagnostics/access-witness.md).
 
+#### `--why`: the routing plan (issue #5521)
+
+A [`<stem>.routing_plan.json`](#post-route-sidecars) sidecar beside the board
+is auto-discovered the same way — again with no flag, and again with
+byte-identical output when it is absent. For each stuck net that crosses an
+**overflowed corridor** in the plan, `--why` prints the corridor and its
+measured relief immediately before the `recommendation:` line:
+
+```
+  routing plan:     corridor U2 -> U3 (tiles 17-18, layer 0): demand 14.0 tracks, capacity 9, overflow 5
+                    relief: move U3 +2.0/+0.0 mm -> total overflow 0
+```
+
+The access witness and the classification are *copper* evidence; the routing
+plan is a *capacity measurement* taken before anything was routed. The plan
+never reclassifies a net — the `[PLACEMENT_BOUND]` header and the counts are
+unchanged — it is a second, independent witness printed alongside.
+
+In `--format json` a sidecar adds exactly two keys: a top-level
+`routing_plan` block (`path`, `schema_version`, `total_overflow`,
+`overflowed_edges`, `feasible`) and an `overflow_edge` on each crossing
+diagnosis. Both are **absent** (not null) without a sidecar. A sidecar built
+for a different board, or older than the PCB, is reported on stderr and
+ignored rather than guessed from. Full reference:
+[`routing-plan.md`](routing-plan.md).
+
 ---
 
 ## Cost Commands
@@ -1675,7 +1703,7 @@ expanded by the `# Exit codes:` comment block — both live in `_main_impl`
 | 4 | Partial routing **and** clearance violations remain — segment-segment (issue #1666) or HV pairwise (issue #4588) |
 | 5 | Interrupted by SIGINT with partial results saved (file on disk is valid) |
 | 8 | `--complete`: one or more previously-unconnected links remain unroutable (issue #4477) |
-| 9 | `--census-advisory-gate`: the replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice for this board, so routing was **not started** (issue #4799). The only route code that means "nothing was spent"; the fix layer is placement / escape planning. Opt-in — never returned without the flag. See [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gate). |
+| 9 | A pre-route gate fired — **detailed routing was not started**. Two opt-in gates share this code and the stderr prefix says which: `[crosstail-gate]` — `--census-advisory-gate`'s replayed crossing-tail census (`--census-advisory <report.json>`) predicts an inert crossover lattice, refused before any router or component loading, so nothing at all was spent (issue #4799; see [crosstail-census-report](crosstail-census-report.md#turning-the-prediction-into-a-gate)); `[plan-gate]` — `--plan-gate` found `overflow_report.feasible` false, refused after the report-only plan stage (board loaded, plan under 5 s) but before any detailed routing, and overridable with `--force` (issue #5510 Phase 1c; see [`routing-plan.md`](routing-plan.md)). For both, the fix layer is placement / escape planning / stackup, not the router. Neither is ever returned without its flag. |
 
 > **Consumer note (issues #4588 / #4607).** `kct build` and `kct pipeline`
 > forward `--voltage-map` (plus `--creepage-standard`, `--pollution-degree`,

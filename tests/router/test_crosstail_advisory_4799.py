@@ -974,7 +974,13 @@ def test_route_help_documents_the_gate_and_its_exit_code(capsys):
     out = capsys.readouterr().out
     assert "--census-advisory-gate" in out
     assert "--census-advisory-gate-pct" in out
-    assert "9  --census-advisory-gate" in out
+    # Issue #5510-1c widened the exit-code-9 row: code 9 is now SHARED with
+    # ``--plan-gate``, so this flag no longer sits immediately after the "9".
+    # The contract this test defends is unchanged -- `route --help` must still
+    # document exit 9 and must still name THIS gate as one of its causes -- so
+    # assert those two facts rather than the old adjacency.
+    assert "9  a pre-route gate fired" in out
+    assert "[crosstail-gate] --census-advisory-gate" in out
 
 
 def test_outer_kct_parser_accepts_and_forwards_the_gate_flags():

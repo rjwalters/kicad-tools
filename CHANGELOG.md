@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Make the routing plan's overflow report **consumable and measured**
+  (Issue #5521, Phase 1c of Epic #5510). Phases 1a/1b produced a sidecar
+  listing over-subscribed tile boundaries; this slice says what they mean
+  and what would fix them:
+  - **`RoutingPlan.format_overflow_report()`** prints one block per
+    overflowed edge — the two regions' bounds, the nearest component ref
+    on each side, the overflowed layer indices, demand, capacity,
+    overflow, and the nets crossing. It reads only the plan object, so a
+    sidecar loaded with `from_dict` formats identically to a plan built
+    in-process. New per-edge `refs_a` / `refs_b` (populated on overflowed
+    edges only) carry the ref ranking.
+  - **Computed relief** (`relief`, empty since 1a, plus a new
+    `relief_meta`). Each candidate is *measured*, not guessed: the same
+    global pass is re-run under one hypothetical change and the resulting
+    board-wide `expected_overflow` recorded, keeping only candidates that
+    beat the baseline. `move_component` shifts one adjacent component by
+    a 2.0 mm step against a **copy** of the pads — the router, the grid
+    and the PCB are never touched, so routed copper stays byte-identical;
+    `add_signal_layer` re-plans with one plane index treated as signal
+    (advice about capacity, not a claim the plane is removable);
+    `swap_pins` is a deferred stub for #5511 and evaluates nothing. The
+    search is bounded by a deterministic cap (3 edges x 3 refs x 4 steps)
+    and a 5 s wall-clock budget, and runs only when the board actually
+    overflows, so a feasible board pays 0 s.
+  - **`kct route --plan-gate`** (off by default): when the plan reports
+    `feasible: false`, print the report and exit **9** before any
+    detailed routing, on both the negotiated and the dense two-phase
+    paths. Exit 9 is shared with `--census-advisory-gate` (#4799) and the
+    stderr prefix (`[plan-gate]` / `[crosstail-gate]`) says which fired.
+    The override is the **existing** `--force`, not a second flag — note
+    it also disables grid/DRC validation, so to simply not gate, omit
+    `--plan-gate`.
+  - **`kct net-status --why` reads the sidecar.** No new flag: `--why`
+    auto-discovers `<pcb_stem>.routing_plan.json` beside the board and,
+    for each stuck net crossing an overflowed corridor, names that
+    corridor and its measured relief immediately *before* the
+    `recommendation:` line — a pre-route capacity measurement printed
+    alongside the classifier's inference from finished copper, never
+    replacing it. In `--format json` this adds exactly two keys, and only
+    when a sidecar was loaded: a top-level `routing_plan` block and an
+    `overflow_edge` per crossing diagnosis (injected in `output_why`;
+    `StuckNetDiagnosis.to_dict()` is untouched). **Without a sidecar the
+    output is byte-identical to before**, pinned by golden fixtures in
+    `tests/fixtures/net_status_why_golden/`. A sidecar built for another
+    board, or older than the PCB, is reported on stderr and ignored.
+  - **Fleet precision/recall table** in `docs/reference/routing-plan.md`,
+    printed by `scripts/routing_plan_fleet_table.py` (which reads
+    sidecars and `kct net-status --format json` dumps — it never routes).
+    This replaces Epic #5510 Phase 1's two unmeasurable acceptance lines
+    with two falsifiable ones: *recall* (of the nets that really ended
+    unrouted, how many cross an overflowed corridor) and *precision* (of
+    the overflowed corridors, how many are crossed by an unrouted net).
+
 ## [0.21.1] - 2026-09-21
 
 ### Summary

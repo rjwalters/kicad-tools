@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .global_router import GlobalRoutingResult
     from .layers import LayerStack
+    from .primitives import Pad
     from .region_graph import RegionGraph
     from .rules import NetClassRouting
 
@@ -39,6 +40,11 @@ SCHEMA_VERSION = 1
 
 #: Valid values for :attr:`NetPlanEntry.status`.
 NET_STATUS_VALUES = frozenset({"assigned", "failed", "pour_skipped", "single_pad", "no_endpoints"})
+
+#: Most net names listed per edge in :meth:`RoutingPlan.format_overflow_report`
+#: before the list is elided.  A DDR byte is 8 nets wide, so 8 keeps the
+#: common case whole.
+_REPORT_MAX_NETS = 8
 
 
 def signal_layer_indices(layer_stack: LayerStack) -> list[int]:
@@ -62,6 +68,62 @@ def signal_layer_indices(layer_stack: LayerStack) -> list[int]:
         Ascending list of non-plane layer indices.
     """
     return [i for i in range(layer_stack.num_layers) if not layer_stack.is_plane_layer(i)]
+
+
+class RoutingPlanGateAbort(Exception):
+    """``--plan-gate`` refused to start detailed routing (Issue #5521).
+
+    Raised by the CLI's plan-gate preflight when the report-only plan says
+    the board is **not** feasible (``overflow_report.feasible is False``)
+    and the run did not pass the existing ``--force``.  Carries the plan so
+    the CLI can print :meth:`RoutingPlan.format_overflow_report` before
+    exiting with the shared pre-route gate code (9).
+
+    Never raised without ``--plan-gate``: the default path stays
+    report-only.
+    """
+
+    def __init__(self, plan: RoutingPlan) -> None:
+        super().__init__("routing plan reports the board is not feasible")
+        self.plan = plan
+
+
+def rank_refs_in_region(ref_nets: dict[str, set[int]], edge_nets: Iterable[int]) -> list[str]:
+    """Rank component refs by how many of *edge_nets* they touch.
+
+    Args:
+        ref_nets: ``{ref: {net_id, ...}}`` for the refs with a pad in one
+            region (see :func:`index_pad_refs`).
+        edge_nets: The net IDs crossing the edge being explained.
+
+    Returns:
+        Refs sorted by crossing-net count descending, then lexically --
+        deterministic, so the report text and the relief search agree on
+        which ref is "nearest" without either re-deriving it.
+    """
+    wanted = set(edge_nets)
+    scored = [(len(nets & wanted), ref) for ref, nets in ref_nets.items()]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [ref for _, ref in scored]
+
+
+def index_pad_refs(graph: RegionGraph, pads: Iterable[Pad]) -> dict[int, dict[str, set[int]]]:
+    """Index ``region_id -> {ref: {net_id, ...}}`` from a pad collection.
+
+    One pass over the pads, so a board with tens of thousands of pads is
+    indexed once and every overflowed edge reads the result.  Pads with no
+    ``ref`` (Steiner points, synthetic terminals) are skipped.
+    """
+    index: dict[int, dict[str, set[int]]] = {}
+    for pad in pads:
+        ref = getattr(pad, "ref", "")
+        if not ref:
+            continue
+        region = graph.get_region_at(pad.x, pad.y)
+        if region is None:
+            continue
+        index.setdefault(region.id, {}).setdefault(ref, set()).add(pad.net)
+    return index
 
 
 @dataclass
@@ -186,6 +248,15 @@ class EdgePlanEntry:
             by the string layer index; ``demand`` likewise sums both
             directions.  Empty when the graph has no per-layer data
             (``num_layers <= 1``).  A PLANE layer has no row at all.
+        refs_a: Component refs with at least one pad in region ``a``,
+            ranked by how many of this edge's crossing nets they touch
+            (ties broken lexically).  Issue #5521: populated **only for
+            overflowed edges** -- the ranking is what names the "nearest
+            component refs on each side" in
+            :meth:`RoutingPlan.format_overflow_report` and what seeds the
+            relief search, and computing it for every edge would bloat the
+            sidecar on large tile grids for no reader.
+        refs_b: Same, for region ``b``.
     """
 
     a: int
@@ -196,6 +267,8 @@ class EdgePlanEntry:
     blockage_mm: float
     nets: list[int]
     layers: dict[str, dict[str, float]] = field(default_factory=dict)
+    refs_a: list[str] = field(default_factory=list)
+    refs_b: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -207,6 +280,8 @@ class EdgePlanEntry:
             "blockage_mm": self.blockage_mm,
             "nets": list(self.nets),
             "layers": {k: dict(v) for k, v in self.layers.items()},
+            "refs_a": list(self.refs_a),
+            "refs_b": list(self.refs_b),
         }
 
     @classmethod
@@ -220,7 +295,25 @@ class EdgePlanEntry:
             blockage_mm=data["blockage_mm"],
             nets=list(data.get("nets", [])),
             layers={k: dict(v) for k, v in data.get("layers", {}).items()},
+            refs_a=list(data.get("refs_a", [])),
+            refs_b=list(data.get("refs_b", [])),
         )
+
+    def overflowed_layers(self) -> list[int]:
+        """Layer indices whose demand exceeds their capacity on this edge.
+
+        Empty on a single-layer graph (which carries no ``layers`` rows at
+        all) even when the edge itself overflows -- the caller falls back
+        to the scalar ``capacity`` / ``demand`` pair there.
+        """
+        out: list[int] = []
+        for key, row in self.layers.items():
+            if row.get("demand", 0.0) > row.get("capacity", 0):
+                try:
+                    out.append(int(key))
+                except (TypeError, ValueError):  # pragma: no cover - defensive
+                    continue
+        return sorted(out)
 
 
 @dataclass
@@ -278,7 +371,12 @@ class RoutingPlan:
     nets: dict[int, NetPlanEntry] = field(default_factory=dict)
     edges: list[EdgePlanEntry] = field(default_factory=list)
     overflow_report: OverflowReport | None = None
-    relief: list[Any] = field(default_factory=list)
+    relief: list[dict[str, Any]] = field(default_factory=list)
+    #: Bookkeeping for the bounded relief search (Issue #5521):
+    #: ``candidates_evaluated`` / ``elapsed_s`` / ``truncated`` /
+    #: ``baseline_overflow`` / ``budget_s``.  Empty ``{}`` when the search
+    #: never ran (a feasible board pays nothing).
+    relief_meta: dict[str, Any] = field(default_factory=dict)
 
     # -- construction -----------------------------------------------------
 
@@ -298,6 +396,7 @@ class RoutingPlan:
         default_trace_clearance: float,
         pour_skipped: Iterable[int] = (),
         single_pad: Iterable[int] = (),
+        pads: Iterable[Pad] = (),
     ) -> RoutingPlan:
         """Build a :class:`RoutingPlan` from an already-completed global pass.
 
@@ -333,6 +432,10 @@ class RoutingPlan:
             single_pad: Net IDs filtered as trivially-connected single-pad
                 nets before the global pass (``two_phase.py``'s local
                 ``single_pad_nets``).
+            pads: The router's pads (``router.pads.values()``).  Used only
+                to name the component refs adjacent to an **overflowed**
+                edge (Issue #5521); omitting them leaves ``refs_a`` /
+                ``refs_b`` empty and changes nothing else.
 
         Returns:
             A populated :class:`RoutingPlan`.
@@ -460,6 +563,20 @@ class RoutingPlan:
                 )
             )
 
+        # Issue #5521: name the component refs on each side of every
+        # OVERFLOWED edge, ranked by how many of that edge's crossing nets
+        # they touch.  Only overflowed edges pay for this (a feasible board
+        # indexes nothing), and the ranking is shared with the relief
+        # search so the report and the candidate set cannot disagree about
+        # which ref is "nearest".
+        overflowed = [e for e in edges if e.overflow > 0]
+        pad_list = list(pads)
+        if overflowed and pad_list:
+            region_refs = index_pad_refs(graph, pad_list)
+            for entry in overflowed:
+                entry.refs_a = rank_refs_in_region(region_refs.get(entry.a, {}), entry.nets)
+                entry.refs_b = rank_refs_in_region(region_refs.get(entry.b, {}), entry.nets)
+
         regions: dict[int, RegionInfo] = {}
         for region_id in sorted(used_region_ids):
             region = graph.regions.get(region_id)
@@ -527,7 +644,8 @@ class RoutingPlan:
             "nets": {str(k): v.to_dict() for k, v in self.nets.items()},
             "edges": [e.to_dict() for e in self.edges],
             "overflow_report": self.overflow_report.to_dict() if self.overflow_report else None,
-            "relief": list(self.relief),
+            "relief": [dict(entry) for entry in self.relief],
+            "relief_meta": dict(self.relief_meta),
         }
 
     @classmethod
@@ -541,7 +659,8 @@ class RoutingPlan:
             nets={int(k): NetPlanEntry.from_dict(v) for k, v in data.get("nets", {}).items()},
             edges=[EdgePlanEntry.from_dict(e) for e in data.get("edges", [])],
             overflow_report=OverflowReport.from_dict(overflow_data) if overflow_data else None,
-            relief=list(data.get("relief", [])),
+            relief=[dict(entry) for entry in data.get("relief", [])],
+            relief_meta=dict(data.get("relief_meta", {})),
         )
 
     def summary_line(self) -> str:
@@ -560,6 +679,186 @@ class RoutingPlan:
             f"overflow {total_overflow} on {overflowed_edges} edges "
             f"({elapsed_s:.1f}s)"
         )
+
+    # -- report text (Issue #5521) ------------------------------------------
+
+    def _region_bounds_text(self, region_id: int) -> str:
+        """``(min_x, min_y)-(max_x, max_y)`` for *region_id*, or ``?``."""
+        region = self.regions.get(region_id)
+        if region is None:
+            return "bounds unknown"
+        return f"({region.min_x:.3f}, {region.min_y:.3f})-({region.max_x:.3f}, {region.max_y:.3f})"
+
+    def _side_label(self, region_id: int, refs: list[str]) -> str:
+        """Nearest ref in a region, or the region centre when it has none."""
+        if refs:
+            return refs[0]
+        region = self.regions.get(region_id)
+        if region is None:
+            return f"tile {region_id}"
+        center_x = (region.min_x + region.max_x) / 2.0
+        center_y = (region.min_y + region.max_y) / 2.0
+        return f"tile {region_id} @ ({center_x:.3f}, {center_y:.3f})"
+
+    def _relief_text(self, edge: EdgePlanEntry) -> list[str]:
+        """One ``relief:`` line per candidate recorded for *edge*."""
+        out: list[str] = []
+        for entry in self.relief:
+            pair = entry.get("edge")
+            if not (isinstance(pair, list) and len(pair) == 2):
+                continue
+            if int(pair[0]) != edge.a or int(pair[1]) != edge.b:
+                continue
+            kind = entry.get("kind")
+            if kind == "move_component":
+                out.append(
+                    f"move {entry.get('ref')} "
+                    f"{float(entry.get('dx', 0.0)):+.1f}/{float(entry.get('dy', 0.0)):+.1f} mm "
+                    f"-> total overflow {entry.get('expected_overflow')}"
+                )
+            elif kind == "add_signal_layer":
+                out.append(
+                    f"add signal layer {entry.get('layer_index')} (currently a plane) "
+                    f"-> total overflow {entry.get('expected_overflow')}"
+                )
+            elif kind == "swap_pins":
+                out.append(f"swap_pins deferred ({entry.get('deferred', '#5511')})")
+            else:  # pragma: no cover - forward compatibility
+                out.append(str(kind))
+        return out
+
+    def format_edge_headline(self, edge: EdgePlanEntry) -> str:
+        """The one-line ``corridor A -> B (tiles ..): demand/capacity`` headline.
+
+        Factored out of :meth:`format_overflow_report` (Issue #5521) so the
+        ``net-status --why`` consumer names an overflowed edge with exactly
+        the same wording the route-time report uses -- two renderings of
+        the same edge can never disagree.
+        """
+        layers = edge.overflowed_layers()
+        layer_text = (
+            "layer " + ", ".join(str(index) for index in layers) if layers else "all layers"
+        )
+        return (
+            f"corridor {self._side_label(edge.a, edge.refs_a)} -> "
+            f"{self._side_label(edge.b, edge.refs_b)} "
+            f"(tiles {edge.a}-{edge.b}, {layer_text}): "
+            f"demand {edge.demand:.1f} tracks, capacity {edge.capacity}, "
+            f"overflow {edge.overflow}"
+        )
+
+    def relief_lines(self, edge: EdgePlanEntry) -> list[str]:
+        """Public alias of the per-edge relief rendering (Issue #5521).
+
+        ``net-status --why`` prints the same candidate wording the route-time
+        report does; exposing it here is what keeps the two in lockstep.
+        """
+        return self._relief_text(edge)
+
+    # -- crossing predicate (Issue #5521) -----------------------------------
+
+    def overflowed_edges(self) -> list[EdgePlanEntry]:
+        """Overflowed edges, worst first then by ``(a, b)`` -- the report order."""
+        return sorted(
+            (e for e in self.edges if e.overflow > 0),
+            key=lambda e: (-e.overflow, e.a, e.b),
+        )
+
+    def crossings_by_net_name(self) -> dict[str, list[EdgePlanEntry]]:
+        """``{net name: [overflowed edges it crosses]}`` (Issue #5521).
+
+        **The** definition of "a net crosses an overflowed edge", used by
+        both the ``net-status --why`` consumer and the fleet
+        precision/recall table (``scripts/routing_plan_fleet_table.py``):
+        the net's name resolves through this plan's ``nets`` table to a net
+        ID listed in ``edges[i].nets`` for some edge with non-zero
+        ``overflow``.  Deliberately *not* a pad-in-region fallback -- two
+        definitions would let the diagnostic and the measurement disagree
+        about the same board.
+
+        Edges keep :meth:`overflowed_edges` order, so the first entry for a
+        net is the worst edge it crosses.
+        """
+        by_id: dict[int, list[EdgePlanEntry]] = {}
+        for edge in self.overflowed_edges():
+            for net_id in edge.nets:
+                by_id.setdefault(net_id, []).append(edge)
+        out: dict[str, list[EdgePlanEntry]] = {}
+        for net_id, edges in by_id.items():
+            entry = self.nets.get(net_id)
+            if entry is None:
+                continue
+            out.setdefault(entry.name, []).extend(edges)
+        return out
+
+    def format_overflow_report(self) -> str:
+        """Human-readable congestion report, one block per overflowed edge.
+
+        Reads only this object, so it works identically on a plan just
+        built in-process and on one loaded from a sidecar with
+        :meth:`from_dict`.  Example (Issue #5521)::
+
+            Routing plan: overflow 5 on 1 edge(s) -- NOT feasible
+            corridor U1 -> U3 (tiles 17-18, layer 0): demand 14.0 tracks,
+              capacity 9, overflow 5
+              tile 17: (20.000, 12.000)-(24.000, 16.000)
+              tile 18: (24.000, 12.000)-(28.000, 16.000)
+              nets: /DQ0 /DQ1 /DQ2
+              relief: move U3 +2.0/+0.0 mm -> total overflow 0
+
+        ``add signal layer`` relief is advice about *capacity* -- it says
+        what the plan would report if one plane index carried signals, not
+        that the plane can be removed.
+
+        Returns:
+            The report text (no trailing newline).  A feasible plan yields
+            a single "no overflowed edges" line.
+        """
+        report = self.overflow_report
+        overflowed = sorted(
+            (e for e in self.edges if e.overflow > 0),
+            key=lambda e: (-e.overflow, e.a, e.b),
+        )
+        lines: list[str] = []
+        if report is not None:
+            verdict = "feasible" if report.feasible else "NOT feasible"
+            lines.append(
+                f"Routing plan: overflow {report.total_overflow} on "
+                f"{report.overflowed_edges} edge(s) -- {verdict}"
+            )
+            if report.failed_nets:
+                names = [self.nets[n].name for n in report.failed_nets if n in self.nets]
+                lines.append(
+                    f"  {len(report.failed_nets)} net(s) failed global routing: "
+                    + " ".join(names[:_REPORT_MAX_NETS])
+                    + (" ..." if len(names) > _REPORT_MAX_NETS else "")
+                )
+        if not overflowed:
+            lines.append("  no overflowed edges")
+            return "\n".join(lines)
+
+        for edge in overflowed:
+            lines.append(self.format_edge_headline(edge))
+            lines.append(f"  tile {edge.a}: {self._region_bounds_text(edge.a)}")
+            lines.append(f"  tile {edge.b}: {self._region_bounds_text(edge.b)}")
+            names = [self.nets[n].name if n in self.nets else f"Net {n}" for n in edge.nets]
+            shown = " ".join(names[:_REPORT_MAX_NETS])
+            if len(names) > _REPORT_MAX_NETS:
+                shown += f" ... ({len(names)} total)"
+            lines.append(f"  nets: {shown}")
+            relief = self._relief_text(edge)
+            if relief:
+                lines.append("  relief: " + " | ".join(relief))
+
+        meta = self.relief_meta
+        if meta:
+            lines.append(
+                "  relief search: "
+                f"{meta.get('candidates_evaluated', 0)} candidate(s) in "
+                f"{float(meta.get('elapsed_s', 0.0)):.1f}s"
+                + (" (budget exhausted, truncated)" if meta.get("truncated") else "")
+            )
+        return "\n".join(lines)
 
     def write_sidecar(self, path: Path | str, *, quiet: bool = False) -> bool:
         """Serialize this plan to *path* as JSON.
@@ -861,6 +1160,130 @@ def _register_blockage(region_graph: RegionGraph, router: Any) -> None:
         region_graph.register_blockage_rects(rects, layers=None if key is None else list(key))
 
 
+def run_global_pass(
+    router: Any,
+    *,
+    net_order: Iterable[int],
+    corridor_width_factor: float = 2.0,
+    report: Callable[[str], None] | None = None,
+    pads: dict[Any, Pad] | None = None,
+    extra_signal_layers: Iterable[int] = (),
+) -> PlanBuildResult:
+    """Build the tile graph and run one negotiated global pass.
+
+    The mechanics :func:`build_plan` runs on the real placement, factored
+    out (Issue #5521) so the bounded relief search can re-run the identical
+    pass against a *hypothetical* one without touching the router.
+
+    Args:
+        router: ``TwoPhaseRouter`` or ``Autorouter``.
+        net_order: Pre-filtered net order (see :func:`select_plan_nets`).
+        corridor_width_factor: Corridor half-width as a multiple of the
+            design-rule clearance.
+        report: Optional sink for the one-line tile-grid diagnostic.
+        pads: Pad dict to plan against.  ``None`` (the default) uses
+            ``router.pads`` unchanged; the relief search passes a shifted
+            **copy** so nothing on the router, the grid or the PCB is ever
+            mutated and "placement is restored exactly" holds trivially.
+        extra_signal_layers: Layer indices to treat as signal layers **in
+            addition** to :func:`signal_layer_indices` -- the
+            ``add_signal_layer`` relief candidate's only lever.  Advice
+            about capacity, not a claim that the plane is removable.
+
+    Returns:
+        A :class:`PlanBuildResult` whose ``plan`` is always ``None``
+        (serialization is :func:`build_plan`'s job).
+    """
+    from .global_router import GlobalRouter
+    from .region_graph import RegionGraph
+
+    grid = router.grid
+    rules = router.rules
+    pad_dict = router.pads if pads is None else pads
+
+    # Routing pitch and tile sizing -- identical to the pre-#5520 inline code.
+    trace_pitch = rules.trace_width + rules.trace_clearance
+    corridor_width = corridor_width_factor * rules.trace_clearance
+    tile_size = max(trace_pitch * TILE_PITCH_FACTOR, 1.0)
+    num_cols = max(MIN_TILE_DIM, int(grid.width / tile_size))
+    num_rows = max(MIN_TILE_DIM, int(grid.height / tile_size))
+
+    # Issue #5575: only non-PLANE layers advertise capacity.  ``grid.
+    # num_layers`` is still passed so the graph knows the stack depth, but
+    # capacity (and the GlobalRouter's round-robin layer choice) is
+    # confined to these indices.
+    plan_signal_layers = signal_layer_indices(grid.layer_stack)
+    extra = [i for i in extra_signal_layers if i not in plan_signal_layers]
+    if extra:
+        plan_signal_layers = sorted([*plan_signal_layers, *extra])
+
+    # Issue #5575: per-class pitch.  ``Autorouter.net_class_map`` is keyed
+    # by net NAME, so the lambda resolves id -> name -> class; nets with no
+    # class entry fall back to the design-rule pitch (weight 1.0).
+    net_class_map = getattr(router, "net_class_map", None) or {}
+    net_names = router.net_names
+
+    def _pitch_for_net(net_id: int) -> float:
+        ncr = net_class_map.get(net_names.get(net_id, ""))
+        if ncr is None:
+            return float(trace_pitch)
+        return float(ncr.trace_width) + float(ncr.clearance)
+
+    region_graph = RegionGraph(
+        board_width=grid.width,
+        board_height=grid.height,
+        origin_x=grid.origin_x,
+        origin_y=grid.origin_y,
+        num_cols=num_cols,
+        num_rows=num_rows,
+        trace_pitch=trace_pitch,
+        num_layers=grid.num_layers,
+        signal_layer_indices=plan_signal_layers,
+        pitch_for_net=_pitch_for_net,
+    )
+
+    # Register pads as obstacles for blockage-aware capacity.
+    region_graph.register_obstacles(list(pad_dict.values()))
+    # Issue #5575: blockage beyond pads -- keepout rule areas and preserved
+    # copper.  Read-only with respect to the router (see
+    # ``collect_blockage_rects``); it only mutates the fresh RegionGraph.
+    _register_blockage(region_graph, router)
+
+    if report is not None:
+        stats = region_graph.get_statistics()
+        report(
+            f"  Tile grid: {num_cols}x{num_rows} "
+            f"({stats['num_regions']} regions, {stats['num_edges']} edges, "
+            f"pitch={trace_pitch:.3f}mm, signal layers={len(plan_signal_layers)}"
+            f"/{grid.num_layers})"
+        )
+
+    global_router = GlobalRouter(
+        region_graph=region_graph,
+        corridor_width=corridor_width,
+        default_layer=0,
+        negotiated=True,
+        max_iterations=GLOBAL_MAX_ITERATIONS,
+        history_increment=GLOBAL_HISTORY_INCREMENT,
+    )
+
+    started = time.time()
+    global_result = global_router.route_all(
+        nets=router.nets,
+        pad_dict=pad_dict,
+        net_order=list(net_order),
+    )
+    elapsed_s = time.time() - started
+
+    return PlanBuildResult(
+        plan=None,
+        region_graph=region_graph,
+        global_result=global_result,
+        tile_mm=tile_size,
+        elapsed_s=elapsed_s,
+    )
+
+
 def build_plan(
     router: Any,
     *,
@@ -870,6 +1293,7 @@ def build_plan(
     corridor_width_factor: float = 2.0,
     emit: bool = True,
     report: Callable[[str], None] | None = None,
+    relief: bool = True,
 ) -> PlanBuildResult:
     """Run one tile-based global-routing pass and (optionally) plan it.
 
@@ -901,87 +1325,26 @@ def build_plan(
             itself always runs there.
         report: Optional sink for the one-line tile-grid diagnostic.
             ``None`` keeps the stage silent.
+        relief: When ``True`` (the default) and the pass reports non-zero
+            overflow, run the bounded relief search (Issue #5521) and fill
+            ``plan.relief`` / ``plan.relief_meta``.  A feasible board never
+            enters the search, so boards with no overflow pay nothing.
 
     Returns:
         A :class:`PlanBuildResult`.
     """
-    from .global_router import GlobalRouter
-    from .region_graph import RegionGraph
-
+    net_order_list = list(net_order)
     grid = router.grid
     rules = router.rules
 
-    # Routing pitch and tile sizing -- identical to the pre-#5520 inline code.
-    trace_pitch = rules.trace_width + rules.trace_clearance
-    corridor_width = corridor_width_factor * rules.trace_clearance
-    tile_size = max(trace_pitch * TILE_PITCH_FACTOR, 1.0)
-    num_cols = max(MIN_TILE_DIM, int(grid.width / tile_size))
-    num_rows = max(MIN_TILE_DIM, int(grid.height / tile_size))
-
-    # Issue #5575: only non-PLANE layers advertise capacity.  ``grid.
-    # num_layers`` is still passed so the graph knows the stack depth, but
-    # capacity (and the GlobalRouter's round-robin layer choice) is
-    # confined to these indices.
-    plan_signal_layers = signal_layer_indices(grid.layer_stack)
-
-    # Issue #5575: per-class pitch.  ``Autorouter.net_class_map`` is keyed
-    # by net NAME, so the lambda resolves id -> name -> class; nets with no
-    # class entry fall back to the design-rule pitch (weight 1.0).
-    net_class_map = getattr(router, "net_class_map", None) or {}
-    net_names = router.net_names
-
-    def _pitch_for_net(net_id: int) -> float:
-        ncr = net_class_map.get(net_names.get(net_id, ""))
-        if ncr is None:
-            return float(trace_pitch)
-        return float(ncr.trace_width) + float(ncr.clearance)
-
-    region_graph = RegionGraph(
-        board_width=grid.width,
-        board_height=grid.height,
-        origin_x=grid.origin_x,
-        origin_y=grid.origin_y,
-        num_cols=num_cols,
-        num_rows=num_rows,
-        trace_pitch=trace_pitch,
-        num_layers=grid.num_layers,
-        signal_layer_indices=plan_signal_layers,
-        pitch_for_net=_pitch_for_net,
-    )
-
-    # Register pads as obstacles for blockage-aware capacity.
-    region_graph.register_obstacles(list(router.pads.values()))
-    # Issue #5575: blockage beyond pads -- keepout rule areas and preserved
-    # copper.  Read-only with respect to the router (see
-    # ``collect_blockage_rects``); it only mutates the fresh RegionGraph.
-    _register_blockage(region_graph, router)
-
-    if report is not None:
-        stats = region_graph.get_statistics()
-        report(
-            f"  Tile grid: {num_cols}x{num_rows} "
-            f"({stats['num_regions']} regions, {stats['num_edges']} edges, "
-            f"pitch={trace_pitch:.3f}mm, signal layers={len(plan_signal_layers)}"
-            f"/{grid.num_layers})"
-        )
-
-    global_router = GlobalRouter(
-        region_graph=region_graph,
-        corridor_width=corridor_width,
-        default_layer=0,
-        negotiated=True,
-        max_iterations=GLOBAL_MAX_ITERATIONS,
-        history_increment=GLOBAL_HISTORY_INCREMENT,
-    )
-
-    net_order_list = list(net_order)
-    started = time.time()
-    global_result = global_router.route_all(
-        nets=router.nets,
-        pad_dict=router.pads,
+    passed = run_global_pass(
+        router,
         net_order=net_order_list,
+        corridor_width_factor=corridor_width_factor,
+        report=report,
     )
-    elapsed_s = time.time() - started
+    region_graph = passed.region_graph
+    global_result = passed.global_result
 
     plan: RoutingPlan | None = None
     if emit:
@@ -992,18 +1355,33 @@ def build_plan(
             net_names=router.net_names,
             net_class_map=getattr(router, "net_class_map", None),
             layer_stack=grid.layer_stack,
-            tile_mm=tile_size,
-            elapsed_s=elapsed_s,
+            tile_mm=passed.tile_mm,
+            elapsed_s=passed.elapsed_s,
             default_trace_width=rules.trace_width,
             default_trace_clearance=rules.trace_clearance,
             pour_skipped=pour_nets,
             single_pad=single_pad_nets,
+            pads=router.pads.values(),
         )
+        # Issue #5521: computed relief.  Only an over-subscribed board
+        # enters the search, and the search itself never mutates the
+        # router (each candidate re-plans against a shifted *copy* of the
+        # pads), so the report-only contract of Phase 1 is preserved.
+        if relief and plan.overflow_report is not None and plan.overflow_report.total_overflow > 0:
+            from .routing_plan_relief import compute_relief
+
+            compute_relief(
+                plan,
+                region_graph,
+                router,
+                net_order=net_order_list,
+                corridor_width_factor=corridor_width_factor,
+            )
 
     return PlanBuildResult(
         plan=plan,
         region_graph=region_graph,
         global_result=global_result,
-        tile_mm=tile_size,
-        elapsed_s=elapsed_s,
+        tile_mm=passed.tile_mm,
+        elapsed_s=passed.elapsed_s,
     )

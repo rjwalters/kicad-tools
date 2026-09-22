@@ -456,6 +456,81 @@ def _discover_net_class_map(pcb_path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _discover_routing_plan(pcb_path: Path) -> tuple[Any, Path] | None:
+    """Auto-discover + load the ``<stem>.routing_plan.json`` sidecar (#5521).
+
+    ``kct route`` writes the report-only routing plan beside the **routed**
+    PCB under a stem-keyed name (``_write_routing_plan_sidecar``, #5519), so
+    the lookup is the exact inverse of the write: same directory, same stem.
+
+    Returns ``(plan, path)``, or ``None`` when there is nothing trustworthy
+    to read.  Three distinct "nothing" cases, deliberately different:
+
+    - **No sidecar** -- silent.  ``--why`` output is byte-identical to
+      pre-#5521 (this is what the golden test pins); printing "no plan
+      found" would itself be the behaviour change.
+    - **Unreadable / malformed sidecar** -- silent.  A broken diagnostic
+      must not break a diagnostic that worked before it existed.
+    - **Stale sidecar** (``source.pcb`` names a different board, or the
+      sidecar predates the PCB) -- one stderr line, then ignored.  Guessing
+      from a stale plan is worse than not guessing: the same attitude the
+      census gate takes to a stale cross-check.
+    """
+    from kicad_tools.router.routing_plan import RoutingPlan
+
+    sidecar = pcb_path.with_name(pcb_path.stem + ".routing_plan.json")
+    if not sidecar.is_file():
+        return None
+    try:
+        plan = RoutingPlan.from_dict(json.loads(sidecar.read_text()))
+    except Exception:
+        return None
+
+    recorded = plan.source.get("pcb")
+    if recorded and Path(str(recorded)).name != pcb_path.name:
+        print(
+            f"Warning: ignoring {sidecar.name} -- it was built for "
+            f"{Path(str(recorded)).name}, not {pcb_path.name}",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        if sidecar.stat().st_mtime < pcb_path.stat().st_mtime:
+            print(
+                f"Warning: ignoring {sidecar.name} -- it is older than "
+                f"{pcb_path.name} (re-run `kct route` to refresh it)",
+                file=sys.stderr,
+            )
+            return None
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return plan, sidecar
+
+
+def _print_routing_plan_block(plan: Any, crossings: dict[str, list], net_name: str) -> None:
+    """Print the ``routing plan:`` block for one diagnosis (#5521).
+
+    Prints nothing when the net crosses no overflowed edge (or no sidecar
+    was loaded), which is what keeps the no-sidecar output byte-identical.
+
+    Ordered **before** ``recommendation:`` on purpose: the classifier's
+    ``PLACEMENT_BOUND`` verdict is inferred from finished copper, while the
+    plan is a pre-route capacity measurement.  When both are present the
+    measurement is the stronger witness and should be read first -- but it
+    does not *reclassify* anything, so the ``[PLACEMENT_BOUND]`` header and
+    the counts above are untouched.
+    """
+    edges = crossings.get(net_name) or []
+    if not edges:
+        return
+    edge = edges[0]
+    print(f"  routing plan:     {plan.format_edge_headline(edge)}")
+    if len(edges) > 1:
+        print(f"                    (+{len(edges) - 1} more overflowed edge(s) on this net)")
+    for line in plan.relief_lines(edge):
+        print(f"                    relief: {line}")
+
+
 def _print_access_witness(diag: Any) -> None:
     """Render the replay-derived access witness for one diagnosis (#5517).
 
@@ -534,11 +609,26 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
     output formats render the block: which pass and iteration emptied the pad's
     access set, and whose copper did it.  Also no new CLI flag, and also
     byte-identical output when the sidecar is absent.
+
+    Issue #5521 (Epic #5510, Phase 1c): the same auto-discovery for the
+    ``<stem>.routing_plan.json`` sidecar ``kct route`` writes.  When one is
+    present and a stuck net crosses an overflowed corridor in it, both
+    formats name that corridor and its measured relief *ahead of* the
+    classifier's ``PLACEMENT_BOUND`` guess -- a pre-route capacity
+    measurement rather than an inference from finished copper.  Again no new
+    flag, and again byte-identical output without a sidecar: the
+    ``overflow_edge`` / ``routing_plan`` JSON keys are injected here, never
+    added to ``StuckNetDiagnosis.to_dict`` (which other consumers share).
     """
     from kicad_tools.router.stuck_classifier import StuckClassifierResult, classify_stuck_nets
 
     net_class_map = _discover_net_class_map(pcb_path)
     result = classify_stuck_nets(pcb_path, strict=strict, net_class_map=net_class_map)
+
+    # Issue #5521: the routing-plan sidecar, if one is beside the board.
+    discovered = _discover_routing_plan(pcb_path)
+    plan = discovered[0] if discovered is not None else None
+    crossings: dict[str, list] = plan.crossings_by_net_name() if plan is not None else {}
 
     # --net filter (issue #4682): restrict diagnoses (and every derived
     # count) to the selected net.
@@ -553,6 +643,26 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
         }
         if net is not None:
             data["net_filter"] = net
+        if plan is not None and discovered is not None:
+            # Issue #5521: additive ONLY when a sidecar was actually loaded.
+            # A ``"overflow_edge": null`` on every diagnosis would change the
+            # byte output of every board that has no plan -- exactly what the
+            # golden test forbids.
+            data["routing_plan"] = {
+                "path": str(discovered[1]),
+                "schema_version": plan.schema_version,
+                "total_overflow": (
+                    plan.overflow_report.total_overflow if plan.overflow_report else 0
+                ),
+                "overflowed_edges": (
+                    plan.overflow_report.overflowed_edges if plan.overflow_report else 0
+                ),
+                "feasible": (plan.overflow_report.feasible if plan.overflow_report else True),
+            }
+            for diag, payload in zip(result.diagnoses, data["nets"], strict=False):
+                edges = crossings.get(diag.net_name) or []
+                if edges:
+                    payload["overflow_edge"] = edges[0].to_dict()
         print(json.dumps(data, indent=2))
         return 2 if result.diagnoses else 0
 
@@ -602,6 +712,10 @@ def output_why(pcb_path: Path, fmt: str, strict: bool = True, net: str | None = 
                 )
             print(f"  blocking nets:    {', '.join(diag.blocking_nets)}{note}")
         print(f"  evidence:         {diag.evidence}")
+        # Issue #5521: the measured plan witness goes BEFORE the inferred
+        # recommendation (see _print_routing_plan_block).
+        if plan is not None:
+            _print_routing_plan_block(plan, crossings, diag.net_name)
         if diag.recommendation:
             _print_recommendation(diag)
         _print_access_witness(diag)

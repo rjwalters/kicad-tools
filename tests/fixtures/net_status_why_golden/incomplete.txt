@@ -1,0 +1,19 @@
+Stuck-net classification: incomplete.kicad_pcb
+======================================================================
+Connectivity model: strict (real copper geometry, matches kicad-cli)
+
+Stuck signal nets: 2
+  ESCAPE_BLOCKED:       0
+  CONGESTION_SATURATED: 0
+  BUDGET_STARVED:       1
+  PLACEMENT_BOUND:      0
+  POUR_DISCONTINUOUS:   1
+
+[BUDGET_STARVED] SIG
+  unconnected pads: R1.1, U1.6
+  evidence:         pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (1 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.
+
+[POUR_DISCONTINUOUS] GND
+  unconnected pads: R1.2
+  evidence:         pour-carried net: 1 pad(s) stranded from main connected island (layers: no zone definition)
+

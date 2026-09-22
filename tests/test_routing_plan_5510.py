@@ -1578,3 +1578,276 @@ def test_board_copper_unchanged_by_plan_stage(tmp_path, pcb_rel, extra):
         "fix the determinism protocol first; the comparison is meaningless "
         "while a stage-off route cannot reproduce itself."
     )
+
+
+# =============================================================================
+# Overflow report text + computed relief (Issue #5521, Epic #5510 Phase 1c)
+# =============================================================================
+
+
+def _overflowed_plan() -> RoutingPlan:
+    """A hand-built plan with one over-subscribed edge.
+
+    Built by hand (not by routing anything) so the report assertions below
+    are about the FORMATTER, not about whatever a fixture board happens to
+    congest this week.
+    """
+    return RoutingPlan(
+        source={"pcb": "ddr.kicad_pcb", "tile_mm": 4.0},
+        layers={"signal": [0, 3], "plane": [1, 2]},
+        regions={
+            17: RegionInfo(row=3, col=5, min_x=20.0, min_y=12.0, max_x=24.0, max_y=16.0),
+            18: RegionInfo(row=3, col=6, min_x=24.0, min_y=12.0, max_x=28.0, max_y=16.0),
+        },
+        nets={
+            n: NetPlanEntry(
+                name=f"/DQ{n}",
+                net_class="DDR",
+                pitch_mm=0.35,
+                layer_set=[0],
+                region_path=[17, 18],
+                status="assigned",
+            )
+            for n in range(3)
+        },
+        edges=[
+            EdgePlanEntry(
+                a=17,
+                b=18,
+                capacity=9,
+                demand=14.0,
+                overflow=5,
+                blockage_mm=1.2,
+                nets=[0, 1, 2],
+                layers={
+                    "0": {"capacity": 5, "demand": 12.0},
+                    "3": {"capacity": 4, "demand": 2.0},
+                },
+                refs_a=["U1", "C4"],
+                refs_b=["U3"],
+            )
+        ],
+        overflow_report=OverflowReport(
+            iterations=15,
+            total_overflow=5,
+            overflowed_edges=1,
+            failed_nets=[],
+            feasible=False,
+            elapsed_s=0.4,
+        ),
+        relief=[
+            {
+                "edge": [17, 18],
+                "kind": "move_component",
+                "ref": "U3",
+                "dx": 2.0,
+                "dy": 0.0,
+                "expected_overflow": 0,
+            },
+            {
+                "edge": [17, 18],
+                "kind": "add_signal_layer",
+                "layer_index": 1,
+                "expected_overflow": 1,
+            },
+            {"edge": [17, 18], "kind": "swap_pins", "deferred": "#5511"},
+        ],
+        relief_meta={
+            "candidates_evaluated": 9,
+            "elapsed_s": 1.25,
+            "truncated": False,
+            "baseline_overflow": 5,
+            "budget_s": 5.0,
+        },
+    )
+
+
+class TestFormatOverflowReport:
+    """AC-1: the report names tile pair, layer, demand, capacity, nets, refs."""
+
+    def test_report_names_every_required_field(self):
+        text = _overflowed_plan().format_overflow_report()
+
+        # Tile pair and both regions' bounds.
+        assert "tiles 17-18" in text
+        assert "(20.000, 12.000)-(24.000, 16.000)" in text
+        assert "(24.000, 12.000)-(28.000, 16.000)" in text
+        # The overflowed LAYER only (layer 3 has spare capacity).
+        assert "layer 0" in text
+        # Demand / capacity / overflow.
+        assert "demand 14.0 tracks" in text
+        assert "capacity 9" in text
+        assert "overflow 5" in text
+        # The nets crossing it.
+        assert "/DQ0 /DQ1 /DQ2" in text
+        # The nearest component ref on each side (rank 1, not the whole list).
+        assert "corridor U1 -> U3" in text
+
+    def test_report_lists_each_relief_candidate(self):
+        text = _overflowed_plan().format_overflow_report()
+        assert "move U3 +2.0/+0.0 mm -> total overflow 0" in text
+        assert "add signal layer 1 (currently a plane) -> total overflow 1" in text
+        assert "swap_pins deferred (#5511)" in text
+        assert "9 candidate(s)" in text
+
+    def test_region_without_a_ref_falls_back_to_its_centre(self):
+        plan = _overflowed_plan()
+        plan.edges[0].refs_a = []
+        text = plan.format_overflow_report()
+        assert "tile 17 @ (22.000, 14.000) -> U3" in text
+
+    def test_feasible_plan_reports_no_overflowed_edges(self):
+        plan = _overflowed_plan()
+        plan.edges[0].overflow = 0
+        assert plan.overflow_report is not None
+        plan.overflow_report.total_overflow = 0
+        plan.overflow_report.overflowed_edges = 0
+        plan.overflow_report.feasible = True
+        text = plan.format_overflow_report()
+        assert "no overflowed edges" in text
+        assert "-- feasible" in text
+
+    def test_report_survives_a_sidecar_round_trip(self):
+        """The #5521 consumer reads a sidecar, not a live router -- so the
+        report must be reproducible from ``from_dict`` alone."""
+        plan = _overflowed_plan()
+        restored = RoutingPlan.from_dict(json.loads(json.dumps(plan.to_dict())))
+        assert restored.format_overflow_report() == plan.format_overflow_report()
+
+    def test_truncated_search_says_so(self):
+        plan = _overflowed_plan()
+        plan.relief_meta["truncated"] = True
+        assert "budget exhausted, truncated" in plan.format_overflow_report()
+
+
+def make_blocker_board(blocker_xy: tuple[float, float] = (18.0, 23.0)) -> Autorouter:
+    """Three nets through a channel a single component's pads over-subscribe.
+
+    Built on :func:`make_channel_board` with a gap wide enough for FOUR
+    tracks (``capacity 4`` vs ``demand 3`` -> feasible on its own), then a
+    single-pad blocker component dropped inside the left-hand boundary tile.
+    Its 1.2 mm pad contributes 1.2 mm of region blockage, which the edge
+    model averages over the pair (0.6 mm) and subtracts from the boundary,
+    taking capacity to 2 against a demand of 3 -> overflow 1.
+
+    Moving the blocker +2 mm in Y lifts it out of BOTH boundary tiles, so
+    the capacity comes back and the board is feasible again -- which is
+    exactly the ``move_component`` relief candidate the search must find
+    (and must find by MEASURING, not by guessing).
+    """
+    router = make_channel_board(3, channel_width_mm=1.6)
+    router.add_component(
+        ref="BLK",
+        pads=[
+            {
+                "number": "1",
+                "x": blocker_xy[0],
+                "y": blocker_xy[1],
+                "net": 99,
+                "net_name": "NBLK",
+                "width": 1.2,
+                "height": 1.2,
+            }
+        ],
+    )
+    return router
+
+
+def _pad_positions(router: Autorouter) -> dict:
+    return {key: (pad.x, pad.y) for key, pad in router.pads.items()}
+
+
+class TestComputedRelief:
+    """AC-1/AC-4: relief is MEASURED per candidate, and placement is restored."""
+
+    def test_move_candidate_empties_the_edge(self):
+        router = make_blocker_board()
+        plan = router.plan_routing()
+
+        assert plan is not None
+        assert plan.overflow_report.total_overflow == 1
+        moves = [entry for entry in plan.relief if entry["kind"] == "move_component"]
+        assert moves, "the +2 mm step that removes the blockage was not found"
+        best = moves[0]
+        assert best["ref"] == "BLK"
+        assert best["expected_overflow"] == 0
+        assert (best["dx"], best["dy"]) in {(0.0, 2.0), (0.0, -2.0), (2.0, 0.0), (-2.0, 0.0)}
+        # Every kept candidate must actually improve on the baseline.
+        assert all(m["expected_overflow"] < 1 for m in moves)
+
+    def test_relief_restores_the_placement_exactly(self):
+        """The search re-plans against a shifted COPY of the pads, so the
+        router's own placement is not merely restored -- it is never
+        touched.  Byte-identical copper depends on this."""
+        router = make_blocker_board()
+        before = _pad_positions(router)
+        router.plan_routing()
+        assert _pad_positions(router) == before
+
+    def test_relief_names_the_adjacent_ref(self):
+        router = make_blocker_board()
+        plan = router.plan_routing()
+        edge = next(e for e in plan.edges if e.overflow > 0)
+        assert "BLK" in (edge.refs_a + edge.refs_b)
+        assert "BLK" in plan.format_overflow_report()
+
+    def test_swap_pins_is_a_deferred_stub_only(self):
+        plan = make_blocker_board().plan_routing()
+        stubs = [entry for entry in plan.relief if entry["kind"] == "swap_pins"]
+        assert stubs == [{"edge": [54, 55], "kind": "swap_pins", "deferred": "#5511"}]
+        # No evaluation, no expected_overflow, no #5511 implementation.
+        assert "expected_overflow" not in stubs[0]
+
+    def test_add_signal_layer_candidate_only_when_planes_exist(self):
+        """The channel fixture's B.Cu is a PLANE, so promoting it is a
+        legitimate capacity lever; an all-signal stack has none to offer."""
+        with_plane = make_blocker_board().plan_routing()
+        assert [e for e in with_plane.relief if e["kind"] == "add_signal_layer"]
+
+        no_plane = make_channel_board(6)
+        no_plane.grid.layer_stack = LayerStack.two_layer()
+        plan = no_plane.plan_routing()
+        assert plan.layers["plane"] == []
+        assert [e for e in plan.relief if e["kind"] == "add_signal_layer"] == []
+
+    def test_relief_meta_records_the_bound(self):
+        plan = make_blocker_board().plan_routing()
+        meta = plan.relief_meta
+        assert meta["baseline_overflow"] == 1
+        assert meta["budget_s"] == 5.0
+        assert meta["truncated"] is False
+        # 4 unit steps for the single adjacent ref + 1 plane candidate.
+        assert 0 < meta["candidates_evaluated"] <= 3 * 3 * 4 + 2
+        assert meta["elapsed_s"] < 5.0
+
+    def test_exhausted_budget_truncates_rather_than_overrunning(self):
+        from kicad_tools.router.routing_plan_relief import compute_relief
+
+        router = make_blocker_board()
+        result = build_plan(
+            router,
+            net_order=select_plan_nets(router).net_order,
+            relief=False,
+        )
+        plan = result.plan
+        assert plan.relief == [] and plan.relief_meta == {}
+
+        compute_relief(
+            plan,
+            result.region_graph,
+            router,
+            net_order=select_plan_nets(router).net_order,
+            budget_s=0.0,
+        )
+        assert plan.relief_meta["truncated"] is True
+        assert plan.relief_meta["candidates_evaluated"] == 0
+        # The stub is free (no re-plan), so it is still reported.
+        assert [e["kind"] for e in plan.relief] == ["swap_pins"]
+
+    def test_a_feasible_board_pays_nothing(self):
+        """AC: boards with no overflow never enter the search."""
+        router = _plain_autorouter()
+        plan = router.plan_routing()
+        assert plan.overflow_report.total_overflow == 0
+        assert plan.relief == []
+        assert plan.relief_meta == {}

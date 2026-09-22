@@ -4892,6 +4892,69 @@ def _apply_routing_plan_flag(router: "Autorouter", args) -> None:
     router.emit_routing_plan = bool(getattr(args, "routing_plan", True))
 
 
+def _plan_gate_preflight(router: "Autorouter", args, *, quiet: bool = False) -> None:
+    """Refuse to route an infeasible plan when ``--plan-gate`` is set (#5521).
+
+    Called immediately after ``_apply_routing_plan_flag`` at every CLI
+    dispatch site -- i.e. after the board is loaded but **before any
+    detailed routing** (escape routing included) on both the negotiated and
+    the dense two-phase paths, which is what makes the gate's promise
+    ("nothing was spent beyond the plan stage") true on either.
+
+    A no-op unless ``--plan-gate`` is set, so the default path is
+    byte-unchanged.  When the plan is infeasible:
+
+    - without ``--force``: raises
+      :class:`~kicad_tools.router.routing_plan.RoutingPlanGateAbort`, which
+      ``_main_impl`` turns into the report plus exit
+      :data:`_CENSUS_GATE_EXIT_CODE` (9, shared with the crossing-tail
+      census gate -- the stderr prefix says which fired);
+    - with ``--force`` (the EXISTING flag, #5521 adds no second override):
+      prints one line and routes.
+
+    The plan built here is **discarded** afterwards (``routing_plan`` reset
+    to ``None``), so the sidecar a gated run writes is still the one the
+    normal in-route stage builds.  That costs one extra plan pass under
+    ``--plan-gate --force``, and buys the guarantee that the flag cannot
+    change what lands in the sidecar.
+    """
+    if not getattr(args, "plan_gate", False):
+        return
+    from kicad_tools.router.routing_plan import RoutingPlanGateAbort
+
+    previous_emit = getattr(router, "emit_routing_plan", True)
+    try:
+        # The gate needs a plan even under --no-routing-plan; the sidecar
+        # switch is restored (and the plan dropped) immediately below.
+        router.emit_routing_plan = True
+        plan = router.plan_routing()
+    except Exception as e:  # pragma: no cover - defensive
+        print(
+            f"  Warning: --plan-gate could not build a routing plan "
+            f"({type(e).__name__}: {e}); routing anyway",
+            file=sys.stderr,
+        )
+        return
+    finally:
+        router.emit_routing_plan = previous_emit
+        router.routing_plan = None
+        router.plan_region_graph = None
+
+    if plan is None or plan.overflow_report is None or plan.overflow_report.feasible:
+        if not quiet and plan is not None:
+            print("[plan-gate] GO -- routing plan reports no overflow", file=sys.stderr)
+        return
+    if getattr(args, "force", False):
+        print(
+            "[plan-gate] overridden by --force -- routing an infeasible plan "
+            f"(overflow {plan.overflow_report.total_overflow} on "
+            f"{plan.overflow_report.overflowed_edges} edge(s))",
+            file=sys.stderr,
+        )
+        return
+    raise RoutingPlanGateAbort(plan)
+
+
 def _apply_rescue_pass_override(router: "Autorouter", args) -> None:
     """Disable the post-negotiation rescue sweep when requested (Issue #4159).
 
@@ -7558,6 +7621,9 @@ def route_with_layer_escalation(
         _apply_pairwise_clearance(router, args, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
+        # Issue #5521: --plan-gate refuses an infeasible plan here --
+        # before ANY detailed routing on this attempt.
+        _plan_gate_preflight(router, args, quiet=quiet)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -8657,6 +8723,9 @@ def route_with_rule_relaxation(
         _apply_pairwise_clearance(router, args, quiet=quiet)
         # Issue #5520: --no-routing-plan (report-only plan stage).
         _apply_routing_plan_flag(router, args)
+        # Issue #5521: --plan-gate refuses an infeasible plan here --
+        # before ANY detailed routing on this attempt.
+        _plan_gate_preflight(router, args, quiet=quiet)
         # Issue #3470: thread --max-ripups-per-net into the destructive
         # rip-up budgets (route_all + two-phase stall recovery).
         _apply_ripup_budget_override(router, args)
@@ -11001,6 +11070,9 @@ def route_with_combined_escalation(
             _apply_pairwise_clearance(router, args, quiet=quiet)
             # Issue #5520: --no-routing-plan (report-only plan stage).
             _apply_routing_plan_flag(router, args)
+            # Issue #5521: --plan-gate refuses an infeasible plan here --
+            # before ANY detailed routing on this attempt.
+            _plan_gate_preflight(router, args, quiet=quiet)
             # Issue #3470: thread --max-ripups-per-net into the destructive
             # rip-up budgets (route_all + two-phase stall recovery).
             _apply_ripup_budget_override(router, args)
@@ -13370,9 +13442,13 @@ def _route_parser() -> argparse.ArgumentParser:
                  clearance violations (issues #1666, #4588)
               5  interrupted by SIGINT with partial results saved
               8  --complete: one or more unroutable links remain (issue #4477)
-              9  --census-advisory-gate: the replayed crossing-tail census
-                 predicts an inert crossover lattice; aborted before any
-                 router work (issue #4799)
+              9  a pre-route gate fired -- detailed routing was not started;
+                 the stderr prefix says which:
+                 [crosstail-gate] --census-advisory-gate predicts an inert
+                 crossover lattice (issue #4799, before any router work), or
+                 [plan-gate] --plan-gate found the routing plan infeasible
+                 (issue #5510-1c, after the plan stage, before any detailed
+                 routing); --force overrides the latter
         """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -14979,6 +15055,24 @@ def _route_parser() -> argparse.ArgumentParser:
             "change routing behaviour."
         ),
     )
+    # Issue #5521 (Epic #5510, Phase 1c): opt-in pre-route gate on the
+    # report-only plan.  Deliberately the ONLY new flag in this slice --
+    # the override is the EXISTING --force (see the help text below), not a
+    # second one.
+    parser.add_argument(
+        "--plan-gate",
+        action="store_true",
+        default=False,
+        help=(
+            f"Refuse to start detailed routing (exit {_CENSUS_GATE_EXIT_CODE}) when the "
+            "report-only routing plan reports overflow "
+            "(overflow_report.feasible false), printing the per-edge "
+            "overflow report and its computed relief first. Off by "
+            "default: the plan stage stays report-only. --force overrides "
+            "the gate (note that --force ALSO disables grid/DRC "
+            "validation -- to simply not gate, omit --plan-gate)."
+        ),
+    )
     parser.add_argument(
         "--batch-routing",
         action="store_true",
@@ -15186,6 +15280,8 @@ def _route_parser() -> argparse.ArgumentParser:
 def _main_impl(argv: list[str] | None = None) -> int:
     parser = _route_parser()
     args = parser.parse_args(argv)
+    from kicad_tools.router.routing_plan import RoutingPlanGateAbort
+
     from .route_deadline import CONTROL_ENV, TIMEOUT_EXIT, RouteDeadlineExpired
     from .route_placement import finish
 
@@ -15194,6 +15290,19 @@ def _main_impl(argv: list[str] | None = None) -> int:
     except DRCConstraintPropagationError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return finish(args, 1)
+    except RoutingPlanGateAbort as gate:
+        # Issue #5521: --plan-gate said no-go.  Exit 9 is shared with the
+        # crossing-tail census gate (#4799) -- the "[plan-gate]" prefix is
+        # what tells the two apart.  Nothing beyond the plan stage ran.
+        print("[plan-gate] NO-GO -- detailed routing was not started", file=sys.stderr)
+        print(gate.plan.format_overflow_report(), file=sys.stderr)
+        print(
+            "[plan-gate] fix the placement/stackup (see relief above), or pass "
+            "--force to route anyway (--force also disables grid/DRC validation), "
+            "or drop --plan-gate to keep the plan report-only",
+            file=sys.stderr,
+        )
+        return finish(args, _CENSUS_GATE_EXIT_CODE)
     except RouteDeadlineExpired:
         # Supervised timeouts are finalized after the parent retires output.
         # In-process timeouts must not count an unchecked checkpoint as complete.
@@ -16251,6 +16360,9 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_pairwise_clearance(router, args, quiet=quiet)
     # Issue #5520: --no-routing-plan (report-only plan stage).
     _apply_routing_plan_flag(router, args)
+    # Issue #5521: --plan-gate refuses an infeasible plan here --
+    # before ANY detailed routing on this attempt.
+    _plan_gate_preflight(router, args, quiet=quiet)
     # Issue #3470: thread --max-ripups-per-net into the destructive
     # rip-up budgets (route_all + two-phase stall recovery).
     _apply_ripup_budget_override(router, args)
@@ -18305,12 +18417,19 @@ def _run_main_impl(args, parser, argv) -> int:
     #     was specifically asked to close never closed".  See the per-link
     #     report printed above (and optionally written via
     #     --complete-report) for WHY and what copper is blocking.
-    # 9 = ``--census-advisory-gate`` refused to start: a previous run's
-    #     crossing-tail census (replayed via --census-advisory) predicts an
-    #     inert crossover lattice for this board (issue #4799).  Returned by
-    #     _census_advisory_preflight BEFORE any router or component loading,
-    #     so it is the one route exit code that means "nothing was spent";
-    #     the fix layer is placement / escape planning, not the router.
+    # 9 = A pre-route gate refused to start DETAILED ROUTING.  Two gates
+    #     share this code; the stderr prefix distinguishes them:
+    #     [crosstail-gate] ``--census-advisory-gate`` -- a previous run's
+    #       crossing-tail census (replayed via --census-advisory) predicts an
+    #       inert crossover lattice for this board (issue #4799).  Returned by
+    #       _census_advisory_preflight BEFORE any router or component loading,
+    #       so on this path literally nothing was spent.
+    #     [plan-gate] ``--plan-gate`` -- the report-only routing plan reports
+    #       overflow (issue #5510-1c, _plan_gate_preflight).  The board and
+    #       the plan stage were spent (under 5 s); no detailed routing ran.
+    #       Overridden by the existing --force.
+    #     For both, the fix layer is placement / escape planning / stackup,
+    #     not the router.
     #
     # The --min-completion flag (default 0.95) controls the success threshold.
     # With --min-completion 0.80, routing 85% of nets returns exit code 0.

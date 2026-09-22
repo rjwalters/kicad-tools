@@ -613,6 +613,12 @@ def run_route_command(args) -> int:
     # byte-identical (tests/test_cli_parser_drift.py).
     if not getattr(args, "routing_plan", True):
         sub_argv.append("--no-routing-plan")
+    # Issue #5521 (Epic #5510, Phase 1c): forward --plan-gate.  Both parsers
+    # declare it as ``store_true`` defaulting to False, so only forward when
+    # the user set it -- flag-off argv stays byte-identical.  The override
+    # (--force) is an existing flag and is forwarded by its own block.
+    if getattr(args, "plan_gate", False):
+        sub_argv.append("--plan-gate")
     if getattr(args, "cross_package_pair_corridor", False):
         sub_argv.append("--cross-package-pair-corridor")
     if getattr(args, "slack_corridor_widening", False):
