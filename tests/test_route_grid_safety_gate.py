@@ -817,33 +817,41 @@ def test_explicit_clearance_equals_spelling_is_detected(tmp_path, capsys):
     assert "(rules: explicit --clearance flag)" in capsys.readouterr().out
 
 
-def test_explicit_manufacturer_overrides_board_declared_rules(tmp_path, capsys):
-    """An explicit ``--manufacturer`` is an operator override of board rules.
+def test_explicit_manufacturer_no_longer_waives_board_declared_rules(tmp_path, capsys):
+    """Issue #5645 (Epic #5509 Phase 2): a fab tier is not a rule waiver.
 
-    Decision (issue #4875 ambiguity #1): only an *actually explicit*
-    ``--manufacturer`` counts.  It restores today's behavior exactly (the
-    0.15mm default), so no invocation that names a manufacturer -- which is
-    every demo-board recipe -- changes its clearance because of this issue.
+    #4875 decided (its "ambiguity #1") that an explicit ``--manufacturer``
+    suppresses the board's declared rules, expressly as a blast-radius
+    shield: "It restores today's behavior exactly (the 0.15mm default), so no
+    invocation that names a manufacturer -- which is every demo-board recipe
+    -- changes its clearance because of this issue."
+
+    That is exactly the per-invocation divergence the unified resolver
+    removes.  Naming the fab you are ordering from says nothing about the
+    clearance your own board declares, and #5398 is what the waiver costs:
+    copper routed at 0.15mm on a board requiring 0.20mm fails that board's
+    own DRC whichever profile was named.  An explicit ``--manufacturer`` now
+    selects the *floor* (and names it in the banner); ``--clearance`` remains
+    the one deliberate waiver.
     """
     pcb = _imported_board(tmp_path, _declares(0.254))
     code, gate_reached, clearance = _run_imported_board(pcb, ["--manufacturer", "jlcpcb"])
 
-    assert clearance == 0.15
-    assert code == 1
-    assert gate_reached is False
+    assert clearance == 0.254, "the board's declared rule survives a named fab tier"
+    assert gate_reached is True
+    assert code is None
 
     out = capsys.readouterr().out
-    assert "rules: manufacturer profile jlcpcb" in out
-    assert "overrides the board's declared net_class" in out
+    assert 'Clearance: 0.254mm (rules: board net_class "Default")' in out
     assert out.count("(rules:") == 1
 
 
-def test_explicit_mfr_alias_also_overrides(tmp_path, capsys):
-    """The ``--mfr`` alias is the same override."""
+def test_explicit_mfr_alias_also_keeps_board_declared_rules(tmp_path, capsys):
+    """The ``--mfr`` alias resolves identically to ``--manufacturer``."""
     pcb = _imported_board(tmp_path, _declares(0.254))
     _code, _gate, clearance = _run_imported_board(pcb, ["--mfr", "oshpark"])
-    assert clearance == 0.15
-    assert "rules: manufacturer profile oshpark" in capsys.readouterr().out
+    assert clearance == 0.254
+    assert 'Clearance: 0.254mm (rules: board net_class "Default")' in capsys.readouterr().out
 
 
 def test_sub_floor_board_clearance_is_raised_to_the_fab_floor(tmp_path, capsys):

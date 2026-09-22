@@ -181,6 +181,24 @@ def test_fleet_board_declares_no_legacy_net_class(board_dir: str, stem: str, _ex
     assert _board_declared_net_classes(pcb) == {}
 
 
+#: Which precedence layer each fleet board's resolution is attributed to
+#: (issue #5645).  The *value* is 0.15mm for every board either way; boards
+#: 06 and 07 additionally declare a ``.kicad_pro`` board minimum equal to that
+#: target, so the unified resolver names that layer rather than the bare
+#: default.  Boards 05 / 07 route from historical fixtures with no sibling
+#: project file, so nothing is declared for them at all.
+FLEET_RULE_SOURCE: dict[str, str] = {
+    "00-simple-led": "default",
+    "01-voltage-divider": "default",
+    "02-charlieplex-led": "default",
+    "03-usb-joystick": "default",
+    "04-stm32-devboard": "default",
+    "05-bldc-motor-controller": "default",
+    "06-diffpair-test": "project-min-clearance",
+    "07-matchgroup-test": "default",
+}
+
+
 @pytest.mark.parametrize("board_dir,stem,_expected", FLEET)
 def test_fleet_clearance_is_unchanged_by_rule_derivation(
     board_dir: str, stem: str, _expected: bool
@@ -188,8 +206,11 @@ def test_fleet_clearance_is_unchanged_by_rule_derivation(
     """``args.clearance`` still resolves to 0.15mm for every fleet recipe.
 
     Run both with no flags and with the recipe's real ``--manufacturer``, so
-    neither #4875 branch (board-derived, or manufacturer-as-override) can
-    silently move a fleet board off the default the gate map is keyed to.
+    no precedence layer -- #4875's board-derived / manufacturer-as-override
+    branches, or the ``.kicad_dru`` and ``.kicad_pro`` minima #5645 added --
+    can silently move a fleet board off the default the gate map is keyed to.
+    Since #5645 an explicit ``--manufacturer`` no longer waives a declared
+    rule, so the two invocation shapes must agree on the value as well.
     """
     from types import SimpleNamespace
 
@@ -218,4 +239,4 @@ def test_fleet_clearance_is_unchanged_by_rule_derivation(
             "artifacts) assumes the flat 0.15mm route default."
         )
         assert args.clearance == ROUTE_DEFAULT_CLEARANCE
-        assert args._clearance_rule_source == "default"
+        assert args._clearance_rule_source == FLEET_RULE_SOURCE[board_dir]
