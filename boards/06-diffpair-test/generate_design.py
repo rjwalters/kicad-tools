@@ -3617,6 +3617,39 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         f"   Raw: {stats_raw['routes']} routes / {stats_raw['segments']} segments / {stats_raw['vias']} vias"
     )
 
+    # Issue #5617: phase-4 resume-exhaustion breakdown.  The CI job's
+    # dominant "Re-route board + check diff-pair coverage" step spends the
+    # bulk of phase 4 here; the issue's own investigation could only inspect
+    # ONE hand-picked net's Actions log by hand.  ``fallback_stats`` (Issue
+    # #5599 diagnostics + the new #5617 wall-clock aggregates) gives a
+    # whole-board answer for free -- printed within phase 4's own span (no
+    # new numbered header) so ``scripts/ci/check_diffpair_coverage.py``'s
+    # phase-profiler timeline attributes it to phase 4, where the time was
+    # actually spent.  Pure read of already-collected diagnostics -- no
+    # routing behaviour is touched.
+    try:
+        _fb_stats = router.backend_info.get("fallback_stats")
+    except Exception as exc:  # pragma: no cover - degrade gracefully
+        _fb_stats = None
+        print(f"   Resume-exhaustion summary skipped: {exc}")
+    if _fb_stats:
+        _exhausted_s = _fb_stats.get("resume_loop_exhausted_seconds", 0.0)
+        _by_reason = _fb_stats.get("python_fallback_seconds_by_reason", {})
+        _exhaustion_fallback_s = _by_reason.get("resume_exhaustion", 0.0)
+        _other_fallback_s = sum(v for k, v in _by_reason.items() if k != "resume_exhaustion")
+        _n_exhausted = sum(
+            1
+            for record in _fb_stats.get("resume_diagnostics", {}).values()
+            if record.get("exhausted")
+        )
+        if _exhausted_s or _exhaustion_fallback_s or _other_fallback_s:
+            print(
+                f"   Resume-exhaustion: {_n_exhausted} net(s) burned the full "
+                f"resume budget ({_exhausted_s:.1f}s of discarded C++ search); "
+                f"Python fallback spent {_exhaustion_fallback_s:.1f}s on those "
+                f"nets, {_other_fallback_s:.1f}s on other fallback triggers"
+            )
+
     print("\n5. Optimizing traces...")
     opt_config = OptimizationConfig(
         merge_collinear=True,
