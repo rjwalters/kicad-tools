@@ -727,6 +727,70 @@ class RoutingPlan:
                 out.append(str(kind))
         return out
 
+    def format_edge_headline(self, edge: EdgePlanEntry) -> str:
+        """The one-line ``corridor A -> B (tiles ..): demand/capacity`` headline.
+
+        Factored out of :meth:`format_overflow_report` (Issue #5521) so the
+        ``net-status --why`` consumer names an overflowed edge with exactly
+        the same wording the route-time report uses -- two renderings of
+        the same edge can never disagree.
+        """
+        layers = edge.overflowed_layers()
+        layer_text = (
+            "layer " + ", ".join(str(index) for index in layers) if layers else "all layers"
+        )
+        return (
+            f"corridor {self._side_label(edge.a, edge.refs_a)} -> "
+            f"{self._side_label(edge.b, edge.refs_b)} "
+            f"(tiles {edge.a}-{edge.b}, {layer_text}): "
+            f"demand {edge.demand:.1f} tracks, capacity {edge.capacity}, "
+            f"overflow {edge.overflow}"
+        )
+
+    def relief_lines(self, edge: EdgePlanEntry) -> list[str]:
+        """Public alias of the per-edge relief rendering (Issue #5521).
+
+        ``net-status --why`` prints the same candidate wording the route-time
+        report does; exposing it here is what keeps the two in lockstep.
+        """
+        return self._relief_text(edge)
+
+    # -- crossing predicate (Issue #5521) -----------------------------------
+
+    def overflowed_edges(self) -> list[EdgePlanEntry]:
+        """Overflowed edges, worst first then by ``(a, b)`` -- the report order."""
+        return sorted(
+            (e for e in self.edges if e.overflow > 0),
+            key=lambda e: (-e.overflow, e.a, e.b),
+        )
+
+    def crossings_by_net_name(self) -> dict[str, list[EdgePlanEntry]]:
+        """``{net name: [overflowed edges it crosses]}`` (Issue #5521).
+
+        **The** definition of "a net crosses an overflowed edge", used by
+        both the ``net-status --why`` consumer and the fleet
+        precision/recall table (``scripts/routing_plan_fleet_table.py``):
+        the net's name resolves through this plan's ``nets`` table to a net
+        ID listed in ``edges[i].nets`` for some edge with non-zero
+        ``overflow``.  Deliberately *not* a pad-in-region fallback -- two
+        definitions would let the diagnostic and the measurement disagree
+        about the same board.
+
+        Edges keep :meth:`overflowed_edges` order, so the first entry for a
+        net is the worst edge it crosses.
+        """
+        by_id: dict[int, list[EdgePlanEntry]] = {}
+        for edge in self.overflowed_edges():
+            for net_id in edge.nets:
+                by_id.setdefault(net_id, []).append(edge)
+        out: dict[str, list[EdgePlanEntry]] = {}
+        for net_id, edges in by_id.items():
+            entry = self.nets.get(net_id)
+            if entry is None:
+                continue
+            out.setdefault(entry.name, []).extend(edges)
+        return out
+
     def format_overflow_report(self) -> str:
         """Human-readable congestion report, one block per overflowed edge.
 
@@ -774,17 +838,7 @@ class RoutingPlan:
             return "\n".join(lines)
 
         for edge in overflowed:
-            layers = edge.overflowed_layers()
-            layer_text = (
-                "layer " + ", ".join(str(index) for index in layers) if layers else "all layers"
-            )
-            lines.append(
-                f"corridor {self._side_label(edge.a, edge.refs_a)} -> "
-                f"{self._side_label(edge.b, edge.refs_b)} "
-                f"(tiles {edge.a}-{edge.b}, {layer_text}): "
-                f"demand {edge.demand:.1f} tracks, capacity {edge.capacity}, "
-                f"overflow {edge.overflow}"
-            )
+            lines.append(self.format_edge_headline(edge))
             lines.append(f"  tile {edge.a}: {self._region_bounds_text(edge.a)}")
             lines.append(f"  tile {edge.b}: {self._region_bounds_text(edge.b)}")
             names = [self.nets[n].name if n in self.nets else f"Net {n}" for n in edge.nets]

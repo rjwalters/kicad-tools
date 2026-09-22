@@ -41,6 +41,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     The override is the **existing** `--force`, not a second flag — note
     it also disables grid/DRC validation, so to simply not gate, omit
     `--plan-gate`.
+  - **`kct net-status --why` reads the sidecar.** No new flag: `--why`
+    auto-discovers `<pcb_stem>.routing_plan.json` beside the board and,
+    for each stuck net crossing an overflowed corridor, names that
+    corridor and its measured relief immediately *before* the
+    `recommendation:` line — a pre-route capacity measurement printed
+    alongside the classifier's inference from finished copper, never
+    replacing it. In `--format json` this adds exactly two keys, and only
+    when a sidecar was loaded: a top-level `routing_plan` block and an
+    `overflow_edge` per crossing diagnosis (injected in `output_why`;
+    `StuckNetDiagnosis.to_dict()` is untouched). **Without a sidecar the
+    output is byte-identical to before**, pinned by golden fixtures in
+    `tests/fixtures/net_status_why_golden/`. A sidecar built for another
+    board, or older than the PCB, is reported on stderr and ignored.
+  - **Fleet precision/recall table** in `docs/reference/routing-plan.md`,
+    printed by `scripts/routing_plan_fleet_table.py` (which reads
+    sidecars and `kct net-status --format json` dumps — it never routes).
+    This replaces Epic #5510 Phase 1's two unmeasurable acceptance lines
+    with two falsifiable ones: *recall* (of the nets that really ended
+    unrouted, how many cross an overflowed corridor) and *precision* (of
+    the overflowed corridors, how many are crossed by an unrouted net).
 
 ## [0.21.1] - 2026-09-21
 

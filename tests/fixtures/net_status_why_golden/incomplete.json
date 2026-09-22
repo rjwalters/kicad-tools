@@ -1,0 +1,55 @@
+{
+  "pcb": "INCOMPLETE_PCB",
+  "connectivity_model": "strict",
+  "summary": {
+    "stuck_nets": 2,
+    "counts": {
+      "escape_blocked": 0,
+      "congestion_saturated": 0,
+      "placement_bound": 0,
+      "budget_starved": 1,
+      "pour_discontinuous": 1
+    }
+  },
+  "nets": [
+    {
+      "net_name": "SIG",
+      "net_number": 3,
+      "classification": "budget_starved",
+      "failure_cause": "routing_order",
+      "unconnected_pads": [
+        "R1.1",
+        "U1.6"
+      ],
+      "blocking_nets": [],
+      "evidence": "pad reachable (360 deg lane), no adjacent rippable strict copper (no strict copper nearby); sparse neighbourhood (1 foreign obstructions) -- looks routable on current copper (not confirmed); the batch negotiation likely never committed it. Re-route this net first or raise the per-net budget.",
+      "escape_lane_deg": 360.0,
+      "local_congestion": 1,
+      "nearest_blocker_mm": null,
+      "same_group_congestion": 0,
+      "foreign_congestion": 1,
+      "match_group": "",
+      "topology": "",
+      "recommendation": []
+    },
+    {
+      "net_name": "GND",
+      "net_number": 2,
+      "classification": "pour_discontinuous",
+      "failure_cause": "blocked_path",
+      "unconnected_pads": [
+        "R1.2"
+      ],
+      "blocking_nets": [],
+      "evidence": "pour-carried net: 1 pad(s) stranded from main connected island (layers: no zone definition)",
+      "escape_lane_deg": 0.0,
+      "local_congestion": 0,
+      "nearest_blocker_mm": null,
+      "same_group_congestion": 0,
+      "foreign_congestion": 0,
+      "match_group": "",
+      "topology": "",
+      "recommendation": []
+    }
+  ]
+}

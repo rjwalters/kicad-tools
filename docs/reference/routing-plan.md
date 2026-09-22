@@ -462,6 +462,89 @@ The plan the gate builds is discarded afterwards, so the sidecar a
 produces. That costs one extra plan pass on that path, and buys the
 guarantee that the flag cannot change what lands in the sidecar.
 
+## `kct net-status --why` reads the sidecar (Issue #5521)
+
+`--why` classifies a *saved* board: it has no live router, so its verdicts
+are inferred from finished copper. The routing plan is the other kind of
+evidence — a capacity measurement taken *before* anything was routed — and
+`--why` now prints it when it is available.
+
+No flag. `output_why` looks for `<pcb_stem>.routing_plan.json` beside the
+board (the exact inverse of what `kct route` writes) and, for each stuck
+net that **crosses an overflowed corridor**, prints the corridor and its
+measured relief immediately *before* the `recommendation:` line:
+
+```
+[PLACEMENT_BOUND] /DQ3
+  unconnected pads: U2.14, U3.9
+  evidence:         ...
+  routing plan:     corridor U2 -> U3 (tiles 17-18, layer 0): demand 14.0 tracks, capacity 9, overflow 5
+                    relief: move U3 +2.0/+0.0 mm -> total overflow 0
+  recommendation:   [medium] ...
+```
+
+The corridor line is rendered by `RoutingPlan.format_edge_headline()`, the
+same method the route-time report uses, so the two renderings of one edge
+cannot drift.
+
+Three properties are load-bearing:
+
+- **No sidecar ⇒ nothing changes.** Not a "no plan found" line, not a
+  `null` JSON key — byte-identical output, pinned by golden fixtures in
+  `tests/fixtures/net_status_why_golden/` (regenerate deliberately with
+  `scripts/regen_net_status_why_golden.py`).
+- **The plan never reclassifies.** The `[PLACEMENT_BOUND]` header and the
+  counts above it come from copper evidence; the plan is a second witness
+  printed underneath, not a new verdict.
+- **A sidecar that cannot be trusted is not used.** Built for a different
+  board (`source.pcb` basename mismatch) or older than the PCB ⇒ one stderr
+  line and it is ignored; malformed or unreadable ⇒ ignored silently. A
+  stale plan's guess is worse than no guess.
+
+In `--format json` the additions are exactly two, and only when a sidecar
+was actually loaded: a top-level `"routing_plan"` block (path,
+`schema_version`, `total_overflow`, `overflowed_edges`, `feasible`) and an
+`"overflow_edge"` key on each crossing diagnosis. Both are injected in
+`output_why`; `StuckNetDiagnosis.to_dict()` is untouched, because other
+consumers share it (the same discipline `bundle_orientation` follows).
+
+### What "crosses" means
+
+One definition, `RoutingPlan.crossings_by_net_name()`: a net crosses an
+overflowed edge iff its **name** resolves through the sidecar's `nets`
+table to a net ID listed in that edge's `nets`, for some edge with non-zero
+`overflow`. There is deliberately no pad-in-region fallback — the fleet
+table below scores recall with the same method call, and two definitions
+would let the diagnostic and the measurement disagree about one board.
+
+## Fleet measurement (Phase 1c)
+
+Epic #5510 Phase 1's original acceptance lines ("the report is useful")
+were not measurable. This table replaces them. For each board it asks two
+falsifiable questions about the plan's predicted congestion:
+
+- **recall** — of the nets that really ended unrouted, what fraction cross
+  at least one overflowed corridor? Low recall ⇒ the plan did not see the
+  congestion that actually stopped the router.
+- **precision** — of the overflowed corridors, what fraction are crossed by
+  at least one unrouted net? Low precision ⇒ the plan cried wolf.
+
+`scripts/routing_plan_fleet_table.py DIR...` prints the rows. It **does not
+route**: it reads a `*.routing_plan.json` sidecar plus a `kct net-status
+--strict --format json` dump from a directory a `kct route` run already
+produced. Each row's routing argv is listed under the table so any row can
+be reproduced.
+
+The denominator is "nets the plan actually planned": a net the global pass
+filed as `pour_skipped`, or that has no row in the plan's `nets` table at
+all, is excluded — the plan makes no claim about it, so it cannot be scored
+on it. (Board 04 is why the second exclusion exists: it auto-pours
+`+3.3V`/`GND` rather than passing them to `--skip-nets`, so they never
+reach the plan's net table, yet `net-status` reports them `incomplete` as
+advisory plane residuals.)
+
+<!-- FLEET_TABLE_PLACEHOLDER -->
+
 ## Non-goals of this phase
 
 - No per-board corridor / tile-size / keepout configuration.

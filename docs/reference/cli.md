@@ -1540,6 +1540,32 @@ key, with `pads[]` carrying `access_at_escape_end`, `final_access`,
 key is **absent** (not null) when no sidecar was found. Full format reference:
 [`../diagnostics/access-witness.md`](../diagnostics/access-witness.md).
 
+#### `--why`: the routing plan (issue #5521)
+
+A [`<stem>.routing_plan.json`](#post-route-sidecars) sidecar beside the board
+is auto-discovered the same way — again with no flag, and again with
+byte-identical output when it is absent. For each stuck net that crosses an
+**overflowed corridor** in the plan, `--why` prints the corridor and its
+measured relief immediately before the `recommendation:` line:
+
+```
+  routing plan:     corridor U2 -> U3 (tiles 17-18, layer 0): demand 14.0 tracks, capacity 9, overflow 5
+                    relief: move U3 +2.0/+0.0 mm -> total overflow 0
+```
+
+The access witness and the classification are *copper* evidence; the routing
+plan is a *capacity measurement* taken before anything was routed. The plan
+never reclassifies a net — the `[PLACEMENT_BOUND]` header and the counts are
+unchanged — it is a second, independent witness printed alongside.
+
+In `--format json` a sidecar adds exactly two keys: a top-level
+`routing_plan` block (`path`, `schema_version`, `total_overflow`,
+`overflowed_edges`, `feasible`) and an `overflow_edge` on each crossing
+diagnosis. Both are **absent** (not null) without a sidecar. A sidecar built
+for a different board, or older than the PCB, is reported on stderr and
+ignored rather than guessed from. Full reference:
+[`routing-plan.md`](routing-plan.md).
+
 ---
 
 ## Cost Commands
