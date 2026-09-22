@@ -100,6 +100,7 @@ deadline-kill fix, and CI/router performance recoveries.
   gets filled-polygon edge indexing plus phase-level profiling, and the
   validation hot path rejects far copper by bounding box before the exact
   halo distance (Issues #5617 and #5240's closing sweep).
+
 ### Changed
 
 - Make the report-only routing plan's capacity model honest (Issue #5575,

@@ -543,7 +543,118 @@ on it. (Board 04 is why the second exclusion exists: it auto-pours
 reach the plan's net table, yet `net-status` reports them `incomplete` as
 advisory plane residuals.)
 
-<!-- FLEET_TABLE_PLACEHOLDER -->
+### The table
+
+Measured 2026-09-21 at kct `d4049b9f7` (this slice's branch), every row from a
+`kct route` run into `scratch/5510-1c-fleet/<board>/` — no board's tracked
+`output/` was written, and no per-board tile, corridor or keepout was added to
+improve a row.
+
+| board | pcb | kct SHA | date | plan_s | relief_s | total_overflow | overflowed_edges | feasible | unrouted | unrouted_crossing | recall | precision | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 00 | simple_led_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.00 | 0.00 | 0 | 0 | true | 0 | 0 | n/a (0/0) | n/a (0/0) | |
+| 01 | voltage_divider_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.00 | 0.00 | 0 | 0 | true | 0 | 0 | n/a (0/0) | n/a (0/0) | |
+| 02 | charlieplex_3x3_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.06 | 0.16 | 2 | 2 | false | 0 | 0 | n/a (0/0) | 0.00 (0/2) | routed 100% anyway |
+| 03 | usb_joystick_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.10 | 3.62 | 7 | 6 | false | 2 | 1 | 0.50 (1/2) | 0.33 (2/6) | opens: USB_D+, VBUS; `--timeout 3600` |
+| 04 | stm32_devboard_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.25 | 2.85 | 4 | 4 | false | 0 | 0 | n/a (0/0) | 0.00 (0/4) | routed 100% anyway |
+| 05 | bldc_controller_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.16 | 1.74 | 2 | 2 | false | 6 | 1 | 0.17 (1/6) | 0.50 (1/2) | seed 7, not seed-deterministic (#3894); `--timeout 3600` |
+| 06 | diffpair_test_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.01 | 0.00 | 0 | 0 | true | 0 | 0 | n/a (0/0) | n/a (0/0) | |
+| 07 | matchgroup_test_routed.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.02 | 0.00 | 0 | 0 | true | 5 | 0 | 0.00 (0/5) | n/a (0/0) | regression fixture, `--search-timeout 600` |
+| softstart | softstart.kicad_pcb | d4049b9f7 | 2026-09-21 | 0.44 | 2.28 | 1 | 1 | false | 0 | 0 | n/a (0/0) | 0.00 (0/1) | local-only, **not a CI gate**; route hit `--timeout 1800`, row read from the partial board |
+
+Reproduce a row: route with the argv below, then
+`python scripts/routing_plan_fleet_table.py <output-dir>`. Boards 00–02, 04, 06
+and 07 use their production recipe argv verbatim; 03 and 05 use theirs with
+`--timeout` raised (their recipe budgets expired on this host before the run
+could emit a sidecar), and 07 trims `--timeout`/`--search-timeout` to the search
+stage because the table measures the *plan*, not the placement-feedback loop.
+
+```
+00  kct route boards/00-simple-led/output/simple_led.kicad_pcb -o OUT/simple_led_routed.kicad_pcb \
+      --seed 42 --deterministic-budget
+01  kct route boards/01-voltage-divider/output/voltage_divider.kicad_pcb -o OUT/voltage_divider_routed.kicad_pcb \
+      --strategy negotiated --iterations 30 --per-net-timeout 30 --timeout 240 --seed 42 --skip-nets GND
+02  kct route boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb -o OUT/charlieplex_3x3_routed.kicad_pcb \
+      --strategy negotiated --iterations 30 --deterministic-budget --timeout 900 --seed 42 \
+      --no-auto-pour --no-auto-layers --grid 0.1 --manufacturer jlcpcb
+03  kct route boards/03-usb-joystick/output/usb_joystick.kicad_pcb -o OUT/usb_joystick_routed.kicad_pcb \
+      --no-auto-pour --layers 4 --starting-layers 4 --max-layers 4 --seed 42 --skip-nets GND,VCC \
+      --grid 0.05 --manufacturer jlcpcb-tier1 --backend cpp --deterministic-budget --timeout 3600 \
+      --differential-pairs --net-class-map boards/03-usb-joystick/output/net_class_map.json
+04  kct route boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb -o OUT/stm32_devboard_routed.kicad_pcb \
+      --mfr jlcpcb-tier1 --auto-fix --no-auto-layers --layers 2 --grid 0.05 --via-drill 0.15 \
+      --via-diameter 0.30 --placement-feedback --no-cache --seed 42 --deterministic-budget --timeout 600
+05  kct route boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb -o OUT/bldc_controller_routed.kicad_pcb \
+      --auto-layers --starting-layers 4 --max-layers 4 --manufacturer jlcpcb-tier1 \
+      --micro-via-in-pad-fallback --backend cpp --seed 7 --timeout 3600 --per-net-timeout 60 \
+      --allow-unsafe-grid --escape-corridor-reservation --skip-nets '+24V,+5V,+3V3,GND,PHASE_A,PHASE_B,PHASE_C'
+06  kct route boards/06-diffpair-test/output/diffpair_test.kicad_pcb -o OUT/diffpair_test_routed.kicad_pcb \
+      --nets IN1,IN2,IN3,IN4,OUT1,OUT2,OUT3,OUT4 --preserve-existing --layers 4 --no-auto-layers \
+      --no-auto-pour --strict-layers --no-cache --strategy negotiated --seed 42 --iterations 20 \
+      --timeout 120 --grid 0.075 --net-class-map boards/06-diffpair-test/output/net_class_map.json
+07  kct route boards/07-matchgroup-test/regression-fixture/matchgroup_test.kicad_pcb \
+      -o OUT/matchgroup_test_routed.kicad_pcb \
+      --manufacturer jlcpcb --strategy negotiated --no-auto-layers --layers 4 --seed 42 \
+      --timeout 900 --search-timeout 600 --deterministic-budget --skip-nets 'GND,+1V2,+1V8' \
+      --net-class-map boards/07-matchgroup-test/regression-fixture/net_class_map.json --length-match-groups
+softstart  (copy the PCB and its net-class map into scratch/ first -- `kct route` rewrites the map in place)
+    kct route scratch/5510-1c-softstart/softstart.kicad_pcb -o scratch/5510-1c-softstart/softstart_routed.kicad_pcb \
+      --layers 4 --no-auto-layers --seed 42 --timeout 1800 \
+      --net-class-map scratch/5510-1c-softstart/net_class_map.json
+```
+
+Every routed PCB is followed by
+`kct net-status ROUTED --strict --format json > net_status.json` in the same
+directory; that is the only other input the runner reads.
+
+### What the table says (and what it refuses to say)
+
+**The plan under-reports more than it over-reports.** Two of the three boards
+that reported overflow (02, 04) routed to completion anyway — precision 0/2 and
+0/4. On the two boards that did leave opens (03, 05) recall is 1/2 and 1/6: the
+plan saw *some* of the congestion that stopped the router, not most of it. No
+row is a pass/fail gate in this phase; these are the numbers Phase 2's layer
+assignment and Phase 3's hard corridors have to move.
+
+**The epic's Phase 1 acceptance line "boards 00–06: `total_overflow == 0`,
+`feasible: true`" is measured FALSE, and is not being papered over.** Boards 02,
+03, 04 and 05 report non-zero overflow under their own production recipes. Two
+readings are possible and this phase deliberately does not choose between them:
+the pitch-heuristic capacity in `RegionGraph` is pessimistic (a 4 mm tile edge's
+track budget is an estimate, not a routed count), or those boards genuinely have
+corridors the router only clears by detouring. Changing a tile size or adding a
+per-board keepout to turn those rows green is explicitly out of scope — it would
+make the instrument agree with the prediction by editing the instrument.
+
+**Board 07's recall is 0/5, and that is the useful result.** The plan calls the
+assembled matchgroup fixture *feasible*: no edge overflows, so no corridor is
+named, so nothing is recalled. Board 07's opens come from bundle reversal
+(#3438, #5511), which a scalar per-edge track count structurally cannot see —
+so this row measures a known blind spot rather than a regression.
+`tests/test_board_07_routing_plan_5521.py` pins both numbers (0 overflowed
+edges, 0 crossing opens) as **records, not thresholds**, alongside the control
+that the DDR byte *in isolation* is also reported feasible (consistent with
+#4089's 11/11) — the plan is not simply calling every DDR bundle congested. Note
+the trimmed-timeout run in the table above leaves a different open set
+(`TMDS_D0_N, TMDS_D1_N, TMDS_D1_P, TMDS_D2_N, TMDS_D2_P`) than the committed
+regression expectation (`DQ3, DQ4, TMDS_D0_N, TMDS_D1_N`); recall is 0 either
+way, because the overflowed-edge count is 0.
+
+**Softstart is reported, not asserted.** It is local-only (the board lives
+outside this repo) and is *not* a CI gate. Two honest caveats: its route hit the
+1800 s budget, so `unrouted` is read from the partial board; and the issue's
+cited path `../softstart/hardware/kicad/output_revc/softstart_revc.kicad_pcb`
+does not exist in the softstart checkout as of 2026-09-21 — the current
+`hardware/kicad/output/softstart.kicad_pcb` was used instead. `GND` and `+3.3V`
+are excluded from the plan the same way board 04's are (auto-poured, never
+offered to the trace router) rather than carrying a `pour_skipped` status, so
+the denominator excludes them under the "no row in the plan's `nets` table"
+rule. The HV trunk nets are present in the plan and *are* pitch-weighted:
+`FUSED_LINE` and `AC_NEUTRAL` enter at `pitch_mm` 0.6 (their net class is
+0.4 mm wide with 0.2 mm clearance) against 0.4 for an unclassed signal — note
+this is the board's current net-class map, not the 2.6 mm trunk widths the
+issue text quotes from an earlier revision. No claim is made here about
+agreement with that board's 33-net wall; that needs #5509's pairwise HV pitch.
 
 ## Non-goals of this phase
 
@@ -567,7 +678,12 @@ The stage is a coarse-graph pass, not a detailed route: graph build is
 ~0.01 s at 53x33 tiles, and the negotiated global pass is cheap whenever
 nothing overflows. On the fleet boards (00-06, <= 38 nets) the measured
 `overflow_report.elapsed_s` ranges from ~0.1 ms to 57 ms, with the maximum
-on board 05 (37 nets, total overflow 4 -- see the measurement above).
+on board 05 (37 nets, total overflow 4 -- the #5588 measurement). The
+Phase-1c fleet table above re-measures the same column under each board's
+own production recipe and agrees on the order of magnitude: 0.00 s to
+0.25 s across boards 00-07, 0.44 s on the out-of-repo softstart board.
+(The per-board `total_overflow` values in that table are *not* the same
+run as the #5588 figures -- different argv, different layer counts.)
 `tests/test_routing_plan_5510.py::test_board_copper_unchanged_by_plan_stage`
 encodes the actual acceptance bound: `plan["overflow_report"]["elapsed_s"]
 < 5.0`, i.e. the guarantee is "well under 5 s on fleet-sized boards," not
