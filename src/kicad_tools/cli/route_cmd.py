@@ -6545,6 +6545,7 @@ _CLEARANCE_SOURCE_TOKENS: dict[str, str] = {
     "board-net-class": "board",
     "fab-floor": "fab-floor",
     "project-min-clearance": "project-min-clearance",
+    "project-net-class": "project-net-class",
     "project-dru": "project-dru",
 }
 
@@ -6605,6 +6606,8 @@ def _decide_route_clearance(
             return "board .kicad_dru clearance rule"
         if rule_source is RuleSource.PROJECT_MIN_CLEARANCE:
             return "project board minimum clearance"
+        if rule_source is RuleSource.PROJECT_NET_CLASS:
+            return f'project netclass "{class_name}"' if class_name else "project netclass"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         return str(rule_source.value)
