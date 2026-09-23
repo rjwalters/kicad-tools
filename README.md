@@ -744,9 +744,7 @@ entries live in [CHANGELOG.md](CHANGELOG.md).
   only the listed nets (inverse of `--skip-nets`); non-listed copper is treated
   as a fixed obstacle.
 - **Experimental routing substrates** (v0.17.0) — `--route-engine lattice`
-  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine
-  mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine
-  grid` remains the default and is unchanged. See
+  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine grid` remains the default and is unchanged. See
   [Routing Guide](docs/guides/routing.md).
 - **`kct net-status --why`** (v0.17.0) — ranked fix recommendations explaining
   why each incomplete net is stuck, with pin-order-verified reversed-bundle
@@ -839,8 +837,7 @@ uv run ruff format .
    build it. After `cd` into the worktree, run `uv run kct build-native`
    once before any routing benchmarks.
 
-3. **If a local `mypy` error names a file outside your diff, `rm -rf
-   .mypy_cache` and re-run before investigating it.** `.mypy_cache/` is
+3. **If a local `mypy` error names a file outside your diff, `rm -rf .mypy_cache` and re-run before investigating it.** `.mypy_cache/` is
    gitignored, so it survives `git reset --hard`, `git clean -fd`, a rebase,
    and a worktree reuse — bare `mypy` / `pnpm typecheck` can replay an error
    computed against an older tree. CI is always cold (no `actions/cache`), so
