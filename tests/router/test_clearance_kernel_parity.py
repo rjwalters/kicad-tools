@@ -871,6 +871,15 @@ def test_cpp_kernel_present_in_ci() -> None:
 
 MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
     {
+        # Epic #5509 Phase 3c (#5662), consumer groups 7 and 8: the coupled
+        # diff-pair search path.  ``clearance_shapes.py`` is the one
+        # router-primitive -> kernel-shape translation every migrated Python
+        # consumer shares, so two of them cannot end up disagreeing about the
+        # copper rather than about the clearance; ``diffpair_routing.py``
+        # reaches the kernel through it and is listed because its docstrings
+        # cite the kernel by name (this check is a plain text scan).
+        "router/clearance_shapes.py",
+        "router/diffpair_routing.py",
         # Epic #5509 Phase 3d (#5663), consumer group 9: the lattice engine.
         # The adapter is the package's single import site on purpose -- the
         # lattice is geometry-only in an integer net-id space and the kernel is
@@ -916,7 +925,7 @@ def test_only_migrated_consumers_reference_the_kernel() -> None:
     right answer was "none at all").  The property is unchanged -- an
     *accidental* import would destroy a consumer's before/after measurement --
     but the expected set is now an enumerated allowlist rather than the empty
-    set, because Phase 3d really did switch one.
+    set, because Phases 3c and 3d really did switch three modules.
     """
     repo_root = Path(__file__).resolve().parents[2]
     src = repo_root / "src" / "kicad_tools"
@@ -953,6 +962,14 @@ MIGRATED_CPP_KERNEL_CALLERS: frozenset[str] = frozenset(
         # takes every number from ``copper_gap_ring_edge`` /
         # ``ring_edge_crosses_ray``.
         "src/grid.cpp",
+        # Epic #5509 Phase 3c (#5662), consumer group 7: the coupled rail gate.
+        # ``coupled_pathfinder.cpp``'s ``rail_clear`` measures a candidate rail
+        # step against the grid's stored route geometry with the kernel, which
+        # is what made committed copper visible to the coupled search again
+        # (#4507).  The header is listed too: it documents the migration at
+        # ``rail_clear``'s declaration, and this check is a text scan.
+        "src/coupled_pathfinder.cpp",
+        "include/coupled_pathfinder.hpp",
     }
 )
 """C++ translation units allowed to reference the kernel, one per migration.
@@ -1009,10 +1026,12 @@ def test_ripgrep_acceptance_criterion() -> None:
     ``src/kicad_tools`` instead keeps the globs exactly as the issue wrote
     them and makes them mean what they say.
 
-    One glob per entry in :data:`MIGRATED_KERNEL_CALLERS` is appended, for the
-    same reason the structural test carries an allowlist: since Phase 3d the
-    criterion is "nothing *unplanned* references the kernel", and a deliberate
-    migration is not a violation of it.
+    One glob per entry in :data:`MIGRATED_KERNEL_CALLERS` is appended, derived
+    rather than hand-listed so the ledger stays the single place a migration is
+    recorded.  Excluding a migrated consumer is not weakening the criterion:
+    since Phase 3c/3d the question the command asks is *"has anything reached
+    the kernel that no phase signed off"*, and a deliberate migration is not a
+    violation of it.
 
     Skipped where ``rg`` is unavailable; the two structural tests above cover
     the same property without depending on the binary.

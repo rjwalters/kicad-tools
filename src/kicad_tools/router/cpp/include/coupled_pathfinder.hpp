@@ -131,7 +131,51 @@ public:
         int max_iterations_budget,
         double timeout_seconds);
 
+    // Epic #5509 Phase 3c (#5662): the coupled search's rail clearance gate,
+    // promoted out of the ``route()`` loop into a named, bindable method.
+    //
+    // Two things changed when it was promoted.  It is now **public and
+    // reachable from Python** (``bindings.cpp`` exposes it), which is what
+    // retires the epic's one genuinely unexposed consumer group -- group 7
+    // used to be a lambda no oracle adapter could drive.  And it now consults
+    // the shared exact-geometry clearance kernel
+    // (``clearance_kernel.hpp``) against the grid's **stored route
+    // geometry**, not just its fixed fills: committed copper that the C++
+    // blocked plane has not been re-synced with was invisible to the coupled
+    // search by construction, which is the #4507 defect.
+    //
+    // ``ax``/``ay`` -> ``bx``/``by`` is the candidate rail step in GRID
+    // coordinates; ``layer`` the layer it is traced on (ignored for a via
+    // candidate, which is copper on every layer); ``net`` the rail's own net;
+    // ``partner_net`` the other rail's net (pass ``-1`` for none), whose
+    // copper is deliberately exempt here -- within-pair spacing is the
+    // search's own spacing constraint plus the commit-time intra-pair gate,
+    // not this foreign-copper check; ``rail_half`` / ``rail_gap`` the
+    // per-rail copper half-width and clearance (negative = fall back to the
+    // ``DesignRules`` scalars), matching ``set_fill_rail_dimensions``.
+    bool rail_clear(int ax, int ay, int bx, int by, int layer, int net,
+                    int partner_net, double rail_half, double rail_gap,
+                    bool is_via) const;
+
+    // The same gate in WORLD millimetres, which is where the arithmetic
+    // actually lives -- ``rail_clear`` is ``grid_to_world`` plus this call.
+    //
+    // Both are bound.  The grid-coordinate form is what the search uses; the
+    // world form is what the Epic #5509 conformance adapter must use, because
+    // snapping a corpus case's copper onto the routing grid first would
+    // measure the raster's quantisation instead of this consumer's clearance
+    // model.
+    bool rail_clear_world(double ax, double ay, double bx, double by,
+                          int layer, int net, int partner_net,
+                          double rail_half, double rail_gap,
+                          bool is_via) const;
+
 private:
+    // The stored-route half of ``rail_clear``.
+    bool stored_route_clear(double ax, double ay, double bx, double by,
+                            int layer, int net, int partner_net,
+                            double half, double gap, bool is_via) const;
+
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
     Grid3D& grid_;
     DesignRules rules_;

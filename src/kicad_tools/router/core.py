@@ -10319,6 +10319,11 @@ class Autorouter:
                 self.grid._is_zone = old_grid._is_zone.copy()
                 self.grid._pad_blocked = old_grid._pad_blocked.copy()
                 self.grid._original_net = old_grid._original_net.copy()
+                # #5662: carry the registry-less blocker provenance across, or
+                # the rebuilt grid would lose every keep-out attribution and a
+                # refinement consumer could re-decide cells it cannot measure.
+                if old_grid._raster_only_blocked is not None:
+                    self.grid._raster_only_blocked = old_grid._raster_only_blocked.copy()
                 self.grid._pads = old_grid._pads.copy()
                 self.grid._component_hole_index = old_grid._component_hole_index.refreshed()
                 # Issue #4794: the occupancy planes were replaced wholesale
