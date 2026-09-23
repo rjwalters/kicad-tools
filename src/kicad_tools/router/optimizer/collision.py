@@ -583,22 +583,41 @@ class VectorCollisionChecker:
         # cells per step that were already covered by the previous step's
         # window.
         #
-        # Issue #5240: read the four backing arrays directly instead of
-        # ``cell_at(...)`` + ``_CellView`` property descriptors.  Profiling a
-        # representative board-02 route with the R-tree collision checker
-        # active (``rtree`` installed via ``--extra dev``, matching every CI
-        # job -- see this issue's history for the trap of profiling without
-        # it) showed this loop as the single hottest leaf frame in the whole
-        # route+optimize pipeline: 2.6s self time / 6.5s cumulative out of
-        # 19.0s total wall (34%), with ``cell_at`` + its four per-cell
-        # property reads accounting for nearly all of it. ``_CellView``
-        # exists so mutating call sites (``.blocked = True`` etc.) and
-        # single-field reads get a clean object API; this loop reads all
-        # four fields for O(route_length * clearance) cells per optimizer
-        # pass, so it skips the wrapper and reads the same backing arrays
-        # ``_CellView`` itself indexes.  Slicing out the 2D per-layer views
-        # once (rather than 3-tuple-indexing the 3D array per cell) also
-        # avoids repeating the leading-axis lookup on every iteration.
+        # Issue #5240: read the four backing planes directly instead of
+        # materialising a ``_CellView`` per cell via ``cell_at(...)`` and then
+        # reading four Python ``property`` descriptors off it.
+        #
+        # ``_CellView`` exists so mutating call sites (``cell.blocked = True``
+        # and friends) and one-off single-field reads get a clean object API.
+        # This loop is neither: it reads all four fields for
+        # O(segment_length * clearance_cells) cells on every optimizer
+        # candidate, so the wrapper's per-cell allocation plus four attribute
+        # lookups dominate the actual NumPy indexing.  Reading the same planes
+        # ``_CellView`` itself indexes (``grid._blocked`` etc.) is the idiom
+        # already used for the analogous hot predicates in
+        # ``pathfinder.py::_is_diagonal_blocked`` and
+        # ``cpp_backend.py::from_routing_grid``.  Slicing out the 2D per-layer
+        # views once, rather than 3-tuple-indexing the 3D array per cell, also
+        # drops the leading-axis lookup from every iteration.
+        #
+        # Measured with ``rtree`` installed (``uv sync --extra dev``, matching
+        # every CI job) -- without it ``make_collision_checker`` never selects
+        # this class, so the scan under measurement is never reached:
+        #
+        # * ``scripts/research/profile_route_obstacle_scan.py`` on a real
+        #   board-02 ``kct route``: this method's inclusive cost fell from
+        #   8.655 s to 2.870 s over an identical 6,394 calls (1353.6 -> 448.8
+        #   us/call), i.e. 6.1% -> 2.1% of route wall clock.
+        # * ``scripts/research/bench_collision_obstacle_scan.py`` in isolation
+        #   on a board-06-shaped 0.05 mm grid: 759.1 -> 267.3 us/probe, 2.84x,
+        #   with all 400 probe verdicts identical.
+        #
+        # Exact-output controls: the routed board-02 PCB is byte-identical
+        # across the two arms once random UUIDs are normalised, and
+        # ``tests/router/test_collision_obstacle_scan_parity_5240.py`` pins
+        # this loop against a transcription of the ``cell_at`` version it
+        # replaces (the mock grids in ``tests/test_router_collision.py``
+        # cannot tell the two code paths apart).
         blocked_layer = self.grid._blocked[layer_idx]
         is_obstacle_layer = self.grid._is_obstacle[layer_idx]
         pad_blocked_layer = self.grid._pad_blocked[layer_idx]
