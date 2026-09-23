@@ -19,6 +19,9 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 | `check_trace_vs_zone_fills.py` | Verify track segments against foreign-net zone fill copper (clearance/short check DRC cannot yet do; #3527). |
 | `replay_pairwise_gate.py` | Replay the router's own pairwise (HV-isolation) gate over a routed board. |
 | `route_chorus.py` | Canonical chorus-test-revA routing recipe runner with partial-net rescue (#3474). |
+| `verify-site-deployment.sh` | Standalone drift check: does the live kicad-tools.org deployment match the built site artifacts (uses `lib/site-verify.sh`). |
+| `regen_net_status_why_golden.py` | Regenerate the `net-status --why` golden fixtures (#5521). |
+| `routing_plan_fleet_table.py` | Fleet precision/recall table for the routing plan (#5521). |
 
 ## Subdirectories
 
@@ -29,13 +32,17 @@ Gate scripts invoked by GitHub Actions (and vendored into consumer repos by
 on copper-LVS, routed-DRC, diff-pair / match-group coverage, board-specific
 end-to-end checks, the mypy baseline, and route determinism:
 
-`board06_determinism_smoke.sh`, `board_route_determinism_smoke.sh`,
-`check_board_00_e2e.py`, `check_board_05_blocking.py`, `check_copper_lvs.py`,
-`check_diffpair_coverage.py`, `check_matchgroup_coverage.py`,
-`check_mypy_baseline.py`, `check_net_status.py`, `check_routed_drc.py`,
-`local-gate.sh` (local CI-equivalent gate, Actions-outage backstop),
-`net_class_map_resolver.py`, `normalize_copper.py`.
-
+`analyze_native_observations.py`, `board06_determinism_smoke.sh`,
+`board_recipe_artifacts.py`, `board_route_determinism_smoke.sh`,
+`check-content-contracts.sh`, `check_board_00_e2e.py`,
+`check_board_05_blocking.py`, `check_copper_lvs.py`,
+`check_diffpair_coverage.py`, `check_mask_copper_native.py`,
+`check_matchgroup_coverage.py`, `check_mypy_baseline.py`,
+`check_net_status.py`, `check_routed_drc.py`,
+`collect_failed_routing_bundle.py`, `init_kicad_libraries.py`, `local-gate.sh`,
+`native_observer.md`, `native_observer.py`, `native_observer_pytest.py`,
+`net_class_map_resolver.py`, `normalize_copper.py`, `run_native_routed_drc.sh`,
+`run_observed.py`, `select_routed_pcbs.py`, `verify_changes_filter.mjs`.
 `normalize_copper.py` is the routed-copper normalizer
 `board_route_determinism_smoke.sh` compares runs with: it reduces a
 `.kicad_pcb` to the sorted multiset of whole, paren-balanced
@@ -117,11 +124,20 @@ network, no CLI) are unit-tested by `tests/test_corpus_manifest.py`;
 `corpus/omnieda_sample.py` (offline) by `tests/test_corpus_omnieda.py`;
 `corpus/benchmark_readiness.py` (offline) by `tests/test_corpus_readiness.py`.
 
+### `lib/`
+
+Shell helpers sourced by the top-level scripts: `site-verify.sh` is the
+deployed-artifact verification library behind `verify-site-deployment.sh`.
+
 ### `research/`
 
-FOM-calibration and corpus-generation scripts (pair with `data/research/`):
+FOM-calibration and corpus-generation scripts (pair with `data/research/`),
+plus standalone router benchmark / profiling scripts (`bench_*.py`,
+`profile_*.py`) that back measured performance PRs (#5240, #5617):
 
+`bench_python_astar_via_kernel.py`, `bench_rtree_ripup.py`,
+`bench_stitch_fill_predicates.py`, `bench_stitch_track_index.py`,
 `calibrate_fom.py`, `check_negatives.py`, `demo_integration.py`,
 `generate_negative_controls.py`, `generate_perturbations.py`,
-`run_phase0_corpus.sh`, `run_phase0_fast_corpus.sh`,
-`train_phase0_classifier.py`.
+`profile_board06_rtree_deletes.py`, `run_phase0_corpus.sh`,
+`run_phase0_fast_corpus.sh`, `train_phase0_classifier.py`.
