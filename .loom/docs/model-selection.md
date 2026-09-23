@@ -4,6 +4,10 @@ How Loom resolves each worker's model, the Judge-rejection escalation ladder, an
 the suggested-model defaults by role. Retuning these defaults is measurement-gated
 — see [`docs/model-selection-retune.md`](https://github.com/rjwalters/loom/blob/main/docs/model-selection-retune.md).
 
+For *task-oriented* recipes that combine these keys with the runtime, credential-pool
+and spend-bound axes ("put the expensive model on Judge", "minimize wall-clock"), see
+[`configuring-resources.md`](configuring-resources.md).
+
 ### Model Selection Strategy
 
 Model selection is a first-class orchestration concern (issue #3477, Phase 1). Each worker's model is resolved through a fixed precedence chain — highest first:

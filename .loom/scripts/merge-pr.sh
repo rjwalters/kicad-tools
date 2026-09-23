@@ -1263,6 +1263,95 @@ _partial_increment_ref_snippets() {
   printf '%s\n' "$1" | _mp_refs partial-increment-ref-snippets --issue "$2"
 }
 
+# --- Backticked partial-increment trailer detection (#5690) ---------------
+#
+# #5234's code-span exclusion above is CORRECT and unchanged: a backticked
+# `Part of #N` is a hypothetical mention, not a declared intent. The gap it
+# leaves is that a Builder can write the convention's exact trailer text inside
+# a code span — it reads as "a literal piece of syntax, so put it in backticks"
+# — and the PR then looks completely right to a human reviewer and to Judge
+# while silently defeating the automation: _partial_increment_refs returns
+# nothing, so the #3667 `loom:building` -> `loom:issue` reset no-ops with no log
+# line anywhere and the issue is stranded at `loom:building` indefinitely. That
+# is exactly what happened merging PR #5686 into #5240.
+#
+# The remedy is DETECTION, not a parser change: a non-blocking pre-merge
+# warning (same advisory style as the #4569/#4595 conflict warnings) so the
+# person running the merge sees "this body looks like it is trying to declare a
+# partial increment, but the declaration will not parse".
+#
+# The shape matched here is deliberately MUCH narrower than the declaration
+# anchor in _partial_increment_refs: the backticked trailer must be the ENTIRE
+# line (modulo an optional list/blockquote marker, surrounding whitespace and
+# one trailing punctuation mark). That is the shape a Builder produces when
+# they MEANT to declare, and it excludes the two prose shapes that must stay
+# silent — the mid-sentence #5234 mention ("...I will switch the reference to
+# `Part of #4574`.") and a line that merely lists backticked trailers as
+# examples ("`Part of #123` / `Contributes to #456` — non-closing trailers").
+# Fenced code blocks are stripped first, so a documentation example never
+# warns.
+#
+# Split head/tail so _backticked_partial_increment_trailer_snippets can splice
+# a specific issue number into the same expression the ref extractor uses —
+# one regex, no drift between "what warned" and "what is quoted".
+_MP_BACKTICKED_PARTIAL_HEAD='^[[:space:]]*([-*+][[:space:]]+|[0-9]+\.[[:space:]]+|>[[:space:]]*)*`+[[:space:]]*(part of|contributes to)[[:space:]]+#'
+_MP_BACKTICKED_PARTIAL_TAIL='[[:space:]]*`+[[:space:]]*[.,;:]?[[:space:]]*$'
+
+# Issue numbers that appear ONLY as a whole-line, code-span-wrapped trailer in
+# text $1, one per line, deduped. Like _partial_increment_refs, `#N` tokens are
+# extracted FIRST and the `#` stripped only afterwards, so a numbered-list
+# marker's own ordinal (`3. \`Part of #789\``) cannot leak in as an issue
+# number.
+_backticked_partial_increment_trailer_refs() {
+  printf '%s\n' "$1" \
+    | _strip_fenced_code_blocks \
+    | grep -oiE "${_MP_BACKTICKED_PARTIAL_HEAD}[0-9]+${_MP_BACKTICKED_PARTIAL_TAIL}" \
+    | grep -oE '#[0-9]+' \
+    | tr -d '#' \
+    | sort -un || true
+}
+
+# The literal offending line(s) in text $1 that carry a backticked trailer for
+# issue $2, rendered `snippet", "snippet` like _closing_ref_snippets so the
+# warning can quote them in the same shape the rest of this guard uses.
+_backticked_partial_increment_trailer_snippets() {
+  printf '%s\n' "$1" \
+    | _strip_fenced_code_blocks \
+    | grep -iE "${_MP_BACKTICKED_PARTIAL_HEAD}${2}${_MP_BACKTICKED_PARTIAL_TAIL}" \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | awk 'NR>1 { printf "\", \"" } { printf "%s", $0 } END { if (NR) print "" }' || true
+}
+
+# Warn (non-blocking) for every issue that a backticked trailer names but that
+# $2 — the authoritative declaration list from _partial_increment_refs — does
+# NOT contain. An issue named by BOTH a backticked line and a real plain-text
+# trailer is not warned about: the reset will fire for it regardless.
+_warn_backticked_partial_increment_trailers() {
+  local pr_body="$1" declared_refs="$2"
+  local backticked issue_num snippet dr=""
+
+  backticked="$(_backticked_partial_increment_trailer_refs "$pr_body")"
+  [[ -n "$backticked" ]] || return 0
+
+  # Match the dry-run contract of the conflict warnings above: report the
+  # would-be outcome without claiming a merge is happening.
+  [[ "${DRY_RUN:-false}" == "true" ]] && dr="[dry-run] "
+
+  while IFS= read -r issue_num; do
+    [[ -n "$issue_num" ]] || continue
+    # `if`, not `&& continue`: a failing `a && b` list is the statement's exit
+    # status, which would trip errexit in a caller that is not under `|| true`.
+    if grep -qx "$issue_num" <<<"$declared_refs"; then
+      continue
+    fi
+    snippet="$(_backticked_partial_increment_trailer_snippets "$pr_body" "$issue_num")"
+    warning "${dr}Backticked partial-increment trailer (#5690): PR #$PR_NUMBER's body carries a whole-line \`Part of\`/\`Contributes to\` reference to #$issue_num wrapped in a code span (\"$snippet\"), which is NOT read as a declaration — inline code spans are deliberately excluded (#5234) so a hypothetical mention cannot be mistaken for declared intent."
+    warning "  ${dr}Consequence: the automatic \`loom:building\` -> \`loom:issue\` reset (#3667) will NOT run for #$issue_num on merge, and nothing else logs that it was skipped — #$issue_num would sit at \`loom:building\` until a stale-claim pass reclaims it. If #$issue_num really is a partial increment, edit the PR body so the trailer is PLAIN TEXT on its own line (no backticks), then re-run this merge. If the mention was hypothetical, ignore this — nothing is blocked."
+  done <<< "$backticked"
+
+  return 0
+}
+
 # Every commit message of this PR, concatenated (#4595). merge-pr.sh squash-
 # merges without overriding the commit message (forge_merge_pr passes no
 # commit_title/commit_message), so GitHub composes the squash message from these
@@ -1300,6 +1389,14 @@ _check_partial_increment_close_conflict() {
 
   local partial_refs
   partial_refs="$(_partial_increment_refs "$pr_body")"
+
+  # #5690: runs BEFORE the early return below, because the case it exists for
+  # is precisely the one where $partial_refs is EMPTY — a trailer the author
+  # backticked, which parses as no declaration at all. Pure text analysis, no
+  # forge calls, so the common (non-partial-increment) path still costs zero
+  # extra API requests.
+  _warn_backticked_partial_increment_trailers "$pr_body" "$partial_refs"
+
   [[ -n "$partial_refs" ]] || return 0
 
   # Closing references GitHub will honor on merge, from three unioned signals:

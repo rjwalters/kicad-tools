@@ -696,7 +696,16 @@ BASE_WORKDIR="$(mktemp -d)"
 # suite runs under `set -uo pipefail` with NO `-e`, so a bare call would swallow
 # both and continue with a HALF-ARMED sandbox — the exact state the helper's own
 # failure path exists to prevent — while driving the real lifecycle scripts.
-if ! live_state_sandbox_init "$BASE_WORKDIR/live-state"; then
+#
+# FIXTURE CONTAINMENT (#8712) is armed on the same line and for the same reason:
+# it declares $BASE_WORKDIR as the only place this suite's fixtures may write,
+# which closes the one damaging path the live-state sandbox does not cover — the
+# REAL checkout's `loom-daemon/target/release/loom-daemon`, where
+# `loom_resolve_self_daemon_bin` looks for the binary implementing
+# `release-fetch`. A fixture fake left there made every `--fetch` on
+# loom-worker-1 fail for hours. Same failure handling: a containment guard that
+# could not be armed is a half-armed sandbox, and this suite refuses to run.
+if ! live_state_sandbox_init "$BASE_WORKDIR/live-state" || ! loom_fixture_scratch_root "$BASE_WORKDIR"; then
     echo "FATAL: live-state sandbox init failed — refusing to run this suite against a half-armed sandbox (#6420)." >&2
     echo "  See the reason above (lib/live-state-sandbox.sh): a writable sandbox root is required, and the ambient LOOM_LAUNCHD_LABEL / LOOM_WATCHDOG_LABEL must not be the real production identities." >&2
     rm -rf "$BASE_WORKDIR"
@@ -4645,14 +4654,25 @@ fi
 #     "discovered by an operator on a degraded host" into "caught by the suite":
 #     isolation alone is unfalsifiable, since each of the previous three fixes
 #     also LOOKED complete.
+#
+#     PAIRED (#8712) with the real-build-output sentinel, because the same
+#     "isolation alone is unfalsifiable" argument applies to the one damaging
+#     path OUTSIDE `.loom`: the real checkout's
+#     `loom-daemon/target/release/loom-daemon`, where
+#     `loom_resolve_self_daemon_bin` looks for the binary that implements
+#     `release-fetch`. A fixture fake left there made every `--fetch` on
+#     loom-worker-1 fail for hours. The containment guard armed at the top of
+#     this suite should make that unreachable; the sentinel reports it (and
+#     clears it, when it is one of our own shell fakes) if it was reached
+#     anyway. See loom_fixture_assert_build_output_untouched.
 # ============================================================
 TESTS_RUN=$((TESTS_RUN + 1))
-if live_state_sandbox_assert_untouched; then
+if live_state_sandbox_assert_untouched && loom_fixture_assert_build_output_untouched; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} no live .loom daemon state path was written during the suite ($(live_state_sandbox_snapshot_size) paths guarded, #5179)"
+    echo -e "${GREEN}✓${NC} no live .loom daemon state path and no real build output was written during the suite ($(live_state_sandbox_snapshot_size) paths guarded, #5179/#8712)"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} a LIVE .loom daemon state path was written during this test run (#5179 regression!)"
+    echo -e "${RED}✗${NC} a LIVE .loom daemon state path or the real build output was written during this test run (#5179/#8712 regression!)"
     echo "  sandbox in effect during the run:"
     live_state_sandbox_describe | sed 's/^/    /'
 fi

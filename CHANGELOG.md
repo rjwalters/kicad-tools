@@ -62,6 +62,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unrouted, how many cross an overflowed corridor) and *precision* (of
     the overflowed corridors, how many are crossed by an unrouted net).
 
+### Fixed
+
+- **Qualify KiCad 10.0.6 for the native mask-to-copper gate** (Issue #5678).
+  The CI runner's floating `kicad/kicad:10.0` tag moved from 10.0.5 to 10.0.6,
+  and both hard-coded `10.0.5` version pins — `scripts/ci/check_mask_copper_native.py`'s
+  gate and `validate/mask_copper_geometry.py`'s native-attribution check —
+  rejected it, failing the `Test` job's mask step (which also skipped every
+  later step in that job, including `Run tests`). The two pins are now one
+  shared `QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")` in
+  `validate/mask_copper_geometry.py`, imported by the CI gate so the pair can
+  no longer drift apart; an unqualified build still fails loudly, now naming
+  the versions it did see.
+  10.0.6 was **measured**, not assumed, before being admitted: the full native
+  suite was run in both `kicad/kicad@sha256:182c8005…` (10.0.5) and
+  `kicad/kicad@sha256:18693567…` (10.0.6), each reporting `32 passed, no
+  skips`, and the resulting mask/copper geometry was compared across the two —
+  every exported layer polygon and every per-UUID attributed object polygon
+  came back byte-identical in WKT (0.000e+00 mm² symmetric difference).
+
 ## [0.21.1] - 2026-09-21
 
 ### Summary

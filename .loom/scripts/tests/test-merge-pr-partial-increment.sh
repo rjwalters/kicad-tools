@@ -181,6 +181,9 @@ awk '
 
 for _fn in _strip_fenced_code_blocks _partial_increment_refs _closing_refs_stdin \
            _body_closing_refs _closing_ref_snippets _partial_increment_ref_snippets \
+           _backticked_partial_increment_trailer_refs \
+           _backticked_partial_increment_trailer_snippets \
+           _warn_backticked_partial_increment_trailers \
            _pr_commit_messages _check_partial_increment_close_conflict \
            _reset_one_partial_issue _reset_partial_increment_labels; do
     if ! grep -q "^${_fn}() {" "$FUNCS_FILE"; then
@@ -547,6 +550,116 @@ quoted_body='Context from the epic:
 > Part of #456'
 assert_eq "456" "$(_partial_increment_refs "$quoted_body")" \
   "Blockquote marker: '> Part of #456' still counts as a declaration"
+
+echo ""
+echo "Testing backticked-trailer warning (#5690)..."
+
+# BT1: the exact incident shape — PR #5686's body wrote the trailer as
+# `Part of #5240` (whole line, wrapped in an inline code span) instead of the
+# plain `Part of #5240`. #5234's code-span exclusion correctly reads that as a
+# non-declaration, so the #3667 reset silently no-opped and #5240 was stranded
+# at loom:building with no log line anywhere. The parser's answer must NOT
+# change; the new warning is what makes the silence visible.
+backticked_body='## Summary
+
+Implements the first slice.
+
+`Part of #5240`'
+assert_eq "" "$(_partial_increment_refs "$backticked_body")" \
+  "#5690 incident: backticked '\`Part of #5240\`' is still NOT a declaration (#5234 unchanged)"
+assert_eq "5240" "$(_backticked_partial_increment_trailer_refs "$backticked_body")" \
+  "#5690 incident: the backticked-trailer detector DOES see #5240"
+
+reset_log
+PR_JSON="$(jq -n --arg body "$backticked_body" '{body: $body}')"
+run_capturing_stderr _check_partial_increment_close_conflict
+bt_err="$(read_stderr)"
+assert_contains "$bt_err" "Backticked partial-increment trailer (#5690)" \
+  "#5690 incident: pre-merge guard emits the backticked-trailer warning"
+assert_contains "$bt_err" '"`Part of #5240`"' \
+  "#5690 incident: warning quotes the offending line verbatim"
+assert_contains "$bt_err" '#5240' \
+  "#5690 incident: warning names the affected issue"
+assert_eq "" "$PARTIAL_CONFLICT_ISSUES" \
+  "#5690 incident: warning is advisory only — no conflict recorded"
+assert_eq "" "$PARTIAL_OPEN_BEFORE_MERGE" \
+  "#5690 incident: warning does not add the issue to the partial-increment tracking sets"
+assert_eq "" "$(read_log)" \
+  "#5690 incident: warning is non-blocking and mutates nothing"
+
+# BT2: the correct, plain-text trailer must NOT warn (the whole point — this is
+# the shape the convention asks for and the one the reset already handles).
+plain_body='## Summary
+
+Implements the first slice.
+
+Part of #123'
+assert_eq "" "$(_backticked_partial_increment_trailer_refs "$plain_body")" \
+  "Plain-text 'Part of #123' trailer: detector finds nothing to warn about"
+
+reset_log
+PR_JSON="$(jq -n --arg body "$plain_body" '{body: $body}')"
+run_capturing_stderr _check_partial_increment_close_conflict
+assert_not_contains "$(read_stderr)" "Backticked partial-increment trailer (#5690)" \
+  "Plain-text 'Part of #123' trailer: no warning (declaration parses, reset will fire)"
+
+# BT3: the #5234 incident body — a MID-SENTENCE backticked mention — must stay
+# silent. It is prose describing a hypothetical, and warning on it would train
+# operators to ignore this warning entirely.
+assert_eq "" "$(_backticked_partial_increment_trailer_refs "$incident_body")" \
+  "#5234 prose: mid-sentence backticked 'Part of #4574' does NOT warn (not a whole-line trailer)"
+
+# BT4: a line that merely LISTS backticked trailers as examples (documentation
+# prose) is not an attempted declaration either.
+example_line_body='Use `Part of #123` / `Contributes to #456` for a partial increment.'
+assert_eq "" "$(_backticked_partial_increment_trailer_refs "$example_line_body")" \
+  "Docs prose: a line listing backticked trailers as examples does NOT warn"
+
+# BT5: a backticked trailer inside a FENCED code block is documentation, and is
+# stripped before matching — same treatment _partial_increment_refs gives it.
+fenced_backticked_body='Write the trailer plainly:
+
+```markdown
+`Part of #123`
+```
+
+Part of #456'
+assert_eq "" "$(_backticked_partial_increment_trailer_refs "$fenced_backticked_body")" \
+  "Fenced block: a backticked trailer inside a fence does NOT warn"
+
+# BT6: an issue named by BOTH a backticked line and a real plain-text trailer
+# is not warned about — the reset fires for it regardless.
+both_body='Part of #123
+
+`Part of #123`'
+assert_eq "123" "$(_partial_increment_refs "$both_body")" \
+  "Both shapes: the plain-text trailer still declares #123"
+reset_log
+PR_JSON="$(jq -n --arg body "$both_body" '{body: $body}')"
+run_capturing_stderr _check_partial_increment_close_conflict
+assert_not_contains "$(read_stderr)" "Backticked partial-increment trailer (#5690)" \
+  "Both shapes: no warning — #123 is already a parsed declaration"
+
+# BT7: marker-prefixed and numbered-list forms. The numbered case also proves
+# the marker ordinal cannot leak in as an issue number (the PA6 trap, which the
+# detector must avoid independently of _partial_increment_refs).
+assert_eq "42" "$(_backticked_partial_increment_trailer_refs '- `Contributes to #42`')" \
+  "List marker: '- \`Contributes to #42\`' warns on #42"
+assert_eq "789" "$(_backticked_partial_increment_trailer_refs '3. `Part of #789`')" \
+  "Numbered marker: '3. \`Part of #789\`' yields ONLY 789 (ordinal does not leak)"
+
+# BT8: --dry-run prefixes the warning, matching the conflict warnings' contract.
+reset_log
+PR_JSON="$(jq -n --arg body "$backticked_body" '{body: $body}')"
+# Set/unset explicitly rather than `DRY_RUN=true run_capturing_stderr …`:
+# in bash, a variable assignment preceding a SHELL FUNCTION call leaks into the
+# calling shell afterwards, which would silently flip every later case to
+# dry-run mode.
+DRY_RUN=true
+run_capturing_stderr _check_partial_increment_close_conflict
+unset DRY_RUN
+assert_contains "$(read_stderr)" "[dry-run] Backticked partial-increment trailer (#5690)" \
+  "Dry run: warning carries the [dry-run] prefix"
 
 echo ""
 echo "Testing _check_partial_increment_close_conflict (pre-merge guard)..."

@@ -448,6 +448,314 @@ else
     done
 fi
 
+# --- content-based lineage: pure upstream content is never a "local fix" -----
+#
+# #8676: the guard used to decide lineage purely from the installed file's last
+# commit SUBJECT. A file never touched since a repo's ORIGINAL install carries
+# that install's subject -- whatever the installing human typed -- and real
+# fleet examples match none of RESYNC_COMMIT_SUBJECT_RE's alternatives:
+#
+#     tooling: install Repo Skills and Loom into the map repo
+#     Upgrade Loom to 0.18.0 (resync installed surfaces + role prompts)
+#     Install Loom orchestration (quick install from rjwalters/loom@cd4ab46e)
+#
+# So the moment upstream EDITED such a file, the old upstream text being
+# replaced was read as "lines unique to the installed copy" and the update was
+# blocked as a phantom local fix -- the incident behind #8676 blocked a
+# one-line jq-1.6 compatibility fix to scripts/archive-transcripts.sh across
+# the fleet, each repo needing a hand-run --force.
+#
+# The fix decides by CONTENT first: byte-identical to defaults/<rel> as it
+# stood at the installed version (install-metadata.json's loom_commit, else a
+# v<loom_version> tag, resolved in SOURCE_ROOT) => pure upstream lineage, no
+# local fix to protect, whatever the subject says.
+
+# make_lineage_fixture <dirname> <install-subject> [metadata-mode]
+#   A repo "installed at commit A" with an ARBITRARY install commit subject.
+#   .loom/hooks/guard.sh is byte-identical to defaults/hooks/guard.sh at that
+#   commit -- the "never individually patched since install" shape.
+#
+#   metadata-mode (default "commit") selects how the installed version is
+#   recorded, so both resolution rungs and the unresolvable fallback are
+#   exercised:
+#     commit      -- loom_commit = commit A's short sha
+#     tag         -- loom_commit unresolvable, but tag v0.0.0 points at A
+#     unresolvable-- neither resolves (models a tarball/vendored source tree)
+#
+#   The metadata is written in a SECOND commit that does not touch
+#   .loom/hooks/guard.sh, so that file's last-commit subject stays the
+#   arbitrary install subject under test.
+make_lineage_fixture() {
+    local repo="$WORKDIR/$1" subject="$2" mode="${3:-commit}"
+    rm -rf "$repo"
+    mkdir -p "$repo/defaults/hooks" "$repo/defaults/scripts" \
+             "$repo/.loom/hooks" "$repo/.loom/scripts"
+    git -C "$repo" init -q
+
+    printf 'line-one\nline-two\nline-three\n' > "$repo/defaults/hooks/guard.sh"
+    printf 'line-one\nline-two\nline-three\n' > "$repo/.loom/hooks/guard.sh"
+    chmod +x "$repo/defaults/hooks/guard.sh"
+    printf '{\n  "version": "9.9.9"\n}\n' > "$repo/package.json"
+    printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "unknown",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+        "$repo" > "$repo/.loom/install-metadata.json"
+    git -C "$repo" add -A >/dev/null 2>&1
+    git -C "$repo" commit -qm "$subject" >/dev/null 2>&1
+
+    local recorded="unknown"
+    case "$mode" in
+        commit) recorded="$(git -C "$repo" rev-parse --short HEAD)" ;;
+        tag)    git -C "$repo" tag v0.0.0 >/dev/null 2>&1 ;;
+    esac
+    printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "%s",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+        "$recorded" "$repo" > "$repo/.loom/install-metadata.json"
+    git -C "$repo" add .loom/install-metadata.json >/dev/null 2>&1
+    git -C "$repo" commit -qm "chore: record install metadata" >/dev/null 2>&1
+
+    echo "$repo"
+}
+
+# bump_upstream <repo>
+#   "Tag B": upstream drops a line from defaults/hooks/guard.sh. Against the
+#   untouched installed copy this is a removal (removed_line_count > 0), so it
+#   reaches the lineage gate -- exactly the jq-1.6-rename shape.
+bump_upstream() {
+    local repo="$1"
+    printf 'line-one\nline-three\n' > "$repo/defaults/hooks/guard.sh"
+    git -C "$repo" add defaults/hooks/guard.sh >/dev/null 2>&1
+    git -C "$repo" commit -qm "fix(guard): drop line-two for jq 1.6 compatibility" >/dev/null 2>&1
+}
+
+echo "Test group 11: a file identical to upstream-at-installed-version is never a local fix (#8676)"
+LINEAGE_N=0
+for INSTALL_SUBJECT in \
+    'tooling: install Repo Skills and Loom into the map repo' \
+    'Upgrade Loom to 0.18.0 (resync installed surfaces + role prompts)' \
+    'Install Loom orchestration (quick install from rjwalters/loom@cd4ab46e)'; do
+    LINEAGE_N=$((LINEAGE_N + 1))
+    REPO11="$(make_lineage_fixture "repo-lineage-$LINEAGE_N" "$INSTALL_SUBJECT")"
+    bump_upstream "$REPO11"
+
+    # Precondition: the subject heuristic alone would call this diverged.
+    if [[ "$(git -C "$REPO11" log -1 --format='%s' -- .loom/hooks/guard.sh)" == "$INSTALL_SUBJECT" ]]; then
+        pass "(#8676) fixture precondition: guard.sh's last subject is the arbitrary install subject"
+    else
+        fail "(#8676) fixture precondition unmet for: $INSTALL_SUBJECT"
+    fi
+
+    # The per-file verdict line, not the tail summary -- the summary always
+    # carries the word "blocked" ("... 0 blocked (needs --force ...)").
+    OUT="$(cd "$REPO11" && bash "$SCRIPT" --dry-run 2>&1)"
+    RC=$?
+    if [[ $RC -eq 2 ]] && grep -q "would update hooks/guard.sh" <<<"$OUT" \
+        && ! grep -qE 'blocked[[:space:]]+hooks/guard\.sh' <<<"$OUT"; then
+        pass "(#8676) --dry-run previews 'would update', not 'blocked': $INSTALL_SUBJECT"
+    else
+        fail "(#8676) --dry-run reported a block for pure upstream content (rc=$RC): $INSTALL_SUBJECT; out=$OUT"
+    fi
+
+    OUT="$(cd "$REPO11" && bash "$SCRIPT" 2>&1)"
+    RC=$?
+    if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+        && [[ "$(cat "$REPO11/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+        pass "(#8676) the legitimate upstream removal applies without --force: $INSTALL_SUBJECT"
+    else
+        fail "(#8676) a legitimate upstream removal was blocked (rc=$RC): $INSTALL_SUBJECT; out=$OUT"
+    fi
+done
+
+# The v<loom_version> tag is the second resolution rung: an install whose
+# recorded loom_commit has since been GC'd or was never written still proves
+# pure lineage when a matching tag exists in the source checkout.
+echo "Test group 11b: the v<loom_version> tag is an equivalent lineage anchor (#8676)"
+REPO11T="$(make_lineage_fixture repo-lineage-tag 'Upgrade Loom to 0.18.0 (resync installed surfaces + role prompts)' tag)"
+bump_upstream "$REPO11T"
+OUT="$(cd "$REPO11T" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11T/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+    pass "(#8676) a v<loom_version> tag resolves the installed version when loom_commit does not"
+else
+    fail "(#8676) the tag rung failed to resolve the installed version (rc=$RC); out=$OUT"
+fi
+
+# The narrowing is strictly content-proved: a genuinely hand-edited installed
+# file differs from upstream-at-installed-version, so the content rung cannot
+# fire and the subject heuristic still protects it exactly as before.
+echo "Test group 11c: a genuinely hand-edited file is still blocked (#8676)"
+REPO11H="$(make_lineage_fixture repo-lineage-handedit 'tooling: install Repo Skills and Loom into the map repo')"
+printf 'line-one\nline-two\nline-three\nLOCAL-HOTFIX\n' > "$REPO11H/.loom/hooks/guard.sh"
+git -C "$REPO11H" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO11H" commit -qm "fix(guard): hand-applied hotfix that upstream has not taken yet" >/dev/null 2>&1
+bump_upstream "$REPO11H"
+OUT="$(cd "$REPO11H" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11H/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three\nLOCAL-HOTFIX' ]]; then
+    pass "(#8676) a hand-edited installed file is still protected"
+else
+    fail "(#8676) a hand-edited installed file lost its protection (rc=$RC); out=$OUT"
+fi
+
+# Same hand edit, but committed with an install-shaped subject at install time:
+# content still differs from upstream-at-installed-version, so the content rung
+# must NOT rescue it -- it can only ever prove lineage, never assume it.
+echo "Test group 11d: the content rung never fires on content that differs (#8676)"
+REPO11D="$(make_lineage_fixture repo-lineage-differs 'tooling: install Repo Skills and Loom into the map repo')"
+printf 'line-one\nline-two\nline-three\nDIVERGED\n' > "$REPO11D/.loom/hooks/guard.sh"
+git -C "$REPO11D" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO11D" commit -qm "chore: tweak the installed guard" >/dev/null 2>&1
+bump_upstream "$REPO11D"
+OUT="$(cd "$REPO11D" && bash "$SCRIPT" --dry-run 2>&1)"
+RC=$?
+if [[ $RC -eq 2 ]] && grep -qE 'blocked[[:space:]]+hooks/guard\.sh' <<<"$OUT"; then
+    pass "(#8676) --dry-run still reports a block when the installed content differs"
+else
+    fail "(#8676) --dry-run failed to report a block for diverged content (rc=$RC); out=$OUT"
+fi
+
+# When the installed version cannot be resolved at all (no usable loom_commit,
+# no matching tag -- e.g. a tarball/vendored source tree or a GC'd commit), the
+# subject heuristic remains the fallback and behaviour is exactly as before.
+echo "Test group 11e: an unresolvable installed version falls back to the subject heuristic (#8676)"
+REPO11F="$(make_lineage_fixture repo-lineage-unresolvable 'tooling: install Repo Skills and Loom into the map repo' unresolvable)"
+bump_upstream "$REPO11F"
+OUT="$(cd "$REPO11F" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11F/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three' ]]; then
+    pass "(#8676) an unresolvable installed version keeps the pre-#8676 (conservative) verdict"
+else
+    fail "(#8676) the unresolvable-version fallback did not behave conservatively (rc=$RC); out=$OUT"
+fi
+
+# The recorded version DRIFTS AHEAD of the installed bytes: restamp_metadata()
+# rewrites loom_commit to the source HEAD on every non-dry run, and it runs
+# BEFORE the blocked-file exit -- so the run that blocks a file also records a
+# version whose content that file no longer matches. One blocked run is enough
+# to put a repo here permanently, and it is where #8676's 23 fleet repos
+# already are: they saw the block, and any `loom update` since stamped their
+# metadata past the upstream commit that caused it. An exact-version-only
+# content check would leave every one of them blocked forever.
+echo "Test group 11f: a recorded version that drifted PAST the installed bytes still resolves (#8676)"
+REPO11G="$(make_lineage_fixture repo-lineage-drift 'Install Loom orchestration (quick install from rjwalters/loom@cd4ab46e)')"
+bump_upstream "$REPO11G"
+# Re-stamp loom_commit to the bumped HEAD, exactly as a blocked non-dry run
+# would have. The stamp lands in its own commit so .loom/hooks/guard.sh keeps
+# the arbitrary install subject as its last change.
+printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "%s",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+    "$(git -C "$REPO11G" rev-parse --short HEAD)" "$REPO11G" > "$REPO11G/.loom/install-metadata.json"
+git -C "$REPO11G" add .loom/install-metadata.json >/dev/null 2>&1
+git -C "$REPO11G" commit -qm "chore: re-stamp install metadata" >/dev/null 2>&1
+
+# Precondition: the installed bytes no longer match the RECORDED version, so
+# only the reachable-revision rung can prove lineage here.
+if ! git -C "$REPO11G" show "$(git -C "$REPO11G" rev-parse --short HEAD~1):./defaults/hooks/guard.sh" 2>/dev/null \
+    | cmp -s - "$REPO11G/.loom/hooks/guard.sh"; then
+    pass "(#8676) drift fixture precondition: installed bytes differ from the recorded version"
+else
+    fail "(#8676) drift fixture precondition unmet: recorded version still matches the installed bytes"
+fi
+
+OUT="$(cd "$REPO11G" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11G/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+    pass "(#8676) a drifted loom_commit still proves lineage from a reachable revision"
+else
+    fail "(#8676) a drifted loom_commit left pure upstream content blocked (rc=$RC); out=$OUT"
+fi
+
+# The reachable-revision rung must not become a blanket amnesty: content that
+# was never any revision of this path stays protected even though the recorded
+# version has drifted.
+echo "Test group 11g: drift does not excuse content upstream never had (#8676)"
+REPO11H2="$(make_lineage_fixture repo-lineage-drift-handedit 'Install Loom orchestration (quick install from rjwalters/loom@cd4ab46e)')"
+printf 'line-one\nline-two\nline-three\nLOCAL-HOTFIX\n' > "$REPO11H2/.loom/hooks/guard.sh"
+git -C "$REPO11H2" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO11H2" commit -qm "fix(guard): hand-applied hotfix upstream never took" >/dev/null 2>&1
+bump_upstream "$REPO11H2"
+printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "%s",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+    "$(git -C "$REPO11H2" rev-parse --short HEAD)" "$REPO11H2" > "$REPO11H2/.loom/install-metadata.json"
+git -C "$REPO11H2" add .loom/install-metadata.json >/dev/null 2>&1
+git -C "$REPO11H2" commit -qm "chore: re-stamp install metadata" >/dev/null 2>&1
+OUT="$(cd "$REPO11H2" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11H2/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three\nLOCAL-HOTFIX' ]]; then
+    pass "(#8676) a hand edit stays protected even when the recorded version drifted"
+else
+    fail "(#8676) drift handling weakened protection for a real hand edit (rc=$RC); out=$OUT"
+fi
+
+# The reachable-revision lookup pipes `git cat-file --batch-check` into grep,
+# under this script's `set -o pipefail`. With `grep -q` that is a latent phantom
+# block: grep exits the instant it matches, SIGPIPEs cat-file into status 141,
+# and pipefail reports the whole pipeline as failed -- so a SUCCESSFUL lineage
+# proof reads as "no proof" and the file is blocked anyway. It only bites once
+# the object-id list outgrows the 64KiB pipe buffer (~1600 revisions of one
+# path), which is why every small fixture above passes either way. This fixture
+# is deliberately large enough to cross that line, and puts the matching
+# revision NEXT TO HEAD so grep matches on its second line of input -- the
+# earliest possible exit, i.e. the worst case for SIGPIPE.
+echo "Test group 11h: a long-lived path does not phantom-block via pipefail+SIGPIPE (#8676)"
+REPO11P="$WORKDIR/repo-lineage-longhistory"
+rm -rf "$REPO11P"
+mkdir -p "$REPO11P/defaults/hooks" "$REPO11P/defaults/scripts" \
+         "$REPO11P/.loom/hooks" "$REPO11P/.loom/scripts"
+git -C "$REPO11P" init -q
+LONG_SUBJECT='Install Loom orchestration (quick install from rjwalters/loom@cd4ab46e)'
+printf 'line-one\nline-two\nline-three\nrev-0\n' > "$REPO11P/defaults/hooks/guard.sh"
+printf 'line-one\nline-two\nline-three\nrev-0\n' > "$REPO11P/.loom/hooks/guard.sh"
+chmod +x "$REPO11P/defaults/hooks/guard.sh"
+printf '{\n  "version": "9.9.9"\n}\n' > "$REPO11P/package.json"
+printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "unknown",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+    "$REPO11P" > "$REPO11P/.loom/install-metadata.json"
+git -C "$REPO11P" add -A >/dev/null 2>&1
+git -C "$REPO11P" commit -qm "$LONG_SUBJECT" >/dev/null 2>&1
+
+# ~1700 upstream revisions of the SOURCE file (~7s). --no-verify keeps any
+# ambient hook out of the loop.
+LONG_REVS=1699
+for ((i = 1; i <= LONG_REVS; i++)); do
+    printf 'line-one\nline-two\nline-three\nrev-%s\n' "$i" > "$REPO11P/defaults/hooks/guard.sh"
+    git -C "$REPO11P" add defaults/hooks/guard.sh
+    git -C "$REPO11P" commit -qm "upstream rev $i" --no-verify
+done >/dev/null 2>&1
+
+# The installed copy is the LAST of those revisions, committed under the
+# arbitrary install subject, so only the content rung can clear it.
+printf 'line-one\nline-two\nline-three\nrev-%s\n' "$LONG_REVS" > "$REPO11P/.loom/hooks/guard.sh"
+git -C "$REPO11P" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO11P" commit -qm "$LONG_SUBJECT" --no-verify >/dev/null 2>&1
+# Upstream then drops a line, and the metadata drifts to that new HEAD.
+printf 'line-one\nline-three\nrev-%s\n' "$((LONG_REVS + 1))" > "$REPO11P/defaults/hooks/guard.sh"
+git -C "$REPO11P" add defaults/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO11P" commit -qm "fix(guard): drop line-two for jq 1.6 compatibility" --no-verify >/dev/null 2>&1
+printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "%s",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
+    "$(git -C "$REPO11P" rev-parse --short HEAD)" "$REPO11P" > "$REPO11P/.loom/install-metadata.json"
+git -C "$REPO11P" add .loom/install-metadata.json >/dev/null 2>&1
+git -C "$REPO11P" commit -qm "chore: re-stamp install metadata" --no-verify >/dev/null 2>&1
+
+# Precondition: the id list really does outgrow a 64KiB pipe buffer, or this
+# fixture cannot exercise the hazard it exists for.
+LONG_BYTES="$(git -C "$REPO11P" rev-list HEAD -- defaults/hooks/guard.sh \
+    | sed 's|$|:./defaults/hooks/guard.sh|' \
+    | git -C "$REPO11P" cat-file --batch-check='%(objectname)' | wc -c | tr -d '[:space:]')"
+if [[ "${LONG_BYTES:-0}" -gt 65536 ]]; then
+    pass "(#8676) long-history precondition: object-id list is ${LONG_BYTES}B, past the 64KiB pipe buffer"
+else
+    fail "(#8676) long-history fixture too small to exercise the SIGPIPE hazard (${LONG_BYTES}B)"
+fi
+
+OUT="$(cd "$REPO11P" && bash "$SCRIPT" --dry-run 2>&1)"
+RC=$?
+if [[ $RC -eq 2 ]] && grep -q "would update hooks/guard.sh" <<<"$OUT" \
+    && ! grep -qE 'blocked[[:space:]]+hooks/guard\.sh' <<<"$OUT"; then
+    pass "(#8676) a match late in a long id list is not lost to pipefail+SIGPIPE"
+else
+    fail "(#8676) long-history lineage proof was lost -- phantom block (rc=$RC); out=$OUT"
+fi
+
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "========================================"

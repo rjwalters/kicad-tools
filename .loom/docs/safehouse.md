@@ -1257,6 +1257,57 @@ loop on) for background — closed 2026-09-16 as obsolete once the automated
 per-episode dedup (`#7664`/`#7680`) replaced the need for it as a manual
 duplicate-closing anchor.
 
+### The idle gate: a host that is saying nothing does not judge the silence (#8026)
+
+Raising the grace (#8276 above) treated the symptom. #8026 traced the
+mechanism, and it is structural: **advertising is entirely dispatch-gated.**
+The only two `ClaimKind::Advertise` publishers in the daemon are
+`SweepRegistry::dispatch` (one ad per newly-dispatched issue) and
+`SweepRegistry::readvertise_peer_claims`, which re-advertises **only** entries
+in `SweepState::Running`/`Pending`. A host with zero live sweeps at a given
+reaper tick publishes **zero** ads that tick. There is no periodic liveness
+heartbeat on this channel.
+
+So during a **fleet-wide dispatch lull** — nobody anywhere has work in flight,
+so nobody's reaper has anything to re-advertise — no host transmits, therefore
+no host receives, therefore every host's quiet clock runs out at roughly the
+same moment and the whole fleet reports DEGRADED simultaneously with nothing
+broken. From inside one process that is indistinguishable from a genuinely
+one-way receive path: `received` stalls while `quiet_for` grows, either way.
+
+**The rule (implemented in `loom-daemon/src/peer_claims/coordination_idle.rs`):
+the receive-quiet clock only runs while this host is itself advertising.**
+
+| This host | `evaluate_coordination` |
+|---|---|
+| Published an `Advertise` within `LOOM_PEER_COORDINATION_ADVERTISE_ACTIVITY_WINDOW_SECS` (default 180s, 6× the reaper cadence) | Judges exactly as before — same anchor, same grace, same recovery threshold |
+| Silent for longer than that | Withholds the verdict and rebases the quiet clock to now |
+
+Rebasing is what makes the second row safe across a resume: a host picking work
+back up after a three-hour lull gets a **full fresh grace window** to hear from
+its peers instead of inheriting a stale, already-blown anchor and tripping
+DEGRADED on its first tick back. Going idle is **not** a recovery signal — an
+already-DEGRADED verdict still clears only on
+`LOOM_PEER_COORDINATION_RECOVERY_THRESHOLD` sustained receives.
+
+**What it costs.** One detection loss: a genuine receive-path break on a host
+that happens to be idle is not reported *while it is idle*. That is the right
+trade — an idle host is coordinating with nobody, so a broken receive path has
+no live consequence at that moment, and the instant it dispatches again the
+gate opens and the break surfaces within one grace window. The 2026-08-13
+reference signature (a host advertising continuously into silence) is detected
+byte-for-byte as before. This is also a check that has been **diagnostic-only
+since #6317** — #6286's lease record is the sole gate on stale-claim
+reclamation — so a false DEGRADED costs auto-filed watchdog noise, not safety.
+
+**What it does not fix.** The converse case: *this* host busy while its
+**peers** are idle, which is the shape #8276's data showed (150+ dispatches
+per data point throughout its own "degraded" window). No local signal can
+separate "peers are quiet because idle" from "peers are quiet because my
+receive path is broken". Only a periodic liveness heartbeat from idle hosts
+can, and that is a wire-protocol change tracked separately in **#8736**
+rather than smuggled into this fix.
+
 ### Fleet-wide completion dedup: reusing the peer-claim channel (#6352)
 
 The [per-host completion dedup](#what-gets-narrated) documented under
