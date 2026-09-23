@@ -53,7 +53,12 @@ def main():
         "source_sha": hex_identity(source),
         "pr_head_sha": hex_identity(os.environ.get("KCT_OBSERVER_PR_HEAD")),
         "container_id": hex_identity(os.environ.get("KCT_OBSERVER_CONTAINER_ID")),
-        "configured_image": "kicad/kicad:10.0",
+        # Pinned KiCad image this workload ran in (#5682). Read from the
+        # workflow-level KICAD_IMAGE env (the single digest source of truth,
+        # inherited by every step of the container jobs) rather than
+        # re-hardcoding the pin here, so the recorded identity can never
+        # drift from the workflow's pin.
+        "configured_image": os.environ.get("KICAD_IMAGE"),
         "image_digest": None,
         "image_digest_provenance": "Bind Initialize-container pull log to this run after execution; not available inside container",
         "run_id": os.environ.get("GITHUB_RUN_ID")

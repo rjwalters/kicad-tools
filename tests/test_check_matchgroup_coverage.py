@@ -247,11 +247,13 @@ def _matchgroup_job() -> dict:
 class TestMatchgroupJobContainer:
     def test_job_runs_in_kicad_container(self):
         """Issue #3617: the job needs kicad-cli (zone fills), so it must
-        run in the kicad/kicad:10.0 container like the diffpair job."""
+        run in the workflow's pinned KiCad container (workflow-level
+        KICAD_IMAGE digest via the kicad_pin bridge, #5682) like the
+        diffpair job."""
         job = _matchgroup_job()
         container = job.get("container")
         assert container is not None, "matchgroup job must declare a container"
-        assert container["image"] == "kicad/kicad:10.0"
+        assert container["image"] == "${{ needs.kicad_pin.outputs.image }}"
 
     def test_job_probes_kicad_cli_early(self):
         """An early ``kicad-cli --version`` probe makes a lost filler
