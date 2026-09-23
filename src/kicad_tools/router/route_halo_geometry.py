@@ -280,8 +280,20 @@ class RouteHaloGeometry:
                     and abs(candidate.y - other.y) < 1e-6
                 ):
                     continue
-                floor = (
-                    router.rules.min_drill_clearance if same_net else router.rules.min_hole_to_hole
+                # Issue #5673: the fab drill-pitch floor is MECHANICAL --
+                # KiCad's ``hole_to_hole_clearance`` rule does not exempt a
+                # same-net pair, so neither may this pre-check.
+                # ``min_drill_clearance`` (0.102 mm) is the tiny same-net via-
+                # MERGE threshold, not a fab minimum; taking it as the whole
+                # same-net floor let two same-net vias sit 0.428 mm drill-to-
+                # drill on board 02.  Until #5660 the Chebyshev square halo
+                # masked that by over-blocking the candidate cell; the exact
+                # disc withdraws the accident, so the floor has to be stated
+                # rather than inherited from the raster.  Mirrors the C++
+                # sibling ``Grid3D::route_via_geometry_clear``.
+                floor = max(
+                    router.rules.min_hole_to_hole,
+                    router.rules.min_drill_clearance if same_net else 0.0,
                 )
                 if distance - (candidate.drill + other.drill) / 2 < floor - 1e-4:
                     return False

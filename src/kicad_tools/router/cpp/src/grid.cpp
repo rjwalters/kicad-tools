@@ -1114,7 +1114,17 @@ bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
         const float distance = std::hypot(v.x - other.x, v.y - other.y);
         if (other.net == v.net && std::abs(v.x - other.x) < 1e-6f && std::abs(v.y - other.y) < 1e-6f) continue;
         const float drill_gap = distance - (v.drill + other.drill) / 2;
-        const float drill_required = other.net == v.net ? same_net_drill_clearance : hole_clearance;
+        // Issue #5673: the fab drill-pitch floor is MECHANICAL -- KiCad's
+        // ``hole_to_hole_clearance`` rule does not exempt a same-net pair, so
+        // neither may this pre-check.  ``same_net_drill_clearance``
+        // (``rules.min_drill_clearance``, 0.102 mm) is the tiny same-net via-
+        // MERGE threshold, not a fab minimum; taking it as the whole same-net
+        // floor let two same-net vias sit 0.428 mm drill-to-drill on board 02.
+        // Until #5660 the Chebyshev square halo masked that by over-blocking
+        // the candidate cell; the exact disc withdraws the accident, so the
+        // floor has to be stated rather than inherited from the raster.
+        const float drill_required = other.net == v.net
+            ? std::max(same_net_drill_clearance, hole_clearance) : hole_clearance;
         if (drill_gap < drill_required - CLEARANCE_EPSILON_MM) return false;
         if (other.net == v.net) continue;
         const float gap = distance - (v.diameter + other.diameter) / 2;
