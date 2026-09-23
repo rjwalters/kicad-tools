@@ -2737,12 +2737,13 @@ including mid-sweep, with zero risk to the live checkout:
 ./.loom/scripts/resync-installed.sh --output /tmp/loom-resync-staging
 cd /tmp/loom-resync-staging
 git checkout -b chore/resync-installed-$(date +%Y%m%d)
-# Never a bare `git add -A` here (#7818): `.loom/gh-config/` and
-# `.loom/gh-config-by-owner/` are the daemon-owned GH_CONFIG_DIR trees holding
-# live GitHub App installation tokens, and a bare add is exactly what swept one
-# into a public repo on 2026-08-23. The exclusions below are belt-and-braces —
-# loom-daemon's managed .gitignore block already covers both.
-git add -A -- . ':!.loom/gh-config' ':!.loom/gh-config-by-owner'
+# Never a bare `git add -A` here (#7818/#8005): the credential-bearing class
+# (post_init.rs CREDENTIAL_PATTERNS — token pool, account keys, harness auth,
+# GH_CONFIG_DIR trees) must never be staged, and a bare add is exactly what
+# swept a live installation token into a public repo on 2026-08-23. The
+# exclusions are belt-and-braces — the managed .gitignore block covers them too.
+git add -A -- . ':!.loom/claude-config' ':!.loom/tokens' ':!.loom/accounts.env' \
+  ':!.loom/api-keys' ':!.loom/gh-config' ':!.loom/gh-config-by-owner'
 git commit -m 'chore: resync installed Loom surfaces'
 git push -u origin HEAD   # open a PR from here
 cd - && git worktree remove /tmp/loom-resync-staging   # from the primary checkout when done
@@ -2751,8 +2752,8 @@ cd - && git worktree remove /tmp/loom-resync-staging   # from the primary checko
 Or skip the hand-rolled add entirely and let
 `./.loom/scripts/land-resync-commit.sh` stage and commit for you — it stages an
 explicit allowlist of resync-surface pathspecs (never `-A`), refuses to land if
-any unrelated dirt is present, and unconditionally excludes the two credential
-trees above even on a host whose `.gitignore` is stale.
+any unrelated dirt is present, and unconditionally excludes the credential class
+above even on a host whose `.gitignore` is stale.
 
 **If a credential path is already git-TRACKED, that same script stops instead
 (#8004).** Excluding it from one commit fixes nothing in that state: git applies

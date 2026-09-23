@@ -213,7 +213,6 @@ test-sync-labels-repo-flag.sh
 test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
-test-verify-proposal-refs.sh
 test-version-bump-workflow-identity.sh
 test-version-check-gate-callsites.sh
 test-version-check-gate.sh

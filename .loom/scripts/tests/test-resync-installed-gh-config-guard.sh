@@ -94,7 +94,7 @@ make_fixture() {
     echo "$repo"
 }
 
-echo "Test group 1: --output staging mode's printed next-steps exclude .loom/gh-config[-by-owner]/ from git add (#7818)"
+echo "Test group 1: --output staging mode's printed next-steps exclude the credential class from git add (#7818/#8005)"
 REPO="$(make_fixture)"
 STAGE="$WORKDIR/output-stage"
 rm -rf "$STAGE"
@@ -124,7 +124,7 @@ else
 fi
 
 echo ""
-echo "Test group 2: the excluding pathspec actually works against a real git add (#7818)"
+echo "Test group 2: the excluding pathspec works against a real git add, for the whole credential class (#7818/#8005)"
 # Belt-and-braces: don't just assert the printed string, prove the emitted
 # pathspec really does what it claims against a real `git add -A` invocation,
 # the same way an operator/agent following the suggestion would run it.
@@ -148,25 +148,36 @@ if [[ -n "$ADD_CMD" ]]; then
 else
     fail "(#7818) could not extract the emitted git add command to execute (ctx=$ADD_LINE_CTX)"
 fi
-mkdir -p "$STAGE/.loom/gh-config" "$STAGE/.loom/gh-config-by-owner/some-owner"
-printf 'oauth_token: ghs_live_dummy\n' > "$STAGE/.loom/gh-config/hosts.yml"
-printf 'oauth_token: ghs_live_dummy2\n' > "$STAGE/.loom/gh-config-by-owner/some-owner/hosts.yml"
-# #8006: the pathspec is belt-and-braces FOR A HOST WHOSE .gitignore IS
+# #8005: seed EVERY member of the credential class (post_init.rs
+# CREDENTIAL_PATTERNS), not just the two gh-config trees #7818 started with.
+CRED_FILES=(
+    .loom/gh-config/hosts.yml
+    .loom/gh-config-by-owner/some-owner/hosts.yml
+    .loom/tokens/acct-1.token
+    .loom/accounts.env
+    .loom/api-keys/zai/acct.env
+    .loom/claude-config/builder-1/.credentials.json
+)
+for f in "${CRED_FILES[@]}"; do
+    mkdir -p "$STAGE/$(dirname "$f")"
+    printf 'live-secret-dummy\n' > "$STAGE/$f"
+done
+# #8006/#8005: the pathspec is belt-and-braces FOR A HOST WHOSE .gitignore IS
 # MISSING OR STALE -- and resync-installed.sh refreshes the loom-managed
-# .gitignore block in this very staging worktree, which already lists both
-# credential trees. Leave that block intact and a BARE `git add -A` skips them
-# too, so this group would pass no matter what pathspec the script emitted.
-# Drop those entries so the emitted pathspec is the ONLY thing that can keep a
-# credential out of the index -- the exact host state #7818 defends against.
-if [[ -f "$STAGE/.gitignore" ]]; then
-    grep -v "gh-config" "$STAGE/.gitignore" > "$STAGE/.gitignore.tmp"
-    mv "$STAGE/.gitignore.tmp" "$STAGE/.gitignore"
-fi
-if ! git -C "$STAGE" check-ignore -q .loom/gh-config/hosts.yml && \
-   ! git -C "$STAGE" check-ignore -q .loom/gh-config-by-owner/some-owner/hosts.yml; then
-    pass "(#7818) fixture now models a host whose .gitignore does NOT cover the credential trees (the pathspec is the only guard left)"
+# .gitignore block in this very staging worktree, which already lists every
+# credential path. Leave it in place and a BARE `git add -A` skips them too,
+# so this group would pass no matter what pathspec the script emitted. Remove
+# the .gitignore ENTIRELY (the #8005 acceptance state) so the emitted pathspec
+# is the ONLY thing that can keep a credential out of the index.
+rm -f "$STAGE/.gitignore"
+STILL_IGNORED=0
+for f in "${CRED_FILES[@]}"; do
+    git -C "$STAGE" check-ignore -q "$f" && STILL_IGNORED=1
+done
+if [[ ! -e "$STAGE/.gitignore" && "$STILL_IGNORED" -eq 0 ]]; then
+    pass "(#8005) fixture now models a host with NO .gitignore (the pathspec is the only guard left)"
 else
-    fail "(#7818) the credential trees are still gitignored — this group would pass regardless of the emitted pathspec"
+    fail "(#8005) a credential path is still gitignored — this group would pass regardless of the emitted pathspec"
 fi
 # Run it the way an operator pasting the suggestion into a shell would.
 (cd "$STAGE" && bash -c "$ADD_CMD")
@@ -179,16 +190,18 @@ if [[ -n "$STAGED" ]]; then
 else
     fail "(#7818) the emitted command staged nothing at all — the exclusion check below would pass vacuously (cmd=$ADD_CMD)"
 fi
-if ! grep -q "gh-config" <<< "$STAGED"; then
-    pass "(#7818) neither credential tree was staged by the printed pathspec"
-else
-    fail "(#7818) a credential path was staged: $STAGED"
-fi
-if [[ -f "$STAGE/.loom/gh-config/hosts.yml" && -f "$STAGE/.loom/gh-config-by-owner/some-owner/hosts.yml" ]]; then
-    pass "(#7818) the credential files are left on disk, untouched"
-else
-    fail "(#7818) the credential files were unexpectedly removed/modified"
-fi
+for f in "${CRED_FILES[@]}"; do
+    if ! grep -qxF "$f" <<< "$STAGED"; then
+        pass "(#8005) $f was not staged by the printed pathspec"
+    else
+        fail "(#8005) credential path $f was staged: $STAGED"
+    fi
+    if [[ -f "$STAGE/$f" ]]; then
+        pass "(#8005) $f is left on disk, untouched"
+    else
+        fail "(#8005) $f was unexpectedly removed"
+    fi
+done
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "========================================"

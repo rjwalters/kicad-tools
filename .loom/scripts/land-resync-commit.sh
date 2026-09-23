@@ -41,10 +41,11 @@
 #      `.claude/commands/loom/`, and the handful of single-file targets
 #      resync-installed.sh itself resyncs), it refuses to commit ANYTHING --
 #      an unrelated (possibly operator) change must never be swept into a
-#      "chore: resync" commit. One exception: `.loom/gh-config/` and
-#      `.loom/gh-config-by-owner/` (live GitHub App installation-token state,
-#      #7818) are never staged, and while UNTRACKED they never block the
-#      commit either -- they are silently excluded, unconditionally, even if a
+#      "chore: resync" commit. One exception: the credential-bearing class
+#      (`.loom/tokens/`, `.loom/accounts.env`, `.loom/api-keys/`,
+#      `.loom/claude-config/`, `.loom/gh-config/`, `.loom/gh-config-by-owner/`
+#      -- #7818/#8005) is never staged, and while UNTRACKED it never blocks the
+#      commit either -- it is silently excluded, unconditionally, even if a
 #      host's `.gitignore` is missing the corresponding entries. A credential
 #      path that is already git-TRACKED is the opposite case and STOPS the run
 #      (#8004): no ignore rule can apply to a tracked path, so excluding it
@@ -284,10 +285,11 @@ is_resync_surface_path() {
     esac
 }
 
-# #7818: daemon-owned GH_CONFIG_DIR trees holding live GitHub App installation
-# tokens (.loom/gh-config/, .loom/gh-config-by-owner/<owner>/ -- #4458/#5401).
-# These must NEVER be staged by this script, belt-and-braces alongside the
-# loom-daemon-managed .gitignore entries (post_init.rs EPHEMERAL_PATTERNS):
+# #7818 / #8005: the credential-bearing path class -- the Claude OAuth token
+# pool, the repo-local account source, the per-host API-key pool, the harness
+# auth store, and the daemon-owned GH_CONFIG_DIR trees holding live GitHub App
+# installation tokens. These must NEVER be staged by this script,
+# belt-and-braces alongside the loom-daemon-managed .gitignore entries:
 # checked UNCONDITIONALLY, before is_resync_surface_path(), so a host whose
 # .gitignore is missing or stale still cannot have this script sweep a live
 # credential into a commit. This is what let a resync commit on
@@ -297,16 +299,22 @@ is_resync_surface_path() {
 # EXCLUDED (like a retired pure-copy path) rather than treated as blocking
 # FOREIGN dirt, so an untracked credential file never stops an otherwise-clean
 # resync from landing.
+#
+# The list is declared ONCE, as CREDENTIAL_PATTERNS in
+# loom-daemon/src/init/post_init.rs; this array is a machine-checked copy
+# (init/credential_class_tests.rs fails CI if the two disagree). It cannot be
+# read from the daemon at runtime: a consumer repo has no post_init.rs, and the
+# installed binary is exactly what is stale on the hosts this guards (#7818).
+# Contract: a trailing `/` is a directory (itself + everything under it);
+# anything else is an exact file path.
+LOOM_CREDENTIAL_PATTERNS=(.loom/claude-config/ .loom/tokens/ .loom/accounts.env
+    .loom/api-keys/ .loom/gh-config/ .loom/gh-config-by-owner/)
 is_credential_leak_path() {
-    case "$1" in
-        .loom/gh-config | .loom/gh-config/* | \
-            .loom/gh-config-by-owner | .loom/gh-config-by-owner/*)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    local p
+    for p in "${LOOM_CREDENTIAL_PATTERNS[@]}"; do
+        [[ "$1" == "${p%/}" || ("$p" == */ && "$1" == "$p"*) ]] && return 0
+    done
+    return 1
 }
 
 # #8004: the state the #7818 incident actually left behind -- a credential path
@@ -407,14 +415,14 @@ if [[ "${#CREDENTIAL_PATHS[@]}" -gt 0 ]]; then
     for p in "${CREDENTIAL_PATHS[@]}"; do
         warn "    $p"
     done
-    warn "  These are the daemon-owned GH_CONFIG_DIR credential trees (.loom/gh-config/,"
-    warn "  .loom/gh-config-by-owner/) — host-local, never committed. If they show up"
+    warn "  These are credential-bearing paths (token pool, account keys, harness auth,"
+    warn "  GH_CONFIG_DIR trees — #8005) — host-local, never committed. If they show up"
     warn "  here your .gitignore is missing the entries loom-daemon's managed block"
     warn "  writes (loom-daemon update-gitignore repairs it)."
 fi
 
 if [[ "${#TRACKED_CREDENTIAL_PATHS[@]}" -gt 0 ]]; then
-    err "Refusing to land: a daemon-owned GH_CONFIG_DIR credential path is already TRACKED by git (#8004):"
+    err "Refusing to land: a credential-bearing path is already TRACKED by git (#8004/#8005):"
     for p in "${TRACKED_CREDENTIAL_PATHS[@]}"; do
         err "    $p"
     done
@@ -428,7 +436,7 @@ if [[ "${#TRACKED_CREDENTIAL_PATHS[@]}" -gt 0 ]]; then
     err "    1. git -C \"$REPO_ROOT\" rm --cached -r -- <path>   (untrack it; the file stays on disk)"
     err "    2. loom-daemon update-gitignore                  (restore the managed ignore entries)"
     err "    3. commit that removal, then ROTATE the credential (revoke/regenerate the"
-    err "       GitHub App installation token or OAuth credential it holds)."
+    err "       GitHub App installation token, OAuth token or API key it holds)."
     exit "$EXIT_ERROR"
 fi
 

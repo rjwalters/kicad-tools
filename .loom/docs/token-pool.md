@@ -2,6 +2,10 @@
 
 Loom rotates Claude OAuth accounts to spread load across weekly limits.
 
+For capacity *recipes* — adding accounts, ordering taps, bounding a metered
+backstop, and verifying which pool a role actually draws on — see
+[`configuring-resources.md`](configuring-resources.md).
+
 **Storage policy:** keep all real credentials outside repositories/worktrees,
 even ignored files. Provision with `tokens bootstrap --shared` or
 `tokens import-from-monitor --shared`; keep sources external and owner-only.

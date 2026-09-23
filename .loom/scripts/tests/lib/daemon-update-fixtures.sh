@@ -42,6 +42,140 @@ if [[ -z "${_LOOM_UPDATE_FIXTURES_DAEMON_BIN_PINNED:-}" ]]; then
     _LOOM_UPDATE_FIXTURES_DAEMON_BIN_PINNED=1
 fi
 
+# ---------------------------------------------------------------------------
+# SCRATCH-ROOT CONTAINMENT (#8712)
+# ---------------------------------------------------------------------------
+#
+# THE INCIDENT. A fleet host's checkout was found with a 472-byte bash fake —
+# this file's own `fake loom-daemon: unsupported subcommand` stub — sitting at
+# `loom-daemon/target/release/loom-daemon`, the canonical build-output path.
+# `loom-daemon-update.sh --fetch` resolves the binary that IMPLEMENTS
+# `release-fetch` by preferring a repo-local build, got the fake, and every
+# `auto_update` fetch on that host failed for hours while the machine-level
+# install it was trying to update sat there working.
+#
+# HOW A FIXTURE CAN REACH A REAL PATH AT ALL. Every fixture below is handed an
+# explicit path under the suite's `mktemp -d`, so the direct writers are safe by
+# construction. The one that computes its destination at RUN time is the fake
+# `cargo` (`write_fake_cargo`): it writes `${CARGO_TARGET_DIR:-target}/release/
+# loom-daemon` relative to ITS OWN CWD, and that cwd is whatever
+# `loom-daemon-update.sh` resolved as `$REPO_ROOT/loom-daemon` — normally the
+# fixture, but the script has documented fallbacks (`$PWD` resolves no checkout
+# ⇒ the script's OWN checkout, #5140; `LOOM_MACHINE_CHECKOUT`, #4229) under
+# which that is a REAL checkout while a fake `cargo` is still first on `$PATH`.
+# That is the poisoning path, and it needs no test bug to fire — only a host
+# condition that makes a fixture's `$PWD` stop resolving as a checkout.
+#
+# THE GUARD. A suite declares its scratch root once (`loom_fixture_scratch_root
+# "$BASE_WORKDIR"`), which both records it here and EXPORTS it so the generated
+# fake `cargo` — a separate process, spawned later — enforces the same rule.
+# Any fixture write outside it aborts loudly instead of landing on a real path.
+# Containment, not cleanup: it holds on failure and on interruption alike,
+# because the write never happens rather than being undone afterwards.
+#
+# Declaring it is optional (unset ⇒ no containment, byte-identical behaviour)
+# so an unrelated suite can source this file without adopting the discipline.
+loom_fixture_scratch_root() {
+    LOOM_FIXTURE_SCRATCH_ROOT="$(cd "$1" 2>/dev/null && pwd -P)" || {
+        echo "loom_fixture_scratch_root: '$1' does not exist" >&2
+        return 1
+    }
+    export LOOM_FIXTURE_SCRATCH_ROOT
+    _loom_fixture_arm_build_output_sentinel
+}
+
+# ---------------------------------------------------------------------------
+# REAL-BUILD-OUTPUT SENTINEL (#8712)
+# ---------------------------------------------------------------------------
+#
+# The containment guard above is prevention; this is detection, for whatever it
+# does not cover. It watches exactly one path — the REAL checkout's
+# `loom-daemon/target/release/loom-daemon`, the canonical build output and the
+# first thing `loom_resolve_self_daemon_bin`'s tier 2 finds script-relative —
+# and reports it if the suite CREATED it.
+#
+# "Created", never merely "present": a developer's own `cargo build --release`
+# lives there legitimately, and a check that fired on it would be noise that
+# gets muted. Armed from the checkout this library itself lives in, which is by
+# construction the one a fixture can reach (it is the checkout whose scripts the
+# suite copies and runs), so a suite does not have to name it.
+_loom_fixture_arm_build_output_sentinel() {
+    local self_checkout
+    self_checkout="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd)" || return 0
+    _LOOM_FIXTURE_BUILD_OUTPUT="$self_checkout/loom-daemon/target/release/loom-daemon"
+    _LOOM_FIXTURE_BUILD_OUTPUT_EXISTED=false
+    [[ -e "$_LOOM_FIXTURE_BUILD_OUTPUT" ]] && _LOOM_FIXTURE_BUILD_OUTPUT_EXISTED=true
+    return 0
+}
+
+# loom_fixture_assert_build_output_untouched — 0 when the real build output was
+# not created by this run, 1 (with a diagnostic) when it was.
+#
+# On a violation the offending file is DELETED, but only after confirming it
+# starts with `#!` — i.e. that it is one of this harness's shell fakes and not a
+# real compiled binary. That asymmetry is the point: the damage this whole issue
+# is about is a host that cannot roll until somebody moves the file aside by
+# hand, so a failing test run must not walk away leaving one; but a real build
+# that merely happens to sit there is the developer's, and is never touched.
+loom_fixture_assert_build_output_untouched() {
+    [[ -n "${_LOOM_FIXTURE_BUILD_OUTPUT:-}" ]] || return 0
+    [[ "${_LOOM_FIXTURE_BUILD_OUTPUT_EXISTED:-true}" == "false" ]] || return 0
+    [[ -e "$_LOOM_FIXTURE_BUILD_OUTPUT" ]] || return 0
+    {
+        echo "  a fixture wrote into the REAL checkout's build output during this run (#8712):"
+        echo "    $_LOOM_FIXTURE_BUILD_OUTPUT"
+        if head -c 2 "$_LOOM_FIXTURE_BUILD_OUTPUT" 2>/dev/null | grep -q '#!'; then
+            rm -f -- "$_LOOM_FIXTURE_BUILD_OUTPUT"
+            echo "    (removed: it is a shell script, i.e. one of this harness's fakes)"
+        else
+            echo "    (left in place: not a shell script, so it may be a real build)"
+        fi
+    } >&2
+    return 1
+}
+
+# _loom_fixture_real_ancestor <path> — echo the physical (`pwd -P`, so macOS's
+# symlinked `$TMPDIR` resolves the same way the scratch root did) path of the
+# DEEPEST EXISTING ancestor directory of <path>.
+#
+# The deepest existing one, rather than the parent: the destination usually
+# does not exist yet, and neither does the `target/release/` it lives in, so
+# `cd "$(dirname …)"` alone cannot answer "where would this land". Walking up
+# to something real and resolving THAT is exact for the question actually being
+# asked — containment is inherited by every descendant.
+_loom_fixture_real_ancestor() {
+    local probe="$1"
+    case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac
+    while [[ -n "$probe" && "$probe" != "/" && ! -d "$probe" ]]; do
+        probe="$(dirname "$probe")"
+    done
+    (cd "$probe" 2>/dev/null && pwd -P) || printf '%s\n' "$probe"
+}
+
+# _loom_fixture_assert_scratch_path <path> <what> — abort unless <path> would
+# land under the declared scratch root.
+#
+# Exits rather than returning non-zero. A fixture that cannot write where it
+# was told has no correct fallback, and the whole point is that the write must
+# not reach a real build-output path by any route.
+_loom_fixture_assert_scratch_path() {
+    local path="$1" what="${2:-fixture file}" real
+    [[ -n "${LOOM_FIXTURE_SCRATCH_ROOT:-}" ]] || return 0
+    real="$(_loom_fixture_real_ancestor "$(dirname "$path")")"
+    case "$real/" in
+        "$LOOM_FIXTURE_SCRATCH_ROOT"/*) return 0 ;;
+    esac
+    {
+        echo "FIXTURE CONTAINMENT VIOLATION (#8712): refusing to write $what outside the suite scratch root."
+        echo "  requested:    $path"
+        echo "  resolved dir: $real"
+        echo "  scratch root: $LOOM_FIXTURE_SCRATCH_ROOT"
+        echo "A fake loom-daemon left at a real build-output path poisons"
+        echo "\`loom-daemon-update.sh --fetch\` on this host until it is removed by hand."
+    } >&2
+    exit 1
+}
+
 # sha256_of <path> — portable checksum in `.sha256`-file format
 # (`<hex>  <basename>`), matching the release workflow's own
 # `shasum -a 256`/`sha256sum` output.
@@ -139,6 +273,7 @@ new_fixture_with_origin() {
 # report a version NEWER than the installed daemon's.
 write_fake_artifact_daemon() {
     local path="$1" version="$2" commit="$3"
+    _loom_fixture_assert_scratch_path "$path" "a fake release-artifact loom-daemon"
     cat > "$path" <<EOF
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "--version" ]]; then
@@ -172,12 +307,47 @@ EOF
 # possibly-redirected, absolute executable path). Also answers `cargo metadata
 # --format-version 1 --no-deps` with a minimal object reporting the same
 # (redirect-aware) target_directory, for the fallback path's own test coverage.
+#
+# CONTAINMENT (#8712). This is the ONE fixture whose destination is computed at
+# run time, from the cwd `loom-daemon-update.sh` chose — so it is the one that
+# can land a fake binary on a REAL `loom-daemon/target/release/loom-daemon` when
+# the script's `$PWD` stops resolving to the fixture and one of its documented
+# checkout fallbacks (#5140 / #4229) picks a real checkout instead. It therefore
+# re-checks `$LOOM_FIXTURE_SCRATCH_ROOT` itself, in the child process, BEFORE
+# the `cp`: a suite that declared a scratch root gets a loud aborted build
+# instead of a poisoned host. Unset ⇒ unchanged behaviour.
 write_fake_cargo() {
     local path="$1"
+    _loom_fixture_assert_scratch_path "$path" "a fake cargo"
     cat > "$path" <<'EOF'
 #!/usr/bin/env bash
+# #8712: refuse to write build output outside the suite's scratch root.
+# Checked BEFORE the `mkdir -p`, so not even an empty `target/release/` is
+# created in a real checkout.
+assert_scratch() {
+    local probe="$1" real
+    [[ -n "${LOOM_FIXTURE_SCRATCH_ROOT:-}" ]] || return 0
+    case "$probe" in /*) ;; *) probe="$PWD/$probe" ;; esac
+    while [[ -n "$probe" && "$probe" != "/" && ! -d "$probe" ]]; do
+        probe="$(dirname "$probe")"
+    done
+    real="$(cd "$probe" 2>/dev/null && pwd -P)" || real="$probe"
+    case "$real/" in
+        "$LOOM_FIXTURE_SCRATCH_ROOT"/*) return 0 ;;
+    esac
+    {
+        echo "[fake cargo] FIXTURE CONTAINMENT VIOLATION (#8712): refusing to write build output outside the suite scratch root."
+        echo "  cwd:          $PWD"
+        echo "  target dir:   $1 (resolved under $real)"
+        echo "  scratch root: $LOOM_FIXTURE_SCRATCH_ROOT"
+        echo "  A fake loom-daemon left at a real build-output path poisons"
+        echo "  \`loom-daemon-update.sh --fetch\` on this host until it is removed by hand."
+    } >&2
+    exit 1
+}
 if [[ "${1:-}" == "build" ]]; then
     target_dir="${CARGO_TARGET_DIR:-target}"
+    assert_scratch "$target_dir"
     mkdir -p "$target_dir/release"
     cp "$NEW_FAKE_BIN_SRC" "$target_dir/release/loom-daemon"
     chmod +x "$target_dir/release/loom-daemon"
@@ -197,6 +367,7 @@ if [[ "${1:-}" == "build" ]]; then
 fi
 if [[ "${1:-}" == "metadata" ]]; then
     target_dir="${CARGO_TARGET_DIR:-target}"
+    assert_scratch "$target_dir"
     mkdir -p "$target_dir"
     abs_target_dir="$(cd "$target_dir" && pwd)"
     printf '{"target_directory":"%s"}\n' "$abs_target_dir"
@@ -336,6 +507,7 @@ FAKEGH
 # supervisors DO launch the daemon proper with flags.
 write_fake_daemon() {
     local path="$1" commit="$2" marker="$3"
+    _loom_fixture_assert_scratch_path "$path" "a fake loom-daemon"
     cat > "$path" <<EOF
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "--version" ]]; then

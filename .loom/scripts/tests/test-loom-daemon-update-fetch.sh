@@ -81,6 +81,10 @@ assert_eq() {
 
 MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 BASE_WORKDIR="$(mktemp -d)"
+# #8712: every fixture write in this suite must land under this directory. A
+# fake loom-daemon that escapes to a real `loom-daemon/target/release/` poisons
+# `loom-daemon-update.sh --fetch` on the host until it is removed by hand.
+loom_fixture_scratch_root "$BASE_WORKDIR"
 cleanup() { rm -rf "$BASE_WORKDIR"; }
 trap cleanup EXIT
 
@@ -1395,6 +1399,11 @@ fi
 # release-fetch deliberately hands its scratch dir to the caller (the wrapper's
 # EXIT trap owns it in production); this suite is that caller here.
 rm -rf "$(grep '^TMP_DIR=' <<<"$outY" | cut -d= -f2-)"
+
+# The containment guard armed above (loom_fixture_scratch_root) is exercised by
+# its own sibling suite, test-daemon-update-fixture-containment.sh — it belongs
+# to lib/daemon-update-fixtures.sh, not to `--fetch`, and this suite is already
+# at the file-size ratchet's threshold.
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
