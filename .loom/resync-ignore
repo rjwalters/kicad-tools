@@ -23,3 +23,19 @@ scripts/judge-fallback-guard.sh
 scripts/tests/test-judge-fallback-cap.sh
 commands/loom/judge.md
 roles/judge.md
+
+# #5690: a `Part of #N` trailer written inside an inline code span is
+# deliberately NOT read as a declaration (#5234's code-span exclusion, which is
+# correct and unchanged here), so merge-pr.sh's partial-increment
+# `loom:building` -> `loom:issue` reset (#3667) silently no-ops — the incident
+# on PR #5686 / issue #5240. Two local fixes, neither of which touches the
+# loom-daemon parser: a non-blocking pre-merge warning in merge-pr.sh
+# (_warn_backticked_partial_increment_trailers + its two text helpers, with
+# regression cases in the partial-increment suite) and a plain-text-not-
+# backticked caution next to the trailer example in builder-pr.md (both
+# installed copies, which must stay byte-identical).
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+scripts/merge-pr.sh
+scripts/tests/test-merge-pr-partial-increment.sh
+commands/loom/builder-pr.md
+roles/builder-pr.md
