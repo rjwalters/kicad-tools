@@ -62,6 +62,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unrouted, how many cross an overflowed corridor) and *precision* (of
     the overflowed corridors, how many are crossed by an unrouted net).
 
+### Performance
+
+- The pure-Python A\* fallback stops re-deriving four things that do not
+  vary with what they were being re-derived for (Issue #5617). A py-spy
+  profile of the Diff-Pair regression job's re-route step now attributes
+  **67.6 %** of phase 4 ("Routing nets") to the GIL-released native C++ A\*
+  and 20.1 % to the Python fallback; this takes about a quarter of that
+  Python remainder:
+  - **`ComponentHoleIndex.clear`** is a *physical drill* floor, so a
+    predicate of the candidate cell alone — yet it ran once in
+    `_check_via_placement_cached` and again per non-plane layer inside
+    `_is_via_blocked`, 3–5 identical evaluations per via candidate.
+  - **The #5240 non-through-hole pad-drill sweep** is likewise cell-only,
+    but ran on *every* `_check_via_placement_cached` call because the
+    sibling `_via_cache` is bypassed whenever `allow_sharing` is set —
+    exactly the negotiated mode the fallback runs in.
+  - **`_is_trace_blocked`'s #3229 Euclidean-disc kernel** is a pure
+    function of the radius and the region offsets *relative to the
+    centre*, rebuilt from `np.arange` on every neighbour expansion.
+  - **`RouteHaloGeometry.cell_known`** reached the four occupancy planes
+    through a freshly allocated `_CellView` and four bound-property calls;
+    it now indexes the same arrays directly, with the operand order and
+    short-circuit points unchanged.
+
+  The two via-site memos are tokened against the state they read — the
+  hole memo on `(index object, len(index.holes), index.known)`, the
+  pad-drill memo on the identity of the arrays tuple
+  `_non_th_pad_geometry` returns — because `RoutingGrid.add_component_hole`
+  and `add_pad` mutate the live index in place, mid-route, with no
+  router-side hook. Measured locally on `boards/06-diffpair-test --seed 42`
+  across four alternating arms, normalised against the native search to
+  cancel host load: phase 4 −3.8 % (floor −2.0 % on the most conservative
+  pairing), `_check_via_placement_cached` −30.1 %, `cell_known` −34.2 %,
+  the whole fallback −16.5 %. `diffpair_test_routed.kicad_pcb` is
+  byte-identical across every arm. Method, the full line-level attribution
+  and the six-run table are retained in
+  `docs/diagnostics/issue-5617/phase4-native-split.md`.
+
 ## [0.21.1] - 2026-09-21
 
 ### Summary
