@@ -33,17 +33,16 @@ on copper-LVS, routed-DRC, diff-pair / match-group coverage, board-specific
 end-to-end checks, the mypy baseline, and route determinism:
 
 `analyze_native_observations.py`, `board06_determinism_smoke.sh`,
-`board_recipe_artifacts.py`, `board_route_determinism_smoke.sh`, `check-
-content-contracts.sh`, `check_board_00_e2e.py`,
+`board_recipe_artifacts.py`, `board_route_determinism_smoke.sh`,
+`check-content-contracts.sh`, `check_board_00_e2e.py`,
 `check_board_05_blocking.py`, `check_copper_lvs.py`,
 `check_diffpair_coverage.py`, `check_mask_copper_native.py`,
 `check_matchgroup_coverage.py`, `check_mypy_baseline.py`,
 `check_net_status.py`, `check_routed_drc.py`,
-`collect_failed_routing_bundle.py`, `init_kicad_libraries.py`, `local-
-gate.sh`, `native_observer.md`, `native_observer.py`,
-`native_observer_pytest.py`, `net_class_map_resolver.py`,
-`normalize_copper.py`, `run_native_routed_drc.sh`, `run_observed.py`,
-`select_routed_pcbs.py`, `verify_changes_filter.mjs`.
+`collect_failed_routing_bundle.py`, `init_kicad_libraries.py`, `local-gate.sh`,
+`native_observer.md`, `native_observer.py`, `native_observer_pytest.py`,
+`net_class_map_resolver.py`, `normalize_copper.py`, `run_native_routed_drc.sh`,
+`run_observed.py`, `select_routed_pcbs.py`, `verify_changes_filter.mjs`.
 `normalize_copper.py` is the routed-copper normalizer
 `board_route_determinism_smoke.sh` compares runs with: it reduces a
 `.kicad_pcb` to the sorted multiset of whole, paren-balanced
