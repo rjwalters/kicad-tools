@@ -159,18 +159,39 @@ class RouteHaloGeometry:
         return self._version
 
     def cell_known(self, x: int, y: int, layer: int) -> bool:
+        """Is ``(x, y, layer)``'s conservative mark backed by known copper?
+
+        Issue #5617.  Reads the four occupancy planes DIRECTLY rather than
+        through ``grid.cell_at(...)`` + four ``_CellView`` properties.  The
+        predicate, its operand order and its short-circuit points are
+        unchanged -- ``_CellView.blocked`` / ``.net`` / ``.is_obstacle`` /
+        ``.pad_blocked`` are each defined as exactly the indexed read spelled
+        out below (``grid.py``) -- but the per-cell ``_CellView`` allocation
+        and the four bound-property calls are gone.
+
+        This is a hot leaf of the pure-Python A* fallback: a py-spy profile of
+        the Diff-Pair regression job's re-route step (board 06, ``--seed 42``)
+        attributed **15.9 s of phase 4's 524.2 s (3.0 %)** to it, reached from
+        two call sites -- ``Router._trace_halo_clear``'s
+        ``all(cell_known(...) for ...)`` guard (8.4 s) and
+        ``Router._is_via_blocked``'s known-cell filter (7.5 s) -- with 8.2 s of
+        that inside ``cell_at`` + the four property getters.
+        """
         grid = self.grid
         if not (0 <= x < grid.cols and 0 <= y < grid.rows and 0 <= layer < grid.num_layers):
             return False
-        cell = grid.cell_at(layer, y, x)
-        if not cell.blocked or cell.net <= 0 or cell.is_obstacle or cell.pad_blocked:
+        if not grid._blocked[layer, y, x]:
             return False
-        if grid._static_blocked is not None and grid._static_blocked[layer, y, x]:
+        net = int(grid._net[layer, y, x])
+        if net <= 0 or grid._is_obstacle[layer, y, x] or grid._pad_blocked[layer, y, x]:
+            return False
+        static_blocked = grid._static_blocked
+        if static_blocked is not None and static_blocked[layer, y, x]:
             return False
         if (layer, y, x) in grid._reserved_for_nets:
             return False
         self._refresh()
-        return bool(self._cells[layer, y, x] == cell.net)
+        return bool(self._cells[layer, y, x] == net)
 
     def clear(
         self, candidate, router, *, partner_net=None, partner_clearance=None, require_geometry=True

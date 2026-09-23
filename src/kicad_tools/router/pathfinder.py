@@ -394,6 +394,26 @@ class Router:
         self._via_halo_cache: dict[tuple[int, int, int], bool] = {}
         self._via_halo_cache_token: int | None = None
 
+        # Issue #5617: memos for the two SITE-level via preconditions --
+        # predicates of the candidate CELL alone, with no ``net`` / ``layer``
+        # / ``radius`` / ``allow_sharing`` dependence, yet re-evaluated once
+        # per ``_check_via_placement_cached`` call AND once per non-plane
+        # layer inside ``_is_via_blocked``.  Both are dropped by
+        # ``invalidate_pad_geometry_cache`` (hence by ``clear_via_cache``),
+        # the same trigger the sibling ``_non_th_pad_cache`` uses -- see
+        # ``_component_hole_clear_cached`` / ``_non_th_pad_drill_clear``
+        # for the per-memo soundness argument.
+        self._hole_site_cache: dict[tuple[int, int], bool] = {}
+        self._pad_drill_site_cache: dict[tuple[int, int], bool] = {}
+
+        # Issue #5617: memo for ``_is_trace_blocked``'s Euclidean-disc
+        # kernel (#3229).  ``(dist_sq, within_disc)`` is a pure function of
+        # the radius and the four CLAMPED region offsets, so it repeats for
+        # every interior cell of every A* expansion; the arrays are only ever
+        # read (``&`` / ``>`` / indexing all allocate fresh results), never
+        # mutated in place, so sharing one instance is safe.
+        self._trace_disc_cache: dict[tuple[int, int, int, int, int], tuple] = {}
+
         # Issue #5240: vectorized geometry for the non-through-hole pad
         # sweep in ``_check_via_placement_cached`` (the ``not
         # self._allow_smd_vias`` branch -- the default for jlcpcb and any
@@ -1696,6 +1716,43 @@ class Router:
             self._via_halo_cache[key] = hit
         return hit
 
+    def _trace_disc_kernel(
+        self, radius: int, dy1: int, dy2: int, dx1: int, dx2: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Memoised ``(dist_sq, within_disc)`` for :meth:`_is_trace_blocked`.
+
+        Issue #5617.  The #3229 Euclidean-disc filter builds two small arrays
+        per call from ``np.arange``:
+
+        .. code-block:: python
+
+            dist_sq = ((ys - gy) ** 2)[:, None] + ((xs - gx) ** 2)[None, :]
+            within_disc = dist_sq <= radius * radius
+
+        Both are pure functions of ``radius`` and the region offsets
+        **relative to the centre** -- ``(y1 - gy, y2 - gy, x1 - gx,
+        x2 - gx)`` -- which is what this memo keys on.  Away from the board
+        edge those offsets are always ``(-radius, radius + 1, -radius,
+        radius + 1)``, so every interior A* expansion at a given radius
+        rebuilds one identical pair of arrays.
+
+        Returning a SHARED array is safe because both results are read-only
+        at every use site: ``within_disc`` only ever appears as an operand of
+        ``&`` or as a scalar index, and ``dist_sq`` only in ``>``.  Every one
+        of those allocates a fresh result rather than writing in place.
+        """
+        key = (radius, dy1, dy2, dx1, dx2)
+        hit = self._trace_disc_cache.get(key)
+        if hit is None:
+            dy_grid = np.arange(dy1, dy2)
+            dx_grid = np.arange(dx1, dx2)
+            dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
+            hit = (dist_sq, dist_sq <= radius * radius)
+            if len(self._trace_disc_cache) >= self._SITE_CACHE_MAX:
+                self._trace_disc_cache.clear()
+            self._trace_disc_cache[key] = hit
+        return hit
+
     def _is_trace_blocked(
         self,
         gx: int,
@@ -1778,13 +1835,7 @@ class Router:
         # producing 8 sub-127um ``clearance_pad_segment`` violations on
         # board 05 with the legacy Chebyshev kernel (shortfalls 17-98um
         # at ``res = 0.127mm``, ``radius = 2``).
-        radius_sq = radius * radius
-        ys = np.arange(y1, y2)
-        xs = np.arange(x1, x2)
-        dy_grid = ys - gy
-        dx_grid = xs - gx
-        dist_sq = (dy_grid * dy_grid)[:, None] + (dx_grid * dx_grid)[None, :]
-        within_disc = dist_sq <= radius_sq
+        dist_sq, within_disc = self._trace_disc_kernel(radius, y1 - gy, y2 - gy, x1 - gx, x2 - gx)
 
         # Issue #4079: lateral-trace corridor keep-out.  A cell reserved for
         # a net set that EXCLUDES ``net`` blocks this trace placement -- even
@@ -2151,10 +2202,9 @@ class Router:
             radius: Override the via half-width in grid cells. When None,
                     uses the pre-computed ``_via_half_cells`` (Issue #1692).
         """
-        wx, wy = self.grid.grid_to_world(gx, gy)
-        if not self.grid._component_hole_index.clear(
-            wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
-        ):
+        # Issue #5617: memoised per cell -- same predicate, same arguments,
+        # evaluated once instead of once per non-plane layer.
+        if not self._component_hole_clear_cached(gx, gy):
             return True
         halo = getattr(self.grid, "_route_halo", None)
         geometry_complete = halo is not None and halo.complete
@@ -3094,6 +3144,81 @@ class Router:
         self._non_th_pad_cache = (len(pads), arrays)
         return arrays
 
+    #: Entry cap for the two site memos and the disc-mask memo (issue #5617).
+    #: Purely a memory backstop: dropping entries can only cost work, never
+    #: change a verdict, because every miss recomputes the same pure function.
+    _SITE_CACHE_MAX = 500_000
+
+    def _component_hole_clear_cached(self, gx: int, gy: int) -> bool:
+        """Memoised ``grid._component_hole_index.clear`` for a via at ``(gx, gy)``.
+
+        Issue #5617.  The physical-drill floor is a predicate of the CELL
+        alone: its four arguments are ``grid_to_world(gx, gy)`` plus
+        ``rules.via_drill`` / ``rules.min_hole_to_hole``, neither of which
+        depends on ``net``, ``layer``, ``radius`` or ``allow_sharing``.  Yet
+        the A* re-evaluates it once in :meth:`_check_via_placement_cached`
+        and then once more per non-plane layer inside :meth:`_is_via_blocked`
+        -- 3-5 identical evaluations per via candidate on a four-layer board.
+
+        Soundness: the only mutable input is ``grid._component_hole_index``,
+        and the sole mutators are ``RoutingGrid.add_pad`` and
+        ``refresh_component_holes`` (which REPLACES the index outright).
+        :meth:`invalidate_pad_geometry_cache` calls the latter and clears
+        this memo in the same breath, and :meth:`clear_via_cache` -- start of
+        every route / A* search, every foreign-context change -- calls
+        ``invalidate_pad_geometry_cache``.  So an entry is only ever served
+        when recomputing would return the same bool.
+        """
+        key = (gx, gy)
+        hit = self._hole_site_cache.get(key)
+        if hit is None:
+            wx, wy = self.grid.grid_to_world(gx, gy)
+            hit = self.grid._component_hole_index.clear(
+                wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
+            )
+            if len(self._hole_site_cache) >= self._SITE_CACHE_MAX:
+                self._hole_site_cache.clear()
+            self._hole_site_cache[key] = hit
+        return hit
+
+    def _non_th_pad_drill_clear(self, gx: int, gy: int) -> bool:
+        """Memoised non-through-hole pad-drill sweep for a via at ``(gx, gy)``.
+
+        Issue #5617.  Same shape as :meth:`_component_hole_clear_cached`: the
+        #5240 vectorised sweep reads only ``grid_to_world(gx, gy)``,
+        ``rules.via_drill`` and :meth:`_non_th_pad_geometry`, so it is a
+        predicate of the cell alone -- but because ``_via_cache`` is bypassed
+        whenever ``allow_sharing`` is set (the negotiated mode the pure-Python
+        fallback runs in), it was re-run on **every**
+        :meth:`_check_via_placement_cached` call.  A py-spy profile of the
+        Diff-Pair regression job's re-route step attributed 7.3 s of phase
+        4's 524.2 s to its six NumPy lines alone.
+
+        Soundness: keyed by cell, invalidated with ``_non_th_pad_cache``
+        itself in :meth:`invalidate_pad_geometry_cache` -- the contract that
+        method's docstring already states for in-place ``Pad`` mutation.  The
+        arithmetic is byte-identical to the inline form it replaces.
+        """
+        key = (gx, gy)
+        hit = self._pad_drill_site_cache.get(key)
+        if hit is None:
+            pxs, pys, half_w, half_h, cos_r, sin_r = self._non_th_pad_geometry()
+            hit = True
+            if pxs.size:
+                wx, wy = self.grid.grid_to_world(gx, gy)
+                drill_radius = self.rules.via_drill / 2.0
+                dx = wx - pxs
+                dy = wy - pys
+                lx = cos_r * dx - sin_r * dy
+                ly = sin_r * dx + cos_r * dy
+                ex = np.maximum(np.abs(lx) - half_w, 0.0)
+                ey = np.maximum(np.abs(ly) - half_h, 0.0)
+                hit = not bool(np.any(np.hypot(ex, ey) < drill_radius))
+            if len(self._pad_drill_site_cache) >= self._SITE_CACHE_MAX:
+                self._pad_drill_site_cache.clear()
+            self._pad_drill_site_cache[key] = hit
+        return hit
+
     def _check_via_placement_cached(
         self,
         gx: int,
@@ -3117,10 +3242,8 @@ class Router:
         Returns:
             True if via CAN be placed (all layers clear), False if blocked.
         """
-        wx, wy = self.grid.grid_to_world(gx, gy)
-        if not self.grid._component_hole_index.clear(
-            wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
-        ):
+        # Issue #5617: memoised per cell (see ``_component_hole_clear_cached``).
+        if not self._component_hole_clear_cached(gx, gy):
             return False
 
         # Try cache first (only in non-sharing mode since sharing state can change)
@@ -3133,28 +3256,19 @@ class Router:
                 return self._via_cache[cache_key]
 
         # Process restrictions also apply to own-net copper and plane layers.
-        if not self._allow_smd_vias:
-            wx, wy = self.grid.grid_to_world(gx, gy)
-            drill_radius = self.rules.via_drill / 2.0
-            # Issue #5240: vectorized replacement for the equivalent
-            # per-pad ``pad_point_distance(pad, wx, wy) < drill_radius``
-            # Python loop -- same pad_local_point/pad_point_distance math
-            # (rotate into the pad frame, clamp to the rectangle, hypot the
-            # residual), evaluated for every non-through-hole pad in one
-            # NumPy sweep instead of a per-pad function call + trig
-            # recompute.  This branch is hot: it is the default for jlcpcb
-            # (no via-in-pad support) and runs once per via candidate the
-            # pure-Python A* fallback considers.
-            pxs, pys, half_w, half_h, cos_r, sin_r = self._non_th_pad_geometry()
-            if pxs.size:
-                dx = wx - pxs
-                dy = wy - pys
-                lx = cos_r * dx - sin_r * dy
-                ly = sin_r * dx + cos_r * dy
-                ex = np.maximum(np.abs(lx) - half_w, 0.0)
-                ey = np.maximum(np.abs(ly) - half_h, 0.0)
-                if np.any(np.hypot(ex, ey) < drill_radius):
-                    return False
+        #
+        # Issue #5240 vectorized the equivalent per-pad
+        # ``pad_point_distance(pad, wx, wy) < drill_radius`` Python loop --
+        # same pad_local_point/pad_point_distance math (rotate into the pad
+        # frame, clamp to the rectangle, hypot the residual) -- for every
+        # non-through-hole pad in one NumPy sweep.  This branch is hot: it is
+        # the default for jlcpcb (no via-in-pad support) and ran once per via
+        # candidate the pure-Python A* fallback considers, because the
+        # ``_via_cache`` above is bypassed whenever ``allow_sharing`` is set.
+        # Issue #5617 memoises that sweep per cell -- it does not depend on
+        # ``net``, ``radius`` or ``allow_sharing``.
+        if not self._allow_smd_vias and not self._non_th_pad_drill_clear(gx, gy):
+            return False
 
         # Check all layers using priority ordering.
         # Issue #2325: Skip plane layers when checking via blockage.  On plane
@@ -3250,6 +3364,14 @@ class Router:
         ``_restore_router_pads``.
         """
         self._non_th_pad_cache = None
+        # Issue #5617: the two site-level via memos read exactly the state
+        # this method invalidates -- ``_non_th_pad_cache`` (the pad-drill
+        # sweep) and ``grid._component_hole_index`` (which
+        # ``refresh_component_holes`` below REPLACES).  Dropping them here
+        # ties them to the same contract, so every pad mutation that must
+        # invalidate the pad geometry invalidates these too.
+        self._hole_site_cache.clear()
+        self._pad_drill_site_cache.clear()
         self.grid.refresh_component_holes()
 
     def set_via_cache_enabled(self, enabled: bool) -> None:
