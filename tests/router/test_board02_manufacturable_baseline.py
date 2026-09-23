@@ -725,7 +725,25 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # jlcpcb-tier1; CI's containerized kicad-cli run is authoritative
     # for the live board).
     # Prior pin (22, 226-segment-era, 24, 326.73).
-    EXPECTED_VIAS = 23
+    #
+    # Re-baselined 2026-09-23 for Issue #5673 (the #5660 follow-up): the
+    # via-drop hole-to-hole predicate now applies the fab drill floor
+    # (``rules.min_hole_to_hole``, 0.5 mm) to a SAME-NET pair too, instead
+    # of the 0.102 mm ``min_drill_clearance`` via-merge threshold.  Until
+    # #5660 the Chebyshev square's diagonal excess happened to keep
+    # same-net vias apart; the exact disc withdrew that accident and this
+    # very board shipped two VCC vias 0.428 mm drill-to-drill
+    # (``hole_to_hole_clearance ... at (137.90, 86.75)``, the Board 02
+    # End-to-End regression).  With the floor stated rather than inherited
+    # from the raster, seeds 42/43/44 all yield (22, 229, 24, 322.39):
+    # routes (22) and reach (8/8) UNCHANGED, vias 23 -> 24 and length
+    # 322.77 -> 322.39 (-0.38 mm) because the rejected drop is replaced by
+    # a legal pair.  Verified end-to-end: a full
+    # ``boards/02-charlieplex-led/generate_design.py`` regen reports
+    # ``DRC: PASS`` / ``LVS: PASS`` / ``Overall: PASS`` with zero
+    # ``hole_to_hole_clearance`` violations (it reported one before).
+    # Prior pin (22, 227-segment-era, 23, 322.77).
+    EXPECTED_VIAS = 24
     # Re-measured at ff96e855 after local halo-coverage refinement:
     # seeds 42/43/44 yield (22, 226, 24, 326.73), identical copper
     # geometry, 34 preserved/bound pads, and zero native refill/all-track
@@ -734,7 +752,7 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # the physical delta is a 1.981623mm shorter NODE_C route.
     # Retained evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
     # Keep exact length and cross-seed guards; no tolerance changes.
-    EXPECTED_LENGTH = 322.77
+    EXPECTED_LENGTH = 322.39
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
