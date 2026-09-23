@@ -89,11 +89,19 @@ bool CoupledPathfinder::trace_halo_cell_clear(int cx, int cy, int layer,
     segment.layer = layer; segment.net = net;
     const float clearance =
         static_cast<float>(dims ? dims->trace_clearance : rules_.trace_clearance);
-    // No partner waiver: passing ``partner_net = -1`` makes partner copper
-    // require the ordinary (wider) clearance, so the refinement can only ever
-    // be MORE conservative than the per-net search, never less.
+    // Issue #5711: the diff-pair intra-pair waiver, mirroring
+    // ``RouteHaloRefiner.trace_clear``'s ``partner_net=`` /
+    // ``partner_clearance=`` arguments to ``RouteHaloGeometry.clear``.  Both
+    // are installed together by ``set_halo_net_dimensions``; a net with no
+    // resolvable ``diffpair_partner`` installs (-1, -1) and keeps the
+    // ordinary class clearance against every foreign net, exactly as the
+    // Python ``partner is None`` branch does.
+    const int partner_net = dims ? dims->partner_net : -1;
+    const float partner_clearance =
+        dims ? static_cast<float>(dims->partner_clearance) : -1.0f;
     return grid_.route_trace_geometry_clear(segment, clearance,
-                                            -1, -1.0f, rules_.via_clearance);
+                                            partner_net, partner_clearance,
+                                            rules_.via_clearance);
 }
 
 // Issue #5410: physical clearance of a through via, mirroring

@@ -113,9 +113,22 @@ public:
     //
     // Nets with no entry fall back to the global rules, so a caller that
     // installs nothing keeps exactly the pre-#5410 global-rule behaviour.
+    //
+    // Issue #5711: ``partner_net`` / ``partner_clearance`` carry the diff-pair
+    // intra-pair waiver ``RouteHaloRefiner.trace_clear`` passes into
+    // ``RouteHaloGeometry.clear`` (``nc.diffpair_partner`` resolved to a net
+    // id, and ``nc.effective_intra_pair_clearance()``).  Omitting them made
+    // partner copper demand the ordinary, wider class clearance -- safe, but
+    // 212 cells more conservative than the Python arm on a class whose
+    // intra-pair gap is narrower than its clearance, which is the normal
+    // reason to author one.  ``partner_net < 0`` or ``partner_clearance < 0``
+    // means "no waiver", matching the Python ``partner is None`` branch.
     void set_halo_net_dimensions(int net, double trace_width,
-                                 double trace_clearance, double via_diameter) {
-        halo_net_dims_[net] = HaloNetDims{trace_width, trace_clearance, via_diameter};
+                                 double trace_clearance, double via_diameter,
+                                 int partner_net = -1,
+                                 double partner_clearance = -1.0) {
+        halo_net_dims_[net] = HaloNetDims{trace_width, trace_clearance, via_diameter,
+                                          partner_net, partner_clearance};
     }
     void clear_halo_net_dimensions() { halo_net_dims_.clear(); }
     // All construction-time scalars mirror the Python
@@ -217,6 +230,9 @@ private:
         double trace_width;
         double trace_clearance;
         double via_diameter;
+        // Issue #5711: the diff-pair intra-pair waiver, or (-1, -1) for none.
+        int partner_net = -1;
+        double partner_clearance = -1.0;
     };
     std::unordered_map<int, HaloNetDims> halo_net_dims_;
     const HaloNetDims* halo_dims_for(int net) const {

@@ -265,7 +265,13 @@ namespace router {
 // accepted goal node, so the Python resume loop rejects the right cell).  New
 // struct fields, so a v41 .so must be rejected rather than AttributeError deep
 // in the resume loop.
-constexpr int ROUTER_CPP_BUILD_VERSION = 44;
+// v45 (Issue #5711, part of #5410): ``CoupledPathfinder::HaloNetDims`` gained
+// ``partner_net`` / ``partner_clearance`` and
+// ``set_halo_net_dimensions`` gained the two matching trailing arguments, so
+// the coupled halo refinement applies the same diff-pair intra-pair waiver
+// ``RouteHaloRefiner.trace_clear`` applies.  A v44 .so silently drops the
+// waiver (over-blocking), so it must be rejected rather than used.
+constexpr int ROUTER_CPP_BUILD_VERSION = 45;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor
