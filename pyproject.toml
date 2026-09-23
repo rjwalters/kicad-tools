@@ -269,15 +269,22 @@ exclude = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# .claude/ and .loom/ hold Loom-vendored markdown (README.md, role/pattern
-# docs) refreshed by `./.loom/scripts/resync-installed.sh` on every Loom
-# update. Their embedded Python code blocks are illustrative examples, not
-# repo source -- ruff's markdown formatting on them just gets clobbered by
-# the next resync (#4895, #4930, #4938, #4940, #4950), breaking `main` CI
-# repeatedly. Exclude the vendored surface instead of re-formatting it.
+# .claude/, .loom/ and .agents/ hold Loom-vendored markdown (README.md,
+# role/pattern docs, generated agent skills) refreshed by
+# `./.loom/scripts/resync-installed.sh` on every Loom update. Their embedded
+# Python code blocks are illustrative examples, not repo source -- ruff's
+# markdown formatting on them just gets clobbered by the next resync (#4895,
+# #4930, #4938, #4940, #4950, #5697), breaking `main` CI repeatedly. Exclude
+# the vendored surface instead of re-formatting it.
+# .agents/skills/ joined this list at #5697: it is the same INSTALLED surface,
+# not repo source. Every file in it is written by a tool installer -- Loom's
+# resync (`loom-<name>/SKILL.md`, marked `<!-- loom-managed-skill -->`, 18 of
+# 47 files) plus the Squad and Repo Skills installers for the rest. None of it
+# is authored here, so formatting it only produces churn the next install
+# clobbers. It was simply missed when that tree was introduced (loom #8673).
 # Manufacturing bundles contain immutable, hash-bound source snapshots. Format
 # the source recipes, not the archived copies used to reproduce a release.
-extend-exclude = [".claude", ".loom", "boards/*/output/manufacturing"]
+extend-exclude = [".claude", ".loom", ".agents", "boards/*/output/manufacturing"]
 
 [tool.ruff.lint]
 select = [
