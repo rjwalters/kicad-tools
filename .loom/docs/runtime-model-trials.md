@@ -674,6 +674,9 @@ Full semantics, the operator-pin rule, and the
 "Ordered runtime preference with fall-through". Dispatch is not yet wired to the
 resolver — see the follow-up issues on #8436.
 
+Operator recipes that combine a trial tap with the model, capacity and
+spend-bound axes: [`configuring-resources.md`](configuring-resources.md).
+
 ## Evidence and limits
 
 `--log` appends both streams, launch identity and native JSON events to a file.

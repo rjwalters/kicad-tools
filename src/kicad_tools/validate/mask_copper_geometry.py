@@ -14,6 +14,18 @@ from typing import Any
 from .mask_export_geometry import MaskExportOptions, _inventory, inspect_exported_mask_geometry
 from .mask_geometry import _validate_structure
 
+#: KiCad versions whose native plot profile has been qualified against this
+#: repository's independent material oracle. Each entry was admitted by running
+#: ``tests/test_mask_copper_native.py`` end to end under that exact KiCad build
+#: (native ``pcbnew`` object plotting compared against Gerbonara's reading of
+#: ``kicad-cli``-plotted Gerbers, 5 nm tolerance) and confirming the whole suite
+#: passes with no skips -- see ``scripts/ci/check_mask_copper_native.py``, which
+#: imports this same set so the CI gate and the library check can never drift
+#: apart. Do not add a version here without repeating that comparison; an
+#: unqualified build must keep failing loudly rather than silently attributing
+#: mask geometry from an unverified plot profile.
+QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")
+
 
 @dataclass
 class AttributedMaskGeometry:
@@ -196,9 +208,12 @@ def inspect_attributed_mask_geometry(
         if data.get("source_sha256") != exported.source_sha256:
             result.errors.append("Native object/source binding mismatch")
             return result
-        if str(data.get("native_version", "")).split()[0] != "10.0.5":
+        native_version = str(data.get("native_version", "")).split()
+        if not native_version or native_version[0] not in QUALIFIED_NATIVE_VERSIONS:
             result.errors.append(
-                "Native object attribution requires the verified KiCad 10.0.5 plot profile"
+                "Native object attribution requires a qualified KiCad plot profile "
+                f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got "
+                f"{data.get('native_version', '') or 'no version'}"
             )
             return result
         if str(data["native_version"]).split()[0] != exported.native_version.split()[0]:

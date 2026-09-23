@@ -267,6 +267,14 @@ loom_daemon_self_bin_override() {
 #      $REPO_ROOT is the fixture, which has no build at all). $REPO_ROOT is
 #      still probed after it, for the caller that has one.
 #   3. `loom-daemon` on PATH.
+#   4. The machine-level install location: $LOOM_DAEMON_BIN_DIR (default
+#      $HOME/.local/bin) -- the same directory loom-daemon-update.sh's
+#      --provision path writes to, and the same tier loom_locate_daemon_bin
+#      already carries for the `ssh host 'cmd'` case (#4875) where a
+#      non-interactive shell never puts it on PATH. Added by #8712: with only
+#      tiers 1-3, a host whose repo-local build was unusable AND whose PATH did
+#      not carry loom-daemon resolved NOTHING, even though the install this
+#      very script updates was sitting right there.
 # Echoes "" when none resolves; the caller then answers in its own contract
 # (a fail-safe verdict, not a crash) rather than failing silently.
 #
@@ -285,14 +293,66 @@ loom_resolve_self_daemon_bin() {
         [[ -n "$base" ]] || continue
         for candidate in "$base/release/loom-daemon" "$base/debug/loom-daemon"; do
             if [[ -x "$candidate" ]]; then
-                printf '%s\n' "$candidate"
-                return 0
+                if _loom_self_bin_answers_as_daemon "$candidate"; then
+                    printf '%s\n' "$candidate"
+                    return 0
+                fi
+                echo "loom_resolve_self_daemon_bin: ignoring $candidate — it does not answer \`--version\` as a loom-daemon build (stale/partial/poisoned build output?); falling through to the installed binary" >&2
             fi
         done
     done
     candidate="$(command -v loom-daemon 2>/dev/null || true)"
-    [[ -n "$candidate" && -x "$candidate" ]] && printf '%s\n' "$candidate"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    candidate="${LOOM_DAEMON_BIN_DIR:-$HOME/.local/bin}/loom-daemon"
+    [[ -x "$candidate" ]] && printf '%s\n' "$candidate"
     return 0
+}
+
+# _loom_self_bin_answers_as_daemon <path> -- one cheap sanity probe of a
+# REPO-LOCAL candidate before loom_resolve_self_daemon_bin commits to it:
+# `--version` must print `loom-daemon <digit>…` on its first line.
+#
+# THE INCIDENT (#8712). A test fixture's 472-byte bash fake -- the
+# `fake loom-daemon: unsupported subcommand: $*` stub daemon-update-fixtures.sh
+# writes -- was left at `loom-daemon/target/release/loom-daemon` in a fleet
+# host's checkout. `loom-daemon-update.sh --fetch` delegates the download to
+# `"$rf_bin" release-fetch`, tier 2 handed it that file, and every auto_update
+# fetch on the host failed for hours (attempts 1-5, backoff to 960s) while the
+# machine-level install this script exists to UPDATE sat one tier below,
+# perfectly fine. Moving the fake aside made the same command succeed at once.
+#
+# So tier 2 is the one tier that is INFERRED rather than named: nobody asserted
+# that file is a loom-daemon; it was found by path convention, and build-output
+# paths accumulate stale, half-written and (as above) outright fake files. One
+# `--version` call -- microseconds against a real binary, already the idiom
+# `_loom_daemon_reported_version` uses below -- converts an unrecoverable
+# update loop into a fallback.
+#
+# DELIBERATELY NOT APPLIED TO TIERS 1, 3 AND 4. Tier 1 ($LOOM_DAEMON_SELF_BIN)
+# is an EXPLICIT pin: an operator or a test naming a binary directly is stating
+# the answer, and second-guessing it would break every suite that pins a
+# deliberately-fake implementation (and would remove the escape hatch that
+# selects a repo-local build explicitly). Tiers 3/4 are the fallback itself --
+# there is nothing below them to fall through TO, so a probe there could only
+# convert "hand back the install and let it report its own error" into "hand
+# back nothing", which is strictly less actionable.
+#
+# LOOM_SKIP_SELF_BIN_SANITY_PROBE=1 disables it wholesale (same shape as
+# LOOM_SKIP_DAEMON_VERSION_PREFLIGHT above), for a harness that deliberately
+# places a non-answering binary at a build-output path.
+#
+# Never exits and never fails the caller: returns 0 (usable) / 1 (not), and
+# every caller runs under `set -e`, so the probe itself is fully guarded.
+_loom_self_bin_answers_as_daemon() {
+    local bin="$1" out=""
+    [[ "${LOOM_SKIP_SELF_BIN_SANITY_PROBE:-0}" == "1" ]] && return 0
+    [[ -n "$bin" && -x "$bin" ]] || return 1
+    out="$("$bin" --version 2>/dev/null </dev/null || true)"
+    out="${out%%$'\n'*}"
+    [[ "$out" =~ ^loom-daemon[[:space:]]+[0-9] ]]
 }
 
 # loom_daemon_model_select_flag <daemon_bin> <model> -- echo `--model <model>`

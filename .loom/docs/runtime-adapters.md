@@ -1925,6 +1925,9 @@ collaboration:
 
 ## Related
 
+- [`configuring-resources.md`](configuring-resources.md) — operator runbook that
+  combines this doc's `runtimes.*` keys with the model, credential-pool and
+  spend-bound axes into copy-pasteable recipes.
 - Epic **#4167** — first-class multi-runtime worker support (the seven contract
   points' authoritative framing, the phasing, and the fork PR list).
 - **#4165** — fork divergence triage (harvest tracking).

@@ -201,12 +201,33 @@ class SExp:
         Example:
             doc.find("symbol", lib_id="Audio:PCM5122PW")
         """
-        # Search descendants only (not self)
-        for child in self.children:
-            for node in child.iter_all():
+        # Search descendants only (not self).  The walk is the same pre-order
+        # DFS ``iter_all()`` performs, open-coded over an explicit stack so a
+        # query does not pay for one generator frame per tree level per node
+        # (see iter_all's note).  ``stack`` holds the not-yet-visited nodes in
+        # reverse visit order, so ``pop()`` yields children[0] before its
+        # siblings and a node's whole subtree before the next sibling.
+        stack = self.children[::-1]
+        pop = stack.pop
+        if not attrs:
+            while stack:
+                node = pop()
                 if node.name == name:
-                    if all(self._match_attr(node, k, v) for k, v in attrs.items()):
-                        return node
+                    return node
+                children = node.children
+                if children:
+                    stack.extend(children[::-1])
+            return None
+        items = list(attrs.items())
+        match_attr = self._match_attr
+        while stack:
+            node = pop()
+            if node.name == name:
+                if all(match_attr(node, k, v) for k, v in items):
+                    return node
+            children = node.children
+            if children:
+                stack.extend(children[::-1])
         return None
 
     def find_all(self, name: str, **attrs) -> list[SExp]:
@@ -215,13 +236,31 @@ class SExp:
         Note: This searches descendants only, not self. To include self,
         use iter_all() directly.
         """
-        results = []
-        # Search descendants only (not self) - iterate children and their descendants
-        for child in self.children:
-            for node in child.iter_all():
+        results: list[SExp] = []
+        # Search descendants only (not self) - same explicit-stack pre-order
+        # DFS as find(); see the comment there.
+        stack = self.children[::-1]
+        pop = stack.pop
+        if not attrs:
+            append = results.append
+            while stack:
+                node = pop()
                 if node.name == name:
-                    if all(self._match_attr(node, k, v) for k, v in attrs.items()):
-                        results.append(node)
+                    append(node)
+                children = node.children
+                if children:
+                    stack.extend(children[::-1])
+            return results
+        items = list(attrs.items())
+        match_attr = self._match_attr
+        while stack:
+            node = pop()
+            if node.name == name:
+                if all(match_attr(node, k, v) for k, v in items):
+                    results.append(node)
+            children = node.children
+            if children:
+                stack.extend(children[::-1])
         return results
 
     def _match_attr(self, node: SExp, attr: str, value: Any) -> bool:
@@ -237,10 +276,24 @@ class SExp:
         return False
 
     def iter_all(self) -> Iterator[SExp]:
-        """Iterate over this node and all descendants."""
-        yield self
-        for child in self.children:
-            yield from child.iter_all()
+        """Iterate over this node and all descendants (pre-order).
+
+        Open-coded over an explicit stack rather than ``yield from
+        child.iter_all()``: the recursive form creates one generator frame
+        per node and re-yields every node once per tree level above it, so a
+        deep document pays O(depth) interpreter resumes per node instead of
+        O(1).  The emitted sequence is identical -- ``stack`` holds the
+        not-yet-visited nodes in reverse visit order, so ``pop()`` returns
+        ``children[0]`` and its whole subtree before ``children[1]``.
+        """
+        stack = [self]
+        pop = stack.pop
+        while stack:
+            node = pop()
+            yield node
+            children = node.children
+            if children:
+                stack.extend(children[::-1])
 
     def append(self, child: SExp) -> SExp:
         """Add a child node."""

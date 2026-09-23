@@ -4002,6 +4002,12 @@ concurrency ceiling 5" and share it with the team:
         "cooldownSecs": 21600,
         "warnThreshold": 3
       },
+      "prlessRetry": {
+        "enabled": true,
+        "threshold": 3,
+        "backoffSecs": 300,
+        "maxBackoffSecs": 3600
+      },
       "extraSkipLabels": ["blocked-upstream"]
     },
     "hostBreaker": {
@@ -4092,6 +4098,10 @@ knobs not yet audited here.
 | `autonomous.workFinder.declineCooldown.enabled` | `LOOM_WORK_FINDER_DECLINE_COOLDOWN` | `true` | Hard-exclusion decline cooldown on/off (#7528). A safety backstop — defaults on. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. The **label list itself** is deliberately not configurable — see "Hard-exclusion decline cooldown (#7528)" below |
 | `autonomous.workFinder.declineCooldown.cooldownSecs` | `LOOM_WORK_FINDER_DECLINE_COOLDOWN_SECS` | `21600` (6h) | How long a sweep that declined on a hard-exclusion label rule holds the issue out of dispatch. Flat, non-exponential. Deliberately longer than `noopCooldown.cooldownSecs`: a no-op release means "nothing to do *yet*", a decline means a label only a maintainer can remove is present. Zero/invalid → default |
 | `autonomous.workFinder.declineCooldown.warnThreshold` | `LOOM_WORK_FINDER_DECLINE_WARN_THRESHOLD` | `3` | Consecutive declines of one issue that emit a single WARN naming the issue and the rule it declined on. Matches `quarantine.threshold`. Zero/invalid → default |
+| `autonomous.workFinder.prlessRetry.enabled` | `LOOM_WORK_FINDER_PRLESS_RETRY` | `true` | PR-less retry bound on/off (#7972). A safety backstop — defaults on. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. See "PR-less retry bound (#7972)" below |
+| `autonomous.workFinder.prlessRetry.threshold` | `LOOM_WORK_FINDER_PRLESS_RETRY_THRESHOLD` | `3` | Consecutive dispatches that claim an issue, release it, and leave **no pull request** behind before the issue is held with `loom:blocked` (plus a comment naming the failure and the count). Matches `quarantine.threshold`. Zero/invalid → default |
+| `autonomous.workFinder.prlessRetry.backoffSecs` | `LOOM_WORK_FINDER_PRLESS_RETRY_BACKOFF_SECS` | `300` | Window applied after the **first** PR-less release; doubles per consecutive release. Deliberately longer than `dispatchBackoff.baseSecs` — the reported symptom was claim/release pairs inside the same minute, and a PR-less release follows a full agent session, so a one-minute retry cannot plausibly land differently. Zero/invalid → default |
+| `autonomous.workFinder.prlessRetry.maxBackoffSecs` | `LOOM_WORK_FINDER_PRLESS_RETRY_MAX_BACKOFF_SECS` | `3600` | Ceiling on the doubling — also the idle window after which a cold streak restarts at zero, and the in-memory TTL of a hold (whose durable half is the `loom:blocked` label). Zero/invalid → default; clamped up to `backoffSecs` |
 | `autonomous.workFinder.extraSkipLabels` | `LOOM_WORK_FINDER_EXTRA_SKIP_LABELS` (comma-separated) | `[]` | Per-workspace/per-repo **additional** label names (#6685) the work-finder treats as a skip/park signal, beyond the hardcoded `loom:blocked` / `loom:operator-only` (`PARK_LABELS`) — e.g. a repo-local `blocked-upstream` label that will never be renamed to a `loom:*` name. Purely additive to `SKIP_LABELS`' candidate-query filter (`WorkItem::is_skipped_with_extra`); it does **not** extend the separate dispatch()-level park-label guard (#4444) above, which stays keyed on `PARK_LABELS` only. Env replaces config entirely when set (even to an empty string); resolved once per workspace, live on the next tick (a cheap `.loom/config.json` read, no daemon restart needed). **`loom:building` can never be added to the resolved list** — filtered out defensively even if named explicitly in config/env, so a misconfiguration can never re-introduce the "an in-flight claim is treated as a park" regression `SKIP_LABELS`' own doc comment warns against |
 | *(env only)* | `LOOM_OPEN_PR_MEMO` | `true` | Verified-open-PR memo for the #4123 open-PR dispatch guard (#6788). Falsy (`0`/`false`/`no`/`off`) disables; anything else (including unset) enables. When on, the guard (a) reuses a verified "issue #N has open linked PR #M" answer for 15 minutes instead of re-running the closes-graph query on every work-finder tick, and (b) when **both** the GraphQL probe and its #5911 REST fallback fail, re-verifies that one known PR over a single `GET repos/{owner}/{repo}/pulls/{M}` before conceding. The documented fail-open contract is unchanged: with no memo, or if that recheck also cannot answer, the guard still proceeds. In-memory only — a daemon restart clears it. Disable only to restore the exact pre-#6788 probe |
 | *(env only)* | `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | How many **distinct** sources must hit an unsatisfiable token selection (exit 78) inside the window below before new dispatch to that workspace is paused (#6614). A source is an issue dispatch, or — since #7607 — a `(workspace, role)` role tick whose pre-spawn pool preflight found zero spawnable accounts. Distinct *sources*, not raw failures: one issue cycling through its own `dispatchBackoff`, or one role looping on one workspace, can never trip it. Crossing it trips the existing pre-flight advisory (#4386) + half-open dispatch gate (#5030) — one loud `ERROR` plus a `daemon.preflight.advisory` event — and the first dispatch that gets past token selection clears it. Zero/invalid → default |
@@ -4635,6 +4645,63 @@ dispatch that produced it, so a dispatch-time clear would reset the tally every
 cycle and the threshold WARN could never fire. Defaults **on**; disable with
 `LOOM_WORK_FINDER_DECLINE_COOLDOWN=0` or
 `autonomous.workFinder.declineCooldown.enabled = false`.
+
+**PR-less retry bound (#7972).** Every brake above classifies a sweep by **how
+it ended** — did it crash fast, did it exit cleanly with nothing moved, did it
+self-report a no-op, did it decline on a label. The loop this one bounds
+satisfies none of those questions and all of their carve-outs: a sweep that
+runs for minutes, *advances its phase checkpoint*, and still produces no pull
+request. `reap_once`'s `checkpoint_progress` arm reads that rewritten
+checkpoint as proof of forward progress and actively **clears** the dispatch
+backoff, the quarantine tally and the resume runway — so the next tick
+re-offers the issue immediately, and the cycle repeats with nothing counting
+it. Observed on `rjwalters/loom#7893`: **14 claims in just over four hours, 55
+`loom:issue`/`loom:building` label events, several claim/release pairs inside
+the same minute, zero PRs** — plus a `loom:urgent` label that made a stuck
+dispatcher look like a priority item.
+
+The discriminator is therefore not how the child died but **whether the
+dispatch left a pull request behind** — the one thing that loop could not fake:
+
+- **Classification.** At every terminal sweep outcome the reaper asks once. An
+  observed `merge` phase, or a verified open linked PR (including the #4123
+  open-PR self-skip, which is a sweep correctly standing down, not a failure),
+  **clears** the tally. A verified "no open linked PR" **records** a PR-less
+  release. An unverifiable probe does neither — fail-open, so a forge outage
+  can neither manufacture a hold nor erase a real streak. The probe is usually
+  free: the clean-exit branch already ran it for #4366/#6350, and the #6788
+  memo serves most of the rest.
+- **Backoff (`backoffSecs`, doubling to `maxBackoffSecs`).** Each recorded
+  release arms a window the work finder skips *before* the capacity gate —
+  counted as **`prless-retry-skip`** on the per-tick summary line — so a
+  re-claim cannot land in the same minute as the release, and a held candidate
+  never reserves a shared dispatch slot. A streak older than `maxBackoffSecs`
+  is cold and restarts at 1: a failure an hour ago and a failure now are not a
+  pattern.
+- **Visibility.** From the **second** consecutive release the failure reason is
+  posted to the issue, so the next claimer starts from "the last attempt died
+  like *this*" instead of from nothing. Bounded by construction: at most
+  `threshold` comments per streak, versus the fourteen claim cycles and
+  eighteen comments the observed loop produced.
+- **Hold (`threshold`).** The `threshold`-th consecutive PR-less release adds
+  `loom:blocked`, removes `loom:issue`, and comments with the failure and the
+  count. `loom:blocked` (not `loom:operator`) because it is the established
+  automated-hold state the work finder's skip-label filter and
+  `quarantine_reconciliation` already understand. Release it the way every
+  other `loom:blocked` park is released — fix the cause and flip it back to
+  `loom:issue`; the tally resets, so the issue gets a full fresh runway. An
+  already-closed issue is never held (it is out of the pool anyway).
+
+**Not charged for faults that are not the issue's.** A `no-usable-account` pool
+death (#7708) is host-level, a pre-flight-classified death (#4386) is
+workspace-level, a hard-exclusion decline (#7528) is a standing question, and a
+superseded claim (#4463) belongs to a newer sweep — each is excluded at the
+call site. A **self-reported no-op release** (#6670) actively *clears* this
+tally: a standing/tracking issue that legitimately keeps concluding "still
+nothing to do" must never accrete toward a `loom:blocked` hold, and
+`noopCooldown` is the right brake for it. Defaults **on**; disable with
+`LOOM_WORK_FINDER_PRLESS_RETRY=0` or
+`autonomous.workFinder.prlessRetry.enabled = false`.
 
 **Verified-open-PR memo (#6788).** The three brakes above bound how often an
 issue is *re-dispatched*. A fourth, narrower problem sits one layer down, in the

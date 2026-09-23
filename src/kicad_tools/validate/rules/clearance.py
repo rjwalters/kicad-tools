@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from typing import TYPE_CHECKING
 
@@ -52,6 +52,21 @@ if TYPE_CHECKING:
 # for the router's coordinate space, so it suppresses the modeling
 # artifact without masking real near-misses.  See Issue #2706.
 _COLOCATION_EPSILON_MM = 1e-4
+
+
+#: Sentinel for "this element's shapely copper geometry has not been built
+#: yet".  ``None`` is a legitimate *result* (``_element_to_shapely_geom``
+#: returns it for a degenerate zero-radius element), so the memo slots below
+#: cannot use ``None`` to mean "unset".
+_GEOM_UNSET = object()
+
+#: Issue #5240: when ``False``, the shapely copper geometry of every element
+#: is rebuilt from scratch on every pair -- the exhaustive pre-memoisation
+#: behaviour.  Kept reachable so the equivalence tests can run the same corpus
+#: both ways and assert the emitted violations are identical (the oracle
+#: pattern PR #5641 established for ``_PRUNE_BY_BOUNDS``).  Production always
+#: leaves this ``True``; the memo is a pure allocation saving.
+_MEMOIZE_COPPER_GEOM = True
 
 
 @dataclass
@@ -111,6 +126,19 @@ class CopperElement:
     # the existing analytic AABB behaviour unchanged.  ``""`` for
     # segments and vias.
     pad_shape: str = ""
+    # Issue #5240: lazily-memoised shapely copper geometry.  A clearance
+    # sweep asks the same element for its copper shape once per candidate
+    # PAIR it takes part in -- on board 06's routed artifact that is 4,059
+    # segment buffers across 169 distinct segments and 8,922 pad/via
+    # geometry builds across 270 distinct elements -- and the shape is a
+    # pure function of the element's (immutable, never reassigned) geometry
+    # fields, so the rebuild is redundant work, not a different answer.
+    #
+    # ``compare=False`` / ``repr=False`` keep ``__eq__`` and ``__repr__``
+    # byte-identical to the pre-memo dataclass, so nothing that compares or
+    # prints elements can observe the cache.
+    _seg_geom_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+    _pad_geom_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -661,6 +689,42 @@ def _segment_circle_clearance(
     return clearance, cx, cy
 
 
+def _segment_copper_geom(seg: CopperElement):
+    """Return (and memoise) a segment's shapely copper footprint.
+
+    The footprint is the segment centerline buffered by half the trace
+    width -- a pure function of ``seg.geometry``, which is assigned once in
+    :meth:`CopperElement.from_segment` and never reassigned.  A clearance
+    sweep asks for it once per candidate pair the segment takes part in, so
+    without the memo the identical buffer is rebuilt tens of times per
+    segment (Issue #5240).
+
+    Shapely geometries are immutable, so handing the same object to every
+    caller is indistinguishable from handing each an equal fresh copy.
+    """
+    if _MEMOIZE_COPPER_GEOM:
+        cached = seg._seg_geom_cache
+        if cached is not _GEOM_UNSET:
+            return cached
+
+    require_shapely("pad-segment clearance geometry")
+    from shapely.geometry import LineString, Point
+
+    x1, y1, x2, y2, seg_width = seg.geometry
+    seg_half = seg_width / 2.0
+
+    if x1 == x2 and y1 == y2:
+        # Degenerate (zero-length) segment -- treat as a point.
+        line_geom = Point(x1, y1)
+    else:
+        line_geom = LineString([(x1, y1), (x2, y2)])
+
+    geom = line_geom.buffer(seg_half) if seg_half > 0 else line_geom
+    if _MEMOIZE_COPPER_GEOM:
+        seg._seg_geom_cache = geom
+    return geom
+
+
 def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> float | None:
     """Signed segment-to-pad clearance using the pad's true copper polygon.
 
@@ -680,19 +744,7 @@ def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> flo
     if pad_poly is None:
         return None
 
-    require_shapely("pad-segment clearance geometry")
-    from shapely.geometry import LineString, Point
-
-    x1, y1, x2, y2, seg_width = seg.geometry
-    seg_half = seg_width / 2.0
-
-    if x1 == x2 and y1 == y2:
-        # Degenerate (zero-length) segment -- treat as a point.
-        line_geom = Point(x1, y1)
-    else:
-        line_geom = LineString([(x1, y1), (x2, y2)])
-
-    seg_geom = line_geom.buffer(seg_half) if seg_half > 0 else line_geom
+    seg_geom = _segment_copper_geom(seg)
 
     inter = seg_geom.intersection(pad_poly)
     if not inter.is_empty and inter.area > 0:
@@ -841,7 +893,26 @@ def _element_to_shapely_geom(elem: CopperElement):
     element without a polygon) are represented as a circle buffered around
     their center using the AABB diameter.  Returns ``None`` if no geometry
     can be built.
+
+    Memoised per element (Issue #5240): the result is a pure function of
+    ``elem.polygon`` / ``elem.geometry``, both assigned once at construction
+    and never reassigned, while a clearance sweep asks for it once per
+    candidate pair the element takes part in.
     """
+    if not _MEMOIZE_COPPER_GEOM:
+        return _build_pad_copper_geom(elem)
+
+    cached = elem._pad_geom_cache
+    if cached is not _GEOM_UNSET:
+        return cached
+
+    geom = _build_pad_copper_geom(elem)
+    elem._pad_geom_cache = geom
+    return geom
+
+
+def _build_pad_copper_geom(elem: CopperElement):
+    """Build a pad/via shapely geometry without consulting the memo."""
     if elem.polygon is not None:
         return elem.polygon
     from shapely.geometry import Point
