@@ -63,6 +63,7 @@ from .quantize import (
     dogleg_points,
     verify_segment_45,
 )
+from .route_halo_geometry import RouteHaloRefiner
 from .via_clearance import segment_via_deficit
 
 logger = logging.getLogger(__name__)
@@ -1585,6 +1586,25 @@ def build_corridor_mask(
     return frozenset(zip(out_xs[in_bounds].tolist(), out_ys[in_bounds].tolist(), strict=True))
 
 
+def _arm_coupled_halo_refinement(pathfinder: CoupledPathfinder, autorouter) -> None:
+    """Install the net-name map / attach zones a coupled search needs (#5410).
+
+    The dynamic-halo physical refinement resolves net-class widths, diff-pair
+    partners and pairwise (HV-isolation) net names through a net-name map.
+    Tolerates an autorouter without either attribute, and a pathfinder without
+    the setters (test doubles, third-party subclasses) -- the refiner simply
+    stays dormant, which is the conservative pre-#5410 behaviour.  Mirrors the
+    ``hasattr`` guard ``Autorouter`` already applies to the single-ended
+    ``Router.set_net_name_to_id`` call.
+    """
+    names = getattr(autorouter, "net_names", None)
+    if names and hasattr(pathfinder, "set_net_name_to_id"):
+        pathfinder.set_net_name_to_id({name: net for net, name in names.items()})
+    zones = getattr(autorouter, "_pairwise_attach_zones_cache", None)
+    if zones and hasattr(pathfinder, "set_attach_zones"):
+        pathfinder.set_attach_zones(zones)
+
+
 class CoupledPathfinder:
     """A* pathfinder for coupled differential pair routing.
 
@@ -1818,6 +1838,32 @@ class CoupledPathfinder:
         self._cpp_coupled_impl: CppCoupledPathfinder | None = None
         self._cpp_coupled_grid: RoutingGrid | None = None
 
+        # Issue #5410: dynamic route halos are a CONSERVATIVE acceleration
+        # structure -- ``mark_route`` dilates committed copper to whole grid
+        # cells, so a foreign route's halo covers candidates whose actual
+        # copper/drill gaps satisfy the effective rules.  PR #5425 taught the
+        # per-net A* to measure that geometry before rejecting such a cell;
+        # the coupled search consulted the raster alone, so it kept refusing
+        # legal steps next to any previously-routed net.  The refiner applies
+        # the identical check here.  It stays DORMANT until
+        # ``set_net_name_to_id`` arms it, so a caller that never wires the map
+        # keeps the pre-#5410 conservative verdict rather than consulting a
+        # pairwise (HV) table with unknown net names.
+        self._halo_refiner = RouteHaloRefiner(grid, rules, self.net_class_map)
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Arm the dynamic-halo physical refinement (Issue #5410).
+
+        Mirrors :meth:`Router.set_net_name_to_id`: the reverse map resolves
+        net-class widths, diff-pair partners and pairwise (HV-isolation)
+        names for the geometric check.  Without it the refinement is inert.
+        """
+        self._halo_refiner.set_net_name_to_id(mapping)
+
+    def set_attach_zones(self, zones) -> None:
+        """Install rated-footprint necking regions for halo refinement."""
+        self._halo_refiner.set_attach_zones(zones)
+
     def _is_cell_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
         """Check if a cell is blocked for this net.
 
@@ -1851,7 +1897,9 @@ class CoupledPathfinder:
             return True
         return False
 
-    def _is_trace_blocked(self, gx: int, gy: int, layer: int, net: int) -> bool:
+    def _is_trace_blocked(
+        self, gx: int, gy: int, layer: int, net: int, from_cell: tuple[int, int] | None = None
+    ) -> bool:
         """Check if placing a trace centerline at this cell would conflict.
 
         Issue #3508: this checks ONLY the head cell, matching the per-net
@@ -1872,8 +1920,19 @@ class CoupledPathfinder:
         an identical frontier regardless of iteration budget or
         tie-break order (best_progress 34-49 on PCIE/USB2 across
         FIFO/LIFO and 10k/90k-iteration runs).
+
+        Issue #5410: when the head cell is blocked ONLY by a foreign net's
+        dynamic route halo -- conservative whole-cell dilation of copper this
+        grid actually stores -- measure the real gap between the swept trace
+        step and that copper before rejecting the move.  ``from_cell`` is the
+        step's origin; passing it checks the whole swept segment rather than
+        just its endpoint, matching the per-net A* (PR #5425).  Every hard
+        constraint (static halos, pad metal, keepouts, reservations,
+        unverifiable ownership) fails ``cells_known`` and stays blocked.
         """
-        return self._is_cell_blocked(gx, gy, layer, net)
+        if not self._is_cell_blocked(gx, gy, layer, net):
+            return False
+        return not self._halo_refiner.trace_clear([(gx, gy)], layer, gx, gy, net, from_cell)
 
     def _is_via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Check if placing a via at this position would conflict on any layer.
@@ -1901,11 +1960,29 @@ class CoupledPathfinder:
         any cell under its DRILL footprint is pad metal on any layer.
         """
         drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution)))
+        # Issue #5410: the physical verdict for a THROUGH via is the same on
+        # every layer, so compute it at most once per candidate.
+        via_geometry_clear: bool | None = None
         for layer in range(self.grid.num_layers):
+            blocked_cells: list[tuple[int, int]] = []
             for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
                 for dx in range(-self._via_extra_cells, self._via_extra_cells + 1):
                     if self._is_cell_blocked(gx + dx, gy + dy, layer, net):
-                        return True
+                        blocked_cells.append((gx + dx, gy + dy))
+            if blocked_cells:
+                # Issue #5410: the envelope may be covered purely by a foreign
+                # net's dynamic route halo.  Refine only when EVERY blocked
+                # cell is verified dynamic route copper; one hard or
+                # unverifiable cell (out of bounds, pad metal, static halo,
+                # keepout, reservation, unknown owner) keeps the rejection.
+                if not self._halo_refiner.cells_known(blocked_cells, layer):
+                    return True
+                if via_geometry_clear is None:
+                    via_geometry_clear = self._halo_refiner.via_clear(
+                        blocked_cells, layer, gx, gy, net
+                    )
+                if not via_geometry_clear:
+                    return True
             # Issue #3508: no via-in-pad regardless of net ownership.
             for dy in range(-drill_cells, drill_cells + 1):
                 for dx in range(-drill_cells, drill_cells + 1):
@@ -2174,10 +2251,14 @@ class CoupledPathfinder:
             # disqualify the move.
             p_is_endpoint = self._is_at_goal(new_p, p_goal) or self._is_at_goal(new_p, p_start)
             n_is_endpoint = self._is_at_goal(new_n, n_goal) or self._is_at_goal(new_n, n_start)
-            if not p_is_endpoint and self._is_trace_blocked(new_p.x, new_p.y, new_p.layer, p_net):
+            if not p_is_endpoint and self._is_trace_blocked(
+                new_p.x, new_p.y, new_p.layer, p_net, (state.p_pos.x, state.p_pos.y)
+            ):
                 self.last_rejections["sym_blocked_p"] += 1
                 continue
-            if not n_is_endpoint and self._is_trace_blocked(new_n.x, new_n.y, new_n.layer, n_net):
+            if not n_is_endpoint and self._is_trace_blocked(
+                new_n.x, new_n.y, new_n.layer, n_net, (state.n_pos.x, state.n_pos.y)
+            ):
                 self.last_rejections["sym_blocked_n"] += 1
                 continue
 
@@ -2292,7 +2373,9 @@ class CoupledPathfinder:
                 )
                 if not (
                     p_is_endpoint
-                    or not self._is_trace_blocked(cand_p.x, cand_p.y, cand_p.layer, p_net)
+                    or not self._is_trace_blocked(
+                        cand_p.x, cand_p.y, cand_p.layer, p_net, (state.p_pos.x, state.p_pos.y)
+                    )
                 ):
                     self.last_rejections["asym_blocked_p"] += 1
                 else:
@@ -2373,7 +2456,7 @@ class CoupledPathfinder:
                     cand_n2, n_start
                 )
                 if not n_is_endpoint and self._is_trace_blocked(
-                    cand_n2.x, cand_n2.y, cand_n2.layer, n_net
+                    cand_n2.x, cand_n2.y, cand_n2.layer, n_net, (state.n_pos.x, state.n_pos.y)
                 ):
                     self.last_rejections["asym_blocked_n"] += 1
                     continue
@@ -2667,6 +2750,16 @@ class CoupledPathfinder:
             # still routes any raised exception to the Python fallback.
             try:
                 cpp_grid = CppGrid.from_routing_grid(self.grid)
+                # Issue #5410: ``from_routing_grid`` copies the occupancy
+                # raster but not the provenance behind it.  Replay the halo
+                # marks and the committed copper they dilate so the coupled
+                # C++ search can tell a conservative route halo apart from a
+                # hard constraint; without both, ``route_cell_has_geometry``
+                # answers false everywhere and the refinement stays dormant.
+                from .cpp_backend import replay_route_halo_marks, sync_stored_routes
+
+                sync_stored_routes(cpp_grid, self.grid)
+                replay_route_halo_marks(cpp_grid, self.grid)
             finally:
                 self.grid._cpp_grid = saved_cpp_grid
             impl = CppCoupledPathfinder(
@@ -9853,6 +9946,11 @@ class DiffPairRouter:
             heuristic_weight=coupled_heuristic_weight,
         )
 
+        # Issue #5410: arm the dynamic-halo physical refinement.  Without the
+        # reverse map the refiner stays dormant and the coupled search keeps
+        # its conservative raster verdict (see ``CoupledPathfinder.__init__``).
+        _arm_coupled_halo_refinement(pathfinder, self.autorouter)
+
         routes: list[Route] = []
         p_routes: list[Route] = []
         n_routes: list[Route] = []
@@ -11115,6 +11213,11 @@ class DiffPairRouter:
             allow_swap_via=False,  # synthetic asymmetric-pad case rarely needs it
             min_spacing_cells=min_spacing_cells,
         )
+
+        # Issue #5410: arm the dynamic-halo physical refinement.  Without the
+        # reverse map the refiner stays dormant and the coupled search keeps
+        # its conservative raster verdict (see ``CoupledPathfinder.__init__``).
+        _arm_coupled_halo_refinement(pathfinder, self.autorouter)
 
         # Pair the pads with the same MST/legacy logic as
         # route_differential_pair_coupled so the spec ordering

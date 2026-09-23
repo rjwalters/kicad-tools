@@ -318,3 +318,142 @@ class RouteHaloGeometry:
             if distance - half - other_half < required - 1e-4:
                 return False
         return True
+
+
+class RouteHaloRefiner:
+    """Adapter that lets a non-:class:`~.pathfinder.Router` search refine halos.
+
+    :meth:`RouteHaloGeometry.clear` reads a small, duck-typed surface off its
+    ``router`` argument -- ``rules``, ``_route_halo_names``,
+    ``_halo_net_class`` and ``_attach_zones``.  The per-net A* satisfies that
+    surface directly (issue #5410 / PR #5425), but the coupled differential-
+    pair A* in :mod:`.diffpair_routing` is a separate class whose blocked
+    predicates still reject every foreign-net cell of a *dynamic route halo*
+    without ever measuring the copper underneath it.  This adapter supplies
+    the surface so that search can apply the identical refinement.
+
+    **Fail-closed by construction.**  Every entry point answers "not clear"
+    unless a net-name map has been installed (:meth:`set_net_name_to_id`) and
+    the halo reports the cell's owner as verified copper.  A caller that never
+    wires the map keeps its pre-existing, conservative raster verdict, and a
+    pairwise (HV-isolation) table is never consulted with unknown net names --
+    the direction that would *under*-block.
+    """
+
+    def __init__(self, grid, rules, net_class_map=None):
+        self.grid = grid
+        self.rules = rules
+        self.net_class_map = net_class_map if net_class_map is not None else {}
+        self._net_name_to_id: dict[str, int] = {}
+        self._route_halo_names: dict[int, str] = {}
+        self._attach_zones: tuple = ()
+
+    # -- duck-typed ``router`` surface consumed by ``RouteHaloGeometry`` ----
+
+    def _get_net_class(self, net_name: str):
+        return self.net_class_map.get(net_name)
+
+    def _halo_net_class(self, net: int):
+        return self._get_net_class(self._route_halo_names.get(net, ""))
+
+    # -- configuration ------------------------------------------------------
+
+    def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
+        """Install the net-name -> net-id map that arms the refinement."""
+        self._net_name_to_id = dict(mapping)
+        self._route_halo_names = {net: name for name, net in mapping.items()}
+
+    def set_attach_zones(self, zones) -> None:
+        self._attach_zones = tuple(zones)
+
+    @property
+    def armed(self) -> bool:
+        """True once a net-name map is installed (see the fail-closed note)."""
+        return bool(self._route_halo_names)
+
+    # -- refinement ---------------------------------------------------------
+
+    @property
+    def _halo(self):
+        return getattr(self.grid, "_route_halo", None)
+
+    def cells_known(self, cells, layer: int) -> bool:
+        """True when every cell in *cells* is verified dynamic route copper."""
+        halo = self._halo
+        if halo is None or not self.armed:
+            return False
+        return all(halo.cell_known(x, y, layer) for x, y in cells)
+
+    def _layer_object(self, layer: int):
+        from .primitives import Layer
+
+        enum_value = self.grid._index_to_layer.get(layer)
+        if enum_value is None:
+            return None
+        try:
+            return Layer(enum_value)
+        except ValueError:
+            return None
+
+    def _resolve_partner_net_id(self, net_name: str) -> int | None:
+        net_class = self._get_net_class(net_name)
+        if net_class is None or net_class.diffpair_partner is None:
+            return None
+        return self._net_name_to_id.get(net_class.diffpair_partner)
+
+    def trace_clear(self, cells, layer: int, gx: int, gy: int, net: int, from_cell=None) -> bool:
+        """Physical clearance of the swept trace step ending at ``(gx, gy)``."""
+        halo = self._halo
+        if halo is None or not self.armed:
+            return False
+        from .primitives import Segment
+
+        if not self.cells_known(cells, layer):
+            return False
+        copper_layer = self._layer_object(layer)
+        if copper_layer is None:
+            return False
+        name = self._route_halo_names.get(net, "")
+        nc = self._halo_net_class(net)
+        x1, y1 = self.grid.grid_to_world(*(from_cell or (gx, gy)))
+        x2, y2 = self.grid.grid_to_world(gx, gy)
+        segment = Segment(
+            x1,
+            y1,
+            x2,
+            y2,
+            nc.trace_width if nc else self.rules.trace_width,
+            copper_layer,
+            net,
+            name,
+        )
+        partner = self._resolve_partner_net_id(name)
+        gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
+        return bool(halo.clear(segment, self, partner_net=partner, partner_clearance=gap))
+
+    def via_clear(self, cells, layer: int, gx: int, gy: int, net: int) -> bool:
+        """Physical clearance of a through via centred on ``(gx, gy)``."""
+        halo = self._halo
+        if halo is None or not self.armed:
+            return False
+        from .primitives import Via
+
+        if not self.cells_known(cells, layer):
+            return False
+        first_layer = self._layer_object(0)
+        last_layer = self._layer_object(self.grid.num_layers - 1)
+        if first_layer is None or last_layer is None:
+            return False
+        name = self._route_halo_names.get(net, "")
+        nc = self._halo_net_class(net)
+        x, y = self.grid.grid_to_world(gx, gy)
+        via = Via(
+            x,
+            y,
+            self.rules.via_drill,
+            nc.via_size if nc else self.rules.via_diameter,
+            (first_layer, last_layer),
+            net,
+            name,
+        )
+        return bool(halo.clear(via, self))

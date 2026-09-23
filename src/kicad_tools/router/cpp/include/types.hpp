@@ -265,7 +265,7 @@ namespace router {
 // accepted goal node, so the Python resume loop rejects the right cell).  New
 // struct fields, so a v41 .so must be rejected rather than AttributeError deep
 // in the resume loop.
-constexpr int ROUTER_CPP_BUILD_VERSION = 42;
+constexpr int ROUTER_CPP_BUILD_VERSION = 43;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

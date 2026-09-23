@@ -229,6 +229,19 @@ NB_MODULE(router_cpp, m) {
         .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
         .def("route_geometry_complete", &Grid3D::route_geometry_complete)
         .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
+        .def("register_route_mark", &Grid3D::register_route_mark,
+             "kind"_a, "net"_a, "layer"_a, "x1"_a, "y1"_a, "x2"_a, "y2"_a,
+             "radius"_a, "add"_a = true,
+             "Issue #5410: replay a RouteHaloGeometry mark onto a grid that "
+             "was bulk-copied from a Python RoutingGrid, so cells carry the "
+             "coverage provenance search-time refinement requires.")
+        .def("set_cell_static_blocked", &Grid3D::set_cell_static_blocked,
+             "x"_a, "y"_a, "layer"_a, "value"_a,
+             "Issue #5410: restore a bulk-copied cell's static/dynamic split, "
+             "which mark_blocked cannot express.")
+        .def("set_cells_static_blocked", &Grid3D::set_cells_static_blocked,
+             "xs"_a, "ys"_a, "layers"_a, "value"_a,
+             "Issue #5410: bulk form of set_cell_static_blocked.")
         .def("route_trace_geometry_clear", &Grid3D::route_trace_geometry_clear)
         .def("route_via_geometry_clear", &Grid3D::route_via_geometry_clear)
         .def("route_geometry_candidates", &Grid3D::route_geometry_candidates)
@@ -670,7 +683,15 @@ NB_MODULE(router_cpp, m) {
              "effective_target_spacing"_a, "effective_approach_radius"_a,
              "effective_departure_radius"_a,
              "routable_layers"_a, "corridor_bitset"_a,
-             "max_iterations_budget"_a, "timeout_seconds"_a);
+             "max_iterations_budget"_a, "timeout_seconds"_a)
+        .def("trace_blocked", &CoupledPathfinder::trace_blocked,
+             "gx"_a, "gy"_a, "layer"_a, "net"_a, "from_x"_a = -1, "from_y"_a = -1,
+             "Issue #5410: probe the coupled trace predicate, including the "
+             "dynamic route-halo physical refinement.")
+        .def("via_blocked", &CoupledPathfinder::via_blocked,
+             "gx"_a, "gy"_a, "net"_a,
+             "Issue #5410: probe the coupled via predicate, including the "
+             "dynamic route-halo physical refinement.");
 
     // Geometry functions (Issue #2439)
     m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {

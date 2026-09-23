@@ -131,6 +131,18 @@ public:
         int max_iterations_budget,
         double timeout_seconds);
 
+    // Issue #5410: public probes over the two blocked predicates the dynamic-
+    // halo refinement changed.  The joint-state search is a single opaque
+    // ``route`` call, so without these a backend-parity test could only infer
+    // the branch's verdict from whether a whole pair happened to route.
+    bool trace_blocked(int gx, int gy, int layer, int net,
+                       int from_x = -1, int from_y = -1) const {
+        return is_trace_blocked(gx, gy, layer, net, from_x, from_y);
+    }
+    bool via_blocked(int gx, int gy, int net) const {
+        return is_via_blocked(gx, gy, net);
+    }
+
 private:
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
     Grid3D& grid_;
@@ -151,9 +163,27 @@ private:
         const GridCell& cell = grid_.at(gx, gy, layer);
         return cell.blocked && cell.net != net;
     }
-    inline bool is_trace_blocked(int gx, int gy, int layer, int net) const {
-        return is_cell_blocked(gx, gy, layer, net);
-    }
+    // Issue #5410: a conservative dynamic route halo is an acceleration
+    // structure, not a physical constraint.  ``mark_segment`` / ``mark_via``
+    // dilate committed copper to whole grid cells, so a foreign route's halo
+    // covers candidates whose ACTUAL copper and drill gaps satisfy the
+    // effective rules.  PR #5425 taught the per-net ``Pathfinder`` to measure
+    // that geometry before rejecting such a cell; these two helpers apply the
+    // identical refinement to the coupled joint-state search, which until now
+    // consulted the raster alone.
+    //
+    // ``route_cell_has_geometry`` is the provenance gate: it answers false for
+    // out-of-bounds cells, pad metal, static halos, keepouts, reserved cells,
+    // and for any cell whose covering marks lack registered physical geometry
+    // -- so every hard or unverifiable blockage keeps its rejection and only
+    // verified dynamic route copper is ever re-measured.
+    bool trace_halo_cell_clear(int cx, int cy, int layer, int from_x, int from_y,
+                               int to_x, int to_y, int net) const;
+    bool via_route_geometry_clear(int x, int y, int net) const;
+    // ``from_x`` / ``from_y`` (default -1) name the step's ORIGIN cell so the
+    // refinement measures the swept segment, not just its endpoint.
+    bool is_trace_blocked(int gx, int gy, int layer, int net,
+                          int from_x = -1, int from_y = -1) const;
     bool is_via_blocked(int gx, int gy, int net) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {

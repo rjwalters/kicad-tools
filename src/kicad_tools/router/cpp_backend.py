@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 # node the A* actually accepted, consumed by the resume loop to reject the
 # correct goal cell (the last-segment endpoint derivation always produced the
 # end-pad center, a no-op rejection after the first attempt).
-_REQUIRED_CPP_BUILD_VERSION = 42
+_REQUIRED_CPP_BUILD_VERSION = 43
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -4201,45 +4201,7 @@ class CppPathfinder:
         so that validate_route() can check clearances without Python callbacks.
         Only copies routes added since the last sync.
         """
-        current_count = len(py_grid.routes)
-        if current_count <= self._grid._synced_route_count:
-            return
-
-        # Add segments/vias from newly completed routes
-        for route in py_grid.routes[self._grid._synced_route_count :]:
-            for seg in route.segments:
-                layer_idx = self._grid._layer_to_index.get(seg.layer.value)
-                if layer_idx is None:
-                    # No planar copper on an active layer. Candidate vias
-                    # still check this physical segment in final validation.
-                    self._grid._off_grid_stored_segments.append(seg)
-                    continue
-                self._grid._impl.add_stored_segment(
-                    seg.x1,
-                    seg.y1,
-                    seg.x2,
-                    seg.y2,
-                    seg.width,
-                    layer_idx,
-                    seg.net,
-                    (
-                        *py_grid.world_to_grid(seg.x1, seg.y1),
-                        *py_grid.world_to_grid(seg.x2, seg.y2),
-                    ),
-                )
-            for via in route.vias:
-                for span in self._project_via_spans(via.layers):
-                    self._grid._impl.add_stored_via(
-                        via.x,
-                        via.y,
-                        via.drill,
-                        via.diameter,
-                        via.net,
-                        py_grid.world_to_grid(via.x, via.y),
-                        *span,
-                    )
-
-        self._grid._synced_route_count = current_count
+        sync_stored_routes(self._grid, py_grid, self._project_via_spans)
 
     def find_blocking_nets(
         self,
@@ -4552,6 +4514,135 @@ def create_hybrid_router(
 # ---------------------------------------------------------------------------
 
 
+def project_via_spans(cpp_grid: CppGrid, layers) -> list[tuple[int, int]]:
+    """Project physical via copper onto contiguous runs of grid layer indices.
+
+    Module-level form of ``CppPathfinder._project_via_spans`` so the coupled
+    pathfinder's own ``CppGrid`` can be populated without a ``CppPathfinder``
+    (Issue #5410).
+    """
+    lo, hi = sorted(layer.value for layer in layers)
+    indices = sorted(
+        index for value, index in cpp_grid._layer_to_index.items() if lo <= value <= hi
+    )
+    if not indices:
+        return [(cpp_grid.num_layers, cpp_grid.num_layers)]
+    spans = []
+    start = previous = indices[0]
+    for index in indices[1:]:
+        if index != previous + 1:
+            spans.append((start, previous))
+            start = index
+        previous = index
+    spans.append((start, previous))
+    if layers[0].value > layers[1].value:
+        spans = [(end, start) for start, end in reversed(spans)]
+    return spans
+
+
+def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) -> None:
+    """Copy committed route copper into *cpp_grid*'s stored-geometry index.
+
+    Issue #2439: incremental -- only routes added since the last sync are
+    copied, tracked by ``cpp_grid._synced_route_count``.
+    """
+    if project is None:
+
+        def project(layers):
+            return project_via_spans(cpp_grid, layers)
+
+    current_count = len(py_grid.routes)
+    if current_count <= cpp_grid._synced_route_count:
+        return
+
+    for route in py_grid.routes[cpp_grid._synced_route_count :]:
+        for seg in route.segments:
+            layer_idx = cpp_grid._layer_to_index.get(seg.layer.value)
+            if layer_idx is None:
+                # No planar copper on an active layer. Candidate vias
+                # still check this physical segment in final validation.
+                cpp_grid._off_grid_stored_segments.append(seg)
+                continue
+            cpp_grid._impl.add_stored_segment(
+                seg.x1,
+                seg.y1,
+                seg.x2,
+                seg.y2,
+                seg.width,
+                layer_idx,
+                seg.net,
+                (
+                    *py_grid.world_to_grid(seg.x1, seg.y1),
+                    *py_grid.world_to_grid(seg.x2, seg.y2),
+                ),
+            )
+        for via in route.vias:
+            for span in project(via.layers):
+                cpp_grid._impl.add_stored_via(
+                    via.x,
+                    via.y,
+                    via.drill,
+                    via.diameter,
+                    via.net,
+                    py_grid.world_to_grid(via.x, via.y),
+                    *span,
+                )
+
+    cpp_grid._synced_route_count = current_count
+
+
+def replay_route_halo_marks(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
+    """Replay ``RoutingGrid._route_halo``'s active marks onto *cpp_grid* (#5410).
+
+    ``CppGrid.from_routing_grid`` bulk-copies the occupancy raster but never
+    replays the ``mark_segment`` / ``mark_via`` calls that produced it, so the
+    C++ grid has no record of WHICH halo covers a cell.  Search-time physical
+    refinement needs exactly that provenance: ``route_cell_has_geometry``
+    answers false for every cell until the covering marks are known, which
+    leaves the copy permanently pinned to the conservative raster verdict.
+
+    Pairs with :func:`sync_stored_routes` -- marks establish coverage, stored
+    segments/vias establish that the covering copper is registered.  A mark
+    without registered geometry is, correctly, treated as unverifiable.
+    """
+    halo = getattr(py_grid, "_route_halo", None)
+    if halo is None:
+        return
+
+    # ``mark_blocked`` -- the only entry point ``from_routing_grid`` has --
+    # records every cell as static board geometry.  Restore the Python grid's
+    # own split first; without it every route-halo cell reads as a hard static
+    # blockage and no mark can make it refinable.
+    static_np = getattr(py_grid, "_static_blocked", None)
+    if static_np is not None:
+        import numpy as np
+
+        from ..acceleration.backend import to_numpy
+
+        dynamic = to_numpy(py_grid._blocked) & ~to_numpy(static_np)
+        layers, ys, xs = np.nonzero(dynamic)
+        if xs.size:
+            cpp_grid._impl.set_cells_static_blocked(
+                xs.tolist(), ys.tolist(), layers.tolist(), False
+            )
+
+    register = cpp_grid._impl.register_route_mark
+    for (key, radius), count in halo.marks.items():
+        kind, net, layer, x1, y1, x2, y2 = key[:7]
+        for _ in range(count):
+            register(
+                int(kind),
+                int(net),
+                int(layer),
+                int(x1),
+                int(y1),
+                int(x2),
+                int(y2),
+                int(radius),
+                True,
+            )
+
+
 class CppCoupledPathfinder:
     """C++ wrapper for the coupled differential-pair joint-state A* search.
 
@@ -4623,6 +4714,17 @@ class CppCoupledPathfinder:
             float(spacing_penalty_factor),
             float(heuristic_weight),
         )
+
+    def trace_blocked(
+        self, gx: int, gy: int, layer: int, net: int, from_cell: tuple[int, int] | None = None
+    ) -> bool:
+        """Probe the coupled trace predicate (Issue #5410 parity testing)."""
+        fx, fy = from_cell if from_cell is not None else (-1, -1)
+        return bool(self._impl.trace_blocked(gx, gy, layer, net, fx, fy))
+
+    def via_blocked(self, gx: int, gy: int, net: int) -> bool:
+        """Probe the coupled via predicate (Issue #5410 parity testing)."""
+        return bool(self._impl.via_blocked(gx, gy, net))
 
     def route(
         self,

@@ -645,6 +645,30 @@ bool Grid3D::route_geometry_complete() const {
     return route_coverage_complete_;
 }
 
+void Grid3D::register_route_mark(int kind, int net, int layer, int x1, int y1,
+                                 int x2, int y2, int radius, bool add) {
+    record_route_mark(kind == 1 ? via_mark_key(x1, y1, net, radius)
+                                : segment_mark_key(x1, y1, x2, y2, layer, net, radius),
+                      add);
+}
+
+void Grid3D::set_cell_static_blocked(int x, int y, int layer, bool value) {
+    if (!is_valid(x, y, layer)) return;
+    at(x, y, layer).static_blocked = value;
+    route_coverage_dirty_ = true;
+}
+
+void Grid3D::set_cells_static_blocked(const std::vector<int>& xs,
+                                      const std::vector<int>& ys,
+                                      const std::vector<int>& layers, bool value) {
+    const size_t n = std::min({xs.size(), ys.size(), layers.size()});
+    for (size_t i = 0; i < n; ++i) {
+        if (!is_valid(xs[i], ys[i], layers[i])) continue;
+        at(xs[i], ys[i], layers[i]).static_blocked = value;
+    }
+    route_coverage_dirty_ = true;
+}
+
 bool Grid3D::route_cell_has_geometry(int x, int y, int layer) const {
     if (!is_valid(x, y, layer)) return false;
     const auto& cell = at(x, y, layer);
