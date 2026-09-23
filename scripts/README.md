@@ -45,7 +45,9 @@ that kept only the multi-line nodes' header lines and so compared element
 *counts* rather than geometry (#5580).
 
 `check_mask_copper_native.py` is the repository's mandatory native mask-to-copper
-suite gate. It probes matching KiCad 10.0.5 CLI/pcbnew and Gerbonara >=1.6.3,
+suite gate. It probes a matching CLI/pcbnew pair at one of the KiCad versions
+qualified in `validate/mask_copper_geometry.py`
+(`QUALIFIED_NATIVE_VERSIONS`, imported rather than restated) and Gerbonara >=1.6.3,
 runs every case in `tests/test_mask_copper_native.py`, and rejects failures,
 empty results, missing material witnesses, or any skips. For a local equivalent
 in a KiCad environment with shared scratch paths:
