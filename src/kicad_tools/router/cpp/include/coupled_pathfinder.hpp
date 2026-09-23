@@ -31,6 +31,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 
 namespace router {
 
@@ -93,6 +94,30 @@ public:
     void set_fill_rail_dimensions(double ph, double pg, double nh, double ng) {
         p_fill_half_ = ph; p_fill_gap_ = pg; n_fill_half_ = nh; n_fill_gap_ = ng;
     }
+
+    // Issue #5410 (B1): per-net-class dimensions for the dynamic route-halo
+    // refinement, mirroring what ``RouteHaloRefiner`` reads off the net class
+    // on the Python side (``nc.trace_width``, ``nc.clearance``,
+    // ``nc.via_size``).
+    //
+    // WHY this exists.  The halo refinement WAIVES a raster rejection, so the
+    // scalar it re-measures with is a real design rule, not a search radius.
+    // The raster halo it overrides was dilated with the candidate's NET-CLASS
+    // clearance; re-measuring with the global ``DesignRules`` scalar therefore
+    // admits candidates the net class forbids whenever the class is wider than
+    // the global rule -- the under-blocking direction.  The single-ended
+    // ``Pathfinder`` already threads its effective values in
+    // (``search_trace_half_width_mm_`` / ``search_fill_trace_clearance_``);
+    // this is the coupled equivalent, keyed by net id because the coupled
+    // predicates are called for both rails.
+    //
+    // Nets with no entry fall back to the global rules, so a caller that
+    // installs nothing keeps exactly the pre-#5410 global-rule behaviour.
+    void set_halo_net_dimensions(int net, double trace_width,
+                                 double trace_clearance, double via_diameter) {
+        halo_net_dims_[net] = HaloNetDims{trace_width, trace_clearance, via_diameter};
+    }
+    void clear_halo_net_dimensions() { halo_net_dims_.clear(); }
     // All construction-time scalars mirror the Python
     // ``CoupledPathfinder.__init__`` derived radii and rule constants.  The
     // Python side pre-computes the trace/via clearance radii (identical
@@ -142,8 +167,63 @@ public:
     bool via_blocked(int gx, int gy, int net) const {
         return is_via_blocked(gx, gy, net);
     }
+    // Epic #5509 Phase 3c (#5662): the coupled search's rail clearance gate,
+    // promoted out of the ``route()`` loop into a named, bindable method.
+    //
+    // Two things changed when it was promoted.  It is now **public and
+    // reachable from Python** (``bindings.cpp`` exposes it), which is what
+    // retires the epic's one genuinely unexposed consumer group -- group 7
+    // used to be a lambda no oracle adapter could drive.  And it now consults
+    // the shared exact-geometry clearance kernel
+    // (``clearance_kernel.hpp``) against the grid's **stored route
+    // geometry**, not just its fixed fills: committed copper that the C++
+    // blocked plane has not been re-synced with was invisible to the coupled
+    // search by construction, which is the #4507 defect.
+    //
+    // ``ax``/``ay`` -> ``bx``/``by`` is the candidate rail step in GRID
+    // coordinates; ``layer`` the layer it is traced on (ignored for a via
+    // candidate, which is copper on every layer); ``net`` the rail's own net;
+    // ``partner_net`` the other rail's net (pass ``-1`` for none), whose
+    // copper is deliberately exempt here -- within-pair spacing is the
+    // search's own spacing constraint plus the commit-time intra-pair gate,
+    // not this foreign-copper check; ``rail_half`` / ``rail_gap`` the
+    // per-rail copper half-width and clearance (negative = fall back to the
+    // ``DesignRules`` scalars), matching ``set_fill_rail_dimensions``.
+    bool rail_clear(int ax, int ay, int bx, int by, int layer, int net,
+                    int partner_net, double rail_half, double rail_gap,
+                    bool is_via) const;
+
+    // The same gate in WORLD millimetres, which is where the arithmetic
+    // actually lives -- ``rail_clear`` is ``grid_to_world`` plus this call.
+    //
+    // Both are bound.  The grid-coordinate form is what the search uses; the
+    // world form is what the Epic #5509 conformance adapter must use, because
+    // snapping a corpus case's copper onto the routing grid first would
+    // measure the raster's quantisation instead of this consumer's clearance
+    // model.
+    bool rail_clear_world(double ax, double ay, double bx, double by,
+                          int layer, int net, int partner_net,
+                          double rail_half, double rail_gap,
+                          bool is_via) const;
 
 private:
+    // The stored-route half of ``rail_clear``.
+    bool stored_route_clear(double ax, double ay, double bx, double by,
+                            int layer, int net, int partner_net,
+                            double half, double gap, bool is_via) const;
+
+    // Issue #5410 (B1): net id -> effective net-class halo dimensions.
+    struct HaloNetDims {
+        double trace_width;
+        double trace_clearance;
+        double via_diameter;
+    };
+    std::unordered_map<int, HaloNetDims> halo_net_dims_;
+    const HaloNetDims* halo_dims_for(int net) const {
+        auto it = halo_net_dims_.find(net);
+        return it == halo_net_dims_.end() ? nullptr : &it->second;
+    }
+
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
     Grid3D& grid_;
     DesignRules rules_;

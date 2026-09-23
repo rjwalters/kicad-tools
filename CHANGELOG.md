@@ -7,7 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The coupled diff-pair search now sees the copper it was routing
+  through** (Issue #5662, Phase 3c of Epic #5509). #4507 summarised the
+  defect as *"the copper this board fails on is invisible to both by
+  construction"*, and both halves of that are closed here by moving the
+  coupled path onto the shared exact-geometry clearance kernel:
+  - **C++ (`CoupledPathfinder::rail_clear`, consumer group 7).** The gate
+    was a lambda inside `route()`, wrapped in `if
+    (grid_.has_fixed_fills())` and consulting fixed fills alone — so on a
+    board with no copper pour it ran *no rail check at all*, and a route
+    committed through `add_stored_segment` / `add_stored_via` after the
+    last blocked-plane re-sync was invisible to it. It is now a named,
+    bound method that always runs and measures the candidate rail against
+    the grid's stored route geometry with the clearance kernel, through
+    the same 2 mm bin index the single-ended refinement path uses. Its two
+    rejection reasons also join the #4459 rejection histogram instead of
+    pruning the frontier silently.
+  - **Python (`DiffPairRouter`'s gates, consumer group 8).**
+    `_segment_cells_clear`, `_span_pad_clear`, `_segment_pad_clear`,
+    `_span_via_clear`, `_route_via_clear`, `_pair_has_physical_overlap`,
+    `_copper_conflicts` and `find_intra_pair_clearance_violations` now
+    read the kernel through one shared translation
+    (`router/clearance_shapes.py`) instead of six private predicates.
+    `_segment_cells_clear` gains the missing quadrant — a candidate span
+    is screened against the constructor's own unmarked shadow copper —
+    and the raster's *over*-block is re-decided by exact geometry when
+    every blocking cell is attributable to copper the grid can name, the
+    same authorisation `Pathfinder._trace_halo_clear` has used since
+    #5240. `roundrect` / `oval` pads are now measured as the copper they
+    are rather than as their enclosing rectangle.
+  - **The oracle rows harden.** Groups 7 and 8 stop being report-only in
+    the over-rejection direction: refusing a candidate `kicad-cli` calls
+    clean is a test failure
+    (`test_migrated_consumer_never_over_rejects`). Group 7 was the epic's
+    one *unexposed* consumer; binding `rail_clear` retires
+    `NOT_MEASURED_REASONS` entirely, so all nineteen groups are measured.
+  - No rule value, `.kicad_dru`, or A\* heuristic term is touched (Epic
+    #5509 scope guards #1 and #2); rule resolution stays with each
+    consumer, the kernel answers only gaps.
+
 ### Added
+
+- **Measured effective-native-DRC coverage for silkscreen clearance**
+  (Issue #5059). A manufacturer profile can emit a constraint that *looks*
+  correct in the generated `.kicad_pro` / `.kicad_dru` and still be applied to
+  nothing; asserting emitted values cannot detect that.
+  `tests/test_effective_silk_clearance_5059.py` asserts only what
+  `kicad-cli pcb drc` actually reports for geometry placed a known distance
+  below (0.085 mm) or above (0.16 mm) the 0.15 mm JLCPCB silkscreen-to-pad
+  floor:
+  - the project key `board.design_settings.rules.min_silk_clearance` alone
+    reports **no** finding for that gap — measured on KiCad CLI 10.0.1, both
+    at the factory floor and with the key raised to 2.0 mm — while a
+    positive-control test proves the same project block *is* loaded
+    (`min_clearance` raised to 0.5 mm reports `board minimum clearance
+    0.5000 mm; actual 0.1200 mm`);
+  - the explicit `(constraint silk_clearance …)` rule emitted by
+    `generate_dru` reports the gap numerically on byte-identical geometry;
+  - the shipped JLCPCB profile gates it end to end through
+    `write_drc_constraints`, stays silent above the floor, and does not fire
+    for back-side silk against a front-side pad.
+
+  If a future KiCad honours the built-in minimum for this pair, the first
+  test fails and says so rather than silently leaving a redundant rule in
+  place. The behaviour is characterised, not explained: the upstream cause
+  is a lead, not a conclusion this repository has established.
+- **`docs/guides/drc-and-validation.md`: "Three gates, not one"** — native
+  DRC, `kct check --mfr` and factory DFM are separate gates, and a clean
+  `kicad-cli pcb drc` run is not supplier approval. Includes the measured
+  silk-clearance evidence above and the standing warning that a blanket
+  same-net `physical_clearance` over every copper object is not how to get
+  net-independent gap checks (499 warnings on a real board, including
+  intentional track joins).
 
 - Make the routing plan's overflow report **consumable and measured**
   (Issue #5521, Phase 1c of Epic #5510). Phases 1a/1b produced a sidecar
@@ -79,7 +152,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing geometry — still rejects, and the refinement is **fail-closed**:
   dormant without the net-name map it needs to resolve pairwise
   (HV-isolation) requirements, and, on the C++ side, dormant unless that
-  grid's own cross-domain widening was installed. Native ABI 42 → 43.
+  grid's own cross-domain widening was installed *and* the refiner is armed.
+  The refinement re-measures with the candidate's **net-class** trace width,
+  clearance and via size on both backends — re-measuring with the global
+  `DesignRules` scalar would have waived clearance the raster halo (dilated
+  with the net-class value) had enforced, which is the #5673 under-blocking
+  direction. Native ABI 42 → 44.
 - **Qualify KiCad 10.0.6 for the native mask-to-copper gate** (Issue #5678).
   The CI runner's floating `kicad/kicad:10.0` tag moved from 10.0.5 to 10.0.6,
   and both hard-coded `10.0.5` version pins — `scripts/ci/check_mask_copper_native.py`'s

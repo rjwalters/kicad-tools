@@ -491,6 +491,15 @@ public:
     // refuses placements the post-route validator would later reject.
     const std::vector<StoredVia>& stored_vias() const { return stored_vias_; }
 
+    // Accessor for stored segments (Epic #5509 Phase 3c, Issue #5662).
+    // The sibling of ``stored_vias()``, added for the same reason: the
+    // coupled diff-pair search's ``rail_clear`` gate has to *see* committed
+    // route copper to check it, and before this the only committed geometry
+    // it could reach was ``fixed_fills_`` -- which is why copper routed
+    // earlier in the same session was invisible to it by construction
+    // (#4507).  Read-only, like every other accessor here.
+    const std::vector<StoredSegment>& stored_segments() const { return stored_segments_; }
+
     // Issue #5599: exact swept-edge vs foreign-pad clearance, mirroring
     // validate_route()'s segment-vs-pad branch (rect-aware
     // ``pad_rect_distance`` for rectangles, point-to-segment for explicit

@@ -3233,6 +3233,13 @@ class Autorouter:
                 layer_stack=self.layer_stack,
             )
         self._mesh_pathfinder.fixed_fills = self.grid.fixed_fills
+        # Epic #5509 Phase 3e: hand the mesh fit the SAME already-resolved
+        # copper-to-board-edge floor the grid's ``add_edge_keepout`` and the
+        # lattice's ``set_escape_boundary`` are given, so the three engines
+        # cannot disagree about it.  No new rule value is introduced here -- an
+        # unset ``_edge_clearance`` stays 0.0, which leaves the mesh outline
+        # branch the pure containment test it was before that phase.
+        self._mesh_pathfinder.edge_clearance = self._edge_clearance or 0.0
         return self._mesh_pathfinder
 
     def _negotiate_mesh_netset(self) -> dict[int, list[Route]]:
@@ -10312,6 +10319,11 @@ class Autorouter:
                 self.grid._is_zone = old_grid._is_zone.copy()
                 self.grid._pad_blocked = old_grid._pad_blocked.copy()
                 self.grid._original_net = old_grid._original_net.copy()
+                # #5662: carry the registry-less blocker provenance across, or
+                # the rebuilt grid would lose every keep-out attribution and a
+                # refinement consumer could re-decide cells it cannot measure.
+                if old_grid._raster_only_blocked is not None:
+                    self.grid._raster_only_blocked = old_grid._raster_only_blocked.copy()
                 self.grid._pads = old_grid._pads.copy()
                 self.grid._component_hole_index = old_grid._component_hole_index.refreshed()
                 # Issue #4794: the occupancy planes were replaced wholesale

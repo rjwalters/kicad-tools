@@ -227,6 +227,10 @@ NB_MODULE(router_cpp, m) {
         .def("clear_fixed_fills", &Grid3D::clear_fixed_fills)
         .def("add_fixed_fill", &Grid3D::add_fixed_fill)
         .def("fixed_fill_clear", &Grid3D::fixed_fill_clear)
+        // Epic #5509 Phase 3c (#5662): bound so a test can *assert* the
+        // premise of the #4507 construction -- a board with no pour at all --
+        // instead of asserting around it.
+        .def("has_fixed_fills", &Grid3D::has_fixed_fills)
         .def("route_geometry_complete", &Grid3D::route_geometry_complete)
         .def("route_cell_has_geometry", &Grid3D::route_cell_has_geometry)
         .def("register_route_mark", &Grid3D::register_route_mark,
@@ -663,6 +667,15 @@ NB_MODULE(router_cpp, m) {
     // Python-only), surfaced on ``CoupledRouteResult::rejections``.
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
         .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
+        // Issue #5410 (B1): the net-class dimensions the dynamic route-halo
+        // refinement re-measures with.  Without these the C++ arm waives
+        // clearance the raster enforced whenever a net class is wider than
+        // the global rule.
+        .def("set_halo_net_dimensions", &CoupledPathfinder::set_halo_net_dimensions,
+             "net"_a, "trace_width"_a, "trace_clearance"_a, "via_diameter"_a,
+             "Install the effective net-class trace width / clearance / via "
+             "diameter used by the dynamic route-halo refinement for one net.")
+        .def("clear_halo_net_dimensions", &CoupledPathfinder::clear_halo_net_dimensions)
         // Issue #4485: like ``Pathfinder``, ``CoupledPathfinder`` holds a bare
         // ``Grid3D& grid_`` reference, so the grid argument must outlive the
         // pathfinder.  ``keep_alive<1, 2>`` ties the grid (patient, arg index
@@ -691,7 +704,24 @@ NB_MODULE(router_cpp, m) {
         .def("via_blocked", &CoupledPathfinder::via_blocked,
              "gx"_a, "gy"_a, "net"_a,
              "Issue #5410: probe the coupled via predicate, including the "
-             "dynamic route-halo physical refinement.");
+             "dynamic route-halo physical refinement.")
+        // Epic #5509 Phase 3c (#5662).  ``rail_clear`` used to be a lambda
+        // inside ``route()``, which made group 7 of the epic's consumer
+        // inventory the one entry point no oracle adapter could reach.  It is
+        // a named method now, so the conformance harness can measure it
+        // directly instead of recording it as "unexposed".
+        .def("rail_clear", &CoupledPathfinder::rail_clear,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "partner_net"_a = -1, "rail_half"_a = -1.0, "rail_gap"_a = -1.0,
+             "is_via"_a = false,
+             "Clearance gate for one candidate rail step, in GRID cells "
+             "(Epic #5509 group 7)")
+        .def("rail_clear_world", &CoupledPathfinder::rail_clear_world,
+             "ax"_a, "ay"_a, "bx"_a, "by"_a, "layer"_a, "net"_a,
+             "partner_net"_a = -1, "rail_half"_a = -1.0, "rail_gap"_a = -1.0,
+             "is_via"_a = false,
+             "The same gate in world millimetres -- what the conformance "
+             "adapter drives, so grid quantisation cannot move a verdict");
 
     // Geometry functions (Issue #2439)
     m.def("fnv1a_hash", [](const std::string& s) -> uint32_t {

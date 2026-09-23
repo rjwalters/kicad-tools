@@ -38,6 +38,15 @@ from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
 
+from .clearance_shapes import (
+    KShape,
+    copper_gap,
+    gap_deficit,
+    overlaps,
+    pad_shape,
+    segment_shape,
+    via_shape,
+)
 from .crosstail_census import (
     CENSUS_COLLECTOR,
     CrossingTailCensusRecord,
@@ -64,7 +73,6 @@ from .quantize import (
     verify_segment_45,
 )
 from .route_halo_geometry import RouteHaloRefiner
-from .via_clearance import segment_via_deficit
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +372,23 @@ _SHADOW_VIA_DEFICIT_EPS: float = _SHADOW_PAD_DEFICIT_EPS
 # than the checker and decline sides over geometry that is never reported --
 # pure reach loss for zero DRC gain.
 _SHADOW_VIA_COLOCATION_EPS: float = 1e-4
+
+
+def _via_spans_layer(via: Via, layer: Layer) -> bool:
+    """Whether a barrel reaches ``layer`` (Epic #5509 Phase 3c, #5662).
+
+    The clearance kernel's ``KVia`` is a *through* barrel -- copper on every
+    layer, with no layer field to gate on -- because that is what the router
+    emits and what ``Grid3D``'s stored vias model.  A caller that measures a
+    single-layer candidate against a possibly blind/buried barrel therefore
+    owns the span check, exactly as ``Grid3D::trace_stored_vias_clear`` does
+    on the C++ side.  Lifted out of the individual gates so the three of them
+    cannot drift.
+    """
+    lo = min(via.layers[0].value, via.layers[1].value)
+    hi = max(via.layers[0].value, via.layers[1].value)
+    return lo <= layer.value <= hi
+
 
 # Issue #4574: the constructed crossover's via sites are chosen FIRST-LEGAL out
 # of a fixed 3x5 lattice, so the winning site carries no information about what
@@ -1205,10 +1230,18 @@ def find_intra_pair_clearance_violations(
     """Detect intra-pair clearance violations on a routed differential pair.
 
     Walks every same-layer (p-segment, n-segment) pair and computes the
-    edge-to-edge clearance via :func:`core.geometry.segment_clearance`.
+    edge-to-edge clearance with the shared exact-geometry clearance kernel
+    (:func:`router.clearance_kernel.copper_gap`, Epic #5509 Phase 3c).
     Returns ``None`` when no violation is found, otherwise a single
     :class:`IntraPairClearanceViolation` summarising the worst case and
     listing every offending segment pair for downstream consumption.
+
+    The kernel replaced a private :func:`core.geometry.segment_clearance`
+    call here.  Both read "centre-to-centre distance minus the two
+    half-widths", so the arithmetic is unchanged; what changes is that this
+    detector and every other migrated consumer now answer from **one** model,
+    which is the whole point of the epic.  ``threshold_mm`` is still resolved
+    entirely by the caller -- the kernel carries no rule values.
 
     This is the SAME segment-clearance idiom ``match_pair_lengths`` uses
     at ``diffpair_routing.py:1033-1053`` to reject would-be serpentine
@@ -1235,8 +1268,6 @@ def find_intra_pair_clearance_violations(
         ``segment_violations`` list contains every offending pair and
         whose top-level fields summarise the worst case.
     """
-    from kicad_tools.core.geometry import segment_clearance
-
     if p_route is None or n_route is None:
         return None
     if not p_route.segments or not n_route.segments:
@@ -1247,21 +1278,11 @@ def find_intra_pair_clearance_violations(
     worst_pair: tuple[Segment, Segment] | None = None
 
     for pseg in p_route.segments:
+        p_shape = segment_shape(pseg)
         for nseg in n_route.segments:
             if pseg.layer != nseg.layer:
                 continue
-            clearance = segment_clearance(
-                pseg.x1,
-                pseg.y1,
-                pseg.x2,
-                pseg.y2,
-                pseg.width,
-                nseg.x1,
-                nseg.y1,
-                nseg.x2,
-                nseg.y2,
-                nseg.width,
-            )
+            clearance = copper_gap(p_shape, segment_shape(nseg))
             # 1e-9 tolerance matches the serpentine self-check at
             # diffpair_routing.py:1052 -- floating-point equality at the
             # threshold counts as compliant.
@@ -1848,7 +1869,11 @@ class CoupledPathfinder:
         # the identical check here.  It stays DORMANT until
         # ``set_net_name_to_id`` arms it, so a caller that never wires the map
         # keeps the pre-#5410 conservative verdict rather than consulting a
-        # pairwise (HV) table with unknown net names.
+        # pairwise (HV) table with unknown net names.  That contract binds
+        # BOTH backends: ``_get_cpp_coupled_impl`` replays halo provenance onto
+        # the coupled search's private ``CppGrid`` only when ``armed`` is also
+        # true, because the pairwise-domain install it is otherwise gated on
+        # answers True whenever there is no table at all.
         self._halo_refiner = RouteHaloRefiner(grid, rules, self.net_class_map)
 
     def set_net_name_to_id(self, mapping: dict[str, int]) -> None:
@@ -2738,6 +2763,7 @@ class CoupledPathfinder:
             # 21/21).  The coupled pathfinder needs its own CppGrid but must
             # NOT steal the single-ended router's paired back-reference, so
             # snapshot ``grid._cpp_grid`` and restore it afterwards.
+            halo_refinement_replayed = False
             saved_cpp_grid = getattr(self.grid, "_cpp_grid", None)
             # Restore the single-ended router's back-reference (or ``None`` if
             # it had none) in a ``finally`` so it is restored even when
@@ -2769,12 +2795,22 @@ class CoupledPathfinder:
                     sync_stored_routes,
                 )
 
+                # FAIL-CLOSED on an UNARMED refiner.  ``install_pairwise_domains``
+                # answers True whenever ``rules.pairwise_clearance is None``
+                # (the common case), so gating the replay on it alone would
+                # hand the C++ search the full refinement even when no
+                # net-name map was ever installed -- contradicting the
+                # DORMANT-until-``set_net_name_to_id`` contract the Python
+                # predicates honour, and leaving the two backends disagreeing
+                # on an unarmed search.  ``armed`` is the same condition every
+                # ``RouteHaloRefiner`` entry point already checks.
                 names = self._halo_refiner._net_name_to_id
-                if install_pairwise_domains(
+                if self._halo_refiner.armed and install_pairwise_domains(
                     cpp_grid, self.rules, names, self._halo_refiner._attach_zones
                 ):
                     sync_stored_routes(cpp_grid, self.grid)
                     replay_route_halo_marks(cpp_grid, self.grid)
+                    halo_refinement_replayed = True
             finally:
                 self.grid._cpp_grid = saved_cpp_grid
             impl = CppCoupledPathfinder(
@@ -2790,6 +2826,8 @@ class CoupledPathfinder:
                 spacing_penalty_factor=self.spacing_penalty_factor,
                 heuristic_weight=self.heuristic_weight,
             )
+            if halo_refinement_replayed:
+                self._install_cpp_halo_net_dimensions(impl)
         except Exception:
             logger.debug("C++ coupled pathfinder construction failed; using Python", exc_info=True)
             self._use_cpp_coupled = False
@@ -2797,6 +2835,38 @@ class CoupledPathfinder:
         self._cpp_coupled_impl = impl
         self._cpp_coupled_grid = self.grid
         return impl
+
+    def _install_cpp_halo_net_dimensions(self, impl) -> None:
+        """Thread the net-class halo dimensions into the C++ coupled search.
+
+        Issue #5410.  ``RouteHaloGeometry.clear`` derives its scalar from the
+        candidate's net class (``nc.clearance``) and builds the candidate at
+        ``nc.trace_width`` / ``nc.via_size``.  The refinement WAIVES a raster
+        rejection, and the raster halo it overrides was dilated with those
+        same net-class values -- so a C++ arm that re-measured with the global
+        ``DesignRules`` scalars would admit candidates the net class forbids
+        whenever the class is wider than the global rule.  That is the #5673
+        under-blocking direction, reachable on the production-default backend.
+
+        Mirrors the single-ended ``Pathfinder``'s
+        ``search_trace_half_width_mm_`` / ``search_fill_trace_clearance_``
+        threading (PR #5425), keyed by net id because the coupled predicates
+        run for both rails.  Nets with no class install nothing and keep the
+        global scalars, which is what both arms already did.
+        """
+        setter = getattr(impl, "set_halo_net_dimensions", None)
+        if setter is None:
+            return
+        for name, net_id in self._halo_refiner._net_name_to_id.items():
+            net_class = self.net_class_map.get(name)
+            if net_class is None:
+                continue
+            setter(
+                net_id,
+                net_class.trace_width,
+                net_class.clearance,
+                net_class.via_size,
+            )
 
     def _try_cpp_route_coupled(
         self,
@@ -4702,21 +4772,241 @@ class DiffPairRouter:
         layer_idx: int,
         net: int,
     ) -> bool:
-        """True when every grid cell under the segment is legal for ``net``.
+        """True when a candidate span is legal for ``net``.
 
         Issue #3508: the grid encodes the full centerline clearance
         envelope at obstacle-marking time (see ``_is_trace_blocked``),
-        so a clear rasterisation implies a clearance-clear segment.
+        so a clear rasterisation implies a clearance-clear segment -- *for
+        copper the grid was actually marked with*.
+
+        Epic #5509 Phase 3c (#5662): that qualifier is the #4507 defect.
+        Copper the constructor itself put on the board -- a sibling leg, a
+        meander tooth, a synthesized tail -- lives in
+        ``_shadow_foreign_universe`` and is never marked into the raster, so
+        a span could be driven straight *through* it and this gate would
+        call it clear.  A second, exact pass now measures the span against
+        that universe's foreign **segments** with the shared clearance
+        kernel.
+
+        The two passes are complementary, not redundant: the raster answers
+        about ambient board copper (pads, committed routes, keep-outs) and
+        the kernel pass answers about constructor-built copper the raster
+        has never seen.  When the shadow gate is disarmed
+        (``_shadow_foreign_universe is None``) the second pass is skipped
+        entirely and this method behaves exactly as it did before.
+
+        The raster's *blocking* answer is also refined by the kernel now --
+        see :meth:`_blocked_cells_refined`.  The halo the grid marks is a
+        square Chebyshev envelope quantised to whole cells, so it blocks
+        strictly more than the copper does; where every blocking cell is
+        attributable to copper the kernel can actually measure, the exact
+        kernel gap decides instead.  "Attributable" is the whole safety
+        argument and it is about *correctness*, not reach: a cell blocked --
+        even partly -- by something with no geometry to measure is never
+        refined, because accepting more is exactly the failure mode when the
+        attribution is unsound (PR #5676 review).
         """
         grid = self.autorouter.grid
         gx1, gy1 = grid.world_to_grid(x1, y1)
         gx2, gy2 = grid.world_to_grid(x2, y2)
         steps = max(abs(gx2 - gx1), abs(gy2 - gy1))
+        blocked: list[tuple[int, int]] = []
         for i in range(steps + 1):
             t = i / steps if steps else 0.0
             gx = int(round(gx1 + (gx2 - gx1) * t))
             gy = int(round(gy1 + (gy2 - gy1) * t))
             if pathfinder._is_cell_blocked(gx, gy, layer_idx, net):
+                blocked.append((gx, gy))
+        if blocked and not self._blocked_cells_refined(blocked, x1, y1, x2, y2, layer_idx, net):
+            return False
+        return self._span_shadow_segment_clear(x1, y1, x2, y2, layer_idx, net)
+
+    def _pad_attributable_cell(self, cx: int, cy: int, layer_idx: int, net: int) -> bool:
+        """Is a registered pad the *only* reason this cell is blocked?
+
+        Epic #5509 Phase 3c (#5662); hardened after the PR #5676 review.
+
+        :meth:`RoutingGrid.pad_marked_cell` is a purely **geometric**
+        rectangle test: it establishes that a pad's marking pass wrote this
+        cell, never that the pad is why the cell is blocked.  ``_blocked`` is
+        a union with no memory of its writers, and the pad's pass overwrites
+        ``cell.net`` 0 -> ``pad.net`` regardless of insertion order, so a
+        keep-out whose cells fall inside a foreign pad's marking rectangle
+        leaves no trace at all in the raster: every blocking cell looked
+        attributable, the kernel measured the pad alone -- ``add_obstacle``
+        registers no geometry to measure -- and a span was accepted straight
+        through the keep-out (both insertion orders, Judge's reproduction on
+        PR #5676).
+
+        Attribution therefore has to be *exclusive*, which is what
+        :meth:`RouteHaloGeometry.cell_known` already enforces on the
+        single-ended path by refusing occupancy it cannot account for.  Its
+        exclusion list cannot be copied verbatim here, though:
+
+        * ``is_obstacle`` / ``pad_blocked`` are set by ``_add_pad_unsafe``
+          *on the pad's own halo and metal*, so refusing them would refuse
+          every pad cell and delete the refinement this phase exists for.
+        * ``grid._static_blocked`` is a snapshot taken after pads are added,
+          so a pad halo is static **by construction** -- same outcome.
+
+        What is left is the occupancy a pad genuinely cannot explain:
+        registry-less raster marks (:meth:`RoutingGrid.raster_only_blocked_cell`
+        -- obstacles, keepouts, region bounds, board-edge keepouts) and
+        corridor reservations held for another net, neither of which the
+        kernel pass can see.
+        """
+        grid = self.autorouter.grid
+        if not grid.pad_marked_cell(cx, cy, layer_idx):
+            return False
+        # Keep-outs / obstacles / region bounds / board-edge copper: no
+        # geometry is registered anywhere, so the kernel can never re-measure
+        # them and the cell can never be refined.
+        if grid.raster_only_blocked_cell(cx, cy, layer_idx):
+            return False
+        # Corridor reservations, mirroring ``cell_known``: a cell held for
+        # another net is blocked by bookkeeping, not by measurable copper.
+        reserved = getattr(grid, "_reserved_for_nets", None)
+        if reserved:
+            owners = reserved.get((layer_idx, cy, cx))
+            if owners is not None and net not in owners:
+                return False
+        return True
+
+    def _blocked_cells_refined(
+        self,
+        blocked: list[tuple[int, int]],
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+    ) -> bool:
+        """Does exact kernel geometry clear a span the raster blocked?
+
+        Epic #5509 Phase 3c (#5662).  The single-ended search has had this
+        refinement since #5240 -- a conservative halo mark is refinable only
+        when the copper that produced it is *known*, and then the physical
+        geometry decides (``Pathfinder._trace_halo_clear``).  The coupled
+        constructor never had it, so its span gate answered purely from the
+        raster: a square, cell-quantised envelope that blocks measurably
+        more than the copper it stands for.  That over-rejection is the
+        group-8 half of what Epic #5509 set out to remove.
+
+        Two properties keep this safe:
+
+        * **Every blocking cell must be attributable, exclusively**, to
+          copper the kernel can measure -- either committed route copper
+          (:meth:`RouteHaloGeometry.cell_known`, the same authorisation the
+          single-ended path uses) or a registered pad and nothing else
+          (:meth:`_pad_attributable_cell`).  A cell blocked -- even partly --
+          by a keep-out, an obstacle, a board-edge mark or a foreign
+          reservation is *not* refinable, and the span is declined exactly as
+          it was before this phase.
+        * **The verdict is the kernel's**, not a second private predicate:
+          the span is measured against every foreign route and every foreign
+          pad, at the consumer's own unchanged rule values.
+
+        Returns ``True`` when the span may proceed despite the raster.
+        """
+        grid = self.autorouter.grid
+        halo = getattr(grid, "_route_halo", None)
+        for cx, cy in blocked:
+            if halo is not None and halo.cell_known(cx, cy, layer_idx):
+                continue
+            if self._pad_attributable_cell(cx, cy, layer_idx, net):
+                continue
+            return False
+
+        rules = self.autorouter.rules
+        layer = Layer(grid.index_to_layer(layer_idx))
+        probe = segment_shape(
+            Segment(
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                width=rules.trace_width,
+                layer=layer,
+                net=net,
+                net_name="",
+            )
+        )
+        for route in grid.routes:
+            for seg in route.segments:
+                if seg.net == net:
+                    continue
+                if gap_deficit(probe, segment_shape(seg), rules.trace_clearance) > 0.0:
+                    return False
+            for via in route.vias:
+                if via.net == net:
+                    continue
+                if not _via_spans_layer(via, layer):
+                    continue
+                if gap_deficit(probe, via_shape(via), rules.via_clearance) > 0.0:
+                    return False
+        # Foreign pads, measured exactly and at the *same* per-component
+        # requirement ``_span_pad_clear`` resolves, so a span the raster
+        # blocked on a pad halo is re-decided by the pad's real copper.
+        return self._kernel_pad_deficit(probe, layer, net)[0] <= _SHADOW_PAD_DEFICIT_EPS
+
+    def _span_shadow_segment_clear(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        layer_idx: int,
+        net: int,
+    ) -> bool:
+        """Physical-overlap gate for a span vs foreign shadow **segments**.
+
+        Epic #5509 Phase 3c (#5662), the missing quadrant behind #4507.  The
+        constructor already screens a candidate span against foreign *vias*
+        (:meth:`_span_via_clear`, #4575) and foreign *pads*
+        (:meth:`_span_pad_clear`, #4571), but nothing measured it against
+        foreign trace copper the raster had not been marked with.  That is
+        the copper "invisible by construction": the raster does not know it
+        exists and the exact gates were never asked about it, so a span
+        could be routed straight through a sibling leg.
+
+        Deliberately an **overlap** test (kernel gap strictly below zero),
+        not a clearance test.  A clearance threshold here would have to
+        name a required value, and the one value that is right for the case
+        this gate exists for is the *intra-pair* clearance for the partner
+        leg and the board minimum for everyone else -- a rule-resolution
+        question this phase must not answer (Epic #5509 scope guard #1).
+        Physical intersection needs no rule value: it is a short whoever
+        owns the copper, which is the same reading
+        :meth:`_pair_has_physical_overlap` applies to the assembled pair.
+        Clearance-grade screening stays with the gates that already resolve
+        their own thresholds.
+        """
+        universe = self._shadow_foreign_universe
+        if universe is None or not universe.segments:
+            return True
+        grid = self.autorouter.grid
+        probe = segment_shape(
+            Segment(
+                x1=x1,
+                y1=y1,
+                x2=x2,
+                y2=y2,
+                # No candidate width reaches this gate (its callers pass a
+                # span, not a ``Segment``), so the rule default is the
+                # honest copper model -- and an overlap verdict is not
+                # sensitive to a fraction of a trace width the way a
+                # clearance verdict would be.
+                width=self.autorouter.rules.trace_width,
+                layer=Layer(grid.index_to_layer(layer_idx)),
+                net=net,
+                net_name="",
+            )
+        )
+        for seg in universe.segments:
+            if seg.net == net:
+                continue  # own-net copper may touch (a tail lands on it)
+            if overlaps(probe, segment_shape(seg)):
                 return False
         return True
 
@@ -4754,10 +5044,23 @@ class DiffPairRouter:
         ``net`` -- including the diff-pair PARTNER's pads, which are a
         foreign net and therefore fully checked.
 
-        Deliberately called with ``exclude_net`` only and NO
-        ``exclude_refs``: the #3545 same-component carve-out would otherwise
-        exempt the partner's pad whenever P and N share a fine-pitch
-        connector ref (the board-06 FFC case this gate exists for).
+        Deliberately measured with ``net`` as the only exclusion and NO
+        same-component carve-out: the #3545 carve-out would otherwise exempt
+        the partner's pad whenever P and N share a fine-pitch connector ref
+        (the board-06 FFC case this gate exists for).
+
+        Epic #5509 Phase 3c: the *geometry* now comes from the shared
+        clearance kernel rather than from
+        ``RoutingGrid.worst_segment_pad_deficit``'s rect-aware
+        approximation.  The **rule resolution is unchanged and still the
+        grid's** -- ``DesignRules.get_clearance_for_component`` with the same
+        component-pitch map -- because the kernel carries no rule values and
+        Epic #5509's scope guard #1 forbids changing any.  What changes is
+        that a ``roundrect`` or ``oval`` pad is now measured as the copper it
+        actually is (``make_pad``'s Minkowski core, the ``_pad_polygon``
+        model ``kct check``'s ``ClearanceRule`` reads) instead of as its
+        enclosing rectangle, so this gate and the DRC that judges its output
+        no longer disagree about the pad.
         """
         grid = self.autorouter.grid
         probe = Segment(
@@ -4770,12 +5073,54 @@ class DiffPairRouter:
             net=net,
             net_name="",
         )
-        deficit, _loc = grid.worst_segment_pad_deficit(
-            probe,
-            exclude_net=net,
-            component_pitches=self._pad_component_pitches(),
-        )
-        return deficit
+        return self._kernel_pad_deficit(segment_shape(probe), probe.layer, net)[0]
+
+    def _kernel_pad_deficit(
+        self,
+        candidate: KShape,
+        layer: Layer | None,
+        net: int,
+        via: Via | None = None,
+    ) -> tuple[float, tuple[float, float] | None]:
+        """Worst foreign-pad deficit of one kernel shape, ``<= 0`` when clean.
+
+        Epic #5509 Phase 3c: the single pad-clearance reading behind the
+        coupled constructor's span, segment and via pad gates.  It mirrors
+        ``RoutingGrid.worst_segment_pad_deficit``'s **rule** logic exactly
+        (same-net skip, SMD layer filter, per-component required clearance
+        from the pitch map) and replaces only its geometry with
+        :func:`clearance_kernel.copper_gap`.
+
+        ``layer`` is the candidate's own copper layer -- pass the segment's
+        layer for a span.  ``KVia`` carries no layer field (``candidate`` is
+        copper on every layer, exactly as ``ALL_LAYERS`` models it), so a via
+        candidate passes ``layer=None`` and instead passes the source
+        ``via`` -- its ``via.layers`` barrel span gates which foreign SMD
+        pads are measured (mirrors ``_via_spans_layer`` and the legacy
+        ``grid.worst_via_pad_deficit``'s span filter), so a blind/buried
+        barrel does not get charged against pads on layers it never
+        reaches.
+        """
+        grid = self.autorouter.grid
+        pitches = self._pad_component_pitches()
+        rules = self.autorouter.rules
+        worst = 0.0
+        worst_loc: tuple[float, float] | None = None
+        for pad in grid.pads:
+            if pad.net == net:
+                continue
+            if not pad.through_hole:
+                if via is not None:
+                    if not _via_spans_layer(via, pad.layer):
+                        continue
+                elif layer is not None and pad.layer.value != layer.value:
+                    continue
+            pin_pitch = pitches.get(pad.component_key) if pitches else None
+            required = rules.get_clearance_for_component(pad.ref, pin_pitch)
+            deficit = gap_deficit(candidate, pad_shape(pad), required)
+            if deficit > worst:
+                worst, worst_loc = deficit, (pad.x, pad.y)
+        return worst, worst_loc
 
     def _span_pad_clear(
         self,
@@ -4806,12 +5151,20 @@ class DiffPairRouter:
         )
 
     def _via_pad_deficit(self, via: Via) -> float:
-        """Worst exact clearance deficit of a via vs FOREIGN pads (#4571)."""
-        deficit, _loc = self.autorouter.grid.worst_via_pad_deficit(
-            via,
-            exclude_net=via.net,
-            component_pitches=self._pad_component_pitches(),
-        )
+        """Worst exact clearance deficit of a via vs FOREIGN pads (#4571).
+
+        Epic #5509 Phase 3c: the barrel sibling of :meth:`_segment_pad_clear`,
+        and it reads the same single pad-clearance model
+        (:meth:`_kernel_pad_deficit`).  The **rule resolution is unchanged and
+        still the grid's** -- ``DesignRules.get_clearance_for_component`` over
+        the same component-pitch map ``worst_via_pad_deficit`` consulted --
+        because the kernel carries no rule values and scope guard #1 forbids
+        changing any.  What changes is that a ``roundrect`` or ``oval`` pad is
+        measured as the copper it actually is rather than as its enclosing
+        rectangle, so this gate and the DRC that judges its output no longer
+        disagree about the pad.
+        """
+        deficit, _loc = self._kernel_pad_deficit(via_shape(via), None, via.net, via=via)
         return deficit
 
     def _route_pad_violation(
@@ -4822,25 +5175,21 @@ class DiffPairRouter:
 
         Returns ``(worst_deficit, worst_pad_location)``; ``worst_deficit <=
         _SHADOW_PAD_DEFICIT_EPS`` means the route is clean.
+
+        Epic #5509 Phase 3c: the assembled-route form of the same #4571 gate,
+        reading the same :meth:`_kernel_pad_deficit` the span and barrel forms
+        do.  Sharing one model is the point -- before, the span gate and this
+        one could disagree about a ``roundrect`` pad and accept a span they
+        would then refuse once it was assembled.
         """
-        grid = self.autorouter.grid
-        pitches = self._pad_component_pitches()
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
         for seg in route.segments:
-            deficit, loc = grid.worst_segment_pad_deficit(
-                seg,
-                exclude_net=seg.net,
-                component_pitches=pitches,
-            )
+            deficit, loc = self._kernel_pad_deficit(segment_shape(seg), seg.layer, seg.net)
             if deficit > worst:
                 worst, worst_loc = deficit, loc
         for via in route.vias:
-            deficit, loc = grid.worst_via_pad_deficit(
-                via,
-                exclude_net=via.net,
-                component_pitches=pitches,
-            )
+            deficit, loc = self._kernel_pad_deficit(via_shape(via), None, via.net, via=via)
             if deficit > worst:
                 worst, worst_loc = deficit, loc
         return worst, worst_loc
@@ -4974,11 +5323,18 @@ class DiffPairRouter:
         covers segment-to-SEGMENT edges only.
 
         Returns ``(0.0, None)`` when the gate is disarmed.
+
+        Epic #5509 Phase 3c: the distance comes from the shared clearance
+        kernel instead of ``via_clearance.segment_via_deficit``'s private
+        point-to-segment arithmetic.  The threshold, the layer-span gate and
+        the #2706 co-location carve-out are unchanged -- they are rule and
+        policy, which stay with this consumer.
         """
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
         clearance = self.autorouter.rules.trace_clearance
+        shape = segment_shape(seg)
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
         for via in universe.vias:
@@ -4986,7 +5342,9 @@ class DiffPairRouter:
                 continue  # own-net copper may touch (a tail lands on it)
             if self._seg_via_colocated(seg, via):
                 continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            if not _via_spans_layer(via, seg.layer):
+                continue  # the barrel never reaches this segment's layer
+            deficit = gap_deficit(shape, via_shape(via), clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         return worst, worst_loc
@@ -5043,11 +5401,18 @@ class DiffPairRouter:
         ``rules.via_clearance`` from foreign trace centrelines (the exact
         threshold ``RoutingGrid.worst_via_segment_deficit`` and
         ``via_clears_foreign_segment`` use) and from foreign barrels.
+
+        Epic #5509 Phase 3c: both directions are measured with the shared
+        clearance kernel.  The layer-span gates stay here -- ``KVia`` models
+        a *through* barrel (copper on every layer), so a blind/buried span
+        has to be excluded by the caller that knows about it, exactly as
+        ``Grid3D::trace_stored_vias_clear`` does on the C++ side.
         """
         universe = self._shadow_foreign_universe
         if universe is None:
             return 0.0, None
         clearance = self.autorouter.rules.via_clearance
+        shape = via_shape(via)
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
         for seg in universe.segments:
@@ -5055,7 +5420,9 @@ class DiffPairRouter:
                 continue
             if self._seg_via_colocated(seg, via):
                 continue
-            deficit = segment_via_deficit(seg, via, clearance)
+            if not _via_spans_layer(via, seg.layer):
+                continue
+            deficit = gap_deficit(shape, segment_shape(seg), clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (via.x, via.y)
         v_lo = min(via.layers[0].value, via.layers[1].value)
@@ -5067,8 +5434,7 @@ class DiffPairRouter:
             o_hi = max(other.layers[0].value, other.layers[1].value)
             if o_hi < v_lo or o_lo > v_hi:
                 continue  # barrels never share a layer
-            dist = math.hypot(via.x - other.x, via.y - other.y)
-            deficit = via.diameter / 2 + other.diameter / 2 + clearance - dist
+            deficit = gap_deficit(shape, via_shape(other), clearance)
             if deficit > worst:
                 worst, worst_loc = deficit, (other.x, other.y)
         return worst, worst_loc
@@ -6114,24 +6480,33 @@ class DiffPairRouter:
         ripped (de-coupled) downstream.  Running the full check at
         construction time keeps the committed pre-phase output
         rip-proof.
+
+        Epic #5509 Phase 3c: all three overlap questions now go through the
+        shared clearance kernel's :func:`clearance_shapes.overlaps` (gap
+        strictly below zero) instead of three hand-rolled radius sums.  This
+        is a pure short-detection question -- no clearance term, no rule
+        value -- so the threshold is unchanged; the geometry is now the same
+        model every other migrated consumer reads.
         """
         for a, b in ((p_route, n_route), (n_route, p_route)):
             for via in a.vias:
-                bound_any = via.diameter / 2
+                shape = via_shape(via)
+                # A barrel is copper on every layer, which the kernel models
+                # directly (``KVia`` carries no layer field), so this arm
+                # keeps the #3508 "via-barrel vs any-layer segments" reading
+                # without a special case.
                 for seg in b.segments:
-                    if self._point_segment_distance(via.x, via.y, seg) < bound_any + seg.width / 2:
+                    if overlaps(shape, segment_shape(seg)):
                         return True
                 for w in b.vias:
-                    if math.hypot(via.x - w.x, via.y - w.y) < bound_any + w.diameter / 2:
+                    if overlaps(shape, via_shape(w)):
                         return True
         for ps in p_route.segments:
+            p_shape = segment_shape(ps)
             for ns in n_route.segments:
                 if ps.layer != ns.layer:
                     continue
-                if (
-                    self._min_distance_to_partner(ps.x1, ps.y1, ps.x2, ps.y2, [ns], ps.layer)
-                    < (ps.width + ns.width) / 2
-                ):
+                if overlaps(p_shape, segment_shape(ns)):
                     return True
         return False
 
@@ -11854,29 +12229,31 @@ class DiffPairRouter:
         copper closer to it than the clearance rule has to go, and copper
         that is further away does not.  Vias count on every layer (a
         through via is an obstacle on layers its owner never traced on).
+
+        Epic #5509 Phase 3c: the copper is shaped once
+        (:func:`clearance_shapes.segment_shape` /
+        :func:`~clearance_shapes.via_shape`) and measured with the shared
+        kernel, which replaces both the hand-rolled "layer ``None`` means
+        every layer" encoding (``KVia`` models that directly) and the
+        private half-width subtraction.  ``clearance`` is still the
+        caller's resolved rule value, and the comparison stays the strict
+        ``gap < clearance`` this planner has always used -- deliberately
+        *not* the kernel's epsilon-slack :func:`~clearance_kernel.clear`,
+        which would flip the boundary case and change which pairs the
+        corridor planner decides to yield.
         """
 
-        def _segments(
-            routes: list[Route],
-        ) -> list[tuple[object | None, float, float, float, float, float]]:
-            out: list[tuple[object | None, float, float, float, float, float]] = []
+        def _shapes(routes: list[Route]) -> list[object]:
+            out: list[object] = []
             for route in routes:
-                for seg in route.segments:
-                    layer = getattr(seg.layer, "value", seg.layer)
-                    out.append((layer, seg.x1, seg.y1, seg.x2, seg.y2, seg.width / 2.0))
-                for via in route.vias:
-                    # layer=None -> "every layer" (through-hole annulus)
-                    out.append((None, via.x, via.y, via.x, via.y, via.diameter / 2.0))
+                out.extend(segment_shape(seg) for seg in route.segments)
+                out.extend(via_shape(via) for via in route.vias)
             return out
 
-        segs_a = _segments(routes_a)
-        segs_b = _segments(routes_b)
-        for la, ax1, ay1, ax2, ay2, ra in segs_a:
-            for lb, bx1, by1, bx2, by2, rb in segs_b:
-                if la is not None and lb is not None and la != lb:
-                    continue
-                gap = _segment_to_segment_distance(ax1, ay1, ax2, ay2, bx1, by1, bx2, by2)
-                if gap - ra - rb < clearance:
+        shapes_b = _shapes(routes_b)
+        for a in _shapes(routes_a):
+            for b in shapes_b:
+                if copper_gap(a, b) < clearance:  # type: ignore[arg-type]
                     return True
         return False
 

@@ -18,9 +18,14 @@ A group with no adapter is never silently omitted, and never merely stamped
 ``not measured`` either: :data:`NOT_MEASURED_REASONS` gives each one a stated
 reason, rendered in the table's ``notes`` column.  ``not measured`` with no
 reason is indistinguishable from "nobody looked", which is the failure mode
-the whole document exists to prevent -- and it is what the epic means by
-"group 7 is the only permitted *unexposed* entry": exactly one consumer is
-unreachable from Python, and every other gap has to justify itself.
+the whole document exists to prevent.
+
+Phase 1c left exactly one such gap -- group 7's ``rail_clear``, an *unexposed*
+C++ lambda no binding could reach.  Epic #5509 Phase 3c (#5662) promoted it to
+a bound method while migrating it onto the kernel, so :data:`NOT_MEASURED_REASONS`
+is now **empty**: all nineteen groups are measured.  The dict and the machinery
+around it stay, because they are what forces the *next* gap to justify itself
+rather than appear as a bare blank cell.
 
 :data:`NOTES` carries the same column for *measured* rows, where it records
 the sub-entry-points a row does **not** cover (the C++ pairwise threshold, the
@@ -52,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tests.conformance.adapters import ConsumerAdapter
+from tests.conformance.adapters.coupled import CoupledRailAdapter
 from tests.conformance.adapters.diffpair import DiffPairAdapter
 from tests.conformance.adapters.drc_cpp import DrcCppAdapter
 from tests.conformance.adapters.drc_nudge import DrcNudgeAdapter
@@ -282,6 +288,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
     RouteHaloAdapter(),
     RouteGeometryCppAdapter(),
     FixedCopperAdapter(),
+    CoupledRailAdapter(),
     DiffPairAdapter(),
     LatticeAdapter(),
     MeshAdapter(),
@@ -297,7 +304,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({6, 9})
+MIGRATED_GROUPS: frozenset[int] = frozenset({6, 7, 8, 9, 10})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -317,29 +324,35 @@ Migrated so far:
 
 * **6** -- the fixed-copper predicate (``router/fixed_copper.py`` and
   ``grid.cpp``'s ``fixed_fill_clear``), Phase 3f.
+* **7** -- the C++ coupled rail gate (``CoupledPathfinder::rail_clear``), Phase 3c.
+* **8** -- the Python coupled / diff-pair gates (``DiffPairRouter``), Phase 3c.
 * **9** -- the lattice engine (``router/lattice/``), Phase 3d.
+* **10** -- the mesh engine's per-leg consult
+  (``router/mesh/obstacles.py``), Phase 3e.
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
     6: "3f",
+    7: "3c",
+    8: "3c",
     9: "3d",
+    10: "3e",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
 
 
 # Why a group has no adapter.  A bare ``not measured`` is indistinguishable
-# from "nobody looked"; every gap here states its kind.  Group 7 is the only
-# entry, and it is the *unexposed* kind -- no Python entry point exists at all,
-# which is exactly the one exception the epic's acceptance criterion permits.
-NOT_MEASURED_REASONS: dict[int, str] = {
-    7: (
-        "**unexposed**: `CoupledPathfinder::rail_clear` "
-        "(`coupled_pathfinder.cpp:627`) is a lambda inside the coupled search "
-        "loop -- not a method, so `bindings.cpp` cannot reach it and no Python "
-        "caller exists. Measured in its own Phase 3 PR, which can add the "
-        "binding; this phase adds no C++."
-    ),
-}
+# from "nobody looked"; every gap here states its kind.
+#
+# EMPTY since Epic #5509 Phase 3c (#5662).  The single entry was group 7's
+# ``CoupledPathfinder::rail_clear``, classified *unexposed*: a lambda inside
+# the coupled search loop that ``bindings.cpp`` could not reach.  Phase 3c
+# promoted it to a bound method as part of migrating it onto the clearance
+# kernel, and ``adapters/coupled.py`` now measures it -- so nineteen of
+# nineteen groups have an adapter.  The dict stays (with its renderer and its
+# ``test_every_unwired_group_states_its_reason`` guard) because it is what
+# would force a *future* gap to state its kind instead of rendering a blank.
+NOT_MEASURED_REASONS: dict[int, str] = {}
 
 # What a *measured* row does not cover.  Every sub-entry-point named in the
 # epic's group inventory that this phase could not score is recorded here, so
@@ -380,6 +393,16 @@ NOTES: dict[int, str] = {
         "project's `Default` netclass (0.20 mm), the #5398 / #5654 defect no "
         "Phase 3 PR is allowed to fix."
     ),
+    7: (
+        "The coupled search's own rail gate, driven through the bound "
+        "`rail_clear_world` (Epic #5509 Phase 3c, #5662) so grid quantisation "
+        "cannot move a verdict. Measures against **stored route geometry** -- "
+        "the committed copper the old lambda could not see, which is #4507 -- "
+        "and against fixed fills. **Not measured**: pad pairs, because "
+        "`rail_clear` never consults `pads_`; pad copper reaches the coupled "
+        "search through the blocked plane (groups 1-3) and through the Python "
+        "constructor's exact pad gate (group 8)."
+    ),
     8: (
         "Three gates in series (`_segment_cells_clear` raster walk through the "
         "**Python** `CoupledPathfinder._is_cell_blocked`, the #4571 exact "
@@ -415,25 +438,32 @@ NOTES: dict[int, str] = {
     ),
     10: (
         "`ObstacleModel.is_clear`, constructed directly as "
-        "`MeshPathfinder._route_with_portals` does: other-net pads as keep-out "
-        "rects inflated by the agent radius (`_keepouts`), committed traces as "
-        "capsule polygons "
+        "`MeshPathfinder._route_with_portals` does: other-net pads passed "
+        "**verbatim** (`_foreign_pads`) and measured exactly through the "
+        "kernel's Minkowski pad model, committed traces as capsule polygons "
         "inflated by a **full** `trace_width + clearance` (`_route_obstacles`' "
-        "own over-approximation, square end-caps included). Seg-candidate "
-        "pairs only -- `is_clear(a, b)` takes two points and no width, and a "
-        "committed via is not in this model at all (`_route_via_injection` "
-        "handles those). `fixed_fills` left `None`: group 6 already measures "
-        "`FixedFillObstacles` on both its halves. The `pours` branch is driven "
-        "by `seg-zone` pairs (pour outlines, verbatim, as `_route_obstacles` "
-        "passes them) and the `outline` branch by `copper-edge` pairs (#5644); "
-        "both are pure containment tests with **no clearance term**, so a leg "
-        "that merely comes close to a pour or to `Edge.Cuts` is accepted and "
-        "the under-rejection on those kinds is the consumer's own arithmetic. "
-        "In production the engine keeps legs off the outline through the "
-        "navmesh triangulation rather than through this predicate. "
-        "**Not measured**: `via-zone`, excluded for the same reason `seg-via` "
-        "is -- `is_clear(a, b)` takes two points and no width, so a via "
-        "candidate has no call to make."
+        "own over-approximation, square end-caps included, unchanged by this "
+        "phase). Seg-candidate pairs only -- `is_clear(a, b)` takes two points "
+        "and no width of its own, and a committed via is not in this model at "
+        "all (`_route_via_injection` handles those). `fixed_fills` left "
+        "`None`: group 6 already measures `FixedFillObstacles` on both its "
+        "halves. Before Phase 3e a pad entered as its `pad_half_extents` "
+        "**bounding box** grown by the agent radius -- a legal candidate "
+        "refused during search, #5410's failure mode -- and the `outline` "
+        "branch was a bare containment test with no clearance term; both are "
+        "now kernel measurements against the real copper. The `copper-edge` "
+        "cell that remains is a **rule** reading, not a geometry one: this row "
+        "drives the consumer at the board-edge floor it actually resolves, "
+        "which `MeshPathfinder.edge_clearance` takes from the owning "
+        "`Autorouter._edge_clearance` and which is 0.0 with none configured, "
+        "while kicad-cli applies the `.kicad_pro` board rule -- the #5398 / "
+        "#5654 axis, which Phase 3e does not touch. The `pours` branch is "
+        "still driven by `seg-zone` pairs against pour outlines verbatim, as "
+        "`_route_obstacles` passes them, and is still a touch test with no "
+        "clearance term, so a leg that merely comes close to a pour is "
+        "accepted. **Not measured**: `via-zone`, excluded for the same reason "
+        "`seg-via` is -- `is_clear(a, b)` takes two points and no width, so a "
+        "via candidate has no call to make."
     ),
     11: (
         "`via_clearance.py`'s four pure predicates. **Not measured**: "

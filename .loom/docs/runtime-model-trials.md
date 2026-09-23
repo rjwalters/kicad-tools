@@ -671,8 +671,10 @@ Three things to know before pointing a trial at this:
 
 Full semantics, the operator-pin rule, and the
 `# LOOM_RUNTIME_PREFERENCE` observability marker: `runtime-adapters.md` §
-"Ordered runtime preference with fall-through". Dispatch is not yet wired to the
-resolver — see the follow-up issues on #8436.
+"Ordered runtime preference with fall-through". Dispatch is already wired to the
+resolver; the remaining gaps are the chosen tier not yet carried into the
+per-sweep launch record (#8599) and `modelProfile` gating admission without
+pinning the launch to it (#8602) — see the other follow-up issues on #8436.
 
 Operator recipes that combine a trial tap with the model, capacity and
 spend-bound axes: [`configuring-resources.md`](configuring-resources.md).

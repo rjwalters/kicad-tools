@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 # node the A* actually accepted, consumed by the resume loop to reject the
 # correct goal cell (the last-segment endpoint derivation always produced the
 # end-pad center, a no-op rejection after the first attempt).
-_REQUIRED_CPP_BUILD_VERSION = 43
+_REQUIRED_CPP_BUILD_VERSION = 44
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -4786,6 +4786,32 @@ class CppCoupledPathfinder:
     def via_blocked(self, gx: int, gy: int, net: int) -> bool:
         """Probe the coupled via predicate (Issue #5410 parity testing)."""
         return bool(self._impl.via_blocked(gx, gy, net))
+
+    def set_halo_net_dimensions(
+        self, net: int, trace_width: float, trace_clearance: float, via_diameter: float
+    ) -> None:
+        """Install one net's effective net-class dimensions (Issue #5410).
+
+        The dynamic route-halo refinement *waives* a raster rejection, so it
+        must re-measure with the same effective rule the raster halo was
+        dilated with -- the candidate's **net-class** trace width / clearance /
+        via size, exactly as :meth:`RouteHaloRefiner.trace_clear` and
+        :meth:`RouteHaloRefiner.via_clear` build their candidates on the
+        Python side.  A net with no entry keeps the global ``DesignRules``
+        scalars, which is the pre-existing behaviour for class-less nets.
+
+        Not installing these on a class-bearing net is an **under-blocking**
+        divergence from the Python arm, not merely a parity nit: a class whose
+        ``clearance`` exceeds ``rules.trace_clearance`` would have its halo
+        waived against the narrower global value.
+        """
+        self._impl.set_halo_net_dimensions(
+            int(net), float(trace_width), float(trace_clearance), float(via_diameter)
+        )
+
+    def clear_halo_net_dimensions(self) -> None:
+        """Drop every installed net-class halo dimension (Issue #5410)."""
+        self._impl.clear_halo_net_dimensions()
 
     def route(
         self,
