@@ -422,3 +422,157 @@ def test_pad_marked_cell_does_not_attribute_distant_cells() -> None:
     cx, cy = grid.world_to_grid(5.0, 5.0)
     assert grid.pad_marked_cell(cx, cy, 0)
     assert not grid.pad_marked_cell(cx, cy, 1)
+
+
+# ---------------------------------------------------------------------------
+# Attribution soundness: a pad halo may not launder a co-located keep-out
+# ---------------------------------------------------------------------------
+
+# Judge's reproduction for the #5676 review finding, in world coordinates: a
+# 1x1 mm foreign pad at the board centre, and a keep-out sliver standing on
+# the eastern edge of that pad's marked halo.  Every cell the span walks is
+# inside BOTH the pad's marking rectangle and the obstacle's blocked region.
+_HALO_PAD_X = 5.0
+_HALO_PAD_Y = 5.0
+_HALO_PAD_SIZE = 1.0
+# x = pad centre + half the pad + (trace_clearance + trace_width / 2), i.e.
+# the last column ``_add_pad_unsafe`` marks -- and exactly ``TRACE_CLEARANCE``
+# of real copper-to-copper gap, so the kernel pass finds the span legal
+# against the pad alone.
+_HALO_SPAN_X = 5.8
+
+
+def _halo_pad():
+    from kicad_tools.router.primitives import Pad
+
+    return Pad(
+        x=_HALO_PAD_X,
+        y=_HALO_PAD_Y,
+        width=_HALO_PAD_SIZE,
+        height=_HALO_PAD_SIZE,
+        layer=Layer.F_CU,
+        net=FOREIGN_NET,
+        net_name="FOREIGN",
+        ref="U1",
+        pin="1",
+    )
+
+
+def _halo_obstacle():
+    from kicad_tools.router.primitives import Obstacle
+
+    return Obstacle(
+        x=_HALO_SPAN_X,
+        y=_HALO_PAD_Y,
+        width=0.1,
+        height=1.2,
+        layer=Layer.F_CU,
+        clearance=0.0,
+    )
+
+
+def test_segment_cells_clear_refines_a_pad_halo_with_exact_geometry() -> None:
+    """The refinement this phase exists for: a pad halo, re-decided exactly.
+
+    The span runs down the last column the pad's marking pass wrote, where
+    the real copper-to-copper gap is exactly ``TRACE_CLEARANCE``.  The raster
+    blocks it (the halo is a square, cell-quantised envelope); the kernel,
+    measuring the pad's actual metal, does not.
+
+    This is the control for the keep-out test below: the fix for that defect
+    must not be "stop refining pad halos", which would undo the phase.
+    """
+    router, dpr = _router()
+    router.grid.add_pad(_halo_pad())
+    pathfinder = CoupledPathfinder(router.grid, router.rules, 2)
+
+    gx, gy = router.grid.world_to_grid(_HALO_SPAN_X, _HALO_PAD_Y)
+    assert pathfinder._is_cell_blocked(gx, gy, 0, OWN_NET), (
+        "setup guard: the pad halo must cover this legal span, or the test "
+        "passes for the wrong reason"
+    )
+
+    assert dpr._segment_cells_clear(pathfinder, _HALO_SPAN_X, 4.45, _HALO_SPAN_X, 5.55, 0, OWN_NET)
+
+
+@pytest.mark.parametrize("pad_first", [True, False], ids=["pad-then-obstacle", "obstacle-then-pad"])
+def test_segment_cells_clear_refuses_a_keep_out_hidden_inside_a_pad_halo(
+    pad_first: bool,
+) -> None:
+    """A keep-out co-located with a pad halo must still refuse the span.
+
+    The #5676 review finding.  ``pad_marked_cell`` is a *geometric* rectangle
+    test: it establishes that a pad marked this cell, never that the pad is
+    the only reason the cell is blocked.  When a keep-out's cells fall inside
+    a foreign pad's marking rectangle, every blocking cell looks attributable,
+    the kernel pass measures the pad and nothing else -- ``add_obstacle``
+    registers no geometry to measure -- and the span is accepted straight
+    through the keep-out.
+
+    Insertion order is parametrised because the raster keeps no trace of it:
+    the pad's marking pass overwrites ``cell.net`` 0 -> 2 either way, so the
+    obstacle's own signature is erased and a ``cell.net`` guard cannot see it.
+    """
+    router, dpr = _router()
+    grid = router.grid
+    if pad_first:
+        grid.add_pad(_halo_pad())
+        grid.add_obstacle(_halo_obstacle())
+    else:
+        grid.add_obstacle(_halo_obstacle())
+        grid.add_pad(_halo_pad())
+    pathfinder = CoupledPathfinder(grid, router.rules, 2)
+
+    gx, gy = grid.world_to_grid(_HALO_SPAN_X, _HALO_PAD_Y)
+    assert pathfinder._is_cell_blocked(gx, gy, 0, OWN_NET), "setup guard: cell must be blocked"
+    assert grid.pad_marked_cell(gx, gy, 0), (
+        "setup guard: the keep-out must sit inside the pad's marking rectangle, "
+        "or the geometric attribution never fires and the defect is not exercised"
+    )
+
+    assert not dpr._segment_cells_clear(
+        pathfinder, _HALO_SPAN_X, 4.45, _HALO_SPAN_X, 5.55, 0, OWN_NET
+    ), "span accepted through a registered keep-out the kernel never measured"
+
+
+def test_segment_cells_clear_refuses_a_keep_out_with_no_pad_in_sight() -> None:
+    """The third row of the reproduction: the obstacle alone, still refused.
+
+    Pins that the keep-out itself was never refinable -- so the failure above
+    is the pad halo laundering it, not a change in how obstacles are read.
+    """
+    router, dpr = _router()
+    router.grid.add_obstacle(_halo_obstacle())
+    pathfinder = CoupledPathfinder(router.grid, router.rules, 2)
+
+    assert not dpr._segment_cells_clear(
+        pathfinder, _HALO_SPAN_X, 4.45, _HALO_SPAN_X, 5.55, 0, OWN_NET
+    )
+
+
+def test_segment_cells_clear_refuses_a_keepout_rectangle_inside_a_pad_halo() -> None:
+    """The same laundering, through ``add_keepout`` rather than ``add_obstacle``.
+
+    Attribution soundness is a property of the *class* of blockers the exact
+    kernel cannot measure, not of one entry point.  A keepout registers no
+    geometry either, so a keepout rectangle overlapping a pad's marking
+    rectangle must decline the span for the same reason.
+    """
+    router, dpr = _router()
+    grid = router.grid
+    grid.add_pad(_halo_pad())
+    grid.add_keepout(
+        _HALO_SPAN_X - 0.05,
+        _HALO_PAD_Y - 0.6,
+        _HALO_SPAN_X + 0.05,
+        _HALO_PAD_Y + 0.6,
+        layers=[Layer.F_CU],
+    )
+    pathfinder = CoupledPathfinder(grid, router.rules, 2)
+
+    gx, gy = grid.world_to_grid(_HALO_SPAN_X, _HALO_PAD_Y)
+    assert grid.pad_marked_cell(gx, gy, 0), "setup guard: the keepout must sit inside the pad halo"
+
+    assert not dpr._segment_cells_clear(
+        pathfinder, _HALO_SPAN_X, 4.45, _HALO_SPAN_X, 5.55, 0, OWN_NET
+    )

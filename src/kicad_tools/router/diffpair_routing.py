@@ -4642,9 +4642,12 @@ class DiffPairRouter:
         see :meth:`_blocked_cells_refined`.  The halo the grid marks is a
         square Chebyshev envelope quantised to whole cells, so it blocks
         strictly more than the copper does; where every blocking cell is
-        attributable to *known* committed route copper, the exact kernel gap
-        decides instead.  That direction can only ever accept more, never
-        less, so it cannot cost reach.
+        attributable to copper the kernel can actually measure, the exact
+        kernel gap decides instead.  "Attributable" is the whole safety
+        argument and it is about *correctness*, not reach: a cell blocked --
+        even partly -- by something with no geometry to measure is never
+        refined, because accepting more is exactly the failure mode when the
+        attribution is unsound (PR #5676 review).
         """
         grid = self.autorouter.grid
         gx1, gy1 = grid.world_to_grid(x1, y1)
@@ -4660,6 +4663,57 @@ class DiffPairRouter:
         if blocked and not self._blocked_cells_refined(blocked, x1, y1, x2, y2, layer_idx, net):
             return False
         return self._span_shadow_segment_clear(x1, y1, x2, y2, layer_idx, net)
+
+    def _pad_attributable_cell(self, cx: int, cy: int, layer_idx: int, net: int) -> bool:
+        """Is a registered pad the *only* reason this cell is blocked?
+
+        Epic #5509 Phase 3c (#5662); hardened after the PR #5676 review.
+
+        :meth:`RoutingGrid.pad_marked_cell` is a purely **geometric**
+        rectangle test: it establishes that a pad's marking pass wrote this
+        cell, never that the pad is why the cell is blocked.  ``_blocked`` is
+        a union with no memory of its writers, and the pad's pass overwrites
+        ``cell.net`` 0 -> ``pad.net`` regardless of insertion order, so a
+        keep-out whose cells fall inside a foreign pad's marking rectangle
+        leaves no trace at all in the raster: every blocking cell looked
+        attributable, the kernel measured the pad alone -- ``add_obstacle``
+        registers no geometry to measure -- and a span was accepted straight
+        through the keep-out (both insertion orders, Judge's reproduction on
+        PR #5676).
+
+        Attribution therefore has to be *exclusive*, which is what
+        :meth:`RouteHaloGeometry.cell_known` already enforces on the
+        single-ended path by refusing occupancy it cannot account for.  Its
+        exclusion list cannot be copied verbatim here, though:
+
+        * ``is_obstacle`` / ``pad_blocked`` are set by ``_add_pad_unsafe``
+          *on the pad's own halo and metal*, so refusing them would refuse
+          every pad cell and delete the refinement this phase exists for.
+        * ``grid._static_blocked`` is a snapshot taken after pads are added,
+          so a pad halo is static **by construction** -- same outcome.
+
+        What is left is the occupancy a pad genuinely cannot explain:
+        registry-less raster marks (:meth:`RoutingGrid.raster_only_blocked_cell`
+        -- obstacles, keepouts, region bounds, board-edge keepouts) and
+        corridor reservations held for another net, neither of which the
+        kernel pass can see.
+        """
+        grid = self.autorouter.grid
+        if not grid.pad_marked_cell(cx, cy, layer_idx):
+            return False
+        # Keep-outs / obstacles / region bounds / board-edge copper: no
+        # geometry is registered anywhere, so the kernel can never re-measure
+        # them and the cell can never be refined.
+        if grid.raster_only_blocked_cell(cx, cy, layer_idx):
+            return False
+        # Corridor reservations, mirroring ``cell_known``: a cell held for
+        # another net is blocked by bookkeeping, not by measurable copper.
+        reserved = getattr(grid, "_reserved_for_nets", None)
+        if reserved:
+            owners = reserved.get((layer_idx, cy, cx))
+            if owners is not None and net not in owners:
+                return False
+        return True
 
     def _blocked_cells_refined(
         self,
@@ -4684,14 +4738,14 @@ class DiffPairRouter:
 
         Two properties keep this safe:
 
-        * **Every blocking cell must be attributable** to copper the grid
-          can name exactly -- either committed route copper
+        * **Every blocking cell must be attributable, exclusively**, to
+          copper the kernel can measure -- either committed route copper
           (:meth:`RouteHaloGeometry.cell_known`, the same authorisation the
-          single-ended path uses) or a cell a registered pad's marking pass
-          wrote (:meth:`RoutingGrid.pad_marked_cell`).  A cell blocked by a
-          static obstacle, a reservation, or a mark whose copper the grid
-          cannot name is *not* refinable and the span is declined exactly as
-          before.
+          single-ended path uses) or a registered pad and nothing else
+          (:meth:`_pad_attributable_cell`).  A cell blocked -- even partly --
+          by a keep-out, an obstacle, a board-edge mark or a foreign
+          reservation is *not* refinable, and the span is declined exactly as
+          it was before this phase.
         * **The verdict is the kernel's**, not a second private predicate:
           the span is measured against every foreign route and every foreign
           pad, at the consumer's own unchanged rule values.
@@ -4703,7 +4757,7 @@ class DiffPairRouter:
         for cx, cy in blocked:
             if halo is not None and halo.cell_known(cx, cy, layer_idx):
                 continue
-            if grid.pad_marked_cell(cx, cy, layer_idx):
+            if self._pad_attributable_cell(cx, cy, layer_idx, net):
                 continue
             return False
 

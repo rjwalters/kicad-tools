@@ -1177,6 +1177,28 @@ class RoutingGrid:
         # sub-clearance copper (routing-diagnostic fixture: NET3 through
         # J1-1's halo at 0.127mm actual vs 0.200mm required).
         self._static_blocked: np.ndarray | None = None
+        # Epic #5509 Phase 3c (#5662, review finding on PR #5676): provenance
+        # for cells blocked by geometry that exists ONLY in the raster.
+        #
+        # ``_blocked`` is a union with no memory of its writers, so a cell
+        # blocked by a keep-out and ALSO covered by a pad's marking rectangle
+        # is indistinguishable from a cell the pad alone blocked -- the pad's
+        # marking pass even overwrites ``cell.net`` 0 -> pad.net, erasing the
+        # obstacle's only trace.  A consumer that re-decides a blocked cell
+        # with exact geometry (``DiffPairRouter._blocked_cells_refined``) can
+        # measure pads (``self._pads``) and committed routes (``self.routes``)
+        # because those carry registries; obstacles, keepouts, region bounds
+        # and board-edge keepouts carry none, so a cell they touched can never
+        # be re-measured and must never be refined away.
+        #
+        # This plane is therefore written by exactly those registry-less
+        # blockers and is **monotone**: bits are set, never cleared.  A stale
+        # bit (the cell was later unblocked, e.g. by the same-component
+        # clearance relaxation) costs a refinement, never soundness, and an
+        # unblocked cell never reaches a refinement consumer in the first
+        # place.  Allocated lazily -- boards with no registry-less geometry
+        # pay nothing.
+        self._raster_only_blocked: np.ndarray | None = None
         # Issue #4794: monotonic occupancy generation.  Allocating (or
         # re-allocating) the planes is itself an occupancy change -- the new
         # buffers share none of the old contents -- so bump rather than reset,
@@ -1261,6 +1283,87 @@ class RoutingGrid:
         if self._static_blocked is None:
             self._static_blocked = to_numpy(self._blocked).copy()
 
+    def _mark_raster_only_region(
+        self,
+        layer_idx: int,
+        gx1: int,
+        gy1: int,
+        gx2: int,
+        gy2: int,
+    ) -> None:
+        """Record that registry-less geometry blocks this cell rectangle.
+
+        Epic #5509 Phase 3c (#5662).  Called by every blocker whose geometry
+        the exact clearance kernel cannot re-measure -- ``add_obstacle``,
+        ``add_keepout``, ``mark_region_bound``, the board-edge keepout -- so a
+        consumer that refines a blocked cell with exact geometry can tell
+        "blocked by a pad I can measure" from "blocked by a keep-out I cannot".
+
+        Marked over the blocker's WHOLE rectangle, not only over the cells it
+        newly blocked: a cell a pad halo had already blocked is exactly the
+        cell the attribution has to refuse, and "already blocked, skip" is how
+        it would otherwise go unrecorded.
+
+        Bits are only ever set; see ``_raster_only_blocked``'s note in
+        :meth:`_init_arrays` for why a stale bit is safe.
+        """
+        if not (0 <= layer_idx < self.num_layers):
+            return
+        ax, ay = max(gx1, 0), max(gy1, 0)
+        bx, by = min(gx2, self.cols - 1), min(gy2, self.rows - 1)
+        if ax > bx or ay > by:
+            return
+        self._ensure_raster_only_plane()[layer_idx, ay : by + 1, ax : bx + 1] = True
+
+    def _ensure_raster_only_plane(self) -> np.ndarray:
+        """Allocate the registry-less-blocker plane on first use (#5662)."""
+        if self._raster_only_blocked is None:
+            self._raster_only_blocked = np.zeros(
+                (self.num_layers, self.rows, self.cols), dtype=np.bool_
+            )
+        return self._raster_only_blocked
+
+    def _mark_raster_only_cells(
+        self,
+        layer_indices: list[int],
+        cells: set[tuple[int, int]],
+    ) -> None:
+        """Scattered-cell form of :meth:`_mark_raster_only_region`.
+
+        For blockers whose footprint is not a rectangle (the board-edge
+        keepout's swept disc).  One vectorised write per layer.
+        """
+        if not cells or not layer_indices:
+            return
+        plane = self._ensure_raster_only_plane()
+        xs = np.fromiter((c[0] for c in cells), dtype=np.intp, count=len(cells))
+        ys = np.fromiter((c[1] for c in cells), dtype=np.intp, count=len(cells))
+        inside = (xs >= 0) & (xs < self.cols) & (ys >= 0) & (ys < self.rows)
+        if not inside.all():
+            xs, ys = xs[inside], ys[inside]
+        for layer_idx in layer_indices:
+            if 0 <= layer_idx < self.num_layers:
+                plane[layer_idx, ys, xs] = True
+
+    def raster_only_blocked_cell(self, gx: int, gy: int, layer_idx: int) -> bool:
+        """Is this cell (partly) blocked by geometry with no registry?
+
+        Epic #5509 Phase 3c (#5662).  ``True`` means at least one obstacle,
+        keepout, region bound or board-edge keepout covers the cell, so its
+        blocked state cannot be fully re-measured from ``self._pads`` and
+        ``self.routes`` -- a refinement that re-decides the cell from exact
+        geometry alone would be authorising occupancy it never accounted for.
+
+        The plane is lazily allocated, so a board with no registry-less
+        geometry answers ``False`` without touching memory.
+        """
+        plane = self._raster_only_blocked
+        if plane is None:
+            return False
+        if not (0 <= gx < self.cols and 0 <= gy < self.rows and 0 <= layer_idx < self.num_layers):
+            return False
+        return bool(plane[layer_idx, gy, gx])
+
     def invalidate_static_blockage_snapshot(self) -> None:
         """Drop the static-blockage snapshot (Issue #3545).
 
@@ -1309,6 +1412,7 @@ class RoutingGrid:
         self._original_net = xp.zeros((0, 0, 0), dtype=np.int32)
         self._present_cost_ema = None
         self._static_blocked = None
+        self._raster_only_blocked = None
         # Congestion planes + cached clearance stamps.
         self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
         self._congestion_counted = None
@@ -1623,6 +1727,13 @@ class RoutingGrid:
             gx2, gy2 = self.world_to_grid(x2, y2)
 
             layer_idx = self.layer_to_index(obs.layer.value)
+
+            # #5662: an obstacle registers no geometry anywhere -- only this
+            # raster mark -- so a consumer can never re-measure it.  Record the
+            # provenance before marking, over the whole rectangle (cells a pad
+            # halo already blocked included: those are exactly the ones a
+            # geometric pad attribution would otherwise launder).
+            self._mark_raster_only_region(layer_idx, gx1, gy1, gx2, gy2)
 
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
@@ -3053,6 +3164,8 @@ class RoutingGrid:
             gx2, gy2 = self.world_to_grid(x2, y2)
 
             for layer_idx in layer_indices:
+                # #5662: same registry-less provenance as ``add_obstacle``.
+                self._mark_raster_only_region(layer_idx, gx1, gy1, gx2, gy2)
                 for gy in range(gy1, gy2 + 1):
                     for gx in range(gx1, gx2 + 1):
                         if 0 <= gx < self.cols and 0 <= gy < self.rows:
@@ -3116,6 +3229,14 @@ class RoutingGrid:
 
             blocked_count = 0
             for layer_idx in layer_indices:
+                # #5662: the bound is a registry-less keep-out over everything
+                # OUTSIDE the region, recorded as four bands so the cells the
+                # loop below skips ("already blocked", e.g. by a pad halo) are
+                # still attributed to it.
+                self._mark_raster_only_region(layer_idx, 0, 0, self.cols - 1, gy1 - 1)
+                self._mark_raster_only_region(layer_idx, 0, gy2 + 1, self.cols - 1, self.rows - 1)
+                self._mark_raster_only_region(layer_idx, 0, gy1, gx1 - 1, gy2)
+                self._mark_raster_only_region(layer_idx, gx2 + 1, gy1, self.cols - 1, gy2)
                 for gy in range(self.rows):
                     inside_y = gy1 <= gy <= gy2
                     for gx in range(self.cols):
@@ -6180,10 +6301,19 @@ class RoutingGrid:
         """Did a registered pad's marking pass write to this cell?
 
         Epic #5509 Phase 3c (#5662).  The boolean sibling of
-        :meth:`find_pad_ref_at`, and the *attribution* half of a kernel
+        :meth:`find_pad_ref_at`, and the *geometric* half of a kernel
         refinement: a consumer that wants to re-decide a blocked cell with
         exact geometry first has to know **what** blocked it, or it would be
         bypassing occupancy it cannot account for.
+
+        **This answer is necessary but not sufficient** (PR #5676 review).
+        It says a pad's marking pass wrote this cell -- never that the pad is
+        the *only* reason the cell is blocked.  ``_blocked`` is a union with
+        no memory of its writers, so a keep-out co-located with a pad halo is
+        invisible here; a refining consumer must additionally rule out the
+        occupancy it cannot measure (see
+        :meth:`raster_only_blocked_cell` and
+        ``DiffPairRouter._pad_attributable_cell``).
 
         Answered in **cell** coordinates, and by reproducing
         ``_add_pad_unsafe``'s own loop bounds rather than by testing the cell
@@ -6991,6 +7121,15 @@ class RoutingGrid:
                 if e2 < dx:
                     err += dx
                     gy += sy
+
+        # #5662: board-edge keep-out copper has no registry the exact
+        # clearance kernel could re-measure, so every cell it covers is
+        # unrefinable.  Recorded for the WHOLE disc union, not only the cells
+        # newly blocked above: the ``if not cell.blocked`` branch skips cells a
+        # pad halo already owns, and those are precisely the ones a geometric
+        # pad attribution would otherwise launder.  Done once, vectorised,
+        # because this runs per outline segment over the whole board edge.
+        self._mark_raster_only_cells(layer_indices, blocked_cells)
 
         return blocked_count
 
