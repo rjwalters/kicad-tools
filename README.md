@@ -15,7 +15,7 @@ This project provides standalone Python tools that enable AI agents (LLMs, auton
 Traditional EDA tools require GUIs and manual interaction. `kicad-tools` bridges the gap by providing:
 
 - **Structured data access** - Parse KiCad files into clean Python objects
-- **Machine-readable output** - All CLI commands support `--format json`
+- **Machine-readable output** - Analysis and query commands offer JSON output; check each command’s `--help` for supported formats
 - **Programmatic modification** - Edit schematics and PCBs without a GUI
 - **LLM reasoning interface** - Purpose-built module for LLM-driven PCB layout decisions
 
@@ -108,16 +108,17 @@ from kicad_tools.router import Autorouter, DesignRules
 rules = DesignRules(
     grid_resolution=0.25,  # mm
     trace_width=0.2,  # mm
-    clearance=0.15,  # mm
+    trace_clearance=0.15,  # mm
 )
 
 # Create router and add components
 router = Autorouter(width=100, height=80, rules=rules)
-router.add_component("U1", pads=[...])
+router.add_component("U1", pads=[{"number": "1", "x": 10, "y": 10, "net": 1}])
+router.add_component("U2", pads=[{"number": "1", "x": 20, "y": 10, "net": 1}])
 
 # Route all nets
-result = router.route_all()
-print(f"Routed {result.routed_nets}/{result.total_nets} nets")
+routes = router.route_all(timeout=30)
+print(f"Created {len(routes)} routes")
 ```
 
 ### LLM-Driven PCB Layout
