@@ -43,11 +43,24 @@ instructions)`. The block states three rules:
 | `champion-issue-promo.md` | issue bodies + comments |
 | `champion-pr-merge.md` | PR bodies, review comments, diffs |
 | `champion-epic.md` | epic bodies + comments |
+| `concierge.md` | **safehouse room messages** (+ issue/PR text read while answering) |
 
-All of these ship from `defaults/.claude/commands/loom/`. The five with a
-`defaults/roles/` entry (`curator`, `builder`, `judge`, `doctor`, `guide`) are
-**symlinks** into that same directory, so the role-file and slash-command views
-of a role can never disagree about this block.
+All of these ship from `defaults/.claude/commands/loom/`. The six with a
+`defaults/roles/` entry (`curator`, `builder`, `judge`, `doctor`, `guide`,
+`concierge`) are **symlinks** into that same directory, so the role-file and
+slash-command views of a role can never disagree about this block.
+
+`concierge.md` carries the block verbatim **and** adds a room-specific rider
+(#7947), because its threat model is sharper than an issue body's: the text
+arrives in real time and the persona may turn it into a daemon command within
+seconds. The rider says three things the generic block does not need to —
+an allowlisted sender is not a trusted *instruction* source, the refusal must
+name the shape rather than quote the payload, and forge text read while
+answering is untrusted too. Crucially, the rider is **not** what makes the
+persona safe: see
+[`safehouse.md` § The four relay gates](safehouse.md) for the mechanical
+property (a message cannot authorize itself) that holds with the phrase list
+deleted entirely.
 
 **Maintenance rule**: when a new role — or a new split-out sub-file of an
 existing role — starts reading forge text, add the same block and add a row to

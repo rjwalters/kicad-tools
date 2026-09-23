@@ -30,6 +30,7 @@ To edit a role definition:
 | `auditor` | Main branch build/runtime validation | 10min |
 | `builder` | Feature implementation | Manual |
 | `champion` | Proposal evaluation and PR auto-merge | 10min |
+| `concierge` | Operator-agent persona: room intent → typed daemon ChatOps verbs | 5min, **opt-in twice** |
 | `curator` | Issue enhancement | 5min |
 | `doctor` | Bug fixes and PR feedback | 5min |
 | `driver` | Plain shell environment | Manual |
@@ -37,6 +38,16 @@ To edit a role definition:
 | `hermit` | Code simplification proposals | 15min |
 | `judge` | Code review | 5min |
 | `loom` | Tier 2 daemon-mode operator surface | 1min |
+
+> **`concierge` takes two independent opt-ins**, unlike every other role here.
+> It is excluded from the "unset `autonomous.roleRunner.roles` ⇒ all defaults"
+> fallback (like `architect`), **and** gated a second time on its own config
+> block resolving: naming it in `roles` is not enough — `safehouse.concierge`
+> must also name at least one allowed sender. It is an inbound control channel
+> wired to a chat room, so it must never arrive because a repo forgot to pin
+> `roles`. Run `loom-daemon concierge check` in a workspace to see which of the
+> two gates is closed. Full trust boundary:
+> [`safehouse.md` § Operator-agent persona](../docs/safehouse.md).
 
 > **Note**: the `shepherd` role (Layer 1 issue-lifecycle orchestrator) was
 > removed in v0.10.0. Use `/loom:sweep <issue>` for the same single-issue
