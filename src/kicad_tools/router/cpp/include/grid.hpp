@@ -287,6 +287,30 @@ public:
     // Clearing validation geometry invalidates coverage immediately.
     bool route_geometry_complete() const;
     bool route_cell_has_geometry(int x, int y, int layer) const;
+    // Issue #5410: replay a Python-side halo mark onto a C++ grid that was
+    // bulk-copied from a ``RoutingGrid`` (``CppGrid.from_routing_grid``)
+    // rather than built by committing routes through ``mark_segment`` /
+    // ``mark_via``.  Coverage provenance -- not the occupancy raster, which
+    // the bulk copy already carries -- is what the copy is missing, and
+    // without it every refinable cell reads as unverified.  ``kind`` is 0 for
+    // a segment mark and 1 for a via mark, matching ``RouteHaloGeometry``'s
+    // key encoding.
+    void register_route_mark(int kind, int net, int layer, int x1, int y1,
+                             int x2, int y2, int radius, bool add);
+    // Issue #5410: ``mark_blocked`` (the bulk-copy entry point) records every
+    // cell as STATIC board geometry, because route copper normally arrives
+    // through ``mark_segment`` / ``mark_via`` instead.  A grid bulk-copied
+    // from a ``RoutingGrid`` that already carries committed routes therefore
+    // over-states static blockage on exactly the dynamic halo cells search-
+    // time refinement is allowed to re-measure.  This restores the Python
+    // grid's own static/dynamic split for such a cell.
+    void set_cell_static_blocked(int x, int y, int layer, bool value);
+    // Bulk form of the above.  The dynamic (non-static) cell set scales with
+    // committed copper, so a per-cell Python->C++ call would reintroduce
+    // exactly the marshalling cost #5240 removed from the bulk grid copy.
+    void set_cells_static_blocked(const std::vector<int>& xs,
+                                  const std::vector<int>& ys,
+                                  const std::vector<int>& layers, bool value);
     bool route_trace_geometry_clear(const Segment& segment, float clearance,
                                     int partner_net, float partner_clearance, float via_clearance) const;
     // Hard constraint for negotiated traces; foreign trace copper remains soft.

@@ -31,6 +31,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 
 namespace router {
 
@@ -93,6 +94,30 @@ public:
     void set_fill_rail_dimensions(double ph, double pg, double nh, double ng) {
         p_fill_half_ = ph; p_fill_gap_ = pg; n_fill_half_ = nh; n_fill_gap_ = ng;
     }
+
+    // Issue #5410 (B1): per-net-class dimensions for the dynamic route-halo
+    // refinement, mirroring what ``RouteHaloRefiner`` reads off the net class
+    // on the Python side (``nc.trace_width``, ``nc.clearance``,
+    // ``nc.via_size``).
+    //
+    // WHY this exists.  The halo refinement WAIVES a raster rejection, so the
+    // scalar it re-measures with is a real design rule, not a search radius.
+    // The raster halo it overrides was dilated with the candidate's NET-CLASS
+    // clearance; re-measuring with the global ``DesignRules`` scalar therefore
+    // admits candidates the net class forbids whenever the class is wider than
+    // the global rule -- the under-blocking direction.  The single-ended
+    // ``Pathfinder`` already threads its effective values in
+    // (``search_trace_half_width_mm_`` / ``search_fill_trace_clearance_``);
+    // this is the coupled equivalent, keyed by net id because the coupled
+    // predicates are called for both rails.
+    //
+    // Nets with no entry fall back to the global rules, so a caller that
+    // installs nothing keeps exactly the pre-#5410 global-rule behaviour.
+    void set_halo_net_dimensions(int net, double trace_width,
+                                 double trace_clearance, double via_diameter) {
+        halo_net_dims_[net] = HaloNetDims{trace_width, trace_clearance, via_diameter};
+    }
+    void clear_halo_net_dimensions() { halo_net_dims_.clear(); }
     // All construction-time scalars mirror the Python
     // ``CoupledPathfinder.__init__`` derived radii and rule constants.  The
     // Python side pre-computes the trace/via clearance radii (identical
@@ -131,6 +156,17 @@ public:
         int max_iterations_budget,
         double timeout_seconds);
 
+    // Issue #5410: public probes over the two blocked predicates the dynamic-
+    // halo refinement changed.  The joint-state search is a single opaque
+    // ``route`` call, so without these a backend-parity test could only infer
+    // the branch's verdict from whether a whole pair happened to route.
+    bool trace_blocked(int gx, int gy, int layer, int net,
+                       int from_x = -1, int from_y = -1) const {
+        return is_trace_blocked(gx, gy, layer, net, from_x, from_y);
+    }
+    bool via_blocked(int gx, int gy, int net) const {
+        return is_via_blocked(gx, gy, net);
+    }
     // Epic #5509 Phase 3c (#5662): the coupled search's rail clearance gate,
     // promoted out of the ``route()`` loop into a named, bindable method.
     //
@@ -176,6 +212,18 @@ private:
                             int layer, int net, int partner_net,
                             double half, double gap, bool is_via) const;
 
+    // Issue #5410 (B1): net id -> effective net-class halo dimensions.
+    struct HaloNetDims {
+        double trace_width;
+        double trace_clearance;
+        double via_diameter;
+    };
+    std::unordered_map<int, HaloNetDims> halo_net_dims_;
+    const HaloNetDims* halo_dims_for(int net) const {
+        auto it = halo_net_dims_.find(net);
+        return it == halo_net_dims_.end() ? nullptr : &it->second;
+    }
+
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
     Grid3D& grid_;
     DesignRules rules_;
@@ -195,9 +243,27 @@ private:
         const GridCell& cell = grid_.at(gx, gy, layer);
         return cell.blocked && cell.net != net;
     }
-    inline bool is_trace_blocked(int gx, int gy, int layer, int net) const {
-        return is_cell_blocked(gx, gy, layer, net);
-    }
+    // Issue #5410: a conservative dynamic route halo is an acceleration
+    // structure, not a physical constraint.  ``mark_segment`` / ``mark_via``
+    // dilate committed copper to whole grid cells, so a foreign route's halo
+    // covers candidates whose ACTUAL copper and drill gaps satisfy the
+    // effective rules.  PR #5425 taught the per-net ``Pathfinder`` to measure
+    // that geometry before rejecting such a cell; these two helpers apply the
+    // identical refinement to the coupled joint-state search, which until now
+    // consulted the raster alone.
+    //
+    // ``route_cell_has_geometry`` is the provenance gate: it answers false for
+    // out-of-bounds cells, pad metal, static halos, keepouts, reserved cells,
+    // and for any cell whose covering marks lack registered physical geometry
+    // -- so every hard or unverifiable blockage keeps its rejection and only
+    // verified dynamic route copper is ever re-measured.
+    bool trace_halo_cell_clear(int cx, int cy, int layer, int from_x, int from_y,
+                               int to_x, int to_y, int net) const;
+    bool via_route_geometry_clear(int x, int y, int net) const;
+    // ``from_x`` / ``from_y`` (default -1) name the step's ORIGIN cell so the
+    // refinement measures the swept segment, not just its endpoint.
+    bool is_trace_blocked(int gx, int gy, int layer, int net,
+                          int from_x = -1, int from_y = -1) const;
     bool is_via_blocked(int gx, int gy, int net) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {

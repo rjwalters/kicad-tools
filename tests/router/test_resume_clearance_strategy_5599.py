@@ -174,11 +174,21 @@ class _FakeImpl:
 
 @requires_cpp
 class TestBindingSurfaceGoalFields:
+    #: The ABI that introduced ``goal_gx`` / ``goal_gy`` / ``goal_layer`` on
+    #: ``RouteResult`` (Issue #5599).  A LOWER version cannot carry the fields
+    #: ``test_route_result_carries_goal_fields_defaulting_to_sentinel`` reads,
+    #: so this is a floor, not an equality: pinning the exact number made every
+    #: later, unrelated ABI bump fail here (#5410 bumped 42 -> 43 to add the
+    #: coupled halo-provenance surface and tripped it).  The invariant this
+    #: test actually owns -- that the two sides move TOGETHER -- is asserted
+    #: below and independently in ``tests/test_router_determinism.py``.
+    GOAL_FIELDS_ABI = 42
+
     def test_build_version_bumped_both_sides(self) -> None:
-        """v42 (goal_gx/goal_gy/goal_layer) must be pinned in BOTH
-        ``types.hpp`` (via the compiled .so) and ``cpp_backend.py``."""
-        assert int(router_cpp.BUILD_VERSION) == 42
-        assert _REQUIRED_CPP_BUILD_VERSION == 42
+        """The goal-field ABI must be pinned in BOTH ``types.hpp`` (via the
+        compiled .so) and ``cpp_backend.py``, and never regress below v42."""
+        assert int(router_cpp.BUILD_VERSION) == _REQUIRED_CPP_BUILD_VERSION
+        assert int(router_cpp.BUILD_VERSION) >= self.GOAL_FIELDS_ABI
 
     def test_route_result_carries_goal_fields_defaulting_to_sentinel(self) -> None:
         result = router_cpp.RouteResult()

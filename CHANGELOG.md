@@ -155,6 +155,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Coupled differential-pair search now refines dynamic route-halo rejection
+  with physical clearance** (part of Issue #5410). A dynamic route halo is a
+  conservative acceleration structure: committed copper is dilated to whole
+  grid cells, so a foreign route's halo covers candidates whose actual copper
+  and drill gaps satisfy the effective rules. PR #5425 taught the per-net A*
+  (both backends) to measure that geometry before rejecting such a candidate;
+  the **coupled** joint-state search — the engine that routes every
+  differential pair — still answered on the raster alone, so every pair after
+  the first refused legal steps beside already-committed copper. Both coupled
+  backends now apply the identical check, over the swept trace step (not just
+  its endpoint) and the through-via envelope. Hard or unverifiable blockage —
+  pad metal, static halos, keepouts, reservations, hidden overlapping owners,
+  missing geometry — still rejects, and the refinement is **fail-closed**:
+  dormant without the net-name map it needs to resolve pairwise
+  (HV-isolation) requirements, and, on the C++ side, dormant unless that
+  grid's own cross-domain widening was installed *and* the refiner is armed.
+  The refinement re-measures with the candidate's **net-class** trace width,
+  clearance and via size on both backends — re-measuring with the global
+  `DesignRules` scalar would have waived clearance the raster halo (dilated
+  with the net-class value) had enforced, which is the #5673 under-blocking
+  direction. Native ABI 42 → 44.
 - **Qualify KiCad 10.0.6 for the native mask-to-copper gate** (Issue #5678).
   The CI runner's floating `kicad/kicad:10.0` tag moved from 10.0.5 to 10.0.6,
   and both hard-coded `10.0.5` version pins — `scripts/ci/check_mask_copper_native.py`'s
