@@ -637,11 +637,40 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `pcb.layout` | Layout preservation for PCB regeneration |
 
-## What's New (v0.20.0, August 2026)
+## What's New (v0.21.1, September 2026)
 
 Recent additions an agent reading these docs cold should know about. Older
 entries live in [CHANGELOG.md](CHANGELOG.md).
 
+- **Routing, validation and CLI hot-path performance sweep** (v0.21.0) —
+  measured removal of overhead across the router, validator, placement and
+  CLI: `import kicad_tools` 1.46 s → 0.34 s user CPU, the A\* neighbor-batch
+  cost ~3.9× faster with identical routes, the placement C++ path ~64 s →
+  0.55 s, board-05 LVS pin resolution ~20× faster. Local measurements; the
+  hosted-CI median comparison remains open on #5240.
+- **MCP server requires the mcp 2.x SDK** (v0.21.0, breaking for `[mcp]`
+  extra users) — `FastMCP` was renamed to `mcp.server.mcpserver.MCPServer`
+  and the `fastmcp` pin is now `>=4,<5`. In-process API callers using the
+  stdio `MCPServer` dataclass are unaffected.
+- **Copper-LVS and `kct net-status` decide on physical copper contact**
+  (v0.21.0) — a net owning a zone somewhere no longer suppresses its `open`
+  findings, copper contact is decided over a segment's full length, dangling
+  tracks are detected by copper-cap contact, and `kct check` gains a
+  geometry-based copper-slit detector.
+- **Pour bridges terminate on existing same-net copper** (v0.21.0) — pour
+  repair reuses an existing same-net via barrel or through-hole pad as the
+  bridge terminus instead of adding a new via; board07 pour repair is now
+  frame-independent with native-refill stability.
+- **Legacy `(module …)` footprints and rotated pads are honored everywhere**
+  (v0.21.0) — KiCad-4-era boards are recognized by every router/zones/DRC/LVS/
+  panel tree-walk, and non-cardinal pad rotation is applied in every obstacle,
+  clearance and thermal consumer so a rotated pad is priced identically
+  everywhere.
+- **Slimmer sdist and honest failure modes** (v0.21.1) — the sdist drops from
+  127 MB to 18 MB (board artifacts and evidence trees excluded; the wheel is
+  unchanged), `kct route` on board06 refuses a foreign input PCB with a named
+  error instead of emitting misleading `UNREPAIRED` lines, and the
+  access-witness sidecar is written even on a wall-clock deadline kill.
 - **Search-time HV pairwise clearance in the lattice engine** (v0.20.0) — with
   `--voltage-map`, the lattice router now *avoids* HV↔LV proximity during
   search instead of merely failing the post-route gate; KiCad keepout rule
