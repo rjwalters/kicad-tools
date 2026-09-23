@@ -955,9 +955,14 @@ assert_classify "TOKEN_EXPIRED" \
     1 codex "invalid_api_key is TOKEN_EXPIRED"
 
 # --- TOKEN_EXHAUSTED: plan/quota exhaustion ---
-assert_classify "TOKEN_EXHAUSTED" \
-    "You've hit your usage limit. Upgrade to Pro to continue using Codex" \
-    1 codex "\"hit your usage limit\" is TOKEN_EXHAUSTED"
+# Kept on one line each (rather than the usual continuations) so the #8539
+# capture below could be added without growing this over-ratchet file.
+assert_classify "TOKEN_EXHAUSTED" "You've hit your usage limit. Upgrade to Pro to continue using Codex" 1 codex "\"hit your usage limit\" is TOKEN_EXHAUSTED"
+# The wording captured verbatim on the #8539 host (a headless `codex exec`
+# inside an account's session container, every registered account walled). The
+# horizon it names is parsed daemon-side by `tokens_pool::codex_reset`;
+# classification stays this table's job and must not regress when it is.
+assert_classify "TOKEN_EXHAUSTED" "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at September 25, 2026 3:00 PM." 1 codex "the captured usage-limit refusal, reset horizon and all, is TOKEN_EXHAUSTED (#8539)"
 assert_classify "TOKEN_EXHAUSTED" \
     "You've reached your usage limit. Increase your limits to continue using codex." \
     1 codex "\"reached your usage limit\" is TOKEN_EXHAUSTED"

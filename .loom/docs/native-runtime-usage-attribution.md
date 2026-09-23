@@ -99,6 +99,25 @@ loom-daemon opencode-usage --directory ~/GitHub/loom --all-time --json
 **Retention is not guaranteed.** The trial-window numbers exist only as long as
 the hosts' session databases do — capture them before relying on them.
 
+## This reader does not feed fleet telemetry directly
+
+It feeds it *indirectly*: the folded `tokens_by_model` rides `sweep.outcome` /
+`role_tick.outcome`, whose `loom.tokens_by_model` / `loom.models_used` /
+`loom.runtime` / `loom.provider` / `loom.model` attributes are already
+allowlisted by the gateway collector. So everything the **daemon dispatches** on
+OpenCode is queryable by runtime, model and duration today.
+
+There is deliberately no periodic job reading the session store straight onto
+the OTLP wire, which would be the only way to observe an **interactive**,
+human-launched `opencode` session (it writes a different store,
+`$XDG_DATA_HOME/opencode/opencode.db`, which `discover_opencode_dbs` does not
+scan). Issue #8670 decided that gap stays open for now, and
+[`defaults/observability/collector/README.md`](https://github.com/rjwalters/loom/blob/main/defaults/observability/collector/README.md)
+§"Known gap: OpenCode interactive sessions" records the evidence, the extract
+design to use if it is ever built (watermark on `session.time_updated`, dedup on
+`session.id` — the rows are mutable running totals, not append-only events), and
+the two triggers that should re-open it.
+
 ## Adding another runtime
 
 `UsageSource` in `loom-daemon/src/usage_source.rs` is the one place that maps a

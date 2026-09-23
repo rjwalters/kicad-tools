@@ -70,6 +70,14 @@ The ladder is configured in `.loom/config.json`:
 
 **Aliases vs pinned IDs**: shipped role JSONs use aliases so defaults stay sensible across model releases with zero maintenance. The GitHub Actions cron workflows (`.github/workflows/loom-*.yml`) are the exception — they pin exact IDs because scheduled support roles are predictable, cost-sensitive load and a stale pin is visible and cheap to bump in the consuming repo.
 
+Daemon sweep dispatch resolves implicit defaults **after runtime admission**. An
+admitted Claude sweep keeps the cost-safe `sonnet` default (or its canary-gated
+experiment arm); admitted native runtimes use their model profile without a
+Claude default/experiment override. Explicit dispatch models still win, and
+`autonomous.model` keeps its existing precedence and alias handling. An explicit
+native model must match its profile or use `provider/model`; incompatible pins
+remain errors. Claude experiments still outrank `autonomous.model` when enabled.
+
 > **Logical-tier resolution (`sweep.modelAliases`, issue #3982).** A logical alias
 > is not always current on the wire: the bare `opus` alias still resolves to a
 > **previous-generation** model (`claude-opus-4-8`) while `sonnet`/`fable` resolve

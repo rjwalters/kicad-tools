@@ -433,6 +433,27 @@ and there is exactly one place a human edits the prose. An adapter declares its
 instruction-file set (e.g. Codex reads `AGENTS.md` + `.codex/` config); it must
 **not** introduce a per-runtime copy of the role prompts.
 
+- **`.agents/skills/<name>/SKILL.md`** is the SECOND single-source instruction
+  surface (#8673): the cross-vendor skills convention Codex, Kimi Code, Mistral
+  Vibe, and Grok discover natively (invoked as `$loom-<name>` in Codex), the
+  same convention `superset-sh/superset` uses for its own `.claude/skills`,
+  `.cursor/commands`, `.codex/prompts` fan-out. `AGENTS.md` above covers the
+  top-level repo guide; this surface covers the **role prompts**
+  (`.loom/roles/<name>.md`, exposed to Claude Code as
+  `.claude/commands/loom/<name>.md`), which `AGENTS.md` does not — without it a
+  Codex/Kimi worker has no way to discover `loom:builder-pr`,
+  `loom:probe-protocol`, or any other sub-skill a role prompt tells it to load,
+  and an operator running a non-Claude CLI interactively in a Loom repo has no
+  Loom skills at all. `loom-daemon generate-agent-skills` (backing the
+  `defaults/scripts/generate-agent-skills.sh` stub) generates
+  `defaults/.agents/skills/loom-<name>/SKILL.md` for every
+  `defaults/roles/<name>.md`, each carrying `name: loom-<name>` /
+  `description:` frontmatter plus a `<!-- loom-managed-skill -->` ownership
+  marker (CI `scripts/check-agent-skills-sync.sh` fails if a checked-in file is
+  stale). Install/resync tooling gates every overwrite on that marker's
+  presence in the destination file, so a consumer-authored or hand-detached
+  `SKILL.md` at the same path is left alone and logged, never silently reaped.
+
 ### 6. Permission / sandbox mapping
 
 **Contract:** map Loom's guard-hook *intent* to the runtime's own sandbox

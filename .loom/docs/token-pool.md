@@ -1984,15 +1984,34 @@ availability.
 file the owning container itself wrote. The ownership rule constrains *process*
 access to the credential chain; this touches none of it.
 
-### Fail-open, always
+### Fail-open, never fail-silent (#8539)
 
-Every unknown is reported as "no evidence", never as a refusal:
+Every unknown is reported as "no evidence" — never as a refusal, and (since
+#8539) never as health either:
 
 | Situation | Result |
 |---|---|
-| No rollout log, unparseable lines, unrecognized schema | `available`, no utilization — the account keeps its place in selection |
-| A reading whose own window **already rolled over** | discarded, not carried forward (the Codex form of #7420's overdue-reset trap: a week-old `100%` must never pin a healthy subscription out of rotation) |
+| No rollout log, unparseable lines, unrecognized schema | `unknown` + `no_rate_limit_snapshot`, no utilization — the account keeps its place in selection |
+| A reading whose own window **already rolled over** | discarded, not carried forward (the Codex form of #7420's overdue-reset trap: a week-old `100%` must never pin a healthy subscription out of rotation) — the row reads `unknown` + `snapshot_window_rolled_over` |
 | A recorded hold in `account-health.json` | outranks the measurement — reporting `available` for an account the selector will skip is the dishonest direction |
+
+`unknown` exists because `available` is a **claim about headroom**, and on a
+host where nothing has ever run an interactive Codex session there is no
+reading to back it. Before #8539 such a host rendered an all-dashes table in
+which every row said `available`: on the reported incident *every* registered
+account was at its provider-side usage limit and the pool still looked
+perfectly healthy. `available` is now only ever earned, by a live reading with
+measurable headroom; `unknown` sorts strictly below it (and strictly above
+every known refusal) so it can never outrank a measured account, and the table
+footer says what the word means and how to fix it — one `codex exec` turn on
+the account records a snapshot.
+
+It is still **fail-open**: `unknown` is the absence of a refusal, not a
+refusal. Nothing holds the account, `has_usable_account` counts it, and codex
+selection reads `account-health.json` rather than this status word at all.
+Treating "no snapshot yet" as unusable would exit `1` on every correctly
+provisioned host that simply has not written a rollout log — the fail-*closed*
+direction this probe rules out.
 
 ### Which window is binding
 
@@ -2007,6 +2026,7 @@ Codex-specific rule:
 | secondary (~weekly) at/over the ceiling | `exhausted` | the weekly reset |
 | primary (~5h) at/over it, weekly below | `rate_limited` | the 5h reset |
 | both below | `available` | — |
+| no live reading at all | `unknown` | — |
 
 One derivation feeds both the reported row and the health hold it arms, so a
 row can never advertise one horizon while the hold uses another — the bug that
@@ -2032,7 +2052,7 @@ flag the command is a pure read.
 | Exit | Meaning |
 |---|---|
 | `0` | A report was produced. **Includes a host with no Codex profiles**, which says so and exits `0` — an un-provisioned host is not an outage. |
-| `1` | Codex accounts exist but **none is dispatchable right now** — every one is rate-limited, exhausted, blocked, disabled, or errored — the pre-dispatch signal that routing codex work here will fail at selection. |
+| `1` | Codex accounts exist but **none is dispatchable right now** — every one is rate-limited, exhausted, blocked, disabled, or errored — the pre-dispatch signal that routing codex work here will fail at selection. An `unknown` row does **not** trigger this: nothing holds that account, so selection will still hand it work. |
 
 This is deliberately stricter than `tokens check` (exit `1` only when every row
 is `error`/`skipped`): that command's consumers re-derive selectability from
@@ -2056,7 +2076,12 @@ beta|exhausted|1.00|2026-09-22T10:00:00Z
 One format, one parser, every provider — so a dashboard (and the API-key
 account pool of #8401) reads them all the same way. Statuses come from the same
 vocabulary (`available`, `rate_limited`, `exhausted`, `blocked`, `skipped`,
-`error`); no Codex-only status word was invented.
+`error`), plus `unknown` (#8539) for an account this probe has no current
+reading for. `unknown` is shared vocabulary, not a Codex-only word: it is
+ranked by the same `status_order::status_rank` every provider sorts on, one
+rung below `available` and above every refusal. No reader today consumes the
+Codex ranking file, so the rung is a table/`--json` ordering fact rather than a
+selection input.
 
 The file is secret-free by construction: every field is a name, a status word,
 a number, or a timestamp. `auth.json` is never opened.
@@ -2068,6 +2093,54 @@ a number, or a timestamp. `auth.json` is never opened.
 `TOKEN_EXHAUSTED` arm — so an account measured at its ceiling is skipped
 *before* a dispatch is burned on it, by the same
 `select_healthy_at` filter every Codex selection already goes through.
+
+### The reactive half: a refusal's own reset horizon (#8539)
+
+The probe above is proactive and needs a rollout log. The reactive half needs
+nothing: a dispatch against a walled account dies with the CLI's own refusal,
+and that refusal names the reset.
+
+```text
+ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage
+to purchase more credits or try again at September 25, 2026 3:00 PM.
+```
+
+`classify-error.sh` already mapped that text to `TOKEN_EXHAUSTED`, and both
+dispatch surfaces already turned the category into a hold — but the hold's
+deadline was a blind `now + LOOM_CODEX_EXHAUSTED_COOLDOWN_SECS` (5h default),
+because nothing parsed `try again at <date>`. So `accounts check` showed no
+`Resets at` for a walled account, and the hold expired on a schedule unrelated
+to the provider's: early (the re-dispatch bounces again) or late (a recovered
+subscription idles).
+
+`tokens_pool::codex_reset` closes that. Both consumers of the adapter's
+terminal record — `sweep_registry::provider_health_feedback` (sweeps) and
+`role_runner::provider_health_feedback` (role ticks) — already read the child's
+retained log and scope their parse to their own dispatch region, so the horizon
+costs one extra call over text they already hold. The parsed instant is passed
+to `health::record_terminal_for_class_with_reset_at`, which uses it as the
+deadline for the two exhaustion arms and nothing else.
+
+Four properties keep a parser reading an agent's own transcript honest:
+
+| Property | Why |
+|---|---|
+| It never decides *whether* to hold an account | that is the adapter's classification, from the CLI's stderr; this text decides only *when* an already-decided hold ends, so a transcript quoting a refusal changes nothing |
+| The **last** match in the dispatch region wins | the CLI's fatal refusal is the last thing written before exit; anything the agent said is necessarily earlier |
+| Only one date shape is recognised | `<Month> <day>, <year> <h:mm AM/PM>`, read as host-local (the CLI prints no timezone, and the process that printed it and the daemon that reads it are the same host). A relative horizon, a bare time, an ambiguous/nonexistent local time (DST) all parse to nothing |
+| Temporal policy is downstream | a horizon already past, or further out than 35 days, falls back to the configured cooldown — a bogus reading degrades to the pre-#8539 behaviour rather than inventing a hold |
+
+The parse happens in `loom-daemon`, not in `spawn-codex.sh`, for two reasons:
+date parsing is new executable logic and belongs in the daemon
+([shell-language-policy.md](https://github.com/rjwalters/loom/blob/main/.loom/docs/shell-language-policy.md)),
+and a new `LOOM_TERMINAL_RESULT` field
+would be dropped wholesale by an older daemon on a mixed-version host, losing
+the bad-mark along with the horizon. Parsing text the adapter already writes
+cannot regress an existing path.
+
+After such a refusal, `accounts check` reports the account `exhausted` with the
+parsed instant in `Resets at`, and `select_healthy_at` skips it until exactly
+then.
 
 Three guardrails bound what a measurement may do:
 
