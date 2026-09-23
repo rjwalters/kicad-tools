@@ -4514,6 +4514,67 @@ def create_hybrid_router(
 # ---------------------------------------------------------------------------
 
 
+def grid_layer_indices(cpp_grid: CppGrid) -> dict[str, int] | None:
+    """KiCad copper-layer name -> C++ grid layer index (module-level, #5410)."""
+    index_to_layer = getattr(cpp_grid, "_index_to_layer", None)
+    if not index_to_layer:
+        return None
+    from .layers import Layer
+
+    names: dict[str, int] = {}
+    for index, enum_value in index_to_layer.items():
+        try:
+            names[Layer(enum_value).kicad_name] = int(index)
+        except ValueError:  # pragma: no cover - defensive
+            continue
+    return names or None
+
+
+def install_pairwise_domains(
+    cpp_grid: CppGrid, rules, net_name_to_id: dict[str, int], attach_zones=()
+) -> bool:
+    """Install the pairwise (HV-isolation) matrix + attach zones on *cpp_grid*.
+
+    Module-level sibling of ``CppPathfinder._sync_pairwise_domains_to_cpp``, for
+    a ``CppGrid`` that has no ``CppPathfinder`` -- the coupled diff-pair search
+    builds its own (Issue #5410).
+
+    Returns True when the grid's cross-domain widening is faithful: either
+    there is no table at all (dormant by construction, the pre-#4510 verdict),
+    or the translated payload was pushed.  Returns **False** when a table
+    exists but could not be installed -- the caller must then keep any
+    geometry-based clearance refinement switched off, because the C++ grid
+    would answer with the scalar clearance where the Python side would widen.
+    """
+    table = getattr(rules, "pairwise_clearance", None)
+    if table is None:
+        return True
+    impl = getattr(cpp_grid, "_impl", None)
+    if impl is None or not hasattr(impl, "set_pairwise_domains"):
+        return False
+    from .pairwise_clearance import attach_zones_to_net_ids, build_cpp_domain_matrix
+
+    domains = build_cpp_domain_matrix(table, net_name_to_id)
+    if domains is None:
+        return False
+    cpp_zones = []
+    for min_x, min_y, max_x, max_y, net_ids, net_layers in attach_zones_to_net_ids(
+        attach_zones, net_name_to_id, grid_layer_indices(cpp_grid)
+    ):
+        zone = router_cpp.AttachZone()
+        zone.min_x = min_x
+        zone.min_y = min_y
+        zone.max_x = max_x
+        zone.max_y = max_y
+        zone.net_ids = net_ids
+        if net_layers:
+            zone.net_layers = {net_id: sorted(indices) for net_id, indices in net_layers.items()}
+        cpp_zones.append(zone)
+    impl.set_pairwise_domains(domains.net_to_domain, domains.matrix)
+    impl.set_attach_zones(cpp_zones)
+    return True
+
+
 def project_via_spans(cpp_grid: CppGrid, layers) -> list[tuple[int, int]]:
     """Project physical via copper onto contiguous runs of grid layer indices.
 

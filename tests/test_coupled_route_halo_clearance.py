@@ -21,6 +21,7 @@ import pytest
 from kicad_tools.router.cpp_backend import (
     CppCoupledPathfinder,
     CppGrid,
+    install_pairwise_domains,
     is_cpp_available,
     replay_route_halo_marks,
     sync_stored_routes,
@@ -67,12 +68,19 @@ def _context(*, armed: bool = True) -> tuple[RoutingGrid, CoupledPathfinder]:
 
 
 def _cpp_pathfinder(grid: RoutingGrid, pathfinder: CoupledPathfinder) -> CppCoupledPathfinder:
-    """Build the C++ coupled search over a faithful copy of *grid*."""
+    """Build the C++ coupled search over a faithful copy of *grid*.
+
+    Mirrors ``CoupledPathfinder._ensure_cpp_coupled``, including its
+    fail-closed pairwise gate: provenance is replayed only onto a grid whose
+    cross-domain widening was installed.
+    """
     saved = getattr(grid, "_cpp_grid", None)
     try:
         cpp_grid = CppGrid.from_routing_grid(grid)
-        sync_stored_routes(cpp_grid, grid)
-        replay_route_halo_marks(cpp_grid, grid)
+        names = pathfinder._halo_refiner._net_name_to_id
+        if install_pairwise_domains(cpp_grid, pathfinder.rules, names):
+            sync_stored_routes(cpp_grid, grid)
+            replay_route_halo_marks(cpp_grid, grid)
     finally:
         grid._cpp_grid = saved
     return CppCoupledPathfinder(
@@ -295,3 +303,115 @@ def test_cpp_checks_the_swept_step_not_only_its_endpoint():
     cpp = _cpp_pathfinder(grid, pathfinder)
     assert not cpp.trace_blocked(56, 56, LAYER, 1)
     assert cpp.trace_blocked(56, 56, LAYER, 1, (55, 56))
+
+
+@requires_cpp
+def test_cpp_refinement_preserves_pairwise_hv_widening():
+    """The C++ grid re-measures against its OWN pairwise matrix (#5410).
+
+    The coupled search builds a private ``CppGrid`` that no ``CppPathfinder``
+    ever installs cross-domain widening on, so replaying halo provenance onto
+    it without the matrix would waive an HV requirement the Python side
+    applies.  The refinement is gated on that install.
+    """
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+    grid, pathfinder = _context()
+    pathfinder.rules.pairwise_clearance = PairwiseClearanceTable(
+        dru=0.15, net_voltages={"N1": 0, "N2": 300}, required_by_pair={("N1", "N2"): 0.4}
+    )
+    cpp = _cpp_pathfinder(grid, pathfinder)
+    assert cpp.via_blocked(*LEGAL, 1)
+    assert cpp.via_blocked(*LEGAL, 1) == pathfinder._is_via_blocked(*LEGAL, 1)
+
+
+@requires_cpp
+def test_cpp_refinement_stays_dormant_when_widening_cannot_be_installed():
+    """An untranslatable table keeps the conservative raster verdict."""
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+    grid, pathfinder = _context(armed=False)
+    pathfinder.rules.pairwise_clearance = PairwiseClearanceTable(
+        dru=0.15, net_voltages={"N1": 0, "N2": 300}, required_by_pair={("N1", "N2"): 0.4}
+    )
+    # No net-name map -> the domain matrix cannot be built -> no replay.
+    cpp = _cpp_pathfinder(grid, pathfinder)
+    assert cpp.trace_blocked(*LEGAL, LAYER, 1)
+    assert cpp.via_blocked(*LEGAL, 1)
+
+
+# ---------------------------------------------------------------------------
+# Search-level witness
+# ---------------------------------------------------------------------------
+
+
+def _channel_context(armed: bool, use_cpp: bool):
+    """A coupled pair whose straight channel is sealed only by a halo.
+
+    A committed foreign via sits 0.7 mm above the P trace's row: its
+    conservative halo reaches the row, its copper does not.
+    """
+    from kicad_tools.router.primitives import Pad
+
+    rules = DesignRules()
+    grid = RoutingGrid(width=12.7, height=12.7, rules=rules)
+    obstacle = Route(net=9, net_name="OBST")
+    obstacle.vias.append(
+        Via(6.0, 3.3, rules.via_drill, rules.via_diameter, (Layer.F_CU, Layer.B_CU), 9, "OBST")
+    )
+    grid.mark_route(obstacle)
+    pathfinder = CoupledPathfinder(
+        grid=grid, rules=DesignRules(), target_spacing_cells=2, min_spacing_cells=2
+    )
+    pathfinder._use_cpp_coupled = use_cpp
+    if armed:
+        pathfinder.set_net_name_to_id({"D+": 1, "D-": 2, "OBST": 9})
+    pads = (
+        Pad(x=2.0, y=4.0, width=0.4, height=0.4, net=1, net_name="D+", layer=Layer.F_CU),
+        Pad(x=10.0, y=4.0, width=0.4, height=0.4, net=1, net_name="D+", layer=Layer.F_CU),
+        Pad(x=2.0, y=6.0, width=0.4, height=0.4, net=2, net_name="D-", layer=Layer.F_CU),
+        Pad(x=10.0, y=6.0, width=0.4, height=0.4, net=2, net_name="D-", layer=Layer.F_CU),
+    )
+    return grid, pathfinder, pads
+
+
+def test_python_coupled_search_crosses_a_legal_halo_channel():
+    grid, pathfinder, pads = _channel_context(armed=False, use_cpp=False)
+    assert pathfinder.route_coupled(*pads, max_iterations_budget=20000) is None
+
+    grid, pathfinder, pads = _channel_context(armed=True, use_cpp=False)
+    result = pathfinder.route_coupled(*pads, max_iterations_budget=20000)
+    assert result is not None
+    p_route, n_route = result
+    assert pathfinder.last_coupled_backend == "python"
+    for segment in p_route.segments + n_route.segments:
+        assert grid.validate_segment_clearance(segment, segment.net)[0]
+
+
+@requires_cpp
+def test_cpp_coupled_search_crosses_a_legal_halo_channel():
+    grid, pathfinder, pads = _channel_context(armed=True, use_cpp=True)
+    result = pathfinder.route_coupled(*pads, max_iterations_budget=20000)
+    assert result is not None
+    assert pathfinder.last_coupled_backend == "cpp"
+    p_route, n_route = result
+    for segment in p_route.segments + n_route.segments:
+        assert grid.validate_segment_clearance(segment, segment.net)[0]
+
+
+@requires_cpp
+def test_cpp_channel_is_sealed_again_when_provenance_is_not_replayed():
+    """The C++ refinement is load-bearing for this channel, and fail-closed.
+
+    An unnameable pairwise table blocks the provenance replay (the C++ grid's
+    own cross-domain widening could not be installed), so the coupled search
+    falls back to the conservative raster -- and the channel seals shut again,
+    exactly as it does on the unrefined Python backend.
+    """
+    from kicad_tools.router.pairwise_clearance import PairwiseClearanceTable
+
+    _, pathfinder, pads = _channel_context(armed=False, use_cpp=True)
+    pathfinder.rules.pairwise_clearance = PairwiseClearanceTable(
+        dru=0.15, net_voltages={"D+": 0, "OBST": 300}, required_by_pair={("D+", "OBST"): 0.4}
+    )
+    assert pathfinder.route_coupled(*pads, max_iterations_budget=20000) is None

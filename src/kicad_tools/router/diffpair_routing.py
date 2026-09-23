@@ -2756,10 +2756,25 @@ class CoupledPathfinder:
                 # C++ search can tell a conservative route halo apart from a
                 # hard constraint; without both, ``route_cell_has_geometry``
                 # answers false everywhere and the refinement stays dormant.
-                from .cpp_backend import replay_route_halo_marks, sync_stored_routes
+                #
+                # FAIL-CLOSED on cross-domain (HV-isolation) widening: the
+                # refinement re-measures a candidate against the C++ grid's own
+                # pairwise matrix, so replaying provenance onto a grid whose
+                # matrix was NOT installed would waive widening the Python side
+                # applies.  Install it first and skip the replay if it did not
+                # take -- the search then keeps its conservative raster verdict.
+                from .cpp_backend import (
+                    install_pairwise_domains,
+                    replay_route_halo_marks,
+                    sync_stored_routes,
+                )
 
-                sync_stored_routes(cpp_grid, self.grid)
-                replay_route_halo_marks(cpp_grid, self.grid)
+                names = self._halo_refiner._net_name_to_id
+                if install_pairwise_domains(
+                    cpp_grid, self.rules, names, self._halo_refiner._attach_zones
+                ):
+                    sync_stored_routes(cpp_grid, self.grid)
+                    replay_route_halo_marks(cpp_grid, self.grid)
             finally:
                 self.grid._cpp_grid = saved_cpp_grid
             impl = CppCoupledPathfinder(
