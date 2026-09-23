@@ -252,6 +252,15 @@ def generate_dru(
     # silk-to-pad as a silk-layer restriction: native cross-layer pairs need
     # an explicit rule. No blanket same-net physical_clearance is emitted.
     if rules.min_silk_to_pad_clearance_mm is not None:
+        # This rule is load-bearing, not belt-and-braces: the project key
+        # ``board.design_settings.rules.min_silk_clearance`` was MEASURED not
+        # to gate a sub-floor silk-to-pad gap at all (KiCad CLI 10.0.1: silent
+        # on a 0.085 mm gap even when raised to 2.0 mm, while the same project
+        # block demonstrably loaded).  Deleting this rule in the belief that
+        # the project setting covers it silently drops the factory floor --
+        # ``tests/test_effective_silk_clearance_5059.py`` measures both halves
+        # against real below-limit geometry so that cannot happen quietly.
+        #
         # Severity is deliberately left to the project's DRC severity map
         # (KiCad classifies ``silk_over_copper`` -- "Silkscreen clipped by
         # solder mask" -- as a WARNING by default).  The factory floor is a

@@ -176,6 +176,14 @@ def build_project_rules(rules: DesignRules) -> dict[str, float]:
         "min_microvia_drill": _MICRO_VIA_FLOOR_HOLE_MM,
         "min_hole_to_hole": rules.min_hole_to_hole_mm,
         "min_copper_edge_clearance": rules.min_copper_to_edge_mm,
+        # NOTE (#5059): this key is fed from the solder-mask clearance, NOT
+        # from ``min_silk_to_pad_clearance_mm`` (0.05 mm vs 0.15 mm for
+        # JLCPCB).  The mapping predates #5059 (#3720) and is reproduced in
+        # committed board/fixture ``.kicad_pro`` artifacts.  It was measured
+        # to have no effect on a sub-floor silk-to-pad gap in either
+        # direction, so the factory silkscreen floor is carried by the
+        # explicit ``Silk to Pad`` rule in the ``.kicad_dru`` instead -- see
+        # ``tests/test_effective_silk_clearance_5059.py``.
         "min_silk_clearance": rules.min_solder_mask_clearance_mm,
         "min_text_thickness": rules.min_silkscreen_width_mm,
         "min_text_height": rules.min_silkscreen_height_mm,

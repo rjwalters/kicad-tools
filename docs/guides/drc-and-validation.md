@@ -12,6 +12,82 @@ Different PCB manufacturers have different capabilities:
 
 kicad-tools includes profiles for popular manufacturers and can validate your design against their limits.
 
+## Three gates, not one
+
+A board that is ready to fabricate has to clear **three independent gates**.
+Passing one says nothing about the others, and none of them is a substitute
+for another:
+
+| Gate | Run by | Answers |
+|------|--------|---------|
+| **Native DRC** | `kicad-cli pcb drc` (reads `.kicad_pro` + `.kicad_dru`) | Does the geometry satisfy the constraints KiCad's own engine evaluates? |
+| **`kct check --mfr`** | kicad-tools' own checker | Does the geometry satisfy the manufacturer floors, including the ones KiCad's rule language cannot express? |
+| **Factory DFM** | The fab, after upload | Will *this* supplier, on *this* process and panel, accept the job? |
+
+Two consequences are worth stating plainly:
+
+- **Native DRC is not factory DFM.** A clean `kicad-cli pcb drc` run means the
+  constraints in the sidecars were satisfied. It is not supplier approval:
+  the fab applies its own DFM review, tooling limits, panel utilisation and
+  process-specific allowances, and can reject or silently modify a board that
+  passes every rule here. Conversely, a factory DFM report is not a DRC
+  substitute — it is generated against a specific uploaded revision and is
+  not re-derivable from the board alone (see
+  [Submission Preparation](submission-preparation.md) for how a raster DFM
+  report is bound to the exact upload it audited).
+- **`kct check --mfr` and native DRC are not redundant.** Some manufacturer
+  floors have no native custom-rule equivalent (a numeric solder-mask web
+  floor, for example), and some need a scope KiCad's rule language cannot
+  express — the different-net SMD-pad-to-SMD-pad floor is a *placement*
+  limit, so it must be scoped to pads in **different** footprints, which the
+  rule grammar has no predicate for. Those are enforced Python-side. Others
+  need the native engine because only it sees the filled/plotted geometry.
+  Run both.
+
+### Emitted constraints are not effective constraints
+
+It is tempting to check a manufacturer profile by reading the numbers it
+writes into `.kicad_pro` / `.kicad_dru`. That only proves kicad-tools
+serialised what it meant to; it cannot detect a constraint the native engine
+declines to apply to the pair you care about. A constraint is only real if a
+board whose geometry sits *below* it produces a finding.
+
+A measured example, which is why this repository tests effective behaviour
+against deliberately below-limit geometry
+(`tests/test_effective_silk_clearance_5059.py`, issue #5059):
+
+On KiCad CLI **10.0.1**, a minimal board with a 0.085 mm gap between a
+silkscreen line and an SMD pad's mask aperture reported **no** silk finding
+from `board.design_settings.rules.min_silk_clearance` alone — not at the
+0.15 mm factory floor, and not with that key raised to 2.0 mm. The same
+project block *was* being read: raising `min_clearance` on the same fixture
+produced `board minimum clearance 0.5000 mm; actual 0.1200 mm`. Adding an
+explicit rule on byte-identical geometry:
+
+```lisp
+(rule "Silk to Pad"
+  (condition "A.Type == 'Pad' || B.Type == 'Pad'")
+  (constraint silk_clearance (min 0.15mm)))
+```
+
+reported `silk_over_copper` with `clearance 0.1500 mm; actual 0.0850 mm`.
+KiCad's built-in silk check does fire with no `min_silk_clearance` key
+present at all, once the silk genuinely *overlaps* the aperture — and reports
+no numeric clearance/actual pair, consistent with an overlap test rather than
+a gap threshold. This is a behavioural characterisation, not a claim about
+KiCad's implementation; the upstream cause has not been established here.
+
+The practical rule that follows: **cross-layer silk clearance needs an
+explicit rule in the `.kicad_dru`.** kicad-tools emits one for the profiles
+that publish a silkscreen-to-pad floor. Do not assume the project key covers
+it, and do not verify a profile change by diffing emitted values alone.
+
+> Care is needed in the other direction too. A blanket same-net
+> `physical_clearance` over every copper object is *not* the way to get
+> net-independent gap checks: on a real board that experiment produced 499
+> warnings, including intentional track joins. Net-independent checks need
+> geometry-aware treatment, not a broader rule.
+
 ## Prerequisites
 
 ```bash
