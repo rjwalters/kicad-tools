@@ -3,6 +3,7 @@
 import json
 import subprocess
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +21,7 @@ def board_fixture(path, kind, gap, *, layer="F.Cu", same_net=False, pad_type="sm
             '(pad "1" thru_hole circle (at 0 0) (size .7 .7) (drill .4) '
             '(layers "*.Cu" "*.Mask") (net 1 "A"))'
         )
-        first = f'(footprint "T" (layer "F.Cu") (at 10 10) {pad})'
+        first = f'(footprint "T" (layer "F.Cu") (at 10 10) {_REF_TEXT[0]} {pad})'
         if kind == "via":
             first = '(via (at 10 10) (size .7) (drill .4) (layers "F.Cu" "B.Cu") (net 1))'
         x = 10 + 0.2 + gap + 0.06
@@ -28,13 +29,13 @@ def board_fixture(path, kind, gap, *, layer="F.Cu", same_net=False, pad_type="sm
     else:
         mask = ' "F.Mask"' if masked else ""
         drill = "(drill .4)" if pad_type == "thru_hole" else ""
-        first = f'(footprint "T" (layer "F.Cu") (at 10 10) (pad "1" {pad_type} rect (at 0 0) (size 1 1) {drill} (layers "F.Cu"{mask}) (net 1 "A")))'
+        first = f'(footprint "T" (layer "F.Cu") (at 10 10) {_REF_TEXT[0]} (pad "1" {pad_type} rect (at 0 0) (size 1 1) {drill} (layers "F.Cu"{mask}) (net 1 "A")))'
         if kind == "silk":
             x = 10.5 + gap + 0.075
             silk_layer = "F.SilkS" if layer == "F.Cu" else "B.SilkS"
             other = f'(gr_line (start {x} 9) (end {x} 11) (stroke (width .15) (type default)) (layer "{silk_layer}"))'
         else:
-            other = f'(footprint "T" (layer "{layer}") (at {11 + gap} 10) (pad "2" smd rect (at 0 0) (size 1 1) (layers "{layer}") (net {net} "{"A" if same_net else "B"}")))'
+            other = f'(footprint "T" (layer "{layer}") (at {11 + gap} 10) {_REF_TEXT[1]} (pad "2" smd rect (at 0 0) (size 1 1) (layers "{layer}") (net {net} "{"A" if same_net else "B"}")))'
     path.write_text(f"""(kicad_pcb (version 20240108) (generator pcbnew)
       (general (thickness 1.6)) (paper "A4")
       (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
@@ -44,6 +45,22 @@ def board_fixture(path, kind, gap, *, layer="F.Cu", same_net=False, pad_type="sm
       (gr_rect (start 0 0) (end 20 20) (stroke (width .1) (type default))
        (fill none) (layer "Edge.Cuts")) {first} {other})""")
     return path
+
+
+#: Reference designators for the fixture's two independently placed
+#: footprints.  KiCad 10 documents that footprint children (pads) carry
+#: their parent footprint's ``Reference`` (pcbnew manual, custom design
+#: rules -> footprint properties), which is what the native
+#: different-footprint scope keys on -- so the fixture models a realistic
+#: placed board, where every footprint has a reference.  The texts sit on
+#: opposite sides of their footprints so they never overlap each other or
+#: the probe gap and become findings of their own.
+_REF_TEXT = (
+    '(fp_text reference "U1" (at 0 -2.5) (layer "F.SilkS")'
+    " (effects (font (size 1 1) (thickness 0.15))))",
+    '(fp_text reference "U2" (at 0 2.5) (layer "F.SilkS")'
+    " (effects (font (size 1 1) (thickness 0.15))))",
+)
 
 
 CASES = [
@@ -122,15 +139,19 @@ def test_native_object_specific_clearance(tmp_path, kind, gap, options, expected
     violations = json.loads(report.read_text())["violations"]
     assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
     if kind == "smd":
-        # The different-net SMD pad floor is intentionally Python-only (no
-        # native rule is emitted -- see
-        # ``test_optional_constraints_preserve_other_profiles_and_stricter_general_clearance``),
-        # so native DRC must stay silent on every SMD probe regardless of
-        # ``expected``.  ``expected`` describes the ``kct check`` verdict, which
-        # ``test_python_object_specific_clearance`` asserts.
-        assert not [v for v in violations if "rule 'SMD Pad Clearance" in v["description"]], (
-            violations
-        )
+        # The different-net SMD pad floor is emitted natively, scoped by the
+        # two predicates the deferral in #5705 thought impossible:
+        # ``A.Pad_Type == 'SMD'`` on both sides and
+        # ``A.Reference != B.Reference`` -- footprint children carry their
+        # parent's Reference (KiCad 10 custom-rules docs, footprint
+        # properties), so package-internal pairs compare equal and stay
+        # exempt.  ``expected`` describes the ``kct check`` verdict; the
+        # native rule agrees on every case in this matrix because the
+        # fixture gives its two footprints distinct references.
+        relevant = [v for v in violations if "rule 'SMD Pad Clearance" in v["description"]]
+        assert bool(relevant) == expected, violations
+        if expected:
+            assert relevant[0]["severity"] == "error"
         return
     names = {
         "silk": ("Silk to Pad",),
@@ -157,14 +178,17 @@ def test_optional_constraints_preserve_other_profiles_and_stricter_general_clear
     assert "Silk to Pad" in emitted
     assert "PTH Hole to Track" in emitted
     assert "Inner PTH Hole to Copper" in emitted
-    # The different-net SMD pad floor is deliberately NOT emitted as a native
-    # rule: KiCad's rule language has no "same footprint" predicate, so a
-    # native rule would also police package-internal geometry the designer
-    # cannot change (stock fine-pitch QFP/QFN pad rows sit under the floor by
-    # construction).  ``kct check`` enforces it instead, where the
-    # different-footprint scope is expressible -- see
-    # ``test_python_smd_floor_is_scoped_to_different_footprints``.
-    assert "SMD Pad Clearance" not in emitted
+    # The different-net SMD pad floor IS emitted natively, scoped to pads of
+    # different footprints via ``A.Reference != B.Reference``: KiCad 10
+    # documents that footprint children (pads) carry their parent's
+    # Reference, so package-internal pairs compare equal and stay exempt --
+    # the QFP/QFN wall that kept this rule Python-only before.  The Python
+    # floor remains authoritative where the string key cannot discriminate
+    # (blank or duplicated reference designators); see
+    # ``test_native_smd_floor_omits_pairs_sharing_a_reference_designator``.
+    assert "SMD Pad Clearance" in emitted
+    assert "A.Reference != B.Reference" in emitted
+    assert "A.Pad_Type == 'SMD'" in emitted
     legacy = replace(
         rules,
         min_silk_to_pad_clearance_mm=None,
@@ -173,6 +197,7 @@ def test_optional_constraints_preserve_other_profiles_and_stricter_general_clear
         min_inner_pth_hole_to_copper_mm=None,
     )
     assert "Silk to Pad" not in generate_dru(legacy)
+    assert "SMD Pad Clearance" not in generate_dru(legacy)
     strict = replace(rules, min_clearance_mm=0.2)
     path = board_fixture(tmp_path / "probe.kicad_pcb", "smd", 0.18)
     violations = ClearanceRule().check(PCB.load(path), strict).violations
@@ -180,21 +205,32 @@ def test_optional_constraints_preserve_other_profiles_and_stricter_general_clear
     assert "(constraint clearance (min 0.2mm))" in generate_dru(strict)
 
 
-def _two_pad_board(path, gap, *, same_footprint):
-    """Two different-net SMD pads ``gap`` apart, in one or two footprints."""
+def _two_pad_board(path, gap, *, same_footprint, references=("U1", "U2")):
+    """Two different-net SMD pads ``gap`` apart, in one or two footprints.
+
+    ``references`` names the two footprints' reference designators.  The
+    default ``("U1", "U2")`` models a realistic placed board and is what
+    the native ``A.Reference`` scope keys on; passing blank or identical
+    strings exercises the documented boundary where the native rule
+    cannot discriminate and the Python identity-scoped floor stands alone.
+    """
     pad_a = '(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "A"))'
     pad_b = f'(pad "2" smd rect (at {1 + gap} 0) (size 1 1) (layers "F.Cu") (net 2 "B"))'
+    ref_a = f'(fp_text reference "{references[0]}" (at 0 -2.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))'
     if same_footprint:
         # One placed footprint owning both pads -- package-internal geometry.
-        bodies = f'(footprint "T" (layer "F.Cu") (at 10 10) {pad_a} {pad_b})'
+        # Both pads necessarily share the parent's single reference.
+        bodies = f'(footprint "T" (layer "F.Cu") (at 10 10) {ref_a} {pad_a} {pad_b})'
     else:
-        # Two independently placed footprints.  Note both carry a BLANK
-        # reference, exactly like the shared ``board_fixture`` boards: the
-        # different-footprint scope must not be keyed on the reference string.
+        # Two independently placed footprints.  With blank references this
+        # pins the Python scope to footprint IDENTITY (which is neither
+        # unique nor guaranteed present as a string); with distinct
+        # references it is also the native rule's case.
+        ref_b = f'(fp_text reference "{references[1]}" (at 0 -2.5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))'
         pad_b_local = '(pad "2" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 2 "B"))'
         bodies = (
-            f'(footprint "T" (layer "F.Cu") (at 10 10) {pad_a}) '
-            f'(footprint "T" (layer "F.Cu") (at {11 + gap} 10) {pad_b_local})'
+            f'(footprint "T" (layer "F.Cu") (at 10 10) {ref_a} {pad_a}) '
+            f'(footprint "T" (layer "F.Cu") (at {11 + gap} 10) {ref_b} {pad_b_local})'
         )
     path.write_text(f"""(kicad_pcb (version 20240108) (generator pcbnew)
       (general (thickness 1.6)) (paper "A4")
@@ -219,16 +255,97 @@ def test_python_smd_floor_is_scoped_to_different_footprints(tmp_path, same_footp
     25/37), so flagging it would declare every such package unmanufacturable.
 
     The two-footprint board deliberately gives both footprints a BLANK
-    reference, pinning the scope to footprint IDENTITY rather than to the
-    reference string (which is neither unique nor guaranteed present).
+    reference, pinning the Python scope to footprint IDENTITY rather than to
+    the reference string (which is neither unique nor guaranteed present).
     """
-    path = _two_pad_board(tmp_path / "probe.kicad_pcb", 0.12, same_footprint=same_footprint)
+    path = _two_pad_board(
+        tmp_path / "probe.kicad_pcb", 0.12, same_footprint=same_footprint, references=("", "")
+    )
     rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
     assert rules.min_smd_pad_clearance_mm == 0.15
     violations = ClearanceRule().check(PCB.load(path), rules).violations
     assert bool(violations) == expected, violations
     if expected:
         assert violations[0].required_value == pytest.approx(0.15)
+
+
+def _run_native_drc(path: Path) -> list[dict]:
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("Native KiCad CLI is not installed")
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+    write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=4)
+    report = path.parent / "native.json"
+    proc = subprocess.run(
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            "--severity-all",
+            "--format",
+            "json",
+            "-o",
+            str(report),
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    violations = json.loads(report.read_text())["violations"]
+    assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
+    return violations
+
+
+@pytest.mark.parametrize("same_footprint,expected", [(False, True), (True, False)])
+def test_native_smd_floor_is_scoped_to_different_footprints(tmp_path, same_footprint, expected):
+    """The emitted ``SMD Pad Clearance`` rule exempts package-internal pairs.
+
+    Native twin of ``test_python_smd_floor_is_scoped_to_different_footprints``
+    on a referenced board (every footprint carries a distinct reference
+    designator, as any realistically placed board does).  The QFP/QFN wall
+    that kept this floor Python-only (#5705's deferral) is closed by
+    ``A.Reference != B.Reference``: KiCad 10 documents that footprint
+    children -- pads -- carry their parent footprint's Reference, so pads of
+    one footprint compare equal and the rule never fires package-internally,
+    while two independently placed footprints at the same 0.12 mm
+    sub-floor gap do fire -- measured, not assumed, against
+    ``kicad-cli pcb drc``.
+    """
+    path = _two_pad_board(tmp_path / "probe.kicad_pcb", 0.12, same_footprint=same_footprint)
+    violations = _run_native_drc(path)
+    relevant = [v for v in violations if "rule 'SMD Pad Clearance" in v["description"]]
+    assert bool(relevant) == expected, violations
+    if expected:
+        assert relevant[0]["severity"] == "error"
+        assert "actual 0.1200 mm" in relevant[0]["description"]
+
+
+def test_native_smd_floor_omits_pairs_sharing_a_reference_designator(tmp_path):
+    """Documented divergence: the native scope is the reference STRING.
+
+    Two different footprints that share one reference designator (a
+    duplicate-reference anomaly) sit below the floor with distinct
+    footprint identities, so the Python checker -- scoped by identity --
+    reports the pair, while the native ``A.Reference != B.Reference``
+    condition cannot tell them apart and stays silent.  This is the
+    measured boundary of the native rule, not a bug in either engine:
+    duplicate references are themselves a board defect a full DRC run
+    flags separately, and the ``kct check`` floor remains authoritative
+    for exactly this shape.  Both engines must agree once the references
+    are distinct.
+    """
+    path = _two_pad_board(
+        tmp_path / "probe.kicad_pcb", 0.12, same_footprint=False, references=("U1", "U1")
+    )
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+    python_violations = ClearanceRule().check(PCB.load(path), rules).violations
+    assert python_violations, "Python identity-scoped floor must still catch the pair"
+    native_violations = _run_native_drc(path)
+    assert not [v for v in native_violations if "rule 'SMD Pad Clearance" in v["description"]], (
+        native_violations
+    )
 
 
 @pytest.mark.parametrize("kind,gap", [("silk", 0.085), ("smd", 0.12), ("pth", 0.27)])

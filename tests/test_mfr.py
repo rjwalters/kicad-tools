@@ -354,12 +354,12 @@ class TestDRUFiles:
             assert version.values[0] == 1, f"{dru_file} has wrong version"
 
             # JLC has a separate plated-component-pad ring floor, plus the
-            # three object-specific factory rules (#5059): Silk to Pad,
-            # PTH Hole to Track and Inner PTH Hole to Copper.  Only the JLC
-            # profiles declare those optional floors, so the other fabs stay
-            # at the 9 base rules.
+            # four object-specific factory rules (#5059): Silk to Pad,
+            # SMD Pad Clearance, PTH Hole to Track and Inner PTH Hole to
+            # Copper.  Only the JLC profiles declare those optional floors,
+            # so the other fabs stay at the 9 base rules.
             rules = sexp.find_children("rule")
-            expected = 13 if dru_file.startswith("jlcpcb-") else 9
+            expected = 14 if dru_file.startswith("jlcpcb-") else 9
             assert len(rules) == expected
 
 
@@ -860,11 +860,11 @@ class TestDruGenerator:
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
         rule_count = content.count("(rule ")
-        assert rule_count == 13, f"Expected 13 rules, got {rule_count}"
+        assert rule_count == 14, f"Expected 14 rules, got {rule_count}"
         assert 'rule "Silk to Pad - JLCPCB"' in content
         assert 'rule "PTH Hole to Track - JLCPCB"' in content
         assert 'rule "Inner PTH Hole to Copper - JLCPCB"' in content
-        assert "SMD Pad Clearance" not in content
+        assert 'rule "SMD Pad Clearance - JLCPCB"' in content
 
     def test_generate_dru_has_condition_expressions(self):
         """Test that generated DRU includes condition expressions."""
@@ -956,15 +956,16 @@ class TestDruGenerator:
             rules = profile.get_design_rules(layers=2, copper_oz=1.0)
             content = generate_dru(rules, manufacturer_name=profile.name)
             assert "(version 1)" in content, f"Failed for {mfr_id}"
-            # 9 base rules, plus one per OPTIONAL floor the profile declares.
-            # ``min_smd_pad_clearance_mm`` is intentionally excluded: it has no
-            # native rule (no "same footprint" predicate in KiCad's rule
-            # language) and is enforced Python-side only (#5059).
+            # 9 base rules, plus one per OPTIONAL floor the profile declares
+            # (including the different-net SMD pad floor, emitted natively
+            # since the Reference-based different-footprint scope was
+            # measured working; #5059).
             expected = 9 + sum(
                 value is not None
                 for value in (
                     rules.min_pth_annular_ring_mm,
                     rules.min_silk_to_pad_clearance_mm,
+                    rules.min_smd_pad_clearance_mm,
                     rules.min_pth_hole_to_track_mm,
                     rules.min_inner_pth_hole_to_copper_mm,
                 )
