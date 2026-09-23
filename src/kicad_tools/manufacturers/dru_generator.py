@@ -286,9 +286,10 @@ def generate_dru(
     # internal pairs compare equal and stay exempt, which keeps stock
     # fine-pitch QFP/QFN packages (``Package_QFP:LQFP-48_7x7mm_P0.5mm`` has a
     # 0.1414 mm diagonal gap between adjacent pad rows) out of the report.
-    # Measured against ``kicad-cli pcb drc`` 10.0.1 and 10.0.6 in
+    # Measured against ``kicad-cli pcb drc`` 10.0.6 in
     # ``tests/test_factory_object_clearance.py``
-    # (``test_native_smd_floor_is_scoped_to_different_footprints``).
+    # (``test_native_smd_floor_is_scoped_to_different_footprints``); CI's
+    # ``kicad/kicad:10.0`` container exercises the same suite.
     #
     # Known boundary: the native scope is the reference STRING.  Pads under
     # footprints with blank or duplicated references compare equal and are

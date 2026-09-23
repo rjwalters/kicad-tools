@@ -58,7 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   custom-rule docs state that footprint children (pads) carry their parent
   footprint's reference designator, so package-internal pairs compare equal
   and stay exempt (the fine-pitch QFP/QFN wall that kept this floor
-  Python-only). Measured against `kicad-cli pcb drc` 10.0.1 and 10.0.6:
+  Python-only). Measured against `kicad-cli pcb drc` 10.0.6 (CI's
+  `kicad/kicad:10.0` container exercises the same suite):
   a 0.12 mm gap between two referenced footprints fires
   `rule 'SMD Pad Clearance' ... actual 0.1200 mm`; the same gap inside one
   footprint stays silent. Known boundary, pinned by test: the native scope
