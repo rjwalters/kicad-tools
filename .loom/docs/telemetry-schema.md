@@ -68,6 +68,7 @@ only on a **breaking** wire change to the record shapes below. A backend should:
 | `2` | Adds the `role_tick.outcome` record kind (Issue #8056). | **Every `1`-era record shape is byte-identical in `2`.** The bump exists solely because a backend that pattern-matches exhaustively on `kind` has no arm for the new one. A `2` envelope carrying any of the original six kinds is still parseable by a `1`-era reader; a `1` envelope is still parseable by the current daemon (the version is read, never validated, on the read path). Issue #8056's *additive* fields on `sweep.outcome` — `failure_class`, `models_used`, `doctor_cycles` — shipped under `1` and did **not** bump it, exactly as this section prescribes: a new optional field is not a breaking change, a new record kind is. Issue #8222's `judge_verdicts` is additive under `2` for the same reason (and re-sourcing `doctor_cycles` changed the value's provenance, never its wire type). |
 | `3` | Adds `trace.span` (only trace envelopes use this version). | Existing lifecycle envelopes keep version `2`. |
 | `4` | Adds `sweep.identity` (#8713); only identity envelopes use `4`. | Existing lifecycle/trace versions and shapes remain unchanged. Older Workers store unknown kinds in history but cannot enrich live state from them. |
+| `5` | Adds `session.summary` (#8757, G3 of #8714); only session-summary envelopes use `5`. | Existing lifecycle/trace/identity versions and shapes remain unchanged. |
 
 ## `/ingest` response (the bound-`host_id` echo)
 
@@ -144,6 +145,7 @@ records (`tokens.snapshot`, `host.health`) do not.
 | `sweep.outcome` | repo | terminal sweep transition |
 | `sweep.identity` | repo | active launch identity becomes known |
 | `role_tick.outcome` | repo | role-runner tick (Issue #8056) |
+| `session.summary` | repo | ingested transcript (session or subagent, Issue #8757) |
 | `tokens.snapshot` / `host.health` | host | sampling interval |
 
 ### `sweep.started`
@@ -616,6 +618,69 @@ action (`gh issue edit --add-label`, `gh pr comment`, `merge-pr.sh`, `gh api …
 is not counted, and a single command chaining several such invocations counts
 once per bucket. Under-counting is preferred to over-counting: a compound
 command must never inflate the number a fleet decision is made on.
+
+### `session.summary`
+
+One transcript's session shape (Issue #8757, G3 of epic #8714) — emitted by the
+transcript-ingest pass (`activity/transcript_ingest.rs`), one record per
+transcript (parent session or subagent) that the pass re-reads because it
+changed, and exported through whatever exporter(s) `observability` configures.
+A still-growing session is re-summarized on each pass that re-reads it; the
+last record for a session is the complete one, mirroring the
+replace-never-append semantics of the `resource_usage` rows it summarizes.
+
+**A summary, never a transcript excerpt.** Every field is a count, an id, an
+allowlisted name, or derived from timestamps. The parse that produces the
+record never copies message text, tool arguments, or tool output — pinned by
+the redaction test suite (`otlp/mapping/metadata/tests.rs` +
+`activity/session_summary.rs`): a transcript containing a prompt, raw tool
+output, a key and an email produces a record carrying none of the four.
+
+```json
+{
+  "kind": "session.summary",
+  "repo": "loom",
+  "visibility": "private",
+  "session_id": "agent-1",
+  "parent_session_id": "7d8119a7-250a-48ca-a0ee-b4b2c7f14d92",
+  "runtime": "claude",
+  "role": "builder",
+  "issue": 8757,
+  "models": ["claude-sonnet-5", "claude-opus-5"],
+  "tokens_input": 12, "tokens_output": 24,
+  "tokens_cache_read": 100, "tokens_cache_write": 10,
+  "wall_ms": 181000,
+  "turns": 1,
+  "tool_calls": [{ "tool": "Bash", "count": 2 }],
+  "tool_errors": 1
+}
+```
+
+| Field | Type | Always present | Notes |
+|---|---|---|---|
+| `repo` | string | yes | Final path component of the session's cwd (`repo_from_cwd`) — a Loom agent's cwd is the workspace root or a worktree inside it, both mapping to the same name. `unknown` when the transcript carries no parseable cwd (the `cost_by_role` convention). Not an `owner/repo` slug: the ingest pass makes no forge round trip. |
+| `visibility` | `"public"` / `"private"` | yes | Always `private` today — the ingest pass has no slug to key the visibility cache on, so it stamps the fail-closed default every absent/unknown visibility decodes to anyway. |
+| `session_id` | string | yes | The transcript's own `sessionId`, or the subagent file's stem for a `subagents/` transcript whose records restate only the parent's id. |
+| `parent_session_id` | string | no | The enclosing session's uuid, for a `subagents/` transcript; absent for a parent session. |
+| `runtime` | string | yes | `claude` — this pass reads Claude Code transcripts only (#8664's `loom.runtime` vocabulary; per-runtime tails are sibling work). |
+| `role` | string | no | Attributed Loom role from the first user message (`attribute_role`); absent when unattributable. |
+| `issue` | integer | no | The `/loom:<role> <N>` command's first argument, when present. |
+| `pr_number` | integer | no | Reserved — not derivable from a transcript; absent until registry correlation exists. |
+| `models` | string array | yes | Distinct models used, sorted — the `(model, day)` bucket keys collapsed to their model axis. |
+| `tokens_input` / `tokens_output` / `tokens_cache_read` / `tokens_cache_write` | integer | yes | The four counters `activity.db`'s `resource_usage` tracks, deduped by `message.id` (a streamed message counts once) and summed across buckets. |
+| `wall_ms` | integer | yes | Last record timestamp minus first, milliseconds. `0` when the file carries no timestamps. |
+| `turns` | integer | yes | Real user turns — user records whose content is not a tool result. |
+| `tool_calls` | array | yes | Histogram of assistant `tool_use` blocks by tool name (`{ "tool", "count" }`), deduped by `message.id`; empty when the session used no tools. |
+| `tool_errors` | integer | yes | Tool results flagged `is_error`. |
+| `outcome` | string | no | Reserved — this pass has no positive terminal-outcome signal to read from a transcript, so it stays absent until the `session.analysis` slice (or registry correlation) can populate it honestly. |
+
+On the OTLP path this maps to a log record (severity `Info`) with
+`loom.session_id`, `loom.parent_session_id`, `loom.runtime`, `loom.role`,
+`loom.issue`, `loom.models_used`, `loom.tokens.input`, `loom.tokens.output`,
+`loom.tokens.cache_read`, `loom.tokens.cache_write`, `loom.wall_ms`,
+`loom.turns`, `loom.tool_calls` (kvlist array), `loom.tool_errors` and
+`loom.outcome` attributes — all covered by the gateway collector's
+`loom.*` privacy allowlist.
 
 ### `tokens.snapshot`
 

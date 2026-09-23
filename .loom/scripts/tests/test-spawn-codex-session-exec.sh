@@ -78,9 +78,9 @@ out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
     bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
 line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
 
-assert_contains "would-exec: docker exec --workdir $WS --env LOOM_WORKSPACE=$WS -e CARGO_INCREMENTAL=0" "$line" \
+assert_contains "session-exec host --container loom-codex-session-acct --workdir $WS --env LOOM_WORKSPACE=$WS --env CARGO_INCREMENTAL=0" "$line" \
     "the exec carries the caller's cwd as --workdir and LOOM_WORKSPACE, before the container name"
-assert_contains " loom-codex-session-acct codex exec " "$line" \
+assert_contains " -- codex exec " "$line" \
     "…then the container name, then the codex argv"
 assert_contains " hi" "$line" "…and the prompt survives at the end of the argv"
 assert_not_contains "HOME=" "$line" \

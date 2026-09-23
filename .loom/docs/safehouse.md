@@ -49,6 +49,7 @@ below.
 - [Implementation (phase 2)](#implementation-phase-2)
 - [Inbound steering: ChatOps (phase 3a, #7893)](#inbound-steering-chatops-phase-3a-7893)
 - [Operator-agent persona: the Concierge (phase 3b, #7947)](#operator-agent-persona-the-concierge-phase-3b-7947)
+- [The daemon speaking first: digests and watch narrations (phase 4, #8762)](#the-daemon-speaking-first-digests-and-watch-narrations-phase-4-8762)
 <!-- toc:end -->
 
 ## The degradation contract (read this first)
@@ -2072,5 +2073,109 @@ and gets exactly today's read-only narrator.
   cadence, `interval_default: false`) and `role_is_config_gated`.
 
 > Out of scope here, as in 3a: any widening of the daemon's typed enum. Phase 4
-> (interface parity, digests, watch-results posted back into the room) is
-> tracked separately.
+> (interface parity, digests, watch-results posted into the room) landed as
+> #8762 — next section.
+
+## The daemon speaking first: digests and watch narrations (phase 4, #8762)
+
+Phase 3b made the persona purely reactive: it spoke only when an allowlisted
+human addressed it. Phase 4 adds the two things the room could not get that
+way — both rendered by **deterministic code from state the daemon already
+holds**, never by an LLM:
+
+- **`loom-daemon concierge digest`** — one line summarizing what is in flight:
+  live sweeps (from `~/.loom/sweeps.json`) and registered watches (from
+  `~/.loom/watches.json`). No forge call, no model. Suppressed while that state
+  is unchanged (fingerprint of *identity* — issues + workspaces + watch labels —
+  deliberately not of the rendered line, which embeds ages that would make every
+  tick differ); `--force` overrides, `--dry-run` prints without sending.
+- **`loom-daemon concierge narrate-watches`** — says each watch resolution into
+  the room, once, tracking a cursor over the same durable
+  `~/.loom/logs/watch-results.log` the monitor already appends to. A cursor over
+  the log rather than a push hook in the monitor, so a resolution that fired
+  while safehoused was down is narrated on the next pass instead of lost, and
+  the room and `tail watch-results.log` can never disagree.
+
+### One out-path, not three (`concierge::room::emit`)
+
+Three producers now write to the room as the persona — `say`, the digest, and
+the watch narration — and the `addresses-daemon` check they all pass through
+lives in exactly one function, `loom-daemon/src/concierge/room.rs::emit`. It
+runs [`vet_say`](#the-four-relay-gates-conciergerelayvet_relay) (3a's own
+`addresses_persona`, so the prediction cannot drift from the parser it predicts)
+**before any socket is opened**, charges the budget **before** the send, and
+sends last. `say` was rewritten to call it; the two new producers physically
+cannot reach a socket by another route. A digest or narration body that 3a's
+`inbound_command` would read as an addressed command is therefore not merely
+unlikely — it is unsendable, on the identical mechanism as the persona's own
+prose.
+
+### The third budget axis (`maxNarrationsPerDay`)
+
+| Axis | Key | Bounds |
+|---|---|---|
+| Messages acted on per tick | `maxMessagesPerTick` | an LLM turn's relays |
+| Turns per UTC day | `maxTurnsPerDay` | LLM sessions |
+| **Daemon-originated narrations per UTC day** | `maxNarrationsPerDay` (default 48) | **digests + watch lines** — the daemon talking on its own initiative, which has no session to bound it |
+
+Narrations charge no turn and never spend the per-turn relay allowance: a
+mechanical line must not compete with (or be gated by) the persona's commands.
+Ledger field is `narrations`, `#[serde(default)]` so a pre-phase-4 ledger reads
+back as zero.
+
+### Who runs them
+
+The concierge role tick (default 300s) runs both subcommands at the top of its
+turn, **before** `budget --begin-turn` — narrations are bounded by their own
+axis, so they still post on a day whose turn budget is spent. The cadence
+question ("who calls a periodic digest?") is answered by the existing role
+runner rather than a new daemon timer: one less long-lived task, and the
+digest's suppression makes a listening cadence safe for a summary cadence.
+
+### What the persona may and may not do with them
+
+The concierge prompt (`.loom/roles/concierge.md`) carries the one-line rule —
+"you run them, you never author, re-render, or continue them". The reasoning
+behind each clause lives here, so the always-loaded prompt does not pay for it:
+
+- **Never re-render their content via `say`.** If the room should hear it, the
+  subcommand says it — through the same `addresses-daemon` gate as `say`, on the
+  daemon's own narration budget. A hand-typed "digest" via `say` would spend the
+  turn's relay allowance, escape the suppression cursor, and put probabilistic
+  prose where the room expects an auditable line.
+- **Never widen them into conversation.** If an operator replies to a digest
+  line, that reply is ordinary room traffic — handled through `listen` /
+  `propose` like any other message. A digest is not a thread the persona owes a
+  follow-up on.
+- **Phrasing is not the persona's to choose.** Both bodies are rendered by pure
+  functions from daemon state; the `watch resolved — …` prefix is what tells the
+  room this is a report, not an echo of the `watch` verb. `--dry-run` prints what
+  would be said without sending — a diagnostic, not a preview-then-`say`.
+- **A refusal or transport failure is terminal for the tick**, exactly like a
+  failed `say`: report nothing, retry nothing. The next tick retries by running
+  the subcommands again, and a narration-cap refusal recovers the next UTC day.
+
+### Interface parity: what the room still cannot reach (scoping, prerequisite for decomposition)
+
+Phase 4's third bullet was explicitly under-scoped; this is the scoping pass
+the issue required. Enumerated from `mcp-loom/src/tools/` (30 MCP tools),
+`safehouse_chatops/command.rs` (6 typed verbs), and `concierge/intent.rs`
+(5 relayable verbs — `confirm` excluded by design):
+
+| Surface | Reachable from the room today | Not reachable from the room |
+|---|---|---|
+| Sweep lifecycle | `status`, `dispatch`, `cancel`, `watch` | `list_sweeps`, `get_sweep_status`, `tail_sweep_log` (all readable via `status`/prose Q&A only) |
+| Watches | `watch` (register) | `list_watches`, `remove_watch` — **the sharpest gap**: a room-registered watch cannot be room-listed or room-removed |
+| Events | — | `subscribe_to_events`, `publish_event`, `tail_event_bus` |
+| Terminals | — | `create_terminal`, `configure_terminal`, `delete_terminal`, `restart_terminal`, `list_terminals`, `get_terminal_output`, `send_terminal_input`, `set_primary_terminal`, `get_selected_terminal` |
+| Engine control | `dispatch`/`cancel`/`unblock` cover the sweep engine | `start_autonomous_mode`, `stop_autonomous_mode`, `stop_engine`, `launch_interval`, `trigger_start`, `trigger_force_start`, `trigger_force_factory_reset` |
+| Observability | — | `get_ui_state`, `get_agent_metrics`, `get_heartbeat` |
+| Destructive confirm | `confirm <nonce>` (human-typed only) | — (by design; the persona can never relay it) |
+
+Decomposition order this suggests, if parity is pursued: (1) watch management
+(`list_watches` / `remove_watch`) — read-only plus a registry edit, no forge
+side effects, and it closes the loop the room already opened with `watch`;
+(2) read-only status depth (`get_sweep_status`, `tail_sweep_log`) — pure
+narration, no new authority; (3) engine control and terminals — these spend
+tokens, kill work, or factory-reset, and should each need their own explicit
+ruling about whether a room may reach them at all before any verb is proposed.

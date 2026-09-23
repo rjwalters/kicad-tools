@@ -1229,14 +1229,13 @@ Each tick performs the smallest possible edit to it, in this order:
      single-holder case above, just applied to the whole group at once.
    - If an incumbent's issue number is for any reason unreadable from the
      step-1 listing, this tick makes **no** `loom:urgent` writes rather than
-     guess which one to evict — fail closed, the same stance
-     `urgent-flip-guard.sh` takes on an unreadable label-event history below.
+     guess which one to evict — fail closed.
 
 ### `urgency_rank()` — the deterministic ladder
 
 Two independent ticks reading the **same** forge state MUST compute the same
-number here. That reproducibility, not the ladder's sophistication, is what stops
-the flap. Never rank on anything the next tick cannot re-derive mechanically.
+number here. That reproducibility is what stops the flap. Never rank on
+anything the next tick cannot re-derive mechanically.
 
 ```bash
 urgency_rank() {
@@ -1250,7 +1249,8 @@ urgency_rank() {
     echo 1; return
   fi
   # 2 — the delivery pipeline itself is down (nothing ships until it is fixed).
-  if printf '%s\n' "$title" | grep -Eqi 'broken main|main is red|CI is red|pipeline (is )?(stalled|halted|wedged)|outage'; then
+  #     Bare `outage` alone is a component name (#8649/#8769) — it needs a pipeline/CI/build noun.
+  if printf '%s\n' "$title" | grep -Eqi 'broken main|main is red|CI is red|pipeline (is )?(stalled|halted|wedged)|(pipeline|CI|build) outage'; then
     echo 2; return
   fi
   # 3-5 — tier labels (see "Tier-Aware Prioritization" above).

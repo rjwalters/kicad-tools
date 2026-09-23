@@ -164,9 +164,35 @@ loom-daemon archive-transcripts --archive-dir /Volumes/big/transcripts
 
 **Opt-in and operator-driven.** Unlike ingestion, nothing starts this on its
 own: it consumes real disk, and the derived data it backstops is already
-preserved. Run it by hand, or from your own cron/launchd/systemd timer — often
-enough that a transcript is archived before `cleanupPeriodDays` deletes it (a
-daily timer against a 30-day fuse has ample margin).
+preserved. Two ways to run it, both ledgering under the `local` sink:
+
+- **By hand** — run the CLI above, or from your own cron/launchd/systemd
+  timer, often enough that a transcript is archived before
+  `cleanupPeriodDays` deletes it (a daily timer against a 30-day fuse has
+  ample margin).
+- **Scheduled by the daemon (#8758)** — set `autonomous.transcriptArchive` in
+  `.loom/config.json` (see `daemon-reference.md` for the full knob table):
+
+  ```json
+  {
+    "autonomous": {
+      "transcriptArchive": {
+        "enabled": true,
+        "intervalSecs": 86400,
+        "minAgeHours": 24,
+        "archiveDir": "~/.loom/transcript-archives",
+        "sinks": ["local"]
+      }
+    }
+  }
+  ```
+
+  With `enabled: true` the daemon runs the same pass on `intervalSecs`
+  cadence — no manual CLI step, no personal cron. The env overrides are
+  `LOOM_TRANSCRIPT_ARCHIVE_ENABLED` / `_INTERVAL` / `_MIN_AGE_HOURS` /
+  `_DIR` (deliberately not `LOOM_TRANSCRIPT_ARCHIVE`, which the
+  session-transcript archival completion hook already owns); config is
+  resolved once at daemon start, so changes need a restart.
 
 What one pass does, and the guarantees worth knowing:
 
@@ -175,7 +201,7 @@ What one pass does, and the guarantees worth knowing:
 | Output | One dated `transcripts-<UTC-stamp>.tar.zst` plus a sibling `.manifest.json` under `--archive-dir` (default `~/.loom/transcript-archives`) |
 | Manifest | One record per file: path (relative to the projects dir, the same key ingestion's ledger uses), size, mtime, SHA-256 — so an archive can be **audited or selectively restored without unpacking it whole** |
 | Verified | The archive is **read back** after writing and every entry re-hashed against the manifest. An archive that is not read back is not a backup. A mismatch fails the run *before* the ledger is touched, so the same files are retried next run rather than being recorded as done |
-| Incremental | A `transcript_archive` ledger row per archived transcript (size + mtime), mirroring `transcript_ingest`. An unchanged file is skipped on later runs; `--force` re-archives anyway |
+| Incremental | A `transcript_archive` ledger row per **(transcript, sink)** pair (#8758): `local` for the on-disk `.tar.zst` pass, and — when the remote sink lands (#8759) — one row per destination for the same transcript. Within a sink, the row's size + mtime make an unchanged file a cheap skip, mirroring `transcript_ingest`; `--force` re-archives anyway. Pre-#8758 databases migrate to this keying on first open, with every existing row backfilled as `local` |
 | Leaves live sessions alone | `--min-age-hours` (default 24) skips a transcript modified more recently than that, so a still-growing session is snapshotted on a later pass instead of mid-write |
 | `memory/` | Never visited. `~/.claude/projects/<project>/memory/` holds persistent agent memory, not session transcripts |
 | Empty host | A pass with nothing eligible is a **no-op, not an error** |

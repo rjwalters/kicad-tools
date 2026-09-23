@@ -771,8 +771,7 @@ fi
 
 if [[ "$CODEX_SESSION_EXEC" == "true" && "$HAS_PROMPT" != "true" ]]; then
     log_error "Profile '$CODEX_PROFILE_NAME' is session-managed; an interactive host-direct Codex run is not permitted against an adopted profile (ADR-0017 Decision 1)."
-    log_error "For interactive access (e.g. re-authentication), use:"
-    log_error "  loom-daemon accounts session attach $CODEX_PROFILE_NAME"
+    log_error "For interactive re-authentication, use: loom-daemon accounts session attach $CODEX_PROFILE_NAME"
     exit 78  # EX_CONFIG
 fi
 
@@ -984,9 +983,9 @@ if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
     # explicitly for the same reason; host HOME/PATH/CODEX_HOME and ambient
     # provider credentials are deliberately NOT forwarded — the container
     # owns its own CODEX_HOME (ADR-0017 Decision 1).
-    CODEX_INVOKE=(docker exec --workdir "$PWD" --env "LOOM_WORKSPACE=$WORKSPACE" -e CARGO_INCREMENTAL=0)
+    CODEX_INVOKE=("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" session-exec host --container "$CODEX_SESSION_CONTAINER" --workdir "$PWD" --env "LOOM_WORKSPACE=$WORKSPACE" --env CARGO_INCREMENTAL=0 --owner-pid "$PPID")
     for _v in LOOM_ROLE LOOM_RUNTIME LOOM_TERMINAL_ID LOOM_SWEEP_ID LOOM_WORKTREE_PATH LOOM_WORKTREE_ROOT LOOM_PROJECT_ROOT LOOM_SWEEP_CLAIM_OWNED LOOM_ACCOUNT_NAME LOOM_ACCOUNT_PROVIDER; do [[ -n "${!_v:-}" ]] && CODEX_INVOKE+=(--env "$_v=${!_v}"); done
-    CODEX_INVOKE+=("$CODEX_SESSION_CONTAINER")
+    CODEX_INVOKE+=(--)
 fi
 CODEX_INVOKE+=(codex ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"})
 
@@ -1000,26 +999,13 @@ if [[ -n "${LOOM_CODEX_NO_EXEC:-}" ]]; then
 fi
 
 # --- Binary check ---
+# requires-daemon: session-exec >= 0.19.316 Feature-probed for session profiles (#8773).
 # Exit 127 (not 78): 78/EX_CONFIG is reserved for configuration errors,
 # including spawn-worker.sh's unknown-runtime dispatch failure. A missing
 # runtime binary is the contract's "Runtime-missing" facet, which
 # spawn-claude.sh answers with 127.
-if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
-    if ! command -v docker >/dev/null 2>&1; then
-        log_error "'docker' command not found in PATH."
-        log_error "Session-exec dispatch requires Docker to exec into the session container '$CODEX_SESSION_CONTAINER' (issue #6926)."
-        exit 127
-    fi
-    # Fail with a named, actionable error rather than a raw `docker exec`
-    # failure when the session container has not been started (or was
-    # stopped) — the contract's missing-credential-shaped facet, reused for
-    # "missing session container".
-    _session_running="$(docker inspect -f '{{.State.Running}}' "$CODEX_SESSION_CONTAINER" 2>/dev/null || true)"
-    if [[ "$_session_running" != "true" ]]; then
-        log_error "Session container '$CODEX_SESSION_CONTAINER' for profile '$CODEX_PROFILE_NAME' is not running. Start it with: loom-daemon accounts session start $CODEX_PROFILE_NAME"
-        exit 78  # EX_CONFIG
-    fi
-elif ! command -v codex >/dev/null 2>&1; then
+[[ "$CODEX_SESSION_EXEC" != "true" ]] || "${LOOM_DAEMON_SELF_BIN:-loom-daemon}" session-exec protocol >/dev/null 2>&1 || { log_error "Session dispatch requires an updated loom-daemon with session-exec supervision; update Loom before retrying."; exit 78; }
+if [[ "$CODEX_SESSION_EXEC" != "true" ]] && ! command -v codex >/dev/null 2>&1; then
     log_error "'codex' command not found in PATH. Install the OpenAI Codex CLI (>= 0.146.0), e.g.: npm install -g @openai/codex  # or: brew install codex"
     exit 127
 fi
@@ -1045,13 +1031,27 @@ fi
 # exit-code passthrough is preserved despite not using `exec`.
 _stderr_file="$(mktemp -t loom-spawn-codex.XXXXXX 2>/dev/null || mktemp)"
 # shellcheck disable=SC2064  # expand $_stderr_file now, at trap-install time.
-trap "rm -f '$_stderr_file'" EXIT
+trap "rm -f '$_stderr_file' '$_stderr_file.cancel'" EXIT
 
 set +e
 echo "# LOOM_CLI_START runtime=codex" >&2
-{ "${CODEX_INVOKE[@]}" </dev/null 2>&1 1>&3 3>&- \
-    | tee "$_stderr_file" >&2; } 3>&1
-_exit_code=${PIPESTATUS[0]}
+if [[ "$CODEX_SESSION_EXEC" == "true" ]]; then
+    # The Rust transport tees stderr itself. Keep this shell alive until its
+    # cleanup acknowledgement, including signals arriving during child startup.
+    _session_pid=""; _session_cancelled=0
+    trap '_session_cancelled=143; : > "$_stderr_file.cancel"' TERM INT HUP
+    LOOM_SESSION_STDERR_FILE="$_stderr_file" "${CODEX_INVOKE[@]}" </dev/null &
+    _session_pid=$!
+    wait "$_session_pid"; _exit_code=$?
+    # wait is interrupted by a trap; the next wait still owns the live child.
+    while jobs -pr | grep -x "$_session_pid" >/dev/null; do wait "$_session_pid"; _exit_code=$?; done
+    [[ "$_session_cancelled" -eq 0 ]] || _exit_code="$_session_cancelled"
+    trap - TERM INT HUP
+else
+    { "${CODEX_INVOKE[@]}" </dev/null 2>&1 1>&3 3>&- \
+        | tee "$_stderr_file" >&2; } 3>&1
+    _exit_code=${PIPESTATUS[0]}
+fi
 set -e
 
 # --- Session / transcript / cost reporting (contract points 1, 2 and 4) ---
