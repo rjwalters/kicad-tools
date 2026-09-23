@@ -9,6 +9,26 @@ on:
 permissions:
   contents: read
 
+# Single source of truth for every KiCad container this workflow runs (#5682).
+# Docker Hub moved the floating kicad/kicad:10.0 tag from 10.0.5 to 10.0.6 on
+# 2026-09-22 with no repo-visible signal, silently changing measured native
+# behaviour and skipping every step after the native mask-to-copper gate
+# (#5678). The digest below is the exact build kicad/kicad:10.0 resolved to
+# when this pin landed (== 10.0.6), so pinning changes nothing today -- it
+# only makes the *next* tag move a deliberate, reviewable PR. Bump procedure
+# (native-gate re-qualification + QUALIFIED_NATIVE_VERSIONS update in the same
+# change): docs/contributing/kicad-image-pin.md.
+#
+# Why an `env:` plus a bridge job rather than `${{ env.KICAD_IMAGE }}` at each
+# `container.image`: GitHub does not allow the `env` context in
+# jobs.<job_id>.container.image (only github/inputs/matrix/needs/strategy/vars
+# -- "Unrecognized named-value: 'env'" otherwise), and this workflow is not a
+# reusable workflow, so `inputs` is unavailable too. The `kicad_pin` job below
+# republishes this one literal into the `needs` context the container jobs CAN
+# reference, keeping the digest to this single line.
+env:
+  KICAD_IMAGE: kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec
+
 # One live run per ref (2AMLogic/2am#29, 2026-09-11). PR branches: a new push
 # cancels the run it supersedes -- a third of the ~370 daily runs were
 # superseded and still ran all 18 jobs to completion. main: a running
@@ -22,6 +42,21 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Bridge job (#5682): republishes the workflow-level KICAD_IMAGE env value
+  # (the single digest source of truth above) into the `needs` context, since
+  # `container.image` cannot reference the `env` context directly. Runs on
+  # every event with no `if:` gate -- including main pushes, where the
+  # PR-only `changes` job below is skipped -- so the 12 container jobs always
+  # resolve a non-empty image.
+  kicad_pin:
+    name: KiCad image pin (env -> needs bridge)
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+    steps:
+      - name: Publish KICAD_IMAGE into the needs context
+        id: pin
+        run: echo "image=${KICAD_IMAGE}" >> "$GITHUB_OUTPUT"
   # Detect whether a PR touches anything CI can act on. 55 of the last 60 PRs
   # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
   # board job legitimately depends on the router source, so this is NOT a
@@ -156,7 +191,7 @@ jobs:
 
   test:
     name: Test
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
@@ -263,7 +298,7 @@ jobs:
     # All of these failures were previously invisible because the Test
     # step had continue-on-error.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
       # to the kicad slots' cores (6-31,38-63: their physical cores plus the
@@ -565,7 +600,7 @@ jobs:
 
   kicad-cli-smoke:
     name: kicad-cli Round-trip Smoke
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -589,7 +624,7 @@ jobs:
     # generator_version 9.0 → 10.0) in PR #2716. KiCad 9 cannot load files
     # in the new format, so the smoke gate has to track the writer.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # Run as root so uv/pip installs go to the system site-packages and
       # actions/checkout can write into $GITHUB_WORKSPACE without permission
       # juggling.
@@ -620,7 +655,7 @@ jobs:
           # version string.
           kicad-cli --version | tee /tmp/kicad-cli-version
           grep -qE '(^|[[:space:]])10\.' /tmp/kicad-cli-version || {
-            echo "::error::kicad/kicad:10.0 container does not provide kicad-cli 10.x"
+            echo "::error::pinned KiCad container ($KICAD_IMAGE) does not provide kicad-cli 10.x"
             exit 1
           }
 
@@ -773,7 +808,7 @@ jobs:
           docker run --rm \
             -v "$PWD:$PWD" -w "$PWD" \
             --user 0:0 \
-            kicad/kicad:10.0 \
+            "$KICAD_IMAGE" \
             bash scripts/ci/run_native_routed_drc.sh "${args[@]}"
 
   diffpair-routing-regression:
@@ -822,7 +857,7 @@ jobs:
     # job runs on every PR but is advisory -- its failure does not block
     # the merge button.
     name: Diff-Pair Routing Regression
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
@@ -847,7 +882,7 @@ jobs:
     # REQUIRE_POUR_CONNECTIVITY contract), so a future fill regression
     # fails the job instead of rotting in the log.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
       # to the kicad slots' cores (6-31,38-63: their physical cores plus the
@@ -1079,7 +1114,7 @@ jobs:
   matchgroup-routing-regression:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
@@ -1151,7 +1186,7 @@ jobs:
     # + the board recipe's REQUIRE_POUR_CONNECTIVITY contract), so a future
     # fill regression fails the job instead of rotting in the log.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # Run as root so installs write system locations and actions/checkout
       # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
       options: --user 0:0
@@ -1374,7 +1409,7 @@ jobs:
     # block the merge button.  Same pattern as
     # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
     name: Board 00 End-to-End
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
@@ -1384,7 +1419,7 @@ jobs:
     # ubuntu runner without masking a hang.
     timeout-minutes: 15
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # Run as root so installs write system locations and actions/checkout
       # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
       options: --user 0:0
@@ -1519,12 +1554,12 @@ jobs:
     # advisory (non-required-check) status until a repo admin flips the
     # branch-protection setting.
     name: Board 01 End-to-End
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -1613,12 +1648,12 @@ jobs:
     # the C++ backend build, and the advisory (non-required-check) status
     # until a repo admin flips the branch-protection setting.
     name: Board 02 End-to-End
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -1727,12 +1762,12 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01/02/06/07 e2e jobs).
     name: Board 03 End-to-End (LVS-only)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -1907,7 +1942,7 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
@@ -1921,7 +1956,7 @@ jobs:
     # Internal routing budgets and all validation gates remain unchanged.
     timeout-minutes: 35
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
       # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
       # to the kicad slots' cores (6-31,38-63: their physical cores plus the
@@ -2071,7 +2106,7 @@ jobs:
   board-07-end-to-end:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
@@ -2124,7 +2159,7 @@ jobs:
     # precedent set by ``board-05-routing-regression``.
     timeout-minutes: 90
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -2353,12 +2388,12 @@ jobs:
     # intentionally higher than every other job (next-highest is the 45-min
     # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -2473,12 +2508,12 @@ jobs:
     # needs 90 min), so 45 min leaves comfortable headroom over board 03's
     # 30 min for the LQFP-48 escape work.
     name: Board 04 End-to-End (LVS-only + DRC allowlist)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:

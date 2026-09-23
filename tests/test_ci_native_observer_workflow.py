@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,7 +13,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "scripts/ci/run_observed.py"
-JOB = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["test"]
+WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+JOB = WORKFLOW["jobs"]["test"]
 GROUPS = {
     "board05": "Run Board05 manufacturing regression",
     "mask-copper": "Run native mask-to-copper gate",
@@ -30,7 +32,16 @@ def test_opt_in_and_resources_and_artifact_retention():
         "contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->')" in expression
     )
     assert JOB["timeout-minutes"] == 45
-    assert JOB["container"]["image"] == "kicad/kicad:10.0"
+    # #5682: the KiCad image is pinned by digest at the workflow level.
+    # container.image cannot reference the env context (GitHub allows only
+    # github/inputs/matrix/needs/strategy/vars there), so the kicad_pin
+    # bridge job republishes the single KICAD_IMAGE literal into the needs
+    # context every container job references.
+    assert JOB["container"]["image"] == "${{ needs.kicad_pin.outputs.image }}"
+    pinned = WORKFLOW["env"]["KICAD_IMAGE"]
+    assert re.fullmatch(r"kicad/kicad@sha256:[0-9a-f]{64}", pinned), pinned
+    bridge = WORKFLOW["jobs"]["kicad_pin"]
+    assert bridge["outputs"]["image"] == "${{ steps.pin.outputs.image }}"
     assert "--memory 12g" in JOB["container"]["options"]
     steps = {s.get("name"): s for s in JOB["steps"]}
     for name in GROUPS.values():
@@ -154,6 +165,7 @@ def test_enabled_identity_redacts_and_forwards_exact_command(tmp_path):
         KCT_OBSERVER_PR_HEAD="b" * 40,
         GITHUB_RUN_ID="123",
         GITHUB_RUN_ATTEMPT="2",
+        KICAD_IMAGE="kicad/kicad@sha256:" + "c" * 64,
         SECRET="do-not-record",
     )
     command = ["fake-workload", "--secret", "do-not-record", "space argument"]
@@ -175,6 +187,7 @@ def test_enabled_identity_redacts_and_forwards_exact_command(tmp_path):
     )
     assert identity["container_id"] == "a" * 64
     assert identity["image_digest"] is None
+    assert identity["configured_image"] == "kicad/kicad@sha256:" + "c" * 64
     assert identity["run_id"] == "123"
     assert len(identity["argv_sha256"]) == 64
 
