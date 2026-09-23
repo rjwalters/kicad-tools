@@ -581,13 +581,39 @@ class VectorCollisionChecker:
         # here (an early-exit obstacle scan, not a set builder) -- as the
         # prior nested-range loop, just without the O(clearance) *redundant*
         # cells per step that were already covered by the previous step's
-        # window.  ``cell_at`` (also #5240) keeps the per-cell lookup itself
-        # a single ``_CellView`` allocation.
+        # window.
+        #
+        # Issue #5240: read the four backing arrays directly instead of
+        # ``cell_at(...)`` + ``_CellView`` property descriptors.  Profiling a
+        # representative board-02 route with the R-tree collision checker
+        # active (``rtree`` installed via ``--extra dev``, matching every CI
+        # job -- see this issue's history for the trap of profiling without
+        # it) showed this loop as the single hottest leaf frame in the whole
+        # route+optimize pipeline: 2.6s self time / 6.5s cumulative out of
+        # 19.0s total wall (34%), with ``cell_at`` + its four per-cell
+        # property reads accounting for nearly all of it. ``_CellView``
+        # exists so mutating call sites (``.blocked = True`` etc.) and
+        # single-field reads get a clean object API; this loop reads all
+        # four fields for O(route_length * clearance) cells per optimizer
+        # pass, so it skips the wrapper and reads the same backing arrays
+        # ``_CellView`` itself indexes.  Slicing out the 2D per-layer views
+        # once (rather than 3-tuple-indexing the 3D array per cell) also
+        # avoids repeating the leading-axis lookup on every iteration.
+        blocked_layer = self.grid._blocked[layer_idx]
+        is_obstacle_layer = self.grid._is_obstacle[layer_idx]
+        pad_blocked_layer = self.grid._pad_blocked[layer_idx]
+        net_layer = self.grid._net[layer_idx]
+        cols = self.grid.cols
+        rows = self.grid.rows
+
         for check_x, check_y in _iter_dilated_line_cells(gx1, gy1, gx2, gy2, clearance_cells):
-            if not (0 <= check_x < self.grid.cols and 0 <= check_y < self.grid.rows):
+            if not (0 <= check_x < cols and 0 <= check_y < rows):
                 continue
-            cell = self.grid.cell_at(layer_idx, check_y, check_x)
-            if cell.blocked and (cell.is_obstacle or cell.pad_blocked):
+            if not blocked_layer[check_y, check_x]:
+                continue
+            is_obstacle = bool(is_obstacle_layer[check_y, check_x])
+            pad_blocked = bool(pad_blocked_layer[check_y, check_x])
+            if is_obstacle or pad_blocked:
                 # Hard obstacle (cross-net pad) OR pad-copper cell
                 # (Issue #2757: pads on skipped pour nets have
                 # pad_blocked=True but is_obstacle=False because
@@ -595,9 +621,10 @@ class VectorCollisionChecker:
                 # load_pcb_for_routing; treat them as obstacles
                 # too so the optimizer doesn't chamfer through
                 # BGA GND / power pads).
-                if cell.net != 0 and cell.net == exclude_net:
+                cell_net = int(net_layer[check_y, check_x])
+                if cell_net != 0 and cell_net == exclude_net:
                     continue  # Own-net pad is OK
-                if cell.pad_blocked and cell.net == exclude_net:
+                if pad_blocked and cell_net == exclude_net:
                     continue  # Own-net pad-metal cell (net match)
                 return False
 
