@@ -166,18 +166,26 @@ def test_every_unwired_group_states_its_reason() -> None:
         ), f"group {number}'s reason does not classify the gap: {reason}"
 
 
-def test_group_seven_is_the_only_unexposed_consumer() -> None:
-    """Epic #5509's Phase 1c criterion, asserted rather than asserted-about.
+def test_no_consumer_is_unexposed_any_more() -> None:
+    """The Phase 1c criterion, now discharged (Epic #5509 Phase 3c, #5662).
 
-    ``rail_clear`` is a lambda inside ``coupled_pathfinder.cpp``'s search
-    loop, so no binding can reach it without adding C++ -- which this phase
-    forbids.  Every *other* gap must be something else (deferred plumbing, a
-    corpus-scope limit); if a second "unexposed" reason ever appears, either a
-    binding regressed or the classification is being used to excuse a gap
-    that has another cause.
+    Phase 1c permitted exactly one *unexposed* gap: ``rail_clear`` was a
+    lambda inside ``coupled_pathfinder.cpp``'s search loop, so no binding
+    could reach it without adding C++ -- which that phase forbade.  Phase 3c
+    is the phase that migrates group 7 onto the clearance kernel, and
+    promoting the lambda to a bound method was part of doing so; the gap is
+    closed and ``adapters/coupled.py`` measures the group.
+
+    The assertion is kept, inverted, because it is the one that would catch a
+    *reintroduction*: a consumer becoming unreachable from Python again means
+    a binding regressed, and this phase has already paid to prove that does
+    not have to be tolerated.
     """
     unexposed = [n for n, reason in NOT_MEASURED_REASONS.items() if "unexposed" in reason]
-    assert unexposed == [7], f"expected only group 7 to be unexposed, got {unexposed}"
+    assert unexposed == [], (
+        "no consumer group may be unexposed: group 7 was the last one and "
+        f"Phase 3c bound it, but these are unreachable again: {unexposed}"
+    )
 
 
 def test_adapters_are_registered_for_the_wired_groups() -> None:
@@ -186,15 +194,17 @@ def test_adapters_are_registered_for_the_wired_groups() -> None:
     Succeeds ``test_phase_1a_registers_no_adapters`` (#5513 / PR #5532), which
     pinned ``ADAPTERS == ()`` while only the truth side existed, and the
     five-group pin that replaced it in #5533.  Each was a *phase* assertion:
-    Phase 1c wires fourteen more consumer groups plus the Phase 1b kernel,
-    leaving group 7 -- an unexposed C++ lambda -- as the sole stated gap.
+    Phase 1c wired fourteen more consumer groups plus the Phase 1b kernel,
+    leaving group 7 -- an unexposed C++ lambda -- as the sole stated gap, and
+    Phase 3c (#5662) closed that one by binding ``rail_clear``.  Nineteen of
+    nineteen.
 
     The invariant the original test really protected -- that the harness does
     not import the code it measures -- is unchanged and still enforced, one
     test down, by ``test_truth_side_does_not_import_the_code_it_measures``.
     """
     consumer_groups = {adapter.group for adapter in ADAPTERS} - {KERNEL_GROUP}
-    assert consumer_groups == {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+    assert consumer_groups == set(range(1, 20))
     assert consumer_groups | set(NOT_MEASURED_REASONS) == {g.number for g in GROUPS}, (
         "every group is either wired or has a stated reason -- no group may be both or neither"
     )
