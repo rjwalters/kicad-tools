@@ -400,11 +400,16 @@ class Router:
         # per ``_check_via_placement_cached`` call AND once per non-plane
         # layer inside ``_is_via_blocked``.  Both are dropped by
         # ``invalidate_pad_geometry_cache`` (hence by ``clear_via_cache``),
-        # the same trigger the sibling ``_non_th_pad_cache`` uses -- see
+        # the same trigger the sibling ``_non_th_pad_cache`` uses, AND each
+        # carries a token identifying the state it was computed against so
+        # that a mutation which bypasses that entry point (notably
+        # ``RoutingGrid.add_component_hole``) still drops it -- see
         # ``_component_hole_clear_cached`` / ``_non_th_pad_drill_clear``
         # for the per-memo soundness argument.
         self._hole_site_cache: dict[tuple[int, int], bool] = {}
+        self._hole_site_cache_token: tuple[object, int, bool] | None = None
         self._pad_drill_site_cache: dict[tuple[int, int], bool] = {}
+        self._pad_drill_cache_token: object | None = None
 
         # Issue #5617: memo for ``_is_trace_blocked``'s Euclidean-disc
         # kernel (#3229).  ``(dist_sq, within_disc)`` is a pure function of
@@ -3161,21 +3166,37 @@ class Router:
         -- 3-5 identical evaluations per via candidate on a four-layer board.
 
         Soundness: the only mutable input is ``grid._component_hole_index``,
-        and the sole mutators are ``RoutingGrid.add_pad`` and
-        ``refresh_component_holes`` (which REPLACES the index outright).
-        :meth:`invalidate_pad_geometry_cache` calls the latter and clears
-        this memo in the same breath, and :meth:`clear_via_cache` -- start of
-        every route / A* search, every foreign-context change -- calls
-        ``invalidate_pad_geometry_cache``.  So an entry is only ever served
-        when recomputing would return the same bool.
+        and it is **not** reached exclusively through
+        :meth:`invalidate_pad_geometry_cache` -- ``RoutingGrid.add_pad`` and
+        ``add_component_hole`` append to the live index in place, mid-route,
+        with no router-side hook (``test_component_hole_search.py`` pins
+        exactly that: a hole added after a positive answer must flip it).
+        So the memo carries a token instead of relying on the entry point:
+
+        * the index **object** -- ``refresh_component_holes`` and the
+          thread-safe grid rebuild both install a fresh ``refreshed()``
+          instance, and holding the reference in the token keeps the compared
+          object alive, so identity can never be recycled underneath it;
+        * ``len(index.holes)`` -- a perfect version counter for one instance,
+          because ``_index`` only ever *appends* (holes are never removed);
+        * ``index.known`` -- flipped to ``False`` by
+          ``install_component_hole_census(None)``, which turns every verdict
+          negative without touching ``holes``.
+
+        Any mismatch drops the memo wholesale.  Building and comparing that
+        token is a tuple allocation against a bin sweep of the hole index, so
+        the memo still pays for itself on the first repeat.
         """
+        index = self.grid._component_hole_index
+        token = (index, len(index.holes), index.known)
+        if token != self._hole_site_cache_token:
+            self._hole_site_cache.clear()
+            self._hole_site_cache_token = token
         key = (gx, gy)
         hit = self._hole_site_cache.get(key)
         if hit is None:
             wx, wy = self.grid.grid_to_world(gx, gy)
-            hit = self.grid._component_hole_index.clear(
-                wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole
-            )
+            hit = index.clear(wx, wy, self.rules.via_drill, self.rules.min_hole_to_hole)
             if len(self._hole_site_cache) >= self._SITE_CACHE_MAX:
                 self._hole_site_cache.clear()
             self._hole_site_cache[key] = hit
@@ -3194,15 +3215,23 @@ class Router:
         Diff-Pair regression job's re-route step attributed 7.3 s of phase
         4's 524.2 s to its six NumPy lines alone.
 
-        Soundness: keyed by cell, invalidated with ``_non_th_pad_cache``
-        itself in :meth:`invalidate_pad_geometry_cache` -- the contract that
-        method's docstring already states for in-place ``Pad`` mutation.  The
-        arithmetic is byte-identical to the inline form it replaces.
+        Soundness: the memo is valid for exactly as long as the geometry it
+        reads is, so it is tokened on the **identity of the arrays tuple**
+        :meth:`_non_th_pad_geometry` hands back.  That tuple is rebuilt
+        whenever ``_non_th_pad_cache`` misses -- on a pad-count change, and on
+        the explicit :meth:`invalidate_pad_geometry_cache` drop that PR #5330
+        introduced for in-place ``Pad`` mutation -- so a new tuple object is
+        precisely the signal that the sweep's inputs moved.  The arithmetic is
+        byte-identical to the inline form it replaces.
         """
+        geometry = self._non_th_pad_geometry()
+        if geometry is not self._pad_drill_cache_token:
+            self._pad_drill_site_cache.clear()
+            self._pad_drill_cache_token = geometry
         key = (gx, gy)
         hit = self._pad_drill_site_cache.get(key)
         if hit is None:
-            pxs, pys, half_w, half_h, cos_r, sin_r = self._non_th_pad_geometry()
+            pxs, pys, half_w, half_h, cos_r, sin_r = geometry
             hit = True
             if pxs.size:
                 wx, wy = self.grid.grid_to_world(gx, gy)
@@ -3367,11 +3396,15 @@ class Router:
         # Issue #5617: the two site-level via memos read exactly the state
         # this method invalidates -- ``_non_th_pad_cache`` (the pad-drill
         # sweep) and ``grid._component_hole_index`` (which
-        # ``refresh_component_holes`` below REPLACES).  Dropping them here
-        # ties them to the same contract, so every pad mutation that must
-        # invalidate the pad geometry invalidates these too.
+        # ``refresh_component_holes`` below REPLACES).  Their own tokens
+        # would already catch both (a fresh arrays tuple, a fresh index
+        # object), so dropping them here is belt-and-braces rather than the
+        # contract -- it just makes the invalidation visible at the entry
+        # point every other pad-geometry consumer uses.
         self._hole_site_cache.clear()
+        self._hole_site_cache_token = None
         self._pad_drill_site_cache.clear()
+        self._pad_drill_cache_token = None
         self.grid.refresh_component_holes()
 
     def set_via_cache_enabled(self, enabled: bool) -> None:

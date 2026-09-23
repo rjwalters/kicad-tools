@@ -170,6 +170,53 @@ def test_hole_memo_drops_when_pad_geometry_is_invalidated():
     assert router._component_hole_clear_cached(*probe) is False
 
 
+def test_hole_memo_drops_on_add_component_hole_without_any_router_hook():
+    """The mutator that bypasses ``invalidate_pad_geometry_cache`` entirely.
+
+    ``RoutingGrid.add_component_hole`` / ``add_pad`` append to the LIVE index
+    in place, mid-route, with no router-side hook -- so the memo's token
+    (index object, ``len(holes)``, ``known``), not the entry point, is what
+    has to catch it.  This is the invariant
+    ``test_component_hole_search.py::test_python_new_hole_invalidates_prior_positive_via_answer``
+    asserts through the public ``_check_via_placement_cached``.
+    """
+    grid, router = _context()
+    probe = (70, 70)
+    assert router._component_hole_clear_cached(*probe) is True
+
+    wx, wy = grid.grid_to_world(*probe)
+    grid.add_component_hole(
+        Pad(
+            x=wx,
+            y=wy,
+            width=1.2,
+            height=1.2,
+            layer=Layer.F_CU,
+            net=3,
+            net_name="N3",
+            through_hole=True,
+            drill=0.6,
+            ref="J2",
+            pin="1",
+        )
+    )
+
+    assert _hole_clear_uncached(router, *probe) is False
+    assert router._component_hole_clear_cached(*probe) is False
+
+
+def test_hole_memo_drops_when_the_census_becomes_unknown():
+    """``install_component_hole_census(None)`` turns every verdict negative."""
+    _, router = _context()
+    probe = (70, 70)
+    assert router._component_hole_clear_cached(*probe) is True
+
+    router.grid.install_component_hole_census(None)
+
+    assert _hole_clear_uncached(router, *probe) is False
+    assert router._component_hole_clear_cached(*probe) is False
+
+
 # ---------------------------------------------------------------------------
 # 2. Non-through-hole pad-drill sweep memo
 # ---------------------------------------------------------------------------
@@ -215,6 +262,36 @@ def test_pad_drill_memo_drops_on_in_place_pad_mutation():
     pad = next(p for p in grid._pads if not p.through_hole)
     pad.x, pad.y = grid.grid_to_world(*probe)
     router.invalidate_pad_geometry_cache()
+
+    assert _pad_drill_clear_uncached(router, *probe) is False
+    assert router._non_th_pad_drill_clear(*probe) is False
+
+
+def test_pad_drill_memo_drops_on_a_newly_added_pad_without_any_router_hook():
+    """``grid.add_pad`` changes the pad count with no router-side hook.
+
+    ``_non_th_pad_geometry`` catches that itself (its cache is keyed on the
+    count) and rebuilds the arrays tuple -- which is exactly the token this
+    memo watches, so the memo must follow it without an explicit drop.
+    """
+    grid, router = _context()
+    probe = (110, 70)
+    assert router._non_th_pad_drill_clear(*probe) is True
+
+    px, py = grid.grid_to_world(*probe)
+    grid.add_pad(
+        Pad(
+            x=px,
+            y=py,
+            width=0.9,
+            height=0.5,
+            layer=Layer.F_CU,
+            net=3,
+            net_name="N3",
+            ref="U2",
+            pin="1",
+        )
+    )
 
     assert _pad_drill_clear_uncached(router, *probe) is False
     assert router._non_th_pad_drill_clear(*probe) is False
