@@ -304,7 +304,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({6, 7, 8, 9})
+MIGRATED_GROUPS: frozenset[int] = frozenset({6, 7, 8, 9, 10})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -327,6 +327,8 @@ Migrated so far:
 * **7** -- the C++ coupled rail gate (``CoupledPathfinder::rail_clear``), Phase 3c.
 * **8** -- the Python coupled / diff-pair gates (``DiffPairRouter``), Phase 3c.
 * **9** -- the lattice engine (``router/lattice/``), Phase 3d.
+* **10** -- the mesh engine's per-leg consult
+  (``router/mesh/obstacles.py``), Phase 3e.
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
@@ -334,6 +336,7 @@ _MIGRATION_PHASE: dict[int, str] = {
     7: "3c",
     8: "3c",
     9: "3d",
+    10: "3e",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
 
@@ -435,25 +438,32 @@ NOTES: dict[int, str] = {
     ),
     10: (
         "`ObstacleModel.is_clear`, constructed directly as "
-        "`MeshPathfinder._route_with_portals` does: other-net pads as keep-out "
-        "rects inflated by the agent radius (`_keepouts`), committed traces as "
-        "capsule polygons "
+        "`MeshPathfinder._route_with_portals` does: other-net pads passed "
+        "**verbatim** (`_foreign_pads`) and measured exactly through the "
+        "kernel's Minkowski pad model, committed traces as capsule polygons "
         "inflated by a **full** `trace_width + clearance` (`_route_obstacles`' "
-        "own over-approximation, square end-caps included). Seg-candidate "
-        "pairs only -- `is_clear(a, b)` takes two points and no width, and a "
-        "committed via is not in this model at all (`_route_via_injection` "
-        "handles those). `fixed_fills` left `None`: group 6 already measures "
-        "`FixedFillObstacles` on both its halves. The `pours` branch is driven "
-        "by `seg-zone` pairs (pour outlines, verbatim, as `_route_obstacles` "
-        "passes them) and the `outline` branch by `copper-edge` pairs (#5644); "
-        "both are pure containment tests with **no clearance term**, so a leg "
-        "that merely comes close to a pour or to `Edge.Cuts` is accepted and "
-        "the under-rejection on those kinds is the consumer's own arithmetic. "
-        "In production the engine keeps legs off the outline through the "
-        "navmesh triangulation rather than through this predicate. "
-        "**Not measured**: `via-zone`, excluded for the same reason `seg-via` "
-        "is -- `is_clear(a, b)` takes two points and no width, so a via "
-        "candidate has no call to make."
+        "own over-approximation, square end-caps included, unchanged by this "
+        "phase). Seg-candidate pairs only -- `is_clear(a, b)` takes two points "
+        "and no width of its own, and a committed via is not in this model at "
+        "all (`_route_via_injection` handles those). `fixed_fills` left "
+        "`None`: group 6 already measures `FixedFillObstacles` on both its "
+        "halves. Before Phase 3e a pad entered as its `pad_half_extents` "
+        "**bounding box** grown by the agent radius -- a legal candidate "
+        "refused during search, #5410's failure mode -- and the `outline` "
+        "branch was a bare containment test with no clearance term; both are "
+        "now kernel measurements against the real copper. The `copper-edge` "
+        "cell that remains is a **rule** reading, not a geometry one: this row "
+        "drives the consumer at the board-edge floor it actually resolves, "
+        "which `MeshPathfinder.edge_clearance` takes from the owning "
+        "`Autorouter._edge_clearance` and which is 0.0 with none configured, "
+        "while kicad-cli applies the `.kicad_pro` board rule -- the #5398 / "
+        "#5654 axis, which Phase 3e does not touch. The `pours` branch is "
+        "still driven by `seg-zone` pairs against pour outlines verbatim, as "
+        "`_route_obstacles` passes them, and is still a touch test with no "
+        "clearance term, so a leg that merely comes close to a pour is "
+        "accepted. **Not measured**: `via-zone`, excluded for the same reason "
+        "`seg-via` is -- `is_clear(a, b)` takes two points and no width, so a "
+        "via candidate has no call to make."
     ),
     11: (
         "`via_clearance.py`'s four pure predicates. **Not measured**: "

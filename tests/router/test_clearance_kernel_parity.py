@@ -895,6 +895,14 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # ``cpp_backend``) delegates to ``FixedFillObstacles`` and composes no
         # gap of its own, so it is switched without referencing the kernel.
         "router/fixed_copper_kernel.py",
+        # Epic #5509 Phase 3e (#5664), consumer group 10: the mesh engine's
+        # per-leg obstacle consult.  Same shape again -- one adapter module
+        # owns the projection (keep-out rects / pour outlines -> kernel ring
+        # sets, foreign pads -> ``KPad``, the board outline -> ``KEdge``) and
+        # ``router/mesh/obstacles.py`` calls it.  ``mesh/pathfinder.py`` builds
+        # the model but composes no gap of its own, so it is switched without
+        # referencing the kernel.
+        "router/mesh/kernel_adapter.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.
