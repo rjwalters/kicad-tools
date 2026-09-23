@@ -745,6 +745,24 @@ Contributes to #123
 
 `Part of #N` references the issue (keeping the PR discoverable) but does NOT trigger auto-close, so the family/epic issue survives the merge. Only the **final increment** that completes the family uses `Closes #N`.
 
+**Write the trailer as PLAIN TEXT — never wrapped in backticks (#5690).** A trailer inside an
+inline code span (or a fenced code block) is **silently ignored**: merge-pr.sh's
+partial-increment parser blanks code spans before matching, on purpose (#5234 — so a
+hypothetical mid-sentence mention such as "say so and I will switch the reference to
+`` `Part of #123` ``" is not mistaken for a declaration). Backticking the real trailer therefore
+produces a PR that looks completely correct to a human reviewer and to Judge, while the
+automatic `loom:building` → `loom:issue` reset (#3667) never fires and the family/epic issue
+is stranded at `loom:building` with no error logged anywhere — exactly what happened on
+PR #5686 / issue #5240.
+
+```markdown
+Part of #123              <- declaration: parsed, the label reset fires on merge
+`Part of #123`            <- code span: NOT a declaration, reset silently skipped
+```
+
+`merge-pr.sh` emits a non-blocking warning when a line's entire content is a backticked
+trailer, but that warning only reaches whoever runs the merge — get it right in the body.
+
 **Both the PR body and the commit message must carry the same reference.** This repo squash-merges, and GitHub harvests closing keywords from the squash commit message as well as the PR body — a stray `Closes #N` in the commit body will auto-close the family issue even when the PR body says `Part of #N`. When in doubt on a `loom:epic` issue, prefer `Part of #N`.
 
 #### A stray closing keyword ANYWHERE in the body defeats `Part of #N` (#4569)
