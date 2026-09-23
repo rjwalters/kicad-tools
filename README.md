@@ -15,7 +15,7 @@ This project provides standalone Python tools that enable AI agents (LLMs, auton
 Traditional EDA tools require GUIs and manual interaction. `kicad-tools` bridges the gap by providing:
 
 - **Structured data access** - Parse KiCad files into clean Python objects
-- **Machine-readable output** - All CLI commands support `--format json`
+- **Machine-readable output** - Analysis and query commands offer JSON output; check each command’s `--help` for supported formats
 - **Programmatic modification** - Edit schematics and PCBs without a GUI
 - **LLM reasoning interface** - Purpose-built module for LLM-driven PCB layout decisions
 
@@ -108,16 +108,17 @@ from kicad_tools.router import Autorouter, DesignRules
 rules = DesignRules(
     grid_resolution=0.25,  # mm
     trace_width=0.2,  # mm
-    clearance=0.15,  # mm
+    trace_clearance=0.15,  # mm
 )
 
 # Create router and add components
 router = Autorouter(width=100, height=80, rules=rules)
-router.add_component("U1", pads=[...])
+router.add_component("U1", pads=[{"number": "1", "x": 10, "y": 10, "net": 1}])
+router.add_component("U2", pads=[{"number": "1", "x": 20, "y": 10, "net": 1}])
 
 # Route all nets
-result = router.route_all()
-print(f"Routed {result.routed_nets}/{result.total_nets} nets")
+routes = router.route_all(timeout=30)
+print(f"Created {len(routes)} routes")
 ```
 
 ### LLM-Driven PCB Layout
@@ -637,11 +638,40 @@ All commands support `--format json` for machine-readable output.
 | `mcp` | MCP server for AI agent integration |
 | `pcb.layout` | Layout preservation for PCB regeneration |
 
-## What's New (v0.20.0, August 2026)
+## What's New (v0.21.1, September 2026)
 
 Recent additions an agent reading these docs cold should know about. Older
 entries live in [CHANGELOG.md](CHANGELOG.md).
 
+- **Routing, validation and CLI hot-path performance sweep** (v0.21.0) —
+  measured removal of overhead across the router, validator, placement and
+  CLI: `import kicad_tools` 1.46 s → 0.34 s user CPU, the A\* neighbor-batch
+  cost ~3.9× faster with identical routes, the placement C++ path ~64 s →
+  0.55 s, board-05 LVS pin resolution ~20× faster. Local measurements; the
+  hosted-CI median comparison remains open on #5240.
+- **MCP server requires the mcp 2.x SDK** (v0.21.0, breaking for `[mcp]`
+  extra users) — `FastMCP` was renamed to `mcp.server.mcpserver.MCPServer`
+  and the `fastmcp` pin is now `>=4,<5`. In-process API callers using the
+  stdio `MCPServer` dataclass are unaffected.
+- **Copper-LVS and `kct net-status` decide on physical copper contact**
+  (v0.21.0) — a net owning a zone somewhere no longer suppresses its `open`
+  findings, copper contact is decided over a segment's full length, dangling
+  tracks are detected by copper-cap contact, and `kct check` gains a
+  geometry-based copper-slit detector.
+- **Pour bridges terminate on existing same-net copper** (v0.21.0) — pour
+  repair reuses an existing same-net via barrel or through-hole pad as the
+  bridge terminus instead of adding a new via; board07 pour repair is now
+  frame-independent with native-refill stability.
+- **Legacy `(module …)` footprints and rotated pads are honored everywhere**
+  (v0.21.0) — KiCad-4-era boards are recognized by every router/zones/DRC/LVS/
+  panel tree-walk, and non-cardinal pad rotation is applied in every obstacle,
+  clearance and thermal consumer so a rotated pad is priced identically
+  everywhere.
+- **Slimmer sdist and honest failure modes** (v0.21.1) — the sdist drops from
+  127 MB to 18 MB (board artifacts and evidence trees excluded; the wheel is
+  unchanged), `kct route` on board06 refuses a foreign input PCB with a named
+  error instead of emitting misleading `UNREPAIRED` lines, and the
+  access-witness sidecar is written even on a wall-clock deadline kill.
 - **Search-time HV pairwise clearance in the lattice engine** (v0.20.0) — with
   `--voltage-map`, the lattice router now *avoids* HV↔LV proximity during
   search instead of merely failing the post-route gate; KiCad keepout rule
@@ -714,9 +744,7 @@ entries live in [CHANGELOG.md](CHANGELOG.md).
   only the listed nets (inverse of `--skip-nets`); non-listed copper is treated
   as a fixed obstacle.
 - **Experimental routing substrates** (v0.17.0) — `--route-engine lattice`
-  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine
-  mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine
-  grid` remains the default and is unchanged. See
+  (adaptive octilinear; 45°-legal copper by construction) and `--route-engine mesh` (constrained-Delaunay navmesh), both default **off**. `--route-engine grid` remains the default and is unchanged. See
   [Routing Guide](docs/guides/routing.md).
 - **`kct net-status --why`** (v0.17.0) — ranked fix recommendations explaining
   why each incomplete net is stuck, with pin-order-verified reversed-bundle
@@ -809,8 +837,7 @@ uv run ruff format .
    build it. After `cd` into the worktree, run `uv run kct build-native`
    once before any routing benchmarks.
 
-3. **If a local `mypy` error names a file outside your diff, `rm -rf
-   .mypy_cache` and re-run before investigating it.** `.mypy_cache/` is
+3. **If a local `mypy` error names a file outside your diff, `rm -rf .mypy_cache` and re-run before investigating it.** `.mypy_cache/` is
    gitignored, so it survives `git reset --hard`, `git clean -fd`, a rebase,
    and a worktree reuse — bare `mypy` / `pnpm typecheck` can replay an error
    computed against an older tree. CI is always cold (no `actions/cache`), so
