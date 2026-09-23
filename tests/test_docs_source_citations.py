@@ -350,7 +350,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "docs/clearance-conformance.md",
-        "_keepouts",
+        "_foreign_pads",
         "src/kicad_tools/router/mesh/pathfinder.py",
     ),
     (
