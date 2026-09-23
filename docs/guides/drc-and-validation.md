@@ -37,12 +37,16 @@ Two consequences are worth stating plainly:
   report is bound to the exact upload it audited).
 - **`kct check --mfr` and native DRC are not redundant.** Some manufacturer
   floors have no native custom-rule equivalent (a numeric solder-mask web
-  floor, for example), and some need a scope KiCad's rule language cannot
-  express — the different-net SMD-pad-to-SMD-pad floor is a *placement*
-  limit, so it must be scoped to pads in **different** footprints, which the
-  rule grammar has no predicate for. Those are enforced Python-side. Others
-  need the native engine because only it sees the filled/plotted geometry.
-  Run both.
+  floor, for example) and stay Python-side. The different-net
+  SMD-pad-to-SMD-pad floor *is* emitted natively — scoped by
+  `A.Reference != B.Reference`, using KiCad's documented rule that footprint
+  children (pads) carry their parent footprint's reference designator, so
+  package-internal pairs compare equal and stay exempt — but the two engines
+  still disagree on one measured shape: pads under footprints with **blank or
+  duplicated** references compare equal natively and are not discriminated,
+  while `kct check` scopes by footprint *identity* and still catches them.
+  Other floors need the native engine because only it sees the filled/plotted
+  geometry. Run both.
 
 ### Emitted constraints are not effective constraints
 

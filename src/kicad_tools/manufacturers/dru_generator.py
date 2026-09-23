@@ -66,7 +66,7 @@ DRU_VERSION_HEADER = "(version 1)"
 _LEGACY_RULE_NAME_RE = re.compile(
     r"^(?:Trace Width|Clearance|Via Drill|Via Diameter|Annular Ring|PTH Annular Ring|"
     r"Copper to Edge|Hole to Edge|Silkscreen Width|Silkscreen Height|"
-    r"Solder Mask Clearance|Solder Mask Dam|"
+    r"SMD Pad Clearance|Solder Mask Clearance|Solder Mask Dam|"
     r"Ampacity Min Width \(.+, (?:external|internal)\))"
     r"(?: - .+)?$"
 )
@@ -277,16 +277,34 @@ def generate_dru(
             "  (condition \"A.Type == 'Pad' || B.Type == 'Pad'\")\n"
             f"  (constraint silk_clearance (min {rules.min_silk_to_pad_clearance_mm}mm)))"
         )
-    # The different-net SMD pad floor is deliberately NOT emitted as a native
-    # rule.  It is a placement limit on copper the designer positions, and
-    # KiCad's rule language has no predicate for "these two pads belong to
-    # the same footprint" -- so a native rule would also police package
-    # geometry the designer cannot change.  Stock library packages sit under
-    # the floor (the diagonal corner gap between adjacent pad rows of
-    # ``Package_QFP:LQFP-48_7x7mm_P0.5mm`` is 0.1414 mm), so emitting it
-    # would report every fine-pitch QFP/QFN as a hard clearance error.
-    # ``kct check`` enforces this floor instead, where the different-footprint
-    # scope is expressible (``validate.rules.clearance._check_layer``).
+    # The different-net SMD pad floor is emitted natively, scoped to pads of
+    # DIFFERENT footprints.  The scoping predicate the #5705 deferral thought
+    # impossible exists and is documented: KiCad's custom-rule Reference
+    # property states that footprint children (pads) carry their parent
+    # footprint's reference designator, so ``A.Reference != B.Reference`` is
+    # exactly "pads of two independently placed footprints" -- package-
+    # internal pairs compare equal and stay exempt, which keeps stock
+    # fine-pitch QFP/QFN packages (``Package_QFP:LQFP-48_7x7mm_P0.5mm`` has a
+    # 0.1414 mm diagonal gap between adjacent pad rows) out of the report.
+    # Measured against ``kicad-cli pcb drc`` 10.0.1 and 10.0.6 in
+    # ``tests/test_factory_object_clearance.py``
+    # (``test_native_smd_floor_is_scoped_to_different_footprints``).
+    #
+    # Known boundary: the native scope is the reference STRING.  Pads under
+    # footprints with blank or duplicated references compare equal and are
+    # not discriminated -- the ``kct check`` floor (identity-scoped, see
+    # ``validate/rules/clearance.py``) remains authoritative for that shape
+    # (``test_native_smd_floor_omits_pairs_sharing_a_reference_designator``).
+    # No ``(severity error)`` override: a custom ``clearance`` constraint is
+    # error-class by default, matching the Python checker's severity.
+    if rules.min_smd_pad_clearance_mm is not None:
+        lines.append(
+            f'(rule "SMD Pad Clearance{label_suffix}"\n'
+            "  (condition \"A.Type == 'Pad' && B.Type == 'Pad'"
+            " && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD'"
+            ' && A.Net != B.Net && A.Reference != B.Reference")\n'
+            f"  (constraint clearance (min {rules.min_smd_pad_clearance_mm}mm)))"
+        )
     if rules.min_pth_hole_to_track_mm is not None:
         lines.append(
             f'(rule "PTH Hole to Track{label_suffix}"\n'

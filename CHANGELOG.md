@@ -50,6 +50,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Native emission of the different-net SMD-pad clearance floor**
+  (Issue #5059). The `SMD Pad Clearance` rule is now emitted into the
+  generated `.kicad_dru` (and the shipped JLCPCB templates) whenever a
+  profile sets `min_smd_pad_clearance_mm`, scoped to SMD pads of
+  **different** footprints via `A.Reference != B.Reference` — KiCad's
+  custom-rule docs state that footprint children (pads) carry their parent
+  footprint's reference designator, so package-internal pairs compare equal
+  and stay exempt (the fine-pitch QFP/QFN wall that kept this floor
+  Python-only). Measured against `kicad-cli pcb drc` 10.0.1 and 10.0.6:
+  a 0.12 mm gap between two referenced footprints fires
+  `rule 'SMD Pad Clearance' ... actual 0.1200 mm`; the same gap inside one
+  footprint stays silent. Known boundary, pinned by test: the native scope
+  is the reference *string*, so blank or duplicated reference designators
+  are not discriminated — `kct check`'s identity-scoped floor remains
+  authoritative for that shape. The `dru_generator` legacy-sidecar
+  rule-family list learned the new rule name.
+
 - **Measured effective-native-DRC coverage for silkscreen clearance**
   (Issue #5059). A manufacturer profile can emit a constraint that *looks*
   correct in the generated `.kicad_pro` / `.kicad_dru` and still be applied to
