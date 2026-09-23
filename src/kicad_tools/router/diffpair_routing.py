@@ -40,7 +40,6 @@ from kicad_tools.core.geometry import (
 
 from .clearance_shapes import (
     KShape,
-    KVia,
     copper_gap,
     gap_deficit,
     overlaps,
@@ -4870,6 +4869,7 @@ class DiffPairRouter:
         candidate: KShape,
         layer: Layer | None,
         net: int,
+        via: Via | None = None,
     ) -> tuple[float, tuple[float, float] | None]:
         """Worst foreign-pad deficit of one kernel shape, ``<= 0`` when clean.
 
@@ -4881,22 +4881,29 @@ class DiffPairRouter:
         :func:`clearance_kernel.copper_gap`.
 
         ``layer`` is the candidate's own copper layer -- pass the segment's
-        layer for a span, and ``None`` for a via barrel, which is copper on
-        every layer (``KVia`` carries no layer field, exactly as
-        ``ALL_LAYERS`` models it), so an SMD pad on any layer the barrel
-        passes through is still measured.
+        layer for a span.  ``KVia`` carries no layer field (``candidate`` is
+        copper on every layer, exactly as ``ALL_LAYERS`` models it), so a via
+        candidate passes ``layer=None`` and instead passes the source
+        ``via`` -- its ``via.layers`` barrel span gates which foreign SMD
+        pads are measured (mirrors ``_via_spans_layer`` and the legacy
+        ``grid.worst_via_pad_deficit``'s span filter), so a blind/buried
+        barrel does not get charged against pads on layers it never
+        reaches.
         """
         grid = self.autorouter.grid
         pitches = self._pad_component_pitches()
         rules = self.autorouter.rules
         worst = 0.0
         worst_loc: tuple[float, float] | None = None
-        through = layer is None or isinstance(candidate, KVia)
         for pad in grid.pads:
             if pad.net == net:
                 continue
-            if not pad.through_hole and not through and pad.layer.value != layer.value:  # type: ignore[union-attr]
-                continue
+            if not pad.through_hole:
+                if via is not None:
+                    if not _via_spans_layer(via, pad.layer):
+                        continue
+                elif layer is not None and pad.layer.value != layer.value:
+                    continue
             pin_pitch = pitches.get(pad.component_key) if pitches else None
             required = rules.get_clearance_for_component(pad.ref, pin_pitch)
             deficit = gap_deficit(candidate, pad_shape(pad), required)
@@ -4946,7 +4953,7 @@ class DiffPairRouter:
         rectangle, so this gate and the DRC that judges its output no longer
         disagree about the pad.
         """
-        deficit, _loc = self._kernel_pad_deficit(via_shape(via), None, via.net)
+        deficit, _loc = self._kernel_pad_deficit(via_shape(via), None, via.net, via=via)
         return deficit
 
     def _route_pad_violation(
@@ -4971,7 +4978,7 @@ class DiffPairRouter:
             if deficit > worst:
                 worst, worst_loc = deficit, loc
         for via in route.vias:
-            deficit, loc = self._kernel_pad_deficit(via_shape(via), None, via.net)
+            deficit, loc = self._kernel_pad_deficit(via_shape(via), None, via.net, via=via)
             if deficit > worst:
                 worst, worst_loc = deficit, loc
         return worst, worst_loc
