@@ -297,7 +297,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({9})
+MIGRATED_GROUPS: frozenset[int] = frozenset({6, 9})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -315,10 +315,13 @@ consumer really imports the kernel.
 
 Migrated so far:
 
+* **6** -- the fixed-copper predicate (``router/fixed_copper.py`` and
+  ``grid.cpp``'s ``fixed_fill_clear``), Phase 3f.
 * **9** -- the lattice engine (``router/lattice/``), Phase 3d.
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
+    6: "3f",
     9: "3d",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
@@ -366,7 +369,16 @@ NOTES: dict[int, str] = {
         "`Grid3D::fixed_fill_clear`); a pair is flagged when either refuses. "
         "The fill polygon is the pad's exact outline via the `_pad_polygon` "
         "reference model, so the row measures group 6's arithmetic, not a "
-        "harness approximation."
+        "harness approximation. Both halves now ask the kernel *per boundary "
+        "edge* (`copper_gap_ring_edge` / `ring_edge_crosses_ray`) behind their "
+        "own 1 mm index rather than handing it a whole `KZonePoly`: the index "
+        "only selects candidate edges, and "
+        "`tests/router/test_fixed_copper_kernel.py` asserts the indexed verdict "
+        "equals the whole-pour one. The under-rejection cell is a **rule** "
+        "reading, not a geometry one -- this row drives the consumer at the "
+        "router's own `trace_clearance` (0.15 mm) while kicad-cli applies the "
+        "project's `Default` netclass (0.20 mm), the #5398 / #5654 defect no "
+        "Phase 3 PR is allowed to fix."
     ),
     8: (
         "Three gates in series (`_segment_cells_clear` raster walk through the "

@@ -26,7 +26,16 @@
 #   Scenario A: child branch checked out in a worktree  -> rebase runs there.
 #   Scenario B: child branch NOT checked out anywhere    -> in-place fallback.
 #
+# Since #8583 the planning/execution half of the subject is
+# `loom-daemon reconcile-stack` (Rust), reached through this script — so the
+# suite needs a BUILT loom-daemon and is wired in the "Native Port Suites" CI
+# job rather than shell-suite-tests, which builds no binary. Every assertion
+# below predates that port apart from Scenario J and the two rebase-target
+# assertions the fix necessarily changed, which is what makes it equivalence
+# evidence rather than a restatement of the new implementation.
+#
 # Usage:
+#   cargo build --package loom-daemon
 #   ./.loom/scripts/tests/test-reconcile-stack.sh
 
 set -euo pipefail
@@ -34,6 +43,13 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 RECONCILE="$SCRIPTS_DIR/reconcile-stack.sh"
+
+# Pin the binary every invocation of reconcile-stack.sh execs to the one built
+# from THIS tree (#8176), and fail — never skip — when none resolves: without
+# it the suite would report green while testing nothing.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "reconcile-stack"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -198,7 +214,21 @@ STUB
     cat > "$GIT_STUB_DIR/git" <<STUB
 #!/usr/bin/env bash
 REAL_GIT="$REAL_GIT"
-if [[ "\$1" == "push" && "\${LOOM_TEST_FAKE_REJECT:-0}" == "1" ]]; then
+# Find the SUBCOMMAND, skipping any leading global options that take a value.
+# Since #8583 the script always invokes \`git -C <dir> push\`, so keying on
+# \$1 alone would silently stop matching and this scenario would assert
+# nothing.
+_args=("\$@")
+_sub=""
+_i=0
+while [[ \$_i -lt \${#_args[@]} ]]; do
+    case "\${_args[\$_i]}" in
+        -C|-c) _i=\$((_i + 2)) ;;
+        -*)    _i=\$((_i + 1)) ;;
+        *)     _sub="\${_args[\$_i]}"; break ;;
+    esac
+done
+if [[ "\$_sub" == "push" && "\${LOOM_TEST_FAKE_REJECT:-0}" == "1" ]]; then
     "\$REAL_GIT" "\$@"
     rc=\$?
     if [[ \$rc -eq 0 ]]; then
@@ -498,8 +528,15 @@ assert_contains "$RUN_OUT" "no longer resolves locally" \
   "G: script reports the branch-name fallback explicitly"
 assert_contains "$RUN_OUT" "refs/loom/parent/$PARENT_BR" \
   "G: script names the pinned ref it fell back to"
-assert_contains "$RUN_OUT" "rebase --onto main refs/loom/parent/$PARENT_BR $CHILD_BR" \
-  "G: the rebase step itself is run against the pinned ref, not the (gone) branch name"
+# The destination is the FETCHED remote tip as a COMMIT, never the branch name
+# (#8583). In this sandbox local and remote main agree, so the expected SHA is
+# unambiguous — what is asserted is that a commit, not `main`, is what the
+# rebase was given.
+TARGET_SHA_G="$(git_q -C "$MAIN" rev-parse main)"
+assert_contains "$RUN_OUT" "rebase --onto $TARGET_SHA_G refs/loom/parent/$PARENT_BR $CHILD_BR" \
+  "G: the rebase step is run against the pinned remote COMMIT and the pinned parent ref, not the (gone) branch name"
+assert_not_contains "$RUN_OUT" "rebase --onto main " \
+  "G: the branch NAME is never handed to the rebase (#8583)"
 
 CHILD_LOG_G="$(git_q -C "$MAIN" log --format=%s main.."$CHILD_BR")"
 assert_eq "C-own-commit" "$CHILD_LOG_G" "G: child branch carries ONLY its own commit above main"
@@ -512,16 +549,80 @@ assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --base main" \
 teardown_sandbox
 
 # ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario J: the local default branch is STALE — rebase must target the FETCHED tip (#8583)"
+setup_sandbox
+
+# The state that exists at the exact moment reconciliation runs: the parent
+# squash-merged ON THE FORGE, so origin/main has moved and the local clone has
+# pulled nothing. Reproduce it by rewinding the local default branch to the
+# pre-merge base and dropping the remote-tracking ref, so ONLY a real fetch can
+# find the merged tip.
+git_q -C "$MAIN" checkout -q main
+git_q -C "$MAIN" reset -q --hard HEAD~1
+git_q -C "$MAIN" update-ref -d refs/remotes/origin/main >/dev/null 2>&1 || true
+STALE_LOCAL_MAIN="$(git_q -C "$MAIN" rev-parse main)"
+REMOTE_MAIN_J="$(git_q -C "$REMOTE" rev-parse main)"
+if [[ "$STALE_LOCAL_MAIN" == "$REMOTE_MAIN_J" ]]; then
+    echo -e "  ${RED}FATAL${NC}: scenario J expected a STALE local main" >&2
+    exit 2
+fi
+
+run_reconcile "$MAIN"
+
+assert_eq "0" "$RUN_RC" "J: reconcile succeeds against a stale local default branch"
+assert_contains "$RUN_OUT" "rebase --onto $REMOTE_MAIN_J " \
+  "J: the destination is the FETCHED remote tip, not the stale local branch"
+assert_not_contains "$RUN_OUT" "rebase --onto $STALE_LOCAL_MAIN " \
+  "J: the stale local commit is never the destination"
+
+# The silent-failure signature: with an independent child file the old rebase
+# exited 0 and simply lost the merged parent's implementation.
+PARENT_FILE_J="$(git_q -C "$MAIN" show "$CHILD_BR:parent.txt" 2>/dev/null || echo "MISSING")"
+assert_eq "parent" "$PARENT_FILE_J" \
+  "J: the just-merged parent's implementation survives on the child branch"
+CHILD_FILE_J="$(git_q -C "$MAIN" show "$CHILD_BR:child.txt" 2>/dev/null || echo "MISSING")"
+assert_eq "child" "$CHILD_FILE_J" "J: the child's own work survives too"
+CHILD_LOG_J="$(git_q -C "$MAIN" log --format=%s "$REMOTE_MAIN_J..$CHILD_BR")"
+assert_eq "C-own-commit" "$CHILD_LOG_J" "J: ONLY the child's own commit is replayed"
+assert_eq "$STALE_LOCAL_MAIN" "$(git_q -C "$MAIN" rev-parse main)" \
+  "J: the operator's local default branch is left exactly where it was"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "Scenario K: a failed fetch refuses instead of falling back to the stale local branch (#8583)"
+setup_sandbox
+
+git_q -C "$MAIN" checkout -q main
+git_q -C "$MAIN" reset -q --hard HEAD~1
+CHILD_BEFORE_K="$(git_q -C "$MAIN" rev-parse "$CHILD_BR")"
+git_q -C "$MAIN" remote set-url origin "$SANDBOX/not-a-repository"
+
+run_reconcile "$MAIN"
+
+assert_eq "1" "$RUN_RC" "K: a fetch failure is a precondition failure (exit 1), not a silent degrade"
+assert_contains "$RUN_OUT" "FETCH" "K: the diagnostics name the failing prerequisite"
+assert_eq "$CHILD_BEFORE_K" "$(git_q -C "$MAIN" rev-parse "$CHILD_BR")" \
+  "K: the child branch was not touched"
+assert_eq "" "$(cat "$GH_EDIT_LOG")" "K: the child PR was not retargeted either"
+
+teardown_sandbox
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Source guards: fail loudly if a refactor drops either fix.
 echo ""
 echo "Source guards on reconcile-stack.sh"
 src="$(cat "$RECONCILE")"
-assert_contains "$src" "git worktree list --porcelain" \
-  "reconcile-stack.sh detects the child worktree via git worktree list --porcelain"
+assert_contains "$src" '"$DAEMON_BIN" reconcile-stack' \
+  "reconcile-stack.sh delegates planning/execution to loom-daemon reconcile-stack (#8583)"
+assert_contains "$src" "LOOM_RS_TARGET_COMMIT" \
+  "reconcile-stack.sh consumes the pinned destination COMMIT the subcommand resolved (#8583)"
+assert_not_contains "$src" 'rebase --onto "$DEFAULT_BRANCH"' \
+  "reconcile-stack.sh never rebases onto the LOCAL default branch name (#8583)"
 assert_contains "$src" "git -C" \
-  "reconcile-stack.sh runs the rebase/push in the worktree via git -C"
-assert_contains "$src" "git ls-remote" \
-  "reconcile-stack.sh uses a live ls-remote check for the stale-origin advisory"
+  "reconcile-stack.sh runs the push in the worktree the rebase ran in via git -C"
 assert_contains "$src" "push_landed_despite_rejection" \
   "reconcile-stack.sh verifies the actual remote ref state after a rejected --force-with-lease push (#6695)"
 assert_contains "$src" "PUSH-LEASE-RACE-DETECTED" \
@@ -530,8 +631,8 @@ assert_contains "$src" '"$SCRIPT_DIR/version-check-gate.sh"' \
   "reconcile-stack.sh runs the shared version-check-gate.sh after rebase, before push (#7168, #7341)"
 assert_contains "$src" 'DRY_RUN' \
   "reconcile-stack.sh's version-check-gate call is itself skipped under --dry-run"
-assert_contains "$src" 'refs/loom/parent/' \
-  "reconcile-stack.sh falls back to the refs/loom/parent/<branch> pinned ref (#7982)"
+assert_contains "$src" 'LOOM_RS_PARENT_PIN_REF' \
+  "reconcile-stack.sh reaps the refs/loom/parent/<branch> pin only when the fallback was used (#7982, #8010)"
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""

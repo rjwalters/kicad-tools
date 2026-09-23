@@ -27,8 +27,6 @@ This file contains PR auto-merge instructions for the Champion role. **Read this
 
 Auto-merge Judge-approved PRs that are safe, routine, and low-risk.
 
-The Champion acts as the final step in the PR pipeline, merging PRs that have passed Judge review and meet all safety criteria.
-
 ---
 
 ## ⚠️ `--body @path` Does NOT Expand — It Posts the Literal String
@@ -294,7 +292,7 @@ echo "PASS: Label check"
 - [ ] The PR is green on **all four risk axes** below — or carries `loom:auto-merge-ok` (an explicit human/Judge override)
 - [ ] **No prior merge-risk hold is still in force** — if an earlier tick held this PR, a durable release signal exists (see "Sticky holds" below). A fresh green re-read of the same diff is **not** a release signal.
 
-**This criterion is a judgment call you make by reading the PR, not an arithmetic check.** You already have the diff, the PR body, and the Judge's review in front of you; use them. **Line count is not a criterion** — there is no numeric ceiling any more (the `champion.auto_merge_max_lines` knob is retired; see the migration note below), and a hold must never be justified by a line count.
+**This criterion is a judgment call you make by reading the PR, not an arithmetic check.** You already have the diff, the PR body, and the Judge's review in front of you; use them. **Line count is not a criterion** — there is no numeric ceiling any more (the `champion.auto_merge_max_lines` knob is retired, see below), and a hold must never be justified by a line count.
 
 **Run the sticky-hold precheck FIRST** (below) — it decides what a green re-read of this PR is even allowed to do. Then gather the evidence and judge the axes.
 
@@ -601,6 +599,8 @@ four-axis judgment below.
 - Merging a PR that ever carried a hold marker -> **PASS + mandatory reversal comment** (Step 2 must state what changed; see "Sticky holds").
 
 **Size is not a proxy for any axis.** An 886-line PR that is 700 lines of new tests plus one self-contained module is green on all four; a 12-line change to `merge-pr.sh`'s ordering guard is red on blast radius *and* revertability. Never hold a PR because it is large, and never merge a PR because it is small.
+
+**Optional shadow pre-score (#8545).** Only with `TYPESAFE_API_KEY` set, and only *after* your verdict above is final, log a score per [`champion-merge-risk-shadow.md`](champion-merge-risk-shadow.md) — telemetry about this rubric, never an input to it. Unset: skip; nothing changes.
 
 #### Sticky holds — a hold does NOT clear on a re-read alone (#4742)
 
@@ -1006,7 +1006,7 @@ its critical-file caveat, or its role as sticky-hold release path (a).
 
 **Rationale**: A raw line count is a poor risk proxy. Every substantive change-plus-tests PR exceeds any tolerable numeric threshold, so a ceiling holds *all* real work while letting through small changes to exactly the high-blast-radius files that most need human eyes (on 2026-07-30 the 200-line ceiling stalled four consecutive Judge-approved, CI-green PRs: #4551, #4558, #4560, #4562). Champion is an LLM agent that has already read the diff and the Judge's review — it can assess actual risk directly. The four axes keep that judgment concrete and checkable rather than a vague "use your best judgment".
 
-**Migration note (retired config knob)**: `champion.auto_merge_max_lines` is **no longer read**. If your repo's `.loom/config.json` sets it, the key is now inert — delete it (leaving it does no harm, but it no longer has any effect). Repos that used a low value to keep Champion conservative should instead rely on this criterion's conservative bias, hold individual PRs by removing `loom:pr`, or stop running Champion's auto-merge pass. Repos that set a high value to work *around* the ceiling can simply drop the key.
+**Migration note (retired config knob)**: `champion.auto_merge_max_lines` is **no longer read** — an existing key in `.loom/config.json` is inert and can be deleted. A repo that used a low value to keep Champion conservative should rely instead on this criterion's conservative bias, hold individual PRs by removing `loom:pr`, or stop running the auto-merge pass.
 
 ### 3. Critical File Exclusion Check
 - [ ] No changes to critical configuration or infrastructure files, **except** a version-only diff hunk in one of the 6 version-bearing files (see "Version-only diff carve-out" below)
@@ -1289,10 +1289,9 @@ LAST_ACTIVITY=$(jq -r '
   ] | max' <<<"$PR_DATA")
 
 # Convert to Unix timestamp
-LAST_ACTIVITY_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ACTIVITY" +%s 2>/dev/null || \
+LAST_ACTIVITY_TS=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ACTIVITY" +%s 2>/dev/null || \
                    date -d "$LAST_ACTIVITY" +%s 2>/dev/null)
 
-# Get current time
 NOW_TS=$(date +%s)
 
 # Calculate hours since last real activity
@@ -1687,7 +1686,7 @@ HELD_AT_DOCTOR=$(printf '%s\n' "$HELD_JSON" | jq '[.[] | select([.labels[].name]
 # Oldest by PR creation — the age of the head of the pile.
 OLDEST_CREATED=$(printf '%s\n' "$HELD_JSON" | jq -r 'min_by(.createdAt) | .createdAt // empty')
 if [ -n "$OLDEST_CREATED" ]; then
-  OLDEST_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$OLDEST_CREATED" +%s 2>/dev/null || \
+  OLDEST_TS=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$OLDEST_CREATED" +%s 2>/dev/null || \
               date -d "$OLDEST_CREATED" +%s 2>/dev/null)
   OLDEST_DAYS=$(( ($(date +%s) - OLDEST_TS) / 86400 ))
 else
@@ -1822,7 +1821,7 @@ for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
     else
       CONFLICT_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     fi
-    SINCE_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$CONFLICT_SINCE" +%s 2>/dev/null || \
+    SINCE_TS=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$CONFLICT_SINCE" +%s 2>/dev/null || \
                date -d "$CONFLICT_SINCE" +%s 2>/dev/null)
     CONFLICT_DAYS=$(( ($(date +%s) - SINCE_TS) / 86400 ))
     STATUS="${STATUS} since ${CONFLICT_SINCE}, ${CONFLICT_DAYS}d"
@@ -1967,7 +1966,7 @@ DELETIONS=$(printf '%s\n' "$PR_DATA" | jq -r '.deletions')
 TOTAL_LINES=$((ADDITIONS + DELETIONS))
 
 UPDATED_AT=$(printf '%s\n' "$PR_DATA" | jq -r '.updatedAt')
-UPDATED_TS=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$UPDATED_AT" +%s 2>/dev/null || \
+UPDATED_TS=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$UPDATED_AT" +%s 2>/dev/null || \
              date -d "$UPDATED_AT" +%s 2>/dev/null)
 NOW_TS=$(date +%s)
 HOURS_AGO=$(( (NOW_TS - UPDATED_TS) / 3600 ))
@@ -2059,27 +2058,32 @@ git checkout main 2>/dev/null || true
 # merge-pr.sh reads the PR's head SHA itself (a fresh, uncached read — see
 # "Cached forge reads" above) immediately before merging, and passes it
 # through to the forge's merge API as an optimistic-concurrency precondition
-# (#5579). Capture the exit code rather than using a bare `||`: exit 3 is a
-# DISTINCT outcome from exit 1 and must not be handled as a failure (below).
+# (#5579). Capture the exit code rather than using a bare `||`: exits 3 and 4
+# are DISTINCT outcomes from exit 1, never handled as failures (both below).
+# --redate-stale-checks (#8508) lets the script perform the #8248 freshness
+# guard's OWN documented remedy — a tree-identical no-op commit that re-dates
+# CI — rather than only naming it; exit 4 reports that, and bypasses nothing.
 MERGE_RC=0
-./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto || MERGE_RC=$?
+./.loom/scripts/merge-pr.sh "$PR_NUMBER" --auto --redate-stale-checks || MERGE_RC=$?
 
-if [ "$MERGE_RC" -eq 3 ]; then
+if [ "$MERGE_RC" -eq 3 ] || [ "$MERGE_RC" -eq 4 ]; then
   # #5579: the PR's head branch moved past the SHA this merge attempt gated
   # on — most commonly a session pushing new commits to an open, loom:pr
   # branch while Champion was running. This is NOT a merge failure: the PR
   # is still Judge-approved, its diff just changed underneath it.
   #
-  # Do NOT follow the failure steps below for this outcome — see the "Exit
-  # code 3" exception in "Error Handling".
+  # Exit 4 (#8508) needs the SAME handling for the same reason: the head moved
+  # because merge-pr.sh itself re-dated the stale required checks.
+  #
+  # Do NOT follow the failure steps below for either — see the "Exit codes 3
+  # and 4" exception in "Error Handling".
   #
   # Note: merge-pr.sh's output for this case now includes both the stale SHA
   # (the one the merge attempt gated on) and the current head SHA, making it
   # easier to diagnose which commits raced in. These values are in the
   # merge-pr.sh output and logged to stderr; they are NOT posted as a PR
-  # comment (that design decision is documented in the "Exit code 3" exception
-  # section below).
-  echo "PR #$PR_NUMBER head moved during merge attempt — re-queuing for a fresh pass instead of failing"
+  # comment (that design decision is documented in that exception below).
+  echo "PR #$PR_NUMBER head moved (raced in, or re-dated by #8508) — re-queuing for a fresh pass instead of failing"
 elif [ "$MERGE_RC" -ne 0 ]; then
   echo "Merge failed for PR #$PR_NUMBER"
   # Post failure comment (see Error Handling section)
@@ -2093,7 +2097,10 @@ fi
 - Branch deleted automatically after merge
 - **Head-moved guard (#5579)**: `merge-pr.sh` refuses to merge (exit 3, not a
   failure) if the PR's head branch advanced past the SHA it read immediately
-  before merging — see "Exit code 3" in "Error Handling" below
+  before merging — see "Exit codes 3 and 4" in "Error Handling" below
+- **Stale-check re-date (#8508)**: exit 4, also not a failure — the #8248
+  guard blocked the merge and `--redate-stale-checks` pushed a tree-identical
+  no-op commit so CI re-dates the stale check
 
 ### Step 4: Verify Issue Auto-Close
 
@@ -3305,14 +3312,23 @@ This PR met all safety criteria but the merge operation failed. A human will nee
 *Automated by Champion role*"
 ```
 
-### Exception: exit code 3 — head moved, re-queue, not a failure (#5579)
+### Exception: exit codes 3 and 4 — head moved, re-queue, not a failure (#5579, #8508)
 
 `merge-pr.sh` exits **3** (distinct from the generic failure exit **1**) when
 the PR's head branch changed between the fresh head-SHA read it took
 immediately before merging and the actual merge call — most commonly because
 a session pushed new commits to an open, `loom:pr`-labeled branch while
-Champion was running. **Do not follow the 5 failure steps above for this
-outcome:**
+Champion was running.
+
+Exit **4** is the same shape with a different cause: the #8248 required-check
+freshness guard blocked the merge, and `--redate-stale-checks` performed that
+guard's own documented remedy — a tree-identical no-op commit so CI re-runs
+with a current timestamp. Nothing merged, nothing bypassed. It is bounded to
+one push per head; a second block escalates the PR to a durable
+`loom:operator` hold and returns the ordinary exit 1 with the original
+refusal, which is then simply a held PR.
+
+**Do not follow the 5 failure steps above for either outcome:**
 
 - Do **not** post the "Merge Failed" comment — the PR is still Judge-approved,
   its diff just moved out from under the merge attempt.
@@ -3322,32 +3338,16 @@ outcome:**
   `updatedAt` and CI status) will naturally re-evaluate the new head before
   merging it.
 
-**Diagnostic output:** When this occurs, `merge-pr.sh` logs to stderr both the
-stale SHA (the one it gated the merge on) and the current head SHA, making it
-easy to see which commits raced in. These values appear in the merge-pr.sh
-output and Champion's run log. They are **not** posted as a PR comment; the
-no-comment design decision reflects the fact that an exit-3 re-queue is a normal
-operational event (a session pushing mid-merge) and posting a comment on every
-such occurrence would be noisy for an ordinary race condition.
-
 **Leaving `loom:pr` in place here does NOT mean the approval still applies to
 the new head (#5686).** The head moving is exactly the condition that
-invalidates a verdict — this exception only says "don't treat the failed merge
-as an error", not "the new tree is approved". The next pass's Verdict-State
-Janitor Part 2 is what resolves that: if the Judge's approval was stamped
-against the old SHA, it returns `12` (STALE), clears `loom:pr`, and re-queues
-the PR for review rather than merging the tree that raced in. Do not
-short-circuit that by re-merging on a later tick without re-running Part 2.
+invalidates a verdict; this exception only says "don't treat the failed merge
+as an error". The next pass's Verdict-State Janitor Part 2 resolves it —
+never short-circuit that by re-merging on a later tick without re-running it.
 
-**Squash-merge detection trap.** If you ever need to manually verify whether a
-re-queued (or, worse, an already-merged-before-this-fix) PR's commits actually
-landed vs. were silently stranded, `git merge-base --is-ancestor <commit>
-origin/main` is **not reliable evidence either way**: a squash merge produces
-a brand-new commit SHA on `main` that is not a git-ancestry descendant of any
-commit on the original PR branch, regardless of whether that commit's content
-made it into the squash or was left behind. There is no cheap ancestry check
-for "squashed-and-landed" vs. "stranded" — verification requires diffing the
-actual file content on `main` against the branch/commit in question.
+Exit 4's full rationale and bound, why neither outcome is commented on the PR,
+and the squash-merge ancestry trap that makes `git merge-base --is-ancestor`
+useless for checking whether a re-queued PR's commits landed:
+[`merge-pr-exit-code-exceptions.md`](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
 
 ---
 

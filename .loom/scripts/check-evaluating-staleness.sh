@@ -137,8 +137,8 @@ TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/timeline" --paginate
   echo "ERROR: 'gh api .../issues/$ISSUE/timeline' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1
 }
-CLAIMED_AT="$(jq -r --arg label "$LABEL" \
-  '[.[] | select(.event=="labeled" and .label.name==$label)] | last | .created_at // empty' \
+CLAIMED_AT="$(jq -r --arg claim_label "$LABEL" \
+  '[.[] | select(.event=="labeled" and .label.name==$claim_label)] | last | .created_at // empty' \
   <<<"$TIMELINE_JSON" 2>/dev/null || true)"
 
 # Portable ISO-8601 -> epoch-seconds: GNU `date -d` first, BSD/macOS `date -j

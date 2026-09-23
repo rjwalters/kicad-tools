@@ -68,6 +68,44 @@ usable artifact is unchanged. It exists so an operator planning a fleet roll
 can tell, before running anything destructive, whether `--fetch` is currently
 usable or whether a release needs to be cut first.
 
+## A missed intermediate Release is an accepted gap, not a defect (#8290)
+
+`release.yml`'s `resolve` job now retries `gh release create` up to twice on a
+5xx/403 before failing (bounded, logged) — see the step's own comments for the
+retry shape. That covers most one-off transient forge failures. It does **not**
+guarantee every `VERSION` bump gets a Release: if all retries are exhausted, or
+the run fails before the retry loop even starts, that version's tag/Release is
+simply never created.
+
+**This is accepted, not treated as a gap to backfill**, for two reasons:
+
+1. **Each bump's tag is unique** (`v<VERSION>`, and `VERSION` moves forward on
+   nearly every merge). A later run resolves a *different*, newer tag — it has
+   no way to notice or recreate a specific *earlier* version's missing
+   Release without extra state (e.g. diffing the full tag history against
+   Releases on every run just to catch a rare one-off). That mechanism would
+   run on every single push to guard against a failure mode observed exactly
+   once in this repo's history, at a cost (extra `gh` calls, more surface
+   area to go wrong) out of proportion to the problem.
+2. **The cadence design (above) already tolerates a release-vs-`VERSION` gap
+   as normal** — most `VERSION` bumps intentionally get no Release at all,
+   and a release is cut only at an explicit fleet-rollable boundary. A single
+   missing intermediate Release from a transient failure is indistinguishable,
+   downstream, from the far more common case of a bump that was never
+   *meant* to have its own Release: the immediately-following bump's Release
+   (or the next deliberately-cut one) supersedes it either way, and
+   `--fetch`/`--check`'s gap reporting (above) is already keyed off "newest
+   release vs. current source `VERSION`", not off "does every past version
+   have a Release" — so it does not regress from this.
+
+Concretely: this happened once, for `v0.19.169` on 2026-09-18 (HTTP 403,
+"Resource not accessible by integration"); the very next bump, `v0.19.170`,
+published normally one minute later with no operator action needed. If this
+recurs at a rate that suggests it is not actually transient, that is a signal
+to revisit this decision (e.g. add a periodic reconciliation job that lists
+tags with no matching Release) — not something to build preemptively for a
+single observed incident.
+
 ## See also
 
 - `CLAUDE.md` § "Forge Authentication & Releasing" — how `/repo:release` works
@@ -77,3 +115,6 @@ usable or whether a release needs to be cut first.
   they fit the update lifecycle.
 - Issue [#6010](https://github.com/rjwalters/loom/issues/6010) — the incident
   and acceptance criteria this doc satisfies.
+- Issue [#8290](https://github.com/rjwalters/loom/issues/8290) — the one-off
+  `gh release create` HTTP 403 that motivated the retry logic and the
+  "accepted gap" decision above.

@@ -17,8 +17,20 @@
 #     "timestamp": "<ISO 8601 UTC>",
 #     "pr_number": <int or null>,
 #     "attempt": <int, optional - omitted when not provided; absent means attempt 1>,
-#     "model": "<string, optional - omitted when not provided; absent means default/unknown>"
+#     "model": "<string, optional - omitted when not provided; absent means default/unknown>",
+#     "jev_tier": "<mechanical|routine|complex, optional>",
+#     "jev_confidence": <float 0-1, optional - always paired with jev_tier>
 #   }
+#
+# The "jev_tier"/"jev_confidence" pair (#8543) is a shadow-mode Jev (TypeSafe)
+# complexity classification, merged onto an ALREADY-EXISTING checkpoint rather
+# than written with the rest of the record: the Tier-2.5 dispatch step that
+# produces it does not know the sweep's current phase/task-id, which a `write`
+# would overwrite. Normally recorded in-process by `loom-daemon resolve-model
+# --tier` (see `jev_tier::shadow_sample_from_env`); `jev <issue> <tier>
+# <confidence>` below is the same merge exposed for a manual/out-of-band
+# sample. Present only when `TYPESAFE_API_KEY` was set for the run; absent
+# otherwise (the common case today). Never fed back into model selection.
 #
 # The "task_id" field (#3768) identifies the sweep RUN that wrote the checkpoint.
 # It must be a STABLE per-sweep-run id (generated once at sweep start — see
@@ -71,6 +83,7 @@
 #   sweep-checkpoint.sh phase <issue>          # Print phase string only (or empty)
 #   sweep-checkpoint.sh attempt <issue>        # Print attempt number (empty if absent = attempt 1)
 #   sweep-checkpoint.sh model <issue>          # Print model string (empty if absent = default/unknown)
+#   sweep-checkpoint.sh jev <issue> <tier> <confidence>  # Patch jev_tier/jev_confidence onto an existing checkpoint (#8543); silent no-op if none exists yet
 #   sweep-checkpoint.sh exists <issue>         # Exit 0 if checkpoint exists, 1 otherwise
 #   sweep-checkpoint.sh list                   # List all checkpoint issue numbers
 #
@@ -80,204 +93,12 @@
 #   2 - invalid phase
 #   3 - I/O error
 
+# The native helper owns persistence and lifecycle tracing (#8525).
 set -euo pipefail
-
-VALID_PHASES=(curator-done builder-done judge-rejected judge-done doctor-done merge-done)
-
-usage() {
-    sed -n '3,55p' "$0" | sed 's/^# \{0,1\}//'
-    exit 1
-}
-
-# Resolve repo root (handles invocation from worktree subdirs).
-repo_root() {
-    git rev-parse --show-toplevel 2>/dev/null || pwd
-}
-
-checkpoint_dir() {
-    echo "$(repo_root)/.loom/sweep-checkpoint"
-}
-
-checkpoint_file() {
-    local issue="$1"
-    echo "$(checkpoint_dir)/issue-${issue}.json"
-}
-
-ensure_dir() {
-    mkdir -p "$(checkpoint_dir)"
-}
-
-validate_issue() {
-    local issue="$1"
-    if [[ ! "$issue" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: issue must be a positive integer (got: '$issue')" >&2
-        exit 1
-    fi
-}
-
-validate_phase() {
-    local phase="$1"
-    for valid in "${VALID_PHASES[@]}"; do
-        [[ "$phase" == "$valid" ]] && return 0
-    done
-    echo "ERROR: invalid phase '$phase'. Valid: ${VALID_PHASES[*]}" >&2
-    exit 2
-}
-
-iso_now() {
-    date -u +"%Y-%m-%dT%H:%M:%SZ"
-}
-
-cmd_write() {
-    local issue="${1:-}" phase="${2:-}"
-    shift 2 || true
-    validate_issue "$issue"
-    validate_phase "$phase"
-
-    local task_id="" pr_number="null" attempt="" model=""
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --task-id) task_id="${2:-}"; shift 2 ;;
-            --pr-number) pr_number="${2:-null}"; shift 2 ;;
-            --attempt) attempt="${2:-}"; shift 2 ;;
-            --model) model="${2:-}"; shift 2 ;;
-            *) echo "ERROR: unknown flag '$1'" >&2; exit 1 ;;
-        esac
-    done
-
-    # Last-resort fallback ONLY: sweep.md always passes a stable --task-id "$RUN_ID"
-    # (see sweep-run-registry.sh). This default exists so a bare/manual write still
-    # produces a parseable checkpoint; `sweep-run-$$` is deliberately labelled a
-    # fallback rather than masquerading as a stable per-run id.
-    [[ -z "$task_id" ]] && task_id="sweep-run-fallback-$$"
-    if [[ "$pr_number" != "null" && ! "$pr_number" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: --pr-number must be a positive integer or 'null'" >&2
-        exit 1
-    fi
-    if [[ "$phase" == "judge-rejected" && "$pr_number" == "null" ]]; then
-        echo "ERROR: judge-rejected requires --pr-number for resume routing" >&2
-        exit 1
-    fi
-    if [[ -n "$attempt" && ! "$attempt" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: --attempt must be a positive integer >= 1 (got: '$attempt')" >&2
-        exit 1
-    fi
-    # Model values are aliases (sonnet/opus/haiku) or pinned IDs
-    # (claude-sonnet-4-6). Restrict the charset so the value embeds safely
-    # in the hand-rolled JSON below (no quotes/backslashes/control chars).
-    if [[ -n "$model" && ! "$model" =~ ^[A-Za-z0-9._-]+$ ]]; then
-        echo "ERROR: --model must match [A-Za-z0-9._-]+ (got: '$model')" >&2
-        exit 1
-    fi
-
-    # Optional fields: omitted entirely when not provided so legacy readers
-    # (and diffs against old checkpoints) stay clean.
-    local attempt_json=""
-    [[ -n "$attempt" ]] && attempt_json=$',\n  "attempt": '"$attempt"
-    local model_json=""
-    [[ -n "$model" ]] && model_json=$',\n  "model": "'"$model"'"'
-
-    ensure_dir
-    local target tmp
-    target="$(checkpoint_file "$issue")"
-    tmp="${target}.tmp.$$"
-
-    cat > "$tmp" <<EOF
-{
-  "phase": "$phase",
-  "task_id": "$task_id",
-  "timestamp": "$(iso_now)",
-  "pr_number": $pr_number$attempt_json$model_json
-}
-EOF
-
-    mv "$tmp" "$target"
-    echo "wrote $target (phase=$phase)"
-}
-
-cmd_read() {
-    local issue="${1:-}"
-    validate_issue "$issue"
-    local target
-    target="$(checkpoint_file "$issue")"
-    if [[ ! -f "$target" ]]; then
-        return 1
-    fi
-    cat "$target"
-}
-
-cmd_phase() {
-    local issue="${1:-}"
-    validate_issue "$issue"
-    local target
-    target="$(checkpoint_file "$issue")"
-    [[ ! -f "$target" ]] && return 0
-    # Extract phase via grep+sed to avoid jq dependency.
-    sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$target" | head -n1
-}
-
-cmd_attempt() {
-    local issue="${1:-}"
-    validate_issue "$issue"
-    local target
-    target="$(checkpoint_file "$issue")"
-    [[ ! -f "$target" ]] && return 0
-    # Empty output means the field is absent (legacy checkpoint) = attempt 1.
-    sed -n 's/.*"attempt"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$target" | head -n1
-}
-
-cmd_model() {
-    local issue="${1:-}"
-    validate_issue "$issue"
-    local target
-    target="$(checkpoint_file "$issue")"
-    [[ ! -f "$target" ]] && return 0
-    # Empty output means the field is absent (legacy checkpoint) =
-    # default/unknown model. Mirrors cmd_attempt semantics (#3482).
-    sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$target" | head -n1
-}
-
-cmd_exists() {
-    local issue="${1:-}"
-    validate_issue "$issue"
-    [[ -f "$(checkpoint_file "$issue")" ]]
-}
-
-cmd_delete() {
-    local issue="${1:-}"
-    validate_issue "$issue"
-    local target
-    target="$(checkpoint_file "$issue")"
-    if [[ -f "$target" ]]; then
-        rm -f "$target"
-        echo "deleted $target"
-    fi
-}
-
-cmd_list() {
-    local dir
-    dir="$(checkpoint_dir)"
-    [[ ! -d "$dir" ]] && return 0
-    find "$dir" -maxdepth 1 -name 'issue-*.json' -type f 2>/dev/null \
-        | sed -E 's|.*/issue-([0-9]+)\.json$|\1|' \
-        | sort -n
-}
-
-main() {
-    local cmd="${1:-}"
-    shift || true
-    case "$cmd" in
-        write)   cmd_write "$@" ;;
-        read)    cmd_read "$@" ;;
-        phase)   cmd_phase "$@" ;;
-        attempt) cmd_attempt "$@" ;;
-        model)   cmd_model "$@" ;;
-        exists)  cmd_exists "$@" ;;
-        delete)  cmd_delete "$@" ;;
-        list)    cmd_list "$@" ;;
-        -h|--help|"") usage ;;
-        *) echo "ERROR: unknown command '$cmd'" >&2; usage ;;
-    esac
-}
-
-main "$@"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/lib/script-helper.sh"
+# Missing binary is an operational failure, never a missing checkpoint (1).
+export LOOM_SCRIPT_HELPER_MISSING_RC=3
+# requires-daemon: sweep-checkpoint >= 0.19.255  #8525 development floor: requires a build containing the Rust checkpoint port; first published release is unassigned. Version alone does not establish capability.
+loom_exec_script_helper sweep-checkpoint "$@"

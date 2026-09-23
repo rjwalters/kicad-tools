@@ -239,7 +239,9 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     For a **migrated** group (``report.MIGRATED_GROUPS``) the item carries no
     ``xfail`` -- that is the flip its epic phase exists to make -- and the
     consumer is driven at kicad-cli's own rule value; see
-    :func:`_consumer_verdicts` for why the two readings differ.
+    :func:`_consumer_verdicts` for why the two readings differ.  A gated
+    adapter must compare something on at least one of ``CI_SEEDS``, or the
+    gate is vacuous.
 
     Zone pairs are the one exception, and for the same reason the report
     scores them only on its refilled run: this item measures the *as-is* board,
@@ -270,15 +272,33 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
         elif in_truth and not in_consumer:
             under.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
 
-    if adapter.group in MIGRATED_GROUPS:
+    if adapter.group in MIGRATED_GROUPS and not compared:
         # A gate over an empty denominator is green for the wrong reason.  An
         # xfailed row can afford to be vacuous (the published table carries
         # the real denominator); a gated one cannot, because "no in-scope pair
         # on this seed" and "this consumer agrees" would look identical.
-        assert compared, (
-            f"{adapter.name} (group {adapter.group}) is gated but seed {seed} "
-            f"offered no in-scope pair to compare (pair_kinds={sorted(adapter.pair_kinds)}) "
-            "-- the gate is vacuous; re-pin CI_SEEDS or widen the scope"
+        #
+        # The statement is made over ``CI_SEEDS`` rather than over this one
+        # seed, because a consumer's ``pair_kinds`` can be rare enough that no
+        # single seed carries one: group 6 sees only static placement copper
+        # (``pad-seg`` / ``pad-via``) and seed 2 places no pad pair at all.
+        # Requiring *every* seed to contribute would force CI_SEEDS to grow --
+        # a kicad-cli process per seed per adapter -- to say something the
+        # union already says.  Counting pairs needs no oracle, so this stays
+        # cheap.
+        elsewhere = sum(
+            1
+            for other in CI_SEEDS
+            for pair in generate_case(other).pairs
+            if pair.kind in adapter.pair_kinds
+            and not pair.boundary
+            and pair.kind not in PairKind.ZONE
+        )
+        assert elsewhere, (
+            f"{adapter.name} (group {adapter.group}) is gated but no seed in "
+            f"{CI_SEEDS} offers an in-scope pair to compare "
+            f"(pair_kinds={sorted(adapter.pair_kinds)}) -- the gate is vacuous; "
+            "re-pin CI_SEEDS or widen the scope"
         )
 
     gated = (

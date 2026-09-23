@@ -504,7 +504,7 @@ conflict_since_for() {
 }
 
 _iso_to_epoch() {
-    date -d "$1" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s
+    date -d "$1" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s
 }
 
 conflict_days() {

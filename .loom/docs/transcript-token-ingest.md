@@ -39,16 +39,196 @@ with its previous rows **replaced**, never appended to. A repeated pass can
 therefore neither double-count nor miss a live session's tail. `--force`
 re-reads even unchanged files; it still replaces rather than appends.
 
-### In the daemon (opt-in, default off)
+### In the daemon (on by default since #8477)
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `LOOM_TRANSCRIPT_INGEST` | unset (off) | `1`/`true`/`yes`/`on` starts the periodic pass |
-| `LOOM_TRANSCRIPT_INGEST_INTERVAL` | `900` | Seconds between passes |
-| `LOOM_TRANSCRIPT_INGEST_WINDOW_HOURS` | `24` | How far back each pass looks; `0` = full history |
+The daemon runs the pass itself every 15 minutes. **Precedence is `env var >
+config value > built-in default`**, the same rule every `autonomous.*` knob
+follows:
 
-Default-off follows the daemon's FLAGS-OFF convention: ingestion writes to a
-database the IPC path also writes to, so a host opts in deliberately.
+| Config key | Env override | Default | Meaning |
+|---|---|---|---|
+| `autonomous.transcriptIngest.enabled` | `LOOM_TRANSCRIPT_INGEST` | `true` | Master on/off. Env `0`/`false`/`no`/`off` opts this host **out**; `1`/`true`/`yes`/`on` forces it on over a config `false`. An unrecognized value falls through to config/default rather than silently disabling |
+| `autonomous.transcriptIngest.intervalSecs` | `LOOM_TRANSCRIPT_INGEST_INTERVAL` | `900` | Seconds between passes. Zero/invalid → default |
+| `autonomous.transcriptIngest.windowHours` | `LOOM_TRANSCRIPT_INGEST_WINDOW_HOURS` | `24` | How far back each pass looks; `0` = full history (still cheap after the first pass, thanks to the ledger) |
+
+```json
+{
+  "autonomous": {
+    "transcriptIngest": { "enabled": false }
+  }
+}
+```
+
+**Restart required** for all three: they are resolved once, during daemon
+bring-up, and frozen for the life of the process (`try_init_transcript_ingest`
+is called before the loop is spawned). Landing the edit on disk changes
+nothing until the daemon restarts — see
+[`fleet-config-lifecycle.md`](fleet-config-lifecycle.md).
+
+#### Why this one defaults ON, against the FLAGS-OFF convention
+
+The daemon's FLAGS-OFF doctrine governs **work generation** — loops that spawn
+agents, spend tokens, and mutate the forge. This pass generates no work: it is
+a passive telemetry writer into Loom's own `~/.loom/activity.db`, incremental,
+ledgered, and idempotent (a repeat pass over unchanged files is a no-op).
+
+Default-*off* was actively destroying data, and silently. See "The 30-day fuse"
+below: every host that never hand-set `LOOM_TRANSCRIPT_INGEST=1` — which, as
+measured across the fleet on 2026-09-20, was all of them — was losing its
+token/cost history permanently as Claude Code pruned the transcripts it had
+never read. A knob whose "safe" position deletes the data it guards is the
+wrong polarity; opting *out* is now the deliberate act.
+
+## The 30-day fuse (#8477)
+
+**Claude Code deletes session transcripts after `cleanupPeriodDays` (default
+30), and the cleanup runs at session start.** On a fleet host, agents start
+constantly, so transcripts are pruned continuously as they cross the line —
+observed live on 2026-09-20: 43 transcripts dated Aug 21 vanished from
+`~/.claude/projects` within a few minutes.
+
+The transcripts are the **only** copy of this data. Once a transcript is gone,
+the tokens and cost it recorded are unrecoverable — there is no forge-side or
+API-side backfill. So the window in which ingestion can run is exactly
+`cleanupPeriodDays` wide, and anything that stops the pass for longer than that
+(daemon down, config opt-out, a wedged database) burns history that no later
+run can recover. The first run on that host wrote 100,652 rows spanning only
+the surviving ~30 days; everything older was already gone.
+
+Three levers, independently:
+
+- **Ingest** (this document) — keeps the *derived* token/cost rows forever in
+  `~/.loom/activity.db`, at a few hundred MB. On by default; verify with
+  `loom-daemon health` (below).
+- **Archive the raw transcripts** — `loom-daemon archive-transcripts` (#8494)
+  rolls them into a verified, incremental `.tar.zst` + manifest before the fuse
+  fires. On the measured host that set compressed **10.9:1** (25.4 GB →
+  2.33 GB), so it buys the same forensic retention for roughly a tenth of the
+  disk that raising `cleanupPeriodDays` costs. Opt-in and operator-driven — see
+  ["Archiving the raw transcripts"](#archiving-the-raw-transcripts-8494) below
+  for how to run it and how to restore from an archive.
+- **Retain the raw transcripts in place** — raise `cleanupPeriodDays` in
+  `~/.claude/settings.json`, trading disk for retention linearly (~33 GB per 30
+  days on the measured host). Only needed for forensics or `claude --resume`;
+  the cost/token views do not depend on it once the rows are ingested.
+
+**Anything that archives or prunes transcripts must exclude
+`~/.claude/projects/<project>/memory/`** — that holds persistent agent memory,
+not session transcripts. `archive-transcripts` never visits it, and a test
+asserts that rather than a comment claiming it.
+
+### Checking it is actually running
+
+```bash
+loom-daemon health --json | jq '.sections[] | select(.key == "transcript_ingest")'
+```
+
+The `transcript_ingest` section always renders, and is **DEGRADED** when:
+
+- ingestion is off on this host (`LOOM_TRANSCRIPT_INGEST=0` or
+  `autonomous.transcriptIngest.enabled: false`) — deliberate or not, the host
+  is losing history right now; or
+- the newest `transcript_ingest` ledger entry is more than 6 hours old **while
+  a newer transcript exists on disk** — the pass is enabled but has stopped
+  keeping up (crashed thread, wedged database lock, daemon down). An old ledger
+  entry on a quiet host with no newer transcripts is *not* flagged: nothing has
+  arrived to ingest.
+
+A second corroborating check, from the daemon log and a dry run:
+
+```bash
+grep 'Transcript ingestion' ~/.loom/daemon.log | tail -1
+loom-daemon ingest-transcripts --dry-run --format json | jq '{transcripts_seen, skipped_unchanged}'
+```
+
+A healthy host reports `skipped_unchanged` ≈ `transcripts_seen`. A
+`skipped_unchanged` of **0** means nothing has ever been ingested — the
+symptom that opened #8477.
+
+## Archiving the raw transcripts (#8494)
+
+Ingestion preserves the *derived* rows. `loom-daemon archive-transcripts`
+preserves the *raw* transcripts themselves — the only artifact that supports
+forensics on a surprising row total, `claude --resume` on an older session, and
+**re-ingestion under a corrected method** (the pricing table and the dedupe
+method have both needed fixing after the fact; a fix can only be re-applied to
+transcripts that still exist).
+
+```bash
+loom-daemon archive-transcripts                       # every eligible transcript
+loom-daemon archive-transcripts --dry-run             # report, write nothing
+loom-daemon archive-transcripts --format json         # machine-readable summary
+loom-daemon archive-transcripts --workspace ~/GitHub/loom   # one repo's transcripts
+loom-daemon archive-transcripts --archive-dir /Volumes/big/transcripts
+```
+
+**Opt-in and operator-driven.** Unlike ingestion, nothing starts this on its
+own: it consumes real disk, and the derived data it backstops is already
+preserved. Run it by hand, or from your own cron/launchd/systemd timer — often
+enough that a transcript is archived before `cleanupPeriodDays` deletes it (a
+daily timer against a 30-day fuse has ample margin).
+
+What one pass does, and the guarantees worth knowing:
+
+| Behaviour | Detail |
+|---|---|
+| Output | One dated `transcripts-<UTC-stamp>.tar.zst` plus a sibling `.manifest.json` under `--archive-dir` (default `~/.loom/transcript-archives`) |
+| Manifest | One record per file: path (relative to the projects dir, the same key ingestion's ledger uses), size, mtime, SHA-256 — so an archive can be **audited or selectively restored without unpacking it whole** |
+| Verified | The archive is **read back** after writing and every entry re-hashed against the manifest. An archive that is not read back is not a backup. A mismatch fails the run *before* the ledger is touched, so the same files are retried next run rather than being recorded as done |
+| Incremental | A `transcript_archive` ledger row per archived transcript (size + mtime), mirroring `transcript_ingest`. An unchanged file is skipped on later runs; `--force` re-archives anyway |
+| Leaves live sessions alone | `--min-age-hours` (default 24) skips a transcript modified more recently than that, so a still-growing session is snapshotted on a later pass instead of mid-write |
+| `memory/` | Never visited. `~/.claude/projects/<project>/memory/` holds persistent agent memory, not session transcripts |
+| Empty host | A pass with nothing eligible is a **no-op, not an error** |
+
+`--level` sets the zstd level (default 19); `--projects-dir` and `--db`
+override the transcript and database locations, as with ingestion.
+
+### Restoring from an archive
+
+The manifest is the index — read it first, and unpack only what you need.
+
+```bash
+ARCHIVES=~/.loom/transcript-archives
+
+# 1. Which archive holds the session you want? Ask the ledger...
+sqlite3 ~/.loom/activity.db \
+  "SELECT transcript_path, archive_file, archived_at FROM transcript_archive
+   WHERE transcript_path LIKE '%<session-uuid>%';"
+
+# ...or grep the manifests directly, if the database is gone too.
+jq -r '.entries[].path' "$ARCHIVES"/transcripts-*.manifest.json | grep <session-uuid>
+
+# 2. Extract exactly that one transcript (no need to unpack the archive whole).
+#    Paths inside the archive are relative to the projects dir. The `--` is
+#    load-bearing: a project slug is the workspace path with `/` replaced by
+#    `-`, so it ALWAYS begins with `-` and tar would otherwise read the member
+#    name as a bundle of options (BSD tar: "Invalid replacement string").
+mkdir -p /tmp/restored
+zstd -dc "$ARCHIVES/transcripts-20260922T041500Z.tar.zst" \
+  | tar -xv -C /tmp/restored -f - -- '<project-slug>/<session-uuid>.jsonl'
+
+# 3. Confirm the bytes are what was archived.
+shasum -a 256 /tmp/restored/<project-slug>/<session-uuid>.jsonl
+jq -r '.entries[] | select(.path | endswith("<session-uuid>.jsonl")) | .sha256' \
+  "$ARCHIVES/transcripts-20260922T041500Z.manifest.json"
+```
+
+To **re-ingest** a restored set — the case that matters after a pricing-table or
+method correction — point ingestion at the restore directory instead of the live
+projects directory. `--force` is what makes it re-read files whose ledger rows
+already exist; ingestion **replaces** a transcript's rows rather than appending,
+so a re-ingest cannot double-count:
+
+```bash
+mkdir -p /tmp/restored
+zstd -dc "$ARCHIVES/transcripts-20260922T041500Z.tar.zst" | tar -x -C /tmp/restored -f -
+loom-daemon ingest-transcripts --projects-dir /tmp/restored --force --since all
+```
+
+To restore transcripts for `claude --resume`, extract into the live
+`${CLAUDE_CONFIG_DIR:-~/.claude}/projects` directory instead of `/tmp/restored`.
+Note that Claude Code's cleanup will prune them again once they cross
+`cleanupPeriodDays`, so treat that as a working copy, not storage.
 
 ## What a row means
 

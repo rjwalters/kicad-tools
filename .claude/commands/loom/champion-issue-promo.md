@@ -647,7 +647,10 @@ A criterion 6/8 failure is `premise-false` only when the proposal's central
 factual claim is **conclusively false** on current `main` — a cited file
 doesn't exist, a "tracked" file isn't tracked, a cited line range doesn't
 exist, a quoted string isn't present. Mere imprecision ("near line 40, not
-exactly 12") is an ordinary finding, not this kind.
+exactly 12") is an ordinary finding, not this kind — and **a count mismatch is
+premise-false only when the correct count is zero** (#8313): an undercount of
+a still-true problem ("26 files lack the marker", re-count 38) is imprecision,
+and the premise holds.
 
 Tag it `[premise-false]` and cite the literal mechanical check + output, not a
 paraphrase:
@@ -658,11 +661,28 @@ paraphrase:
   grep -Fx src/does/not/exist.rs` → (no output, exit 1)
 ```
 
-Other acceptable checks: `git ls-files '<pattern>'` ("tracked" claims), `wc -l
-<path>` (line-range claims), `grep -c '<string>' <path>` ("string appears"
-claims) — always against `origin/main`, always with literal output. This tag
-and citation are what Step 4's premise-false close gate reads back on the N=2
-pass — an untagged or uncited finding never triggers that gate.
+The other acceptable checks — "tracked", line-range and "string appears"
+claims — are the evidence table in
+[`champion-premise-false-evidence.md`](champion-premise-false-evidence.md),
+always against `origin/main`, always with literal output. This tag and
+citation are what Step 4's premise-false close gate reads back on the N=2 pass
+— an untagged or uncited finding never triggers that gate.
+
+##### Three rules that make a cited check citable (#8593)
+
+The resolver snippet, the full evidence table and the #8494 incident behind
+them: [`champion-premise-false-evidence.md`](champion-premise-false-evidence.md).
+
+1. **Resolve symlinks first.** A path whose `origin/main` tree entry is mode
+   `120000` (every `.loom/docs/*.md` since #7842) reads back through git as
+   its link-target string, so any `grep`/`wc` over it is empty whatever the
+   document says — that is how #8494 was closed on two true premises. Resolve
+   with `resolve_main_path`, check **that** path, and cite it in the finding.
+2. **Counting form only** (`grep -c`, `wc -l`), so a false premise produces a
+   *non-empty* output.
+3. **An empty result is "check inconclusive", never "premise false"** — on a
+   path that exists on `main` it cannot be told apart from a check that could
+   not read the file at all, so it is not citable evidence.
 
 ---
 
@@ -797,10 +817,20 @@ VERDICT_MARKER="<!-- champion:proposal-verdict:body-$BODY_HASH -->"
 # reaching Step 4. Step 4 reuses these same variables.
 PRIOR_REJECTIONS=$(printf '%s\n' "$ISSUE_JSON" | jq \
   '[.comments[] | select(.body | contains("Champion Review: NEEDS REVISION"))] | length')
-ALREADY_ROUTED=$(printf '%s\n' "$ISSUE_JSON" | jq -e '.labels[] | select(.name=="loom:operator-only")' >/dev/null && echo yes || echo no)
+# A human owns the proposal when it carries ANY of the three hold labels (#8245,
+# porting champion-epic.md's #7734 widening): loom:operator-only is Step 4's own
+# terminal state; loom:blocked / loom:operator are an operator's park, which
+# escalating would silently undo. All three end the pass identically.
+HELD_BY=$(printf '%s\n' "$ISSUE_JSON" | jq -r \
+  '[.labels[].name | select(. == "loom:operator-only" or . == "loom:blocked" or . == "loom:operator")] | join(",")')
+ALREADY_ROUTED=$([ -n "$HELD_BY" ] && echo yes || echo no)
+# The self-healing un-escalation below can only ever clear loom:operator-only, so
+# it is gated on that ONE label — never on the widened set.
+OPERATOR_ONLY_PRESENT=$(printf '%s\n' "$ISSUE_JSON" | jq -e '.labels[] | select(.name=="loom:operator-only")' >/dev/null && echo yes || echo no)
 SKIP_STREAK=0            # silent skips already recorded for THIS body revision
 ESCALATE_UNREVISED=no    # set to yes to bypass re-evaluation and go straight to Step 4's escalation
 FORCE_REEVALUATE=no      # set to yes when an escalation was just undone (#5664)
+OPERATOR_RULED=no        # set to yes when a human un-parked THIS body revision after its rejection (#8245)
 
 # Self-healing un-escalation (#5664). An issue can only reach here carrying
 # loom:operator-only when it was handed in outside champion.md's discovery
@@ -810,18 +840,26 @@ FORCE_REEVALUATE=no      # set to yes when an escalation was just undone (#5664)
 # (SUBSET_CARVEOUT: yes, "recurred after closure"), rejoins normal evaluation
 # in THIS pass rather than waiting for a human; every other escalation
 # (merits, cycle, human-applied) is left exactly as it is.
-if [ "$ALREADY_ROUTED" = "yes" ]; then
+if [ "$OPERATOR_ONLY_PRESENT" = "yes" ]; then
   UNESC_RC=0
   ./.loom/scripts/classify-dependency-block.sh --issue "$ISSUE_NUMBER" \
     --check-unescalate --apply || UNESC_RC=$?
   if [ "$UNESC_RC" -eq 0 ]; then
-    ALREADY_ROUTED=no
-    # The body hash has not changed, so the verdict marker still matches and the
-    # skip tally is still at the cap. Without this flag the very next branch
-    # would set ESCALATE_UNREVISED=yes and re-escalate on the same stale
-    # dependency finding, undoing the un-escalation in the same pass.
-    FORCE_REEVALUATE=yes
-    echo "#$ISSUE_NUMBER un-escalated — its recorded blocker has closed; re-evaluating from scratch this pass"
+    OPERATOR_ONLY_PRESENT=no
+    # Only loom:operator-only came off. A loom:blocked / loom:operator park
+    # underneath it still holds, so recompute rather than assuming "no" (#8245).
+    HELD_BY=$(printf '%s\n' "$HELD_BY" | tr ',' '\n' | grep -v '^loom:operator-only$' | paste -sd, -)
+    ALREADY_ROUTED=$([ -n "$HELD_BY" ] && echo yes || echo no)
+    if [ "$ALREADY_ROUTED" = "no" ]; then
+      # The body hash has not changed, so the verdict marker still matches and the
+      # skip tally is still at the cap. Without this flag the very next branch
+      # would set ESCALATE_UNREVISED=yes and re-escalate on the same stale
+      # dependency finding, undoing the un-escalation in the same pass.
+      FORCE_REEVALUATE=yes
+      echo "#$ISSUE_NUMBER un-escalated — its recorded blocker has closed; re-evaluating from scratch this pass"
+    else
+      echo "#$ISSUE_NUMBER un-escalated, but a human hold ($HELD_BY) remains — skipping (no comment, no claim, no tally)"
+    fi
   fi
 fi
 
@@ -839,10 +877,39 @@ if [ "$FORCE_REEVALUATE" = "no" ] && printf '%s\n' "$ISSUE_JSON" | jq -e --arg m
     | sed -n "s|.*<!-- champion:unrevised-skips:$BODY_HASH:\([0-9]\{1,\}\) -->.*|\1|p" | tail -n 1)
   SKIP_STREAK=${SKIP_STREAK:-0}
   UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
+  VERDICT_CREATED_AT=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.created_at // ""')
+
+  # Operator un-park (#8245, porting champion-epic.md's #7921): loom:operator-only
+  # removed AFTER this revision's own rejection is a human ruling on THIS body —
+  # stand down, unrevised, until the body changes. Without it the next pass
+  # re-escalates: no label distinguishes "ruled on" from "never escalated", and
+  # the tally is already at the cap. A DIFFERENT signal from FORCE_REEVALUATE
+  # above (a human's label edit, not a closed dependency) — never fold the two.
+  # The actor is not inspected (agents authenticate as the operator); the bot's
+  # OWN un-park is excluded by TIME, via the marker classify-dependency-block.sh
+  # --apply posts right after removing the label. Why not the epic path's
+  # presence-based BOT_UNESCALATABLE: champion-epic-guard-invariants.md.
+  BOT_UNESCALATED_AT=$(printf '%s\n' "$ISSUE_JSON" | jq -r \
+    '[.comments[] | select(.body | contains("<!-- champion:proposal-unescalated")) | .createdAt] | max // ""')
+  UNPARKED_AT=$(gh api "repos/{owner}/{repo}/issues/$ISSUE_NUMBER/timeline" --paginate \
+    --jq '.[] | select(.event == "unlabeled" and .label.name == "loom:operator-only") | .created_at' \
+    | sort | tail -n 1)
+  # Unknown inputs fail OPEN, never closed (#7965's rule): an empty
+  # VERDICT_CREATED_AT is a failed REST re-read, and `> ""` matches ANY un-park.
+  if [ -n "$UNPARKED_AT" ] && [ -n "$VERDICT_CREATED_AT" ] \
+     && [[ "$UNPARKED_AT" > "$VERDICT_CREATED_AT" ]] \
+     && { [ -z "$BOT_UNESCALATED_AT" ] || [[ "$UNPARKED_AT" > "$BOT_UNESCALATED_AT" ]]; }; then
+    OPERATOR_RULED=yes
+  fi
 
   if [ "$ALREADY_ROUTED" = "yes" ]; then
     # Terminal state — a human owns this now. Skip without tallying or escalating.
-    echo "#$ISSUE_NUMBER already routed to loom:operator-only — skipping (no comment, no claim, no tally)"
+    echo "#$ISSUE_NUMBER is held by $HELD_BY — skipping (no comment, no claim, no tally)"
+  elif [ "$OPERATOR_RULED" = "yes" ]; then
+    # A human already answered this revision's escalation by un-parking it.
+    # Re-escalating with nothing new re-fights that ruling (#8245); the ladder
+    # resumes only when the body is revised.
+    echo "#$ISSUE_NUMBER: loom:operator-only removed at $UNPARKED_AT, after this revision's rejection — a human has ruled on body $BODY_HASH; standing down (no comment, no claim, no tally, no escalation) until it is revised"
   elif [ "$UNREVISED_EVALS" -ge "${LOOM_MAX_UNREVISED_EVALUATIONS:-2}" ]; then
     # Silence is not free forever: the skip budget is spent, so this pass does
     # NOT skip. Fall through to Claim, then jump straight to Step 4's escalation
@@ -868,6 +935,8 @@ if [ "$FORCE_REEVALUATE" = "no" ] && printf '%s\n' "$ISSUE_JSON" | jq -e --arg m
   fi
 fi
 ```
+
+If `OPERATOR_RULED=yes`, **stop here** — no comment, no claim, no tally, no escalation: a human has already ruled on this exact body by un-parking it, and only a revision restarts the ladder (#8245).
 
 If the marker is present **and `ESCALATE_UNREVISED=no`**, **stop here for this issue** — do not read comments further, do not claim, do not comment. This is the mechanism that turns "6 identical NEEDS REVISION comments" into "1 comment, then silent skips" for a truly unrevised proposal. If `ESCALATE_UNREVISED=yes`, do **not** stop: continue to the Claim step and then to Step 4, which applies the dependency-timing gate and then escalates on that flag without re-running the 8 criteria. If `FORCE_REEVALUATE=yes` the marker branch never ran at all: claim and go to Step 1 for a full re-evaluation, because the escalation this pass just undid was written against a blocker that has since closed.
 
@@ -916,7 +985,8 @@ Invariants a future edit must preserve:
 - **The counter must not live in a comment Champion refuses to write.** Anything that requires posting per cycle re-creates this bug; anything derived from the issue's own text is frozen by construction, which is what makes the tally an *edit* of a comment that already exists.
 - **A revision resets `SKIP_STREAK`, not `PRIOR_REJECTIONS`.** A new hash means a new marker, so the tally starts at 0 for the new revision — but the rejection count keeps accumulating across revisions, so a proposal that is revised-and-rejected twice still escalates on its third cycle. Both paths remain bounded.
 - **Escalation goes through the claim.** `ESCALATE_UNREVISED=yes` falls through to the Claim step and the verdict-time recheck rather than escalating inline, so two concurrent passes cannot post two escalation comments. A lost `PATCH` update between concurrent passes can only *under*count (escalating a cycle later), never double-escalate.
-- **`ALREADY_ROUTED=yes` short-circuits everything.** A proposal already carrying `loom:operator-only` is never re-escalated and never re-tallied; "When NOT to Promote" already excludes it from future passes. Since #5664 that short-circuit is **conditional, not unconditional**: the self-healing un-escalation runs first, and only a *dependency-only* escalation whose recorded blocker has closed can clear the label (see "Pass 0"). Everything else still short-circuits exactly as before.
+- **`ALREADY_ROUTED=yes` short-circuits everything.** A proposal carrying any of `loom:operator-only`, `loom:blocked`, or `loom:operator` (#8245 — `champion-epic.md`'s three-label set since #7734; the two parks are an operator's hold, which escalating would silently undo) is never re-escalated and never re-tallied; "When NOT to Promote" already excludes the first two from future passes. Since #5664 that short-circuit is **conditional, not unconditional**: the self-healing un-escalation runs first, and only a *dependency-only* escalation whose recorded blocker has closed can clear the label (see "Pass 0"). It stays gated on `loom:operator-only` alone — the only label it can remove — so a park surviving it keeps `ALREADY_ROUTED=yes`. Everything else short-circuits exactly as before.
+- **An un-park is a ruling on the current revision (#8245).** `loom:operator-only` removed after this revision's own verdict comment means `OPERATOR_RULED=yes`: stand down, no tally, no escalation, until the body is revised. Two preconditions keep that safe and removing either reintroduces the incident — a non-empty `VERDICT_CREATED_AT` (an empty one is a failed REST re-read, and `> ""` matches any historical un-park), and an `UNPARKED_AT` newer than `BOT_UNESCALATED_AT` so Champion's own un-escalation cannot masquerade as a human's. Full rationale, including why the epic path's presence-based `BOT_UNESCALATABLE` could not be ported verbatim: [`champion-epic-guard-invariants.md`](champion-epic-guard-invariants.md).
 - **Escalation is gated on the finding's *kind*, not just on the count** (#5664). `UNREVISED_EVALS >= N` is necessary but no longer sufficient: Step 4's dependency-timing gate declines to escalate when the only recurring finding is an open, non-cycle dependency. A merits finding — any of the other 7 criteria, a dependency phrase that cites no issue, or a real cycle — escalates on exactly the same cycle it always did.
 
 `LOOM_MAX_UNREVISED_EVALUATIONS` (default **2**) — bounds the silent-skip streak the same way `LOOM_MAX_STANDDOWN_STREAK` (default 3) bounds `judge.md`'s silent stand-downs: silence is a valid response to a repeated no-op, but never an unbounded one.
@@ -1196,12 +1266,13 @@ If any criteria fail, first check whether this rejection should **escalate** ins
 # first — see "Per-issue order in the loop"), so do NOT recompute them here:
 #   PRIOR_REJECTIONS  — posted "Champion Review: NEEDS REVISION" comments (any revision)
 #   SKIP_STREAK       — silent skips recorded for THIS body revision (0 if the marker did not match)
-#   ALREADY_ROUTED    — yes when loom:operator-only is already present
+#   ALREADY_ROUTED    — yes when loom:operator-only, loom:blocked, or loom:operator is present (#8245)
+#   OPERATOR_RULED    — yes when loom:operator-only was removed after THIS revision's rejection (#8245)
 # Escalation is gated on evaluation CYCLES, not on posted comments (#4967):
 UNREVISED_EVALS=$(( PRIOR_REJECTIONS + SKIP_STREAK ))
 ```
 
-**If `UNREVISED_EVALS >= ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` and not already routed** (the N=2 threshold), **or if `ESCALATE_UNREVISED=yes`** (the idempotency check already made this determination and sent you straight here without re-evaluating): you are about to escalate. **First run the dependency-timing gate.**
+**If `UNREVISED_EVALS >= ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}`, `ALREADY_ROUTED=no`, and `OPERATOR_RULED=no`** (the N=2 threshold), **or if `ESCALATE_UNREVISED=yes`** (the idempotency check already made this determination and sent you straight here without re-evaluating): you are about to escalate. **First run the dependency-timing gate.**
 
 #### Dependency-timing gate — do NOT escalate a finding that clears itself (#5664)
 
@@ -1264,17 +1335,28 @@ PREMISE_FALSE_FINDINGS=$(printf '%s\n' "$RECURRING_FINDINGS_TEXT" | grep -c '^- 
 
 if [ "$TOTAL_FINDINGS" -gt 0 ] && [ "$TOTAL_FINDINGS" -eq "$PREMISE_FALSE_FINDINGS" ]; then
   # Every recurring finding is premise-false. Re-run EACH cited mechanical
-  # check verbatim against CURRENT origin/main before closing -- never trust
-  # the prior verdict's captured output, since the repo may have changed:
-  #   git fetch origin main
-  #   <re-run every "verified via: <command>" from the findings list above,
-  #    exactly as cited>
-  # If ANY re-run check now shows the premise IS true after all (the path now
-  # exists, the string is now present, the count now matches), this gate does
-  # NOT apply -- the world changed under the proposal, and only a fresh
-  # evaluation is correct: go to Step 1, not to closing or escalating on a
+  # check against CURRENT origin/main (`git fetch origin main` first) -- never
+  # trust the prior verdict's captured output, since the repo may have changed.
+  #
+  # RESOLVE, THEN CHECK, THEN SCORE (#8593). "Verbatim" is not enough: if the
+  # cited path is a symlink (mode 120000 -- every .loom/docs/*.md is one), a
+  # verbatim re-run reads the link-target string and reproduces the SAME false
+  # negative, so the escape hatch below can never fire. For each cited path:
+  #   P=$(resolve_main_path "$p")   # champion-premise-false-evidence.md
+  # re-run the check against "$P" in a counting form, quote "$P" in the close
+  # comment, and score each result per that file's evidence table:
+  #   false        -- positive evidence (absent from `git ls-tree`; `grep -c`
+  #                   = 0, or `wc -l` below the cited range, on a regular blob)
+  #   inconclusive -- no output on a path that exists on main, an error, or an
+  #                   unresolved 120000 read
+  #   true         -- the premise now holds (path present, string found, ...)
+  # ANY inconclusive => CLOSE_PREMISE_FALSE=no, fall through to the ordinary
+  # escalation branch: an operator reading an unreadable check is cheap, and a
+  # close on a check that cannot match is what #8494 cost. ANY true => this
+  # gate does not apply at all -- the world changed under the proposal, so go
+  # to Step 1 for a fresh evaluation rather than closing or escalating on a
   # now-stale finding.
-  CLOSE_PREMISE_FALSE=yes
+  CLOSE_PREMISE_FALSE=yes   # only if EVERY re-run scored `false`
 else
   CLOSE_PREMISE_FALSE=no
 fi
@@ -1282,8 +1364,9 @@ fi
 
 | `CLOSE_PREMISE_FALSE` | Re-run outcome | What to do |
 |---|---|---|
-| `yes` | every re-run check still confirms false | **Close** — use the template below. Do not apply `loom:operator-only` |
+| `yes` | every re-run check still confirms false, on resolved paths, with positive evidence | **Close** — use the template below. Do not apply `loom:operator-only` |
 | `yes` | a re-run check now contradicts the prior finding | Premise no longer false — do not close or escalate on it; go to Step 1 instead (like the dependency gate's `REEVALUATE`) |
+| `yes` | any re-run check is **inconclusive** — no output on a path that exists on `main`, or a read of an unresolved `120000` entry | Do **not** close. Re-run it against `resolve_main_path`'s output in a counting form first; if it is still inconclusive, fall through to the ordinary escalation branch (#8593) |
 | `no` | mixed premise-false + ordinary finding, or none at all | Fall through to the ordinary escalation branch below, unchanged |
 
 **Closing (`CLOSE_PREMISE_FALSE=yes`, re-verified false):**
@@ -1295,9 +1378,10 @@ gh issue comment <number> --body "$CLOSE_MARKER
 **Champion: Closing — Premise Verified False**
 
 [One-paragraph rationale: name the finding(s), the exact mechanical check(s)
-re-run against \`origin/main\` @ \`$MAIN_SHA\`, and their output, so a human
-skimming the closed issue can see for themselves why no operator decision was
-needed. Implemented per #7657.]
+re-run against \`origin/main\` @ \`$MAIN_SHA\` — quoting the RESOLVED path for
+any symlinked citation (#8593) — and their literal output, so a human skimming
+the closed issue can see for themselves why no operator decision was needed.
+Implemented per #7657.]
 
 ---
 *Automated by Champion role*" \
@@ -1385,7 +1469,8 @@ Continue evaluating issues until all have been processed or all applicable tier 
 | No marker match (new or revised proposal) | Claim → Step 1 (Read) → Step 2 (Evaluate) → Step 3 or 4 |
 | Marker match, `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | Tally the skip (`PATCH` the existing verdict comment), continue the loop to the next issue |
 | Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | Claim → **Step 4's escalation branch directly** (skip Steps 1–3: the text is unchanged, so re-evaluating cannot change the verdict) — but run Step 4's **dependency-timing gate** first (`DEFER` continues the loop with no label and no comment, `REEVALUATE` sends you to Step 1 after all, #5664), then the **premise-false close gate** (#7657): every recurring finding re-verified `premise-false` closes the issue instead of escalating; any other outcome escalates as before |
-| Marker match, `ALREADY_ROUTED=yes` | Continue the loop — no tally, no escalation; a human already owns it |
+| Marker match, `ALREADY_ROUTED=yes` (`loom:operator-only`, `loom:blocked`, or `loom:operator` present, #8245) | Continue the loop — no tally, no escalation, no comment; a human already owns it |
+| Marker match, `OPERATOR_RULED=yes` (`loom:operator-only` removed after this revision's rejection, #8245) | Continue the loop — no tally, no escalation, no comment. A human has already ruled on this exact body; only a revision (new hash, new verdict) restarts the ladder |
 | `FORCE_REEVALUATE=yes` (the self-healing un-escalation just cleared `loom:operator-only`) | Claim → Step 1 (Read) → Step 2 → Step 3 or 4, ignoring the marker entirely (#5664) |
 
 A skip (either the idempotency skip or a fresh-claim skip) means: continue the loop to the next issue, do not count it against the tier limits (it was neither promoted nor rejected this pass). An escalation **is** a verdict — count it as you would a rejection.

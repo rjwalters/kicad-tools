@@ -241,6 +241,15 @@ cd .loom/worktrees/issue-XX
   (`refs/loom/stash-baseline/issue-<N>`), never `refs/stash`, so no concurrent
   builder's stash can land between your push and pop.
 
+**Don't leave a detached process running after your session ends**
+- It outlives the sweep, holds files open in a worktree that is auto-removed on
+  merge, and loads the host with work no owner can be found for.
+- **Never `launchctl submit`**: its jobs are **KeepAlive**, so launchd re-runs a
+  one-shot script every time it exits, forever (#8478: 25 orphaned `ngspice`,
+  load 58, 12h of suppressed dispatch).
+- Long compute → the repo's batch backend, or scoped to fit the session, or
+  `loom:blocked` naming the compute gap: `.loom/docs/long-running-compute.md`.
+
 **Don't use `git push --force` without `--force-with-lease`**
 - `--force-with-lease` is safer - it fails if someone else pushed
 - Prevents accidentally overwriting others' work

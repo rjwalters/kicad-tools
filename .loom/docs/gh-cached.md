@@ -176,7 +176,11 @@ merge that should not have happened, or a test that observes its own stale
   landed *during* your review; a cached label set defeats the mechanism.
 - **merge gating** — the 6 Champion safety criteria, `mergeStateStatus` /
   `mergeable`, `gh pr checks`, and the paginated changed-file list (#4613).
-  These are the last read before an irreversible action.
+  These are the last read before an irreversible action. `merge-pr.sh`'s
+  initial PR fetch belongs here too (#8550): it is the sole source of the
+  label set the #8112 verdict-contradiction guard decides on, so a read
+  landing inside the TTL window right after a hold release refuses a merge on
+  a label the operator has already removed.
 - **liveness probes** — the Judge's `gh repo view` environment check must
   observe the live environment, not a cached success from a healthy session.
 - **before/after differential checks** — e.g. sweep's `--dry-run`

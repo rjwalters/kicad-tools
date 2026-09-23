@@ -99,16 +99,15 @@ Before creating new proposals, check if there are already open proposals:
 gh issue list --label="loom:architect" --state=open
 ```
 
-**Important**: Don't create too many proposals at once. If there are already 3+ open proposals, wait for approval/rejection before creating more. When this invocation carries `--max-proposals <n>` (see "Argument Handling" above), that number is a hard ceiling on top of this judgment call — never above it.
+**Important**: Don't create too many proposals at once. If there are already 3+ open proposals, wait for approval/rejection before creating more. `--max-proposals <n>` (see "Argument Handling" above) caps this judgment call — never file above it.
 
 ### Goal Discovery (CRITICAL)
 
 **Run goal discovery at the START of every scan.** This ensures proposals align with project priorities.
 
-> This is a condensed inline variant. The full `discover_project_goals()` /
-> `check_backlog_balance()` scripts live in `architect-patterns.md` → "Goal
-> Discovery Script" / "Backlog Balance Check Script" (kept standalone per role for
-> prompt isolation — see the note there).
+> Condensed inline variant. The full `discover_project_goals()` /
+> `check_backlog_balance()` scripts live in `architect-patterns.md` (kept
+> standalone per role for prompt isolation — see the note there).
 
 ```bash
 # Check README for milestones
@@ -195,8 +194,8 @@ When creating a proposal:
 3. **Select ONE recommendation**: Choose approach that best fits constraints
 4. **Check for duplicates**: Run duplicate check before creating issue
 5. **Create the issue**: Use `./.loom/scripts/create-issue.sh` with focused recommendation
-6. **Add labels**: `loom:architect` + tier label — pass them as `--label` on the
-   creation command itself, never as a follow-up `gh issue edit`
+6. **Add labels**: `loom:architect` + tier label, on the creation call itself
+7. **Emit the premise record** (see below) in the body you file
 
 **For templates and examples**, read `.claude/commands/loom/architect-patterns.md`.
 
@@ -223,21 +222,23 @@ repo's paths or lines. Full rule: `.loom/docs/citation-scope.md`.
 **BEFORE creating any issue, check for potential duplicates:**
 
 ```bash
-# Check if similar issue already exists
-if ./.loom/scripts/check-duplicate.sh "Your proposed issue title" "Optional body text"; then
-    # No duplicates found - safe to create
-    ./.loom/scripts/create-issue.sh --title "Your proposed issue title" ...
+TITLE="Your proposal title"; BODY="Your proposal body..."
+if ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
+    # No duplicates - file it, with BOTH labels on the SAME call: a follow-up
+    # `gh issue edit --add-label` doubles requests and can half-fail into an
+    # unlabelled issue no queue query finds.
+    ./.loom/scripts/create-issue.sh --title "$TITLE" --body "$BODY" \
+      --label "loom:architect" \
+      --label "tier:goal-advancing"  # or tier:goal-supporting | tier:maintenance
 else
     # Potential duplicate found - review existing issues first
     echo "Similar issue may already exist. Checking..."
 fi
 ```
 
-**When duplicates are found:**
-1. Review the similar issues listed in the output
-2. If truly duplicate: Skip creation, add comment to existing issue instead
-3. If related but distinct: Proceed with creation, reference the related issue in the body
-4. If unclear: Skip creation, wait for the existing issue to be resolved first
+**When duplicates are found**, review the ones it listed: truly duplicate ⇒
+comment on the existing issue instead of filing; related but distinct ⇒ file
+and reference it in the body; unclear ⇒ skip, let that issue resolve first.
 
 **Why this matters**: #1981 and #1988 were the identical bug.
 
@@ -246,15 +247,10 @@ fi
 **BEFORE creating any issue, run `verify-proposal-refs.sh` on the drafted body.** Architect proposals go straight to Champion — they never pass through Curator, the only other role with a cited-path existence check (`curator.md` → "Verify against build base"). A false citation (a path from a sibling repo, a nonexistent file, a line range that runs into unrelated code, a false "N tracked files" count) has already cost two Champion evaluations plus an operator escalation per incident.
 
 ```bash
-cat > /tmp/proposal-body.md <<'EOF'
-[drafted proposal body]
-EOF
-
-if ./.loom/scripts/verify-proposal-refs.sh /tmp/proposal-body.md; then
-    ./.loom/scripts/create-issue.sh --title "$TITLE" --body-file /tmp/proposal-body.md --label "loom:architect" ...
-else
-    echo "Reference verification failed — fix the misses before filing (see below)"
-fi
+# draft the body into /tmp/proposal-body.md first, then gate filing on the check
+./.loom/scripts/verify-proposal-refs.sh /tmp/proposal-body.md \
+  && ./.loom/scripts/create-issue.sh --title "$TITLE" \
+       --body-file /tmp/proposal-body.md --label "loom:architect" ...
 ```
 
 **Any miss blocks filing** — do not file with a failing reference check. Fix what the script reports, then re-run it:
@@ -262,29 +258,25 @@ fi
 - **Bad line range**: re-derive the line numbers against current `origin/main`, or drop the specific range and describe the region in prose.
 - **False tracked claim**: re-run the count against `git ls-files` and use the real number, or drop the claim.
 
-### Quick Issue Creation
+### Emit a Premise Record With the Proposal (#8420)
 
-```bash
-# First, check for duplicates
-TITLE="Your proposal title"
-BODY="Your proposal body..."
+`loom:architect` puts every issue you file inside the premise gate's scope:
+Curator cannot enrich it until a record exists, and you have just read the code
+it cites. Write one into the body:
 
-if ./.loom/scripts/check-duplicate.sh "$TITLE" "$BODY"; then
-    # No duplicates - safe to create. Labels ride along in the SAME call:
-    # a follow-up `gh issue edit --add-label` doubles the request count and
-    # can half-fail into an unlabelled issue no queue query finds.
-    ./.loom/scripts/create-issue.sh --title "$TITLE" \
-      --label "loom:architect" \
-      --label "tier:goal-advancing" \
-      --body "$(cat <<'EOF'
-[issue content - see architect-patterns.md for template]
-EOF
-)"
-    # tier label above is one of: tier:goal-advancing | tier:goal-supporting | tier:maintenance
-else
-    echo "Skipping creation - potential duplicate found"
-fi
+```text
+<!-- loom:premise-check exists=yes deliberate=yes reversal=no verdict=clear -->
+premise-evidence: path/file.rs:42 — what it asserts
+premise-extends: why this extends that decision rather than reversing it
 ```
+
+Cite what you claim, or the record is malformed (exit 12): `deliberate=yes`
+needs `premise-evidence:`, `deliberate=no` needs `premise-searched: <path you
+read>` — deliberateness is never inferred from absence. And `deliberate=yes
+reversal=yes` MUST be `verdict=operator-decision`: route your own reversal to a
+human, never self-clear it. Rules: `.loom/docs/premise-gate.md` §
+"Filing-time emission"; verify with `./.loom/scripts/premise-check.sh --issue
+"$N"` (0 ⇒ ready for Curator).
 
 ### Priority Assessment
 
@@ -376,8 +368,6 @@ Architect uses context-specific instruction files to keep token usage efficient:
 |------|---------|--------------|
 | `architect-patterns.md` | Templates, examples, epics | Creating proposals |
 | `architect-reference.md` | Label workflow, exceptions | Edge cases |
-
-**How to use**: When creating proposals, read `architect-patterns.md` for templates. For edge cases or explicit user instructions, read `architect-reference.md`.
 
 ---
 

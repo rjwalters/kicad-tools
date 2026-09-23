@@ -142,19 +142,18 @@ addition rather than a rewrite: `OtlpExporter` (epic Phase 4, issue
 `TelemetryEnvelope` batches into OTLP logs (`/v1/logs`) and metrics
 (`/v1/metrics`) requests for operators with an existing OpenTelemetry stack
 (a self-hosted collector, Grafana, Honeycomb, …), reusing `sender.rs`'s
-drain/retry loop unchanged.
+durable queue and drain/retry loop.
 
 Select it with `observability.exporter = "otlp"`
 (`LOOM_OBSERVABILITY_EXPORTER` env override; **env > config > default**,
-default `"https"`). It is opt-in twice over: off unless explicitly selected,
-*and* gated behind the `otlp` Cargo feature — a default `loom-daemon` build
-never compiles in the `opentelemetry-proto` dependency, so choosing
-`HttpsExporter` costs nothing extra. The field-by-field
-`TelemetryEnvelope` → OTLP mapping (which record kinds become logs vs.
-metrics; how `host_id` / `emitted_at` / the repo-visibility tag map onto OTLP
-resource/record attributes) is documented in
-`loom-daemon/src/observability/otlp/mod.rs`'s module doc comment, verified by
-`loom-daemon/src/observability/otlp/mapping.rs`'s unit tests.
+default `"https"`). Published artifacts include OTLP; local default Cargo builds
+still omit the optional feature. Export remains disabled until explicitly enabled.
+See [execution traces](tracing.md) for persisted trace identity, correlated logs,
+completed-span export, and bounded shutdown.
+
+See [OTLP transport and artifact verification](otlp-transport.md) for response
+classification, per-signal counters, retry/drop policy and the real Collector
+canary. Mapping details remain in `observability/otlp/mapping.rs`.
 
 **The HTTPS exporter verifies its own identity** (issue #4830). Each `/ingest`
 success response echoes the `host_id` the presented key is bound to; the
@@ -365,6 +364,61 @@ as §5b, mirroring `guide-docs-telemetry.sh`:
   `_recheck_mergeable_before_refusal()`'s actual decision logic in any way
   (#6156 recommended keeping that behavior as-is).
 
+## 5d. Non-daemon emitters onto the same backend (2am elastic compute, Issue #8304)
+
+Sections 1-5 above are all `loom-daemon` hosts pushing their own
+`sweep.*`/`tokens.snapshot`/`host.health` telemetry through the collector →
+queue → exporter pipeline. The same Cloudflare backend also accepts
+telemetry from emitters that are **not** a `loom-daemon` process at all —
+`POST /ingest`'s wire contract (a bare JSON array of `TelemetryEnvelope`s,
+bearer-authenticated) has no dependency on the sender being the daemon,
+provided the sender speaks the same envelope shape.
+
+The first such emitter (2am's elastic EDA batch runner, tracked in parent
+issue #8257) reports `ephemeral_compute` records — job id, instance id,
+region, instance type, spot flag, AMI, start/end timestamps, wall clock,
+estimated cost — for short-lived cloud compute jobs that have no
+`loom-daemon` host of their own. This raised a question the daemon-host
+model above never had to answer: **what `host_id` does a hostless emitter
+authenticate as?**
+
+**Decision: a dedicated synthetic `host_id` for the whole elastic-compute
+fleet** (e.g. `2am-elastic`), provisioned via the ordinary `POST
+/admin/hosts` flow — not a binding to any single real machine. Full
+rationale (why not the orchestrating controller's own hostname, why this
+needs no `handleIngest` change) is in
+[`dashboard/docs/deploy-runbook.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/deploy-runbook.md)
+§"Provisioning a non-daemon emitter". In short: `handleIngest` always stamps
+every row with the authenticated key's own bound identity, never a
+client-supplied value, so "hostless ingest" is a provisioning decision, not
+a schema one — exactly the same one-key-per-reporting-process model every
+`loom-daemon` host already uses, just pointed at a synthetic id instead of a
+real hostname so it survives the controller itself being replaced.
+
+`ephemeral_compute` rows land in the same `records` table as every other
+kind (`dashboard/migrations/0003_ephemeral_compute.sql`) — no dedicated
+per-kind table, see that migration's own header comment for the schema
+rationale — and carry no `repo`/`issue`/`sweep_id` (host-level, like
+`tokens.snapshot`/`host.health`). Redaction: **no field survives to
+`/public/*`** for this kind — job/instance/region/cost detail is private
+compute-spend detail, the same category `sweep.outcome`'s work-output
+fields are held back for (§5 above) — see `src/redaction.ts`'s
+`RECORD_FIELD_ALLOWLIST["ephemeral_compute"]` entry for the stated policy.
+
+Phase 2 (#8305) turned the launch/completion record pair into live Durable
+Object state — a `compute:<jobId>` entry created at launch, deleted at
+completion, and flagged `leaked` once it has gone 24h with no completion
+record — surfaced on `GET /api/fleet-state`'s `activeCompute` (always `[]` on
+`/public/*`, per the redaction decision above). Phase 3 (#8306) added the two
+dashboard views over both halves: a "running now" panel on the fleet overview
+(leaked instances flagged and sorted first) and an "elastic spend this period"
+view at `#/spend`, backed by a new `GET /api/spend` aggregation — spend summed
+over a `since`/`until` window and bucketed by UTC day, against the standing
+daily spot ceiling. `/public/spend` answers `{ "withheld": true }` rather than
+a zeroed summary, since no field of this kind survives redaction and a `$0.00`
+would read as a real idle window. See
+[`dashboard/docs/query-api.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/query-api.md).
+
 ## 6. The operator reference instance
 
 `dashboard.example.com` is a live, operator-owned deployment of this same
@@ -381,11 +435,14 @@ capture, and why) so you can produce the equivalent for your own instance.
 | Doc | Covers |
 |---|---|
 | [`.loom/docs/telemetry-schema.md`](telemetry-schema.md) | Wire envelope, record kinds, visibility contract, local journal |
+| [`.loom/docs/telemetry-fixtures.md`](telemetry-fixtures.md) | Offline synthetic graphs, expected query manifest, and live-comparison limits |
+| [`.loom/docs/telemetry-overhead.md`](telemetry-overhead.md) | What lifecycle instrumentation costs on a representative run, realised attribute/event bounds, and what the measurement excludes |
 | `dashboard/docs/deploy-runbook.md` | Deploy your own Cloudflare backend end to end |
 | `dashboard/docs/cloudflare-access.md` | Gating the authenticated view behind SSO; single-URL fallback |
 | `dashboard/docs/query-api.md` | `/api/*` vs `/public/*` routes, redaction policy, live tail |
 | `dashboard/docs/token-analytics.md` | Burn curves, forecasting, per-repo attribution |
 | `defaults/scripts/guide-docs-telemetry.sh` | Local doc-maintenance throughput telemetry (§5b) — record + report, no daemon/Cloudflare involvement |
 | `defaults/scripts/merge-admission-telemetry.sh` | Local merge-admission-recheck outcome telemetry (§5c) — record + report, no daemon/Cloudflare involvement |
+| `dashboard/migrations/0003_ephemeral_compute.sql` | `ephemeral_compute` schema decision + hostless-ingest provisioning rationale (§5d) |
 | `dashboard/docs/reference-deployment.md` | Generic guidance/template for recording your own instance's deployment identity in your own infrastructure repo — carries no operator identity here |
 | `loom-daemon/src/observability/mod.rs` | Config resolution, collector/queue/exporter/sender source of truth |

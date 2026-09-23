@@ -30,6 +30,12 @@ Without a gate, the Judge phase has to catch every one of these post-hoc, which 
 The gate runs three checks in order. Any failure short-circuits PR creation:
 
 1. **has-commits** — `git rev-list --count origin/main..HEAD > 0` in the worktree.
+   Since #8267 this check has an executable implementation that any caller can
+   reuse — `loom-daemon worktree-state report` (exit `3` = unsaved deliverables)
+   and the turn-end guard built on it, documented under
+   [`guard-hooks.md` → Uncommitted-Work Stop Guard](guard-hooks.md). Ask it
+   rather than writing a second commit-counter: the gate below and the guard
+   must never be able to disagree about whether an agent committed anything.
 2. **has-real-changes** — at least one changed file matches the configured `realChangeGlobs` (or the default scratch-exclusion list when no globs are configured).
 3. **build-passes** — the configured `buildGate.command` exits with code 0 inside the worktree.
 
@@ -185,14 +191,62 @@ The wrapper lives at [`defaults/scripts/build-gate.sh`](../scripts/build-gate.sh
 to it via the `.loom/scripts -> ../defaults/scripts` symlink). It runs these
 stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
 
-1. `cargo test --workspace --lib --bins` — the Rust crates' **unit tests**
-   (`loom-daemon`, `loom-api`). The integration test **targets** under
+1. `cargo nextest run --workspace --lib --bins --profile ci` — the Rust crates'
+   **unit tests** (`loom-daemon`, `loom-api`), run with the same runner and the
+   same profile CI uses. Falls back to `cargo test --workspace --lib --bins`
+   with a loud warning when `cargo-nextest` is not installed — see "Why the
+   gate prefers `cargo nextest`" below. The integration test **targets** under
    `loom-daemon/tests/` are deliberately excluded here — see "Local gate vs.
    CI" below.
-2. `bash scripts/test-installer.sh` — the 131-case bash installer suite.
-3. `bash scripts/test-changelog.sh` — `scripts/changelog.sh`'s unit suite
-   (#5196), against a disposable scratch repo (`CHANGELOG_REPO_ROOT`); no
-   network, no dependency on this repo's own history.
+2. `cargo test --workspace --doc` — the workspace **doctests**, as their own
+   step because nextest does not run doctests (#4385). CI keeps a separate
+   "Run doctests" step for exactly this reason. Unconditional: identical on
+   both runner branches above, so doctest coverage never depends on which
+   unit-test runner a host happens to have.
+3. The bash suites, in order, one `run_gate_step` each —
+   `scripts/test-installer.sh` (the 131-case installer suite),
+   `scripts/test-changelog.sh` (`scripts/changelog.sh`'s unit suite, #5196,
+   against a disposable scratch repo `CHANGELOG_REPO_ROOT` — no network, no
+   dependency on this repo's own history), `scripts/test-daemon-liveness.sh`
+   (#5548), `scripts/test-install-local-mode.sh` and
+   `scripts/test-migrate-consumer.sh` (#5276).
+
+### Why the gate prefers `cargo nextest` (#8326)
+
+`cargo test` runs every test in a binary **in one shared process, on shared
+threads** — precisely the execution mode [`.config/nextest.toml`](https://github.com/rjwalters/loom/blob/main/.config/nextest.toml)
+and `loom-daemon`'s crate-level "Test isolation convention" (#4385) exist to
+avoid: the daemon's unit tests mutate the process environment
+(`std::env::set_var` / `remove_var`) at ~774 call sites while other tests in
+the same binary `Command::spawn` children, and `Command::spawn` reads the
+environ non-atomically, so an env mutation racing a spawn can corrupt a child's
+environment mid-flight. nextest runs each test in its own process, closing that
+window by construction.
+
+CI has always done this (`cargo nextest run --workspace --profile ci`); until
+#8326 the local gate did not, which made the gate **both slower and less
+reliable than the runner it is supposed to predict**. That mismatch produced
+#8170's false red — 8 `sweep_registry::watchdog::tests::midbuild_*` "failures"
+under `cargo test` that were 90/90 green under nextest on the same commit, and
+cost a whole investigation to establish as a runner artifact. Every false red
+the gate emits trains agents to distrust a real signal.
+
+**When `cargo-nextest` is absent** the gate still runs — it degrades to `cargo
+test --workspace --lib --bins` — but it prints a multi-line `[build-gate]
+WARNING:` block on stderr naming #4385, the false-red hazard, and the fix:
+
+```
+cargo install cargo-nextest --locked
+```
+
+The degradation is never silent: a `cargo test` verdict from this gate is a
+weaker signal than CI's, and a reader triaging a red needs to know that before
+spending an investigation on a failure that only reproduces locally.
+
+[`nextest-daemon-guard.sh`](../scripts/tests/nextest-daemon-guard.sh) (#6528) is
+deliberately **not** used by the gate: it guards the host-global tmux sweep
+performed by the `integration_*` test **targets**, and `--lib --bins` never
+builds or runs those targets at all (#3985).
 
 **The gate requires no Python toolchain at all (epic #4081 Phase 4, #4557;
 finished by #4970).** Stage 2 used to be `cd loom-tools && uv run pytest
@@ -228,8 +282,12 @@ measure different things, and that difference is deliberate:
 
 | | Command | Measures |
 |---|---------|----------|
-| **CI** (`.github/workflows/ci.yml`) | `cargo test --workspace` (all targets, incl. integration) | **the commit**, in a controlled runner with a guaranteed-live tmux |
-| **Local gate** (`build-gate.sh`) | `cargo test --workspace --lib --bins` (unit tests only) | **the commit**, on whatever host is actively running Loom |
+| **CI** (`.github/workflows/ci.yml`) | `cargo nextest run --workspace --profile ci` (all targets, incl. integration) + `cargo test --workspace --doc` | **the commit**, in a controlled runner with a guaranteed-live tmux |
+| **Local gate** (`build-gate.sh`) | `cargo nextest run --workspace --lib --bins --profile ci` (unit tests only; `cargo test` fallback) + `cargo test --workspace --doc` | **the commit**, on whatever host is actively running Loom |
+
+Since #8326 both sides run the **same runner** (`cargo nextest`, process-per-test)
+under the **same profile** (`ci`); the remaining difference is target scope, not
+execution model.
 
 The local gate runs on the machine that is *also running the sweeps* — a busy,
 sometimes headless, sometimes tmux-less host. Any assertion in the gate that
@@ -364,7 +422,7 @@ stage set the wrapper runs:
 
 | Tier | `LOOM_BUILD_GATE_TIER` | Stages | Cost |
 |------|------------------------|--------|------|
-| **full** (DEFAULT) | unset / `full` | `cargo test --lib --bins` + installer suite | minutes, cold |
+| **full** (DEFAULT) | unset / `full` | `cargo nextest run --lib --bins --profile ci` (or a warned `cargo test --lib --bins` fallback) + `cargo test --doc` + installer suite | minutes, cold |
 | **fast** | `fast` | `cargo build --workspace --lib --bins` (compile) + a `loom-daemon --version` startup smoke | a few minutes cold, no test execution |
 
 The default is unchanged when the variable is absent, so **CI parity, manual
@@ -422,7 +480,9 @@ load average overstates consumption on macOS (see "measured idle fraction",
 
 Explicitly **out of scope** here (separable follow-ups): a dedicated gate cargo
 target-dir to isolate contention (never shipped by #4020); per-test timeouts
-(would require adopting cargo-nextest); and any change to sweep spawn priority
+(would require adopting cargo-nextest — #8326 has since done exactly that, so
+`.config/nextest.toml`'s `slow-timeout` now applies to the gate's Rust unit
+step); and any change to sweep spawn priority
 (that is #4233). The **shared build lock** half of that first item did land
 later — see the next section.
 
@@ -563,6 +623,46 @@ with the RED-classification work in #3974 AC4, not the test/scope hardening
 here). It is intentionally **not** implemented in this change; the scope split
 + test hardening + `nice` above already break the self-reddening loop this
 issue targets. Tracked as follow-up under #3974.
+
+### Worker builds run with `CARGO_INCREMENTAL=0` (#8456)
+
+Every Loom-spawned worker builds with `CARGO_INCREMENTAL=0` in its
+environment. The value is injected at the daemon dispatcher's single env seam
+(`worker_spawn::run`, the same place `LOOM_RUNTIME` and the #8077 test-isolation
+defaults are set), so it covers every dispatch surface — daemon sweep dispatch,
+role-runner children, and manual `spawn-worker.sh` runs — for every runtime
+adapter, native harnesses (Pi, OpenCode) and legacy shell adapters (Claude,
+Codex, Aider, generic) alike. Dispatch paths that cross a docker boundary carry
+it across explicitly, because neither `docker run -e` by-name passthrough nor
+`docker exec` forwards it on their own: `spawn-claude.sh`'s containment env
+exports it alongside `CARGO_TARGET_DIR`, and `spawn-codex.sh`'s session-exec
+wraps the CLI in `docker exec -e CARGO_INCREMENTAL=0`. A native containment
+container re-execs `spawn-worker.sh`, which re-enters the dispatcher seam
+inside the container, so it needs no separate handling.
+
+**Why** (#8453 item 1): a host that points every checkout at one shared cargo
+target directory (`build.target-dir` in `~/.cargo/config.toml`) and configures
+`rustc-wrapper = "sccache"` gets the worst of both worlds from incremental
+compilation:
+
+- **sccache cannot cache an incrementally-compiled crate.** A `rustc`
+  invocation carrying incremental state is non-cacheable, so workspace crates
+  never hit the cache — the host pays full compile cost *and* keeps the
+  incremental artifacts, losing on both axes at once.
+- **The incremental state itself is orphaned disk.** Cargo keys a crate's
+  incremental session state by the crate's **absolute source path**, and every
+  Loom worktree is a new path — so state written under a discarded worktree is
+  never reused and never cleaned up. One fleet host accumulated **213 GB across
+  6,402 session dirs** (measured 2026-09-20) before this was traced.
+
+Scope is deliberately narrow: this is a **spawn-time** env var in the
+environment Loom constructs for a worker, never a global cargo config change —
+an operator's own interactive shell (and any manually-run `cargo build` outside
+a spawn adapter) is unaffected. The default is unconditional rather than
+`${VAR:-0}`: an inherited `CARGO_INCREMENTAL=1` from the spawning environment
+would silently re-enable both failure modes. A worker that genuinely wants
+incremental for one command still can — an inline `CARGO_INCREMENTAL=1 cargo
+build` prefix outranks the ambient value for that invocation only.
 
 ## Failure semantics
 

@@ -597,11 +597,15 @@ fi
 # finish before the daemon exits, so the orphan case above is a hard-stop
 # fallback, not the common path. Reconciling a still-running orphaned
 # container after a daemon restart (`SweepRegistry::reconstruct`'s
-# container-recognition extension) and teaching `cancel_sweep` to `docker
-# stop`/`docker rm` a containerized sweep it explicitly cancels are real,
-# named Phase 3 obligations ADR-0017 defers past this issue's own scope note
-# ("only add the dispatch mode itself") — tracked as a follow-up rather than
-# silently assumed done.
+# container-recognition extension) remains a real, named Phase 3 obligation
+# ADR-0017 defers past this issue's own scope note ("only add the dispatch
+# mode itself") — tracked as a follow-up rather than silently assumed done.
+# Teaching `cancel_sweep` (and every watchdog/deadline-driven cancel, which
+# compose the same begin/finish pair) to stop the container LANDED in #8435:
+# the daemon's cancellation path label-identifies this container via
+# `loom.sweep.issue=<N>` + `loom.dispatch=container` (the labels below) and
+# issues `docker stop --time <grace>` then `docker kill` on expiry, so a
+# cancelled containerized sweep no longer leaks its container.
 #
 # Build-cache placement (MOUNT-CONTRACT.md §4, issue #6013/#6014): a
 # container that mounts no build-cache path gets a fresh, empty `target/`
@@ -741,10 +745,9 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
 
     # --- Build-cache placement (MOUNT-CONTRACT.md §4, issue #6013/#6014) ---
     _containment_env=()
-    _containment_cargo_lib="${_script_dir}/lib/cargo-target-dir.sh"
-    if [[ -f "${WORKSPACE}/Cargo.toml" && -f "$_containment_cargo_lib" ]]; then
+    if [[ -f "${WORKSPACE}/Cargo.toml" && -f "${_script_dir}/lib/cargo-target-dir.sh" ]]; then
         # shellcheck source=./lib/cargo-target-dir.sh
-        source "$_containment_cargo_lib"
+        source "${_script_dir}/lib/cargo-target-dir.sh"
         _containment_target_dir="$(loom_resolve_cargo_target_dir "$WORKSPACE")"
         if [[ -n "$_containment_target_dir" ]]; then
             if [[ "$_containment_target_dir" != "${WORKSPACE}"/* ]]; then
@@ -754,6 +757,23 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
             _containment_env+=(-e "CARGO_TARGET_DIR=${_containment_target_dir}")
         fi
     fi
+
+    # --- sccache-effective worker builds (issue #8456, parent #8453 §1) ---
+    # CARGO_INCREMENTAL=0 rides the same docker boundary the build cache
+    # above does, as an explicit `-e KEY=VALUE` (NOT the by-name passthrough
+    # below, which matches only LOOM_*/CLAUDE_*/CODEX_*/… and would drop it):
+    # cargo keys a crate's incremental session state by its ABSOLUTE source
+    # path, so state written under one sweep's worktree is orphaned the
+    # moment that worktree goes away (213 GB / 6,402 session dirs measured on
+    # one shared-target-dir fleet host), and sccache cannot cache an
+    # incrementally-compiled crate at all — the host pays the disk AND loses
+    # the cache hit. The daemon-side dispatcher (worker_spawn::run) already
+    # injects this for bare-metal dispatch; this carries it across the
+    # container boundary this re-exec would otherwise strip. A worker that
+    # wants incremental for one command can still prefix it —
+    # `CARGO_INCREMENTAL=1 cargo …` outranks the ambient value for that
+    # invocation only.
+    _containment_env+=(-e "CARGO_INCREMENTAL=0")
 
     # --- Env passthrough ---
     # Every LOOM_*/CLAUDE_*/SAFEHOUSE*/CODEX_*/GH_TOKEN/GITHUB_TOKEN var
@@ -779,7 +799,7 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     [[ -n "$_containment_cpus" ]] && _containment_limit_flags+=(--cpus "$_containment_cpus")
     [[ -n "$_containment_memory" ]] && _containment_limit_flags+=(--memory "$_containment_memory")
 
-    _containment_labels=(--label "loom.sweep=1" --label "loom.dispatch=container")
+    _containment_labels=(--label "loom.sweep=1" --label "loom.dispatch=container" --label "loom.containment=claude-ephemeral")
     [[ -n "${LOOM_SWEEP_CLAIM_OWNED:-}" ]] && _containment_labels+=(--label "loom.sweep.issue=${LOOM_SWEEP_CLAIM_OWNED}")
     [[ -n "$_containment_cpus" ]] && _containment_labels+=(--label "loom.dispatch.cpus=${_containment_cpus}")
     [[ -n "$_containment_memory" ]] && _containment_labels+=(--label "loom.dispatch.memory=${_containment_memory}")
@@ -791,8 +811,14 @@ if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
     # `loom-daemon status`/health output — see
     # `sweep_registry::containment_signal::parse_containment_after`. `none`
     # (not an empty field) marks an intentionally-unbounded axis so the
-    # parser can always find both `cpus=`/`memory=` tokens.
-    echo "# LOOM_DISPATCH_MODE mode=container image=${_containment_image} cpus=${_containment_cpus:-none} memory=${_containment_memory:-none}" >&2
+    # parser can always find both `cpus=`/`memory=` tokens. The trailing
+    # `containment=` token (issue #8403) names the container SHAPE, so a
+    # reader can tell this per-sweep Claude container apart from a native
+    # harness's (`containment=native-ephemeral`, written by the Rust
+    # `worker_spawn::containment` dispatch) without inspecting the image name.
+    # It is APPENDED, never inserted: every existing parser and test asserts
+    # on the prefix through `memory=`, and this keeps all of them valid.
+    echo "# LOOM_DISPATCH_MODE mode=container image=${_containment_image} cpus=${_containment_cpus:-none} memory=${_containment_memory:-none} containment=claude-ephemeral" >&2
     # Retained for backward compatibility with anything already grepping the
     # pre-#7430 marker text.
     echo "# LOOM_CONTAINMENT_ENABLED image=${_containment_image}" >&2
@@ -895,14 +921,21 @@ for _arg in ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}; do
     esac
 done
 
+# The model this spawn will actually run, after the precedence above — reused
+# by token selection below (`tokens select --model`, issue #8058) so the pool
+# can skip accounts bad-marked for THIS model class only. Empty means "session
+# default": nothing is passed, and selection stays account-wide.
+_resolved_model=""
 if [[ "$_has_model_arg" == "true" ]]; then
     if [[ -n "${LOOM_MODEL:-}" ]]; then
         log_info "spawn-claude: explicit --model in args wins over LOOM_MODEL='$LOOM_MODEL'"
     fi
     log_info "spawn-claude: model=${_explicit_model:-default} (from --model arg)"
+    _resolved_model="$_explicit_model"
 elif [[ -n "${LOOM_MODEL:-}" ]]; then
     PASSTHROUGH_ARGS+=(--model "$LOOM_MODEL")
     log_info "spawn-claude: model=$LOOM_MODEL (from LOOM_MODEL)"
+    _resolved_model="$LOOM_MODEL"
 else
     log_info "spawn-claude: model=default"
 fi
@@ -1025,6 +1058,28 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
     if "$_daemon_bin" tokens select --help 2>&1 | grep -q -- '--auto-unpin'; then
         _select_args+=(--auto-unpin)
     fi
+    # Per-model-class selection (issue #8058): an account that hit its Opus
+    # ceiling is still fully usable for Sonnet work, so tell the selector which
+    # class this spawn will actually run and let it skip only the accounts
+    # bad-marked for THAT class. `loom_daemon_model_select_flag` applies the
+    # same capability probe as --auto-unpin above, for the same reason: a daemon
+    # binary mid-roll that predates `--model` must degrade to account-wide
+    # selection, not hard-fail on an unknown argument. With no resolved model
+    # (session default) it emits nothing and behaviour is byte-identical to
+    # pre-#8058.
+    # Deliberate word splitting: the helper emits either the two words
+    # `--model <value>` or nothing at all.
+    # shellcheck disable=SC2206,SC2207
+    _select_args+=($(loom_daemon_model_select_flag "$_daemon_bin" "$_resolved_model"))
+
+    # Prompt-cache affinity key (issue #8146): the account that last ran this
+    # (repo, role) is the one holding a warm prompt cache for it — a 65% full
+    # prefix-hit rate on same-account ticks vs 1.4% on cross-account ones.
+    # No shell-side passing needed — `tokens select`'s `--role` arg reads
+    # `LOOM_ROLE` straight from the environment (clap `env =`), which is
+    # already present here, so an older daemon binary that predates the
+    # field simply never reads it. No role set, or affinity unconfigured,
+    # selects exactly as before.
 
     # Capture stdout (shell-evalable export lines) and stderr (errors /
     # advisories, e.g. a firing "[auto-unpin] ..." line) separately so log

@@ -530,11 +530,33 @@ def run_fill_zones(
     # (before that pass's DRC check), letting remediation force the offending
     # pad solid until the post-carve board is clean.  Both are no-ops without
     # shapely / kicad-cli; guarded so they never disturb a successful fill.
+    #
+    # Issue #5617: when the fill just above went through
+    # :func:`_run_fill_zones_via_drc` (the only reachable branch on every
+    # kicad-cli 8/9/10 -- ``_kicad_cli_has_fill_zones`` is unconditionally
+    # False there, see its docstring) *and* that call already used
+    # ``--refill-zones --save-board`` (``_kicad_drc_supports_refill`` true),
+    # ``result.output_path`` is already a freshly filled, saved board -- an
+    # exact duplicate of what remediation's own first-pass refill would
+    # redo.  Nothing mutates ``pcb_path`` between the fill above and this
+    # call, and #5578 (see ``tests/test_pour_fill_determinism_5578.py``)
+    # already established the fill engine is deterministic given identical
+    # input, so re-running it here would reproduce byte-identical zone
+    # geometry at the cost of one more full kicad-cli launch (measured
+    # locally at ~1/3 of a "zone fill" call's wall time -- one of three
+    # kicad-cli round trips a clean first pass makes).  Skip that redundant
+    # first-pass refill in exactly this case; every other path (the native
+    # ``fill-zones`` branch, or a kicad-cli whose DRC doesn't support
+    # ``--refill-zones``) keeps the original, unconditional refill.
     if result.success and result.output_path is not None:
+        already_freshly_refilled = (not _kicad_cli_has_fill_zones(kicad_cli)) and (
+            _kicad_drc_supports_refill(kicad_cli)
+        )
         _remediate_starved_thermal(
             result.output_path,
             kicad_cli,
             settle=None if native_clearance else _apply_foreign_pad_clearance,
+            skip_first_refill=already_freshly_refilled,
         )
 
     return result
@@ -545,6 +567,8 @@ def _remediate_starved_thermal(
     kicad_cli: Path,
     max_passes: int = 4,
     settle: Callable[[Path], None] | None = None,
+    *,
+    skip_first_refill: bool = False,
 ) -> None:
     """Force solid connection on the pads KiCad's DRC flags (Issue #3729).
 
@@ -571,6 +595,15 @@ def _remediate_starved_thermal(
     shipped copper carries it.  A pass that finds nothing returns early.  Any
     failure (kicad-cli missing, malformed report) is swallowed so the fill is
     left as produced.
+
+    Args:
+        skip_first_refill: When ``True``, step (1) is skipped on the very
+            first pass only -- the caller asserts ``pcb_path`` is already a
+            freshly filled, saved board (Issue #5617), so pass 0's own
+            refill would be a byte-for-byte redundant kicad-cli launch.
+            Every later pass still refills unconditionally: once
+            ``force_solid_on_pads_by_uuid``/``save_pcb`` below mutate the
+            board, a real refill is required again.
     """
     import json
     import os
@@ -633,11 +666,15 @@ def _remediate_starved_thermal(
             settle(pcb_path)
 
     try:
-        for _ in range(max_passes):
+        for pass_num in range(max_passes):
             # Refill the zones (bakes in prior overrides), then apply the
             # foreign-pad carve so the DRC we read reflects the shipped copper.
-            if _run_drc(refill=True) is None:
-                return
+            # Issue #5617: pass 0's refill is skippable when the caller
+            # already guarantees a freshly filled, saved board on disk --
+            # see the ``skip_first_refill`` docstring above.
+            if not (skip_first_refill and pass_num == 0):
+                if _run_drc(refill=True) is None:
+                    return
             _settle()
             report = _run_drc(refill=False)
             if report is None:

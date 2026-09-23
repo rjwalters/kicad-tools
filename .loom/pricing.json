@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-09-18",
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "notes": "Model rate card, USD per 1000 tokens (= the published $/MTok / 1000). Resync-delivered to .loom/pricing.json so a price change reaches the fleet without a Loom release (#8177, ask 2 of #8060). loom-daemon falls back to the compiled card in loom-daemon/src/activity/resource_usage.rs when this file is absent or fails validation, and the two are held in agreement by the shipped_pricing_asset_agrees_with_the_compiled_card test. Rows are an ORDERED cascade: the first row with a `match` substring contained in the (lowercased, alias-resolved) model id wins, exactly like the compiled card. Keep the trailing `claude-<family>-` catch-all of each family pointing at that family's NEWEST published row — an unrecognized id is far likelier to be newer than the card than to be a resurrected retired model.",
+  "cache_multipliers": {
+    "read": 0.1,
+    "read_reduced": 0.025,
+    "write_5m": 1.25,
+    "write_1h": 2.0
+  },
+  "aliases": {
+    "sonnet": "claude-sonnet-5",
+    "opus": "claude-opus-5",
+    "haiku": "claude-haiku-4-5",
+    "fable": "claude-fable-5-1",
+    "mythos": "claude-mythos-5-1"
+  },
+  "rows": [
+    {
+      "id": "fable-mythos-5-1",
+      "match": ["claude-fable-5-1", "claude-mythos-5-1"],
+      "input_per_1k": 0.01,
+      "output_per_1k": 0.05,
+      "cache_read": "reduced"
+    },
+    {
+      "id": "fable-mythos-5",
+      "match": ["claude-fable-5", "claude-mythos-5"],
+      "input_per_1k": 0.01,
+      "output_per_1k": 0.05,
+      "cache_read": "standard"
+    },
+    {
+      "id": "fable-mythos-newest",
+      "match": ["claude-fable-", "claude-mythos-"],
+      "input_per_1k": 0.01,
+      "output_per_1k": 0.05,
+      "cache_read": "reduced"
+    },
+    {
+      "id": "opus-current",
+      "match": [
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5"
+      ],
+      "input_per_1k": 0.005,
+      "output_per_1k": 0.025,
+      "cache_read": "standard"
+    },
+    {
+      "id": "opus-retired",
+      "match": ["claude-opus-4-1", "claude-opus-4", "claude-3-opus"],
+      "input_per_1k": 0.015,
+      "output_per_1k": 0.075,
+      "cache_read": "standard"
+    },
+    {
+      "id": "opus-newest",
+      "match": ["claude-opus-"],
+      "input_per_1k": 0.005,
+      "output_per_1k": 0.025,
+      "cache_read": "standard"
+    },
+    {
+      "id": "sonnet-5",
+      "match": ["claude-sonnet-5"],
+      "input_per_1k": 0.002,
+      "output_per_1k": 0.01,
+      "cache_read": "standard"
+    },
+    {
+      "id": "sonnet-4-and-older",
+      "match": ["claude-sonnet-4", "claude-3-5-sonnet", "claude-3-sonnet"],
+      "input_per_1k": 0.003,
+      "output_per_1k": 0.015,
+      "cache_read": "standard"
+    },
+    {
+      "id": "sonnet-newest",
+      "match": ["claude-sonnet-"],
+      "input_per_1k": 0.002,
+      "output_per_1k": 0.01,
+      "cache_read": "standard"
+    },
+    {
+      "id": "haiku-4-5",
+      "match": ["claude-haiku-4-5"],
+      "input_per_1k": 0.001,
+      "output_per_1k": 0.005,
+      "cache_read": "standard"
+    },
+    {
+      "id": "haiku-3-5",
+      "match": ["claude-haiku-3-5", "claude-3-5-haiku"],
+      "input_per_1k": 0.0008,
+      "output_per_1k": 0.004,
+      "cache_read": "standard"
+    },
+    {
+      "id": "haiku-3",
+      "match": ["claude-3-haiku"],
+      "input_per_1k": 0.00025,
+      "output_per_1k": 0.00125,
+      "cache_read": "standard"
+    },
+    {
+      "id": "haiku-newest",
+      "match": ["claude-haiku-"],
+      "input_per_1k": 0.001,
+      "output_per_1k": 0.005,
+      "cache_read": "standard"
+    },
+    {
+      "id": "gpt-4o",
+      "match": ["gpt-4o"],
+      "input_per_1k": 0.005,
+      "output_per_1k": 0.015,
+      "cache_rates": {
+        "read_per_1k": 0.0025,
+        "write_5m_per_1k": 0.005,
+        "write_1h_per_1k": 0.005
+      }
+    },
+    {
+      "id": "gpt-4-turbo",
+      "match": ["gpt-4-turbo"],
+      "input_per_1k": 0.01,
+      "output_per_1k": 0.03,
+      "cache_rates": {
+        "read_per_1k": 0.005,
+        "write_5m_per_1k": 0.01,
+        "write_1h_per_1k": 0.01
+      }
+    },
+    {
+      "id": "gpt-3-5",
+      "match": ["gpt-3.5"],
+      "input_per_1k": 0.0005,
+      "output_per_1k": 0.0015,
+      "cache_rates": {
+        "read_per_1k": 0.00025,
+        "write_5m_per_1k": 0.0005,
+        "write_1h_per_1k": 0.0005
+      }
+    }
+  ]
+}

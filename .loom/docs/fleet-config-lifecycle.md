@@ -61,6 +61,7 @@ this doc, verified against source:
 | `autonomous.hostBreaker.*` | **Requires a daemon restart** — resolved once at startup, registered as a process-global handle | `loom-daemon/src/daemon_service.rs`: "resolve its config once at startup ... and register the process-global handle" |
 | `autonomous.rateLimitBreaker.*` | **Requires a daemon restart** — resolved once at startup, before any loop is spawned | `loom-daemon/src/daemon_service.rs`, registered unconditionally ahead of the work-finder branch |
 | `autonomous.mainHealthGate.suppressDispatchDuringGate` | **Requires a daemon restart** — resolved once at startup from the primary workspace config | `loom-daemon/src/daemon_service.rs` comment: "Resolved once at startup from the same primary workspace config as the gate's master switch" |
+| `autonomous.transcriptIngest.*` (`enabled`, `intervalSecs`, `windowHours`) | **Requires a daemon restart** — resolved once before the ingestion thread is spawned, then frozen for the life of that thread | `read_transcript_ingest_config` + `resolve_settings` are called inside `try_init_transcript_ingest` (`loom-daemon/src/activity/transcript_ingest.rs`), which `daemon_service.rs` invokes once at bring-up; the spawned thread's `loop` body reads only the already-resolved `interval`/`window_hours` locals |
 
 The full, authoritative per-knob table (env override, default, notes) lives
 in [`daemon-reference.md`](daemon-reference.md) → "Config surface

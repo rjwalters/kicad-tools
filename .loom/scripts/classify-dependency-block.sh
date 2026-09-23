@@ -64,5 +64,6 @@ source "$SCRIPT_DIR/lib/script-helper.sh"
 # stub that exec'd on source would replace the sourcing shell and run the
 # subcommand with ITS arguments.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # requires-daemon: classify-dependency-block >= 0.19.99   #7952/#7953 — the Rust port added loom-daemon/src/cli/dep_classify.rs in 91ebce3ea, merged when VERSION read 0.19.98 (so 0.19.98 is the last version WITHOUT it); the post-merge bump that first shipped it was 0.19.99 (c718d1391). Hard, not `optional`: this stub only execs, it never probes or degrades. The refusal exits LOOM_SCRIPT_HELPER_MISSING_RC=2 set above, never 1 — 1 MEANS NO_DEFER / NO_UNESCALATE here (#8484).
     loom_exec_script_helper classify-dependency-block "$@"
 fi

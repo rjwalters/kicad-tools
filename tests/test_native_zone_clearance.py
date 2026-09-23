@@ -35,7 +35,12 @@ def test_native_clearance_precedes_fill_and_preserves_factory_rules(tmp_path, mo
     remediation = Mock()
     monkeypatch.setattr(runner, "_remediate_starved_thermal", remediation)
     assert runner.run_fill_zones(pcb, kicad_cli=Path("native"), native_clearance=True).success
-    remediation.assert_called_once_with(pcb, Path("native"), settle=None)
+    # Issue #5617: skip_first_refill is False here -- ``_kicad_cli_has_fill_zones``
+    # is monkeypatched True-free (returns False, i.e. the DRC-fallback branch is
+    # "used"), but ``_kicad_drc_supports_refill(Path("native"))`` genuinely probes
+    # a non-existent binary and returns False, so the caller cannot assert the
+    # fill above already refilled+saved via ``--refill-zones --save-board``.
+    remediation.assert_called_once_with(pcb, Path("native"), settle=None, skip_first_refill=False)
     first = dru.read_bytes()
     runner.run_fill_zones(pcb, kicad_cli=Path("native"), native_clearance=True)
     assert dru.read_bytes() == first

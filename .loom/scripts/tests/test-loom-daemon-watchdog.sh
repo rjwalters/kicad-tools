@@ -37,6 +37,10 @@ source "$SCRIPT_DIR/lib/bg-proc-trap.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+# Used by retired() below. A review pass removed this as unused, correctly for
+# the state of the file at the time: retired() was being CALLED four times but
+# had never actually been defined, so nothing referenced YELLOW.
+YELLOW='\033[0;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -45,6 +49,23 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "${GREEN}✓${NC} $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "${RED}✗${NC} $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader of this suite must be able to see that something was
+# removed, why, and what proves the property now. Counted as run so the totals
+# stay honest about how many assertions this file still carries.
+TESTS_RETIRED=0
+retired() { # <what> <property> <why-structural> <successor>
+    # Counted in its OWN bucket, not as a pass. A retirement is a record that
+    # an assertion was removed and why — calling it a pass inflates the figure
+    # a reader uses to judge how much this suite still proves.
+    TESTS_RETIRED=$((TESTS_RETIRED + 1))
+    echo -e "${YELLOW}⊘${NC} RETIRED: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_rc() { # <expected> <actual> <msg>
     if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected rc=$1, got rc=$2)"; fi
@@ -60,6 +81,37 @@ WORKDIR="$(mktemp -d)"
 # running every remaining test case.
 trap 'bg_proc_reap; rm -rf "$WORKDIR"' EXIT
 trap 'bg_proc_reap; rm -rf "$WORKDIR"; exit 1' INT TERM
+
+# Pin the binary that IMPLEMENTS the stub (#8134). $WATCHDOG is now a 77-line
+# stub over `loom-daemon daemon-watchdog`, so every case below only tests the
+# port if that stub execs the binary built from THIS working tree.
+#
+# --self-only is mandatory here, and this suite is the case that flag was built
+# for (see lib/require-daemon-bin.sh's header): it exports LOOM_DAEMON_SELF_BIN
+# and leaves $LOOM_DAEMON_BIN alone. Dozens of cases below pin $LOOM_DAEMON_BIN
+# to a make_daemon_stub mock to drive the #4398 IPC probe -- that is the
+# "daemon this caller probes" meaning, and it has to survive untouched.
+#
+# Without this pin lib/script-helper.sh resolves the IMPLEMENTATION through
+# $LOOM_DAEMON_BIN as well, so cases 13/13b/14/14b/14c/14d/15/20/21 exec the
+# `hang` mock (`while true; do sleep 1; done`) AS THE WATCHDOG and never
+# return. That wedges the suite until run-ci-suites.sh's 1200s per-suite
+# timeout -- twice, counting the #7791 retry -- which is exactly how the
+# 30-minute "Shell Test Suites (hermetic)" job budget was blown with zero
+# suite output. Every remaining case would have exec'd its own (non-hanging)
+# mock as the watchdog instead, which is no better, just louder.
+#
+# Called AFTER the traps above so the harness sees this suite's own EXIT trap
+# and declines to clobber it; its snapshots are bounded by the pid-keyed
+# reaper instead.
+#
+# It is FATAL, not a skip, when no binary resolves: these assertions are the
+# equivalence evidence for the port, and a suite that skipped itself would
+# report green while proving nothing. That is why this suite moved out of
+# ci-wired.txt into the "Native Port Suites" CI job, which builds one first.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" daemon-watchdog
 
 MARKER="$WORKDIR/autonomy-desired"
 HEARTBEAT="$WORKDIR/daemon.heartbeat"
@@ -1434,39 +1486,22 @@ else
 fi
 rm -rf "$PS_STUB_DIR" "$STUB21"
 
-# ===================================================================
-# 22. #4832: a missing/unreadable lib/bounded-run.sh must degrade to a
-#     clearly-diagnosed skip, never a raw "command not found" (rc 127) on a
-#     scheduled tick. Simulate by temporarily renaming the shared lib file
-#     the watchdog sources bounded_run() from.
-# ===================================================================
-# NOTE: deliberately does NOT register its own EXIT trap for the restore —
-# the suite already owns a single combined EXIT trap (line ~56, `bg_proc_reap;
-# rm -rf "$WORKDIR"`), and `trap ... EXIT` REPLACES rather than stacks, so
-# adding a second one here would silently disable that cleanup for every test
-# after this one. Restore inline instead, immediately after the probing run.
-BOUNDED_RUN_LIB="$(cd "$SCRIPT_DIR/../lib" && pwd)/bounded-run.sh"
-BOUNDED_RUN_LIB_BAK="${BOUNDED_RUN_LIB}.test-disabled-4832"
-mv "$BOUNDED_RUN_LIB" "$BOUNDED_RUN_LIB_BAK"
+# ---- 22. RETIRED (#8086): #4832's missing-lib/bounded-run.sh case.
+#          Its MECHANISM was `mv`-ing defaults/scripts/lib/bounded-run.sh out
+#          of the way. The port sources no lib: the bound is
+#          crate::sweep_registry::output_with_timeout, a compiled-in call.
+#          There is nothing to move, so the case cannot run -- and note its
+#          third assertion ("no raw 'command not found' surfaced") would now
+#          pass VACUOUSLY, which is the #7834 failure one step earlier.
+#
+#          Retired under the three-part test in
+#          defaults/docs/verification-recipes.md §6.
 
-STUB22="$(make_daemon_stub unreachable)"
-start_alive_and_fresh 22
-run_watchdog_verbose PATH="$PS_STUB_DIR:$PATH" LOOM_WATCHDOG_IPC_PROBE=1 \
-    LOOM_DAEMON_BIN="$STUB22/loom-daemon-mock"
-kill "$LIVE_PID" 2>/dev/null || true
-mv "$BOUNDED_RUN_LIB_BAK" "$BOUNDED_RUN_LIB"
-assert_rc 0 "$RC" "missing lib/bounded-run.sh: degrades to a skip, not a hard failure (exit 0)"
-if log_hasi 'bounded_run is undefined'; then
-    pass "missing lib/bounded-run.sh: clearly-diagnosed skip in the log"
-else
-    fail "missing lib/bounded-run.sh: expected a clear diagnostic ($(cat "$WDLOG" 2>/dev/null))"
-fi
-if grep -qi 'command not found' "$OUT" "$WDLOG" 2>/dev/null; then
-    fail "missing lib/bounded-run.sh: raw 'command not found' leaked instead of the diagnosed skip"
-else
-    pass "missing lib/bounded-run.sh: no raw 'command not found' surfaced"
-fi
-rm -rf "$PS_STUB_DIR" "$STUB22"
+retired "#4832: a missing lib/bounded-run.sh degrades to a diagnosed skip, not rc 127" \
+    "an absent optional helper must never turn a scheduled, unattended tick into a raw 'command not found' -- the watchdog failing is strictly worse than the watchdog reporting it cannot probe" \
+    "there is no optional helper. The bound is a compiled-in function call; its absence is a compile error, not a runtime state, so no tick can ever encounter it" \
+    "the IpcVerdict::Skipped path carries the whole property and is still exercised BEHAVIOURALLY by two cases above -- 'probe disabled' and 'no resolvable loom-daemon binary' -- each asserting exit 0 plus a diagnosed skip. Case 21 separately proves the bound holds with no external timeout(1) on PATH."
+
 
 # ===================================================================
 # #5118 — SOCKET-FIRST LIVENESS. Everything below drives the state the fleet
@@ -2610,46 +2645,31 @@ rm -rf "$STUB53"
 #        the two structural properties that make each function safe.
 # ===================================================================
 
-# The scan itself lives in lib/heredoc-body-safety.sh so this suite and its
-# sibling test-loom-daemon-watchdog-dedup.sh share ONE implementation (#7834):
-# the vacuous-pass bug it fixes spread by the two suites carrying independent
-# copies of the same heuristic.
-# shellcheck source=lib/heredoc-body-safety.sh
-source "$SCRIPT_DIR/lib/heredoc-body-safety.sh"
+# ---- 54/55. RETIRED (#8086): the #7508 static scans read the SHELL's source.
+#             $WATCHDOG is now a 69-line stub; the bodies they scanned live in
+#             loom-daemon/src/watchdog/{escalate,peer_coord}.rs as Rust string
+#             literals. These greps cannot pass, and making them pass would
+#             mean asserting something about a file the port deleted.
+#
+#             Retired under the three-part test in
+#             defaults/docs/verification-recipes.md §6.
 
-# ---- 54. escalate_peer_coordination_degraded() must not rebuild its body ----
-#          via the vulnerable `body="$(cat <<EOF ... EOF)"` construct --
-#          #7508's fix moved it to `read -r -d '' body <<EOF ... EOF`, which
-#          reads the heredoc directly with no `$(...)` wrapper and so never
-#          enters bash 3.2's buggy quote-tracking scan at all, regardless of
-#          what punctuation the body prose contains.
-PCD_FUNC_BODY="$(heredoc_func_body "$WATCHDOG" escalate_peer_coordination_degraded)"
-PCD_FUNC_CODE_ONLY="$(echo "$PCD_FUNC_BODY" | grep -Ev '^\s*#')"
-if echo "$PCD_FUNC_CODE_ONLY" | grep -Eq 'body="\$\(cat <<'; then
-    fail "#7508 static: escalate_peer_coordination_degraded() reverted to the vulnerable \$(cat <<EOF) body construction"
-else
-    pass "#7508 static: escalate_peer_coordination_degraded() does not use the vulnerable \$(cat <<EOF) body construction"
-fi
-if echo "$PCD_FUNC_BODY" | grep -Eq "read (-[a-zA-Z]+ )*-d ''.*body.*<<EOF"; then
-    pass "#7508 static: escalate_peer_coordination_degraded() builds its body via read -d '' (no \$(...) wrapper)"
-else
-    fail "#7508 static: expected escalate_peer_coordination_degraded() to build its body via read -d '' <<EOF"
-fi
+retired "#7508: escalate_daemon_outage() builds its body safely (#5391)" \
+    "an unescaped backtick or bare apostrophe in a heredoc wrapped in \$(...) trips bash 3.2's lexer and silently files an EMPTY issue body -- 1099 times from 2026-08-16" \
+    "there is no shell, no heredoc and no command substitution: the body is a Rust string literal, so no punctuation in the prose can change how it parses" \
+    "watchdog::escalate::shell_differential -- asserts the body is BYTE-IDENTICAL (1314 bytes) to the shell's own rendered output. A scan checks the body was BUILT safely; this checks it IS the same body, which subsumes it."
 
-# ---- 55. Each escalation heredoc body is located and scanned, and the ----
-#          `$(...)`-wrapped one (escalate_daemon_outage()) stays free of both
-#          confirmed bash-3.2 trigger shapes. #7834: the previous inline
-#          version of this scan only recognised openers ENDING in `<<EOF`, so
-#          escalate_peer_coordination_degraded()'s `read -r -d '' body <<EOF
-#          || true` sliced to nothing and BOTH of its assertions passed
-#          without reading the body. The shared scan now fails loudly on an
-#          unlocatable body and scopes the prose rules to the construction
-#          that can actually trip the lexer bug -- a `read -d ''` body that
-#          regresses to `$(cat <<EOF` is reclassified and gets them applied.
-check_heredoc_scan_selftest
-check_heredoc_body_safety "$WATCHDOG" escalate_daemon_outage "escalate_daemon_outage() (#5391)"
-check_heredoc_body_safety "$WATCHDOG" escalate_peer_coordination_degraded "escalate_peer_coordination_degraded() (#6222)"
+retired "#7508: escalate_peer_coordination_degraded() builds its body via read -d '' (#6222)" \
+    "same hazard, and this body is the one that actually contains the trigger: a bare apostrophe in \"This host's ... path\"" \
+    "same -- a Rust string literal, and the apostrophe is now inert prose rather than a lexer input" \
+    "watchdog::peer_coord::shell_differential -- BYTE-IDENTICAL (1415 bytes), plus an explicit assertion that the backticks and the apostrophe are CARRIED, so the port cannot have dodged the hazard by rewording instead of porting."
+
+retired "#7508/#7834: the scan locates each heredoc body rather than passing vacuously" \
+    "a scan whose opener pattern stops matching passes without reading anything -- the failure one step earlier than the one it guards" \
+    "there is no opener to locate; the differential either matches the exact bytes or fails" \
+    "the two differentials above assert an exact 1314/1415-byte match, which cannot pass vacuously: there is no pattern to stop matching, only bytes to differ."
+
 
 echo
-echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"
+echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed, $TESTS_RETIRED retired"
 [[ "$TESTS_FAILED" -eq 0 ]]

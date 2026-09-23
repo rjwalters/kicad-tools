@@ -12,6 +12,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$SCRIPT_DIR/../sweep-checkpoint.sh"
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPT_DIR/.." "sweep-checkpoint"
 
 if [[ ! -x "$HELPER" ]]; then
     echo "FAIL: helper not executable at $HELPER" >&2
@@ -25,6 +28,7 @@ trap 'rm -rf "$TMP_REPO"' EXIT
 cd "$TMP_REPO" || exit 1
 git init -q .
 mkdir -p .loom/scripts
+cp -R "$SCRIPT_DIR/../lib" .loom/scripts/lib
 # Use a script-relative copy so `repo_root` lands here, not in the real loom checkout.
 cp "$HELPER" .loom/scripts/sweep-checkpoint.sh
 chmod +x .loom/scripts/sweep-checkpoint.sh

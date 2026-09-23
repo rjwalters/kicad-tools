@@ -458,6 +458,215 @@ check "$([[ "$bare_rc" -eq 0 && "$bare_out" == *"REACHED-THE-CASES"* ]] && echo 
     "control: a BARE call site sails past the same failure under set -uo pipefail (rc=$bare_rc, #6420)" \
     "output: $bare_out"
 
+# ============================================================
+# 12. #8077 — the live-HOST leak guard.
+#
+#     `daemon.log` is deliberately NOT in LIVE_STATE_SANDBOX_GUARDED_FILES: a
+#     running daemon appends to it constantly, so a size/mtime/sha fingerprint
+#     of it flaps every second. The #8077 pair guards it at the only
+#     granularity that does not — the number of `Daemon logging initialized`
+#     lines, one per daemon PROCESS START. These cases prove both that an
+#     append does not trip it (or the guard would be disabled within a day) and
+#     that a new boot block does.
+# ============================================================
+LEAK_HOME="$WORKDIR/leak-home"
+mkdir -p "$LEAK_HOME/.loom/tokens" "$LEAK_HOME/.config/systemd/user"
+printf '[t] Daemon logging initialized to x\n[t] Loom daemon starting...\n' > "$LEAK_HOME/.loom/daemon.log"
+: > "$LEAK_HOME/.loom/tokens/alpha.token"
+: > "$LEAK_HOME/.config/systemd/user/loom-daemon.service"
+
+# 12a. Append-only churn (a healthy daemon logging) is NOT a leak.
+leak_clean_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$LEAK_HOME" XDG_CONFIG_HOME="$LEAK_HOME/.config"
+    live_host_leak_snapshot
+    echo "surfaces=$(live_host_leak_snapshot_size)"
+    printf '[t] a live daemon keeps logging\n[t] and logging\n' >> "$HOME/.loom/daemon.log"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_clean_out" == *"RC=0"* ]] && echo 0 || echo 1)" \
+    "a live daemon's own daemon.log appends do NOT trip the #8077 guard" "$leak_clean_out"
+check "$([[ "$leak_clean_out" == *"surfaces=4"* ]] && echo 0 || echo 1)" \
+    "the #8077 snapshot covers 4 live-host surfaces (log, unit identity, unit dir, token pool)" "$leak_clean_out"
+
+# 12b. A NEW boot block with no supervised restart = the #8077 signature.
+leak_boot_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$LEAK_HOME" XDG_CONFIG_HOME="$LEAK_HOME/.config"
+    live_host_leak_snapshot
+    printf '[t] Daemon logging initialized to x\n' >> "$HOME/.loom/daemon.log"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_boot_out" == *"RC=1"* ]] && echo 0 || echo 1)" \
+    "a NEW daemon boot block in the live daemon.log FAILS the #8077 guard (rc=1)" "$leak_boot_out"
+check "$([[ "$leak_boot_out" == *"boot blocks before: 1"*"after: 2"* ]] && echo 0 || echo 1)" \
+    "the #8077 guard reports the before/after boot counts" "$leak_boot_out"
+check "$([[ "$leak_boot_out" == *"LOOM_DAEMON_LOG"* && "$leak_boot_out" == *"LOOM_SOCKET_PATH"* ]] && echo 0 || echo 1)" \
+    "the #8077 failure names the two overrides that would have prevented it" "$leak_boot_out"
+
+# 12c. A daemon.log CREATED where none existed is always a leak — the only
+#      direction a CI runner (no daemon, no user manager) can observe.
+leak_create_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$WORKDIR/leak-bare" XDG_CONFIG_HOME="$WORKDIR/leak-bare/.config"
+    mkdir -p "$HOME/.loom"
+    live_host_leak_snapshot
+    printf '[t] Daemon logging initialized to x\n' > "$HOME/.loom/daemon.log"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_create_out" == *"RC=1"* ]] && echo 0 || echo 1)" \
+    "CREATING a previously-absent live daemon.log FAILS the #8077 guard (rc=1)" "$leak_create_out"
+
+# 12d. Real unit files dropped into the live systemd --user search path (the
+#      #4862 MX block's shape) are caught.
+leak_unit_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$LEAK_HOME" XDG_CONFIG_HOME="$LEAK_HOME/.config"
+    live_host_leak_snapshot
+    : > "$XDG_CONFIG_HOME/systemd/user/loom-daemon-test-mx-mixed-999.service"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_unit_out" == *"RC=1"* ]] && echo 0 || echo 1)" \
+    "a test unit file left in the LIVE systemd --user dir FAILS the #8077 guard (rc=1)" "$leak_unit_out"
+check "$([[ "$leak_unit_out" == *"LOOM_TEST_ALLOW_SYSTEMD=1"* ]] && echo 0 || echo 1)" \
+    "the unit-dir failure names the LOOM_TEST_ALLOW_SYSTEMD opt-in gate" "$leak_unit_out"
+
+# 12d-2. A test that `mkdir -p`s the LIVE systemd --user dir (absent beforehand)
+#        and then cleans up its own unit file — the #4862 MX block's mx_cleanup
+#        shape — must NOT trip the guard. The directory's own existence is not
+#        what is guarded, only the unit-file NAME SET; a CI runner with no
+#        pre-existing $HOME/.config/systemd/user hit this as a false positive
+#        (before=`<absent>`, after=`names=` — empty, but no longer `<absent>`).
+LEAK_MKDIR_HOME="$WORKDIR/leak-mkdir-home"
+mkdir -p "$LEAK_MKDIR_HOME/.loom"
+leak_unit_clean_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$LEAK_MKDIR_HOME" XDG_CONFIG_HOME="$LEAK_MKDIR_HOME/.config"
+    live_host_leak_snapshot
+    mkdir -p "$XDG_CONFIG_HOME/systemd/user"
+    : > "$XDG_CONFIG_HOME/systemd/user/loom-daemon-test-mx-mixed-999.service"
+    rm -f "$XDG_CONFIG_HOME/systemd/user/loom-daemon-test-mx-mixed-999.service"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_unit_clean_out" == *"RC=0"* ]] && echo 0 || echo 1)" \
+    "mkdir -p'ing an absent LIVE systemd --user dir and cleaning up its own unit file does NOT trip the #8077 guard" "$leak_unit_clean_out"
+
+# 12e. A token written into the live shared pool is caught.
+leak_token_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$LEAK_HOME" XDG_CONFIG_HOME="$LEAK_HOME/.config"
+    live_host_leak_snapshot
+    : > "$HOME/.loom/tokens/beta.token"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_token_out" == *"RC=1"* ]] && echo 0 || echo 1)" \
+    "a token written into the LIVE shared pool FAILS the #8077 guard (rc=1)" "$leak_token_out"
+
+# 12f. Asserting without a snapshot is an error, not a silent pass — the same
+#      fail-closed shape the state-path pair already has.
+leak_nosnap_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$LEAK_HOME"
+    _LSS_LEAK_SNAPSHOT_TAKEN=0
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=0" || echo "RC=1"
+)
+check "$([[ "$leak_nosnap_out" == *"RC=1"* && "$leak_nosnap_out" == *"live_host_leak_snapshot first"* ]] && echo 0 || echo 1)" \
+    "asserting the #8077 guard without a snapshot fails and says so" "$leak_nosnap_out"
+
+# 12g. The LOOM_SOCKET_PATH-derived log is enumerated too — that is the #8077
+#      resolution tier (the sweep environment inherits the production socket
+#      path, so the "default" a forgetful test gets IS the live log).
+leak_socket_out=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$WORKDIR/leak-sock-home"
+    mkdir -p "$HOME/.loom" "$WORKDIR/leak-sock-dir"
+    export LOOM_SOCKET_PATH="$WORKDIR/leak-sock-dir/loom-daemon.sock"
+    printf '[t] Daemon logging initialized to x\n' > "$WORKDIR/leak-sock-dir/daemon.log"
+    live_host_leak_snapshot
+    printf '[t] Daemon logging initialized to x\n' >> "$WORKDIR/leak-sock-dir/daemon.log"
+    live_host_leak_assert_unchanged 2>&1 && echo "RC=1-with:" || echo "RC=1-with:"
+)
+check "$([[ "$leak_socket_out" == *"leak-sock-dir/daemon.log"* ]] && echo 0 || echo 1)" \
+    "the #8077 guard also watches the LOOM_SOCKET_PATH-derived daemon.log (the sweep-inherited tier)" "$leak_socket_out"
+
+# ============================================================
+# 13. #8077 — live_state_sandbox_init redirects the machine-level state the
+#     Rust harness's isolate_daemon_state() already pinned and this one did
+#     not. The sweep journal is the load-bearing one: a test daemon that reads
+#     the real one ADOPTS the live host's in-flight sweep claims.
+# ============================================================
+init8077_out=$(
+    eval "$NEUTRAL_ENV"
+    unset LOOM_DAEMON_LOG LOOM_SHARED_TOKENS_DIR LOOM_WORKSPACES_PATH LOOM_SWEEPS_JOURNAL_PATH LOOM_TEST_ALLOW_SYSTEMD
+    export HOME="$FAKE_HOME"
+    live_state_sandbox_init "$WORKDIR/sandbox8077" >/dev/null
+    live_state_sandbox_describe
+)
+for _var in LOOM_DAEMON_LOG:daemon.log LOOM_SHARED_TOKENS_DIR:tokens \
+            LOOM_WORKSPACES_PATH:workspaces.json LOOM_SWEEPS_JOURNAL_PATH:sweeps.json \
+            LOOM_WATCHES_PATH:watches.json LOOM_WATCH_RESULTS_LOG:watch-results.log; do
+    _name="${_var%%:*}"; _leaf="${_var#*:}"
+    check "$([[ "$init8077_out" == *"$_name=$WORKDIR/sandbox8077/$_leaf"* ]] && echo 0 || echo 1)" \
+        "init redirects $_name into the sandbox (#8077)" "$init8077_out"
+done
+check "$([[ "$init8077_out" == *"LOOM_TEST_ALLOW_SYSTEMD=0"* ]] && echo 0 || echo 1)" \
+    "init defaults LOOM_TEST_ALLOW_SYSTEMD to 0 — a sandboxed suite never drives the LIVE user manager (#8077)" \
+    "$init8077_out"
+
+# An operator who deliberately opted in keeps that opt-in through init.
+init8077_optin=$(
+    eval "$NEUTRAL_ENV"
+    export HOME="$FAKE_HOME" LOOM_TEST_ALLOW_SYSTEMD=1
+    live_state_sandbox_init "$WORKDIR/sandbox8077b" >/dev/null
+    live_state_sandbox_describe
+)
+check "$([[ "$init8077_optin" == *"LOOM_TEST_ALLOW_SYSTEMD=1"* ]] && echo 0 || echo 1)" \
+    "init preserves an explicit LOOM_TEST_ALLOW_SYSTEMD=1 rather than overwriting it (#8077)" \
+    "$init8077_optin"
+
+# ============================================================
+# 14. #8077 AC2 — the #4862 real-systemd block in test-loom-daemon-start.sh is
+#     opt-in. Asserted against the SOURCE rather than by running the suite:
+#     executing it is a ~2-minute daemon-lifecycle run, and the property under
+#     test is exactly "this code is not reachable by default", which a source
+#     assertion states directly. The suite's own run proves the other half.
+# ============================================================
+MX_SUITE="$SCRIPT_DIR/test-loom-daemon-start.sh"
+mx_gate_line="$(grep -n 'MX_HAVE_SYSTEMD=true' -B4 "$MX_SUITE" | grep 'LOOM_TEST_ALLOW_SYSTEMD' || true)"
+check "$([[ -n "$mx_gate_line" ]] && echo 0 || echo 1)" \
+    "the #4862 real-systemd block is gated on LOOM_TEST_ALLOW_SYSTEMD (#8077 AC2)" \
+    "no LOOM_TEST_ALLOW_SYSTEMD in the MX_HAVE_SYSTEMD gate"
+check "$([[ "$mx_gate_line" == *'LOOM_TEST_ALLOW_SYSTEMD:-0'* ]] && echo 0 || echo 1)" \
+    "…and the gate DEFAULTS to off, so a host with a reachable user manager does not opt itself in" \
+    "$mx_gate_line"
+# The whole point is that the only live `systemctl --user` MUTATIONS in the
+# tests directory live behind that gate. A new unguarded one would reopen
+# #8077, so this counts them rather than trusting review.
+#
+# Matched in COMMAND POSITION only (line starts with `systemctl`), which is the
+# form every real invocation in this directory takes and which no assertion
+# message, `grep` pattern or stub-expectation string does. A deliberately
+# obfuscated call (`eval`, `$(systemctl …)` mid-expression) would slip past —
+# this is a tripwire against the next honest addition, not a sandbox. The
+# `stop`/`reset-failed` verbs count as mutations too: MX's own cleanup uses
+# them, so excluding them would let half the block back in.
+mx_unguarded="$(grep -rnE '^[[:space:]]*systemctl --user (daemon-reload|start|stop|restart|enable|disable|reset-failed|kill)' \
+    "$SCRIPT_DIR"/*.sh 2>/dev/null | grep -v 'test-loom-daemon-start.sh' || true)"
+check "$([[ -z "$mx_unguarded" ]] && echo 0 || echo 1)" \
+    "no other suite in defaults/scripts/tests/ mutates the LIVE systemd --user manager (#8077 AC2)" \
+    "unguarded call sites:
+$mx_unguarded"
+# …and the gated file's own mutations are all INSIDE the gate: every one of
+# them sits after the `if [[ "$MX_HAVE_SYSTEMD" == "true" ]]` line, so the gate
+# above is not merely present but actually covers them.
+mx_gate_open="$(grep -n 'if \[\[ "\$MX_HAVE_SYSTEMD" == "true" \]\]' "$MX_SUITE" | head -1 | cut -d: -f1)"
+mx_before_gate="$(grep -nE '^[[:space:]]*systemctl --user (daemon-reload|start|stop|restart|enable|disable|reset-failed|kill)' \
+    "$MX_SUITE" | awk -F: -v g="${mx_gate_open:-0}" '$1 < g')"
+check "$([[ -n "$mx_gate_open" && -z "$mx_before_gate" ]] && echo 0 || echo 1)" \
+    "every live 'systemctl --user' mutation in test-loom-daemon-start.sh sits INSIDE the gate (#8077 AC2)" \
+    "gate opens at line ${mx_gate_open:-<not found>}; mutations before it:
+$mx_before_gate"
+
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"
 [[ "$TESTS_FAILED" -eq 0 ]]

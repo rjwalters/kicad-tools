@@ -28,6 +28,7 @@ pipeline state already lives.
 - [`loom:needs-capability` — a narrower claim than `loom:operator-only` (#5817)](#loomneeds-capability--a-narrower-claim-than-loomoperator-only-5817)
 - [Bidirectional routing: `loom:operator-only` ↔ `loom:needs-capability` (#5818)](#bidirectional-routing-loomoperator-only--loomneeds-capability-5818)
 - [Fact-based de-escalation of a Champion `proposal-escalated` hold (#7650)](#fact-based-de-escalation-of-a-champion-proposal-escalated-hold-7650)
+- [PR verdict-label mutual exclusion: three independent layers (#8112)](#pr-verdict-label-mutual-exclusion-three-independent-layers-8112)
 - [Follow-up work](#follow-up-work)
 <!-- toc:end -->
 
@@ -48,7 +49,7 @@ each definition, for the terse version of this same table):
 | `loom:blocked` | Waiting on a dependency, but still automatable once that clears | No |
 | `loom:operator-only` | Requires human action or ruling *outside* automation entirely (credentials, infra, hardware, an owner-gated decision) | **Yes** — sweep/shepherd skip it, except the narrow capability-matched `loom:operator-mechanical` case (#6893, see "Dispatch path" below) |
 | `loom:needs-capability` | Blocked on a missing tool/agent capability — not an operator-by-right decision, but automation genuinely cannot proceed without the capability existing first (#5817) | **Yes** — sweep/shepherd skip it, identically to `loom:operator-only` today |
-| `loom:operator` | The engine has stopped on this specific artifact and a human must act, but the item stays live in its normal queue so the engine's own release conditions can still fire | **No** — stays in the normal re-evaluation queue |
+| `loom:operator` | The engine has stopped on this specific artifact and a human must act, but the item stays live in its normal queue so the engine's own release conditions can still fire | **New-builder skip only** — the work finder does not *start* a fresh `--claim-owned` build on it (vibesql#6664); re-evaluation lanes (Champion/role ticks, watchdog re-dispatch, reaper resume, explicit `loom-daemon dispatch <N>`) still reach it |
 
 The distinguishing property of `loom:operator` is that it is **re-evaluable**:
 unlike `loom:operator-only`, applying it must never cause sweep/shepherd
@@ -56,6 +57,17 @@ dispatch to skip the item. That is what makes it safe to apply to a PR that
 still needs to pass through its normal Champion tick — the hold that put the
 label on can also be the mechanism that takes it back off, without a human
 having to remember to remove it.
+
+One lane is deliberately excluded from that guarantee (vibesql#6664): the
+work finder's *candidate* filter. A sweep that concludes "a human is needed"
+releases its claim (restoring `loom:issue`) and applies `loom:operator` in one
+motion — without the candidate skip, the finder immediately re-listed the
+issue and dispatched another builder onto the fresh hold (observed 3× in 13
+minutes on vibesql#6172). So the finder treats a held candidate like an
+already-claimed one (it will not *start* work), while every route that
+*re-evaluates* or explicitly targets the item still proceeds. The label never
+refuses dispatch by itself — it is not in the park set the dispatch-time
+guard consults.
 
 ## Entry points
 
@@ -554,6 +566,44 @@ sweep). The prompt-side convention is enforced mechanically by
 `--add-label` in a role prompt, doc, or script that applies `loom:operator-only`
 without a sub-kind in the same argument.
 
+### An issue's own autonomous filing is not operator approval (#7855, #8309)
+
+Filing an issue — by any role, including one footed "🤖 Generated with Claude
+Code" — is not itself an operator ruling, even when the issue's substance is
+a proposal to reverse a documented design decision, safety posture, or a
+test's asserted intent. That reversal still needs `loom:operator-only` +
+`loom:operator-decision`; the filing agent's own presence on the issue is
+never a substitute for that routing.
+
+**Named anti-pattern**: on #7855, a Curator pass reasoned "the operator
+filing it is the ruling that reverses it" about an issue — itself filed
+autonomously — proposing to drop the deliberate no-auto-restart posture for a
+wedged-but-alive daemon (`loom-daemon/src/watchdog/help.txt` and
+`loom-daemon/src/watchdog/mod.rs`'s "no automatic kill/restart" rationale,
+asserted by `defaults/scripts/tests/test-loom-daemon-watchdog.sh`'s Test 14).
+Champion caught the reversal at the promotion gate, one stage after Curator
+had already spent a pass enriching and scoping it on that premise. Do not
+restate this reasoning — an issue's own filing, autonomous or not, carries no
+approval weight over a documented decision.
+
+This is narrow: it flags proposed *reversals* of existing, documented/tested
+behaviour, not autonomously-filed issues in general (see CLAUDE.md § "Issues
+Are Suggestions").
+
+**Since #8396 this rule has a mechanism, not only a prose statement.**
+`./.loom/scripts/premise-check.sh --issue N` (`loom-daemon premise-check`)
+runs **before** Curator enrichment — from the sweep orchestrator's Curator
+phase, and from `curator.md` § "Before Starting Curation" on every other
+path. For a scoped population (`loom:architect`/`loom:hermit`/`loom:auditor`,
+an incident-report heading, or an issue whose own text claims a reversal) it
+requires a recorded premise check, and it **refuses** the one combination this
+section names as the anti-pattern: a record saying `deliberate=yes
+reversal=yes` is admissible only with `verdict=operator-decision`, which is
+this exact routing. It invents no label and relaxes nothing above — exit `11`
+means "apply `loom:operator-only` + `loom:operator-decision`, with the
+disagreement-axis comment rule 4 already requires". Contract and design
+rationale: [`premise-gate.md`](premise-gate.md).
+
 ## `loom:needs-capability` — a narrower claim than `loom:operator-only` (#5817)
 
 A fleet-wide census (example-org/fleet-repo#301) found `loom:operator-only` carrying at
@@ -718,6 +768,65 @@ repo, and Curator is the role already positioned to do that re-check (per
 Champion's own promotion pass is unaffected: it still owns the pure
 dependency-timing case end to end via Pass 0, and treats a Curator-revised
 proposal exactly like any other revision once it reaches the queue.
+
+## PR verdict-label mutual exclusion: three independent layers (#8112)
+
+`loom:pr` (approved) must never coexist with a label asserting the opposite
+or a pending/blocking hold — `loom:changes-requested`, `loom:blocked`,
+`loom:operator`, or `loom:review-requested` (the invariant is stated
+authoritatively in `.github/labels.yml`, "PR verdict-label mutual
+exclusion"). A contradictory pair is not hypothetical: two Judge passes
+reviewing the same head roughly a minute apart reached different verdicts on
+PR #4560 (2026-07-30, #4570) and again on PR #8076 (#8112) — nothing about
+GitHub's label API is compare-and-swap, so two writers can each read a clean
+state and then both still write.
+
+Three independent mechanisms exist for this, at three different points in
+the pipeline. None of them supersedes the others — each is a backstop for a
+path the others do not cover:
+
+1. **Write-time prevention (chosen remediation for #8112's race, candidate
+   (3))** — Judge's and Doctor's **Verdict-Time CAS Recheck**
+   (`judge.md` / `doctor.md`) already claims the PR with `loom:reviewing`
+   before reviewing and re-reads the label set immediately before writing
+   any verdict label, aborting if another verdict already landed, the claim
+   was lost, or the head moved. This is the standing mechanism for the race
+   itself and predates #8112 (#5686, generalizing the PR #4560 incident
+   response) — #8112 does not replace it or add a second one; a Judge/Doctor
+   path that skips this recheck is the actual bug to fix if the race recurs,
+   not a signal that a new claim/CAS mechanism is needed.
+2. **Post-hoc auto-resolution** — Champion's **Verdict-State Janitor Part 1**
+   (`champion-pr-merge.md`) runs before Champion's own merge-eligibility
+   criteria, detects a `loom:pr` + blocking-label pair regardless of how it
+   arose (a race that slipped past layer 1, a manual label edit, a bug
+   elsewhere), and resolves it fail-safe: `loom:pr` always loses, the other
+   label is kept, and a fresh Judge pass is invited.
+3. **Direct-invocation hard block (#8112, this issue)** — `merge-pr.sh`'s
+   `_check_verdict_label_contradiction` guard. Layers 1 and 2 both live in
+   markdown-orchestrated agent steps, not in the shared script — so a human
+   or agent invoking `merge-pr.sh` directly (the documented, canonical way
+   to merge; `gh pr merge` is never used, see the root `CLAUDE.md`) bypassed
+   both of them entirely, which is the literal gap #8112 reports. The guard
+   refuses to merge (hard block, naming both labels) whenever `loom:pr`
+   and a blocking label are both present, checking a **fixed list** of
+   blocking labels rather than "whichever label happens to be read first" —
+   so the refusal cannot be silently defeated by label ordering. Unlike
+   layer 2, it does not auto-resolve anything; it stops the merge and leaves
+   the contradiction for a human or a fresh Judge pass to sort out, since a
+   script invoked directly has no authority to silently discard a
+   `loom:changes-requested`/`loom:blocked`/`loom:operator` verdict the way
+   Champion's own janitor does under its own auto-merge authority.
+
+**`--allow-unapproved` does not bypass layer 3, and there is no separate
+override flag for it either** — this was an explicit decision, not an
+oversight. `--allow-unapproved` overrides *absence* of a review signal
+("nobody has reviewed this head yet"); the verdict-contradiction guard fires
+on *presence* of a conflicting one ("a reviewer explicitly rejected this
+head, or it is on hold, or re-review is pending"). Those are different acts:
+overriding a missing opinion is a call about risk tolerance for skipping
+review; overriding a stated rejection discards someone else's judgment
+outright. The remedy for a real block here is the same as layer 2's: get a
+fresh Judge verdict on the current head, not force a flag past it.
 
 ## Follow-up work
 

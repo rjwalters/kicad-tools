@@ -152,6 +152,50 @@ else
 fi
 
 echo
+echo "--- classify_error: Kimi Code CLI (#8561) needs no provider table; the generic transients already cover it ---"
+
+# Issue #8561 was filed against a documented Kimi print-mode contract of
+# "75 = transient (rate limit / 5xx / timeout)". Probing the pinned CLI
+# (@moonshot-ai/kimi-code 2.0.2) disproved it: 75 is emitted nowhere in the
+# shipped bundle. Kimi absorbs transients IN-PROCESS — a 429 is retried up to
+# ten times with exponential backoff — and only the exhaustion of that ladder
+# reaches the process boundary, as exit 1. Full probe evidence:
+# docs/experiments/kimi-harness-probe-2026-09-22.json.
+#
+# So no `_classify_error_kimi` table was added and no 75 special case exists.
+# These assertions pin WHY that is safe rather than an oversight: the strings
+# Kimi actually emits already land on RECOVERABLE through the generic,
+# provider-independent table, which is precisely the retry-with-backoff verdict
+# the phantom 75 mapping was meant to produce. If someone later adds a kimi
+# table, these must keep passing.
+while IFS='|' read -r desc output expected; do
+    [[ -z "$desc" ]] && continue
+    actual="$(classify_error "$output" 1 kimi)"
+    assert_eq "$expected" "$actual" "$desc"
+done <<'EOF'
+429 retry-ladder exhaustion, verbatim from 2.0.2|error: failed to run prompt: provider.rate_limit: 429 rate limit exceeded|RECOVERABLE
+turn.step.retrying NDJSON meta event, verbatim from 2.0.2|{"role":"meta","type":"turn.step.retrying","failed_attempt":9,"next_attempt":10,"max_attempts":10,"error_name":"APIProviderRateLimitError","error_message":"429 rate limit exceeded","status_code":429}|RECOVERABLE
+unrecognised Kimi config fault falls through to the daemon-mode catch-all|error: failed to run prompt: No model configured. Run `kimi` and use /login to sign in.|RECOVERABLE
+EOF
+
+# An unknown provider selector must never make classification FAIL — "kimi"
+# matches no table in _classify_error_provider by design, and the exit-code-first
+# rules still apply ahead of any output inspection.
+assert_eq "SUCCESS" "$(classify_error 'provider.rate_limit: 429 rate limit exceeded' 0 kimi)" \
+    "a CLEAN Kimi exit stays SUCCESS even when its stream quoted a 429 (#3233)"
+assert_eq "TIMEOUT" "$(classify_error '' 124 kimi)" \
+    "timeout(1) on a Kimi launch is provider-independent TIMEOUT"
+
+TESTS_RUN=$((TESTS_RUN + 1))
+if classification_is_transient "$(classify_error 'error: failed to run prompt: provider.rate_limit: 429 rate limit exceeded' 1 kimi)"; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: Kimi's rate-limit exhaustion is retryable (the verdict the phantom exit-75 mapping wanted)"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: Kimi's rate-limit exhaustion is retryable (the verdict the phantom exit-75 mapping wanted)"
+fi
+
+echo
 echo "--- classification_is_transient: TOKEN_EXHAUSTED stays retryable (rotation path consumes it first) ---"
 
 for _category in TOKEN_EXHAUSTED MODEL_CREDITS_EXHAUSTED; do

@@ -517,6 +517,43 @@ Full recipe, the atomic create+label requirement, the scripted
 `forge_gh_create_issue_rl_safe` equivalent, and why `loom-daemon forge issue
 create` is NOT a fallback: [`gh-issue-create-rest-fallback.md`](gh-issue-create-rest-fallback.md).
 
+### The duplicate backstop, and what makes it refuse (exit 3)
+
+Before filing, `create-issue.sh` runs `check-duplicate.sh` against **open
+issues** and refuses (exit 3, nothing filed) when the new issue looks like work
+already in flight. The similarity is a true Jaccard percentage over keyword
+sets, scored by `loom-daemon duplicate-scan`. The shipped calibration:
+
+| Signal | Default | Meaning |
+|---|---|---|
+| block threshold | **18%** full-text similarity | at/above this, the filing is refused |
+| corroboration ceiling | **25%** full-text similarity | below this, a block needs a second signal |
+| title threshold | **18%** *title-only* similarity | the second signal a low block must clear |
+| warn band floor | **13%** full-text similarity | reported on stderr, filed anyway |
+
+18% comes from this repo's own history (#4409): the confirmed duplicate pair
+#3550/#3551 scored 19% on full bodies, while unrelated richly-worded issues
+scored 4–13%. But 18% on *full text* alone is cheap — two long issues in the
+same subsystem share enough jargon to reach it — so since #8591 a match between
+18% and 25% must **also** reach 18% similarity on **titles alone** before it
+blocks. Titles are short and specific, so they are the cheap second opinion:
+#3550/#3551 scores 26% on titles and still blocks, while #8561 (a Kimi CLI
+harness adapter) vs. #8505 (an OpenCode metered-runtime budget bug) scores 3%
+and no longer does. At or above 25% the body overlap stands on its own.
+
+An uncorroborated match is **demoted, not discarded**: it appears as a
+`NEAR #<n>: … (similarity: X%, title overlap only Y% — not corroborated, so not
+a block)` row, and the filing proceeds. So does anything in the 13–17% warn
+band. Nothing the check noticed is ever silently dropped.
+
+**When you still need `--force`.** Genuinely distinct work that trips the block
+anyway — re-run with `--force` (or `LOOM_SKIP_DUPLICATE_CHECK=1` for a whole
+filing burst). Reaching for it *reflexively* is the failure mode the
+calibration exists to prevent: a backstop everyone bypasses protects nothing.
+An intentional follow-up needs neither — a filing that already cross-references
+the match by number (`Part of #123`, `Parent: #123`, `split out of #123`) is
+exempt by construction.
+
 ## Troubleshooting
 
 ### Token not being picked up

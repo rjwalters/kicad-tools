@@ -398,7 +398,7 @@ else
     pass "Case 6: bump commit stages no defaults/ path (cannot re-trigger itself)"
 fi
 
-for managed in VERSION package.json mcp-loom/package.json Cargo.toml CLAUDE.md \
+for managed in VERSION package.json mcp-loom/package.json Cargo.toml \
     .loom/install-metadata.json; do
     if grep -qF -- "$managed" <<<"$STAGED_BLOCK"; then
         pass "Case 6: version-bearing file still staged: $managed"
@@ -407,6 +407,20 @@ for managed in VERSION package.json mcp-loom/package.json Cargo.toml CLAUDE.md \
             "scripts/version.sh rewrites it, so an unstaged one desyncs main"
     fi
 done
+
+# The mirror image (#8147): CLAUDE.md must NOT be staged. version.sh stopped
+# rewriting it (it is injected into every agent session's prompt prefix, so a
+# per-bump token in it invalidates every warm prefix in the fleet), and a
+# `git add CLAUDE.md` left behind here would silently sweep an unrelated dirty
+# CLAUDE.md into the automated bump commit.
+if grep -qF -- 'CLAUDE.md' <<<"$STAGED_BLOCK"; then
+    fail "Case 6: CLAUDE.md is NOT staged by the bump commit (#8147)" \
+        "version.sh no longer rewrites CLAUDE.md; staging it can only pick up" \
+        "unrelated working-tree changes:" \
+        "$STAGED_BLOCK"
+else
+    pass "Case 6: CLAUDE.md is NOT staged by the bump commit (#8147)"
+fi
 
 echo ""
 

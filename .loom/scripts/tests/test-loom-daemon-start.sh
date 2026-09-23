@@ -22,6 +22,25 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 START_SCRIPT="$(cd "$SCRIPT_DIR/../cli" && pwd)/loom-daemon-start.sh"
 
+# WHICH BINARY IMPLEMENTS THE STUB (#8134, epic #7810 / #8087)
+#
+# loom-daemon-start.sh is a thin stub over `loom-daemon daemon-start`, so this
+# suite is only testing what it thinks it is if the stub execs the binary built
+# from the working tree. `--self-only` is mandatory here and is exactly the
+# case that flag exists for: this suite pins $LOOM_DAEMON_BIN to FAKE daemon
+# binaries (one that prints the autonomy env it inherited, one that just
+# sleeps) to exercise the LAUNCH path, and $LOOM_DAEMON_BIN means "the daemon
+# this caller manages or probes" — not "the binary that implements me". Without
+# --self-only the harness would export $LOOM_DAEMON_BIN over the top of those
+# per-invocation pins AND hand the stub a fake to exec as itself.
+#
+# This is a HARNESS change, not an assertion change: every expectation below is
+# byte-for-byte what it was against the shell. Editing the oracle to fit the
+# answer is never the cheap option (verification-recipes.md §6).
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" daemon-start
+
 # Background-PID bookkeeping (#4773): the `sleep 30 &` decoys below stand in
 # for a real daemon MainPID and are tracked here so the EXIT/INT/TERM trap can
 # reap them even if this suite is interrupted before its own inline `kill`.
@@ -1792,8 +1811,19 @@ rm -rf "$WORKDIR/ad11"
 # cannot be redirected via an env HOME override the way the stub-based tests
 # above redirect it), uniquely named with $$ so a leftover from an
 # interrupted run cannot collide with a later one.
+#
+# OPT-IN ONLY (LOOM_TEST_ALLOW_SYSTEMD=1, #8077). "Reachable `systemctl --user`"
+# used to be the whole gate, which meant this block ran unconditionally on every
+# FLEET WORKER — where the reachable user manager is the one supervising the
+# PRODUCTION loom-daemon. That is not a hypothetical: a builder sweep on
+# loom-worker-2 (2026-09-17) drove 32 × `systemctl --user daemon-reload` into
+# the live manager from here. Unlike every other resolution tier in this file,
+# this one has no env seam to redirect — the ONLY safe default is not to run it.
+# CI keeps its coverage by setting LOOM_TEST_ALLOW_SYSTEMD=1 explicitly on a
+# runner with no production daemon; a sweep never does (spawn-worker.sh exports
+# `0`), so the two cases stay distinguishable without a host heuristic.
 MX_HAVE_SYSTEMD=false
-if command -v systemctl >/dev/null 2>&1 && [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+if [[ "${LOOM_TEST_ALLOW_SYSTEMD:-0}" =~ ^(1|true|yes|on)$ ]] && command -v systemctl >/dev/null 2>&1 && [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
     mx_state="$(systemctl --user is-system-running 2>/dev/null)"
     [[ "$mx_state" != "offline" && -n "$mx_state" ]] && MX_HAVE_SYSTEMD=true
 fi
@@ -1894,7 +1924,7 @@ MXEOF
     trap 'bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"' EXIT
     trap 'bg_proc_reap; [ -n "$WORKDIR" ] && pkill -f "$WORKDIR" >/dev/null 2>&1; rm -rf "$WORKDIR"; exit 1' INT TERM
 else
-    echo "  (skipping real-systemd #4862 regression: no reachable 'systemctl --user' manager on this host)"
+    echo "  (skipping real-systemd #4862 regression: needs LOOM_TEST_ALLOW_SYSTEMD=1 AND a reachable 'systemctl --user' manager — it writes real unit files into \$HOME/.config/systemd/user and reloads the LIVE user manager, which on a fleet worker supervises the production daemon, #8077)"
 fi
 
 # ===================================================================
@@ -2683,24 +2713,38 @@ EOF
 }
 
 SI_REPO="$(mktemp -d)"; mkdir -p "$SI_REPO/.loom/logs"
+# SI_UNSET_SESSION — `-u KEY` args for every agent-session key THIS shell exports
+# (#8173). The suite itself routinely runs from INSIDE a Loom sweep, which exports
+# LOOM_SWEEP_*/LOOM_TERMINAL_ID/LOOM_ROLE; without stripping them those leak into
+# every case below and fail SI4, whose entire premise is a start with NO session
+# context -- a failure invisible from a clean shell, where the same suite is green.
+# The key pattern is READ OUT of the script under test (its own
+# LOOM_SESSION_CONTEXT_KEY_RE) rather than restated here, so this list cannot drift
+# from the detector it has to mirror. The literal after `:-` is the fallback for
+# when that read comes up empty: an empty pattern would make `grep -E` match every
+# line and unset the entire environment, so it must never be allowed to be empty.
+# SI1-SI3 are unaffected: they pass their own session assignments to the same
+# `env`, and assignments are applied after `-u`, so they still win.
+SI_SESSION_RE="$(sed -n "s/^LOOM_SESSION_CONTEXT_KEY_RE='\(.*\)'\$/\1/p" "$START_SCRIPT" | head -1)"
+SI_UNSET_SESSION="$(env | grep -E "${SI_SESSION_RE:-^(LOOM_SWEEP_[A-Za-z0-9_]*|LOOM_TERMINAL_ID|LOOM_ROLE)=}" | cut -d= -f1 | sed 's/^/-u /' | tr '\n' ' ')"
 si_run() {
     # $1 = scratch HOME; remaining args are extra env assignments consumed by
     # `env` before the script name.
     local home="$1"; shift
+    # SI_UNSET_SESSION is intentionally unquoted: it is a word list of `-u KEY`
+    # pairs, and quoting would pass it as one argument (empty when this shell
+    # carries no session keys, which `env` would then read as the command name).
+    # shellcheck disable=SC2086
     ( cd "$SI_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
-        -u LOOM_MACHINE_CHECKOUT -u LOOM_WORKSPACE \
+        -u LOOM_MACHINE_CHECKOUT -u LOOM_WORKSPACE $SI_UNSET_SESSION \
         PATH="$SI_BIN:$PATH" HOME="$home" \
         LOOM_SYSTEMD_FORCE=1 LOOM_DAEMON_BIN="$FAKE_BIN" \
         LOOM_SOCKET_PATH="$home/.loom/loom-daemon.sock" \
         LOOM_AUTONOMY_MARKER="$home/.loom/autonomy-desired" \
         "$@" bash "$START_SCRIPT" --no-launchd 2>&1 )
 }
-SI_SESSION_ENV=(
-    LOOM_SWEEP_CLAIM_OWNED=6388
-    LOOM_TERMINAL_ID=daemon-sweep-issue-6388-abcdef
-    LOOM_ROLE=sweep-lifecycle
-    LOOM_RUNTIME=claude
-)
+SI_SESSION_ENV=( LOOM_SWEEP_CLAIM_OWNED=6388 LOOM_TERMINAL_ID=daemon-sweep-issue-6388-abcdef
+    LOOM_ROLE=sweep-lifecycle LOOM_RUNTIME=claude )
 
 # SI1. The incident shape: a real start from a session context with NO
 #      identity override is REFUSED (exit 1) before anything is written.

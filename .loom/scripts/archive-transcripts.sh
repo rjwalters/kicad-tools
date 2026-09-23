@@ -272,7 +272,7 @@ write_index() {
       obj="$(jq -n \
         --arg id "$agent_id" --arg role "$role" --arg desc "$desc" \
         --arg issue "$issue" --arg model "$model" \
-        --arg start "$start" --arg end "$end" \
+        --arg start "$start" --arg range_end "$end" \
         --arg arm "$ARM" --arg attempt "$ATTEMPT" \
         --arg tr "subagents/$agent_id.jsonl" --arg meta "subagents/$agent_id.meta.json" \
         '{agent_id:$id,
@@ -283,7 +283,7 @@ write_index() {
           arm:(($arm|select(.!="")) // null),
           attempt:(($attempt|select(.!="")|tonumber?) // null),
           start_ts:(($start|select(.!="")) // null),
-          end_ts:(($end|select(.!="")) // null),
+          end_ts:(($range_end|select(.!="")) // null),
           transcript:$tr, meta:$meta}')"
       acc="$acc$obj"$'\n'
     done < <(find "$subdir" -maxdepth 1 -name '*.meta.json' 2>/dev/null | sort)

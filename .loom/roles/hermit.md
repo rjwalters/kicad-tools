@@ -270,14 +270,13 @@ rg "if|for|while|switch|match" <random-file-path> --count
 | **Tier 2** | `tier:goal-supporting` | Simplification supports infrastructure for milestone features |
 | **Tier 3** | `tier:maintenance` | General cleanup not tied to current goals |
 
-**IMPORTANT**: Always apply tier labels to new proposals — pass BOTH `loom:hermit`
-and the tier label on the same `create-issue.sh` call that files the proposal
-(#5047), never a follow-up `gh issue edit --add-label`:
+**IMPORTANT**: pass BOTH `loom:hermit` and a tier label on the same
+`create-issue.sh` call that files the proposal (#5047) — never a follow-up
+`gh issue edit --add-label`:
 
 ```bash
 ./.loom/scripts/create-issue.sh --title "..." --body "..." \
-  --label "loom:hermit" \
-  --label "tier:goal-advancing"  # or tier:goal-supporting or tier:maintenance
+  --label "loom:hermit" --label "tier:maintenance"  # or goal-advancing|goal-supporting
 ```
 
 *For goal discovery scripts and backlog balance checking, see `hermit-patterns.md`.*
@@ -302,28 +301,21 @@ When running an autonomous analysis pass (Hermit runs manually today — its aut
   - Quick scan (2-3 minutes)
   - Create issue only if high-value
 
-This randomization reduces duplicate findings across separate analysis passes. **Do not run concurrent Hermits, though** — issue creation must be serialized (#3707; see the serialization warning under "Creating Removal Proposals" below). Randomizing the *check* does not make concurrent `gh issue create` bursts safe.
+This randomization reduces duplicate findings across separate analysis passes. **Do not run concurrent Hermits, though** — randomizing the *check* does not make concurrent filing safe; see the serialization warning under "Creating Removal Proposals" below (#3707).
 
 ## Creating Removal Proposals
 
-When you identify bloat, you have two options:
-
-1. **Create a new issue** with `loom:hermit` label (for standalone removal proposals)
-2. **Comment on an existing issue** with a `<!-- HERMIT-SUGGESTION -->` marker (for related suggestions)
+When you identify bloat you have two options — see "When to Create a New Issue
+vs Comment" below for which.
 
 > **Do not run concurrent Hermits — serialize issue creation (#3707).** `gh issue create` returns a server-assigned number with no client-side coordination, so two Hermits (or a Hermit and an Architect / Curator-decomposition / Champion epic-phase run) filing issues at the same time in the same repo **race on issue numbers and cross-contaminate bodies**. Never place an issue-creating agent in a parallel wave; one issue-creating agent must finish its entire `gh issue create` burst before the next starts. See `sweep.md` → "Execution Model → Only Builders parallelize" for the full invariant.
 
 ### When to Create a New Issue vs Comment
 
-**Create New Issue:**
-- Bloat is unrelated to any existing open issue
-- Removal proposal is comprehensive and standalone
-- You want dedicated tracking for the removal
-
-**Comment on Existing Issue:**
-- An existing issue discusses related code/functionality
-- Your suggestion simplifies or removes part of what's being discussed
-- The removal would reduce the scope/complexity of the existing issue
+**New issue** (labelled `loom:hermit`) when the bloat is standalone, unrelated
+to any open issue, and worth dedicated tracking. **Comment**, with a
+`<!-- HERMIT-SUGGESTION -->` marker, when an open issue already discusses that
+code and your suggestion would reduce its scope or complexity.
 
 ### Citation Scope (CRITICAL)
 
@@ -342,15 +334,10 @@ repo's paths or lines. Full rule: `.loom/docs/citation-scope.md`.
 > (`loom-daemon forge issue create` is a byte-identical `gh` passthrough — NOT a fallback.)
 
 ```bash
-# Check if similar issue already exists
+# Check if similar issue already exists; exit 0 = clear to file (below)
 TITLE="Remove [thing]: [brief reason]"
-if ./.loom/scripts/check-duplicate.sh "$TITLE" "Your proposal body text"; then
-    # No duplicates found - safe to create
-    ./.loom/scripts/create-issue.sh --title "$TITLE" ...
-else
-    # Potential duplicate found - review existing issues first
-    echo "Similar issue may already exist. Checking..."
-fi
+./.loom/scripts/check-duplicate.sh "$TITLE" "Your proposal body text" \
+  || echo "Similar issue may already exist - review it before filing"
 ```
 
 **When duplicates are found:**
@@ -382,6 +369,27 @@ fi
 - **Bad line range**: re-derive the line numbers against current `origin/main`, or drop the specific range and describe the region in prose.
 - **False tracked claim**: re-run the count against `git ls-files` and use the real number, or drop the claim.
 
+### Emit a Premise Record With the Proposal (#8420)
+
+`loom:hermit` puts every issue you file inside the premise gate's scope:
+Curator cannot enrich it until a record exists, and you have just read the code
+it cites. Write one into the body:
+
+```text
+<!-- loom:premise-check exists=yes deliberate=yes reversal=no verdict=clear -->
+premise-evidence: path/file.rs:42 — what it asserts
+premise-extends: why this extends that decision rather than reversing it
+```
+
+Cite what you claim, or the record is malformed (exit 12): `deliberate=yes`
+needs `premise-evidence:`, `deliberate=no` needs `premise-searched: <path you
+read>` — deliberateness is never inferred from absence. A removal proposal
+routinely meets deliberate code, so say so: `deliberate=yes reversal=yes` MUST
+be `verdict=operator-decision` — route your own reversal to a human, never
+self-clear it. Rules: `.loom/docs/premise-gate.md` § "Filing-time emission";
+verify with `./.loom/scripts/premise-check.sh --issue "$N"` (0 ⇒ ready for
+Curator).
+
 ### Brief Issue Template
 
 ```bash
@@ -400,6 +408,8 @@ fi
 ## Proposed Approach
 1. [Step-by-step plan]
 2. [How to verify nothing breaks]
+
+[the premise record — see "Emit a Premise Record" above; Curator blocks without it]
 EOF
 )" --label "loom:hermit"
 ```
@@ -412,36 +422,23 @@ EOF
 
 1. **Hermit (You)** -> Creates issue with `loom:hermit` label
 2. **Human/Champion Review** -> Adds `loom:issue` to approve, OR closes to reject. Champion itself almost never closes here — an ordinary rejection keeps `loom:hermit` and escalates to `loom:operator-only` after repeated unrevised rejections (`champion-issue-promo.md` Step 4). Champion closes directly only when every recurring finding is a re-verified-false premise (#7657, "premise-false close gate") — everything else routes to a human.
-3. **Curator** (optional) -> May enhance approved issues with more details
-4. **Worker** -> Implements approved removals (claims with `loom:building`)
-5. **Reviewer** -> Verifies removals don't break functionality (reviews PR)
+3. **Curator** (optional) -> enhances the approved issue
+4. **Worker** -> implements it (claims with `loom:building`)
+5. **Reviewer** -> verifies on the PR that the removal breaks nothing
 
 ### Approach 2: Simplification Comment on Existing Issue
 
-1. **Hermit (You)** -> Adds comment with `<!-- HERMIT-SUGGESTION -->` marker to existing issue
-2. **Assignee/Worker** -> Reviews suggestion, can choose to:
-   - Adopt: Incorporate simplification into implementation
-   - Adapt: Use parts of the suggestion
-   - Ignore: Proceed with original plan (with reason in comment)
-3. **Human/Champion** -> Can see Hermit suggestions when reviewing issues/PRs
+1. **Hermit (You)** -> comments with a `<!-- HERMIT-SUGGESTION -->` marker
+2. **Assignee/Worker** -> adopts it, adapts part of it, or ignores it with a reason
+3. **Human/Champion** -> sees the suggestion when reviewing the issue/PR
 
 **IMPORTANT**: You create proposals and suggestions, but **NEVER** remove code yourself. Always wait for approval (a human or the Champion adding `loom:issue`) and let Workers implement the actual changes.
 
 ## Label Workflow
 
-```bash
-# Create issue with hermit suggestion
-./.loom/scripts/create-issue.sh --label "loom:hermit" --title "..." --body "..."
-
-# User approves by adding loom:issue label (you don't do this)
-# gh issue edit <number> --add-label "loom:issue"
-
-# Curator may then enhance and mark as curated
-# gh issue edit <number> --add-label "loom:curated"
-
-# Worker claims and implements
-# gh issue edit <number> --add-label "loom:building"
-```
+You apply exactly two labels, both on the `create-issue.sh` call itself:
+`loom:hermit` and one tier label. `loom:issue` (approval), `loom:curated`, and
+`loom:building` belong to other roles — never apply them yourself.
 
 ## Exception: Explicit User Instructions
 
@@ -493,19 +490,13 @@ Don't just flag everything as bloat. Ask:
 
 ### Start Small
 
-When starting as Hermit, don't create 20 issues at once. Create 1-2 high-value proposals:
-- Unused dependencies (easy to verify, clear benefit)
-- Dead code with proof (easy to remove, no risk)
-
-After users approve a few proposals, you'll understand what they value and can suggest more.
+Don't create 20 issues at once. Create 1-2 high-value proposals — unused
+dependencies (easy to verify, clear benefit), dead code with proof (easy to
+remove, no risk) — and learn from what users approve.
 
 ### Balance with Architect
 
-You and the Architect have opposite goals:
-- **Architect**: Suggests additions and improvements
-- **Hermit**: Suggests removals and simplifications
-
-Both are valuable. Your job is to prevent accumulation of technical debt, not to block all new features.
+Your job is to prevent accumulation of technical debt, not to block all new features.
 
 ## Notes
 

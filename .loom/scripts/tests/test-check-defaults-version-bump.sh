@@ -28,8 +28,10 @@
 # .github/workflows/version-bump-on-merge.yml):
 #   - defaults/ change, no version-bearing file value changed -> PASS
 #   - a version-bearing file's value hand-edited               -> FAIL
-#   - CLAUDE.md prose edit (not the Loom Version line) + a
+#   - CLAUDE.md edited, INCLUDING a `**Loom Version**:` line, + a
 #     defaults/ change                                         -> PASS
+#     (#8147: CLAUDE.md is no longer version-bearing at all -- it is injected
+#      into every session's prompt prefix, so it carries no version stamp)
 #
 # Usage:
 #   ./.loom/scripts/tests/test-check-defaults-version-bump.sh
@@ -88,6 +90,9 @@ make_fixture() {
     echo '{"version": "1.0.0"}' > "$REPO/package.json"
     echo '{"version": "1.0.0"}' > "$REPO/mcp-loom/package.json"
     printf '[workspace.package]\nversion = "1.0.0"\n' > "$REPO/Cargo.toml"
+    # Deliberately carries a legacy `**Loom Version**:` line even though #8147
+    # removed it from the real CLAUDE.md: a pre-#8147 repo still has one on
+    # disk, and the point of tests 19/22/23 is that the gate now ignores it.
     printf '# Test\n\n**Loom Version**: 1.0.0\n\nSome prose.\n' > "$REPO/CLAUDE.md"
     git -C "$REPO" add -A
     git -C "$REPO" commit -q -m "base"
@@ -383,8 +388,27 @@ else
     fail "--forbid-bump: failure output missing bump-workflow pointer. Got: $err_out"
 fi
 
-# -------- Test 19: --forbid-bump, CLAUDE.md prose edit + defaults/ change -> PASS --------
-echo "Test 19: --forbid-bump, CLAUDE.md prose edit (not the Loom Version line) passes"
+# -------- Test 19: --forbid-bump, CLAUDE.md is not version-bearing (#8147) -> PASS --------
+#
+# CLAUDE.md left FORBID_BUMP_VALUE_FILES in #8147 (it is injected into every
+# agent session's prompt prefix, so it must carry no per-release token). The
+# gate must therefore pass a diff that changes -- or, as here, DELETES -- a
+# `**Loom Version**:` line in it, which before #8147 was a hard FAIL. Without
+# this, the very PR that removed the stamp could not have merged.
+echo "Test 19: --forbid-bump, CLAUDE.md's version line is no longer gated (#8147)"
+make_fixture
+printf '# Test\n\nSome prose.\n' > "$REPO/CLAUDE.md"   # drops **Loom Version**: 1.0.0
+echo "changed" >> "$REPO/defaults/scripts/foo.md"
+git -C "$REPO" commit -q -am "remove CLAUDE.md's version stamp + defaults/ change"
+out="$(cd "$REPO" && "$SCRIPT" --forbid-bump --base base 2>&1)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+    pass "--forbid-bump: removing CLAUDE.md's **Loom Version** line exits 0 (#8147)"
+else
+    fail "--forbid-bump: CLAUDE.md version-line removal expected exit 0, got $rc. Output: $out"
+fi
+
+# Same file, ordinary prose edit: still passes (unchanged pre-#8147 behavior).
 make_fixture
 echo "More prose, not the version line." >> "$REPO/CLAUDE.md"
 echo "changed" >> "$REPO/defaults/scripts/foo.md"
@@ -446,7 +470,8 @@ make_drift_fixture() {
     echo '{"version": "1.0.1"}' > "$REPO/package.json"
     echo '{"version": "1.0.1"}' > "$REPO/mcp-loom/package.json"
     printf '[workspace.package]\nversion = "1.0.1"\n' > "$REPO/Cargo.toml"
-    printf '# Test\n\n**Loom Version**: 1.0.1\n\nSome prose.\n' > "$REPO/CLAUDE.md"
+    # CLAUDE.md is deliberately NOT bumped here: since #8147 the automated
+    # post-merge bump workflow does not touch it.
     git -C "$REPO" commit -q -am "automated post-merge version bump (sibling merge)"
     MAIN_TIP="$(git -C "$REPO" rev-parse HEAD)"
 }

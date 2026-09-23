@@ -49,8 +49,8 @@
 #     --forbid-bump   Inverted mode (#7743): FAIL if this PR's own commits
 #                     change the extracted version VALUE of any version-bearing file
 #                     (package.json, mcp-loom/package.json, Cargo.toml,
-#                     CLAUDE.md, VERSION -- the same set scripts/version.sh
-#                     manages); PASS otherwise, regardless of --paths /
+#                     VERSION -- the same set scripts/version.sh manages);
+#                     PASS otherwise, regardless of --paths /
 #                     VERSION_BUMP_WATCH_PATHS (this mode does not gate on a
 #                     watched path at all -- it gates on the version value
 #                     itself, which is a property of the diff alone). Off by
@@ -79,8 +79,8 @@
 # version value between merge-base(--base, --head) and --head (not "did the
 # raw file change", and NOT against --base directly: see the BASE_REF block
 # in that code path for why base-branch drift would otherwise false-FAIL),
-# so an unrelated CLAUDE.md prose edit that never touches the
-# `**Loom Version**:` line still passes even though CLAUDE.md itself is in
+# so an unrelated Cargo.toml edit (a dependency bump, say) that never touches
+# the `version = "..."` line still passes even though Cargo.toml itself is in
 # the diff. This mirrors scripts/version.sh's own get_version_from_file()
 # extraction rules per file type rather than importing that script, so this
 # file stays a single self-contained script (its own #6480 header contract
@@ -143,11 +143,17 @@ MARKER='<!-- loom:no-surface-change -->'
 # (#7743) -- kept as a literal duplicate here, not sourced from that script,
 # so this file remains a single self-contained script per its own #6480
 # consumer-reuse header contract.
+#
+# CLAUDE.md was dropped from this set in #8147, in lockstep with
+# scripts/version.sh's own VERSION_FILES: it no longer carries a
+# `**Loom Version**:` header at all, because it is injected into every agent
+# session's prompt prefix and a per-bump token there invalidates the whole
+# cached prefix downstream of it. Keep the two lists identical — a file listed
+# here but not stamped by version.sh can only ever produce false FAILs.
 FORBID_BUMP_VALUE_FILES=(
   "package.json"
   "mcp-loom/package.json"
   "Cargo.toml"
-  "CLAUDE.md"
   "VERSION"
 )
 
@@ -255,9 +261,6 @@ if $FORBID_BUMP; then
         ;;
       *.toml)
         grep -m1 '^version' <<<"$content" | sed 's/version = "\(.*\)"/\1/' || true
-        ;;
-      CLAUDE.md)
-        grep -o 'Loom Version\*\*: [0-9]*\.[0-9]*\.[0-9]*' <<<"$content" | grep -o '[0-9]*\.[0-9]*\.[0-9]*' || true
         ;;
       VERSION)
         tr -d '[:space:]' <<<"$content"

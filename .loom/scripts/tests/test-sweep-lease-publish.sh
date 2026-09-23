@@ -486,6 +486,57 @@ FENCE_ERR="$(cat "$STUB_DIR/fence-stderr.log" 2>/dev/null || true)"
 assert_eq "0" "$FENCE_RC" "(l) a lease this script just published passes its own default fence check as 'own, fresh' -- not a self-fencing deadlock"
 assert_contains "$FENCE_ERR" "host matches this sweep" "(l) fence stderr confirms the published lease is recognized as this sweep's own host"
 
+# --- (o) LOOM_REPO unset -> empty `repo_args[@]` must never surface as
+# "unbound variable" and must not prevent publication (#8281). First on the
+# ambient bash -- always runs -- then again under a real 3.x /bin/bash when one
+# is present (macOS system bash), which is the one environment that actually
+# exhibits the pre-fix bash-3.2 empty-array unbound-variable hazard; skipped,
+# not failed, elsewhere. Mirrors the pattern used in test-sweep-lease-fence.sh's
+# (s) case.
+reset_state
+unset LOOM_REPO
+run_script publish 6320 --sweep-id sweep-repo-unset
+assert_eq "0" "$RC" "(o) ambient bash: LOOM_REPO unset -> exit 0 (publish succeeds)"
+assert_eq "1" "$(post_count)" "(o) ambient bash: the publish actually ran and posted a comment"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$ERR" != *"unbound variable"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (o) ambient bash: no 'unbound variable' on stderr"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (o) ambient bash: no 'unbound variable' on stderr"
+    echo "    stderr: $ERR"
+fi
+
+LEGACY_BASH=""
+if [[ -x /bin/bash ]]; then
+    bash_version_output="$(/bin/bash --version 2>/dev/null)"
+    if [[ "$bash_version_output" == *"version 3."* ]]; then
+        LEGACY_BASH=/bin/bash
+    fi
+fi
+if [[ -n "$LEGACY_BASH" ]]; then
+    unset LOOM_REPO
+    # Re-setup for bash 3.2 test run
+    rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail "$STUB_DIR"/post-fail
+    rm -f "$STUB_DIR"/post-*.body "$STUB_DIR"/post-count "$STUB_DIR"/post-calls.log "$STUB_DIR"/post-flags.log
+    OUT="$("$LEGACY_BASH" "$SCRIPT" publish 6320 --sweep-id sweep-repo-unset-3x 2>"$STUB_DIR/stderr-legacy.log")"
+    RC=$?
+    ERR="$(cat "$STUB_DIR/stderr-legacy.log" 2>/dev/null || true)"
+    assert_eq "0" "$RC" "(o) bash 3.2: LOOM_REPO unset -> exit 0 (publish succeeds)"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$ERR" != *"unbound variable"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: (o) bash 3.2: no 'unbound variable' on stderr"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: (o) bash 3.2: no 'unbound variable' on stderr"
+        echo "    stderr: $ERR"
+    fi
+else
+    echo "· skipped: (o) bash 3.2 unbound-variable regression check (no 3.x /bin/bash on this host)"
+fi
+
 # --- Contract checks (mirrors test-sweep-lease-renew.sh) ------------------
 "$SCRIPT" --help > "$STUB_DIR/help.out" 2>&1
 HELP_RC=$?
