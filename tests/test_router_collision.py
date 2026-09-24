@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import numpy as np
+
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.optimizer.collision import (
     GridCollisionChecker,
@@ -99,6 +101,16 @@ def _make_mock_grid(
     # y, x)`` instead of the legacy ``grid.grid[layer][y][x]`` chain -- wire
     # up the same non-blocking cell so this mock satisfies both call styles.
     grid.cell_at = MagicMock(return_value=mock_cell)
+    # Issue #5240: ``VectorCollisionChecker._check_obstacles_clear`` reads
+    # the backing arrays directly rather than going through ``cell_at``/
+    # ``_CellView`` (see that method's docstring) -- an unset MagicMock
+    # attribute is truthy, so without this the "no obstacles" default above
+    # would silently NOT apply to that call path.  Match ``mock_cell``'s
+    # all-clear defaults at the array level too.
+    grid._blocked = np.zeros((1, rows, cols), dtype=bool)
+    grid._is_obstacle = np.zeros((1, rows, cols), dtype=bool)
+    grid._pad_blocked = np.zeros((1, rows, cols), dtype=bool)
+    grid._net = np.zeros((1, rows, cols), dtype=np.int32)
 
     return grid
 
@@ -267,6 +279,16 @@ def _make_mock_grid_with_pad_cell(
     # y, x)`` instead of the legacy ``grid.grid[layer][y][x]`` chain -- wire
     # up the same pad cell so this mock satisfies both call styles.
     grid.cell_at = MagicMock(return_value=pad_cell)
+    # Issue #5240: ``VectorCollisionChecker._check_obstacles_clear`` reads
+    # the backing arrays directly (bypassing ``cell_at``/``_CellView`` for
+    # the hot per-cell obstacle scan -- see that method's docstring), so
+    # this mock must also expose a uniform "every cell is the pad cell"
+    # grid at the array level for that call path to exercise the same
+    # scenario the ``cell_at`` mock above covers for ``GridCollisionChecker``.
+    grid._blocked = np.full((1, grid.rows, grid.cols), blocked, dtype=bool)
+    grid._is_obstacle = np.full((1, grid.rows, grid.cols), is_obstacle, dtype=bool)
+    grid._pad_blocked = np.full((1, grid.rows, grid.cols), pad_blocked, dtype=bool)
+    grid._net = np.full((1, grid.rows, grid.cols), cell_net, dtype=np.int32)
 
     return grid
 

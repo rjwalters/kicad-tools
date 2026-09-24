@@ -581,13 +581,58 @@ class VectorCollisionChecker:
         # here (an early-exit obstacle scan, not a set builder) -- as the
         # prior nested-range loop, just without the O(clearance) *redundant*
         # cells per step that were already covered by the previous step's
-        # window.  ``cell_at`` (also #5240) keeps the per-cell lookup itself
-        # a single ``_CellView`` allocation.
+        # window.
+        #
+        # Issue #5240: read the four backing planes directly instead of
+        # materialising a ``_CellView`` per cell via ``cell_at(...)`` and then
+        # reading four Python ``property`` descriptors off it.
+        #
+        # ``_CellView`` exists so mutating call sites (``cell.blocked = True``
+        # and friends) and one-off single-field reads get a clean object API.
+        # This loop is neither: it reads all four fields for
+        # O(segment_length * clearance_cells) cells on every optimizer
+        # candidate, so the wrapper's per-cell allocation plus four attribute
+        # lookups dominate the actual NumPy indexing.  Reading the same planes
+        # ``_CellView`` itself indexes (``grid._blocked`` etc.) is the idiom
+        # already used for the analogous hot predicates in
+        # ``pathfinder.py::_is_diagonal_blocked`` and
+        # ``cpp_backend.py::from_routing_grid``.  Slicing out the 2D per-layer
+        # views once, rather than 3-tuple-indexing the 3D array per cell, also
+        # drops the leading-axis lookup from every iteration.
+        #
+        # Measured with ``rtree`` installed (``uv sync --extra dev``, matching
+        # every CI job) -- without it ``make_collision_checker`` never selects
+        # this class, so the scan under measurement is never reached:
+        #
+        # * ``scripts/research/profile_route_obstacle_scan.py`` on a real
+        #   board-02 ``kct route``: this method's inclusive cost fell from
+        #   8.655 s to 2.870 s over an identical 6,394 calls (1353.6 -> 448.8
+        #   us/call), i.e. 6.1% -> 2.1% of route wall clock.
+        # * ``scripts/research/bench_collision_obstacle_scan.py`` in isolation
+        #   on a board-06-shaped 0.05 mm grid: 759.1 -> 267.3 us/probe, 2.84x,
+        #   with all 400 probe verdicts identical.
+        #
+        # Exact-output controls: the routed board-02 PCB is byte-identical
+        # across the two arms once random UUIDs are normalised, and
+        # ``tests/router/test_collision_obstacle_scan_parity_5240.py`` pins
+        # this loop against a transcription of the ``cell_at`` version it
+        # replaces (the mock grids in ``tests/test_router_collision.py``
+        # cannot tell the two code paths apart).
+        blocked_layer = self.grid._blocked[layer_idx]
+        is_obstacle_layer = self.grid._is_obstacle[layer_idx]
+        pad_blocked_layer = self.grid._pad_blocked[layer_idx]
+        net_layer = self.grid._net[layer_idx]
+        cols = self.grid.cols
+        rows = self.grid.rows
+
         for check_x, check_y in _iter_dilated_line_cells(gx1, gy1, gx2, gy2, clearance_cells):
-            if not (0 <= check_x < self.grid.cols and 0 <= check_y < self.grid.rows):
+            if not (0 <= check_x < cols and 0 <= check_y < rows):
                 continue
-            cell = self.grid.cell_at(layer_idx, check_y, check_x)
-            if cell.blocked and (cell.is_obstacle or cell.pad_blocked):
+            if not blocked_layer[check_y, check_x]:
+                continue
+            is_obstacle = bool(is_obstacle_layer[check_y, check_x])
+            pad_blocked = bool(pad_blocked_layer[check_y, check_x])
+            if is_obstacle or pad_blocked:
                 # Hard obstacle (cross-net pad) OR pad-copper cell
                 # (Issue #2757: pads on skipped pour nets have
                 # pad_blocked=True but is_obstacle=False because
@@ -595,9 +640,10 @@ class VectorCollisionChecker:
                 # load_pcb_for_routing; treat them as obstacles
                 # too so the optimizer doesn't chamfer through
                 # BGA GND / power pads).
-                if cell.net != 0 and cell.net == exclude_net:
+                cell_net = int(net_layer[check_y, check_x])
+                if cell_net != 0 and cell_net == exclude_net:
                     continue  # Own-net pad is OK
-                if cell.pad_blocked and cell.net == exclude_net:
+                if pad_blocked and cell_net == exclude_net:
                     continue  # Own-net pad-metal cell (net match)
                 return False
 
