@@ -12,6 +12,7 @@ from kicad_tools.manufacturers import get_profile, write_drc_constraints
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.clearance import ClearanceRule
 from kicad_tools.validate.rules.factory_clearance import check_silk_pad_clearance
+from tests._native_drc_findings import findings_for_rules
 
 
 def board_fixture(path, kind, gap, *, layer="F.Cu", same_net=False, pad_type="smd", masked=True):
@@ -148,7 +149,7 @@ def test_native_object_specific_clearance(tmp_path, kind, gap, options, expected
         # exempt.  ``expected`` describes the ``kct check`` verdict; the
         # native rule agrees on every case in this matrix because the
         # fixture gives its two footprints distinct references.
-        relevant = [v for v in violations if "rule 'SMD Pad Clearance" in v["description"]]
+        relevant = findings_for_rules(violations, "SMD Pad Clearance")
         assert bool(relevant) == expected, violations
         if expected:
             assert relevant[0]["severity"] == "error"
@@ -158,7 +159,7 @@ def test_native_object_specific_clearance(tmp_path, kind, gap, options, expected
         "pth": ("PTH Hole to Track", "Inner PTH Hole to Copper"),
         "via": ("PTH Hole to Track", "Inner PTH Hole to Copper"),
     }[kind]
-    relevant = [v for v in violations if any(f"rule '{name}" in v["description"] for name in names)]
+    relevant = findings_for_rules(violations, *names)
     assert bool(relevant) == expected, violations
     if expected:
         # ``Silk to Pad`` deliberately carries NO ``(severity error)``
@@ -315,7 +316,7 @@ def test_native_smd_floor_is_scoped_to_different_footprints(tmp_path, same_footp
     """
     path = _two_pad_board(tmp_path / "probe.kicad_pcb", 0.12, same_footprint=same_footprint)
     violations = _run_native_drc(path)
-    relevant = [v for v in violations if "rule 'SMD Pad Clearance" in v["description"]]
+    relevant = findings_for_rules(violations, "SMD Pad Clearance")
     assert bool(relevant) == expected, violations
     if expected:
         assert relevant[0]["severity"] == "error"
@@ -343,9 +344,7 @@ def test_native_smd_floor_omits_pairs_sharing_a_reference_designator(tmp_path):
     python_violations = ClearanceRule().check(PCB.load(path), rules).violations
     assert python_violations, "Python identity-scoped floor must still catch the pair"
     native_violations = _run_native_drc(path)
-    assert not [v for v in native_violations if "rule 'SMD Pad Clearance" in v["description"]], (
-        native_violations
-    )
+    assert not findings_for_rules(native_violations, "SMD Pad Clearance"), native_violations
 
 
 @pytest.mark.parametrize("kind,gap", [("silk", 0.085), ("smd", 0.12), ("pth", 0.27)])
@@ -473,14 +472,7 @@ def _assert_native_pth_scope(path, rules, expected):
         timeout=30,
     )
     violations = json.loads(report.read_text())["violations"]
-    relevant = [
-        v
-        for v in violations
-        if any(
-            f"rule '{name}" in v["description"]
-            for name in ("PTH Hole to Track", "Inner PTH Hole to Copper")
-        )
-    ]
+    relevant = findings_for_rules(violations, "PTH Hole to Track", "Inner PTH Hole to Copper")
     assert bool(relevant) == expected, violations
 
 
