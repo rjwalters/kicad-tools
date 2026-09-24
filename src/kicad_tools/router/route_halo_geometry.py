@@ -368,6 +368,13 @@ class RouteHaloRefiner:
         self._net_name_to_id: dict[str, int] = {}
         self._route_halo_names: dict[int, str] = {}
         self._attach_zones: tuple = ()
+        #: Issue #5696: ``(gx, gy, net) -> bool`` memo for the geometric half of
+        #: :meth:`via_clear`, dropped wholesale whenever :meth:`_memo_token`
+        #: changes.  Unlike ``Router._via_halo_cache`` this adapter has no
+        #: per-route reset hook, so its token carries the rule configuration
+        #: itself rather than relying on a caller to drop the memo.
+        self._via_memo: dict[tuple[int, int, int], bool] = {}
+        self._via_memo_token: tuple | None = None
 
     # -- duck-typed ``router`` surface consumed by ``RouteHaloGeometry`` ----
 
@@ -452,15 +459,132 @@ class RouteHaloRefiner:
         gap = nc.effective_intra_pair_clearance() if nc and partner is not None else None
         return bool(halo.clear(segment, self, partner_net=partner, partner_clearance=gap))
 
+    #: Entry cap for :attr:`_via_memo` (issue #5696).  Purely a memory
+    #: backstop: dropping memo entries can only cost work, never change a
+    #: verdict, because every miss recomputes the same pure function.
+    _VIA_MEMO_MAX = 500_000
+
+    def _memo_token(self, halo) -> tuple:
+        """Everything :meth:`_via_geometry_clear` reads that is not in its key.
+
+        Issue #5696.  ``Router._via_halo_clear_cached`` (``pathfinder.py``)
+        keys an identical memo on ``(gx, gy, net)`` and tokens it on
+        ``halo.state_version`` alone.  That is sound **there** only because
+        ``Router.clear_via_cache()`` drops the memo at the start of every route
+        / A* search, pinning the rule configuration for the memo's lifetime.
+        This adapter has no such per-route reset hook -- its ``rules`` object
+        is mutated in place between probes of the same cell by callers and by
+        ``tests/test_coupled_route_halo_clearance.py`` -- so copying that token
+        as-is would serve a *stale clearance verdict*, which in the
+        "was blocked, now cached clear" direction is a silent DRC violation.
+
+        The token therefore carries the rule configuration too.  Its members
+        are exactly the inputs of ``RouteHaloGeometry.clear(via, self)`` that
+        the key does not already pin, read off that method's source for the
+        via branch (``is_trace`` false, ``partner_net``/``partner_clearance``
+        ``None``, ``require_geometry`` true):
+
+        * ``halo`` itself and :attr:`RouteHaloGeometry.state_version` -- the
+          rebuilt snapshot (``_objects`` / ``_bounds`` / ``_bins`` / ``_cells``
+          / ``marks``) every verdict is measured against.
+        * ``rules.via_clearance`` -- the via branch's ``scalar``, and a term of
+          ``margin``.
+        * ``rules.via_drill`` / ``rules.via_diameter`` -- the candidate ``Via``
+          :meth:`via_clear` builds (``via_diameter`` only when the net has no
+          class; the class itself is covered by ``net_class_map`` below).
+        * ``rules.min_hole_to_hole`` / ``rules.min_drill_clearance`` -- the
+          drill-to-drill ``floor`` and two more ``margin`` terms.
+        * ``rules.pairwise_clearance`` -- ``widen`` and the per-pair
+          ``required_clearance`` lookup.
+        * ``_route_halo_names`` (the candidate's and every neighbour's net
+          name), ``net_class_map`` (``nc.via_size``) and ``_attach_zones``
+          (the HV widening's exemption test).
+        * ``rules.trace_clearance`` is not read on the via branch; it is
+          included so the token stays correct if the memo is ever extended to
+          :meth:`trace_clear`.  An over-wide token can only cost recomputation.
+
+        Container members are compared by value, but Python's tuple comparison
+        short-circuits on identity, so the common case (nothing replaced) costs
+        a pointer compare per member rather than a dict walk.  The token also
+        holds a strong reference to each member, which is what makes the
+        comparison meaningful -- no member can be freed and its address reused
+        by a different object while the token is live.
+
+        Residual assumption, stated rather than hidden: a mutation that neither
+        changes one of the scalars above nor replaces a container object -- for
+        example mutating a ``NetClassRouting`` *in place* inside the same
+        ``net_class_map`` dict -- is not observed.  That is the same assumption
+        the un-memoised code already makes everywhere else the net-class
+        dimensions are cached (``_install_cpp_halo_net_dimensions``), and
+        neither production wiring nor the test-suite does it: classes are built
+        once and the map is replaced wholesale.
+        """
+        rules = self.rules
+        return (
+            halo,
+            halo.state_version,
+            rules.via_clearance,
+            rules.via_drill,
+            rules.via_diameter,
+            rules.trace_clearance,
+            rules.min_hole_to_hole,
+            rules.min_drill_clearance,
+            rules.pairwise_clearance,
+            self._route_halo_names,
+            self.net_class_map,
+            self._attach_zones,
+        )
+
+    def _via_geometry_clear(self, halo, gx: int, gy: int, net: int) -> bool:
+        """Memoised geometric half of :meth:`via_clear` (issue #5696).
+
+        The split is what makes the memo sound.  :meth:`via_clear`'s
+        ``cells_known`` guard reads the grid's occupancy planes *directly*
+        (``_blocked`` / ``_net`` / ``_is_obstacle`` / ``_pad_blocked`` /
+        ``_static_blocked`` / ``_reserved_for_nets``), several of which can be
+        written without bumping ``grid.occupancy_generation`` -- exactly what
+        ``test_refinement_preserves_hard_or_unverifiable_blockage`` does.  That
+        guard stays **outside** the memo and is re-evaluated on every call; it
+        is also the cheap half (direct array reads), while the expensive half
+        is the shapely distance sweep inside ``RouteHaloGeometry.clear``.
+
+        What is left once the guard has passed depends only on ``(gx, gy,
+        net)`` -- the key -- plus :meth:`_memo_token`.  Note in particular that
+        it does **not** depend on ``cells`` or ``layer``: the candidate ``Via``
+        always spans layer 0 to layer ``num_layers - 1`` and is centred on
+        ``grid_to_world(gx, gy)``, which is why ``_is_via_blocked`` already
+        hoists one verdict across its per-layer loop.
+        """
+        token = self._memo_token(halo)
+        if self._via_memo_token != token:
+            self._via_memo.clear()
+            self._via_memo_token = token
+        key = (gx, gy, net)
+        hit = self._via_memo.get(key)
+        if hit is None:
+            hit = self._via_geometry_clear_uncached(halo, gx, gy, net)
+            if len(self._via_memo) >= self._VIA_MEMO_MAX:
+                self._via_memo.clear()
+            self._via_memo[key] = hit
+        return hit
+
     def via_clear(self, cells, layer: int, gx: int, gy: int, net: int) -> bool:
         """Physical clearance of a through via centred on ``(gx, gy)``."""
         halo = self._halo
         if halo is None or not self.armed:
             return False
-        from .primitives import Via
-
         if not self.cells_known(cells, layer):
             return False
+        return self._via_geometry_clear(halo, gx, gy, net)
+
+    def _via_geometry_clear_uncached(self, halo, gx: int, gy: int, net: int) -> bool:
+        """``via_clear``'s post-``cells_known`` body, with no memo (issue #5696).
+
+        Kept as a separate entry point so the equivalence tests can pin the
+        memoised path against the computation it replaces.
+        """
+        from .primitives import Via
+
         first_layer = self._layer_object(0)
         last_layer = self._layer_object(self.grid.num_layers - 1)
         if first_layer is None or last_layer is None:
