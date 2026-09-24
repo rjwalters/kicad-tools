@@ -8,6 +8,7 @@ import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.manufacturers import get_profile, write_drc_constraints
+from tests._native_drc_findings import findings_for_rules
 
 
 @pytest.mark.parametrize("layers,expected_rings,x", [(2, 2, 10), (4, 0, 10), (2, 2, 0.65)])
@@ -46,7 +47,7 @@ def test_native_full_rules_enforce_pth_floor_without_hole_edge_false_positives(
     assert all("PTH Annular Ring" in v["description"] for v in rings)
     # The .35mm copper-to-adjacent-hole gap must not inherit a .4/.5mm
     # board-edge floor. Both pads are ten millimeters from the board edge.
-    edge = [v for v in violations if "rule 'Hole to Edge" in v["description"]]
+    edge = findings_for_rules(violations, "Hole to Edge")
     assert bool(edge) == (x < 1), violations
     if x == 10:
         assert not [v for v in violations if v["type"] == "hole_clearance"], violations
