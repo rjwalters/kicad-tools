@@ -255,6 +255,94 @@ def test_unsupported_native_stream_invalidates_complete_layer(tmp_path, monkeypa
     assert "B.Mask" in result.layers  # Partial evidence is explicit; never called complete.
 
 
+# The wxWidgets single-instance warning KiCad prints when two kicad-cli
+# processes share /tmp/org.kicad.kicad/instances/, or when a killed process
+# left the lock behind (#5707). Exact text observed in CI.
+INSTANCE_LOCK_WARNING = (
+    "16:01:17: Warning: Invalid lock file '/tmp/org.kicad.kicad/instances/kicad-cli-10.0'."
+)
+
+
+def _export_with_native_stderr(tmp_path, monkeypatch, *, stderr, returncode=0):
+    """Run a full export against a synthetic kicad-cli with a chosen stderr."""
+    import subprocess
+
+    import kicad_tools.validate.mask_export_geometry as module
+
+    path = _board(tmp_path / "input.kicad_pcb", NATIVE_CASES["merged"])
+
+    def run(command, **kwargs):
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, "10.0.5\n", "")
+        destination = Path(command[command.index("-o") + 1])
+        destination.mkdir()
+        for layer in module.LAYERS:
+            (destination / f"input-{layer.replace('.', '_')}.gbr").write_text(
+                HEADER + "%ADD10C,1*%D10*X0Y0D03*M02*"
+            )
+        return subprocess.CompletedProcess(command, returncode, "", stderr)
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    return module.inspect_exported_mask_geometry(path, native_command=["fake-kicad-cli"])
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        INSTANCE_LOCK_WARNING + "\n",
+        # No wx log timestamp.
+        "Warning: Invalid lock file '/tmp/org.kicad.kicad/instances/kicad-cli-10.0'.\n",
+        # Version-agnostic: a future KiCad must not reintroduce the flake.
+        "Warning: Invalid lock file '/tmp/org.kicad.kicad/instances/kicad-cli-11.2'.\n",
+        # A relocated instance directory is still the same bookkeeping warning.
+        "09:00:01: Warning: Invalid lock file '/run/user/1000/org.kicad.kicad/instances/kicad-cli-10.0'.\n",
+        # Surrounding blank lines must not defeat the allowlist.
+        "\n" + INSTANCE_LOCK_WARNING + "\n\n",
+    ],
+)
+def test_instance_lock_warning_alone_does_not_invalidate_export(tmp_path, monkeypatch, stderr):
+    result = _export_with_native_stderr(tmp_path, monkeypatch, stderr=stderr)
+    assert result.unsupported == []
+    assert result.complete
+    # Nothing is hidden: the verbatim stderr and what was suppressed both stay.
+    assert result.export_identity["stderr"] == stderr
+    assert [e["pattern"] for e in result.export_identity["suppressed_stderr"]] == [
+        "wx-instance-lock"
+    ]
+    assert result.export_identity["suppressed_stderr"][0]["line"] in stderr
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        # Plain unrelated warning: the anti-over-broadening guard.
+        "Warning: something else entirely\n",
+        "Error: mask plot failed\n",
+        # Allowlisted line plus an unrelated one: the unrelated line still fails.
+        INSTANCE_LOCK_WARNING + "\nWarning: something else entirely\n",
+        # Near misses on the allowlisted pattern must not be swallowed.
+        "Warning: Invalid lock file '/tmp/org.kicad.kicad/instances/kicad-cli-10.0' and F.Mask plot failed.\n",
+        "Warning: Invalid lock file '/tmp/board.kicad_pcb'.\n",
+        "Warning: Invalid lock file '/tmp/org.kicad.kicad/instances/pcbnew-10.0'.\n",
+    ],
+)
+def test_non_allowlisted_native_warning_still_invalidates_export(tmp_path, monkeypatch, stderr):
+    result = _export_with_native_stderr(tmp_path, monkeypatch, stderr=stderr)
+    assert not result.complete
+    assert any(d["feature"] == "native-export" for d in result.unsupported)
+    assert stderr.strip() in result.unsupported[0]["reason"]
+
+
+def test_failed_export_is_unsupported_despite_allowlisted_warning(tmp_path, monkeypatch):
+    # The allowlist is unreachable when the process failed, whatever it printed.
+    result = _export_with_native_stderr(
+        tmp_path, monkeypatch, stderr=INSTANCE_LOCK_WARNING + "\n", returncode=2
+    )
+    assert not result.complete
+    assert any(d["feature"] == "native-export" for d in result.unsupported)
+    assert "suppressed_stderr" not in result.export_identity
+
+
 def test_stored_plot_options_preserved_with_hashed_macro_free_representation(tmp_path):
     import subprocess
 

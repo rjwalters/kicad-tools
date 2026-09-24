@@ -113,6 +113,12 @@ def inspect_attributed_mask_geometry(
             scratch_dir=scratch_dir,
         )
         result = AttributedMaskGeometry(exported)
+        # Native export stderr is classified once, inside
+        # inspect_exported_mask_geometry, so this caller inherits its
+        # geometry-neutral stderr allowlist (#5707) rather than repeating it.
+        # The separate worker launch below judges returncode and output
+        # presence only -- it never word-matches stderr -- so it has no
+        # equivalent misclassification to fix.
         result.errors.extend(f"{e['feature']}: {e['reason']}" for e in exported.unsupported)
         # Native pcbnew LoadBoard has no exposed general DRC-expression loader.
         # These rule constraints do not change plotted shape. Anything else is
