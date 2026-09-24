@@ -2,12 +2,12 @@
 
 import json
 import math
-import shutil
 import subprocess
 
 import pytest
 from shapely.geometry import Point
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.schema.pcb import Footprint, Pad, Via
 from kicad_tools.sexp import parse_string
 from kicad_tools.validate.rules.clearance import (
@@ -114,9 +114,11 @@ def _parsed_circle():
 @pytest.mark.parametrize("shape", ["rect", "roundrect", "oval"])
 @pytest.mark.parametrize("angle", [-30, 30])
 def test_native_kicad_confirms_physical_overlap_and_mirrored_gap(tmp_path, shape, angle):
-    cli = shutil.which("kicad-cli")
+    cli = find_kicad_cli()
     if cli is None:
-        pytest.skip("native kicad-cli unavailable")
+        pytest.skip(
+            "find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)"
+        )
     inside = _point((10, 20), (1.5, 0), angle)
     outside = _point((30, 20), (1.5, 0), -angle)
     inside_id = "00000000-0000-4000-8000-000000005227"

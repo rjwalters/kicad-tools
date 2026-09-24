@@ -31,12 +31,12 @@ from __future__ import annotations
 
 import json
 import math
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.recovery import (
     Action,
     Difficulty,
@@ -192,7 +192,10 @@ class TestMirrorSerializes:
             (front_silk.start[0], -front_silk.start[1]), abs=_TOL
         )
 
-    @pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="kicad-cli not installed")
+    @pytest.mark.skipif(
+        find_kicad_cli() is None,
+        reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+    )
     def test_kicad_cli_drc_cross_gate(self, tmp_path: Path):
         """Repo process rule: ``kct check`` alone is insufficient -- the saved
         flipped board must load and DRC clean in KiCad's own tooling."""
@@ -202,7 +205,7 @@ class TestMirrorSerializes:
         report = tmp_path / "drc.json"
         proc = subprocess.run(
             [
-                "kicad-cli",
+                str(find_kicad_cli()),
                 "pcb",
                 "drc",
                 "--severity-error",

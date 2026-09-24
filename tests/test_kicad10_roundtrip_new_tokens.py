@@ -44,18 +44,20 @@ tokens survive re-emission.
 """
 
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.sexp import parse_file
 from kicad_tools.sexp.parser import parse_string
 
 # CI runners may lack KiCad; skip-guard the load assertion exactly like the
-# existing round-trip tests do.
-KICAD_CLI = shutil.which("kicad-cli")
+# existing round-trip tests do. find_kicad_cli() checks PATH plus common
+# non-PATH install locations, so this can't silently disagree with the
+# rest of the suite about which kicad-cli (if any) is available (#5714).
+KICAD_CLI = find_kicad_cli()
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "test_kicad10_save_board_new_tokens.kicad_pcb"
 
@@ -171,7 +173,10 @@ class TestKiCad10NewTokenFidelity:
         out = parse_file(fixture_path).to_string()
         assert "(mode hatch)" in out, "fixture must carry the hatched fill mode"
 
-    @pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+    @pytest.mark.skipif(
+        KICAD_CLI is None,
+        reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+    )
     def test_reemitted_file_loads_in_kicad(self, fixture_path: Path, tmp_path: Path) -> None:
         """The re-emitted fixture loads in KiCad without a parse failure."""
         assert KICAD_CLI is not None  # narrowed by the skipif guard

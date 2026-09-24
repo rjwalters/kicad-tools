@@ -4,17 +4,19 @@ Integration tests for S-expression round-trip with KiCad.
 These tests verify that files saved by the SExp serializer can be loaded by KiCad CLI.
 """
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.sexp import parse_file
 from kicad_tools.sexp.parser import parse_string
 
-# Check if kicad-cli is available
-KICAD_CLI = shutil.which("kicad-cli")
+# Check if kicad-cli is available. find_kicad_cli() checks PATH plus common
+# non-PATH install locations, so this can't silently disagree with the rest
+# of the suite about which kicad-cli (if any) is available (#5714).
+KICAD_CLI = find_kicad_cli()
 
 
 # Synthetic minimal footprint carrying an embedded keepout rule area, matching
@@ -75,7 +77,10 @@ def demo_routed_pcb_path():
 class TestSExpRoundTripWithKiCad:
     """Tests that verify round-trip compatibility with KiCad CLI."""
 
-    @pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+    @pytest.mark.skipif(
+        KICAD_CLI is None,
+        reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+    )
     def test_roundtrip_demo_pcb_loads_in_kicad(self, demo_pcb_path, tmp_path):
         """Verify that serialized PCB can be loaded by kicad-cli."""
         # Parse the original file
@@ -99,7 +104,10 @@ class TestSExpRoundTripWithKiCad:
             f"stderr: {result.stderr}"
         )
 
-    @pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+    @pytest.mark.skipif(
+        KICAD_CLI is None,
+        reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+    )
     def test_roundtrip_routed_pcb_loads_in_kicad(self, demo_routed_pcb_path, tmp_path):
         """Verify that serialized routed PCB can be loaded by kicad-cli."""
         # Parse the original file
@@ -168,7 +176,10 @@ class TestSExpRoundTripWithKiCad:
         # A second serialize cycle is a fixed point (stable byte-exact).
         assert reparsed.to_string() == output
 
-    @pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+    @pytest.mark.skipif(
+        KICAD_CLI is None,
+        reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+    )
     def test_keepout_board_loads_in_kicad(self, tmp_path):
         """A board carrying a keepout footprint must load after round-trip.
 
