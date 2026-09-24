@@ -671,10 +671,16 @@ NB_MODULE(router_cpp, m) {
         // refinement re-measures with.  Without these the C++ arm waives
         // clearance the raster enforced whenever a net class is wider than
         // the global rule.
+        // Issue #5711: ``partner_net`` / ``partner_clearance`` carry the
+        // diff-pair intra-pair waiver the Python ``RouteHaloRefiner`` applies;
+        // they default to "no waiver" so a caller that installs only the three
+        // dimensions keeps the v44 behaviour.
         .def("set_halo_net_dimensions", &CoupledPathfinder::set_halo_net_dimensions,
              "net"_a, "trace_width"_a, "trace_clearance"_a, "via_diameter"_a,
+             "partner_net"_a = -1, "partner_clearance"_a = -1.0,
              "Install the effective net-class trace width / clearance / via "
-             "diameter used by the dynamic route-halo refinement for one net.")
+             "diameter used by the dynamic route-halo refinement for one net, "
+             "plus the optional diff-pair intra-pair clearance waiver.")
         .def("clear_halo_net_dimensions", &CoupledPathfinder::clear_halo_net_dimensions)
         // Issue #4485: like ``Pathfinder``, ``CoupledPathfinder`` holds a bare
         // ``Grid3D& grid_`` reference, so the grid argument must outlive the

@@ -339,6 +339,162 @@ def test_a_wider_net_class_keeps_cells_the_global_rule_would_admit():
     assert cpp.trace_blocked(*LEGAL, LAYER, 1)
 
 
+# ---------------------------------------------------------------------------
+# Issue #5711: the diff-pair intra-pair waiver
+# ---------------------------------------------------------------------------
+
+
+def _partnered_net_class_map(
+    intra_pair_clearance: float | None = 0.05, partner: str = "N2"
+) -> dict[str, NetClassRouting]:
+    """``N1``/``N2`` declared as each other's diff-pair rails.
+
+    ``clearance`` (0.30 mm) is what every *foreign* net must respect; a
+    ``intra_pair_clearance`` narrower than it is the normal reason to author
+    the field at all, and is exactly the configuration in which the C++ arm's
+    missing waiver was visible.  ``partner`` is overridable so a test can name
+    a net that is absent from the net-name map.
+    """
+    return {
+        "N1": NetClassRouting(
+            name="P1",
+            trace_width=0.2,
+            clearance=0.30,
+            via_size=0.6,
+            diffpair_partner=partner,
+            intra_pair_clearance=intra_pair_clearance,
+        ),
+        "N2": NetClassRouting(
+            name="P2",
+            trace_width=0.2,
+            clearance=0.30,
+            via_size=0.6,
+            diffpair_partner="N1",
+            intra_pair_clearance=intra_pair_clearance,
+        ),
+    }
+
+
+#: A halo cell whose verdict the intra-pair waiver actually flips: net 2's
+#: committed via is close enough to forbid a net-1 centreline at the ordinary
+#: 0.30 mm class clearance, and far enough to permit it at the 0.05 mm
+#: intra-pair gap.  Naming it keeps the sweep below from passing vacuously.
+PARTNER_WAIVED = (57, 56)
+
+
+def _partner_sweep(pathfinder, cpp) -> tuple[int, int, int]:
+    """Compare both arms' trace verdicts over the halo around net 2's via.
+
+    Returns ``(sampled, under_blocks, over_blocks)`` where an *under*-block is
+    a cell the C++ arm admits and the Python arm rejects -- the direction that
+    could produce a DRC violation -- and an *over*-block is the reverse.
+    Both step origins are exercised so the swept-segment branch is covered,
+    not only the degenerate point candidate.
+    """
+    sampled = under = over = 0
+    for gy in range(45, 76):
+        for gx in range(45, 76):
+            if not pathfinder._is_cell_blocked(gx, gy, LAYER, 1):
+                continue
+            for origin in ((gx, gy), (gx - 1, gy)):
+                sampled += 1
+                py = pathfinder._is_trace_blocked(gx, gy, LAYER, 1, origin)
+                native = cpp.trace_blocked(gx, gy, LAYER, 1, origin)
+                if py and not native:
+                    under += 1
+                elif native and not py:
+                    over += 1
+    return sampled, under, over
+
+
+def test_partner_waiver_is_load_bearing_on_the_python_arm():
+    """Without the waiver the same cell is rejected; with it, admitted.
+
+    This is the precondition for the parity tests below: if the waiver never
+    changed a verdict, a C++ arm that ignored it would agree by accident.
+    """
+    _, no_waiver = _context(net_class_map=_partnered_net_class_map(None))
+    assert no_waiver._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+
+    _, waived = _context(net_class_map=_partnered_net_class_map(0.05))
+    assert not waived._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+
+
+@requires_cpp
+def test_cpp_applies_the_partner_waiver_the_python_arm_applies():
+    """Issue #5711: the C++ arm passed ``partner_net = -1`` and lost reach.
+
+    The divergence was 212 cells over a four-layer sweep, every one in the
+    *over*-blocking (safe) direction -- so it could not cause a DRC violation,
+    only cost the production-default backend reach beside a partner rail's
+    committed copper that the Python fallback had.
+    """
+    _, no_waiver = _context(net_class_map=_partnered_net_class_map(None))
+    cpp_no_waiver = no_waiver._get_cpp_coupled_impl()
+    assert cpp_no_waiver is not None
+    assert cpp_no_waiver.trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+
+    _, waived = _context(net_class_map=_partnered_net_class_map(0.05))
+    cpp_waived = waived._get_cpp_coupled_impl()
+    assert cpp_waived is not None
+    assert not cpp_waived.trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+
+
+@requires_cpp
+@pytest.mark.parametrize("intra_pair_clearance", [None, 0.05])
+def test_backend_parity_under_a_partnered_net_class(intra_pair_clearance):
+    """Zero divergence in BOTH directions, waiver on and waiver off.
+
+    The over-blocking direction is what #5711 measured; the under-blocking
+    direction is the invariant PR #5695's review established and the one a
+    careless "parity" fix would break -- so both are asserted, not just the
+    one that was failing.
+    """
+    _, pathfinder = _context(net_class_map=_partnered_net_class_map(intra_pair_clearance))
+    cpp = pathfinder._get_cpp_coupled_impl()
+    assert cpp is not None
+    sampled, under, over = _partner_sweep(pathfinder, cpp)
+    assert sampled > 0
+    assert (under, over) == (0, 0)
+
+
+@requires_cpp
+def test_partner_waiver_absent_when_the_partner_is_not_in_the_net_name_map():
+    """No resolvable partner id => no waiver, on both arms.
+
+    ``RouteHaloRefiner._resolve_partner_net_id`` returns ``None`` when the
+    declared ``diffpair_partner`` has no net id, and ``trace_clear`` then
+    passes ``partner_clearance=None``.  The C++ install site must reach the
+    same verdict rather than waiving against a net id it guessed.
+    """
+    _, unresolvable = _context(net_class_map=_partnered_net_class_map(0.05, partner="ABSENT"))
+    assert unresolvable._halo_refiner._resolve_partner_net_id("N1") is None
+    cpp = unresolvable._get_cpp_coupled_impl()
+    assert cpp is not None
+    # Identical to the no-waiver configuration, not to the waived one.
+    assert unresolvable._is_trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+    assert cpp.trace_blocked(*PARTNER_WAIVED, LAYER, 1)
+    sampled, under, over = _partner_sweep(unresolvable, cpp)
+    assert sampled > 0
+    assert (under, over) == (0, 0)
+
+
+@requires_cpp
+def test_partner_waiver_does_not_reach_the_via_predicate():
+    """``RouteHaloRefiner.via_clear`` passes no partner, so neither may C++.
+
+    A via's barrel is measured against the ordinary clearance even beside its
+    own pair's rail; waiving there would be an under-block the Python arm
+    never performs.
+    """
+    _, waived = _context(net_class_map=_partnered_net_class_map(0.05))
+    cpp = waived._get_cpp_coupled_impl()
+    assert cpp is not None
+    for gx in range(45, 76):
+        for gy in range(45, 76):
+            assert cpp.via_blocked(gx, gy, 1) == waived._is_via_blocked(gx, gy, 1)
+
+
 @requires_cpp
 def test_unarmed_coupled_search_is_dormant_on_both_backends():
     """Issue #5410 B2: ``armed`` gates the C++ replay, as the docstrings say.

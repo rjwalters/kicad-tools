@@ -56,7 +56,11 @@ logger = logging.getLogger(__name__)
 # node the A* actually accepted, consumed by the resume loop to reject the
 # correct goal cell (the last-segment endpoint derivation always produced the
 # end-pad center, a no-op rejection after the first attempt).
-_REQUIRED_CPP_BUILD_VERSION = 44
+# v45 (Issue #5711, part of #5410): ``CoupledPathfinder::set_halo_net_dimensions``
+# gained ``partner_net`` / ``partner_clearance`` so the coupled halo refinement
+# applies the same diff-pair intra-pair waiver ``RouteHaloRefiner.trace_clear``
+# applies.  A v44 .so silently drops the waiver, so it must be rejected.
+_REQUIRED_CPP_BUILD_VERSION = 45
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -4788,7 +4792,13 @@ class CppCoupledPathfinder:
         return bool(self._impl.via_blocked(gx, gy, net))
 
     def set_halo_net_dimensions(
-        self, net: int, trace_width: float, trace_clearance: float, via_diameter: float
+        self,
+        net: int,
+        trace_width: float,
+        trace_clearance: float,
+        via_diameter: float,
+        partner_net: int | None = None,
+        partner_clearance: float | None = None,
     ) -> None:
         """Install one net's effective net-class dimensions (Issue #5410).
 
@@ -4804,9 +4814,24 @@ class CppCoupledPathfinder:
         divergence from the Python arm, not merely a parity nit: a class whose
         ``clearance`` exceeds ``rules.trace_clearance`` would have its halo
         waived against the narrower global value.
+
+        Issue #5711: ``partner_net`` / ``partner_clearance`` carry the
+        diff-pair intra-pair waiver :meth:`RouteHaloRefiner.trace_clear` passes
+        to :meth:`RouteHaloGeometry.clear` -- the resolved
+        ``nc.diffpair_partner`` net id and ``nc.effective_intra_pair_clearance()``.
+        Omitting them is an **over-blocking** divergence (the partner rail's
+        committed copper demands the wider class clearance), so it cannot
+        cause a DRC violation, but it costs the C++ arm reach the Python arm
+        has.  ``None`` on either argument means "no waiver" and is the
+        ``partner is None`` branch on the Python side.
         """
         self._impl.set_halo_net_dimensions(
-            int(net), float(trace_width), float(trace_clearance), float(via_diameter)
+            int(net),
+            float(trace_width),
+            float(trace_clearance),
+            float(via_diameter),
+            -1 if partner_net is None or partner_clearance is None else int(partner_net),
+            -1.0 if partner_net is None or partner_clearance is None else float(partner_clearance),
         )
 
     def clear_halo_net_dimensions(self) -> None:

@@ -2853,19 +2853,39 @@ class CoupledPathfinder:
         threading (PR #5425), keyed by net id because the coupled predicates
         run for both rails.  Nets with no class install nothing and keep the
         global scalars, which is what both arms already did.
+
+        Issue #5711 additionally threads the diff-pair intra-pair waiver.
+        ``RouteHaloRefiner.trace_clear`` resolves the candidate's
+        ``diffpair_partner`` to a net id and passes
+        ``nc.effective_intra_pair_clearance()`` as that pair's required gap;
+        without it the C++ arm demanded the ordinary (wider) class clearance
+        against the partner rail's committed copper.  That divergence is in
+        the over-blocking direction -- it cannot produce a DRC violation --
+        but it cost the production-default backend reach the Python fallback
+        had, on exactly the classes that author a narrower intra-pair gap.
+        The waiver is resolved through the refiner's own
+        ``_resolve_partner_net_id`` so both arms consult the same net-name map
+        and answer ``None`` (no waiver) in the same cases.
         """
         setter = getattr(impl, "set_halo_net_dimensions", None)
         if setter is None:
             return
-        for name, net_id in self._halo_refiner._net_name_to_id.items():
+        refiner = self._halo_refiner
+        for name, net_id in refiner._net_name_to_id.items():
             net_class = self.net_class_map.get(name)
             if net_class is None:
                 continue
+            partner_net = refiner._resolve_partner_net_id(name)
+            partner_clearance = (
+                net_class.effective_intra_pair_clearance() if partner_net is not None else None
+            )
             setter(
                 net_id,
                 net_class.trace_width,
                 net_class.clearance,
                 net_class.via_size,
+                partner_net,
+                partner_clearance,
             )
 
     def _try_cpp_route_coupled(
