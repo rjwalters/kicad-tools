@@ -44,6 +44,37 @@ DRU_FLOORS_BLOCK_END = "# END kct fab floors"
 DRU_VERSION_HEADER = "(version 1)"
 
 # ---------------------------------------------------------------------------
+# Native-engine capability floor for ``SMD Pad Clearance`` (Issue #5713)
+# ---------------------------------------------------------------------------
+
+#: Lowest ``kicad-cli`` version whose DRC engine actually *evaluates* the
+#: emitted ``SMD Pad Clearance`` rule.
+#:
+#: The rule's scope predicate is ``A.Reference != B.Reference``, which relies
+#: on a pad inheriting its parent footprint's reference designator.  KiCad
+#: 10.0.0 and 10.0.1 do not implement that inheritance: ``A.Reference``
+#: resolves to the empty string for a pad, both sides compare equal, and the
+#: whole condition is permanently false.  The rule is then silently inert --
+#: KiCad reports **no** ``drc_rule_error``, just a clean board, which is the
+#: dangerous shape this constant exists to make explicit.
+#:
+#: Measured, not inferred (Issue #5713): a two-footprint board with distinct
+#: references at a 0.12 mm sub-floor gap produced 0 ``SMD Pad Clearance``
+#: findings on ``kicad/kicad:10.0.0`` and ``:10.0.1`` and exactly 1 on
+#: ``:10.0.2``, ``:10.0.4``, ``:10.0.5`` and ``:10.0.6``.  Narrowing the
+#: condition one predicate at a time on the same board isolated
+#: ``A.Reference != B.Reference`` as the sole predicate that fails on 10.0.1
+#: (``A.Pad_Type == 'SMD'`` and ``A.Net != B.Net`` both behave there).
+#: There is no 10.0.3 release.
+#:
+#: Consumers must gate on *behaviour* where they can (run a positive control
+#: and see whether the rule fires) and fall back to this version floor only
+#: to name the reason -- a future KiCad could regress the property again at
+#: a version above the floor.  See
+#: ``tests/test_factory_object_clearance.py`` for both halves.
+SMD_PAD_CLEARANCE_MIN_KICAD_VERSION = (10, 0, 2)
+
+# ---------------------------------------------------------------------------
 # Legacy (pre-#4600) generated-sidecar detection (Issue #4667)
 # ---------------------------------------------------------------------------
 #
@@ -298,6 +329,11 @@ def generate_dru(
     # (``test_native_smd_floor_omits_pairs_sharing_a_reference_designator``).
     # No ``(severity error)`` override: a custom ``clearance`` constraint is
     # error-class by default, matching the Python checker's severity.
+    #
+    # Second known boundary -- a MINIMUM KICAD VERSION, see
+    # ``SMD_PAD_CLEARANCE_MIN_KICAD_VERSION`` above: on KiCad 10.0.0/10.0.1
+    # the emitted rule is inert because pads do not yet inherit their parent
+    # footprint's ``Reference``.
     if rules.min_smd_pad_clearance_mm is not None:
         lines.append(
             f'(rule "SMD Pad Clearance{label_suffix}"\n'
