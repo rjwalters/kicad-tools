@@ -2950,9 +2950,13 @@ def test_plane_stitch_native_refill_preserves_connection(tmp_path, via_x):
     import shutil
     import subprocess
 
-    native = shutil.which("kicad-cli")
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    native = find_kicad_cli()
     if native is None:
-        pytest.skip("native KiCad CLI unavailable")
+        pytest.skip(
+            "find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)"
+        )
     fixture = Path(__file__).parent / "fixtures/via_relocation/isolated_inner_plane.kicad_pcb"
     board = tmp_path / "isolated.kicad_pcb"
     shutil.copyfile(fixture, board)
@@ -3172,9 +3176,13 @@ def test_hole_floor_native_refill_roundtrip(tmp_path, accepted):
     import shutil
     import subprocess
 
-    native = shutil.which("kicad-cli")
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    native = find_kicad_cli()
     if native is None:
-        pytest.skip("native KiCad CLI unavailable")
+        pytest.skip(
+            "find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)"
+        )
     source = Path(__file__).parent / "fixtures/via_relocation/hole_floor.kicad_pcb"
     board = tmp_path / "hole_floor.kicad_pcb"
     shutil.copyfile(source, board)
@@ -3502,12 +3510,15 @@ def test_alternative_preserves_offset_pad_and_all_layers(tmp_path):
 
 def test_alternative_native_roundtrip(tmp_path):
     import json
-    import shutil
     import subprocess
 
-    native = shutil.which("kicad-cli")
+    from kicad_tools.cli.runner import find_kicad_cli
+
+    native = find_kicad_cli()
     if native is None:
-        pytest.skip("native KiCad CLI unavailable")
+        pytest.skip(
+            "find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)"
+        )
     board = _blocked_slide_board(tmp_path)
 
     def drc(name):

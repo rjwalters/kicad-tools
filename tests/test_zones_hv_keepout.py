@@ -8,12 +8,12 @@ pure geometry (no ``kicad-cli`` needed), the shared HV-net classification with
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.zones_cmd import main as zones_main
 from kicad_tools.creepage.engine import resolve_hv_nets
 from kicad_tools.schema.pcb import PCB
@@ -22,7 +22,10 @@ from kicad_tools.zones.hv_keepout import build_hv_keepout_plan
 pytest.importorskip("shapely")
 
 # kicad-cli is used for the end-to-end load test below; skip when absent.
-KICAD_CLI = shutil.which("kicad-cli")
+# find_kicad_cli() checks PATH plus common non-PATH install locations, so
+# this can't silently disagree with the rest of the suite about which
+# kicad-cli (if any) is available (#5714).
+KICAD_CLI = find_kicad_cli()
 
 
 # A minimal-but-real board:
@@ -243,7 +246,10 @@ def test_cli_writes_keepout_zone(tmp_path: Path) -> None:
     assert len(keepouts) == 1
 
 
-@pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+@pytest.mark.skipif(
+    KICAD_CLI is None,
+    reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+)
 def test_emitted_keepout_loads_in_kicad(tmp_path: Path) -> None:
     """Regression (Issue #4430): the emitted keepout must load in kicad-cli.
 
@@ -473,7 +479,10 @@ def _curved_board(tmp_path, kind, shift=0.0037, angle=37.0):
     return _write(tmp_path, source), core, radius
 
 
-@pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+@pytest.mark.skipif(
+    KICAD_CLI is None,
+    reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+)
 @pytest.mark.parametrize(
     "kind,clearance",
     [

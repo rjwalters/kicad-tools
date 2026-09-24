@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from kicad_tools.cli import stitch_cmd
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.stitching import (
     StitchRejected,
     _native_refill,
@@ -23,12 +24,16 @@ FIXTURES = Path(__file__).parent / "fixtures" / "stitch-5388"
 
 @pytest.fixture
 def native_cli():
-    cli = shutil.which("kicad-cli")
-    bundled = Path("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
-    if not cli and bundled.is_file():
-        cli = str(bundled)
-    if not cli:
-        pytest.skip("KiCad 10 is needed for native refill acceptance")
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip(
+            "find_kicad_cli() found no kicad-cli install (checked PATH and common install "
+            "locations) -- KiCad 10 is needed for native refill acceptance"
+        )
+    # complete_power_connections()'s kicad_cli param (and _native_refill's
+    # command-list json.dumps() log) expect a str, matching the prior
+    # shutil.which() return type -- keep the resolved Path a str here.
+    cli = str(cli)
     version = subprocess.run([cli, "version"], capture_output=True, text=True, timeout=20)
     if version.returncode or not version.stdout.startswith("10."):
         pytest.skip("This acceptance contract requires native KiCad 10")
