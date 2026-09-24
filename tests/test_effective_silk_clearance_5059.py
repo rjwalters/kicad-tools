@@ -373,14 +373,39 @@ def test_emitted_jlcpcb_profile_silk_rule_is_scoped_to_the_same_board_side(tmp_p
     copper on the other, which is not a manufacturable concern.  Without this
     negative, a rule broadened until the below-floor probe passes would look
     correct while flagging every board twice over.
+
+    The assertion is keyed on the ``Silk to Pad`` rule NAME, so on its own it
+    would also pass on any KiCad that never evaluates that rule -- green for
+    exactly the reason it is meant to catch (Issue #5713, where the sibling
+    ``SMD Pad Clearance`` negative did precisely that on KiCad 10.0.1).  The
+    same-side positive control below is therefore part of the test, not
+    decoration: the absence is only evidence once the presence is measured in
+    the same run, on the same board shape and the same emitted sidecar.
     """
     _require_cli()
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+
+    control = _write_board(
+        tmp_path / "control.kicad_pcb",
+        silk_centre_x=_silk_centre_for_gap(_SUBFLOOR_GAP_MM),
+        silk_layer="F.SilkS",
+    )
+    write_drc_constraints(control, rules, manufacturer_id="jlcpcb", layers=4)
+    control_findings = [
+        v
+        for v in _silk_findings(_run_native_drc(control, tmp_path / "control.json"))
+        if "Silk to Pad" in v["description"]
+    ]
+    assert control_findings, (
+        "Positive control produced no 'Silk to Pad' finding: this KiCad is not evaluating "
+        "the emitted rule at all, so the cross-side negative below would pass vacuously."
+    )
+
     board = _write_board(
         tmp_path / "probe.kicad_pcb",
         silk_centre_x=_silk_centre_for_gap(_SUBFLOOR_GAP_MM),
         silk_layer="B.SilkS",
     )
-    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
     write_drc_constraints(board, rules, manufacturer_id="jlcpcb", layers=4)
 
     violations = _run_native_drc(board, tmp_path / "native.json")

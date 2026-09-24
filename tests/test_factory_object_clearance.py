@@ -1,14 +1,18 @@
 """Measured object/layer controls for the complete generated factory rules."""
 
+import functools
 import json
 import subprocess
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.export.gerber import get_kicad_cli_version
 from kicad_tools.manufacturers import get_profile, write_drc_constraints
+from kicad_tools.manufacturers.dru_generator import SMD_PAD_CLEARANCE_MIN_KICAD_VERSION
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate.rules.clearance import ClearanceRule
 from kicad_tools.validate.rules.factory_clearance import check_silk_pad_clearance
@@ -140,6 +144,11 @@ def test_native_object_specific_clearance(tmp_path, kind, gap, options, expected
     violations = json.loads(report.read_text())["violations"]
     assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
     if kind == "smd":
+        # Issue #5713: below KiCad 10.0.2 the rule is emitted but never
+        # evaluated, which turns ``expected=True`` into a bare
+        # ``AssertionError: []`` and ``expected=False`` into a pass for the
+        # wrong reason.  Gate on a measured positive control, not on luck.
+        _require_native_smd_rule()
         # The different-net SMD pad floor is emitted natively, scoped by the
         # two predicates the deferral in #5705 thought impossible:
         # ``A.Pad_Type == 'SMD'`` on both sides and
@@ -299,6 +308,149 @@ def _run_native_drc(path: Path) -> list[dict]:
     return violations
 
 
+# ---------------------------------------------------------------------------
+# ``SMD Pad Clearance`` availability gate (Issue #5713)
+# ---------------------------------------------------------------------------
+#
+# The emitted ``SMD Pad Clearance`` rule is SILENTLY INERT on KiCad 10.0.0 and
+# 10.0.1: its ``A.Reference != B.Reference`` scope needs pads to inherit their
+# parent footprint's reference designator, which those builds do not do.  The
+# engine raises no ``drc_rule_error`` -- it just reports a clean board.  Every
+# assertion below that says "this shape produces no SMD finding" would
+# therefore pass for the wrong reason, and every assertion that says "this
+# shape produces one" would fail as a bare ``AssertionError: []`` naming
+# nothing.  Both are replaced by an explicit, measured capability probe.
+
+#: Sub-floor gap (mm) for the SMD positive control: clears the general copper
+#: floor (0.1016 mm) but is under the 0.15 mm different-net SMD pad floor, so
+#: a working ``SMD Pad Clearance`` rule MUST report it.
+_SMD_POSITIVE_CONTROL_GAP_MM = 0.12
+
+_MIN_KICAD_VERSION_STR = ".".join(str(part) for part in SMD_PAD_CLEARANCE_MIN_KICAD_VERSION)
+
+
+def _kicad_cli_version_tuple(cli: Path) -> tuple[int, ...] | None:
+    """Parse ``kicad-cli version`` into a comparable tuple, or ``None``."""
+    raw = get_kicad_cli_version(cli)
+    if not raw:
+        return None
+    head = raw.split()[0].split("-")[0].split("~")[0]
+    parts: list[int] = []
+    for chunk in head.split("."):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts) or None
+
+
+def _native_smd_rule_fires(cli: Path, workdir: Path) -> bool:
+    """Run the SMD positive control and report whether the rule fired.
+
+    The control board is the exact shape
+    ``test_native_smd_floor_is_scoped_to_different_footprints[False-True]``
+    asserts on: two independently placed footprints with DISTINCT reference
+    designators, at a sub-floor gap.  If ``SMD Pad Clearance`` is evaluated at
+    all, it fires here.
+    """
+    path = _two_pad_board(
+        workdir / "smd-positive-control.kicad_pcb",
+        _SMD_POSITIVE_CONTROL_GAP_MM,
+        same_footprint=False,
+    )
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+    write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=4)
+    report = workdir / "smd-positive-control.json"
+    proc = subprocess.run(
+        [
+            str(cli),
+            "pcb",
+            "drc",
+            "--severity-all",
+            "--format",
+            "json",
+            "-o",
+            str(report),
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    violations = json.loads(report.read_text())["violations"]
+    # A rejected sidecar would make the probe report "unavailable" for a
+    # completely different reason; surface it instead of masking it.
+    assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
+    return bool(findings_for_rules(violations, "SMD Pad Clearance"))
+
+
+@functools.lru_cache(maxsize=1)
+def _native_smd_rule_status() -> tuple[bool, str]:
+    """``(fires, description)`` for the installed kicad-cli, probed once."""
+    cli = find_kicad_cli()
+    if cli is None:
+        return False, "Native KiCad CLI is not installed"
+    version = get_kicad_cli_version(cli) or "an unknown version"
+    with tempfile.TemporaryDirectory(prefix="kct-smd-probe-") as raw:
+        fires = _native_smd_rule_fires(cli, Path(raw))
+    return fires, f"kicad-cli {version}"
+
+
+def _require_native_smd_rule() -> None:
+    """Skip -- naming the rule -- when the native engine will not evaluate it.
+
+    Never let a caller fall through to an assertion that an absent rule would
+    satisfy vacuously.  The reason string names the rule, the probe that was
+    run, and the measured version floor, so a skipped run is diagnosable from
+    the pytest report alone rather than surfacing as ``AssertionError: []``.
+    """
+    fires, description = _native_smd_rule_status()
+    if fires:
+        return
+    if find_kicad_cli() is None:
+        pytest.skip("Native KiCad CLI is not installed")
+    pytest.skip(
+        f"The native 'SMD Pad Clearance' rule is not evaluated by {description}: a "
+        f"positive control (two distinct-reference footprints at "
+        f"{_SMD_POSITIVE_CONTROL_GAP_MM} mm, under the 0.15 mm floor) produced no "
+        f"finding. KiCad >= {_MIN_KICAD_VERSION_STR} is required -- 10.0.0/10.0.1 do "
+        "not give a pad its parent footprint's Reference, so the rule's "
+        "'A.Reference != B.Reference' scope is permanently false."
+    )
+
+
+def test_native_smd_pad_clearance_rule_is_available():
+    """The ``SMD Pad Clearance`` minimum-KiCad-version dependency, asserted.
+
+    Every other native SMD assertion in this module is gated on this same
+    probe and SKIPS below the floor, so without this test an old KiCad would
+    make the whole SMD surface quietly disappear from the report.  Here the
+    dependency is explicit: at or above the recorded floor the rule MUST fire,
+    and a regression fails by name rather than as an empty list.
+    """
+    cli = find_kicad_cli()
+    if cli is None:
+        pytest.skip("Native KiCad CLI is not installed")
+    version = _kicad_cli_version_tuple(cli)
+    fires, description = _native_smd_rule_status()
+    if version is not None and version < SMD_PAD_CLEARANCE_MIN_KICAD_VERSION:
+        assert not fires, (
+            f"{description} evaluates 'SMD Pad Clearance' below the recorded floor of "
+            f"{_MIN_KICAD_VERSION_STR}; lower SMD_PAD_CLEARANCE_MIN_KICAD_VERSION."
+        )
+        pytest.skip(
+            f"{description} is below the measured {_MIN_KICAD_VERSION_STR} floor for the "
+            "native 'SMD Pad Clearance' rule (pads gained their parent footprint's "
+            "Reference in 10.0.2); the rule is emitted but inert here."
+        )
+    assert fires, (
+        f"{description} is at or above the recorded {_MIN_KICAD_VERSION_STR} floor but the "
+        "emitted 'SMD Pad Clearance' rule did not fire on a 0.12 mm sub-floor positive "
+        "control. Either the rule is no longer emitted, or KiCad regressed the "
+        "'A.Reference' property that scopes it."
+    )
+
+
 @pytest.mark.parametrize("same_footprint,expected", [(False, True), (True, False)])
 def test_native_smd_floor_is_scoped_to_different_footprints(tmp_path, same_footprint, expected):
     """The emitted ``SMD Pad Clearance`` rule exempts package-internal pairs.
@@ -313,7 +465,12 @@ def test_native_smd_floor_is_scoped_to_different_footprints(tmp_path, same_footp
     while two independently placed footprints at the same 0.12 mm
     sub-floor gap do fire -- measured, not assumed, against
     ``kicad-cli pcb drc``.
+
+    Gated on the ``SMD Pad Clearance`` availability probe (Issue #5713): the
+    ``same_footprint=True`` half asserts an ABSENCE, which a KiCad that never
+    evaluates the rule would satisfy without evaluating anything.
     """
+    _require_native_smd_rule()
     path = _two_pad_board(tmp_path / "probe.kicad_pcb", 0.12, same_footprint=same_footprint)
     violations = _run_native_drc(path)
     relevant = findings_for_rules(violations, "SMD Pad Clearance")
@@ -336,11 +493,35 @@ def test_native_smd_floor_omits_pairs_sharing_a_reference_designator(tmp_path):
     flags separately, and the ``kct check`` floor remains authoritative
     for exactly this shape.  Both engines must agree once the references
     are distinct.
+
+    The native half is a NEGATIVE assertion keyed on the rule name, so it is
+    paired with an in-test positive control on the identical board shape with
+    DISTINCT references (Issue #5713).  Without it the assertion passes on any
+    KiCad that omits the rule entirely -- which is exactly what 10.0.0/10.0.1
+    do, and was confirmed empirically: this test passed on 10.0.1 while its
+    own siblings failed with ``AssertionError: []``.  Now the absence is only
+    meaningful because the presence was measured first, in the same run.
     """
+    _require_native_smd_rule()
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+
+    # Positive control FIRST: same geometry, distinct references.  If this
+    # does not fire, the rule is not being evaluated and the negative below
+    # would be vacuous -- fail here, naming the rule, rather than there.
+    control = _two_pad_board(
+        tmp_path / "control.kicad_pcb", 0.12, same_footprint=False, references=("U1", "U2")
+    )
+    control_findings = findings_for_rules(_run_native_drc(control), "SMD Pad Clearance")
+    assert control_findings, (
+        "Positive control produced no 'SMD Pad Clearance' finding: the native rule is not "
+        "being evaluated on this KiCad, so the shared-reference negative below would pass "
+        "vacuously. KiCad >= "
+        f"{_MIN_KICAD_VERSION_STR} is required."
+    )
+
     path = _two_pad_board(
         tmp_path / "probe.kicad_pcb", 0.12, same_footprint=False, references=("U1", "U1")
     )
-    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
     python_violations = ClearanceRule().check(PCB.load(path), rules).violations
     assert python_violations, "Python identity-scoped floor must still catch the pair"
     native_violations = _run_native_drc(path)
