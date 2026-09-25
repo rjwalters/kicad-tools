@@ -174,13 +174,14 @@ def region_of_poly(poly: Sequence[Pt]) -> MeshRegion | None:
 
     Args:
         poly: A ring WITHOUT a repeated final vertex -- the mesh engine's own
-            convention (:func:`~.geometry.segment_intersects_polygon`).
+            convention (the retired ``segment_intersects_polygon`` helper used
+            the same ring convention).
 
     Returns:
         The region, or ``None`` for a degenerate ring of fewer than three
-        vertices.  ``segment_intersects_polygon`` answered ``False`` for those,
-        and a two-vertex "region" would otherwise become a bare line the kernel
-        measures a real distance to.
+        vertices.  The retired ``segment_intersects_polygon`` helper answered
+        ``False`` for those, and a two-vertex "region" would otherwise become a
+        bare line the kernel measures a real distance to.
     """
     if len(poly) < 3:
         return None
@@ -308,8 +309,8 @@ def outline_of(outline: Sequence[Pt]) -> MeshOutline | None:
 def leg_touches(candidate: KSegment, region: MeshRegion) -> bool:
     """True when the centreline ``candidate`` meets or enters ``region``.
 
-    The kernel reading of :func:`~.geometry.segment_intersects_rect` /
-    :func:`~.geometry.segment_intersects_polygon`: a gap of zero or less is
+    The kernel reading of the retired ``segment_intersects_rect`` /
+    ``segment_intersects_polygon`` helpers: a gap of zero or less is
     contact, and the region already carries whatever inflation its producer
     applied, so the requirement is zero by construction.
     """
