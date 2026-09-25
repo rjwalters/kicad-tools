@@ -71,66 +71,6 @@ def rects_overlap(a: Rect, b: Rect) -> bool:
     return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
 
 
-def merge_overlapping(rects: list[Rect]) -> list[Rect]:
-    """Union-find cluster overlapping rects into their bounding boxes.
-
-    poly2tri holes must be disjoint and simple; a dense pin-field produces
-    overlapping inflated keep-outs.  Merging each overlap-cluster into its
-    bounding box keeps the holes disjoint while staying *conservative*
-    (the merged keep-out only ever grows the avoided region).
-
-    Epic #5509 Phase 3e retired this helper's one production caller: the mesh
-    fit no longer inflates pads into rectangles at all (see the module
-    docstring).  It is kept rather than deleted because ``keepouts`` remains a
-    supported model input for a caller that *does* hold pre-inflated
-    rectangles, and because the epic assigns deletion of the arithmetic each
-    phase supersedes to its own Phase 4 pass rather than to the switching
-    phase.
-    """
-    n = len(rects)
-    parent = list(range(n))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i: int, j: int) -> None:
-        parent[find(i)] = find(j)
-
-    # Iterate to a fixpoint: merging can create new overlaps.
-    changed = True
-    while changed:
-        changed = False
-        boxes = _cluster_boxes(rects, parent, find, n)
-        roots = list(boxes.keys())
-        for a in range(len(roots)):
-            for b in range(a + 1, len(roots)):
-                ra, rb = roots[a], roots[b]
-                if find(ra) != find(rb) and rects_overlap(boxes[ra], boxes[rb]):
-                    union(ra, rb)
-                    changed = True
-    return list(_cluster_boxes(rects, parent, find, n).values())
-
-
-def _cluster_boxes(rects: list[Rect], parent: list[int], find, n: int) -> dict[int, Rect]:
-    boxes: dict[int, Rect] = {}
-    for i in range(n):
-        r = find(i)
-        if r not in boxes:
-            boxes[r] = rects[i]
-        else:
-            cur = boxes[r]
-            boxes[r] = (
-                min(cur[0], rects[i][0]),
-                min(cur[1], rects[i][1]),
-                max(cur[2], rects[i][2]),
-                max(cur[3], rects[i][3]),
-            )
-    return boxes
-
-
 class ObstacleModel:
     """Board outline, foreign pad copper, keep-out rectangles and pour polygons.
 
