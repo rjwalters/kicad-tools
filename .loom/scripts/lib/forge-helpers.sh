@@ -493,41 +493,6 @@ forge_check_auto_delete() {
   fi
 }
 
-# Check whether the repository has GitHub's "Allow auto-merge" setting enabled.
-# Usage: forge_check_auto_merge_allowed NWO [GH_CMD]
-# Returns on stdout: "true", "false", or "unknown".
-#
-# GitHub only: reads the repo-level `allow_auto_merge` flag. When it is false,
-# GitHub rejects the enablePullRequestAutoMerge mutation outright — no PR-level
-# state (CLEAN/UNSTABLE) will ever let it succeed — so callers that want to
-# degrade gracefully (wait-for-checks-then-merge) can detect it up front rather
-# than reacting to the post-mutation error string (#3820).
-#
-# Gitea returns "unknown" (there is no equivalent single repo flag consumed
-# here; Gitea auto-merge goes through forge_auto_merge's own curl poll-and-merge,
-# which this probe must not perturb). A probe failure (network/auth/unexpected value)
-# also returns "unknown" so callers preserve their existing behavior fail-safe.
-forge_check_auto_merge_allowed() {
-  local nwo="$1"
-  local gh_cmd="${2:-gh}"
-
-  if [[ "$FORGE_TYPE" != "github" ]]; then
-    echo "unknown"
-    return 0
-  fi
-
-  local val
-  val="$("$gh_cmd" api "repos/$nwo" --jq '.allow_auto_merge' 2>/dev/null)" || {
-    echo "unknown"
-    return 0
-  }
-  case "$val" in
-    true)  echo "true" ;;
-    false) echo "false" ;;
-    *)     echo "unknown" ;;
-  esac
-}
-
 # Delete a remote branch.
 # Usage: forge_delete_branch NWO BRANCH_NAME
 # GitHub: DELETE /repos/{nwo}/git/refs/heads/{branch}
@@ -544,77 +509,15 @@ forge_delete_branch() {
   fi
 }
 
-# Enable auto-merge on a PR.
-# Usage: forge_auto_merge NWO PR_NUMBER [EXPECTED_HEAD_SHA] [MERGE_METHOD]
-# GitHub: GraphQL enablePullRequestAutoMerge mutation (pure API, no
-#         working-tree dependency — `gh pr merge --auto` does a local
-#         checkout that collides with worktrees owning the head branch).
-# Gitea: POST /repos/{owner}/{repo}/pulls/{n}/merge with merge_when_checks_succeed
-#
-# MERGE_METHOD (optional, #7754): one of "squash"/"merge"/"rebase" (GitHub is
-# uppercased to the GraphQL enum's SQUASH/MERGE/REBASE). Defaults to "squash"
-# when omitted -- preserves this function's pre-#7754 behavior for any caller
-# that has not been updated to pass a detected method (e.g. via
-# forge_detect_merge_method). Callers that need to respect a target repo's
-# actual allowed strategies MUST pass this explicitly.
-#
-# EXPECTED_HEAD_SHA (optional, #5579): same optimistic-concurrency precondition
-# as forge_merge_pr's — see that function's comment for the general rationale
-# and the Gitea `head_commit_id` citation (identical here; Gitea's `/merge`
-# endpoint carries both the auto-merge poll flags and the mismatch guard).
-#
-# GitHub: the GraphQL mutation's `expectedHeadOid: GitObjectID` input field
-# (confirmed present in GitHub's public GraphQL schema, 2026-08-07). The exact
-# error string GitHub returns on a mismatch could NOT be verified against a
-# live incident or public documentation as of this writing (GraphQL validation
-# error text is not part of the published schema) — merge-pr.sh's classifier
-# for this path therefore matches a best-effort pattern and should be
-# tightened against the first real occurrence, the same way the CLEAN/UNSTABLE
-# classifiers elsewhere in this file were derived from live incident text.
-forge_auto_merge() {
-  local nwo="$1"
-  local pr_number="$2"
-  local expected_head_sha="${3:-}" merge_method="${4:-squash}"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    forge_split_nwo "$nwo"
-    if [[ -n "$expected_head_sha" ]]; then
-      gitea_api POST "repos/$FORGE_OWNER/$FORGE_REPO/pulls/$pr_number/merge" \
-        -d "$(jq -nc --arg method "$merge_method" --arg sha "$expected_head_sha" \
-          '{"Do":$method,"merge_when_checks_succeed":true,"delete_branch_after_merge":true,"head_commit_id":$sha}')"
-    else
-      gitea_api POST "repos/$FORGE_OWNER/$FORGE_REPO/pulls/$pr_number/merge" \
-        -d "$(jq -nc --arg method "$merge_method" '{"Do":$method,"merge_when_checks_succeed":true,"delete_branch_after_merge":true}')"
-    fi
-  else
-    # Resolve PR node_id (required by GraphQL mutation).
-    local node_id
-    node_id=$(gh api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
-    [[ -z "$node_id" ]] && return 1
-
-    # The mutation (a WRITE) goes through the #6074 permission ladder (#6752),
-    # like the native `loom-daemon forge auto-merge` this shell path stands in
-    # for; the node_id lookup above is a read and needs no escalation.
-    # GraphQL's PullRequestMergeMethod enum is uppercase (MERGE/SQUASH/REBASE,
-    # #7754) -- uppercased inline below rather than via a separate variable.
-    if [[ -n "$expected_head_sha" ]]; then
-      local mutation_with_oid='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod, expectedHeadOid: $expectedHeadOid}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
-
-      forge_gh_perm_safe api graphql \
-        -f "query=$mutation_with_oid" \
-        -F "pullRequestId=$node_id" \
-        -F "mergeMethod=$(printf '%s' "$merge_method" | tr '[:lower:]' '[:upper:]')" \
-        -F "expectedHeadOid=$expected_head_sha" 2>/dev/null
-    else
-      local mutation='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
-
-      forge_gh_perm_safe api graphql \
-        -f "query=$mutation" \
-        -F "pullRequestId=$node_id" \
-        -F "mergeMethod=$(printf '%s' "$merge_method" | tr '[:lower:]' '[:upper:]')" 2>/dev/null
-    fi
-  fi
-}
+# forge_auto_merge / forge_check_auto_merge_allowed were RETIRED by #8427.
+# They armed the forge's server-side auto-merge (GitHub
+# enablePullRequestAutoMerge / Gitea merge_when_checks_succeed), which is gated
+# only by the ruleset's REQUIRED checks and never re-reads `loom:pr` or the
+# non-required suites (PR #8220). No Loom merge path arms one since #8410:
+# `merge-pr.sh --auto` waits for check-runs and merges in-process. A human who
+# deliberately wants a queued GitHub merge can use the operator-only
+# `loom-daemon forge auto-merge` (see its --help for the caveat); do NOT
+# reintroduce an arming helper here.
 
 # --- CI Status Helpers ---
 

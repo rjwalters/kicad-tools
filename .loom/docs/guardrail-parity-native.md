@@ -47,7 +47,25 @@ has its own private directory (0700), including concurrent launches in one
 workspace. `LOOM_NATIVE_TOOLS_DIR` selects an alternative **external base**,
 including the existing container-private base; it no longer selects a shared
 binding directory. Pi's agent/auth and session directories, and OpenCode's
-config/data/state/cache directories are pinned beneath the launch directory.
+data/state/cache directories are pinned beneath the launch directory.
+
+**One exception, and only for immutable content (#8663):** OpenCode's
+`OPENCODE_CONFIG_DIR` is a content-keyed tree at
+`<workspace-hash>/bindings/<digest>/opencode/`, shared by every launch of that
+workspace whose bindings hash identically (the plugin source is `include_str!`'d
+and its dependency is pinned, so the bytes are fixed by the daemon build). It
+holds the generated `plugins/loom.ts`, the pinned `package.json`, and the
+`node_modules/` the CLI resolves from them — ~126 MB and ~7,300 files that were
+previously re-installed per launch and never removed (30–37 GB per fleet host,
+two ENOSPC incidents). Nothing mutable is shared: auth snapshots, sessions,
+transcripts and every XDG directory stay inside the launch's own 0700
+directory, so two concurrent workers still share no credential or session
+state. The tree is published by an atomic rename of a fully written staging
+copy, and its two binding files are re-written (idempotently) on every launch,
+so a damaged tree self-heals instead of serving content no launch provisioned.
+
+Stale launch directories are reaped by the next launch for the same workspace
+and by `loom-daemon clean` (see "Reaping stale native launch state" below).
 Absolute paths are required. Paths inside this workspace or another Git
 checkout, including symlink aliases, are refused before binding provisioning;
 unsafe inherited HOME, Pi, OpenCode and XDG directory overrides also refuse
@@ -359,6 +377,46 @@ explicit incompatible pins fail rather than silently choosing another model.
 Standalone scheduled roles can have different runtime bindings; one sweep uses
 one runtime throughout. Keep the purchased provider plan's concurrency limit
 in mind when setting the existing worker concurrency configuration.
+
+## Reaping stale native launch state
+
+A per-launch directory is never reused, and nothing used to remove it: three
+fleet hosts accumulated 252–358 session directories (30–37 GB) in a day, and
+one filled its root volume twice (#8663). There is no exit-time hook to use —
+`worker_spawn::exec` replaces the Loom process image with the harness CLI, so
+no parent survives the session — so the reap runs in the two places a Loom
+process demonstrably exists:
+
+1. **At the next launch for the same workspace**, before the new session
+   directory is created. Best effort: a reap failure never fails a launch.
+2. **`loom-daemon clean`**, over every workspace under the base. It *reports*
+   by default (and under `--dry-run`) and removes with `--force`/`-y`, which is
+   what the fleet's scheduled `clean --deep --safe -y` pass uses. `--safe` does
+   not narrow it: a session directory has no PR to be merged, exactly like the
+   log and tmux artifacts.
+
+What is removed is decided by liveness first, age second. Each session
+directory carries a `loom-session.json` record naming the harness pid (`execve`
+preserves it) and the host that wrote it:
+
+| Session state | Removed when |
+| --- | --- |
+| This host, pid alive | never — a 12-hour sweep is safe |
+| This host, pid exited | 15 minutes old (covers the record-write race) |
+| Another host's record, or no record (pre-#8663) | 6 hours old |
+| Age unreadable | never |
+
+Shared binding trees are content-keyed, so a plugin-pin bump strands the
+previous one; each carries a `.last-used` marker refreshed per launch and is
+removed after 7 idle days. Staging trees stranded by a crashed provision are
+removed on the orphan threshold.
+
+The equivalent manual sweep, for a host that cannot run `clean` (it has no
+liveness check, so run it only when no native launch is in flight):
+
+```bash
+find ~/.local/state/loom/native-tools -mindepth 2 -maxdepth 2 -type d -mmin +360 -exec rm -rf {} +
+```
 
 ## Residual limits
 

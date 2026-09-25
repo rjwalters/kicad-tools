@@ -16,7 +16,9 @@
 #      second pass does not duplicate the entries (idempotent).
 #   4. A repo with NO nested node_modules and NO linkPaths config produces no
 #      nested/linkPaths symlinks (no-behavior-change regression guard).
-#   5. Missing jq (simulated via PATH override) skips the linkPaths step silently.
+#   5. Missing jq (simulated via PATH override) does not break worktree
+#      creation — and, since #8195 slice 4, no longer costs the linkPaths
+#      symlink either (see the retirement record in Test 5 itself).
 #   6. A forced ln -s failure (dst pre-exists as a real file) warns and worktree
 #      creation still succeeds (exit 0).
 #   7. The root node_modules symlink and the .mcp.json symlink both get
@@ -28,16 +30,34 @@
 # Pattern follows test-worktree-sentinel.sh / test-worktree-concurrency.sh:
 # throw-away bare origin + clone in a mktemp dir, copy worktree.sh + lib/,
 # exercise behaviors.
+#
+# Needs a BUILT `loom-daemon` since #8195 slice 4: every symlink and every
+# .git/info/exclude entry asserted below is now written by
+# `loom-daemon worktree-link`, which worktree.sh invokes after `git worktree
+# add`. Apart from Test 5's one retired assertion (see there), every
+# assertion is unchanged from the shell implementation — running them against
+# the port is the equivalence evidence — so this suite moved to the "Native
+# Port Suites" CI job, which builds the binary, and FAILS rather than skips
+# without one.
+#
+# Usage:
+#   cargo build --package loom-daemon
+#   bash defaults/scripts/tests/test-worktree-nested-symlinks.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-link"
+
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -47,6 +67,18 @@ TESTS_FAILED=0
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
 
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why, and what proves
+# the property now. Counted as run so the totals stay honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
+
 assert_symlink() {
     if [[ -L "$1" ]]; then
         pass "$2"
@@ -55,6 +87,10 @@ assert_symlink() {
     fi
 }
 
+# Kept although its only call site was retired in Test 5 (#8195 slice 4): the
+# negative form is the natural way to write the next "must NOT be linked"
+# case, and re-deriving it later is how a suite ends up with two spellings.
+# shellcheck disable=SC2329  # referenced only by future cases
 assert_not_symlink() {
     if [[ ! -L "$1" ]]; then
         pass "$2"
@@ -209,9 +245,9 @@ else
 fi
 cleanup_repo "$REPO"
 
-# --- Test 5: missing jq → linkPaths step skipped silently ---
+# --- Test 5: missing jq → worktree still succeeds ---
 echo ""
-echo "Test 5: missing jq → linkPaths skipped, worktree still succeeds"
+echo "Test 5: missing jq → worktree still succeeds, linkPaths still applied"
 REPO=$(setup_repo)
 (
     cd "$REPO"
@@ -248,7 +284,23 @@ if [[ -d "$WT" ]]; then
 else
     fail "worktree not created when jq unavailable"
 fi
-assert_not_symlink "$WT/apps/web/src/wasm" "linkPaths symlink skipped when jq unavailable"
+
+# The pre-port assertion here was:
+#     assert_not_symlink "$WT/apps/web/src/wasm" \
+#         "linkPaths symlink skipped when jq unavailable"
+# Retired under verification-recipes.md §6's three-part test, and replaced
+# below by the strictly stronger positive assertion — which also happens to
+# be the outcome the property always wanted.
+retired "linkPaths symlink skipped when jq unavailable" \
+    "A host without jq must still get a usable worktree: the linkPaths step degrades instead of breaking creation. The NEGATIVE form asserted the MECHANISM of that degradation (the symlink is not made), not the property." \
+    "There is no jq call left to be missing. worktree.sh delegates to 'loom-daemon worktree-link', which resolves worktree.linkPaths through config_resolver.rs (serde). The dependency this assertion modelled does not exist in the port — not 'we handle it', but 'the construct is gone'." \
+    "The two assertions immediately below: the worktree is created AND the linkPaths symlink is present AND its .git/info/exclude entry is recorded, all with jq absent. That subsumes the retired assertion (creation still succeeds) and closes the gap it tolerated (the link silently going missing)."
+
+assert_symlink "$WT/apps/web/src/wasm" \
+    "linkPaths symlink IS created with jq unavailable (successor to the retired assertion)"
+EXCLUDE="$(worktree_exclude_path "$WT")"
+assert_grep "apps/web/src/wasm" "$EXCLUDE" \
+    ".git/info/exclude records the linkPaths entry with jq unavailable"
 cleanup_repo "$REPO"
 
 # --- Test 6: forced ln -s failure warns but worktree creation succeeds ---

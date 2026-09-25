@@ -21,12 +21,26 @@
 # Follows the throwaway-repo harness pattern in test-worktree-sentinel.sh:
 # a bare origin remote + a working repo, with worktree.sh + its lib/ helpers
 # copied into a temp tree, then the script driven directly.
+#
+# Needs a BUILT `loom-daemon` since #8195 slice 3: `worktree.sh remove` is now
+# a thin stub over `loom-daemon worktree-remove`. Every assertion below is
+# unchanged from the shell implementation — running them against the port is
+# the equivalence evidence — so this suite moved to the "Native Port Suites" CI
+# job, which builds the binary, and FAILS rather than skips without one.
+#
+# Usage:
+#   cargo build --package loom-daemon
+#   bash defaults/scripts/tests/test-worktree-remove.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-remove"
 
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 

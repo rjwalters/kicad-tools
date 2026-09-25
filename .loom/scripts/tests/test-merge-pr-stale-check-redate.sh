@@ -130,8 +130,9 @@ source "$FUNCS_FILE"
 #
 # Contract being stubbed:
 #   merge-pr stale-checks : 0 + CLEAN sentinel / 1 + refusal / 2 + reason
-#   merge-pr redate-checks: 0 + LOOM-REDATE-PUSHED / 1 failed / 3 head moved
-#                           / 4 escalated to loom:operator
+#   merge-pr redate-checks: 0 + LOOM-REDATE-PUSHED or LOOM-RERUN-PENDING
+#                           / 5 + LOOM-RERUN-FRESH (#8914) / 1 failed
+#                           / 3 head moved / 4 escalated to loom:operator
 # $1 selects the stale-checks answer, $2 the redate-checks answer. Each
 # invocation's argv is appended to $STUB_DIR/argv-<subcommand> so the suite
 # can assert which calls happened and with which operands.
@@ -141,7 +142,7 @@ make_stub() {
     {
         echo '#!/usr/bin/env bash'
         echo 'SUB="$2"'
-        echo "printf '%s\n' \"\$*\" >> \"$STUB_DIR/argv-\$SUB\""
+        echo "printf '%s ALLOW=%s\n' \"\$*\" \"\${LOOM_REDATE_ALLOW_PROCEED:-}\" >> \"$STUB_DIR/argv-\$SUB\""
         echo 'if [ "$SUB" = "stale-checks" ]; then'
         case "$checks_mode" in
             clean)  echo "  echo 'LOOM-STALE-CHECKS-CLEAN'; exit 0" ;;
@@ -152,6 +153,8 @@ make_stub() {
         echo 'if [ "$SUB" = "redate-checks" ]; then'
         case "$redate_mode" in
             pushed)    echo "  echo 'LOOM-REDATE-PUSHED sha=cafe1234'; exit 0" ;;
+            fresh)     echo "  echo 'LOOM-RERUN-FRESH pr=8493 head=deadbeef runs=555'; exit 5" ;;
+            pending)   echo "  echo 'LOOM-RERUN-PENDING pr=8493 head=deadbeef runs=555'; exit 0" ;;
             escalated) echo "  echo 'LOOM-REDATE-ESCALATED pr=8493 head=deadbeef label=loom:operator notice=posted'; exit 4" ;;
             moved)     echo "  echo 'branch already moved to feed0000'; exit 3" ;;
             failed)    echo "  echo 'could not create the re-date commit'; exit 1" ;;
@@ -208,6 +211,22 @@ assert_contains "$REDATE_ARGV" "--branch feature/issue-8478" "remedy is passed t
 assert_contains "$REDATE_ARGV" "--expected-head-sha deadbeef" "remedy gates on the SHA this merge attempt used"
 assert_contains "$LAST_OUT" "LOOM-REDATE-PUSHED" "the remedy's own output is surfaced"
 assert_contains "$LAST_OUT" "not merged" "exit 4 is explained as 're-dated, not merged'"
+assert_contains "$REDATE_ARGV" "ALLOW=1" "the script opts in to exit 5 via LOOM_REDATE_ALLOW_PROCEED=1 (an env var, so an older binary ignores it)"
+
+# T2b (#8914): the stale checks were re-run IN PLACE and are fresh now
+# (subcommand exit 5) -> the guard passes and the merge proceeds in this run.
+# No commit was pushed, so the head and loom:pr are intact.
+STUB="$(make_stub stale fresh)"
+LOOM_DAEMON_BIN="$STUB" run_guard
+assert_eq "0" "$LAST_RC" "re-ran in place + fresh (exit 5) -> guard passes, merge proceeds"
+assert_contains "$LAST_OUT" "LOOM-RERUN-FRESH" "the in-place re-run is reported"
+
+# T2c (#8914): re-run in place but still running when the wait ran out
+# (subcommand exit 0) -> exit 4, re-queue, same as a push.
+STUB="$(make_stub stale pending)"
+LOOM_DAEMON_BIN="$STUB" run_guard
+assert_eq "4" "$LAST_RC" "re-running in place, not yet fresh -> exit 4 (re-queue)"
+assert_contains "$LAST_OUT" "loom:pr kept" "exit 4 explains the in-place case keeps the verdict"
 
 # T3: the bound was reached and the PR was escalated (subcommand exit 4) ->
 # the ORIGINAL #8248 refusal still blocks the merge. The guard is not weakened
@@ -281,7 +300,7 @@ unset REDATE_STALE_CHECKS
 # T11: the flag is accepted by the argument parser and advertised in --help.
 HELP_OUT="$(bash "$MERGE_PR_SRC" --help 2>&1)"
 assert_contains "$HELP_OUT" "--redate-stale-checks" "--help advertises the flag"
-assert_contains "$HELP_OUT" "4 = stale required checks were re-dated" "--help documents exit 4"
+assert_contains "$HELP_OUT" "4 = stale required checks re-running in place" "--help documents exit 4"
 assert_contains "$(grep -c -- '--redate-stale-checks) REDATE_STALE_CHECKS=true' "$MERGE_PR_SRC")" "1" \
     "the argument parser has exactly one arm for the flag"
 
@@ -302,9 +321,20 @@ REDATE_HELP="$("$REAL_DAEMON_BIN" merge-pr redate-checks --help 2>&1)"
 REDATE_HELP_RC=$?
 set -e
 assert_eq "0" "$REDATE_HELP_RC" "real binary: 'merge-pr redate-checks --help' exits 0"
-for opt in --pr --repo --branch --expected-head-sha; do
+for opt in --pr --repo --branch --expected-head-sha --rerun-wait-secs --allow-proceed; do
     assert_contains "$REDATE_HELP" "$opt" "real binary: subcommand accepts $opt"
 done
+
+# T14 (#8914): the REAL binary accepts the exact opt-in value this script sets.
+# clap's default bool parser rejects "1" (exit 2, "invalid value"), which would
+# silently disable BOTH remedies; a stub loom-daemon cannot catch that.
+FAIL_GH="$STUB_DIR/gh-fails"; printf '#!/usr/bin/env bash\nexit 1\n' > "$FAIL_GH"; chmod +x "$FAIL_GH"
+set +e
+OPTIN_OUT="$(LOOM_REDATE_ALLOW_PROCEED=1 LOOM_GH_BIN="$FAIL_GH" "$REAL_DAEMON_BIN" merge-pr redate-checks --pr 1 --repo o/r --branch b --expected-head-sha abc --rerun-wait-secs 0 2>&1)"
+OPTIN_RC=$?
+set -e
+assert_eq "1" "$OPTIN_RC" "real binary + LOOM_REDATE_ALLOW_PROCEED=1 parses and reaches the remedy (a failing gh -> exit 1, not a clap exit 2)"
+assert_not_contains "$OPTIN_OUT" "invalid value" "the opt-in value merge-pr.sh sets is accepted"
 
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]]

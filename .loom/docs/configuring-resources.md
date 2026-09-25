@@ -291,10 +291,11 @@ before writing one (full contract in
 - **An operator pin disables fall-through outright.** `LOOM_RUNTIME`,
   `LOOM_RUNTIME_<ROLE>`, or an explicit per-dispatch runtime short-circuits to
   static resolution — deliberately, so a pin stays useful for debugging.
-- **`modelProfile` currently gates but does not pin** (#8602): availability is
-  read against the named profile's pool, but the launch resolves whatever profile
-  that runtime would have used anyway. Prefer **bare** runtime entries unless the
-  named profile *is* that runtime's default.
+- **`modelProfile` gates *and* pins** (#8602): availability is read against the
+  named profile's pool, and the chosen tap's profile is pinned at launch as
+  `LOOM_MODEL_PROFILE`, so the launch runs on exactly the tap whose pool was
+  checked. A **bare** runtime entry pins nothing and keeps that runtime's own
+  default profile resolution.
 - **Fail-closed stays fail-closed.** When every listed tap is skipped the caller
   holds exactly as before; the list only widens what counts as "available".
 
@@ -493,6 +494,14 @@ is not yet guarded for Judge (no verified `loom_*` tool binding), so a quality
 tier on it fails closed at exit `78`.
 
 ### The flash profile is the one indirection point
+
+**Shortcut:** the bundled `quick-flash` preset (#8711) is exactly this profile,
+already in the binary — `"runtimes": {"default": "pi", "defaultModelProfile":
+"quick-flash"}` and nothing else, with `loom-daemon api-keys add gemini <account>`
+for the key. Write the object below when you want a different flash generation,
+a `-latest` alias, or a second provider binding; a configured profile of the
+same name shadows the bundled one. Preset inventory and the backstop recipe:
+[`runtime-model-trials.md`](runtime-model-trials.md) §More models.
 
 Define it once under `runtimes.modelProfiles` and make it the default:
 

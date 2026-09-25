@@ -55,7 +55,7 @@ document should be read as "Codex is safe to point at your repos".
 | `sandbox_permissions` / `writable_roots` / `--add-dir` | Widen a `workspace-write` sandbox to extra readable/writable roots. | **Not driven by the adapter.** Passes through if an operator supplies it. |
 | `--skip-git-repo-check` | Waives Codex's refusal to run outside a git work tree. | Injected **only** when the cwd is genuinely not inside a work tree (see "Trusted-directory check" below). |
 | `$CODEX_HOME/hooks.json` (`pre_tool_use`, `permission_request`, `post_tool_use`, `user_prompt_submit`, `session_start`, `session_end`, `pre_compact`, `post_compact`, `subagent_start`, `subagent_stop`) | Per-tool-call and per-prompt interception — the direct analogue of Claude Code's hook taxonomy. | **`pre_tool_use` is now WIRED** (issue #4495) via the managed bridge `defaults/hooks/guard-codex-bridge.sh`, installed by `defaults/scripts/provision-codex-hooks.sh`. See "Managed `pre_tool_use` hook bridge" below. Every other event remains unwired. |
-| `$CODEX_HOME/config.toml` → `hooks.state."<id>".trusted_hash` | Persisted hook trust. A hook that has not been trusted does not run. | **Verified, never bypassed.** `spawn-codex.sh` fails closed (exit 78) for mutable roles when trust cannot be observed. `--dangerously-bypass-hook-trust` is never passed. |
+| `$CODEX_HOME/config.toml` → `hooks.state."<id>".trusted_hash` | Persisted hook trust. A hook that has not been trusted does not run. | **Verified, never bypassed.** `spawn-codex.sh` fails closed (exit 78) for mutable roles when trust cannot be observed. `--dangerously-bypass-hook-trust` is never passed — and profile provisioning (#8672) denylists these keys, so trust is never copied between pooled profiles either. |
 | `approval_policy` / `-a` | When Codex pauses to ask a human. | **Irrelevant to Loom.** `codex exec` is non-interactive and exposes no `-a` at all; there is no human to answer, so approvals gate nothing. The sandbox is the only load-bearing guard. |
 | `AGENTS.md` | Repository instructions, read natively by Codex via ancestor traversal. | Advisory context, not a boundary. Loom's `AGENTS.md` codegen is a separate issue (contract point 5). |
 
@@ -690,10 +690,23 @@ companion provisioning issue #4469 so it has exactly one owner.
     └── …                          # Codex's own state (caches, logs, skills)
 ```
 
+A profile holds far more than the credential: `AGENTS.md`, `config.toml`
+(models, MCP servers), `prompts/`, and `hooks.json` all live here, and the CLI
+reads all of them. A profile that holds *only* `auth.json` is a blank install,
+which is why **`loom-daemon accounts provision` populates a pooled profile from
+the operator's own `~/.codex`** (issue #8672) — automatically on `accounts
+add`/`import` and at daemon start, idempotently, under a per-surface sharing
+table. It never reads `auth.json`, never shares `hooks.state` trust hashes or
+`[projects."<path>"] trust_level` (the two keys immediately below and above
+this section), and never overwrites an edit an operator made inside a pooled
+profile. Full rules, ledger semantics, and the per-provider table:
+[`codex-profile-provisioning.md`](codex-profile-provisioning.md).
+
 Provision profiles through the secret-safe lifecycle CLI:
 
 ```bash
 loom-daemon accounts add codex alice --device-auth
+loom-daemon accounts provision --all          # populate every pooled profile
 loom-daemon accounts import codex bob --auth-file ~/.codex/auth.json
 loom-daemon accounts status codex alice --json
 loom-daemon accounts disable codex alice

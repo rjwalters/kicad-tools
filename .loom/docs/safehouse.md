@@ -1327,6 +1327,30 @@ arrived, and recovering from an already-DEGRADED verdict still requires the
 latter. A truly one-way receive path still receives neither claims nor
 heartbeats, so the genuine-break signature above is unaffected.
 
+**That "unaffected" case stopped being hypothetical (#8886).** Both fixes
+above landed (#8739 2026-09-23, #8817 2026-09-24), and two independent
+per-host trackers went DEGRADED again afterward showing exactly this
+signature — `robb-studio` (#8509, flap #10, `0 received / 4373 advertised`)
+and `ip-172-31-74-176` (#8779, flap #6, `0 received / 1782 advertised`), both
+well after both merges. On both hosts the local daemon's own safehouse RPC
+socket reports `state: "connected"` — healthy — so a genuine break here, if
+one exists, lives **above** the RPC link: inside the `safehoused` sidecar's
+own Matrix sync/room-membership state, which the client protocol this daemon
+speaks does not expose at all.
+
+Confirmed by inspecting `loom-daemon/src/safehouse.rs` directly (2026-09-25):
+the only ops this client issues are `hello`, `send`, and `create_room`, and
+every reply it parses is limited to `ok`/`error`/`id` (plus, for
+`create_room`, a room-identity key). None carry a last-successful-Matrix-sync
+timestamp, a room member count, or any other sidecar-side mesh-health signal
+— so `SafehouseStatus` (`loom-daemon/src/types.rs`) cannot be extended with
+one today without a protocol change on the `rjwalters/safehouse` side.
+That capability request has been filed as #8888 (external, since this repo
+does not vendor `rjwalters/safehouse` and cannot implement its side). Until
+it lands, telling "genuine mesh break" apart from "still-undiscovered local
+false positive" for `robb-studio`/`ip-172-31-74-176` needs live host SSH —
+routed to #8889 (`loom:operator-mechanical`) rather than guessed at here.
+
 ### Fleet-wide completion dedup: reusing the peer-claim channel (#6352)
 
 The [per-host completion dedup](#what-gets-narrated) documented under

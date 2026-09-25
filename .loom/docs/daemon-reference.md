@@ -229,6 +229,7 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `daemon.drain.aborted`     | Daemon IPC (#4090)             | `{was_draining}` |
 | `daemon.drain.timeout`     | Drain supervisor (#4090)       | `{in_flight, forced, cancelled?, then_exit?, roll_pending?, attempts?, elapsed_secs?}` |
 | `daemon.drain.roll_pending` | Drain supervisor (#6007)      | `{in_flight, attempt, window_secs, budget_secs}` |
+| `daemon.drain.superseded`  | Auto-update loop (#8514)       | `{from, to}` (artifact identities) |
 | `forge.event`               | `forge_events.rs` feed consumer (#8765) | `{source: "forge-event-feed", host_id, count, first_seq, last_seq, types}` |
 
 The four `epic.issue.{N}.*` topics were authorized by **#3873** (epic #3842
@@ -247,7 +248,9 @@ restart). **#6007** adds a fifth, `roll_pending`: a relaunch drain whose deadlin
 passed with work still in flight now **retains** the roll (dispatch stays paused,
 the restart re-arms itself at quiescence) and publishes `roll_pending` per re-arm;
 `timeout` then fires only if the whole paused-dispatch budget is spent and the roll
-is abandoned. See
+is abandoned. **#8514** adds a sixth, `superseded`: the auto-update loop discarded
+a *pending* roll because a newer release artifact had overtaken the one it was
+armed for, and re-armed for that newer artifact instead. See
 [Supervised restart primitive](#supervised-restart-primitive-4054) below.
 They ride the same in-memory bus as the sweep topics and are tailable via
 `subscribe_to_events` / `tail_event_bus`.
@@ -1940,6 +1943,51 @@ ordering:
 queues that drain fast. A permanently-full higher tier **will** starve lower tiers;
 fairness knobs (per-tier slot reservations) and cross-repo dependency awareness are
 explicit follow-ups, deferred until observed to matter.
+
+**`tier:*` labels do not affect dispatch order.** `tier:goal-advancing` and its
+siblings are triage metadata; no daemon code reads them. Only the four keys above
+order the queue.
+
+### Ready queue view (`loom-daemon queue`, #8852)
+
+Each multi-workspace tick records one row per ready `loom:issue` it listed, ranked
+by `candidate_cmp`, with what the tick did with it:
+
+- **running**: `dispatched`, `in_flight`
+- **ready** (waiting on a limit): `deferred_capacity`, `deferred_ramp_cap`,
+  `deferred_saturation`, `deferred_out_of_slice`
+- **blocked** (held by something specific to the issue or repo): `parked` (with
+  the label), `open_pr` (with the PR number), `dispatch_backoff`,
+  `open_pr_backoff`, `quarantined`, `noop_cooldown`, `declined`,
+  `prless_retry`, `peer_claim`, `recheck_interval`, `hard_exclusion`,
+  `host_constraint`, `workspace_halted` (the whole repo's dispatch is held: red
+  `main`, a gate in flight, a pre-flight or token-pool hold, a drain, or the
+  host-distress breaker; the row does not say which), `workspace_commands_missing`,
+  `dispatch_error` (with the error text)
+
+Each disposition is recorded next to the `TickReport` counter it matches, so the
+rows and the counters agree. Issues dropped before the sort are still ranked by the same
+comparator, so their rank shows where they would sit once unblocked. With repo
+sharding (#6243), an out-of-slice row can be passed over for a lower-ranked
+in-slice one; its disposition says so.
+
+The rows travel on `last_work_finder_tick.queue` in `loom-daemon status --json`,
+`health --json` and `serve`'s `/api/status`, stamped with the tick's `at`.
+`loom-daemon queue [--json]` renders them with a freshness verdict: `fresh`,
+`stale` (no tick for 5 of the daemon's reported `work_finder_interval_secs`,
+never under 5 minutes), `no_tick` (no tick yet in this daemon process, so the
+queue is unknown rather than empty) or `disabled`. A repo whose forge listing
+failed on the tick is named in `last_work_finder_tick.listing_failed`, and the
+view says the queue is INCOMPLETE rather than empty (`--json`: `complete:
+false`). The `serve`
+dashboard has a matching "Ready queue" panel. The single-workspace tick path does
+not record rows. Each row also carries daemon-derived `state` and `reason`
+strings, so clients do not keep their own copy of the mapping. With
+observability export on, the queue also reaches SigNoz as
+`loom.queue.issues{state,reason}` gauges and reaches the fleet backend as a
+`queue.snapshot` record (phase 2; see
+[`observability.md` §3c](observability.md#3c-operational-signals-from-daemon-loops-issue-8860)).
+The fleet dashboard view is phase 3.
 
 ## Forge-side pipeline snapshot (`status --pipeline`, #3977)
 
@@ -5357,6 +5405,132 @@ single-host installs print neither. `--json` carries the same under
 else: killing a host does **not** reassign its slice. The next section is the
 opt-in that makes the ring dynamic.
 
+### Fleet captain (#8848)
+
+A multi-host fleet has two kinds of scheduled job: **per-host** jobs (the
+daemon watchdog, clean, resync, drift) that every host runs unchanged, and
+**singleton** jobs that watch one shared thing — a forge-wide queue check, a
+public-feed staleness check, a token-pool anomaly check — and must run on
+**exactly one** host, because a dedup-sensitive alert filed twice (the #6714
+race class) is a duplicate, not a redundancy win. Before this, an operator
+hand-placed a singleton by installing a timer on a chosen host and documenting
+the choice in prose — nothing enforced "exactly one", so a rebuilt/re-imaged
+worker silently lost the job, or a second host silently duplicated it.
+
+`fleet.captain: "<host id>"` in the **tracked** `.loom/config.json` names the
+one host — by its own `host_identity()` (`loom-daemon/src/sweep_registry/mod.rs`;
+precedence `LOOM_HOST_ID` env var > `$HOSTNAME` > the `hostname` binary >
+`UNKNOWN_HOST` — the same operator-controlled identity issue #5063
+established fleet-wide) — that runs every declared singleton job. This
+follows the `shardCount`/`shardKey`
+"identical fleet-wide, tracked" precedent from the sharding table just above
+(**not** `shardIndex`'s "must differ per host" tier): every host must agree on
+who the captain is, and a committed file is identical fleet-wide by
+construction. There is no election and no lease — the captain is *assigned*,
+not elected — so a lease-based "alert when the captain has been down for N
+hours" extension is deliberately out of scope for this mechanism today; it
+would be a follow-up, not a change to the assignment model.
+
+**The gate**: `loom_daemon::fleet_captain::resolve_gate_for_root(root,
+current_host_id)` compares the declared `fleet.captain` against
+`current_host_id`, mirroring the host-affinity constraint's (#7456,
+`loom-daemon/src/host_affinity.rs`) fail-closed shape (exact string equality
+only, no partial/case-insensitive match) at fleet-config scope rather than
+issue-affinity scope. Three outcomes, each load-bearing:
+
+| Declared captain | This host | Outcome |
+|---|---|---|
+| Absent | — | `NoCaptainDeclared` — refuses. A **defined** outcome, not "whatever falls out": a declared singleton job with no captain assigned must never silently arm everywhere (reopening the exact duplicate-alert race this exists to close) |
+| Set, matches | — | `Armed` — the job may run here |
+| Set, does not match | — | `Refused`, naming the current captain in the message (mirrors `cli/dispatch.rs`'s host-affinity refusal style) |
+
+A successful arm records the job's name in a process-lifetime registry
+(`fleet_captain::armed_singleton_job_names()`); any other outcome clears it,
+so a job that flips from armed to refused across ticks (a `fleet.captain`
+edit, or a host-identity change) self-heals within one tick rather than
+requiring a daemon restart. **Per-host jobs are entirely unaffected** — this
+is opt-in per job (a job simply never calls `arm_singleton_job`), not a
+blanket gate on every cron/timer/tick.
+
+**The shell-facing half**: `loom-daemon fleet-captain <job-name>` resolves the
+same gate for a schedule wrapper — a launchd/systemd timer or a shell script
+installed on every fleet host — so "exactly one host runs this" stops being a
+per-wrapper reimplementation (2AMLogic/2am's `batch-fleet-reconcile-schedule.sh`
+and `loom-wake-pull-schedule.sh` each hand-rolled their own; others simply did
+not, which is how `loom-worker-2` ended up carrying two singleton timers
+`loom-worker-1` lacked):
+
+```sh
+# Refuse on every host that is not the captain:
+loom-daemon fleet-captain forge-queue-check || exit 0
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` | This host IS the declared captain — run the job |
+| `3` | A captain IS declared and it is not this host — routine "not my turn" |
+| `4` | No `fleet.captain` declared at all — a **misconfiguration**, not a turn |
+| `2` | The repo root could not be resolved |
+
+`3` and `4` are separate codes on purpose: collapsing them would make a
+typo'd or never-declared captain indistinguishable from correct behavior,
+i.e. every singleton silently unarmed fleet-wide with no signal. `--repo-root`
+picks the workspace to read `fleet.captain` from, `--host-id` overrides
+`host_identity()` for testing a placement decision from another host's point
+of view, and `--quiet` suppresses the message on the **armed** path only —
+refusals always print, because a silent refusal is exactly how a singleton
+goes missing unnoticed. This subcommand is a gate **check**, not an arm: it
+deliberately does not touch the process-lifetime armed registry, since a CLI
+process exits immediately and would publish a phantom `armed_singleton_jobs`
+entry (durable cross-process arm reporting for shell-driven singletons is
+follow-up work).
+
+**Observability**: `host.health` (`HostHealthRecord`) carries `is_captain` and
+`armed_singleton_jobs`. `is_captain` is **three-valued**, not a bare `bool` —
+`None`/absent when this repo declares no `fleet.captain` at all (the
+mechanism does not apply here, the overwhelmingly common case), `Some(false)`
+when a captain IS declared and it is not this host, `Some(true)` when this
+host is the declared captain. Collapsing "not applicable" into `false` would
+make the dashboard's "no host reports `is_captain: true`" check fire on every
+ordinary repo that has never opted in — the same "unknown != zero" contract
+every other optional field on that struct already follows. The dashboard
+(`dashboard/src/redaction.ts`'s `host.health` allowlist,
+`dashboard/web/src/fleet.ts`'s `singletonsArmedOnNonCaptain`/
+`noCaptainReporting`, rendered in `dashboard/web/src/views/fleetOverview.ts`)
+flags (a) a singleton reported armed on a non-captain host, and (b) a fleet
+that has opted in (some host reports `is_captain` at all) but none of them is
+currently `true` — a typo'd or decommissioned captain id, or one that has
+simply never reported `host.health`, surfaces the same way rather than
+silently leaving every singleton unarmed with no signal.
+
+**Config example**:
+
+```json
+{
+  "fleet": {
+    "captain": "loom-worker-1"
+  }
+}
+```
+
+No `fleet.captain` declared at all leaves today's behavior fully unchanged —
+the config parse degrades gracefully (`None`) on the absent key, same as every
+other soft-fail read in `loom-daemon/src/config_resolver.rs`.
+
+**Deliberately out of scope for #8848 itself** (tracked as follow-ups, not
+half-done here): (a) **#8901** — migrating a real first singleton job onto
+this gate, and giving shell-driven arms a durable cross-process registry so
+they appear in `armed_singleton_jobs` (until then a `fleet-captain` CLI
+invocation deliberately records nothing, since its process exits immediately;
+so the "singleton armed on a non-captain host" dashboard flag can only fire
+for in-daemon jobs); and (b) **#8902** — the lease: an alert when the
+declared captain has not reported `host.health` for N hours. Note that (b) is
+an *alert*, not failover — the captain stays assigned, never elected, because
+a singleton that runs twice is the exact duplicate-alert bug this mechanism
+exists to prevent, while one that is late is merely late. #8848
+shipped the config schema, the gate library, the `fleet-captain` CLI, the
+`host.health` fields, and the dashboard flags as the base mechanism.
+
 ### Role-runner host roster (#6704, phases A and B)
 
 The design record — [`role-runner-roster.md`](role-runner-roster.md) — picked
@@ -8771,6 +8945,48 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
   skips instead of rebuilding again: the binary is already provisioned and the
   restart is already coming, and a redundant `cargo build` would compete for CPU
   with the very in-flight sweeps the pending roll is waiting on.
+- **…but a superseded pending roll is replaced, not waited out (#8514).** That
+  skip was unconditional, so a release published mid-pause was ignored until the
+  armed roll finished or spent its budget — on a multi-release day a host could
+  sit paused for up to the whole budget converging on a binary that was already
+  stale. A tick now compares the release it resolves against the identity the
+  armed roll was triggered for (its tag + published asset checksum, recorded by
+  `DrainState::set_roll_target`) and **supersedes** a stale one: the roll is
+  discarded through the same `--abort-drain` primitive (flag cleared, generation
+  bumped, #6007's pending bookkeeping reset — dispatch resumes while the new
+  artifact is fetched), then re-armed for the newer artifact, publishing
+  `daemon.drain.superseded`. Deliberately narrow — every other shape still skips
+  exactly as before: a **first-attempt** drain (still inside its own deadline), a
+  **then-exit teardown**, an **untargeted** operator `restart --drain`, and any
+  tick whose resolved artifact is unresolved, already installed, or older
+  (#8513's stale-repo shape).
+- **Worst-case pause, per path — and why the two paths keep sharing one budget
+  (#8514).** The budget constants (`DRAIN_PENDING_BUDGET_MULTIPLIER` = 4,
+  `MAX_DRAIN_PENDING_BUDGET_SECS` = 4h, `MAX_DRAIN_RETRY_WINDOW_SECS` = 2h, all in
+  `loom-daemon/src/ipc/drain_roll.rs`) are deliberately **shared** between the
+  automatic auto-update roll and an operator-issued `restart --drain --timeout`,
+  because the budget is already derived from the *requested* timeout and the two
+  paths request different ones:
+
+  | Path | Requested timeout | Pending budget | Worst case dispatch stays paused |
+  |---|---|---|---|
+  | Auto-update roll (`IpcDrainTrigger::trigger`, `timeout_secs = None`) | `DEFAULT_DRAIN_TIMEOUT_SECS` = 1800s | `4 × 1800s` = **2h** | 2h, then abandon + dispatch resumes |
+  | `restart --drain` (no `--timeout`) | 1800s | 2h | as above |
+  | `restart --drain --timeout 60` | 60s | 240s | 4m |
+  | `restart --drain --timeout 7200` | 7200s | `min(4 × 7200, 4h)` = **4h** | 4h (the absolute cap) |
+
+  A separate, smaller constant for the automatic path was considered and
+  **rejected**: abandoning sooner does not shorten the pause a busy host
+  experiences, it only makes it *repeat* sooner. Abandon resumes dispatch, but the
+  artifact is still not installed, so the next auto-update tick re-arms the roll
+  and re-pauses dispatch — a 30m budget would oscillate pause/resume every 30m
+  instead of every 2h, adding drain-supervisor churn and more `daemon.drain.*`
+  noise for no extra dispatch throughput. The multi-release day the issue actually
+  reported is fixed by the supersede bullet above (the pause now ends when a newer
+  release lands, not when a timer expires), and the previously-invisible pause is
+  fixed by the live `drain.roll` fields in the observability bullet below.
+  Operators who *do* want a shorter automatic bound should shorten the **timeout**
+  (which the budget follows), not the multiplier.
 - **Supervision proof is checked up front (AC5):** on an unsupervised host the
   request is refused **before** dispatch is paused (`accepted: false`), so a caller
   can detect nothing happened and no silent outage is introduced.
@@ -8781,9 +8997,16 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
   of scope (it would require a role registry, #4090's stop-and-split boundary).
 - **Observability:** `loom-daemon status` renders `DRAINING (n sweep(s) remaining,
   deadline …)` while active and the last transition (timeout refusal / abort)
-  afterward; the five `daemon.drain.*` events (above) narrate the transitions on
+  afterward; the `daemon.drain.*` events (above) narrate the transitions on
   the event bus. **Cannot be used for its own first roll** — see the rollout note
-  below.
+  below. Since **#8514** the roll state is also **live and queryable** rather than
+  only a one-shot note: `status --json`'s `drain.roll` object (`null` when no
+  drain is active) carries `roll_pending`, `started_at`, `paused_secs`,
+  `budget_secs`, `refusals`, `in_flight`, `target` and `then_exit`, and the human
+  renderer prints the same under the `Drain: DRAINING …` line as
+  `roll PENDING since T — dispatch paused Dm of a 2h0m budget, N in flight, …`.
+  That is what makes a host idling behind a roll visible from one poll — and, by
+  diffing `paused_secs` across polls, whether the pause is still advancing.
 - **Supervised stop/start vs. a full wait-for-zero drain (#5340).** These are two
   different tools for two different situations, not a strict "drain is always
   safer" hierarchy:

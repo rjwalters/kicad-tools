@@ -25,7 +25,11 @@ helpers resolve inside that clone. **Guard code and effective guard policy do
 not**: they come from the image-owned, digest-sealed
 `loom-private-control-v1` bundle at `/opt/loom/private-control/`, whose identity
 is bound to the account/container/lease at admission and rechecked immediately
-before spawn and again in-container before the model is exec'd — see
+before spawn and again in-container before the model is exec'd. The account
+profile's hook registration, Codex trust state and readiness receipt are bound
+**read-only over their own paths**, so they cannot be written, removed or
+renamed from inside the session at all, while the profile directory stays
+writable for the canonical `auth.json` refresh — see
 [private-control-bundle.md](private-control-bundle.md) for the supported
 image/CLI/protocol combinations, the forced policy map, the residual limitations
 and rollback. The host retains the logical repository identity for dispatch,

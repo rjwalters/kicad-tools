@@ -2,7 +2,7 @@
   "schema_version": 1,
   "verified_on": "2026-09-18",
   "source": "https://platform.claude.com/docs/en/about-claude/pricing",
-  "notes": "Model rate card, USD per 1000 tokens (= the published $/MTok / 1000). Resync-delivered to .loom/pricing.json so a price change reaches the fleet without a Loom release (#8177, ask 2 of #8060). loom-daemon falls back to the compiled card in loom-daemon/src/activity/resource_usage.rs when this file is absent or fails validation, and the two are held in agreement by the shipped_pricing_asset_agrees_with_the_compiled_card test. Rows are an ORDERED cascade: the first row with a `match` substring contained in the (lowercased, alias-resolved) model id wins, exactly like the compiled card. Keep the trailing `claude-<family>-` catch-all of each family pointing at that family's NEWEST published row — an unrecognized id is far likelier to be newer than the card than to be a resurrected retired model.",
+  "notes": "Model rate card, USD per 1000 tokens (= the published $/MTok / 1000). Resync-delivered to .loom/pricing.json so a price change reaches the fleet without a Loom release (#8177, ask 2 of #8060). loom-daemon falls back to the compiled card in loom-daemon/src/activity/resource_usage.rs when this file is absent or fails validation, and the two are held in agreement by the shipped_pricing_asset_agrees_with_the_compiled_card test. Rows are an ORDERED cascade: the first row with a `match` substring contained in the (lowercased, alias-resolved) model id wins, exactly like the compiled card. Keep the trailing `claude-<family>-` catch-all of each family pointing at that family's NEWEST published row — an unrecognized id is far likelier to be newer than the card than to be a resurrected retired model. The Moonshot/Kimi rows (#8564) come from a SECOND vendor page, https://platform.moonshot.ai/docs/pricing/chat, verified 2026-09-22; `verified_on` above stays at the OLDER of the two dates so the staleness warning fires on whichever vendor has gone unchecked longest. Those rows are the platform API LIST price and are an estimate: a Kimi Code subscription is not billed per token, so for a subscription launch the derived cost is 'what these tokens would have cost on the API', not money that changed hands. The K2 table publishes no cache-write price, so the K2 rows' write rates are the published cache-miss input price rather than an invented surcharge.",
   "cache_multipliers": {
     "read": 0.1,
     "read_reduced": 0.025,
@@ -113,6 +113,61 @@
       "input_per_1k": 0.001,
       "output_per_1k": 0.005,
       "cache_read": "standard"
+    },
+    {
+      "id": "kimi-k3",
+      "match": ["kimi-k3"],
+      "input_per_1k": 0.003,
+      "output_per_1k": 0.015,
+      "cache_rates": {
+        "read_per_1k": 0.0003,
+        "write_5m_per_1k": 0.003,
+        "write_1h_per_1k": 0.006
+      }
+    },
+    {
+      "id": "kimi-k2-7-code-highspeed",
+      "match": ["kimi-k2.7-code-highspeed", "kimi-k2-7-code-highspeed"],
+      "input_per_1k": 0.0019,
+      "output_per_1k": 0.008,
+      "cache_rates": {
+        "read_per_1k": 0.00038,
+        "write_5m_per_1k": 0.0019,
+        "write_1h_per_1k": 0.0019
+      }
+    },
+    {
+      "id": "kimi-k2-7-code",
+      "match": ["kimi-k2.7-code", "kimi-k2-7-code", "kimi-k2p7-code"],
+      "input_per_1k": 0.00095,
+      "output_per_1k": 0.004,
+      "cache_rates": {
+        "read_per_1k": 0.00019,
+        "write_5m_per_1k": 0.00095,
+        "write_1h_per_1k": 0.00095
+      }
+    },
+    {
+      "id": "kimi-k2-6",
+      "match": ["kimi-k2.6", "kimi-k2-6", "kimi-k2p6"],
+      "input_per_1k": 0.00095,
+      "output_per_1k": 0.004,
+      "cache_rates": {
+        "read_per_1k": 0.00016,
+        "write_5m_per_1k": 0.00095,
+        "write_1h_per_1k": 0.00095
+      }
+    },
+    {
+      "id": "kimi-k2-newest",
+      "match": ["kimi-k2"],
+      "input_per_1k": 0.00095,
+      "output_per_1k": 0.004,
+      "cache_rates": {
+        "read_per_1k": 0.00019,
+        "write_5m_per_1k": 0.00095,
+        "write_1h_per_1k": 0.00095
+      }
     },
     {
       "id": "gpt-4o",

@@ -391,17 +391,11 @@ assert_contains "$LAST_OUT" "first parent" "the daemon's refusal reason is surfa
 echo ""
 echo "Testing merge-pr.sh source wiring..."
 
-# Both "Base branch was modified" branches must re-read the head AFTER the
-# sync and BEFORE looping back to the merge call. Anchored on the loop headers
-# so a branch that moved to another part of the script cannot pass by accident.
-auto_loop_refresh=$(awk '
-  /^  for MERGE_ATTEMPT in \$\(seq 1 \$MAX_MERGE_RETRIES\); do/ { infor=1 }
-  infor && /forge_update_branch/                                { synced=1 }
-  infor && synced && /_refresh_precondition_sha/                { print "ok"; exit }
-  infor && synced && /^        continue$/                       { print "missing"; exit }
-' "$MERGE_PR_SRC")
-assert_eq "ok" "$auto_loop_refresh" "auto-merge retry loop re-reads the head after forge_update_branch, before continuing"
-
+# RETIRED by #8410: the native auto-merge retry loop (2-space-indented
+# `for MERGE_ATTEMPT`, inside the AUTO_MERGE block) is gone — `--auto` now
+# waits then falls into the one synchronous-merge loop below, so there is
+# only ONE retry loop left to assert on. The "Base branch was modified"
+# re-read-after-sync property is still asserted, just on that single loop.
 sync_loop_refresh=$(awk '
   /^for MERGE_ATTEMPT in \$\(seq 1 \$MAX_MERGE_RETRIES\); do/ { infor=1 }
   infor && /forge_update_branch/                              { synced=1 }
@@ -410,15 +404,17 @@ sync_loop_refresh=$(awk '
 ' "$MERGE_PR_SRC")
 assert_eq "ok" "$sync_loop_refresh" "synchronous retry loop re-reads the head after forge_update_branch, before continuing"
 
-# All THREE head-mismatch sites route through the wrapper: the two text
-# classified ones and the native `loom-daemon forge auto-merge` exit-4 one. A
+# The ONE remaining head-mismatch site (the synchronous merge loop's own
+# retry) routes through the wrapper. #8410 removed the other two: the native
+# `loom-daemon forge auto-merge` exit-4 site died with the arm dispatch it
+# belonged to, and the text-classified auto-merge-loop site died with it. A
 # site left calling error_head_moved() directly would keep the #8164 bug on
 # whichever path it is.
-assert_eq "3" "$(grep -c '_head_moved_or_resync "\$' "$MERGE_PR_SRC")" "all three head-mismatch sites route through _head_moved_or_resync"
+assert_eq "1" "$(grep -c '_head_moved_or_resync "\$' "$MERGE_PR_SRC")" "the one surviving head-mismatch site routes through _head_moved_or_resync (#8410)"
 
-# The retry sites must `continue` — a retry that falls through would proceed
+# The retry site must `continue` — a retry that falls through would proceed
 # past the merge call it was supposed to re-make.
-assert_eq "3" "$(grep -c '_head_moved_or_resync "\$[A-Z_]*"\( exit-code\)\? && continue' "$MERGE_PR_SRC")" "each retry authorization continues the retry loop"
+assert_eq "1" "$(grep -c '_head_moved_or_resync "\$[A-Z_]*"\( exit-code\)\? && continue' "$MERGE_PR_SRC")" "the retry authorization continues the retry loop"
 
 # ============================================================================
 # Part 4: the REAL binary's offline contract (--from-stdin)

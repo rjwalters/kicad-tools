@@ -23,6 +23,13 @@ Never include live values in examples, command arguments, issue/PR bodies,
 test snapshots or screenshots. Gitignore and secret scanners are backstops,
 not permission to keep credential files in a checkout.
 
+Task credentials an agent needs for work outside Loom's own config (cloud
+tokens, SSH keys, service API keys) may be committed **by name only**: a
+per-repo `./.loom/credentials.md` manifest records where each credential lives —
+an env var name, an owner-store path, a provisioned-file path — never its
+value. See [credentials.md](credentials.md) for the lookup-before-ask
+convention and the owner-provisions/agent-installs flow.
+
 Host-specific paths belong in machine configuration. The existing machine
 defaults file is `~/.local/share/loom/config/defaults.json`; it can hold paths
 and non-secret settings. Repository and environment overrides can still take

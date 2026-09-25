@@ -35,6 +35,19 @@
 # is the regression guard). Every redirect below therefore uses the mechanism
 # the feature actually reclaims: `build.target-dir` in a per-worktree
 # `.cargo/config.toml`, the host-optimize convention issue #7239 describes.
+#
+# Needs a BUILT `loom-daemon` since #8195 slice 3: `worktree.sh remove` is now
+# a thin stub over `loom-daemon worktree-remove`, which drives the RUST
+# reclaim (`worktree_ops/cargo_target.rs`) instead of this lib's bash one. The
+# `worktree.sh remove` cases below are unchanged and are the equivalence
+# evidence for the removal-time half; the resolution-parity cases (Test 7)
+# still compare the two SHELL implementations and are unaffected. So this suite
+# moved to the "Native Port Suites" CI job, which builds the binary, and FAILS
+# rather than skips without one.
+#
+# Usage:
+#   cargo build --package loom-daemon
+#   bash defaults/scripts/tests/test-cargo-target-dir-reclaim.sh
 
 set -uo pipefail
 
@@ -45,6 +58,10 @@ REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 LIB_SH="$SCRIPTS_DIR/lib/cargo-target-dir.sh"
 STANDALONE_SH="$REPO_ROOT/scripts/cargo-target-dir.sh"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-remove"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

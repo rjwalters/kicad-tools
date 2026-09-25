@@ -376,9 +376,22 @@ runtime's per-session **transcript** (Claude Code writes per-message `usage` +
 OpenCode's equivalent is its own SQLite session store, wired up in #8507 —
 along with first-class `runtime`/`provider`/`profile` fields on every outcome
 record, so a non-Claude completion is identifiable even with no usage numbers
-at all. See [`native-runtime-usage-attribution.md`](native-runtime-usage-attribution.md)
-for the reader, its credential-isolation contract, and the
+at all. Kimi Code CLI's is its per-agent `wire.jsonl` durable event log, wired
+up in #8564. See [`native-runtime-usage-attribution.md`](native-runtime-usage-attribution.md)
+for both readers, their secret-isolation contracts, and the
 `loom-daemon opencode-usage` backfill path.
+
+| Runtime | Store | Selected by |
+|---|---|---|
+| Claude | `~/.claude/projects/<slug>/*.jsonl` transcripts | no launch record (the default) |
+| OpenCode | `opencode.db`, table `session` | `runtime: "opencode"` |
+| Kimi | `$KIMI_CODE_HOME/session_index.jsonl` → `<sessionDir>/agents/<agentId>/wire.jsonl` (`usage.record` + `llm.request`) | `runtime: "kimi"` |
+| Pi, Codex | *(not wired)* — labels but no numbers | falls through to the Claude reader |
+
+Two rules the seam enforces on every one of these, and on any adapter that adds
+the next: **unknown is not zero** (a store with nothing to report returns "no
+totals", never a zeroed breakdown), and **never guess a model id** (an
+unresolved alias is carried verbatim rather than mapped to a plausible name).
 
 An adapter must expose the equivalent for its runtime: a way to attribute a
 session to an account, a limit/exhaustion signal (via the error categories
@@ -1155,15 +1168,13 @@ ids and with completely different economics, so `modelProfile` is what
 distinguishes them. A bare runtime name is shorthand for "that runtime with
 whatever profile it would have chosen anyway".
 
-> **A `modelProfile` currently gates but does not pin.** Availability is read
-> against exactly the named profile's provider and credential pool, but nothing
-> carries the name to the launched child — the launch resolves whatever profile
-> that runtime would have used anyway, so for two profiles on *different*
-> providers the tap that ran is not the tap whose pool was checked. Bare-runtime
-> entries are unaffected (their profile is that default resolution). Pinning it
-> needs `LOOM_MODEL_PROFILE` set at the same launch sites #8599 has to touch, so
-> it is tracked behind that in #8602; until it lands, prefer bare entries unless
-> the named profile *is* the runtime's default.
+> **A `modelProfile` gates *and* pins (#8602).** Availability is read against
+> exactly the named profile's provider and credential pool, and the chosen
+> tap's profile is pinned at launch via `LOOM_MODEL_PROFILE`, set in the shared
+> `launch_env::apply_launch_env` helper (#8599) beside `LOOM_RUNTIME` — the
+> same env var `worker_spawn`'s arg parser already falls back to when no
+> `--profile` flag is given. Bare-runtime entries pin nothing, matching their
+> own `modelProfile: None`.
 
 **Resolution, per launch**: walk the list and take the first tap that is
 **(a)** admitted for the role and **(b)** has a spawnable credential right now.
@@ -1213,11 +1224,17 @@ crash-signal reader takes the entire rest of that line as the runtime name, so
 appending to it would report a runtime called `"opencode tier=2"`. "How much work
 is going to the backstop" reduces to counting markers whose `tier` is not `0`.
 
-Today each dispatch seam emits that marker to the **daemon log**
-(`loom-daemon logs`), which is where all three resolve. Writing it into the
-per-sweep launch record, beside that record's own `# LOOM_RUNTIME_RESOLVED`
-line, additionally requires teaching `crash_signals::log_has_progress` not to
-read it as child progress — tracked in #8599 rather than done half-way.
+Each dispatch seam emits that marker to the **daemon log** (`loom-daemon logs`),
+which is where all three resolve, and (#8599) the daemon carries it to the child
+in `LOOM_RUNTIME_PREFERENCE_MARKER` so `worker_spawn::launch` writes the same
+line, verbatim, into the **per-sweep launch record** beside that record's own
+`# LOOM_RUNTIME_RESOLVED`. `crash_signals::log_has_progress` excludes it as
+preamble, so a hung preference-resolved sweep still reads as stalled. The
+variable is set **only** when a walk decided the launch, so an unconfigured host
+writes a byte-identical log. A role tick additionally records the decision
+durably in `role_tick.outcome` as `preference_tier` / `preference_tap` (absent,
+never a fabricated `0`, when no list decided it) — so "how much work is going to
+the backstop" is a query over the journal, not a grep of the daemon log.
 
 ### Bounding the metered backstop tier (issue #8555)
 
@@ -1320,11 +1337,12 @@ host fault to repair before the metered tier can be used again).
 > (`work_finder::pool_preflight`), and a role tick's runtime is chosen by the
 > list with the #6201/#8408 pre-spawn gate kept as its fail-closed reporter
 > (`role_runner::runtime_preflight`). Sweep dispatch and role ticks both attach
-> the ceiling's slot to the child they spawn. Still to come: carrying the chosen
-> tier into the `role_tick.outcome`/launch-record surfaces (#8599 — today the
-> chosen tier is logged by the daemon, not written into the per-sweep log), and
-> the `modelProfile` launch pin noted above (#8602), which shares those same
-> sites. See also the other follow-up issues on #8436.
+> the ceiling's slot to the child they spawn. The chosen tier is reported per
+> launch as well as logged (#8599): both dispatch seams pin it through the
+> shared `launch_env::apply_launch_env`, which also pins a profile-pinned tap's
+> `modelProfile` as `LOOM_MODEL_PROFILE` (#8602), so a launch always agrees
+> with the tap availability just checked. See also the other follow-up issues
+> on #8436.
 
 ### Adding a runtime adapter
 
@@ -2055,7 +2073,7 @@ collaboration:
 | #9 | `spawn-worker.sh` spawn dispatcher | **1. Spawn** — the runtime-neutral dispatch entry point | **landed** (Phase 1) |
 | #6 | Restructured `classify-error.sh` into per-provider pattern tables | **3. Error classification** — the per-runtime pattern-table shape | **landed** (#4190) |
 | #15 | Codex runner | **1. Spawn** — Codex's `spawn-<runtime>.sh` implementation | **landed** as `defaults/scripts/spawn-codex.sh` (#4468). Ported, not cherry-picked: token-pool auth deferred to Phase 4, `--full-auto`/`-a` replaced (absent on `codex exec` 0.146.0), and the skip-permissions → sandbox mapping deliberately diverges (see the parity doc). |
-| #16 | `.codex/` config | **5. Instruction format** — Codex's config/instruction file set | not started (separate issue) |
+| #16 | `.codex/` config | **5. Instruction format** — Codex's config/instruction file set | **landed for the pooled case** (#8672) as `loom-daemon accounts provision`: a pooled `CODEX_HOME` is populated from the operator's own `~/.codex` per a per-provider sharing table (symlink capability/session trees, copy `AGENTS.md`, key-merge `config.toml` under a credential/identity denylist, never touch `auth.json` or per-project trust state), with a `<profile>/.loom-profile.json` ledger so a local edit inside a profile wins forever. See [`codex-profile-provisioning.md`](codex-profile-provisioning.md). Generating a repo's `.codex/` config from single source (the `AGENTS.md` codegen analogue) is still a separate issue. |
 | #20, #40 | `GUARDRAIL-PARITY.md` guardrail parity | **6. Permission / sandbox mapping** — the parity-doc requirement | **landed** as [`guardrail-parity-codex.md`](guardrail-parity-codex.md) (#4468), re-verified against 0.146.0 — several fork claims no longer hold and are corrected there |
 | #8 | `AGENTS.md` codegen | **5. Instruction format** — single-source instruction generation | **landed** (#4479) as a *generator* (`defaults/scripts/generate-agents-md.sh`) that extracts `agents-md:include` ranges from `defaults/.loom/CLAUDE.md` — not the fork's hand-authored static file (that would violate this repo's single-source non-goal). CI `check-agents-md-sync.sh` keeps the checked-in `defaults/.loom/AGENTS.md` in sync; scaffolding installs the root pointer + `.loom/AGENTS.md` full guide. |
 | #12, #17 | Provider-aware account pool (per-account provider, waterfall fill, `CODEX_HOME` rotation) | **4. Usage accounting** — provider-aware selection consuming the pool signals | Phase 4. #4468 ships only single-profile `CODEX_HOME` passthrough — no pool, no rotation, no bad-token marking. |

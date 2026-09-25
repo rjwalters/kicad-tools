@@ -15,16 +15,23 @@
 #
 # Strategy (mirrors test-merge-pr-merge-ordering-guard.sh): the functions
 # under test (_check_loom_pr_label, _check_champion_hold_state_staleness)
-# depend only on globals (PR_NUMBER, REPO_NWO, PR_LABELS, PR_HEAD_SHA,
-# DRY_RUN, ALLOW_UNAPPROVED) plus forge_get_pr_comments() and
-# forge_gh_comment_rl_safe() (both stubbed as shell functions here, not real
-# forge-helpers.sh — this test does not source that file). We extract the
-# function definitions from merge-pr.sh and source them, stub their forge
-# calls, then assert on exit code + emitted message. Because the block path
-# calls `error` (which `exit 1`s), the guard is invoked inside a
-# command-substitution subshell so the exit does not tear down the test.
-# Extracting from source (rather than replicating) keeps the test in
-# lockstep with the script.
+# depend on globals (PR_NUMBER, REPO_NWO, PR_LABELS, PR_HEAD_SHA, DRY_RUN,
+# ALLOW_UNAPPROVED) plus forge_get_pr_comments() and forge_gh_comment_rl_safe()
+# (both stubbed as shell functions here, not real forge-helpers.sh — this test
+# does not source that file). We extract the function definitions from
+# merge-pr.sh and source them, stub their forge calls, then assert on exit
+# code + emitted message. Because the block path calls `error` (which
+# `exit 1`s), the guard is invoked inside a command-substitution subshell so
+# the exit does not tear down the test. Extracting from source (rather than
+# replicating) keeps the test in lockstep with the script.
+#
+# As of #8191 (a slice of the merge-pr port), the label/override/block
+# DECISION inside _check_loom_pr_label is `loom-daemon merge-pr loom-pr-guard`
+# (Rust, loom-daemon/src/merge_pr/loom_pr_guard.rs) — this suite now also
+# pins a real built binary (see require-daemon-bin.sh below), same as
+# test-merge-pr-verdict-label-guard.sh already does for its sibling guard.
+# _check_champion_hold_state_staleness is unaffected — its marker-extraction
+# logic stays plain shell.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-merge-pr-loom-pr-label-guard.sh
@@ -133,6 +140,17 @@ last_posted_comment() {
     # call is made per reset, so the whole (trimmed) file is that one body.
     sed '/^---CALL-BOUNDARY---$/d' "$COMMENT_POST_LOG"
 }
+
+# The label/override/block decision inside _check_loom_pr_label is now
+# `loom-daemon merge-pr loom-pr-guard` (#8191). Pin the binary this suite
+# tests against and verify it knows the subcommand family — FATAL, never a
+# skip: a suite that skipped itself when no binary resolved would report
+# green while testing nothing (same rationale as
+# test-merge-pr-verdict-label-guard.sh, which pins the same subcommand family
+# for its sibling guard).
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 
 # --- Extract the functions under test from merge-pr.sh and source them ---
 # From `_check_champion_hold_state_staleness() {` up to (not including) the
@@ -284,6 +302,63 @@ run_guard
 assert_eq "1" "$LAST_RC" "Empty label array -> merge hard-blocked (exit 1)"
 assert_contains "$LAST_OUT" "<none>" "Empty label array -> message uses <none> placeholder, not a blank line"
 
+# --- FAILS CLOSED when the implementation behind the guard cannot run ---
+#
+# Moving the label/override/block decision from a sourced shell function into
+# a SUBPROCESS (#8191) introduces a failure mode the original could not have:
+# the binary can be missing, or be an older install that does not know this
+# subcommand. Same rationale as test-merge-pr-verdict-label-guard.sh's
+# identically-named section for its sibling guard: every outcome that is not
+# a recognized CLEAN/override/block shape must refuse the merge, because a
+# caller that only checks the exit code cannot tell "reviewed and clean" (or
+# "override accepted") from "never ran".
+echo ""
+echo "Testing fail-closed behavior when loom-daemon cannot answer..."
+
+_SAVED_BIN="${LOOM_DAEMON_BIN:-}"
+
+# T-FC1: no binary at all.
+DRY_RUN=false; ALLOW_UNAPPROVED=false
+PR_LABELS=$'loom:review-requested'
+PR_HEAD_SHA="deadbeef"
+LOOM_DAEMON_BIN="/nonexistent/loom-daemon"
+run_guard
+assert_eq "1" "$LAST_RC" "an absent loom-daemon BLOCKS the merge (never silently proceeds)"
+assert_contains "$LAST_OUT" "Merge blocked" "the refusal is stated as a block"
+assert_contains "$LAST_OUT" "could not run" "the message distinguishes 'never ran' from 'reviewed'"
+
+# T-FC2: a binary that EXISTS and exits ZERO but never emits the clean
+# sentinel or an override-shaped message — e.g. an older loom-daemon, or
+# anything substituted onto the path. /bin/echo exits 0 and prints its
+# arguments, so a contract that inferred "clean" from a zero exit alone would
+# wave this straight through.
+LOOM_DAEMON_BIN="/bin/echo"
+run_guard
+assert_eq "1" "$LAST_RC" "a zero-exit binary without a recognized verdict still BLOCKS"
+assert_contains "$LAST_OUT" "could not run" "its stdout is not mistaken for a verdict"
+
+# T-FC3: silent success. /bin/true exits 0 and prints nothing.
+LOOM_DAEMON_BIN="/usr/bin/true"
+run_guard
+assert_eq "1" "$LAST_RC" "a silently-succeeding binary BLOCKS (silence is not consent)"
+
+# T-FC4: silent failure. /usr/bin/false exits 1 with no output, unlike a real
+# block (which exits 1 WITH a 'Merge blocked:'-prefixed message) — exit 1
+# alone must never be read as the real refusal.
+LOOM_DAEMON_BIN="/usr/bin/false"
+run_guard
+assert_eq "1" "$LAST_RC" "a binary exiting 1 with no message still BLOCKS via the fail-closed message"
+assert_contains "$LAST_OUT" "could not run" "an empty exit-1 is not mistaken for the real refusal text"
+
+# T-FC5: the fail-closed path still honours --dry-run's no-side-effects
+# contract — it reports the would-be block without exiting 1.
+DRY_RUN=true
+run_guard
+assert_eq "0" "$LAST_RC" "--dry-run reports the fail-closed block without exiting 1"
+assert_contains "$LAST_OUT" "dry-run" "the dry-run marker is present"
+DRY_RUN=false
+LOOM_DAEMON_BIN="$_SAVED_BIN"
+
 # --- Regression tests for #7678 (real `set -e` semantics) ---
 #
 # T8 above ("no hold-state marker at all") already exercises the right
@@ -386,6 +461,8 @@ assert_contains "$src" "_check_champion_hold_state_staleness" \
   "merge-pr.sh defines the champion:hold-state staleness check"
 assert_contains "$src" 'PR_LABELS=$(echo "$PR_JSON" | jq -r' \
   "merge-pr.sh extracts PR_LABELS from the already-fetched PR_JSON (no extra API call)"
+assert_contains "$src" "merge-pr loom-pr-guard" \
+  "merge-pr.sh delegates the label/override/block decision to loom-daemon (#8191)"
 
 # Assert the guard is invoked BEFORE the auto-merge path (line ordering): the
 # _check_loom_pr_label invocation must precede `# Handle auto-merge mode`.

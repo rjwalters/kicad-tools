@@ -318,14 +318,22 @@ assert_contains "$out" "Base branch was modified" \
 echo ""
 echo "Testing merge-pr.sh source wiring (#6752)..."
 
-if grep -q 'forge_cmd_perm_safe loom-daemon forge auto-merge "\$PR_NUMBER"' "$MERGE_PR_SRC"; then
-    pass "merge-pr.sh routes the native auto-merge through forge_cmd_perm_safe"
+# #8410 removed the native auto-merge call site along with the rest of the
+# server-side arm, so the write this ladder has to protect on the `--auto`
+# path is now the synchronous REST merge itself (forge_merge_pr, section 2
+# above — it carries its own escalation and is exercised there). What must
+# still hold here is that the merge call merge-pr.sh DOES make is the
+# ladder-protected one.
+if grep -q 'forge_merge_pr "\$REPO_NWO" "\$PR_NUMBER" "\$MERGE_PRECONDITION_SHA"' "$MERGE_PR_SRC"; then
+    pass "merge-pr.sh merges through forge_merge_pr, which carries the #6752 escalation ladder"
 else
-    fail "merge-pr.sh must invoke the native auto-merge via forge_cmd_perm_safe (#6752)"
+    fail "merge-pr.sh must merge via forge_merge_pr (the ladder-protected write)"
 fi
 
 # The forcing function: an unwrapped invocation IS the bug, so assert none
-# remains. Prose/comment mentions never start an assignment or a command.
+# remains. Since #8410 there is no wrapped one either — any `loom-daemon forge
+# auto-merge` line in this script is a reintroduced server-side arm.
+# Prose/comment mentions never start an assignment or a command.
 bare_native="$(grep -nE '^[[:space:]]*(AUTO_MERGE_OUTPUT=\$\()?loom-daemon forge auto-merge' "$MERGE_PR_SRC" || true)"
 if [[ -z "$bare_native" ]]; then
     pass "no bare (unwrapped) 'loom-daemon forge auto-merge' invocation remains in merge-pr.sh"

@@ -2688,11 +2688,13 @@ rationale: ADR-0015 §2 and §4.
 
 ## Scoped Test Execution
 
-When running quality checks (step 7), use **scoped test execution** — run only the tests relevant to the changed files — to cut evaluation time while keeping confidence that the changed code is correct.
-
-**The full scoped-test cookbook** (changed-file detection, config-change full-suite trigger, per-language strategies, the full-suite fallback, the strategy-documentation template, and the merge-base-tree recipe) **lives in [`judge-reference.md`](judge-reference.md) → "Scoped Test Execution".** Read and follow it when running step 7.
+In step 7, run only the tests relevant to the changed files (**scoped test execution**). **The cookbook** (changed-file detection, full-suite triggers/fallback, per-language strategies, strategy template, merge-base-tree recipe) **lives in [`judge-reference.md`](judge-reference.md) → "Scoped Test Execution"** — follow it.
 
 **Your environment is not a clean shell (#5388)**: a dispatched sweep/daemon child inherits `LOOM_FORCE_SCOPE=protected` and `LOOM_GUARD_DECISION_LOG=1`, which can flip a guard-hook suite (e.g. `test-guard-destructive*.sh`) away from the *factory-default* behavior it asserts. Before requesting changes on such a failure, re-run with `env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <command>` — see `.loom/docs/guard-hooks.md` → "Known consequence".
+
+| File | Load when |
+|---|---|
+| [`cargo-target-isolation.md`](cargo-target-isolation.md) | Before a local cargo result informs a verdict: a shared target dir may hold another worktree's binary (#8457). |
 
 ## Feedback Style
 

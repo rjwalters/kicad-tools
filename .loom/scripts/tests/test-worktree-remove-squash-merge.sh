@@ -30,12 +30,28 @@
 # temp tree) and test-merge-pr-local-branch-cleanup.sh (extract-and-eval the
 # real function body — here exercised indirectly through worktree.sh itself,
 # not re-extracted a second time).
+#
+# Needs a BUILT `loom-daemon` since #8195 slice 3: `worktree.sh remove` is now
+# a thin stub over `loom-daemon worktree-remove`, and the squash-aware rule it
+# used to `awk` out of merge-pr.sh's live source is now
+# `loom-daemon/src/worktree_cli/branch_delete.rs`. Every assertion below is
+# unchanged — they are the evidence that the rule survived that move intact —
+# so this suite moved to the "Native Port Suites" CI job, which builds the
+# binary, and FAILS rather than skips without one.
+#
+# Usage:
+#   cargo build --package loom-daemon
+#   bash defaults/scripts/tests/test-worktree-remove-squash-merge.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-remove"
 
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 MERGE_PR_SH="$SCRIPTS_DIR/merge-pr.sh"

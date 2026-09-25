@@ -596,6 +596,28 @@ interpolate a key into these blocks: reference it with OpenCode's own
 A profile whose provider configuration embeds the literal value of one of its
 own `credentialEnv` variables is rejected before launch.
 
+Two bundled **quick-tap presets** — real model ids, usable as shipped, nothing
+to copy (#8711). They exist so the metered-backstop recipe below is one command
+plus one config key instead of a hand-written profile:
+
+| Preset | Harness → provider | Model | Pool namespace |
+|--------|--------------------|-------|----------------|
+| `quick-cerebras` | `pi` → `cerebras` | `gpt-oss-120b` | `cerebras` (`CEREBRAS_API_KEY`) |
+| `quick-flash` | `pi` → `google`, `opencode` → `google` | `gemini-3.5-flash` | `gemini` (`GEMINI_API_KEY`) |
+
+Neither sets `effort` or `allowedEfforts`: a quick tap's job is to spawn, and a
+guessed reasoning vocabulary would reject levels the provider actually accepts.
+Pass `--effort` (or set one in your own copy) when you want a specific level —
+the harness remains the authority on which it takes.
+
+**Their model ids are pins, and pins rot.** Both track their harness's bundled
+catalog; re-check them against the live catalog (`pi update --models`, or the
+provider's own model list) before leaning on a preset, and if a provider
+publishes a `-latest` alias that your harness's catalog accepts, prefer it in a
+`runtimes.modelProfiles` override of the same name. Configuration always
+shadows a bundled profile of the same name, so an override is an edit in one
+place and no per-role or sweep config names the raw id.
+
 Three bundled **examples** (placeholder model ids, no account-specific values —
 copy into `runtimes.modelProfiles` and edit, they are not usable as shipped):
 
@@ -614,10 +636,12 @@ loom-daemon worker profile-check example-bedrock
 loom-daemon worker profile-check my-comparison --runtime opencode
 ```
 
-For an unset credential variable that a pooled provider could supply,
-`profile-check` also names the pool namespace and its selectable count — and
-says explicitly when a real spawn would refuse at `78` because nothing is
-selectable, still without reading any account's secret value.
+For an unset credential variable, `profile-check` names the **pool namespace**
+`api-keys add` takes — with its selectable count when the host has registered
+accounts there, and `no accounts registered here` when it has not (#8711).
+Registered-but-nothing-selectable says explicitly that a real spawn would refuse
+at `78`; unregistered does not, because that launch still proceeds on the
+harness's own auth store. Neither reads any account's secret value.
 
 Native adapters require `--prompt`; use the harness CLI directly for interactive
 sessions. Legacy runtimes retain their interactive behavior.
@@ -669,12 +693,63 @@ Three things to know before pointing a trial at this:
   every phase in one session with no subagents, set `rolePreference.judge` to keep
   review off the tap that produced the change.
 
+### Zero-config recipe with a bundled quick-tap preset (#8711)
+
+The whole backstop, using `quick-cerebras` (swap in `quick-flash` unchanged —
+it binds `opencode` as well as `pi`). Nothing is copied into
+`runtimes.modelProfiles`; the preset is already in the binary.
+
+1. **Register the key in the pool**, never in config — the profile names
+   variables only ([`credential-storage.md`](credential-storage.md)). The
+   namespace is the one `profile-check` printed:
+
+   ```sh
+   loom-daemon api-keys add cerebras alpha --key-file /path/to/key   # --shared for a machine-level pool
+   loom-daemon api-keys health --provider cerebras
+   ```
+
+2. **Put it last in the preference list, and bound it.** The tap's
+   `modelProfile` both gates admission and pins the launch (#8602), so the tap
+   that runs is the one whose pool was just checked:
+
+   ```jsonc
+   "runtimes": {
+     "preference": ["claude", "codex", {"runtime": "pi", "modelProfile": "quick-cerebras"}],
+     "backstopCeiling": {
+       "maxConcurrent": 2,          // most concurrent metered dispatches this HOST may hold
+       "appliesFrom": 2,            // first tier the ceiling governs; here, the preset
+       "minComplexity": "routine"   // optional: keep trivia off the metered tap
+     }
+   }
+   ```
+
+   `backstopCeiling` is a resource bound, not an approval gate: a refusal is a
+   skip that continues the walk. Absent ⇒ unbounded; `maxConcurrent: 0` switches
+   the metered tier off without editing the list. Full key semantics:
+   `runtime-adapters.md` § "Bounding the metered backstop tier".
+
+3. **Prove it before dispatch** — reads no secrets, contacts no provider:
+
+   ```sh
+   loom-daemon worker profile-check quick-cerebras --runtime pi
+   loom-daemon validate                                  # the preference list + ceiling parse
+   ```
+
+4. **Read back which tap paid**: `loom-daemon sweep-outcomes summary --group-by tap`.
+   The presets' models are not on the bundled rate card, so their token counters
+   are attributed but their cost reports **unmeasured** — that is the honest
+   value, not zero (see § Evidence and limits).
+
+To make a preset the *default* tap rather than a fall-through — a repo with no
+Claude seats at all — set `"runtimes": {"default": "pi", "defaultModelProfile":
+"quick-flash"}` instead, and leave `preference` unset.
+
 Full semantics, the operator-pin rule, and the
 `# LOOM_RUNTIME_PREFERENCE` observability marker: `runtime-adapters.md` §
 "Ordered runtime preference with fall-through". Dispatch is already wired to the
-resolver; the remaining gaps are the chosen tier not yet carried into the
-per-sweep launch record (#8599) and `modelProfile` gating admission without
-pinning the launch to it (#8602) — see the other follow-up issues on #8436.
+resolver, the chosen tier is carried into the per-sweep launch record (#8599),
+and a tap's `modelProfile` both gates admission and pins the launch to it via
+`LOOM_MODEL_PROFILE` (#8602) — see the other follow-up issues on #8436.
 
 Operator recipes that combine a trial tap with the model, capacity and
 spend-bound axes: [`configuring-resources.md`](configuring-resources.md).
@@ -715,6 +790,48 @@ mechanism can bound its aggregate spend; the decision on how that ceiling is
 imposed (provider-side hard ceiling first, observability-backend aggregation as a
 scoped fallback) is recorded in
 [`ADR-0020`](https://github.com/rjwalters/loom/blob/main/docs/adr/0020-fleet-metered-spend-ceiling.md).
+
+**Kimi keeps its usage off the stdout stream entirely (issue #8564).** Unlike Pi
+and OpenCode, `kimi --output-format stream-json` carries **no** token counters:
+`PromptJsonWriter` in the shipped `@moonshot-ai/kimi-code@2.0.2` bundle (read
+2026-09-22) emits only `{"role":"assistant",…}`, `{"role":"tool",…}` and
+`{"role":"meta","type":…}` lines. `state.json` has none either — it is session
+metadata (`normalizeSessionMeta`: id/version/cwd/title/titleKind/createdAt/
+updatedAt/archived). The counters live in the durable per-agent event log,
+`<sessionDir>/agents/<agentId>/wire.jsonl`, on two record types:
+
+```jsonc
+// usage.record — the counters. `model` is the model ALIAS, not the provider id.
+{"type":"usage.record","agentId":"main","model":"code",
+ "usage":{"inputOther":1200,"output":340,"inputCacheRead":8000,"inputCacheCreation":500},
+ "usageScope":"turn","time":1790000000000}
+// llm.request — resolves that alias to the provider's own model id + provider.
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"kimi",
+ "model":"kimi-k2.7-code","modelAlias":"code","time":1789999999000}
+```
+
+(Redacted sample: field names and nesting copied from the bundle's
+`usageRecordSchema` / `llmRequestSchema` / `emptyUsage()` / `Event2.serialize()`;
+the *values* are synthetic — no credentialled Kimi session was available, see
+the canary note above.) `usageScope` is `"turn"` or `"session"` and partitions
+the records, so summing all of them is the total rather than a double count;
+`inputTotal()` in the bundle is `inputOther + inputCacheRead +
+inputCacheCreation`; there is no separate reasoning counter. The exact session
+id is available only on stdout, as
+`{"role":"meta","type":"session.resume_hint","session_id":…}`. Sessions are
+found through `$KIMI_CODE_HOME/session_index.jsonl`
+(`{sessionId, sessionDir, workDir}`, absolute `sessionDir`, `{sessionId,
+deleted:true}` tombstones). The reader is
+`loom-daemon/src/kimi_usage.rs`; full write-up in
+[`native-runtime-usage-attribution.md`](native-runtime-usage-attribution.md).
+
+Kimi's API list prices (`defaults/pricing.json`, verified 2026-09-22 against
+<https://platform.moonshot.ai/docs/pricing/chat>) are recorded so a Kimi
+completion gets a cost number at all, but they are an **estimate**: a Kimi Code
+subscription is not billed per token, so on the subscription route the number is
+"what these tokens would have cost on the platform API", not money that changed
+hands — the same distinction retained for OpenCode's reported cost of zero
+below.
 
 For full issues measure cost per independently accepted issue, with identical
 base commits, dependencies, task text and reviewer. Include failed attempts and

@@ -39,6 +39,7 @@ A fine-grained PAT scoped to the target repository needs these permissions:
 | Pull requests | Read & Write | Builder, Judge, Champion, Doctor | PR creation, reviews, merges |
 | Contents | Read & Write | Builder, Champion | Push branches, merge PRs, delete branches |
 | Checks | Read | Auditor, Judge | CI status verification |
+| Actions | Read & Write (recommended) | Champion (`merge-pr.sh --redate-stale-checks`) | Re-run stale required checks in place when the #8248 freshness guard blocks a merge. Without it the fallback pushes a no-op commit, which moves the head and costs the PR its Judge approval (#8914) |
 | Metadata | Read | All roles | Implicit, always granted with any other permission |
 
 ## Creating a Fine-Grained PAT
@@ -53,6 +54,7 @@ A fine-grained PAT scoped to the target repository needs these permissions:
    - **Issues**: Read and write
    - **Pull requests**: Read and write
    - **Checks**: Read-only
+   - **Actions**: Read and write (recommended — see the table above)
 7. Click **Generate token** and copy the value immediately — it won't be shown again
 
 ## Using the Token
@@ -202,7 +204,12 @@ hard-failing.
 
 1. Create a GitHub App (under whichever account/org owns the target repos)
    with **Contents: Read & write**, **Issues: Read & write**, **Pull
-   requests: Read & write**, **Metadata: Read** permissions.
+   requests: Read & write**, **Metadata: Read** permissions, plus
+   **Actions: Read & write** (recommended: lets `merge-pr.sh` re-run stale
+   required checks in place instead of pushing a no-op commit that clears the
+   Judge verdict, #8914). GitHub has no API for changing an App's
+   permissions: add it in the App's settings, then accept the updated
+   permission request on each installation.
 2. Generate a private key for the app (downloads a `.pem` file) and copy it to
    each fleet host that should mint tokens for that account/org — e.g.
    `~/.config/loom/github-app-key.pem`, readable only by the daemon's user
@@ -327,22 +334,21 @@ Wired call sites: `create-pr.sh` (PR creation), `create-issue.sh` /
 (comments), `forge_gh_swap_label_rl_safe` (label edits), and the sweep's
 own Builder-recovery PR creation.
 
-**The merge itself is wired too (#6752).** `merge-pr.sh`'s primary merge path
-calls the *native* `loom-daemon forge auto-merge`, whose forge-write code lives
-in Rust entirely outside this bash ladder, and its synchronous path issued a
-bare `gh api … -X PUT`. Both hard-failed on the integration-403 until #6752 —
-observed on 2026-08-22 (`/loom:sweep 6746`, PR #6751), where comment/label
-writes recovered through the ladder but the merge died, and the operator had to
-`unset GH_CONFIG_DIR` by hand (rung 3, performed manually) to finish it. The
-ladder is now command-agnostic: `forge_cmd_perm_safe <cmd> …` runs the same
-three rungs around **any** command whose credential comes from the environment
+**The merge itself is wired too (#6752).** `merge-pr.sh`'s merge path then
+called the *native* `loom-daemon forge auto-merge` (Rust, outside this bash
+ladder), and its synchronous path issued a bare `gh api … -X PUT`. Both
+hard-failed on the integration-403 until #6752 — observed on 2026-08-22
+(`/loom:sweep 6746`, PR #6751), where comment/label writes recovered through
+the ladder but the merge died, and the operator had to `unset GH_CONFIG_DIR` by
+hand (rung 3, performed manually) to finish it. The ladder is now
+command-agnostic: `forge_cmd_perm_safe <cmd> …` runs the same three rungs
+around **any** command whose credential comes from the environment
 (`loom-daemon forge …` shells out to `gh`, so the same `GH_TOKEN` /
 `GH_CONFIG_DIR` swap reaches it), and `forge_gh_perm_safe` is now just its
 `gh`-prefixed spelling — one implementation, so the two cannot drift. The
-wrapped command's exit code is preserved verbatim, so `loom-daemon forge
-auto-merge`'s meaningful codes (3 = forge declined → shell fallback, 4 =
-head-SHA mismatch → re-queue) still reach `merge-pr.sh` unretried and
-unrewritten.
+wrapped command's exit code is preserved verbatim. Since #8410 `merge-pr.sh`
+merges only via the ladder-protected `forge_merge_pr`; `forge auto-merge` is
+an operator-only verb no Loom path calls (#8427 — see its `--help` caveat).
 
 **Builders never lose work to this window.** `create-pr.sh` adopts an
 already-open PR for the head branch instead of creating a second one, and the

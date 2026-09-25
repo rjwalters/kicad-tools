@@ -17,6 +17,11 @@
 #      declines the requested method (exit 1) makes merge-pr.sh refuse fast,
 #      before ever touching a specific PR, with the daemon's own message
 #      surfaced -- never a silent fallback to squash.
+#   6. LOOM_DAEMON_BIN (#8878): with an older `loom-daemon` on PATH that
+#      predates `forge merge-method` and a pinned LOOM_DAEMON_BIN that has it,
+#      the PINNED binary decides -- validation runs instead of degrading to an
+#      unvalidated pass-through, which is what made the documented
+#      _mp_daemon_roll_hint remediation a no-op.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-merge-pr-merge-method.sh
@@ -98,14 +103,19 @@ echo "Test 3: merge-pr.sh source contains the #8845 resolution logic"
 
 assert_grep 'MERGE_METHOD_REQUESTED=' "$MERGE_PR" \
     "merge-pr.sh declares MERGE_METHOD_REQUESTED state"
-assert_grep 'loom-daemon forge merge-method --repo' "$MERGE_PR" \
-    "merge-pr.sh calls loom-daemon forge merge-method"
+# #8878: the probe AND the invocation both go through LOOM_DAEMON_BIN when set --
+# a bare `command -v loom-daemon` probed PATH's older binary and degraded to the
+# unvalidated path even when the pinned one could have answered authoritatively.
+assert_grep '"${LOOM_DAEMON_BIN:-loom-daemon}" forge merge-method --repo' "$MERGE_PR" \
+    "merge-pr.sh calls forge merge-method through the LOOM_DAEMON_BIN-resolved binary (#8878)"
+assert_grep 'if command -v "${LOOM_DAEMON_BIN:-loom-daemon}"' "$MERGE_PR" \
+    "the availability probe tests the resolved binary, not a bare 'loom-daemon' (#8878)"
 assert_grep 'Merge blocked: $_MPM_OUT' "$MERGE_PR" \
     "a validated-disallowed request (exit 1) hard-blocks with the daemon's message"
 assert_grep 'using it unvalidated' "$MERGE_PR" \
     "an unverifiable request (daemon declines/errors) warns rather than blocking"
-assert_grep 'loom-daemon not found; using --merge-method' "$MERGE_PR" \
-    "a missing loom-daemon warns and falls back to the unvalidated request"
+assert_grep 'loom-daemon not found (' "$MERGE_PR" \
+    "a missing loom-daemon warns (naming the resolved path) and falls back to the unvalidated request"
 
 # --- Test 4: inline simulation of the three-way resolution branch ---
 echo ""
@@ -194,6 +204,58 @@ if [[ $rc -ne 0 ]] && [[ "$out" == *"Merge blocked:"* ]] && [[ "$out" == *"allow
     pass "a stubbed daemon declining the request hard-blocks the merge with its own message (never a silent squash fallback)"
 else
     fail "expected a 'Merge blocked' refusal naming the allowed set; got rc=$rc, out='$out'"
+fi
+
+# --- Test 6 (#8878): LOOM_DAEMON_BIN wins over an older PATH loom-daemon ---
+#
+# This is the issue's own reproduction, made automatic: PATH carries a daemon
+# that PREDATES `forge merge-method` (clap exits 2 with a usage message), while
+# LOOM_DAEMON_BIN points at one that has it. Before #8878 the bare
+# `command -v loom-daemon` probe found the PATH binary, got exit 2, and passed
+# the request through UNVALIDATED -- discarding the very answer the operator
+# exported LOOM_DAEMON_BIN to get (the remediation _mp_daemon_roll_hint prints
+# verbatim). The pinned binary must be the one that decides.
+echo ""
+echo "Test 6: LOOM_DAEMON_BIN is honored over an older PATH loom-daemon (#8878)"
+
+OLD_DIR=$(mktemp -d)
+PINNED_DIR=$(mktemp -d)
+trap 'rm -rf "$STUB_DIR" "$OLD_DIR" "$PINNED_DIR"' EXIT
+
+# PATH daemon: predates the subcommand -- clap's "unrecognized subcommand", exit 2.
+cat > "$OLD_DIR/loom-daemon" <<'OLDSTUB'
+#!/usr/bin/env bash
+echo "error: unrecognized subcommand 'merge-method'" >&2
+echo "Usage: loom-daemon forge <COMMAND>" >&2
+exit 2
+OLDSTUB
+chmod +x "$OLD_DIR/loom-daemon"
+
+# Pinned daemon: has the subcommand and answers authoritatively (exit 1 = refuse).
+cat > "$PINNED_DIR/loom-daemon" <<'NEWSTUB'
+#!/usr/bin/env bash
+if [[ "$1" == "forge" && "$2" == "merge-method" ]]; then
+  echo "requested merge method 'merge' is not allowed by this repository; allowed method(s): squash" >&2
+  exit 1
+fi
+exit 2
+NEWSTUB
+chmod +x "$PINNED_DIR/loom-daemon"
+
+set +e
+out=$(PATH="$OLD_DIR:$PATH" LOOM_DAEMON_BIN="$PINNED_DIR/loom-daemon" \
+    "$MERGE_PR" --merge-method merge 999999999 2>&1)
+rc=$?
+set -e
+if [[ $rc -ne 0 ]] && [[ "$out" == *"Merge blocked:"* ]] && [[ "$out" == *"allowed method(s): squash"* ]]; then
+    pass "LOOM_DAEMON_BIN's daemon decides the request even when PATH's loom-daemon predates 'forge merge-method'"
+else
+    fail "expected the pinned daemon's refusal; got rc=$rc, out='$out'"
+fi
+if [[ "$out" != *"using it unvalidated"* ]]; then
+    pass "validation actually ran -- no degraded 'using it unvalidated' pass-through when a usable binary was pinned"
+else
+    fail "the pinned binary was ignored and the request degraded to unvalidated; out='$out'"
 fi
 
 # --- Summary ---
