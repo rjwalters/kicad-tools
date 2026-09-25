@@ -96,13 +96,16 @@ cat > "$STUB_DIR/gh" <<'STUB'
 #      (network failure / 403), to test the fail-closed paths — either source
 #      erroring fails the lookup. No canned file at all = a 200 with an empty
 #      rules array (a SUCCESSFUL "no ruleset rules" answer, not a failure).
+#      The marker file's CONTENT (if any) is emitted on stderr, so #8872's
+#      plan-gated-403 tests can control the exact failure message.
 #
 #   2. Classic branch protection:
 #        gh api graphql -f query=... -F owner=... -F name=... -F ref=refs/heads/<b>
 #                       --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]'
 #      Canned response: $STUB_DIR/required-checks-<branch>.txt (one context per
 #      line, post-jq). Missing file = absent branchProtectionRule (empty).
-#      A `$STUB_DIR/graphql-fail-<branch>` marker makes the call exit nonzero.
+#      A `$STUB_DIR/graphql-fail-<branch>` marker makes the call exit nonzero,
+#      its content (if any) emitted on stderr, same as the ruleset marker.
 STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:-}"
 if [[ -z "$STUB_DIR_FROM_ENV" ]]; then
   echo "stub gh: LOOM_TEST_STUB_DIR not set" >&2
@@ -125,7 +128,10 @@ for a in "$@"; do
 done
 
 if [[ -n "$rules_branch" ]]; then
-  [[ -f "$STUB_DIR_FROM_ENV/ruleset-fail-$rules_branch" ]] && exit 1
+  if [[ -f "$STUB_DIR_FROM_ENV/ruleset-fail-$rules_branch" ]]; then
+    cat "$STUB_DIR_FROM_ENV/ruleset-fail-$rules_branch" >&2
+    exit 1
+  fi
   canned="$STUB_DIR_FROM_ENV/ruleset-rules-$rules_branch.json"
   [[ -f "$canned" ]] || exit 0
   jq -r "$jq_filter" "$canned"
@@ -136,7 +142,10 @@ if [[ -z "$ref" ]]; then
   exit 0
 fi
 
-[[ -f "$STUB_DIR_FROM_ENV/graphql-fail-$ref" ]] && exit 1
+if [[ -f "$STUB_DIR_FROM_ENV/graphql-fail-$ref" ]]; then
+  cat "$STUB_DIR_FROM_ENV/graphql-fail-$ref" >&2
+  exit 1
+fi
 
 # Canned response file lookup
 canned="$STUB_DIR_FROM_ENV/required-checks-$ref.txt"
@@ -309,6 +318,59 @@ else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: #8103: forge-helpers no longer queries /rules/branches/ (ruleset-based required checks would be invisible)"
 fi
+
+# --- Plan-gated 403 relaxation (#8872, mirrors #8871's Rust
+# `stale_checks::fetch::is_plan_gated`) ---
+#
+# On a private repo whose GitHub plan excludes rulesets/branch protection,
+# BOTH sources answer the SAME 403:
+#   "HTTP 403: Upgrade to GitHub Pro or make this repository public to
+#   enable this feature."
+# That source cannot hold a required_status_checks rule, so it must
+# configure NO required checks (per source) rather than failing the whole
+# lookup closed. Any OTHER 403 (missing scope, SSO, rate limit) must keep
+# failing closed -- the match is on the message, never the status code.
+echo ""
+echo "Testing the plan-gated 403 relaxation (#8872)..."
+
+PLAN_GATED_403="HTTP 403: Upgrade to GitHub Pro or make this repository public to enable this feature."
+OTHER_403="HTTP 403: Resource not accessible by integration"
+
+# Subtest P.1: ruleset source plan-gated, classic source answers normally ->
+# the classic contexts stay authoritative; only the ruleset configures
+# nothing.
+echo "$PLAN_GATED_403" > "$STUB_DIR/ruleset-fail-plan-gated-ruleset"
+cat > "$STUB_DIR/required-checks-plan-gated-ruleset.txt" <<EOF
+Classic Required
+EOF
+result=$(forge_get_required_status_check_contexts "owner/repo" "plan-gated-ruleset" "$STUB_DIR/gh" 2>/dev/null | tr '\n' '|' | sed 's/|$//')
+assert_eq "Classic Required" "$result" "#8872: plan-gated ruleset source configures nothing; classic source stays authoritative"
+
+# Subtest P.2: BOTH sources plan-gated -> empty result, exit 0 (this plan has
+# no required checks anywhere), plus a visible warning on stderr.
+echo "$PLAN_GATED_403" > "$STUB_DIR/ruleset-fail-plan-gated-both"
+echo "$PLAN_GATED_403" > "$STUB_DIR/graphql-fail-plan-gated-both"
+rc=0
+result=$(forge_get_required_status_check_contexts "owner/repo" "plan-gated-both" "$STUB_DIR/gh" 2>/dev/null | tr '\n' '|' | sed 's/|$//') || rc=$?
+stderr_out=$(forge_get_required_status_check_contexts "owner/repo" "plan-gated-both" "$STUB_DIR/gh" 2>&1 1>/dev/null)
+assert_eq "0" "$rc" "#8872: both sources plan-gated -> success exit (no required checks, not a failure)"
+assert_eq "" "$result" "#8872: both sources plan-gated -> empty stdout"
+case "$stderr_out" in
+  *"plan-gated"*)
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: #8872: plan-gated relaxation emits a visible stderr warning" ;;
+  *)
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: #8872: no visible warning emitted for the plan-gated relaxation" ;;
+esac
+
+# Subtest P.3: a DIFFERENT 403 (missing scope / SSO / rate limit) must keep
+# failing closed -- the narrow message match is the whole point.
+echo "$OTHER_403" > "$STUB_DIR/ruleset-fail-other-403"
+rc=0
+result=$(forge_get_required_status_check_contexts "owner/repo" "other-403" "$STUB_DIR/gh" 2>/dev/null | tr '\n' '|' | sed 's/|$//') || rc=$?
+assert_eq "1" "$rc" "#8872: a non-plan-gated 403 keeps failing closed"
+assert_eq "" "$result" "#8872: a non-plan-gated 403 -> empty stdout"
 
 # --- Test the set-difference policy ---
 # These replicate the comm/sort/diff logic used inside merge-pr.sh so that the

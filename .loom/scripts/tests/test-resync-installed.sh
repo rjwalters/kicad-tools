@@ -698,7 +698,7 @@ if grep -q '"loom_version": *"9.9.9"' "$META"; then
 else
     fail "(n) loom_version not re-stamped"
 fi
-if grep -q "\"last_resync\": *\"$(date +%Y-%m-%d)\"" "$META"; then
+if grep -q "\"last_resync\": *\"$(date -u +%Y-%m-%d)\"" "$META"; then
     pass "(n) last_resync stamped with today's date"
 else
     fail "(n) last_resync not stamped"

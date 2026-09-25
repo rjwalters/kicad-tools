@@ -1971,6 +1971,15 @@ _forge_gitea_paginate() {
 #   in merge-pr.sh already treat a nonzero lookup as "refuse to merge," which
 #   is the correct disposition for an unknown.
 #
+#   ONE narrow exception (#8872, mirroring #8871's Rust
+#   `stale_checks::fetch::is_plan_gated`): a source that answers the exact 403
+#   "upgrade to github ... make this repository public ..." cannot be holding
+#   a rule at all — that's GitHub declining to serve the source because the
+#   repository's PLAN excludes it, not because a rule is unreadable — so it
+#   configures no required checks instead of failing the whole lookup closed,
+#   per source, with a stderr warning. Any OTHER 403 (missing scope, SSO,
+#   rate limit) still fails closed; only that exact message qualifies.
+#
 # Gitea: GET /api/v1/repos/{owner}/{repo}/branch_protections/{name}. Gitea's
 #   branch-protection rule carries both `enable_status_check` (boolean toggle)
 #   and `status_check_contexts` (array of context patterns). The contexts are
@@ -2069,12 +2078,22 @@ forge_get_required_status_check_contexts() {
   # 403, 404 on the repo itself — is a lookup failure, and a failure on EITHER
   # source fails the whole lookup closed: a surviving source's answer is a
   # partial view, and "partial view of what is required" is not a safe input to
-  # a merge decision.
-  local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out=""
+  # a merge decision. `2>&1` (not `2>/dev/null`) so a failing call's stdout IS
+  # its stderr message — on success `gh`/`jq` write nothing to stderr, so this
+  # changes nothing for the happy path — letting the #8872 plan-gate checks
+  # below (inlined rather than a helper, to hold the line-budget cost down;
+  # matching #8871's Rust `stale_checks::fetch::is_plan_gated`: the exact 403
+  # "upgrade to github ... make this repository public ...", never the status
+  # code alone — a missing token scope, SSO enforcement and a rate-limit
+  # refusal are all 403s where required checks may genuinely exist) see the
+  # real failure text without a temp file. A source the gate excuses
+  # configures no required checks, with a stderr warning so the relaxation is
+  # never silent; any other failure still fails the whole lookup closed.
+  local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out="" _pg
   local query='query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { branchProtectionRule { requiredStatusCheckContexts } } } }'
-  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/${branch}" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>/dev/null)" || ruleset_rc=1
-  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>/dev/null)" || classic_rc=1
-  if [[ "$ruleset_rc" -ne 0 || "$classic_rc" -ne 0 ]]; then return 1; fi
+  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/${branch}" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>&1)" || ruleset_rc=1
+  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>&1)" || classic_rc=1
+  [[ "$ruleset_rc" -eq 0 ]] || { _pg=$(printf '%s' "$ruleset_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: ruleset required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $ruleset_out" >&2; ruleset_out=""; } || return 1; }; [[ "$classic_rc" -eq 0 ]] || { _pg=$(printf '%s' "$classic_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: classic branch-protection required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $classic_out" >&2; classic_out=""; } || return 1; }
   # Union, order-preserving, de-duplicated: a context can legitimately be
   # required by BOTH a ruleset and a classic rule, and the callers' `comm`
   # set-difference needs each name once.

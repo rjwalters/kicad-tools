@@ -92,7 +92,9 @@ archive_task_outputs() {
   header "Archiving Task Outputs"
   echo ""
 
-  local today=$(date +%Y-%m-%d)
+  # Issue #8504: -u so the archive-subdir date is the same calendar day a
+  # UTC-based reader expects, not whatever day the host's local clock reads.
+  local today=$(date -u +%Y-%m-%d)
   local archive_subdir="$ARCHIVE_DIR/$today"
   local archived=0
 
@@ -231,8 +233,11 @@ archive_daemon_state() {
     return
   fi
 
-  local today=$(date +%Y-%m-%d)
-  local timestamp=$(date +%Y-%m-%dT%H-%M-%SZ)
+  # Issue #8504: -u on both — the second was already spelling `Z` into the
+  # filename while actually reading host-local time, so a non-UTC host wrote
+  # a timestamp that LIED about being UTC.
+  local today=$(date -u +%Y-%m-%d)
+  local timestamp=$(date -u +%Y-%m-%dT%H-%M-%SZ)
   local archive_subdir="$ARCHIVE_DIR/$today"
   local archive_name="daemon-state-${timestamp}.json"
 

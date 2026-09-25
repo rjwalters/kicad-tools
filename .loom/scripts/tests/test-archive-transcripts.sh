@@ -44,7 +44,8 @@ make_fixture() {
   printf '{"agentType":"loom-builder","description":"Build issue #42","spawnDepth":1}\n' > "$proj/UUID1/subagents/agent-abc.meta.json"
   printf 'big tool output\n' > "$proj/UUID1/tool-results/r1.txt"
   DEST="$ROOT/archive"
-  DATE="$(date +%Y-%m-%d)"
+  # Issue #8504: -u to match epoch_to_date()'s UTC-based archive-subdir day.
+  DATE="$(date -u +%Y-%m-%d)"
 }
 
 echo "Case 1: enabled via env — copies session + subagents + sidecars + index"

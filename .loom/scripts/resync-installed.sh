@@ -2114,7 +2114,9 @@ restamp_metadata() {
     local version commit today tmp remote
     version="$(read_source_version)"
     commit="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
-    today="$(date +%Y-%m-%d)"
+    # Issue #8504: -u — `last_resync` is a machine-readable metadata field,
+    # so it is the UTC calendar day, not the host-local one.
+    today="$(date -u +%Y-%m-%d)"
     # Refresh loom_source_remote (#6780 AC3) from the SOURCE_ROOT this resync
     # actually resolved to, so it tracks a repointed sidecar rather than
     # freezing whatever was recorded at install time. Best-effort: empty when

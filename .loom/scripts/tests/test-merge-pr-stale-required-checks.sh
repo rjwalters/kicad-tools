@@ -129,6 +129,7 @@ Merge blocked: PR #8078's required check \`File Size Ratchet\` last ran at 2026-
 REFUSAL
 exit 1" ;;
             nodate) echo "echo 'could not determine'; exit 2" ;;
+            lookupfail) echo "echo \"Merge blocked: PR #8078's required-check freshness guard (#8248) could not determine whether the green required checks predate the base tip — ruleset lookup failed: gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)\"; exit 2" ;;
             cleanwarn) echo "echo 'Warning: required-check freshness guard (#8248): the ruleset lookup for '\''main'\'' is gated by this repository'\''s GitHub plan (#8844).' >&2; echo 'LOOM-STALE-CHECKS-CLEAN'; exit 0" ;;
             silent) echo "exit 0" ;;
             hang)   echo "exit 127" ;;
@@ -142,6 +143,7 @@ STUB_STALE="$(make_stub stale)"
 STUB_NODATE="$(make_stub nodate)"
 STUB_SILENT="$(make_stub silent)"
 STUB_CLEANWARN="$(make_stub cleanwarn)"
+STUB_LOOKUPFAIL="$(make_stub lookupfail)"
 
 # --- Shared globals the function reads ---
 PR_NUMBER="8078"
@@ -186,6 +188,7 @@ assert_contains "$LAST_OUT" "2026-09-18 11:45:21 UTC" "block names the base-tip 
 LOOM_DAEMON_BIN="$STUB_NODATE" run_guard
 assert_eq "1" "$LAST_RC" "exit 2 (undeterminable) -> merge refused (fail closed)"
 assert_contains "$LAST_OUT" "could not run" "fail-closed path explains itself"
+assert_contains "$LAST_OUT" "What it reported: could not determine" "the subcommand's own stdout survives into the refusal"
 
 # T4: exit 0 WITHOUT the sentinel (old/silent binary) -> fails closed too;
 # only a positive clean signal passes.
@@ -232,6 +235,19 @@ LOOM_DAEMON_BIN="$STUB_CLEANWARN" run_guard
 assert_eq "0" "$LAST_RC" "CLEAN + a stderr warning -> guard still passes (stderr does not contaminate the sentinel)"
 assert_contains "$LAST_OUT" "Warning:" "the plan-gate warning is not swallowed"
 assert_contains "$LAST_OUT" "#8844" "the warning names the condition"
+
+# T10 (#8873): the RESIDUAL fail-closed path — a lookup failure the plan-gate
+# predicate deliberately does NOT relax (a scoped 403, a 404, a 5xx). The
+# daemon's reason is on stdout, and the whole safety argument for that narrow
+# predicate ("if GitHub rewords the message we fail closed again") only holds
+# if the refusal the operator reads names what the forge actually said. It
+# must also NOT offer the build/install remedy here: the binary ran fine.
+LOOM_DAEMON_BIN="$STUB_LOOKUPFAIL" run_guard
+assert_eq "1" "$LAST_RC" "exit 2 with a forge reason -> merge still refused (fail closed)"
+assert_contains "$LAST_OUT" "could not run" "the generic fail-closed framing is kept"
+assert_contains "$LAST_OUT" "Upgrade to GitHub Pro" "the forge's own reason reaches the operator"
+assert_contains "$LAST_OUT" "(HTTP 403)" "the refusal keeps the status the forge returned"
+assert_eq "no" "$(grep -qF -- "cargo build" <<<"$LAST_OUT" && echo yes || echo no)" "a binary that RAN is not told to rebuild itself"
 
 # --- The REAL binary's offline contract (--from-stdin) ----------------------
 #

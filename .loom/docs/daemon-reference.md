@@ -4256,6 +4256,10 @@ re-registration), documented in full at that step, along with the #4697
 `setup_logging()` writes every daemon log line to `$HOME/.loom/daemon.log` by
 default — this is the destination for `env_logger`-routed output (see the
 launchd redirect note below), NOT the on-disk `LOOM_SOCKET_PATH` used by IPC.
+**All machine-readable timestamps Loom writes — `daemon.log`'s own line
+prefix included — are UTC with a trailing `Z`** (`2026-09-21T17:25:38.246Z`),
+never the host's local time, so a reader never has to know which timezone the
+writing host was in (#8504).
 Before #4010, this path was hardcoded with no override at all, so **any**
 `loom-daemon` process — including one spawned by an integration test that
 already isolates its IPC socket via `LOOM_SOCKET_PATH` — still wrote into the

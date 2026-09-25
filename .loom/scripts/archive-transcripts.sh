@@ -114,7 +114,9 @@ file_size() {
     [[ "$v" =~ ^[0-9]+$ ]] || v=0
     printf '%s\n' "$v"
 }
-epoch_to_date()    { date -r "$1" +%Y-%m-%d 2>/dev/null || date -d "@$1" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d; }
+# Issue #8504: -u throughout — this feeds the machine-readable `date` field
+# in index.json, so it must be the UTC calendar day, not the host-local one.
+epoch_to_date()    { date -u -r "$1" +%Y-%m-%d 2>/dev/null || date -u -d "@$1" +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d; }
 iso_now()          { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # ---------------------------------------------- resolve enable + destination ---

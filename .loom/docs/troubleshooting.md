@@ -862,10 +862,19 @@ org, every `merge-pr.sh` run stops at the #8248 required-check freshness
 guard, whatever the PR looks like:
 
 ```
-Merge blocked: PR #N's required-check freshness guard (#8248) could not determine
-whether the green required checks predate the base tip — ruleset lookup failed:
+Error: Merge blocked: PR #N's required-check freshness guard (#8248) could not run —
+'loom-daemon merge-pr stale-checks' exited 2 without the LOOM-STALE-CHECKS-CLEAN signal.
+[...]
+
+What it reported: Merge blocked: PR #N's required-check freshness guard (#8248) could not
+determine whether the green required checks predate the base tip — ruleset lookup failed:
 gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)
 ```
+
+`merge-pr.sh` wraps the subcommand's own refusal under `What it reported:`
+(#8873); a host whose script predates that fix prints only the outer "could
+not run" paragraph, and you have to re-run the `gh api` call below to see
+which failure it was.
 
 No flag helps: `--allow-unapproved` overrides a missing review and
 `--redate-stale-checks` re-dates a stale check; neither is this condition.
@@ -884,8 +893,11 @@ code — a token missing a scope, SSO enforcement and a rate-limit refusal are
 all 403s too, and there required checks may genuinely exist. Every one of
 those still exits 2 and still refuses the merge.
 
-**If you still see a block here**, read the quoted forge error in the refusal:
-it is a different failure (network, auth scope, rate limit, 404, 5xx). Fix the
+**If you still see a block here**, read the forge error quoted under `What it
+reported:`: it is a different failure (network, auth scope, rate limit, 404,
+5xx), and the refusal names it rather than telling you to rebuild a binary
+that ran fine (#8873 — the build/install remedy is offered only when the
+subcommand printed nothing at all, i.e. it is missing or too old). Fix the
 lookup — `gh api "repos/{owner}/{repo}/rules/branches/main"` reproduces it in
 one call — rather than reaching for a `LOOM_DAEMON_BIN` shim. And if the host's
 binary predates the fix, roll it (next section).

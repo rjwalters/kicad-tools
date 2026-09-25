@@ -155,6 +155,7 @@ test-merge-pr-head-mismatch.sh
 test-merge-pr-help.sh
 test-merge-pr-local-branch-cleanup.sh
 test-merge-pr-loom-pr-label-guard.sh
+test-merge-pr-merge-method.sh
 test-merge-pr-merge-ordering-guard.sh
 test-merge-pr-primary-checkout-advice.sh
 test-merge-pr-primary-worktree-guard.sh
