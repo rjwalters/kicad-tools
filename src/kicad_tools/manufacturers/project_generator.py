@@ -39,9 +39,11 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import tempfile
 from dataclasses import replace
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -49,6 +51,8 @@ from .base import DesignRules
 
 if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
+
+logger = logging.getLogger(__name__)
 
 # Severities for DRC rule categories that are *not* manufacturability
 # blockers.  ``lib_footprint_mismatch`` is a library-sync artifact (the
@@ -374,6 +378,62 @@ def generate_project_dru(
     )
 
 
+@lru_cache(maxsize=1)
+def _installed_kicad_cli_version() -> str | None:
+    """Resolve the installed ``kicad-cli``'s raw version string, or ``None``.
+
+    Cached: ``write_drc_constraints`` runs once per exported board (and the
+    export/route/check paths each call it), so an uncached lookup would spawn
+    a ``kicad-cli version`` subprocess per call for a value that cannot change
+    within a process.  Tests that stub the lookup must call
+    ``_installed_kicad_cli_version.cache_clear()``.
+
+    Returns ``None`` -- never raises -- when ``kicad-cli`` is absent or
+    unreadable: a version we cannot determine must not produce a warning.
+    """
+    try:
+        from kicad_tools.cli.runner import find_kicad_cli
+        from kicad_tools.export.gerber import get_kicad_cli_version
+
+        cli = find_kicad_cli()
+        if cli is None:
+            return None
+        return get_kicad_cli_version(cli)
+    except Exception:  # pragma: no cover - defensive; this is a warning path
+        return None
+
+
+def _warn_if_smd_pad_clearance_is_inert(rules: DesignRules, dru_path: Path) -> None:
+    """Warn when the just-written ``SMD Pad Clearance`` rule cannot fire (#5724).
+
+    The rule is emitted unconditionally whenever the profile declares a
+    different-net SMD pad floor, but KiCad 10.0.0/10.0.1 do not give a pad its
+    parent footprint's ``Reference``, so the rule's scope is permanently false
+    *and no ``drc_rule_error`` is raised* -- ``kicad-cli pcb drc`` simply
+    reports a clean board.  Without this warning a user on an affected KiCad
+    gets a green DFM verdict from a sidecar ``kct`` just wrote for them.
+
+    Warning-only and best-effort by design: the sidecar content is unchanged,
+    and an absent/unparseable ``kicad-cli`` stays silent rather than guessing.
+    """
+    if rules.min_smd_pad_clearance_mm is None:
+        # The rule is not emitted at all for this profile/tier -- nothing to
+        # warn about (mirrors the emission gate in ``generate_dru``).
+        return
+
+    from .dru_generator import smd_pad_clearance_inert_reason
+
+    reason = smd_pad_clearance_inert_reason(_installed_kicad_cli_version())
+    if reason is None:
+        return
+    logger.warning(
+        "%s: %s (floor: %.4g mm different-net SMD pad clearance)",
+        dru_path,
+        reason,
+        rules.min_smd_pad_clearance_mm,
+    )
+
+
 def write_drc_constraints(
     pcb_path: str | Path,
     rules: DesignRules,
@@ -401,6 +461,16 @@ def write_drc_constraints(
     the ``kct creepage export-rules`` managed block (#4508) outside the
     fab-floors markers survive verbatim; a pre-existing user-owned file
     is never clobbered -- the block is merged in alongside its content.
+
+    After writing the ``.kicad_dru`` this logs a ``WARNING`` when the
+    locally installed ``kicad-cli`` is below
+    :data:`~kicad_tools.manufacturers.dru_generator.SMD_PAD_CLEARANCE_MIN_KICAD_VERSION`
+    and the profile declares a different-net SMD pad floor: KiCad
+    10.0.0/10.0.1 evaluate the emitted ``SMD Pad Clearance`` rule as
+    permanently false *without* raising a rule error, so a native DRC run
+    would report a clean board (Issue #5724).  The emitted content is
+    identical either way -- this is a diagnostic only, and it stays silent
+    when ``kicad-cli`` cannot be located or its version cannot be parsed.
 
     Args:
         pcb_path: Path to the routed board.
@@ -526,5 +596,8 @@ def write_drc_constraints(
             encoding="utf-8",
         )
         written.append(dru_path)
+        # The sidecar is on disk now; tell the user if the engine they have
+        # installed will silently ignore its SMD pad floor (#5724).
+        _warn_if_smd_pad_clearance_is_inert(rules, dru_path)
 
     return written

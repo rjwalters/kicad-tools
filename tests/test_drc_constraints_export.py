@@ -11,6 +11,7 @@ built-in defaults.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -364,6 +365,248 @@ def test_write_drc_constraints_without_net_classes_omits_ampacity(tmp_path: Path
     assert "Ampacity Min Width" not in dru_text
     from kicad_tools.manufacturers.dru_generator import merge_dru_floors
 
+    assert dru_text == merge_dru_floors(None, generate_dru(rules, manufacturer_name="jlcpcb-tier1"))
+
+
+# ---------------------------------------------------------------------------
+# SMD Pad Clearance minimum-KiCad-version warning (#5724)
+# ---------------------------------------------------------------------------
+#
+# The native ``SMD Pad Clearance`` rule is emitted unconditionally but is
+# SILENTLY INERT on KiCad 10.0.0/10.0.1 -- those builds do not give a pad its
+# parent footprint's ``Reference``, so ``A.Reference != B.Reference`` is
+# permanently false and ``kicad-cli pcb drc`` reports a CLEAN board rather
+# than a ``drc_rule_error``.  #5713 gated the test suite on that floor;
+# these tests cover the product-side warning that tells a user on an affected
+# KiCad that the sidecar ``kct`` just wrote for them will not enforce the
+# different-net SMD pad floor.
+
+
+_WARN_LOGGER = "kicad_tools.manufacturers.project_generator"
+
+
+@pytest.fixture
+def clear_kicad_version_cache():
+    """Isolate the process-wide ``kicad-cli`` version cache around a test."""
+    from kicad_tools.manufacturers import project_generator
+
+    project_generator._installed_kicad_cli_version.cache_clear()
+    yield
+    project_generator._installed_kicad_cli_version.cache_clear()
+
+
+def _stub_kicad_version(monkeypatch, raw: str | None) -> None:
+    """Pin what the installed ``kicad-cli`` reports, via the real lookup path.
+
+    Stubs the two helpers ``_installed_kicad_cli_version`` actually composes
+    (``find_kicad_cli`` + ``get_kicad_cli_version``) rather than the cached
+    wrapper itself, so the wiring between them is exercised too.
+    """
+    from kicad_tools.cli import runner
+    from kicad_tools.export import gerber
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/stub/kicad-cli"), raising=True)
+    monkeypatch.setattr(gerber, "get_kicad_cli_version", lambda _cli: raw, raising=True)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("10.0.6", (10, 0, 6)),
+        ("10.0.2\n", (10, 0, 2)),
+        # Distro packages decorate the version with a build/release suffix.
+        ("10.0.1-1~ubuntu24.04.1 release build", (10, 0, 1)),
+        ("9.0.3", (9, 0, 3)),
+        ("10", (10,)),
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("nightly", None),
+    ],
+)
+def test_parse_kicad_cli_version(raw, expected):
+    """Only the leading dotted-numeric run is significant (and never raises)."""
+    from kicad_tools.manufacturers.dru_generator import parse_kicad_cli_version
+
+    assert parse_kicad_cli_version(raw) == expected
+
+
+def test_min_kicad_version_str_tracks_the_tuple():
+    """The warning text's floor and the comparison floor cannot drift apart."""
+    from kicad_tools.manufacturers.dru_generator import (
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION,
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR,
+    )
+
+    rendered = tuple(int(part) for part in SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR.split("."))
+    assert rendered == SMD_PAD_CLEARANCE_MIN_KICAD_VERSION
+
+
+@pytest.mark.parametrize("raw", ["10.0.0", "10.0.1", "9.0.3"])
+def test_inert_reason_names_the_rule_and_the_floor(raw):
+    """Below the floor the explanation names the rule, the floor and the risk."""
+    from kicad_tools.manufacturers.dru_generator import (
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR,
+        smd_pad_clearance_inert_reason,
+    )
+
+    reason = smd_pad_clearance_inert_reason(raw)
+    assert reason is not None
+    assert "SMD Pad Clearance" in reason
+    assert SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR in reason
+    assert raw in reason
+
+
+@pytest.mark.parametrize("raw", ["10.0.2", "10.0.4", "10.0.6", "11.0.0", None, "", "nightly"])
+def test_inert_reason_is_silent_at_or_above_the_floor_or_when_unknown(raw):
+    """At/above the floor -- and for any version we cannot parse -- stay silent."""
+    from kicad_tools.manufacturers.dru_generator import smd_pad_clearance_inert_reason
+
+    assert smd_pad_clearance_inert_reason(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["10.0.0", "10.0.1"])
+def test_write_drc_constraints_warns_below_the_smd_floor(
+    tmp_path: Path, monkeypatch, caplog, raw, clear_kicad_version_cache
+):
+    """A user on 10.0.0/10.0.1 is told the emitted rule will never fire."""
+    from kicad_tools.manufacturers.dru_generator import (
+        SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR,
+    )
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+    assert rules.min_smd_pad_clearance_mm is not None  # the rule IS emitted
+
+    _stub_kicad_version(monkeypatch, raw)
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, caplog.text
+    message = warnings[0].getMessage()
+    assert "SMD Pad Clearance" in message
+    assert SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR in message
+    assert raw in message
+    # The sidecar it is warning about is named, so the user knows which file.
+    assert str(board.with_suffix(".kicad_dru")) in message
+
+
+@pytest.mark.parametrize("raw", ["10.0.2", "10.0.4", "10.0.6"])
+def test_write_drc_constraints_silent_at_or_above_the_smd_floor(
+    tmp_path: Path, monkeypatch, caplog, raw, clear_kicad_version_cache
+):
+    """At/above 10.0.2 the rule genuinely fires -- no warning is emitted."""
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    _stub_kicad_version(monkeypatch, raw)
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_no_warning_when_the_smd_rule_is_not_emitted(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """No floor configured means no rule emitted -- so nothing to warn about."""
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = replace(
+        get_profile("jlcpcb-tier1").get_design_rules(layers=4),
+        min_smd_pad_clearance_mm=None,
+    )
+
+    _stub_kicad_version(monkeypatch, "10.0.1")
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert "SMD Pad Clearance" not in board.with_suffix(".kicad_dru").read_text()
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_no_warning_when_the_dru_is_not_written(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """``write_dru=False`` emits no rule, so the version dependency is moot."""
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    _stub_kicad_version(monkeypatch, "10.0.1")
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        written = write_drc_constraints(
+            board, rules, manufacturer_id="jlcpcb-tier1", layers=4, write_dru=False
+        )
+
+    assert not board.with_suffix(".kicad_dru").exists()
+    assert written == [board.with_suffix(".kicad_pro")]
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_missing_kicad_cli_degrades_silently(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """No ``kicad-cli`` on PATH: no baseline to compare, so no warning, no raise."""
+    from kicad_tools.cli import runner
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: None, raising=True)
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        written = write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert board.with_suffix(".kicad_dru") in written
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_unparseable_kicad_cli_version_degrades_silently(
+    tmp_path: Path, monkeypatch, caplog, clear_kicad_version_cache
+):
+    """``kicad-cli version`` answering nothing usable is not evidence of a defect."""
+    from kicad_tools.cli import runner
+    from kicad_tools.export import gerber
+
+    monkeypatch.setattr(runner, "find_kicad_cli", lambda: Path("/usr/bin/kicad-cli"), raising=True)
+    monkeypatch.setattr(gerber, "get_kicad_cli_version", lambda _cli: None, raising=True)
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    with caplog.at_level(logging.WARNING, logger=_WARN_LOGGER):
+        write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    assert [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+@pytest.mark.parametrize("raw", ["10.0.1", "10.0.6", None])
+def test_warning_never_changes_the_emitted_sidecars(
+    tmp_path: Path, monkeypatch, raw, clear_kicad_version_cache
+):
+    """#5724 is warning-only: the ``.kicad_dru``/``.kicad_pro`` bytes are unchanged.
+
+    The rule must keep being emitted even on an affected KiCad -- the sidecar
+    travels with the board and stays correct for whoever opens it on a newer
+    build.
+    """
+    from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+
+    board = tmp_path / "demo.kicad_pcb"
+    board.write_text("(kicad_pcb)")
+    rules = get_profile("jlcpcb-tier1").get_design_rules(layers=4)
+
+    _stub_kicad_version(monkeypatch, raw)
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb-tier1", layers=4)
+
+    dru_text = board.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert "SMD Pad Clearance" in dru_text
     assert dru_text == merge_dru_floors(None, generate_dru(rules, manufacturer_name="jlcpcb-tier1"))
 
 

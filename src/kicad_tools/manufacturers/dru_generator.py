@@ -74,6 +74,77 @@ DRU_VERSION_HEADER = "(version 1)"
 #: ``tests/test_factory_object_clearance.py`` for both halves.
 SMD_PAD_CLEARANCE_MIN_KICAD_VERSION = (10, 0, 2)
 
+#: Human-readable rendering of :data:`SMD_PAD_CLEARANCE_MIN_KICAD_VERSION`
+#: (``"10.0.2"``) for warning text, so the floor is stated in exactly one place.
+SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR = ".".join(
+    str(part) for part in SMD_PAD_CLEARANCE_MIN_KICAD_VERSION
+)
+
+
+def parse_kicad_cli_version(raw: str | None) -> tuple[int, ...] | None:
+    """Parse ``kicad-cli version`` output into a comparable integer tuple.
+
+    ``kicad-cli version`` prints a bare ``10.0.6`` on some builds and a
+    decorated ``10.0.1-1~ubuntu24.04.1 release build`` on distro packages,
+    so only the leading dotted-numeric run is significant.
+
+    Args:
+        raw: Raw ``kicad-cli version`` stdout (or ``None``).
+
+    Returns:
+        A tuple such as ``(10, 0, 6)``, or ``None`` when ``raw`` is empty or
+        carries no leading numeric component.
+    """
+    tokens = (raw or "").split()
+    if not tokens:
+        return None
+    head = tokens[0].split("-")[0].split("~")[0]
+    parts: list[int] = []
+    for chunk in head.split("."):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts) or None
+
+
+def smd_pad_clearance_inert_reason(raw_kicad_cli_version: str | None) -> str | None:
+    """Explain why the emitted ``SMD Pad Clearance`` rule cannot fire, if so.
+
+    The rule is *always* emitted when the profile declares a different-net SMD
+    pad floor, but it is silently inert below
+    :data:`SMD_PAD_CLEARANCE_MIN_KICAD_VERSION` -- see that constant for the
+    measured evidence.  This helper turns a resolved ``kicad-cli`` version into
+    the user-facing explanation, so the floor, the mechanism and the workaround
+    are worded in exactly one place (Issue #5724).
+
+    Args:
+        raw_kicad_cli_version: Raw ``kicad-cli version`` stdout, or ``None``
+            when ``kicad-cli`` could not be located or did not answer.
+
+    Returns:
+        A sentence describing the inertness, or ``None`` when the installed
+        engine is at/above the floor **or** could not be determined (an
+        unknown version is never reported as broken -- there is no local
+        baseline to compare against).
+    """
+    version = parse_kicad_cli_version(raw_kicad_cli_version)
+    if version is None or version >= SMD_PAD_CLEARANCE_MIN_KICAD_VERSION:
+        return None
+    installed = (raw_kicad_cli_version or "").strip() or "unknown"
+    return (
+        f"the emitted 'SMD Pad Clearance' rule is INERT on the installed "
+        f"kicad-cli {installed}: it requires KiCad >= "
+        f"{SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR}, where a pad first inherits its "
+        "parent footprint's Reference. Below that the rule's "
+        '"A.Reference != B.Reference" scope is permanently false, so '
+        "'kicad-cli pcb drc' reports a clean board without raising any rule "
+        "error. Upgrade KiCad to >= "
+        f"{SMD_PAD_CLEARANCE_MIN_KICAD_VERSION_STR}, or rely on 'kct check' (whose "
+        "engine-independent clearance rule enforces the same floor), before "
+        "treating a native DRC pass as a different-net SMD pad clearance pass."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy (pre-#4600) generated-sidecar detection (Issue #4667)
 # ---------------------------------------------------------------------------
