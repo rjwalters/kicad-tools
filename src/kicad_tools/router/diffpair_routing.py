@@ -34,6 +34,7 @@ import contextlib
 
 import numpy as np
 
+from kicad_tools.acceleration import to_numpy
 from kicad_tools.core.geometry import (
     segment_to_segment_distance as _segment_to_segment_distance,
 )
@@ -1983,40 +1984,83 @@ class CoupledPathfinder:
         via-in-pad).  ``cell.pad_blocked`` marks cells whose extent
         overlaps continuous pad metal (#3233), so reject the via when
         any cell under its DRILL footprint is pad metal on any layer.
+
+        Issue #5720: the three per-cell Python sweeps this used to run --
+        ``num_layers x (2 * via_extra_cells + 1)^2`` ``_is_cell_blocked``
+        calls, the same cells again through ``cells_known`` ->
+        ``RouteHaloGeometry.cell_known``, and a
+        ``num_layers x (2 * drill_cells + 1)^2``
+        ``grid.cell_at(...).pad_blocked`` walk that allocated a ``_CellView``
+        per cell -- are now occupancy-plane slices over the whole candidate
+        column.  On the #5410 fixture's refinable cell (55, 56) those sweeps
+        measured 47.3 / 37.3 / 30.6 us of the predicate's 131.2 us/call.  The
+        verdict is unchanged, cell for cell:
+
+        * ``_is_cell_blocked``'s in-bounds body is exactly
+          ``_blocked[layer, y, x] and _net[layer, y, x] != net``, so the
+          ``envelope`` mask below selects the same cells its ``blocked_cells``
+          list did -- mirroring what #5617 did for ``cell_known``.
+        * Every out-of-bounds cell in either footprint made the old loop
+          return ``True``: an out-of-bounds envelope cell is unconditionally
+          "blocked" and then fails ``cell_known``, and the drill sweep
+          rejected an out-of-bounds cell outright.  A single up-front bounds
+          test on the larger of the two footprints therefore stands in for
+          both.
+        * The per-layer loop returned ``True`` from four places and ``False``
+          only by falling off the end, so WHICH layer's rejection is found
+          first is not observable.  That is what lets the pad-metal test run
+          once for the whole column and the ``cells_known`` test run as one
+          masked comparison across all layers -- the guard itself stays
+          strictly per-layer (the raster is not layer-independent, only the
+          via GEOMETRY verdict is; #5410/#5696).
         """
-        drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / self.grid.resolution)))
+        grid = self.grid
+        num_layers = grid.num_layers
+        if num_layers <= 0:
+            # No layer to sweep: the pre-#5720 per-layer loop fell straight
+            # through to ``return False``.
+            return False
+        drill_cells = max(0, int(math.ceil((self.rules.via_drill / 2) / grid.resolution)))
+        extra_cells = self._via_extra_cells
+
+        # Out of bounds anywhere under either footprint -> reject (see above).
+        reach = max(drill_cells, extra_cells)
+        if gx - reach < 0 or gy - reach < 0 or gx + reach >= grid.cols or gy + reach >= grid.rows:
+            return True
+
+        # Issue #3508: no via-in-pad regardless of net ownership.  Reading the
+        # ``_pad_blocked`` plane directly is the substitution #5617 already
+        # made for ``cell_at(...).pad_blocked`` inside ``cell_known``.
+        drill_window = (
+            slice(0, num_layers),
+            slice(gy - drill_cells, gy + drill_cells + 1),
+            slice(gx - drill_cells, gx + drill_cells + 1),
+        )
+        if bool(to_numpy(grid._pad_blocked[drill_window]).any()):
+            return True
+
+        envelope_window = (
+            slice(0, num_layers),
+            slice(gy - extra_cells, gy + extra_cells + 1),
+            slice(gx - extra_cells, gx + extra_cells + 1),
+        )
+        envelope = to_numpy(grid._blocked[envelope_window]) & (
+            to_numpy(grid._net[envelope_window]) != net
+        )
+        if not envelope.any():
+            return False
+        # Issue #5410: the envelope may be covered purely by a foreign net's
+        # dynamic route halo.  Refine only when EVERY blocked cell is verified
+        # dynamic route copper ON ITS OWN LAYER; one hard or unverifiable cell
+        # (pad metal, static halo, keepout, reservation, unknown owner) keeps
+        # the rejection.
+        if not self._halo_refiner.cells_known_mask(envelope, gx - extra_cells, gy - extra_cells):
+            return True
         # Issue #5410: the physical verdict for a THROUGH via is the same on
-        # every layer, so compute it at most once per candidate.
-        via_geometry_clear: bool | None = None
-        for layer in range(self.grid.num_layers):
-            blocked_cells: list[tuple[int, int]] = []
-            for dy in range(-self._via_extra_cells, self._via_extra_cells + 1):
-                for dx in range(-self._via_extra_cells, self._via_extra_cells + 1):
-                    if self._is_cell_blocked(gx + dx, gy + dy, layer, net):
-                        blocked_cells.append((gx + dx, gy + dy))
-            if blocked_cells:
-                # Issue #5410: the envelope may be covered purely by a foreign
-                # net's dynamic route halo.  Refine only when EVERY blocked
-                # cell is verified dynamic route copper; one hard or
-                # unverifiable cell (out of bounds, pad metal, static halo,
-                # keepout, reservation, unknown owner) keeps the rejection.
-                if not self._halo_refiner.cells_known(blocked_cells, layer):
-                    return True
-                if via_geometry_clear is None:
-                    via_geometry_clear = self._halo_refiner.via_clear(
-                        blocked_cells, layer, gx, gy, net
-                    )
-                if not via_geometry_clear:
-                    return True
-            # Issue #3508: no via-in-pad regardless of net ownership.
-            for dy in range(-drill_cells, drill_cells + 1):
-                for dx in range(-drill_cells, drill_cells + 1):
-                    cgx, cgy = gx + dx, gy + dy
-                    if not (0 <= cgx < self.grid.cols and 0 <= cgy < self.grid.rows):
-                        return True
-                    if self.grid.cell_at(layer, cgy, cgx).pad_blocked:
-                        return True
-        return False
+        # every layer, so it is computed at most once per candidate.  The
+        # per-layer guard above has already passed for every layer with a
+        # blocked cell, which is ``via_clear_verified``'s precondition.
+        return not self._halo_refiner.via_clear_verified(gx, gy, net)
 
     def _is_at_goal(self, pos: GridPos, goal: GridPos | None) -> bool:
         """Check if a grid position is at the goal (ignoring layer)."""

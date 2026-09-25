@@ -193,6 +193,64 @@ class RouteHaloGeometry:
         self._refresh()
         return bool(self._cells[layer, y, x] == net)
 
+    def window_known(self, x0: int, y0: int, x1: int, y1: int) -> np.ndarray | None:
+        """:meth:`cell_known` for the whole grid column ``[x0, x1) x [y0, y1)``.
+
+        Issue #5720.  Returns a ``(num_layers, y1 - y0, x1 - x0)`` boolean
+        array whose ``[layer, y - y0, x - x0]`` entry equals
+        ``cell_known(x, y, layer)``, or ``None`` when the window is not wholly
+        inside the grid (``cell_known`` answers ``False`` for every cell of a
+        window that is even partly out of bounds, and the callers that reach
+        for this method already reject on the out-of-bounds case, so ``None``
+        never has to be interpreted as a verdict).
+
+        Same predicate, same operand set, evaluated with one array op per
+        occupancy plane instead of one Python call plus five scalar indexed
+        reads per cell.  The per-cell short-circuit is gone by construction --
+        every plane is read for every cell in the window -- which is
+        unobservable: the reads have no side effects, and ``_refresh`` bumps
+        :attr:`state_version` at most once per ``grid.occupancy_generation``
+        however many times it is called (so an extra call cannot perturb a
+        caller's memo token).  It is skipped anyway when nothing survives the
+        hard-blockage planes.
+
+        ``CoupledPathfinder._is_via_blocked`` sweeps a
+        ``(2 * via_extra_cells + 1)^2`` envelope on every layer and then walked
+        its blocked cells a second time through ``cell_known``; on the #5410
+        fixture that second walk cost 37.3 us of the predicate's 131.2
+        us/call.
+        """
+        grid = self.grid
+        num_layers = grid.num_layers
+        if num_layers <= 0 or x1 <= x0 or y1 <= y0:
+            return None
+        if x0 < 0 or y0 < 0 or x1 > grid.cols or y1 > grid.rows:
+            return None
+        window = (slice(0, num_layers), slice(y0, y1), slice(x0, x1))
+        nets = to_numpy(grid._net[window])
+        # ``cell_known``'s conjunction, plane by plane: conservatively blocked,
+        # owned by a real signal net, and not hard-blocked by pad metal, a true
+        # obstacle or a static halo.
+        known = to_numpy(grid._blocked[window]) & (nets > 0)
+        known &= ~to_numpy(grid._is_obstacle[window])
+        known &= ~to_numpy(grid._pad_blocked[window])
+        static_blocked = grid._static_blocked
+        if static_blocked is not None:
+            known &= ~static_blocked[window]
+        reserved = grid._reserved_for_nets
+        if reserved:
+            # Bounded by the window volume, and only for the cells that are
+            # still candidates -- the same dict lookups ``cell_known`` would
+            # have done, no more.
+            for zz, yy, xx in zip(*known.nonzero(), strict=True):
+                if (int(zz), y0 + int(yy), x0 + int(xx)) in reserved:
+                    known[zz, yy, xx] = False
+        if not known.any():
+            return known
+        self._refresh()
+        known &= to_numpy(self._cells[window]) == nets
+        return known
+
     def clear(
         self, candidate, router, *, partner_net=None, partner_clearance=None, require_geometry=True
     ) -> bool:
@@ -412,6 +470,39 @@ class RouteHaloRefiner:
             return False
         return all(halo.cell_known(x, y, layer) for x, y in cells)
 
+    def cells_known_mask(self, mask, x0: int, y0: int) -> bool:
+        """:meth:`cells_known` for a per-layer mask stack (issue #5720).
+
+        *mask* is a ``(num_layers, height, width)`` boolean array selecting the
+        cells to verify inside the grid column whose top-left cell is
+        ``(x0, y0)``.  Equivalent to::
+
+            all(
+                self.cells_known(
+                    [(x0 + x, y0 + y) for y, x in zip(*mask[layer].nonzero())], layer
+                )
+                for layer in range(grid.num_layers)
+            )
+
+        with one array op per occupancy plane for the whole column instead of a
+        Python call per selected cell.
+
+        Fail-closed exactly like :meth:`cells_known`: a dormant refiner (no
+        halo, or no net-name map installed) answers ``False`` regardless of
+        *mask* -- including an all-``False`` one, which is the one case where
+        this differs from ``all(...)`` over an empty cell list.  Callers guard
+        on ``mask.any()`` before asking.
+        """
+        halo = self._halo
+        if halo is None or not self.armed:
+            return False
+        known = halo.window_known(x0, y0, x0 + mask.shape[2], y0 + mask.shape[1])
+        if known is None:
+            # Out-of-bounds window: ``cell_known`` answers False for every cell
+            # in it, so only an empty selection is (vacuously) all-known.
+            return not bool(mask.any())
+        return not bool((mask & ~known).any())
+
     def _layer_object(self, layer: int):
         from .primitives import Layer
 
@@ -570,10 +661,31 @@ class RouteHaloRefiner:
 
     def via_clear(self, cells, layer: int, gx: int, gy: int, net: int) -> bool:
         """Physical clearance of a through via centred on ``(gx, gy)``."""
+        if not self.cells_known(cells, layer):
+            return False
+        return self.via_clear_verified(gx, gy, net)
+
+    def via_clear_verified(self, gx: int, gy: int, net: int) -> bool:
+        """:meth:`via_clear`'s geometric half, for an already-verified caller.
+
+        Issue #5720.  **Precondition**: the caller must have already
+        established, with :meth:`cells_known` or :meth:`cells_known_mask` and
+        for the layer it is refining, that every conservatively-blocked cell it
+        wants relaxed is verified dynamic route copper.  Calling this without
+        that check authorises raster relaxation over pad metal, static halos,
+        keepouts, reservations and unknown owners -- a silent DRC violation
+        with no error signal.  Use :meth:`via_clear`, which performs the check
+        itself, unless you have just performed it.
+
+        Splitting it out lets ``CoupledPathfinder._is_via_blocked`` reuse the
+        one hoisted geometry verdict (#5410) without re-running the guard a
+        third time over the same envelope: the guard is genuinely per-layer,
+        the geometry is not -- a through via always spans layer 0 to layer
+        ``num_layers - 1`` and is centred on ``grid_to_world(gx, gy)``, which is
+        why :meth:`_via_geometry_clear` keys on ``(gx, gy, net)`` alone.
+        """
         halo = self._halo
         if halo is None or not self.armed:
-            return False
-        if not self.cells_known(cells, layer):
             return False
         return self._via_geometry_clear(halo, gx, gy, net)
 
