@@ -171,3 +171,8 @@ The profile is expressed in the same runtime-neutral logical tiers (`haiku`/`son
   ]
 }
 ```
+
+**Fast-harness default + per-role quality levels** (e.g. a cheap Gemini-Flash
+default with Judge on a higher-quality model, including on native runtimes such
+as Pi/OpenCode) is the runbook recipe in
+[`configuring-resources.md`](configuring-resources.md).

@@ -476,8 +476,7 @@ real hostname so it survives the controller itself being replaced.
 `ephemeral_compute` rows land in the same `records` table as every other
 kind (`dashboard/migrations/0003_ephemeral_compute.sql`) — no dedicated
 per-kind table, see that migration's own header comment for the schema
-rationale — and carry no `repo`/`issue`/`sweep_id` (host-level, like
-`tokens.snapshot`/`host.health`). Redaction: **no field survives to
+rationale — and carry no `repo`/`issue`. Redaction: **no field survives to
 `/public/*`** for this kind — job/instance/region/cost detail is private
 compute-spend detail, the same category `sweep.outcome`'s work-output
 fields are held back for (§5 above) — see `src/redaction.ts`'s
@@ -497,6 +496,32 @@ a zeroed summary, since no field of this kind survives redaction and a `$0.00`
 would read as a real idle window. See
 [`dashboard/docs/query-api.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/query-api.md).
 
+**Attributing a job to the sweep that submitted it (#8835).** An
+`ephemeral_compute` record may carry one more field: `sweep_id`, the sweep
+whose work caused the job. When present *and* naming a sweep still in
+`activeSweeps`, the authenticated dashboard renders the job **nested under
+that sweep** — on the fleet overview card and in the host-detail sweep table —
+rather than only in the flat "running compute" list. To make that possible,
+`loom-daemon` exports the sweep's own id to every dispatched sweep child as
+`LOOM_SWEEP_ID` (bare, no `daemon-` prefix — unlike `LOOM_TERMINAL_ID`), so an
+emitter running anywhere inside the sweep's process tree can read it and stamp
+it on the record.
+
+Three properties are deliberate and are pinned by tests:
+
+- **The join is on `sweep_id` alone, never `host_id`.** A hostless emitter's
+  `host_id` is one synthetic ingest identity for its whole fleet (above), so it
+  routinely differs from the host the submitting sweep runs on; matching on it
+  would attribute jobs confidently but wrongly.
+- **Nothing is dropped.** A job with no `sweep_id`, or one naming a sweep that
+  is no longer live, stays in the flat "running compute" list with its `leaked`
+  flag intact — which is precisely the shape an orphaned, still-billing
+  instance takes.
+- **Nothing changes publicly.** The `["kind"]` allowlist is untouched, so
+  `sweep_id` is withheld from `/public/*` like every other field of this kind
+  and `activeCompute` stays `[]` there — the nesting only ever renders for an
+  Access-authenticated viewer.
+
 ## 6. The operator reference instance
 
 `dashboard.example.com` is a live, operator-owned deployment of this same
@@ -514,6 +539,7 @@ capture, and why) so you can produce the equivalent for your own instance.
 |---|---|
 | [`.loom/docs/telemetry-schema.md`](telemetry-schema.md) | Wire envelope, record kinds, visibility contract, local journal |
 | [`.loom/docs/telemetry-fixtures.md`](telemetry-fixtures.md) | Offline synthetic graphs, expected query manifest, and live-comparison limits |
+| [`.loom/docs/ci-observability.md`](ci-observability.md) | Standing policy: every `2amlogic` GitHub Actions run/job/duration/outcome/log captured in SigNoz — poller (#8824), log capture + gateway redaction (#8825), retro surfaces + retention (#8826) |
 | [`.loom/docs/telemetry-overhead.md`](telemetry-overhead.md) | What lifecycle instrumentation costs on a representative run, realised attribute/event bounds, and what the measurement excludes |
 | `dashboard/docs/deploy-runbook.md` | Deploy your own Cloudflare backend end to end |
 | `dashboard/docs/cloudflare-access.md` | Gating the authenticated view behind SSO; single-URL fallback |

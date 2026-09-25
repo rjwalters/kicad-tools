@@ -134,9 +134,10 @@ Everything downstream reads its presence as *proof that a rejection was posted*:
 
 - `PRIOR_REJECTIONS`, `SKIP_STREAK`, and `UNREVISED_EVALS` count
   **`Champion Review: Epic Needs Revision` verdicts only**. A passing verdict,
-  stand-down note, or phase-progress update must never contribute to them; a
-  marker match with `PRIOR_REJECTIONS == 0` is a stray marker, and the check
-  below refuses to escalate on it.
+  stand-down note, or phase-progress update must never contribute to them. A
+  match with `PRIOR_REJECTIONS == 0`, **or one whose marker-bearing comment is
+  not itself a rejection** (#8795), is a stray marker the check below refuses
+  to tally or escalate on.
 - `loom:operator-only` / `loom:operator-decision` may only ever be applied by
   Step 4's escalation branch, to an epic with real, recurring rejection findings.
   **A passing epic is never routed to the operator by this file.** "It passes
@@ -212,10 +213,18 @@ elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
   # the REST payload has the numeric comment id that the PATCH below needs (the
   # `id` from `gh issue view --json comments` is a GraphQL node id and cannot be
   # PATCHed).
+  # Marker AND rejection title (#8795): a pre-#7666 stray carries the marker on
+  # a PASSING verdict, whose skip tally would otherwise read as this revision's
+  # rejection history.
   VERDICT_COMMENT=$(gh api "repos/{owner}/{repo}/issues/$EPIC_NUMBER/comments" --paginate \
-    --jq ".[] | select(.body | contains(\"$VERDICT_MARKER\"))" | jq -s 'last')
+    --jq ".[] | select((.body | contains(\"$VERDICT_MARKER\")) and (.body | contains(\"Champion Review: Epic Needs Revision\")))" \
+    | jq -s 'last')
   COMMENT_ID=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.id // empty')
   COMMENT_BODY=$(printf '%s\n' "$VERDICT_COMMENT" | jq -r '.body // ""')
+  case "$COMMENT_BODY" in
+    *"Champion Review: Epic Needs Revision"*) VERDICT_IS_REJECTION=yes ;;
+    *) VERDICT_IS_REJECTION=no ;;   # stray marker, or a failed REST re-read
+  esac
   SKIP_STREAK=$(printf '%s' "$COMMENT_BODY" \
     | sed -n "s|.*<!-- champion:epic-unrevised-skips:$BODY_HASH:\([0-9]\{1,\}\) -->.*|\1|p" | tail -n 1)
   SKIP_STREAK=${SKIP_STREAK:-0}
@@ -249,13 +258,16 @@ elif printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$VERDICT_MARKER" \
   # unchanged body, and this marker matches by construction on exactly the
   # rejected-then-completed (#6516) and rejected-then-decomposed (#7666) epics
   # that must not be skipped into silence or escalated.
-  if [ "$PRIOR_REJECTIONS" -eq 0 ]; then
-    # Stray marker: the marker matched, but no "Champion Review: Epic Needs
-    # Revision" comment was ever posted. Only Step 4's rejection branch may
-    # write this marker (see "Hard constraint" above), so this is a defect in
-    # whatever wrote it — not an unrevised rejection and not a stuck epic.
-    # Never tally it and NEVER escalate on it (#7666).
-    echo "#$EPIC_NUMBER carries a verdict marker but has no posted 'Epic Needs Revision' comment — stray marker (#7666): no tally, no escalation, no comment"
+  if [ "$PRIOR_REJECTIONS" -eq 0 ] || [ "$VERDICT_IS_REJECTION" = "no" ]; then
+    # Stray marker: no "Epic Needs Revision" comment stands behind the match —
+    # none was ever posted (#7666), or the comment CARRYING the marker is not
+    # itself a rejection (#8795; PRIOR_REJECTIONS spans the whole issue history,
+    # so rejections of a SUPERSEDED body cannot stand in for this check). Only
+    # Step 4's rejection branch may write this marker (see "Hard constraint"
+    # above), so either shape is a defect in the writer — not an unrevised
+    # rejection and not a stuck epic. Never tally it, NEVER escalate on it. A
+    # failed REST re-read lands here too, in the safe direction (#7965).
+    echo "#$EPIC_NUMBER carries a verdict marker with no 'Epic Needs Revision' comment behind it — stray marker (#7666/#8795): no tally, no escalation, no comment"
     # Continue to the next epic; do not read further.
   elif [ "$OPERATOR_RULED" = "yes" ]; then
     # A human already answered this revision's escalation by un-parking it.
@@ -292,9 +304,9 @@ fi
 | Guard outcome | Next action |
 |---|---|
 | No marker match — a new epic, or one revised since its last rejection | Step 0 (Completion-First Check) → Step 0.5 (Tracking-Umbrella Stand-Down) → Step 1 (Read) → Step 2 (Evaluate) → Step 2.5 → Step 3 or 4. Either of Step 0 / Step 0.5 may end the pass on its own (close / operator ask / stand-down); only an epic that is neither finished nor already decomposed reaches the structural criteria — that part is then a **full** re-evaluation, exactly as before this section existed |
-| Marker match, `PRIOR_REJECTIONS == 0` (stray marker, #7666) | **Run Step 0 and Step 0.5 first.** If neither acts, continue to the next epic — no tally, no escalation, no comment. Only Step 4's rejection branch may write this marker, so a match with no posted rejection is a defect in the writer, never evidence of a stuck epic |
+| Marker match with no rejection behind it — `PRIOR_REJECTIONS == 0` (#7666), or the marker-bearing comment is not itself a `Champion Review: Epic Needs Revision` verdict (#8795) | **Run Step 0 and Step 0.5 first.** If neither acts, continue to the next epic — no tally, no escalation, no comment. Only Step 4's rejection branch may write this marker, so either shape is a defect in the writer, never evidence of a stuck epic |
 | Marker match, `OPERATOR_RULED=yes` (`loom:operator-only` removed after this revision's rejection, #7921) | **Run Step 0 and Step 0.5 first.** If neither acts, continue to the next epic — no tally, no escalation, no comment. A human has already ruled on this exact body; only a revision (new hash, new verdict) restarts the ladder |
-| Marker match, `PRIOR_REJECTIONS ≥ 1` and `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | **Run Step 0, then Step 0.5, first.** If either acts (close / operator ask / stand-down), the pass ends there. Otherwise tally the skip in place (`PATCH` the existing verdict comment) and continue to the next epic: no new comment, no label change, no structural evaluation |
+| Marker match on a real rejection verdict and `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | **Run Step 0, then Step 0.5, first.** If either acts (close / operator ask / stand-down), the pass ends there. Otherwise tally the skip in place (`PATCH` the existing verdict comment) and continue to the next epic: no new comment, no label change, no structural evaluation |
 | Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | **Run Step 0, then Step 0.5, first**, then — if neither acted — go **straight to Step 4's escalation branch**, skipping Steps 1–3: the text is byte-identical, so re-evaluating the criteria cannot change the verdict |
 | `ALREADY_ROUTED=yes` (`loom:operator-only`, `loom:blocked`, or `loom:operator` present, #7734) | Continue to the next epic — no tally, no re-escalation, no comment, no evaluation; a human already owns it |
 

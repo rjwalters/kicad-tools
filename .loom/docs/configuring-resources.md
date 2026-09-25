@@ -25,6 +25,7 @@ linked doc disagree, the linked doc wins.
 - [Recipe 2 — minimize wall-clock on code work](#recipe-2--minimize-wall-clock-on-code-work)
 - [Recipe 3 — throttle and capacity backstops](#recipe-3--throttle-and-capacity-backstops)
 - [Recipe 4 — verify what you configured](#recipe-4--verify-what-you-configured)
+- [Recipe 5 — cheap fast default model (e.g. Gemini Flash)](#recipe-5--cheap-fast-default-model-eg-gemini-flash)
 - [Interaction rules that bite](#interaction-rules-that-bite)
 <!-- toc:end -->
 
@@ -386,6 +387,20 @@ It does **not** catch a model/runtime *mismatch* — `runtimes.roles.judge =
 "codex"` with `roleModels.judge = "sonnet"` validates clean. That is a
 **spawn-time** refusal (#5028/#6201); see step 3.
 
+Native-harness profiles get their own pre-dispatch proof — the harness +
+provider + model ID resolve, or the launch is refused before it runs:
+
+```sh
+loom-daemon worker profile-check gemini-flash            # reads no secret values, contacts no provider
+loom-daemon worker profile-check gemini-flash --runtime pi
+```
+
+An unresolvable profile exits `78` naming the bound harness — so "which model
+is the default even" is answered *before* dispatch. For an unset credential
+variable a pooled provider could supply, the check also names the pool
+namespace and its selectable count, still without reading any account's value
+(full contract: [`runtime-model-trials.md`](runtime-model-trials.md) §More models).
+
 ### Step 2 — which tap actually ran?
 
 Two sibling stderr markers, never merged into one line (the crash-signal reader
@@ -459,6 +474,98 @@ hides: every counter is optional, so a missing one means **unmeasured, not
 zero**, and the weighted-token figures price through a named, known-stale rate
 card. The cost field is `tap_cost_estimate` — an estimate for a metered tap and
 **not a charge at all** for a flat-rate one.
+
+## Recipe 5 — cheap fast default model (e.g. Gemini Flash)
+
+The inverse of Recipe 1: instead of paying for the expensive subscriptions
+fleet-wide and pinning the expensive model on Judge, run the **default** on a
+cheap, fast model and promote only the quality-critical roles. Recipe 1 owns
+the promotion; this recipe owns everything that stays cheap.
+
+### The harness has to be native
+
+Claude Code (Anthropic-only) and Codex (OpenAI-only) cannot serve a
+`gemini-*` model. Pi and OpenCode can, through the model-profile mechanism,
+for any provider ID their CLI knows. Put the chosen CLI on `PATH` (or set
+`LOOM_PI_BIN` / `LOOM_OPENCODE_BIN` to its executable) and authenticate it per
+the profile's credential mapping. Kimi Code CLI is the third native harness but
+is not yet guarded for Judge (no verified `loom_*` tool binding), so a quality
+tier on it fails closed at exit `78`.
+
+### The flash profile is the one indirection point
+
+Define it once under `runtimes.modelProfiles` and make it the default:
+
+```json
+{
+  "runtimes": {
+    "default": "pi",
+    "defaultModelProfile": "gemini-flash",
+    "modelProfiles": {
+      "gemini-flash": {
+        "model": "gemini-2.5-flash",
+        "providers": { "pi": "google", "opencode": "google" },
+        "credentialEnv": "GEMINI_API_KEY",
+        "credentialTargets": { "pi": "GEMINI_API_KEY", "opencode": "GEMINI_API_KEY" }
+      }
+    }
+  }
+}
+```
+
+**"Latest flash" is a moving target.** Verify the `model` ID against the CLI's
+own model list on the day you write it — Recipe 4's `worker profile-check`
+refuses an ID the runtime cannot resolve. When the provider rotates the flash
+line, edit *this object* and nothing else: no per-role or sweep config names
+the raw ID. That is the same single-indirection property `sweep.modelAliases`
+gives the escalation ladder ([`model-selection.md`](model-selection.md)).
+
+The profile **names variables only** — the key value rides in the launching
+environment or an api-key pool (`loom-daemon api-keys add gemini <account>
+--key-file …`), never in config ([`credential-storage.md`](credential-storage.md)).
+A Vertex / ambient-cloud-credential deployment uses the multi-variable shape:
+`credentialEnv` as an array, a per-variable `credentialTargets.opencode` map,
+provider `google-vertex` — the bundled `example-vertex` in
+`defaults/model-profiles.json` is the template.
+
+### Keep the default cheap: leave the runner's global model tier unset
+
+Profile selection for the native adapters is `--profile` > `LOOM_MODEL_PROFILE`
+> `runtimes.defaultModelProfile` > the shipped `zai-flash`. The rule that makes
+this recipe work: **an unconfigured native role runs its selected profile —
+never the shipped Claude `sonnet` alias.** So leave
+`autonomous.roleRunner.model` unpinned; that is what keeps the un-promoted
+majority on flash. (If you do pin it, pin something the native runtime
+accepts — a qualified `provider/model` or the profile's model name. A Claude
+alias trips the #5028 mismatch preflight: Recipe 1's trap, same shape.)
+
+### Promotion: the native pin rule, and the judge-independence trap
+
+The per-role pins work exactly as in Recipe 1; two things differ on a native
+runtime.
+
+- **Explicit pins must be qualified `provider/model`** (or match the resolved
+  profile's model exactly). The native adapters do no fuzzy Claude-alias
+  translation and no silent provider fallback, so "one rung up on the same tap"
+is a qualified ID, e.g. `"roleModels": { "judge": "google/gemini-2.5-pro" }`,
+  not a bare tier name.
+- **Judge independence.** A native sweep runs every phase in **one session with
+  no subagents** — the fast model that wrote the PR would be grading its own
+  work. Recipe 1's trap paragraph applies verbatim:
+  `rolePreference.judge` / `runtimes.roles.judge` govern the **standalone
+  periodic Judge tick**, not the sweep's Judge phase (a sweep resolves under
+  `sweep-lifecycle`). The working shape is therefore unchanged: the sweep opens
+  its PR at `loom:review-requested` and a **standalone Judge tick on a
+  different tap** (e.g. the Claude subscription) reviews it.
+
+### Interactive sweeps: the fast model is the session's tier-4 default
+
+The session's own model is tier 4 of the model-selection chain: start the
+orchestrator session on the fast model (a Pi/OpenCode session whose selected
+profile is the flash one), and every unpinned role inherits it. Pin the quality
+roles per Recipe 1 Path A — `terminals[].roleConfig.model` at tier 2, or the
+role's `suggestedModel` (the shipped Judge default is already `opus`) — and a
+pin outranks the `sweep.escalation` ladder for that role.
 
 ## Interaction rules that bite
 

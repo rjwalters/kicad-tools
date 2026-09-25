@@ -613,8 +613,18 @@ assert_not_contains "$out" "STUB_CODEX" "default path does not touch the codex r
 assert_contains "$out" 'argv=[-p /loom:sweep 4467 --dangerously-skip-permissions]' "default path forwards the same claude args as before (byte-for-byte)"
 
 echo "Test 20: 'LOOM_RUNTIME=codex loom sweep' routes to spawn-codex.sh"
+# Hermeticity (#8859): this test asserts the *dispatcher's* runtime routing, so it
+# must not also be running runtime_admission's role gate. `codex` is the one legacy
+# adapter that calls resolve_and_admit when LOOM_ROLE is non-empty
+# (worker_spawn/mod.rs) — and every daemon-launched shell carries one (a Builder
+# running build-gate.sh carries LOOM_ROLE=sweep-lifecycle, which binds to Builder's
+# requirements). Builder requires worktreeIsolation, defaults/runtimes/codex.json
+# still declares it "partial", so the ambient role alone makes this exit 78 before
+# spawn-codex.sh is ever reached. LOOM_WORKSPACE must go too: worker_spawn::workspace()
+# prefers it over the fixture, so an ambient one silently re-roots admission at the
+# real checkout instead of $SWEEPREPO. Same `env -u LOOM_ROLE` shape as Test 22.
 set +e
-out=$(cd "$SWEEPREPO" && LOOM_RUNTIME=codex LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
+out=$(cd "$SWEEPREPO" && env -u LOOM_ROLE -u LOOM_WORKSPACE LOOM_RUNTIME=codex LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
 rc=$?
 set -e 2>/dev/null || true
 assert_eq "$rc" "0" "'LOOM_RUNTIME=codex loom sweep' exits 0"
@@ -626,8 +636,12 @@ if command -v jq >/dev/null 2>&1; then
     echo "Test 21: 'loom sweep' honors .loom/config.json runtimes.default (no env)"
     SWEEPCFG="$(make_sweep_repo)"
     echo '{"runtimes":{"default":"codex"}}' > "$SWEEPCFG/.loom/config.json"
+    # `-u LOOM_ROLE` for the same reason as Test 20 (#8859): this is also a codex
+    # route, so an ambient role runs the admission gate against a fixture that ships
+    # no defaults/roles/*.json at all — "role manifest .../builder.json: No such
+    # file or directory", exit 78, before spawn-codex.sh is reached.
     set +e
-    out=$(cd "$SWEEPCFG" && env -u LOOM_RUNTIME -u LOOM_WORKSPACE LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
+    out=$(cd "$SWEEPCFG" && env -u LOOM_RUNTIME -u LOOM_ROLE -u LOOM_WORKSPACE LOOM_CONFIG_DEFAULTS_FILE="" LOOM_HOME="$CHK" bash "$DISPATCHER" sweep 4467 2>&1)
     rc=$?
     set -e 2>/dev/null || true
     assert_eq "$rc" "0" "'loom sweep' with runtimes.default=codex exits 0"

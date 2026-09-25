@@ -129,6 +129,7 @@ Merge blocked: PR #8078's required check \`File Size Ratchet\` last ran at 2026-
 REFUSAL
 exit 1" ;;
             nodate) echo "echo 'could not determine'; exit 2" ;;
+            cleanwarn) echo "echo 'Warning: required-check freshness guard (#8248): the ruleset lookup for '\''main'\'' is gated by this repository'\''s GitHub plan (#8844).' >&2; echo 'LOOM-STALE-CHECKS-CLEAN'; exit 0" ;;
             silent) echo "exit 0" ;;
             hang)   echo "exit 127" ;;
         esac
@@ -140,6 +141,7 @@ STUB_CLEAN="$(make_stub clean)"
 STUB_STALE="$(make_stub stale)"
 STUB_NODATE="$(make_stub nodate)"
 STUB_SILENT="$(make_stub silent)"
+STUB_CLEANWARN="$(make_stub cleanwarn)"
 
 # --- Shared globals the function reads ---
 PR_NUMBER="8078"
@@ -218,6 +220,18 @@ LOOM_DAEMON_BIN="$STUB_CLEAN" run_guard
 assert_contains "$(cat "$STUB_DIR/argv-clean")" "--base-ref trunk" "missing .base.ref -> DEFAULT_BRANCH_NAME used"
 PR_JSON='{"base":{"ref":"main"}}'
 unset DEFAULT_BRANCH_NAME
+
+# T9 (#8844): the plan-gate path. On a private repo whose GitHub plan has no
+# rulesets, the daemon answers CLEAN on stdout AND a `Warning:` on stderr
+# saying which source it read as configuring nothing. Two things must hold:
+# the guard still passes (the sentinel comparison must not be contaminated by
+# stderr — this is why the invocation no longer redirects it to /dev/null),
+# and the warning REACHES the operator. A relaxation nobody can see is how a
+# fail-open ships unnoticed.
+LOOM_DAEMON_BIN="$STUB_CLEANWARN" run_guard
+assert_eq "0" "$LAST_RC" "CLEAN + a stderr warning -> guard still passes (stderr does not contaminate the sentinel)"
+assert_contains "$LAST_OUT" "Warning:" "the plan-gate warning is not swallowed"
+assert_contains "$LAST_OUT" "#8844" "the warning names the condition"
 
 # --- The REAL binary's offline contract (--from-stdin) ----------------------
 #

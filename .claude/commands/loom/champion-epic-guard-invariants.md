@@ -100,6 +100,17 @@ Invariants a future edit must preserve:
   nobody ever rejected. Any future verdict type (a pass, a stand-down, a status
   note) must carry its own marker name and idempotency rule — Step 0.5 is the
   worked example.
+- **…and the READER must verify that, not just the marker (#8795).** #7666 fixed
+  the *writing* half, but strays written before it are already posted on live
+  epics and cannot be un-written. `PRIOR_REJECTIONS ≥ 1` does not rule one out:
+  it spans the epic's **whole history**, so rejections against a *superseded*
+  body keep it non-zero while the comment carrying the *current* body's marker
+  is a passing verdict — whose own `epic-unrevised-skips` tally then lands in
+  `SKIP_STREAK`. So the REST selection matches marker **and**
+  `Champion Review: Epic Needs Revision`, and the stray branch fires on
+  `VERDICT_IS_REJECTION=no` as well as `PRIOR_REJECTIONS == 0`. Observed on
+  `rjwalters/kicad-tools` epics #4410 and #3438 at `UNREVISED_EVALS` = 5 against
+  a cap of 2, both healthy and actively worked.
 
 These are enforced statically, not by prose:
 `defaults/scripts/tests/test-champion-epic-verdict-marker-scope.sh` (#7666,

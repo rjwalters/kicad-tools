@@ -751,6 +751,10 @@ _rj_verb_cancel() {
 
 _rj_main() {
     set -uo pipefail
+    # requires-daemon: private-workspace >= 0.19.335  No host execution from a private worker.
+    if [[ -n "${LOOM_PRIVATE_WORKSPACE:-}" || -e /workspace/identity.json ]]; then
+        "${LOOM_DAEMON_SELF_BIN:-loom-daemon}" private-workspace check-host-job || return 78
+    fi
     trap _rj_on_signal TERM INT HUP
 
     local verb="${1:-}"

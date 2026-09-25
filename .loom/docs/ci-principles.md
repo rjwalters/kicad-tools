@@ -85,3 +85,7 @@ a cancellation rate.
 - #7789 / #7791 — flake tracking, and why retry must *record* rather than hide
 - #7745 / #7761 — the same "a skipped check must not read as a pass" rule,
   learned in the resync and guard layers
+- [`ci-observability.md`](ci-observability.md) — the observability face of
+  the same family: every run, job, duration, outcome and log is captured in
+  SigNoz as standing policy, so a regression like #7779's cancellation storm
+  is visible over time instead of weeks later (#8827)

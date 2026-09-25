@@ -69,6 +69,8 @@ only on a **breaking** wire change to the record shapes below. A backend should:
 | `3` | Adds `trace.span` (only trace envelopes use this version). | Existing lifecycle envelopes keep version `2`. |
 | `4` | Adds `sweep.identity` (#8713); only identity envelopes use `4`. | Existing lifecycle/trace versions and shapes remain unchanged. Older Workers store unknown kinds in history but cannot enrich live state from them. |
 | `5` | Adds `session.summary` (#8757, G3 of #8714); only session-summary envelopes use `5`. | Existing lifecycle/trace/identity versions and shapes remain unchanged. |
+| `6` | Adds `session.analysis` (#8760, G3 part 2 of #8714); only session-analysis envelopes use `6`. | Existing lifecycle/trace/identity/session-summary versions and shapes remain unchanged. |
+| `7` | Adds `daemon.event` (#8760, G4 of #8714); only daemon-event envelopes use `7`. | Existing lifecycle/trace/identity/session-summary/session-analysis versions and shapes remain unchanged. |
 
 ## `/ingest` response (the bound-`host_id` echo)
 
@@ -681,6 +683,106 @@ On the OTLP path this maps to a log record (severity `Info`) with
 `loom.turns`, `loom.tool_calls` (kvlist array), `loom.tool_errors` and
 `loom.outcome` attributes — all covered by the gateway collector's
 `loom.*` privacy allowlist.
+
+### `session.analysis`
+
+A derived per-session anomaly/quality rollup (Issue #8760, G3 part 2 of epic
+#8714), computed alongside `session.summary` from the same parsed transcript
+(`activity/session_analysis.rs`) and emitted at the same point in the
+transcript-ingest pass — a still-growing session is re-analyzed on each pass
+that re-reads it, mirroring `session.summary`'s own replace-never-append
+semantics.
+
+**Bounded, mechanical derivation only**: retry-loop detection, the longest
+paired `tool_use`/`tool_result` call, a USD cost estimate from the existing
+single pricing rate card (applied per-model across the transcript's own usage
+buckets, so a multi-model session is costed correctly rather than
+approximated from a flat total), and a fixed-threshold anomaly flag. **No
+LLM-written prose summary** — that is explicitly a later slice, per #8714's
+own G3 proposal.
+
+**Same wire-safety contract as `session.summary`.** Every field is a count,
+an id, an allowlisted tool name, a duration, or a derived dollar figure —
+pinned by the redaction test suite (`otlp/mapping/metadata/tests.rs` +
+`activity/session_analysis.rs`), extended for this kind the same way
+`session.summary`'s was.
+
+```json
+{
+  "kind": "session.analysis",
+  "repo": "loom",
+  "visibility": "private",
+  "session_id": "uuid-a",
+  "parent_session_id": "7d8119a7-250a-48ca-a0ee-b4b2c7f14d92",
+  "retry_loops": [{ "tool": "Bash", "length": 3 }],
+  "longest_tool_call": { "tool": "Bash", "duration_ms": 5000 },
+  "cost_usd": 0.042,
+  "anomalies": ["high_token_usage"]
+}
+```
+
+| Field | Type | Always present | Notes |
+|---|---|---|---|
+| `repo` / `visibility` / `session_id` / `parent_session_id` | — | see `session.summary` | Copied verbatim from the source `session.summary` record — `session_id` is the join key a consumer uses to correlate the two records. |
+| `retry_loops` | array | yes | Maximal runs of `>= 3` consecutive invocations of the identical tool name, detected purely from call order and name (never arguments/output). `{ "tool", "length" }` per run. Empty (never omitted) when none were detected, so "computed and found none" is distinguishable from "not computed". |
+| `longest_tool_call` | object | no | The `tool_use` -> `tool_result` pairing with the largest elapsed wall time, matched by the content block's own opaque call id (never by content). Absent when no pair could be matched (e.g. a transcript whose `tool_use` blocks carry no id) — never a fabricated zero duration. |
+| `cost_usd` | number | no | Summed per-model across the session's own usage buckets via the shared rate card (`activity::resource_usage::ModelPricing`) — the same helper `transcript_ingest`'s own cost accounting uses. Absent when the transcript contributed no usage buckets at all — never a fabricated `0.0`. |
+| `anomalies` | string array | yes | Anomaly flag classes raised for this session. One class today: `high_token_usage` (combined `tokens_input + tokens_output` above a static, initial-calibration threshold — **not** a live per-role fleet percentile; a true percentile needs a historical query this bounded, mechanical slice does not add). Empty (never omitted) when none were raised. |
+
+On the OTLP path this maps to a log record (severity `Warn` when any anomaly
+was raised, `Info` otherwise) with `loom.session_id`,
+`loom.parent_session_id`, `loom.cost_usd`, `loom.longest_tool_call.tool`,
+`loom.longest_tool_call.duration_ms`, `loom.retry_loops` (kvlist array) and
+`loom.anomalies` (string array) attributes — all covered by the gateway
+collector's `loom.*` privacy allowlist.
+
+### `daemon.event`
+
+One of the four named event-bus topics that carried no telemetry record kind
+of their own before this issue (Issue #8760, G4 of epic #8714):
+`daemon.drain.*`, `daemon.capacity.advisory`, `daemon.preflight.advisory`,
+and `epic.issue.*`. Host/daemon-level operational signals, not per-session
+user work — carries no `visibility` tag, the same "references no repository"
+contract `tokens.snapshot`/`host.health` already establish.
+
+Deliberately generic — one record shape for four topic families — rather than
+four new per-topic record types: every one of these topics is already a
+small, frozen, operator-facing payload (`event_bus.rs`'s own documented
+taxonomy) with no prompt/tool-output/secret content by construction, the same
+shape the live SSE event-bus tail already exposes to an authenticated
+operator.
+
+```json
+{
+  "kind": "daemon.event",
+  "topic": "daemon.drain.started",
+  "payload": { "in_flight": 2, "timeout_secs": 300, "force_after_timeout": true }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `topic` | string | The exact bus topic this record mirrors, e.g. `"daemon.drain.started"`, `"epic.issue.123.decompose"`. |
+| `payload` | object | The event's own payload, exactly as published on the bus — see `event_bus.rs`'s topic table for each topic's shape. One documented exception, below. |
+
+**The one payload field that is not carried verbatim**:
+`daemon.preflight.advisory`'s `workspace_root` is reduced to its final path
+component (`/home/alice/repos/loom` -> `loom`). It is the only absolute host
+filesystem path anywhere in the four topic families, and no other telemetry
+record kind ships one — an absolute path routinely embeds the operating
+user's name, which is host-identifying in a way nothing else on this wire is.
+The final component keeps the field's whole operational point (*which*
+workspace in a multi-workspace fleet is failing preflight) at the same
+repo-slug granularity `loom.repo` uses everywhere else.
+
+Emitted by a dedicated bus subscriber (`observability/daemon_event.rs`)
+alongside — not folded into — `collector.rs`'s own sweep/issue-scoped
+subscription, since these four topics need none of that module's dispatch-
+correlation or repo-slug-resolution state.
+
+On the OTLP path this maps to a log record (severity `Info`) with
+`loom.topic` and `loom.payload` (the payload carried whole as one
+compact-JSON string, since its shape varies per topic) attributes.
 
 ### `tokens.snapshot`
 

@@ -229,6 +229,7 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `daemon.drain.aborted`     | Daemon IPC (#4090)             | `{was_draining}` |
 | `daemon.drain.timeout`     | Drain supervisor (#4090)       | `{in_flight, forced, cancelled?, then_exit?, roll_pending?, attempts?, elapsed_secs?}` |
 | `daemon.drain.roll_pending` | Drain supervisor (#6007)      | `{in_flight, attempt, window_secs, budget_secs}` |
+| `forge.event`               | `forge_events.rs` feed consumer (#8765) | `{source: "forge-event-feed", host_id, count, first_seq, last_seq, types}` |
 
 The four `epic.issue.{N}.*` topics were authorized by **#3873** (epic #3842
 Phase 4) and are documented in full under [Epic supervisor](#epic-supervisor-3842)
@@ -250,6 +251,26 @@ is abandoned. See
 [Supervised restart primitive](#supervised-restart-primitive-4054) below.
 They ride the same in-memory bus as the sweep topics and are tailable via
 `subscribe_to_events` / `tail_event_bus`.
+
+The `forge.event` topic was authorized by **#8767** (epic #8764) for the forge
+event-plane feed consumer. Publisher: `loom-daemon/src/forge_events.rs`
+(#8765) — one `Event::Generic` per non-empty verified feed page. Payload:
+`{source: "forge-event-feed", host_id: string, count: u64, first_seq: u64,
+last_seq: u64, types: string[]}`, `types` being the page's event-type names
+sorted and deduplicated. The payload is a **routing hint only, never decision
+input** — it carries counts, sequence bounds and event-type names but no forge
+state, so a consumer that wants state re-reads the forge through its normal
+rate-limited clients and must be idempotent under the per-page dedup contract
+(a prompt may arrive with the events themselves absent from the bus — the
+on-disk journal is the copy, the prompt is a "check now"). Invariant source:
+`docs/adr/0021-forge-event-plane.md` (ADR-0021); implementation:
+`loom-daemon/src/forge_events.rs`.
+
+**`Generic`-topic rule.** A `Generic` topic is allowed only while it (a) is
+listed in this inventory, (b) carries a `source` field naming its producing
+subsystem on every payload, and (c) never triggers a write to external state
+without a forge-verified re-read in the consumer. `forge.event` satisfies all
+three; every future prompt topic must too.
 
 The four `sweep.issue.{N}.*` payloads gained an additive **`repo`** field in
 **#3929** (`(repo, issue)`-aware sweep visibility, phase c of #3926). The bus is

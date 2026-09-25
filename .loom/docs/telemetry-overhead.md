@@ -101,39 +101,53 @@ Point-in-time records, **not a budget and not a threshold** — nothing gates on
 these numbers, and they are kept only so a later measurement has something to be
 compared against. Re-run the command rather than citing this table as current.
 
-Two runs are kept, not one. The first is a debug build on a saturated host; the
-second is a release build on a working-but-not-saturated host. **The pair is the
-point** — a single row cannot tell a reader how much of a figure was the build
-profile and how much was the machine it ran on.
+Three runs are kept. The first is a debug build on a saturated host; the
+second and third are both release builds on the same fleet host, before and
+after the two durability-neutral fsync reductions from #8643 (`Journal::lock`
+skips the parent-directory `fsync` once the journal already holds a record,
+and `Journal::drain` commits the cursor once per delivered record instead of
+once per journal entry). **The B/C pair is the point** — same host, same
+shape, same command; the only thing that changed between them is the code.
 
-| Field | A — debug, saturated | B — release, non-saturated |
-| --- | --- | --- |
-| Measured | 2026-09-22, from the working tree that introduced this command | 2026-09-22, re-measured post-#8642 (drain-to-completion `run_once`), same session as the ladder below |
-| Build | `debug` profile, `--features otlp`, macOS aarch64 | `release` profile, `--features otlp`, rustc 1.96.0, Linux x86_64 |
-| Host | (not recorded beyond load) | 8-vCPU Xeon 8488C, ext4 (the harness's temp workspaces are on the same filesystem as the repo, so its fsyncs are real disk fsyncs) |
-| Host state | 1-minute load average ≈ 37 (a busy multi-sweep host, not an idle one) | 1-minute load average ≈6.6, i.e. ≈82% of 8 cores. A working fleet host with concurrent agent processes — **not idle**, and not claimed to be |
-| Shape | 5 phases (repair waterfall), 4 tool spans per attempt, 41 spans, 5 repetitions | identical |
-| `added_median_ns` | 5,572,089,583 (≈5.57 s per representative run) | 977,210,046 (≈0.98 s per representative run) |
-| `added_ns_per_span` | 135,904,623 (≈136 ms per span boundary pair) | 23,834,391 (≈23.8 ms per span boundary pair) |
-| `journal_bytes` | 44,751 | 45,565 |
-| `bounded_record_bytes` | 18,661 (`bytes_per_span` 455) | 18,907 (`bytes_per_span` 461) |
-| `bounds` | max attribute value 14 B, 7 attributes, 0 events, 0 links per span | identical |
-| `reference` | 712 observed sweeps, p50 109 s, p90 2,846 s | 410 observed sweeps, p50 103 s, p90 3,279 s |
-| `overhead_fraction_of_p50` | 0.0511 | 0.0095 |
+| Field | A — debug, saturated | B — release, post-#8642 | C — release, post-#8643 |
+| --- | --- | --- | --- |
+| Measured | 2026-09-22, from the working tree that introduced this command | 2026-09-22, re-measured post-#8642 (drain-to-completion `run_once`), same session as the ladder below | 2026-09-22, from the working tree that closed #8643 |
+| Build | `debug` profile, `--features otlp`, macOS aarch64 | `release` profile, `--features otlp`, rustc 1.96.0, Linux x86_64 | identical |
+| Host | (not recorded beyond load) | 8-vCPU Xeon 8488C, ext4 (the harness's temp workspaces are on the same filesystem as the repo, so its fsyncs are real disk fsyncs) | identical |
+| Host state | 1-minute load average ≈ 37 (a busy multi-sweep host, not an idle one) | 1-minute load average ≈6.6, i.e. ≈82% of 8 cores. A working fleet host with concurrent agent processes — **not idle**, and not claimed to be | 1-minute load average ≈ 11.1 before and after, i.e. ≈140% of 8 cores — busier than B, not idle |
+| Shape | 5 phases (repair waterfall), 4 tool spans per attempt, 41 spans, 5 repetitions | identical | identical |
+| `added_median_ns` | 5,572,089,583 (≈5.57 s per representative run) | 977,210,046 (≈0.98 s per representative run) | 648,161,508 (≈0.65 s per representative run) |
+| `added_ns_per_span` | 135,904,623 (≈136 ms per span boundary pair) | 23,834,391 (≈23.8 ms per span boundary pair) | 15,808,817 (≈15.8 ms per span boundary pair) |
+| `journal_bytes` | 44,751 | 45,565 | 45,647 |
+| `bounded_record_bytes` | 18,661 (`bytes_per_span` 455) | 18,907 (`bytes_per_span` 461) | identical to B |
+| `bounds` | max attribute value 14 B, 7 attributes, 0 events, 0 links per span | identical | identical |
+| `reference` | 712 observed sweeps, p50 109 s, p90 2,846 s | 410 observed sweeps, p50 103 s, p90 3,279 s | 412 observed sweeps, p50 105 s, p90 3,279 s |
+| `overhead_fraction_of_p50` | 0.0511 | 0.0095 | 0.0062 |
 
 B's prior figures (measured at `5ee4fd120`, #8614) were 1,187,124,055 ns
-added / 28,954,245 ns per span. The row above is a deliberate re-measurement,
-not a drift: `run_once` now drains its journal to completion instead of once
-(#8642, see ["The harness no longer caps at ~256
+added / 28,954,245 ns per span. The row above is a deliberate re-measurement
+for #8642, not a drift: `run_once` now drains its journal to completion
+instead of once (see ["The harness no longer caps at ~256
 spans"](#the-harness-no-longer-caps-at-256-spans) below), which adds one extra
 no-op `backfill` call to every instrumented run. That call is a single
 `read_dir` against an already-retired (and thus empty or absent)
 trace-context directory — no journal entries to drain, no fsyncs — so it
 cannot explain the drop; the difference here is host-load noise between
 sessions, consistent with the ±12% run-to-run spread this same host shows
-within one session (see the ladder below). B is reproducible verbatim; the
-reference denominator is this host's own recorded history, so its `reference`
-row will differ elsewhere:
+within one session (see the ladder below). B is reproducible verbatim against
+its own stated conditions; the reference denominator is this host's own
+recorded history, so its `reference` row will differ elsewhere.
+
+C isolates a *different*, independent change (#8643) against its own
+pre-change baseline, measured on the same host in the same session as C
+itself: the pre-#8643 baseline read 1,187,124,055 ns added / 28,954,245 ns per
+span (the same `5ee4fd120` figures B superseded above, since C's branch point
+predates #8642), falling to 648,161,508 ns / 15,808,817 ns per span after —
+a ≈45% drop in per-span cost attributable to #8643 alone. Because B and C's
+baselines were captured in different sessions under different host load, B and
+C are each independently reproducible verbatim against their own stated
+conditions, but the two are not a clean pair against *each other* — the
+`reference` row differs between them for that reason.
 
 ```console
 cargo build --release -p loom-daemon --features otlp
@@ -142,23 +156,28 @@ cargo build --release -p loom-daemon --features otlp
     --repetitions 5 --reference-workspace /path/to/loom
 ```
 
-Read both with their conditions attached. A is a **debug build on a saturated
-host measuring the longest ordinary lifecycle** — an upper bound, not a fleet
-figure. B is what this fleet host actually pays: <1% of its p50 observed
-sweep, and ≈0.03% against p90 (3,279 s). The p50 is small (103 s) because
-short-lived and failed dispatches are sweeps too, so the p50 fraction is the
-conservative reading of the two, not the representative one.
+Read all three with their conditions attached. A is a **debug build on a
+saturated host measuring the longest ordinary lifecycle** — an upper bound,
+not a fleet figure. B is what this fleet host pays after #8642's
+drain-to-completion fix: <1% of its p50 observed sweep, and ≈0.03% against p90
+(3,279 s). C, measured separately against #8643's own pre-change baseline on
+the same host, shows a further ≈45% per-span reduction attributable to that
+specific fsync-skipping change. The p50 is small (103–105 s) in both B and C
+because short-lived and failed dispatches are sweeps too, so the p50 fraction
+is the conservative reading of the two, not the representative one.
 
 B is ≈5.7× cheaper than A, but **that ratio cannot be attributed to the build
 profile alone**: the two rows differ in profile, in host load, *and* in
 machine/OS/architecture. Nothing here isolates those three, and no attempt is
-made to. What the pair does establish is that the 136 ms/span figure was not the
-fleet's, and ≈24-34 ms/span is — on this host, under this load, and rising
-with span count (see the next section).
+made to. What the pair does establish is that the 136 ms/span figure was not
+the fleet's, and ≈24-34 ms/span is — on this host, under this load, and
+rising with span count (see the next section). C's own before/after pair, by
+contrast, *does* isolate one thing (the #8643 code change alone), because both
+of its measurements ran in the same session on the same host.
 
-The `bounds` row is the acceptance-relevant half, and is identical in both:
-every attribute key emitted survived the allowlist, and the realised maxima sit
-far under the declared caps (256 B per value, 32 events, 16 links).
+The `bounds` row is the acceptance-relevant half, and is identical across all
+three: every attribute key emitted survived the allowlist, and the realised
+maxima sit far under the declared caps (256 B per value, 32 events, 16 links).
 
 ## How overhead scales with span count
 
@@ -167,7 +186,9 @@ re-parse the whole journal under the file lock, per-execution cost has an O(n²)
 term in span count, which 41 spans would not reveal. `--tools-per-attempt`
 varies the span count without changing anything else, so the curve is directly
 measurable (release build, same host, same session, 3 repetitions per point
-except the first):
+except the first). This table is post-#8642 (the fix that lifted the ~256-span
+measurement cap) but **pre-#8643** — it measures the same code as column B
+above, not column C:
 
 | `--tools-per-attempt` | Spans | `added_median_ns` | Per span | Journal |
 | --- | --- | --- | --- | --- |
@@ -204,6 +225,53 @@ count per span is unchanged (still ~10) but the whole-journal re-parse in
 `Journal::start`/`finish` grows with journal length — the O(n²) term the flat
 segment could not resolve.
 
+### Isolating the #8643 fsync reduction
+
+The ladder above measures the O(n²) re-parse term after #8642 lifted the
+256-span cap, but before #8643's fsync reduction landed. A separate
+same-session before/after ladder, measured on #8643's own branch before #8642
+had landed there (so still capped at ~256 spans / `--tools-per-attempt 40`),
+isolates #8643's effect on the flat part of the per-span cost instead:
+
+| `--tools-per-attempt` | Spans | `added_median_ns` (post-#8643) | Per span | Journal |
+| --- | --- | --- | --- | --- |
+| 4 (default) | 41 | 0.65 s | 15.8 ms | 44.6 KiB |
+| 12 | 81 | 1.35 s | 16.7 ms | 89.0 KiB |
+| 20 | 121 | 2.09 s | 17.3 ms | 133.5 KiB |
+| 28 | 161 | 3.05 s | 18.9 ms | 178.0 KiB |
+| 40 | 221 | 4.37 s | 19.8 ms | 244.7 KiB |
+
+(Pre-#8643, the same shape read 29.0 / 26.8 / 23.1 / 23.8 / 26.6 ms — noisier
+and roughly 1.4–1.8× higher, consistent with the fsync-count reduction below.
+`journal_bytes` is unchanged at every point, as expected: neither change alters
+what the journal itself stores.)
+
+Over this 5.4× increase in span count, per-span cost does not rise — it varies
+between 15.8 and 19.8 ms with no monotone trend beyond noise, and a straight
+line (`added_ms ≈ 19.7 × spans`) fits every point to within ±13%, comparable to
+the spread *within* a single point on this host (host load during this session
+ranged from ≈7 to ≈11 on 8 cores). This ladder is too short to resolve the
+O(n²) re-parse term the extended table above finds past 221 spans; it isolates
+only the flat, fsync-dominated part of the cost.
+
+What dominates that constant is measured, not assumed. `strace` on one 41-span
+run under #8643 counts **250 durability barriers**, down from 417 before
+(measured on the pre-#8643 baseline above) — 82 `fdatasync` on the journal
+(two per span: `Started`, `Completed`, unchanged — this is the per-boundary
+write the doc's next section explains keeping), 44 `fsync` on the
+trace-context directory (down from 170 — `Journal::lock` now only fsyncs it
+while the journal is still empty), 83 `fsync` on cursor/context temp files
+(down from 124 — `Journal::drain` now commits the cursor once per *delivered*
+record instead of once per journal entry), and 41 `fsync` on the durable queue
+(unchanged — `DurableQueue::push_durable` is outside this issue's scope). That
+is ≈6.1 barriers per span, down from ≈10. A measured `fdatasync` on this
+host's ext4/NVMe costs ≈2.7 ms (median over 200, p90 2.95 ms, measured
+pre-#8643 and not re-measured here since the disk did not change), so 6.1
+barriers/span predicts ≈16.5 ms/span against 15.8–19.8 ms measured. The
+overhead is still, to a first approximation, fsync count × fsync latency; the
+re-parse work found in the extended ladder above is small beside it at these
+sizes, though this shorter ladder alone is too short to see it.
+
 ### The harness no longer caps at ~256 spans
 
 Before #8642, above roughly 256 spans the command failed with `instrumented
@@ -226,32 +294,59 @@ outright; it now completes and reports like any other.
 **Yes — keep it. Do not batch the journal write.** Stated explicitly so the
 trade-off is not left to inference:
 
-- The cost is <1% of this host's p50 observed sweep and ≈0.03% of its p90.
-  Even the debug/saturated upper bound is ≈5% of p50.
-- The per-boundary journal append is only about **40%** of the measured cost:
-  4 of the ~10 barriers per span (2 `fdatasync` on the journal, 2 directory
-  `fsync` from the lock path). Batching it could not remove more than that, and
-  would trade away the property the design exists for — a trace that survives a
-  crash mid-sweep (#8579), which is exactly the sweep whose trace is worth most.
-- The remaining **~60%** (≈6 barriers per span) is drain and queue bookkeeping:
-  the cursor is persisted per drained *entry* (a temp-file `fsync`, a rename,
-  and a directory `fsync` each time), plus one queue `fsync` per span and the
-  trace-context store's own atomic replaces. In a live daemon that
-  drain runs on the collector's periodic `spawn_blocking` pass, **not** on the
-  sweep's critical path — so the sweep-visible cost is lower than the recorded
-  figure, which folds the drain into the measured window.
+- The cost is now ≈0.6% of this host's p50 observed sweep and ≈0.02% of its
+  p90 (column C above). Even the debug/saturated upper bound (column A,
+  pre-#8643) was ≈5% of p50.
+- The per-boundary journal append itself (`Journal::append`'s `sync_data`, two
+  `fdatasync` per span, unchanged by #8643) is now a **larger share** of what
+  remains — 82 of the 250 barriers on a 41-span run, ≈33%, up from the same 2
+  of ~10 (≈20%) pre-#8643 — because the two savings below removed cost sitting
+  *around* it (the lock path's directory `fsync`, the drain path's per-entry
+  cursor commit) rather than touching it. Batching the append itself would
+  trade away the property the design exists for — a trace that survives a
+  crash mid-sweep (#8579), which is exactly the sweep whose trace is worth
+  most — so it stays as-is regardless of its now larger share.
 
-If this ever does need to get cheaper, two **durability-neutral** savings come
-first, before anything that weakens the journal (both tracked as #8643):
+Two **durability-neutral** savings were identified above the append and have
+both been implemented (#8643), verified against the code paths they touch
+rather than assumed safe:
 
-1. `Journal::lock` `fsync`s the parent directory on *every* call. That is needed
-   only to durably link a newly created journal file; on every subsequent
-   boundary the directory entry already exists. ≈2 barriers per span.
-2. `Journal::drain` advances the cursor once per entry rather than once per
-   batch. ≈4 barriers per span, in the export path rather than the trace path.
+1. **`Journal::lock` no longer `fsync`s the parent directory on every call.**
+   A directory `fsync` is needed only to durably link a *newly created*
+   journal file — once the journal holds a record, that link is already
+   stable, so `lock()` now fsyncs the parent only while the journal file is
+   still empty (`loom-daemon/src/telemetry/trace/journal.rs`). This is
+   durability-neutral because creation and the first `append` both happen
+   while holding the same file lock: whichever call finds the journal empty is
+   necessarily the one durably linking it before any record exists in it, so
+   no record is ever made reachable ahead of its directory entry. A journal
+   deleted by `retire_if_drained` and recreated later is empty again and gets
+   a fresh directory `fsync`, verified by a dedicated test
+   (`parent_directory_is_synced_to_link_a_new_journal_not_on_every_lock`).
+2. **`Journal::drain` now commits the cursor once per *delivered* record, not
+   once per journal entry.** Entries that deliver nothing (`Started`, `Owner`,
+   `Supervisor`) are re-read and re-skipped on replay after a crash, so
+   deferring their cursor commit into the next delivered record's commit (or a
+   single commit for the batch's undelivered tail) costs nothing on replay —
+   verified by `drain_commits_the_cursor_per_delivered_record_not_per_entry`
+   and `a_failed_delivery_replays_only_the_record_it_failed_on`. This is a
+   **narrower** batching than "once per whole batch": the backend's
+   `TelemetryEnvelope` sink only deduplicates `sweep.completed`/
+   `sweep.outcome` by `(kind, sweep_id)`; `trace.span` has no such index, so
+   committing the cursor across multiple *delivered* records would let a crash
+   between them re-offer — and duplicate — up to a whole batch of spans. That
+   half of the idea (batching across deliveries) is **declined**: the queue's
+   at-least-once contract does not extend to `trace.span`, and duplicating
+   span rows is a correctness regression, not a durability-neutral one.
 
-Neither changes what survives a crash of the traced process. Batching the
-per-boundary write does, and is therefore the last option, not the first.
+Together the two land the fsync count at ≈6.1 barriers per span (82
+`fdatasync` + 44 directory `fsync` + 83 temp-file `fsync` + 41 queue `fsync`,
+over 41 spans), down from ≈10, and `added_ns_per_span` at ≈15.8 ms on this
+host, down from ≈29 ms (see the recorded measurements and ladder above). What
+remains is out of this issue's scope: the once-per-span `DurableQueue`
+directory `fsync` (`push_durable`) and the trace-context store's own atomic
+replaces were not part of #8643's two proposed savings and were left
+unchanged.
 
 ## What this cannot establish
 

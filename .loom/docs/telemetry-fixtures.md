@@ -82,6 +82,13 @@ cost. Those require the live
 trial protocol and a measured report. Never replace these gaps with a product
 winner or a claim that the comparison issue is complete.
 
+This harness dispatches its own attempts through Pi and OpenCode; it does not
+exercise Claude Code's own OTLP exporter. For a human's interactive `claude`
+session reaching this same gateway ingress, see "Claude Code native OTLP
+(interactive sessions)" in `defaults/observability/collector/README.md` —
+that is the canonical env-block wiring and has no `loom-daemon` subcommand of
+its own to run here.
+
 ## Opt-in native harness canary
 
 `telemetry-live-canary` plans two attempts without reading credentials, creating

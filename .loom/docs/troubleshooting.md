@@ -855,6 +855,41 @@ they find one — scoped to a symlink whose target resolves through a
 `loom-tools` path segment and no longer exists, so a same-named script you
 authored yourself is never touched. No manual action needed on either path.
 
+### Every merge blocked by the freshness guard on a private free-plan repo (#8844)
+
+**Symptom**: on a **private** repository owned by a GitHub Free account or
+org, every `merge-pr.sh` run stops at the #8248 required-check freshness
+guard, whatever the PR looks like:
+
+```
+Merge blocked: PR #N's required-check freshness guard (#8248) could not determine
+whether the green required checks predate the base tip — ruleset lookup failed:
+gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)
+```
+
+No flag helps: `--allow-unapproved` overrides a missing review and
+`--redate-stale-checks` re-dates a stale check; neither is this condition.
+
+**Root cause**: rulesets and branch protection are paid features for private
+repositories. `GET /repos/{owner}/{repo}/rules/branches/{branch}` answers 403
+with that message, and the guard — correctly fail-closed on any lookup it
+cannot complete — refused every merge.
+
+**Fixed in `loom-daemon merge-pr stale-checks`**: that ONE message is now read
+as "this repository's plan has no rulesets, so nothing can be a *required*
+check", the lookup yields no required contexts, and the guard returns its
+`LOOM-STALE-CHECKS-CLEAN` sentinel while printing a `Warning:` on stderr
+naming the gated source. The match is on the message, never on the status
+code — a token missing a scope, SSO enforcement and a rate-limit refusal are
+all 403s too, and there required checks may genuinely exist. Every one of
+those still exits 2 and still refuses the merge.
+
+**If you still see a block here**, read the quoted forge error in the refusal:
+it is a different failure (network, auth scope, rate limit, 404, 5xx). Fix the
+lookup — `gh api "repos/{owner}/{repo}/rules/branches/main"` reproduces it in
+one call — rather than reaching for a `LOOM_DAEMON_BIN` shim. And if the host's
+binary predates the fix, roll it (next section).
+
 ### `merge-pr.sh` refuses after a `git pull` — roll the daemon (#8285)
 
 **Symptom**: merges on ONE host stop dead, immediately after pulling `main`,

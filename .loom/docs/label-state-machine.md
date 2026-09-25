@@ -246,8 +246,11 @@ gh issue list --state open --label loom:operator-only --json number --jq 'length
 **2. The merge-risk hold digest — [#6877](https://github.com/rjwalters/loom/issues/6877).**
 Champion's Held-PR Census (#6720 / #6851 / #7020) overwrites this issue's body
 every pass with one row per held PR — PR number, the hold's own reason, the
-`mergeable` status, and how long a conflict has been rotting — plus an
-aggregate line. It is **pinned** to the repository so it is reachable from the
+`mergeable` status, how long a conflict has been rotting, and (#8552) the PR's
+**base-staleness**: whether `main` has moved into the files this PR changes
+while it waited, and whether the rebase that implies looks mechanical or
+structural — plus an aggregate line. It is **pinned** to the repository so it
+is reachable from the
 issues page without knowing the number; `champion-pr-merge.md` → "Held-PR
 Census" → "Per-PR Digest" → Step 2 re-pins it on **every** pass, so an
 unpinned digest self-heals rather than silently staying invisible (the pin is

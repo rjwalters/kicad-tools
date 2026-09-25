@@ -109,6 +109,10 @@ log_error() { echo -e "${RED}[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] ERROR${NC} $*" >
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXEC_LIB="$SCRIPT_DIR/lib/run-job-exec.sh"
+# requires-daemon: private-workspace >= 0.19.335  Private workers fail closed on old daemon images.
+if [[ -n "${LOOM_PRIVATE_WORKSPACE:-}" || -e /workspace/identity.json ]]; then
+    "${LOOM_DAEMON_SELF_BIN:-loom-daemon}" private-workspace check-host-job || exit 78
+fi
 
 if [[ ! -f "$EXEC_LIB" ]]; then
     log_error "run-job: executor library not found at $EXEC_LIB"

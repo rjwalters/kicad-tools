@@ -600,6 +600,42 @@ FAKECS
     chmod +x "$path"
 }
 
+# Writes a fake `codesign` at $1 that reports a Developer ID Authority for
+# every target EXCEPT the exact path $2 (the eventual provisioning
+# destination), on which `-dv`/`-dvvv` sleeps for $3 seconds before answering
+# -- long enough that a caller-side `timeout "$DEST_SIG_VERIFY_TIMEOUT"`
+# shorter than $3 kills it first. Exercises the #8770 bounded-invocation +
+# inconclusive-on-timeout fix in verify_destination_artifact(): the
+# post-provision check must NOT collapse "codesign never answered" into
+# "codesign answered and reported no Authority=" (the exit-5 DOWNGRADED path).
+write_fake_codesign_signature_hang() {
+    local path="$1" hang_target="$2" sleep_seconds="$3"
+    cat > "$path" <<FAKECS
+#!/usr/bin/env bash
+HANG_TARGET="$hang_target"
+SLEEP_SECONDS="$sleep_seconds"
+FAKECS
+    cat >> "$path" <<'FAKECS'
+target="${!#}"
+if [[ "${1:-}" == "-dv" || "${1:-}" == "-dvvv" ]]; then
+    if [[ "$target" == "$HANG_TARGET" ]]; then
+        sleep "$SLEEP_SECONDS"
+    fi
+    {
+        echo "Executable=$target"
+        echo "Identifier=com.rjwalters.loom-daemon"
+        echo "Authority=Developer ID Application: Test Authority (TESTTEAM)"
+    } >&2
+    exit 0
+fi
+if [[ "${1:-}" == "--verify" ]]; then
+    exit 0
+fi
+exit 0
+FAKECS
+    chmod +x "$path"
+}
+
 # Writes a fake `cosign` at $1 whose `verify-blob` exits $2 — the Linux
 # detached-signature branch of verify_artifact_signature().
 write_fake_cosign() {

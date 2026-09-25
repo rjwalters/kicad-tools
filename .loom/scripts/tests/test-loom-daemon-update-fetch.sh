@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # test-loom-daemon-update-fetch.sh -- artifact-fetch mode (Epic #4990 Phase 3,
-# #5020) of loom-daemon-update.sh: tests A-V, split out of
+# #5020) of loom-daemon-update.sh: tests A-Y, split out of
 # test-loom-daemon-update.sh by #8028 (epic #7810 PR 6a).
+#
+# Scenario V (post-provision signature preservation, #8008) moved OUT of here
+# to test-loom-daemon-update-dest-signature.sh with #8770, which added a
+# second scenario on that same subject: it is about what provisioning does to
+# the destination binary, not about fetching, and this suite had no room left
+# under the file-size ratchet (see the closing note at the bottom).
 #
 # WHY THIS IS A SEPARATE SUITE
 #
@@ -1149,54 +1155,6 @@ else
     echo -e "${GREEN}✓${NC} release-gap: forced --fetch hard-fail never falls back to 'cargo build'"
 fi
 
-# ------------------------------------------------------------
-# V. Post-provision signature-preservation assertion (#8008, the follow-up to
-#    #7932): the VERIFIED download carries a Developer ID Authority=
-#    signature, but the PROVISIONED DESTINATION reports ad-hoc/no Authority=
-#    afterward -- exactly the shape of the #7932 regression (sign_daemon_binary's
-#    `codesign ... | grep -q` pipe form silently reported 141 under
-#    `set -o pipefail`, so it force-resigned every Developer ID-signed release
-#    artifact ad-hoc on every provision, unnoticed because nothing compared
-#    the destination's signature against the verified download's). Must
-#    hard-fail (exit 5, same class as the existing version-mismatch check),
-#    not silently succeed.
-# ------------------------------------------------------------
-WV="$BASE_WORKDIR/w-fetch-v"
-new_fixture "$WV"
-write_fake_daemon "$WV/installed-loom-daemon" "oldc0mm" "$WV/marker"
-
-WV_ASSETS="$WV/gh-assets"
-mkdir -p "$WV_ASSETS"
-WV_BIN_NAME="loom-daemon-aarch64-apple-darwin"
-write_fake_artifact_daemon "$WV_ASSETS/$WV_BIN_NAME" "0.16.0" "sigdown0"
-sha256_of "$WV_ASSETS/$WV_BIN_NAME" > "$WV_ASSETS/$WV_BIN_NAME.sha256"
-
-WV_FAKEBIN="$WV/fakebin"
-mkdir -p "$WV_FAKEBIN"
-write_fake_gh "$WV_FAKEBIN/gh" "v0.16.0" "$WV_ASSETS"
-# Authority= for every codesign target EXCEPT the provisioning destination
-# itself, which reports ad-hoc -- simulating a post-provision downgrade.
-write_fake_codesign_signature_downgrade "$WV_FAKEBIN/codesign" "$WV/installed-loom-daemon"
-
-outV=$( cd "$WV" && PATH="$WV_FAKEBIN:$TEST_PATH" \
-    LOOM_DAEMON_BIN="$WV/installed-loom-daemon" \
-    LOOM_DAEMON_UPDATE_GH_REPO="test-owner/test-repo" \
-    LOOM_DAEMON_UPDATE_TARGET="aarch64-apple-darwin" \
-    bash "$UPDATE_SCRIPT" --no-restart 2>&1; echo "EXIT=$?" )
-rcV=$(echo "$outV" | grep -o 'EXIT=[0-9]*' | cut -d= -f2)
-assert_eq "5" "$rcV" "macOS signature-preservation: Authority pre-provision, ad-hoc post-provision hard-fails (exit 5)"
-
-TESTS_RUN=$((TESTS_RUN + 1))
-if grep -q 'Post-provision verification FAILED.*Developer ID (Authority=) signature' <<< "$outV" \
-    && grep -q 'DOWNGRADED the signature' <<< "$outV"; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} macOS signature-preservation: downgrade reported explicitly, names the #7932 regression class"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} macOS signature-preservation: downgrade reported explicitly, names the #7932 regression class"
-    echo "  output: $outV"
-fi
-
 
 # ------------------------------------------------------------
 # W. (#7609) A forced --fetch is NOT blocked by local-checkout state. The
@@ -1402,8 +1360,12 @@ rm -rf "$(grep '^TMP_DIR=' <<<"$outY" | cut -d= -f2-)"
 
 # The containment guard armed above (loom_fixture_scratch_root) is exercised by
 # its own sibling suite, test-daemon-update-fixture-containment.sh — it belongs
-# to lib/daemon-update-fixtures.sh, not to `--fetch`, and this suite is already
-# at the file-size ratchet's threshold.
+# to lib/daemon-update-fixtures.sh, not to `--fetch`.
+#
+# Keep that reflex: this suite sat one code line short of the 1000-line freeze
+# until #8770 moved scenario V out to test-loom-daemon-update-dest-signature.sh.
+# A new scenario belongs in the sibling whose SUBJECT it shares, not here by
+# default.
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

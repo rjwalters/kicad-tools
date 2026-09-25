@@ -34,7 +34,7 @@ Judge stay refused on Kimi until one lands; see "Kimi" below.
 | --- | --- |
 | Native edits stay in managed worktrees | Every write/edit target is checked by the existing worktree policy before access. Shell commands use the existing shell-write policy. |
 | Protected branches and workflow rules | The same destructive and workflow guards used by the existing runtimes inspect each shell call. |
-| Broken guard cannot permit a tool | Missing guard files, malformed/unknown output, nonzero exit, and a 20-second policy timeout refuse the operation. |
+| Broken guard cannot permit a tool | Missing guard files, malformed/unknown output, and nonzero exit refuse the operation with a `policy error:`-prefixed message. A policy timeout (default 20s, see below) refuses too, but is reported with a distinct `policy timeout:` prefix — see "Policy timeout vs. denial" below. |
 | Binding fails to load | Pi starts with builtin tools and extension discovery disabled. OpenCode uses a dedicated primary agent whose default permission is deny, with only the four named tools enabled. Missing bindings therefore leave no executable unguarded tool surface. *(OpenCode: verified on 1.18.31 only.)* A role tick that exits 0 having used no `loom_*` tool is additionally reported as a failed tick, not a success — see "Toolless launch detection". |
 | Concurrent file edits | File operations share a workspace mutation lock; an edit must match exactly one nonempty old-text occurrence. |
 | Large output and hung commands | Reads/output are bounded; shell execution uses the existing Rust bounded process executor and a maximum 600-second deadline. SIGTERM/SIGINT cancels the owned shell process group. |
@@ -82,6 +82,68 @@ The OpenCode binding depends on the matching
 directory. That package is pinned to 1.18.31 and was verified against an
 OpenCode 1.18.31 host only; whether a 2.x host loads it is unverified. No
 global CLI model/login settings are rewritten by Loom dispatch.
+
+## Policy timeout vs. denial (#8451)
+
+The guard bridge runs as a subprocess (`guard-codex-bridge.sh`, which itself
+forks `guard-loom-workflow.sh` and `guard-destructive.sh`) under a bounded
+deadline in `loom-daemon/src/native_tools/guard.rs`. On a CPU-saturated host
+that fork chain can outrun the deadline before it ever produces a decision —
+observed live on a host at load average 55/28 cores (another tenant's test run
+holding ~19 cores, not an exec-scan or a guard defect): 4 of 21 `loom_bash`
+calls refused in the first 9 minutes of a sweep, including plain `cat
+.loom/config.json`.
+
+Both outcomes fail closed (no tool runs either way), but they mean different
+things to the model driving a native sweep, so every `loom_bash`/`loom_read`/
+`loom_write`/`loom_edit` failure text carries a class prefix:
+
+| Prefix | Meaning | Retry? |
+| --- | --- | --- |
+| `policy denied: <reason>` | The check ran to completion and the shared guards said no. | No — this is a real refusal; change the command, not the wording. |
+| `policy timeout: …` | The check did not finish inside the budget; the command was never evaluated. | Yes — transient, most likely host load. Retrying the identical command is reasonable once. |
+| `policy error: …` | The guard scripts are missing, crashed, or returned something the bridge could not parse. | Treat as a refusal (fail closed), but it is a provisioning defect, not a policy decision about this command — do not keep retrying the same command in a loop. |
+
+[`native-sweep.md`](native-sweep.md) tells the model to apply this distinction
+directly.
+
+### Configuring the budget
+
+The fixed 20-second budget was chosen on an idle host and is now configurable,
+still bounded and fail-closed at the limit (never "wait forever"):
+
+- `guards.nativePolicyTimeoutSecs` in the effective (tiered) `.loom/config.json`.
+- `LOOM_NATIVE_POLICY_TIMEOUT_SECS` env var, which outranks the config key
+  (env > config > default, the repo's usual precedence).
+- Default `20`; both sources are clamped to `[5, 120]` seconds, so a stray
+  value (e.g. `0`, or a typo like `99999`) cannot turn the guard into an
+  instant-refuse or an unbounded hang.
+
+### Per-worker timeout counter
+
+Every policy timeout appends one line to
+`.loom/native-tools/policy-timeouts.jsonl` (`{"worker_pid", "budget_secs",
+"at"}`), keyed by `LOOM_NATIVE_WORKER_PID` — the stable per-sweep identity
+`native-sweep.md` already uses for session liveness. A starving sweep is
+therefore visible by reading that file (or counting lines for its own worker
+pid via `loom-daemon`'s `policy_timeout_count` helper) rather than only from
+scrollback. This is a best-effort local log, not a daemon-side telemetry
+record; a host too saturated to append one small file has bigger problems
+than a missed counter increment.
+
+### Read-only fast path reachability
+
+`guards.readOnlyFastPath` (default on) is implemented inside
+`guard-destructive-generic.sh` itself, and `guard-destructive.sh` (which the
+bridge's `shell_command` branch runs) `exec`s straight into it — so a shell
+command's destructive-guard leg **does** reach the fast path today; an
+in-workspace `cat`/`ls`/`grep` skips the expensive parts of that leg (the git
+`rev-parse` and the deny/ask array scan) before ever forking further. The
+bridge's *other* forked guard for a shell command,
+`guard-loom-workflow.sh`, always runs in full — it has no fast path of its own
+and is out of scope here, since it is a separate, comparatively cheap
+protected-branch/workflow check, not the destructive-command analyzer this
+issue is about.
 
 ## OpenCode major versions
 

@@ -503,6 +503,15 @@ else
 fi
 locate_daemon_bin() { loom_locate_daemon_bin "$1"; }
 
+# bounded_run (#4799) — wall-clock budget with a `timeout(1)`-compatible 124,
+# and a real portable implementation for hosts that ship no `timeout(1)`.
+# macOS is exactly such a host, and macOS is the ONLY platform on which
+# verify_destination_artifact()'s `codesign` probe runs, so a bare
+# `timeout … codesign …` there would silently degrade to unbounded — the very
+# hang #8770 exists to bound.
+# shellcheck source=../lib/bounded-run.sh
+source "$SCRIPT_DIR/../lib/bounded-run.sh" || { err "bounded-run.sh not found at $SCRIPT_DIR/../lib/bounded-run.sh — this checkout is missing an expected lib file."; exit 1; }
+
 # resolve_self_daemon_bin -- the loom-daemon that IMPLEMENTS this script's
 # ported logic, which is NOT the same binary as locate_daemon_bin's. The
 # definition moved into lib/locate-daemon-bin.sh with #8037, when
@@ -1190,6 +1199,15 @@ verify_destination_binary() {
 # provisioning. It is empty only if the artifact refused to report a version,
 # in which case there is nothing to compare against and we skip loudly rather
 # than invent a comparison.
+#
+# Deadline (#8770) for the `codesign -dvvv "$dest"` post-provision signature
+# check below -- a local crypto/keychain operation, not a forge call, so the
+# default mirrors loom-daemon/src/release_fetch/signature.rs's own
+# VERIFY_TIMEOUT (30s = cmd_out::DEFAULT_TIMEOUT). Overridable so a test that
+# needs the timeout to actually fire does not have to wait out the production
+# ceiling.
+DEST_SIG_VERIFY_TIMEOUT="${LOOM_DAEMON_UPDATE_DEST_SIG_TIMEOUT_SECS:-30}"
+
 verify_destination_artifact() {
     local dest="$1"
     if [[ -z "${ARTIFACT_VERSION_OUTPUT:-}" ]]; then
@@ -1200,11 +1218,9 @@ verify_destination_artifact() {
         err "Post-provision verification FAILED: provisioning reported success but no executable binary was found at the destination ('${dest:-<unknown>}')."
         exit 5
     fi
-    local dest_version
-    dest_version=$("$dest" --version 2>/dev/null || true)
+    local dest_version; dest_version=$("$dest" --version 2>/dev/null || true)
     if [[ "$dest_version" != "$ARTIFACT_VERSION_OUTPUT" ]]; then
-        err "Post-provision verification FAILED: destination binary at $dest reports '${dest_version:-<none>}' but the fetched release artifact reports '$ARTIFACT_VERSION_OUTPUT'."
-        err "Provisioning reported success yet the destination is NOT the freshly-fetched binary — a silent no-op roll. Refusing to report success."
+        err "Post-provision verification FAILED: destination binary at $dest reports '${dest_version:-<none>}' but the fetched release artifact reports '$ARTIFACT_VERSION_OUTPUT' — provisioning reported success yet the destination is NOT the freshly-fetched binary (a silent no-op roll); refusing to report success."
         exit 5
     fi
     ok "Post-provision verification: destination binary at $dest is the fetched release artifact ($dest_version)."
@@ -1223,24 +1239,51 @@ verify_destination_artifact() {
     # pre-provision download demonstrably carried an Authority (set by
     # verify_artifact_signature() before provisioning); skips silently when
     # that is unknown (Linux target, or codesign unavailable at download time).
-    if [[ "$ARTIFACT_SIGNATURE_HAD_AUTHORITY" == "true" ]]; then
-        if ! command -v codesign >/dev/null 2>&1; then
-            warn "'codesign' not available -- cannot verify the destination binary's signature survived provisioning (the verified download carried a Developer ID Authority signature)."
-        else
-            local dest_sig_desc
-            # Read-then-match (#6662/#7932): NEVER `codesign ... | grep -q`,
-            # which is exactly the pipefail bug this whole check exists to
-            # guard against (grep -q closes the pipe before codesign finishes
-            # writing, reporting 141 under `set -o pipefail`).
-            dest_sig_desc="$(codesign -dvvv "$dest" 2>&1 || true)"
-            if ! grep -q '^Authority=' <<<"$dest_sig_desc"; then
-                err "Post-provision verification FAILED: the fetched release artifact carried a Developer ID (Authority=) signature, but the provisioned destination at $dest does not."
-                err "Provisioning has DOWNGRADED the signature -- this replaces the certificate-anchored designated requirement with a per-build ad-hoc identity and orphans every TCC grant on this host (the #7932 regression class). Refusing to report success."
-                exit 5
-            fi
-            ok "Post-provision verification: destination binary at $dest retains its Developer ID Authority signature."
-        fi
+    #
+    # Guard-clause form (#8770): the two skip conditions return early rather
+    # than nesting, which keeps the bounded-probe logic below at one indent.
+    [[ "$ARTIFACT_SIGNATURE_HAD_AUTHORITY" == "true" ]] || return 0
+    command -v codesign >/dev/null 2>&1 || { warn "'codesign' not available -- cannot verify the destination binary's signature survived provisioning (the verified download carried a Developer ID Authority signature)."; return 0; }
+
+    local dest_sig_desc dest_sig_rc=0 dest_sig_desc_file
+    # Bounded (#8770, the shell-side twin of #8754's
+    # loom-daemon/src/release_fetch/signature.rs::verify_darwin fix): a
+    # contended host can make `codesign -dvvv` hang indefinitely, and this call
+    # previously had no deadline at all. bounded_run (NOT a bare `timeout …`)
+    # because this branch only ever runs on Darwin, which ships no
+    # `timeout(1)`: bounded_run's portable fallback is a real bound there, and
+    # it normalizes every implementation's kill to `timeout`'s own rc 124.
+    #
+    # Foreground, NOT `$(bounded_run …)` (#8770): bounded_run's portable
+    # fallback kills the child with a background subshell, and inside a
+    # command substitution that killer never reaches the child -- the bound
+    # silently stops being enforced and the call runs for the child's full
+    # lifetime (measured on macOS bash 3.2.57 and bash 5.3: a 2s budget hung
+    # the full 30s in-substitution, bound in 2s foreground). So bounded_run
+    # runs in the function's shell and its report lands in a temp file that
+    # is read back. That also strengthens the read-then-match property below:
+    # codesign now writes to a regular file, so there is no pipe at all left
+    # to SIGPIPE (the class of bug #6662/#7932's `codesign ... | grep -q` hit
+    # under `set -o pipefail`).
+    dest_sig_desc_file="$(mktemp "${TMPDIR:-/tmp}/loom-daemon-destsig.XXXXXX" 2>/dev/null || mktemp)"
+    bounded_run "$DEST_SIG_VERIFY_TIMEOUT" codesign -dvvv "$dest" >"$dest_sig_desc_file" 2>&1; dest_sig_rc=$?
+    dest_sig_desc="$(cat "$dest_sig_desc_file" 2>/dev/null)"; rm -f "$dest_sig_desc_file"
+    # #8770: an empty report -- whether from a deadline-killed invocation
+    # (rc 124), or any other codesign failure that produced no diagnostic text
+    # at all -- is "we could not check", NOT "we checked and it's bad".
+    # Collapsing that into the exit-5 downgrade path below is the exact #8754
+    # conflation one layer further into the update: only a codesign that ran to
+    # completion and actually wrote a report (even a negative one, e.g. "not
+    # signed at all") counts as a definitive answer about whether Authority=
+    # survived.
+    [[ -n "$dest_sig_desc" ]] || { warn "'codesign -dvvv' $(if [[ "$dest_sig_rc" -eq 124 ]]; then echo "timed out after ${DEST_SIG_VERIFY_TIMEOUT}s"; else echo "exited ${dest_sig_rc} without writing a report"; fi) for $dest -- cannot verify the destination binary's signature survived provisioning (the verified download carried a Developer ID Authority signature). Treating as inconclusive, not a downgrade."; return 0; }
+
+    if ! grep -q '^Authority=' <<<"$dest_sig_desc"; then
+        err "Post-provision verification FAILED: the fetched release artifact carried a Developer ID (Authority=) signature, but the provisioned destination at $dest does not."
+        err "Provisioning has DOWNGRADED the signature -- this replaces the certificate-anchored designated requirement with a per-build ad-hoc identity and orphans every TCC grant on this host (the #7932 regression class). Refusing to report success."
+        exit 5
     fi
+    ok "Post-provision verification: destination binary at $dest retains its Developer ID Authority signature."
 }
 
 # verify_supervisor_matches_provisioned <provisioned_dest> — the #6009
