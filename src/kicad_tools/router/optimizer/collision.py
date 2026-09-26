@@ -11,6 +11,7 @@ from ..primitives import Segment
 
 if TYPE_CHECKING:
     from ..grid import RoutingGrid
+    from ..primitives import Via
 
 
 def _iter_dilated_line_cells(
@@ -99,6 +100,160 @@ def _iter_dilated_line_cells(
             lead_y = gy + step_y * c
             for cx in range(-c, c + 1):
                 yield (gx + cx, lead_y)
+
+
+def _path_clear_of_segment(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    half_width: float,
+    other: Segment,
+    min_clearance: float,
+) -> bool:
+    """Exact edge-to-edge clearance between a candidate path and one segment.
+
+    Issue #5625: the single narrow phase both checkers in this module use, so
+    ``VectorCollisionChecker``'s "drop-in, ~10x faster replacement" claim is
+    true by construction -- the two classes now differ only in how they find
+    candidates (R-tree query vs. raster walk), never in the arithmetic that
+    decides them.  Transcribed unchanged from the vector checker's own
+    pre-#5625 inline math (``dist - half_width - other.width / 2 <
+    min_clearance`` rejects), so the migration is a refactor on that side.
+    """
+    dist = segment_to_segment_distance(x1, y1, x2, y2, other.x1, other.y1, other.x2, other.y2)
+    return dist - half_width - other.width / 2 >= min_clearance
+
+
+def _path_clear_of_via(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    half_width: float,
+    via: Via,
+    via_clearance: float,
+) -> bool:
+    """Exact edge-to-edge clearance between a candidate path and one via.
+
+    The via half of :func:`_path_clear_of_segment`'s contract, with the same
+    arithmetic the vector checker applied inline before issue #5625.
+    """
+    dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
+    return dist - half_width - via.diameter / 2 >= via_clearance
+
+
+def _via_spans_layer(grid: RoutingGrid, via: Any, layer_idx: int) -> bool:
+    """Return True if ``via`` blocks copper on ``layer_idx``.
+
+    Through-hole vias (the common case in kicad-tools today) declare
+    ``layers=(F.Cu, B.Cu)`` and physically block every layer in between as
+    well.  Blind / buried vias declare a sub-range.  This helper maps the
+    start / end layer enum values to grid layer indices and returns ``True``
+    iff ``layer_idx`` falls in the inclusive range.
+
+    When the layer mapping cannot be resolved (unexpected Layer enum value,
+    etc.) the helper returns ``True`` to preserve the conservative "assume
+    blocking" behaviour of ``grid.validate_segment_clearance``, which iterates
+    every via without layer filtering.
+
+    Issue #5625: lifted out of ``VectorCollisionChecker._via_on_layer`` (which
+    now delegates here) so the grid checker's own exact pass applies the same
+    layer-span rule rather than a second transcription of it.
+    """
+    try:
+        start_idx = grid.layer_to_index(via.layers[0].value)
+        end_idx = grid.layer_to_index(via.layers[1].value)
+    except Exception:
+        return True
+    lo, hi = (start_idx, end_idx) if start_idx <= end_idx else (end_idx, start_idx)
+    return lo <= layer_idx <= hi
+
+
+def _soft_cell_is_accountable_route_copper(
+    grid: RoutingGrid, gx: int, gy: int, layer_idx: int
+) -> bool:
+    """May this softly-blocked cell be re-decided from exact copper?
+
+    Issue #5625.  ``RoutingGrid._mark_segment`` / ``_mark_via`` dilate every
+    committed object by ``width / 2 + trace_clearance`` (plus the #1666 safety
+    cell) before painting it, so a raster cell being occupied by a foreign net
+    does **not** mean the candidate path is within clearance of that net's
+    copper -- it means the path's own clearance envelope reached that net's
+    clearance envelope, which is roughly twice the real requirement.  The
+    raster is therefore a broad phase, and the verdict belongs to the exact
+    measurement the vector checker already performs.
+
+    A raster cell may only be re-decided when its occupancy is fully
+    accounted for by copper that is *registered* and can therefore be
+    re-measured.  That is exactly the authorisation
+    :meth:`RouteHaloGeometry.cell_known` was built for in Epic #5509 Phase 3c
+    (issue #5617): it refuses a cell that is a hard obstacle, pad metal,
+    statically blocked, reserved for another net, or whose conservative mark
+    does not match a route halo currently registered in ``grid.routes``.
+    :meth:`RoutingGrid.raster_only_blocked_cell` (#5662) is required on top of
+    it: obstacles, keepouts, region bounds and the board-edge band register no
+    geometry anywhere, so the raster mark is their only record and a cell they
+    touched must keep its conservative verdict however clear the measurable
+    copper is.
+
+    Both predicates are compared with ``is True`` rather than truth-tested on
+    purpose: a grid that cannot answer them at all -- a ``MagicMock`` test
+    double, an older grid object without the planes -- must fall through to
+    the conservative branch instead of silently authorising a refinement on a
+    truthy auto-generated attribute.
+    """
+    halo = getattr(grid, "_route_halo", None)
+    if halo is None:
+        return False
+    raster_only = getattr(grid, "raster_only_blocked_cell", None)
+    if raster_only is not None and raster_only(gx, gy, layer_idx) is True:
+        return False
+    return halo.cell_known(gx, gy, layer_idx) is True
+
+
+def _routed_copper_clear(
+    grid: RoutingGrid,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    layer: Layer,
+    layer_idx: int,
+    width: float,
+    exclude_net: int,
+) -> bool:
+    """Exact clearance of a candidate path against every committed route.
+
+    Issue #5625: the grid checker's narrow phase.  Same question, same
+    arithmetic and same rule values as ``VectorCollisionChecker``'s R-tree
+    narrow phase -- only the broad phase differs, because this class is
+    selected precisely when no R-tree is available, so candidates come from a
+    linear walk of ``grid.routes`` instead.
+    """
+    half_width = width / 2
+    min_clearance = grid.rules.trace_clearance
+    via_clearance = max(min_clearance, grid.rules.via_clearance)
+    layer_value = layer.value
+
+    # Own-net copper is filtered per OBJECT rather than per route, matching
+    # the vector checker's R-tree narrow phase (``other_seg.net`` /
+    # ``via.net``): a route whose own ``net`` disagrees with an object it
+    # carries must not hide that object from this scan.
+    for route in grid.routes:
+        for seg in route.segments:
+            if seg.net == exclude_net or seg.layer.value != layer_value:
+                continue
+            if not _path_clear_of_segment(x1, y1, x2, y2, half_width, seg, min_clearance):
+                return False
+        for via in route.vias:
+            if via.net == exclude_net:
+                continue
+            if not _via_spans_layer(grid, via, layer_idx):
+                continue
+            if not _path_clear_of_via(x1, y1, x2, y2, half_width, via, via_clearance):
+                return False
+    return True
 
 
 class CollisionChecker(Protocol):
@@ -209,6 +364,14 @@ class GridCollisionChecker:
         # Check all cells along the path using Bresenham's algorithm
         cells_to_check = self._get_path_cells(gx1, gy1, gx2, gy2, clearance_cells)
 
+        # Issue #5625: set when the walk meets a foreign-net cell whose
+        # occupancy is fully accounted for by registered route copper.  Such a
+        # cell is a broad-phase hit, not a verdict (the raster already carries
+        # the committed object's own clearance dilation, so the two envelopes
+        # meeting is about twice the real requirement) -- the exact narrow
+        # phase below decides it, exactly as ``VectorCollisionChecker`` does.
+        needs_exact_route_check = False
+
         for gx, gy in cells_to_check:
             if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
                 continue  # Out of bounds - skip but don't fail
@@ -264,10 +427,28 @@ class GridCollisionChecker:
                 # never honored ``ignore_overflow`` for foreign
                 # segments -- only this grid fallback was blind.
                 if cell.net != 0 and cell.net != exclude_net:
-                    if not self.ignore_overflow:
-                        return False  # Blocked by another net
-                    if cell.usage_count <= 1:
-                        return False  # Clean foreign trace -- never cross.
+                    if self.ignore_overflow and cell.usage_count > 1:
+                        continue  # Genuinely overused cell -- tolerated.
+
+                    # Issue #5625: ``VectorCollisionChecker`` answers this
+                    # same question by measuring the foreign copper exactly,
+                    # and the two checkers disagreed on 16 of the 53
+                    # path probes in Epic #5509's seeded corpus (seeds 0-19)
+                    # because this branch answered it off the raster instead.
+                    # Defer to the same exact measurement whenever the cell's
+                    # occupancy is accountable to registered copper; a cell
+                    # that is not (a keepout, an obstacle, a region bound, the
+                    # board-edge band -- none of which register geometry to
+                    # re-measure) keeps the conservative reject below.
+                    if _soft_cell_is_accountable_route_copper(self.grid, gx, gy, layer_idx):
+                        needs_exact_route_check = True
+                        continue
+                    return False  # Blocked by another net
+
+        if needs_exact_route_check and not _routed_copper_clear(
+            self.grid, x1, y1, x2, y2, layer, layer_idx, width, exclude_net
+        ):
+            return False
 
         return True
 
@@ -406,22 +587,11 @@ class VectorCollisionChecker:
             if other_seg.net == exclude_net:
                 continue
 
-            # Exact center-to-center distance
-            dist = segment_to_segment_distance(
-                x1,
-                y1,
-                x2,
-                y2,
-                other_seg.x1,
-                other_seg.y1,
-                other_seg.x2,
-                other_seg.y2,
-            )
-
-            # Edge-to-edge clearance
-            clearance = dist - half_width - other_seg.width / 2
-
-            if clearance < min_clearance:
+            # Exact edge-to-edge clearance.  Issue #5625: the arithmetic moved
+            # to a module-level helper the grid checker's own exact pass calls
+            # too, so the two implementations of this protocol can no longer
+            # drift apart on the number they compare.
+            if not _path_clear_of_segment(x1, y1, x2, y2, half_width, other_seg, min_clearance):
                 return False
 
         # Issue #2955 / #2960: Check against foreign-net vias.
@@ -490,10 +660,7 @@ class VectorCollisionChecker:
                 # Layer filter mirrors the linear-scan version.
                 if not self._via_on_layer(via, layer_idx):
                     continue
-                via_radius = via.diameter / 2
-                dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
-                clearance = dist - half_width - via_radius
-                if clearance < via_clearance:
+                if not _path_clear_of_via(x1, y1, x2, y2, half_width, via, via_clearance):
                     return False
         else:
             # Fallback: index not built (e.g. mock grids in unit tests,
@@ -505,10 +672,7 @@ class VectorCollisionChecker:
                 for via in route.vias:
                     if not self._via_on_layer(via, layer_idx):
                         continue
-                    via_radius = via.diameter / 2
-                    dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
-                    clearance = dist - half_width - via_radius
-                    if clearance < via_clearance:
+                    if not _path_clear_of_via(x1, y1, x2, y2, half_width, via, via_clearance):
                         return False
 
         # Also check hard obstacles (pads, keepouts) via the grid
@@ -532,14 +696,13 @@ class VectorCollisionChecker:
         value, etc.) the helper returns ``True`` to preserve the conservative
         "assume blocking" behaviour of ``grid.validate_segment_clearance``
         which iterates every via without layer filtering.
+
+        Issue #5625: the body now lives in the module-level
+        :func:`_via_spans_layer` so the grid checker's exact pass applies the
+        identical span rule; this method is kept as the (unchanged) bound
+        name its call sites and tests already use.
         """
-        try:
-            start_idx = self.grid.layer_to_index(via.layers[0].value)
-            end_idx = self.grid.layer_to_index(via.layers[1].value)
-        except Exception:
-            return True
-        lo, hi = (start_idx, end_idx) if start_idx <= end_idx else (end_idx, start_idx)
-        return lo <= layer_idx <= hi
+        return _via_spans_layer(self.grid, via, layer_idx)
 
     def _check_obstacles_clear(
         self,
