@@ -489,7 +489,13 @@ NOTES: dict[int, str] = {
     15: (
         "`VectorCollisionChecker`, which delegates to `GridCollisionChecker` "
         "when the per-layer R-tree is unpopulated, so both citations are "
-        "exercised by this row. `ignore_overflow` left at its stricter default."
+        "exercised by this row. `ignore_overflow` left at its stricter default. "
+        "Since #5625 the delegation no longer changes the answer for routed "
+        "copper: the two checkers apply one shared exact narrow phase, and the "
+        "grid checker's Bresenham-plus-buffer walk is only its broad phase (a "
+        "raster cell whose occupancy is not accountable to registered copper "
+        "still rejects outright, and a pad's halo is still the gate for "
+        "`pad-seg`). The percentages in this row were measured before that fix."
     ),
     16: (
         "**Not measured**: `_post_insertion_clearance_detail_pair_group` "
