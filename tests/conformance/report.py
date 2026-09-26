@@ -103,6 +103,7 @@ __all__ = [
     "NOTES",
     "NOT_MEASURED",
     "NOT_MEASURED_REASONS",
+    "REFINEMENT_GATED_GROUPS",
     "TABLE_BEGIN",
     "TABLE_END",
     "KERNEL_TABLE_BEGIN",
@@ -341,6 +342,34 @@ _MIGRATION_PHASE: dict[int, str] = {
 """Which epic phase switched each migrated group, for the table's notes."""
 
 
+REFINEMENT_GATED_GROUPS: dict[int, str] = {
+    4: "#5410",
+    5: "#5410",
+}
+"""Groups that are a merge gate **without** having been migrated, and by whose issue.
+
+:data:`MIGRATED_GROUPS` answers *"which consumers are on the shared kernel"*.
+That is not the same question as *"which consumers' rows are allowed to
+disagree"*, and conflating the two leaves a third state unrepresentable: a
+consumer that already agrees with ground truth, whose agreement someone paid
+for, and which no later epic phase is scheduled to re-verify.
+
+Groups 4 and 5 -- the search-time route-halo refinement, Python and native --
+are exactly that.  #5410 drove their over-rejection (a *legal* candidate
+refused because a conservative halo swallowed it, the defect that exhausted
+A*'s expansion budget on Board 07's DQ3) to zero, and driven at kicad-cli's
+own clearance they now agree in both directions.  They still carry their own
+arithmetic, so they are **not** migrated -- the switch onto the Phase 1b
+kernel is Epic #5509 Phase 3b (#5661) -- but leaving them auto-``xfail``\\ ed
+until that phase lands means a regression of the repair would be recorded as
+a number in this table and reddened nothing.
+
+``tests/conformance/test_route_halo_refinement_gate.py`` is where that gate
+lives; it deliberately does not add these groups to :data:`MIGRATED_GROUPS`,
+which would misreport the epic's progress and collide with #5661's diff.
+"""
+
+
 # Why a group has no adapter.  A bare ``not measured`` is indistinguishable
 # from "nobody looked"; every gap here states its kind.
 #
@@ -370,12 +399,34 @@ NOTES: dict[int, str] = {
         "than group 2's square by construction. Via candidates go through the "
         "sibling `is_via_blocked`."
     ),
-    4: "Raises the requirement to `max(required, via_clearance)` for trace-vs-via.",
+    4: (
+        "Raises the requirement to `max(required, via_clearance)` for "
+        "trace-vs-via. **Gated, though not migrated** (#5410): the "
+        "over-rejection cell is this row's whole point -- it is the "
+        "legal-candidate refusal that exhausted A*'s budget -- and it is 0.0%, "
+        "held there by `tests/conformance/test_route_halo_refinement_gate.py` "
+        "rather than left to a later phase. The under-rejection cell is a "
+        "**rule** reading, not a geometry one, and that attribution is "
+        "asserted pair-by-pair rather than claimed: every under-rejected pair "
+        "is a `seg-seg` one whose gap sits in the 0.15-0.20 mm band the "
+        "router's own `trace_clearance` does not require and the project's "
+        "`Default` netclass does -- the #5398 / #5654 defect this row may not "
+        "close. Driven instead at the clearance kicad-cli itself applies, the "
+        "same unmodified consumer agrees in **both** directions; the switch "
+        "onto the Phase 1b kernel is still outstanding as Phase 3b (#5661)."
+    ),
     5: (
         "Measures the `Grid3D` predicate; the `Pathfinder` wrappers "
         "(`trace_halo_cell_clear`, `via_route_geometry_clear`) are unbound and "
         "add only cell-to-world conversion, per-net `search_fill_*` overrides "
-        "and a `route_cell_has_geometry` pre-check -- no arithmetic."
+        "and a `route_cell_has_geometry` pre-check -- no arithmetic. **Gated, "
+        "though not migrated** (#5410), on the same two readings as group 4 "
+        "and by the same module: 0.0% over-rejection is a hard failure, and "
+        "the under-rejection cell is asserted to be entirely the 0.15-0.20 mm "
+        "`trace_clearance`-versus-`Default`-netclass band (#5398 / #5654) "
+        "rather than geometry. At kicad-cli's own clearance this consumer "
+        "agrees in both directions. Both halves of the refinement move onto "
+        "the shared kernel in Phase 3b (#5661)."
     ),
     6: (
         "Both halves driven (Python `FixedFillObstacles` + native "
@@ -846,6 +897,31 @@ def render_document(
                 "",
             ]
             if MIGRATED_GROUPS
+            else []
+        ),
+        *(
+            [
+                "**Gated without having been migrated**: "
+                + ", ".join(
+                    f"group {n} ({REFINEMENT_GATED_GROUPS[n]})"
+                    for n in sorted(REFINEMENT_GATED_GROUPS)
+                )
+                + ". Being on the shared kernel and being allowed to disagree "
+                "are two different questions, and the search-time route-halo "
+                "refinement is the case where they come apart: its "
+                "over-rejection -- a legal candidate refused because a "
+                "conservative halo swallowed it -- was driven to zero by "
+                "#5410, and driven at kicad-cli's own clearance it now agrees "
+                "in **both** directions, but it still carries its own "
+                "arithmetic and its kernel switch is Phase 3b (#5661). "
+                "`tests/conformance/test_route_halo_refinement_gate.py` holds "
+                "that agreement as a hard failure so a regression reddens the "
+                "build instead of quietly becoming a number in this table; "
+                "the percentages below still keep the consumer's own rule "
+                "values, so the rule axis stays measured rather than gated.",
+                "",
+            ]
+            if REFINEMENT_GATED_GROUPS
             else []
         ),
         "## Status",
