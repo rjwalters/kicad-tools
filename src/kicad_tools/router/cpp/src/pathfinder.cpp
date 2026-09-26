@@ -214,6 +214,10 @@ bool Pathfinder::via_route_geometry_clear(int x, int y, int net) const {
     return grid_.route_via_geometry_clear(via, clearance, rules_.min_hole_to_hole, rules_.min_drill_clearance);
 }
 
+// Pad halos already include a trace-center clearance envelope. Expanding
+// that envelope again seals legal BGA exits (#5286). Radius checks consult
+// the pad-metal cells instead; only padding with explicit provenance and
+// no routed copper is exempt. Keepouts and unknown blockage stay hard.
 bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
                                   bool allow_sharing, int radius_override,
                                   int partner_net, int partner_radius, int from_x, int from_y) const {
@@ -286,7 +290,8 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             }
 
             const auto& cell = grid_.at(cx, cy, layer);
-            if (!cell.blocked) {
+            if (!cell.blocked || (cell.pad_halo_only && !cell.pad_blocked &&
+                    !cell.is_obstacle && cell.usage_count == 0)) {
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
@@ -377,7 +382,8 @@ bool Pathfinder::is_trace_blocked(int x, int y, int layer, int net,
             }
 
             const auto& cell = grid_.at(cx, cy, layer);
-            if (!cell.blocked) {
+            if (!cell.blocked || (cell.pad_halo_only && !cell.pad_blocked &&
+                    !cell.is_obstacle && cell.usage_count == 0)) {
                 continue;
             }
             if (cell.net != net && halo_clear(cx, cy)) {
@@ -907,7 +913,8 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                 }
 
                 const auto& cell = grid_.at(cx, cy, layer);
-                if (!cell.blocked) {
+                if (!cell.blocked || (cell.pad_halo_only && !cell.pad_blocked &&
+                    !cell.is_obstacle && cell.usage_count == 0)) {
                     continue;
                 }
                 if (grid_.route_cell_has_geometry(cx, cy, layer)) {
@@ -977,7 +984,8 @@ bool Pathfinder::is_via_blocked_diag(int x, int y, int net, bool allow_sharing,
                     }
 
                     const auto& cell = grid_.at(cx, cy, layer);
-                    if (!cell.blocked) {
+                    if (!cell.blocked || (cell.pad_halo_only && !cell.pad_blocked &&
+                    !cell.is_obstacle && cell.usage_count == 0)) {
                         continue;
                     }
                     if (grid_.route_cell_has_geometry(cx, cy, layer)) {

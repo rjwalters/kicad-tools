@@ -1035,7 +1035,15 @@ class CppGrid:
                     pad_blocked_np[ls, ys, xs].tolist(),
                     strict=True,
                 ):
-                    mark_blocked(x, y, layer, net, is_obstacle, pad_blocked)
+                    mark_blocked(
+                        x,
+                        y,
+                        layer,
+                        net,
+                        is_obstacle,
+                        pad_blocked,
+                        (layer, y, x) in grid._pad_halo_cells,
+                    )
 
         # Issue #4071: marshal corridor reservations into the C++ grid.
         # ``RoutingGrid._reserved_for_nets`` maps ``(layer, y, x)`` -> owner
@@ -2522,6 +2530,12 @@ class CppPathfinder:
             _resume_loop_t0 = time.monotonic()
             for attempt in range(max_resume_attempts + 1):
                 route = self._convert_result_to_route(result, start, end, net_class)
+                from .via_reuse import reuse_same_net_vias
+
+                if self._grid._py_grid is not None:
+                    reuse_same_net_vias(
+                        route, self._grid._py_grid.routes, self._rules.min_drill_clearance
+                    )
 
                 # Issue #3438: relief PROBES deliberately cross foreign
                 # copper/halos -- post-route clearance validation would

@@ -306,6 +306,8 @@ struct GridCell {
     // True only when this route cell contributes to coarse congestion.
     // Imported/static cells were never counted and must not decrement it.
     bool congestion_counted = false;
+    // Only pad padding was registered here; metal flags still take precedence.
+    bool pad_halo_only = false;
     // Issue #4071: corridor-reservation owner set (mirrors the Python
     // ``RoutingGrid._reserved_for_nets`` per-cell ``frozenset[int]``).
     // ``reserved_count == 0`` means "not reserved" (fast path).  A

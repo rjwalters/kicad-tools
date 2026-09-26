@@ -123,13 +123,15 @@ Grid3D::Grid3D(int cols, int rows, int layers, float resolution,
 }
 
 void Grid3D::mark_blocked(int x, int y, int layer, int net, bool is_obstacle,
-                          bool pad_blocked) {
+                          bool pad_blocked, bool pad_halo_only) {
     if (!is_valid(x, y, layer)) return;
     auto& cell = at(x, y, layer);
     if (cell.congestion_counted) {
         update_congestion(x, y, layer, -1);
         cell.congestion_counted = false;
     }
+    cell.pad_halo_only = pad_halo_only &&
+        (!cell.static_blocked || cell.pad_halo_only);
     cell.blocked = true;
     cell.net = net;
     cell.is_obstacle = is_obstacle;

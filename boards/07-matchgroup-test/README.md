@@ -54,3 +54,27 @@ The previous nonfunctional fixture remains in
 coverage. Legacy `generate_design.py` defaults to `regression-output/` and
 must not be used to generate this assembled demo. Its synthetic pinouts and
 historical routing failures are not manufacturing artifacts.
+
+### Staged pad-drill relocation
+
+The synthetic recipe relocates in-pad drills through
+`relocate_in_pad_vias_with_refill`. It stages the PCB and adjacent project/rule
+files, retains original same-net filled-copper attachment evidence while
+planning, and refills both an untouched baseline and the complete candidate
+using plain native KiCad. The native CLI must support explicit zone refill and
+board saving.
+
+Publication requires no new native violation identities or multiplicities
+(including unconnected items), unchanged physical pad-connectivity partitions,
+and the shared via, full-stub, project drill-floor, and closed-outline gates.
+The baseline is independently refilled because stale source pours can represent
+connections that native refill removes even without relocation. The API returns
+both raw native reports; this is a no-regression check, not a claim that the
+historical synthetic fixture has zero manufacturing violations.
+
+Any failed check leaves source files untouched. Only the validated PCB is
+atomically replaced; project/rule sidecars retain their original bytes. The
+legacy direct-relocation entry points remain available for their conservative
+filled-copper regression controls and delegate blocked-stub extension to the
+shared relocation module. Board 07 CI remains suspended until full recipe and
+both dedicated job checks qualify.
