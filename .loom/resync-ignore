@@ -39,3 +39,16 @@ scripts/merge-pr.sh
 scripts/tests/test-merge-pr-partial-increment.sh
 commands/loom/builder-pr.md
 roles/builder-pr.md
+
+# #5741: `_check_required_check_freshness`'s `loom-daemon merge-pr stale-checks`
+# call is now wrapped in `forge_cmd_perm_safe` (the #6074/#6752 credential
+# ladder), because the App installation cannot read branch-protection rules on
+# this repo — `403 Resource not accessible by integration` blocked EVERY merge
+# until an operator applied rung 3 by hand. That call lives in merge-pr.sh,
+# already pinned above; these two suites source the extracted function and must
+# therefore source lib/forge-helpers.sh, or every case fails with exit 127.
+# They are pinned so a resync cannot revert the suites while leaving the pinned
+# merge-pr.sh calling a function the harness no longer defines.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+scripts/tests/test-merge-pr-stale-required-checks.sh
+scripts/tests/test-merge-pr-stale-check-redate.sh

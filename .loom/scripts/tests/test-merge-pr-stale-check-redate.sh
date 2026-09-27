@@ -103,6 +103,14 @@ success() { echo "OK: $*"; }
 warning() { echo "WARN: $*" >&2; }
 error()   { echo "ERROR: $*" >&2; exit 1; }
 
+# --- The #6074/#6752 credential ladder the guard's call is wrapped in (#5741) -
+# The extracted function invokes `forge_cmd_perm_safe`, so the suite must
+# provide the real one or every case would fail with exit 127. Sourced BEFORE
+# the shared globals below on purpose: forge-helpers.sh assigns FORGE_TYPE=""
+# at source time, which would otherwise clobber this suite's FORGE_TYPE.
+# shellcheck source=../lib/forge-helpers.sh
+source "$HELPERS_DIR/lib/forge-helpers.sh"
+
 # --- The real binary, for the subcommand-exists assertion at the end ---
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"

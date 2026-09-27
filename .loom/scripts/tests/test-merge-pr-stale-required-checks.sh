@@ -84,6 +84,13 @@ success() { echo "OK: $*"; }
 warning() { echo "WARN: $*" >&2; }
 error()   { echo "ERROR: $*" >&2; exit 1; }
 
+# --- The #6074/#6752 credential ladder the guard's call is wrapped in (#5741) -
+# Sourced BEFORE the shared globals below on purpose: forge-helpers.sh assigns
+# FORGE_TYPE="" at source time, which would otherwise clobber the
+# FORGE_TYPE="github" this suite sets for the extracted function to read.
+# shellcheck source=../lib/forge-helpers.sh
+source "$HELPERS_DIR/lib/forge-helpers.sh"
+
 # --- Pin the REAL binary for the --from-stdin contract tests below ---
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"
@@ -249,6 +256,69 @@ assert_contains "$LAST_OUT" "Upgrade to GitHub Pro" "the forge's own reason reac
 assert_contains "$LAST_OUT" "(HTTP 403)" "the refusal keeps the status the forge returned"
 assert_eq "no" "$(grep -qF -- "cargo build" <<<"$LAST_OUT" && echo yes || echo no)" "a binary that RAN is not told to rebuild itself"
 
+# --- T11 (#5741): the App-installation 403 self-heals through the ladder ----
+#
+# THE INCIDENT: `stale-checks` resolves branch-protection rules, which a
+# scope-limited GitHub App installation token cannot read — the call returned
+# exit 2 carrying `Resource not accessible by integration`, this guard
+# fail-closed (correctly, given what it was told), and EVERY merge on the repo
+# was blocked until an operator re-ran the whole script under the ambient
+# personal credential by hand. The call site was the only `loom-daemon` write
+# in this script still outside the #6074/#6752 ladder; wrapping it makes the
+# same recovery automatic. What must hold: the integration-403 escalates to a
+# freshly minted installation token, the retried attempt's CLEAN sentinel is
+# what the guard sees, and the guard therefore passes instead of blocking.
+PERM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/test-merge-pr-stale-checks-403.XXXXXX")"
+trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" "$PERM_DIR" 2>/dev/null || true' EXIT
+PERM_ATTEMPTS="$PERM_DIR/attempts.log"
+: > "$PERM_ATTEMPTS"
+
+# A loom-daemon stub reproducing the live failure: the ambient attempt answers
+# the integration-403 on STDOUT with exit 2 (exactly as observed), and only an
+# attempt carrying the freshly minted token answers CLEAN.
+cat > "$PERM_DIR/loom-daemon" <<'PERMSTUB'
+#!/usr/bin/env bash
+cred="ambient"
+[[ -n "${GH_TOKEN:-}" ]] && cred="token:${GH_TOKEN}"
+printf '%s | %s\n' "$cred" "$*" >> "$PERM_ATTEMPTS"
+if [[ "${GH_TOKEN:-}" == "ghs_fresh" ]]; then
+  echo 'LOOM-STALE-CHECKS-CLEAN'
+  exit 0
+fi
+echo "Merge blocked: PR #8078's required-check freshness guard (#8248) could not determine whether the green required checks predate the base tip — classic branch-protection lookup failed: gh api graphql failed: gh: Resource not accessible by integration."
+exit 2
+PERMSTUB
+chmod +x "$PERM_DIR/loom-daemon"
+
+# A github-app-token.sh stub speaking the real JSON envelope, so rung 2 can mint.
+cat > "$PERM_DIR/github-app-token.sh" <<'PERMMINT'
+#!/usr/bin/env bash
+echo '{"status":"ok","token":"ghs_fresh","installation_id":"1","app_id":"2","expires_at":"2099-01-01T00:00:00Z"}'
+PERMMINT
+chmod +x "$PERM_DIR/github-app-token.sh"
+
+# A repo with an origin remote, so _forge_nwo_from_remote resolves the NWO the
+# re-mint needs without any API call.
+mkdir -p "$PERM_DIR/repo"
+git -C "$PERM_DIR/repo" init -q
+git -C "$PERM_DIR/repo" remote add origin "https://github.com/rjwalters/kicad-tools.git"
+
+set +e
+LAST_OUT="$(
+  cd "$PERM_DIR/repo" \
+    && PERM_ATTEMPTS="$PERM_ATTEMPTS" \
+       LOOM_GITHUB_APP_SCRIPT="$PERM_DIR/github-app-token.sh" \
+       LOOM_DAEMON_BIN="$PERM_DIR/loom-daemon" \
+       _check_required_check_freshness 2>&1
+)"
+LAST_RC=$?
+set -e
+assert_eq "0" "$LAST_RC" "integration-403 -> the ladder escalates and the guard passes (not a fail-closed block)"
+assert_eq "2" "$(wc -l < "$PERM_ATTEMPTS" | tr -d ' ')" "the 403 is retried exactly once (rung 2), not swallowed or looped"
+assert_contains "$(sed -n '1p' "$PERM_ATTEMPTS")" "ambient" "rung 1 runs under the ambient credential"
+assert_contains "$(sed -n '2p' "$PERM_ATTEMPTS")" "token:ghs_fresh" "rung 2 re-runs under the freshly minted installation token"
+assert_contains "$(sed -n '2p' "$PERM_ATTEMPTS")" "merge-pr stale-checks --pr 8078" "the escalated attempt carries the same argv"
+
 # --- The REAL binary's offline contract (--from-stdin) ----------------------
 #
 # The wiring above proves the shell side; these prove the binary side of the
@@ -324,6 +394,16 @@ guard_line="${first_match%%:*}"
 IFS= read -r first_match < <(grep -n '^# Handle auto-merge mode' "$MERGE_PR_SRC")
 automerge_line="${first_match%%:*}"
 assert_eq yes "$( [[ -n "$guard_line" && -n "$automerge_line" && "$guard_line" -lt "$automerge_line" ]] && echo yes || echo no )" "Guard precedes both merge paths"
+
+# --- Wiring: the call must stay inside the ladder (#5741) -------------------
+# The forcing function, mirroring test-merge-pr-app-permission-fallback.sh's
+# section 3: an UNWRAPPED invocation IS the bug, so assert none remains. A
+# behavioral test alone cannot catch a future edit that drops the wrapper while
+# keeping the exit-code handling intact.
+assert_eq yes "$(grep -qF -- 'forge_cmd_perm_safe "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr stale-checks' "$MERGE_PR_SRC" && echo yes || echo no)" \
+    "the stale-checks call routes through forge_cmd_perm_safe (#6074/#6752 ladder)"
+assert_eq "" "$(grep -nF -- '$("${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr stale-checks' "$MERGE_PR_SRC" || true)" \
+    "no bare (unwrapped) 'loom-daemon merge-pr stale-checks' invocation remains"
 
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
 [[ $TESTS_FAILED -eq 0 ]]
