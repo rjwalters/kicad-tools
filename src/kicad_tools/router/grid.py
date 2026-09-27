@@ -1314,6 +1314,17 @@ class RoutingGrid:
         if ax > bx or ay > by:
             return
         self._ensure_raster_only_plane()[layer_idx, ay : by + 1, ax : bx + 1] = True
+        # Issue #5410: a registry-less blocker is STATIC board geometry.  Once
+        # routing has begun the static snapshot already exists, so without
+        # this a keep-out landing on a cell a routed-copper halo already owns
+        # stays attributed to that route: search-time halo refinement then
+        # re-measures the cell against the route's copper alone (and accepts
+        # it), and ripping the route up frees the cell outright.  Folding the
+        # rectangle into the snapshot keeps it hard for both.  Before the
+        # first route mark the snapshot is ``None`` and will capture these
+        # cells when it is taken.
+        if self._static_blocked is not None:
+            self._static_blocked[layer_idx, ay : by + 1, ax : bx + 1] = True
 
     def _ensure_raster_only_plane(self) -> np.ndarray:
         """Allocate the registry-less-blocker plane on first use (#5662)."""
@@ -1341,9 +1352,78 @@ class RoutingGrid:
         inside = (xs >= 0) & (xs < self.cols) & (ys >= 0) & (ys < self.rows)
         if not inside.all():
             xs, ys = xs[inside], ys[inside]
+        static = self._static_blocked
         for layer_idx in layer_indices:
             if 0 <= layer_idx < self.num_layers:
                 plane[layer_idx, ys, xs] = True
+                # Issue #5410: same static promotion as the rectangle form.
+                if static is not None:
+                    static[layer_idx, ys, xs] = True
+
+    def _registry_less_window(
+        self, layer_idx: int, gx1: int, gy1: int, gx2: int, gy2: int
+    ) -> tuple[int, int, np.ndarray] | None:
+        """Snapshot the blocked plane under a registry-less rectangle (#5410).
+
+        Returns ``(ax, ay, was_blocked)`` for the in-grid part of the
+        rectangle, or ``None`` when it misses the grid or no native mirror is
+        attached (nothing to hand to
+        :meth:`_mirror_registry_less_window_to_cpp`).
+        """
+        if getattr(getattr(self, "_cpp_grid", None), "_impl", None) is None:
+            return None
+        if not (0 <= layer_idx < self.num_layers):
+            return None
+        ax, ay = max(gx1, 0), max(gy1, 0)
+        bx, by = min(gx2, self.cols - 1), min(gy2, self.rows - 1)
+        if ax > bx or ay > by:
+            return None
+        was_blocked = to_numpy(self._blocked[layer_idx, ay : by + 1, ax : bx + 1]).copy()
+        return ax, ay, was_blocked
+
+    def _mirror_registry_less_window_to_cpp(
+        self, layer_idx: int, window: tuple[int, int, np.ndarray] | None
+    ) -> None:
+        """Mirror a keep-out / obstacle rectangle onto the native grid (#5410).
+
+        ``add_keepout`` and ``add_obstacle`` only wrote the Python planes, so
+        one issued after ``CppGrid.from_routing_grid`` (every
+        ``Autorouter.add_obstacle`` call, and every obstacle ``_reset_for_new_trial``
+        replays onto a rebuilt grid) was invisible to the native A*: it
+        routed straight through.  Cells the blocker newly blocked get the same
+        ``mark_blocked`` call the region bound and board-edge keepout already
+        issue.  Cells that were ALREADY blocked keep their native owner and
+        are only flagged static -- the native twin of the static-snapshot
+        promotion in :meth:`_mark_raster_only_region`, so the native
+        ``route_cell_has_geometry`` refuses to refine a keep-out that sits on a
+        routed-copper halo, and native rip-up keeps it blocked.
+        """
+        if window is None:
+            return
+        impl = getattr(getattr(self, "_cpp_grid", None), "_impl", None)
+        if impl is None:
+            return
+        ax, ay, was_blocked = window
+        h, w = was_blocked.shape
+        sl = (layer_idx, slice(ay, ay + h), slice(ax, ax + w))
+        nets = to_numpy(self._net[sl])
+        obstacle = to_numpy(self._is_obstacle[sl])
+        pad = to_numpy(self._pad_blocked[sl])
+        now_blocked = to_numpy(self._blocked[sl])
+        for yy, xx in zip(*np.nonzero(now_blocked & ~was_blocked), strict=True):
+            impl.mark_blocked(
+                int(ax + xx),
+                int(ay + yy),
+                int(layer_idx),
+                int(nets[yy, xx]),
+                bool(obstacle[yy, xx]),
+                bool(pad[yy, xx]),
+            )
+        ys, xs = np.nonzero(was_blocked)
+        if xs.size:
+            impl.set_cells_static_blocked(
+                (xs + ax).tolist(), (ys + ay).tolist(), [int(layer_idx)] * int(xs.size), True
+            )
 
     def raster_only_blocked_cell(self, gx: int, gy: int, layer_idx: int) -> bool:
         """Is this cell (partly) blocked by geometry with no registry?
@@ -1734,11 +1814,13 @@ class RoutingGrid:
             # halo already blocked included: those are exactly the ones a
             # geometric pad attribution would otherwise launder).
             self._mark_raster_only_region(layer_idx, gx1, gy1, gx2, gy2)
+            window = self._registry_less_window(layer_idx, gx1, gy1, gx2, gy2)
 
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         self.cell_at(layer_idx, gy, gx).blocked = True
+            self._mirror_registry_less_window_to_cpp(layer_idx, window)
 
     def _clearance_for_pin_pitch(
         self,
@@ -3166,10 +3248,12 @@ class RoutingGrid:
             for layer_idx in layer_indices:
                 # #5662: same registry-less provenance as ``add_obstacle``.
                 self._mark_raster_only_region(layer_idx, gx1, gy1, gx2, gy2)
+                window = self._registry_less_window(layer_idx, gx1, gy1, gx2, gy2)
                 for gy in range(gy1, gy2 + 1):
                     for gx in range(gx1, gx2 + 1):
                         if 0 <= gx < self.cols and 0 <= gy < self.rows:
                             self.cell_at(layer_idx, gy, gx).blocked = True
+                self._mirror_registry_less_window_to_cpp(layer_idx, window)
 
     def mark_region_bound(
         self,
@@ -3237,6 +3321,8 @@ class RoutingGrid:
                 self._mark_raster_only_region(layer_idx, 0, gy2 + 1, self.cols - 1, self.rows - 1)
                 self._mark_raster_only_region(layer_idx, 0, gy1, gx1 - 1, gy2)
                 self._mark_raster_only_region(layer_idx, gx2 + 1, gy1, self.cols - 1, gy2)
+                kept_xs: list[int] = []
+                kept_ys: list[int] = []
                 for gy in range(self.rows):
                     inside_y = gy1 <= gy <= gy2
                     for gx in range(self.cols):
@@ -3245,8 +3331,13 @@ class RoutingGrid:
                         cell = self.cell_at(layer_idx, gy, gx)
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
-                            # board edge).  Nothing to add, and mirroring is
-                            # handled by whoever set it.
+                            # board edge).  Its native blocked state is
+                            # mirrored by whoever set it; only the static flag
+                            # is new (Issue #5410) -- a routed-copper halo
+                            # here must not be refined or ripped open.
+                            if cpp_grid is not None:
+                                kept_xs.append(int(gx))
+                                kept_ys.append(int(gy))
                             continue
                         cell.blocked = True
                         blocked_count += 1
@@ -3259,6 +3350,10 @@ class RoutingGrid:
                                 False,  # not is_obstacle (a keepout, not pad metal)
                                 False,  # not pad_blocked
                             )
+                if kept_xs and cpp_grid is not None:
+                    cpp_grid._impl.set_cells_static_blocked(
+                        kept_xs, kept_ys, [int(layer_idx)] * len(kept_xs), True
+                    )
             return blocked_count
 
     def reopen_stub_terminal(self, x: float, y: float, layer: Layer, net: int) -> tuple[int, int]:
