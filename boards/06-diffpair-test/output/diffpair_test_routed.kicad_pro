@@ -58,7 +58,7 @@
   "meta": {
     "filename": "diffpair_test_routed.kicad_pro",
     "version": 1,
-    "manufacturer": "jlcpcb-tier1"
+    "manufacturer": "jlcpcb"
   },
   "net_settings": {
     "classes": [
