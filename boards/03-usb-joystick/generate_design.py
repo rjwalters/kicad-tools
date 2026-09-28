@@ -107,9 +107,11 @@ def create_usb_joystick_pcb(output_dir: Path) -> Path:
     sys.path.insert(0, str(Path(__file__).parent))
     import generate_pcb as _pcb_gen
 
-    pcb_path = output_dir / "usb_joystick.kicad_pcb"
     output_dir.mkdir(parents=True, exist_ok=True)
-    pcb_path.write_text(_pcb_gen.generate_pcb())
+    # ``write_pcb`` (not ``generate_pcb`` + ``write_text``) so this recipe and
+    # every other entry point share one placement, including the #5744
+    # silk-to-pad repair it performs -- see ``generate_pcb.write_pcb``.
+    pcb_path = _pcb_gen.write_pcb(output_dir / "usb_joystick.kicad_pcb")
     _pcb_gen.stage_local_footprints(output_dir)
     print(f"   PCB: {pcb_path}")
     print(f"\n   Board size: {_pcb_gen.BOARD_WIDTH}mm x {_pcb_gen.BOARD_HEIGHT}mm")
