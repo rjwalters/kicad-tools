@@ -283,6 +283,11 @@ EXPECTED_TOTAL_NETS = 13
 # dropped from the allowlist set; the board-03 entry is removed from
 # ``.github/routed-drc-tolerance.yml`` (absence = strict 0 gate).  The only
 # BY-RULE entries remaining are ``silkscreen_text_height`` WARNINGS.
+# Issue #5744 (Sep 28 2026): restoring the footprint silkscreen the replay had
+# been deleting changes the WARNING mix (not the 0-error ceiling) -- as measured
+# on the committed artifact it is now ``silkscreen_line_width`` 139 +
+# ``silk_edge_clearance`` 2 warnings + ``connector_edge_distance`` 2 infos, and
+# ``pin1_marker_missing`` 5 is GONE.  See the per-entry notes below.
 MAX_COMMITTED_DRC_ERRORS = 0
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
@@ -308,13 +313,33 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
     # regression.
     "connector_edge_distance",
-    # The pin-1 marker rule reports the board's footprints that carry no
-    # silkscreen graphics at all (U1 TQFP-44, U2 SOT-23-6, Y1, J2, J3), so
-    # nothing marks pin 1.  It is WARNING severity (advisory), so it does
-    # NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above; it only
-    # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
-    # regression.
-    "pin1_marker_missing",
+    # Issue #5744: the restored footprint silkscreen is stock KiCad library
+    # geometry drawn with a 0.12mm stroke, below jlcpcb-tier1's
+    # min_silkscreen_width_mm of 0.15mm -- 139 WARNINGS, one per footprint silk
+    # graphic.  These are NOT new to the board: the same 0.12mm strokes were
+    # always in the placement, they were simply unmeasurable for as long as
+    # ``routing_plan.apply_plan()`` deleted every footprint silk graphic on
+    # replay (the #5744 defect), so the routed artifact had no silk to check.
+    # Restoring the silk makes them visible; WARNING severity, so the 0-error
+    # ceiling (MAX_COMMITTED_DRC_ERRORS) is unchanged.  Boards 02/05/06/07 all
+    # ship footprint silk at 0.15mm -- board 03 is the outlier, and raising it
+    # to the floor is tracked separately (it also needs ``fp_poly`` support in
+    # ``drc.repair_silkscreen``, which only widens fp_line/rect/circle/arc
+    # today, and a re-run of the silk-to-pad clip against the wider strokes).
+    "silkscreen_line_width",
+    # Issue #5744: 2 WARNINGS on J1's (USB-C receptacle) outline silk running
+    # inside the board-edge clearance.  Same provenance as the entry above --
+    # J1 sits 0.50mm from the edge (see ``connector_edge_distance``), so its
+    # library outline silk was always within the floor; restoring the silk is
+    # what made it measurable.  WARNING severity; ceiling unchanged.
+    "silk_edge_clearance",
+    # ``pin1_marker_missing`` is deliberately NOT listed.  It used to fire 5
+    # WARNINGS (U1 TQFP-44, U2 SOT-23-6, Y1, J2, J3 -- "no silkscreen graphics
+    # at all, so nothing marks pin 1"), which was a direct symptom of #5744:
+    # the replay had deleted every pin-1 marker on the board.  With the silk
+    # restored the rule is clean, so the allowance is withdrawn on purpose --
+    # if this rule ever reappears in the breakdown, the pin-1 markers have gone
+    # missing again and this test SHOULD fail.
 }
 
 

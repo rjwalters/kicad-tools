@@ -111,9 +111,32 @@ def _reference(fp):
     )
 
 
-def _silk(node):
+# Issue #5744: a footprint's silk-layer children are two unrelated kinds of
+# data, and the plan may only ever replay ONE of them.
+#
+#   * ``property`` nodes are the reviewed revision-B silkscreen *text*
+#     placement -- reference designators nudged by hand off pads and copper
+#     during the review.  That placement is a manual repair which exists
+#     nowhere else, so it is captured in the plan and replayed.
+#   * ``fp_line``/``fp_rect``/``fp_circle``/``fp_arc``/``fp_poly`` are the
+#     footprint *geometry* (body outlines, pin-1 markers) the footprint
+#     generator emits from the library at placement time.  Every regeneration
+#     reproduces it identically from the input board, so the plan has no
+#     business carrying -- or rewriting -- it.
+#
+# Before this distinction existed, both helpers matched on layer alone:
+# ``apply_plan()`` deleted every silk-layer child and restored only what the
+# plan held, and because the plan only ever held ``property`` nodes that
+# silently wiped all 139 footprint silk graphics (including every pin-1
+# marker) out of the routed artifact.
+def _on_silk(node):
     layer = node.find_child("layer")
     return layer is not None and layer.get_string(0) in {"F.SilkS", "B.SilkS"}
+
+
+def _silk_text(node):
+    """A reviewed silkscreen text node -- the only silk data the plan replays."""
+    return node.name == "property" and _on_silk(node)
 
 
 def physical_contract(path):
@@ -293,8 +316,13 @@ def save_plan(reviewed_board, plan_path=PLAN):
         },
         "usb_geometry": usb_geometry(reviewed_board),
         "copper": [serialize_sexp(n) for n in doc.children if n.name in {"segment", "via", "arc"}],
+        # Text only, symmetric with ``apply_plan()`` below (Issue #5744).
+        # Footprint silk *geometry* is regenerated from the library on every
+        # rebuild and is deliberately NOT snapshotted here -- capturing it
+        # would freeze stale outlines into the plan, and the replay side no
+        # longer removes it, so there would be nothing for it to restore.
         "silkscreen": {
-            _reference(fp): [serialize_sexp(n) for n in fp.children if _silk(n)]
+            _reference(fp): [serialize_sexp(n) for n in fp.children if _silk_text(n)]
             for fp in doc.find_children("footprint")
         },
     }
@@ -319,9 +347,20 @@ def apply_plan(input_path, output_path, plan_path=PLAN):
         doc.add(node)
     for fp in doc.find_children("footprint"):
         reference = _reference(fp)
-        fp.children = [n for n in fp.children if not _silk(n)]
-        for source in plan["silkscreen"][reference]:
-            fp.add(parse_string(source))
+        # Replace the reviewed silk TEXT only.  Footprint silk geometry
+        # (outlines, pin-1 markers) is regenerated from the library into
+        # ``input_path`` and is carried through untouched (Issue #5744).
+        replacements = [parse_string(source) for source in plan["silkscreen"][reference]]
+        stale = [n.name for n in replacements if not _silk_text(n)]
+        if stale:
+            raise ValueError(
+                f"Routing plan stores non-text silkscreen nodes for {reference} ({stale}); "
+                "recapture it with save_plan() -- footprint silk geometry is replayed from "
+                "the input board, never from the plan"
+            )
+        fp.children = [n for n in fp.children if not _silk_text(n)]
+        for node in replacements:
+            fp.add(node)
     output_path = Path(output_path)
     candidate = output_path.with_name(f".{output_path.stem}.candidate.kicad_pcb")
     try:
