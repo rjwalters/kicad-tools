@@ -162,6 +162,87 @@ def test_island_through_arc(tmp_path):
     assert islands[0].actual_value == pytest.approx(0.5 * 3.141592653589793, abs=1e-4)
 
 
+def test_island_across_rounding_boundary_is_joined(tmp_path):
+    """Endpoints within tolerance but in different rounded buckets still join.
+
+    With ``node_tolerance_mm = 0.0005`` the rounding boundary lies at
+    ``x = 102.00025`` (``x / q = 204000.5``); the shared endpoint of the first
+    two tracks is written as 102.0002 on one side and 102.0003 on the other
+    (0.0001 mm apart, well inside the tolerance) so the plain rounded keys
+    differ (204000 vs 204001).  The chain must still be walked through that
+    point and the 0.5 mm island reported exactly once (issue #5750).
+    """
+    rule = WidthConsistencyRule()
+    q = rule.node_tolerance_mm
+    assert rule._node((102.0002, 100.0)) != rule._node((102.0003, 100.0))
+    assert abs(102.0003 - 102.0002) <= q
+
+    items = (
+        via(100, 100, 1)
+        + seg(100, 100, 102.0002, 100, 0.2, 1)
+        + seg(102.0003, 100, 103, 100, 0.5, 1)
+        + seg(103, 100, 106, 100, 0.2, 1)
+        + via(106, 100, 1)
+    )
+    results = _check(_load(tmp_path, items))
+    islands = _by_id(results, "width_island")
+    assert len(islands) == 1
+    assert islands[0].actual_value == pytest.approx(1.0, abs=1e-3)
+    assert _by_id(results, "width_transition") == []
+
+
+def test_transition_across_rounding_boundary_is_joined(tmp_path):
+    """A two-terminal neck split by a straddled bucket is still one chain."""
+    items = (
+        via(100, 110, 3)
+        + seg(100, 110, 103.0002, 110, 0.5, 3)
+        + seg(103.0003, 110, 106, 110, 0.2, 3)
+        + via(106, 110, 3)
+    )
+    (finding,) = _by_id(_check(_load(tmp_path, items)), "width_transition")
+    assert "no other-net copper within" in finding.message
+
+
+def test_same_bucket_endpoints_always_join():
+    """Same-bucket endpoints share a node even when > tol apart (PR #5760).
+
+    ``p`` and ``r2`` share bucket (200000, 200000) but sit ~1.27 * q apart
+    (a bucket's diagonal is ~1.41 * q), so a pure distance test would not
+    join them.  ``r2`` is within tolerance of ``s`` in the lower-keyed
+    neighbour bucket (200000, 199999); ``p`` is not.  All three must still
+    end up on one canonical node -- the plain rounded key always joined
+    ``p`` and ``r2``, and the tolerance join must never split that.
+    """
+    from kicad_tools.validate.rules.width_consistency import _Track
+
+    rule = WidthConsistencyRule()
+    q = rule.node_tolerance_mm
+    p = (100.0 + 0.45 * q, 100.0 + 0.45 * q)
+    r2 = (100.0 - 0.45 * q, 100.0 - 0.45 * q)
+    s = (100.0 - 0.45 * q, 100.0 - 0.60 * q)
+    assert rule._node(p) == rule._node(r2) == (200000, 200000)
+    assert rule._node(s) == (200000, 199999)
+    assert abs(((p[0] - r2[0]) ** 2 + (p[1] - r2[1]) ** 2) ** 0.5 - 1.27 * q) < 0.01 * q
+    assert ((r2[0] - s[0]) ** 2 + (r2[1] - s[1]) ** 2) ** 0.5 <= q
+    assert ((p[0] - s[0]) ** 2 + (p[1] - s[1]) ** 2) ** 0.5 > q
+
+    def track(end: tuple[float, float], far: tuple[float, float]) -> _Track:
+        return _Track(
+            segment=None,  # type: ignore[arg-type]
+            points=[end, far],
+            length=1.0,
+            width=0.2,
+            net_label="N",
+            uuid="",
+        )
+
+    tracks = [track(p, (90.0, 100.0)), track(r2, (110.0, 100.0)), track(s, (100.0, 90.0))]
+    ends = rule._end_nodes(tracks)
+    assert ends[0][0] == ends[1][0] == ends[2][0]
+    # The far ends stay on their own distinct nodes.
+    assert len({ends[0][1], ends[1][1], ends[2][1], ends[0][0]}) == 4
+
+
 def test_narrow_neck_is_not_an_island(tmp_path):
     items = (
         via(100, 100, 1)
