@@ -6,10 +6,17 @@ name: Release Tag
 # tests/test_release_tag.py). On every push to main it checks whether the
 # pushed SHA is a release merge -- `chore(release): vX.Y.Z (#N)` (the
 # automated release PR, #5776) or `Merge pull request #N from
-# <owner>/release/vX.Y.Z` (a hand-merged one) -- cross-checked against
-# pyproject.toml's [project].version at that SHA (and a changed version vs.
-# the first parent). If so, and `vX.Y.Z` does not exist on origin yet, it
-# pushes an annotated tag on exactly that SHA. Everything else exits quietly.
+# <owner>/release/vX.Y.Z` (a hand-merged one). If so it tags the release PR's
+# HEAD -- the merge commit's SECOND parent, i.e. exactly what the release gate
+# and the PR's CI tested -- not the merge commit, after cross-checking:
+# it is a real merge (a single-parent release commit fails the run), the
+# second parent's pyproject.toml [project].version is X.Y.Z and differs from
+# the first parent's, both commits are on origin/main, and `vX.Y.Z` does not
+# exist on origin yet. Everything else exits quietly.
+#
+# Manual `sha` input: tags exactly that commit (`--exact`) after the same
+# version (ahead of the latest reachable v* tag), ancestry and tag-exists
+# checks. Left empty, it re-runs the detection on the main tip.
 #
 # The tag push authenticates as the loom-fleet-dispatch GitHub App, so
 # publish.yml's `push: tags` trigger fires exactly as for a human push (a
@@ -25,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       sha:
-        description: "main SHA to (re)check and tag (default: the main tip)"
+        description: "Commit on main to tag exactly (empty: re-detect a release merge at the main tip)"
         type: string
         default: ""
 
@@ -68,8 +75,8 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
 
-      # Full history + tags: the script reads pyproject.toml at the SHA and its
-      # first parent, and checks the SHA is on origin/main. The persisted
+      # Full history + tags: the script reads pyproject.toml at the merge's
+      # two parents, and checks both are on origin/main. The persisted
       # credential is the App token in `on` mode so the tag push triggers
       # publish.yml.
       - uses: actions/checkout@v7
@@ -96,10 +103,15 @@ jobs:
           git config user.name "$bot_login"
           git config user.email "${bot_id}+${bot_login}@users.noreply.github.com"
 
-      - name: Tag the release merge
+      - name: Tag the release PR head
         if: steps.mode.outputs.mode != 'off'
         env:
           MODE: ${{ steps.mode.outputs.mode }}
           SHA: ${{ inputs.sha || github.sha }}
+          EXACT: ${{ inputs.sha != '' && inputs.sha != null }}
         run: |
-          python scripts/release_tag.py tag --mode "$MODE" --sha "$SHA"
+          if [ "$EXACT" = true ]; then
+            python scripts/release_tag.py tag --mode "$MODE" --exact --sha "$SHA"
+          else
+            python scripts/release_tag.py tag --mode "$MODE" --sha "$SHA"
+          fi

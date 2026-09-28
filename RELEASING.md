@@ -5,7 +5,8 @@ to keep releases consistent with `main` branch protection: every commit reaches
 `main` through a pull request, including the version-bump commit.
 
 **The default path is automated** (epic #5774): a daily workflow opens and
-merges the release PR, a push-to-`main` workflow tags the merged commit, the
+merges the release PR, a push-to-`main` workflow tags the release PR's
+tested head (now on `main`'s history), the
 existing `publish.yml` publishes the tag to PyPI, and a follow-up workflow
 creates the GitHub Release and verifies PyPI. See
 [Automated release (default)](#automated-release-default). The
@@ -15,9 +16,11 @@ automation is off, paused or broken, and they follow the same rules.
 > **TL;DR** — Automated: set `AUTO_RELEASE=on` and watch the "Automated
 > release status" issue. Manual: reconcile the CHANGELOG
 > (`scripts/changelog_gap_report.py`) → branch → bump commit + CHANGELOG → PR →
-> merge → `git fetch` → annotated tag on the **merged `main` SHA** → push the
-> tag. The tag is created **only after** the bump commit is on `main`. Never
-> push the version-bump commit directly to `main`.
+> merge → `git fetch` → annotated tag on the **release PR's head as merged
+> into `main`** (the merge commit's second parent) → push the tag. The tag is
+> created **only after** the merge, so it points at the release PR's tested
+> head, which is on `main`'s history. Never push the version-bump commit
+> directly to `main`.
 
 ## Why PR-based (not a direct push)
 
@@ -60,7 +63,7 @@ and each obeys the same kill switch.
 | Stage | Workflow | Script (tests) |
 |-------|----------|----------------|
 | 1. Release PR: plan, gate, open, merge | `release-pr.yml` (daily 14:00 UTC) | `scripts/release_plan.py` (`tests/test_release_plan.py`) |
-| 2. Tag the merged `main` SHA | `release-tag.yml` (every push to `main`) | `scripts/release_tag.py tag` (`tests/test_release_tag.py`) |
+| 2. Tag the release PR head (merge's 2nd parent, on `main`) | `release-tag.yml` (every push to `main`) | `scripts/release_tag.py tag` (`tests/test_release_tag.py`) |
 | 3. Publish to PyPI | `publish.yml` (on the `v*` tag, **unchanged**) | — |
 | 4. GitHub Release + PyPI check | `release-finalize.yml` (when publish completes) | `scripts/release_tag.py finalize` |
 
@@ -139,7 +142,7 @@ uv run python scripts/release_plan.py plan               # tag, merges, level, s
 uv run python scripts/release_plan.py run --mode dry-run --wait-ci 0
 ```
 
-### Stage 2: tag the merge (`release-tag.yml`, #5777)
+### Stage 2: tag the release PR's head (`release-tag.yml`, #5777)
 
 On every push to `main`, `release_tag.py tag` decides whether the pushed SHA
 is a release merge. Two commit subjects count:
@@ -148,22 +151,41 @@ is a release merge. Two commit subjects count:
 - `Merge pull request #N from <owner>/release/vX.Y.Z`: a hand-opened release
   PR merged by `merge-pr.sh` or the GitHub button (the manual path below).
 
-The subject alone never tags. `pyproject.toml`'s `[project].version` at the SHA
-must equal the subject's version and differ from the version at the first
-parent, and the SHA must be on `origin/main`. If `vX.Y.Z` already exists on
-`origin`, the run exits quietly, so a rerun cannot double-tag and a human who
-tagged first is left alone. Every other push, which is almost all of them,
-exits quietly.
+**The tag points at the release PR's tested head, which is on `main`'s
+history** — the merge commit's **second parent**, not the merge commit. That
+head is exactly what the release gate and the PR's own CI tested. PRs that
+merged to `main` while the release PR was waiting are in the merge commit's
+first parent, not in the tag: they ship in the next release instead of
+untested in this one.
 
-In `on` mode it pushes an **annotated** tag on exactly the merged SHA. The
+The subject alone never tags. The pushed SHA must be a two-parent merge
+commit: a single-parent commit with a release subject (a squash or rebase
+merge) fails the run, because there is no PR head on `main`'s history to tag;
+tag it by hand with the `sha` input below. `pyproject.toml`'s
+`[project].version` at the second parent must equal the subject's version and
+differ from the version at the first parent, and both the merge commit and its
+second parent must be reachable from `origin/main`
+(`git merge-base --is-ancestor`). If `vX.Y.Z` already exists on `origin`, the
+run exits quietly, so a rerun cannot double-tag and a human who tagged first
+is left alone. Every other push, which is almost all of them, exits quietly.
+
+In `on` mode it pushes an **annotated** tag on the second parent. The
 push authenticates as the loom-fleet-dispatch App, which matters: a tag pushed
 with `GITHUB_TOKEN` would not trigger `publish.yml`, while an App-token push
 triggers it exactly like a human `git push origin vX.Y.Z`. If a merge was
 missed (for example `AUTO_RELEASE` was `dry-run` at the time), dispatch
-`release-tag.yml` with its `sha` input, or tag by hand as in manual step (d).
+`release-tag.yml` with its `sha` input set to the release PR's head
+(`git rev-parse <merge-sha>^2`), or tag by hand as in manual step (d). A given
+`sha` is tagged **exactly** (`release_tag.py tag --exact`), after the same
+checks: its `pyproject.toml` version is ahead of the latest `v*` tag reachable
+from it, it is on `origin/main`, and the tag does not exist yet. Left empty,
+the input re-runs the detection on the `main` tip.
 
 Once the tag exists, stage 1's "pyproject is ahead of the latest tag" guard
-clears and daily planning resumes.
+clears and daily planning resumes. Stage 1 reads "the latest tag" as the
+highest `vX.Y.Z` tag reachable from `main` (not `git describe`'s nearest tag,
+which can prefer an older first-parent tag over one reached through a second
+parent), and it does not count the release merge itself as a PR to release.
 
 ### Stage 3: publish (`publish.yml`, unchanged)
 
@@ -193,6 +215,7 @@ Preview locally:
 
 ```bash
 uv run python scripts/release_tag.py tag --sha origin/main --mode dry-run
+uv run python scripts/release_tag.py tag --exact --sha <sha> --mode dry-run
 uv run python scripts/release_tag.py notes X.Y.Z         # the Release notes
 ```
 
@@ -306,21 +329,26 @@ This lands the bump commit on `main` through the protected-branch gate. The
 commit that ends up on `main` is a **new** commit — today a two-parent merge
 commit (`Merge pull request #N from rjwalters/release/vX.Y.Z`, e.g. `9e8bc11b`
 for v0.22.0), and a squash commit would be new too — so it has a **different
-SHA** than the commit on your `release/vX.Y.Z` branch. That is exactly why the
-tag must wait until after the merge (see the ordering rule below).
+SHA** than the commit on your `release/vX.Y.Z` branch. With a merge commit,
+the release branch's head becomes that merge's **second parent**, and so part
+of `main`'s history. The tag must still wait until after the merge (see the
+ordering rule below).
 
-### (d) Fetch, then create an annotated tag on the merged `main` SHA
+### (d) Fetch, then create an annotated tag on the release PR's head
 
 ```bash
 git checkout main
 git fetch origin
-git pull origin main            # main now includes the merged bump commit
-git tag -a vX.Y.Z -m "Release X.Y.Z" <merged-main-SHA>
+git pull origin main            # main now includes the release merge
+git merge-base --is-ancestor <merge-SHA>^2 origin/main && \
+  git tag -a vX.Y.Z -m "Release X.Y.Z" <merge-SHA>^2
 ```
 
-Use the SHA of the bump commit **as it landed on `main`** (e.g.
-`git rev-parse origin/main`, or the SHA of the squashed commit), not the
-pre-merge branch SHA.
+Tag the release PR's head **as merged into `main`**: the merge commit's second
+parent, which is exactly what the PR's CI tested. It is only on `main`'s
+history once the merge has happened, so check with
+`git merge-base --is-ancestor` first. For a squash merge there is no second
+parent; tag the squashed commit on `main` instead.
 
 ### (e) Push the tag — this triggers publish
 
@@ -329,12 +357,12 @@ git push origin vX.Y.Z
 ```
 
 Only this step triggers `publish.yml`. It builds the commit the tag points at,
-which is now a commit on `main`.
+which is now a commit on `main`'s history.
 
 ## The hard ordering rule (read this)
 
-**Create the tag ONLY AFTER the bump commit is on `main`. Never tag a
-pre-merge PR-branch commit.**
+**Create the tag ONLY AFTER the release PR has merged into `main`, and only on
+a commit reachable from `main`. Never tag a PR-branch commit before its merge.**
 
 Why this is non-negotiable:
 
@@ -349,13 +377,14 @@ Why this is non-negotiable:
   that tag would publish a commit `main` never saw — defeating the entire
   purpose of the PR gate.
 
-By creating the tag only after `git fetch` brings the merged commit down, the
-tag references the commit that is actually on `main`, and `publish.yml` builds
-that commit.
+By creating the tag only after `git fetch` brings the merge down, the tag
+references a commit that is actually on `main`'s history (the release PR's
+tested head, reached through the merge's second parent), and `publish.yml`
+builds that commit.
 
 `release-tag.yml` follows the same rule by construction: it runs on the push
-to `main` and only ever tags that pushed SHA, after checking it is on
-`origin/main`.
+to `main` and tags the pushed merge's second parent only after checking with
+`git merge-base --is-ancestor` that it is reachable from `origin/main`.
 
 ## How the tag drives publish
 
@@ -438,6 +467,6 @@ above; no runner infrastructure is maintained for this repo.
 - [ ] PR merged onto `main` via `./.loom/scripts/merge-pr.sh <PR>` (not a direct
       push).
 - [ ] `git fetch` / `git pull` so `main` includes the merged bump commit.
-- [ ] Annotated tag `vX.Y.Z` created on the **merged `main` SHA**.
+- [ ] Annotated tag `vX.Y.Z` created on the **release PR's head as merged into `main`** (the merge's second parent).
 - [ ] `git push origin vX.Y.Z` — `publish.yml` builds the tagged commit and
       publishes to PyPI.

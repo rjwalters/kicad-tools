@@ -7,26 +7,42 @@ unit-tested (``tests/test_release_tag.py``).
 
 ``tag`` -- ``.github/workflows/release-tag.yml``, on every push to ``main``
 --------------------------------------------------------------------------
+The tag goes on the **release PR's head commit** -- the merge commit's second
+parent -- not on the merge commit.  That head is exactly what the release gate
+and the PR's own CI tested, and once merged it is reachable from ``main``, so
+RELEASING.md's "the tag is on main's history" rule holds.  PRs that merged
+while the release PR waited are in the merge commit but not in its second
+parent: they ship in the next release instead of untested in this one.
+
 1. **Detect a release merge** on the pushed SHA.  Two commit subjects count:
 
    - ``chore(release): vX.Y.Z (#N)`` -- the automated release PR, merged by
-     ``release_plan.py`` through the API (Phase 2, #5776);
+     ``release_plan.py`` through the API with a merge commit (Phase 2, #5776);
    - ``Merge pull request #N from <owner>/release/vX.Y.Z`` -- a hand-opened
      release PR merged by ``merge-pr.sh`` or the GitHub button (RELEASING.md's
      manual fallback).
 
    Anything else exits quietly -- that is almost every push.
 2. **Cross-check** against the tree, so a coincidentally worded subject can
-   never tag: ``pyproject.toml``'s ``[project].version`` at the SHA must equal
-   the subject's version, and must differ from the version at the first
-   parent (the merge really bumped it).  The SHA must be on ``origin/main``.
+   never tag.  The SHA must be a merge commit (a single-parent commit with a
+   release subject -- a squash or rebase merge -- is refused loudly: there is
+   no PR head on main's history to tag).  ``pyproject.toml``'s
+   ``[project].version`` at the second parent must equal the subject's
+   version and differ from the version at the first parent (the release
+   really bumped it).  The merge commit and its second parent must both be on
+   ``origin/main``.
 3. **Idempotency**: if ``vX.Y.Z`` already exists on ``origin``, exit quietly
    (a rerun, or a human who tagged first).
 4. **Mode** (``AUTO_RELEASE``, same resolution as Phase 2): ``off`` exits at
    once; ``dry-run`` (and unset) logs the tag it would push; ``on`` creates an
-   annotated ``vX.Y.Z`` on the SHA and pushes it.  The push authenticates as
-   the loom-fleet-dispatch App, so ``publish.yml``'s ``push: tags`` trigger
-   fires (a ``GITHUB_TOKEN`` push would not).
+   annotated ``vX.Y.Z`` on the second parent and pushes it.  The push
+   authenticates as the loom-fleet-dispatch App, so ``publish.yml``'s
+   ``push: tags`` trigger fires (a ``GITHUB_TOKEN`` push would not).
+
+``tag --exact`` (the workflow's manual ``sha`` input) skips the subject
+detection and tags exactly the given commit, with the same checks: its
+``pyproject.toml`` version is ahead of the latest ``v*`` tag reachable from it,
+it is on ``origin/main``, and the tag does not exist yet.
 
 ``finalize`` -- ``.github/workflows/release-finalize.yml``, on ``workflow_run``
 ------------------------------------------------------------------------------
@@ -45,6 +61,7 @@ payload's ``head_branch`` is the tag name and ``head_sha`` the tagged commit.
 Usage
 -----
     uv run python scripts/release_tag.py tag --sha HEAD --mode dry-run
+    uv run python scripts/release_tag.py tag --exact --sha <sha> --mode dry-run
     uv run python scripts/release_tag.py notes 0.22.0      # print release notes
     uv run python scripts/release_tag.py finalize --tag v0.22.0 --sha <sha> \\
         --conclusion success --mode dry-run
@@ -53,7 +70,8 @@ Exit codes
 ----------
     0 -- done (tagged, finalized, dry-run reported, not a release, or ``off``).
     1 -- a release that should have completed did not (publish failed, PyPI
-         missing files, tag push failed).
+         missing files, tag push failed, a release merge that is not a merge
+         commit).
     2 -- usage / environment error.
 """
 
@@ -80,10 +98,8 @@ import release_plan as rp  # noqa: E402  (sibling script, not a package)
 PYPI_JSON_URL = "https://pypi.org/pypi/{package}/{version}/json"
 REQUIRED_DISTS = frozenset({"bdist_wheel", "sdist"})
 
-_AUTO_SUBJECT = re.compile(r"^chore\(release\): v(?P<version>\d+\.\d+\.\d+) \(#(?P<pr>\d+)\)$")
-_MANUAL_SUBJECT = re.compile(
-    r"^Merge pull request #(?P<pr>\d+) from [^/\s]+/release/v(?P<version>\d+\.\d+\.\d+)$"
-)
+_AUTO_SUBJECT = rp.RELEASE_MERGE_AUTOMATED
+_MANUAL_SUBJECT = rp.RELEASE_MERGE_MANUAL
 _TAG = re.compile(r"^v\d+\.\d+\.\d+$")
 
 
@@ -99,8 +115,8 @@ class Outcome:
 @dataclass(frozen=True)
 class ReleaseMerge:
     version: str
-    pr: int
-    shape: str  # "automated" | "manual"
+    pr: int | None
+    shape: str  # "automated" | "manual" | "exact" (a hand-given SHA)
 
     @property
     def tag(self) -> str:
@@ -130,13 +146,36 @@ def remote_tag_sha(git: rp.Git, tag: str) -> str | None:
 
 @dataclass
 class Detection:
-    sha: str
+    sha: str  # the commit inspected (the pushed main SHA, or the --exact SHA)
+    target: str | None = None  # the commit to tag
     merge: ReleaseMerge | None = None
-    stop: str | None = None  # a reason not to tag (quiet unless it looks wrong)
+    stop: str | None = None  # a reason not to tag (quiet unless ``loud``)
+    loud: bool = False  # a release that cannot be tagged automatically: fail the run
+
+
+def _rev(git: rp.Git, rev: str) -> str:
+    return str(git("rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}", check=False)).strip()
+
+
+def _check_target(git: rp.Git, found: Detection, target: str, tag: str, base: str) -> bool:
+    """Ancestry and idempotency checks shared by both paths; sets ``stop``."""
+    for label, commit in (("", found.sha), ("the release PR head ", target)):
+        if not _is_ancestor(git, commit, base):
+            found.stop = (
+                f"{label}{commit[:12]} is not on {base}: only a commit on main's history is "
+                "ever tagged"
+            )
+            return False
+    existing = remote_tag_sha(git, tag)
+    if existing is not None:
+        where = "this commit" if existing == target else f"{existing[:12]}, not {target[:12]}"
+        found.stop = f"{tag} already exists on origin (at {where}): nothing to do"
+        return False
+    return True
 
 
 def detect(git: rp.Git, sha: str, base: str = f"origin/{rp.BASE_BRANCH}") -> Detection:
-    """Decide whether ``sha`` is a release merge that still needs its tag."""
+    """Decide whether ``sha`` is a release merge whose PR head still needs its tag."""
     sha = git.rev_parse(f"{sha}^{{commit}}")
     found = Detection(sha)
     subject = git("log", "-1", "--format=%s", sha).strip()
@@ -144,29 +183,50 @@ def detect(git: rp.Git, sha: str, base: str = f"origin/{rp.BASE_BRANCH}") -> Det
     if merge is None:
         found.stop = f"not a release merge: {subject!r}"
         return found
-    at_sha = rp.pyproject_version(git.show(sha, "pyproject.toml"))
-    if at_sha != merge.version:
+    first, head = _rev(git, f"{sha}^1"), _rev(git, f"{sha}^2")
+    if not head:
         found.stop = (
-            f"subject names v{merge.version} but pyproject.toml at {sha[:12]} is {at_sha}: "
-            "not tagging"
+            f"subject names v{merge.version} but {sha[:12]} is not a merge commit (squash or "
+            "rebase merge?): there is no release PR head on main's history to tag. Tag by "
+            "hand with the release-tag workflow's `sha` input (RELEASING.md)"
+        )
+        found.loud = True
+        return found
+    at_head = rp.pyproject_version(git.show(head, "pyproject.toml"))
+    if at_head != merge.version:
+        found.stop = (
+            f"subject names v{merge.version} but pyproject.toml at the release PR head "
+            f"{head[:12]} is {at_head}: not tagging"
         )
         return found
-    parent = git("rev-parse", "--verify", "--quiet", f"{sha}^1", check=False).strip()
-    if parent and rp.pyproject_version(git.show(parent, "pyproject.toml")) == at_sha:
+    if first and rp.pyproject_version(git.show(first, "pyproject.toml")) == at_head:
         found.stop = (
-            f"subject names v{merge.version} but this commit did not change pyproject.toml's "
-            "version: not tagging"
+            f"subject names v{merge.version} but main was already at that version before "
+            "this merge (the release did not change pyproject.toml's version): not tagging"
         )
         return found
-    if not _is_ancestor(git, sha, base):
-        found.stop = f"{sha[:12]} is not on {base}: only a merged main SHA is ever tagged"
+    if not _check_target(git, found, head, merge.tag, base):
         return found
-    existing = remote_tag_sha(git, merge.tag)
-    if existing is not None:
-        where = "this commit" if existing == sha else f"{existing[:12]}, not {sha[:12]}"
-        found.stop = f"{merge.tag} already exists on origin (at {where}): nothing to do"
+    found.target, found.merge = head, merge
+    return found
+
+
+def detect_exact(git: rp.Git, sha: str, base: str = f"origin/{rp.BASE_BRANCH}") -> Detection:
+    """The manual path: tag exactly ``sha`` if it carries an untagged release version."""
+    sha = git.rev_parse(f"{sha}^{{commit}}")
+    found = Detection(sha)
+    version = rp.pyproject_version(git.show(sha, "pyproject.toml"))
+    latest = git.latest_tag(sha)
+    if latest is not None and rp.parse_version(version) <= rp.parse_version(latest):
+        found.stop = (
+            f"pyproject.toml at {sha[:12]} is {version}, not ahead of the latest tag {latest} "
+            "reachable from it: not tagging"
+        )
         return found
-    found.merge = merge
+    merge = ReleaseMerge(version, None, "exact")
+    if not _check_target(git, found, sha, merge.tag, base):
+        return found
+    found.target, found.merge = sha, merge
     return found
 
 
@@ -180,36 +240,44 @@ def _is_ancestor(git: rp.Git, sha: str, base: str) -> bool:
     return proc.returncode == 0
 
 
-def tag_message(merge: ReleaseMerge) -> str:
-    return f"Release {merge.version}\n\nRelease PR #{merge.pr} ({merge.shape})."
+def tag_message(merge: ReleaseMerge, merge_sha: str | None = None) -> str:
+    if merge.pr is None:
+        return f"Release {merge.version}\n\nTagged by hand-given SHA (release-tag.yml `sha`)."
+    via = f", merged to main by {merge_sha[:12]}" if merge_sha else ""
+    return f"Release {merge.version}\n\nHead of release PR #{merge.pr} ({merge.shape}){via}."
 
 
-def run_tag(*, mode: str, mode_note: str, git: rp.Git, sha: str) -> Outcome:
+def run_tag(*, mode: str, mode_note: str, git: rp.Git, sha: str, exact: bool = False) -> Outcome:
     out = [f"mode: {mode} ({mode_note})"]
     if mode == "off":
         return Outcome(0, "\n".join(out + ["AUTO_RELEASE=off: not tagging"]))
-    found = detect(git, sha)
-    if found.merge is None:
+    found = detect_exact(git, sha) if exact else detect(git, sha)
+    if found.merge is None or found.target is None:
         out.append(f"{found.sha[:12]}: {found.stop}")
-        return Outcome(0, "\n".join(out))
-    merge = found.merge
-    out.append(
-        f"{found.sha[:12]} is the {merge.shape} release merge of PR #{merge.pr} (v{merge.version})"
-    )
+        return Outcome(1 if found.loud else 0, "\n".join(out))
+    merge, target = found.merge, found.target
+    if exact:
+        out.append(f"{target[:12]} is at v{merge.version}, not yet tagged (--exact)")
+    else:
+        out.append(
+            f"{found.sha[:12]} is the {merge.shape} release merge of PR #{merge.pr} "
+            f"(v{merge.version}); tagging the PR head {target[:12]} (second parent)"
+        )
     if mode != "on":
-        out.append(f"dry-run: would push annotated tag {merge.tag} -> {found.sha}")
+        out.append(f"dry-run: would push annotated tag {merge.tag} -> {target}")
         return Outcome(0, "\n".join(out))
-    git("tag", "-a", merge.tag, "-m", tag_message(merge), found.sha)
+    message = tag_message(merge, None if exact else found.sha)
+    git("tag", "-a", merge.tag, "-m", message, target)
     try:
         git("push", "origin", f"refs/tags/{merge.tag}")
     except rp.ReleaseError as exc:
         # Lost a race with a human (or a concurrent rerun) who pushed the same tag.
-        if remote_tag_sha(git, merge.tag) == found.sha:
-            out.append(f"{merge.tag} appeared on origin at {found.sha[:12]} meanwhile: fine")
+        if remote_tag_sha(git, merge.tag) == target:
+            out.append(f"{merge.tag} appeared on origin at {target[:12]} meanwhile: fine")
             return Outcome(0, "\n".join(out))
         out.append(f"tag push failed: {exc}")
         return Outcome(1, "\n".join(out))
-    out.append(f"pushed {merge.tag} -> {found.sha} (publish.yml runs on this tag)")
+    out.append(f"pushed {merge.tag} -> {target} (publish.yml runs on this tag)")
     return Outcome(0, "\n".join(out))
 
 
@@ -384,8 +452,13 @@ def _mode(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[st
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    p_tag = sub.add_parser("tag", help="tag the release merge at --sha (release-tag.yml)")
+    p_tag = sub.add_parser("tag", help="tag the release PR head merged at --sha (release-tag.yml)")
     p_tag.add_argument("--sha", default="HEAD")
+    p_tag.add_argument(
+        "--exact",
+        action="store_true",
+        help="tag exactly --sha (no release-merge detection; same version/ancestry checks)",
+    )
     p_fin = sub.add_parser("finalize", help="GitHub Release + PyPI check (release-finalize.yml)")
     p_fin.add_argument("--tag", required=True)
     p_fin.add_argument("--sha", required=True)
@@ -411,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         mode, note = _mode(args, parser)
         if args.command == "tag":
-            outcome = run_tag(mode=mode, mode_note=note, git=git, sha=args.sha)
+            outcome = run_tag(mode=mode, mode_note=note, git=git, sha=args.sha, exact=args.exact)
         else:
             forge = ReleaseForge(args.repo, write_token=os.environ.get("RELEASE_TOKEN") or None)
             outcome = run_finalize(

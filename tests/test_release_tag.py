@@ -201,6 +201,11 @@ def _merge(repo: Path, branch: str, subject: str, files: dict[str, str]) -> str:
     return _git(repo, "rev-parse", "HEAD").strip()
 
 
+def _head(repo: Path, merge_sha: str) -> str:
+    """The merge's second parent: the release PR head the tag must land on."""
+    return _git(repo, "rev-parse", f"{merge_sha}^2").strip()
+
+
 def _release(repo: Path, version: str = "0.2.0", shape: str = "automated") -> str:
     subject = (
         f"chore(release): v{version} (#100)"
@@ -220,11 +225,13 @@ def _remote_tags(repo: Path) -> str:
 
 
 @pytest.mark.parametrize("shape", ["automated", "manual"])
-def test_detect_release_merge_both_shapes(repo: Path, shape: str) -> None:
+def test_detect_release_merge_both_shapes_targets_the_second_parent(repo: Path, shape: str) -> None:
     sha = _release(repo, shape=shape)
     found = rt.detect(rp.Git(repo), sha)
     assert found.stop is None
     assert found.merge == rt.ReleaseMerge("0.2.0", 100, shape)
+    assert found.sha == sha
+    assert found.target == _head(repo, sha) != sha
 
 
 def test_detect_ordinary_merge_is_quiet(repo: Path) -> None:
@@ -236,6 +243,7 @@ def test_detect_ordinary_merge_is_quiet(repo: Path) -> None:
     )
     found = rt.detect(rp.Git(repo), sha)
     assert found.merge is None and "not a release merge" in (found.stop or "")
+    assert not found.loud
 
 
 def test_detect_subject_without_pyproject_change_does_not_fire(repo: Path) -> None:
@@ -259,36 +267,99 @@ def test_detect_subject_version_disagreeing_with_pyproject_does_not_fire(repo: P
     assert found.merge is None and "pyproject.toml" in (found.stop or "")
 
 
-def test_detect_refuses_a_sha_not_on_main(repo: Path) -> None:
-    _git(repo, "checkout", "-q", "-b", "side")
+@pytest.mark.parametrize(
+    "subject", ["chore(release): v0.2.0 (#5)", "Merge pull request #5 from o/release/v0.2.0"]
+)
+def test_single_parent_release_commit_is_refused_loudly(repo: Path, subject: str) -> None:
+    """A squash/rebase-merged release has no PR head on main's history: the
+    automated path must refuse, and fail the run so a human tags by hand."""
     (repo / "pyproject.toml").write_text(_pyproject("0.2.0"))
-    _git(repo, "commit", "-q", "-am", "chore(release): v0.2.0 (#5)")
+    _git(repo, "commit", "-q", "-am", subject)
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "fetch", "-q", "origin")
+    found = rt.detect(rp.Git(repo), "HEAD")
+    assert found.merge is None and found.loud
+    assert "not a merge commit" in (found.stop or "")
+    outcome = _tag(repo, "on")
+    assert outcome.code == 1 and "not a merge commit" in outcome.summary
+    assert "v0.2.0" not in _remote_tags(repo)
+
+
+def test_detect_refuses_a_merge_not_on_main(repo: Path) -> None:
+    """A release-shaped merge on a side branch: neither it nor its second
+    parent is reachable from origin/main, so nothing is tagged."""
+    _git(repo, "checkout", "-q", "-b", "side")
+    _git(repo, "checkout", "-q", "-b", "release/v0.2.0")
+    (repo / "pyproject.toml").write_text(_pyproject("0.2.0"))
+    _git(repo, "commit", "-q", "-am", "chore(release): bump")
+    _git(repo, "checkout", "-q", "side")
+    _git(repo, "merge", "-q", "--no-ff", "release/v0.2.0", "-m", "chore(release): v0.2.0 (#5)")
     sha = _git(repo, "rev-parse", "HEAD").strip()
     found = rt.detect(rp.Git(repo), sha)
     assert found.merge is None and "not on origin/main" in (found.stop or "")
 
 
+def test_detect_refuses_a_second_parent_not_on_the_base(repo: Path) -> None:
+    """The ancestry check is on the second parent itself: against a base that
+    does not contain the release PR head, nothing is tagged."""
+    sha = _release(repo)
+    _git(repo, "update-ref", "refs/remotes/origin/old-main", f"{sha}^1")
+    found = rt.detect(rp.Git(repo), sha, base="origin/old-main")
+    assert found.merge is None and "not on origin/old-main" in (found.stop or "")
+
+
 def test_detect_existing_tag_is_a_quiet_noop(repo: Path) -> None:
     sha = _release(repo)
-    _git(repo, "tag", "-a", "v0.2.0", "-m", "by hand", sha)
+    head = _head(repo, sha)
+    _git(repo, "tag", "-a", "v0.2.0", "-m", "by hand", head)
     _git(repo, "push", "-q", "origin", "v0.2.0")
     found = rt.detect(rp.Git(repo), sha)
     assert found.merge is None and "already exists" in (found.stop or "")
     assert "this commit" in (found.stop or "")
 
 
-def _tag(repo: Path, mode: str, sha: str = "HEAD"):
-    return rt.run_tag(mode=mode, mode_note="test", git=rp.Git(repo), sha=sha)
+def _tag(repo: Path, mode: str, sha: str = "HEAD", exact: bool = False):
+    return rt.run_tag(mode=mode, mode_note="test", git=rp.Git(repo), sha=sha, exact=exact)
 
 
-def test_run_tag_on_pushes_annotated_tag_on_the_merge_sha(repo: Path) -> None:
-    sha = _release(repo)
+@pytest.mark.parametrize("shape", ["automated", "manual"])
+def test_run_tag_on_pushes_annotated_tag_on_the_release_pr_head(repo: Path, shape: str) -> None:
+    sha = _release(repo, shape=shape)
+    head = _head(repo, sha)
     outcome = _tag(repo, "on", sha)
     assert outcome.code == 0, outcome.summary
     assert "pushed v0.2.0" in outcome.summary
-    assert f"{sha}\trefs/tags/v0.2.0^{{}}" in _remote_tags(repo)
+    tags = _remote_tags(repo)
+    assert f"{head}\trefs/tags/v0.2.0^{{}}" in tags and sha not in tags
     assert _git(repo, "cat-file", "-t", "v0.2.0").strip() == "tag"  # annotated
-    assert "Release PR #100" in _git(repo, "tag", "-l", "--format=%(contents)", "v0.2.0")
+    message = _git(repo, "tag", "-l", "--format=%(contents)", "v0.2.0")
+    assert "Head of release PR #100" in message and sha[:12] in message
+
+
+def test_prs_merged_while_the_release_pr_waited_are_not_in_the_tag(repo: Path) -> None:
+    """The operator's reason for tagging the PR head: a PR merged to main
+    after the release branch was cut is in the merge commit, not in the tag,
+    and the next release plan counts it (and not the release merge)."""
+    _git(repo, "checkout", "-q", "-b", "release/v0.2.0")
+    (repo / "pyproject.toml").write_text(_pyproject("0.2.0"))
+    (repo / "CHANGELOG.md").write_text(_CHANGELOG)
+    _git(repo, "commit", "-q", "-am", "chore(release): bump version to 0.2.0")
+    _git(repo, "checkout", "-q", "main")
+    late = _merge(repo, "feature/late", "Merge pull request #7 from o/feature/late", {"late": "x"})
+    _git(repo, "merge", "-q", "--no-ff", "release/v0.2.0", "-m", "chore(release): v0.2.0 (#100)")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "fetch", "-q", "origin")
+    sha = _git(repo, "rev-parse", "HEAD").strip()
+    assert _tag(repo, "on", sha).code == 0
+    git = rp.Git(repo)
+    assert not _is_ancestor(repo, late, "v0.2.0")
+    tip_commits = git.commits(f"v0.2.0..{sha}", first_parent=True)
+    assert rp.merged_prs(tip_commits) == [7]
+
+
+def _is_ancestor(repo: Path, a: str, b: str) -> bool:
+    proc = subprocess.run(["git", "merge-base", "--is-ancestor", a, b], cwd=repo, check=False)
+    return proc.returncode == 0
 
 
 def test_run_tag_rerun_cannot_double_tag(repo: Path) -> None:
@@ -301,7 +372,8 @@ def test_run_tag_rerun_cannot_double_tag(repo: Path) -> None:
 def test_run_tag_dry_run_logs_and_pushes_nothing(repo: Path) -> None:
     sha = _release(repo)
     outcome = _tag(repo, "dry-run", sha)
-    assert outcome.code == 0 and f"would push annotated tag v0.2.0 -> {sha}" in outcome.summary
+    assert outcome.code == 0
+    assert f"would push annotated tag v0.2.0 -> {_head(repo, sha)}" in outcome.summary
     assert "v0.2.0" not in _remote_tags(repo)
     assert _git(repo, "tag", "-l", "v0.2.0") == ""
 
@@ -324,7 +396,8 @@ def test_run_tag_ordinary_push_is_quiet(repo: Path) -> None:
 
 def test_phase2_guard_clears_once_tagged(repo: Path) -> None:
     """Phase 2 stops while pyproject is ahead of the latest tag; the tag this
-    phase pushes is exactly what clears it."""
+    phase pushes on the second parent is reachable from main's tip, so it is
+    exactly what clears it -- and the release merge is not a PR to re-release."""
     sha = _release(repo)
     git = rp.Git(repo)
     assert git.latest_tag(sha) == "v0.1.0"
@@ -333,6 +406,52 @@ def test_phase2_guard_clears_once_tagged(repo: Path) -> None:
     assert rp.parse_version(git.latest_tag(sha)) == rp.parse_version(
         rp.pyproject_version(git.show(sha, "pyproject.toml"))
     )
+    assert rp.merged_prs(git.commits(f"v0.2.0..{sha}", first_parent=True)) == []
+
+
+# --- manual `sha` input (--exact) ------------------------------------------------------
+
+
+def test_exact_tags_exactly_the_given_sha(repo: Path) -> None:
+    sha = _release(repo)
+    head = _head(repo, sha)
+    outcome = _tag(repo, "on", head, exact=True)
+    assert outcome.code == 0, outcome.summary
+    assert f"{head}\trefs/tags/v0.2.0^{{}}" in _remote_tags(repo)
+    # Given the merge commit instead, --exact tags the merge commit (in a fresh repo state).
+    again = _tag(repo, "on", sha, exact=True)
+    assert again.code == 0 and "not ahead of the latest tag v0.2.0" in again.summary
+
+
+def test_exact_can_tag_the_merge_commit_when_asked(repo: Path) -> None:
+    sha = _release(repo)
+    outcome = _tag(repo, "on", sha, exact=True)
+    assert outcome.code == 0, outcome.summary
+    assert f"{sha}\trefs/tags/v0.2.0^{{}}" in _remote_tags(repo)
+
+
+def test_exact_refuses_a_version_that_is_not_ahead(repo: Path) -> None:
+    outcome = _tag(repo, "on", "HEAD", exact=True)
+    assert outcome.code == 0 and "not ahead of the latest tag v0.1.0" in outcome.summary
+    assert "v0.1.0" in _remote_tags(repo) and "v0.2.0" not in _remote_tags(repo)
+
+
+def test_exact_refuses_a_sha_not_on_main(repo: Path) -> None:
+    _git(repo, "checkout", "-q", "-b", "side")
+    (repo / "pyproject.toml").write_text(_pyproject("0.2.0"))
+    _git(repo, "commit", "-q", "-am", "chore(release): bump version to 0.2.0")
+    outcome = _tag(repo, "on", "HEAD", exact=True)
+    assert outcome.code == 0 and "not on origin/main" in outcome.summary
+    assert "v0.2.0" not in _remote_tags(repo)
+
+
+def test_exact_existing_tag_is_a_quiet_noop(repo: Path) -> None:
+    sha = _release(repo)
+    head = _head(repo, sha)
+    _git(repo, "tag", "-a", "v0.2.0", "-m", "by hand", sha)  # tagged elsewhere
+    _git(repo, "push", "-q", "origin", "v0.2.0")
+    found = rt.detect_exact(rp.Git(repo), head)
+    assert found.merge is None and "already exists" in (found.stop or "")
 
 
 # --- finalize -----------------------------------------------------------------------
@@ -359,7 +478,7 @@ class FakeForge(rt.ReleaseForge):
 def tagged(repo: Path) -> tuple[Path, str]:
     sha = _release(repo)
     assert _tag(repo, "on", sha).code == 0
-    return repo, sha
+    return repo, _head(repo, sha)  # the tagged commit publish.yml runs on
 
 
 def _finalize(repo: Path, sha: str, forge: FakeForge, *, mode: str = "on", **kw: Any):
@@ -523,6 +642,8 @@ def test_release_tag_workflow_shape() -> None:
     assert "app-token" in checkout["with"]["token"]
     final = job["steps"][-1]
     assert "release_tag.py tag" in final["run"] and "github.sha" in final["env"]["SHA"]
+    assert "inputs.sha" in final["env"]["SHA"] and "inputs.sha" in final["env"]["EXACT"]
+    assert "--exact" in final["run"]
 
 
 def test_release_finalize_workflow_shape() -> None:

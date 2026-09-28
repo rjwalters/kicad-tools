@@ -159,6 +159,17 @@ def test_direct_pushes_alone_are_not_merges() -> None:
     assert rp.merged_prs([_commit("chore: resync installed Loom surfaces")]) == []
 
 
+def test_release_merges_are_not_prs_to_release() -> None:
+    """The tag sits on the release PR head (the merge's second parent, #5777),
+    so the release merge itself is always in ``tag..main``: never count it."""
+    commits = [
+        _commit("chore(release): v0.23.0 (#5801)"),
+        _commit("Merge pull request #5772 from rjwalters/release/v0.22.0"),
+        _commit("Merge pull request #7 from o/feature/issue-7"),
+    ]
+    assert rp.merged_prs(commits) == [7]
+
+
 # --- CI gate --------------------------------------------------------------------
 
 
