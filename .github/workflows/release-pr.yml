@@ -1,0 +1,125 @@
+name: Release PR
+
+# Daily automated release PR (issue #5776, Phase 2 of epic #5774).
+#
+# All decisions live in scripts/release_plan.py (unit-tested in
+# tests/test_release_plan.py); this file only resolves the mode, mints the
+# App token and calls it. One run:
+#   - exits quietly when no PR merged since the latest v* tag (or nothing
+#     user-visible is waiting in changelog.d/ / [Unreleased]);
+#   - gates on the exact origin/main SHA: the newest CI push run's release-topic
+#     jobs green or skipped, an empty changelog gap report, `uv lock --check`;
+#   - in `on` mode opens/updates ONE release/vX.Y.Z PR, waits (bounded) for its
+#     own checks, and merges it through the API. A red gate or red PR checks
+#     are reported on the "Automated release status" issue; nothing releases.
+#
+# Kill switch: repo variable AUTO_RELEASE = on | off | dry-run
+# (unset -> dry-run, so a fresh install only reports).
+#
+# Identity: the loom-fleet-dispatch GitHub App (secrets LOOM_FLEET_DISPATCH_APP_ID
+# / LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY) pushes the branch and opens / merges the
+# PR, so ci.yml's pull_request trigger fires -- a GITHUB_TOKEN push/PR would not
+# trigger it, and this repo forbids GITHUB_TOKEN from opening PRs anyway. The
+# App has no `actions` read, so CI run/job status is read with GITHUB_TOKEN.
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "Version level (auto = patch / minor by the fragment + commit rule)"
+        type: choice
+        options: [auto, patch, minor, major]
+        default: auto
+      dry_run:
+        description: "Report only; open nothing (even when AUTO_RELEASE=on)"
+        type: boolean
+        default: false
+
+# GITHUB_TOKEN is read-only: CI status (actions), the gap report's PR lookups
+# (pull-requests), the tracking-issue search (issues). Writes use the App token.
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: Daily release PR
+    runs-on: ubuntu-latest
+    # Bounded waits inside: main CI <= 90 min, the release PR's checks <= 150 min.
+    timeout-minutes: 300
+    steps:
+      - name: Resolve mode
+        id: mode
+        env:
+          AUTO_RELEASE: ${{ vars.AUTO_RELEASE }}
+          DISPATCH_DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          value="$(printf '%s' "${AUTO_RELEASE:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
+          case "$value" in
+            off) mode=off ;;
+            on) if [ "$DISPATCH_DRY_RUN" = "true" ]; then mode=dry-run; else mode=on; fi ;;
+            *) mode=dry-run ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "AUTO_RELEASE='${AUTO_RELEASE:-}' -> mode=$mode"
+          if [ "$mode" = off ]; then echo "AUTO_RELEASE=off: nothing to do" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Mint loom-fleet-dispatch App token
+        id: app-token
+        if: steps.mode.outputs.mode == 'on'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      # Full history + tags: the plan walks <latest v* tag>..origin/main. The
+      # persisted credential is the App token in `on` mode so `git push` of the
+      # release branch triggers ci.yml.
+      - uses: actions/checkout@v7
+        if: steps.mode.outputs.mode != 'off'
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - uses: actions/setup-python@v7
+        if: steps.mode.outputs.mode != 'off'
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        if: steps.mode.outputs.mode != 'off'
+
+      - name: Configure git identity (App bot)
+        if: steps.mode.outputs.mode == 'on'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          bot_login="${APP_SLUG}[bot]"
+          bot_id="$(gh api "users/$bot_login" --jq '.id')"
+          git config user.name "$bot_login"
+          git config user.email "${bot_id}+${bot_login}@users.noreply.github.com"
+
+      - name: Plan, gate and open / merge the release PR
+        if: steps.mode.outputs.mode != 'off'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          LEVEL: ${{ inputs.level || 'auto' }}
+        run: |
+          python scripts/release_plan.py run --mode "$MODE" --level "$LEVEL"
