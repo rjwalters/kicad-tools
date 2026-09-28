@@ -100,8 +100,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Same setup-uv pin + uv version selector as ci.yml, so the gate's
+      # `uv lock --check` runs the uv that main CI runs (no drift between the
+      # two). Bump both together.
       - uses: astral-sh/setup-uv@v10.2.0
         if: steps.mode.outputs.mode != 'off'
+        with:
+          version: "latest"
+          # Match ci.yml: keep the pre-v5 no-cache behavior.
+          enable-cache: false
 
       - name: Configure git identity (App bot)
         if: steps.mode.outputs.mode == 'on'
