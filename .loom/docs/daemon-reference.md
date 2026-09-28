@@ -4913,7 +4913,14 @@ dispatch left a pull request behind** — the one thing that loop could not fake
   posted to the issue, so the next claimer starts from "the last attempt died
   like *this*" instead of from nothing. Bounded by construction: at most
   `threshold` comments per streak, versus the fourteen claim cycles and
-  eighteen comments the observed loop produced.
+  eighteen comments the observed loop produced. These are **attempt notes, not
+  holds** — they apply no label and the issue stays in the queue. Each body
+  declares its kind (`<!-- loom:prless-retry-kind=attempt -->` /
+  `…=hold` / `…=hold-failed`, #9239) in addition to the shared
+  `<!-- loom:prless-retry (#7972) -->` marker, so an audit never has to infer
+  the difference from prose — before #9239 it had to, and got it wrong: on
+  `rjwalters/loom#8812` four of five "holds" were `Attempt 2 of 3` notes, one
+  per dispatch host.
 - **Hold (`threshold`).** The `threshold`-th consecutive PR-less release adds
   `loom:blocked`, removes `loom:issue`, and comments with the failure and the
   count. `loom:blocked` (not `loom:operator`) because it is the established
@@ -4922,6 +4929,19 @@ dispatch left a pull request behind** — the one thing that loop could not fake
   other `loom:blocked` park is released — fix the cause and flip it back to
   `loom:issue`; the tally resets, so the issue gets a full fresh runway. An
   already-closed issue is never held (it is out of the pool anyway).
+- **The label write is the hold (#9239).** `loom:blocked` is what `PARK_LABELS`
+  consults, so it — not the notice — is what removes the issue from dispatch.
+  The write is checked (not merely issued), retried with the `--add-label` half
+  alone when the combined flip is rejected, and read back before being given
+  up on; only a **confirmed** label is recorded as a hold and gets a "Held
+  after …" notice. When it cannot be confirmed, the daemon logs an error,
+  raises one `…=hold-failed` alarm on the issue naming the forge's own error,
+  leaves the tally un-held so the next release re-attempts the write, and posts
+  no notice claiming a park that did not happen. The first implementation did
+  none of that — it discarded the `gh issue edit` result and commented
+  regardless — and one fleet issue collected seven hold notices over four days,
+  from two different bot accounts, with zero `loom:blocked` label events, while
+  dispatch kept claiming it throughout (the case #9239 was filed on).
 
 **Not charged for faults that are not the issue's.** A `no-usable-account` pool
 death (#7708) is host-level, a pre-flight-classified death (#4386) is

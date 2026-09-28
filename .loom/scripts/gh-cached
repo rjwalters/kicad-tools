@@ -430,7 +430,7 @@ def try_etag_list(resource_type: str, args: list[str]) -> tuple[str, int] | None
     to the normal path (binary absent → daemon unreachable; or the daemon
     declined an uncacheable shape — e.g. `--search head:…`, a table `list` with
     no `--json`, a PR-only field — with a non-zero exit)."""
-    if os.environ.get("LOOM_ETAG_LIST_DISABLE", "") == "1":
+    if etag_layer_disabled():
         return None
     daemon = locate_loom_daemon()
     if not daemon:
@@ -445,6 +445,62 @@ def try_etag_list(resource_type: str, args: list[str]) -> tuple[str, int] | None
     if proc.returncode == 0:
         return proc.stdout, 0
     return None
+
+
+def etag_layer_disabled(*extra_vars: str) -> bool:
+    """LOOM_ETAG_LIST_DISABLE=1 turns off the whole ETag layer (list + view);
+    extra_vars are per-shape kill switches (e.g. LOOM_ETAG_VIEW_DISABLE)."""
+    return any(os.environ.get(v, "") == "1" for v in ("LOOM_ETAG_LIST_DISABLE", *extra_vars))
+
+
+def try_etag_view(resource_type: str, args: list[str]) -> tuple[str, int] | None:
+    """Route `issue view N --json …` / `pr view N --json …` through loom-daemon's
+    conditional-request (ETag/304) single-object read (#9254).
+
+    Every read is revalidated with If-None-Match, so — unlike the TTL cache
+    below — it is never stale, and an unchanged object costs a free 304. Tried
+    before the TTL cache; returns None (fall back) when the binary is absent or
+    the daemon declines the shape (exit 3: no --json, an unsupported field such
+    as author/mergeable/statusCheckRollup, --comments/--web, a non-numeric
+    selector, an issue number that is really a PR, …)."""
+    if etag_layer_disabled("LOOM_ETAG_VIEW_DISABLE"):
+        return None
+    daemon = locate_loom_daemon()
+    if not daemon:
+        return None
+    # args == [resource_type, "view", <rest…>]; forward everything after "view".
+    cmd = [daemon, "forge", resource_type, "view", "--cached", *args[2:]]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        return None
+    if proc.returncode == 0:
+        return proc.stdout, 0
+    return None
+
+
+def invalidate_etag_views(resource_id: str | None) -> None:
+    """Write-through rule (ADR-0021 amendment, #9254): after a wrapped mutation,
+    drop the daemon's ETag view entries for that number so the next read is
+    unconditional (guards against a replica-lag 304 right after our own write).
+    A non-numeric/absent id drops every view entry. Best-effort."""
+    if etag_layer_disabled("LOOM_ETAG_VIEW_DISABLE"):
+        return
+    daemon = locate_loom_daemon()
+    if not daemon:
+        return
+    number = None
+    if resource_id:
+        tail = resource_id.rstrip("/").rsplit("/", 1)[-1].lstrip("#")
+        if tail.isdigit():
+            number = tail
+    cmd = [daemon, "forge", "issue", "view", "--cached", "--invalidate"]
+    if number:
+        cmd.append(number)
+    try:
+        subprocess.run(cmd, capture_output=True, text=True)
+    except OSError:
+        pass
 
 
 def main() -> int:
@@ -465,7 +521,7 @@ def main() -> int:
         print(f"Misses: {stats['misses']}", file=sys.stderr)
         print(f"Bypasses: {stats['bypasses']}", file=sys.stderr)
         print(f"Invalidations: {stats['invalidations']}", file=sys.stderr)
-        print(f"ETag (free 304 listings): {stats.get('etag', 0)}", file=sys.stderr)
+        print(f"ETag (REST conditional list/view reads): {stats.get('etag', 0)}", file=sys.stderr)
         print(f"Hit rate: {rate:.1f}%", file=sys.stderr)
         return 0
 
@@ -501,6 +557,8 @@ def main() -> int:
                 invalidate_for_resource(parsed["resource_type"], parsed["resource_id"])
             else:
                 invalidate_all_for_type(parsed["resource_type"] or "unknown")
+            if parsed["resource_type"] in ("issue", "pr"):
+                invalidate_etag_views(parsed["resource_id"])
 
         increment_stat("bypasses")
         return rc
@@ -512,6 +570,17 @@ def main() -> int:
     # never stale. On decline / absent binary it falls through to the TTL path.
     if parsed["subcommand"] == "list" and parsed["resource_type"] in ("issue", "pr"):
         etag_result = try_etag_list(parsed["resource_type"], args)
+        if etag_result is not None:
+            etag_stdout, etag_rc = etag_result
+            sys.stdout.write(etag_stdout)
+            increment_stat("etag")
+            return etag_rc
+
+    # Conditional single-object read (#9254): `issue view` / `pr view` are
+    # revalidated with If-None-Match (free 304, never stale) before the TTL
+    # cache; a decline falls through to the TTL path below unchanged.
+    if parsed["subcommand"] == "view" and parsed["resource_type"] in ("issue", "pr"):
+        etag_result = try_etag_view(parsed["resource_type"], args)
         if etag_result is not None:
             etag_stdout, etag_rc = etag_result
             sys.stdout.write(etag_stdout)

@@ -290,6 +290,17 @@ mkdir -p "$FAKE_DAEMON_DIR"
 # check the way the incident describes.
 cat > "$FAKE_DAEMON_DIR/loom-daemon-mock" <<'FAKE'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_DAEMON_LOG"
+if [[ "$1" == "forge" && "$3" == "view" ]]; then
+    # #9254 view path: --invalidate succeeds silently; a --json shape without
+    # `author` is served; everything else declines (exit 3), like the real one.
+    if [[ "$*" == *--invalidate* ]]; then exit 0; fi
+    if [[ "$*" == *--json* && "$*" != *author* ]]; then
+        echo '{"labels":[{"name":"from-etag-view"}],"state":"OPEN"}'
+        exit 0
+    fi
+    exit 3
+fi
 if [[ "$1" == "forge" && "$3" == "list" ]]; then
     if printf '%s\n' "$@" | grep -q -- '--json'; then
         echo '[{"number":777,"title":"from-etag-daemon"}]'
@@ -305,6 +316,10 @@ chmod +x "$FAKE_DAEMON_DIR/loom-daemon-mock"
 # ENABLED. FAKE_DAEMON_DIR is still added to PATH as a belt-and-suspenders
 # safety net for any code path that falls through to a PATH search, but
 # LOOM_DAEMON_BIN is what locate_loom_daemon() actually resolves first.
+FAKE_DAEMON_LOG="$TMP_ROOT/daemon-calls.log"
+: > "$FAKE_DAEMON_LOG"
+export FAKE_DAEMON_LOG
+
 ghc_etag() {
     PATH="$STUB_DIR:$FAKE_DAEMON_DIR:$PATH" \
     GH_CACHE_DIR="$CACHE_DIR" \
@@ -327,6 +342,46 @@ assert_eq "1" "$(call_count)" "a daemon-declined list shape falls through to a r
 reset_cache
 LOOM_ETAG_LIST_DISABLE=1 ghc_etag issue list --label "loom:issue" --state open --json number,title >/dev/null
 assert_eq "1" "$(call_count)" "LOOM_ETAG_LIST_DISABLE=1 bypasses the ETag path (falls to gh)"
+
+# --- 9b. Conditional single-object reads (#9254) ---------------------------
+# `issue view` / `pr view` try `forge … view --cached` before the TTL cache;
+# a decline (exit 3) falls through to exactly the TTL + plain-gh behaviour, and
+# a wrapped mutation drops the daemon's view entries for that number.
+echo ""
+echo "Testing the #9254 ETag/REST single-object view routing..."
+
+reset_cache
+view_out=$(ghc_etag issue view 123 --json labels,state)
+assert_eq '{"labels":[{"name":"from-etag-view"}],"state":"OPEN"}' "$view_out" \
+    "'issue view --json labels,state' is served by the daemon's conditional view path"
+assert_eq "0" "$(call_count)" "…and the stub gh is never called for the ETag-served view"
+case "$(tail -n 1 "$FAKE_DAEMON_LOG")" in
+  "forge issue view --cached 123 --json labels,state") fwd_ok="yes" ;;
+  *) fwd_ok="no: $(tail -n 1 "$FAKE_DAEMON_LOG")" ;;
+esac
+assert_eq "yes" "$fwd_ok" "…with the argv forwarded verbatim after '--cached'"
+
+reset_cache
+declined_out=$(ghc_etag pr view 4242 --json author)
+declined_out2=$(ghc_etag pr view 4242 --json author)
+assert_eq "$(cat "$STATE_DIR/pr-view.json")" "$declined_out" \
+    "a daemon-declined view shape returns exactly plain gh's output"
+assert_eq "1" "$(call_count)" "…through the TTL path (one gh call, the repeat is a TTL hit)"
+assert_eq "$declined_out" "$declined_out2" "…and the TTL hit is identical"
+
+reset_cache
+: > "$FAKE_DAEMON_LOG"
+ghc_etag issue edit 123 --add-label "loom:building" >/dev/null
+assert_eq "1" "$(grep -c -- '--invalidate 123$' "$FAKE_DAEMON_LOG")" \
+    "a wrapped 'issue edit 123' drops the daemon's ETag view entries for #123"
+: > "$FAKE_DAEMON_LOG"
+ghc_etag pr comment 4242 --body hi >/dev/null
+assert_eq "1" "$(grep -c -- '--invalidate 4242$' "$FAKE_DAEMON_LOG")" \
+    "a wrapped 'pr comment 4242' drops the view entries for #4242"
+
+reset_cache
+LOOM_ETAG_VIEW_DISABLE=1 ghc_etag issue view 123 --json labels,state >/dev/null 2>&1
+assert_eq "1" "$(call_count)" "LOOM_ETAG_VIEW_DISABLE=1 bypasses the view path (falls to gh)"
 
 # --- 10. Multi-repo cache isolation (#5224) --------------------------------
 # CACHE_DIR is scoped per-repo so two different repos on the same host never
