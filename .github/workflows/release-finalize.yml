@@ -1,0 +1,94 @@
+name: Release Finalize
+
+# GitHub Release + PyPI verification (issue #5777, Phase 3 of epic #5774).
+#
+# Runs when "Publish to PyPI" (publish.yml, triggered by the vX.Y.Z tag that
+# release-tag.yml -- or a human -- pushed) completes. For a tag-triggered run
+# the workflow_run payload's head_branch is the tag name and head_sha the
+# tagged commit. All decisions live in scripts/release_tag.py (`finalize`):
+#   - publish concluded non-success -> comment on the "Automated release
+#     status" issue and fail;
+#   - otherwise create the GitHub Release vX.Y.Z with CHANGELOG.md's
+#     `## [X.Y.Z]` section as notes (skipped if it already exists), then poll
+#     PyPI (10 x 30 s) until both a wheel and an sdist are listed; if not,
+#     comment on the tracking issue and fail.
+#
+# Kill switch: repo variable AUTO_RELEASE = on | off | dry-run
+# (unset -> dry-run: reports, creates / comments nothing).
+on:
+  workflow_run:
+    workflows: ["Publish to PyPI"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: release-finalize-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  release-finalize:
+    name: GitHub Release + PyPI check
+    # Tag-triggered publish runs only (push event, v* ref).
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve mode
+        id: mode
+        env:
+          AUTO_RELEASE: ${{ vars.AUTO_RELEASE }}
+        run: |
+          value="$(printf '%s' "${AUTO_RELEASE:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
+          case "$value" in
+            off) mode=off ;;
+            on) mode=on ;;
+            *) mode=dry-run ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "AUTO_RELEASE='${AUTO_RELEASE:-}' -> mode=$mode"
+          if [ "$mode" = off ]; then echo "AUTO_RELEASE=off: not finalizing" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Mint loom-fleet-dispatch App token
+        id: app-token
+        if: steps.mode.outputs.mode == 'on'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+
+      # The scripts come from main (never from the tagged commit, which may
+      # predate them); the tag and its CHANGELOG.md are read through git.
+      - uses: actions/checkout@v7
+        if: steps.mode.outputs.mode != 'off'
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-python@v7
+        if: steps.mode.outputs.mode != 'off'
+        with:
+          python-version: "3.12"
+
+      - name: Create GitHub Release and verify PyPI
+        if: steps.mode.outputs.mode != 'off'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TOKEN: ${{ steps.app-token.outputs.token }}
+          MODE: ${{ steps.mode.outputs.mode }}
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          python scripts/release_tag.py finalize --mode "$MODE" --tag "$TAG" \
+            --sha "$SHA" --conclusion "$CONCLUSION" --run-url "$RUN_URL"

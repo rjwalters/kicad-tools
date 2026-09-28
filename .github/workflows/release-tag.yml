@@ -1,0 +1,105 @@
+name: Release Tag
+
+# Tag a merged release (issue #5777, Phase 3 of epic #5774).
+#
+# All decisions live in scripts/release_tag.py (`tag`, unit-tested in
+# tests/test_release_tag.py). On every push to main it checks whether the
+# pushed SHA is a release merge -- `chore(release): vX.Y.Z (#N)` (the
+# automated release PR, #5776) or `Merge pull request #N from
+# <owner>/release/vX.Y.Z` (a hand-merged one) -- cross-checked against
+# pyproject.toml's [project].version at that SHA (and a changed version vs.
+# the first parent). If so, and `vX.Y.Z` does not exist on origin yet, it
+# pushes an annotated tag on exactly that SHA. Everything else exits quietly.
+#
+# The tag push authenticates as the loom-fleet-dispatch GitHub App, so
+# publish.yml's `push: tags` trigger fires exactly as for a human push (a
+# GITHUB_TOKEN push would not trigger it). publish.yml is unchanged, so PyPI
+# trusted publishing (which names that file) needs no settings change.
+# release-finalize.yml then creates the GitHub Release and verifies PyPI.
+#
+# Kill switch: repo variable AUTO_RELEASE = on | off | dry-run
+# (unset -> dry-run: logs the tag it would push, pushes nothing).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "main SHA to (re)check and tag (default: the main tip)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  release-tag:
+    name: Tag release merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve mode
+        id: mode
+        env:
+          AUTO_RELEASE: ${{ vars.AUTO_RELEASE }}
+        run: |
+          value="$(printf '%s' "${AUTO_RELEASE:-}" | tr '[:upper:]' '[:lower:]' | xargs)"
+          case "$value" in
+            off) mode=off ;;
+            on) mode=on ;;
+            *) mode=dry-run ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "AUTO_RELEASE='${AUTO_RELEASE:-}' -> mode=$mode"
+          if [ "$mode" = off ]; then echo "AUTO_RELEASE=off: not tagging" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Mint loom-fleet-dispatch App token
+        id: app-token
+        if: steps.mode.outputs.mode == 'on'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.LOOM_FLEET_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      # Full history + tags: the script reads pyproject.toml at the SHA and its
+      # first parent, and checks the SHA is on origin/main. The persisted
+      # credential is the App token in `on` mode so the tag push triggers
+      # publish.yml.
+      - uses: actions/checkout@v7
+        if: steps.mode.outputs.mode != 'off'
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - uses: actions/setup-python@v7
+        if: steps.mode.outputs.mode != 'off'
+        with:
+          python-version: "3.12"
+
+      - name: Configure git identity (App bot)
+        if: steps.mode.outputs.mode == 'on'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          bot_login="${APP_SLUG}[bot]"
+          bot_id="$(gh api "users/$bot_login" --jq '.id')"
+          git config user.name "$bot_login"
+          git config user.email "${bot_id}+${bot_login}@users.noreply.github.com"
+
+      - name: Tag the release merge
+        if: steps.mode.outputs.mode != 'off'
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          python scripts/release_tag.py tag --mode "$MODE" --sha "$SHA"
