@@ -15,6 +15,11 @@ from kicad_tools.cli.check_cmd import (
     run_selected_checks,
     write_json_report,
 )
+from kicad_tools.validate.rules.waivers import (
+    apply_waivers,
+    discover_waivers_sidecar,
+    load_waivers,
+)
 
 
 def check(pcb_path, report_path):
@@ -22,6 +27,12 @@ def check(pcb_path, report_path):
     checker = make_checker(pcb_path)
     sch = pcb_path.parent / "stm32_devboard.kicad_sch"
     results = run_selected_checks(checker, None, set(), sch_path=sch, pcb_path=pcb_path)
+    # Apply the committed .kct_waivers.json sidecar exactly as ``kct check``
+    # does (post-check step).  A malformed committed sidecar is a hard error
+    # here: this is a reviewed release gate, not a best-effort CLI run.
+    waivers_path = discover_waivers_sidecar(pcb_path)
+    if waivers_path is not None:
+        apply_waivers(results, load_waivers(waivers_path))
     errors = sum(v.is_error for v in results.violations)
     warnings = sum(v.is_warning for v in results.violations)
     drc = SubCheckResult(
@@ -36,6 +47,7 @@ def check(pcb_path, report_path):
     data["fabrication_overrides"] = {
         **OPTIONS,
         "suppressed_findings": 0,
+        "waived_findings": sum(v.waived for v in results.violations),
         "tracking_issue": "https://github.com/rjwalters/kicad-tools/issues/5009",
     }
     report_path.write_text(json.dumps(data, indent=2) + "\n")

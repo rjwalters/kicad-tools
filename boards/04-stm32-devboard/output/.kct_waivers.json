@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "waivers": [
+    {
+      "rule": "pin1_marker_missing",
+      "items": [
+        "U1"
+      ],
+      "reason": "Board-04 generator emits U1 (SOT-223-3_TabPin2) with no footprint silkscreen graphics, so there is no pin-1 / polarity mark; genuine finding, waived until the generator emits pin-1 silk (tracking #5745).",
+      "issue": "#5745"
+    },
+    {
+      "rule": "pin1_marker_missing",
+      "items": [
+        "U2"
+      ],
+      "reason": "Board-04 generator emits U2 (LQFP-48_7x7mm_P0.5mm) with no footprint silkscreen graphics, so there is no pin-1 / polarity mark; genuine finding, waived until the generator emits pin-1 silk (tracking #5745).",
+      "issue": "#5745"
+    },
+    {
+      "rule": "pin1_marker_missing",
+      "items": [
+        "D1"
+      ],
+      "reason": "Board-04 generator emits D1 (LED_0805_2012Metric) with no footprint silkscreen graphics, so there is no pin-1 / polarity mark; genuine finding, waived until the generator emits pin-1 silk (tracking #5745).",
+      "issue": "#5745"
+    },
+    {
+      "rule": "pin1_marker_missing",
+      "items": [
+        "J1"
+      ],
+      "reason": "Board-04 generator emits J1 (PinHeader_1x06_P2.54mm_Vertical) with no footprint silkscreen graphics, so there is no pin-1 / polarity mark; genuine finding, waived until the generator emits pin-1 silk (tracking #5745).",
+      "issue": "#5745"
+    }
+  ]
+}

@@ -541,6 +541,29 @@ From the Python API, `ViaUnderBodyRule` takes `footprint_pattern` (default
 `exclude_references`, `allow_thermal_pad_vias`, `fallback_to_courtyard`
 and `severity`.
 
+### Missing or Hidden Pin-1 Marker
+
+**Warning:** `pin1_marker_missing` — `U2 (Package_QFP:LQFP-48_7x7mm_P0.5mm) has no silkscreen pin-1 / polarity marker within 2.5mm of pad 1`
+(or `pin1_marker_obscured` when the only mark is under the package body or on pad copper)
+
+ICs, diodes, LEDs, polarized capacitors and connectors (any footprint with
+3+ copper pads including pad `1`/`A1`, plus `Diode_*`, `LED_*` and `CP_*`
+parts) need a silkscreen element next to pad 1 that points at it: closer to
+pad 1 than to any other pad, and at least partly outside the Fab body
+outline and pad copper. Touching silk lines are also judged as one shape, so
+an L-shaped corner (as on KiCad's stock crystal footprints) counts when its
+centroid is closer to pad 1 than to any other pad. A symmetric body outline
+doesn't count, and neither does a mark drawn only on `F.Fab`. Passives, test points, mounting holes,
+switches and keyed USB-C / coax connectors are skipped.
+
+**Fix:** Add a dot, triangle or bar on `F.SilkS`/`B.SilkS` beside pad 1 and
+outside the body. Alternatively, waive it in `.kct_waivers.json` with
+`"items": ["U2"]`. The rule is advisory (warning severity), so it only fails
+`kct check` under `--strict`. From the Python API, `Pin1MarkerRule` takes
+`min_pads`, `polarized_pattern`, `exclude_pattern`, `include_references`,
+`exclude_references`, `search_radius_mm`, `require_asymmetry`,
+`include_board_silk` and `severity`.
+
 ## Complete Example: Pre-Fab Validation
 
 ```python

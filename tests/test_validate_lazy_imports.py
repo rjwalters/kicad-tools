@@ -102,6 +102,7 @@ PUBLIC_EXPORTS = {
         "ImpedanceRule": ".impedance",
         "NetImpedanceSpec": ".impedance",
         "MatchGroupLengthSkewRule": ".match_group_length_skew",
+        "Pin1MarkerRule": ".pin1_marker",
         "check_schematic_fields": ".schematic_fields",
         "check_all_silkscreen": ".silkscreen",
         "check_silk_edge_clearance": ".silkscreen",

@@ -288,6 +288,7 @@ class DRCChecker:
         "check_mask_to_copper",
         "check_footprint_placement",
         "check_netlist",
+        "check_pin1_markers",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_via_in_pad",
@@ -424,6 +425,12 @@ class DRCChecker:
         "diffpair_length_skew": CATEGORY_ADVISORY,
         "diffpair_routing_continuity": CATEGORY_ADVISORY,
         "match_group_length_skew": CATEGORY_ADVISORY,
+        # Pin-1 / polarity silkscreen markers: assembly-legibility
+        # advisories, not fab-blocking.  Explicit entries REQUIRED -- there
+        # is no "pin1" prefix fallback, so they would default to the
+        # Manufacturing bucket.
+        "pin1_marker_missing": CATEGORY_ADVISORY,
+        "pin1_marker_obscured": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
         "silk_edge_clearance": CATEGORY_ADVISORY,
         "silkscreen_line_width": CATEGORY_ADVISORY,
@@ -1189,6 +1196,25 @@ class DRCChecker:
                 self.pcb, self.design_rules, suppress_library=self.suppress_library
             )
         )
+
+    def check_pin1_markers(self) -> DRCResults:
+        """Check that polarized footprints carry a visible pin-1 marker.
+
+        Flags ICs, diodes, LEDs, polarized capacitors and connectors whose
+        silkscreen has no element next to pad 1 that points at it
+        (``pin1_marker_missing``), or whose only such marks are hidden under
+        the package body / on pad copper (``pin1_marker_obscured``).
+        Warning severity, advisory category.  Tune selection and radius
+        through :class:`~kicad_tools.validate.rules.pin1_marker.Pin1MarkerRule`
+        directly; waive individual footprints via ``.kct_waivers.json``.
+
+        Returns:
+            DRCResults containing pin-1 marker findings (one per footprint).
+        """
+        from .rules.pin1_marker import Pin1MarkerRule
+
+        rule = Pin1MarkerRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_mask_to_copper(self) -> DRCResults:
         """Run the explicitly requested native, immutable-source exposure check."""

@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .edge import EdgeClearanceRule
     from .impedance import ImpedanceRule, NetImpedanceSpec
     from .match_group_length_skew import MatchGroupLengthSkewRule
+    from .pin1_marker import Pin1MarkerRule
     from .schematic_fields import check_schematic_fields
     from .silkscreen import (
         check_all_silkscreen,
@@ -55,6 +56,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "ImpedanceRule": ".impedance",
     "NetImpedanceSpec": ".impedance",
     "MatchGroupLengthSkewRule": ".match_group_length_skew",
+    "Pin1MarkerRule": ".pin1_marker",
     "check_schematic_fields": ".schematic_fields",
     "check_all_silkscreen": ".silkscreen",
     "check_silk_edge_clearance": ".silkscreen",
@@ -88,6 +90,7 @@ __all__ = [
     "IsolatedCopperRule",
     "MatchGroupLengthSkewRule",
     "NetImpedanceSpec",
+    "Pin1MarkerRule",
     "SinglePadNetRule",
     "SolderMaskPadRules",
     "ViaInPadRule",

@@ -308,6 +308,13 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
     # regression.
     "connector_edge_distance",
+    # The pin-1 marker rule reports the board's footprints that carry no
+    # silkscreen graphics at all (U1 TQFP-44, U2 SOT-23-6, Y1, J2, J3), so
+    # nothing marks pin 1.  It is WARNING severity (advisory), so it does
+    # NOT raise the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) above; it only
+    # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
+    # regression.
+    "pin1_marker_missing",
 }
 
 
