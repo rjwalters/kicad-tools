@@ -1324,6 +1324,62 @@ retried batch never makes a stalled work finder look live. The fleet
 dashboard renders it as the overview's "Work queue" section, the `#/queue`
 route and a per-host panel.
 
+### `eta.estimate` / `eta.outcome`
+
+Per-issue ETA estimates and their scored outcomes (Issue #9289). The model,
+the heuristics and the `eta-explanation/v1` schema are in [`eta.md`](eta.md).
+Envelopes carry `schema_version: 12`. **OTLP-only** (native: `false`):
+explanations and outcomes live in SigNoz, per the operator decision on #9289.
+Each record is one log record whose **body is the record's JSON**. For an
+estimate that is the whole explanation, so ClickHouse can `JSONExtract` any
+field; the scalars ride as `loom.eta.*` attributes (`ETA_LOG_ATTRIBUTE_KEYS`,
+allowlisted in the collector's `transform/privacy`). Both kinds set the
+envelope's `trace_context` to the issue's D32 story
+(`story_context(repo_id, issue)`), so they land in the issue's story trace;
+a repo with no resolvable `repo_id` gets none.
+
+**Provenance is required on both.** `version`, the full 40-hex `revision`
+(or `unknown` for a tarball build), `tree_state` and `complete` (a full SHA
+and a `clean`/`dirty` tree) of the computing daemon,
+taken from `telemetry::trace::provenance::daemon()`, the source every span's
+`loom.daemon.*` attributes use. A record without them does not deserialize,
+and one whose provenance does not validate is never emitted. An incomplete
+build (`unknown` revision or tree state) is still emitted with
+`complete: false` (`loom.eta.provenance_complete`), and the accuracy queries
+exclude it. An outcome
+carries **both** the estimating build (`estimate.loom`, exported as
+`loom.eta.version` / `revision` / `tree_state`) and the observing build
+(`loom`, exported as `loom.eta.outcome_version` / `_revision` /
+`_tree_state`).
+
+`eta.estimate`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `trigger` | string | `first`, `transition` (stage, rework or refusal changed) or `refresh` (every `refreshSecs`, default 300) |
+| `explanation` | object | the `eta-explanation/v1` record: `estimate_id`, `heuristic`, `kind`, `loom` (required), `as_of`, `subject`, `current_stage`, `history` (`scope`: `local` until #9343 adds `fleet`; per-source and per-host sample counts), `stages[]`, `branches`, `combination`, `result`, `contributions`, `features`, `features_omitted`, `no_estimate_reason`, `truncated` |
+
+A refusal is an estimate too: `explanation.result` is absent (never zero) and
+`no_estimate_reason` names why. Refusals are emitted when the reason first
+appears and are not refreshed.
+
+`eta.outcome` (one per emitted estimate, when its event resolves):
+
+| Field | Type | Notes |
+|---|---|---|
+| `estimate` | object | the estimate as emitted: `estimate_id`, `kind`, `heuristic`, `loom` (required), `repo`, `repo_id`, `issue`, `pr_number`, `as_of`, `stage`, `age_sec`, `p25_sec`/`p50_sec`/`p75_sec` (absent on a refusal), `samples_min`, `no_estimate_reason`, `stage_quartiles[]` |
+| `loom` | object | the observing daemon's provenance (required) |
+| `score` | object | `outcome` (`landed`, `finished`, `abandoned`), `actual_at`, `lead_sec`, `error_sec` (`actual − p50`), `abs_error_sec`, `covered` (`p25 ≤ actual ≤ p75`), `below_p25`, `above_p75`, `pinball_loss_sec`, `horizon_bucket`, `age_bucket`, `stage_at_estimate`, `samples_min`, `stages_actual[]`, `rework_rounds_actual` |
+| `outcome_source` | string | `bus` (in-sweep merge), `pulls_read` (the PR's merge time), `issues_read` (the issue's close state), `sweep_terminal` |
+| `outcome_resolution_sec` | integer? | how late the resolution may be |
+| `result` | string? | `finish`: the sweep's terminal class, `exited` or `crashed` |
+
+Absent is never zero: `abandoned` outcomes (the issue closed as **not
+planned**) and outcomes of refusals carry no error fields at all, so they are
+counted and never scored. A PR closed unmerged and a sweep that ended before
+any PR are not outcomes at all — the issue's own state decides, and until it
+closes those estimates stay pending.
+
 ### `tokens.snapshot`
 
 A point-in-time view of the multi-account token pool (host-level — no `repo` /

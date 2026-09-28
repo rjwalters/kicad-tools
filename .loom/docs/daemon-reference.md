@@ -28,6 +28,7 @@
 - [Per-workspace priority tiers (#3946)](#per-workspace-priority-tiers-3946)
 - [Forge-side pipeline snapshot (`status --pipeline`, #3977)](#forge-side-pipeline-snapshot-status---pipeline-3977)
 - [One-shot fleet vitals (`loom-daemon health`, #4761)](#one-shot-fleet-vitals-loom-daemon-health-4761)
+- [ETA tracker (`autonomous.eta`, #9289)](#eta-tracker-autonomouseta-9289)
 - [Reaper task](#reaper-task)
 - [Stale-claim reconciliation & the sweep journal (#3953, fixed #3975, extended to PR-side claims #4367)](#stale-claim-reconciliation--the-sweep-journal-3953-fixed-3975-extended-to-pr-side-claims-4367)
 - [Stacked-PR dependency — #3729 (v1), #3747 (v2 item 1)](#stacked-pr-dependency--3729-v1-3747-v2-item-1)
@@ -2476,6 +2477,27 @@ subprocess — and is the *only* place any verdict rule lives:
   is a health *report*, not a transport failure.
 - `loom-daemon status` keeps its own (unchanged) rendering; `fleet status`
   reuse is a follow-up (it would need a `health --json` fan-out over ssh).
+
+## ETA tracker (`autonomous.eta`, #9289)
+
+Per-issue `finish` / `land` estimates with a recomputable explanation, scored
+against their outcomes and exported as `eta.estimate` / `eta.outcome` (OTLP
+only). **On by default** wherever observability runs: a bus subscriber
+re-estimates on every sweep transition, and the collector's 5-minute pass
+reads the review-label listings, resolves PRs that left review, and refreshes
+every live estimate. Every observed stage boundary is appended to
+`.loom/logs/eta-stage-samples.jsonl` as it is seen; pending estimates persist
+in `.loom/state/eta/pending.jsonl`.
+
+| key | env | default |
+|---|---|---|
+| `autonomous.eta.enabled` | `LOOM_ETA_ENABLED` | `true` |
+| `autonomous.eta.dryRun` | `LOOM_ETA_DRY_RUN` | `false` (log `eta: would emit …`, enqueue nothing) |
+| `autonomous.eta.refreshSecs` | `LOOM_ETA_REFRESH_SECS` | `300` |
+| `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
+
+Model, heuristics, explanation schema, scoring and queries:
+[`eta.md`](eta.md).
 
 ## Reaper task
 
