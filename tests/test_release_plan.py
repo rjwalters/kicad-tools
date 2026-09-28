@@ -832,9 +832,9 @@ def test_cli_plan_json_against_this_repo() -> None:
     if proc.returncode == 2 and "no v* tag" in proc.stderr:
         pytest.skip("shallow clone without tags")
     if "dubious ownership" in proc.stderr:
-        # CI's Test job runs in the kicad container as a uid other than the
-        # checkout owner, so git refuses the repo (safe.directory). The
-        # release workflow itself runs on a hosted runner and never hits this.
+        # Local fallback only: running as a uid other than the checkout owner
+        # (e.g. root in a container) makes git refuse the repo. CI's Test job
+        # sets safe.directory, so this test really runs there.
         pytest.skip("git refuses repo: dubious ownership (container uid)")
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)

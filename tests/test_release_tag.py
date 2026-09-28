@@ -675,6 +675,9 @@ def test_cli_notes_against_this_repo() -> None:
         capture_output=True,
         text=True,
     )
+    if "dubious ownership" in proc.stderr:
+        # Local fallback only (see test_release_plan); CI sets safe.directory.
+        pytest.skip("git refuses repo: dubious ownership (container uid)")
     if proc.returncode == 2 and "no `## [" in proc.stderr:
         pytest.skip("pyproject version has no CHANGELOG section on this branch")
     assert proc.returncode == 0, proc.stderr
