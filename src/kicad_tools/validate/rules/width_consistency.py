@@ -325,8 +325,11 @@ class WidthConsistencyRule(DRCRule):
 
         Endpoints within ``node_tolerance_mm`` of each other share a node even
         when they round into different grid buckets (e.g. either side of a
-        ``0.5 * q`` boundary).  Candidate pairs come from the 3x3 neighbouring
-        buckets only, so the join stays local; joined endpoints are merged
+        ``0.5 * q`` boundary).  Endpoints in the *same* bucket always share a
+        node unconditionally (a strict superset of the plain rounded key, so
+        nothing that used to join can split); the distance test applies only
+        to the 8 neighbouring buckets, so the join stays local.  Joined
+        endpoints are merged
         with union-find and each component is keyed by its smallest bucket
         (deterministic, and identical to the plain rounded key whenever no
         boundary is straddled).
@@ -350,7 +353,12 @@ class WidthConsistencyRule(DRCRule):
             for dx in (-1, 0, 1):
                 for dy in (-1, 0, 1):
                     for j in by_bucket.get((bx + dx, by + dy), ()):
-                        if j <= i or math.dist(points[i], points[j]) > tol:
+                        # Same bucket always joins (as the plain rounded key
+                        # did); the distance test only gates neighbour buckets.
+                        # Otherwise two same-bucket points up to ~1.41 * tol
+                        # apart could be split when only one of them joins a
+                        # neighbouring bucket's lower-keyed group.
+                        if j <= i or ((dx or dy) and math.dist(points[i], points[j]) > tol):
                             continue
                         ri, rj = find(i), find(j)
                         if ri != rj:
