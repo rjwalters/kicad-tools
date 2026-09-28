@@ -673,6 +673,7 @@ gradeable by a model or prompt experiment.
 | `skipped_no_token_pool` | no | No token pool provisioned for this workspace (#4642). |
 | `skipped_pool_exhausted` | no | The credential pool the admitted runtime draws from has zero spawnable accounts (#7607) — `gated_pool` says which pool (#8408). |
 | `skipped_model_runtime_mismatch` | no | The resolved model provably conflicts with the admitted runtime (#5028). |
+| `skipped_queue_empty` | no | A queue-gated role (judge, doctor) found its work queue empty and spawned nothing (#9391). |
 
 Folding the skips into `failure` is the exact mis-read #7607 documents: one
 fleet-wide exhausted pool produces hundreds of identical exit-78 skips, which
@@ -899,7 +900,10 @@ GitHub Actions telemetry from the `loom-daemon ci-telemetry` poller (#8824).
 One envelope per completed run attempt (`ci.run`) and per completed job
 (`ci.job`), each paired with a `ci.duration` histogram sample and a
 `loom.ci.run` / `loom.ci.job` span. All three carry `repo` + `visibility`
-(derived from the repo's `private` flag). The full field tables, the
+(derived from the repo's `private` flag). Since #9089 each **executed step**
+of a job additionally becomes a span-only envelope (`loom.ci.step`, a child of
+its job span, built from the jobs API's `steps[]` — no log record and no
+metric series, so the record kinds above are unchanged). The full field tables, the
 exactly-once ledger contract and the `loom.ci.*` allowlist live in
 [`ci-observability.md`](ci-observability.md). They are not duplicated here.
 

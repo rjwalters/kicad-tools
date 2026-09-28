@@ -311,11 +311,46 @@ its own claim lock, and posts a `<!-- loom:lease-yield ... -->` standdown
 annotation, but deliberately leaves the shared `loom:building` label alone
 (it is already correct — idempotent across both racing flips, and reverting
 it would destroy the winning claimant's only cross-host mutex out from under
-its still-live sweep). The comparison is bounded to comments created within
-a short lookback window of the dispatch attempt's own pre-flip instant
-(`LEASE_ORDER_LOOKBACK_SECS`), so a long-completed prior claim's lease
-comment — an issue accumulates one per dispatch over its whole lifetime,
-never deleted — can never out-rank a normal, uncontested re-dispatch.
+its still-live sweep).
+
+Which comments get compared at all — **claim-episode membership** — is a
+separate question from that ordering, and lives in
+`loom-daemon/src/sweep_registry/lease_episode.rs`. A record is a member when
+EITHER leg holds:
+
+1. Its forge-assigned `created_at` is within a short lookback window of the
+   dispatch attempt's own pre-flip instant (`LEASE_ORDER_LOOKBACK_SECS`) —
+   #6287's original rule, for the near-simultaneous race. This bound is what
+   stops a long-completed prior claim's lease comment (an issue accumulates
+   one per dispatch over its whole lifetime, never deleted) from out-ranking
+   a normal, uncontested re-dispatch.
+2. Its forge-assigned `updated_at` is strictly later than its `created_at`
+   (genuinely **renewed**, not merely created) and still within the
+   reclamation TTL (`LOOM_LEASE_TTL_MINUTES`, default 15 — the same window
+   the #6286 reclamation gate and `sweep-lease-fence.sh` use) — Issue
+   **#8840**.
+
+Leg 2 exists because **a lease is renewed in place**: `sweep-lease-renew.sh`
+PATCHes the same comment, so a live owner's `created_at` stays frozen at the
+instant its claim episode began while only `updated_at` advances. Any owner
+holding its claim longer than the ~90s lookback — a curation phase, a long
+Builder run, an in-session sweep that published its lease *before* promotion
+— therefore fell out of leg 1 entirely and became invisible to a racing
+dispatcher. That is exactly what produced the 2026-09-24 collision on
+loom#8787: an in-session lease created 262s earlier and **renewed 8 seconds**
+before a peer daemon dispatched the same issue was filtered out of the
+comparison, the peer concluded it was the sole claimant, and two live owners
+existed at once. A lease the reclaimer considers too fresh to reclaim must
+never simultaneously be too old for the dispatcher to see.
+
+Membership is decided on the forge's own `created_at`/`updated_at` fields
+only — never on a timestamp embedded in the comment's prose, per this doc's
+load-bearing rule above. Leg 2 is subtracted for exactly one case: a
+`sweep_id` **this** daemon's own registry knows has already terminated (its
+renewal loop is dead, so its `updated_at` is merely not yet aged out), so a
+host's legitimate re-dispatch after its own previous attempt ended is not
+blocked for a full TTL. A record that simply aged out fails both legs, so an
+abandoned claim can never wedge redispatch.
 
 ## Phase 3 (Issue #6309) has now shipped: sweep-side fencing before push/PR-open
 
