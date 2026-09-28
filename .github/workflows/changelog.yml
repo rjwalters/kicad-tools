@@ -1,0 +1,45 @@
+name: Changelog
+
+# Per-PR changelog-fragment check (issue #5775, Phase 1 of epic #5774).
+#
+# A separate workflow rather than a job in ci.yml because the verdict depends
+# on PR *metadata* -- the `changelog:skip` label, the title's conventional-
+# commit type, the body's `Closes #N` -- so it must re-run on `labeled`,
+# `unlabeled` and `edited`. Adding those event types to ci.yml would re-run
+# all of its heavy KiCad jobs on every label change (Loom relabels PRs several
+# times each). Hosted, stdlib-only Python, no `uv sync`: it finishes in
+# seconds. Deliberately NOT gated by ci.yml's `changes` path filter -- a
+# docs-only or fragment-only PR must still be evaluated.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fragment-check:
+    name: Changelog Fragment Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The PR merge commit plus its first parent (the base), so
+      # `--base HEAD^1` diffs exactly the PR's own changes.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Validate fragment names
+        run: python scripts/changelog_assemble.py --check
+
+      - name: Check this PR has a changelog fragment (or is internal)
+        run: python scripts/changelog_gap_report.py --pr-event "$GITHUB_EVENT_PATH" --base HEAD^1

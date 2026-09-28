@@ -50,11 +50,15 @@ Let `X.Y.Z` be the new version.
 
 ### (0) Reconcile `CHANGELOG.md` against `git log <last-tag>..main`
 
-**Do this before the bump commit, not during it.** Nothing forces a CHANGELOG
-entry at PR time, so `[Unreleased]` drifts silently: between `v0.19.0` and
-2026-08-05 it documented 6 of 87 user-visible commits (#4638). Reconstructing
-two weeks of history *while* cutting a release is how a permanently wrong
-changelog ships — the tag is irrevocable once `publish.yml` uploads to PyPI.
+**Do this before the bump commit, not during it.** Changelog entries are now
+written **at PR time** as `changelog.d/<issue>.<kind>.md` fragments (issue
+#5775; format in `changelog.d/README.md`), and the `Changelog Fragment Check`
+workflow fails a user-visible PR that has none. Before fragments, nothing
+forced an entry and `[Unreleased]` drifted silently — between `v0.19.0` and
+2026-08-05 it documented 6 of 87 user-visible commits (#4638), and 20
+user-visible issues were missing when v0.22.0 was cut (#5772). This step is now
+the residual safety net: it catches what slipped past the PR check (a
+`changelog:skip` that shouldn't have been, a direct push, legacy history).
 
 Run the gap report; it exits non-zero and names every undocumented issue:
 
@@ -66,16 +70,19 @@ uv run python scripts/changelog_gap_report.py --since v0.19.0 --json
 The script walks `git log <tag>..HEAD`, resolves each commit to the **issue**
 number it addresses (closing keyword → `feature/issue-<N>` branch name →
 `Part of #N`), classifies user-visible vs. internal from the conventional-commit
-subject prefix, and prints the user-visible issues that `[Unreleased]` does not
-cite. Close every gap it reports — by writing a thematic `[Unreleased]` bullet,
-or, for a commit that changes nothing a package consumer observes, by adding an
-entry with its rationale to `INTERNAL_ISSUES` / `INTERNAL_COMMITS` in the
-script. **Do not** rename `[Unreleased]` to `[X.Y.Z]` yet; that happens in (a).
+subject prefix, and prints the user-visible issues that neither a
+`changelog.d/` fragment nor `[Unreleased]` cites. Close every gap it reports —
+by adding a fragment (preferred), or, for a commit that changes nothing a
+package consumer observes, by adding an entry with its rationale to
+`INTERNAL_ISSUES` / `INTERNAL_COMMITS` in the script.
 
 > Note the trailing `(#NNNN)` in a squash-merge subject is the **PR** number.
 > CHANGELOG entries cite **issue** numbers — do not read them off subjects.
 
 A clean run ends with `RESULT: gap set is empty` and exit 0. Only then proceed.
+
+The fragments become the release section in step (a), via
+`scripts/changelog_assemble.py` (preview first with `--dry-run`).
 
 ### (a) Create a release branch with the bump commit
 
@@ -91,8 +98,12 @@ Bump the version in `pyproject.toml`, regenerate the lockfile, and add a
 ```bash
 # edit pyproject.toml: version = "X.Y.Z"
 uv lock            # regenerate uv.lock to match
-# add the X.Y.Z CHANGELOG entry
-git add pyproject.toml uv.lock CHANGELOG.md
+# assemble changelog.d/ fragments + any [Unreleased] bullets into
+# "## [X.Y.Z] - <today>" (sections: Summary, Upgrade notes, Fixed, Added,
+# Changed, Performance), add the footer link, and delete the fragments:
+uv run python scripts/changelog_assemble.py --version X.Y.Z --dry-run   # preview
+uv run python scripts/changelog_assemble.py --version X.Y.Z [--summary-file summary.md]
+git add pyproject.toml uv.lock CHANGELOG.md changelog.d/
 git commit -m "chore(release): bump version to X.Y.Z"
 ```
 
@@ -248,7 +259,8 @@ above; no runner infrastructure is maintained for this repo.
       `uv.lock` committed **in the same bump commit**.
 - [ ] `uv lock --check` exits 0 on the release branch before the PR is opened
       (CI's `uv sync --frozen` will NOT catch a stale lockfile — #4698).
-- [ ] CHANGELOG entry added for `X.Y.Z`.
+- [ ] CHANGELOG entry for `X.Y.Z` assembled with
+      `scripts/changelog_assemble.py --version X.Y.Z` (fragments consumed).
 - [ ] Confirmed `pyproject.toml` is authoritative (ignore the `package.json`
       npm misdetection in `/repo:release` Phase 2).
 - [ ] Bump commit on a branch, opened as a PR.

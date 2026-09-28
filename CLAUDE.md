@@ -81,6 +81,33 @@ change; run with `--ask` to review first, and `--prune` to allow irreversible
 removals. Managed by `install.sh` — edit outside the markers only.
 <!-- END REPO-SKILLS -->
 
+## Changelog: every user-visible PR adds a `changelog.d/` fragment
+
+Don't edit `CHANGELOG.md`'s `[Unreleased]` in a PR — ~20 merges a day would
+conflict on it. Instead add one new file per user-visible change (issue #5775):
+
+```
+changelog.d/<issue>.<kind>.md        # kind: added | fixed | changed | performance | upgrade
+```
+
+`<issue>` is the **issue** number (not the PR number). The body is the
+finished bullet in the existing CHANGELOG voice, citing the issue:
+
+```markdown
+- **`kct check` flags vias under QFN bodies** (Issue #5736). New
+  `via_under_body` category, on by default; findings are warnings.
+```
+
+Add an extra `<issue>.upgrade.md` when users must act (a check that can newly
+fail, a changed default, a removed flag). The `Changelog Fragment Check` CI
+job fails a PR whose title type is user-visible (`feat`, `fix`, `perf`, or a
+non-conventional subject) with no fragment citing its issue. Internal titles
+(`chore`, `ci`, `docs`, `test`, `refactor`, `build`, ...), Dependabot PRs and
+Loom resyncs pass without one. `changelog:skip` is the escape hatch for
+the rare user-visible-looking PR that needs no entry. Details:
+`changelog.d/README.md`; check locally with
+`uv run python scripts/changelog_gap_report.py --pr <N>`.
+
 ## Releasing
 
 Releases go through a **PR-based flow** — see [`RELEASING.md`](RELEASING.md) for
