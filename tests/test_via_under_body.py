@@ -336,6 +336,11 @@ class TestSelection:
             "package_dfn_qfn:qfn-8-1ep_3x3mm",
             "MyLib:Wson-6_1.5x1.5mm",
             "vendor:lga-12",
+            "vendor:usoN-8",
+            "MyLib:vson-10_3x3mm",
+            "Package_SON:X2SON-8_1.4x1mm_P0.35mm",
+            "vendor:Dfn-6",
+            "vendor:Qfn-20",
         ],
     )
     def test_default_pattern_selects(self, name: str):
@@ -349,6 +354,12 @@ class TestSelection:
             "Package_QFP:LQFP-48_7x7mm_P0.5mm",
             "Package_BGA:BGA-64_9.0x9.0mm_Layout10x10_P0.8mm",
             "Resistor_SMD:R_0603_1608Metric",
+            # "son" inside vendor/part names must not select (case-insensitive
+            # match is anchored to the SON package token).
+            "Crystal:Resonator_SMD_Murata_CSTxExxV-3Pin_3.0x1.1mm",
+            "Inductor_SMD:L_Panasonic_PCC-M0530M",
+            "Oscillator:Oscillator_SMD_SeikoEpson_SG210-4Pin_2.5x2.0mm",
+            "TerminalBlock:TerminalBlock_Degson_DG246-3.81-2P",
         ],
     )
     def test_default_pattern_skips(self, name: str):

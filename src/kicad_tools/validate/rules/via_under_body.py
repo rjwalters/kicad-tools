@@ -22,8 +22,11 @@ This rule flags any via whose copper (a disc of ``via.size``) overlaps the
   default: vias under a stand-off QFP body (power/ground stitching) and
   dog-bone fan-out under a BGA are routine -- the committed board-07
   LQFP-144 alone carries 48 -- and flagging them would drown the finding.
-  Pass a custom ``footprint_pattern`` (e.g. ``r"QFN|DFN|SON|LGA|QFP|BGA"``)
-  or ``include_references`` to opt them in.
+  Pass a custom ``footprint_pattern`` (e.g.
+  ``DEFAULT_FOOTPRINT_PATTERN + "|QFP|BGA"``) or ``include_references`` to
+  opt them in.  String patterns are compiled case-insensitively, which is
+  why the default anchors ``SON`` as a package token rather than matching
+  it inside names like ``Panasonic`` or ``Resonator``.
 * **Thermal-pad vias** -- vias on the net of the footprint's own exposed
   pad whose centre lies inside that pad's copper -- are the intended
   exception and are allowed by default (``allow_thermal_pad_vias=True``).
@@ -63,7 +66,17 @@ VIA_UNDER_BODY_RULE_ID = "via_under_body"
 # rework / short risk.  Matched case-insensitively with ``re.search`` (so
 # ``Package_DFN_QFN``, ``Package_SON:WSON-8...``, ``Package_LGA`` and
 # lower-case vendor ids such as ``qfn-16...`` all select).
-DEFAULT_FOOTPRINT_PATTERN = r"QFN|DFN|SON|LGA"
+#
+# ``SON`` is anchored as a package token -- start of id or a non-letter,
+# up to two prefix letters (W/V/U/X/HU/TD...SON; ``X2SON`` matches via the
+# non-letter branch), and no trailing letter.  Unanchored, the
+# case-insensitive search would hit ``son`` inside vendor/part names
+# (Degson, Panasonic, SeikoEpson, Resonator, Johanson, Winson, Aosong):
+# 138 non-bottom-terminated KiCad stock footprints such as crystals,
+# resonators and power inductors.  Anchored, the pattern selects exactly
+# the same 964 KiCad 10 stock footprints as the old case-sensitive
+# ``QFN|DFN|SON|LGA``.
+DEFAULT_FOOTPRINT_PATTERN = r"QFN|DFN|LGA|(?:^|[^A-Z])[A-Z]{0,2}SON(?![A-Z])"
 
 # An SMD pad at least this many times the footprint's median copper-pad area
 # is treated as an exposed (thermal) pad.
