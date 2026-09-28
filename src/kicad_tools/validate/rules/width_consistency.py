@@ -13,7 +13,8 @@ does not know electrical intent (current, impedance) -- that is what
 Model
 -----
 Per copper layer and net, straight segments and arcs form a graph whose
-nodes are track endpoints (snapped to ``node_tolerance_mm``).  A node is a
+nodes are track endpoints (endpoints within ``node_tolerance_mm`` of each
+other are joined into one node).  A node is a
 *stop* when it has other than two incident tracks (branch / dead end) or
 touches a same-net pad or via.  A **chain** is the track sequence between
 two stops; within a chain, consecutive tracks of equal width (within
@@ -315,8 +316,53 @@ class WidthConsistencyRule(DRCRule):
     # ------------------------------------------------------------------
 
     def _node(self, point: tuple[float, float]) -> NodeKey:
+        """Quantized grid bucket of *point* (``node_tolerance_mm`` cells)."""
         q = self.node_tolerance_mm
         return (round(point[0] / q), round(point[1] / q))
+
+    def _end_nodes(self, tracks: list[_Track]) -> list[tuple[NodeKey, NodeKey]]:
+        """Canonical node key of each track's two ends.
+
+        Endpoints within ``node_tolerance_mm`` of each other share a node even
+        when they round into different grid buckets (e.g. either side of a
+        ``0.5 * q`` boundary).  Candidate pairs come from the 3x3 neighbouring
+        buckets only, so the join stays local; joined endpoints are merged
+        with union-find and each component is keyed by its smallest bucket
+        (deterministic, and identical to the plain rounded key whenever no
+        boundary is straddled).
+        """
+        tol = self.node_tolerance_mm
+        points: list[tuple[float, float]] = [end for track in tracks for end in track.ends]
+        buckets = [self._node(p) for p in points]
+        by_bucket: dict[NodeKey, list[int]] = {}
+        for i, key in enumerate(buckets):
+            by_bucket.setdefault(key, []).append(i)
+
+        parent = list(range(len(points)))
+
+        def find(i: int) -> int:
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i, (bx, by) in enumerate(buckets):
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for j in by_bucket.get((bx + dx, by + dy), ()):
+                        if j <= i or math.dist(points[i], points[j]) > tol:
+                            continue
+                        ri, rj = find(i), find(j)
+                        if ri != rj:
+                            parent[rj] = ri
+
+        canonical: dict[int, NodeKey] = {}
+        for i, key in enumerate(buckets):
+            root = find(i)
+            if root not in canonical or key < canonical[root]:
+                canonical[root] = key
+        keys = [canonical[find(i)] for i in range(len(points))]
+        return [(keys[2 * t], keys[2 * t + 1]) for t in range(len(tracks))]
 
     def _chains(
         self, tracks: list[_Track], terminals: list[_Terminal]
@@ -328,11 +374,11 @@ class WidthConsistencyRule(DRCRule):
         """
         from shapely.geometry import Point
 
+        end_nodes = self._end_nodes(tracks)
         incident: dict[NodeKey, list[int]] = {}
         coords: dict[NodeKey, tuple[float, float]] = {}
         for i, track in enumerate(tracks):
-            for end in track.ends:
-                key = self._node(end)
+            for end, key in zip(track.ends, end_nodes[i], strict=True):
                 incident.setdefault(key, []).append(i)
                 coords.setdefault(key, end)
 
@@ -354,7 +400,7 @@ class WidthConsistencyRule(DRCRule):
                 while True:
                     used.add(idx)
                     track = tracks[idx]
-                    a, b = (self._node(e) for e in track.ends)
+                    a, b = end_nodes[idx]
                     nxt = b if a == node else a
                     ordered.append(track if a == node else self._reversed(track))
                     if nxt in stops:

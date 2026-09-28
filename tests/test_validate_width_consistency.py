@@ -162,6 +162,47 @@ def test_island_through_arc(tmp_path):
     assert islands[0].actual_value == pytest.approx(0.5 * 3.141592653589793, abs=1e-4)
 
 
+def test_island_across_rounding_boundary_is_joined(tmp_path):
+    """Endpoints within tolerance but in different rounded buckets still join.
+
+    With ``node_tolerance_mm = 0.0005`` the rounding boundary lies at
+    ``x = 102.00025`` (``x / q = 204000.5``); the shared endpoint of the first
+    two tracks is written as 102.0002 on one side and 102.0003 on the other
+    (0.0001 mm apart, well inside the tolerance) so the plain rounded keys
+    differ (204000 vs 204001).  The chain must still be walked through that
+    point and the 0.5 mm island reported exactly once (issue #5750).
+    """
+    rule = WidthConsistencyRule()
+    q = rule.node_tolerance_mm
+    assert rule._node((102.0002, 100.0)) != rule._node((102.0003, 100.0))
+    assert abs(102.0003 - 102.0002) <= q
+
+    items = (
+        via(100, 100, 1)
+        + seg(100, 100, 102.0002, 100, 0.2, 1)
+        + seg(102.0003, 100, 103, 100, 0.5, 1)
+        + seg(103, 100, 106, 100, 0.2, 1)
+        + via(106, 100, 1)
+    )
+    results = _check(_load(tmp_path, items))
+    islands = _by_id(results, "width_island")
+    assert len(islands) == 1
+    assert islands[0].actual_value == pytest.approx(1.0, abs=1e-3)
+    assert _by_id(results, "width_transition") == []
+
+
+def test_transition_across_rounding_boundary_is_joined(tmp_path):
+    """A two-terminal neck split by a straddled bucket is still one chain."""
+    items = (
+        via(100, 110, 3)
+        + seg(100, 110, 103.0002, 110, 0.5, 3)
+        + seg(103.0003, 110, 106, 110, 0.2, 3)
+        + via(106, 110, 3)
+    )
+    (finding,) = _by_id(_check(_load(tmp_path, items)), "width_transition")
+    assert "no other-net copper within" in finding.message
+
+
 def test_narrow_neck_is_not_an_island(tmp_path):
     items = (
         via(100, 100, 1)
