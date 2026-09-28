@@ -214,8 +214,39 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
          of running unbounded when the wall-clock cutoff is removed.
       3. Warns when the outer ``--timeout`` is set, because a firing outer
          deadline re-introduces wall-clock dependence and breaks the
-         reproducibility guarantee (the deadline is kept as a safety
-         backstop, not the binding constraint).
+         reproducibility guarantee.
+
+    Issue #5765: the outer ``--timeout`` is NOT purely a "safety backstop
+    that never binds" the way earlier revisions of this docstring and its
+    printed warning claimed.  Under ``--auto-layers`` escalation (or any
+    other multi-attempt caller of
+    :func:`_per_attempt_budgeted_timeout`), each attempt gets a *fair
+    wall-clock slice* of ``remaining / len(layer_configs)`` -- e.g.
+    ``--timeout 600`` with 8 escalation attempts hands the first (2L)
+    attempt only 75 s, and that slice becomes the detailed router's stage
+    deadline (``two_phase.py`` ``check_timeout()``), which can cut the
+    rip-up/reroute loop between nets on a slow-enough machine even though
+    the iteration backstop from (2)/(2b) never bound.  A time-dilation
+    K-sweep on the frozen board-03 recipe reproduced this directly: K=1..12
+    never bind, K=16 cuts a reroute at 75.1 s and drops 13/13 nets to
+    9/13.  Deliberately not fixed by removing the fair slice here: Issue
+    #3881 / #4770 measured that the fair slice is what recovers throughput
+    on hard fixtures (chorus 13/51 -> more nets attempted) and that
+    removing it costs board-07 real nets, so this normalizer's contract
+    stays "the fair slice can legitimately bind on a slow enough machine or
+    tight enough ``--timeout``" -- the fix here is making that loss
+    ATTRIBUTABLE rather than silent: (a) the warning below states the
+    effective per-attempt slice can be much smaller than ``--timeout``
+    itself, and (b) ``TwoPhaseRouter._note_stage_deadline_determinism_loss``
+    prints ``"[deterministic-budget] stage deadline fired -- run is not
+    reproducible"`` the first time a stage deadline actually fires while the
+    iteration backstop is pinned, so a non-reproducible run is visible in
+    its own log instead of looking identical to a normal, harmless deadline
+    trim.  Production recipes that pair ``--deterministic-budget`` with
+    ``--timeout`` (boards 01/02/03/04/06/07, all naming this normalizer's
+    "SAFETY backstop only" claim in their own comments) are reproducible
+    ONLY when ``--timeout`` is sized generously enough, machine load
+    included, that the fair slice never binds -- not unconditionally.
 
     No-op when ``--deterministic-budget`` is not set, so legacy behaviour is
     preserved bit-for-bit.
@@ -291,10 +322,18 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
         if timeout and timeout > 0:
             print(
                 "[deterministic-budget] WARNING: --timeout "
-                f"{timeout:g}s is set.  It is retained only as a SAFETY "
-                "backstop; if the outer deadline fires the run is no longer "
-                "machine-independent.  Size it generously (or omit it) so the "
-                "iteration budget -- not wall-clock -- bounds the work."
+                f"{timeout:g}s is set.  It is intended as a SAFETY backstop, "
+                "but under --auto-layers escalation each attempt only gets a "
+                f"FAIR SLICE of it (as little as {timeout:g}s / "
+                "len(layer_configs) for the first attempt -- Issue #5765), "
+                "and that slice becomes the detailed router's stage "
+                "deadline.  If it fires, the run is no longer "
+                "machine-independent even though the iteration backstop "
+                "above never bound; a "
+                "'[deterministic-budget] stage deadline fired' log line "
+                "will mark exactly when that happens.  Size --timeout "
+                "generously (or omit it) so the iteration budget -- not "
+                "wall-clock -- bounds the work."
             )
 
 
@@ -13938,9 +13977,13 @@ def _route_parser() -> argparse.ArgumentParser:
             "and pins the C++ A* iteration backstop (--max-search-iterations) "
             "to a fixed positive value, so each search either finds a path or "
             "aborts after the SAME node-expansion count on every environment. "
-            "--timeout (the outer wall-clock budget) is kept only as a safety "
-            "backstop; if it fires it is logged as a determinism-breaking "
-            "warning. Combine with --seed for byte-stable re-routes. The fixed "
+            "--timeout (the outer wall-clock budget) is intended as a safety "
+            "backstop, but under --auto-layers escalation each attempt only "
+            "gets a fair slice of it (timeout / attempts, Issue #5765); if a "
+            "stage deadline fires anyway it is logged as "
+            "'[deterministic-budget] stage deadline fired -- run is not "
+            "reproducible'. Size --timeout generously so that never binds. "
+            "Combine with --seed for byte-stable re-routes. The fixed "
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
