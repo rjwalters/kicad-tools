@@ -804,11 +804,12 @@ def main() -> int:
 
         # Step 5.5: route_success fast-fail gate (#4066, mirrors board 03's
         # ``route_success`` gate after ``route_pcb`` in
-        # boards/03-usb-joystick/generate_design.py).  route_pcb
-        # runs under a wall-clock ``--timeout`` SAFETY backstop layered above
-        # the load-independent per-net ``--deterministic-budget`` iteration
-        # cap, so on a loaded machine that outer deadline can fire before every
-        # signal net lands and ``route_pcb`` returns ``False``.  If we fall
+        # boards/03-usb-joystick/generate_design.py).  Issue #5765: unlike
+        # board 03, this board's ``route_pcb`` does NOT pass
+        # ``--deterministic-budget`` -- it runs under a plain wall-clock
+        # ``--timeout 240`` with no iteration-budget backstop underneath it,
+        # so on a loaded machine that deadline can fire before every signal
+        # net lands and ``route_pcb`` returns ``False``.  If we fall
         # through, the downstream ``write_lvs_report(require_clean=True)`` sees
         # a genuinely unrouted signal net as a copper OPEN and raises
         # ``BoardNetlistMismatch``, which the broad ``except`` below reports as
