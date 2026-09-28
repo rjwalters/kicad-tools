@@ -197,8 +197,25 @@ jobs:
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
     # outside fork ever executes on our host and required checks never go
-    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
-    # 19 vs 27, Diff-Pair ~15 vs 25.
+    # missing.
+    #
+    # Measured cost of that fallback (Issue #5747, re-measured 2026-09-28 --
+    # the "Test 17 vs 40 min" figure this comment used to quote was stale in
+    # both directions):
+    # - self-hosted: 23m27s end to end (job 107504917412, main, 2026-09-24),
+    #   of which "Run tests" is 15m24s.
+    # - ubuntu-latest: did NOT finish. Fork run 36282355031 (PR #5736) was
+    #   cancelled by this job's timeout at 45m06s, 28m17s into "Run tests".
+    #   Every step that DID complete there ran ~2.2x its self-hosted time
+    #   (conformance 3m51s -> 8m34s, stitch 2m25s -> 5m15s, zones 21s -> 45s,
+    #   pre-"Run tests" total 7m59s -> 16m43s), which projects the hosted
+    #   total at ~50 min -- structurally above a 45-minute budget, not
+    #   marginally under it. Five Test runs across the fork batch
+    #   #5736/#5737/#5739 were cancelled this way; none could ever go green.
+    # See timeout-minutes below for the split budget that fixes this. The
+    # other two jobs that share this fork fallback had wide margin in that
+    # same fork run (Board 06 15 min vs 35, Diff-Pair 9 min vs 30), so their
+    # timeouts are deliberately left alone.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     env:
       # -n auto reads the container's 8-core cpuset on the runner; keep the
@@ -284,7 +301,21 @@ jobs:
       # into shell or retained. Pushes/absent markers leave the wrapper inert.
       KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
       KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-    timeout-minutes: 45
+    # Issue #5747: the budget follows the runner, using the same fork-routing
+    # predicate as runs-on/container.options above (GitHub allows expressions
+    # in timeout-minutes with the same context set as container.image:
+    # github/inputs/matrix/needs/strategy/vars -- no env, hence the repeated
+    # literal rather than a shared variable).
+    # - self-hosted: 45, unchanged -- ~1.9x the 23m27s measured median, so a
+    #   real hang is still caught in a bounded time on our own hardware.
+    # - ubuntu-latest (fork PRs): 90, ~1.8x the ~50 min projected above and
+    #   the same value the other 90-minute jobs in this file use. A blanket
+    #   raise to 90 was rejected: it would double the time a genuinely hung
+    #   self-hosted job holds one of this repo's ten runner slots, and the
+    #   self-hosted path has never needed more than 45. Hosted minutes are
+    #   free on this public repo, and pytest's own --timeout=60 per test
+    #   still bounds a hang long before the job timeout fires.
+    timeout-minutes: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 45 || 90 }}
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
     # are NOT used). The container provides what dozens of tests need and

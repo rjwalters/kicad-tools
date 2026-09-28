@@ -860,6 +860,13 @@ Avoid a bare `pip install nanobind` — it is not recorded in the resolved
 set and a subsequent `uv sync` will uninstall it, breaking the next
 `kct build-native` (issue #4412).
 
+**Opening a PR from a fork?** Fork PRs run on GitHub-hosted runners rather than
+this project's self-hosted one, which makes the `Test` job roughly 2.2x slower
+(~50 min, with a 90-minute budget). Nothing is skipped and nothing extra is
+required of you — see
+[`docs/contributing/development.md`](docs/contributing/development.md#6-what-to-expect-from-ci-on-a-fork-pr)
+for the details and the maintainer fallback if a run still cannot finish.
+
 ### Available Commands
 
 If you have `pnpm` installed, you can use these convenience scripts:
