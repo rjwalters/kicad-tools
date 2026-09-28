@@ -239,7 +239,7 @@ three new rules, and router performance work.
   warnings, will now fail on a board with a via under a QFN/DFN/SON/LGA
   body, even if that board passed before the upgrade.** To opt out, run
   `kct check --skip via_under_body`, or waive the via or reference in
-  `.kct_waivers.json`. See "Upgrade notes" below.
+  `.kct_waivers.json`. See "Upgrade notes" above.
 
 - **Pin-1 / polarity silkscreen-marker rule in `kct check`**: a new
   default-on `pin1_marker` category (selectable via `--only`/`--skip`, no new
@@ -262,7 +262,7 @@ three new rules, and router performance work.
   counts warnings, will now fail on a board with an orientation-sensitive
   part that has no visible pin-1 mark, even if that board passed before the
   upgrade.** To opt out, run `kct check --skip pin1_marker`, or waive the
-  reference in `.kct_waivers.json`. See "Upgrade notes" below. Marker
+  reference in `.kct_waivers.json`. See "Upgrade notes" above. Marker
   *generation* is out of scope; it remains a listed follow-up of
   `kicad_tools.silkscreen.generator`.
 
