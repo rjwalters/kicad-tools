@@ -184,7 +184,7 @@ mk_fixtures() {
             printf '%s' "$json" | jq '.' > "$dir/$file"
         fi
     }
-    _write issue-loom_urgent.json \
+    _write issue-loom_operator-priority.json \
         '{"number":6993,"title":"Guide render_plan_body is not stably sorted"}'
     # The exact #6613 tie from PR #6988, plus neighbours.
     _write issue-loom_issue.json \

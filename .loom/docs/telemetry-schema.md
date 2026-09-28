@@ -123,6 +123,40 @@ Both directions are safe:
   by the exporter as "no identity to verify" and is **silently** skipped — it
   never produces a recurring "cannot verify" warning.
 
+**Star intents (#9244 C).** The response may also carry
+`operator_priority_intents`, the stars and unstars loom-ui recorded (loom-ui
+has no GitHub write access, so the daemon applies them):
+
+```json
+{ "accepted": 50, "host_id": "fleet-host-abc",
+  "operator_priority_intents": [
+    { "id": "…", "repo": "owner/repo", "number": 281, "action": "star",
+      "label": "loom:operator-priority",
+      "requested_at": "2026-09-28T08:15:00Z", "requested_by": "operator" } ] }
+```
+
+The actor field is `requested_by`. A missing or `null` field is an older
+backend and a no-op; `[]` is a supporting backend with nothing pending. The
+daemon reads the field as a raw JSON value, so no shape of it (an object, a
+string, a number, a mixed array) can fail the ack or skip the `host_id` check;
+a non-array is ignored and logged, and each array entry that is not a
+well-formed object is dropped on its own. The daemon applies an
+intent only when `label` is exactly `loom:operator-priority`, `action` is
+`star` or `unstar`, `repo` is in this host's workspace registry, and
+`requested_by` is non-empty; anything else is dropped and logged (visible as
+`dropped_intents` in `loom-daemon status --json`). Applying adds or removes the
+label, then posts one audit comment carrying
+`<!-- loom:operator-priority-intent=<id> action=<a> requested_at=<ts> -->`,
+unless a trusted comment with that intent id already exists, so resending an
+intent, or several hosts managing the repo, is harmless. Trusted means an
+`OWNER` / `MEMBER` / `COLLABORATOR`, the fleet App (the configured slug, else `loom-fleet-dispatch*`, as a `…[bot]` login only), or
+the daemon's own login: a marker an outside commenter posts neither suppresses
+the audit comment nor sets the starred-at. `requested_by` is shown inside a
+code span, so an email address stays whole and an `@name` pings no one. `requested_at` becomes the
+issue's starred-at for dispatch order. The exporter reads at most 64 KiB of
+the response (4 KiB before #9244 C, which truncated a ~12 KiB 50-intent ack
+and lost the `host_id` check along with the intents).
+
 ## `RepoVisibility` contract — private by default
 
 Every record that references a repository carries a `visibility` tag, either
@@ -1103,7 +1137,32 @@ Tokens, providers and pools (Issues #8908, #8931):
 |---|---|---|---|
 | `loom.pool.account_marks` | delta `Sum` | `{account}`; labels `provider`, `reason` | one per account mark the daemon writes, at the seam that writes it: sweep and role-tick Codex terminal feedback (`provider=codex`), API-key pool bad marks (`provider` = the pool namespace, e.g. `zai`), and the Claude insta-crash exhaustion mark (`claude`). `reason` ∈ `rate_limited`, `exhausted`, `session_limit`, `model_credits`, `credential`, `transient`. No point when no mark is written (a native credential failure, a Codex `SUCCESS`/`TIMEOUT`, a failed write) |
 | `loom.pool.hold` span | own root trace (derived from `loom.pool.hold.pool` + hold start) | `loom.pool.hold.pool` (16-hex SHA-256 prefix of the pool directory — the pool's identity, never its path), `loom.pool.hold.post_mortem` (`true` when a real token-selection death armed it), `loom.pool.hold.accounts` | one work-finder pool dispatch hold, from arming to clearing. A hold still armed when the daemon stops emits no span |
-| `loom.runtime.usage` span | child of the execution's `loom.runtime.run` (else its root) | `loom.tokens.input`, `.output`, `.cache_read`, `.cache_write`, `.total`, optional `loom.runtime` | one sweep execution's exact token breakdown, from the same per-runtime readers as `sweep.outcome`'s `tokens_by_model`, journalled at the terminal transition over the run span's interval. Absent when usage is unknown; a measured zero is `"0"` |
+| `loom.runtime.usage` span | one per **model**, child of the unit it measures (see below) | `loom.usage.scope` (`execution` \| `attempt`), `loom.model`, `loom.tokens.input`, `.output`, `.cache_read`, `.cache_write` (= `.cache_write_5m` + `.cache_write_1h`), `.total`; aliases `gen_ai.usage.input_tokens` (uncached input, like `loom.tokens.input`), `.output_tokens`, `.cache_read_input_tokens`, `.cache_creation_input_tokens`; `loom.cost.usd_estimate` = `gen_ai.cost.usd_estimate` with `loom.pricing.verified_on` and `loom.pricing.source` (`asset` \| `compiled`); optional `loom.runtime`, `loom.role`, `loom.attempt`, `loom.sweep_id`, `loom.issue`, `loom.pr_number` | one unit's exact token usage for one model (#8908, #9204, #9303). Absent when usage is unknown or has no model rows; a model row's measured-zero counter is `"0"`. No cost attributes for a model the rate card does not know (never a Sonnet fallback) |
+
+**Usage spans: scope, sources, and how to total them (#9204, #9303).**
+
+| Scope | Parent | Written by |
+|---|---|---|
+| `execution` | a daemon sweep's last `loom.runtime.run` (else its root) | the sweep's terminal transition, from `sweep.outcome`'s `tokens_by_model` |
+| `execution` | a role-runner tick's own `loom.role_attempt` root | the tick's transcript/native-store scan |
+| `attempt` | the role's `loom.role_attempt` in the execution journal (daemon child), else a `loom.role_attempt` created in the issue's story trace (operator session) | `loom-daemon usage-record`, run by the sweep prompt after each checkpoint write |
+| `attempt` | the tick's story span, **only when the tick stitched exactly one target** | the role runner; a multi-target tick is never split |
+
+A daemon sweep's `claude -p` child also runs `usage-record`, so one trace can
+hold both scopes for one `loom.sweep_id`. **Total per `loom.sweep_id` from its
+`execution` spans when present, else from the sum of its `attempt` spans —
+never both**; group `attempt` spans by their parent `loom.role_attempt` for the
+per-retry split (`execution − Σattempt` is orchestrator overhead). Price with
+the span's own `loom.model` or read `loom.cost.usd_estimate`, not the parent's
+model. A role launched as its own `claude -p` worker (`worker_attempt`) has no
+subagent transcript, so it stays execution-level only.
+
+Span ids derive from `(parent, scope, model)`, so a re-emit is skipped. The
+counters come from one reader that dedupes streamed chunks on `message.id`
+(per-counter max) — before #9303 it summed every chunk and ran ~2x high
+(#8186). The USD estimate uses the per-model rate card (5-minute and 1-hour
+cache writes at their own rates), ignores `speed`/`service_tier`, and is an API
+list-price estimate, not a bill.
 
 `reason` is a closed enum and `provider` is a fixed literal or a pool
 namespace that must be a short `[a-z0-9_-]` token (anything else is
@@ -1114,8 +1173,10 @@ namespace that must be a short `[a-z0-9_-]` token (anything else is
 The work finder's ranked ready queue as of its last tick (Issue #8852, phase
 2). The rows are the same ones `loom-daemon queue` and `status --json`'s
 `last_work_finder_tick.queue` show. They are ordered by the daemon's own
-dispatch comparator: workspace priority, then `loom:urgent`, then oldest
-`createdAt`, then issue number. `tier:*` labels do not affect the order.
+dispatch comparator (#9244): starred (`loom:operator-priority`) first, starred
+issues by starred-at, then red-main fixes while their repo's `main` is verified
+red, then workspace priority, then oldest `createdAt`, then issue number.
+`loom:urgent` and `tier:*` labels do not affect the order.
 Envelopes carry `schema_version: 11`. **Native-HTTPS only**: the OTLP
 exporter never receives it (the mirror of `metric.points`).
 
@@ -1136,6 +1197,8 @@ daemon process or is disabled.
 | `rows[]` | array | ranked rows (below), at most 200 |
 | `unresolved_rows` | integer | rows dropped because their workspace's forge slug could not be resolved |
 | `rows_truncated` | integer | rows dropped by the 200-row cap |
+| `plan` | object, optional | the tick's dispatch plan block (Issue #9288, below). Absent from older daemons |
+| `operator_priority_landing[]` | array, optional | the landing state of every starred issue this host watches, and of every blocker inheriting a star (#9244 C; below). Omitted when nothing is starred and on older daemons |
 
 Each row:
 
@@ -1146,13 +1209,60 @@ Each row:
 | `visibility` | `public` / `private` | per row; missing or unknown decodes to `private` |
 | `issue` | integer | issue number |
 | `workspace_priority` | integer | lower dispatches first |
-| `urgent` | bool | carries `loom:urgent` |
+| `urgent` | bool | **deprecated (#9244): always `false`**. `loom:urgent` no longer orders dispatch; the field stays on the wire for one release, then goes |
+| `operator_priority` | bool | starred: carries `loom:operator-priority`, which sorts it ahead of all other work (#9244). Absent on older daemons, which decodes as `false` |
+| `operator_priority_at` | RFC 3339, optional | when it was starred (the `labeled` timeline event), when known. Omitted for an unstarred issue, or a starred one ordered by its `created_at` fallback |
 | `created_at` | RFC 3339, optional | issue creation time (the age ordering key) |
 | `tier` | string, optional | the `tier:*` label, informational only |
 | `disposition` | string | `dispatched`, `in_flight`, `deferred_capacity`, `deferred_ramp_cap`, `deferred_saturation`, `deferred_out_of_slice`, `deferred_repo_cap`, `workspace_halted`, `workspace_commands_missing`, `host_constraint`, `host_class_refused`, `parked`, `hard_exclusion`, `recheck_interval`, `quarantined`, `dispatch_backoff`, `open_pr_backoff`, `noop_cooldown`, `declined`, `prless_retry`, `peer_claim`, `open_pr`, `dispatch_error`, `labelled_blocked` (unknown values are forward-compatible) |
 | `state` | string | `running` / `ready` / `blocked`, derived by the daemon so clients never keep a copy of the mapping |
 | `reason` | string | human-readable reason, also daemon-derived |
 | `detail` | string, optional | only for `parked` (the park label), `open_pr` (`open PR #N`) and `labelled_blocked` (the hold labels it also carries, from `loom:operator`, `loom:operator-only`, `loom:operator-mechanical`, `loom:needs-capability`). Free-form dispatch-error and comment text is never exported |
+| `position` | integer, optional | 1-based place in the host's **shaped** dispatch order (#9288, below). `null` when the row is not dispatchable on this host this tick |
+| `plan_state` | string | `running` / `next` / `queued` / `blocked` (#9288); `unknown` when absent |
+| `keys` | array, optional | `{name, value}` comparator keys that placed the row, in comparator order |
+| `gate` | string, optional | the admission gate holding a deferred row: `capacity`, `ramp`, `saturation`, `repo_cap`, `out_of_slice` |
+| `in_slice` | bool, optional | the row's workspace is in this host's preferred repo slice (#6243); `true` on every row when unsharded |
+| `hot` | bool, optional | the workspace had a live sweep at the top of the tick (the #9090 track-affinity input) |
+| `owning_shard` | integer, optional | the shard that owns the workspace when sharding is configured. A host can only name the shard; mapping it to a host is the fleet merge's job |
+| `repo_cap` | object, optional | `{cap, occupancy}`: the workspace's `maxConcurrentPerRepo` (`null` when uncapped) and its top-of-tick live sweeps |
+
+**Dispatch plan (Issue #9288).** `rank` is the bare comparator rank over every
+row, so it is also where a blocked row re-enters. It is not the order pass 2
+offers candidates in when a repo slice or per-repo cap reshapes the list.
+`position` is: the tick records the shaped candidate order it iterated
+(`TickReport::plan_order`), and the plan is a pure projection of it, never a
+second ranking. Out-of-slice rows follow the shaped order, in comparator order.
+`plan_state` is:
+
+- `running`: `dispatched` / `in_flight`;
+- `next`: the first `slots.max_admissions_per_tick` rows, in `position` order,
+  among rows deferred by the concurrency or ramp cap. These are what the next
+  tick admits once slots free. Saturation-held, repo-capped and out-of-slice
+  rows are never `next`, so a saturated host has no `next` rows;
+- `queued`: every other deferred row;
+- `blocked`: everything else, with `position: null`.
+
+The comparator keys come from one seam (`ready_queue::candidate_keys`), which
+is also what `candidate_cmp` compares, so `keys` and `plan.ordering` can never
+describe a different order from the one the tick ran. The `plan` block:
+
+| Field | Type | Notes |
+|---|---|---|
+| `slots` | object | `max_concurrent`, `occupancy` (after the tick), `free` (`max_concurrent − occupancy`), `max_admissions_per_tick`, `saturation_held`, `any_halted` |
+| `tick_interval_secs` | integer, optional | the work finder's tick interval |
+| `shard` | object | `configured` (`false` when unsharded), `host_shard`, `shard_count` |
+| `scope` | array | the labels the plan covers: `["loom:issue", "loom:blocked"]` |
+| `ordering` | array | comparator key names, in order |
+| `complete` | bool | `false` when some repo's listing failed (like `listing_failed`) |
+
+**Pre-ready tiers are unordered.** `loom:curated` and `loom:triage` issues have
+no dispatcher order and never appear in the plan; Champion's promotion order is
+a role-prompt convention, not daemon code. `scope` names what the plan covers.
+Positions are per host. Hosts do not share `workspace_priority`, so two hosts'
+positions cannot be compared directly. A fleet order is a merge of per-host
+plans (follow-up #9310). All of this is additive, so there is no
+`schema_version` bump.
 
 **Forge-side blocked issues (Issue #8957).** After the ranked rows, the
 snapshot carries one `labelled_blocked` row (`state: blocked`, `rank: 0`,
@@ -1164,12 +1274,48 @@ only the tick's rows) and are subject to the same 200-row cap. The blocking
 reason itself is usually a forge comment, and comment text is never read or
 exported. This is additive, so there is no `schema_version` bump.
 
+**Starred landing states (#9244 C).** `rows` is what the work finder did
+with its ready listing this tick, and most starred issues are not in it (they
+are being built, reviewed, or are parked). `operator_priority_landing` covers
+all of them, in starred-at order, each inheriting blocker right after the
+issue it blocks. Join it to `rows` on `(repo, issue)`. It is the last pass of
+the daemon's liveness check (`loom-daemon/src/star_liveness/`), which runs
+every `autonomous.operatorPriority.intervalSecs` while the work finder is on.
+Each entry:
+
+| Field | Type | Notes |
+|---|---|---|
+| `repo` | string | forge `owner/repo` |
+| `visibility` | `public` / `private` | per entry; missing or unknown decodes to `private` |
+| `issue` | integer | issue number |
+| `stage` | string | `curating`, `ready`, `building`, `in-review`, `changes-requested`, `mergeable`, `merging`, `blocked-by`, `needs-operator`, `no-capacity` (unknown values are forward-compatible) |
+| `next_actor` | string | `curator`, `builder`, `judge`, `doctor`, `champion`, `work-finder`, `operator`, or `blocker #N` |
+| `stage_since` | RFC 3339, optional | when this host first saw it in `stage` |
+| `time_in_stage_secs` | integer | seconds in `stage` |
+| `pr` | integer, optional | its open PR |
+| `blocked_by` | string, optional | `blocked-by`: `#N`, or `owner/repo#N` across repos |
+| `no_capacity` | string, optional | `no-capacity`: the work finder's fixed reason text, or the pools-exhausted grace note |
+| `ask` | object, optional | set when the operator has been asked: `{kind, key, text}`. `kind` is `operator-only`, `operator-decision`, `merge-risk-hold`, `merge-refused`, `pools-exhausted`, `unmanaged-repo`, `blocked-unnamed`, `blocked-cross-repo` or `no-progress`. `key` is the dedupe key (`<kind>:<specifics>`), identical on every host for the same cause. `text` is the one concrete ask, templated by the daemon; the only forge text it can quote is a `merge-refused` ask with no open incident, which carries the refusal line bounded to 300 characters, stripped of backticks and angle brackets, inside a code span. A `no-progress` ask keeps the agent-owned `stage` |
+| `inherited_from` | integer, optional | this entry is a blocker inheriting the star of that issue |
+| `operator_priority_at` | RFC 3339, optional | the starred-at it sorts by (its own, the inheriting star's, or `created_at`) |
+| `last_progress_at` | RFC 3339, optional | when forward progress was last seen |
+
+A star made in loom-ui for a repo this host does not manage appears here as
+`needs-operator` with an `unmanaged-repo` ask. Only that host knows it does
+not manage the repo, so the fleet view should treat the ask as real when
+**every** reporting host carries it. Additive, so there is no
+`schema_version` bump. The fleet Worker in this repo
+(`dashboard/src/queueState.ts`) whitelists row fields and does not store it
+yet.
+
 Redaction (phase 3, `dashboard/src/queueState.ts`): the Worker redacts per
 row on `visibility`. On `/public/*` a private row keeps only `rank`,
-`visibility`, `urgent`, `disposition`, `state` and `reason`; its `repo`,
-`issue`, `created_at`, `tier` and `detail` are withheld, and a private
-`listing_failed` entry keeps only its `visibility`. `counts`, `seen` and
-`tick_at` are aggregate and survive. A Worker older than phase 3 applies the
+`visibility`, `urgent`, `operator_priority`, `disposition`, `state` and
+`reason` (plus the #9288 `position`, `plan_state` and `gate`); its `repo`,
+`issue`, `created_at`, `tier`, `detail`, `keys`, `repo_cap`, `owning_shard`,
+`in_slice` and `hot` are withheld, and a private `listing_failed` entry keeps
+only its `visibility`. `counts`, `seen`, `tick_at` and the `plan` block are
+aggregate and survive. A Worker older than phase 3 applies the
 unknown-kind rule instead (`/public/*` sees `kind` only).
 
 The Worker keeps the newest tick per host as live state (`hosts[<id>].queue`
@@ -1319,6 +1465,14 @@ describes the machine, not any repo, issue, branch, or operator. It is a mild
 fingerprinting signal for a named host — reviewed and deliberately allowed
 through, since free-GB is already public and this is only the denominator that
 turns it into a percentage.
+
+**`managed_repos[]` (Issue #4976).** The host's managed-repo roster: one
+`{slug, visibility, priority}` entry per provisioned workspace, whether or not
+it has a sweep in flight. `priority` (#9244, loom-ui#153) is the repo's
+cross-repo dispatch tier from the workspace registry (`Workspace.priority`,
+lower dispatches first); it is omitted for a root that is not a registered
+workspace and on older daemons, never defaulted. Additive, no `schema_version`
+bump.
 
 **Binary identity (`build_commit` / `built_at`, #4956).** `daemon_version` is
 `CARGO_PKG_VERSION`, so it only moves once per release: every build between two

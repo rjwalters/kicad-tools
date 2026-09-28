@@ -148,6 +148,8 @@ chmod +x "$STUB_DIR/loom-daemon"
 #                                 "owner/repo" from this LOCAL read -- no `gh
 #                                 repo view` (GraphQL) round-trip -- so this stub
 #                                 never needs to simulate a rate limit for it.
+#                                 $STUB_DIR/git-remote-url, if present,
+#                                 overrides the URL (remote-casing cases).
 #   anything else              -> delegated to the real `git` binary (unused by
 #                                 check-duplicate.sh today; a safety net only).
 REAL_GIT_BIN="$(command -v git)"
@@ -160,7 +162,11 @@ if [[ "$1" == "remote" && "$2" == "get-url" && "$3" == "origin" ]]; then
     echo "stub git: No such remote 'origin'" >&2
     exit 1
   fi
-  echo "https://github.com/owner/repo.git"
+  if [[ -f "$STUB_DIR_FROM_ENV/git-remote-url" ]]; then
+    cat "$STUB_DIR_FROM_ENV/git-remote-url"
+  else
+    echo "https://github.com/owner/repo.git"
+  fi
   exit 0
 fi
 exec "$REAL_GIT_BIN" "$@"
@@ -298,7 +304,7 @@ export PATH="$STUB_DIR:$PATH"
 reset_state() {
     rm -f "$STUB_DIR"/issues-*.json "$STUB_DIR"/prs-merged.json "$STUB_DIR"/timeline-*.json
     rm -f "$STUB_DIR"/rest-issues-*.json "$STUB_DIR/rest-prs.json"
-    rm -f "$STUB_DIR/timeline-fail" "$STUB_DIR/git-remote-fail"
+    rm -f "$STUB_DIR/timeline-fail" "$STUB_DIR/git-remote-fail" "$STUB_DIR/git-remote-url"
     rm -f "$STUB_DIR"/issue-list-rate-limit-* "$STUB_DIR/pr-list-rate-limit"
     rm -f "$STUB_DIR/rest-issues-fail" "$STUB_DIR/rest-prs-fail"
     rm -f "$STUB_DIR/rate-limit-message"
@@ -416,6 +422,60 @@ run_cds --issue 80 --title "Some issue title"
 assert_eq "0" "$RC" "(g) git remote resolution failure -> exit code driven by similarity check alone"
 assert_not_contains "$OUT" "RELATED_OPEN_WORK" "(g) git remote resolution failure -> probe result skipped"
 assert_contains "$ERR" "Failed to resolve repository" "(g) git remote resolution failure -> stderr warning emitted"
+
+# (cs) Remote-URL casing differs from GitHub's canonical full_name
+# (example-org/tool-repo#202). Owner/repo names are case-insensitive on
+# GitHub, but get_repo_nwo() returns the remote URL's casing verbatim -- a
+# clone of "https://github.com/example-org/harness-ops.git" yields
+# "example-org/harness-ops" while the timeline reports
+# "Example-Org/harness-ops". The same-repo filter must still match, or
+# RELATED_OPEN_WORK is silently [] for every issue.
+case_timeline() {
+    # $1 = issue number, $2 = cross-referencing issue number, $3 = full_name
+    cat > "$STUB_DIR/timeline-$1.json" <<EOF
+[
+  {"event": "cross-referenced", "source": {"type": "issue", "issue": {
+      "number": $2, "title": "Case-variant related work", "state": "open",
+      "repository": {"full_name": "$3"}}}}
+]
+EOF
+}
+
+# (cs1) lowercase remote, mixed-case full_name -> found.
+reset_state
+echo "https://github.com/owner/repo.git" > "$STUB_DIR/git-remote-url"
+case_timeline 90 91 "Owner/Repo"
+run_cds --issue 90 --title "Some issue title"
+assert_eq "1" "$RC" "(cs1) lowercase remote vs mixed-case full_name -> exit 1"
+assert_contains "$OUT" "#91: Case-variant related work (open issue, cross-references #90)" \
+  "(cs1) cross-reference found despite owner/repo casing mismatch"
+
+# (cs2) lowercase SSH remote, all-uppercase full_name -> found.
+reset_state
+echo "git@github.com:owner/repo.git" > "$STUB_DIR/git-remote-url"
+case_timeline 92 93 "OWNER/REPO"
+run_cds --issue 92 --title "Some issue title"
+assert_eq "1" "$RC" "(cs2) lowercase SSH remote vs all-uppercase full_name -> exit 1"
+assert_contains "$OUT" "#93: Case-variant related work" "(cs2) cross-reference found with uppercase full_name"
+
+# (cs3) mixed-case remote vs a full_name whose repo segment differs in case
+# -> found.
+reset_state
+echo "https://github.com/2AMLogic/Harness-Ops.git" > "$STUB_DIR/git-remote-url"
+case_timeline 94 95 "2amlogic/harness-OPS"
+run_cds --issue 94 --title "Some issue title"
+assert_eq "1" "$RC" "(cs3) mixed-case repo segment on both sides -> exit 1"
+assert_contains "$OUT" "#95: Case-variant related work" "(cs3) cross-reference found with mixed-case repo segment"
+
+# (cs4) A genuinely different repo is still excluded -- case-folding must not
+# widen the same-repo guard.
+reset_state
+echo "https://github.com/owner/repo.git" > "$STUB_DIR/git-remote-url"
+case_timeline 96 97 "Other/Repo"
+run_cds --issue 96 --title "Some issue title"
+assert_eq "0" "$RC" "(cs4) cross-reference from other/repo -> exit 0"
+assert_not_contains "$OUT" "RELATED_OPEN_WORK" "(cs4) foreign-repo cross-reference still excluded"
+assert_not_contains "$OUT" "#97" "(cs4) foreign-repo issue #97 not listed"
 
 echo ""
 echo "Testing check-duplicate.sh keyword-similarity scoring (issue #4409)..."

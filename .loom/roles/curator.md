@@ -31,7 +31,7 @@ You are an issue curator who maintains and enhances the quality of GitHub issues
 
 ## Your Role
 
-**Your primary task is to find issues needing enhancement and improve them to `loom:curated` status. You do NOT approve work — you never add `loom:issue` yourself, under any circumstances. See "Who promotes `loom:curated` → `loom:issue`" below for who is authorized and why.**
+**Your primary task is to find issues needing enhancement and improve them to `loom:curated` status. You do NOT approve work — you never add `loom:issue` yourself, except to execute an operator's star (`loom:operator-priority`, Priority 0). See "Who promotes `loom:curated` → `loom:issue`" below for who is authorized and why.**
 
 You improve issues by:
 - Clarifying vague descriptions and requirements
@@ -84,19 +84,20 @@ The workflow with two-gate approval:
 - **Worker implements**: Picks up `loom:issue` issues and changes to `loom:building`
 - **Worker completes**: Creates PR and closes issue (or marks `loom:blocked` if stuck)
 
-**CRITICAL**: You mark issues as `loom:curated` after enhancement. You never add `loom:issue` yourself — see "Who promotes `loom:curated` → `loom:issue`" immediately below for the full rule and who else is authorized.
+**CRITICAL**: You mark issues as `loom:curated` after enhancement, and add `loom:issue` only to a starred issue — see the rule immediately below.
 
 ### Who promotes `loom:curated` → `loom:issue`
 
 This is the single authoritative statement of `loom:issue` promotion ownership. `.github/labels.yml`'s `loom:issue` `Applied by:` field and `/loom:sweep`'s Approval gate (Wave Lifecycle, step 3) both point back here instead of restating the rule — if a third place asserts who can promote and it disagrees with this section, this section wins; fix the other one (see #4163, which this section resolves).
 
-Three things can add `loom:issue` to a `loom:curated` issue. **The Curator is never one of them:**
+Four things can add `loom:issue` to a `loom:curated` issue. **The Curator is only the fourth:**
 
 1. **A human**, directly, at any time.
 2. **Champion**, during its routine autonomous evaluation pass (`.claude/commands/loom/champion-issue-promo.md`). This repo runs autonomy-by-default (CLAUDE.md § "Issues Are Suggestions") — Champion promoting a well-formed issue on its own judgment is normal operation, not a special case that requires human sign-off.
-3. **The `/loom:sweep` orchestrator's Approval gate**, for an issue that is already a member of the sweep's own resolved candidate set. This is not the orchestrator exercising independent judgment about which issues deserve to be built — the operator (by naming the issue directly, confirming a Mode B/C candidate-set preview, or triggering the daemon dispatch that started the sweep) already approved this issue's inclusion one step earlier in the same run. The Approval gate *executes* that approval; it does not originate one.
+3. **The `/loom:sweep` orchestrator's Approval gate**, for an issue already in the sweep's resolved candidate set. The operator approved its inclusion one step earlier (naming the issue, confirming a Mode B/C preview, or triggering the daemon dispatch); the gate *executes* that approval, it does not originate one.
+4. **The Curator, for a `loom:operator-priority` (starred) issue only** (#9244): the star is the operator's Tier-3 approval, so Curator executes it right after curating (Priority 0 below; not for a `loom:epic`). Champion's evaluation is skipped for it.
 
-A Curator subagent that finds `loom:curated` with no `loom:issue` should do exactly what the rest of this file says elsewhere: leave the label alone and move on — including when the Curator is itself running inside a `/loom:sweep` invocation. Promoting is never the Curator's call, under any of the three paths above.
+A Curator subagent that finds `loom:curated` with no `loom:issue` should do exactly what the rest of this file says elsewhere: leave the label alone and move on — including when the Curator is itself running inside a `/loom:sweep` invocation. Promoting is never the Curator's call for an unstarred issue.
 
 **IMPORTANT: Ignore Hard-Excluded Issues**
 
@@ -196,6 +197,20 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`.
 ## Finding Work
 
 Use a **priority-based search** to find the highest-value curation opportunity:
+
+### Priority 0: Starred Issues (`loom:operator-priority`, #9244) — first, every pass
+
+```bash
+gh issue list --label loom:operator-priority --state open --json number,title,labels \
+  --jq '.[] | select([.labels[].name] | any(IN("loom:issue","loom:curating","loom:building","loom:blocked","loom:operator-only","loom:operator-decision")) | not) | "#\(.number) \(.title)"'
+```
+
+Curate each at once (no workflow label = treat as `loom:triage`), then add
+`loom:curated` and `loom:issue` in ONE `gh issue edit`. A starred `loom:epic` gets
+only `loom:curated`; Champion's epic queue takes it first. Guards still apply: skip `loom:blocked`/`loom:operator-only`/`loom:operator-decision` and hard
+exclusions. The star is human-only — never add or remove it. Next come red-main
+fixes (`<!-- loom:main-red-fix -->` in the body): curate them before Priority 1,
+but with **no** promotion bypass.
 
 ### Priority 1: Approved Issues Needing Curation
 
@@ -372,25 +387,15 @@ gh issue list --state=open --limit 500 --json number,title,labels,createdAt \
   ) | \"#\(.number) \(.title)\""
 ```
 
-Note: `loom:blocked` and `loom:operator-only` both stay excluded from this
-curation-candidate query, but neither is dropped entirely from Curator's
-purview. "Checking Dependencies" below re-checks `loom:blocked` issues
-(dependency re-checks, unblock-on-resolve), and "Checking Operator-Only
-Premises" (#6849) further below runs the *same class* of read-only re-check
-against `loom:operator-only` issues that name a specific blocker or parent
-epic. **The distinction the exclusion rests on is doing the work vs.
-re-checking the premise, not the label itself**: `loom:operator-only` is
-excluded here because host/cert/secret provisioning, and any preference or
-authority call, is work only a human may do — that stays true and out of
-scope. But determining whether the reference an operator-parked issue is
-waiting on has since closed is a forge read, the same computation the
-`loom:blocked` re-check already performs, with the same privileges as any
-other Curator pass. It never removes `loom:operator-only` or its sub-kind
-label, and it never auto-releases the issue — see "Checking Operator-Only
-Premises" for the read-only surfacing this enables.
+Note: `loom:blocked` and `loom:operator-only` stay excluded here, but not from
+Curator's purview: "Checking Dependencies" re-checks `loom:blocked` issues, and
+"Checking Operator-Only Premises" (#6849) runs the same read-only premise
+re-check (has the named blocker/epic closed?) on `loom:operator-only` issues.
+Doing operator-only work stays out of scope; that re-check never removes the
+label or auto-releases the issue.
 
 **Workflow**:
-1. Try Priority 1 search first
+1. Priority 0 (starred, then red-main fixes) first; then Priority 1
 2. If no results, use Priority 2
 3. Take the first result — the query now returns oldest-first (`sort_by(.createdAt)`), so no manual age comparison is needed
 4. Enhance and mark as `loom:curated`
@@ -622,7 +627,7 @@ When you find an unlabeled issue, **first assess if it's already implementation-
 gh issue edit <number> --remove-label "loom:curating" --remove-label "loom:triage" --add-label "loom:curated"
 ```
 
-**IMPORTANT**: Do NOT add `loom:issue` — that promotion is never the Curator's to make (see "Who promotes `loom:curated` → `loom:issue`" above).
+**IMPORTANT**: Do NOT add `loom:issue` unless the issue is starred (see "Who promotes `loom:curated` → `loom:issue`" above).
 
 **If ANY checkboxes fail:**
 ⚠️ **Enhance first, then mark curated:**
@@ -631,7 +636,7 @@ gh issue edit <number> --remove-label "loom:curating" --remove-label "loom:triag
 2. Include implementation guidance or options
 3. Add test plan checklist
 4. Check/add dependencies section if needed
-5. Then mark `loom:curated` (NOT `loom:issue` — promotion is never the Curator's call, see "Who promotes `loom:curated` → `loom:issue`" above)
+5. Then mark `loom:curated` (NOT `loom:issue` unless starred — see "Who promotes `loom:curated` → `loom:issue`" above)
 
 ### Examples
 
@@ -655,14 +660,14 @@ Issue #99: "fix the crash bug"
 - ❌ No acceptance criteria
 
 → Action: Ask for reproduction steps, add acceptance criteria
-→ Then: Mark `loom:curated` after enhancement (NOT `loom:issue` — promotion is never the Curator's call)
+→ Then: Mark `loom:curated` after enhancement (NOT `loom:issue` unless starred — see "Who promotes")
 ```
 
 ### Why This Matters
 
 1. **Quality Enhancement**: Curator improves issue quality before human review
 2. **Two-Gate Approval**: Architect→Human, then Curator→Human ensures thorough vetting
-3. **Approval Control**: The Curator never decides what gets implemented (`loom:issue`) — see "Who promotes `loom:curated` → `loom:issue`" above
+3. **Approval Control**: The Curator never decides what gets implemented (`loom:issue`); a star is the operator's decision — see "Who promotes `loom:curated` → `loom:issue`" above
 4. **Clear Standards**: `loom:curated` means enhanced, `loom:issue` means approved for work
 
 ## Decomposing Oversized Issues
@@ -670,7 +675,7 @@ Issue #99: "fix the crash bug"
 If, during curation, you determine an issue is too large to be a single Builder PR (>6 hours, >8 files, or >400 LOC) and must be split into sub-issues:
 
 1. **Create each sub-issue with `loom:triage` only.** Do NOT apply `loom:curated`, even if your decomposition includes curator-quality detail (acceptance criteria, file references, scope guards).
-2. **Do NOT apply `loom:issue`** — the Curator never applies `loom:issue`, to a sub-issue or otherwise (see "Who promotes `loom:curated` → `loom:issue`" above). This rule is unchanged for sub-issues (see "NEVER add `loom:issue`" below).
+2. **Do NOT apply `loom:issue`** — a sub-issue is never starred (the star is human-only), so the starred exception never covers it (see "Who promotes `loom:curated` → `loom:issue`" above).
 3. **Update the parent issue's body or add a comment** with a "Decomposed sub-issues" section linking each child.
 4. **Do not close the parent during decomposition** — it now tracks its children; keep it open (or relabel it as a tracking issue). Closing here would orphan the sub-issues. (Closing/rescoping in general is allowed with a rationale — see "Issues Are Suggestions — Close or Rescope With Rationale" below — but a freshly-decomposed parent is not a close candidate.)
 5. **Do not self-curate your own sub-issues in the same session.** A separate Curator pass (could be the same human-role agent in a later session, or a different agent) must independently review each sub-issue before it can earn `loom:curated`.
@@ -713,7 +718,6 @@ The Builder's complexity-assessment path (`defaults/.claude/commands/loom/builde
 - Link to relevant code, docs, or discussions
 - Document implementation options and trade-offs
 - Add planning details (architecture, dependencies, risks)
-- Assess and add `loom:urgent` label if issue is time-sensitive or critical
 
 ### Verify enumerations
 
@@ -871,7 +875,7 @@ Issues about agent behavior or workflow failures need special curation to preven
 - **Specify a verification method**: Include a concrete test that can distinguish a superficial fix from a real one. Example: "The next PR created by the builder after this change must have sections: Summary, Changes, Test Plan."
 
 ### Organization
-- Apply the real Loom vocabulary: `loom:urgent` for priority, and a tier label (`tier:goal-advancing`, `tier:goal-supporting`, or `tier:maintenance`) for classification — see `.github/labels.yml` for the authoritative set. Do not invent labels (`bug`, `enhancement`, `P0/P1/P2`, and milestones are not part of Loom's label set).
+- Apply the real Loom vocabulary: a tier label (`tier:goal-advancing`, `tier:goal-supporting`, or `tier:maintenance`) for classification — see `.github/labels.yml` for the authoritative set. Do not invent labels (`bug`, `enhancement`, `P0/P1/P2`, and milestones are not part of Loom's label set).
 - Group related issues with `loom:epic` / `loom:epic-phase` tracking issues
 - Update issue templates based on patterns
 
@@ -2104,8 +2108,7 @@ Before marking an issue as `loom:curated`, ensure it has:
 - ✅ **Affected Files section** (see Required Sections below)
 - ✅ **Dependencies verified**: All task list items checked (or no Dependencies section)
 - ✅ **Not a duplicate**: Verified no similar open issues exist (use `check-duplicate.sh`)
-- ✅ Priority label (`loom:urgent` if critical, otherwise none)
-- ✅ Labeled as `loom:curated` when complete (NOT `loom:issue` — promotion is never the Curator's call)
+- ✅ Labeled as `loom:curated` when complete (NOT `loom:issue`, unless starred — Priority 0)
 
 ### Required Sections
 
@@ -2223,7 +2226,7 @@ gh issue edit 100 --remove-label "loom:curating" --remove-label "loom:triage" --
   ```bash
   gh issue edit <number> --remove-label "loom:curating" --remove-label "loom:triage" --add-label "loom:curated"
   ```
-- **NEVER add `loom:issue`**: promotion is never the Curator's call — see "Who promotes `loom:curated` → `loom:issue`" near the top of this file
+- **NEVER add `loom:issue`** to an unstarred issue — see "Who promotes `loom:curated` → `loom:issue`" near the top of this file
 - **Monitor workflow**: Check for `loom:blocked` issues that need help, and
   `loom:operator-only` issues whose stated blocker/parent epic may have closed
   (see "Checking Operator-Only Premises" above)

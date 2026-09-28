@@ -421,7 +421,9 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`.
 
 ## Finding Work
 
-Doctors prioritize work in the following order:
+Doctors prioritize work in the following order. **Within each queue, take
+`loom:operator-priority` (starred) PRs first** (#9244), every pass; guards, holds
+and exclusions apply unchanged. Never add or remove the star.
 
 ### Priority 1: Approved PRs with Merge Conflicts (URGENT)
 
@@ -436,10 +438,8 @@ gh pr list --label="loom:pr" --state=open --json number,title,labels,mergeable \
   | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:treating")) | select(.labels | all(.name != "loom:operator")) | "#\(.number): \(.title)"'
 ```
 
-**Why highest priority?**
-- These PRs are **blocking** - already approved but can't merge
-- Conflicts get harder to resolve over time
-- Delays merge of completed work
+**Why highest priority?** They are approved but blocked, and conflicts only get
+harder over time.
 
 ### Priority 2: PRs with Changes Requested (NORMAL)
 
@@ -1278,7 +1278,7 @@ purely mechanical format fix (#4882).
 
 ### Complex Changes (Create Issue Instead)
 If feedback requires substantial work:
-1. Create an issue with `loom:triage` + `loom:urgent` labels
+1. Create a plain `loom:triage` issue
 2. Link to the original PR and quote the review comments
 3. Document what needs to be done
 4. Let Workers handle the complex refactoring
@@ -1315,7 +1315,7 @@ PR #123 review requested major changes to authentication system:
 [Link to review comment](https://github.com/owner/repo/pull/123#discussion_r123456)
 
 EOF
-)" --label "loom:triage" --label "loom:urgent"
+)" --label "loom:triage"
 ```
 
 ## Best Practices
@@ -1617,7 +1617,7 @@ I want to make sure I address your concern correctly."
 
 ### Feedback Too Complex
 If review requests major architectural changes:
-1. Create issue with `loom:triage` + `loom:urgent`
+1. Create a plain `loom:triage` issue
 2. Link to PR and quote specific feedback
 3. Document what needs to be done
 4. Comment on PR: "This requires substantial refactoring - created issue #X to handle it"
@@ -1631,8 +1631,7 @@ If review requests major architectural changes:
 - **Be proactive**: Check all open PRs regularly - conflicts can appear even on unlabeled PRs
 - **Stay focused**: Only address review feedback and conflicts - don't add new features
 - **Trust the reviewer**: They've thought carefully about their feedback
-- **Keep PRs merge-ready**: Address conflicts immediately, keep branches up-to-date
-- **Keep momentum**: Quick turnaround keeps PRs moving toward merge
+- **Keep PRs merge-ready**: Address conflicts immediately; quick turnaround keeps PRs moving
 
 ## Relationship with Reviewer
 
@@ -1641,7 +1640,6 @@ If review requests major architectural changes:
 **Division of responsibility:**
 - **Reviewer**: Initial review, request changes (→ `loom:changes-requested`), approval (→ `loom:pr`), final label management
 - **Fixer**: Address feedback, resolve conflicts, signal completion (→ `loom:review-requested`)
-- **Handoff**: Fixer transitions `loom:changes-requested` → `loom:review-requested` after fixing
 
 ## Fleet-Comms Etiquette (optional)
 
@@ -1671,8 +1669,9 @@ Handle a pre-existing failure like this:
    reverted (e.g. reproduce it on `origin/main`).
 2. Fix only what is in scope for this PR's feedback.
 3. Leave a PR comment documenting the pre-existing failure so the Judge and Champion
-   have context, and (if it is worth tracking) create a separate issue with
-   `loom:triage` + `loom:urgent` and link it from the comment.
+   have context, and (if it is worth tracking) create a separate `loom:triage`
+   issue with `<!-- loom:main-red-fix -->` in its body (the red-main fast-lane
+   marker, #9244; never a priority label) and link it from the comment.
 
 > **Note**: there is no exit-code-5 "pre-existing" signal. That was part of the
 > Shepherd's test-fix protocol, removed in v0.10.0 — nothing downstream interprets

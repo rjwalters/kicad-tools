@@ -382,7 +382,13 @@ The three states:
 
 **Forced-arm precedence.** The forced arm slots into the Builder model-resolution chain **above tier 2.5 / tier 3** but **below tier 1 / tier 2 operator pins**: an explicit dispatch param (tier 1) or a `roleConfig.model` workspace pin (tier 2) still wins — a pinned canary is intentionally opted out of the experiment. The forced arm only ever replaces what tier 2.5 / tier 3 would have resolved for the Builder.
 
-**Durable stats store.** Instrumentation appends one JSONL record per role phase invocation to `.loom/stats/sweep-model-stats.jsonl` (gitignored; survives the merge that deletes the transient checkpoint). Immediately after each phase's `sweep-checkpoint.sh write`, also run:
+**Usage record (every mode, #9303).** Immediately after **each** `sweep-checkpoint.sh write` — `off` included (telemetry, not the experiment) — journal that subagent's per-model tokens + USD into the issue's story trace (always exits 0):
+
+```bash
+loom-daemon usage-record --issue N --role <role> --attempt <k> --agent-id <agent-id> --task-id "$RUN_ID" || true
+```
+
+**Durable stats store (`observe`/`experiment` only).** Also append one JSONL record per role phase to `.loom/stats/sweep-model-stats.jsonl` (gitignored; outlives the checkpoint):
 
 ```bash
 ./.loom/scripts/sweep-experiment.sh record --mode <mode> --issue N --phase <curator|builder|judge|doctor|merge> \
@@ -390,9 +396,9 @@ The three states:
   --verdict <pass|changes|""> --agent-id <agent-id> --stats-file .loom/stats/sweep-model-stats.jsonl
 ```
 
-Each record carries the **HARD deterministic outcome-chain** (`arm`, `model`, `attempt`, `judge_verdict`, `cycle_count`, `complexity`) — which alone answers #3718's inequality (first-attempt Judge-pass rate + mean Doctor cycles × model price) — **plus the `agent-id` join key** for the role invocation (available in the Task-result metadata at dispatch/return time), which the harvest joins against #3726's transcript index to attribute exact cost.
+Each record carries the **HARD deterministic outcome-chain** (`arm`, `model`, `attempt`, `judge_verdict`, `cycle_count`, `complexity`) — alone enough for #3718's inequality — **plus the `agent-id` join key** (Task-result metadata), which the harvest joins against #3726's transcript index for exact cost.
 
-**Token fidelity.** Live per-phase token capture is **not** available at the Task-result boundary; the exact input/output + cache split is recovered at **harvest** time by parsing each role subagent's `agent-<id>.jsonl` `usage` blocks (see below). Each record stamps a `token_fidelity` tag naming the source (`none` | `sweep-aggregate-log` | `transcript`). The deterministic outcome-chain is the load-bearing signal; exact cost just makes it precise.
+**Token fidelity.** The Task result carries no tokens; the harvest recovers the exact split from each subagent's `agent-<id>.jsonl` `usage` blocks (below). Each record stamps `token_fidelity` (`none` | `sweep-aggregate-log` | `transcript`). The outcome-chain is the load-bearing signal; exact cost makes it precise.
 
 **Guardrails (load-bearing).** `off` by default; `observe` is safe anywhere. `experiment` is **canary-only**: `resolve-mode` refuses to honor it on a non-canary target and **loudly downgrades to `observe`** unless the operator confirms a canary via an **uncommitted** signal — the `LOOM_MODEL_EXPERIMENT_CANARY=1` env var or the gitignored `.loom/CANARY` sentinel file. The committed `sweep.modelExperimentCanary` config flag is **no longer** an accepted confirmation (#3731): it would propagate with a copied config and fire experiment on production. A git-tracked `.loom/CANARY` is refused for the same reason. The `sweep.modelExperiment` *mode* may still live in committed config — it stays inert without the uncommitted confirmation. At lifecycle entry, print the loud banner naming the active mode, the canary confirmation source, and — in `experiment` — the arm assigned to the issue:
 

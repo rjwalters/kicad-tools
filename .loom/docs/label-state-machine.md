@@ -20,6 +20,7 @@ pipeline state already lives.
 
 - [Definition](#definition)
 - [Relationship to `loom:blocked`, `loom:operator-only`, and `loom:needs-capability`](#relationship-to-loomblocked-loomoperator-only-and-loomneeds-capability)
+- [`loom:operator-priority` is not a hold (#9244)](#loomoperator-priority-is-not-a-hold-9244)
 - [Entry points](#entry-points)
 - [Exit rule](#exit-rule)
 - [Current implementation](#current-implementation)
@@ -68,6 +69,31 @@ already-claimed one (it will not *start* work), while every route that
 *re-evaluates* or explicitly targets the item still proceeds. The label never
 refuses dispatch by itself — it is not in the park set the dispatch-time
 guard consults.
+
+## `loom:operator-priority` is not a hold (#9244)
+
+`loom:operator-priority` (the operator's "star") shares a prefix with
+`loom:operator` but means the opposite: not "the engine stopped, a human must
+act" but "a human wants this landed ASAP, act now". It is the one "land this
+ASAP" signal; the older urgent label is retired (its `labels.yml` description
+says so, and no role applies it).
+
+- **Human-only.** No role decides to apply or remove it. The daemon only relays
+  a loom-ui star intent, and Builder copies it from a starred issue onto the PR
+  it opens.
+- **Starred first, every stage.** Curator curates starred issues first (a
+  starred issue with no workflow label counts as `loom:triage`) and promotes
+  them straight to `loom:issue`, because the star is the Tier-3 approval. A
+  starred `loom:epic` instead leads Champion's epic queue. Judge, Doctor and Champion drain starred PRs before their oldest-first pass.
+  Builder takes starred `loom:issue` work first.
+- **Guards unchanged.** `loom:blocked`, `loom:operator-only`,
+  `loom:operator-decision`, Champion's merge-risk and critical-file holds, the
+  host-class gate and Judge's bar all still apply. A starred PR on a hold stays
+  held and is listed first (marked ⭐) in the pinned hold digest (#6877).
+- **Red-main fixes** are a body marker, not a label: an issue that fixes a red
+  `main` carries `<!-- loom:main-red-fix -->` (Doctor adds it when filing a
+  pre-existing failure confirmed on `origin/main`). Curator takes these next,
+  after starred work, with no promotion bypass.
 
 ## Entry points
 

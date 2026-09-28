@@ -57,7 +57,7 @@ Apply the following skip rules (each "skip" logs the reason; the PR does NOT con
 **`loom:reviewing`/`loom:treating` are claim *overlays*, not one of the three state labels the "two or more" conflict-skip row above counts (Issue #6167).** A PR carrying `loom:review-requested` **and** `loom:reviewing` together (a Judge has claimed it and is mid-review — or died mid-review) still has exactly **one** of `{loom:review-requested, loom:changes-requested, loom:pr}`, so it does not hit the conflict-skip row and routes normally to **C1a**. A *stale* `loom:reviewing` next to an actionable state label is therefore **recoverable, not a human-attention case**:
 
 - judge.md's own "Stale `loom:reviewing` Claim Check" (Step 2, before claiming in C1a) reclaims it inline the moment a Judge is actually dispatched for that PR.
-- The sweep-start orphan-recovery pass (`recover-orphaned-shepherds.sh --recover` under the `all` sentinel — see "Build-everything sentinel" below) now also reclaims stale `loom:reviewing`/`loom:treating` claims proactively, across the whole PR set, before any PR-specific Judge/Doctor is even dispatched — closing the gap where a dead Judge's claim on a PR nobody happens to re-visit could otherwise sit unrecovered indefinitely (observed on kicad-tools #4791/#4792, ~36h stale). Doctor's `loom:treating` claim label is the identical overlay for `loom:changes-requested`/C1b and is handled the same way.
+- The sweep-start orphan-recovery pass (`recover-orphaned-shepherds.sh --recover` under the `all` sentinel — see "Build-everything sentinel" below) now also reclaims stale `loom:reviewing`/`loom:treating` claims proactively, across the whole PR set, before any PR-specific Judge/Doctor is even dispatched — so a dead Judge's claim on a PR nobody re-visits cannot sit unrecovered (kicad-tools #4791/#4792, ~36h stale). Doctor's `loom:treating` claim label is the identical overlay for `loom:changes-requested`/C1b and is handled the same way.
 
 Determine the **closing issue number** (used for checkpoint scope below) from `closingIssuesReferences`. This is the GitHub-native `Closes/Fixes/Resolves #N` parser (matches the convention used by the issue-side pre-flight via `closedByPullRequestsReferences`). Record up to one closing issue number per PR:
 
@@ -67,11 +67,11 @@ Determine the **closing issue number** (used for checkpoint scope below) from `c
   CHECKPOINT_PHASE=$(./.loom/scripts/sweep-checkpoint.sh phase N)
   ```
   If `CHECKPOINT_PHASE == "merge-done"`, the closing issue was already merged in a previous sweep — skip this PR with `already merged (per checkpoint)` and delete the stale checkpoint.
-- **2 or more closing issues** → log all closing issue numbers and skip checkpointing (multi-closing PRs are uncommon; a follow-up issue can add a multi-key checkpoint variant if needed). Proceed with Judge/Doctor/Merge as normal.
+- **2 or more closing issues** → log all closing issue numbers and skip checkpointing (multi-closing PRs are uncommon). Proceed with Judge/Doctor/Merge as normal.
 
 ### C1. Per-PR routing by current label
 
-Apply exactly one of the three branches below, based on the PR's current label:
+Apply exactly one of the three branches below, based on the PR's current label. After each checkpoint write, run the `usage-record` step (Execution Model, "Usage record"):
 
 #### C1a. `loom:review-requested` → Judge phase only
 

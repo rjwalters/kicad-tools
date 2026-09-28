@@ -305,14 +305,18 @@ is_resync_surface_path() {
 # (init/credential_class_tests.rs fails CI if the two disagree). It cannot be
 # read from the daemon at runtime: a consumer repo has no post_init.rs, and the
 # installed binary is exactly what is stale on the hosts this guards (#7818).
-# Contract: a trailing `/` is a directory (itself + everything under it);
-# anything else is an exact file path.
+# Contract (#9134): each entry, with any trailing `/` stripped, is a PREFIX of
+# the path it protects -- covering the entry itself, everything under it (for
+# a directory), and any sibling path that extends its final path component
+# (e.g. a rename/backup like `tokens.bak-<ts>/` or `accounts.env.bak`, #9046).
+# Deliberately over-inclusive rather than under-inclusive: a false positive
+# here costs one extra untracked path, a false negative is a credential leak.
 LOOM_CREDENTIAL_PATTERNS=(.loom/claude-config/ .loom/tokens/ .loom/accounts.env
     .loom/api-keys/ .loom/gh-config/ .loom/gh-config-by-owner/)
 is_credential_leak_path() {
     local p
     for p in "${LOOM_CREDENTIAL_PATTERNS[@]}"; do
-        [[ "$1" == "${p%/}" || ("$p" == */ && "$1" == "$p"*) ]] && return 0
+        [[ "$1" == "${p%/}"* ]] && return 0
     done
     return 1
 }

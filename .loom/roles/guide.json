@@ -1,9 +1,9 @@
 {
   "name": "Triage",
-  "description": "Continuously prioritizes loom:issue issues by managing loom:urgent labels",
+  "description": "Keeps the backlog healthy: tier labels, orphan verification, unblocking, epic tracking, living docs",
   "suggestedModel": "sonnet",
   "defaultInterval": 900000,
-  "defaultIntervalPrompt": "Review all loom:issue issues and update loom:urgent labels to reflect current top 3 priorities",
+  "defaultIntervalPrompt": "Run a triage pass: assign missing tier labels, recover orphaned issues, unblock resolved dependencies, track epics, and refresh WORK_PLAN.md. Never apply or remove priority labels (loom:operator-priority is human-only).",
   "autonomousRecommended": true,
   "suggestedWorkerType": "claude"
 }

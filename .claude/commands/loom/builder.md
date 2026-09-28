@@ -1091,27 +1091,27 @@ Workers use a three-level priority system to determine which issues to work on:
 
 ### Priority Order
 
-1. **Urgent** (`loom:urgent`) - Critical/blocking issues requiring immediate attention
+1. **Starred** (`loom:operator-priority`) - The operator wants it landed ASAP (#9244)
 2. **Curated** (`loom:issue` + `loom:curated`) - Approved and enhanced issues (highest quality)
 3. **Approved Only** (`loom:issue` without `loom:curated`) - Approved but not yet curated (fallback)
 
 ### How to Find Work
 
-**Step 1: Check for urgent issues first**
+**Step 1: Check for starred issues first**
 
 ```bash
-gh issue list --label="loom:issue" --label="loom:urgent" --state=open --limit=5
+gh issue list --label="loom:issue" --label="loom:operator-priority" --state=open --limit=5
 ```
 
-If urgent issues exist, **claim one immediately** - these are critical.
+If any exist, **claim one immediately**.
 
-**Step 2: If no urgent, check curated issues**
+**Step 2: If none starred, check curated issues**
 
 ```bash
 gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=10
 ```
 
-**Why prefer these**: Highest quality - human approved + Curator added context.
+**Why prefer these**: human approved + Curator context.
 
 **Step 3: If no curated, fall back to approved-only issues**
 
@@ -1125,7 +1125,7 @@ gh issue list --label="loom:issue" --state=open --json number,title,labels \
   \"#\(.number): \(.title)\""
 ```
 
-**Why allow this**: Work can proceed even if Curator hasn't run yet. Builder can implement based on human approval alone if needed.
+**Why allow this**: work can proceed on human approval alone, before Curator runs.
 
 **Step 4 (every tier): guard the claim before you flip the label**
 
@@ -1293,14 +1293,14 @@ has landed (the failure that made re-dispatched Builders rebuild identical
 work). The canonical body template (Summary / Changes / Acceptance
 Criteria Verification / Test Plan + the `Closes #N` reference) lives in
 **builder-pr.md § "Creating the PR"** — use it verbatim. Do NOT create PRs with
-just `Closes #N`; the body must include the structured sections. Add the
-`loom:review-requested` label at creation only, and never touch PR labels
-afterward (canonical rules in **builder-pr.md § "PR Label Rules"**). PRs are
+just `Closes #N`; the body must include the structured sections. Add
+`loom:review-requested` at creation only (plus `loom:operator-priority` if the
+issue carries it, #9244), and never touch PR labels afterward (canonical rules in **builder-pr.md § "PR Label Rules"**). PRs are
 merged by Champion using `./.loom/scripts/merge-pr.sh` — never use `gh pr merge`.
 
 ## Working Style
 
-- **Start**: Find work using the three-tier priority order (see "Finding Work: Priority System") — urgent → curated → approved-only; oldest-first is only the tiebreak **within** a tier, not a top-level rule
+- **Start**: Find work using the three-tier priority order (see "Finding Work: Priority System") — starred → curated → approved-only; oldest-first is only the tiebreak **within** a tier, not a top-level rule
 - **Verify before claiming**: Issue MUST have `loom:issue` label (unless explicit user override)
 - **Claim**: Remove `loom:issue`, add `loom:building` - always both labels together
 - **During work**: If you discover out-of-scope needs, PAUSE and create an issue (see builder-complexity.md)

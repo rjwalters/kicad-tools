@@ -9,7 +9,7 @@
 # transition on ANY issue, including issues bouncing through Builder-claim ->
 # Judge-approve -> Champion merge-risk-hold -> re-claim cycles (observed on
 # #5607/#5629). Every bounce manufactured its own docs PR. This mirrors the
-# #5643 incident `urgent-flip-guard.sh` fixed for `loom:urgent` specifically,
+# #5643 label-flip incident (fixed then by a per-label flip guard, since retired),
 # but nothing analogous gated the plan-body regeneration itself.
 #
 # The #5890 fix added a time-based debounce: `update_work_plan()` only writes

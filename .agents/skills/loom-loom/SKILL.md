@@ -673,7 +673,7 @@ loom-clean --deep       # Also remove build artifacts
 | `loom:building` | Builder is implementing | Builder |
 | `loom:blocked` | Work is blocked | Builder |
 | `loom:operator-only` | Requires human action; sweep skip | Human |
-| `loom:urgent` | Critical priority | Guide/Human |
+| `loom:operator-priority` | Land ASAP | Human |
 
 **Workflow labels (PR lifecycle):**
 

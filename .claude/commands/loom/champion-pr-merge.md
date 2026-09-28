@@ -1648,11 +1648,9 @@ daemon-reference.md's "`pr-open-skip` (open-PR dispatch guard, #4123)".
 
 ### Per-PR Digest (durable across passes, #6851)
 
-The aggregate line above answers "how big is the pile"; it does not answer
-"which PRs, and why". #6848 was filed after a human found 19 held PRs by
-manually inspecting labels, despite the aggregate line printing a growing
-count in every Champion transcript all along — a number nobody durably records
-is not a tracked signal. Extend the *same* pass (reusing `$HELD_JSON` from
+The aggregate line answers "how big is the pile", not "which PRs, and why"
+(#6848: a human found 19 held PRs by hand despite a growing count in every
+transcript). Extend the *same* pass (reusing `$HELD_JSON` from
 above — no second `gh pr list` call) into a **per-PR digest** (PR number, hold
 reason, `mergeable` status, base-staleness), persisted **durably across
 passes** under the same idempotency-marker convention already used for
@@ -1691,20 +1689,14 @@ fi
 ```
 
 **Step 1 — per-PR hold reason, and conflict-duration tracking (#7020).**
-`$HELD_JSON` already carries `mergeable` and whether the PR is
-`loom:changes-requested` (out at Doctor); it does not carry *why* the PR was
-held, nor *how long* it has been `CONFLICTING`. Read the reason from the PR's
-own hold comment — the same markers the sticky-hold precheck (criterion #2)
-and the durable critical-file hold (criterion #3, #6879) each read — one cached
-read per held PR, never a second bulk `gh pr list`. `loom:operator` is common
-to both hold kinds, but each writes its reason under its own marker, so both
-are checked. Track conflict duration by
-carrying a per-PR `<!-- champion:conflict-since:PR=<n> TS=<iso> -->` marker
-forward from `$OLD_DIGEST_BODY` (Step 0) — present only when that PR was
-*already* `CONFLICTING` in the immediately-prior pass, so it is naturally
-absent (and the clock resets to "now") the first time a PR turns
-`CONFLICTING` **and** after any `MERGEABLE` tick in between two conflict
-episodes, since a `MERGEABLE` pass never writes the marker for that PR:
+`$HELD_JSON` carries `mergeable` and out-at-Doctor state, not *why* the PR was
+held or *how long* it has been `CONFLICTING`. Read the reason from the PR's own
+hold comment (the merge-risk marker of criterion #2, else the critical-file
+marker of criterion #3, #6879) — one cached read per held PR, never a second
+bulk `gh pr list`. Conflict duration rides a per-PR
+`<!-- champion:conflict-since:PR=<n> TS=<iso> -->` marker carried forward from
+`$OLD_DIGEST_BODY` (Step 0). The clock resets on the first conflict and after
+any clean tick between two episodes: a `MERGEABLE` pass never writes the marker for that PR.
 
 **Step 1b — base-staleness, in the same loop (#8552).** A held PR's approval
 and CI stay valid while its base moves, so rot is otherwise found at merge
@@ -1722,8 +1714,10 @@ ROT_THRESHOLD_DAYS=3   # continuously CONFLICTING at least this long -> "rotting
 DIGEST_ROWS=""
 CONFLICT_SINCE_MARKERS=""
 HELD_ROTTING=0
-for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
+# #9244: starred (loom:operator-priority) held PRs sort to the top, marked ⭐.
+for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r 'sort_by([.labels[].name] | index("loom:operator-priority") == null) | .[].number'); do
   ROW=$(printf '%s\n' "$HELD_JSON" | jq -c --argjson n "$PR_NUM" '.[] | select(.number == $n)')
+  STAR=$(jq -e '[.labels[].name] | index("loom:operator-priority")' <<<"$ROW" >/dev/null && echo '⭐ ' || true)
   PR_MERGEABLE=$(jq -r '.mergeable' <<<"$ROW")
   AT_DOCTOR=$(jq -e '[.labels[].name] | index("loom:changes-requested")' <<<"$ROW" >/dev/null && echo true || echo false)
 
@@ -1768,23 +1762,17 @@ for PR_NUM in $(printf '%s\n' "$HELD_JSON" | jq -r '.[].number'); do
   fi
   [ "$AT_DOCTOR" = true ] && STATUS="$STATUS, out at Doctor"
   # Step 1b sets $BASE_STALENESS (champion-held-pr-staleness.md).
-  DIGEST_ROWS="${DIGEST_ROWS}| #$PR_NUM | $REASON | $STATUS | $BASE_STALENESS |
+  DIGEST_ROWS="${DIGEST_ROWS}| ${STAR}#$PR_NUM | $REASON | $STATUS | $BASE_STALENESS |
 "
 done
 HELD_CONFLICTING_CLEAN=$((HELD_CONFLICTING - HELD_ROTTING))
 ```
 
-**`ROT_THRESHOLD_DAYS=3` is deliberately not the 24h staleness window
-criterion #5 routes on.** It answers a different question: staleness (#5, and
-#6852's hold-only suspension above) is *how long since the PR was touched at
-all*; rotting is *how long one conflict has sat unresolved*, and only the
-digest tracks it — nothing routes or force-pushes on it. Three days is long
-enough that a conflict Champion's very next tick would still be reporting on
-does not read as "rotting", and short enough to flag the multi-day drift this
-section exists to surface before it compounds into the crisis-sized pile
-#6720/#6848 describe. It splits "held, clean" (`$HELD_CONFLICTING_CLEAN`,
-younger than the threshold) from "held, rotting" (`$HELD_ROTTING`, at or past
-it) in the aggregate line below.
+**`ROT_THRESHOLD_DAYS=3` is deliberately not criterion #5's 24h staleness
+window**: staleness is *time since the PR was touched*; rotting is *how long one
+conflict has sat unresolved*, tracked only by the digest (nothing routes on
+it). It splits "held, clean" (`$HELD_CONFLICTING_CLEAN`) from "held, rotting"
+(`$HELD_ROTTING`) in the aggregate line below.
 
 **Step 2 — write the digest to a durable tracking issue, and pin it.** Champion
 edits this issue's **body** in place every pass (not a comment thread) — the
@@ -1828,11 +1816,9 @@ gh issue pin "$DIGEST_ISSUE" 2>/dev/null || true   # #8083: self-healing, best-e
 echo "Merge-risk hold digest updated: $DIGEST_URL"
 ```
 
-**Report it even when it is zero, same as the aggregate line** — an empty
-`$HELD_JSON` still writes the digest issue, with a single `_none_` row. A
-fresh "Last updated" timestamp is itself the signal ("the census ran, the pile
-is empty") rather than a stale artifact nobody can distinguish from "Champion
-stopped running this".
+**Report it even when it is zero** — an empty `$HELD_JSON` still writes the
+digest with a single `_none_` row; a fresh "Last updated" is itself the signal
+that the census ran.
 
 **Never let this block a merge decision.** The digest is a read-only summary
 of state this pass already computed for other reasons (`$HELD_JSON`, plus one
@@ -3211,6 +3197,17 @@ fi
 Evaluate and merge qualifying PRs sequentially (oldest first) until the queue is empty. Sequential processing is safe and prevents the bottleneck that occurs when PRs accumulate while the champion waits for the next interval.
 
 If an individual merge fails, continue to the next PR rather than aborting the entire iteration.
+
+**Starred PRs first (`loom:operator-priority`, #9244).** Before the oldest-first
+pass, evaluate every starred `loom:pr` PR. The star changes order only: all 6
+Safety Criteria, the Verdict-State Janitor, and every hold (merge-risk,
+critical-file, `loom:operator-only`, `loom:blocked`) apply unchanged. A starred
+PR that passes is merged this pass. A starred PR on a hold stays held and is
+never merged — it is listed first in the hold digest (Step 1 sorts it to the
+top, marked ⭐). A failed merge (exit 1, not the 3/4/5 re-queues below) on a
+starred PR is retried **once** this pass; if that fails too, post the "Merge
+Failed" comment with the concrete refusal as a starred-PR escalation and do
+not retry it again this pass. Never add or remove the star.
 
 The **Capped-PR Recovery Pass** drains the same way (oldest first, one decision per parked PR, continue past individual failures), but only after the `loom:pr` merge queue is empty — merging approved work always outranks reconsidering parked work.
 

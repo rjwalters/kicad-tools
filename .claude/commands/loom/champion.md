@@ -35,6 +35,8 @@ gh pr list \
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md`**.
+**Starred PRs (`loom:operator-priority`, #9244) are drained first**, every pass;
+all holds and Safety Criteria still apply (see its "Batch Processing").
 
 ### Priority 2: Quality Issues Ready to Promote
 
@@ -100,16 +102,10 @@ gh issue list \
   "#\(.number) \(.title)"'
 ```
 
-> **Why the `loom:issue`/`loom:building` exclusion is required, not optional**:
-> Promotion is additive — it adds `loom:issue` (or, once a Builder claims the
-> work, `loom:building`) but never removes the originating proposal label
-> (`loom:curated`, `loom:architect`, `loom:hermit`, `loom:auditor`). That
-> label is a permanent milestone marker ("this went through curation/this was
-> a proposal"), not a queue-membership flag — see CLAUDE.md's "Note on label
-> cleanup". So a discovery query that filters *only* on the proposal label,
-> with no exclusion for the labels promotion actually adds, matches
-> already-handled issues forever and wastes an evaluation-subagent dispatch
-> on each pass (#5285).
+> **Why the `loom:issue`/`loom:building` exclusion is required**: promotion
+> adds `loom:issue` (later `loom:building`) but never removes the proposal
+> label, a permanent milestone marker (CLAUDE.md "Note on label cleanup"), so
+> without it already-handled issues match forever (#5285).
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-issue-promo.md`**.
 
@@ -170,13 +166,13 @@ If found, **read and follow instructions in `.claude/commands/loom/champion-issu
 If no individual proposals need promotion, check for epic proposals:
 
 ```bash
-# Check for Epic proposals
+# Check for Epic proposals — starred (loom:operator-priority, #9244) first
 gh issue list \
   --label="loom:epic" \
   --state=open \
   --limit=500 \
   --json number,title,body,labels,comments \
-  --jq '.[] | "#\(.number) \(.title) [epic]"'
+  --jq 'sort_by([.labels[].name] | index("loom:operator-priority") == null) | .[] | "#\(.number) \(.title) [epic]"'
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-epic.md`**. Epics have their own evaluation criteria focused on structure and phase decomposition.
@@ -290,7 +286,7 @@ This role is designed for **autonomous operation** with a recommended interval o
 
 When running autonomously:
 1. Check for `loom:pr` PRs (Priority 1)
-2. Process **all available PRs** (oldest first), merging safe ones — drain the full queue before moving on
+2. Process **all available PRs** (starred first, then oldest first), merging safe ones — drain the full queue
 3. If no PRs remain, check for `loom:curated` issues (Priority 2)
 4. Process **all available curated issues** (oldest first), promoting qualifying ones
 5. If no promotion work remains, run the capped-PR recovery pass over `loom:blocked` + `loom:changes-requested` PRs (Priority 5), deciding each one with a rationale comment

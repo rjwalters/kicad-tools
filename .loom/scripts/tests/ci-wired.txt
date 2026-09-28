@@ -107,7 +107,6 @@ test-guide-operator-only-exclude.sh
 test-guide-plan-body-stable-sort.sh
 test-guide-pool-pressure-defer.sh
 test-guide-superseding-block-merge-state.sh
-test-guide-urgency-rank.sh
 test-guide-work-log-debounce.sh
 test-guide-work-log-issue-out-of-order.sh
 test-guide-work-log-issue-pagination.sh
@@ -199,8 +198,8 @@ test-sweep-pr-mode.sh
 test-sweep-run-registry.sh
 test-sync-labels-check.sh
 test-token-cache-affinity.sh
+test-claude-wrapper-proxy-rotation.sh
 test-sync-labels-repo-flag.sh
-test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
 test-version-bump-workflow-identity.sh

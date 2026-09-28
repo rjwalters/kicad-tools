@@ -324,11 +324,11 @@ Prioritized roadmap of upcoming work, maintained by the Guide role.
 
 <!-- Maintained automatically by the Guide triage agent. Manual edits are fine but may be overwritten. -->
 
-## Urgent
+## Operator Priority
 
-Issues requiring immediate attention (`loom:urgent`).
+Operator-starred issues (`loom:operator-priority`).
 
-*No urgent issues.*
+*None.*
 
 ## Ready
 

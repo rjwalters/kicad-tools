@@ -48,7 +48,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:curator [issue]` | Enrich an issue with detail and acceptance criteria; mark `loom:curated`. |
 | `/loom:champion` | Promote quality proposals to `loom:issue` and auto-merge safe `loom:pr` PRs. |
 | `/loom:doctor [pr]` | Address PR feedback, fix bugs, resolve merge conflicts. |
-| `/loom:guide` | Triage the backlog; apply `loom:urgent` to the top priorities. |
+| `/loom:guide` | Triage the backlog: tier labels, unblocking, epics, WORK_PLAN. |
 | `/loom:architect` | Analyze the codebase and file architectural proposals (`loom:architect`). |
 | `/loom:hermit` | Find bloat and file simplification proposals (`loom:hermit`). |
 | `/loom:auditor` | Build and run `main` to verify it actually works; file bugs on failure. |

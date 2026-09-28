@@ -2892,8 +2892,8 @@ git checkout -b chore/resync-installed-$(date +%Y%m%d)
 # GH_CONFIG_DIR trees) must never be staged, and a bare add is exactly what
 # swept a live installation token into a public repo on 2026-08-23. The
 # exclusions are belt-and-braces — the managed .gitignore block covers them too.
-git add -A -- . ':!.loom/claude-config' ':!.loom/tokens' ':!.loom/accounts.env' \
-  ':!.loom/api-keys' ':!.loom/gh-config' ':!.loom/gh-config-by-owner'
+git add -A -- . ':!.loom/claude-config*' ':!.loom/tokens*' ':!.loom/accounts.env*' \
+  ':!.loom/api-keys*' ':!.loom/gh-config*' ':!.loom/gh-config-by-owner*'
 git commit -m 'chore: resync installed Loom surfaces'
 git push -u origin HEAD   # open a PR from here
 cd - && git worktree remove /tmp/loom-resync-staging   # from the primary checkout when done

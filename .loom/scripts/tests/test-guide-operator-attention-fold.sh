@@ -26,7 +26,7 @@
 #   1. guide.md's render_plan_body() queries `loom:operator` PRs into a
 #      `held` variable and renders an "Operator Attention: Merge-Risk-Hold
 #      Pileup" section from it, as the FIRST section emitted (ahead of
-#      "Urgent") — so it is exactly as (non-)volatile as everything else in
+#      "Operator Priority") — so it is exactly as (non-)volatile as everything else in
 #      the generated region.
 #   2. guide.md explicitly documents the fix and prohibits reintroducing a
 #      hand-appended narrative paragraph (the #5930 regression marker).
@@ -121,11 +121,11 @@ else
 fi
 
 OPERATOR_LINE="$(grep -n 'section "Operator Attention: Merge-Risk-Hold Pileup"' <<<"$RPB_BODY" | head -1 | cut -d: -f1)"
-URGENT_LINE="$(grep -n 'section "Urgent"' <<<"$RPB_BODY" | head -1 | cut -d: -f1)"
-if [[ -n "$OPERATOR_LINE" && -n "$URGENT_LINE" && "$OPERATOR_LINE" -lt "$URGENT_LINE" ]]; then
-    pass "the Operator Attention section is emitted BEFORE the Urgent section"
+STARRED_LINE="$(grep -n 'section "Operator Priority"' <<<"$RPB_BODY" | head -1 | cut -d: -f1)"
+if [[ -n "$OPERATOR_LINE" && -n "$STARRED_LINE" && "$OPERATOR_LINE" -lt "$STARRED_LINE" ]]; then
+    pass "the Operator Attention section is emitted BEFORE the Operator Priority section"
 else
-    fail "expected the Operator Attention section call to precede the Urgent section call (operator=$OPERATOR_LINE, urgent=$URGENT_LINE)"
+    fail "expected the Operator Attention section call to precede the Operator Priority section call (operator=$OPERATOR_LINE, starred=$STARRED_LINE)"
 fi
 
 # ---------------------------------------------------------------------------

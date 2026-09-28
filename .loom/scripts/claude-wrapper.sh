@@ -1805,6 +1805,7 @@ is_account_session_limit() { _retry_classify_bool session-limit "$1" "${2:-1}"; 
 # loom-daemon binary resolved" — the same observable failure a broken Python
 # selector used to produce).
 reselect_account_no_mark() {
+    _proxied_launch && { _proxy_rotate concurrent-session && return 0 || return 1; }
     local ws daemon_bin
     ws="$(_resolve_token_workspace)"
     daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "${ws}" || true)"
@@ -1812,49 +1813,76 @@ reselect_account_no_mark() {
         log_warn "No loom-daemon binary resolved — cannot re-select an OAuth account"
         return 1
     fi
+    _select_rotation_account "${ws}" "${daemon_bin}" || return 1
+    log_info "Re-selected OAuth account → '${ACTIVE_TOKEN_NAME}' after concurrent-session limit (token NOT marked bad)"
+    return 0
+}
 
-    local sel_output _sel_rc
+# Run Loom token selection (which skips bad-marked accounts) and export the
+# pick into CLAUDE_CODE_OAUTH_TOKEN / LOOM_TOKEN_NAME / ACTIVE_TOKEN_NAME. The
+# shared tail of all three rotation helpers (one call site, so the #8146
+# `env -u LOOM_ROLE` invariant has exactly one place to hold). Returns 1 when
+# selection yields nothing.
+#
+# #8058: scope selection to the model class this wrapper is running, so an
+# account bad-marked only for another class stays eligible. The helper emits
+# nothing when LOOM_MODEL is unset or the resolved daemon binary predates
+# `--model`, which is why the expansion is deliberately unquoted (it is either
+# two words or none) and why a missing helper -- an older
+# lib/locate-daemon-bin.sh mid-resync -- degrades to plain selection. The class
+# comes from LOOM_MODEL, not from an explicit `--model` in this wrapper's own
+# args: the daemon path sets both (spawn-claude.sh exports LOOM_MODEL and
+# appends the flag), and on the rare path where they disagree a mismatch costs
+# at most one extra rotation -- never a wrong mark, since marking is gated
+# separately by `retry-classify model-class`.
+# #8146: `env -u LOOM_ROLE` is load-bearing here, not hygiene. `tokens select
+# --role` reads LOOM_ROLE straight from the environment (clap `env =`), and the
+# role runner exports it into every spawn, so leaving it set would hand this
+# call the prompt-cache affinity key -- which names the very account we are
+# rotating AWAY from. reselect_account_no_mark does not bad-mark, so that
+# account is still a candidate; affinity would re-pick it every time and burn
+# the retry budget on the same limit. The two bad-marking paths already exclude
+# the failed account, but unsetting keeps the invariant true end-to-end and
+# stops a rotation re-recording the affinity key.
+_select_rotation_account() {
+    local ws="$1" daemon_bin="$2" sel_output _sel_rc
     set +e
-    # #8058: scope selection to the model class this wrapper is running, so an
-    # account bad-marked only for another class stays eligible. The helper
-    # emits nothing when LOOM_MODEL is unset or the resolved daemon binary
-    # predates `--model`, which is why the expansion is deliberately unquoted
-    # (it is either two words or none) and why a missing helper -- an older
-    # lib/locate-daemon-bin.sh mid-resync -- degrades to plain selection.
-    # The class comes from LOOM_MODEL, not from an explicit `--model` in this
-    # wrapper's own args: the daemon path sets both (spawn-claude.sh exports
-    # LOOM_MODEL and appends the flag), and on the rare path where they
-    # disagree a mismatch costs at most one extra rotation -- never a wrong
-    # mark, since marking is gated separately by `retry-classify model-class`.
-    # #8146: `env -u LOOM_ROLE` is load-bearing here, not hygiene. `tokens
-    # select --role` reads LOOM_ROLE straight from the environment (clap
-    # `env =`), and the role runner exports it into every spawn, so leaving it
-    # set would hand this call the prompt-cache affinity key -- which names the
-    # very account we are rotating AWAY from. This function deliberately does
-    # not bad-mark, so that account is still a candidate; affinity would re-pick
-    # it every time and burn the retry budget on the same limit. The two
-    # bad-marking rotation paths below unset it too: they already exclude the
-    # failed account, but unsetting keeps the invariant true end-to-end and
-    # stops a rotation re-recording the affinity key.
     # shellcheck disable=SC2046
     sel_output="$(env -u LOOM_ROLE "${daemon_bin}" tokens select --workspace "${ws}" --export $(declare -F loom_daemon_model_select_flag >/dev/null 2>&1 && loom_daemon_model_select_flag "${daemon_bin}" "${LOOM_MODEL:-}" || true) 2>/dev/null)"
     _sel_rc=$?
     set -e
-    if [[ ${_sel_rc} -ne 0 || -z "${sel_output}" ]]; then
-        return 1
-    fi
-
+    [[ ${_sel_rc} -eq 0 && -n "${sel_output}" ]] || return 1
     # `--export` emits shell-evalable `export CLAUDE_CODE_OAUTH_TOKEN=...` /
-    # `export LOOM_TOKEN_NAME=...` lines (issue #4228) — no more round-trip
-    # through `python3 -c 'import json...'` to pull the two fields back out.
+    # `export LOOM_TOKEN_NAME=...` lines (issue #4228).
     eval "${sel_output}"
-    if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+    [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || return 1
+    ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+}
+
+# --- Proxied launch (#8818) ---
+# Under the Claude credential egress proxy (#8697) this wrapper runs inside a
+# container whose token pool is masked and whose CLAUDE_CODE_OAUTH_TOKEN is a
+# per-launch `loom-placeholder-…`, so `tokens mark-bad` / `tokens select` here
+# would lose the mark and find no account. Instead the HOST rotates:
+# `worker proxy-rotate` asks the proxy to bad-mark this launch's current
+# account (the request carries only a reason from a fixed vocabulary -- never an
+# account, credential or upstream) and swap a fresh credential in behind the
+# SAME placeholder, so the retry needs no new value. It prints only
+# `export LOOM_TOKEN_NAME=…` for attribution. `$2` non-empty narrows an
+# exhaustion mark to the host's model class (#8058).
+# requires-daemon: worker optional   #8818 — only on the opt-in proxied path; an in-container binary predating `worker proxy-rotate` fails the rotation exactly as before this change (ACCOUNT_POOL_EXHAUSTED), never an unproxied fallback.
+_proxied_launch() { [[ "${CLAUDE_CODE_OAUTH_TOKEN:-}" == loom-placeholder-* ]]; }
+_proxy_rotate() {
+    local daemon_bin out
+    daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "$(_resolve_token_workspace)" || true)"
+    if [[ -z "${daemon_bin}" ]]; then
+        log_warn "No loom-daemon binary resolved — cannot ask the host proxy to rotate the OAuth account"
         return 1
     fi
-
+    out="$("${daemon_bin}" worker proxy-rotate --reason "$1" ${2:+--model-scoped})" || return 1
+    eval "${out}"
     ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
-    log_info "Re-selected OAuth account → '${ACTIVE_TOKEN_NAME}' after concurrent-session limit (token NOT marked bad)"
-    return 0
+    log_info "Host-side proxy rotated OAuth account → '${ACTIVE_TOKEN_NAME}' (reason=$1; credential never entered this container)"
 }
 
 # Echo a short human phrase describing why the account was considered
@@ -1930,6 +1958,9 @@ _derive_token_name() {
 # account-wide mark unchanged.
 rotate_exhausted_account() {
     local reason="$1"
+    # Proxied (#8818): the host marks + swaps. "session limit" picks the 5h
+    # window's shorter hold (#7522); the scope flag mirrors the mark below.
+    _proxied_launch && { _proxy_rotate "$(grep -qi 'session limit' <<<"${reason}" && echo session-window || echo usage-limit)" "$(_retry_classify model-class "${2:-}" "${3:-1}" --model "${LOOM_MODEL:-}" && printf '%s' "${_RETRY_CLASSIFY_OUT}" || true)" && return 0 || return 1; }
     local ws daemon_bin
     ws="$(_resolve_token_workspace)"
     daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "${ws}" || true)"
@@ -1964,33 +1995,7 @@ rotate_exhausted_account() {
         log_warn "Active account name unknown — cannot mark it bad; re-selecting anyway"
     fi
 
-    local sel_output _sel_rc
-    set +e
-    # #8058: scope selection to the model class this wrapper is running, so an
-    # account bad-marked only for another class stays eligible. The helper
-    # emits nothing when LOOM_MODEL is unset or the resolved daemon binary
-    # predates `--model`, which is why the expansion is deliberately unquoted
-    # (it is either two words or none) and why a missing helper -- an older
-    # lib/locate-daemon-bin.sh mid-resync -- degrades to plain selection.
-    # The class comes from LOOM_MODEL, not from an explicit `--model` in this
-    # wrapper's own args: the daemon path sets both (spawn-claude.sh exports
-    # LOOM_MODEL and appends the flag), and on the rare path where they
-    # disagree a mismatch costs at most one extra rotation -- never a wrong
-    # mark, since marking is gated separately by `retry-classify model-class`.
-    # shellcheck disable=SC2046
-    sel_output="$(env -u LOOM_ROLE "${daemon_bin}" tokens select --workspace "${ws}" --export $(declare -F loom_daemon_model_select_flag >/dev/null 2>&1 && loom_daemon_model_select_flag "${daemon_bin}" "${LOOM_MODEL:-}" || true) 2>/dev/null)"
-    _sel_rc=$?
-    set -e
-    if [[ ${_sel_rc} -ne 0 || -z "${sel_output}" ]]; then
-        return 1
-    fi
-
-    eval "${sel_output}"
-    if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-        return 1
-    fi
-
-    ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+    _select_rotation_account "${ws}" "${daemon_bin}" || return 1
     log_info "Rotated OAuth account → '${ACTIVE_TOKEN_NAME}' (token tail=…${CLAUDE_CODE_OAUTH_TOKEN: -4})"
     return 0
 }
@@ -2008,6 +2013,7 @@ rotate_exhausted_account() {
 # resolves).
 rotate_auth_dead_account() {
     local reason="$1"
+    _proxied_launch && { _proxy_rotate auth-dead && return 0 || return 1; }
     local ws daemon_bin
     ws="$(_resolve_token_workspace)"
     daemon_bin="$(declare -F loom_locate_daemon_bin >/dev/null 2>&1 && loom_locate_daemon_bin "${ws}" || true)"
@@ -2032,33 +2038,7 @@ rotate_auth_dead_account() {
         log_warn "Active account name unknown — cannot mark it bad; re-selecting anyway"
     fi
 
-    local sel_output _sel_rc
-    set +e
-    # #8058: scope selection to the model class this wrapper is running, so an
-    # account bad-marked only for another class stays eligible. The helper
-    # emits nothing when LOOM_MODEL is unset or the resolved daemon binary
-    # predates `--model`, which is why the expansion is deliberately unquoted
-    # (it is either two words or none) and why a missing helper -- an older
-    # lib/locate-daemon-bin.sh mid-resync -- degrades to plain selection.
-    # The class comes from LOOM_MODEL, not from an explicit `--model` in this
-    # wrapper's own args: the daemon path sets both (spawn-claude.sh exports
-    # LOOM_MODEL and appends the flag), and on the rare path where they
-    # disagree a mismatch costs at most one extra rotation -- never a wrong
-    # mark, since marking is gated separately by `retry-classify model-class`.
-    # shellcheck disable=SC2046
-    sel_output="$(env -u LOOM_ROLE "${daemon_bin}" tokens select --workspace "${ws}" --export $(declare -F loom_daemon_model_select_flag >/dev/null 2>&1 && loom_daemon_model_select_flag "${daemon_bin}" "${LOOM_MODEL:-}" || true) 2>/dev/null)"
-    _sel_rc=$?
-    set -e
-    if [[ ${_sel_rc} -ne 0 || -z "${sel_output}" ]]; then
-        return 1
-    fi
-
-    eval "${sel_output}"
-    if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-        return 1
-    fi
-
-    ACTIVE_TOKEN_NAME="${LOOM_TOKEN_NAME:-}"
+    _select_rotation_account "${ws}" "${daemon_bin}" || return 1
     log_info "Rotated OAuth account → '${ACTIVE_TOKEN_NAME}' (token tail=…${CLAUDE_CODE_OAUTH_TOKEN: -4})"
     return 0
 }

@@ -664,7 +664,8 @@ body. `--signoff` is harmless when not required. See
 ### PR Label Rules
 
 **When creating a NEW PR:**
-- Add `loom:review-requested` label during creation
+- Add `loom:review-requested` during creation, plus `loom:operator-priority`
+  if the issue carries it (#9244: the one label a role copies, never invents)
 - This is the ONLY time you add labels to a PR
 
 **After PR creation:**
@@ -673,7 +674,7 @@ body. `--signoff` is harmless when not required. See
 - NEVER add `loom:pr` yourself (only Judge can approve)
 - NEVER modify any labels on PRs you didn't create
 
-**Why?** PR labels are signals in the review pipeline:
+**Why?** PR labels are review-pipeline signals:
 ```
 Builder creates PR -> loom:review-requested -> Judge reviews
                                             |
@@ -682,7 +683,7 @@ Builder creates PR -> loom:review-requested -> Judge reviews
                       Judge adds loom:pr -> Champion merges
 ```
 
-If you touch these labels, you break the pipeline.
+Touching them breaks the pipeline.
 
 ### GitHub Auto-Close Requirements
 
@@ -978,14 +979,13 @@ things a bare `gh pr create` cannot do are load-bearing here:
   accessible by integration`. The script force-mints a fresh installation token (bypassing
   the ~1h cache) and then falls back to a personal token, instead of dying. Before this,
   that 403 killed the sweep with no PR and the next dispatch **rebuilt the identical
-  work**, leaving an orphaned `feature/issue-N` branch behind each pass.
+  work**, orphaning a `feature/issue-N` branch each pass.
 
 **If it still fails, do NOT rebuild and do NOT delete the branch** — your commits are
-already pushed. Re-run the script (it is idempotent), or report the branch name so the PR
-can be opened from it by hand. The same rule applies on an install predating this script
-(no `.loom/scripts/create-pr.sh` on disk — fall back to a plain `gh pr create` there): a
-`403 … not accessible by integration` after a successful push is a transient credential
-window, never a signal to redo the work.
+pushed. Re-run the script (idempotent), or report the branch name for a hand-opened PR.
+On an install predating this script (no `.loom/scripts/create-pr.sh` — use plain
+`gh pr create`), a `403 … not accessible by integration` after a successful push is
+still a transient credential window, never a signal to redo the work.
 
 ```bash
 # CORRECT way to create PR

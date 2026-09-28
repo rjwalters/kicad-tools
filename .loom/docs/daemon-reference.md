@@ -1925,9 +1925,9 @@ ordering:
   `priorities: &[u32]` slice parallel to the workspaces. Instead of dispatching
   each repo's backlog in registration order, it gathers **every** eligible
   candidate across all workspaces into one queue, sorts it by `candidate_cmp` —
-  **(workspace priority asc, `loom:urgent` first, issue age asc/oldest-first,
-  issue number asc)** — and fills the single shared concurrency budget in that
-  global order. The cap/budget mechanics (#3811/#3930) are unchanged; this only
+  **(workspace priority asc, issue age asc/oldest-first, issue number asc)**,
+  behind the two #9244 lanes below — and fills the single shared concurrency
+  budget in that global order. The cap/budget mechanics (#3811/#3930) are unchanged; this only
   orders the queue. `createdAt` is added to the `gh issue list --json` fields for
   the age key.
 
@@ -1945,15 +1945,174 @@ fairness knobs (per-tier slot reservations) and cross-repo dependency awareness 
 explicit follow-ups, deferred until observed to matter.
 
 **`tier:*` labels do not affect dispatch order.** `tier:goal-advancing` and its
-siblings are triage metadata; no daemon code reads them. Only the four keys above
-order the queue.
+siblings are triage metadata; no daemon code reads them. Neither does
+`loom:urgent` any more (#9244): the label is tolerated on an issue, but it is not
+a key. Only the six keys below order the queue.
+
+### Dispatch order, the operator-priority star and the red-main-fix lane (#9244)
+
+`candidate_cmp` orders candidates by six keys, in this order:
+
+1. **Starred first.** An issue carrying `loom:operator-priority` (the operator's
+   "land this ASAP", applied directly or through the loom-ui star) sorts ahead of
+   every other candidate, fleet-wide, whatever its repo's tier.
+2. **Starred-at**, among starred issues: the issue starred first lands first. The
+   work finder reads the `labeled` event for `loom:operator-priority` from the
+   issue's REST timeline once per starred issue and caches it per (repo, issue); it
+   never reads a timeline for an unstarred issue, and removing the star drops the
+   cache entry. A missing starred-at falls back to `createdAt`. A star applied
+   from loom-ui uses the intent's `requested_at` instead (#9244 C, below). A
+   blocker inheriting a star sorts at that star's position.
+3. **Red-main fixes first**: an issue whose body carries
+   `<!-- loom:main-red-fix -->` at the start of a line, **only while its repo's
+   `main` is verified red** (`WorkspaceHealthStates::is_halted`). A marker on a
+   green repo is inert.
+4. Workspace priority ascending.
+5. `createdAt`, oldest first.
+6. Issue number ascending.
+
+The single-workspace tick sorts by keys 1-3 only, so its listing order is
+unchanged when nothing is starred or red.
+
+**Starred issues outside `loom:issue`.** Besides the `loom:issue` listing, each
+tick makes a second ETag-cached listing of open `loom:operator-priority` issues
+and merges it in, deduplicated by issue number. A starred issue labelled
+`loom:triage` or `loom:curated`, or carrying no workflow label at all, therefore
+becomes a candidate; the dispatched sweep starts from Curator. Starred rows
+already claimed (`loom:building`, `loom:curating`) are dropped. Skip and park labels
+still win: a starred issue carrying `loom:blocked`, `loom:operator-only`,
+`loom:operator-decision` or `loom:operator` is never dispatched
+(`loom:operator-decision` is a skip label in its own right since #9244). If the
+second listing fails, the tick carries on with the `loom:issue` rows. A starred
+`loom:epic` or proposal (`loom:architect`, `loom:hermit`, `loom:auditor`) is
+not taken from the second listing: the star does not make it build work, and it
+keeps its Champion path.
+
+**Lane candidates are not reshaped.** Starred and red-main-fix candidates stay at
+the head of the multi-workspace queue in comparator order. The per-repo cap's
+track affinity and the repo-sharding slice (#6243) reorder and defer only the
+ordinary work behind them, so a starred issue in a cold repo, or in a repo
+another host's slice prefers, is still picked first.
+
+`loom:operator-priority` is **not** `loom:operator` and is not a hold. Code that
+treats a `loom:operator-` prefix match as a hold must exclude it by name (see
+`pr_latency::hold_labels`).
+
+**Overflow slot (one over-limit sweep per host).** A starred candidate that only
+the global `maxConcurrent` cap and/or the per-repo cap (`maxConcurrentPerRepo`)
+refused may still be dispatched, as this host's single overflow sweep, when:
+
+- no live sweep on this host is already marked `overflow` (and no earlier
+  candidate took the slot this tick), and
+- occupancy is at most the **configured** `maxConcurrent`. The cap can drop
+  below occupancy mid-flight; a host already over its limit that way adds
+  nothing, and
+- the host has disk and RAM headroom for one more sweep (occupancy is below
+  `min(disk headroom, ram headroom)`, and the dynamic cap is not 0). Overflow
+  goes past the configured queue limit only, never past resource headroom:
+  when disk or RAM binds the dynamic cap, a starred issue waits like any other.
+
+The saturation brake, the host-class gate, token-pool and pre-flight holds, skip
+and park labels, quarantine, backoff, peer claims and the per-tick ramp cap all
+still apply. Unstarred work, including red-main fixes, never uses the slot. The
+sweep record carries `overflow: true` (shown in `list_sweeps`,
+`get_sweep_status`, and as `[overflow]` in `loom-daemon status`); the tick counts
+it in `TickReport::dispatched_overflow`, and its ready-queue row reads
+`dispatched this tick (overflow)`.
+
+**Main-health halt admits only fixes.** A repo halted because its `main` is
+verified red still admits its `<!-- loom:main-red-fix -->` candidates, and only
+those; every other ready issue in it, starred or not, keeps `workspace_halted`.
+`report.halted` is unchanged. A hold that is not a verified-red `main` (a gate
+run in flight, a drain, the host-distress breaker, a pre-flight or token-pool
+hold) admits nothing, fixes included. With the main-health gate disabled for a
+repo (no enabled `buildGate`), there is no verified-red signal, so the latest
+`main` CI conclusion stands in for key 3: one cached `gh run list` per repo per
+tick, made only when the repo has a marker-bearing candidate.
+
+### Starred-issue liveness and loom-ui stars (#9244 C)
+
+A starred issue is always either being worked on or escalated to the operator
+with one concrete ask. While the work finder is on, a background pass
+(`loom-daemon/src/star_liveness/`) runs every `intervalSecs` and, for each open
+starred issue in each managed repo:
+
+- computes a **landing stage** (`curating`, `ready`, `building`, `in-review`,
+  `changes-requested`, `mergeable`, `merging`, `blocked-by`, `needs-operator`,
+  `no-capacity`), a next actor and time in stage. It is shown by
+  `loom-daemon status` and `loom-daemon queue` (both also under `--json` as
+  `operator_priority_landing`), in the `operator_attention` section of
+  `loom-daemon health` (still always Green), and on `queue.snapshot` for
+  loom-ui;
+- **escalates at once** when no agent can move it: `loom:operator-only` (or a
+  sub-kind) or `loom:operator-decision` on the issue or its PR; Champion's
+  merge-risk / critical-file hold (`loom:operator` on the PR); a forge merge
+  refusal on its approved PR (a "Merge Failed" report whose error is a 405,
+  ruleset or merge-method refusal, the #9268 shape; transient failures do not
+  count); this host's token pool exhausted with no other host having claimed
+  it, after a `poolsExhaustedGraceMinutes` grace so a peer can claim it first
+  (the row is `no-capacity` meanwhile); `loom:blocked` with no open blocker
+  named, or blocked only by an issue in another repo (stars do not cross
+  repos); a loom-ui star on a repo no workspace here manages;
+- escalates an agent-owned stage with **no forward progress** for
+  `noProgressMinutes`, with what it last saw. Progress is forge-visible only,
+  so every host managing the repo agrees: a label change, a PR update, or a
+  trusted comment on the issue, including the sweep's lease renewal (a long
+  Builder phase with a live lease is not a stall on any host). The stall key
+  hashes only those facts (never the stage, which host-local capacity can
+  change), so N hosts post one comment.
+
+An escalation is one comment on the issue, carrying
+`<!-- loom:operator-priority-escalation key=<kind>:<specifics> -->`. Each
+(issue, key) is posted once: a per-process ledger skips repeats without a
+forge call, and every host reads the issue's comments for the marker before
+posting. Only a marker from an `OWNER` / `MEMBER` / `COLLABORATOR`, the fleet
+App (`LOOM_GITHUB_APP_SLUG` > `forge.githubApp.slug`, else
+`loom-fleet-dispatch*`; only as an App login, `…[bot]` or `app/…`, which no
+user can register) or the daemon itself counts; an outside commenter cannot
+pre-post one to suppress an ask. The `pools-exhausted` key is the issue's forge state, not the
+host's hold, so every host and every re-exhaustion share it until the issue
+moves. Safehouse / Matrix delivery is not wired yet (the Safehouse sink only
+narrates the frozen event taxonomy).
+
+**Blocker inheritance.** The issue blocking a starred issue (named by
+`Blocked by #N` on a `loom:blocked` issue, the incident behind a merge refusal,
+or the repo's red-main fix while `main` is red) inherits the star: the work
+finder orders it at the star's position (and it may take the overflow slot),
+even from outside the `loom:issue` listing, and its landing row is marked
+`inherited_from`. Once it closes or stops blocking, the next pass drops it, and
+a repo unreadable for 3 passes in a row loses its inherited stars until a pass
+succeeds. A merge refusal's incident is an **open issue** named in the refusal
+comment itself, or else the newest open issue, filed by a trusted author,
+quoting one of the forge's three specific refusal phrases word-bounded ("Merge
+commits / Squash merges / Rebase merges are not allowed"; for #9276 that was
+#9268).
+A generic refusal (bare 405, merge method, ruleset) never searches, and
+nothing a later comment mentions ever inherits. With no open incident the ask
+quotes the forge's refusal text instead.
+
+**loom-ui stars.** The `/ingest` ack may carry `operator_priority_intents`
+(`defaults/docs/telemetry-schema.md`). The pass applies each valid one (the one
+label, a managed repo, a `requested_by`) idempotently with one audit comment;
+the intent's `requested_at` is the starred-at.
+
+Config (`.loom/config.json → autonomous.operatorPriority`, **env > config >
+default**):
+
+| Key | Env | Default | Meaning |
+|---|---|---|---|
+| `noProgressMinutes` | `LOOM_OPERATOR_PRIORITY_NO_PROGRESS_MINUTES` | `30` | watchdog window |
+| `escalate` | `LOOM_OPERATOR_PRIORITY_ESCALATE` | `true` | post escalations and apply loom-ui intents; `false` still computes and shows every landing state |
+| `intervalSecs` | `LOOM_OPERATOR_PRIORITY_INTERVAL_SECS` | `120` | pass interval |
+| `poolsExhaustedGraceMinutes` | `LOOM_OPERATOR_PRIORITY_POOLS_GRACE_MINUTES` | `10` | wait before a `pools-exhausted` ask; `0` asks at once |
 
 ### Ready queue view (`loom-daemon queue`, #8852)
 
 Each multi-workspace tick records one row per ready `loom:issue` it listed, ranked
 by `candidate_cmp`, with what the tick did with it:
 
-- **running**: `dispatched`, `in_flight`
+- **running**: `dispatched` (detail `overflow` for the host's over-limit
+  starred sweep, #9244), `in_flight`
 - **ready** (waiting on a limit): `deferred_capacity`, `deferred_ramp_cap`,
   `deferred_saturation`, `deferred_out_of_slice`, `deferred_repo_cap`
 - **blocked** (held by something specific to the issue or repo): `parked` (with
@@ -1988,6 +2147,21 @@ observability export on, the queue also reaches SigNoz as
 `queue.snapshot` record (phase 2; see
 [`observability.md` §3c](observability.md#3c-operational-signals-from-daemon-loops-issue-8860)).
 The fleet dashboard view is phase 3.
+
+**Dispatch plan (#9288).** Each row also carries `position`, `plan_state`
+(`running` / `next` / `queued` / `blocked`), `gate`, `keys`, `in_slice`,
+`hot`, `owning_shard` and `repo_cap`. The tick summary carries a `plan` block:
+`slots` (`max_concurrent`, `occupancy`, `free`, `max_admissions_per_tick`,
+`saturation_held`, `any_halted`), `tick_interval_secs`, `shard`, `scope` and
+`ordering`. `position` is the order pass 2 actually offered candidates in,
+after the repo-slice and per-repo-cap shaping. `rank` is still the bare
+comparator rank, so the two differ whenever sharding or
+`maxConcurrentPerRepo` reshapes the list. `loom-daemon queue` shows
+`#<position> <plan_state>[/<gate>]` per row plus a `Plan:` slot line.
+`--json` adds `plan`, and its `ordering` is the daemon's own key list rather
+than a hard-coded string. `loom:curated` / `loom:triage` are unordered and never
+listed. The single-workspace tick has no plan (`plan: null`). Field reference:
+[`telemetry-schema.md` § `queue.snapshot`](telemetry-schema.md#queuesnapshot).
 
 ## Forge-side pipeline snapshot (`status --pipeline`, #3977)
 
@@ -3105,7 +3279,8 @@ issue whose linked PR is in flight a non-candidate (`open_pr`), so the tick's
 next dispatch goes to another repo, and re-engagement when the PR merges is
 automatic. It composes with [repo sharding (#6243)](dispatcher-repo-sharding.md)
 in a fixed order: the sharding slice partition runs first, affinity reorders
-within its result, and the cap gates admission last.
+within its result, and the cap gates admission last. Starred and red-main-fix
+candidates are exempt from both partitions (#9244).
 
 #### Why there is no CPU term in admission (#4512)
 
@@ -4888,7 +5063,7 @@ backoff, the quarantine tally and the resume runway — so the next tick
 re-offers the issue immediately, and the cycle repeats with nothing counting
 it. Observed on `rjwalters/loom#7893`: **14 claims in just over four hours, 55
 `loom:issue`/`loom:building` label events, several claim/release pairs inside
-the same minute, zero PRs** — plus a `loom:urgent` label that made a stuck
+the same minute, zero PRs** — plus an urgent label (since retired, #9244) that made a stuck
 dispatcher look like a priority item.
 
 The discriminator is therefore not how the child died but **whether the

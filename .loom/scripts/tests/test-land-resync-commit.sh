@@ -848,6 +848,56 @@ else
 fi
 
 echo ""
+echo "=== (p4) a sibling-renamed credential dir (.loom/tokens.disabled-<ts>/) is excluded when untracked, hard-stop when tracked (#9134) ==="
+gh_stub_reset
+make_origin origin-p4
+make_primary origin-p4 primary-p4
+P4="$WORKDIR/primary-p4"
+mkdir -p "$P4/.loom/tokens.disabled-20260101T000000Z"
+printf 'sk-ant-oat-dummy\n' > "$P4/.loom/tokens.disabled-20260101T000000Z/acct-1.token"
+printf 'updated\n' > "$P4/.loom/hooks/foo.sh"
+if ! git -C "$P4" check-ignore -q .loom/tokens.disabled-20260101T000000Z/acct-1.token; then
+    pass "fixture's sibling-renamed pool dir is plain untracked dirt (not caught by .gitignore alone)"
+else
+    fail "fixture's sibling-renamed pool dir is already gitignored — this case would pass regardless of the script"
+fi
+OUT="$(cd "$P4" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Excluded from the commit" <<< "$OUT" && \
+   grep -qF ".loom/tokens.disabled-20260101T000000Z/acct-1.token" <<< "$OUT"; then
+    pass "the sibling-renamed pool dir is excluded as credential dirt, not staged as foreign dirt"
+else
+    fail "the sibling-renamed pool dir is excluded as credential dirt, not staged as foreign dirt (rc=$RC, out=$OUT)"
+fi
+ORIGIN_TREE_P4="$(git --git-dir="$WORKDIR/origin-p4.git" ls-tree -r --name-only main)"
+if ! grep -q "tokens.disabled-20260101T000000Z" <<< "$ORIGIN_TREE_P4"; then
+    pass "no sibling-renamed pool path was committed to origin"
+else
+    fail "no sibling-renamed pool path was committed to origin (tree=$ORIGIN_TREE_P4)"
+fi
+
+echo ""
+echo "=== (p5) a TRACKED sibling-renamed credential dir is a hard stop too (#9134) ==="
+gh_stub_reset
+make_origin origin-p5
+make_primary origin-p5 primary-p5
+P5="$WORKDIR/primary-p5"
+mkdir -p "$P5/.loom/tokens.disabled-20260101T000000Z"
+printf 'sk-ant-oat-dummy\n' > "$P5/.loom/tokens.disabled-20260101T000000Z/acct-1.token"
+git -C "$P5" add -f .loom/tokens.disabled-20260101T000000Z/acct-1.token
+git -C "$P5" commit -q -m "oops: committed the renamed token pool"
+git -C "$P5" push -q origin main
+printf 'sk-ant-oat-rotated\n' > "$P5/.loom/tokens.disabled-20260101T000000Z/acct-1.token"
+printf 'updated\n' > "$P5/.loom/hooks/foo.sh"
+OUT="$(cd "$P5" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 1 ]] && grep -q "TRACKED" <<< "$OUT" && \
+   grep -qF ".loom/tokens.disabled-20260101T000000Z/acct-1.token" <<< "$OUT" && \
+   ! grep -q "resync installed Loom surfaces" <<< "$(git --git-dir="$WORKDIR/origin-p5.git" log --oneline main)"; then
+    pass "a tracked sibling-renamed pool file stops the run and nothing is committed or pushed"
+else
+    fail "a tracked sibling-renamed pool file stops the run and nothing is committed or pushed (rc=$RC, out=$OUT)"
+fi
+
+echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"
 if [[ $TESTS_FAILED -gt 0 ]]; then
     echo -e "${RED}$TESTS_FAILED test(s) failed${NC}"

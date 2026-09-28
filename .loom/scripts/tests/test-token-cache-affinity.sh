@@ -113,8 +113,10 @@ echo "Testing claude-wrapper.sh 'tokens select' invocations (#8146)..."
 # prefix, so a future call site added without it fails here.
 invocations="$(grep -c 'tokens select --workspace' "$WRAPPER" || true)"
 unguarded="$(grep 'tokens select --workspace' "$WRAPPER" | grep -cv 'env -u LOOM_ROLE' || true)"
-assert_eq "3" "$invocations" \
-    "claude-wrapper.sh still issues exactly the three known 'tokens select' calls (#8146)"
+# One call site since #8818 folded the three rotation helpers' identical
+# selection tails into `_select_rotation_account`.
+assert_eq "1" "$invocations" \
+    "claude-wrapper.sh issues 'tokens select' from exactly one shared call site (#8146, #8818)"
 assert_eq "0" "$unguarded" \
     "no 'tokens select' invocation runs without the env -u LOOM_ROLE prefix (#8146)"
 

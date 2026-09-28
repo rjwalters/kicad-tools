@@ -455,10 +455,10 @@ discover_project_goals() {
     grep -E "^- \[.\]|^## M[0-9]" docs/roadmap.md ROADMAP.md 2>/dev/null | head -10
   fi
 
-  # 3. Check for urgent/high-priority goal-advancing issues
+  # 3. Goal-advancing and operator-starred work
   echo "Current goal-advancing work:"
   gh issue list --label="tier:goal-advancing" --state=open --limit=5
-  gh issue list --label="loom:urgent" --state=open --limit=5
+  gh issue list --label="loom:operator-priority" --state=open --limit=5
 
   # 4. Summary
   echo "Goal-advancing proposals should target these areas"

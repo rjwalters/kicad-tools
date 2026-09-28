@@ -1786,10 +1786,17 @@ refresh chain.
 
 Three consequences of the proxied Claude path:
 
-- **No mid-sweep rotation.** The pool is not visible inside the container, so
-  `claude-wrapper.sh` cannot rotate to another account. An exhausted account
-  ends the launch instead, and the host pool does not get its bad-mark
-  (#8818).
+- **Rotation happens on the host (#8818).** The pool is not visible inside the
+  container, so `claude-wrapper.sh` runs `loom-daemon worker proxy-rotate
+  --reason <r>` instead. It POSTs `{"reason":…}` to the proxy's never-forwarded
+  `/.loom-egress-proxy/v1/rotate` path under the launch's placeholder. The host
+  bad-marks the launch's own account in the host pool, selects another and
+  swaps it in behind the same placeholder. The body cannot name an account,
+  credential or upstream. A marking reason needs the proxy to have seen a
+  429 (exhaustion, TTL mark) or 401 (`auth-dead`) for the current credential;
+  the permanent `auth-dead` mark is written only if the host's own re-probe
+  also gets a 401. Swaps per launch are capped
+  (`LOOM_EGRESS_PROXY_MAX_ROTATIONS`, default 8).
 - **No survival across a hard daemon stop.** The proxy's lifetime is the
   launch's. `restart --drain` is unaffected.
 - **Some requests bypass the proxy.** They go straight to `api.anthropic.com`

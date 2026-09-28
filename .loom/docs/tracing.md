@@ -34,6 +34,29 @@ the same execution after a daemon restart reuses its identity. A new attempt
 gets a new execution identity. The parser accepts strict W3C version-00 context;
 it rejects malformed, uppercase, and zero IDs.
 
+The story's GitHub-shaped **phase spans** are emitted by the 2AMLogic/2am
+storyline reconciler, not by Loom; Loom only derives and accepts their IDs
+(`story_span_id`, `sha256(input:span:<kind>:<source_event_id>)[0..8]`) over
+D32's closed kind list `STORY_SPAN_KINDS`, kept byte-for-byte in parity with
+2am's `vectors.json` (`loom-daemon/tests/fixtures/story_vectors_d32_v1.json`):
+`story.intake`, `story.queue_dwell`, `story.ci`, `story.ci.queue`,
+`story.ci.run`, `story.review_wait`, `story.rework`, `story.merge`,
+`story.reopened`, `story.operator_hold`. The 2026-09-28 amendment (#9334,
+#9335, #9336) derives `story.review_wait` once per review round; adds
+`story.rework`, the role-neutral envelope from a round's first `labeled
+loom:changes-requested` to the next `labeled loom:review-requested` (absent if
+the PR closes mid-rework; active Doctor/Builder time is the Loom spans nested
+inside it); and adds `story.operator_hold`, one overlapping sibling per
+application of a hold label (`loom:operator-only`, `-blocked`, `-mechanical`,
+`-decision`, `-objective`, or bare `loom:operator`) from `labeled` to
+`unlabeled` or the item's close, keyed by its `labeled` event and tagged
+`loom.story.operator_hold.kind` = the label suffix (`only | blocked |
+mechanical | decision | objective | operator`); it never shortens
+`story.intake` or `story.queue_dwell`. The repeating kinds carry
+`loom.attempt` in its generalized meaning ([trace identity](trace-identity.md)).
+Reconciler spans reach SigNoz through 2am's own host-local collector, not the
+Loom gateway, so these `loom.story.*` attributes need no Loom `keep_keys` entry.
+
 The context directory is private and files are written atomically with fsync.
 An exclusive file lock serializes creators. A corrupt, busy, or full context
 store disables tracing for that launch with a diagnostic instead of delaying
@@ -148,7 +171,14 @@ helper can provide only the phases that the daemon actually observes.
 
 `loom.role_attempt` spans have distinct IDs for retries. Explicit checkpoint
 attempt numbers are retained. Unknown usage remains absent; measured zero stays
-zero. Outcome logs include existing grouped usage, failure classification, ordered
+zero. Each attempt's token usage is a set of per-model `loom.runtime.usage`
+children with `loom.usage.scope=attempt` (#9303): `loom-daemon usage-record`,
+run after each checkpoint write, reads the role subagent's transcript and
+journals them under the role's newest attempt, or, in an operator session with
+no inherited context, under a `loom.role_attempt` it creates in the issue's
+story trace (`loom.timing_source=transcript_window`). The whole execution's
+usage is the `scope=execution` set; see `telemetry-schema.md` for how to total
+the two without double counting. Outcome logs include existing grouped usage, failure classification, ordered
 Judge verdicts and Doctor counts. Grouped usage inherits the source journal's
 attribution window and is not a measured provider bill. Free-form role error text,
 configuration blobs, prompts and account contents are not exported.
@@ -186,6 +216,9 @@ yields the same id. It carries `loom.role`, `loom.issue`, `loom.pr_number`
 `loom.timing_source=tick` — its start and end are the whole tick's, not the
 individual action's — plus a link to the tick's own root. The spans are
 appended to the tick's trace journal and drained like every lifecycle span.
+Its token usage is journalled as per-model `loom.runtime.usage` spans:
+`scope=execution` under the tick's own root, and `scope=attempt` under the
+story span only when exactly one target is stitched (#9303).
 All of this is best-effort after the tick's child has exited; it never fails
 the tick. Non-Claude runtimes record no transcript actions, so their ticks
 join no story yet.

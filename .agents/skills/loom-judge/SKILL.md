@@ -534,7 +534,7 @@ Full policy, TTL/invalidation semantics, and the manual verification steps:
 ### Primary Queue (Priority)
 
 0. **Sweep stale verdicts first**: run the Stale-Verdict Sweep (see below) over the open `loom:pr` / `loom:changes-requested` PRs. Any PR it re-queues joins step 1's queue on this same pass.
-1. **Find work**: `"$GH_READ" pr list --label="loom:review-requested" --state=open --limit 500` (cached — see "Cached Forge Reads")
+1. **Find work**: `"$GH_READ" pr list --label="loom:review-requested" --state=open --limit 500` (cached — see "Cached Forge Reads"). **Review `loom:operator-priority` (starred) PRs first** (#9244), every pass; same bar, holds and guards. Never add or remove the star.
 2. **Claim PR** (staleness-aware — see "Stale `loom:reviewing` Claim Check" immediately below before running this): `gh pr edit <number> --add-label "loom:reviewing"` to signal you're working on it
 3. **Check merge state**: Check for conflicts and attempt automated rebase if DIRTY (see Automated Rebase for DIRTY PRs below)
    ```bash
@@ -3006,7 +3006,7 @@ If no work was found (no PRs with `loom:review-requested`), report that and stop
 3. Continue until the queue is empty
 4. Once the queue is empty, execute `/clear` to reset context for the next interval
 
-This batch processing prevents PRs from waiting unnecessarily when multiple are queued. Under the wave-parallel sweep model, several sweeps can land PRs at once, so the judge must drain the queue efficiently rather than processing one PR per interval.
+Batch mode stops queued PRs waiting an interval each; wave-parallel sweeps can land several at once.
 
 **Apply the "Stale `loom:reviewing` Claim Check" (see Primary Queue, step 2) to every PR in this loop, not just the first.** A `loom:review-requested` PR already carrying a fresh `loom:reviewing` claim from a concurrently-running Judge must be skipped (continue to the next PR in the batch); one carrying a stale claim is reclaimed then reviewed. This keeps a cron-invoked batch pass and a `/loom:sweep`-dispatched pass consistent with each other.
 

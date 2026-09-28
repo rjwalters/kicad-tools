@@ -295,13 +295,9 @@ human, never self-clear it. Rules: `.loom/docs/premise-gate.md` §
 
 ### Priority Assessment
 
-Add `loom:urgent` only if:
-- Critical bug affecting users NOW
-- Security vulnerability requiring immediate patch
-- Blocks all other work
-- Production issue that needs hotfix
-
-When in doubt, leave as normal priority.
+Never apply a priority label (`loom:operator-priority` is human-only, #9244).
+If it looks critical (user-facing bug NOW, security hole, blocks all work), say
+so in the body; the operator decides.
 
 ---
 

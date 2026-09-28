@@ -850,19 +850,16 @@ what feeds the public fleet feed. Loom is the producer:
     `LOOM_SAFEHOUSE_TRANSCRIPT_TOKENS=0` to opt out of the transcript scan
     entirely (the key is then simply omitted on dispatch-driven hosts).
 
-    > **`tokens` is a raw block-sum, not deduped on `message.id` (#8186).** A
-    > streamed assistant message is written to the transcript once per chunk,
-    > and every chunk repeats the same `message.id` carrying that message's
-    > **cumulative** usage, not a delta — `sum_transcript_usage`/
-    > `sum_transcript_usage_by_model` (the functions behind both `tokens` and
-    > `tokens_by_model` below) sum every block without folding on that id.
-    > Measured 2026-09-18 (24h window, 2,330 transcripts): 51% of usage blocks
-    > are repeats, so both figures run roughly 2x high versus a per-message
-    > total. This is long-standing, deliberately-left-alone behaviour (existing
-    > consumers are calibrated against it) — not a bug. For a deduped total,
-    > use `activity.db`'s ingestion path (`activity::transcript_parse`, #8059,
-    > see [`transcript-token-ingest.md`](transcript-token-ingest.md)) instead
-    > of this feed.
+    > **`tokens` and `tokens_by_model` are deduped on `message.id` as of
+    > 2026-09-28 (#9303).** A streamed assistant message is written once per
+    > chunk, each chunk repeating the same `message.id` with **cumulative**
+    > usage; `sum_transcript_usage`/`sum_transcript_usage_by_model` now keep
+    > the max of each counter per id instead of summing every block. Before
+    > that date both figures were raw block-sums, roughly 2x high (51% of
+    > usage blocks were repeats, measured 2026-09-18; #8186) — so a series
+    > spanning the change steps down by about half. It supersedes #8186's
+    > "document, don't change" decision (#8203): per-attempt cost must sum to
+    > the execution total and USD must not inherit the 2x.
   - **`tokens_by_model` (#5740)** is a per-`(model, speed, service_tier)`
     breakdown of the same transcript scan, because `tokens`' single sum
     cannot be priced: it merges five quantities (`input`, `cache_read`, the

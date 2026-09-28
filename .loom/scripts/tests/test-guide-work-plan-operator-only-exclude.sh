@@ -2,7 +2,7 @@
 # test-guide-work-plan-operator-only-exclude.sh - Regression test for issue #7008
 #
 # guide.md's `render_plan_body()` (WORK_PLAN.md's machine-generated region)
-# has SIX forge queries: `urgent`/`ready`/`building`/`review`/`approved`/
+# has SIX forge queries: `starred`/`ready`/`building`/`review`/`approved`/
 # `curated`. The `ready` query (feeding the "Ready" section, documented as
 # "Human-approved issues ready for implementation") filtered only on
 # `--label "loom:issue"` — unlike the "Finding Work" search earlier in the
