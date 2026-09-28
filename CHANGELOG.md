@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-28
+
+### Summary
+
+Three new `kct check` rules — `via_under_body` and `pin1_marker` (both on
+by default) and the opt-in `width_consistency` audit — plus native
+emission of the different-net SMD-pad clearance floor and a single
+clearance resolver for `kct route` (Epic #5509 Phase 2/3). **Read the
+upgrade notes:** `kct check --strict` and native `kicad-cli` DRC can
+newly fail on boards that passed before, and `kct route` now routes at
+the clearance the board's project declares (for example KiCad's stock
+0.20 mm `Default` netclass) instead of letting `--mfr` or its own target
+override it. Also: routing-plan capacity gating (`--plan-gate`,
+`net-status --why` sidecar), the coupled diff-pair search moved onto the
+exact-geometry clearance kernel, pre-release correctness fixes to the
+three new rules, and router performance work.
+
 ### Upgrade notes / behaviour changes
 
 - **`kct check --strict` can newly fail on boards that passed before.**
@@ -23,6 +40,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kct check --strict --skip via_under_body,pin1_marker`, or add
   per-reference / per-item entries to `.kct_waivers.json`. Waivers are
   narrower and keep the check active for new parts.
+
+- **`kct route` now routes at the clearance the board's project
+  declares** (Issues #5645, #5654). The router reads the `.kicad_pro` and
+  `.kicad_dru` beside the `.kicad_pcb` — the same set `kicad-cli pcb drc`
+  checks — and treats each declared value as a **floor** that only ever
+  *raises* the router's 0.15 mm target, never lowers it:
+  - an unconditional `.kicad_dru` clearance rule,
+  - the `.kicad_pro` minimum clearance (`min_clearance` /
+    `clearance_min`), and
+  - the `.kicad_pro` `Default` netclass clearance. A project still
+    carrying KiCad's stock **0.20 mm** `Default` is now routed at 0.20 mm.
+    Projects kct itself creates now write `Default` at 0.15 mm, so they are
+    unaffected.
+
+  In addition, **`--manufacturer` / `--mfr` no longer overrides a clearance
+  the board declares**; it only selects which fab floor applies. The
+  clearance banner names the layer that won. To keep the previous spacing,
+  lower the declared value in the project, or pass `--clearance`, which
+  remains the one deliberate waiver and now warns when it undercuts a
+  declared rule (#5656).
+
+- **`kicad-cli pcb drc` can newly fail boards whose `.kicad_dru` kct
+  regenerates** (Issue #5059). Generated DRU files (and the shipped JLCPCB
+  templates) now carry a native `SMD Pad Clearance` rule for SMD pads of
+  different footprints whenever the profile sets
+  `min_smd_pad_clearance_mm`, so native DRC reports different-net SMD pad
+  pairs closer than that floor that it previously passed. KiCad
+  10.0.0/10.0.1 never fire the rule, and kct warns when it detects one of
+  those versions (#5724).
 
 ### Fixed
 
@@ -87,6 +133,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     #5509 scope guards #1 and #2); rule resolution stays with each
     consumer, the kernel answers only gaps.
 
+- **Coupled differential-pair search now refines dynamic route-halo rejection
+  with physical clearance** (part of Issue #5410). A dynamic route halo is a
+  conservative acceleration structure: committed copper is dilated to whole
+  grid cells, so a foreign route's halo covers candidates whose actual copper
+  and drill gaps satisfy the effective rules. PR #5425 taught the per-net A*
+  (both backends) to measure that geometry before rejecting such a candidate;
+  the **coupled** joint-state search — the engine that routes every
+  differential pair — still answered on the raster alone, so every pair after
+  the first refused legal steps beside already-committed copper. Both coupled
+  backends now apply the identical check, over the swept trace step (not just
+  its endpoint) and the through-via envelope. Hard or unverifiable blockage —
+  pad metal, static halos, keepouts, reservations, hidden overlapping owners,
+  missing geometry — still rejects, and the refinement is **fail-closed**:
+  dormant without the net-name map it needs to resolve pairwise
+  (HV-isolation) requirements, and, on the C++ side, dormant unless that
+  grid's own cross-domain widening was installed *and* the refiner is armed.
+  The refinement re-measures with the candidate's **net-class** trace width,
+  clearance and via size on both backends — re-measuring with the global
+  `DesignRules` scalar would have waived clearance the raster halo (dilated
+  with the net-class value) had enforced, which is the #5673 under-blocking
+  direction. Native ABI 42 → 44.
+- **Qualify KiCad 10.0.6 for the native mask-to-copper gate** (Issue #5678).
+  The CI runner's floating `kicad/kicad:10.0` tag moved from 10.0.5 to 10.0.6,
+  and both hard-coded `10.0.5` version pins — `scripts/ci/check_mask_copper_native.py`'s
+  gate and `validate/mask_copper_geometry.py`'s native-attribution check —
+  rejected it, failing the `Test` job's mask step (which also skipped every
+  later step in that job, including `Run tests`). The two pins are now one
+  shared `QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")` in
+  `validate/mask_copper_geometry.py`, imported by the CI gate so the pair can
+  no longer drift apart; an unqualified build still fails loudly, now naming
+  the versions it did see.
+  10.0.6 was **measured**, not assumed, before being admitted: the full native
+  suite was run in both `kicad/kicad@sha256:182c8005…` (10.0.5) and
+  `kicad/kicad@sha256:18693567…` (10.0.6), each reporting `32 passed, no
+  skips`, and the resulting mask/copper geometry was compared across the two —
+  every exported layer polygon and every per-UUID attributed object polygon
+  came back byte-identical in WKT (0.000e+00 mm² symmetric difference).
+
+- **The new `kct check` rules shipped in this release got three
+  correctness fixes before release.** `pin1_marker`'s bent-component
+  tie-break no longer lets a nearby board-level silk shape stand in for a
+  footprint's own pin-1 mark (Issue #5748). `via_under_body`'s default
+  footprint pattern is now case-insensitive (lower/mixed-case `qfn`,
+  `Wson`, `lga` ids are checked) with the `SON` token anchored so
+  `Resonator` / `Panasonic` / `Epson` / `Degson` footprints are *not*
+  swept in — it selects exactly the same 964 KiCad 10 stock footprints as
+  before — and an exposed pad split into several same-net pads is now
+  recognised as the thermal pad (Issue #5749). `width_consistency` joins
+  track endpoints within `node_tolerance_mm` even when rounding puts them
+  in different buckets, so chains no longer end early and hide
+  `width_island` / `width_transition` findings (Issue #5750; six
+  previously missed transitions on board 05).
+- **The route optimizer's grid collision checker no longer rejects legal
+  copper near the clearance threshold** (Issue #5625). It dilated
+  already-dilated committed copper a second time, so two envelopes merely
+  touching read as a violation at roughly twice the real clearance; it now
+  runs an exact narrow phase and agrees with the vector checker and
+  `kicad-cli` on the conformance corpus's routed-copper (segment-segment)
+  probes.
+- **A routing-cache hit now writes the `<stem>.routing_plan.json`
+  sidecar too** (Issue #5651) — the plan stage previously ran only on a
+  cache miss, so identical runs produced different artifact sets.
+- **`--clearance` below a declared rule now warns** (Issue #5656). The
+  explicit-clearance path skipped reading the board's declared rules, so
+  the undercut advisory could never fire from the CLI; the resolved value
+  is unchanged.
+- **The native mask-geometry export check no longer reports a
+  successful `kicad-cli` export as unsupported** because of KiCad's
+  single-instance `Warning: Invalid lock file` line (Issue #5707). A
+  narrow, anchored allowlist of geometry-neutral stderr lines is ignored
+  only when the process exited 0.
+- **Writing a `.kicad_dru` now warns when its `SMD Pad Clearance` rule
+  is inert on the installed KiCad**
+  (Issue #5724). KiCad 10.0.0/10.0.1 silently never fire it (pads there
+  don't inherit their footprint's reference), which gave a clean DRC on
+  boards violating the 0.15 mm different-net SMD floor.
+- **`--deterministic-budget`'s help text and warning now state the
+  `--timeout` interaction accurately** (Issue #5765). Under `--auto-layers`
+  escalation each attempt gets only a fair slice of `--timeout`, which can
+  bind on a slow host; the flag no longer claims an unconditional safety
+  backstop, and a run whose stage deadline actually fired is logged as
+  having lost determinism.
+- **Board 03's saved-plan replay no longer deletes footprint silkscreen**
+  (Issue #5744). The demo recipe's routed artifact had lost all 139 silk
+  graphics because the plan replay removed every silk child and restored
+  only reference text; it now replays text only.
+
 ### Added
 
 - **Via-under-package-body rule in `kct check`**: a new default-on
@@ -106,7 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warnings, will now fail on a board with a via under a QFN/DFN/SON/LGA
   body, even if that board passed before the upgrade.** To opt out, run
   `kct check --skip via_under_body`, or waive the via or reference in
-  `.kct_waivers.json`. See "Upgrade notes" below.
+  `.kct_waivers.json`. See "Upgrade notes" above.
 
 - **Pin-1 / polarity silkscreen-marker rule in `kct check`**: a new
   default-on `pin1_marker` category (selectable via `--only`/`--skip`, no new
@@ -129,7 +262,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counts warnings, will now fail on a board with an orientation-sensitive
   part that has no visible pin-1 mark, even if that board passed before the
   upgrade.** To opt out, run `kct check --skip pin1_marker`, or waive the
-  reference in `.kct_waivers.json`. See "Upgrade notes" below. Marker
+  reference in `.kct_waivers.json`. See "Upgrade notes" above. Marker
   *generation* is out of scope; it remains a listed follow-up of
   `kicad_tools.silkscreen.generator`.
 
@@ -250,45 +383,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     unrouted, how many cross an overflowed corridor) and *precision* (of
     the overflowed corridors, how many are crossed by an unrouted net).
 
-### Fixed
+### Changed
 
-- **Coupled differential-pair search now refines dynamic route-halo rejection
-  with physical clearance** (part of Issue #5410). A dynamic route halo is a
-  conservative acceleration structure: committed copper is dilated to whole
-  grid cells, so a foreign route's halo covers candidates whose actual copper
-  and drill gaps satisfy the effective rules. PR #5425 taught the per-net A*
-  (both backends) to measure that geometry before rejecting such a candidate;
-  the **coupled** joint-state search — the engine that routes every
-  differential pair — still answered on the raster alone, so every pair after
-  the first refused legal steps beside already-committed copper. Both coupled
-  backends now apply the identical check, over the swept trace step (not just
-  its endpoint) and the through-via envelope. Hard or unverifiable blockage —
-  pad metal, static halos, keepouts, reservations, hidden overlapping owners,
-  missing geometry — still rejects, and the refinement is **fail-closed**:
-  dormant without the net-name map it needs to resolve pairwise
-  (HV-isolation) requirements, and, on the C++ side, dormant unless that
-  grid's own cross-domain widening was installed *and* the refiner is armed.
-  The refinement re-measures with the candidate's **net-class** trace width,
-  clearance and via size on both backends — re-measuring with the global
-  `DesignRules` scalar would have waived clearance the raster halo (dilated
-  with the net-class value) had enforced, which is the #5673 under-blocking
-  direction. Native ABI 42 → 44.
-- **Qualify KiCad 10.0.6 for the native mask-to-copper gate** (Issue #5678).
-  The CI runner's floating `kicad/kicad:10.0` tag moved from 10.0.5 to 10.0.6,
-  and both hard-coded `10.0.5` version pins — `scripts/ci/check_mask_copper_native.py`'s
-  gate and `validate/mask_copper_geometry.py`'s native-attribution check —
-  rejected it, failing the `Test` job's mask step (which also skipped every
-  later step in that job, including `Run tests`). The two pins are now one
-  shared `QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")` in
-  `validate/mask_copper_geometry.py`, imported by the CI gate so the pair can
-  no longer drift apart; an unqualified build still fails loudly, now naming
-  the versions it did see.
-  10.0.6 was **measured**, not assumed, before being admitted: the full native
-  suite was run in both `kicad/kicad@sha256:182c8005…` (10.0.5) and
-  `kicad/kicad@sha256:18693567…` (10.0.6), each reporting `32 passed, no
-  skips`, and the resulting mask/copper geometry was compared across the two —
-  every exported layer polygon and every per-UUID attributed object polygon
-  came back byte-identical in WKT (0.000e+00 mm² symmetric difference).
+- **One clearance resolver for `kct route`** (Issue #5645, Epic #5509
+  Phase 2). `router/clearance_resolver.py` now owns the required
+  clearance for every copper pair in one deterministic precedence:
+  explicit `--clearance` > legacy `.kicad_pcb` net classes > project
+  floors (`.kicad_dru` unconditional clearance, `.kicad_pro` minimum
+  clearance and — new — the `Default` netclass clearance, #5654) >
+  fab-tier floor > the router target, then per-net-class overrides and
+  the #4431 net-pair matrix. The clearance banner names which layer won.
+  See the upgrade note on routing clearance.
 
 ### Performance
 
@@ -328,6 +433,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across every arm. Method, the full line-level attribution and the six-run
   table are retained in
   `docs/diagnostics/issue-5617/phase4-native-split.md`.
+- **Faster exact-geometry clearance checks in the router.** The lattice
+  engine's three pair kinds take a type-exact fast path through
+  `clearance_kernel.copper_gap` (Issue #5672, recovering most of the ~6 %
+  route-CPU cost the kernel migration added on board 02); the coupled
+  diff-pair halo's via refinement memoises its geometric half (Issue
+  #5696); and the coupled via predicate's three per-cell Python raster
+  sweeps become occupancy-plane slices (Issue #5720). Routed copper is
+  unchanged.
 
 ## [0.21.1] - 2026-09-21
 
@@ -6284,6 +6397,9 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.22.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.22.0
+[0.21.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.21.1
+[0.21.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.21.0
 [0.20.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.20.0
 [0.19.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.19.0
 [0.18.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.18.0
