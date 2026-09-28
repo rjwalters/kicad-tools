@@ -203,6 +203,78 @@ the commit the tag references, runs `uv build`, and the `publish` job runs
 the mechanism that makes the tag — and therefore the tag's ordering relative to
 the merge — load-bearing.
 
+## Automated daily release PR (`release-pr.yml`)
+
+Steps (0)–(c) above are automated by `.github/workflows/release-pr.yml`
+(issue #5776, epic #5774). The logic lives in `scripts/release_plan.py`, with
+unit tests in `tests/test_release_plan.py`. The manual path above still works
+and takes precedence: while a hand-opened `release/v*` PR is open, the
+automation pauses.
+
+- **When:** daily at 14:00 UTC, and on `workflow_dispatch` (inputs `level` =
+  `auto|patch|minor|major` and `dry_run`). A run exits quietly when no PR has
+  merged since the latest `v*` tag. Direct pushes such as Loom resyncs don't
+  count. It also exits quietly when nothing user-visible is waiting (no
+  `changelog.d/` fragment and an empty `[Unreleased]`), or when `pyproject.toml`
+  is already ahead of the latest tag, meaning a merged release is waiting for
+  its tag.
+- **Kill switch:** the repo variable `AUTO_RELEASE` is `on`, `off` or
+  `dry-run`; **unset means `dry-run`**. `dry-run` prints the plan, the gate
+  result and the assembled section to the job summary, and opens or comments
+  nothing.
+- **Gate:** checked on the exact `origin/main` SHA.
+  - The newest `CI` push run on that SHA has every release-topic job green or
+    skipped: Lint & Format, Type Check, Test, C++ Build Check, kicad-cli
+    Round-trip Smoke, Routed PCB DRC Check, Diff-Pair, Match-Group, Board 00
+    E2E. Skipped always counts as not red, because Match-Group is skipped
+    while `BOARD_07_CI_ENABLED` is unset. If the run is still in progress,
+    the workflow waits up to 90 min.
+  - `changelog_gap_report.py` reports no gaps.
+  - `uv lock --check` passes.
+
+  If the gate is red, no release PR is opened, and in `on` mode the reasons
+  are commented on the **"Automated release status"** issue. The workflow
+  finds that issue by title or creates it; pin it by hand once.
+- **Level:**
+  - patch by default;
+  - minor if there's any `added` or `upgrade` fragment, or any `feat` commit
+    (including a `feat:` PR title in a merge commit);
+  - a breaking change (`type!:` or `BREAKING CHANGE`) is minor below 1.0 and
+    major from 1.0;
+  - the dispatch `level` input overrides the rule.
+- **Release PR:** branch `release/vX.Y.Z`, titled `chore(release): vX.Y.Z`.
+  - Contents:
+    - the assembled CHANGELOG section, with the fragments deleted;
+    - `pyproject.toml` bumped;
+    - **only** the kicad-tools `version` line of `uv.lock` changed, because a
+      full `uv lock` rewrites hundreds of marker lines across uv versions;
+      `uv lock --check` is re-run on the result;
+    - a WORK_LOG entry.
+  - At most one is open at a time. The same version is force-pushed and
+    edited in place. A new version supersedes the old PR, which is closed and
+    its branch deleted.
+- **Merge:** the workflow waits up to 150 min for the release PR's own checks.
+  It merges through the API with the head SHA pinned once every
+  `pull_request` workflow run on that SHA is green or skipped. If the checks
+  are red or time out, the PR stays open and the tracking issue gets a
+  comment. Tag and publish on merge are Phase 3 (#5777); until then, tag the
+  merged commit by hand as in step (d).
+- **Identity:** the loom-fleet-dispatch GitHub App. Its token comes from the
+  secrets `LOOM_FLEET_DISPATCH_APP_ID` and
+  `LOOM_FLEET_DISPATCH_APP_PRIVATE_KEY`, through
+  `actions/create-github-app-token`. It pushes the branch and opens, merges
+  and comments, which is why `ci.yml`'s `pull_request` trigger fires. A
+  `GITHUB_TOKEN` push or PR would not trigger it, and this repo doesn't let
+  `GITHUB_TOKEN` open PRs anyway. The App has no `actions` read, so CI status
+  is read with the workflow's `GITHUB_TOKEN` (`actions: read`).
+
+Preview locally with no network writes:
+
+```bash
+uv run python scripts/release_plan.py plan               # tag, merges, level, section
+uv run python scripts/release_plan.py run --mode dry-run --wait-ci 0
+```
+
 ## Actions outage fallback (local CI-equivalent gate)
 
 When GitHub Actions is down or badly degraded (as during the ~6-hour
