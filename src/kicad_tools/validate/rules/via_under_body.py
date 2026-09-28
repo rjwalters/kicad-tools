@@ -60,8 +60,9 @@ VIA_UNDER_BODY_RULE_ID = "via_under_body"
 
 # Footprint ids (``Lib:Name``) whose package body is checked by default:
 # bottom-terminated packages where a hidden via is a real inspection /
-# rework / short risk.  Matched with ``re.search`` (so ``Package_DFN_QFN``,
-# ``Package_SON:WSON-8...``, ``Package_LGA`` ... all select).
+# rework / short risk.  Matched case-insensitively with ``re.search`` (so
+# ``Package_DFN_QFN``, ``Package_SON:WSON-8...``, ``Package_LGA`` and
+# lower-case vendor ids such as ``qfn-16...`` all select).
 DEFAULT_FOOTPRINT_PATTERN = r"QFN|DFN|SON|LGA"
 
 # An SMD pad at least this many times the footprint's median copper-pad area
@@ -84,18 +85,35 @@ def exposed_pads(footprint: Footprint) -> list[Pad]:
     at least ``_EXPOSED_PAD_AREA_RATIO`` times the median copper-pad area of
     the footprint (KiCad's own QFN/DFN libraries number the EP ``N+1``, so
     the size test is what catches them).
+
+    A thermal pad split into several smaller same-net pads (common for
+    paste windowing) is also recognised: when the *combined* area of the
+    larger-than-median SMD copper pads sharing a (non-zero) net reaches the
+    same ratio, every pad in that cluster is returned.
     """
     copper = [p for p in footprint.pads if p.type == "smd" and _has_copper(p)]
     if not copper:
         return []
     areas = [p.size[0] * p.size[1] for p in copper]
     typical = median(areas) if len(copper) >= 3 else None
+    threshold = _EXPOSED_PAD_AREA_RATIO * typical if typical is not None and typical > 0 else None
+    # Thermal pads split into several same-net pads: group the
+    # larger-than-median pads by net and test their combined area.  Ordinary
+    # same-net signal pins (e.g. several GND pins) are median-sized, so they
+    # never add up to a phantom exposed pad.
+    split_ep: set[int] = set()
+    if threshold is not None and typical is not None:
+        clusters: dict[int, list[int]] = {}
+        for i, (pad, area) in enumerate(zip(copper, areas, strict=True)):
+            if pad.net_number and area > typical:
+                clusters.setdefault(pad.net_number, []).append(i)
+        for members in clusters.values():
+            if len(members) >= 2 and sum(areas[i] for i in members) >= threshold:
+                split_ep.update(members)
     result = []
-    for pad, area in zip(copper, areas, strict=True):
-        oversized = (
-            typical is not None and typical > 0 and area >= _EXPOSED_PAD_AREA_RATIO * typical
-        )
-        if oversized or pad.number.upper() in _EXPOSED_PAD_NUMBERS:
+    for i, (pad, area) in enumerate(zip(copper, areas, strict=True)):
+        oversized = threshold is not None and area >= threshold
+        if oversized or i in split_ep or pad.number.upper() in _EXPOSED_PAD_NUMBERS:
             result.append(pad)
     return result
 
@@ -129,7 +147,9 @@ class ViaUnderBodyRule(DRCRule):
 
         Args:
             footprint_pattern: Regex searched against the footprint id
-                (``Lib:Name``) to select packages to check.  ``None``
+                (``Lib:Name``) to select packages to check.  A ``str`` is
+                compiled case-insensitively; a pre-compiled ``re.Pattern``
+                is used exactly as given (its own flags).  ``None``
                 disables pattern selection (only ``include_references`` are
                 checked).
             include_references: References always checked, regardless of
@@ -146,7 +166,7 @@ class ViaUnderBodyRule(DRCRule):
         if severity not in ("error", "warning", "info"):
             raise ValueError(f"invalid severity {severity!r}")
         if isinstance(footprint_pattern, str):
-            footprint_pattern = re.compile(footprint_pattern)
+            footprint_pattern = re.compile(footprint_pattern, re.IGNORECASE)
         self.footprint_pattern = footprint_pattern
         self.include_references = frozenset(include_references)
         self.exclude_references = frozenset(exclude_references)

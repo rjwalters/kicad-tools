@@ -18,6 +18,7 @@ Fixture layout (sheet-absolute):
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -264,6 +265,62 @@ class TestThermalPadVias:
         assert [p.number for p in exposed_pads(_qfn())] == ["9"]
 
 
+def _split_ep_qfn(*, ep_net: tuple[int, str] = (1, "GND")) -> Footprint:
+    """A QFN-8 whose 1.5x1.5 thermal pad is split into four 0.7x0.7 pads."""
+    fp = _qfn(ep_net=ep_net)
+    fp.pads = [p for p in fp.pads if p.number != "9"]
+    for i, (dx, dy) in enumerate(
+        [(-0.375, -0.375), (0.375, -0.375), (-0.375, 0.375), (0.375, 0.375)]
+    ):
+        fp.pads.append(
+            Pad(
+                number="9" if i == 0 else f"9{chr(ord('a') + i)}",
+                type="smd",
+                shape="rect",
+                position=(dx, dy),
+                size=(0.7, 0.7),
+                layers=["F.Cu"],
+                net_number=ep_net[0],
+                net_name=ep_net[1],
+            )
+        )
+    return fp
+
+
+class TestSplitExposedPad:
+    def test_split_pads_individually_under_ratio(self):
+        """Guard the premise: no single split pad passes the area ratio."""
+        typical = 0.8 * 0.3
+        assert 0.7 * 0.7 < 4.0 * typical <= 4 * 0.7 * 0.7
+
+    def test_split_ep_cluster_detected(self):
+        assert sorted(p.number for p in exposed_pads(_split_ep_qfn())) == [
+            "9",
+            "9b",
+            "9c",
+            "9d",
+        ]
+
+    def test_thermal_via_over_split_pad_allowed(self):
+        pcb = _pcb([_split_ep_qfn()], [_via(50.375, 50.375, net=(1, "GND"))])
+        assert _run(pcb) == []
+
+    def test_other_net_via_over_split_pad_flagged(self):
+        pcb = _pcb([_split_ep_qfn()], [_via(50.375, 50.375, net=(2, "SIG"))])
+        assert len(_run(pcb)) == 1
+
+    def test_same_net_signal_pins_not_a_cluster(self):
+        """Median-sized same-net pins never sum into a phantom exposed pad."""
+        fp = _qfn()
+        for pad in fp.pads[:6]:
+            pad.net_number, pad.net_name = 3, "VDD"
+        assert [p.number for p in exposed_pads(fp)] == ["9"]
+
+    def test_unconnected_split_pads_not_clustered(self):
+        """Net 0 pads are never grouped together."""
+        assert exposed_pads(_split_ep_qfn(ep_net=(0, ""))) == []
+
+
 # ---------------------------------------------------------------------------
 # Selection / configuration
 # ---------------------------------------------------------------------------
@@ -276,6 +333,9 @@ class TestSelection:
             "Package_DFN_QFN:DFN-8-1EP_2x2mm_P0.5mm_EP0.9x1.6mm",
             "Package_SON:WSON-8-1EP_2x2mm_P0.5mm_EP0.9x1.6mm",
             "Package_LGA:LGA-14_3x2.5mm_P0.5mm_LayoutBorder3x4y",
+            "package_dfn_qfn:qfn-8-1ep_3x3mm",
+            "MyLib:Wson-6_1.5x1.5mm",
+            "vendor:lga-12",
         ],
     )
     def test_default_pattern_selects(self, name: str):
@@ -301,6 +361,12 @@ class TestSelection:
     def test_custom_pattern_opts_in(self, name: str):
         pcb = _pcb([_qfn(name=name)], [_via(50.0, 51.1)])
         assert len(_run(pcb, footprint_pattern=r"QFN|DFN|SON|LGA|QFP|BGA")) == 1
+
+    def test_compiled_pattern_flags_untouched(self):
+        """A pre-compiled pattern keeps its own (case-sensitive) flags."""
+        pcb = _pcb([_qfn(name="vendor:qfn-8")], [_via(50.0, 51.1)])
+        assert _run(pcb, footprint_pattern=re.compile(r"QFN")) == []
+        assert len(_run(pcb, footprint_pattern=r"QFN")) == 1
 
     def test_include_and_exclude_references(self):
         soic = _qfn(reference="U7", name="Package_SO:SOIC-8_3.9x4.9mm_P1.27mm")
