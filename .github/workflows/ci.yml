@@ -218,8 +218,9 @@ jobs:
     # timeouts are deliberately left alone.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     env:
-      # -n auto reads the container's 8-core cpuset on the runner; keep the
-      # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
+      # Pin -n auto's worker count at GitHub-hosted parity (4 vCPU) so memory
+      # stays bounded (the self-hosted container is not CPU-pinned and would
+      # otherwise see every host core).
       PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
       # Issue #5501: bound the number of native KiCad processes across the
       # whole job.
@@ -331,17 +332,17 @@ jobs:
     container:
       image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
-      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the kicad slots' cores (6-31, so the runner's org slots on 0-5 never
-      # share a core with a kicad job; 2AMLogic/2am infra/aws/ci-runner.md). The
-      # host exposes only CPUs 0-31 since 2026-09-27 (the 38-63 hyperthread
-      # siblings are gone, and naming them fails "Initialize containers"; #5694) and cap its memory at 12g (6 GB
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 12g (6 GB
       # SIGKILLed kicad-cli under four xdist workers, 2026-09-11; a
       # GitHub-hosted VM has 16 GB).
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 6-31 --memory 12g' || '--user 0:0' }}
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 12g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -916,16 +917,16 @@ jobs:
     container:
       image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
-      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the kicad slots' cores (6-31, so the runner's org slots on 0-5 never
-      # share a core with a kicad job; 2AMLogic/2am infra/aws/ci-runner.md). The
-      # host exposes only CPUs 0-31 since 2026-09-27 (the 38-63 hyperthread
-      # siblings are gone, and naming them fails "Initialize containers"; #5694) and cap its memory at 8g (same shape as
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 8g (same shape as
       # Board 06: one board, one router run, kicad-cli DRC).
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 6-31 --memory 8g' || '--user 0:0' }}
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the test job).
@@ -1991,16 +1992,16 @@ jobs:
     container:
       image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
-      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the kicad slots' cores (6-31, so the runner's org slots on 0-5 never
-      # share a core with a kicad job; 2AMLogic/2am infra/aws/ci-runner.md). The
-      # host exposes only CPUs 0-31 since 2026-09-27 (the 38-63 hyperthread
-      # siblings are gone, and naming them fails "Initialize containers"; #5694) and cap its memory at 8g (passed at 6 GB;
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 8g (passed at 6 GB;
       # headroom, since the cap SIGKILLs rather than swaps).
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 6-31 --memory 8g' || '--user 0:0' }}
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         shell: bash
