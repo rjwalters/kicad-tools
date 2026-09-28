@@ -3,7 +3,8 @@
 Historical capability tests use the SHA-pinned 32-pad snapshot in
 ``regression-fixture/``. Production DRC below still checks revision B in
 ``output/``. CLI runs retain temporary PCB/log artifacts on timeout (900s
-process cap; 600s routing budget), and never regenerate or overwrite inputs.
+process cap; the route itself is iteration-bounded, with no wall-clock
+``--timeout`` -- issue #5752), and never regenerate or overwrite inputs.
 The June recipe described below is frozen, not the current hardware recipe.
 
 This test pins the **measured routing reach** of
@@ -499,8 +500,21 @@ def _run_kct_route(unrouted: Path, seed: int, artifacts: Path) -> str:
         # per-net wall-clock cutoff, so the seed-42 re-route is
         # byte-identical (UUID-normalized) across machines.
         "--deterministic-budget",
-        "--timeout",
-        "600",
+        # Issue #5752: NO ``--timeout``.  The historical recipe also passed
+        # ``--timeout 600``, but under ``--auto-layers`` escalation that is
+        # not just a safety backstop: ``_per_attempt_budgeted_timeout``
+        # hands the first (2L) attempt a wall-clock fair slice of
+        # 600 / len(layer_configs) = 75s.  The route needs ~10s on an idle
+        # machine, so under enough CPU contention (a long serial run beside
+        # parallel builders) the 2L detailed pass is cut mid-reroute and
+        # the run lands e.g. 9/13 + 4 partial -- exactly the "both reach
+        # tests fail, the 1/16 and Phase-A tests pass" signature.
+        # Reproduced with a time-dilation shim (16x slowdown -> 9/13).
+        # Without --timeout the per-net iteration caps are the only bound:
+        # the routed copper is identical to the --timeout 600 run on an
+        # idle machine, and stays 13/13 with identical copper up to a
+        # 100x simulated slowdown.  ROUTE_TIMEOUT (subprocess) remains
+        # the hang guard and fails loudly and attributably.
         # Issue #3922: --differential-pairs was silently dropped in the
         # #3308/#3410 recipe consolidation, so USB_D+/USB_D- routed
         # through the plain per-net A* loop and the CoupledPathfinder
@@ -575,8 +589,9 @@ def route_stdout(unrouted_pcb_path: Path, tmp_path_factory) -> str:
 class TestBoard03RoutingBaseline:
     """Pin the June 2026 routing reach baseline for board 03.
 
-    The full CLI subprocess takes ~2.5 minutes wall-clock (timeout 600 s
-    on the route step + setup/teardown), so the class is marked
+    The full CLI subprocess takes ~30 s wall-clock on an idle machine
+    (iteration-bounded, no ``--timeout``; ``ROUTE_TIMEOUT`` caps the
+    subprocess -- issue #5752), so the class is marked
     ``@pytest.mark.slow``.  The nightly slow-tests workflow picks it up;
     PR-time CI skips it by default.
     """
@@ -751,6 +766,31 @@ def test_historical_route_timeout_retains_partial_diagnostics(monkeypatch, tmp_p
     assert (tmp_path / "stderr.log").read_text() == "routing deadline\n"
     assert (tmp_path / "usb_joystick_routed.kicad_pcb").read_text() == "partial copper"
     assert UNROUTED_PCB.read_bytes() == before
+
+
+def test_historical_recipe_is_wall_clock_independent(monkeypatch, tmp_path):
+    """The reach recipe must not carry a wall-clock ``kct route`` budget (#5752).
+
+    ``--timeout`` under ``--auto-layers`` escalation gives the 2L attempt a
+    fair slice of ``timeout / len(layer_configs)`` seconds, so a loaded host
+    cut the detailed pass short and the reach tests failed only in long
+    serial runs.  The recipe must stay iteration-bounded
+    (``--deterministic-budget``) with no ``--timeout`` / ``--search-timeout``
+    / ``--per-net-timeout`` so its outcome cannot depend on machine speed.
+    """
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        kwargs["stdout"].write("Nets routed:     13/13\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _run_kct_route(UNROUTED_PCB, 42, tmp_path)
+    (cmd,) = captured
+    assert "--deterministic-budget" in cmd
+    for flag in ("--timeout", "--search-timeout", "--per-net-timeout"):
+        assert flag not in cmd, f"{flag} reintroduces wall-clock dependence (issue #5752)"
 
 
 def test_historical_geometry_is_32_pad_and_release_is_separate(unrouted_pcb_path):
