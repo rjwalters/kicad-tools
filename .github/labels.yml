@@ -146,7 +146,7 @@
 # user-visible but deliberately needs no entry (e.g. a follow-up fix to an
 # unreleased feature already covered by its fragment); see changelog.d/README.md.
 - name: changelog:skip
-  description: "PR needs no changelog.d/ fragment despite a user-visible title; see changelog.d/README.md. Applied by: humans / Builder with rationale."
+  description: "PR needs no changelog.d/ fragment; see changelog.d/README.md. Applied by: humans only."
   color: "D4C5F9"  # lavender - changelog exemption
 
 # BEGIN LOOM LABELS
