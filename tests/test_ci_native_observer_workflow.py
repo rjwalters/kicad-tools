@@ -31,7 +31,18 @@ def test_opt_in_and_resources_and_artifact_retention():
     assert (
         "contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->')" in expression
     )
-    assert JOB["timeout-minutes"] == 45
+    # Issue #5747: the job budget follows the runner. A fork PR routes to
+    # ubuntu-latest, where this job projects to ~50 min and a flat 45 cancelled
+    # five runs in a row (#5736/#5737/#5739), so the hosted branch gets 90
+    # while the self-hosted branch keeps 45. The predicate MUST stay identical
+    # to the one runs-on selects the runner with -- a drift between them would
+    # hand one branch the other's budget.
+    fork_predicate = (
+        "(github.event_name != 'pull_request' "
+        "|| github.event.pull_request.head.repo.full_name == github.repository)"
+    )
+    assert fork_predicate in str(JOB["runs-on"])
+    assert JOB["timeout-minutes"] == f"${{{{ {fork_predicate} && 45 || 90 }}}}"
     # #5682: the KiCad image is pinned by digest at the workflow level.
     # container.image cannot reference the env context (GitHub allows only
     # github/inputs/matrix/needs/strategy/vars there), so the kicad_pin
