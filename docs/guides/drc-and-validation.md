@@ -536,6 +536,11 @@ net, are allowed.
 **Fix:** Move the via outside the package outline, or waive it in
 `.kct_waivers.json` with `"items": ["Via-1a2b3c4d", "U3"]`. The rule is
 advisory (warning severity), so it only fails `kct check` under `--strict`.
+It is on by default, so a board that passed `--strict` (or any gate that
+counts warnings) before upgrading can newly fail on it. To opt out of the
+whole category, run `kct check --strict --skip via_under_body`. Prefer
+waivers when only a few vias are affected, because they keep the check
+active for the rest of the board.
 From the Python API, `ViaUnderBodyRule` takes `footprint_pattern` (default
 `QFN|DFN|SON|LGA`; QFP and BGA are opt-in), `include_references`,
 `exclude_references`, `allow_thermal_pad_vias`, `fallback_to_courtyard`
@@ -559,7 +564,12 @@ switches and keyed USB-C / coax connectors are skipped.
 **Fix:** Add a dot, triangle or bar on `F.SilkS`/`B.SilkS` beside pad 1 and
 outside the body. Alternatively, waive it in `.kct_waivers.json` with
 `"items": ["U2"]`. The rule is advisory (warning severity), so it only fails
-`kct check` under `--strict`. From the Python API, `Pin1MarkerRule` takes
+`kct check` under `--strict`. It is on by default, so a board that passed
+`--strict` (or any gate that counts warnings) before upgrading can newly
+fail on it. To opt out of the whole category, run
+`kct check --strict --skip pin1_marker`. To skip both new categories at
+once, use `--skip via_under_body,pin1_marker`. Prefer per-reference waivers
+when only a few parts are affected. From the Python API, `Pin1MarkerRule` takes
 `min_pads`, `polarized_pattern`, `exclude_pattern`, `include_references`,
 `exclude_references`, `search_radius_mm`, `require_asymmetry`,
 `include_board_silk` and `severity`.

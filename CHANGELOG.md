@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes / behaviour changes
+
+- **`kct check --strict` can newly fail on boards that passed before.**
+  Two new categories are on by default: `via_under_body` (Issue #5736) and
+  `pin1_marker` (Issue #5737). Their findings are warnings, and plain
+  `kct check` exit codes don't change. But `--strict`, and any CI or ship
+  gate that counts warnings, will now fail on:
+  - a via under a QFN/DFN/SON/LGA package body (`via_under_body`)
+  - an orientation-sensitive part with no visible silkscreen pin-1 mark
+    (`pin1_marker_missing` / `pin1_marker_obscured`)
+
+  The repo's own board-04 gate hit this and needed waivers (#5745). To keep
+  a gate green without fixing the board, either skip both categories with
+  `kct check --strict --skip via_under_body,pin1_marker`, or add
+  per-reference / per-item entries to `.kct_waivers.json`. Waivers are
+  narrower and keep the check active for new parts.
+
 ### Fixed
 
 - **The coupled diff-pair search now sees the copper it was routing
@@ -63,7 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allow_thermal_pad_vias`, `fallback_to_courtyard` and `severity`. Findings
   are waivable via `.kct_waivers.json`, and the rule id is classified
   advisory, so plain exit codes don't change. All committed fleet boards
-  produce zero findings.
+  produce zero findings. **`kct check --strict`, and any gate that counts
+  warnings, will now fail on a board with a via under a QFN/DFN/SON/LGA
+  body, even if that board passed before the upgrade.** To opt out, run
+  `kct check --skip via_under_body`, or waive the via or reference in
+  `.kct_waivers.json`. See "Upgrade notes" below.
 
 - **Pin-1 / polarity silkscreen-marker rule in `kct check`**: a new
   default-on `pin1_marker` category (selectable via `--only`/`--skip`, no new
@@ -82,8 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   include/exclude references, `search_radius_mm`, `require_asymmetry`,
   `include_board_silk` and `severity`. Findings are waivable per reference
   via `.kct_waivers.json`, and both rule ids are classified advisory, so
-  plain exit codes don't change. Marker *generation* is out of scope; it
-  remains a listed follow-up of `kicad_tools.silkscreen.generator`.
+  plain exit codes don't change. **`kct check --strict`, and any gate that
+  counts warnings, will now fail on a board with an orientation-sensitive
+  part that has no visible pin-1 mark, even if that board passed before the
+  upgrade.** To opt out, run `kct check --skip pin1_marker`, or waive the
+  reference in `.kct_waivers.json`. See "Upgrade notes" below. Marker
+  *generation* is out of scope; it remains a listed follow-up of
+  `kicad_tools.silkscreen.generator`.
 
 - **Trace width-consistency audit (`width_consistency`).** A new
   heuristic, geometric (not ampacity) advisory rule. It walks each
