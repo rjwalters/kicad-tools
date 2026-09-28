@@ -27,7 +27,8 @@
 #   _worktree_resolve_origin_branch_reuse           worktree.sh's whole
 #                                                   "reuse origin/<branch> or
 #                                                   branch fresh?" decision
-#                                                   (#4823 / #5657 / #7765)
+#                                                   (#4823 / #5657 / #7765 /
+#                                                   #9083)
 #
 # They live here rather than inline in worktree.sh per
 # `.loom/docs/file-size-policy.md` — worktree.sh is over the 1000-line ratchet
@@ -348,6 +349,9 @@ _worktree_guard_fresh_branch_against_open_pr() {
 #     continue the real PR history, not a fresh branch off main)
 #   - origin has the ref but it has already LANDED -> do not reuse; fall
 #     through to a fresh branch (#5657, the reused partial-slice branch name)
+#   - origin has the ref, it has not landed, but its tip is the head of a PR
+#     CLOSED WITHOUT MERGING -> refuse outright, naming the PR (#9083; the
+#     decision is `loom-daemon worktree-closed-pr-branch`)
 #   - origin has no such ref -> hand off to
 #     `_worktree_guard_fresh_branch_against_open_pr` above, which asks the
 #     forge before allowing the fresh branch (#7765)
@@ -365,12 +369,12 @@ _worktree_guard_fresh_branch_against_open_pr() {
 # shim when it is missing. Always returns 0 — refusals exit the script
 # outright, same control flow as when this ran inline.
 _worktree_resolve_origin_branch_reuse() {
-    local branch="$1"
-    local issue_number="$2"
-    local json_output="$3"
-    local base_display="$4"
-    local base_ref="$5"
-    local default_branch="$6"
+    # Declared on one line, sibling-style (`branch_landed` does the same), so
+    # the closed-unmerged dispatch below is paid for out of this function's own
+    # code-line count rather than growing the portable pool (#9083 — this file
+    # is `contract`-category and its growth has no override, see
+    # `.loom/docs/shell-language-policy.md`).
+    local branch="$1" issue_number="$2" json_output="$3" base_display="$4" base_ref="$5" default_branch="$6"
     local origin_fetch_result origin_fetch_output
     origin_fetch_result="ok"
     if ! origin_fetch_output="$(git fetch origin "$branch" 2>&1)"; then
@@ -417,6 +421,25 @@ _worktree_resolve_origin_branch_reuse() {
             # AND the tree comparison unavailable — fail open, never block
             # worktree creation on an outage): preserve today's reuse
             # behavior exactly.
+            #
+            # #9083: EXCEPT for the one not-landed shape that is the merged
+            # case's hazard with a worse payload — a tip that is the head of a
+            # PR CLOSED WITHOUT MERGING. `branch_landed` correctly calls that
+            # `not-landed` (and must keep doing so: that verdict is what stops
+            # `branch_delete` force-deleting it), so the question is asked
+            # separately, by the one implementation of it:
+            # `loom-daemon worktree-closed-pr-branch` (exit 1 = refuse, having
+            # already printed its own message; 0 = proceed and reuse, which is
+            # also what EVERY undecidable probe returns). The `--help` probe
+            # ahead of it skips the guard on a daemon predating the
+            # subcommand — degrading to the pre-#9083 reuse rather than
+            # emitting clap usage text — the same shape
+            # `_handle_feature_branch_in_main_worktree` uses for
+            # `worktree-branch-conflict`. One line, because this file is
+            # `contract`-category and the portable-shell ratchet gives its
+            # growth no override; the whole decision lives in
+            # `loom-daemon/src/worktree_cli/closed_pr_branch.rs`.
+            [[ -z "${_WT_DAEMON_BIN:-}" ]] || ! "$_WT_DAEMON_BIN" worktree-closed-pr-branch --help >/dev/null 2>&1 || "$_WT_DAEMON_BIN" worktree-closed-pr-branch --branch "$branch" --issue "$issue_number" --base-display "$base_display" --repo-root "${WORKTREE_REPO_ROOT:-$PWD}" --json-output "$json_output" >&3 || exit 1
             _WT_REUSE_REMOTE_BRANCH=true
         fi
     else

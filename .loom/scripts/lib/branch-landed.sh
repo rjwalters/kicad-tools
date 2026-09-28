@@ -36,6 +36,18 @@
 # coercing it to `landed` loses work, and coercing it to `not-landed`
 # resurrects the pre-#4889 "can never clean up a squash-merged branch" bug.
 #
+# # A CLOSED-UNMERGED PR's head is `not-landed`, and stays that way (#9083)
+#
+# Do not add a fourth verdict for it. A branch whose tip is the head of a PR
+# closed without merging genuinely has NOT landed — that verdict is what stops
+# `merge-pr.sh` / `worktree.sh remove` escalating to `git branch -D` on work
+# nobody merged — and the three-way answer's whole value is that no consumer
+# has to handle a token it has never seen. `worktree.sh`'s reuse arm does need
+# to tell that shape apart, and asks it separately, at the one call site that
+# cares: `loom-daemon worktree-closed-pr-branch`
+# (loom-daemon/src/worktree_cli/closed_pr_branch.rs), dispatched from
+# lib/worktree-forge-pr-check.sh.
+#
 # # Answer ladder (first definitive answer wins)
 #
 #   1. ANCESTRY — `git merge-base --is-ancestor <branch> <default>`. Only ever

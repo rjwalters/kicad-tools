@@ -56,6 +56,32 @@ the next person to add one will have an equally good argument.
    does not make merges go stale more often. Every step runs under
    `!cancelled()`, so one red gate cannot hide another.
 
+9. **Narrowing what a *result* covers is not path-filtering what a *check*
+   runs.** Rule 3 forbids deciding whether to RUN a check from a path set.
+   The freshness guard asks a different question — "can merging this PR turn
+   a check that already ran and passed red?" — and answering it needs the
+   input set the check actually read (`merge_pr/stale_checks/inputs.rs`).
+   Two narrowings live there, and both must obey the same three constraints:
+   **derive the scope from the repo's own text, never a hand-maintained
+   second copy**; **keep it per-file, never per-commit**; and **fail closed
+   to the broader answer on any doubt**.
+   - *Machine restamps* (#8919, #9065): the release version bump and the
+     `chore: resync installed Loom surfaces` metadata stamp are discounted
+     from the base-move diff, per FILE and only for lines matching each
+     field's pinned value shape. A resync that also rewrote an installed
+     surface leaves that surface in the diff.
+   - *`ci.yml` block attribution* (#9065): one path covers ~25 jobs of which
+     three are required, so a change set's `ci.yml` hunks are attributed to
+     the job and `# component:` block they edit, read from the workflow's own
+     text. **Both sides** are attributed, each against the tree its patch
+     diffs *to* — the base tip for the base move, the PR head for the PR's
+     own delta — and each independently, so one side's doubt never narrows
+     the other. A preamble edit, a structural deletion, an unparseable hunk,
+     a touched line past the file's end, or markers that disagree with the
+     guard's component table all restore the whole-file meaning on that side.
+     Nothing is skipped and no check's coverage narrows — every gate still
+     runs on every PR.
+
 ## What prompted this
 
 Three failures on 2026-09-15, all from cleverness that reviewed well.
@@ -107,6 +133,8 @@ a cancellation rate.
 - #7789 / #7791 — flake tracking, and why retry must *record* rather than hide
 - #7745 / #7761 — the same "a skipped check must not read as a pass" rule,
   learned in the resync and guard layers
+- #8248 / #8919 / #9065 — the required-check freshness guard, its input-scoped
+  predicate, and rule 9's two narrowings
 - [`ci-observability.md`](ci-observability.md) — the observability face of
   the same family: every run, job, duration, outcome and log is captured in
   SigNoz as standing policy, so a regression like #7779's cancellation storm

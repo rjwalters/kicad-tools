@@ -126,6 +126,46 @@ reuse behavior: a forge outage never blocks worktree creation. The #4823
 in-flight case (remote branch exists, not yet merged, possibly diverged from
 base) is unaffected and still reused exactly as before.
 
+### `worktree.sh N` refuses a stale CLOSED-UNMERGED remote branch (#9083)
+
+The #5657 guard above only catches a remote branch that has already
+**merged**. A closed `refs/remotes/origin/feature/issue-N` whose PR was
+**closed without merging** is `not-landed` by `branch_landed`'s own contract
+(correctly — its content genuinely never reached `main`), so it fell through
+to the pre-#5657 reuse behavior: silently seeding the new worktree with
+whatever was in that abandoned branch, sometimes tens of commits behind
+`main`. That is the same hazard #5657 fixed, with a strictly worse payload —
+a merged branch at least contains work that is now on `main`; a
+closed-unmerged one contains work somebody decided *not* to take.
+
+`worktree.sh` now asks a second, separate question — `loom-daemon
+worktree-closed-pr-branch` — right after the `branch_landed` check above: does
+`origin/<branch>`'s tip exactly match the head of a PR the forge reports as
+`CLOSED` and not merged? If so, it refuses outright (exit non-zero, no
+worktree created) and names the PR number, with wording distinct from both the
+merged-case message and the generic "has diverged from main" warning. An
+**open** PR head-matching the same branch (including the close-then-reopen
+shape) always wins and reuses as before — this guard's whole point is a
+branch nobody is still working on, not merely a branch with an old closed PR
+somewhere in its history. A branch that has moved past the closed PR's head is
+untouched too (exact-tip-match only, mirroring #7872's `merged-head-mismatch`
+rung), and a forge outage fails open to reuse, same as every rung above it.
+
+The refusal is not a blanket ban on a closed PR's branch — a PR closed by
+accident, or meant to be picked up again, stays resumable. The refusal prints
+the escape hatch: create the local branch first, and `worktree.sh`'s
+local-ref arm reuses it as-is —
+
+```bash
+git branch feature/issue-N origin/feature/issue-N && ./.loom/scripts/worktree.sh N
+```
+
+This arm has no shell implementation of its own — `lib/worktree-forge-pr-check.sh`
+is `contract`-category (see [`shell-language-policy.md`](https://github.com/rjwalters/loom/blob/main/.loom/docs/shell-language-policy.md)),
+so the decision lives once, in `loom-daemon worktree-closed-pr-branch`. A
+daemon predating the subcommand degrades to the pre-#9083 reuse behavior
+rather than surfacing a clap usage error.
+
 ### `git push --force-with-lease` prints a rejection for a ref update that landed (#6695)
 
 On a repository using Git LFS, `git push --force-with-lease=<branch>:<old-sha>

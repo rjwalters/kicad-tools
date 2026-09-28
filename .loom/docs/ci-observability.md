@@ -184,6 +184,7 @@ views" table.
 | 5 | **Which runs failed, and why?** Each failed run, its non-successful jobs, how much of each job's log was captured, and the exact Logs Explorer filter to read it | `ci.run` / `ci.job` / `ci.job.log` (7 days) |
 | 6 | **Where did a slow run's time go?** Run wall-clock vs its longest job, job count and summed job time | `ci.run` / `ci.job` records (7 days) |
 | 7 | **Per issue, where did the time go — Builder, CI, Judge, merge?** (#9007) Joins `loom_analytics.raw_ship_outcome` (apply `cycle-time-extract.sql` first) to the `ci.run` triggered by that issue's `feature/issue-N` branch, on the issue number recovered from `loom.ci.ref`. Reports Builder/Judge/merge-phase seconds beside the CI run's queue time (`ci_queued_s`, from `loom.ci.queued_ms`) and its running time (`ci_wall_s`). The queue split is a #9007 follow-up; `ci_queued_s` is NULL for runs recorded before it. One thing it deliberately does **not** claim: "lead time" is the sweep's own `total_duration_sec`, not issue-filed-to-merged (no forge issue-open timestamp reaches this stream — see [`cycle-time-questions.md`](https://github.com/rjwalters/loom/blob/main/defaults/observability/cycle-time-questions.md) §"What this question set cannot answer") | `sweep.outcome` rollup + `ci.run` records (7-day CI horizon; sweep-side per the rollup's own retention) |
+| 8 | **How much CI time went to re-date bumps vs new code vs re-runs?** (#9337) Run count, running time and queue time per repo per `loom.ci.trigger_reason` — `stale_main_bump` is the time lost to #8508 re-date commits after `main` moved. `unrecorded` = runs captured before #9337 | `ci.run` records (7 days) |
 
 Section 7's join key is the **issue** number, not a PR number: `ci.run`/
 `ci.job` **log** records carry no PR/issue attribute of their own (only
@@ -510,7 +511,7 @@ completed job produces three lines, and so does each completed run:
 
 | `record.kind` | Fields | OTLP signal |
 |---|---|---|
-| `ci.run` | `repo`, `visibility`, `run_id`, `run_attempt`, `workflow`, `ref`, `head_sha`, `event`, `status`, `conclusion`, `triggered_by`, `started_at`, `completed_at`, `duration_ms`, `queued_ms` (`run_started_at − created_at`, #9007 follow-up; absent when GitHub reported no start) | log record `ci.run`, timestamped at `completed_at` |
+| `ci.run` | `repo`, `visibility`, `run_id`, `run_attempt`, `workflow`, `ref`, `head_sha`, `event`, `status`, `conclusion`, `triggered_by`, `started_at`, `completed_at`, `duration_ms`, `queued_ms` (`run_started_at − created_at`, #9007 follow-up; absent when GitHub reported no start), `trigger_reason` (#9337, see [Trigger attribution](#trigger-attribution-9337)) | log record `ci.run`, timestamped at `completed_at` |
 | `ci.job` | `repo`, `visibility`, `run_id`, `job_id`, `workflow`, `job`, `runner` (first runner label), `attempts` (the job's run attempt), `status`, `conclusion`, `timed_out`, `started_at`, `completed_at`, `duration_ms` | log record `ci.job` |
 | `ci.duration` | `metric` (`run`\|`job`), `repo`, `visibility`, `run_id`, `run_attempt`, `job_id`, `workflow`, `job`, `runner`, `conclusion`, `started_at`, `completed_at`, `duration_ms` | one data point of the `loom.ci.run.duration_ms` / `loom.ci.job.duration_ms` delta histogram |
 | `trace.span` | `loom.ci.run` (root) or `loom.ci.job` (child of its run span) | trace: one per run attempt, one span per job |
@@ -550,9 +551,32 @@ The attribute and label vocabulary is declared once, in
   a run that belongs to an issue is also copied into that issue's story trace
   (see [Story stitching](#story-stitching-9088)); the per-run trace itself
   is still joined to sweeps by attribute only.
+- Both lists also carry `loom.ci.trigger_reason` (#9337), and the run span
+  carries `loom.ci.run_attempt` so a `flaky_retry` is auditable from the span.
 - `CI_METRIC_LABEL_KEYS`: the metric labels, and **only** these:
   `repo`, `workflow`, `job`, `runner`, `conclusion`. Metric labels never
   include a sha, ref, run id or issue number.
+
+### Trigger attribution (#9337)
+
+When one PR runs CI several times, `loom.ci.trigger_reason` on each
+`loom.ci.run` span (and its story-trace copy, which is a clone) and `ci.run`
+record says why. It is a pure function of the one `/actions/runs` row, so
+replay and a second host attribute identically — no cross-run state.
+Rules, first match wins:
+
+| # | Condition | Value |
+|---|---|---|
+| 1 | `run_attempt > 1` | `flaky_retry` — the run was re-run in place on the same head; the *cause* is not knowable from the row |
+| 2 | `head_commit.message` absent or empty | `unknown` |
+| 3 | its first line is the #8508 re-date commit's subject (`merge_pr::redate::is_redate_commit_subject`, tested against `commit_message`) | `stale_main_bump` |
+| 4 | `event` ∈ `push`, `pull_request`, `pull_request_target`, `merge_group` | `new_commit` |
+| 5 | anything else (`workflow_dispatch`, `schedule`, …) | `unknown` |
+
+Known under-count: a `gh pr update-branch` / `git merge main` head or a
+hand-pushed `--allow-empty` commit is a freshness bump in spirit but is
+`new_commit`, because a merge commit can also be real conflict work. Section
+8 of `ci-queries.sql` totals run time per value.
 
 The gateway's `transform/privacy` `keep_keys` lists in
 `defaults/observability/collector/config.yaml` list exactly these keys.
