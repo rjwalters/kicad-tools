@@ -107,6 +107,11 @@ INTERNAL_ISSUES: dict[int, str] = {
     5586: "CI board06 smoke copper hash delegates to normalize_copper.py; repo CI only",
     5587: "CI board02/04 determinism-smoke flag drift + timeout raise; repo CI only",
     5597: "CI board06 determinism-smoke explicit output dir; repo CI only",
+    5685: "dead-code cleanup of unused router/mesh helpers; no behaviour change",
+    5690: "vendored Loom merge-pr.sh trailer warning; repo tooling only",
+    5697: "CI ruff exclude for vendored .agents/ surface; repo CI only",
+    5741: "vendored Loom merge-pr.sh freshness-guard credential routing; repo tooling only",
+    5746: "board-05 export test copies to tmp + regenerated committed demo DRU; tests/boards only",
 }
 
 #: Commits (by SHA prefix) that carry a user-visible-looking subject, resolve to no

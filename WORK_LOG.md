@@ -536,3 +536,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ## 2026-08-06 — v0.20.0 released
 
 - v0.20.0 tagged and published to PyPI: 16-issue sweep (waves 3-5) merged as a 12-PR train after the GitHub Actions outage; headliners: lattice search-time HV pairwise clearance (#4602) + keepout rule-areas (#4605), kct sch tidy (#4596) + schematic field lint (#4595), net-status strict default (#4557), .kicad_dru managed-block hardening (#4600/#4667).
+
+## 2026-09-28 — v0.22.0 release cut
+
+- v0.22.0 bump PR opened after an in-session release-prep sweep: CI runner cpuset fix for the resized heavy-lane host (#5753), pre-release fixes to the new pin1_marker/via_under_body/width_consistency rules (#5748/#5749/#5750), board-05 DRU test isolation (#5746), board-03 reach-test flake (#5752), CHANGELOG reconciled to a zero-gap report; headliners: new kct check rules, SMD pad clearance emission, unified route clearance resolver.
