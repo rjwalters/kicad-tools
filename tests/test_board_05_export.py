@@ -33,6 +33,7 @@ future "clean preflight" state:
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_DIR = REPO_ROOT / "boards" / "05-bldc-motor-controller"
 ROUTED_PCB = BOARD_DIR / "output" / "bldc_controller_routed.kicad_pcb"
+
+# Large generated artifacts in ``output/`` that ``kct export`` does not read;
+# skipped when staging the board into a scratch dir (issue #5746).
+_STAGING_IGNORE = shutil.ignore_patterns(
+    "manufacturing", "manufacturing.zip", "renders", "readiness"
+)
 
 # Preflight checks that must report OK regardless of BOM drift.  These
 # are the "PCB integrity" half of the preflight pipeline -- they have no
@@ -85,12 +92,23 @@ def export_strict_preflight_result(
     per-check ``preflight`` array.
     """
     out_dir = tmp_path_factory.mktemp("export_strict_preflight")
+    # Issue #5746: ``kct export`` writes its DRC-constraint sidecars
+    # (``.kicad_pro`` / ``.kicad_dru``) next to the *input* board, not into
+    # ``--output``.  Exporting the committed board in place therefore
+    # rewrote the committed ``.kicad_dru`` whenever the generator changed,
+    # tripping the #3580 committed-artifact guard.  Stage a scratch copy of
+    # the board's output dir (PCB, schematic, project + library sidecars)
+    # and export that instead, following the
+    # tests/router/test_board03_routing_baseline.py pattern.
+    staged_dir = tmp_path_factory.mktemp("export_strict_preflight_board") / "output"
+    shutil.copytree(routed_pcb_path.parent, staged_dir, ignore=_STAGING_IGNORE)
+    staged_pcb = staged_dir / routed_pcb_path.name
     cmd = [
         sys.executable,
         "-m",
         "kicad_tools.cli",
         "export",
-        str(routed_pcb_path),
+        str(staged_pcb),
         "--strict-preflight",
         # Skip DRC/ERC inside preflight to avoid the kicad-cli dependency;
         # the DRC count regression is covered separately by

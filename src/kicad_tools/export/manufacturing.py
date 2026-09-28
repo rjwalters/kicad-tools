@@ -849,6 +849,18 @@ class ManufacturingPackage:
         (and a companion .kicad_dru) from the target manufacturer profile
         so that ``kicad-cli pcb drc`` checks the board against the fab's
         actual capabilities rather than KiCad's stricter built-in defaults.
+
+        The sidecars are written next to the *input* board
+        (``self.pcb_path``), **not** into ``--output``.  This is deliberate:
+        ``kicad-cli pcb drc`` only loads a ``.kicad_dru`` / ``.kicad_pro``
+        that sits beside the ``.kicad_pcb`` it checks, and the callers that
+        need these rules (preflight DRC here, CI, the gallery render
+        pipeline, a user re-running DRC in KiCad) all operate on the source
+        board in place.  Consequence (issue #5746): ``kct export`` mutates
+        the input directory, so tests that export a *committed* board must
+        stage a scratch copy first (see ``tests/test_board_05_export.py``)
+        or the #3580 committed-artifact guard will fire whenever the
+        generated rules change.
         """
         try:
             from ..manufacturers import (
