@@ -15,9 +15,21 @@ What it does
    three-tier recipe (see :func:`resolve_issue_numbers`).
 3. Classifies each commit user-visible vs. internal from its conventional-commit
    subject prefix.
-4. Prints the user-visible issue numbers that are **not** mentioned anywhere in
-   the CHANGELOG's ``[Unreleased]`` section, and exits non-zero if that set is
-   non-empty.
+4. Prints the user-visible issue numbers that are cited neither by a
+   ``changelog.d/`` fragment (issue #5775) nor anywhere in the CHANGELOG's
+   ``[Unreleased]`` section, and exits non-zero if that set is non-empty.
+
+Per-PR mode (issue #5775)
+-------------------------
+``--pr N`` / ``--pr-event $GITHUB_EVENT_PATH`` evaluates **one pull request**
+before it merges (see :func:`evaluate_pr`).  Unsquashed branch commits rarely
+carry ``Closes #N``, so the PR is judged the way its squash commit will be: the
+conventional-commit type comes from the **PR title** (the squash subject) and
+the issue from the **PR body** (closing keyword), then the head branch
+(``feature/issue-<N>``), then ``Part of #N``.  A PR fails only when it is
+user-visible, not classified internal, not labelled ``changelog:skip``, and no
+fragment / ``[Unreleased]`` entry at the PR head cites its issue (or, for a PR
+with no resolvable issue, it adds no fragment at all).
 
 Note that the trailing ``(#NNNN)`` in a squash-merge subject is the **PR**
 number, never the issue number -- the CHANGELOG convention in this repo is to
@@ -30,6 +42,8 @@ Usage
     uv run python scripts/changelog_gap_report.py --since v0.19.0
     uv run python scripts/changelog_gap_report.py --json
     uv run python scripts/changelog_gap_report.py --offline      # no gh API calls
+    uv run python scripts/changelog_gap_report.py --pr 5801      # one PR, via gh
+    python scripts/changelog_gap_report.py --pr-event "$GITHUB_EVENT_PATH" --base HEAD^1
 
 `--offline` is lossy: without the tier-2 branch lookup, a commit whose body
 carries only a `Part of #<epic>` trailer resolves to the epic rather than to its
@@ -40,6 +54,7 @@ Exit codes
 ----------
     0 -- no gaps (or no commits since the tag).
     1 -- one or more user-visible issues are undocumented.
+         (per-PR mode: the PR fails the fragment rule, or a fragment is malformed.)
     2 -- usage / environment error (bad tag, missing CHANGELOG, git failure).
 """
 
@@ -53,7 +68,19 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import changelog_assemble  # noqa: E402  (sibling script, not a package)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_FRAGMENTS_DIR = REPO_ROOT / "changelog.d"
+
+#: Label that exempts one PR from the per-PR check.  Legitimate uses: a change
+#: that is user-visible by its title but deliberately undocumented (e.g. a fix
+#: to a feature that has not shipped yet, already covered by the feature's own
+#: fragment).  Prefer a fragment, or an ``INTERNAL_ISSUES`` entry with a
+#: rationale, when the exemption should be auditable.
+SKIP_LABEL = "changelog:skip"
 
 # --- classification ---------------------------------------------------------
 
@@ -75,6 +102,37 @@ INTERNAL_TYPES = frozenset(
 )
 
 _CONVENTIONAL_SUBJECT = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?!?:")
+
+#: Structural internal rules (issue #5775): classes of change that are internal
+#: by construction, so they need no per-commit ledger entry.  Both already use
+#: ``chore`` subjects today; these rules keep them internal even if a future
+#: Loom or Dependabot release changes its subject style.
+#:
+#: - Loom's installed-surface resyncs (``chore: resync installed Loom surfaces``)
+#:   and Loom installs/upgrades touch only vendored orchestration files.
+#: - Dependabot bumps only move dev/CI/site pins or the lockfile.
+STRUCTURAL_INTERNAL_SUBJECTS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bresync installed Loom surfaces\b", re.IGNORECASE),
+    re.compile(r"^(?:chore(?:\([^)]*\))?:\s*)?(?:install|update|upgrade) loom\b", re.IGNORECASE),
+)
+#: PR authors whose PRs are internal by construction.
+STRUCTURAL_INTERNAL_AUTHORS = frozenset({"dependabot[bot]", "app/dependabot"})
+#: PR head-branch prefixes that are internal by construction.
+STRUCTURAL_INTERNAL_BRANCH_PREFIXES: tuple[str, ...] = ("dependabot/",)
+
+
+def is_internal_subject(subject: str) -> bool:
+    """Classify a commit subject / PR title as internal (never user-visible)."""
+    if any(p.search(subject) for p in STRUCTURAL_INTERNAL_SUBJECTS):
+        return True
+    match = _CONVENTIONAL_SUBJECT.match(subject)
+    if match is None:
+        # Non-conventional subjects ("route/complete Phase 3: ...",
+        # "board-05 Phase 3: ...") are real feature work often enough that the
+        # safe default is user-visible; the override ledgers demote the rest.
+        return False
+    return match.group("type") in INTERNAL_TYPES
+
 
 #: Issues whose commits carry a user-visible-looking subject but change nothing a
 #: package consumer can observe.  This is the auditable ledger backing the
@@ -163,13 +221,7 @@ class Commit:
 
     @property
     def is_internal(self) -> bool:
-        match = _CONVENTIONAL_SUBJECT.match(self.subject)
-        if match is None:
-            # Non-conventional subjects ("route/complete Phase 3: ...",
-            # "board-05 Phase 3: ...") are real feature work often enough that the
-            # safe default is user-visible; the override ledgers demote the rest.
-            return False
-        return match.group("type") in INTERNAL_TYPES
+        return is_internal_subject(self.subject)
 
     @property
     def pr_number(self) -> int | None:
@@ -313,6 +365,18 @@ def documented_issue_numbers(section_text: str) -> set[int]:
     return {int(n) for n in re.findall(r"#(\d+)\b", section_text)}
 
 
+def fragment_documented_issues(fragments_dir: Path | None) -> set[int]:
+    """Every issue a ``changelog.d/`` fragment documents (name or body citation).
+
+    Raises :class:`changelog_assemble.FragmentError` for a malformed fragment.
+    """
+    if fragments_dir is None:
+        return set()
+    return changelog_assemble.fragment_issue_numbers(
+        changelog_assemble.collect_fragments(fragments_dir)
+    )
+
+
 # --- report -----------------------------------------------------------------
 
 
@@ -342,10 +406,11 @@ def build_report(
     changelog_path: Path,
     section: str,
     resolver: _BranchResolver,
+    fragments_dir: Path | None = None,
 ) -> Report:
     commits = read_commits(since, head)
     section_text = extract_section(changelog_path.read_text(encoding="utf-8"), section)
-    documented = documented_issue_numbers(section_text)
+    documented = documented_issue_numbers(section_text) | fragment_documented_issues(fragments_dir)
 
     user_visible = 0
     internal = 0
@@ -386,7 +451,8 @@ def render_text(report: Report) -> str:
         f"CHANGELOG gap report: {report.since}..{report.head}",
         f"  commits:       {report.total_commits} "
         f"({report.user_visible_commits} user-visible, {report.internal_commits} internal)",
-        f"  documented:    {len(report.documented)} issue reference(s) in [Unreleased]",
+        f"  documented:    {len(report.documented)} issue reference(s) in "
+        "changelog.d/ + [Unreleased]",
         f"  gaps:          {len(report.gaps)}",
     ]
     if report.gaps:
@@ -410,9 +476,208 @@ def render_text(report: Report) -> str:
     lines.append(
         "RESULT: gap set is empty"
         if report.ok
-        else f"RESULT: {len(report.gaps)} undocumented issue(s) -- update CHANGELOG [Unreleased]"
+        else f"RESULT: {len(report.gaps)} undocumented issue(s) -- add changelog.d/ fragments"
     )
     return "\n".join(lines)
+
+
+# --- per-PR mode (issue #5775) ----------------------------------------------
+
+
+@dataclass
+class PullRequest:
+    """The parts of one pull request the per-PR check reads."""
+
+    number: int | None
+    title: str
+    body: str
+    labels: list[str] = field(default_factory=list)
+    author: str = ""
+    head_ref: str = ""
+
+    @classmethod
+    def from_event(cls, event: dict) -> PullRequest:
+        """Build from a GitHub ``pull_request`` event payload (or its ``pull_request`` key)."""
+        pr = event.get("pull_request", event)
+        return cls(
+            number=pr.get("number"),
+            title=pr.get("title") or "",
+            body=pr.get("body") or "",
+            labels=[label["name"] for label in pr.get("labels") or []],
+            author=(pr.get("user") or {}).get("login", ""),
+            head_ref=(pr.get("head") or {}).get("ref", ""),
+        )
+
+    @classmethod
+    def from_gh(cls, data: dict) -> PullRequest:
+        """Build from ``gh pr view --json number,title,body,labels,author,headRefName``."""
+        return cls(
+            number=data.get("number"),
+            title=data.get("title") or "",
+            body=data.get("body") or "",
+            labels=[label["name"] for label in data.get("labels") or []],
+            author=(data.get("author") or {}).get("login", ""),
+            head_ref=data.get("headRefName") or "",
+        )
+
+
+@dataclass
+class PrVerdict:
+    """The per-PR check's decision and the reason for it."""
+
+    ok: bool
+    reason: str
+    issues: list[int]
+    tier: str
+
+
+def resolve_pr_issues(pr: PullRequest) -> tuple[list[int], str]:
+    """Resolve a PR to its issue(s): body closing ref > head branch > ``Part of``.
+
+    The same precedence as :func:`resolve_issue_numbers`, applied to the PR body
+    and head branch (what the squash commit will carry) instead of to a merged
+    commit, because unsquashed branch commits rarely carry ``Closes #N``.
+    """
+    closing = sorted({int(n) for n in _CLOSING_REF.findall(pr.body)})
+    if closing:
+        return closing, "closing"
+    match = _ISSUE_IN_BRANCH.search(pr.head_ref)
+    if match:
+        return [int(match.group(1))], "branch"
+    partial = sorted({int(n) for n in _PARTIAL_REF.findall(pr.body)})
+    if partial:
+        return partial, "partial"
+    return [], "none"
+
+
+def is_structurally_internal_pr(pr: PullRequest) -> bool:
+    """Dependabot PRs and Loom resyncs/installs are internal by construction."""
+    if pr.author in STRUCTURAL_INTERNAL_AUTHORS:
+        return True
+    if pr.head_ref.startswith(STRUCTURAL_INTERNAL_BRANCH_PREFIXES):
+        return True
+    return any(p.search(pr.title) for p in STRUCTURAL_INTERNAL_SUBJECTS)
+
+
+def evaluate_pr(
+    pr: PullRequest,
+    documented: set[int],
+    changed_fragments: list[str],
+) -> PrVerdict:
+    """Decide whether one PR satisfies the changelog-fragment rule.
+
+    ``documented`` is every issue cited at the PR head by a ``changelog.d/``
+    fragment or by ``[Unreleased]``; ``changed_fragments`` is the fragment
+    files the PR itself adds or modifies.  Rules, first match wins:
+
+    1. ``changelog:skip`` label -> pass.
+    2. Structurally internal (Dependabot author/branch, Loom resync title) -> pass.
+    3. Internal conventional-commit type in the PR **title** -> pass.
+    4. Every resolved issue is in ``INTERNAL_ISSUES`` -> pass.
+    5. A resolved issue is documented -> pass.
+    6. No issue resolves, but the PR adds/modifies a fragment -> pass.
+    7. Otherwise -> fail.
+    """
+    issues, tier = resolve_pr_issues(pr)
+    if SKIP_LABEL in pr.labels:
+        return PrVerdict(True, f"labelled {SKIP_LABEL}", issues, tier)
+    if is_structurally_internal_pr(pr):
+        return PrVerdict(True, "internal by construction (Dependabot / Loom resync)", issues, tier)
+    if is_internal_subject(pr.title):
+        return PrVerdict(True, "internal conventional-commit type in PR title", issues, tier)
+    if issues and all(i in INTERNAL_ISSUES for i in issues):
+        return PrVerdict(True, "issue classified internal in INTERNAL_ISSUES", issues, tier)
+    cited = [i for i in issues if i in documented]
+    if cited:
+        return PrVerdict(True, "documented: " + ", ".join(f"#{i}" for i in cited), issues, tier)
+    if not issues and changed_fragments:
+        return PrVerdict(
+            True,
+            "no issue resolved; PR adds fragment(s): " + ", ".join(changed_fragments),
+            issues,
+            tier,
+        )
+    want = f"changelog.d/{issues[0]}.<kind>.md" if issues else "changelog.d/<issue>.<kind>.md"
+    detail = (
+        f" (the PR's fragment(s) {', '.join(changed_fragments)} cite none of "
+        + ", ".join(f"#{i}" for i in issues)
+        + ")"
+        if changed_fragments
+        else ""
+    )
+    return PrVerdict(
+        False,
+        f"user-visible PR with no changelog fragment{detail}: add {want} "
+        f"(kinds: {', '.join(changelog_assemble.KINDS)}), use an internal "
+        f"conventional-commit title, or apply the {SKIP_LABEL} label",
+        issues,
+        tier,
+    )
+
+
+def changed_fragment_paths(base: str, head: str = "HEAD") -> list[str]:
+    """Fragment files added or modified in ``base...head``."""
+    out = _run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=AMR",
+            f"{base}...{head}",
+            "--",
+            "changelog.d/",
+        ]
+    )
+    assert out is not None
+    names = []
+    for line in out.splitlines():
+        name = Path(line.strip()).name
+        if line.strip() and changelog_assemble.parse_fragment_name(name) is not None:
+            names.append(line.strip())
+    return sorted(names)
+
+
+def run_pr_mode(
+    pr: PullRequest,
+    base: str,
+    changelog_path: Path,
+    section: str,
+    fragments_dir: Path,
+    as_json: bool,
+) -> int:
+    """CLI driver for per-PR mode.  Reads the working tree as the PR head."""
+    try:
+        documented = documented_issue_numbers(
+            extract_section(changelog_path.read_text(encoding="utf-8"), section)
+        ) | fragment_documented_issues(fragments_dir)
+        changed = changed_fragment_paths(base)
+    except (changelog_assemble.FragmentError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1 if isinstance(exc, changelog_assemble.FragmentError) else 2
+    verdict = evaluate_pr(pr, documented, changed)
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "pr": pr.number,
+                    "title": pr.title,
+                    "ok": verdict.ok,
+                    "reason": verdict.reason,
+                    "issues": verdict.issues,
+                    "tier": verdict.tier,
+                    "changed_fragments": changed,
+                },
+                indent=2,
+            )
+        )
+    else:
+        label = f"PR #{pr.number}" if pr.number else "PR"
+        print(f"CHANGELOG fragment check: {label}: {pr.title}")
+        resolved = ", ".join(f"#{i}" for i in verdict.issues) or "none"
+        print(f"  issue(s):  {resolved} (via {verdict.tier})")
+        print(f"  fragments: {', '.join(changed) or 'none added/modified'}")
+        print(f"RESULT: {'PASS' if verdict.ok else 'FAIL'} -- {verdict.reason}")
+    return 0 if verdict.ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -443,21 +708,69 @@ def main(argv: list[str] | None = None) -> int:
         help="skip tier-2 (PR branch name) resolution instead of calling the gh API; "
         "lossy, may report spurious gaps for Part-of-only commits",
     )
+    parser.add_argument(
+        "--fragments-dir",
+        type=Path,
+        default=DEFAULT_FRAGMENTS_DIR,
+        help="changelog fragment directory (default: changelog.d/)",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    pr_mode = parser.add_mutually_exclusive_group()
+    pr_mode.add_argument(
+        "--pr", type=int, metavar="N", help="per-PR mode: evaluate PR N (reads it via gh)"
+    )
+    pr_mode.add_argument(
+        "--pr-event",
+        type=Path,
+        metavar="PATH",
+        help="per-PR mode: read the PR from a GitHub pull_request event JSON "
+        "($GITHUB_EVENT_PATH); no gh or network needed",
+    )
+    parser.add_argument(
+        "--base",
+        default="origin/main",
+        metavar="REF",
+        help="per-PR mode: base ref the PR's fragment changes are diffed against "
+        "(default: origin/main; CI's merge checkout uses HEAD^1)",
+    )
     args = parser.parse_args(argv)
+
+    if not args.changelog.is_file():
+        print(f"error: no such CHANGELOG: {args.changelog}", file=sys.stderr)
+        return 2
+
+    if args.pr is not None or args.pr_event is not None:
+        if args.pr_event is not None:
+            try:
+                pr = PullRequest.from_event(json.loads(args.pr_event.read_text(encoding="utf-8")))
+            except (OSError, ValueError, KeyError) as exc:
+                print(f"error: cannot read PR event {args.pr_event}: {exc}", file=sys.stderr)
+                return 2
+        else:
+            fields = "number,title,body,labels,author,headRefName"
+            cmd = ["gh", "pr", "view", str(args.pr), "--json", fields]
+            if args.repo:
+                cmd += ["--repo", args.repo]
+            out = _run(cmd, check=False)
+            if out is None:
+                print(f"error: `gh pr view {args.pr}` failed", file=sys.stderr)
+                return 2
+            pr = PullRequest.from_gh(json.loads(out))
+        return run_pr_mode(
+            pr, args.base, args.changelog, args.section, args.fragments_dir, args.json
+        )
 
     since = args.since or latest_release_tag()
     if not since:
         print("error: no v* tag found; pass --since <tag>", file=sys.stderr)
         return 2
-    if not args.changelog.is_file():
-        print(f"error: no such CHANGELOG: {args.changelog}", file=sys.stderr)
-        return 2
 
     resolver = _BranchResolver(args.repo or default_repo_slug(), args.offline)
     try:
-        report = build_report(since, args.head, args.changelog, args.section, resolver)
-    except RuntimeError as exc:
+        report = build_report(
+            since, args.head, args.changelog, args.section, resolver, args.fragments_dir
+        )
+    except (RuntimeError, changelog_assemble.FragmentError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
