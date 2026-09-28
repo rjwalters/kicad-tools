@@ -353,6 +353,36 @@ class TestCornerMarks:
     def test_crystal_l_tie_break_respects_require_asymmetry_off(self):
         assert _run(_pcb(_crystal(_stock_crystal_l())), require_asymmetry=False) == []
 
+    def test_board_level_l_does_not_pass_tie_break(self):
+        # A crystal with NO silk of its own, next to a board-level L drawn at
+        # pad 1's sheet-absolute corner (same shape/position as the accepted
+        # own-silk L in test_stock_crystal_l_marker_ok, but as two BoardGraphic
+        # gr_lines rather than footprint fp_lines). The per-element loop
+        # correctly rejects each leg (each ties between pad 1 and a neighbour),
+        # and unlike an own-silk L, board-level silk must never enter the
+        # bent-component tie-break -- so this must still be flagged as missing
+        # a marker (#5748).
+        crystal = _crystal([])
+        fx, fy = crystal.position
+        legs = [
+            BoardGraphic(
+                graphic_type="line",
+                layer="F.SilkS",
+                stroke_width=0.12,
+                start=(fx - 2.06, fy - 1.71),
+                end=(fx - 2.06, fy + 1.71),
+            ),
+            BoardGraphic(
+                graphic_type="line",
+                layer="F.SilkS",
+                stroke_width=0.12,
+                start=(fx - 2.06, fy + 1.71),
+                end=(fx + 2.06, fy + 1.71),
+            ),
+        ]
+        found = _run(_pcb(crystal, board_graphics=legs))
+        assert _ids(found) == [(PIN1_MARKER_MISSING_RULE_ID, ("Y1",))]
+
 
 # ---------------------------------------------------------------------------
 # Transforms

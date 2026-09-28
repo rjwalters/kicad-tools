@@ -387,7 +387,7 @@ class Pin1MarkerRule(DRCRule):
         # keeps tying and is still rejected; an L at another pad's corner
         # points at that pad instead.
         if self.require_asymmetry and others is not None:
-            for component in self._bent_components(own_silk + near_board_silk):
+            for component in self._bent_components(own_silk):
                 if component.distance(pin1) > self.search_radius_mm:
                     continue
                 centroid = component.centroid
