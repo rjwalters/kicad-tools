@@ -3625,16 +3625,76 @@ Design notes:
   distinct roles* instead of letting it scale with workspace count, and adding a
   role raises the ceiling by exactly one rather than silently squeezing the
   others.
-- **Refusals are `WARN`, and distinct from cadence overlap.** A ceiling refusal
-  logs `role_runner: <role> tick for <root> not admitted — N role agent(s)
-  already in flight at the ceiling of M …` and retries next tick. The pre-existing
-  per-`(root, role)` overlap skip (#4364) stays at `debug!` — it is routine
-  cadence overlap, not a resource limit, and conflating the two is what made
-  role-agent load invisible.
+- **Refusals are `WARN`, and distinct from cadence overlap.** Once an interval
+  tick hits the ceiling it stops admitting for that tick and logs **one** line
+  per role: `role_runner: <role> tick stopped admitting — N role agent(s)
+  already in flight at the host ceiling of M …; K root(s) deferred to the next
+  tick` (#9391; before, every refused root logged its own line). An idle-edge
+  refusal still logs per root. The per-`(root, role)` overlap skip (#4364) stays
+  at `debug!` — it is routine cadence overlap, not a resource limit, and
+  conflating the two is what made role-agent load invisible.
 - **Not folded into `dynamic_cap`.** Sweeps and role agents are admitted by
   different subsystems against different queues; one `min(...)` over both would
   misreport which is actually binding. They are reported as two ceilings whose
   sum is the host's worst-case agent count.
+
+#### Concurrent across repositories, one instance per `(repository, role)` (#9391)
+
+Before #9391 each role loop awaited every registered workspace in turn, so a
+role was effectively **one session per daemon**: on a 62-workspace host judge
+got one PR pass per workspace rotation however deep the review queue was. The
+repository is now the parallelism boundary:
+
+- **Every role loop dispatches repositories concurrently.** Each admitted
+  `(root, role)` run starts on its own blocking task and holds its in-progress
+  entry until it finishes; the tick does not wait for it. A run still going at
+  the next tick is refused by the per-`(root, role)` overlap check (#4364), so a
+  repository never has two instances of one role. Finished runs are reaped as
+  they complete, where the fail/recover log dedup (#4349) and the empty-pool
+  brake feed (#7607) run as before.
+- **Different roles run in the same repository at once.** The in-progress key
+  is `(root, role)`; judge (`loom:review-requested`), doctor
+  (`loom:changes-requested`), champion (`loom:pr`) and curator act on disjoint
+  label states and claim what they take (`loom:reviewing`, `loom:treating`), so
+  the label state machine arbitrates between them as it already does between
+  hosts. **No role declares repository exclusivity**; a mechanism for that will
+  be added only when a concrete conflict is observed.
+- **Two limits, checked under one lock.** The host ceiling above still counts
+  every role together. Under it, **`autonomous.roleRunner.roleMaxConcurrent`**
+  (`{"<role>": N}`) bounds each role, so a burst of one role cannot take every
+  slot. The default is `max(1, ceiling / 2)` — **3** at the default ceiling of
+  7 — clamped to the ceiling. Idle-edge runs count against the same budget. A
+  budget refusal is reported the same way as a ceiling refusal: one line per
+  tick naming `roleMaxConcurrent`. Like `maxConcurrent`, `roleMaxConcurrent`
+  is read from the config of the root being admitted but counts that role's
+  runs host-wide, so if roots configure different values, each root's own
+  value governs its own admission.
+- **Round-robin across repositories.** A tick stops at the first refusal, and
+  no run can finish while the tick is walking the roots. So a walk that always
+  began at the head of the registry would serve only the first `budget` roots
+  and starve the rest. Instead, each tick starts just after the last root it
+  admitted and wraps around. With a budget of `B` over `N` roots, every root
+  gets a turn within `ceil(N / B)` ticks. If the last-admitted root is removed
+  from the registry, the walk continues from the root that followed it rather
+  than going back to the head.
+- **Queue-gated roles.** `judge` is dispatched to a repository only when its
+  `loom:review-requested` queue is non-empty, and `doctor` only when its
+  `loom:changes-requested` queue is. The check uses the ETag-cached forge
+  listing (an unchanged queue is a free `304`), runs inside the admitted run
+  before any agent is spawned, and records the non-failure outcome
+  `QueueEmpty` (`skipped_queue_empty` in `role_tick.outcome`). A listing
+  **error fails open**: the role is dispatched as if the queue had work.
+  **An empty queue does not use up the tick.** When a run ends `QueueEmpty`,
+  it spent no agent. On that reap, the walk resumes over the roots this tick
+  deferred, so a host where only one late repository has PRs still reviews
+  them in the same interval. Each root is decided at most once per tick. A run
+  that did real work never triggers a resume, so the budget still bounds agent
+  runs per interval. A drain or the rate-limit cooldown suppresses the resume
+  just as it suppresses a tick.
+  Every other role is ungated — champion also promotes `loom:curated` issues
+  and curator works unlabeled issues, so a single-label gate would starve part
+  of their work; the per-role budget bounds them instead. Idle-edge roles
+  (hermit, architect) keep their idle trigger.
 
 **Observability.** `loom-daemon status` prints the live count and its ceiling
 immediately under the in-flight sweep table, plus the total:
@@ -4484,7 +4544,8 @@ knobs not yet audited here.
 | `autonomous.roleRunner.enabled` | `LOOM_ROLE_RUNNER` | `false` | Periodic standalone support-role runner on/off (#4015). **Resolved per registered root** (#4377) — see the callout below the table. **Live** — every `roleRunner.*` key (`enabled`, `roles`, `onIdle`, `model`, …) is re-read from that root's config on every role-runner tick, not cached at daemon startup; no restart needed for a config-only change (#5963) |
 | `autonomous.roleRunner.roles` | *(config only)* | the 7 **interval-default** roles (`architect` excluded, #5656) | Subset of `champion`/`curator`/`judge`/`doctor`/`auditor`/`guide`/`hermit`/`architect` to dispatch on the interval cadence; explicit empty array runs none. **The absent-key default is the interval-default subset, not the whole table**: `architect` is idle-addressable-only (see `onIdle` below) and is never swept in by the "unset ⇒ all defaults" fallback — naming it here explicitly is the deliberate opt-in to a timer-driven architect (1h cadence). **Allowlist, not an addition** — must be updated by hand when a new interval-default role ships, or it silently never dispatches (#5339); a non-empty pinned list missing an interval-default entry warns, once per resolved-config change, in one workspace-named aggregated line (#6163) (omitting `architect` never warns — that is correct, not stale; neither does omitting a role named in `onIdle`, which dispatches on the idle edge instead). Also resolved from each root's own config |
 | `autonomous.roleRunner.intervalSecs` | `LOOM_ROLE_RUNNER_INTERVAL_SECS` | per-role built-in — curator/judge/doctor 300s, champion/auditor/hermit 600s, guide 900s (5–15 min); `architect` 3600s, idle-addressable-only | Uniform override applied to every enabled role's cadence — **when either tier is set, every role logs the same interval and the per-role built-ins are entirely inert.** The boot log names which tier won: `role_runner: <role> interval=<n>s source=built-in|config:…|env:…` (#6204). Zero/invalid env → next tier |
-| `autonomous.roleRunner.maxConcurrent` | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | the 7 interval-default roles | **The ceiling on concurrently-running role agents (#6102)** — the role-runner counterpart of `workFinder.maxConcurrent`, which bounds sweep dispatch **only**. Counted **process-wide across every managed workspace** (the host is shared; a per-root ceiling would bound nothing on a 25-workspace box) but resolved from each root's own config, like `architectMaxProposals`. A refused tick logs at `WARN` and retries next tick — distinct from the `debug!`-level per-`(root, role)` overlap skip (#4364). Zero/non-integer at either tier drops to the next (a `0` ceiling is `enabled: false` spelled confusingly). **Live** — re-read every tick. See [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102) |
+| `autonomous.roleRunner.maxConcurrent` | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | the 7 interval-default roles | **The ceiling on concurrently-running role agents (#6102)** — the role-runner counterpart of `workFinder.maxConcurrent`, which bounds sweep dispatch **only**. Counted **process-wide across every managed workspace and every role** (the host is shared; a per-root ceiling would bound nothing on a 25-workspace box) but resolved from each root's own config, like `architectMaxProposals`. Since #9391 role loops dispatch repositories **concurrently** (one instance per `(repository, role)`), bounded by this ceiling plus the per-role `roleMaxConcurrent` budgets. A tick that reaches it stops admitting and logs one `WARN` summary line per role; the deferred roots retry next tick — distinct from the `debug!`-level per-`(root, role)` overlap skip (#4364). Zero/non-integer at either tier drops to the next (a `0` ceiling is `enabled: false` spelled confusingly). **Live** — re-read every tick. See [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102) |
+| `autonomous.roleRunner.roleMaxConcurrent` | *(config only)* | `max(1, maxConcurrent / 2)` per role — **3** at the default ceiling | **Per-role budget under the host ceiling (#9391).** A `{"<role>": N}` object (e.g. `{"judge": 3, "champion": 3, "curator": 2}`) bounding how many runs of one role may be in flight across every workspace, so one role cannot take every slot. Keys are trimmed and lower-cased; a zero, negative or non-integer value is dropped per entry to the default; a value above the ceiling is clamped to it. Idle-edge runs count against it. Resolved from each root's own config and **live** (re-read every tick). See [Concurrent across repositories](#concurrent-across-repositories-one-instance-per-repository-role-9391) |
 | `autonomous.roleRunner.model` | *(config only)* | `sonnet` | Model every role child is pinned to via `--model` (#4501). Resolved through the same `resolve_dispatch_model` chain as sweep dispatch: this key > `autonomous.model` > shipped default; blanks treated as unset. A role child never inherits the account's interactive CLI default |
 | `autonomous.roleRunner.onIdle` | *(config only)* | `[]` (none) | Subset of all **8** shipped roles — the 7 above **plus `architect`**, which is reachable here and nowhere else by default (#5656) — to fire on the work-finder **idle edge** (#4364) — the non-idle → idle transition (0 in-flight sweeps AND nothing dispatched this tick), in addition to the interval cadence. Absent → none (opposite default from `roles`); unknown names ignored with a warning. Debounced to min 60s per (root, role) and skipped while that role's interval/idle run is in progress. **Requires the work finder enabled** to observe idleness (a startup warning fires if set with the work finder off). **Also gated by that same root's own `enabled`** (#4377) — see below |
 | `autonomous.roleRunner.onIdleMaxWait` | *(config only)* | *(unset — no promotion, today's idle-edge-only firing)* | **Per-role starvation guard for an `onIdle` role (#7511).** A `{"<role>": "<duration>"}` object (e.g. `{"hermit": "24h", "auditor": "72h"}`, duration strings `<n>s`/`<n>m`/`<n>h`/`<n>d`) naming the longest a role may go without a completed tick before it is **promoted** into the next interval-cadence pass — see [`onIdleMaxWait` — promoting a starved `onIdle` role](#onidlemaxwait--promoting-a-starved-onidle-role-7511) below |
@@ -7432,6 +7493,7 @@ leaves the daemon's behavior byte-for-byte unchanged:
 | `LOOM_ROLE_RUNNER_INTERVAL_SECS` | `autonomous.roleRunner.intervalSecs` | env > config > default | per-role built-in (see above) |
 | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | `autonomous.roleRunner.maxConcurrent` | env > config > default | the 7 interval-default roles (concurrent role-agent ceiling, #6102 — bounds the agents `workFinder.maxConcurrent` does not) |
 | — | `autonomous.roleRunner.roles` | config only | the 7 interval-default roles (`architect` excluded, #5656) |
+| — | `autonomous.roleRunner.roleMaxConcurrent` | config only | `max(1, maxConcurrent / 2)` per role (per-role budget under the host ceiling, #9391) |
 | — | `autonomous.roleRunner.onIdle` | config only | `[]` (none; may name any of the 8 shipped roles, `architect` included) |
 | — | `autonomous.roleRunner.model` | config only (`roleRunner.model` > `autonomous.model` > default) | `sonnet` (`DEFAULT_DISPATCH_MODEL`) |
 | — | `autonomous.roleRunner.effort` | config only (`roleRunner.roleEfforts.<role>` > `roleRunner.effort` > unset) | *(unset ⇒ **no** `--effort` argument; the runtime CLI's own session default, #8054)* |
