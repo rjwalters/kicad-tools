@@ -490,6 +490,40 @@ class TestFixtureBoard:
         assert found[0].location == pytest.approx((114.55, 107.025))
 
 
+BOARD_04_ROUTED = Path("boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb")
+
+# The four board-04 footprints this rule selects (issue #5745).  Before the
+# generator emitted pin-1 silk, every one of them reported
+# ``pin1_marker_missing`` and the findings were waived in
+# ``output/.kct_waivers.json``; the waivers are gone, so the marks have to
+# carry the rule on their own.
+BOARD_04_SELECTED = ("D1", "J1", "U1", "U2")
+
+
+def _board_04() -> PCB:
+    if not BOARD_04_ROUTED.is_file():
+        pytest.skip(f"board fixture not present: {BOARD_04_ROUTED}")
+    return PCB.load(str(BOARD_04_ROUTED))
+
+
+class TestCommittedBoard04:
+    """Board 04's committed artifact carries real pin-1 / polarity marks.
+
+    Board 04 is gated by the reviewed paid-drill validator (#5009) whose DRC
+    meta-check fails on *any* warning, so a dropped mark is a red gate rather
+    than an advisory -- this is the regression guard for it.
+    """
+
+    def test_rule_still_selects_all_four_footprints(self):
+        """Guards against the zero-findings assertion passing vacuously."""
+        rule = Pin1MarkerRule()
+        selected = sorted(fp.reference for fp in _board_04().footprints if rule.selects(fp))
+        assert selected == list(BOARD_04_SELECTED)
+
+    def test_no_pin1_marker_findings(self):
+        assert _ids(_run(_board_04())) == []
+
+
 class TestCheckerWiring:
     def test_check_all_methods_includes_rule(self):
         assert "check_pin1_markers" in DRCChecker.CHECK_ALL_METHODS

@@ -26,6 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Board 04 now silkscreens pin 1 / polarity on U1, U2, D1 and J1**
+  (Issue #5745). `boards/04-stm32-devboard/generate_design.py` emitted all
+  four of those footprints with **no** footprint silkscreen graphics at all —
+  only the reference text — so `pin1_marker_missing` fired on every one and
+  the four findings had to be waived in `output/.kct_waivers.json` when
+  #5737 landed the rule. Each generator function now emits its stock KiCad
+  library artwork: the body outline plus the filled pin-1 triangle for
+  `SOT-223-3_TabPin2` (**Y-mirrored** — this board's pad 1 sits at `y=+2.3`,
+  the opposite of the library footprint, so copying the library triangle
+  verbatim would have marked pad 3) and for `LQFP-48_7x7mm_P0.5mm` (four
+  corner brackets, transferred as-is — the pad coordinates already match the
+  library), the open-sided polarity bracket for `LED_0805_2012Metric`, and
+  the L-shaped pin-1 corner plus body rectangle for
+  `PinHeader_1x06_P2.54mm_Vertical` (shifted from the library's pin-1 origin
+  onto this footprint's centered origin). Strokes are 0.15mm, the
+  `jlcpcb-tier1` silkscreen floor, rather than the library's 0.12mm, and the
+  U1/D1/J1 reference designators move clear of the new outlines so
+  `silk_overlap` stays at zero. The four waivers are deleted and the board
+  passes the reviewed paid-drill gate (#5009) at strict-0 **without** them —
+  `kct check` reports 0 errors / 0 warnings / 0 waived, and `kicad-cli pcb
+  drc` independently reports no silk finding of any kind.
+
 - **The coupled diff-pair search now sees the copper it was routing
   through** (Issue #5662, Phase 3c of Epic #5509). #4507 summarised the
   defect as *"the copper this board fails on is invisible to both by
