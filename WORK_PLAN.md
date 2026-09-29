@@ -30,13 +30,13 @@ Human-approved issues ready for implementation (`loom:issue`).
 
 Issues currently being built (`loom:building`).
 
-- **#5790**: research: extend KRT benchmark to boards 04/05/07 (fanout, length-matching, dense bundles) + fix reproduce command
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#5799**: docs(research): benchmark KRT on boards 04/05/07 and fix the harness timeout leak
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -67,11 +67,11 @@ Issues carrying `loom:curated`.
 - **#5701**: ci: stacked PRs (base = a feature branch) get no CI at all — 'CLEAN' means 'never ran', not 'passed' *(curated)*
 - **#5704**: Manufacturing profiles: project min_silk_clearance is mapped from the solder-mask clearance, not the silkscreen floor *(curated)*
 - **#5712**: champion-epic.md: 'Epic Passes Evaluation' comments reuse the rejection-only champion:epic-verdict marker, corrupting the unrevised-eval skip/escalate ladder *(curated)*
-- **#5790**: research: extend KRT benchmark to boards 04/05/07 (fanout, length-matching, dense bundles) + fix reproduce command *(curated)*
 
 ## Proposed (Architect / Hermit)
 
-_None._
+- **#5801**: Wire up or remove orphaned BayesianOptStrategy: --strategy bayesian is unreachable despite README/ROADMAP claiming it ships *(hermit)*
+- **#5802**: router/core.py: Autorouter god-class has regrown to 20,764 lines (216 methods), 4.6x since last extraction closed *(hermit)*
 
 ## Epics
 
@@ -90,11 +90,11 @@ _None._
 | Operator merge-risk holds | 0 |
 | Operator priority | 0 |
 | Ready (`loom:issue`) | 2 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 20 |
-| Architect / Hermit proposals | 0 |
+| Curated | 19 |
+| Architect / Hermit proposals | 2 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
 
