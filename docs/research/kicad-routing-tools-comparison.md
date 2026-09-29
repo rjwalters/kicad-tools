@@ -412,6 +412,12 @@ route set, which is why board 06's own README passes `--nets IN1,…,OUT4`. The
 06a and 06b outputs are therefore identical. KRT kept the pre-routed pairs
 (its cleanup passes simplified them from 8 to 4 segments per leg).
 
+**Fixed after this benchmark ran (Issue #5788).** `--preserve-existing` now
+excludes a net that is already fully connected on the input from the route set,
+so the 06a recipe above keeps 64/64 LVDS segments (it kept 0/64 when measured
+here). The 06a rows in the table above are the pre-fix measurement and were not
+regenerated.
+
 **Reference planes.** On board 06, kct put 22.8 mm of OUT4 on the In1.Cu GND
 plane. It warned about this, and the fix is the opt-in
 `--reserve-plane-layers`. KRT put none there. On board 03, all three results
@@ -523,6 +529,9 @@ triage should decide whether to file them:
 - **`--preserve-existing` help text.** The help says "only unconnected nets
   are routed". In practice, already-complete nets inside the route set are
   re-routed and their copper is dropped (06a lost its coupled LVDS geometry).
+  Filed and fixed as Issue #5788: already-complete nets are now held out of the
+  route set, and the help text states the contract (including that `--nets` /
+  `--region` / `--complete` still re-route what they name).
 - **Plane layers on board 06.** kct's default routes signals on board 06's
   declared reference planes. It warns, but `--reserve-plane-layers` is off.
 

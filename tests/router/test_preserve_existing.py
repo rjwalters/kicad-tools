@@ -74,6 +74,12 @@ _BOARD = (
 # routes in one 2-layer attempt, keeping the CLI test fast.
 _SKIP_ALL_BUT_LINE_A = "LINE_B,LINE_C,LINE_D,NODE_A,NODE_B,NODE_C,NODE_D"
 
+# The lanes ``_composition_board_text(open_nets=("LINE_A",))`` pre-routes -- i.e.
+# every signal net the composition passes below skip, and none of the ones they
+# route.  Issue #5788 makes that distinction load-bearing: an already-complete
+# net is no longer re-routed under --preserve-existing.
+_PRE_ROUTED_NETS = tuple(_SKIP_ALL_BUT_LINE_A.split(","))
+
 _ALL_SIGNAL_NETS = (
     "LINE_A",
     "LINE_B",
@@ -86,12 +92,19 @@ _ALL_SIGNAL_NETS = (
 )
 
 
-def _composition_board_text() -> str:
+def _composition_board_text(*, open_nets: tuple[str, ...] = ()) -> str:
     """Eight separated routed lanes isolate preservation/sidecar plumbing.
 
     These tests need real pads and copper on skipped nets, plus one net to
     reroute. Dense charlieplex topology adds an unrelated congestion search
     under the 1 mm sidecar clearance and makes CLI plumbing checks time out.
+
+    *open_nets* names lanes emitted with pads but WITHOUT their pre-routing
+    segment.  Issue #5788: ``--preserve-existing`` now excludes an
+    already-fully-connected net from the route set, so a lane that is expected
+    to be re-routed on a ``--preserve-existing`` pass must genuinely start out
+    unconnected -- otherwise the pass has nothing to route and the test is
+    vacuous (it was: the lattice driver stopped being driven at all).
     """
     nodes = [
         '(kicad_pcb (version 20240108) (generator "test")',
@@ -111,6 +124,8 @@ def _composition_board_text() -> str:
                 f'(pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") '
                 f'(net {number} "{name}")))'
             )
+        if name in open_nets:
+            continue
         nodes.append(
             f'(segment (start 5 {y}) (end 19 {y}) (width 0.25) (layer "F.Cu") (net {number}))'
         )
@@ -213,13 +228,16 @@ class TestPreserveExistingCLI:
 
     @pytest.fixture
     def board_text(self):
-        return _composition_board_text()
+        # Issue #5788: LINE_A is the lane these tests expect to be ROUTED, so
+        # it must start out unconnected -- a --preserve-existing pass now
+        # leaves an already-complete net (and its copper) alone.
+        return _composition_board_text(open_nets=("LINE_A",))
 
     def test_preserve_keeps_skipped_nets_byte_identical(self, tmp_path, board_text):
         """AC #1/#2: skipped nets keep byte-identical geometry; only LINE_A routes."""
         orig = parse_segments(board_text)
-        # Sanity: the fixture really does carry the eight signal nets.
-        assert set(orig) == set(_ALL_SIGNAL_NETS)
+        # Sanity: the fixture pre-routes every signal net EXCEPT LINE_A (#5788).
+        assert set(orig) == set(_PRE_ROUTED_NETS)
 
         out_text = _run_route(tmp_path, board_text, preserve=True, skip_nets=_SKIP_ALL_BUT_LINE_A)
         out = parse_segments(out_text)
@@ -459,13 +477,16 @@ class TestPreserveExistingNameBasedCLI:
 
     @pytest.fixture
     def board_text(self):
-        return _composition_board_text()
+        # Issue #5788: LINE_A is the lane these tests expect to be ROUTED, so
+        # it must start out unconnected -- a --preserve-existing pass now
+        # leaves an already-complete net (and its copper) alone.
+        return _composition_board_text(open_nets=("LINE_A",))
 
     def test_preserve_keeps_other_nets_on_name_based_board(self, tmp_path, board_text):
         """AC #1: every OTHER net's copper survives a single-net re-route."""
         name_based = _to_name_based_dialect(board_text)
         orig = parse_segments(name_based)
-        assert set(orig) == set(_ALL_SIGNAL_NETS)
+        assert set(orig) == set(_PRE_ROUTED_NETS)
 
         out_text = _run_route(tmp_path, name_based, preserve=True, skip_nets=_SKIP_ALL_BUT_LINE_A)
         out = parse_segments(out_text)
@@ -568,7 +589,10 @@ class TestPreserveExistingHardAvoidLayers:
 
     @pytest.fixture
     def board_text(self):
-        return _composition_board_text()
+        # Issue #5788: LINE_A is the lane these tests expect to be ROUTED, so
+        # it must start out unconnected -- a --preserve-existing pass now
+        # leaves an already-complete net (and its copper) alone.
+        return _composition_board_text(open_nets=("LINE_A",))
 
     def test_preserve_existing_with_hard_avoid_map_keeps_skipped_nets(self, tmp_path, board_text):
         """A ``--preserve-existing`` composition run with a net-class map that
@@ -583,7 +607,7 @@ class TestPreserveExistingHardAvoidLayers:
         import json
 
         orig = parse_segments(board_text)
-        assert set(orig) == set(_ALL_SIGNAL_NETS)
+        assert set(orig) == set(_PRE_ROUTED_NETS)
 
         # Declare LINE_A as a 15 A HV net that must avoid the inner planes.
         map_path = tmp_path / "netclass.json"
@@ -774,7 +798,10 @@ class TestPreservedNetClassMapResolution:
 
     @pytest.fixture
     def board_text(self):
-        return _composition_board_text()
+        # Issue #5788: LINE_A is the lane these tests expect to be ROUTED, so
+        # it must start out unconnected -- a --preserve-existing pass now
+        # leaves an already-complete net (and its copper) alone.
+        return _composition_board_text(open_nets=("LINE_A",))
 
     @staticmethod
     def _spy_sidecar(monkeypatch) -> list[dict]:
