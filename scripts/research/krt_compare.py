@@ -88,29 +88,14 @@ BOARDS: dict[str, Board] = {
         "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
         layers=4,
     ),
-    "04": Board(
-        "04",
-        "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb",
-        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
-    ),
-    # 05: artifact-first board -- the committed routed reference has a
-    # different footprint set (55 vs 42) than the generator's unrouted input,
-    # so its "ref" row is not placement-identical; tool rows are comparable.
-    "05": Board(
-        "05",
-        "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
-        "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
-        note="ref row not placement-identical (artifact-first board)",
-    ),
-    # 07: the generator's input already carries partial copper (~3.7k
-    # segments); both tools route only the open nets on top of it.
-    "07": Board(
-        "07",
-        "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
-        "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
-        kct_args=("--preserve-existing",),
-        note="input pre-routed in part; routes the remaining open nets",
-    ),
+    # 04, 05 and 07 are DEFERRED to a follow-up (docs/research/
+    # kicad-routing-tools-comparison.md's own stated scope, #5781) and are
+    # deliberately NOT defined here: a `Board` entry would make them part of
+    # the default `--boards` set below (`",".join(BOARDS)`), routing boards
+    # the comparison doc explicitly says were never benchmarked. Issue #5783:
+    # a concurrent-worktree-collision incident briefly leaked in-progress
+    # entries for these three keys via PR #5782; this comment is the record
+    # of why they are absent, not merely undocumented.
     # 06a: the board's real input -- the 4 LVDS pairs arrive PRE-ROUTED by the
     # generator (plus GND/+3V3 plane vias); only the 8 LVTTL nets are open.
     # Both tools must keep existing copper: KRT does by default; kct needs

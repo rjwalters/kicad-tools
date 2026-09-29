@@ -20,8 +20,12 @@
 #   (c) a fresh lease held by a DIFFERENT host -> exit 4, nothing posted
 #   (d) a STALE lease (past TTL), same host or a peer's, does not block
 #       publication
-#   (e) a fresh lease from a different sweep on the SAME host -> publishes
-#       anyway (this sweep is the one working the issue now)
+#   (e) regression (#5783): a fresh lease from a DIFFERENT sweep on the SAME
+#       host -> exit 4, nothing posted (a same-host peer is just as live a
+#       worktree co-occupancy hazard as a different-host one -- see the
+#       "sweep-issue-5783-1790637192" style two-call sequence below, which
+#       exercises this via two real, sequential `publish` invocations rather
+#       than a hand-authored fixture)
 #   (f) a `gh` READ failure fails open: publishes anyway
 #   (g) a `gh` WRITE failure -> exit 2 (caller proceeds without a lease)
 #   (h) the POST uses `-F body=@-` (stdin), never `-f` (literal "@-")
@@ -56,6 +60,12 @@
 #       away -- the phantom-block mechanism that lets a multi-host race
 #       churn indefinitely instead of converging. Mirrors sweep-lease-fence.
 #       sh's own #6485 yield-exclusion fix, applied here on the write side.
+#   (p) regression (#5783 AC4): two SEQUENTIAL, real `publish` calls for the
+#       SAME issue with the SAME host but two DIFFERENT --sweep-id values --
+#       exactly the observed #5781 incident shape -- result in exactly ONE
+#       proceeding (the first: exit 0, one comment posted) and the second
+#       exiting 4 with nothing posted, using the script's own freshly-posted
+#       comment as the second call's evidence (not a hand-authored fixture).
 #
 # Usage:
 #   ./.loom/scripts/tests/test-sweep-lease-publish.sh
@@ -323,13 +333,32 @@ run_script publish 6320 --sweep-id sweep-run-A --ttl-minutes 1
 assert_eq "0" "$RC" "(d) --ttl-minutes tightens freshness: a 2-min-old peer lease is stale at ttl=1"
 assert_eq "1" "$(post_count)" "(d) ... and publication proceeds"
 
-# --- (e) fresh lease, same host, DIFFERENT sweep id -> publish anyway -----
+# --- (e) regression (#5783): fresh lease, same host, DIFFERENT sweep id ->
+# exit 4, nothing posted (was: publish anyway, the bug this issue fixes) ---
 reset_state
 lease_json "$OPAQUE_HOST" "sweep-run-OLD" "$FRESH_ISO" > "$STUB_DIR/comments.json"
 run_script publish 6320 --sweep-id sweep-run-A
-assert_eq "0" "$RC" "(e) same-host/different-sweep fresh lease still exits 0"
-assert_eq "1" "$(post_count)" "(e) this sweep publishes its own record on top"
-assert_contains "$ERR" "different sweep on this same host" "(e) stderr explains the same-host case"
+assert_eq "4" "$RC" "(e) same-host/different-sweep fresh lease now exits 4, not 0"
+assert_eq "0" "$(post_count)" "(e) nothing is posted over the same-host peer's live lease"
+assert_contains "$ERR" "different sweep on THIS SAME host" "(e) stderr names the same-host peer condition distinctly from the cross-host one"
+
+# --- (p) regression (#5783 AC4): two sequential real `publish` calls, same
+# issue, same host, different --sweep-id -> exactly one proceeds ----------
+reset_state
+run_script publish 6320 --sweep-id sweep-issue-5783-a
+FIRST_RC="$RC"
+FIRST_POSTS="$(post_count)"
+assert_eq "0" "$FIRST_RC" "(p) the first sweep's publish call proceeds (exit 0)"
+assert_eq "1" "$FIRST_POSTS" "(p) the first call posts exactly one lease comment"
+# Feed the first call's OWN posted comment back as evidence for the second
+# call, exactly as a real forge round trip would: the second sweep's `gh api`
+# read sees the first sweep's just-published record.
+jq --arg body "$(cat "$STUB_DIR/post-1.body")" --arg stamp "$NOW_ISO" \
+    '[{id: 42001, body: $body, updated_at: $stamp}]' -n > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-issue-5783-b
+assert_eq "4" "$RC" "(p) the second, different-sweep-id call on the same issue exits 4"
+assert_eq "$FIRST_POSTS" "$(post_count)" "(p) the second call posts nothing over the first sweep's live lease (post count unchanged since the first call)"
+assert_contains "$ERR" "different sweep on THIS SAME host" "(p) the second call's stderr identifies a same-host peer"
 
 # --- (m) regression (#6333): a fresher same-host/different-sweep lease must
 # not mask an older-but-still-fresh PEER lease. The peer's lease
