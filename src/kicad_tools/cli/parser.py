@@ -3550,9 +3550,17 @@ def _add_route_parser(subparsers) -> None:
         help=(
             "Incremental routing: load existing (segment ...)/(via ...) copper "
             "as immovable obstacles and re-emit it unchanged, so only "
-            "unconnected nets are routed. Preserves manually-routed nets, "
-            "skipped nets' geometry, and standalone stitch vias across a "
-            "route pass. Default off (full re-route, existing copper is "
+            "unconnected nets are routed. A net that is ALREADY fully "
+            "connected on the input board is excluded from the route set "
+            "entirely (Issue #5788), so its traces and vias survive instead of "
+            "being replaced by a fresh route -- 'already connected' is exactly "
+            "what 'kct check' reports (traces, vias and same-net filled zones "
+            "all count). Also preserves manually-routed nets, skipped nets' "
+            "geometry, and standalone stitch vias across a route pass. An "
+            "EXPLICIT route set overrides the exclusion, because there the "
+            "re-route is the request: --nets, --region and --complete each "
+            "choose their own nets and re-route them even when already "
+            "connected. Default off (full re-route, existing copper is "
             "replaced by freshly routed nets)."
         ),
     )

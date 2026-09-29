@@ -7373,6 +7373,11 @@ def route_with_layer_escalation(
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Issue #3155: capture preserved copper ONCE from the staged input before
     # any routing or checkpoint write mutates it.  The escalation loop below
@@ -8605,6 +8610,11 @@ def route_with_rule_relaxation(
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -10902,6 +10912,11 @@ def route_with_combined_escalation(
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -13193,6 +13208,104 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
             file=sys.stderr,
         )
     return 0
+
+
+def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
+    """Hold already-complete nets out of a ``--preserve-existing`` route set (Issue #5788).
+
+    ``--preserve-existing``'s ``--help`` promises that existing copper is
+    re-emitted unchanged "so only unconnected nets are routed".  Only the first
+    half was implemented: :func:`load_pcb_for_routing` marked the copper as a
+    grid obstacle, but ``router.nets`` still contained EVERY multi-pad net --
+    and both engines deliberately let a net that is in the routable set replace
+    its own copper (``fixed_copper = [r for r in self.existing_routes if r.net
+    not in self.nets]``, correct for ``--nets`` / ``--region``).  So a net that
+    was already fully routed in the input was re-routed from scratch and its
+    copper dropped: board 06 lost all 64 of its pre-routed, coupled LVDS
+    segments through a flag whose entire purpose is to keep them.
+
+    This preflight closes the gap the same way ``--complete`` already narrows
+    its own route set: detect the nets that are ALREADY fully connected on the
+    INPUT board (:func:`~kicad_tools.router.preserve_existing.fully_connected_nets`,
+    the connectivity model ``kct check`` itself consumes) and stamp them on
+    ``args._preserved_connected_nets``.  The four routing sub-flows then append
+    them to their local ``skip_nets`` (see
+    :func:`_extend_skip_for_preserved_nets`), which is the established,
+    already-tested way to say "do not route this net": its pads become net-0
+    obstacles, its copper is still loaded into ``router.existing_routes`` (so it
+    is a HARD clearance obstacle for both the mesh and lattice negotiations and
+    is never offered to diff-pair grouping), and the ``--preserve-existing``
+    writer re-emits it verbatim.
+
+    Deliberately scoped to a **bare** ``--preserve-existing``.  It is a no-op
+    when the caller already chose an explicit route set, because there the
+    re-route is the point, not a bug:
+
+    * ``--nets`` / ``--complete`` (both stamp ``args._route_only_nets``) --
+      ``--nets`` promises to route exactly the listed nets, and ``--complete``
+      has already narrowed the set to the stranded ones.
+    * ``--region`` -- confining routing to a box exists precisely to re-route
+      the copper inside it.
+
+    Returns 0 always (detection failures degrade to "nothing preserved", i.e.
+    pre-#5788 behaviour); the int return matches the other preflights so the
+    call site reads uniformly.
+    """
+    args._preserved_connected_nets = []
+    if not getattr(args, "preserve_existing", False):
+        return 0
+    # An explicitly chosen route set (--nets / --complete) or a spatial bound
+    # (--region) means the caller WANTS those nets re-routed.
+    if getattr(args, "_route_only_nets", None) or getattr(args, "nets", None):
+        return 0
+    if getattr(args, "_region_box", None) is not None:
+        return 0
+
+    from kicad_tools.router.preserve_existing import fully_connected_nets
+
+    try:
+        connected = fully_connected_nets(pcb_path)
+    except Exception as e:  # pragma: no cover - a detector that cannot run
+        # must never widen the preserved set (and must never fail the route).
+        if not getattr(args, "quiet", False):
+            print(
+                "Note: --preserve-existing could not determine which nets are "
+                f"already connected ({e}); every multi-pad net stays routable.",
+                file=sys.stderr,
+            )
+        return 0
+
+    if not connected:
+        return 0
+
+    args._preserved_connected_nets = list(connected)
+    if not getattr(args, "quiet", False):
+        preview = ", ".join(connected[:8])
+        more = "" if len(connected) <= 8 else f" (+{len(connected) - 8} more)"
+        print(
+            f"  --preserve-existing: {len(connected)} net(s) already fully "
+            f"connected -- left untouched, not re-routed: {preview}{more}"
+        )
+    return 0
+
+
+def _extend_skip_for_preserved_nets(args, skip_nets: list[str]) -> list[str]:
+    """Append the #5788 already-connected nets to *skip_nets*, in place.
+
+    Mirrors :func:`~kicad_tools.router.auto_pour.auto_skip_pour_nets`'s
+    contract (mutates the caller's list, returns the names it added) and is
+    called from the same spot in every routing sub-flow: AFTER the auto-pour
+    step, so these names are never forwarded as ``force_pour_nets`` pour intent
+    (Issue #3092's ``--skip-nets``-is-pour-intent rule must not pick them up --
+    an already-routed signal net is emphatically not a pour request).
+
+    Returns the list of names appended (empty when the preflight found none, or
+    when the caller opted into an explicit route set).
+    """
+    preserved = list(getattr(args, "_preserved_connected_nets", None) or [])
+    added = [n for n in preserved if n not in skip_nets]
+    skip_nets.extend(added)
+    return added
 
 
 # ---------------------------------------------------------------------------
@@ -15641,6 +15754,17 @@ def _run_main_impl(args, parser, argv) -> int:
         if rc != 0:
             return rc
 
+    # Issue #5788: a bare --preserve-existing must honour its own --help ("only
+    # unconnected nets are routed") -- detect the nets that are ALREADY fully
+    # connected on the input board and stamp them so every routing sub-flow
+    # holds them out of the routable set (their copper stays a hard obstacle and
+    # is re-emitted verbatim).  Runs AFTER --nets / --region so their explicit
+    # re-route semantics win; a no-op unless --preserve-existing is in effect
+    # without an explicit route set.
+    _pc_rc = _resolve_preserved_connected_nets(args, pcb_path)
+    if _pc_rc != 0:
+        return _pc_rc
+
     # Issue #4472 (epic #4465, Phase 2): localize a --complete pass to a
     # per-link bounding box.  Runs AFTER --region so a user-supplied box wins
     # (the lattice localizes to it); otherwise the union of the stranded nets'
@@ -16198,6 +16322,11 @@ def _run_main_impl(args, parser, argv) -> int:
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))
