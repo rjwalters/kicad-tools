@@ -5,6 +5,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ### 2026-09-29
 
+- **PR #5799**: docs(research): benchmark KRT on boards 04/05/07 and fix the harness timeout leak
+- **Issue #5790** (closed): research: extend KRT benchmark to boards 04/05/07 (fanout, length-matching, dense bundles) + fix reproduce command
 - **PR #5797**: fix(router): default kct route to reserve declared plane layers from signal
 - **PR #5796**: chore(claude): fix malformed ./scripts/** Bash permission rules
 - **PR #5794**: fix(router): exclude already-connected nets from --preserve-existing route set
