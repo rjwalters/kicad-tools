@@ -44,14 +44,31 @@ def krt_compare():
     return _load_krt_compare()
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+def _running(pid: int) -> bool:
+    """True while ``pid`` is a RUNNING process -- a zombie is not.
+
+    ``os.kill(pid, 0)`` succeeds on a zombie, so it cannot answer this on its
+    own. It has to: a SIGKILLed orphan is reparented to PID 1, and in a
+    container whose PID 1 does not reap (the CI image is one) it then stays
+    signalable forever. What the benchmark cares about -- and what this test
+    asserts -- is that nothing is left *consuming CPU*, not that the process
+    table has been tidied by someone else.
+    """
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        try:
+            return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except (OSError, IndexError):
+            return False
+    if Path("/proc").is_dir():  # Linux and no /proc/<pid> => gone
         return False
-    except PermissionError:  # pragma: no cover - not expected in-tree
-        return True
-    return True
+    try:  # pragma: no cover - non-Linux fallback
+        out = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True, check=False
+        )
+        return bool(out.stdout.strip()) and not out.stdout.strip().startswith("Z")
+    except OSError:
+        return False
 
 
 @pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups required")
@@ -91,12 +108,41 @@ def test_timeout_kills_the_whole_process_tree(krt_compare, tmp_path: Path) -> No
     # this is checked immediately, with only a short tolerance for the
     # scheduler, not a long "eventually" poll.
     for _ in range(20):
-        if not _alive(grandchild_pid):
+        if not _running(grandchild_pid):
             break
         time.sleep(0.1)
-    if _alive(grandchild_pid):
+    if _running(grandchild_pid):
         os.kill(grandchild_pid, signal.SIGKILL)  # do not leak it out of the test
-        pytest.fail(f"grandchild {grandchild_pid} survived the timeout")
+        pytest.fail(f"grandchild {grandchild_pid} still running after the timeout")
+
+
+@pytest.mark.skipif(not Path("/proc").is_dir(), reason="/proc required to observe a zombie")
+def test_an_unreaped_zombie_does_not_count_as_a_surviving_process(krt_compare) -> None:
+    """The exact CI failure this file was rewritten for.
+
+    A SIGKILLed orphan is reparented to PID 1, and the CI container's PID 1
+    does not reap. It therefore stays *signalable* forever while holding no
+    CPU. If `_group_alive` counted that as alive, `_kill_group` would burn its
+    whole grace period on every timeout and then report a leak that is not one
+    -- and this suite would fail on CI while passing on a normal host, which is
+    precisely what happened.
+
+    An unwaited-for child of *this* process is the same state, reachable
+    without a container.
+    """
+    p = subprocess.Popen(["true"], start_new_session=True)  # noqa: S607 - fixture, not a tool call
+    try:
+        for _ in range(100):
+            if not _running(p.pid):
+                break
+            time.sleep(0.05)
+        assert not _running(p.pid), "child never exited -- test would prove nothing"
+
+        # Still signalable: this is what makes kill(pid, 0) the wrong predicate.
+        os.kill(p.pid, 0)
+        assert krt_compare._group_alive(p.pid) is False
+    finally:
+        p.wait()
 
 
 def test_run_returns_exit_code_and_does_not_flag_a_clean_run(krt_compare, tmp_path: Path) -> None:

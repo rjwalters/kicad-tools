@@ -372,15 +372,50 @@ def _run(cmd: list[str], cwd: Path, log: Path, timeout: float) -> tuple[int, boo
             return -1, True
 
 
-def _group_alive(pgid: int) -> bool:
-    """True while any process remains in group ``pgid`` (zombies included)."""
+def _proc_state_and_pgid(pid_dir: Path) -> tuple[str, int] | None:
+    """``(state, pgid)`` from ``/proc/<pid>/stat``, or None if it is unreadable.
+
+    The comm field is parenthesised and may itself contain spaces, so the split
+    is anchored on the LAST ``)``. After it the fields are state, ppid, pgrp.
+    """
     try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:  # exists, just not ours to signal
+        after = pid_dir.joinpath("stat").read_text().rsplit(")", 1)[1].split()
+        return after[0], int(after[2])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _group_alive(pgid: int) -> bool:
+    """True while some process in group ``pgid`` is still RUNNING.
+
+    **Zombies do not count.** A killed orphan whose new parent has not reaped it
+    stays signalable indefinitely -- ``kill(pid, 0)`` and ``killpg(pgid, 0)``
+    both succeed on it -- but it holds no CPU and cannot contend with the next
+    board's run, which is the only thing this predicate is used to decide. In a
+    container whose PID 1 does not reap (the CI image is one), treating a zombie
+    as alive means waiting out the full grace period on every single timeout and
+    then reporting a leak that does not exist.
+
+    Linux is read from ``/proc``; elsewhere there is no cheap way to tell a
+    zombie from a runner, so the signalability answer is used and zombies are
+    conservatively counted as alive.
+    """
+    proc = Path("/proc")
+    if not proc.is_dir():
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:  # exists, just not ours to signal
+            return True
         return True
-    return True
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        info = _proc_state_and_pgid(entry)
+        if info is not None and info[1] == pgid and info[0] != "Z":
+            return True
+    return False
 
 
 def _kill_group(p: subprocess.Popen, term_grace: float = 10.0, kill_grace: float = 15.0) -> None:
@@ -399,7 +434,8 @@ def _kill_group(p: subprocess.Popen, term_grace: float = 10.0, kill_grace: float
 
     ``start_new_session=True`` in ``_run`` makes ``p.pid`` the group id, and the
     group outlives ``p`` while any member remains, so signalling by that number
-    stays correct after ``p`` itself has exited.
+    stays correct after ``p`` itself has exited. "Gone" means *no member is
+    running* -- see ``_group_alive`` on why an unreaped zombie is not a leak.
     """
     pgid = p.pid
     for sig, grace in ((signal.SIGTERM, term_grace), (signal.SIGKILL, kill_grace)):
