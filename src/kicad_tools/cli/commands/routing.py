@@ -764,10 +764,12 @@ def run_route_command(args) -> int:
         sub_argv.append("--strict-layers")
     # Issue #5014: forward --reserve-plane-layers so a controlled-impedance
     # recipe's declared reference planes are hard-excluded from the routable
-    # set.  Defaults off; forward only when set so the flag-off path stays
-    # byte-identical.
-    if getattr(args, "reserve_plane_layers", False):
-        sub_argv.append("--reserve-plane-layers")
+    # set. Issue #5789: the flag now defaults to True on BOTH the outer and
+    # inner parsers, so the "unset" path already matches (no forwarding
+    # needed); only an explicit opt-out (--no-reserve-plane-layers) needs to
+    # cross the shim, mirroring the --no-sync-check forwarding pattern below.
+    if getattr(args, "reserve_plane_layers", True) is False:
+        sub_argv.append("--no-reserve-plane-layers")
     # Issue #3154: forward the advisory drift-banner flags.  --sync-check
     # defaults on; forward --no-sync-check only when explicitly disabled.
     if getattr(args, "sync_check", True) is False:

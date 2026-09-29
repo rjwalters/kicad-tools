@@ -4370,23 +4370,28 @@ def _add_route_parser(subparsers) -> None:
             "avoided layer must never carry a given net."
         ),
     )
-    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
-    # plane assignments.  Mirror of the inner route_cmd.py flag; both sites
-    # must stay in sync per ``tests/test_cli_parser_drift.py``.
+    # Issue #5014: HARD signal-layer eligibility for controlled-impedance
+    # plane assignments. Issue #5789: defaults to ON -- a declared reference
+    # plane is hard-excluded from signal routing unless the caller opts out
+    # with --no-reserve-plane-layers. Mirror of the inner route_cmd.py flag;
+    # both sites must stay in sync per ``tests/test_cli_parser_drift.py``.
     route_parser.add_argument(
         "--reserve-plane-layers",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Hard-restrict signal routing to the resolved layer stack's "
             "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
             "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
-            "reference planes). By default LayerDefinition.is_routable "
-            "treats every copper layer -- including declared reference "
-            "planes -- as signal-eligible, so a controlled-impedance recipe "
-            "can silently lose its continuous reference construction to "
-            "ordinary signal. A no-op on a stack with no PLANE layers "
-            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+            "reference planes). Enabled by default (Issue #5789): "
+            "LayerDefinition.is_routable treats every copper layer as "
+            "signal-eligible, so without this restriction a controlled-"
+            "impedance recipe can silently lose its continuous reference "
+            "construction to ordinary signal. A no-op on a stack with no "
+            "PLANE layers (--layers 2, 4-all, or an all-signal "
+            "auto-detected board). Pass --no-reserve-plane-layers to allow "
+            "signal routing across declared plane layers (pre-#5789 "
+            "behavior)."
         ),
     )
     route_parser.add_argument(

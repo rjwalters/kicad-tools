@@ -3071,6 +3071,23 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         "--escape-corridor-reservation",
         "--skip-nets",
         ",".join(skip_nets),
+        # Issue #5789: ``kct route`` now hard-restricts signal routing off
+        # declared PLANE layers (In1.Cu/In2.Cu here) BY DEFAULT.  Board 05's
+        # committed baseline carries ~442mm of signal on those two layers --
+        # the router has always leaned on all 4 copper layers for capacity
+        # on this dense (210-pad, 0.15mm-clearance) board, and the
+        # #4548 escape-corridor-reservation above is itself tuned to target
+        # cells "over layers [1,2]" (In1.Cu/In2.Cu).  A live regen measured
+        # under the new default stalled in extended BLOCKED_BY_COMPONENT
+        # rip-up/relief-rescue chains and did not reach the historical
+        # completion floor before the 900s budget above expired -- a real
+        # regression, not a false alarm.  This board's layer-usage tradeoff
+        # predates #5789 and is independently tracked (#3425/#3822/#4548);
+        # opt back out of the new default here so this recipe keeps its
+        # historical behavior while the fleet-wide default still flips to
+        # ON for every other board/user.  See Issue #5789 for the measured
+        # before/after fleet table backing this per-board decision.
+        "--no-reserve-plane-layers",
     ]
 
     print(f"\n1. Input: {input_path}")
