@@ -131,6 +131,14 @@ _CONVENTIONAL = re.compile(r"^(?P<type>[a-z]+)(?:\([^)]*\))?(?P<bang>!)?:")
 _BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE:", re.MULTILINE)
 _MERGE_PR = re.compile(r"^Merge pull request #(\d+)\b")
 _SQUASH_PR = re.compile(r"\(#(\d+)\)\s*$")
+# The two subjects a release PR's merge commit on main carries (Phase 3, #5777,
+# reads them to find the release; the planner skips them when counting PRs).
+RELEASE_MERGE_AUTOMATED = re.compile(
+    r"^chore\(release\): v(?P<version>\d+\.\d+\.\d+) \(#(?P<pr>\d+)\)$"
+)
+RELEASE_MERGE_MANUAL = re.compile(
+    r"^Merge pull request #(?P<pr>\d+) from [^/\s]+/release/v(?P<version>\d+\.\d+\.\d+)$"
+)
 
 
 class ReleaseError(RuntimeError):
@@ -174,6 +182,12 @@ class Commit:
     body: str = ""
 
     @property
+    def is_release_merge(self) -> bool:
+        """The merge of a release PR itself (either shape)."""
+        subject = self.subject.strip()
+        return bool(RELEASE_MERGE_AUTOMATED.match(subject) or RELEASE_MERGE_MANUAL.match(subject))
+
+    @property
     def pr_number(self) -> int | None:
         """The PR a first-parent commit on ``main`` merged, if it names one."""
         match = _MERGE_PR.match(self.subject) or _SQUASH_PR.search(self.subject)
@@ -206,9 +220,16 @@ class Commit:
 
 
 def merged_prs(first_parent_commits: Iterable[Commit]) -> list[int]:
-    """PR numbers merged by first-parent commits, oldest first, de-duplicated."""
+    """PR numbers merged by first-parent commits, oldest first, de-duplicated.
+
+    Release merges are skipped: the tag sits on the release PR's head (the
+    merge's second parent, #5777), so the merge commit itself is always in
+    ``tag..main`` and is not a change to release.
+    """
     seen: list[int] = []
     for commit in first_parent_commits:
+        if commit.is_release_merge:
+            continue
         number = commit.pr_number
         if number is not None and number not in seen:
             seen.append(number)
@@ -464,8 +485,16 @@ class Git:
         return self("rev-parse", ref).strip()
 
     def latest_tag(self, ref: str) -> str | None:
-        out = self("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", ref, check=False)
-        return out.strip() or None
+        """The highest ``vX.Y.Z`` tag reachable from ``ref``.
+
+        Not ``git describe``: Phase 3 (#5777) tags the release PR's head, which
+        is main's history only through a merge's *second* parent, and
+        describe's nearest-tag walk can then prefer an older first-parent tag
+        (it does on equal commit timestamps).  By version it is unambiguous.
+        """
+        out = self("tag", "--merged", ref, "--list", "v[0-9]*", check=False)
+        tags = [t.strip() for t in out.splitlines() if _VERSION.match(t.strip().removeprefix("v"))]
+        return max(tags, key=parse_version, default=None)
 
     def commits(self, rev_range: str, *, first_parent: bool) -> list[Commit]:
         args = ["log", "--format=%H%x1f%s%x1f%b%x1e"]

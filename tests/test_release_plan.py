@@ -159,6 +159,17 @@ def test_direct_pushes_alone_are_not_merges() -> None:
     assert rp.merged_prs([_commit("chore: resync installed Loom surfaces")]) == []
 
 
+def test_release_merges_are_not_prs_to_release() -> None:
+    """The tag sits on the release PR head (the merge's second parent, #5777),
+    so the release merge itself is always in ``tag..main``: never count it."""
+    commits = [
+        _commit("chore(release): v0.23.0 (#5801)"),
+        _commit("Merge pull request #5772 from rjwalters/release/v0.22.0"),
+        _commit("Merge pull request #7 from o/feature/issue-7"),
+    ]
+    assert rp.merged_prs(commits) == [7]
+
+
 # --- CI gate --------------------------------------------------------------------
 
 
@@ -821,9 +832,9 @@ def test_cli_plan_json_against_this_repo() -> None:
     if proc.returncode == 2 and "no v* tag" in proc.stderr:
         pytest.skip("shallow clone without tags")
     if "dubious ownership" in proc.stderr:
-        # CI's Test job runs in the kicad container as a uid other than the
-        # checkout owner, so git refuses the repo (safe.directory). The
-        # release workflow itself runs on a hosted runner and never hits this.
+        # Local fallback only: running as a uid other than the checkout owner
+        # (e.g. root in a container) makes git refuse the repo. CI's Test job
+        # sets safe.directory, so this test really runs there.
         pytest.skip("git refuses repo: dubious ownership (container uid)")
     assert proc.returncode == 0, proc.stderr
     data = json.loads(proc.stdout)
