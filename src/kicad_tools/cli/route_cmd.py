@@ -6795,13 +6795,15 @@ def _warn_plane_layer_reservation(args, layer_stack) -> None:
 
     Advisory only -- stderr, never suppressed by ``--quiet``, exit code
     unchanged. A pure no-op when ``layer_stack`` declares no ``PLANE``
-    layers, or when ``--reserve-plane-layers`` was already passed.
+    layers, or when ``--reserve-plane-layers`` is in effect (the default
+    since Issue #5789 -- the ``getattr`` fallback matches that default so a
+    missing attribute is treated the same as the argparse default).
     """
     from kicad_tools.router.layer_advisories import plane_layer_reservation_advisory
 
     msg = plane_layer_reservation_advisory(
         layer_stack,
-        reserve_plane_layers=getattr(args, "reserve_plane_layers", False),
+        reserve_plane_layers=getattr(args, "reserve_plane_layers", True),
     )
     if msg:
         print(msg, file=sys.stderr)
@@ -6810,11 +6812,14 @@ def _warn_plane_layer_reservation(args, layer_stack) -> None:
 def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
     """Hard-restrict ``rules.allowed_layers`` to non-PLANE layers (#5014).
 
-    A strict no-op unless ``--reserve-plane-layers`` was passed: the early
-    ``return`` leaves ``rules.allowed_layers`` completely untouched,
-    preserving pre-#5014 routing byte for byte.
+    A strict no-op only when ``--reserve-plane-layers`` is explicitly
+    disabled (``--no-reserve-plane-layers``): the early ``return`` leaves
+    ``rules.allowed_layers`` completely untouched, preserving pre-#5014
+    routing byte for byte for that opt-out. Since Issue #5789 the flag
+    defaults to ``True`` (the ``getattr`` fallback matches), so this
+    restriction now applies by default.
 
-    When the flag IS passed, the assignment is **unconditional** -- a
+    When the flag IS in effect, the assignment is **unconditional** -- a
     ``layer_stack`` that declares no ``PLANE`` layers writes ``None``,
     which *clears* any restriction rather than leaving a stale one in
     place.  That distinction matters in
@@ -6833,7 +6838,7 @@ def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
     without threading a new constructor argument through every relaxation
     tier / escalation loop in this module.
     """
-    if not getattr(args, "reserve_plane_layers", False):
+    if not getattr(args, "reserve_plane_layers", True):
         return
     from kicad_tools.router.layer_advisories import reserve_plane_layers_allowed_layers
 
@@ -14586,23 +14591,28 @@ def _route_parser() -> argparse.ArgumentParser:
             "avoided layer must never carry a given net."
         ),
     )
-    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
-    # plane assignments.  Mirror of the outer parser.py flag; both sites must
-    # stay in sync per ``tests/test_cli_parser_drift.py``.
+    # Issue #5014: HARD signal-layer eligibility for controlled-impedance
+    # plane assignments. Issue #5789: defaults to ON -- a declared reference
+    # plane is hard-excluded from signal routing unless the caller opts out
+    # with --no-reserve-plane-layers. Mirror of the outer parser.py flag;
+    # both sites must stay in sync per ``tests/test_cli_parser_drift.py``.
     parser.add_argument(
         "--reserve-plane-layers",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Hard-restrict signal routing to the resolved layer stack's "
             "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
             "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
-            "reference planes). By default LayerDefinition.is_routable "
-            "treats every copper layer -- including declared reference "
-            "planes -- as signal-eligible, so a controlled-impedance recipe "
-            "can silently lose its continuous reference construction to "
-            "ordinary signal. A no-op on a stack with no PLANE layers "
-            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+            "reference planes). Enabled by default (Issue #5789): "
+            "LayerDefinition.is_routable treats every copper layer as "
+            "signal-eligible, so without this restriction a controlled-"
+            "impedance recipe can silently lose its continuous reference "
+            "construction to ordinary signal. A no-op on a stack with no "
+            "PLANE layers (--layers 2, 4-all, or an all-signal "
+            "auto-detected board). Pass --no-reserve-plane-layers to allow "
+            "signal routing across declared plane layers (pre-#5789 "
+            "behavior)."
         ),
     )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is

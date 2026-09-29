@@ -440,14 +440,15 @@ def test_route_cmd_warn_plane_layer_reservation_silent_when_no_planes(capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_route_cmd_warn_plane_layer_reservation_missing_attr_defaults_off(capsys):
+def test_route_cmd_warn_plane_layer_reservation_missing_attr_defaults_on(capsys):
     from argparse import Namespace
 
     from kicad_tools.cli.route_cmd import _warn_plane_layer_reservation
 
-    # No reserve_plane_layers attribute at all -> treated as False (fires).
+    # No reserve_plane_layers attribute at all -> treated as True since
+    # Issue #5789 (matches the argparse default), so the advisory is silent.
     _warn_plane_layer_reservation(Namespace(), LayerStack.four_layer_sig_gnd_pwr_sig())
-    assert "--reserve-plane-layers" in capsys.readouterr().err
+    assert capsys.readouterr().err == ""
 
 
 def test_route_cmd_apply_plane_layer_reservation_sets_allowed_layers():
@@ -462,6 +463,18 @@ def test_route_cmd_apply_plane_layer_reservation_sets_allowed_layers():
     _apply_plane_layer_reservation(
         rules, LayerStack.four_layer_sig_gnd_pwr_sig(), Namespace(reserve_plane_layers=True)
     )
+    assert rules.allowed_layers == ["F.Cu", "B.Cu"]
+
+
+def test_route_cmd_apply_plane_layer_reservation_missing_attr_defaults_on():
+    """Issue #5789: a missing attribute is treated as ``True`` (the new default)."""
+    from argparse import Namespace
+
+    from kicad_tools.cli.route_cmd import _apply_plane_layer_reservation
+    from kicad_tools.router.rules import DesignRules
+
+    rules = DesignRules()
+    _apply_plane_layer_reservation(rules, LayerStack.four_layer_sig_gnd_pwr_sig(), Namespace())
     assert rules.allowed_layers == ["F.Cu", "B.Cu"]
 
 

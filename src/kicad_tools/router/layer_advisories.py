@@ -52,25 +52,25 @@ Tier 3 -- plane-layer signal-reservation guardrail (Issue #5014)
     * :func:`plane_layer_reservation_advisory` -- a route-time warning
       (like Tiers 1 & 2, stderr-only, exit code unchanged) recommending
       ``--reserve-plane-layers`` whenever the resolved stack declares one
-      or more ``PLANE`` layers and the user has not opted into the hard
-      restriction.
+      or more ``PLANE`` layers and the caller has opted OUT of the hard
+      restriction (``--no-reserve-plane-layers``).
     * :func:`reserve_plane_layers_allowed_layers` -- computes the
       ``DesignRules.allowed_layers`` value that makes the restriction
       HARD: every ``PLANE``-typed layer is dropped from the routable set,
       so the A* engine physically refuses to place signal there.  Wired
-      to ``kct route --reserve-plane-layers`` (opt-in; off by default
-      preserves the historical mixed-layer-routing behaviour byte for
-      byte -- PLANE metadata remains advisory-only until this flag is
-      passed).
+      to ``kct route --reserve-plane-layers``.  Issue #5789 flipped this
+      on by default -- ``--no-reserve-plane-layers`` restores the
+      historical mixed-layer-routing behaviour byte for byte, where PLANE
+      metadata is advisory-only.
 
     :func:`plane_layer_signal_violations` closes the loop post-route: it
     scans the committed ``Autorouter.routes`` for any segment that landed
     on a declared ``PLANE`` layer, so a recipe that intentionally routes
     mixed-layer (``--layers 4-all`` or a stack with no planes at all)
     sees nothing, while a plane-bearing stack that still leaked signal
-    onto the reference layer -- e.g. because ``--reserve-plane-layers``
-    was not passed -- gets an explicit, per-net report naming the layer
-    and segment count.
+    onto the reference layer -- e.g. because ``--no-reserve-plane-layers``
+    was passed -- gets an explicit, per-net report naming the layer and
+    segment count.
 """
 
 from __future__ import annotations
