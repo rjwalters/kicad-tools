@@ -58,19 +58,19 @@ def _alive(pid: int) -> bool:
 def test_timeout_kills_the_whole_process_tree(krt_compare, tmp_path: Path) -> None:
     """A grandchild that outlives its parent must not outlive the cap.
 
-    The shell stands in for ``uv``: it backgrounds a long-running python
+    The shell stands in for ``uv``: it backgrounds a long-running ``sleep``
     grandchild (the stand-in for ``kct route``) and then waits. Killing only
     the direct child -- what ``subprocess.run(timeout=...)`` does -- reaps the
     shell and reparents the grandchild, which then runs to its own completion.
     Only a process-GROUP signal reaches it.
+
+    The **shell** records the grandchild's pid (``echo $!``), not the
+    grandchild itself. Making the grandchild write its own pid made the test
+    depend on how fast a second interpreter could start under a loaded CI
+    runner, which is not what is under test.
     """
     pidfile = tmp_path / "grandchild.pid"
-    grandchild = (
-        f"import os,time,pathlib;"
-        f"pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()));"
-        f"time.sleep(600)"
-    )
-    script = f"{shlex.quote(sys.executable)} -c {shlex.quote(grandchild)} & sleep 600"
+    script = f"sleep 600 & echo $! > {shlex.quote(str(pidfile))}; sleep 600"
     cmd = ["sh", "-c", script]
 
     log = tmp_path / "run.log"
@@ -80,17 +80,17 @@ def test_timeout_kills_the_whole_process_tree(krt_compare, tmp_path: Path) -> No
 
     assert timed_out is True, "a run killed at the cap must be reported as a timeout"
     assert rc == -1
-    assert elapsed < 60, f"the cap must bound the call, took {elapsed:.1f}s"
+    assert elapsed < 90, f"the cap plus the kill must bound the call, took {elapsed:.1f}s"
     assert "TIMEOUT" in log.read_text()
 
-    for _ in range(50):  # the kill is asynchronous; give the OS a moment
-        if pidfile.exists():
-            break
-        time.sleep(0.1)
     assert pidfile.exists(), "grandchild never started -- test would prove nothing"
     grandchild_pid = int(pidfile.read_text())
 
-    for _ in range(50):
+    # `_run` must not return while anything it started is still running: the
+    # whole point is that the NEXT board is measured on an idle machine. So
+    # this is checked immediately, with only a short tolerance for the
+    # scheduler, not a long "eventually" poll.
+    for _ in range(20):
         if not _alive(grandchild_pid):
             break
         time.sleep(0.1)

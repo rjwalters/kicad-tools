@@ -690,11 +690,16 @@ direct child. Every kct run is `uv run kct route …`, so the router is a
 *grandchild*: on timeout `uv` died and the router kept running at full CPU,
 reparented, for as long as it liked. A board-07 kct run was observed alive 31
 minutes into a 20-minute cap, contending with the KRT and length-matching runs
-measured after it. Every pass-2 row was re-measured after the fix (each run now
-gets its own process group, signalled as a group); the inflation it had caused
-was roughly 2× — 05 KRT read 25.17 s before the fix and 13.35 s after, 07a KRT
-130.34 s before and 67.76 s after. Regression test:
-`tests/test_krt_compare_timeout.py`.
+measured after it. Every pass-2 row was re-measured after the fix; the
+inflation it had caused was roughly 2× — 05 KRT read 25.17 s before the fix and
+13.35 s after, 07a KRT 130.34 s before and 67.76 s after.
+
+The fix has two halves, and the second is the one that makes the numbers
+trustworthy: each run now gets its **own process group**
+(`start_new_session=True`) which is signalled SIGTERM→SIGKILL as a group, and
+the call **blocks until that group is actually empty** rather than until the
+direct child is reaped. The next board therefore starts on an idle machine by
+construction. Regression test: `tests/test_krt_compare_timeout.py`.
 
 ## Reproduce
 

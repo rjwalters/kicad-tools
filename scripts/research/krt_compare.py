@@ -372,22 +372,51 @@ def _run(cmd: list[str], cwd: Path, log: Path, timeout: float) -> tuple[int, boo
             return -1, True
 
 
-def _kill_group(p: subprocess.Popen) -> None:
-    """SIGTERM, then unconditionally SIGKILL, the process group ``p`` leads.
+def _group_alive(pgid: int) -> bool:
+    """True while any process remains in group ``pgid`` (zombies included)."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, just not ours to signal
+        return True
+    return True
 
-    The second signal is not conditional on the direct child still being alive:
-    ``uv`` can exit on SIGTERM while the router grandchild it spawned ignores
-    it, which is the exact leak this function exists to close.
+
+def _kill_group(p: subprocess.Popen, term_grace: float = 10.0, kill_grace: float = 15.0) -> None:
+    """SIGTERM then SIGKILL the process group ``p`` leads, and BLOCK until it is gone.
+
+    Two properties matter, and neither is free:
+
+    * **The second signal is not conditional on the direct child.** ``uv`` exits
+      on SIGTERM while the router grandchild it spawned is still shutting down
+      (or ignoring it), which is the leak this function exists to close.
+    * **It waits for the group, not for ``p``.** Returning as soon as ``p`` is
+      reaped is what let a "killed" run keep burning CPU into the next board's
+      measurement. The caller's next row must start on an idle machine, so this
+      returns only once the group is actually empty (or ``kill_grace`` expires,
+      which is reported rather than hidden).
+
+    ``start_new_session=True`` in ``_run`` makes ``p.pid`` the group id, and the
+    group outlives ``p`` while any member remains, so signalling by that number
+    stays correct after ``p`` itself has exited.
     """
-    for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+    pgid = p.pid
+    for sig, grace in ((signal.SIGTERM, term_grace), (signal.SIGKILL, kill_grace)):
         try:
-            os.killpg(p.pid, sig)
+            os.killpg(pgid, sig)
         except (ProcessLookupError, PermissionError):
             break
+        # Reap p first: a zombie leader keeps the group "alive" for killpg(0).
         with contextlib.suppress(subprocess.TimeoutExpired):
             p.wait(timeout=grace)
-    with contextlib.suppress(subprocess.TimeoutExpired):
-        p.wait(timeout=5.0)
+        deadline = time.monotonic() + grace
+        while _group_alive(pgid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not _group_alive(pgid):
+            return
+    if _group_alive(pgid):
+        print(f"  !! process group {pgid} survived SIGKILL; later runs may contend", flush=True)
 
 
 def run_kct(board: Board, inp: Path, out_dir: Path, timeout: float) -> RunResult:
