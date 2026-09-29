@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Head-to-head benchmark: kicad-tools (``kct route``) vs KiCadRoutingTools (KRT).
 
-Issue #5781. Reproduces the benchmark table in
+Issues #5781 and #5790. Reproduces the benchmark table in
 ``docs/research/kicad-routing-tools-comparison.md``.
+
+``--boards`` defaults to **every** key in ``BOARDS`` below, which is the exact
+set the doc reports, so the doc's reproduce command (which passes no
+``--boards``) and the measured board set cannot drift apart (#5790).
 
 Research-only: this script is NOT wired into CI and KRT is NOT a dependency.
 It drives an out-of-tree KRT checkout (``--krt-dir``) and this repo's ``kct``
@@ -26,6 +30,12 @@ Fairness rules the script enforces
   board file with this repo's external-benchmark harness
   (``kicad_tools.benchmark.external.metrics``), never taken from either
   tool's own log.
+* Where a board declares length-match groups, **both** tools are handed the
+  same groups *and the same declared skew budget* from the board's own
+  sidecar, and the per-group length spread is measured the same way on both
+  outputs (``measure_group_spread``).
+* A run killed at ``--timeout`` is recorded and printed as a TIMEOUT, even
+  when the tool left a partial board behind that could still be scored.
 
 Usage (from a worktree with the C++ backend built)::
 
@@ -39,10 +49,13 @@ Usage (from a worktree with the C++ backend built)::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -60,10 +73,54 @@ class Board:
     routed_ref: str  # repo-relative committed routed artifact (reference row)
     kct_args: tuple[str, ...] = ()
     # KRT steps: list of (script, extra args); each step's output feeds the next.
+    # A step whose extra args contain the literal token ``{out}`` receives its
+    # output path THERE (for a CLI like ``qfn_fanout.py`` that takes ``-o``);
+    # otherwise the output is appended as the second positional argument.
     krt_steps: tuple[tuple[str, tuple[str, ...]], ...] = (("py_router/route.py", ()),)
     strip_nets: str | None = None  # regex of nets whose copper is ripped first
     layers: int = 2  # copper layers (for the secondary kct-check gate)
     note: str = ""
+    # Which tools this row is defined for. A recipe variant that only changes
+    # one tool's invocation (04f, 07m) declares just that tool, so the shared
+    # rows are not re-measured and re-printed under a second key.
+    tools: tuple[str, ...] = ("kct", "krt", "ref")
+    # Board key whose kct run supplies the fab referee, when this variant does
+    # not run kct itself (04f). Same source board => same emitted fab project.
+    fab_from: str | None = None
+    # repo-relative JSON declaring length-match groups as {"groups": {name: [nets]}}.
+    # When set, every output is additionally scored for per-group length spread.
+    match_groups: str | None = None
+
+
+#: Board 07's own declared match groups (4 groups, 5 mm skew budget), written by
+#: its generator. Used BOTH to build KRT's --length-match-group flags and to
+#: score per-group length spread, so neither tool is told a different grouping.
+SDRAM_GROUPS_JSON = "boards/07-matchgroup-test/output/sdram_constraints.json"
+
+
+def load_match_groups(rel_path: str) -> dict[str, list[str]]:
+    """Read ``{"groups": {name: [net, ...]}}`` from a repo-relative JSON file."""
+    return json.loads((REPO / rel_path).read_text())["groups"]
+
+
+def _krt_length_match_flags(*extra: str) -> tuple[str, ...]:
+    """One ``--length-match-group <nets...>`` flag per declared group.
+
+    Also passes the board's OWN declared skew budget (``group_skew_mm``) as
+    ``--length-match-tolerance``. That is not per-board tuning of KRT: it is the
+    same constraint kct reads from its net-class-map sidecar
+    (``length_match_tolerance_mm``), so both tools are matched against one
+    number the board itself states. KRT's unqualified default is 0.1 mm, which
+    would hold it to a budget kct was never asked to meet.
+    """
+    spec = json.loads((REPO / SDRAM_GROUPS_JSON).read_text())
+    flags: list[str] = []
+    for members in spec["groups"].values():
+        flags.append("--length-match-group")
+        flags.extend(members)
+    flags += ["--length-match-tolerance", str(spec["group_skew_mm"])]
+    flags += extra
+    return tuple(flags)
 
 
 BOARDS: dict[str, Board] = {
@@ -88,14 +145,56 @@ BOARDS: dict[str, Board] = {
         "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb",
         layers=4,
     ),
-    # 04, 05 and 07 are DEFERRED to a follow-up (docs/research/
-    # kicad-routing-tools-comparison.md's own stated scope, #5781) and are
-    # deliberately NOT defined here: a `Board` entry would make them part of
-    # the default `--boards` set below (`",".join(BOARDS)`), routing boards
-    # the comparison doc explicitly says were never benchmarked. Issue #5783:
-    # a concurrent-worktree-collision incident briefly leaked in-progress
-    # entries for these three keys via PR #5782; this comment is the record
-    # of why they are absent, not merely undocumented.
+    # 04, 05 and 07 were deferred by #5781 and are measured here from #5790.
+    # Every key below is part of the default `--boards` set (`",".join(BOARDS)`),
+    # which is what keeps the doc's documented reproduce command -- which passes
+    # no `--boards` -- equal to the measured board set by construction.
+    "04": Board(
+        "04",
+        "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb",
+        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+        note="2 layers, no zones; LQFP-48 0.5 mm pitch",
+    ),
+    # 04f: the fanout row. KRT's documented QFN/QFP escape recipe is a separate
+    # CLI run before route.py; kct has no fanout CLI -- its escape router runs
+    # inside `kct route` and is auto-enabled for dense packages -- so the kct
+    # and ref rows for this board are 04's, and only KRT is re-run here.
+    "04f": Board(
+        "04f",
+        "boards/04-stm32-devboard/output/stm32_devboard.kicad_pcb",
+        "boards/04-stm32-devboard/output/stm32_devboard_routed.kicad_pcb",
+        krt_steps=(
+            ("py_router/qfn_fanout.py", ("--component", "U2", "-o", "{out}")),
+            ("py_router/route.py", ()),
+        ),
+        note="KRT QFP fanout (U2) before route.py; compare against 04 kct/ref",
+        tools=("krt",),
+        fab_from="04",
+    ),
+    "05": Board(
+        "05",
+        "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
+        "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+        note="4 layers, 4 zones; Kelvin/ISENSE current-sense returns",
+        layers=4,
+    ),
+    # 05f: the second fanout row -- same KRT escape CLI as 04f, but on a
+    # 4-layer board with zones and a TQFP-32 (U1). Two points, not one, is
+    # what makes 04f's result readable as "the escape pre-pass helps KRT"
+    # rather than "board 04 is odd". KRT only, for the same reason as 04f.
+    "05f": Board(
+        "05f",
+        "boards/05-bldc-motor-controller/output/bldc_controller.kicad_pcb",
+        "boards/05-bldc-motor-controller/output/bldc_controller_routed.kicad_pcb",
+        krt_steps=(
+            ("py_router/qfn_fanout.py", ("--component", "U1", "-o", "{out}")),
+            ("py_router/route.py", ()),
+        ),
+        note="KRT QFP fanout (U1) before route.py; compare against 05 kct/ref",
+        layers=4,
+        tools=("krt",),
+        fab_from="05",
+    ),
     # 06a: the board's real input -- the 4 LVDS pairs arrive PRE-ROUTED by the
     # generator (plus GND/+3V3 plane vias); only the 8 LVTTL nets are open.
     # Both tools must keep existing copper: KRT does by default; kct needs
@@ -120,6 +219,54 @@ BOARDS: dict[str, Board] = {
         strip_nets=r"LVDS\d_[PN]",
         note="LVDS copper ripped; routes 4 pairs + 8 LVTTL nets",
         layers=4,
+    ),
+    # 07a: the SDRAM exerciser's real input. 119/161 connections arrive routed
+    # from the reviewed source, so -- like 06a -- this is the incremental case:
+    # KRT keeps existing copper by default, kct needs --preserve-existing.
+    "07a": Board(
+        "07a",
+        "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
+        "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
+        kct_args=("--preserve-existing",),
+        note="6 layers; 119/161 connections pre-routed in the reviewed source",
+        layers=6,
+        match_groups=SDRAM_GROUPS_JSON,
+    ),
+    # 07m: the length-matching row. Both tools match lengths only on request,
+    # and each is handed the SAME four groups the board itself declares
+    # (output/sdram_constraints.json, 5 mm skew budget): kct through its
+    # committed net-class-map sidecar, KRT through one --length-match-group
+    # flag per group. The ref row is 07a's, so only the two tools re-run.
+    "07m": Board(
+        "07m",
+        "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
+        "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
+        kct_args=(
+            "--preserve-existing",
+            "--length-match-groups",
+            "--net-class-map",
+            "boards/07-matchgroup-test/output/net_class_map.json",
+        ),
+        krt_steps=(("py_router/route.py", _krt_length_match_flags()),),
+        note="length matching on: kct --length-match-groups, KRT --length-match-group",
+        layers=6,
+        tools=("kct", "krt"),
+        match_groups=SDRAM_GROUPS_JSON,
+    ),
+    # 07t: KRT's TIME matching (--time-matching) on the same four groups. kct
+    # has no propagation-delay matcher at all, so there is nothing to run on
+    # our side; this row exists to say what KRT's time-domain mode does to a
+    # board we also measure in the length domain (07m), not to compare tools.
+    "07t": Board(
+        "07t",
+        "boards/07-matchgroup-test/output/matchgroup_test.kicad_pcb",
+        "boards/07-matchgroup-test/output/matchgroup_test_routed.kicad_pcb",
+        krt_steps=(("py_router/route.py", _krt_length_match_flags("--time-matching")),),
+        note="KRT --time-matching on the same groups; kct has no time-domain matcher",
+        layers=6,
+        tools=("krt",),
+        fab_from="07a",
+        match_groups=SDRAM_GROUPS_JSON,
     ),
 }
 
@@ -199,15 +346,48 @@ class RunResult:
 
 
 def _run(cmd: list[str], cwd: Path, log: Path, timeout: float) -> tuple[int, bool]:
+    """Run ``cmd`` under a hard wall-clock cap, killing the WHOLE process tree.
+
+    ``subprocess.run(timeout=...)`` only kills its direct child. Every kct
+    invocation here is ``uv run kct route ...``, so the direct child is ``uv``
+    and the router itself is a *grandchild*: on timeout ``uv`` died and the
+    router was reparented to init and kept running at full CPU, for as long as
+    it wanted, straight through every later board in the sweep. That silently
+    poisons the runtime column of every row measured after the first timeout
+    (observed on this script: a 07a kct run still alive 31 minutes into a
+    20-minute cap, contending with the 07a KRT and 07m runs). The fix is to put
+    each run in its own process group and signal the group.
+    """
     with log.open("a") as fh:
         fh.write("$ " + " ".join(cmd) + "\n")
         fh.flush()
+        p = subprocess.Popen(
+            cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT, start_new_session=True
+        )
         try:
-            p = subprocess.run(cmd, cwd=cwd, stdout=fh, stderr=subprocess.STDOUT, timeout=timeout)
-            return p.returncode, False
+            return p.wait(timeout=timeout), False
         except subprocess.TimeoutExpired:
             fh.write(f"\n!! TIMEOUT after {timeout}s\n")
+            _kill_group(p)
             return -1, True
+
+
+def _kill_group(p: subprocess.Popen) -> None:
+    """SIGTERM, then unconditionally SIGKILL, the process group ``p`` leads.
+
+    The second signal is not conditional on the direct child still being alive:
+    ``uv`` can exit on SIGTERM while the router grandchild it spawned ignores
+    it, which is the exact leak this function exists to close.
+    """
+    for sig, grace in ((signal.SIGTERM, 10.0), (signal.SIGKILL, 5.0)):
+        try:
+            os.killpg(p.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            p.wait(timeout=grace)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        p.wait(timeout=5.0)
 
 
 def run_kct(board: Board, inp: Path, out_dir: Path, timeout: float) -> RunResult:
@@ -235,7 +415,11 @@ def run_krt(
         cur_pro = cur.with_suffix(".kicad_pro")
         if not cur_pro.exists():
             shutil.copy2(inp.with_suffix(".kicad_pro"), cur_pro)
-        cmd = [krt_python, script, str(cur), str(nxt), *extra]
+        if any("{out}" in a for a in extra):
+            # CLI takes its output through a flag (qfn_fanout.py -o OUT).
+            cmd = [krt_python, script, str(cur), *(a.replace("{out}", str(nxt)) for a in extra)]
+        else:
+            cmd = [krt_python, script, str(cur), str(nxt), *extra]
         remaining = timeout - (time.monotonic() - t0)
         rc, to = _run(cmd, krt_dir, log, max(remaining, 1))
         res.exit_codes.append(rc)
@@ -345,6 +529,36 @@ def measure_coupling(pcb_path: Path, pitch_mm: float, step: float = 0.05) -> dic
     return pairs
 
 
+def measure_group_spread(pcb_path: Path, groups: dict[str, list[str]]) -> dict:
+    """Per-group routed-length spread (mm) for declared length-match groups.
+
+    Length is 2-D track length per net, summed over segments on the refilled
+    board -- **not** including via barrels, and identical for both tools, so
+    the spread is comparable even though KRT's own matcher counts barrels.
+    ``spread`` is max-minus-min over the group members that carry copper;
+    ``members`` reports how many of the declared nets that was.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.load(str(pcb_path))
+    length: dict[str, float] = {}
+    for seg in pcb.segments:
+        name = seg.net_name or ""
+        length[name] = length.get(name, 0.0) + math.dist(seg.start, seg.end)
+    out: dict[str, dict] = {}
+    for group, members in groups.items():
+        routed = [length[m] for m in members if length.get(m, 0.0) > 0.0]
+        if not routed:
+            continue
+        out[group] = {
+            "min_mm": round(min(routed), 2),
+            "max_mm": round(max(routed), 2),
+            "spread_mm": round(max(routed) - min(routed), 2),
+            "members": f"{len(routed)}/{len(members)}",
+        }
+    return out
+
+
 def measure_plane_intrusion(pcb_path: Path) -> float:
     """Track length (mm) of foreign-net copper on INNER layers that carry a zone.
 
@@ -390,6 +604,7 @@ def score(
     emitted: bool,
     fab_project: Path | None,
     layers: int = 2,
+    match_groups: str | None = None,
 ) -> dict:
     """Grade ``pcb`` under every referee.
 
@@ -438,6 +653,10 @@ def score(
         coupling = measure_coupling(graded, pitch)
         if coupling:
             out["diff_pair_coupled_pct"] = coupling
+    if match_groups is not None:
+        spread = measure_group_spread(graded, load_match_groups(match_groups))
+        if spread:
+            out["group_length_spread"] = spread
     if fab_project is not None and fab_project.exists():
         out["fab_referee"] = _grade_with_project(
             pcb,
@@ -482,8 +701,10 @@ def main() -> int:
         board = BOARDS[key]
         stem = Path(board.src).stem
         # kct's emitted JLC-floor project for this board = the fab referee.
-        fab_project = work / key / "kct" / "run" / f"{stem}_routed.kicad_pro"
+        fab_project = work / (board.fab_from or key) / "kct" / "run" / f"{stem}_routed.kicad_pro"
         for tool in args.tools.split(","):
+            if tool not in board.tools:
+                continue  # recipe variant that does not redefine this tool's run
             tag = f"{key}/{tool}"
             print(f"== {tag}", flush=True)
             base = work / key / tool
@@ -499,7 +720,15 @@ def main() -> int:
                 )
                 if out.exists() and not entry.get("timed_out"):
                     entry.update(
-                        score(out, inp, base / "score", tool != "ref", fab_project, board.layers)
+                        score(
+                            out,
+                            inp,
+                            base / "score",
+                            tool != "ref",
+                            fab_project,
+                            board.layers,
+                            board.match_groups,
+                        )
                     )
                 results[tag] = entry
                 results_path.write_text(json.dumps(results, indent=2))
@@ -515,7 +744,17 @@ def main() -> int:
                     "wall_s": None,
                     "commands": [f"(committed artifact) {board.routed_ref}"],
                 }
-                entry.update(score(routed, inp, base / "score", False, fab_project, board.layers))
+                entry.update(
+                    score(
+                        routed,
+                        inp,
+                        base / "score",
+                        False,
+                        fab_project,
+                        board.layers,
+                        board.match_groups,
+                    )
+                )
                 results[tag] = entry
                 results_path.write_text(json.dumps(results, indent=2))
                 continue
@@ -535,7 +774,17 @@ def main() -> int:
                 "note": board.note,
             }
             if rr.output is not None:
-                entry.update(score(rr.output, inp, base / "score", True, fab_project, board.layers))
+                entry.update(
+                    score(
+                        rr.output,
+                        inp,
+                        base / "score",
+                        True,
+                        fab_project,
+                        board.layers,
+                        board.match_groups,
+                    )
+                )
             else:
                 entry["failed"] = "no output board written"
             results[tag] = entry
@@ -565,12 +814,25 @@ def _kct(r: dict) -> str:
     return f"{k['error_count']}" + (f" ({by})" if by else "")
 
 
+def _runtime(r: dict) -> str:
+    """Runtime cell. A run killed at ``--timeout`` is ALWAYS marked TIMEOUT.
+
+    A tool that writes a partial board before the cap fires still gets scored
+    (that is useful -- it says how far it had got), so the timeout must be
+    visible on the row rather than inferred from a suspiciously round runtime.
+    """
+    wall = r.get("wall_s")
+    cell = "n/a" if wall is None else str(wall)
+    return f"{cell} (TIMEOUT)" if r.get("timed_out") else cell
+
+
 def print_table(results: dict) -> None:
     cols = [
         "Board", "Tool", "Nets complete", "Connections", "kicad-cli unconnected",
         "DRC errors, shared referee", "DRC errors, fab referee", "DRC errors, as emitted",
         "kct check errors (jlcpcb)",
         "Vias", "Wirelength mm", "Signal on plane layers mm", "Pair coupling % (min)",
+        "Group length spread mm (max)",
         "Runtime s",
     ]  # fmt: skip
     print("\n| " + " | ".join(cols) + " |")
@@ -580,10 +842,11 @@ def print_table(results: dict) -> None:
         if "completion" not in r:
             status = "TIMEOUT" if r.get("timed_out") else r.get("failed", "?")
             cells = [r["board"], r["tool"], status] + ["--"] * (len(cols) - 4)
-            print("| " + " | ".join(cells + [str(r.get("wall_s"))]) + " |")
+            print("| " + " | ".join(cells + [_runtime(r)]) + " |")
             continue
         c = r["completion"]
         coupling = r.get("diff_pair_coupled_pct")
+        spread = r.get("group_length_spread")
         cells = [
             r["board"], r["tool"],
             f"{c['nets_complete']}/{c['nets_total']}",
@@ -594,7 +857,8 @@ def print_table(results: dict) -> None:
             str(r["via_count"]), str(r["wirelength_mm"]),
             str(r.get("plane_layer_signal_mm", "n/a")),
             f"{min(coupling.values())}" if coupling else "--",
-            str(r["wall_s"]) if r["wall_s"] is not None else "n/a",
+            f"{max(g['spread_mm'] for g in spread.values())}" if spread else "--",
+            _runtime(r),
         ]  # fmt: skip
         print("| " + " | ".join(cells) + " |")
 
