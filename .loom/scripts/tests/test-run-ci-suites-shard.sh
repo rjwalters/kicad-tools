@@ -97,6 +97,9 @@ cp "$RUNNER" "$SCRIPT_DIR/check-ci-suite-manifest.sh" "$FIX_TESTS/"
 cp "$REPO_ROOT/defaults/scripts/lib/live-daemon-guard.sh" \
    "$REPO_ROOT/defaults/scripts/lib/cpu-budget.sh" "$FIX_LIB/"
 cp "$SCRIPT_DIR/lib/live-state-sandbox.sh" "$FIX_TESTS/lib/"
+# The failure-excerpt helper the runner sources, so a failing fixture suite
+# would still print its excerpt.
+cp "$REPO_ROOT/defaults/scripts/lib/ci-suite-excerpt.sh" "$FIX_LIB/"
 
 # Each fixture suite records that it ran and what LOOM_CI_SHARD it saw.
 SEEN="$WORKDIR/seen"

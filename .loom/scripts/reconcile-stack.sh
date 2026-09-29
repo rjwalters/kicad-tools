@@ -115,12 +115,13 @@ fi
 # `gh pr edit --base` target; the git mutation target is the fetched COMMIT
 # the subcommand resolves below, and the two are deliberately kept apart.
 DEFAULT_BRANCH="main"
-if [[ -f "$SCRIPT_DIR/lib/default-branch.sh" ]]; then
-    # shellcheck source=lib/default-branch.sh
-    source "$SCRIPT_DIR/lib/default-branch.sh"
-    if resolved="$(loom_default_branch 2>/dev/null)" && [[ -n "$resolved" ]]; then
-        DEFAULT_BRANCH="$resolved"
-    fi
+# Required, not optional (#9106): this lib also carries check_branch_name, the
+# ref-operand validator the child/parent names below must pass before
+# `reconcile-stack` puts them in a `git rebase --onto` argv.
+# shellcheck source=lib/default-branch.sh
+source "$SCRIPT_DIR/lib/default-branch.sh"
+if resolved="$(loom_default_branch 2>/dev/null)" && [[ -n "$resolved" ]]; then
+    DEFAULT_BRANCH="$resolved"
 fi
 
 # Discover the child branch from the PR (GitHub via gh).
@@ -135,6 +136,16 @@ if [[ -z "$CHILD_BRANCH" ]]; then
     err "Could not resolve the head branch for PR #$CHILD_PR (is the number correct and the PR open?)."
     exit 1
 fi
+# #9106: $CHILD_BRANCH is the forge's `headRefName` — attacker-controlled —
+# and $PARENT_BRANCH comes from argv. Both are handed to `loom-daemon
+# reconcile-stack`, which puts them in `git rebase --onto`/`rev-parse`/
+# `merge-base` argvs, and to `git rev-parse`/`push --force-with-lease` here.
+# Validate BOTH once, up front, and refuse with a forge-visible explanation: a
+# PR whose headRef fails this is a hostile or broken injection, not a data
+# error. (The daemon revalidates them itself — this refusal is the shell half.)
+check_branch_name "$CHILD_BRANCH" "head branch of child PR #$CHILD_PR" || exit 1
+check_branch_name "$PARENT_BRANCH" "parent branch argument" || exit 1
+
 info "Child branch: $CHILD_BRANCH"
 info "Parent branch: $PARENT_BRANCH"
 info "Forge retarget base (default branch name): $DEFAULT_BRANCH"

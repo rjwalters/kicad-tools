@@ -1673,29 +1673,20 @@ deny() {
     local reason="$1"
     local tag="${2:-deny}"
     log_guard_decision "deny" "catastrophic" "$tag" || true
-    if jq -n --arg reason "$reason" '{
-        hookSpecificOutput: {
-            hookEventName: "PreToolUse",
-            permissionDecision: "deny",
-            permissionDecisionReason: $reason
-        }
-    }' 2>/dev/null; then
-        exit 0
-    fi
-    # jq failed — emit raw JSON as fallback
-    local escaped_reason
-    escaped_reason=$(echo "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g')
-    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
-    exit 0
+    emit_decision deny "$reason"
 }
 
 # Helper: output an ask decision and exit
 ask() {
-    local reason="$1"
-    if jq -n --arg reason "$reason" '{
+    emit_decision ask "$1"
+}
+
+# Emit the PreToolUse decision JSON for deny() / ask() and exit 0.
+emit_decision() {
+    if jq -n --arg decision "$1" --arg reason "$2" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",
-            permissionDecision: "ask",
+            permissionDecision: $decision,
             permissionDecisionReason: $reason
         }
     }' 2>/dev/null; then
@@ -1703,8 +1694,12 @@ ask() {
     fi
     # jq failed — emit raw JSON as fallback
     local escaped_reason
-    escaped_reason=$(echo "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g')
-    echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
+    escaped_reason=$(echo "$2" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\n/\\n/g')
+    if [[ "$1" == "deny" ]]; then
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
+    else
+        echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"${escaped_reason}\"}}"
+    fi
     exit 0
 }
 
@@ -1882,6 +1877,31 @@ if declare -F loom_installed_write_denied >/dev/null 2>&1 \
                 deny "$(loom_installed_deny_reason "$IFW_ABS" "Bash-tool write")${IFW_HEREDOC_NOTE}" "loom:installed-file-write"
             fi
         done < <(loom_bash_write_targets "$IFW_SCAN_TEXT")
+    fi
+fi
+
+# =============================================================================
+# LOOM: Refuse a commit/push that would carry a credential-shaped value (#9133)
+#
+# Every other credential defence is path-based (.gitignore, CREDENTIAL_PATTERNS
+# and its shell mirrors). On 2026-09-26 a renamed copy of the token pool sat
+# outside every one of those paths, and an automated resync's whole-directory
+# `git add` pushed it to a public main. `loom-daemon secret-scan` reads CONTENT:
+# for a commit, everything the command could stage (this hook runs BEFORE the
+# command's own `git add`), for a push, every commit no remote has yet.
+#
+# Best-effort on the repo at $CWD: a `git -C elsewhere` / `cd elsewhere &&`
+# form scans the wrong tree; .githooks/ and CI are the backstops for that. A
+# daemon too old to have the subcommand exits 2, which allows, like every
+# other unavailable check in this file. Only exit 1 WITH findings denies.
+# =============================================================================
+
+# requires-daemon: secret-scan optional   a daemon predating #9133 exits 2 on
+# the unknown subcommand, which this block treats as allow, same as every
+# other unavailable check here.
+if [[ -n "$REPO_ROOT" ]] && echo "$GH_PR_MERGE_SCAN_TEXT" | grep -qE '(^|[^[:alnum:]_-])git([[:space:]]+[^;&|[:space:]]+)*[[:space:]]+(commit|push)([[:space:]]|$)'; then
+    if ! SECRET_FINDINGS=$(cd "$REPO_ROOT" && "${LOOM_DAEMON_SELF_BIN:-loom-daemon}" secret-scan --for-command "$GH_PR_MERGE_SCAN_TEXT" 2>&1) && [[ "$SECRET_FINDINGS" == *"(fp "* ]]; then
+        deny "BLOCKED: this git commit/push would carry a credential-shaped value (values are never printed; path, class and sha256 fingerprint only):"$'\n'"${SECRET_FINDINGS}"$'\n'"Take the file out of the tree or .gitignore it, and if the value is real treat it as disclosed and ROTATE it. Do not route around this with --no-verify or another tool (#9133)." "loom:secret-scan"
     fi
 fi
 

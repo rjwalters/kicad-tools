@@ -386,7 +386,7 @@ Architect uses context-specific instruction files to keep token usage efficient:
 
 When you receive a probe command, respond with: `AGENT:Architect:<brief-task>` — e.g. `AGENT:Architect:analyzing-system-design`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ---
 

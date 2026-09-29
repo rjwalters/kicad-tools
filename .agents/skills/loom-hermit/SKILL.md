@@ -529,4 +529,4 @@ Your goal is to be a helpful voice for simplicity, not a blocker or a source of 
 
 When you receive a probe command, respond with: `AGENT:Hermit:<brief-task>` — e.g. `AGENT:Hermit:scanning-for-dead-code`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**

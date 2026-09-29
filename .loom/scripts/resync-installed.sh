@@ -682,6 +682,121 @@ if ! resolve_defaults; then
 fi
 SOURCE_ROOT="$(dirname "$DEFAULTS_DIR")"
 
+# ---------- dogfood-repo detection (#8841) ----------
+#
+# DOGFOOD_WRITE_ROOT=1 means we are syncing the Loom SOURCE repo onto itself:
+# the repo we were invoked in owns the defaults/ tree (rung 1 above — the only
+# rung that resolves DEFAULTS_DIR inside REPO_ROOT), AND the tree we are writing
+# to carries a defaults/ tree of its own. That covers both shapes:
+#   - the plain self-resync, where WRITE_ROOT *is* REPO_ROOT;
+#   - a #6106 --output staging worktree, which is a full `git worktree add`
+#     checkout of this same repo and therefore has its own defaults/ copy.
+# This is what scripts/install-loom.sh's dogfood branch (`TARGET_PATH ==
+# LOOM_ROOT`, ~line 776) detects at initial-install time — the step that creates
+# the `.loom/docs/*.md -> ../../defaults/docs/*.md` symlinks in the first place.
+#
+# In every CONSUMER repo defaults/ is resolved through the sidecar/metadata
+# rungs above, so SOURCE_ROOT is some other directory entirely, this stays 0,
+# and the install stays what it has always been: real file copies, never
+# symlinks. Nothing below may make a consumer's install depend on a path
+# outside its own repository.
+#
+# The second condition is load-bearing, not belt-and-braces: --output mode
+# resolves DEFAULTS_DIR against the PRIMARY checkout while writing into the
+# staging worktree, so a link computed naively from SOURCE_ROOT would escape the
+# staged tree entirely (`../../../../elsewhere/loom/defaults/...`) and get
+# committed — exactly what check-docs-defaults-parity.sh's escaping-link check
+# rejects. sync_one() therefore links to the WRITE_ROOT-local counterpart of the
+# source file, and only after proving it exists and is byte-identical.
+DOGFOOD_WRITE_ROOT=0
+if [[ "$(abs_path "$SOURCE_ROOT")" == "$(abs_path "$REPO_ROOT")" ]] \
+   && is_usable_defaults_root "$WRITE_ROOT"; then
+    DOGFOOD_WRITE_ROOT=1
+fi
+
+# write_root_counterpart <src>
+#   $src re-rooted from the source checkout onto WRITE_ROOT — e.g.
+#   <primary>/defaults/docs/x.md -> <write-root>/defaults/docs/x.md. Prints
+#   nothing unless the result is an existing file whose bytes match $src, so a
+#   caller can treat an empty result as "no local counterpart to link to".
+#   Identity (same path in, same path out) in the plain self-resync case, where
+#   WRITE_ROOT and SOURCE_ROOT are the same directory.
+write_root_counterpart() {
+    local src="$1" src_abs source_abs write_abs rel candidate
+    src_abs="$(abs_file_path "$src")"
+    source_abs="$(abs_path "$SOURCE_ROOT")"
+    write_abs="$(abs_path "$WRITE_ROOT")"
+    [[ "$src_abs" == "$source_abs/"* ]] || return 0
+    rel="${src_abs#"$source_abs/"}"
+    [[ -n "$rel" ]] || return 0
+    candidate="${write_abs%/}/$rel"
+    [[ -f "$candidate" ]] || return 0
+    cmp -s "$src" "$candidate" 2>/dev/null || return 0
+    printf '%s' "$candidate"
+}
+
+# physical_dir_path <dir>
+#   $dir as a physical (symlink-resolved, `..`-free) absolute path, EVEN WHEN
+#   $dir does not exist yet: walk up to the deepest existing ancestor, resolve
+#   that with `pwd -P`, then re-append the not-yet-created tail. Prints nothing
+#   if not even `/` is reachable.
+#
+#   Plain abs_path() cannot do this — it `cd`s into its argument and falls back
+#   to the raw string when that fails, so a destination whose parent directory
+#   is itself brand new (a new `defaults/docs/<sub>/` subtree) would come back
+#   un-normalised, with any `..` left in place. The `../`-counting in
+#   relative_link_target() below needs a genuinely `..`-free physical path to be
+#   exact, because the kernel resolves `..` against REAL directories.
+physical_dir_path() {
+    local dir="$1" tail="" resolved
+    while [[ "$dir" != "/" && "$dir" != "." && ! -d "$dir" ]]; do
+        tail="$(basename "$dir")${tail:+/$tail}"
+        dir="$(dirname "$dir")"
+    done
+    [[ -d "$dir" ]] || return 0
+    resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+    [[ -n "$resolved" ]] || return 0
+    printf '%s%s' "${resolved%/}" "${tail:+/$tail}"
+}
+
+# relative_link_target <src> <dst>
+#   The shortest `../`-prefixed path that, resolved from $dst's own directory,
+#   names $src — e.g. src=<root>/defaults/docs/x.md, dst=<root>/.loom/docs/x.md
+#   yields "../../defaults/docs/x.md", exactly the spelling every existing
+#   .loom/docs/ symlink (and scripts/check-docs-defaults-parity.sh's own fix
+#   hint, #7752) uses. Prints nothing when $src is not a readable file, when
+#   either path cannot be made physical+absolute, or when the two share no
+#   common ancestor — so a caller can treat an empty result as "not safely
+#   linkable" and fall through to a plain copy.
+#
+#   The caller must still verify the link it creates actually resolves to $src
+#   (sync_one does, and unlinks + copies if it does not) — nothing here touches
+#   the filesystem, which is what keeps --dry-run a true no-op.
+relative_link_target() {
+    local src="$1" dst="$2" src_abs dst_dir_abs up rest target
+    src_abs="$(abs_file_path "$src")"
+    dst_dir_abs="$(physical_dir_path "$(dirname "$dst")")"
+    [[ "$src_abs" == /* && "$dst_dir_abs" == /* ]] || return 0
+    # A `..` surviving in either path would make the `../` count below wrong.
+    [[ "$src_abs" != */../* && "$src_abs" != */.. ]] || return 0
+    [[ "$dst_dir_abs" != */../* && "$dst_dir_abs" != */.. ]] || return 0
+
+    # Walk up from $dst's directory until it is a prefix of $src, counting the
+    # levels climbed. String-prefix comparison on "$dir/" is exact here: both
+    # sides are physical, `..`-free absolute paths.
+    local dir="$dst_dir_abs"
+    up=""
+    while [[ "$dir" != "/" && "$src_abs" != "$dir/"* ]]; do
+        dir="$(dirname "$dir")"
+        up="../$up"
+    done
+    [[ "$src_abs" == "$dir/"* ]] || return 0
+    rest="${src_abs#"$dir/"}"
+    target="$up$rest"
+    [[ -n "$target" && "$target" != /* ]] || return 0
+    printf '%s' "$target"
+}
+
 # ---------- pre-resync shell-syntax gate (#6162 AC2) ----------------------
 #
 # #6162: an abandoned `git stash pop` conflict left live conflict markers in
@@ -1356,7 +1471,7 @@ trap 'cleanup_on_exit; exit 129' HUP
 
 # ---------- per-file sync ----------
 #
-# sync_one <src_file> <dst_file> <rel_label>
+# sync_one <src_file> <dst_file> <rel_label> [link_in_dogfood]
 #   Copies src -> dst when they differ (unless --dry-run), preserving the
 #   installed file's executable bit expectation. Only files that exist in the
 #   source tree ever reach this function, so repo-specific installed files with
@@ -1364,8 +1479,13 @@ trap 'cleanup_on_exit; exit 129' HUP
 #
 #   The copy is ALWAYS staged beside the destination and renamed into place
 #   (#4669) — never written in place — so no reader can observe a partial file.
+#
+#   link_in_dogfood (optional, default 0): when 1 AND this is the dogfood repo
+#   resyncing itself (DOGFOOD_WRITE_ROOT=1) AND the destination does not exist
+#   yet, install a relative symlink back into defaults/ instead of a real copy
+#   (#8841). Only the docs surface opts in — see the call site.
 sync_one() {
-    local src="$1" dst="$2" rel="$3"
+    local src="$1" dst="$2" rel="$3" link_in_dogfood="${4:-0}"
 
     # #4669: never rewrite the script this process is executing while the rest
     # of the run is still in flight. Record it and apply it once every other
@@ -1394,6 +1514,60 @@ sync_one() {
         note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(symlink -> $(readlink "$dst" 2>/dev/null))${NC}"
         N_SKIPPED=$((N_SKIPPED + 1))
         return 0
+    fi
+
+    # #8841: create the dogfood symlink for a BRAND-NEW file. The guard just
+    # above only ever PRESERVED an existing symlink — it never created one — so
+    # a `defaults/docs/*.md` added in the same wave as a resync run had no
+    # `.loom/docs/` counterpart for it to protect and fell through to the
+    # plain-copy "create" branch below, materializing a second real copy of a
+    # file the rest of `.loom/docs/` reaches by symlink. That is exactly the
+    # drift check-docs-defaults-parity.sh's check 1b rejects (#7752), and it
+    # turned `main` red when `private-session-dispatch.md` landed that way.
+    #
+    # Scoped three ways, all of which must hold:
+    #   - the caller opted in (docs only — `.loom/hooks`, `.loom/runtimes` and
+    #     `.loom/bin` are deliberately real copies even here, and `.loom/roles`,
+    #     `.loom/scripts` and `.claude/commands/loom` are whole-DIRECTORY
+    #     symlinks whose members never reach this create branch at all);
+    #   - DOGFOOD_WRITE_ROOT=1, so a consumer repo keeps getting real copies;
+    #   - the source file has a byte-identical counterpart INSIDE WRITE_ROOT to
+    #     aim at, so the link never leaves the tree being written (the --output
+    #     staging case; identity in a plain self-resync);
+    #   - relative_link_target() produced a relative target at all, AND the link
+    #     it created verifiably resolves to $src's bytes (checked below, after
+    #     the fact — a link that resolves anywhere else, or nowhere, is unlinked
+    #     and replaced by an ordinary copy).
+    if [[ "$link_in_dogfood" -eq 1 && "$DOGFOOD_WRITE_ROOT" -eq 1 && ! -e "$dst" && ! -L "$dst" ]]; then
+        local link_src link_target
+        link_src="$(write_root_counterpart "$src")"
+        link_target=""
+        [[ -n "$link_src" ]] && link_target="$(relative_link_target "$link_src" "$dst")"
+        if [[ -n "$link_target" ]]; then
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                N_UPDATED=$((N_UPDATED + 1))
+                printf '%b\n' "  ${BOLD}would create${NC} $rel ${YELLOW}(symlink -> $link_target)${NC}"
+                return 0
+            fi
+            mkdir -p "$(dirname "$dst")" 2>/dev/null
+            if ln -s "$link_target" "$dst" 2>/dev/null; then
+                # Verify through the link: `-f` follows it, so this fails for a
+                # dangling link, and `cmp` proves it landed on THIS source file
+                # rather than some other same-named file up the tree.
+                if [[ -f "$dst" ]] && cmp -s "$src" "$dst" 2>/dev/null; then
+                    N_UPDATED=$((N_UPDATED + 1))
+                    printf '%b\n' "  ${GREEN}created${NC}   $rel ${YELLOW}(symlink -> $link_target)${NC}"
+                    return 0
+                fi
+                rm -f "$dst" 2>/dev/null
+                warn "$rel: dogfood symlink -> $link_target did not resolve to the source file; installing a real copy instead."
+            else
+                # Fall through to a real copy rather than fail the run: a plain
+                # file is still correct content, just drift the parity check
+                # will flag on the next CI run.
+                warn "$rel: could not create the dogfood symlink -> $link_target; installing a real copy instead."
+            fi
+        fi
     fi
 
     if [[ -f "$dst" ]] && cmp -s "$src" "$dst" 2>/dev/null; then
@@ -1529,6 +1703,11 @@ apply_deferred_self_sync() {
 #   - defaults_prefix : defaults-relative prefix for the .loom-internal.list
 #                       ownership-boundary check (e.g. "roles", "docs",
 #                       ".claude/commands/loom", ".loom/bin").
+#   link_in_dogfood (optional 5th arg, default 0): forwarded verbatim to
+#   sync_one — 1 opts this surface into installing a brand-new file as a
+#   relative symlink back into defaults/ when (and only when) this is the
+#   dogfood repo resyncing itself (#8841). Only the docs surface passes 1.
+#
 #   A missing src_dir is a silent no-op. Existing sync_one semantics (ignore
 #   list, symlink skip, idempotent copy, --dry-run) apply per file.
 #
@@ -1549,6 +1728,7 @@ apply_deferred_self_sync() {
 #   into defaults/) is untouched and still runs first.
 resync_tree() {
     local src_dir="$1" dst_dir="$2" report_prefix="$3" defaults_prefix="$4"
+    local link_in_dogfood="${5:-0}"
     [[ -d "$src_dir" ]] || return 0
     info "Resyncing ${dst_dir#"$WRITE_ROOT/"}/ from ${src_dir#"$REPO_ROOT/"}/ ..."
     local src rel
@@ -1559,7 +1739,7 @@ resync_tree() {
         if is_loom_internal "$defaults_prefix/$rel"; then
             continue
         fi
-        sync_one "$src" "$dst_dir/$rel" "$report_prefix/$rel"
+        sync_one "$src" "$dst_dir/$rel" "$report_prefix/$rel" "$link_in_dogfood"
     done < <(find -L "$src_dir" -type f -print0 2>/dev/null | sort -z)
 }
 
@@ -1849,7 +2029,13 @@ if [[ -d "$WRITE_ROOT/.loom/roles" ]]; then
     resync_tree "$DEFAULTS_DIR/roles" "$WRITE_ROOT/.loom/roles" "roles" "roles"
 fi
 if [[ -d "$WRITE_ROOT/.loom/docs" ]]; then
-    resync_tree "$DEFAULTS_DIR/docs" "$WRITE_ROOT/.loom/docs" "docs" "docs"
+    # `1` = opt this surface into the #8841 dogfood NEW-FILE symlink path: in
+    # THIS source repo every `.loom/docs/*.md` is a symlink to its
+    # `defaults/docs/` counterpart (#7752, enforced by
+    # scripts/check-docs-defaults-parity.sh check 1b), so a newly-added doc has
+    # to be created as one too rather than as a second real copy. No other
+    # surface passes 1, and a consumer repo (DOGFOOD_WRITE_ROOT=0) ignores it.
+    resync_tree "$DEFAULTS_DIR/docs" "$WRITE_ROOT/.loom/docs" "docs" "docs" 1
 fi
 # `.loom/runtimes/` is deliberately UNCONDITIONAL, unlike the surfaces above
 # (#4688): every one of the gated blocks only backfills a surface the

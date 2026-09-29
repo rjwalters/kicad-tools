@@ -12,6 +12,7 @@ see "Config tiers" below); the operating-core guides (`CLAUDE.md` and
 - [Machine-Level Execution (Epic #3835 Phase 5, #4262)](#machine-level-execution-epic-3835-phase-5-4262)
 - [The Ungated Denial Floor](#the-ungated-denial-floor)
 - [Ask-Tier Composition (#7795)](#ask-tier-composition-7795)
+- [Credential content scan on commit and push (#9133)](#credential-content-scan-on-commit-and-push-9133)
 - [Custom Guard Hooks](#custom-guard-hooks)
 <!-- toc:end -->
 
@@ -428,6 +429,36 @@ the new data, not on this table. Read a moved count against the two caveats
 above first: check whether a precision fix has already landed for it, and
 whether the new hits are live commands or the guard firing on quoted text.
 
+## Credential content scan on commit and push (#9133)
+
+Every other credential defence is path-based: the managed `.gitignore` block,
+`CREDENTIAL_PATTERNS`, and its shell mirrors. A credential at a path nobody
+listed (a renamed `.loom/tokens.<suffix>/`, a pasted log) is invisible to all
+of them at once. `loom-daemon secret-scan` reads **content** instead: Claude
+OAuth/API keys, GitHub and Tailscale tokens, AWS key ids, Slack tokens, private
+keys and z.ai keys, each matched at its real length so short test fixtures do
+not fire. It never prints a value, only `path:line: class (fp <sha256[:8]>)`.
+
+It runs in three places, with one pattern list:
+
+| Where | Mode | Covers |
+|---|---|---|
+| `guard-loom-workflow.sh` (PreToolUse, every Loom repo) | `--for-command` | `git … commit`: everything the command could stage, including untracked files, since the hook runs before the command's own `git add`. `git … push`: every commit no remote-tracking ref has. |
+| `.githooks/pre-commit`, `.githooks/pre-push` (this repo) | `--staged`, `--pre-push` | Commits made outside a Claude session. Needs `core.hooksPath=.githooks`. |
+| CI `Daemon Checks` → `Secret Scan` | `--range <base>..<head>` | Every PR, and every push to `main`, including one that bypassed the PR rules. |
+
+Commits are scanned one at a time, not as a net diff: a value added and then
+deleted on a branch is still published by the push.
+
+Caveats: `git commit --no-verify` skips the git hooks (the guard and CI still
+apply). The guard scans the repo at the session's `cwd`; a `git -C elsewhere`
+form is left to the hooks and CI. A daemon older than the subcommand makes the
+guard allow, like every other unavailable check.
+
+A synthetic fixture that trips it goes in `.loom/secret-scan-allow`, one
+fingerprint per line with a reason. Never list a real credential there: remove
+it, and rotate it, since anything pushed to a public remote is disclosed.
+
 ## Custom Guard Hooks
 
 Loom ships with several built-in `PreToolUse` guard hooks, registered independently under the `Bash` or `Edit|Write` matcher as noted below:
@@ -438,6 +469,7 @@ Loom ships with several built-in `PreToolUse` guard hooks, registered independen
 - **`guard-worktree-paths.sh`** (`Edit|Write` matcher, issue #2441 / #4007) — confines Edit/Write tool calls to a builder's issue worktree, denying writes that resolve into the main checkout. Two mechanisms: the `LOOM_WORKTREE_PATH` env fast path (tmux/manual sessions pinned to one worktree) and, when that env var is absent, a **path-derived fallback** — it walks up from the target path looking for the `.loom-managed` sentinel `worktree.sh` writes at every worktree root, and denies a write that lands in the main checkout while at least one managed worktree exists. The fallback exists because a daemon-dispatched sweep hosts multiple Task-subagent builders in one shared process env, so a single process-wide `LOOM_WORKTREE_PATH` cannot cover that path (#3719). Toggle: `guards.worktreeIsolation` / `LOOM_GUARD_WORKTREE_ISOLATION`, documented alongside the other guard toggles below. **This confines the Edit/Write tool matcher only** — a session denied here could historically fall back to a Bash-tool write (`>`, `tee`, `sed -i`, `cp`/`mv`) targeting the same path with nothing to stop it (the #4178 incident: sweep #4063 used exactly this to edit live guard hooks in the main checkout). `guard-destructive-generic.sh`'s write-confinement category (bullet above) now closes that gap under the identical toggle. **Second, independent category (issue #7995):** this hook also denies an Edit/Write that edits an **installed Loom file in place** in a repo that is not Loom's own source tree — separate toggle (`guards.installedFileWrites` / `LOOM_GUARD_INSTALLED_FILE_WRITES`, below), separate verdict, neither toggle short-circuits the other.
 - **`guard-codex-bridge.sh`** (Codex `pre_tool_use` hook, issue #4495) — **not a Claude Code hook.** It is installed into a selected `$CODEX_HOME/hooks.json` by `defaults/scripts/provision-codex-hooks.sh` and is the adapter that makes the three `PreToolUse` guards above fire for a **Codex** worker. It validates the Codex event, classifies the tool (shell / native patch / read-only / MCP / unknown), normalizes the payload into the Claude-shaped request those guards already accept, dispatches into them **unmodified** (no second policy table), and encodes the outcome on Codex's wire. Two behavioral differences from the Claude path are structural, not choices: Codex 0.146.0 accepts only `permissionDecision:"deny"` (an `allow` is expressed as *no output*, and `ask` is not on the wire at all), so every `ask` becomes a **deny** with the original reason preserved — correct anyway for headless `codex exec`, where nobody can answer; and the bridge fails **closed** (malformed payload, unknown tool, unextractable command/path, or a sub-guard that misbehaves all deny) where the Claude guards fail open. `spawn-codex.sh` refuses to start a **mutable** role (Builder/Doctor) unless the managed hook is installed, pinned, readable and the profile has established Codex hook trust — exit 78 before the CLI runs, and never `--dangerously-bypass-hook-trust`. Full reference: [`guardrail-parity-codex.md`](guardrail-parity-codex.md).
 - **`guard-background-subagents.sh`** (`Stop` hook, issue #4257) — a mechanical backstop for the hazard documented in `defaults/.claude/commands/loom/sweep.md` under "Subagent dispatch is async-only" (#3822): in headless `claude -p` mode, ending the orchestrator's turn **terminates the process**, which kills every still-running background Task/Agent subagent (the #4195/#4243 incident this issue traces). This hook fires when the session is about to stop, scans the transcript JSONL for `Task`/`Agent` tool_use entries with no observed completion (issue #5086 — the harness names the tool `Agent`, not `Task`), and **blocks the stop once** with a loud reason explaining the hazard when it finds any unresolved dispatch. **The block is headless-only (issue #6645)**: the hook first classifies the session, and in an *interactive* session — where background children survive the turn boundary and their completion notifications arrive on a later turn — it allows the stop and emits at most a one-line `systemMessage` advisory instead. Every path that cannot positively establish "interactive" resolves to headless, so the #4257 safety floor is unchanged; see "Session-mode detection" in the reference section below. It uses `stop_hook_active` to block **at most once per stop sequence** — this is a heuristic over the transcript file (not a live process check), so a second consecutive block could wedge the session on a false positive (e.g. a slow transcript flush); after one block, the guard always allows. When it does block, the reason **names the specific tool-use ids** each detector believes are outstanding (issue #5976, capped at 8 with a `+N more` suffix) — before that it reported bare counts, and confirming a false positive meant eliminating every dispatch in the session by hand. Toggle: `guards.backgroundSubagents` / `LOOM_GUARD_BACKGROUND_SUBAGENTS`, documented alongside the other guard toggles below.
+- **`guard-mcp-tools.sh`** (`PreToolUse`/`mcp__loom__.*` matcher, issue #9108) — the only guard registered under the MCP namespace rather than `Bash` or `Edit|Write`. Before #9108, every `PreToolUse` matcher was `Bash` or `Edit|Write`, so a call to any `mcp__loom__*` tool (mcp-loom is registered at user scope and callable from every agent Loom spawns) ran with **no guard hook on its path at all** — including `get_agent_metrics`, which joined its raw MCP arguments into a shell command line until #9107 replaced that with an `execFile` argv and server-side allow-lists. The matcher is a **namespace wildcard**, not an enumerated tool list, so a tool added to mcp-loom later is covered with no wiring edit. The decision logic itself is `loom-daemon guard-mcp-tools` (native from the start, per the shell-language policy); this hook file is a thin stub that resolves and execs it, routed through `hook-wiring.sh` so a broken/absent install fails **closed** the same way the `Bash`/`Edit|Write` entries do (see "An ABSENT or non-executable hook is no longer a silent allow" above — rung 5 denies rather than silently allows). Full rule detail and toggle: `guards.mcpToolArgs` / `LOOM_GUARD_MCP_TOOL_ARGS`, below.
 
 You can also add project-specific guards to protect read-only directories from accidental edits (see below).
 
@@ -1871,6 +1903,53 @@ LOOM_GUARD_READONLY_FASTPATH=0 git status
 # Extend the allowlist with a bare read-only utility (jq/wc/head/tail/find/test
 # are already built-in as of #3772 — use this for a genuinely-custom word):
 #   .loom/config.json  ->  { "guards": { "readOnlyFastPathExtra": ["psql"] } }
+```
+
+### MCP Tool-Argument Guard (`guards.mcpToolArgs` / `LOOM_GUARD_MCP_TOOL_ARGS`)
+
+`guard-mcp-tools.sh` (issue #9108) is the `PreToolUse` guard registered under the `mcp__loom__.*` matcher — see the "Custom Guard Hooks" bullet above for why that matcher exists and what routed no guard hook onto MCP tool calls before it. It applies two rules to every `mcp__loom__*` call's `tool_input`, scanning **every string value at any depth** (not a per-tool schema list, so a field a future tool adds is covered automatically):
+
+1. **A shell metacharacter (`;` `|` `&` `<` `>` backtick, a literal newline, or `$(`) in any argument value → DENY.** MCP arguments are data, never code — mcp-loom tools reach subprocesses and tmux panes, and one of them (`get_agent_metrics`) built a shell command line straight from its raw arguments until #9107 — so a metacharacter in an argument is either an injection attempt or a mistake, and neither should reach the server. **One reviewed exemption list** (`(tool, field)` pairs, e.g. `send_terminal_input.input`, whose documented purpose is carrying literal keystrokes or free prose to a non-shell sink) skips the scan for that field only — adding to it is a deliberate, reviewable act, not a default.
+2. **A documented-`enum:` argument off its `inputSchema` allow-list → DENY.** Scoped per `(tool, field)`, taken from mcp-loom's own schema (e.g. `get_agent_metrics.command` must be one of `summary`/`effectiveness`/`costs`/`velocity`) — never a bare field name, since the same field name means something different on a different tool (`configure_terminal.role` is not the `get_agent_metrics.role` enum).
+
+Neither rule ever echoes the offending argument **value** back into the deny reason — only the tool name, the field path, and which rule fired — so the deny message itself cannot become a second copy of whatever the injection attempt was carrying.
+
+The guard is **on by default**. It is resolved in this order (highest precedence first):
+
+1. **`LOOM_GUARD_MCP_TOOL_ARGS` env var** — `0`/`false`/`no`/`off` disables the guard; `1`/`true`/`yes`/`on` forces it on. Overrides the config value.
+2. **`.loom/config.json`** — `guards.mcpToolArgs` (default `true` when absent). Set it to `false` to disable:
+   ```json
+   {
+     "guards": {
+       "mcpToolArgs": false
+     }
+   }
+   ```
+3. **Default** — `true` (guard on).
+
+Like every other Loom guard, every internal failure resolves to **allow** — an unreadable payload, a missing `tool_name`, or a config read that errors never blocks a legitimate MCP call. That is a different question from the guard being **absent**: a missing `guard-mcp-tools.sh` file in a `.loom/hooks`-bearing workspace is a broken install and is denied by `hook-wiring.sh`'s fail-closed rung 5, exactly like the `Bash`/`Edit|Write` guards (see "An ABSENT or non-executable hook is no longer a silent allow" above).
+
+**Decision log.** Unlike the Bash guards, which log only `deny`/`ask` to avoid swamping the file with the ~99% allow case, this guard also logs a clean `allow` when `guards.decisionLog` / `LOOM_GUARD_DECISION_LOG` is on (below) — MCP calls are orders of magnitude rarer, so an audit trail that captured only refusals could not answer "was this call allowed?" The logged `command` field is a tool name plus an offending field path, never an argument value, for the same reason the deny reason never echoes one.
+
+This category is **defense in depth, not a replacement for server-side validation**: `get_agent_metrics`'s own shell join was #9107's job and was fixed there. This guard does not replace it — and it covers every *other* mcp-loom tool, including ones added later, which carry no server-side allow-list of their own. A `PreToolUse` guard decides *whether a call may happen*; only the tool's own implementation decides what its arguments may *become*. Both layers matter — this one denies the payload before the server sees it, the other stops the payload mattering if this guard is ever off or absent. See [`untrusted-external-content.md`](untrusted-external-content.md) for how this fits the rest of Loom's forge-text-is-data convention.
+
+**Examples**:
+
+```bash
+# A clean, documented call — allowed silently
+mcp__loom__get_agent_metrics {"command":"costs","role":"builder","period":"week"}
+
+# A shell metacharacter in an argument — denied, value never echoed
+mcp__loom__get_agent_metrics {"role":"x; touch /tmp/pwn"}   # DENIED (mcp-arg-shell-metachar)
+
+# An enum field off its documented allow-list — denied
+mcp__loom__get_agent_metrics {"command":"drop-everything"}  # DENIED (mcp-arg-off-allowlist)
+
+# Disable the guard for one session
+LOOM_GUARD_MCP_TOOL_ARGS=0 claude
+
+# Persist the opt-out for a whole repo
+#   .loom/config.json  ->  { "guards": { "mcpToolArgs": false } }
 ```
 
 ### Decision Telemetry Log (`guards.decisionLog` / `LOOM_GUARD_DECISION_LOG`)

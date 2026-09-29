@@ -153,11 +153,18 @@ else
   echo "[build-gate] note: lib/bounded-run.sh not found — stages run unbounded (#6192)" >&2
 fi
 
+
+# Guarded source written as one `&&` rather than the `if` block its two
+# siblings above use: those two also set an `_available` flag inside the
+# branch, this one does not, so the short form is equivalent here. It is
+# deliberate rather than cosmetic — the portable-shell ratchet has NO override
+# for growth (.loom/docs/shell-language-policy.md), and the two code lines
+# freed here are what pay for the structural phase added below (#9140). Same
+# `set -e` behaviour either way: a missing lib leaves the AND-list's failing
+# left operand unchecked, exactly as the `if` did.
 _reap_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/reap-process-group.sh"
-if [[ -f "$_reap_lib" ]]; then
-  # shellcheck source=lib/reap-process-group.sh
-  source "$_reap_lib"
-fi
+# shellcheck source=lib/reap-process-group.sh
+[[ -f "$_reap_lib" ]] && source "$_reap_lib"
 
 _build_gate_exit_cleanup() {
   if [[ "$_build_slot_available" == "true" ]]; then
@@ -253,6 +260,36 @@ run_gate_step() {
 }
 
 cd "$(git rev-parse --show-toplevel)"
+
+# STRUCTURAL PHASE — first, and in BOTH tiers (#9140).
+#
+# Until #9140 this gate ran cargo, the doctests and five bash suites and none of
+# the ~30 structural/ratchet gates CI's required `Structural Checks` job
+# enforces, so a Builder could report a fully green local gate and still fail CI
+# on checks that are fast, deterministic and need no build at all. PR #9137 is
+# the receipt: an honest 9300/9303 local green, then five CI failures (markdown
+# token ratchet, role-prompt ratchet, dangling links, docs/defaults parity,
+# install-surface links) — one whole Builder -> CI -> Judge -> Doctor lap spent
+# on findings a pre-push gate returns in seconds.
+#
+# It runs FIRST because it is the cheapest thing here (~30s against the ~700s
+# cargo phases) and because a gate that reports its cheap failures last makes
+# the Builder pay the expensive ones to find out. It runs in the FAST tier too
+# — placed above the tier switch on purpose: conditional execution is the exact
+# mechanism that created this gap, and 30s of grep/wc is not what saturates a
+# host. `scripts/check-structural.sh` derives its gate set from ci.yml's job on
+# every run, so a gate added to CI reaches this one with no second edit; the
+# `-f` guard is for consumer repos, where this file is installed as
+# .loom/scripts/build-gate.sh but that repo-local checker does not exist.
+#
+# Net-zero on portable shell by construction: the two code lines below are
+# exactly the two the `&&`-collapsed reap-lib source above freed. The
+# portable-shell ratchet has no growth override, AND it refuses a change that
+# retires portable lines while growing the floor (the two are indistinguishable
+# from moving them), so this phase must leave build-gate.sh's count untouched —
+# not lower it. See .loom/docs/shell-language-policy.md.
+_structural_gate="scripts/check-structural.sh"
+[[ -f "$_structural_gate" ]] && run_gate_step "bash $_structural_gate" bash "$_structural_gate"
 
 # Tiered gate mode (#4259). LOOM_BUILD_GATE_TIER selects the stage set:
 #

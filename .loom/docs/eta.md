@@ -98,13 +98,24 @@ level: `schema`, `estimate_id`, `heuristic`, `kind`, `loom` (provenance),
 `reached_with_probability`, `mean_visits`), `branches.changes_requested`,
 `history` (`scope`, `sources`, `samples_by_source`, `samples_by_host`),
 `combination` (`draws`, `seed`, `rng`, `draw_order`), `result` (`p25_sec`,
-`p50_sec`, `p75_sec`, `eta_p50_at`, `samples_min`), `contributions`,
-`features`, `features_omitted`, `no_estimate_reason`, `truncated`.
+`p50_sec`, `p75_sec`, `eta_p50_at`, `samples_min`, `stage_marks`),
+`contributions`, `features`, `features_omitted`, `no_estimate_reason`,
+`truncated`.
+
+`result.stage_marks` (#9366) is the projected future, one mark per stage in
+stage order: `p25_at` / `p50_at` / `p75_at` are `as_of` plus that percentile
+of the stage's cumulative entry time over the same simulated paths the
+`combination` seed already drew (no new draws), and `mean_visits` mirrors the
+stage entry's so the list is self-contained. The terminal stage's mark is the
+path completion time, so its `p50_at` is exactly `eta_p50_at`; a stage no
+path visits carries `null` times, never a fabricated one. A timeline can be
+drawn from `stage_marks` alone.
 
 A feature is `null` when it was not measured, with a `features_omitted`
 reason; never a default. An explanation stays near 8 KiB; over 32 KiB it
-drops `features`, then the stage grids, then every remaining list (`detail`),
-stopping as soon as it fits, and names each drop in `truncated`.
+drops `features`, then the stage grids, then the stage marks, then every
+remaining list (`detail`), stopping as soon as it fits, and names each drop
+in `truncated`.
 
 ## No-estimate reasons
 

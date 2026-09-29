@@ -75,7 +75,7 @@ If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
 comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
 posts the literal string `@path`, not the file's contents. **Full pitfall,
 incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
+[`comment-body-literal-path.md`](../loom-comment-body-literal-path/SKILL.md).
 
 ## Exception: Explicit User Instructions
 
@@ -322,14 +322,17 @@ fi
 
 **When overlaps are found:**
 
-1. **Overlaps with merged PR**: The work may already be done. Flag for human review:
+1. **Overlaps with merged PR**: The work may already be done. Flag for human review —
+   comment **first**, and never cite the merged PR as a blocker (`Blocked by #N` on a
+   closed item reads as cleared and gets auto-unblocked; see `curator.md` → "Adding
+   Dependencies", #9102):
    ```bash
-   gh issue edit <number> --add-label "loom:blocked"
    gh issue comment <number> --body "⚠️ **Potential overlap with merged PR**
 
-   This issue may overlap with recently merged work. Needs human review to confirm.
+   This issue may overlap with recently merged work. No open numbered blocker: needs human review to confirm.
 
    Run \`check-duplicate.sh --include-merged-prs\` for details."
+   gh issue edit <number> --add-label "loom:blocked"
    ```
 
 2. **Overlaps with closed issue**: Work was already completed or intentionally closed:
@@ -984,7 +987,7 @@ Still blocked until all dependencies resolve.
 
 When you receive a probe command, respond with: `AGENT:Guide:<brief-task>` — e.g. `AGENT:Guide:triaging-issue-queue`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ## Document Maintenance
 

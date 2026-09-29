@@ -510,6 +510,23 @@ assert_contains "$src" "merge-pr loom-pr-guard" \
 assert_contains "$src" "merge-pr hold-state" \
   "merge-pr.sh delegates the champion:hold-state marker extraction to loom-daemon (#8191)"
 
+# #9461 regression ratchet: the loom-pr-guard call site must expand the flags
+# array with the empty-safe `${flags[@]+"${flags[@]}"}` idiom (as every other
+# daemon call site in this file does). Under `set -u` on stock macOS bash 3.2,
+# a bare `"${flags[@]}"` on an empty array aborts the expansion
+# ("flags[@]: unbound variable") BEFORE loom-daemon runs, so the guard faults
+# and the merge fails closed on an approved PR. A behavioral repro needs a
+# real bash 3.2 binary, so pin the source shape instead. The pattern anchors
+# on leading whitespace because the idiom itself CONTAINS the literal
+# `"${flags[@]}"` (as its inner expansion, preceded by `+`) — an unanchored
+# grep would flag every correct call site.
+bare_flags_count="$(grep -cE '[[:space:]]"\$\{flags\[@\]\}"' <<<"$src" || true)"
+assert_eq "0" "$bare_flags_count" \
+  "merge-pr.sh has no whitespace-preceded bare \"\${flags[@]}\" expansion (empty-array abort under bash 3.2 + set -u, #9461)"
+guard_call_line="$(grep 'merge-pr loom-pr-guard' "$MERGE_PR_SRC")"
+assert_contains "$guard_call_line" '${flags[@]+"${flags[@]}"}' \
+  "the loom-pr-guard call site expands flags with the empty-safe idiom (#9461)"
+
 # Assert the guard is invoked BEFORE the auto-merge path (line ordering): the
 # _check_loom_pr_label invocation must precede `# Handle auto-merge mode`.
 guard_line="$(grep -n '^_check_loom_pr_label$' "$MERGE_PR_SRC" | head -1 | cut -d: -f1)"

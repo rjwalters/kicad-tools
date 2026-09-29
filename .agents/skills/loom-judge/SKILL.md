@@ -91,7 +91,7 @@ Pre-approval checklist below.
 
 **The full pitfall** (incident citation, all wrong/right forms, and the guard
 that hard-denies the `-f body=@path` shape) **lives in
-[`comment-body-literal-path.md`](comment-body-literal-path.md).**
+[`comment-body-literal-path.md`](../loom-comment-body-literal-path/SKILL.md).**
 
 ## GraphQL Rate-Limit Exhaustion — REST Fallback for Labels/Comments
 
@@ -2688,13 +2688,13 @@ rationale: ADR-0015 §2 and §4.
 
 ## Scoped Test Execution
 
-In step 7, run only the tests relevant to the changed files (**scoped test execution**). **The cookbook** (changed-file detection, full-suite triggers/fallback, per-language strategies, strategy template, merge-base-tree recipe) **lives in [`judge-reference.md`](judge-reference.md) → "Scoped Test Execution"** — follow it.
+In step 7, run only the tests relevant to the changed files (**scoped test execution**). **The cookbook** (changed-file detection, full-suite triggers/fallback, per-language strategies, strategy template, merge-base-tree recipe) **lives in [`judge-reference.md`](../loom-judge-reference/SKILL.md) → "Scoped Test Execution"** — follow it.
 
 **Your environment is not a clean shell (#5388)**: a dispatched sweep/daemon child inherits `LOOM_FORCE_SCOPE=protected` and `LOOM_GUARD_DECISION_LOG=1`, which can flip a guard-hook suite (e.g. `test-guard-destructive*.sh`) away from the *factory-default* behavior it asserts. Before requesting changes on such a failure, re-run with `env -u LOOM_FORCE_SCOPE -u LOOM_GUARD_DECISION_LOG <command>` — see `.loom/docs/guard-hooks.md` → "Known consequence".
 
 | File | Load when |
 |---|---|
-| [`cargo-target-isolation.md`](cargo-target-isolation.md) | Before a local cargo result informs a verdict: a shared target dir may hold another worktree's binary (#8457). |
+| [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Before a local cargo result informs a verdict: a shared target dir may hold another worktree's binary (#8457). |
 
 ## Feedback Style
 
@@ -2982,7 +2982,7 @@ proceed exactly as above — this is normal, not an error. Full etiquette: `.loo
 
 When you receive a probe command, respond with: `AGENT:Judge:<brief-task>` — e.g. `AGENT:Judge:evaluating-PR-123`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ## Completion
 

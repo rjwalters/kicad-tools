@@ -33,7 +33,7 @@ If you post a comment via `gh issue comment` / `gh pr comment` / `gh api ...
 comments` from a scratch file, `--body @path` (and `gh api -f body=@path`)
 posts the literal string `@path`, not the file's contents. **Full pitfall,
 incident citation, and fixes**:
-[`comment-body-literal-path.md`](comment-body-literal-path.md).
+[`comment-body-literal-path.md`](../loom-comment-body-literal-path/SKILL.md).
 
 ## Never Abandon Work
 
@@ -75,15 +75,14 @@ When you claim an issue and realize mid-work it requires >6 hours or touches >8 
 ./.loom/scripts/create-issue.sh --title "[Parent #812] Part 2: Edge cases" --body "..." --label "loom:triage"
 # ... create remaining sub-issues ...
 
-# 2. Update parent issue explaining decomposition
-gh issue comment 812 --body "This issue is complex (>6 hours). Decomposed into:
-- #XXX: Part 1 (2 hours)
-- #YYY: Part 2 (1.5 hours)
-- #ZZZ: Part 3 (2 hours)"
+# 2. Park-record each child in the parent BODY, BEFORE the label (builder.md
+#    "Label Discipline"; .loom/docs/park-record.md -- one line per child):
+{ gh issue view 812 --json body --jq .body; echo; loom-daemon park-record render --blocked-by XXX,YYY,ZZZ --by builder; } > /tmp/body-812.md
+gh issue edit 812 --body-file /tmp/body-812.md
 
 # 3. Mark the parent blocked — humans close it once children are filed.
-#    NEVER close a parent issue yourself; the decomposition comment above
-#    is the record, loom:blocked is the terminal state.
+#    NEVER close a parent issue yourself; the park records above
+#    are the record, loom:blocked is the terminal state.
 gh issue edit 812 --remove-label "loom:building" --add-label "loom:blocked"
 
 # Then exit and let the Curator/sweep pipeline pick up each sub-issue.
@@ -390,7 +389,7 @@ EOF
 
 **Step 3: Mark Parent Blocked (don't close a decomposition-parent yourself)**
 
-Record the decomposition in a comment, then move the parent to `loom:blocked`. A
+Park-record the children in the parent's body (step 2 of the recipe above), then move the parent to `loom:blocked`. A
 freshly-decomposed **parent** is a tracking issue for its children, so it is **not**
 a close candidate — a human (or Curator, per `curator.md` item 4) closes it once the
 children are filed and curated. This is the decomposition-parent exception, not a
@@ -399,16 +398,8 @@ with a rationale per `builder.md` → "Issues Are Suggestions" (or the `.no-chan
 marker under `/loom:sweep`).
 
 ```bash
-gh issue comment <parent-number> --body "$(cat <<'EOF'
-Decomposed into smaller sub-issues for incremental implementation:
-
-- #<phase1-number>: Phase 1 (1-2 hours)
-- #<phase2-number>: Phase 2 (2-3 hours)
-- #<phase3-number>: Phase 3 (1-2 hours)
-
-Each sub-issue references this parent for full context. Curator will enhance them with implementation details.
-EOF
-)"
+# body-file = current body + `park-record render --blocked-by <phase1>,<phase2>,<phase3> --by builder`
+gh issue edit <parent-number> --body-file /tmp/body-<parent-number>.md
 gh issue edit <parent-number> --remove-label "loom:building" --add-label "loom:blocked"
 ```
 
@@ -432,8 +423,7 @@ gh issue edit <parent-number> --remove-label "loom:building" --add-label "loom:b
 ./.loom/scripts/create-issue.sh --title "Add activity querying to /loom heuristic"
 # -> Issue #536 (1-2 hours, depends on #535)
 
-# Mark parent blocked — a human closes it once the children are curated
-gh issue comment 524 --body "Decomposed into #534, #535, #536"
+# Mark parent blocked (after park-recording #534-#536 in its body, as above)
 gh issue edit 524 --remove-label "loom:building" --add-label "loom:blocked"
 ```
 

@@ -3006,7 +3006,7 @@ from this block itself.
 
 ## Capped-PR Recovery Pass (`loom:blocked` + `loom:changes-requested`)
 
-**Scope**: open PRs carrying **both** `loom:blocked` and `loom:changes-requested`. This is the parked state `/loom:sweep` writes when a PR exhausts `sweep.max_doctor_cycles` (`PR #P blocked: doctor cycle exhausted after <k> Doctor→Judge round(s); human attention required`). Without this pass that state is **terminal for automation** — the work-finder skips blocked items and Mode C pre-flight skips blocked PRs — so a PR whose Doctor was making real, distinct progress is never reconsidered (issue #4574, PR #4543 incident, 2026-07-30).
+**Scope**: open PRs carrying **both** `loom:blocked` and `loom:changes-requested`. This is the parked state `/loom:sweep` writes when a PR exhausts `sweep.max_doctor_cycles` (`PR #P blocked: doctor cycle exhausted after <k> Doctor→Judge round(s); human attention required`). Without this pass that state is **terminal for automation** — the work-finder skips blocked items and Mode C pre-flight skips blocked PRs — so a PR whose Doctor was making real, distinct progress is never reconsidered (issue #4574, PR #4543 incident, 2026-07-30). (Whoever applies this park should also record it as a park record — see `.loom/docs/park-record.md`.)
 
 This pass **never merges anything and never closes anything**. For each parked PR it makes exactly one of three decisions, each with a mandatory rationale comment: **grant one more Doctor→Judge cycle**, **keep parked**, or **recommend closing** (routed to the operator). Run it after the auto-merge queue has been drained — it is the lowest-priority Champion work.
 

@@ -18,12 +18,29 @@
 #   3. delete-sentinel + re-invoke with --sparse           -> sentinel restored
 #   4. delete-sentinel + re-invoke with --full             -> sentinel restored
 #   5. NEGATIVE: unregistered directory                    -> exit 1, no sentinel
+#
+# SINCE #8195 SLICE 10 (epic #7810) the --sparse/--full re-configure arm that
+# Tests 3 and 4 drive is `loom-daemon worktree-sparse --arm reconfigure`,
+# which now owns that arm's registration check and its sentinel back-fill.
+# Every assertion below is unchanged from the shell implementation, which is
+# what makes Tests 3/4 equivalence evidence for the port, so the binary is
+# pinned via loom_test_require_daemon_bin and this suite FAILS rather than
+# skips when there is none: without one, --sparse/--full refuse with exit 2
+# before touching anything, and Tests 3/4 would be asserting on a refusal.
+# Test 5's structural awk check still holds for the plain arm's refusal, which
+# stays in the shell; the moved arm's "an unregistered directory gets no
+# sentinel" property is asserted behaviourally by the port's own tests
+# (worktree_cli::sparse unit tests + tests/worktree_sparse_differential.rs).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-sparse"
 
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 

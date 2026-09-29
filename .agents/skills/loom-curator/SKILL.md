@@ -62,7 +62,7 @@ If you post a comment via `gh issue comment` / `gh api ... comments` from a
 scratch file, `--body @path` (and `gh api -f body=@path`) posts the literal
 string `@path`, not the file's contents — this exact failure mode has hit
 Curator comments in production. **Full pitfall, incident citation, and
-fixes**: [`comment-body-literal-path.md`](comment-body-literal-path.md).
+fixes**: [`comment-body-literal-path.md`](../loom-comment-body-literal-path/SKILL.md).
 
 ## Argument Handling
 
@@ -678,12 +678,7 @@ Issue #99: "fix the crash bug"
 → Then: Mark `loom:curated` after enhancement (NOT `loom:issue` unless starred — see "Who promotes")
 ```
 
-### Why This Matters
-
-1. **Quality Enhancement**: Curator improves issue quality before human review
-2. **Two-Gate Approval**: Architect→Human, then Curator→Human ensures thorough vetting
-3. **Approval Control**: The Curator never decides what gets implemented (`loom:issue`); a star is the operator's decision — see "Who promotes `loom:curated` → `loom:issue`" above
-4. **Clear Standards**: `loom:curated` means enhanced, `loom:issue` means approved for work
+**Why**: `loom:curated` means enhanced, `loom:issue` means approved for work — and the Curator never decides the latter (see "Who promotes").
 
 ## Decomposing Oversized Issues
 
@@ -719,9 +714,7 @@ When skipped, the Builder hits these issues at implementation time — usually a
 ./.loom/scripts/create-issue.sh --title "Sub-issue A" --label "loom:triage"
 ```
 
-### Related: Builder decomposition
-
-The Builder's complexity-assessment path (`defaults/.claude/commands/loom/builder-complexity.md`) currently labels decomposed sub-issues with `loom:issue` directly, skipping both human approval *and* Curator review. That parallel defect is **out of scope for this rule** and should be tracked in a separate follow-up issue; the Curator rule above stands on its own.
+The Builder's decomposition path (`builder-complexity.md`) follows the same `loom:triage`-only rule.
 
 ## Curation Activities
 
@@ -773,7 +766,8 @@ The Builder's complexity-assessment path (`defaults/.claude/commands/loom/builde
 > - Use `grep -qFx` (exact match) — not `grep -qF` — so `src/foo.ts` doesn't match `src/foo.ts.bak`.
 > - Run `git fetch origin --quiet` once at the top of the verification pass; do not refetch per file.
 > - If the issue has no `## Affected Files` section yet, this check is a no-op for this tick — add the section in the same pass and let the next curator tick run the verification.
-> - The `loom:blocked` label is the right escape hatch: it's already in the workflow, and is removed by the user (not by Loom) once the underlying files are committed and pushed.
+> - The `loom:blocked` label is the right escape hatch: it's already in the workflow, and is removed by the user (not by Loom) once the underlying files are committed and pushed. No numbered blocker exists; the `COMMENT` above is the recorded reason ("Adding Dependencies").
+> - If this instead names a resolvable dependency on another issue/PR, record it as a park record — see `.loom/docs/park-record.md`.
 
 ### Date-stamp volatile facts
 
@@ -1045,9 +1039,9 @@ fi
    gh issue comment <number> --body "Closing as not planned: resolved by PR #<pr_number> (merged <sha>); the condition no longer reproduces."
    gh issue close <number> --reason "not planned"
 
-   # Cannot verify → flag, do not close:
+   # Cannot verify → flag, do not close. Comment FIRST; never cite the merged PR as a blocker:
+   gh issue comment <number> --body "⚠️ **May Already Be Fixed** — possibly addressed by PR #<pr_number> or commit <sha>. No open numbered blocker: needs verification — please test and close if no longer reproducible."
    gh issue edit <number> --add-label "loom:blocked"
-   gh issue comment <number> --body "⚠️ **May Already Be Fixed** — possibly addressed by PR #<pr_number> or commit <sha>. Needs verification: please test and close if no longer reproducible."
    ```
 
 **Why this matters**: closing on a **clear, stated rationale** keeps the backlog healthy and — because the work-finder only polls *open* issues — removes the item from the queue without a loop. But an **unverified** guess should be flagged, not closed, and never close an issue that is being actively built (`loom:building`) by another agent (see issue #2084 where a curator closed #1981 mid-processing, requiring manual intervention — coordinate via a comment when an issue is in flight).
@@ -1168,15 +1162,15 @@ Exit 2 is not an absent marker: fetch failed (usually quota; retry later) or `lo
 
 ### Points estimate marker (`<!-- loom:points=<N> -->`, #9056)
 
-Alongside the tier, always emit a numeric point estimate — coarse, uncalibrated judgment of total sweep cost (tokens + wall-clock + iterations), not a formula:
+Points are **labels** (#9431): pick exactly one `points:<N>` — `N` one of `1`, `2`, `3`, `5`, `8`, `13`, the `loom:complexity` closed-vocabulary rule — per the rubric in `.loom/docs/story-points.md`: size of one clean landing, not sweep cost or the tier; above 13, split — never size 21. Attach it **in the same `gh issue edit` that applies `loom:curated`** (no second API call); re-assignment **replaces** the prior label (never stacks); a rescope to `loom:triage` updates or removes it in the same mutation — stale points must not survive a scope change:
 
-```html
-<!-- loom:points=<N> -->
+```bash
+gh issue edit <number> --remove-label "points:<old>" --add-label "loom:curated,points:<new>"
 ```
 
-`N` **MUST** be exactly one of `1`, `2`, `3`, `5`, `8`, `13` — same closed-vocabulary rule as `loom:complexity`; out-of-vocabulary is a curation defect, not style. Guidance only: `mechanical`→1-2, `routine`→3-5, `complex`→8-13 — deviate when scope warrants. `require-complexity-marker.sh` blocks `loom:curated` on this marker too.
+Still emit the body marker with the same N — `require-complexity-marker.sh` blocks `loom:curated` on it.
 
-**A related but distinct marker convention** exists for `loom:operator-mechanical` items: `<!-- loom:capability=<name> -->` names the host/credential/admin capability needed (#6892) — same anchored-comment parsing, but a separate convention (no effect on model routing, only alongside `loom:operator-mechanical`). See `defaults/docs/label-state-machine.md` → "Capability-declaration convention" for vocabulary/parser contract; no Curator action required today (docs-only, see #6885/#6893).
+**Related but distinct**: `<!-- loom:capability=<name> -->` (#6892, alongside `loom:operator-mechanical` only) is a separate convention, no Curator action — see `defaults/docs/label-state-machine.md` → "Capability-declaration convention" (#6885/#6893).
 
 ## Where to Add Enhancements
 
@@ -1416,7 +1410,7 @@ If you discover dependencies during curation:
 This issue requires [dependency] to be implemented first.
 ```
 
-Then add `loom:blocked` label:
+Only then add `loom:blocked`. **Record the blocker before the label (#9102):** every `--add-label "loom:blocked"` needs the **body** to declare each **open** blocker — a park record (`.loom/docs/park-record.md`), a `## Dependencies` entry, or a `Blocked by #N` / `Depends on #N` / `Requires #N` line (what `check-stale-blocked`, #8927, the unblock sweep and `merge-pr.sh` read; not comments). Never cite an already-closed item — your re-check below would unblock it. No open numbered blocker? Say so in a comment posted just before the label; never invent one.
 ```bash
 gh issue edit <number> --add-label "loom:blocked"
 ```
@@ -2444,7 +2438,7 @@ By keeping issues well-organized, informative, and actionable, you help the team
 
 When you receive a probe command, respond with: `AGENT:Curator:<brief-task>` — e.g. `AGENT:Curator:enhancing-issue-456`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ## Completion
 

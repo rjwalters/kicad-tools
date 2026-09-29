@@ -307,14 +307,17 @@ fi
 
 **When overlaps are found:**
 
-1. **Overlaps with merged PR**: The work may already be done. Flag for human review:
+1. **Overlaps with merged PR**: The work may already be done. Flag for human review —
+   comment **first**, and never cite the merged PR as a blocker (`Blocked by #N` on a
+   closed item reads as cleared and gets auto-unblocked; see `curator.md` → "Adding
+   Dependencies", #9102):
    ```bash
-   gh issue edit <number> --add-label "loom:blocked"
    gh issue comment <number> --body "⚠️ **Potential overlap with merged PR**
 
-   This issue may overlap with recently merged work. Needs human review to confirm.
+   This issue may overlap with recently merged work. No open numbered blocker: needs human review to confirm.
 
    Run \`check-duplicate.sh --include-merged-prs\` for details."
+   gh issue edit <number> --add-label "loom:blocked"
    ```
 
 2. **Overlaps with closed issue**: Work was already completed or intentionally closed:

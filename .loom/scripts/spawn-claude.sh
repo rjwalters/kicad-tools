@@ -17,17 +17,17 @@
 # the wrapper.
 #
 # Behavior on missing tokens:
-#   Token selection resolves the effective pool (issue #3938): the per-repo
-#   pool at `<repo>/.loom/tokens/` when it holds `*.token` files, else the
-#   shared machine-level pool at `~/.loom/tokens/` (override
-#   `LOOM_SHARED_TOKENS_DIR`; set it empty to disable the fallback). This lets a
-#   consumer repo the daemon dispatches into — which has no pool of its own —
-#   spawn against the shared pool instead of hard-failing. All pool STATE
+#   Token selection resolves the effective pool (issue #3938) to the shared
+#   machine-level pool at `~/.loom/tokens/` (override `LOOM_SHARED_TOKENS_DIR`;
+#   set it empty to disable it). A legacy per-repo pool at `<repo>/.loom/tokens/`
+#   still resolves only when that workspace is NOT inside a git worktree —
+#   inside one it is refused outright (issue #9135: OAuth credentials must never
+#   live in a repository checkout). All pool STATE
 #   (`.bad_tokens`/`.ranking`/`.allowlist`/`.failure_counts`) lives in whichever
 #   pool was selected, so it is never forked per repo.
-#   When NEITHER pool exists/has tokens (or all tokens are bad), this script
+#   When no pool exists/has tokens (or all tokens are bad), this script
 #   exits 78 (EX_CONFIG) with a message instructing the user to run
-#   `loom-daemon tokens bootstrap` (or `--shared` for the machine-level pool).
+#   `loom-daemon tokens bootstrap` (which always targets the shared pool).
 #   It does NOT silently fall back to keychain.
 #   (The recovery advice named the Python `loom-tokens` console script until epic
 #   #4081 Phase 4, #4557, deleted the package that provided it; `loom-daemon
@@ -1127,11 +1127,11 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
         log_error "Token selection failed:"
         cat "$_selection_stderr_file" >&2 || true
         rm -f "$_selection_stderr_file"
-        log_error "Run '$_daemon_bin tokens bootstrap' to populate <repo>/.loom/tokens/,"
-        log_error "or add '--shared' for the machine-level pool"
-        log_error "(~/.loom/tokens, override LOOM_SHARED_TOKENS_DIR) that consumer"
-        log_error "repos fall back to. Use '$_daemon_bin tokens unblock <name>' if"
-        log_error ".bad_tokens is the cause."
+        log_error "Run '$_daemon_bin tokens bootstrap' to populate the shared pool"
+        log_error "(~/.loom/tokens, override LOOM_SHARED_TOKENS_DIR) — the only"
+        log_error "supported location since #9135; a pool inside a git worktree is"
+        log_error "refused. Use '$_daemon_bin tokens unblock <name>' if .bad_tokens"
+        log_error "is the cause."
         log_error "Spawn-claude refuses to auto-clear .bad_tokens — that's"
         log_error "intentional: an empty pool indicates a real auth problem."
         log_error "Set CLAUDE_CODE_OAUTH_TOKEN explicitly to bypass selection."

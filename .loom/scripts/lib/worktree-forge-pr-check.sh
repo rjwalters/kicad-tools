@@ -290,7 +290,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
             if [[ "$json_output" != "true" ]]; then
                 print_info "Open PR #${_WT_OPEN_PR_NUMBER} already exists for '$branch' on origin (not yet fetched) - fetching and reusing it"
             fi
-            git fetch origin "refs/pull/${_WT_OPEN_PR_NUMBER}/head:refs/remotes/origin/$branch" 2>/dev/null || true
+            git fetch origin -- "refs/pull/${_WT_OPEN_PR_NUMBER}/head:refs/remotes/origin/$branch" 2>/dev/null || true
             if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
                 _WT_REUSE_REMOTE_BRANCH=true
                 return 0
@@ -376,13 +376,19 @@ _worktree_resolve_origin_branch_reuse() {
     # `.loom/docs/shell-language-policy.md`).
     local branch="$1" issue_number="$2" json_output="$3" base_display="$4" base_ref="$5" default_branch="$6"
     local origin_fetch_result origin_fetch_output
+    # #9106: $branch reaches `git fetch` as a bare operand. worktree.sh derives
+    # it from the issue number or an explicit --branch argument, but this lib is
+    # sourced rather than exec'd, so it validates its own input instead of
+    # trusting the caller. Refuse — the #7765 stance: a check that cannot run
+    # safely refuses rather than guessing.
+    if ! declare -F check_branch_name >/dev/null 2>&1 || ! check_branch_name "$branch" "worktree branch"; then
+        [[ "$json_output" == "true" ]] && echo '{"success": false, "error": "unsafe-branch-name", "issueNumber": '"$issue_number"'}' >&3
+        exit 1
+    fi
     origin_fetch_result="ok"
-    if ! origin_fetch_output="$(git fetch origin "$branch" 2>&1)"; then
-        if echo "$origin_fetch_output" | grep -qi "couldn't find remote ref"; then
-            origin_fetch_result="no-such-ref"
-        else
-            origin_fetch_result="fetch-failed"
-        fi
+    if ! origin_fetch_output="$(git fetch origin -- "$branch" 2>&1)"; then
+        origin_fetch_result="fetch-failed"
+        echo "$origin_fetch_output" | grep -qi "couldn't find remote ref" && origin_fetch_result="no-such-ref"
     fi
     _WT_REUSE_REMOTE_BRANCH=false
     if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then

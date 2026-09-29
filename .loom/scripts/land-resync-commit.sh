@@ -255,6 +255,10 @@ if [[ $_DB_RC -ne 0 ]]; then
 fi
 rm -f "$DEFAULT_BRANCH_ERR_FILE"
 
+# (#9106: loom_default_branch refuses an unsafe name at the source, and its
+# failure is already handled above, so the `git fetch origin --
+# "$DEFAULT_BRANCH"` below can never receive one.)
+
 CURRENT_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
 if [[ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]]; then
     err "The primary checkout ($REPO_ROOT) is on '$CURRENT_BRANCH', not '$DEFAULT_BRANCH'."
@@ -507,7 +511,7 @@ fi
 FETCH_ERR_FILE="$(mktemp)"
 PUSH_ERR_FILE="$(mktemp)"
 trap 'rm -f "$FETCH_ERR_FILE" "$PUSH_ERR_FILE"' EXIT
-if ! git -C "$REPO_ROOT" fetch --quiet origin "$DEFAULT_BRANCH" 2>"$FETCH_ERR_FILE"; then
+if ! git -C "$REPO_ROOT" fetch --quiet origin -- "$DEFAULT_BRANCH" 2>"$FETCH_ERR_FILE"; then
     warn "Could not fetch origin/$DEFAULT_BRANCH: $(cat "$FETCH_ERR_FILE")"
     if [[ -n "$RESYNC_SHA" ]]; then
         warn "  The resync commit ($RESYNC_SHA) stays LOCAL, uncommitted-to-origin."
@@ -663,7 +667,7 @@ BRANCH="$FALLBACK_BRANCH"
 # CURRENT tip of the side branch (not a stale local notion of it). If origin
 # has no such branch the lease must expect "absent", so drop any stale
 # tracking ref too.
-if ! git -C "$REPO_ROOT" fetch --quiet origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null; then
+if ! git -C "$REPO_ROOT" fetch --quiet origin -- "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null; then
     git -C "$REPO_ROOT" update-ref -d "refs/remotes/origin/$BRANCH" 2>/dev/null || true
 fi
 LEASE_SHA="$(git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/remotes/origin/$BRANCH" 2>/dev/null || true)"

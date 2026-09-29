@@ -31,7 +31,7 @@ it does not change runtime resolution or migrate existing credentials.
 - [Worktree handling](#worktree-handling)
 - [Shared machine-level pool fallback (#3938)](#shared-machine-level-pool-fallback-3938)
 - [Hard-fail on missing pool](#hard-fail-on-missing-pool)
-- [Per-repo pool vs. shared machine-level pool: which to provision (#4642)](#per-repo-pool-vs-shared-machine-level-pool-which-to-provision-4642)
+- [The shared machine-level pool is the only supported location (#4642, #9135)](#the-shared-machine-level-pool-is-the-only-supported-location-4642-9135)
 - [Operator CLI (`loom-daemon tokens pin/unpin/unblock`)](#operator-cli-loom-daemon-tokens-pinunpinunblock)
 - [Tests](#tests)
 - [Codex provider health](#codex-provider-health)
@@ -48,8 +48,10 @@ its files, selection order, state formats, `SelectedToken` API, and
 
 Provider-aware callers identify accounts by `(provider, name)`, so
 `claude/alice` and `codex/alice` are separate identities. Claude inventory
-continues to prefer a repo-local `.loom/tokens` pool and otherwise falls back
-to `LOOM_SHARED_TOKENS_DIR` (default `~/.loom/tokens`).
+resolves to `LOOM_SHARED_TOKENS_DIR` (default `~/.loom/tokens`). A legacy
+repo-local `<workspace>/.loom/tokens` pool is still recognized when the
+workspace is **not** inside a git worktree; inside one it is refused (#9135 —
+see "The shared machine-level pool is the only supported location" below).
 
 Codex inventory uses named directories below `LOOM_CODEX_PROFILE_ROOT`
 (default `~/.loom/codex-profiles`). With no repo metadata, each direct child
@@ -186,8 +188,8 @@ standard way to populate a new host's pool** (it replaces hand-copying a pool
 between machines):
 
 ```bash
-loom-daemon tokens import-from-monitor                  # into <repo>/.loom/tokens
-loom-daemon tokens import-from-monitor --shared         # into the machine-level pool (#3938)
+loom-daemon tokens import-from-monitor                  # into the machine-level pool
+loom-daemon tokens import-from-monitor --shared         # same thing; flag kept for compat (#9135)
 loom-daemon tokens import-from-monitor --force          # apply ROLLED tokens (see below)
 loom-daemon tokens import-from-monitor --dry-run        # preview
 loom-daemon tokens import-from-monitor --prune          # drop accounts the monitor no longer reports
@@ -1320,10 +1322,13 @@ list.
 ## Shared machine-level pool fallback (#3938)
 
 Token selection resolves the effective pool as: the **per-repo** pool
-`<repo>/.loom/tokens/` when it holds `*.token` files, else the **shared
-machine-level pool** `~/.loom/tokens/` (override `LOOM_SHARED_TOKENS_DIR`; set it
-empty to disable the fallback). **This precedence is presence-based, not
-health-based**: a per-repo pool wins by merely *having* `.token` files present,
+`<repo>/.loom/tokens/` when it holds `*.token` files **and that workspace is not
+inside a git worktree** (issue #9135 — inside one it is refused outright, see
+"The shared machine-level pool is the only supported location" below), else the
+**shared machine-level pool** `~/.loom/tokens/` (override
+`LOOM_SHARED_TOKENS_DIR`; set it empty to disable the fallback). **Where a
+per-repo pool still applies, that precedence is presence-based, not
+health-based**: it wins by merely *having* `.token` files present,
 regardless of whether any of its accounts are actually usable — so a per-repo
 pool whose every account has since gone bad-marked or `.ranking`-excluded still
 shadows a healthy shared pool rather than falling back to it (issue #6758; the
@@ -1391,12 +1396,11 @@ default-`--workspace` case, and the daemon's autonomous ranking-refresh loop):
 
 **Operational contract**: for step 3 to actually find tokens, a machine-level
 daemon's pool must be bootstrapped at the shared location —
-`loom-daemon tokens bootstrap --shared` (or `import-from-monitor --shared`) — rather
-than per-repo at whatever directory happens to be the daemon's own checkout.
+`loom-daemon tokens bootstrap` — which since issue #9135 always writes there,
+never per-repo at whatever directory happens to be the daemon's own checkout.
 Registering the daemon's own checkout as a workspace
-(`loom-daemon workspace add <checkout>`) is the alternative: that makes step 2
-apply instead, so a per-repo pool bootstrapped there (without `--shared`) is
-found too.
+(`loom-daemon workspace add <checkout>`) no longer provides an alternative: a
+pool inside that checkout is refused, so the shared location is the contract.
 
 **No `WorkingDirectory=` needed**: with the pool bootstrapped per the
 contract above, a `systemd`-managed daemon started with the unit's default
@@ -1479,18 +1483,50 @@ hitting this hard-fail on every single tick forever. The skip is logged once
 role's log for `no token pool available` — and is re-checked every tick, so
 provisioning either pool later resumes ticking with no daemon restart needed.
 
-## Per-repo pool vs. shared machine-level pool: which to provision (#4642)
+## The shared machine-level pool is the only supported location (#4642, #9135)
 
-Provision an external shared pool with `loom-daemon tokens bootstrap --shared`
-(or `import-from-monitor --shared`). Its default is `~/.loom/tokens/`;
-`LOOM_SHARED_TOKENS_DIR` can select another external, owner-only directory.
-Do not provision credentials inside a repository, even for separate billing.
+**Invariant: a token pool never lives inside a git worktree.** OAuth
+credentials under version control are one `git add -A`, one directory rename,
+or one stale `.gitignore` away from being pushed — and every guard protecting
+the old in-repo path was keyed on that one literal path string, so any of those
+three defeated all of them at once. The structural answer is that the
+credentials are not in the repository at all (see
+[`credential-storage.md`](credential-storage.md)).
+
+Provision with `loom-daemon tokens bootstrap` (or `import-from-monitor`). The
+destination is always the shared machine-level pool — `~/.loom/tokens/` by
+default, or any other external owner-only directory named by
+`LOOM_SHARED_TOKENS_DIR`. `--shared` is accepted for backward compatibility and
+now selects what already happens; there is no workspace-relative alternative.
+`LOOM_SHARED_TOKENS_DIR` pointing *into* a checkout is refused too: the
+invariant is "outside every worktree", not "named `~/.loom/tokens`".
 
 Repositories using the same external pool compete for the same account quotas.
 Choose accounts deliberately; provisioning changes whose allowance is consumed.
-The runtime still prefers legacy repo-local pools when present. Migrate those
-separately and verify effective selection; this policy does not automatically
-move files or change billing isolation.
+
+### Migrating a legacy `<repo>/.loom/tokens` pool
+
+A populated `<repo>/.loom/tokens` inside a git worktree is **ignored, never
+deleted**: selection refuses it, `token_pool_size` counts it as 0 (so the host's
+concurrency cap does not promise spawns that would fail), and the resulting
+empty-pool error names the directory and the migration. `loom-daemon tokens
+check --all-pools` lists it as `legacy in-worktree, RETIRED and ignored by
+selection`. Loom will not relocate an OAuth token on its own — moving a
+credential is an operator act:
+
+```bash
+mkdir -p ~/.loom/tokens && mv <repo>/.loom/tokens/*.token ~/.loom/tokens/
+rm -rf <repo>/.loom/tokens
+loom-daemon tokens check --ranking          # verify effective selection
+```
+
+Re-provisioning from source (`loom-daemon tokens bootstrap --force`) is
+equivalent and preferable when the account sources are still available. A pool
+at `<dir>/.loom/tokens` that is **not** inside any checkout still resolves
+normally — the refusal is scoped to the policy it enforces, not to the path
+shape. If the shared pool is disabled outright (`LOOM_SHARED_TOKENS_DIR=""`)
+while a legacy in-worktree pool is the only one present, the host fails closed
+rather than readmitting it.
 
 ## Operator CLI (`loom-daemon tokens pin/unpin/unblock`)
 

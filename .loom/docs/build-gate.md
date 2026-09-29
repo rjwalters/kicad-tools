@@ -191,6 +191,11 @@ The wrapper lives at [`defaults/scripts/build-gate.sh`](../scripts/build-gate.sh
 to it via the `.loom/scripts -> ../defaults/scripts` symlink). It runs these
 stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
 
+0. `bash scripts/check-structural.sh` — the **structural phase** (#9140): every
+   gate CI's required `Structural Checks` job runs, derived from the workflow
+   itself. First because it is the cheapest stage here (~30s against the cargo
+   phases' minutes) and it runs in **both** tiers. See "The structural phase"
+   below.
 1. `cargo nextest run --workspace --lib --bins --profile ci` — the Rust crates'
    **unit tests** (`loom-daemon`, `loom-api`), run with the same runner and the
    same profile CI uses. Falls back to `cargo test --workspace --lib --bins`
@@ -210,6 +215,107 @@ stages in order under `set -euo pipefail`, aborting on the first non-zero exit:
    dependency on this repo's own history), `scripts/test-daemon-liveness.sh`
    (#5548), `scripts/test-install-local-mode.sh` and
    `scripts/test-migrate-consumer.sh` (#5276).
+
+### The structural phase (#9140)
+
+Stage 0 above. `build-gate.sh` used to run cargo, the doctests and five bash
+suites, and **none** of the ~30 structural/ratchet gates CI's required
+`Structural Checks` job enforces. So the gate could return a fully green,
+honestly-reported verdict and the same commit could still fail CI on checks
+that are fast, deterministic, and need no build at all.
+
+PR #9137 is the receipt. Its Builder reported 9300/9303 locally (the three
+failures independently confirmed pre-existing and host-environmental — an
+accurate report), then CI failed **five** gates: the markdown-token ratchet, the
+role-prompt-prefix ratchet, `check-dangling-links.sh`, `check-docs-defaults-parity.sh`,
+and the install-surface link check — a ratchet violation plus one missing
+`.loom/docs/` symlink. Every one reproduces locally in about a second. The cost
+of not being able to learn that without pushing was one full
+Builder → CI → Judge → Doctor lap.
+
+#### One definition, and it lives in CI
+
+The acceptance criterion #9140 set was not "add the four missing checkers" — it
+was that **CI's job and the local gate share one definition of the gate set**,
+so a gate added to one cannot silently be missing from the other. A
+hand-mirrored list in `build-gate.sh` would fail that the first time someone
+adds a 16th gate to the workflow and not to the script, which is precisely the
+drift #9140 reports.
+
+So [`scripts/check-structural.sh`](https://github.com/rjwalters/loom/blob/main/scripts/check-structural.sh)
+**derives** the set, on every run, from the one place it already has to be
+correct: the `Structural Checks` job in `.github/workflows/ci.yml`. It collects
+every `bash <script>.sh [args…]` invocation in that job's step bodies, in
+workflow order, including the `--self-test` steps (a ratchet that has silently
+stopped measuring reports OK forever, which is why CI self-tests them too).
+There is no second list to keep in sync, and nothing to remember when adding a
+gate to CI.
+
+The direction of the dependency is deliberate. **CI keeps its per-step shape**
+and does not call this script:
+
+- each gate is its own named step under `if: ${{ !cancelled() }}`, so one red
+  gate never hides another and the step name says which one failed; and
+- each step sits inside a `# component:` marker that `loom-daemon`'s
+  required-check freshness guard pins per component
+  ([`stale_checks/inputs.rs`](https://github.com/rjwalters/loom/blob/main/loom-daemon/src/merge_pr/stale_checks/inputs.rs)
+  `REQUIRED_CHECKS`), whose pin test fails if a component's steps run a script
+  missing from that component's spec.
+
+Having CI invoke the aggregate instead would collapse fifteen named steps into
+one opaque one and break that pin test. Reading the workflow costs CI nothing
+and changes nothing about it.
+
+#### Ordering, and why it is unconditional
+
+It runs **first**, above the tier switch, so:
+
+- the cheap failures surface first — a gate that reports them *last* makes the
+  Builder pay the expensive stages to find out; and
+- it runs in the **fast** tier as well as `full`. That is on purpose:
+  conditional execution is the exact mechanism that created this gap, and ~30s
+  of grep/`wc` is not what saturates a host.
+
+#### Failure and skip semantics
+
+Like CI: **every** gate runs even after one fails (the loop is not under
+`set -e`), each gate's own output goes straight to the terminal so the violation
+is readable, and a summary names the tally. The phase exits non-zero iff at
+least one gate failed, which fails `build-gate.sh` through its normal
+`run_gate_step` path.
+
+Three cases are reported as `SKIP` — counted, printed, never silent, and never
+able to turn a red gate green:
+
+| Case | Why |
+|---|---|
+| the invocation carries a `${{ … }}` Actions expression | `check-defaults-version-bump.sh --forbid-bump` needs the PR's base/head SHAs, which exist only in the workflow context |
+| the invocation uses shell quoting or metacharacters | the runner splits on whitespace and deliberately will not `eval` workflow-derived text |
+| the gate's script is not in this tree | a consumer repo, or a workflow ahead of the checkout |
+
+Finding the job but deriving **no** gate from it is a failure (exit `2`), not a
+pass: a runner that cannot tell "checked, fine" from "could not check" reports
+OK forever. A repo with no `Structural Checks` job at all is skipped cleanly,
+and `build-gate.sh` guards the call with `-f` — the wrapper installs into
+consumer repos as `.loom/scripts/build-gate.sh`, where this repo-local checker
+does not exist.
+
+#### Commands
+
+```bash
+bash scripts/check-structural.sh              # what the gate's stage 0 runs
+bash scripts/check-structural.sh --list       # the derived gate set, run nothing
+bash scripts/check-structural.sh --self-test  # verify the derivation still works
+bash scripts/check-structural.sh --help
+```
+
+`--self-test` has two halves. Synthetic fixtures pin the derivation's shape
+(job scoping, joined line continuations, dropped comments, skip classification,
+continue-past-failure, and the measured-nothing failure). The live half is the
+**drift alarm**: it asserts the real `ci.yml` still yields at least ten gates
+and still names each of PR #9137's four script-level failures, so a workflow
+restructure that stops matching fails loudly here instead of leaving the runner
+quietly reporting zero gates.
 
 ### Why the gate prefers `cargo nextest` (#8326)
 
@@ -422,8 +528,12 @@ stage set the wrapper runs:
 
 | Tier | `LOOM_BUILD_GATE_TIER` | Stages | Cost |
 |------|------------------------|--------|------|
-| **full** (DEFAULT) | unset / `full` | `cargo nextest run --lib --bins --profile ci` (or a warned `cargo test --lib --bins` fallback) + `cargo test --doc` + installer suite | minutes, cold |
-| **fast** | `fast` | `cargo build --workspace --lib --bins` (compile) + a `loom-daemon --version` startup smoke | a few minutes cold, no test execution |
+| **full** (DEFAULT) | unset / `full` | structural phase + `cargo nextest run --lib --bins --profile ci` (or a warned `cargo test --lib --bins` fallback) + `cargo test --doc` + installer suite | minutes, cold |
+| **fast** | `fast` | structural phase + `cargo build --workspace --lib --bins` (compile) + a `loom-daemon --version` startup smoke | a few minutes cold, no test execution |
+
+The structural phase (#9140) sits **above** the tier switch, so both tiers run
+it — see "The structural phase" above for why that is unconditional rather than
+full-tier-only.
 
 The default is unchanged when the variable is absent, so **CI parity, manual
 invocations, and the per-builder post-builder gate all behave exactly as

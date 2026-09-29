@@ -309,7 +309,7 @@ e.g. `AGENT:Concierge:listening-for-room-intent`.
 
 **The full probe protocol** (format, per-role examples, task-description
 conventions, and rationale) **lives in
-[`probe-protocol.md`](probe-protocol.md).**
+[`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ## Completion
 

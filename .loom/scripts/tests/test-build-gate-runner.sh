@@ -73,6 +73,14 @@ cleanup() { rm -rf "$STUB_DIR" 2>/dev/null || true; }
 trap cleanup EXIT
 trap 'cleanup; exit 1' INT TERM
 
+# Stage 0 of build-gate.sh (#9140) runs scripts/check-structural.sh whenever that
+# file exists at the repo top level. This suite is about the cargo stages, so run
+# the gate from a scratch git repo that has no such file (the same shape a
+# consumer repo has) rather than from REPO_ROOT, where stage 0 would run the real
+# structural gates against the mocked toolchain and intercept every scenario.
+SCRATCH_REPO="$STUB_DIR/scratch-repo"
+mkdir -p "$SCRATCH_REPO" && git -C "$SCRATCH_REPO" init -q
+
 CARGO_LOG="$STUB_DIR/cargo-calls.log"
 
 # A recording `cargo` stub: appends its own argv to $CARGO_LOG and exits 0,
@@ -130,7 +138,7 @@ EOF
 chmod +x "$STUB_DIR/cargo-nextest"
 
 : > "$CARGO_LOG"
-present_output="$(cd "$REPO_ROOT" && run_gate_full_tier "$STUB_DIR:$MIN_PATH")"
+present_output="$(cd "$SCRATCH_REPO" && run_gate_full_tier "$STUB_DIR:$MIN_PATH")"
 
 if grep -Fxq "nextest run --workspace --lib --bins --profile ci" "$CARGO_LOG"; then
     pass "with cargo-nextest installed, the gate runs 'cargo nextest run --workspace --lib --bins --profile ci'"
@@ -172,7 +180,7 @@ if PATH="$STUB_DIR:$MIN_PATH" command -v cargo-nextest >/dev/null 2>&1; then
     skip "cargo-nextest is reachable even on the minimal PATH ($MIN_PATH) — cannot exercise the fallback branch on this host"
 else
     : > "$CARGO_LOG"
-    absent_output="$(cd "$REPO_ROOT" && run_gate_full_tier "$STUB_DIR:$MIN_PATH")"
+    absent_output="$(cd "$SCRATCH_REPO" && run_gate_full_tier "$STUB_DIR:$MIN_PATH")"
 
     if grep -Fxq "test --workspace --lib --bins" "$CARGO_LOG"; then
         pass "without cargo-nextest, the gate falls back to 'cargo test --workspace --lib --bins'"

@@ -227,7 +227,7 @@ your prose, not a path string.
 
 **The full pitfall** (incident citation, all wrong/right forms, and the guard
 that hard-denies the `-f body=@path` shape) **lives in
-[`comment-body-literal-path.md`](comment-body-literal-path.md).**
+[`comment-body-literal-path.md`](../loom-comment-body-literal-path/SKILL.md).**
 
 ## GraphQL Rate-Limit Exhaustion — REST Fallback for Labels/Comments
 
@@ -1166,7 +1166,7 @@ shellcheck scripts/*.sh # Shell scripts (if applicable)
 
 | File | Load when |
 |---|---|
-| [`cargo-target-isolation.md`](cargo-target-isolation.md) | Before a local cargo result counts as "the fix works": a shared target dir may hold another worktree's binary (#8457). |
+| [`cargo-target-isolation.md`](../loom-cargo-target-isolation/SKILL.md) | Before a local cargo result counts as "the fix works": a shared target dir may hold another worktree's binary (#8457). |
 
 ### Step 5: Verify Remote CI After Push
 
@@ -1656,7 +1656,7 @@ etiquette: `.loom/docs/fleet-comms.md`.
 
 When you receive a probe command, respond with: `AGENT:Doctor:<brief-task>` — e.g. `AGENT:Doctor:fixing-changes-requested-789`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ## Pre-existing Failures
 

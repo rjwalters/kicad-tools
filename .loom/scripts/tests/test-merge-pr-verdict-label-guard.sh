@@ -124,7 +124,9 @@ loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 # command, and every `# requires-daemon:` marker comment — that function reads
 # the floor back out of ${BASH_SOURCE[0]}, i.e. out of THIS extracted file, so
 # the markers have to travel with it or the refusal degrades to
-# `<undeclared>` here while production says 0.19.172.
+# `<undeclared>` here while production names whatever version the marker
+# declares. Deliberately not quoting that version: it MOVES (#8967 raised it
+# from 0.19.172 to 0.19.465), and a number pinned in prose here just goes stale.
 FUNCS_FILE="$(mktemp)"
 trap 'rm -f "$FUNCS_FILE" 2>/dev/null || true' EXIT
 awk '

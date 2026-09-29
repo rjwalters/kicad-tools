@@ -1453,11 +1453,18 @@ that died in ~2s.
 and *all* pool-state bookkeeping resolve the effective pool directory as:
 
 1. the **per-repo** pool `<repo>/.loom/tokens/` when it holds `*.token` files
-   (unchanged for the primary workspace);
+   **and that workspace is not inside a git worktree** — inside one it is
+   refused outright (issue #9135: OAuth credentials must never live in a
+   repository checkout; the refusal is reported with a migration path, and the
+   pool is never read or deleted);
 2. else the **shared** machine-level pool `~/.loom/tokens/` (override
-   `LOOM_SHARED_TOKENS_DIR`; set it empty to disable the fallback);
+   `LOOM_SHARED_TOKENS_DIR`; set it empty to disable the fallback) — the only
+   *supported* location, and the only destination `tokens bootstrap` /
+   `import-from-monitor` will write to;
 3. else the per-repo path (so a truly-unbootstrapped repo still surfaces a clear
-   "run bootstrap" error).
+   "run bootstrap" error) — except when step 1 was refused, where resolution
+   fails closed on a path that can hold no credentials rather than readmitting
+   the in-worktree pool.
 
 Crucially, the **state files** (`.bad_tokens`, `.failure_counts`, `.ranking`,
 `.allowlist`) are read/written in *whichever pool directory was selected* — so a
@@ -2115,7 +2122,8 @@ by `candidate_cmp`, with what the tick did with it:
 - **running**: `dispatched` (detail `overflow` for the host's over-limit
   starred sweep, #9244), `in_flight`
 - **ready** (waiting on a limit): `deferred_capacity`, `deferred_ramp_cap`,
-  `deferred_saturation`, `deferred_out_of_slice`, `deferred_repo_cap`
+  `deferred_saturation`, `deferred_build_backoff` (#9410), `deferred_out_of_slice`,
+  `deferred_repo_cap`
 - **blocked** (held by something specific to the issue or repo): `parked` (with
   the label), `open_pr` (with the PR number), `dispatch_backoff`,
   `open_pr_backoff`, `quarantined`, `noop_cooldown`, `declined`,
@@ -2163,6 +2171,8 @@ comparator rank, so the two differ whenever sharding or
 than a hard-coded string. `loom:curated` / `loom:triage` are unordered and never
 listed. The single-workspace tick has no plan (`plan: null`). Field reference:
 [`telemetry-schema.md` § `queue.snapshot`](telemetry-schema.md#queuesnapshot).
+Folding several hosts' plans into one fleet order (`merge_plans`, #9310) is a
+separate rule: [`dispatch-plan.md`](dispatch-plan.md).
 
 ## Forge-side pipeline snapshot (`status --pipeline`, #3977)
 
@@ -3695,6 +3705,44 @@ repository is now the parallelism boundary:
   and curator works unlabeled issues, so a single-label gate would starve part
   of their work; the per-role budget bounds them instead. Idle-edge roles
   (hermit, architect) keep their idle trigger.
+- **Demand-weighted width and Champion-first reservation (#9392).** Admission
+  also reads a per-host **demand ledger** of open PRs per repository on three
+  axes: `loom:review-requested` (judge), `loom:changes-requested` (doctor) and
+  `loom:pr` (champion). The ledger is fed only by listings the role runner
+  already makes — the queue-gate listing above, plus one ETag-cached `loom:pr`
+  count (`forge_call_stats` caller `role_demand`) after each **admitted**
+  champion run — so it adds no forge query per tick per repository. Only PR
+  rows count, and the `loom:pr` count leaves out PRs held for a human —
+  those also carrying `loom:blocked`, `loom:operator` or `loom:operator-only`
+  (the set `champion-pr-merge.md` names as not merge-eligible; the critical-file
+  hold is one of them, via `loom:operator`) — because Champion cannot drain
+  them (#9410). Likewise the `loom:changes-requested` count leaves out PRs
+  Doctor will not drain — those also carrying `loom:blocked` or
+  `loom:operator-only` (`doctor.md` Priority 2's skip set, the work finder's
+  `PARK_LABELS`; this includes the Doctor-cycle-cap park) — but still counts
+  `loom:operator` (Doctor drains stale held PRs Champion routes to it, #7660)
+  and `loom:treating` (a live Doctor claim) (#9421). The
+  `loom:review-requested` count is unfiltered: Judge's queue has no label
+  exclusions. The labels come from the same listing rows. A failed listing records nothing, and an entry older than
+  `demandWidth.staleSecs` is ignored, so an axis nobody has observed recently is
+  **unobserved** and changes nothing. For a PR role,
+  `width = clamp(ceil(debt / perRun), 1, min(max, roleMaxConcurrent budget))`
+  (the Phase 1 budget when unobserved). Judge and doctor use that width as their
+  effective budget, and a refusal at it is logged naming the width and the
+  queue depth. Champion's budget is never lowered — it also promotes issues —
+  so its width only sizes the reservation: each PR role wants
+  `min(width, repositories with debt)` slots, and admitting a role holds back
+  the unfilled wants of every PR role ranked above it (champion > judge >
+  doctor > every other role), capped at `ceiling − nonPrFloor`. Champion is
+  never refused by a reservation, and non-PR roles always keep `nonPrFloor`
+  slots. A reservation refusal is one summary line per tick naming the reserved
+  count and the roles it is held for, and the round-robin cursor still moves
+  only on an admission, so every repository with debt is still reached within a
+  bounded number of ticks. One `INFO` line is logged when a role's width or
+  reservation changes, naming the debt, `perRun`, `max` and the Phase 1 budget.
+  Idle-edge runs keep the Phase 1 budget. `demandWidth.enabled: false` restores
+  exactly the Phase 1 admission (no ledger reads, no reservation, no `loom:pr`
+  count).
 
 **Observability.** `loom-daemon status` prints the live count and its ceiling
 immediately under the in-flight sweep table, plus the total:
@@ -3714,6 +3762,82 @@ neither field, which parses as `0` active and a `null` ceiling — read `null` a
 **unknown**, not as "unbounded". `loom-daemon calibrate` reports the ceiling
 next to `maxConcurrent` in its "Currently configured" block, and its one-line
 reading appends the worst-case agent sum whenever the role runner is enabled.
+
+#### Build back-off on review and merge debt (#9410)
+
+The work finder's build admission reads no PR debt of its own: with 28 PRs in
+`loom:review-requested` and 59 in `loom:pr`, it would still admit new issue
+builds up to its cap, piling more finished work onto queues Judge and Champion
+are not draining. The **build back-off** is a WIP limit on that debt (Phase 2b
+of #9391). While it is **engaged**, the work finder admits no new unstarred
+issue build; sweeps already in flight are untouched, and the freed host
+resources (token pool, load) go to the role runner's judge / doctor / champion
+runs, which #9392 already sizes to the same debt. It adds no PR dispatch path
+of its own.
+
+- **Input.** Once per multi-workspace tick, the work finder reads the role
+  runner's in-memory demand ledger (see [Concurrent across
+  repositories](#concurrent-across-repositories-one-instance-per-repository-role-9391))
+  with `autonomous.roleRunner.demandWidth.staleSecs`:
+  `debt = review + changes + merge` over the axes with a fresh entry. **No
+  forge call** is added. Each axis leaves out the PRs its role will not
+  drain: merge excludes operator-held PRs (`loom:blocked` / `loom:operator` /
+  `loom:operator-only`), changes excludes parked PRs (`loom:blocked` /
+  `loom:operator-only` — not `loom:operator`, which Doctor still drains;
+  #9421), and review is unfiltered. An axis whose every PR is excluded reads
+  as observed zero, not unobserved. The ledger covers
+  only the repositories whose roles this host runs, so the back-off is
+  per-host and two hosts can disagree.
+- **The ledger comes from the role runner. With the role runner off (or
+  `demandWidth.enabled: false`), the ledger stays empty and the back-off is
+  inert.**
+- **Fail open.** A ledger with no fresh entry on any axis never engages, and
+  releases an engaged back-off (logged as `debt unobserved — failing open`). A
+  partly observed ledger sums the axes it has, which can only err toward not
+  engaging.
+- **Hysteresis.** Starting released:
+
+  | Current | Input | Next |
+  |---|---|---|
+  | released | unobserved | released |
+  | released | `debt > high` | **engaged** (edge) |
+  | released | `debt <= high` | released |
+  | engaged | unobserved | **released** (edge, fail open) |
+  | engaged | `debt < low` | **released** (edge) |
+  | engaged | `debt >= low` | engaged |
+  | any | `enabled: false` | released (edge only if it was engaged) |
+
+  So `debt == high` does not engage and `high + 1` does; while engaged,
+  `debt == low` holds and `low − 1` releases.
+- **Bypass.** A `loom:operator-priority` (starred) issue is an explicit human
+  "now", so it is admitted anyway, still subject to the global cap, the #9244
+  overflow slot, the ramp cap and the per-repo cap. A verified red-main fix is
+  admitted too: a red `main` blocks merges, so the fix lowers the very debt
+  holding the back-off engaged. The saturation brake, a host-safety guard, is
+  checked first and still holds both.
+- **Explicit dispatch is unaffected** (`dispatch_sweep` over IPC does not go
+  through the work-finder tick).
+- **Observability.** One `INFO` line per edge, naming the debt, its per-axis
+  split, `high` and `low`, e.g. `work_finder: build back-off ENGAGED —
+  review+changes+merge debt 87 (review=28 changes=0 merge=59) > high=40; new
+  issue builds held until < low=25 (#9410)`. Steady state logs nothing above
+  `DEBUG`. Deferred issues show as `deferred_build_backoff` in `loom-daemon
+  queue`, the tick summary carries `deferred_build_backoff` and
+  `build_backoff_held` (`BUILD-BACKOFF-HELD` in `loom-daemon health`), the
+  decisions metric uses reason `build_backoff`, and the tick result is
+  `build_backoff_held` when nothing was dispatched.
+
+| Config (under `autonomous.workFinder.buildBackoff`) | Default | Validation |
+|---|---|---|
+| `enabled` | `true` | non-bool → default. `false` is exactly the pre-#9410 admission (no ledger read) |
+| `high` (`W`) | `40` | positive integer, else default |
+| `low` (`W_low`) | `25` | positive integer, else default. **`low >= high` rejects the pair**: both fall back to `40`/`25`, with one `WARN` per distinct bad pair |
+
+Config only (no env tier), re-read every tick from the daemon's primary
+workspace. **Deploy note:** a host whose debt is already above `high` engages
+on its first tick after upgrade and stops admitting unstarred builds until its
+debt falls below `low`; that is the intended WIP limit. The escape hatches are
+`buildBackoff.enabled: false` and starring an issue.
 
 #### Sizing `maxConcurrent`: per-machine **and** per-workload (#4512, #4903)
 
@@ -4506,6 +4630,9 @@ knobs not yet audited here.
 | `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (a single over-threshold reading), the breaker remains the slower sustained-distress trip. **Restart required** — same startup-resolved global as `enabled` above (#5963) |
 | `autonomous.workFinder.saturationBrake.starvationWarnSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_WARN_SECS` | `300` | Seconds of continuous held+0-in-flight before the `WARN`-level `STARVING` log fires once per streak (#5715). `<= 0`/invalid → default. See [Starvation escape hatch](#starvation-escape-hatch-5715) |
 | `autonomous.workFinder.saturationBrake.starvationEscapeSecs` | `LOOM_ADMISSION_BRAKE_STARVATION_ESCAPE_SECS` | `900` | Seconds of continuous held+0-in-flight before the escape hatch yields one tick despite the raw load still being over threshold, logged at `ERROR` (#5715). `<= 0`/invalid → default |
+| `autonomous.workFinder.buildBackoff.enabled` | *(config only)* | `true` | Build back-off on review + merge debt (#9410). While engaged, no new unstarred issue build is admitted; starred and red-main-fix issues bypass it. Reads the role runner's demand ledger, so it is inert with the role runner off. `false` → pre-#9410 admission. Non-bool → default. **Live**. See [Build back-off on review and merge debt](#build-back-off-on-review-and-merge-debt-9410) |
+| `autonomous.workFinder.buildBackoff.high` | *(config only)* | `40` | Engage when `review + changes + merge` debt is **strictly above** this. Zero, negative or non-integer → default. **Live** |
+| `autonomous.workFinder.buildBackoff.low` | *(config only)* | `25` | Release when the debt is **strictly below** this. Zero, negative or non-integer → default; `low >= high` rejects the pair (both fall back to `40`/`25`, one `WARN`). **Live** |
 | `autonomous.workFinder.quarantine.enabled` | `LOOM_WORK_FINDER_QUARANTINE` | `true` | Insta-crash quarantine on/off (#3939). A safety backstop — defaults on |
 | `autonomous.workFinder.quarantine.threshold` | `LOOM_WORK_FINDER_QUARANTINE_THRESHOLD` | `3` | Consecutive insta-crashes before an issue is quarantined. Zero/invalid → default |
 | `autonomous.workFinder.quarantine.ttlSecs` | `LOOM_WORK_FINDER_QUARANTINE_TTL_SECS` | `3600` | How long a quarantine entry persists before auto-release. Zero/invalid → default |
@@ -4546,6 +4673,12 @@ knobs not yet audited here.
 | `autonomous.roleRunner.intervalSecs` | `LOOM_ROLE_RUNNER_INTERVAL_SECS` | per-role built-in — curator/judge/doctor 300s, champion/auditor/hermit 600s, guide 900s (5–15 min); `architect` 3600s, idle-addressable-only | Uniform override applied to every enabled role's cadence — **when either tier is set, every role logs the same interval and the per-role built-ins are entirely inert.** The boot log names which tier won: `role_runner: <role> interval=<n>s source=built-in|config:…|env:…` (#6204). Zero/invalid env → next tier |
 | `autonomous.roleRunner.maxConcurrent` | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | the 7 interval-default roles | **The ceiling on concurrently-running role agents (#6102)** — the role-runner counterpart of `workFinder.maxConcurrent`, which bounds sweep dispatch **only**. Counted **process-wide across every managed workspace and every role** (the host is shared; a per-root ceiling would bound nothing on a 25-workspace box) but resolved from each root's own config, like `architectMaxProposals`. Since #9391 role loops dispatch repositories **concurrently** (one instance per `(repository, role)`), bounded by this ceiling plus the per-role `roleMaxConcurrent` budgets. A tick that reaches it stops admitting and logs one `WARN` summary line per role; the deferred roots retry next tick — distinct from the `debug!`-level per-`(root, role)` overlap skip (#4364). Zero/non-integer at either tier drops to the next (a `0` ceiling is `enabled: false` spelled confusingly). **Live** — re-read every tick. See [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102) |
 | `autonomous.roleRunner.roleMaxConcurrent` | *(config only)* | `max(1, maxConcurrent / 2)` per role — **3** at the default ceiling | **Per-role budget under the host ceiling (#9391).** A `{"<role>": N}` object (e.g. `{"judge": 3, "champion": 3, "curator": 2}`) bounding how many runs of one role may be in flight across every workspace, so one role cannot take every slot. Keys are trimmed and lower-cased; a zero, negative or non-integer value is dropped per entry to the default; a value above the ceiling is clamped to it. Idle-edge runs count against it. Resolved from each root's own config and **live** (re-read every tick). See [Concurrent across repositories](#concurrent-across-repositories-one-instance-per-repository-role-9391) |
+| `autonomous.roleRunner.demandWidth.enabled` | *(config only)* | `true` | **Demand-weighted role admission (#9392).** `false` restores exactly the Phase 1 (#9391) admission: no demand-ledger reads, no reservation, no champion `loom:pr` count. A non-bool value drops to the default. Resolved per root, **live**. See [Concurrent across repositories](#concurrent-across-repositories-one-instance-per-repository-role-9391) |
+| `autonomous.roleRunner.demandWidth.perRun` | *(config only)* | `3` | `k` in the PR-role width `clamp(ceil(debt / k), 1, min(max, roleMaxConcurrent budget))`: queued PRs per role run. Zero, negative or non-integer drops to the default. **Live** |
+| `autonomous.roleRunner.demandWidth.max` | *(config only)* | `4` | Upper clamp on judge, doctor and champion width. Still capped by the role's `roleMaxConcurrent` budget, so at the default ceiling of 7 (budget 3) it binds only where the budget is 4 or more — demand never raises a role above its budget. Zero, negative or non-integer drops to the default. **Live** |
+| `autonomous.roleRunner.demandWidth.reserve` | *(config only)* | `true` | Champion-first ceiling reservation: admitting a role leaves free the unfilled `min(width, repositories with debt)` of each higher-priority PR role (champion > judge > doctor > others). `false` keeps the width but reserves nothing. **Live** |
+| `autonomous.roleRunner.demandWidth.nonPrFloor` | *(config only)* | `1` | Ceiling slots the reservation always leaves for non-PR roles: the reservation never exceeds `maxConcurrent − nonPrFloor`. Zero, negative or non-integer drops to the default. **Live** |
+| `autonomous.roleRunner.demandWidth.staleSecs` | *(config only)* | `1800` | Demand-ledger entries older than this many seconds are ignored; an axis with no fresh entry is unobserved and falls back to Phase 1 behaviour. Zero, negative or non-integer drops to the default. **Live** |
 | `autonomous.roleRunner.model` | *(config only)* | `sonnet` | Model every role child is pinned to via `--model` (#4501). Resolved through the same `resolve_dispatch_model` chain as sweep dispatch: this key > `autonomous.model` > shipped default; blanks treated as unset. A role child never inherits the account's interactive CLI default |
 | `autonomous.roleRunner.onIdle` | *(config only)* | `[]` (none) | Subset of all **8** shipped roles — the 7 above **plus `architect`**, which is reachable here and nowhere else by default (#5656) — to fire on the work-finder **idle edge** (#4364) — the non-idle → idle transition (0 in-flight sweeps AND nothing dispatched this tick), in addition to the interval cadence. Absent → none (opposite default from `roles`); unknown names ignored with a warning. Debounced to min 60s per (root, role) and skipped while that role's interval/idle run is in progress. **Requires the work finder enabled** to observe idleness (a startup warning fires if set with the work finder off). **Also gated by that same root's own `enabled`** (#4377) — see below |
 | `autonomous.roleRunner.onIdleMaxWait` | *(config only)* | *(unset — no promotion, today's idle-edge-only firing)* | **Per-role starvation guard for an `onIdle` role (#7511).** A `{"<role>": "<duration>"}` object (e.g. `{"hermit": "24h", "auditor": "72h"}`, duration strings `<n>s`/`<n>m`/`<n>h`/`<n>d`) naming the longest a role may go without a completed tick before it is **promoted** into the next interval-cadence pass — see [`onIdleMaxWait` — promoting a starved `onIdle` role](#onidlemaxwait--promoting-a-starved-onidle-role-7511) below |
@@ -7494,6 +7627,12 @@ leaves the daemon's behavior byte-for-byte unchanged:
 | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | `autonomous.roleRunner.maxConcurrent` | env > config > default | the 7 interval-default roles (concurrent role-agent ceiling, #6102 — bounds the agents `workFinder.maxConcurrent` does not) |
 | — | `autonomous.roleRunner.roles` | config only | the 7 interval-default roles (`architect` excluded, #5656) |
 | — | `autonomous.roleRunner.roleMaxConcurrent` | config only | `max(1, maxConcurrent / 2)` per role (per-role budget under the host ceiling, #9391) |
+| — | `autonomous.roleRunner.demandWidth.enabled` | config only | `true` (demand-weighted width + Champion-first reservation, #9392; `false` = Phase 1 admission) |
+| — | `autonomous.roleRunner.demandWidth.perRun` | config only | `3` (queued PRs per role run in the width formula) |
+| — | `autonomous.roleRunner.demandWidth.max` | config only | `4` (width clamp, still capped by the role budget) |
+| — | `autonomous.roleRunner.demandWidth.reserve` | config only | `true` (Champion-first ceiling reservation) |
+| — | `autonomous.roleRunner.demandWidth.nonPrFloor` | config only | `1` (slots always left for non-PR roles) |
+| — | `autonomous.roleRunner.demandWidth.staleSecs` | config only | `1800` (ledger entries older than this are unobserved) |
 | — | `autonomous.roleRunner.onIdle` | config only | `[]` (none; may name any of the 8 shipped roles, `architect` included) |
 | — | `autonomous.roleRunner.model` | config only (`roleRunner.model` > `autonomous.model` > default) | `sonnet` (`DEFAULT_DISPATCH_MODEL`) |
 | — | `autonomous.roleRunner.effort` | config only (`roleRunner.roleEfforts.<role>` > `roleRunner.effort` > unset) | *(unset ⇒ **no** `--effort` argument; the runtime CLI's own session default, #8054)* |

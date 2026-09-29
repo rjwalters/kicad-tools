@@ -196,6 +196,14 @@ extract_fn() {
 
 eval "$(extract_fn _recheck_mergeable_before_refusal "$MERGE_PR")"
 
+# The extracted function validates both forge-supplied refs before its fetch
+# (#9106), and merge-pr.sh's own `source lib/default-branch.sh` is outside the
+# extracted body. Source the REAL library rather than stubbing it: the guard is
+# fail-closed, so an absent validator would turn every case below into a
+# refuse-stale and hide whatever the case was actually asserting.
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "$MERGE_PR")" && pwd)/lib/default-branch.sh"
+
 echo ""
 echo "Test 2: behavioral tests of the real _recheck_mergeable_before_refusal body"
 

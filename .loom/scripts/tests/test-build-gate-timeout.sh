@@ -80,6 +80,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup; exit 1' INT TERM
 
+# Stage 0 of build-gate.sh (#9140) runs scripts/check-structural.sh whenever that
+# file exists at the repo top level. This suite is about the cargo stages, so run
+# the gate from a scratch git repo that has no such file (the same shape a
+# consumer repo has) rather than from REPO_ROOT, where stage 0 would run the real
+# structural gates against the mocked toolchain and intercept every scenario.
+SCRATCH_REPO="$STUB_DIR/scratch-repo"
+mkdir -p "$SCRATCH_REPO" && git -C "$SCRATCH_REPO" init -q
+
 # ---------------------------------------------------------------------------
 # Section 1: build-gate.sh per-step timeout (AC1/AC2)
 # ---------------------------------------------------------------------------
@@ -138,7 +146,7 @@ run_gate_fast_tier() {
 }
 
 write_hanging_cargo_stub
-output="$(cd "$REPO_ROOT" && run_gate_fast_tier)"
+output="$(cd "$SCRATCH_REPO" && run_gate_fast_tier)"
 rc=$?
 
 if [[ "$rc" -eq 124 ]]; then
@@ -175,7 +183,7 @@ exit 0
 EOF
 chmod +x "$STUB_DIR/cargo"
 
-happy_output="$(cd "$REPO_ROOT" && run_gate_fast_tier)"
+happy_output="$(cd "$SCRATCH_REPO" && run_gate_fast_tier)"
 happy_rc=$?
 
 if [[ "$happy_rc" -eq 0 ]]; then
@@ -208,7 +216,7 @@ chmod +x "$STUB_DIR/loom-daemon"
 
 write_hanging_cargo_stub
 : > "$BACKOFF_LOG"
-timeout_output="$(cd "$REPO_ROOT" && run_gate_fast_tier \
+timeout_output="$(cd "$SCRATCH_REPO" && run_gate_fast_tier \
     LOOM_SWEEP_CLAIM_OWNED=6192 \
     LOOM_DAEMON_BIN="$STUB_DIR/loom-daemon")"
 timeout_rc=$?
@@ -250,7 +258,7 @@ fi
 # No claimed issue (a manual gate run, or the daemon's own main-health gate)
 # => nothing to back off, and the gate must not invoke the daemon at all.
 : > "$BACKOFF_LOG"
-noclaim_output="$(cd "$REPO_ROOT" && run_gate_fast_tier \
+noclaim_output="$(cd "$SCRATCH_REPO" && run_gate_fast_tier \
     LOOM_DAEMON_BIN="$STUB_DIR/loom-daemon")"
 noclaim_rc=$?
 
@@ -274,7 +282,7 @@ exit 1
 EOF
 chmod +x "$STUB_DIR/loom-daemon"
 
-deadd_output="$(cd "$REPO_ROOT" && run_gate_fast_tier \
+deadd_output="$(cd "$SCRATCH_REPO" && run_gate_fast_tier \
     LOOM_SWEEP_CLAIM_OWNED=6192 \
     LOOM_DAEMON_BIN="$STUB_DIR/loom-daemon")"
 deadd_rc=$?

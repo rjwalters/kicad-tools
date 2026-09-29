@@ -31,7 +31,7 @@ the broad categories are:
   go unused
 
 ### Repo scripts
-- `./scripts/**` and `./.loom/scripts/**` — this repo's and Loom's own helper
+- `./scripts/*` and `./.loom/scripts/*` — this repo's and Loom's own helper
   scripts
 
 ### Common utilities

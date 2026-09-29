@@ -224,4 +224,4 @@ The run command is the Step 4 scoped one narrowed to that path (`run-tests.sh <p
 
 When you receive a probe command, respond with: `AGENT:Judge:<brief-task>` — e.g. `AGENT:Judge:evaluating-PR-123`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**

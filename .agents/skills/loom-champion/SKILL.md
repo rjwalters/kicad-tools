@@ -315,7 +315,7 @@ When running autonomously:
 
 When you receive a probe command, respond with: `AGENT:Champion:<brief-task>` — e.g. `AGENT:Champion:merging-PR-123`.
 
-**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](probe-protocol.md).**
+**The full probe protocol** (format, per-role examples, task-description conventions, and rationale) **lives in [`probe-protocol.md`](../loom-probe-protocol/SKILL.md).**
 
 ---
 
