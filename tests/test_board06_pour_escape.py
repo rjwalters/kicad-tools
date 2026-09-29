@@ -295,44 +295,37 @@ def test_repair_escapes_pad_with_existing_via_on_isolated_fill(tmp_path, pour_re
 
     placed_vias, bridges = pour_recipe._repair_pour_connectivity(board, ["+3V3"])
 
-    assert placed_vias == 1 and bridges == 1
-    assert "Grid escape: +3V3 U1.1" in capsys.readouterr().out
+    # Issue #5286: the escape search now tries the existing via as a start
+    # point (across all its layers) before falling back to a fresh via off
+    # the pad. Here it reaches primary copper directly from the existing
+    # via's B.Cu barrel, so no new via is needed.
+    assert placed_vias == 0 and bridges == 1
+    assert "Grid escape: +3V3 existing via" in capsys.readouterr().out
     assert pour_recipe._audit_pour_nets(board, ["+3V3"])["+3V3"]["connected"]
     after_text = board.read_text()
     _, segments, vias = pour_recipe._parse_copper(after_text)
     added_segments = segments[len(before_segments) :]
     added_vias = vias[len(before_vias) :]
-    assert len(added_segments) > 1 and len(added_vias) == 1
-    assert all(seg["net"] == "+3V3" and seg["layer"] == "F.Cu" for seg in added_segments)
+    assert len(added_segments) > 1 and len(added_vias) == 0
+    assert all(seg["net"] == "+3V3" and seg["layer"] == "B.Cu" for seg in added_segments)
     assert all(seg["w"] == pytest.approx(rules.width) for seg in added_segments)
-    via = added_vias[0]
-    assert via["size"] == pytest.approx(rules.diameter)
-    assert via["drill"] == pytest.approx(rules.drill)
-    assert (via["size"] - via["drill"]) / 2 == pytest.approx(rules.annulus)
 
     # Independently check the committed copper forms a complete path from
-    # U1 to the new via, which actually contacts the primary B.Cu fill.
+    # the existing via directly to the primary B.Cu fill -- the via's own
+    # barrel already reaches B.Cu, so no new via is needed.
     copper = unary_union(
         [
             LineString([(seg["x1"], seg["y1"]), (seg["x2"], seg["y2"])]).buffer(seg["w"] / 2)
             for seg in added_segments
         ]
     )
-    via_point = Point(via["x"], via["y"])
+    old_via = before_vias[0]
+    via_point = Point(old_via["x"], old_via["y"])
     assert copper.geom_type == "Polygon"
-    assert copper.intersects(Point(110, 70)) and copper.intersects(via_point)
-    assert via_point.buffer(via["size"] / 2).intersects(box(120, 69, 122, 71))
+    assert copper.intersects(via_point)
+    assert copper.intersects(box(120, 69, 122, 71))
     barrier = LineString([(115, 67), (115, 73)]).buffer(0.2)
     assert copper.distance(barrier) >= rules.clearance - 1e-6
-    assert via_point.buffer(via["size"] / 2).distance(barrier) >= rules.clearance
-    old_via = before_vias[0]
-    assert (
-        via_point.distance(Point(old_via["x"], old_via["y"]))
-        - (via["drill"] + old_via["drill"]) / 2
-        >= rules.hole_gap
-    )
-    for x in (110, 120.5, 121.5):
-        assert not via_point.buffer(via["size"] / 2).intersects(Point(x, 70).buffer(0.15))
 
     # Existing authored geometry and constraints are preserved byte-for-byte.
     for kind in ("footprint", "segment", "via", "zone"):
