@@ -122,6 +122,15 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-forge-pr-chec
 # shellcheck source=lib/locate-daemon-bin.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/locate-daemon-bin.sh" 2>/dev/null || true
 
+# #5783: guard against silently handing back a worktree that a second, still
+# -live sweep lease might be co-occupying -- see the lib file for the full
+# incident rationale (issue #5781 / PR #5782). Sourced with the diagnostic
+# libs' defensive shape: a missing/broken sibling degrades to "no evidence,
+# proceed" (the guard's own fail-open contract), never to a `source` failure
+# that breaks worktree creation outright.
+# shellcheck source=lib/worktree-foreign-lease-guard.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/worktree-foreign-lease-guard.sh" 2>/dev/null || true
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -958,6 +967,14 @@ Environment Variables:
                                     post-worktree hook run)
   LOOM_WORKTREE_LOCK_POLL_INTERVAL  Lock poll interval in seconds (default 2)
   LOOM_PRESERVE_WORKTREE            Disable cleanup-on-merge for all worktrees
+  WORKTREE_ALLOW_SHARED_LEASE       Override the #5783 refusal to preserve a
+                                    worktree with uncommitted changes when its
+                                    issue carries 2+ simultaneously fresh
+                                    sweep leases (a live-co-occupancy signal)
+  LOOM_WORKTREE_LEASE_GUARD_TIMEOUT Timeout in seconds for the #5783 lease
+                                    read (default 10) — keeps a slow/rate
+                                    -limited gh api call from stalling
+                                    worktree creation
 
 Project-Specific Hooks:
   Create .loom/hooks/post-worktree.sh to run custom setup after worktree creation.
@@ -1581,6 +1598,27 @@ if [[ -d "$WORKTREE_PATH" ]]; then
         [[ -z "${_WT_DAEMON_BIN:-}" ]] || read -r stale_ref stale_display local_commits_ahead local_commits_behind <<< "$("$_WT_DAEMON_BIN" worktree-stale-ref --worktree "$WORKTREE_PATH" --branch "$BRANCH_NAME" --default-branch "$DEFAULT_BRANCH" --base-ref "$BASE_REF" --base-display "$BASE_DISPLAY" 2>/dev/null || echo "$stale_ref $stale_display $local_commits_ahead $local_commits_behind")"
 
         if [[ "$local_commits_ahead" -gt 0 || -n "$local_uncommitted" ]]; then
+            # #5783: uncommitted changes are the actual co-occupancy hazard
+            # (a peer sweep's in-progress edit, not yet committed by either
+            # side) -- the incident behind this check was two sweeps editing
+            # the same uncommitted file in this exact fast path at once.
+            # `declare -F` guards a `source ... || true` failure above from
+            # turning into an "unbound function" crash here (fail open,
+            # matching the guard's own contract).
+            if [[ -n "$local_uncommitted" ]] && declare -F _worktree_foreign_lease_guard > /dev/null 2>&1; then
+                if ! _worktree_foreign_lease_guard "$ISSUE_NUMBER"; then
+                    if [[ "${WORKTREE_ALLOW_SHARED_LEASE:-}" != "1" ]]; then
+                        if [[ "$JSON_OUTPUT" == "true" ]]; then
+                            echo '{"success": false, "error": "Issue #'"$ISSUE_NUMBER"' carries more than one simultaneously fresh sweep lease - refusing to hand back a worktree with uncommitted changes that may belong to a co-occupant. Set WORKTREE_ALLOW_SHARED_LEASE=1 to override."}' >&3
+                        else
+                            print_error "Refusing to hand back $WORKTREE_PATH: it has uncommitted changes AND issue #$ISSUE_NUMBER carries more than one live sweep lease (see warnings above, #5783) - it may be co-occupied by another sweep right now."
+                            print_info "If you are certain this is safe (e.g. a stale/dead peer lease that has not yet aged out of its TTL), re-run with WORKTREE_ALLOW_SHARED_LEASE=1."
+                        fi
+                        exit 1
+                    fi
+                    print_warning "WORKTREE_ALLOW_SHARED_LEASE=1 set - proceeding despite multiple live leases on issue #$ISSUE_NUMBER."
+                fi
+            fi
             # Worktree has real work - preserve it
             # Back-fill/refresh the Loom sentinel so a resumed worktree that
             # lost its marker stays cleanup-eligible (#3548).
