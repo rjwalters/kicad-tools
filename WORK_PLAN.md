@@ -72,6 +72,7 @@ Issues carrying `loom:curated`.
 
 - **#5801**: Wire up or remove orphaned BayesianOptStrategy: --strategy bayesian is unreachable despite README/ROADMAP claiming it ships *(hermit)*
 - **#5802**: router/core.py: Autorouter god-class has regrown to 20,764 lines (216 methods), 4.6x since last extraction closed *(hermit)*
+- **#5804**: Move jsonschema from core to mcp extra: only used by MCP server *(hermit)*
 
 ## Epics
 
@@ -94,7 +95,7 @@ Issues carrying `loom:curated`.
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 19 |
-| Architect / Hermit proposals | 2 |
+| Architect / Hermit proposals | 3 |
 | Active epics | 7 |
 <!-- guide:plan-body:end -->
 
