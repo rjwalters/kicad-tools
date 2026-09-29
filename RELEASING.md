@@ -209,7 +209,8 @@ When `Publish to PyPI` completes for a `v*` tag, `release_tag.py finalize`:
   missing, it reports on the tracking issue and fails.
 
 This stage also runs for tags pushed by hand, so a manual release gets its
-GitHub Release too (unless `AUTO_RELEASE=off`).
+GitHub Release too, but only when `AUTO_RELEASE=on` (under `dry-run`, the
+default when the variable is unset, finalize only logs what it would do).
 
 Preview locally:
 

@@ -360,6 +360,12 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+        with:
+          # Full history + tags: the release repo-introspection tests
+          # (`*_against_this_repo`) need a reachable v* tag, which a default
+          # shallow, tagless checkout does not provide (they would skip).
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Trust the workspace for git
         # The job runs as root (--user 0:0) over a checkout owned by the
