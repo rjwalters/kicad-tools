@@ -63,3 +63,23 @@ scripts/tests/test-champion-epic-children-title-prefix.sh
 # Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
 scripts/tests/test-merge-pr-stale-required-checks.sh
 scripts/tests/test-merge-pr-stale-check-redate.sh
+
+# #5783: sweep-lease-publish.sh now blocks on a fresh lease from ANY other
+# (host, sweep) pair on the same issue, not only a different host's; and
+# worktree.sh's "existing worktree has uncommitted changes -> preserve" fast
+# path calls lib/worktree-foreign-lease-guard.sh first (refuses on 2+ fresh
+# leases). Landed directly in the vendored copies (5e193191) after #5781 was
+# claimed by 4 same-host sweeps that collided in one worktree. Unpinned, the
+# local-fix guard blocked every scheduled resync of this repo (exit 2 on all
+# three dispatch hosts, 15-44 consecutive failures, installed Loom stuck at
+# 0.19.487), so none of the other ~70 upstream updates arrived either.
+# The two helper/test files have no upstream counterpart; pinned so a resync
+# can never orphan or remove them.
+# worktree.sh is the costly pin: upstream is actively porting it to
+# loom-daemon subcommands, so unpin as soon as the equivalent fix lands in
+# rjwalters/loom's defaults/ tree.
+scripts/sweep-lease-publish.sh
+scripts/tests/test-sweep-lease-publish.sh
+scripts/worktree.sh
+scripts/lib/worktree-foreign-lease-guard.sh
+scripts/tests/test-worktree-foreign-lease-guard.sh
