@@ -406,42 +406,31 @@ Full convention and rationale: `.loom/docs/untrusted-external-content.md`. A mar
 
 ## Finding Work
 
-Doctors prioritize work in the following order. **Within each queue, take
-`loom:operator-priority` (starred) PRs first** (#9244), every pass; guards, holds
-and exclusions apply unchanged. Never add or remove the star.
+Use the shared queue and walk its rows in order:
+```bash
+QUEUE=$(loom-daemon pr-queue --role doctor) || exit 1
+printf '%s\n' "$QUEUE" | jq -r '.[] | [.number, .origin, .priorityReason] | @tsv'
+```
+Follow `.loom/docs/pr-planning.md`. Stars precede interactive work; the classes
+below describe the baseline tie-break, not separate passes ahead of the queue.
+After each completed/skipped PR, refresh the queue and take the next unvisited
+row; keep a per-pass visited set. Preserve PR origin during repairs.
 
 ### Priority 1: Approved PRs with Merge Conflicts (URGENT)
 
 **Find approved PRs with merge conflicts that aren't already claimed and are
-not on an explicit operator hold:**
-```bash
-# GitHub search has no `conflicts:` qualifier, so ask the API for each PR's
-# mergeability and filter on CONFLICTING locally. Also excludes loom:operator
-# (Champion's merge-risk hold) — mirrors the Priority 2 operator-hold
-# exclusion below (#5978).
-gh pr list --label="loom:pr" --state=open --json number,title,labels,mergeable \
-  | jq -r '.[] | select(.mergeable == "CONFLICTING") | select(.labels | all(.name != "loom:treating")) | select(.labels | all(.name != "loom:operator")) | "#\(.number): \(.title)"'
-```
+not on an explicit operator hold.**
 
-**Why highest priority?** They are approved but blocked, and conflicts only get
+**Why earlier in the baseline?** They are approved but blocked, and conflicts only get
 harder over time.
 
 ### Priority 2: PRs with Changes Requested (NORMAL)
 
 **Find PRs with review feedback that aren't already claimed and are not on an
-explicit operator hold:**
-```bash
-# `--search` supports `-label:` negation (unlike `--label`, which only ANDs
-# its flags together — see CLAUDE.md's Curator Workflow note). Excludes
-# loom:blocked / loom:operator-only, mirroring the work-finder's PARK_LABELS
-# convention (loom-daemon/src/work_finder.rs) for the loom:issue queue —
-# these mark a PR a human has deliberately taken out of automated flow.
-gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number,title,labels \
-  | jq -r '.[] | select(.labels | all(.name != "loom:treating")) | "#\(.number): \(.title)"'
-```
+explicit hard hold (`loom:blocked` / `loom:operator-only`).**
 
-> **Claim discipline for every queue above.** The `loom:treating` filter in these
-> queries is a point-in-time snapshot: a claim can land between your list call and
+> **Claim discipline for every queue above.** The `loom:treating` filter in this
+> queue is a point-in-time snapshot: a claim can land between your list call and
 > your `gh pr edit`, and an *existing* claim tells you nothing about whether its
 > holder is still alive. Before adding `loom:treating` to any PR — from any queue,
 > from PR Fix Mode, or from an explicit user instruction — run the
@@ -450,7 +439,7 @@ gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:bloc
 > **Operator-hold exclusion (Priority 2 queue, #5272).** `loom:blocked` and
 > `loom:operator-only` are the same generic "a human took this out of
 > automated flow" signal the work-finder already honors for `loom:issue` rows
-> — the Priority 2 query above excludes both so autonomous Finding Work never
+> — the shared queue excludes both so autonomous Finding Work never
 > auto-claims a held PR. This does not change PR Fix Mode or an explicit user
 > instruction naming a PR by number — those remain a deliberate human
 > decision to work on that specific PR, same as everywhere else in this file.
@@ -471,7 +460,7 @@ gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:bloc
 > `loom:operator-only` above — see `.loom/docs/label-state-machine.md`. Doctor
 > is not yet a wired entry/exit point for `loom:operator` (see that doc's
 > "Not yet wired" table) — this exclusion is therefore **filter-only**: the
-> Priority 1 query skips `loom:operator` PRs so autonomous Finding Work never
+> shared queue skips `loom:operator` approved-conflict PRs (feedback rows remain eligible) so autonomous Finding Work never
 > rebases/pushes to a held PR, but Doctor must not itself add or remove
 > `loom:operator`. Don't drop this filter when Doctor is eventually wired as a
 > real entry/exit point — re-derive it from that wiring instead. Same PR Fix
@@ -565,8 +554,8 @@ at all.
 ### Other PRs Needing Attention
 
 **Find PRs with merge conflicts (any label):** this is a broad diagnostic scan,
-not itself a claim path — the guarded Priority 1 query above (which excludes
-`loom:treating` and `loom:operator`) is what autonomous Finding Work actually
+not itself a claim path — the shared queue above (which excludes `loom:treating` and, for approved
+conflicts, `loom:operator`) is what autonomous Finding Work actually
 claims from. Still excludes `loom:operator` here too, so a Doctor skimming this
 list doesn't hand-pick a held PR (#5978).
 ```bash
@@ -636,28 +625,10 @@ if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
 fi
 ```
 
-**Decision tree:**
-```
-Doctor iteration starts
-    ↓
-Search Priority 1 (loom:pr + conflicts)
-    ↓
-    ├─→ Found? → Fix conflicts, KEEP loom:pr (see "Label Ownership" below)
-    │
-    └─→ None found
-            ↓
-        Search Priority 2 (loom:changes-requested)
-            ↓
-            ├─→ Found? → Address feedback, update labels
-            │
-            └─→ None found
-                    ↓
-                Search Priority 3 (unlabeled PRs)
-                    ↓
-                    ├─→ Found? → Fix issues, comment only (no labels)
-                    │
-                    └─→ None found → No work available, exit iteration
-```
+**Selection:** walk the shared queue first, applying each row's claim and
+stale-verdict guards. Only when it has no actionable work, use the existing
+unlabeled diagnostic/fallback path above. Human origin does not expand Doctor's
+permission to modify contributor branches.
 
 ## Exception: Explicit User Instructions
 
@@ -1367,16 +1338,8 @@ pnpm test 2>&1 | grep -A 5 -B 2 "FAIL\|Error\|✗"
 ## Example Commands
 
 ```bash
-# Find PRs with changes requested that aren't already claimed and are not on
-# an explicit operator hold (loom:blocked / loom:operator-only, #5272)
-gh pr list --search "is:open is:pr label:loom:changes-requested -label:loom:blocked -label:loom:operator-only" --json number,title,labels \
-  | jq -r '.[] | select(.labels | all(.name != "loom:treating")) | "#\(.number): \(.title)"'
-
-# Find PRs with merge conflicts (simplified for illustration — see Priority 1
-# above for the full guarded query, which additionally filters on
-# loom:pr / loom:treating / loom:operator, #5978)
-gh pr list --state=open --json number,title,mergeable \
-  | jq -r '.[] | select(.mergeable == "CONFLICTING") | "#\(.number): \(.title)"'
+# Select the next unvisited actionable PR using shared planning.
+loom-daemon pr-queue --role doctor
 
 # Claim the PR before starting work (run the stale-claim check first if the PR
 # already carries loom:treating — see "Stale `loom:treating` Claim Check"), and

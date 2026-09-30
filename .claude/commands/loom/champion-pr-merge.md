@@ -3183,12 +3183,12 @@ fi
 
 **Process all qualifying PRs in one iteration — drain the full queue.**
 
-Evaluate and merge qualifying PRs sequentially (oldest first) until the queue is empty. Sequential processing is safe and prevents the bottleneck that occurs when PRs accumulate while the champion waits for the next interval.
+Use `loom-daemon pr-queue --role champion` and evaluate rows in its order; see `.loom/docs/pr-planning.md`. Continue past holds and CI/dependency waits.
 
-If an individual merge fails, continue to the next PR rather than aborting the entire iteration.
+After each completed/skipped PR, refresh the queue and take the next unvisited row; keep a per-pass visited set. Continue past individual merge failures.
 
-**Starred PRs first (`loom:operator-priority`, #9244).** Before the oldest-first
-pass, evaluate every starred `loom:pr` PR. The star changes order only: all 6
+**Starred PRs first (`loom:operator-priority`, #9244).** The shared queue puts stars
+ahead of interactive work, then ordinary work (oldest first within each class). The star changes order only: all 6
 Safety Criteria, the Verdict-State Janitor, and every hold (merge-risk,
 critical-file, `loom:operator-only`, `loom:blocked`) apply unchanged. A starred
 PR that passes is merged this pass. A starred PR on a hold stays held and is

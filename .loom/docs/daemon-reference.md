@@ -2215,7 +2215,7 @@ a key. Only the six keys below order the queue.
 
 ### Dispatch order, the operator-priority star and the red-main-fix lane (#9244)
 
-`candidate_cmp` orders candidates by six keys, in this order:
+`candidate_cmp` orders **issues** by six keys ([PR planning](pr-planning.md) is separate):
 
 1. **Starred first.** An issue carrying `loom:operator-priority` (the operator's
    "land this ASAP", applied directly or through the loom-ui star) sorts ahead of

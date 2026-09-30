@@ -55,6 +55,10 @@
 #   --draft, -d           Create as a draft.
 #   --repo, -R OWNER/REPO Target repository. Omit for the current repo.
 #
+# LOOM_WORK_ORIGIN=interactive explicitly records a human-driven session.
+# Autonomous launchers pin autonomous; unset/invalid values record unknown.
+# Existing PR adoption and existing body records preserve their original origin.
+#
 # Output: the PR's URL on stdout -- newly created OR adopted (identical to
 # `gh pr create`, so a caller parsing the URL needs no change).
 #

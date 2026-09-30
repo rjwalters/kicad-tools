@@ -43,17 +43,12 @@ Champions prioritize work in the following order:
 Find Judge-approved PRs ready for merge:
 
 ```bash
-gh pr list \
-  --label="loom:pr" \
-  --state=open \
-  --limit=500 \
-  --json number,title,additions,deletions,mergeable,updatedAt,files,statusCheckRollup,labels \
-  --jq '.[] | "#\(.number) \(.title)"'
+loom-daemon pr-queue --role champion
 ```
 
 If found, **read and follow instructions in `.claude/commands/loom/champion-pr-merge.md`**.
-**Starred PRs (`loom:operator-priority`, #9244) are drained first**, every pass;
-all holds and Safety Criteria still apply (see its "Batch Processing").
+Walk the returned order; follow `.loom/docs/pr-planning.md`. All holds and
+Safety Criteria still apply (see its "Batch Processing").
 
 ### Priority 2: Quality Issues Ready to Promote
 
@@ -303,7 +298,7 @@ This role is designed for **autonomous operation** with a recommended interval o
 
 When running autonomously:
 1. Check for `loom:pr` PRs (Priority 1)
-2. Process **all available PRs** (starred first, then oldest first), merging safe ones — drain the full queue
+2. Process **all available PRs** (shared PR queue order), merging safe ones — drain the full queue
 3. If no PRs remain, check for `loom:curated` issues (Priority 2)
 4. Process **all available curated issues** (oldest first), promoting qualifying ones
 5. If no promotion work remains, run the capped-PR recovery pass over `loom:blocked` + `loom:changes-requested` PRs (Priority 5), deciding each one with a rationale comment
