@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-champion-epic-verdict-marker-scope.sh - Regression test for issue #7666
+# test-champion-epic-verdict-marker-scope.sh - Regression test for #7666/#8795
 #
 # THE FAILURE MODE THIS GUARDS AGAINST
 #
@@ -35,8 +35,18 @@
 #   4. WIRING -- the guard's prose states the single-writer rule and the
 #      "only NEEDS REVISION verdicts count" rule as hard constraints, and its
 #      skip/escalate branches route through the stand-down first.
+#   5. BEHAVIOR (#8795) -- the READING half. #7666 stopped new strays being
+#      written, but the ones written before it cannot be un-written: they are
+#      still posted on live epics. The guard used to select its verdict comment
+#      by marker string alone, so a pre-#7666 "Epic Passes Evaluation" stray fed
+#      its own skip tally into UNREVISED_EVALS (and PRIOR_REJECTIONS, a
+#      whole-issue-history count, stayed non-zero from rejections against a
+#      SUPERSEDED body, so the #7666 backstop did not fire). Test 8 runs the
+#      guard's own extracted jq selection + branch condition against the live
+#      kicad-tools#4410 fixture; Test 9 pins both halves in the shipped file.
 #
-# Hermetic: pure file reads plus a mktemp -d fixture dir. No forge/network.
+# Hermetic: file reads, jq over inline fixtures, and a mktemp -d fixture dir.
+# No forge/network.
 
 set -uo pipefail
 
@@ -362,6 +372,162 @@ if [[ -f "$CHAMPION_EPIC" ]]; then
         else
             fail "outcome row(s) do not route through Step 0.5:"$'\n'"$MISSING"
         fi
+    fi
+else
+    fail "champion-epic.md not found at $CHAMPION_EPIC"
+fi
+
+# --- Test 8: a marker-bearing comment that is NOT a rejection is not counted
+#
+# #7666 closed the WRITING half of the single-writer rule; the strays it was
+# filed for are already posted on live epics and cannot be un-written, so the
+# READING half has to be defensive too (#8795). The guard used to select its
+# verdict comment by marker string alone, so a pre-#7666 "Epic Passes
+# Evaluation" comment carrying the reserved marker fed its own
+# `champion:epic-unrevised-skips` tally straight into UNREVISED_EVALS.
+#
+# Behavioral, not prose: the jq selection is EXTRACTED from the shipped file and
+# run against fixtures, so this cannot pass on a file whose selection went back
+# to being marker-only.
+echo ""
+echo "Test 8: a marker-bearing comment that is not a rejection does not feed the tally"
+
+REJECTION_TITLE='Champion Review: Epic Needs Revision'
+FIXTURE_HASH='c01167674ddc243d'
+FIXTURE_MARKER="<!-- champion:epic-verdict:body-$FIXTURE_HASH -->"
+
+# The selection expression the shipped guard actually passes to `gh api --jq`,
+# with its shell escaping undone and $VERDICT_MARKER substituted. No `eval`.
+shipped_verdict_filter() {
+    local line
+    line="$(grep -F -- '--jq ".[] | select(' "$1" | head -n 1)"
+    [[ -n "$line" ]] || return 1
+    # Take exactly what is between `--jq "` and the LAST `"` on the line, so
+    # extraction works whether the invocation is line-continued or ends with
+    # `| jq -s 'last')` on the same line -- a pre-#8795 file must FAIL these
+    # assertions, not error out and accidentally pass.
+    line="${line#*--jq \"}"
+    line="${line%\"*}"
+    printf '%s' "$line" \
+        | sed -e 's/\\"/"/g' \
+        | sed -e "s|\\\$VERDICT_MARKER|$FIXTURE_MARKER|g"
+}
+
+# Does the shipped guard's stray-marker branch require the matched comment to be
+# a rejection? Read from the file, never hardcoded — it is the second half of
+# the mechanism under test, so the model below must track the file for BOTH
+# halves or a pre-#8795 file would still satisfy Test 8.
+shipped_requires_rejection() {
+    if grep -q 'VERDICT_IS_REJECTION" = "no"' "$1"; then echo yes; else echo no; fi
+}
+
+# Mirror of the guard's tally/branch arithmetic (the modelled-logic idiom
+# test-champion-epic-phase-marker-normalization.sh uses for this prose-not-a-
+# script file), driven by the EXTRACTED selection. $5 = does the reader require
+# the matched comment to be a rejection? "no" reproduces the pre-#8795 reader.
+# Prints one of: stray | skip | escalate.
+guard_outcome() {
+    local filter="$1" comments_json="$2" hash="$3" cap="$4" require_rejection="$5"
+    local prior verdict body skips unrevised is_rejection=yes
+    prior="$(printf '%s' "$comments_json" | jq --arg t "$REJECTION_TITLE" \
+        '[.[] | select(.body | contains($t))] | length')"
+    verdict="$(printf '%s' "$comments_json" | jq -c "$filter" | jq -s 'last')"
+    body="$(printf '%s' "$verdict" | jq -r '.body // ""')"
+    if [[ "$require_rejection" == "yes" && "$body" != *"$REJECTION_TITLE"* ]]; then
+        is_rejection=no
+    fi
+    skips="$(printf '%s' "$body" \
+        | sed -n "s|.*<!-- champion:epic-unrevised-skips:$hash:\([0-9]\{1,\}\) -->.*|\1|p" | tail -n 1)"
+    skips="${skips:-0}"
+    unrevised=$(( prior + skips ))
+    if [[ "$prior" -eq 0 || "$is_rejection" == "no" ]]; then
+        echo "stray"
+    elif [[ "$unrevised" -ge "$cap" ]]; then
+        echo "escalate"
+    else
+        echo "skip"
+    fi
+}
+
+# The live shape from rjwalters/kicad-tools#4410 (filed upstream as
+# kicad-tools#5712): two rejections against a SUPERSEDED body (so
+# PRIOR_REJECTIONS == 2 and the #7666 backstop does not fire), plus a PASSING
+# verdict on the CURRENT body that borrowed the reserved marker and carries a
+# skip tally of 3. UNREVISED_EVALS would read 5 against a cap of 2.
+STRAY_FIXTURE="$(jq -n --arg m "$FIXTURE_MARKER" --arg t "$REJECTION_TITLE" '[
+  {id: 1, created_at: "2026-09-01T00:00:00Z",
+   body: ("<!-- champion:epic-verdict:body-0000000000000000 -->\n**" + $t + "**\n\nCriterion 3 fails.")},
+  {id: 2, created_at: "2026-09-08T00:00:00Z",
+   body: ("<!-- champion:epic-verdict:body-1111111111111111 -->\n**" + $t + "**\n\nCriterion 3 still fails.")},
+  {id: 3, created_at: "2026-09-15T21:47:15Z",
+   body: ($m + "\n**Champion Review: Epic Passes Evaluation — Already Decomposed, No Action Needed**\n\n<!-- champion:epic-unrevised-skips:c01167674ddc243d:3 -->")}
+]')"
+
+# A genuine rejection on the current body, at the cap: the ladder must still work.
+REJECTION_FIXTURE="$(jq -n --arg m "$FIXTURE_MARKER" --arg t "$REJECTION_TITLE" '[
+  {id: 1, created_at: "2026-09-15T00:00:00Z",
+   body: ($m + "\n**" + $t + "**\n\nCriterion 3 fails.\n\n<!-- champion:epic-unrevised-skips:c01167674ddc243d:1 -->")}
+]')"
+
+# Marker, but no rejection anywhere on the issue — the original #7666 stray.
+NO_REJECTION_FIXTURE="$(jq -n --arg m "$FIXTURE_MARKER" '[
+  {id: 1, created_at: "2026-09-15T00:00:00Z",
+   body: ($m + "\n**Champion: status note**")}
+]')"
+
+if [[ ! -f "$CHAMPION_EPIC" ]]; then
+    fail "champion-epic.md not found at $CHAMPION_EPIC"
+elif ! SHIPPED_FILTER="$(shipped_verdict_filter "$CHAMPION_EPIC")"; then
+    fail "could not extract the guard's '--jq' verdict-comment selection from champion-epic.md"
+else
+    # Negative control FIRST: with the pre-#8795 reader (marker-only selection,
+    # no rejection check) the fixture really does escalate. Without this, a
+    # fixture that simply never matched anything would make every later
+    # assertion pass vacuously.
+    LEGACY_FILTER=".[] | select(.body | contains(\"$FIXTURE_MARKER\"))"
+    REQUIRE_REJECTION="$(shipped_requires_rejection "$CHAMPION_EPIC")"
+    if [[ "$(guard_outcome "$LEGACY_FILTER" "$STRAY_FIXTURE" "$FIXTURE_HASH" 2 no)" == "escalate" ]]; then
+        pass "control: the pre-#8795 marker-only reader escalates on the stray passing verdict (fixture reproduces the bug)"
+    else
+        fail "control: the pre-#8795 reader did NOT escalate on the fixture — the fixture no longer reproduces #8795"
+    fi
+
+    if [[ "$(guard_outcome "$SHIPPED_FILTER" "$STRAY_FIXTURE" "$FIXTURE_HASH" 2 "$REQUIRE_REJECTION")" == "stray" ]]; then
+        pass "shipped guard: a marker on a PASSING verdict is a stray — no tally, no escalation (even with PRIOR_REJECTIONS == 2)"
+    else
+        fail "shipped guard: a marker on a passing verdict still feeds the escalation ladder (#8795)"
+    fi
+
+    if [[ "$(guard_outcome "$SHIPPED_FILTER" "$REJECTION_FIXTURE" "$FIXTURE_HASH" 2 "$REQUIRE_REJECTION")" == "escalate" ]]; then
+        pass "shipped guard: a REAL rejection verdict at the cap still escalates (fix does not disarm the ladder)"
+    else
+        fail "shipped guard: a real rejection verdict at the cap no longer escalates"
+    fi
+
+    if [[ "$(guard_outcome "$SHIPPED_FILTER" "$NO_REJECTION_FIXTURE" "$FIXTURE_HASH" 2 "$REQUIRE_REJECTION")" == "stray" ]]; then
+        pass "shipped guard: the original #7666 stray (marker, no rejection anywhere) is still ignored"
+    else
+        fail "shipped guard: the #7666 stray-marker backstop regressed"
+    fi
+fi
+
+# --- Test 9: the shipped guard pins both halves of the rejection check
+echo ""
+echo "Test 9: the guard's verdict read requires the comment to BE a rejection"
+if [[ -f "$CHAMPION_EPIC" ]]; then
+    GUARD="$(section_body "$CHAMPION_EPIC" 'Idempotency Guard for Unrevised Epics')"
+    SELECT_LINE="$(grep -F -- '--jq ".[] | select(' <<<"$GUARD" || true)"
+    if [[ -n "$SELECT_LINE" ]] && grep -qF "$REJECTION_TITLE" <<<"$SELECT_LINE"; then
+        pass "the REST verdict-comment selection requires '$REJECTION_TITLE'"
+    else
+        fail "the REST verdict-comment selection matches on the marker alone"
+    fi
+
+    if grep -q 'VERDICT_IS_REJECTION' <<<"$GUARD" \
+        && grep -q 'PRIOR_REJECTIONS" -eq 0 \] || \[ "\$VERDICT_IS_REJECTION" = "no" \]' <<<"$GUARD"; then
+        pass "the stray-marker branch also fires when the matched comment is not a rejection"
+    else
+        fail "the stray-marker branch still keys on PRIOR_REJECTIONS alone"
     fi
 else
     fail "champion-epic.md not found at $CHAMPION_EPIC"

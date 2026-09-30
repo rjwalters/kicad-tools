@@ -5,20 +5,32 @@ generator intends is the geometry KiCad measures.  This module is the layer
 above it -- the same seeded cases, but now asking each in-tree clearance
 consumer the question kicad-cli already answered.
 
-**An unswitched adapter-vs-truth row is report-only.**  Each carries
-``@pytest.mark.consumer``, and ``conftest.py``'s collection hook turns that
-into ``xfail(strict=False)``.  A measured disagreement must not redden the
-build: consumers are switched to the shared kernel in their own Epic #5509
-phase, and only then does a row become a merge gate.  That mechanism landed
-untested in PR #5532 (there were no consumer items to exercise it), so
-:func:`test_every_unswitched_consumer_item_carries_xfail` asserts it over the
-whole collected suite.
+**An adapter-vs-truth row is report-only until its consumer is switched.**
+Each carries ``@pytest.mark.consumer``, and ``conftest.py``'s collection hook
+turns that into ``xfail(strict=False)``.  A measured disagreement must not
+redden the build: consumers are switched to the shared kernel in their own
+Epic #5509 phase, and only then does a row become a merge gate.  That
+mechanism landed untested in PR #5532 (there were no consumer items to
+exercise it), so :func:`test_every_unmigrated_consumer_item_carries_xfail`
+asserts it over the whole collected suite.
 
-**A switched row is a gate.**  Groups listed in ``conftest.SWITCHED_GROUPS``
-have had their phase land, so their rows are exempted from the auto-xfail and
-held to :data:`QUANTISATION_LEDGER` instead: zero under-rejection, and exactly
-the recorded residual over-rejection.  ``#5660`` (Phase 3a) is the first PR to
-use it, for groups 1 and 2.
+**A row whose group is in ``report.MIGRATED_GROUPS`` is a merge gate.**  Its
+consumer has had its Phase 3/4 PR, the hook leaves the item un-``xfail``\\ ed,
+and :func:`test_adapter_agrees_with_kicad_cli` asserts agreement for real.
+The gated reading drives that same unmodified consumer at the clearance
+**kicad-cli itself applies** (``adapter.verdicts_at_project_rules``), so the
+gate fails on a geometry disagreement -- what a migration changes -- and not
+on the rule value the consumer resolves, which is Phase 2's axis and stays
+measured by the published table.
+:func:`test_migrated_consumer_items_are_hard_gates` asserts the flip really
+reached the collected items.
+
+**Groups 1 and 2 carry a pinned quantisation ledger.**  They were migrated by
+#5660 (Phase 3a) and answer with a *cell set*, which over-rejects by
+construction, so :data:`QUANTISATION_LEDGER` records the exact residual they
+are still allowed; zero under-rejection stays unconditional.  Every other
+migrated group has no entry and is held to zero disagreement in both
+directions (``conftest.assert_migrated_group_agrees``).
 
 **Hard assertions here are about the adapters, not the consumers.**  An
 adapter must satisfy the protocol, must be deterministic, and must only ever
@@ -44,15 +56,14 @@ from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.board import write_case
 from tests.conformance.conftest import (
-    SWITCHED_GROUPS,
-    assert_switched_group_matches_ledger,
-    group_of_item,
+    assert_migrated_group_agrees,
+    item_group,
     requires_adapter,
     requires_kicad_cli,
 )
 from tests.conformance.generator import PairKind, generate_case
 from tests.conformance.oracle import run_oracle
-from tests.conformance.report import ADAPTERS, main
+from tests.conformance.report import ADAPTERS, MIGRATED_GROUPS, QUANTISED_GROUPS, main
 
 _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 
@@ -60,24 +71,32 @@ _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 # seeds by every wired adapter, and every item launches its own kicad-cli.
 CI_SEEDS = (0, 1, 2)
 
-# The Epic #5509 section-1 groups Phase 1c leaves unmeasured, with their
-# reasons recorded in ``report.NOT_MEASURED_REASONS``.  Exactly one: group 7's
-# ``CoupledPathfinder::rail_clear`` is a lambda inside the C++ coupled search
-# loop, so no Python entry point exists to wrap.  That is the single
-# *unexposed* entry the epic's acceptance criterion permits, and keeping this
-# set a literal ``{7}`` is what makes "only one" a test rather than a claim --
-# wiring a group without removing it here, or losing a group's adapter, both
-# fail ``test_adapters_cover_the_wired_groups``.
-UNWIRED_GROUPS = {7}
+# The Epic #5509 section-1 groups with no adapter, whose reasons are recorded
+# in ``report.NOT_MEASURED_REASONS``.
+#
+# EMPTY since Phase 3c (#5662).  Phase 1c left exactly one entry -- group 7's
+# ``CoupledPathfinder::rail_clear``, a lambda inside the C++ coupled search
+# loop with no Python entry point to wrap, the single *unexposed* gap the
+# epic's acceptance criterion permitted.  Phase 3c promoted it to a bound
+# method as part of migrating it onto the clearance kernel, so ``coupled.py``
+# measures it and all nineteen groups are wired.  Keeping this an explicit set
+# is what makes "all nineteen" a test rather than a claim: dropping a group's
+# adapter without recording it here fails
+# ``test_adapters_cover_the_wired_groups``.
+UNWIRED_GROUPS: set[int] = set()
 
 # Every group row the table measures, plus the Phase 1b kernel's control row.
 WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GROUP}
 
-# The residual over-rejection a switched group is still allowed, per
-# ``(group, seed)``.  Entries use the same string form the failure message
-# prints, so re-pinning is a copy-paste rather than a transcription.
+# The residual over-rejection a migrated *cell-set* group is still allowed, per
+# ``(group, seed)``, measured on the gated reading (the consumer driven at
+# kicad-cli's own clearance, ``verdicts_at_project_rules``).  Entries use the
+# same string form the failure message prints, so re-pinning is a copy-paste
+# rather than a transcription.  A ``(group, seed)`` with no key is held to an
+# empty set -- which is every migrated group other than 1 and 2, so this ledger
+# widens nothing for groups 6-10.
 #
-# Every entry below is cell quantisation, and it survives Phase 3a by
+# Every entry below is cell quantisation, and it survives Phase 3a (#5660) by
 # construction rather than by oversight.  Groups 1 and 2 answer with a *cell
 # set*, and the adapter's rejection rule dilates **both** sides -- the existing
 # copper's halo and the candidate's own -- so two objects whose copper is a
@@ -86,8 +105,7 @@ WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GR
 # a segment).  #5660 replaced the halo's *shape* (Chebyshev square -> the
 # kernel's exact disc), which removes the sqrt(2) diagonal excess; it does not
 # and cannot remove the outward rounding along the pair axis, which is where
-# every entry here sits.  Measured before and after the switch over seeds
-# 0-49: group 1 73/153 both ways, group 2 56/115 both ways.
+# every entry here sits.
 #
 # These are retired by search-time *refinement* (Epic #5509 groups 4 and 5,
 # Phase 3b), which re-reads the exact geometry of a cell the halo marked -- not
@@ -97,7 +115,6 @@ QUANTISATION_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
     (1, 0): ("pad-seg ['N3', 'N4'] gap=0.2468",),
     (1, 1): ("seg-seg ['N3', 'N4'] gap=0.2289",),
     (1, 2): ("seg-via ['N1', 'N2'] gap=0.2336",),
-    (2, 0): (),
     (2, 1): ("seg-seg ['N3', 'N4'] gap=0.2289",),
     (2, 2): ("seg-via ['N1', 'N2'] gap=0.2336",),
 }
@@ -217,8 +234,35 @@ def test_adapter_only_speaks_about_declared_nets(adapter: ConsumerAdapter) -> No
 
 
 # ---------------------------------------------------------------------------
-# The measurement itself -- report-only, auto-xfail
+# The measurement itself -- report-only until the consumer is switched
 # ---------------------------------------------------------------------------
+
+
+def _consumer_verdicts(adapter: ConsumerAdapter, case) -> set[frozenset[str]]:
+    """The reading this item scores the adapter on.
+
+    An **unmigrated** group is read exactly as the published table reads it:
+    the consumer at its own rule values, with the result xfailed.  Both halves
+    of a disagreement -- geometry and rule selection -- are evidence for that
+    consumer's own phase, and separating them there would be premature.
+
+    A **migrated** group is read at the clearance kicad-cli itself applies.
+    Its migration PR changed *geometry* and nothing else (Epic #5509 scope
+    guard #1 forbids touching a rule value), so gating it on the consumer's
+    own resolved clearance would redden this build for the rule defect
+    #5398 / #5654 tracks, which no Phase 3 PR is allowed to fix.  Pinning the
+    rule axis to ground truth's own value is what makes the gate a statement
+    about the thing the migration actually moved.
+    """
+    if adapter.group in MIGRATED_GROUPS:
+        at_project = getattr(adapter, "verdicts_at_project_rules", None)
+        assert at_project is not None, (
+            f"{adapter.name} (group {adapter.group}) is in MIGRATED_GROUPS but "
+            "does not implement verdicts_at_project_rules(case); a gated row "
+            "must be drivable at kicad-cli's own rule value"
+        )
+        return {v.nets for v in at_project(case)}
+    return {v.nets for v in adapter.verdicts(case)}
 
 
 @requires_kicad_cli
@@ -235,8 +279,16 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     Only the pairs the adapter declares itself in scope for
     (``ConsumerAdapter.pair_kinds``) are compared, and boundary-band pairs are
     excluded: within 1 um of the requirement the two models are arguing about
-    rounding.  This mirrors ``report.measure_corpus`` exactly, so a red (well,
-    xfailed) item here corresponds to a non-zero cell in the published table.
+    rounding.  For an unmigrated group this mirrors ``report.measure_corpus``
+    exactly, so a red (well, xfailed) item here corresponds to a non-zero cell
+    in the published table.
+
+    For a **migrated** group (``report.MIGRATED_GROUPS``) the item carries no
+    ``xfail`` -- that is the flip its epic phase exists to make -- and the
+    consumer is driven at kicad-cli's own rule value; see
+    :func:`_consumer_verdicts` for why the two readings differ.  A gated
+    adapter must compare something on at least one of ``CI_SEEDS``, or the
+    gate is vacuous.
 
     Zone pairs are the one exception, and for the same reason the report
     scores them only on its refilled run: this item measures the *as-is* board,
@@ -249,15 +301,17 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
     result = run_oracle(board.pcb_path, refill=False, work_dir=tmp_path)
 
     truth = {v.nets for v in result.without_zones()}
-    consumer = {v.nets for v in adapter.verdicts(case)}
+    consumer = _consumer_verdicts(adapter, case)
 
     over: list[str] = []
     under: list[str] = []
+    compared = 0
     for pair in case.pairs:
         if pair.kind not in adapter.pair_kinds or pair.boundary:
             continue
         if pair.kind in PairKind.ZONE:
             continue
+        compared += 1
         in_truth = pair.nets in truth
         in_consumer = pair.nets in consumer
         if in_consumer and not in_truth:
@@ -265,12 +319,41 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
         elif in_truth and not in_consumer:
             under.append(f"{pair.kind} {sorted(pair.nets)} gap={pair.target_gap_mm:.4f}")
 
-    if adapter.group in SWITCHED_GROUPS:
-        assert_switched_group_matches_ledger(
+    if adapter.group in MIGRATED_GROUPS and not compared:
+        # A gate over an empty denominator is green for the wrong reason.  An
+        # xfailed row can afford to be vacuous (the published table carries
+        # the real denominator); a gated one cannot, because "no in-scope pair
+        # on this seed" and "this consumer agrees" would look identical.
+        #
+        # The statement is made over ``CI_SEEDS`` rather than over this one
+        # seed, because a consumer's ``pair_kinds`` can be rare enough that no
+        # single seed carries one: group 6 sees only static placement copper
+        # (``pad-seg`` / ``pad-via``) and seed 2 places no pad pair at all.
+        # Requiring *every* seed to contribute would force CI_SEEDS to grow --
+        # a kicad-cli process per seed per adapter -- to say something the
+        # union already says.  Counting pairs needs no oracle, so this stays
+        # cheap.
+        elsewhere = sum(
+            1
+            for other in CI_SEEDS
+            for pair in generate_case(other).pairs
+            if pair.kind in adapter.pair_kinds
+            and not pair.boundary
+            and pair.kind not in PairKind.ZONE
+        )
+        assert elsewhere, (
+            f"{adapter.name} (group {adapter.group}) is gated but no seed in "
+            f"{CI_SEEDS} offers an in-scope pair to compare "
+            f"(pair_kinds={sorted(adapter.pair_kinds)}) -- the gate is vacuous; "
+            "re-pin CI_SEEDS or widen the scope"
+        )
+
+    if adapter.group in MIGRATED_GROUPS:
+        assert_migrated_group_agrees(
             adapter,
             over=over,
             under=under,
-            expected=QUANTISATION_LEDGER[adapter.group, seed],
+            expected_over=QUANTISATION_LEDGER.get((adapter.group, seed), ()),
             what=f"seed {seed}",
             context=result.describe(),
         )
@@ -446,98 +529,121 @@ def test_report_regenerates_byte_identically(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The auto-xfail mechanism is itself under test
+# The auto-xfail mechanism -- and its migrated-group exception -- under test
 # ---------------------------------------------------------------------------
 
 
-def _collected_consumer_items(
-    request: pytest.FixtureRequest,
-) -> list[tuple[pytest.Item, int | None]]:
-    """Session-collected ``consumer`` items paired with the group they measure."""
-    group_by_name = {adapter.name: adapter.group for adapter in ADAPTERS}
-    return [
-        (item, group_of_item(item, group_by_name))
-        for item in request.session.items
-        if item.get_closest_marker("consumer") is not None
+def test_migrated_groups_are_wired_and_drivable_at_ground_truths_rule_value() -> None:
+    """``MIGRATED_GROUPS`` names real, gated, project-rule-drivable adapters.
+
+    Three static properties, none of which needs kicad-cli, so a migration
+    registered without the plumbing to back it fails on any laptop:
+
+    * every migrated group is one of the epic's nineteen (never the kernel
+      control row, which was never a consumer to migrate);
+    * every migrated group actually has an adapter -- listing an unwired group
+      would flip a gate that has no row to gate;
+    * that adapter implements ``verdicts_at_project_rules``, the reading
+      ``_consumer_verdicts`` gates on.  Without it the gate would silently
+      fall back to the consumer's own rule values and start failing for the
+      #5654 rule defect instead of for a geometry disagreement.
+    """
+    consumer_groups = {g for g in WIRED_GROUPS if g != KERNEL_GROUP}
+    assert not (MIGRATED_GROUPS - consumer_groups), (
+        "MIGRATED_GROUPS names groups that are not wired consumer groups: "
+        f"{sorted(MIGRATED_GROUPS - consumer_groups)}"
+    )
+    for group in sorted(MIGRATED_GROUPS):
+        adapter = _ADAPTERS_BY_GROUP[group]
+        assert hasattr(adapter, "verdicts_at_project_rules"), (
+            f"{adapter.name} (group {group}) is migrated but cannot be driven "
+            "at the project netclass clearance"
+        )
+
+
+def test_the_quantisation_ledger_only_names_migrated_cell_set_rows() -> None:
+    """Every ledger key is a migrated group on a seed the gate actually runs.
+
+    The gate itself already fails on an entry that stopped reproducing (the
+    recorded set must *equal* the measured one), so this guards the other way a
+    ledger rots: an entry for a group that is not migrated, or for a seed that
+    left ``CI_SEEDS``, would sit there looking authoritative while nothing ever
+    consulted it.  It is also where "only the cell-set groups may carry
+    over-rejection" is a test rather than a comment.
+    """
+    stale = sorted(
+        key
+        for key in QUANTISATION_LEDGER
+        if key[0] not in MIGRATED_GROUPS or key[1] not in CI_SEEDS
+    )
+    assert not stale, f"quantisation-ledger entries no gated row consults: {stale}"
+    assert {group for group, _ in QUANTISATION_LEDGER} <= QUANTISED_GROUPS, (
+        "only report.QUANTISED_GROUPS (the cell-set occupancy rows) may carry "
+        "a quantisation ledger; every other migrated group is held to zero "
+        "disagreement"
+    )
+    assert QUANTISED_GROUPS <= MIGRATED_GROUPS, "a quantised group must be a migrated one"
+    assert all(QUANTISATION_LEDGER.values()), "an empty ledger entry is the default -- drop the key"
+
+
+def _consumer_items(request: pytest.FixtureRequest) -> list[pytest.Item]:
+    items = [
+        item for item in request.session.items if item.get_closest_marker("consumer") is not None
     ]
+    if not items:
+        pytest.skip(
+            "no @pytest.mark.consumer items were collected -- this assertion "
+            "is only meaningful for a whole-suite run (uv run pytest tests/conformance)"
+        )
+    return items
 
 
-def test_every_unswitched_consumer_item_carries_xfail(request: pytest.FixtureRequest) -> None:
+def test_every_unmigrated_consumer_item_carries_xfail(request: pytest.FixtureRequest) -> None:
     """``conftest.pytest_collection_modifyitems`` really fired.
 
     The hook is the *only* thing standing between a measured disagreement and
     a red build, and it shipped with no item to exercise it.  This walks the
     session's collected items rather than trusting the marker: every
-    ``@pytest.mark.consumer`` item whose group is not yet switched must also
+    ``@pytest.mark.consumer`` item whose group is not yet migrated must also
     carry an ``xfail``, and that ``xfail`` must be non-strict (a strict one
     would fail the moment a consumer starts agreeing, which is the outcome the
     epic is working towards).
     """
-    collected = [
-        (item, group)
-        for item, group in _collected_consumer_items(request)
-        if group not in SWITCHED_GROUPS
-    ]
-    if not collected:
-        pytest.skip(
-            "no unswitched @pytest.mark.consumer items were collected -- this "
-            "assertion is only meaningful for a whole-suite run "
-            "(uv run pytest tests/conformance)"
-        )
+    candidates = [i for i in _consumer_items(request) if item_group(i) not in MIGRATED_GROUPS]
 
-    missing = [item.nodeid for item, _ in collected if item.get_closest_marker("xfail") is None]
+    missing = [item.nodeid for item in candidates if item.get_closest_marker("xfail") is None]
     assert not missing, f"consumer items collected without an auto-xfail: {missing}"
 
     strict = [
         item.nodeid
-        for item, _ in collected
+        for item in candidates
         if item.get_closest_marker("xfail").kwargs.get("strict") is not False
     ]
     assert not strict, f"consumer items whose xfail is strict: {strict}"
 
 
-def test_switched_group_items_are_not_xfailed(request: pytest.FixtureRequest) -> None:
-    """The other half of scope guard #5: "report-only **until switched**".
+def test_migrated_consumer_items_are_hard_gates(request: pytest.FixtureRequest) -> None:
+    """The flip reached the collected items, not just the registry.
 
-    Without this, ``SWITCHED_GROUPS`` would be a comment.  An xfail left on a
-    switched group's row makes the row unfalsifiable in both directions at
-    once -- a regression xfails, an improvement xpasses, and neither is a
-    signal -- which is exactly the state Phase 3a set out to leave behind for
-    groups 1 and 2.
+    The mirror image of the test above, and the assertion that makes "group N
+    is no longer report-only" checkable rather than declared.  Registering a
+    group in ``MIGRATED_GROUPS`` while the hook still xfails its items would
+    leave the epic's Phase 3/4 acceptance criterion unmet *and* invisible --
+    the suite would stay green either way.
+
+    Skips rather than fails when the whole suite was not collected: with
+    ``-k`` or a single-module run there may be no migrated item present, which
+    says nothing about the mechanism.
     """
-    collected = [
-        (item, group)
-        for item, group in _collected_consumer_items(request)
-        if group in SWITCHED_GROUPS
-    ]
-    if not collected:
+    gated = [i for i in _consumer_items(request) if item_group(i) in MIGRATED_GROUPS]
+    if not gated:
         pytest.skip(
-            "no switched-group consumer items were collected -- this assertion "
-            "is only meaningful for a whole-suite run (uv run pytest tests/conformance)"
+            "no migrated-group consumer items collected -- run the whole "
+            "module (uv run pytest tests/conformance/test_corpus.py)"
         )
 
-    xfailed = [
-        f"{item.nodeid} (group {group})"
-        for item, group in collected
-        if item.get_closest_marker("xfail") is not None
-    ]
-    assert not xfailed, (
-        "these rows belong to a consumer that has been switched to the "
-        f"clearance kernel, so they must be gates, not report-only: {xfailed}"
-    )
-
-
-def test_the_quantisation_ledger_covers_every_switched_row() -> None:
-    """No switched ``(group, seed)`` may be missing from the ledger.
-
-    A ``KeyError`` inside the measurement item would read as a harness bug
-    rather than as the gate doing its job, and a *stale* entry for a group that
-    was never switched would sit there looking authoritative.  Asserted as an
-    exact set so both directions are covered.
-    """
-    expected = {(group, seed) for group in SWITCHED_GROUPS for seed in CI_SEEDS}
-    assert set(QUANTISATION_LEDGER) == expected, (
-        "the quantisation ledger and SWITCHED_GROUPS x CI_SEEDS have drifted.\n"
-        f"  missing: {sorted(expected - set(QUANTISATION_LEDGER))}\n"
-        f"  stale:   {sorted(set(QUANTISATION_LEDGER) - expected)}"
+    still_xfailed = [item.nodeid for item in gated if item.get_closest_marker("xfail") is not None]
+    assert not still_xfailed, (
+        "these consumer items belong to a group in MIGRATED_GROUPS but are "
+        f"still auto-xfailed, so their disagreement cannot redden a build: {still_xfailed}"
     )

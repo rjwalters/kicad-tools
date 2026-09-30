@@ -142,6 +142,18 @@ case "$path" in
 esac
 STUB
 chmod +x "$STUB_DIR/gh"
+# #9548: `loom-daemon forge trusted-comments` stub, mirroring the predicate for
+# these fixtures (insider association, or the default fleet App App-spelled).
+# $LOOM_TEST_NO_TRUST_VERB=1 simulates a binary predating the verb.
+cat >"$STUB_DIR/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1 $2" == "forge trusted-comments" ]] || { echo "stub loom-daemon: $*" >&2; exit 64; }
+[[ "${LOOM_TEST_NO_TRUST_VERB:-}" == "1" ]] && exit 2
+exec jq -c '[.[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))
+    or ((.user.login // "") | test("^loom-fleet-dispatch(-[0-9]+)?\\[bot\\]$")))]'
+STUB
+chmod +x "$STUB_DIR/loom-daemon"
+unset LOOM_DAEMON_BIN
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 
@@ -170,13 +182,14 @@ set_claim() { # <label> <iso-ts>  (empty ts => no claim event in the timeline)
     fi
 }
 
-set_comments() { # reads a JSON array on stdin
-    cat >"$STUB_DIR/comments.json"
+set_comments() { # reads a JSON array on stdin; an item without `user` is the fleet's App
+    jq 'map(if has("user") then . else . + {user: {login: "loom-fleet-dispatch[bot]", type: "Bot"}} end)' \
+        >"$STUB_DIR/comments.json"
 }
 
 reset() {
     : >"$STUB_DIR/gh-calls.log"
-    unset LOOM_TEST_MUTATION_FAILS LOOM_TEST_ISSUE_READ_FAILS
+    unset LOOM_TEST_MUTATION_FAILS LOOM_TEST_ISSUE_READ_FAILS LOOM_TEST_NO_TRUST_VERB
     set_labels "loom:reviewing"
     echo '[]' >"$STUB_DIR/comments.json"
 }
@@ -394,12 +407,50 @@ assert_eq "stale" "$(field "$out" CLAIM_STATE)" \
     "T17c: loom:curating uses the 30-minute Curator threshold (45m is stale)"
 
 # --- T18: --json output ---------------------------------------------------
+# Regression coverage for #8293: the jq filter binds the label via `--arg
+# label`/`$label`, which is a reserved word on jq 1.6 and fails to parse
+# there (renamed to `claim_label` internally; the output field stays
+# `label`). These cases exercise --json across every documented claim_state
+# so a reintroduced reserved-word bind would fail loudly here even without a
+# jq 1.6 binary on PATH.
 reset
 set_claim loom:reviewing "$(ago 40)"
 out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
 assert_eq "stale" "$(jq -r '.claim_state' <<<"$out")" "T18a: --json reports claim_state"
 assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18b: --json reports the label"
 assert_eq "30" "$(jq -r '.stale_minutes' <<<"$out")" "T18c: --json reports stale_minutes"
+
+reset
+set_labels "loom:review-requested"
+set_claim loom:reviewing ""
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "unclaimed" "$(jq -r '.claim_state' <<<"$out")" "T18d: --json reports claim_state=unclaimed"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18d: --json reports the label when unclaimed"
+
+reset
+set_claim loom:reviewing "$(ago 5)"
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "fresh" "$(jq -r '.claim_state' <<<"$out")" "T18e: --json reports claim_state=fresh"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18e: --json reports the label when fresh"
+
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 1)" --arg am "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    --arg sm "<!-- loom:standdown claim=$CLAIM_TS seq=3 -->" --arg s "$(ago 2)" \
+    '[{id:601,created_at:$t,body:("Judge: still working.\n" + $am)},
+      {id:602,created_at:$s,body:("Judge pass: standing down.\n" + $sm)}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "stale-bounded-fallback" "$(jq -r '.claim_state' <<<"$out")" \
+    "T18f: --json reports claim_state=stale-bounded-fallback"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" \
+    "T18f: --json reports the label under the bounded fallback"
+
+reset
+set_claim loom:reviewing ""
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing --json)"
+assert_eq "unknown" "$(jq -r '.claim_state' <<<"$out")" "T18g: --json reports claim_state=unknown"
+assert_eq "loom:reviewing" "$(jq -r '.label' <<<"$out")" "T18g: --json reports the label when unknown"
 
 # --- T19: a mutation failure is reported, not swallowed as success --------
 reset
@@ -408,6 +459,19 @@ export LOOM_TEST_MUTATION_FAILS=1
 out="$("$TARGET_SCRIPT" standdown --repo owner/repo --number 6513 --label loom:reviewing)"
 unset LOOM_TEST_MUTATION_FAILS
 assert_eq "failed-post" "$(field "$out" STANDDOWN_ACTION)" "T19: a failed POST reports failed-post"
+
+# --- T20: an untrusted author's activity marker is prose (#9548) -----------
+reset
+CLAIM_TS="$(ago 40)"
+set_claim loom:reviewing "$CLAIM_TS"
+jq -n --arg t "$(ago 3)" --arg m "<!-- loom:claim-activity claim=$CLAIM_TS -->" \
+    '[{id:301,created_at:$t,body:("still here " + $m),user:{login:"drive-by",type:"User"},author_association:"NONE"},
+      {id:302,created_at:$t,body:$m,user:{login:"loom-fleet-dispatch",type:"User"},author_association:"CONTRIBUTOR"}]' | set_comments
+out="$("$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "stale" "$(field "$out" CLAIM_STATE)" "T20a: outsider / bare-slug activity markers do not keep a claim fresh"
+assert_eq "0" "$(field "$out" ACTIVITY_COUNT)" "T20b: neither is counted as claimant activity"
+out="$(LOOM_TEST_NO_TRUST_VERB=1 "$TARGET_SCRIPT" check --repo owner/repo --number 6513 --label loom:reviewing)"
+assert_eq "unknown" "$(field "$out" CLAIM_STATE)" "T20c: no trust filter -> unknown (fail safe, never stomp)"
 
 # --- Summary ---
 echo ""

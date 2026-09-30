@@ -9,7 +9,7 @@ leg -- the exact obstacle-consult discipline generalised from
 
 from __future__ import annotations
 
-from kicad_tools.router.mesh.geometry import segment_intersects_rect
+from kicad_tools.router.mesh.geometry import segments_intersect
 from kicad_tools.router.mesh.obstacles import ObstacleModel
 from kicad_tools.router.mesh.octilinear import octilinear_fit
 
@@ -18,11 +18,28 @@ from kicad_tools.router.mesh.octilinear import octilinear_fit
 _KEEPOUT = (2.0, 2.0, 3.0, 5.0)
 
 
+def _segment_enters_rect(
+    p1: tuple[float, float], p2: tuple[float, float], rect: tuple[float, float, float, float]
+) -> bool:
+    """True if segment ``p1-p2`` intersects (or lies within) AABB ``rect``.
+
+    Local test-only helper: standalone assertion of the anti-#3906 invariant
+    below, independent of whatever clearance predicate ``ObstacleModel`` uses
+    internally (formerly ``geometry.segment_intersects_rect``, retired as
+    production-dead by #5685 once Epic #5509 Phase 3e moved ``is_clear`` onto
+    the shared clearance kernel).
+    """
+    xmin, ymin, xmax, ymax = rect
+    if xmin <= p1[0] <= xmax and ymin <= p1[1] <= ymax:
+        return True
+    if xmin <= p2[0] <= xmax and ymin <= p2[1] <= ymax:
+        return True
+    corners = [(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax)]
+    return any(segments_intersect(p1, p2, corners[i], corners[(i + 1) % 4]) for i in range(4))
+
+
 def _no_leg_enters(path: list[tuple[float, float]], rect) -> bool:
-    return not any(
-        segment_intersects_rect(path[i], path[i + 1], rect[0], rect[1], rect[2], rect[3])
-        for i in range(len(path) - 1)
-    )
+    return not any(_segment_enters_rect(path[i], path[i + 1], rect) for i in range(len(path) - 1))
 
 
 def test_default_dogleg_into_keepout_is_rejected_and_flipped() -> None:

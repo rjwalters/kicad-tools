@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -101,6 +102,55 @@ def test_real_pytest_failure_is_rejected(tmp_path, failure):
     assert (run.returncode == 0) is (failure == "skip")
     with pytest.raises(ValueError, match="failures|did not pass"):
         helper.validate_results(path)
+
+
+def _stub_probe_environment(monkeypatch, *, native_version, cli_version):
+    """Answer probe()'s two version subprocesses without a real KiCad install."""
+    cli = Path("/unused/kicad-cli")
+    monkeypatch.setenv("KCT_MASK_NATIVE_PYTHON", json.dumps([sys.executable]))
+    monkeypatch.setattr(helper, "find_kicad_cli", lambda: cli)
+
+    def check_output(command, **kwargs):
+        if command[0] == str(cli):
+            return cli_version + "\n"
+        Path(command[-1]).write_text("shared")  # the shared-scratch marker probe() asserts
+        return native_version + "\n"
+
+    monkeypatch.setattr(helper.subprocess, "check_output", check_output)
+
+
+@pytest.mark.parametrize("version", sorted(helper.QUALIFIED_NATIVE_VERSIONS))
+def test_probe_accepts_every_qualified_version(tmp_path, monkeypatch, version):
+    _stub_probe_environment(monkeypatch, native_version=version, cli_version=version)
+    info = helper.probe(tmp_path)
+    assert info["pcbnew_version"] == info["kicad_cli_version"] == version
+
+
+@pytest.mark.parametrize(
+    ("native_version", "cli_version"),
+    [
+        ("10.0.4", "10.0.4"),  # older than anything qualified
+        ("10.1.0", "10.1.0"),  # newer, not yet compared against the material oracle
+        ("10.0.5", "10.0.6"),  # qualified individually, but a mismatched pair
+        ("", ""),  # no version reported at all
+    ],
+)
+def test_probe_rejects_unqualified_or_mismatched_versions(
+    tmp_path, monkeypatch, native_version, cli_version
+):
+    _stub_probe_environment(monkeypatch, native_version=native_version, cli_version=cli_version)
+    with pytest.raises(ValueError, match="qualified"):
+        helper.probe(tmp_path)
+
+
+def test_gate_and_checker_share_one_qualified_version_set():
+    """The CI gate imports the checker's set; it must never restate its own."""
+    from kicad_tools.validate.mask_copper_geometry import QUALIFIED_NATIVE_VERSIONS
+
+    assert helper.QUALIFIED_NATIVE_VERSIONS is QUALIFIED_NATIVE_VERSIONS
+    source = (ROOT / "scripts/ci/check_mask_copper_native.py").read_text()
+    assert "QUALIFIED_NATIVE_VERSIONS" in source
+    assert not re.search(r'"10\.\d+\.\d+"', source), "gate must not hard-code a KiCad version"
 
 
 def test_workflow_runs_full_gate_once_and_retains_diagnostics():

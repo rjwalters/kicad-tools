@@ -196,10 +196,33 @@ def get_manufacturer_metadata(data: dict[str, Any]) -> dict[str, Any]:
 # NETCLASS FUNCTIONS
 # =============================================================================
 
+#: The ``Default`` netclass clearance a newly-written project declares, in mm.
+#:
+#: **Deliberately not KiCad's stock 0.20mm template value (#5654).**  KiCad's
+#: project template ships ``Default`` at 0.20mm, and every project this module
+#: wrote used to inherit that verbatim -- which made the field a *template
+#: default* rather than a statement about the board.  That is exactly why Epic
+#: #5509 Phase 2 (#5645) refused to read ``net_settings.classes[].clearance``
+#: as a clearance requirement at all: on this repo's own fleet it carried no
+#: information, so honouring it re-spaced boards 00-04 for no DRC benefit.
+#:
+#: ``kct route`` routes at 0.15mm unless told otherwise
+#: (``cli/route_cmd.py:DEFAULT_ROUTE_CLEARANCE_MM``), so 0.15mm is the
+#: clearance a freshly-created project is actually going to be routed at, and
+#: emitting it makes the netclass agree with what KiCad's own ``clearance``
+#: DRC test measures a copper-to-copper violation against.
+#:
+#: Callers that already know better should say so rather than inherit this:
+#: pass ``clearance_mm=`` (the board's route target, or the fab tier's
+#: ``min_clearance_mm`` floor).  The manufacturer-profile rewrite path does
+#: exactly that -- see
+#: :func:`kicad_tools.manufacturers.project_generator.build_default_netclass`.
+DEFAULT_NETCLASS_CLEARANCE_MM = 0.15
+
 # Default netclass definition structure (KiCad 7+ format)
 DEFAULT_NETCLASS_DEFINITION: dict[str, Any] = {
     "bus_width": 12,
-    "clearance": 0.2,
+    "clearance": DEFAULT_NETCLASS_CLEARANCE_MM,
     "diff_pair_gap": 0.25,
     "diff_pair_via_gap": 0.25,
     "diff_pair_width": 0.2,
@@ -216,19 +239,44 @@ DEFAULT_NETCLASS_DEFINITION: dict[str, Any] = {
 }
 
 
-def get_net_settings(data: dict[str, Any]) -> dict[str, Any]:
+def default_netclass_definition(clearance_mm: float | None = None) -> dict[str, Any]:
+    """
+    Build a fresh ``Default`` netclass, at a stated clearance.
+
+    The one place a ``Default`` netclass is materialized from the template, so
+    "which clearance does a newly-created project declare" has a single
+    answer (#5654) instead of one per creation path.
+
+    Args:
+        clearance_mm: Clearance in mm the board is (or will be) routed at.
+            ``None`` uses :data:`DEFAULT_NETCLASS_CLEARANCE_MM` -- the route
+            default, never KiCad's stock 0.20mm template value.
+
+    Returns:
+        A ``Default`` netclass definition dictionary.
+    """
+    definition = DEFAULT_NETCLASS_DEFINITION.copy()
+    if clearance_mm is not None:
+        definition["clearance"] = float(clearance_mm)
+    return definition
+
+
+def get_net_settings(data: dict[str, Any], clearance_mm: float | None = None) -> dict[str, Any]:
     """
     Get net_settings from project data, creating if missing.
 
     Args:
         data: Project data dictionary
+        clearance_mm: Clearance in mm for the ``Default`` netclass, when this
+            call is the one that creates it.  ``None`` uses
+            :data:`DEFAULT_NETCLASS_CLEARANCE_MM`.
 
     Returns:
         Net settings dictionary
     """
     if "net_settings" not in data:
         data["net_settings"] = {
-            "classes": [DEFAULT_NETCLASS_DEFINITION.copy()],
+            "classes": [default_netclass_definition(clearance_mm)],
             "meta": {"version": 3},
             "net_colors": None,
             "netclass_assignments": None,
@@ -237,19 +285,24 @@ def get_net_settings(data: dict[str, Any]) -> dict[str, Any]:
     return data["net_settings"]
 
 
-def get_netclass_definitions(data: dict[str, Any]) -> list[dict[str, Any]]:
+def get_netclass_definitions(
+    data: dict[str, Any], clearance_mm: float | None = None
+) -> list[dict[str, Any]]:
     """
     Get list of netclass definitions from project data.
 
     Args:
         data: Project data dictionary
+        clearance_mm: Clearance in mm for the ``Default`` netclass, when this
+            call is the one that creates it.  ``None`` uses
+            :data:`DEFAULT_NETCLASS_CLEARANCE_MM`.
 
     Returns:
         List of netclass definition dictionaries
     """
-    net_settings = get_net_settings(data)
+    net_settings = get_net_settings(data, clearance_mm)
     if "classes" not in net_settings:
-        net_settings["classes"] = [DEFAULT_NETCLASS_DEFINITION.copy()]
+        net_settings["classes"] = [default_netclass_definition(clearance_mm)]
     return net_settings["classes"]
 
 
@@ -301,7 +354,7 @@ def get_diff_pairs(data: dict[str, Any]) -> list[dict[str, str]]:
 def create_netclass_definition(
     name: str,
     track_width: float = 0.25,
-    clearance: float = 0.2,
+    clearance: float = DEFAULT_NETCLASS_CLEARANCE_MM,
     via_diameter: float = 0.6,
     via_drill: float = 0.3,
     pcb_color: str | None = None,
@@ -326,7 +379,7 @@ def create_netclass_definition(
     Returns:
         Netclass definition dictionary
     """
-    definition = DEFAULT_NETCLASS_DEFINITION.copy()
+    definition = default_netclass_definition()
     definition["name"] = name
     definition["track_width"] = track_width
     definition["clearance"] = clearance
@@ -347,7 +400,7 @@ def add_netclass_definition(
     data: dict[str, Any],
     name: str,
     track_width: float = 0.25,
-    clearance: float = 0.2,
+    clearance: float = DEFAULT_NETCLASS_CLEARANCE_MM,
     via_diameter: float = 0.6,
     via_drill: float = 0.3,
     pcb_color: str | None = None,
@@ -461,15 +514,22 @@ def add_netclass_patterns(
     return [add_netclass_pattern(data, netclass, p) for p in patterns]
 
 
-def clear_netclass_definitions(data: dict[str, Any], keep_default: bool = True) -> None:
+def clear_netclass_definitions(
+    data: dict[str, Any], keep_default: bool = True, clearance_mm: float | None = None
+) -> None:
     """
     Clear all netclass definitions from project data.
 
     Args:
         data: Project data dictionary
         keep_default: If True, keep the Default netclass
+        clearance_mm: Clearance in mm for the ``Default`` netclass, when the
+            project carried none and one has to be synthesized.  ``None`` uses
+            :data:`DEFAULT_NETCLASS_CLEARANCE_MM`.  An *existing* ``Default``
+            is preserved verbatim -- its clearance is the board's own
+            statement, not this function's to rewrite.
     """
-    net_settings = get_net_settings(data)
+    net_settings = get_net_settings(data, clearance_mm)
     if keep_default:
         # Keep only the Default class
         classes = net_settings.get("classes", [])
@@ -481,7 +541,7 @@ def clear_netclass_definitions(data: dict[str, Any], keep_default: bool = True) 
         if default_class:
             net_settings["classes"] = [default_class]
         else:
-            net_settings["classes"] = [DEFAULT_NETCLASS_DEFINITION.copy()]
+            net_settings["classes"] = [default_netclass_definition(clearance_mm)]
     else:
         net_settings["classes"] = []
 
@@ -497,7 +557,7 @@ def clear_netclass_patterns(data: dict[str, Any]) -> None:
     net_settings["netclass_patterns"] = []
 
 
-def create_minimal_project(filename: str) -> dict[str, Any]:
+def create_minimal_project(filename: str, clearance_mm: float | None = None) -> dict[str, Any]:
     """
     Create a minimal but valid KiCad project structure.
 
@@ -506,6 +566,11 @@ def create_minimal_project(filename: str) -> dict[str, Any]:
 
     Args:
         filename: The project filename (e.g., "my_project.kicad_pro")
+        clearance_mm: Clearance in mm the board is going to be routed at, for
+            the ``Default`` netclass.  ``None`` uses
+            :data:`DEFAULT_NETCLASS_CLEARANCE_MM` (the ``kct route`` default),
+            never KiCad's stock 0.20mm template value -- see that constant for
+            why (#5654).
 
     Returns:
         Project data dictionary ready to be saved with save_project()
@@ -550,7 +615,7 @@ def create_minimal_project(filename: str) -> dict[str, Any]:
             "version": 1,
         },
         "net_settings": {
-            "classes": [DEFAULT_NETCLASS_DEFINITION.copy()],
+            "classes": [default_netclass_definition(clearance_mm)],
             "meta": {"version": 3},
             "net_colors": None,
             "netclass_assignments": None,

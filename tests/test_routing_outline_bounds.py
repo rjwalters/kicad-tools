@@ -647,3 +647,47 @@ def test_closed_collinear_curve_does_not_expand_board(tmp_path, coords):
 def test_small_closed_and_open_collinear_curves_keep_bounds(coords):
     root = parse_string(f'(kicad_pcb (gr_curve (pts {coords}) (layer "Edge.Cuts")))')
     assert board_outline_bounds(root) is not None
+
+
+def test_edge_cuts_gr_poly_outline_is_not_double_counted(tmp_path):
+    """Parsing ``gr_poly`` into ``PCB.graphics`` leaves the outline alone (#5811).
+
+    #5811 taught the schema to parse board-level ``gr_poly`` (so a polygon
+    *silk* marker is visible to the silkscreen clearance checks), which added
+    ``poly`` entries to ``PCB.graphics`` -- the same collection
+    ``BoardOutline`` walks for ``gr_rect``/``gr_circle``/``gr_bezier``
+    Edge.Cuts geometry.  An Edge.Cuts ``gr_poly`` is therefore now reachable
+    from two directions, so this pins that only one of them contributes: the
+    outline is read solely by ``_edge_cuts_poly_chains_sexp``'s S-expression
+    walk, while ``BoardOutline``'s ``_graphics`` loop dispatches on
+    ``rect``/``circle``/``bezier`` and ignores the new ``poly`` entries.
+
+    A double count would show up as duplicated outline segments or a
+    perturbed bbox/origin, so those are what is asserted.
+    """
+    corners = [(68.5, 55.0), (98.5, 55.0), (98.5, 75.0), (68.5, 75.0)]
+    pts = " ".join(f"(xy {x} {y})" for x, y in corners)
+    text = _board(f'(gr_poly (pts {pts}) (layer "Edge.Cuts"))')
+    path = tmp_path / "poly_outline.kicad_pcb"
+    path.write_text(text)
+
+    pcb = PCB.load(path)
+    # The polygon IS parsed now -- that is the #5811 change under test.
+    polys = [g for g in pcb.graphics if g.graphic_type == "poly"]
+    assert len(polys) == 1
+    assert polys[0].layer == "Edge.Cuts"
+    assert polys[0].points == corners
+
+    # ...and the outline is unchanged by its presence in `graphics`.
+    assert extract_board_dimensions(path) == (30, 20)
+    assert extract_board_origin(path) == (68.5, 55.0)
+    assert pcb.board_origin == (68.5, 55.0)
+    assert pcb.board_size == (30, 20)
+    # Exactly the polygon's four edges, each appearing once.
+    assert len(pcb._edge_cuts_poly_chains_sexp()) == 1
+    edges = _extract_edge_segments(text)
+    assert len(edges) == 4
+    assert len({frozenset(edge) for edge in edges}) == 4
+
+    router, _ = load_pcb_for_routing(path, force_python=True, validate_drc=False)
+    assert router._board_bbox == (68.5, 55.0, 98.5, 75.0)

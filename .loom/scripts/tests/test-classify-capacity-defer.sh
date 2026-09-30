@@ -35,6 +35,15 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 CCD="$SCRIPTS_DIR/classify-capacity-defer.sh"
 
+# The script under test filters its comment reads through
+# `loom-daemon forge trusted-comments` (#9548), so this suite pins a real
+# daemon: FATAL, not SKIP — a missing binary would silently turn every
+# fixture marker into "absent" and the trust scenarios could not tell trust
+# from absence. See the helper.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "forge trusted-comments"
+
 # Two `..` reaches repo-root/.claude/commands/loom for an INSTALLED copy
 # (SCRIPTS_DIR is .loom/scripts there); one `..` reaches defaults/.claude/
 # commands/loom when running inside this source repo (SCRIPTS_DIR is
@@ -215,7 +224,11 @@ case "${1:-}" in
     key="$(printf '%s' "$repo#$num" | tr '/#' '__')"
     f="$STUB_DIR/issue-$key.json"
     [[ -f "$f" ]] || { echo "gh: not found" >&2; exit 1; }
-    if [[ -n "$jqexpr" ]]; then jq -c "$jqexpr" < "$f"; else cat "$f"; fi
+    # Render what `gh issue view --json comments` really returns: node ids,
+    # author.login with any App `[bot]` suffix stripped, no account type,
+    # authorAssociation. Serving the REST shape here hid the #9657 bug.
+    gql='{comments:[.comments[] | {id:("IC_" + (.id|tostring)), author:{login:(.user.login | sub("\\[bot\\]$"; ""))}, authorAssociation:.author_association, body}]}'
+    if [[ -n "$jqexpr" ]]; then jq "$gql" < "$f" | jq -c "$jqexpr"; else jq "$gql" < "$f"; fi
     ;;
   api)
     shift
@@ -272,19 +285,52 @@ chmod +x "$STUB_DIR/gh"
 
 export PATH="$STUB_DIR:$PATH"
 
-# issue_fixture <owner/repo#N> [comment-body...]
-# Each comment is auto-assigned a numeric id (1, 2, 3, ...) in call order.
-issue_fixture() {
-    local node="$1"; shift
+# issue_fixture_by <login> <type> <association> <owner/repo#N> [comment-body...]
+# Writes the issue's comment listing in the REST shape (`gh api
+# .../issues/N/comments`: user.login, user.type, author_association) -- the
+# shape a real fleet App author has its `[bot]` suffix in. Each comment is
+# auto-assigned a numeric id (1, 2, 3, ...) in call order.
+issue_fixture_by() {
+    local login="$1" type="$2" assoc="$3" node="$4"; shift 4
     local key; key="$(printf '%s' "$node" | tr '/#' '__')"
-    local comments_json="[]" id=1 c
-    for c in "$@"; do
-        comments_json="$(jq -n --argjson a "$comments_json" --arg b "$c" --argjson i "$id" \
-            '$a + [{"id":$i,"body":$b}]')"
-        id=$((id + 1))
-    done
-    jq -n --argjson c "$comments_json" '{comments:$c}' > "$STUB_DIR/issue-$key.json"
+    jq -n '{comments:[]}' > "$STUB_DIR/issue-$key.json"
+    local c
+    for c in "$@"; do append_comment "$node" "$login" "$type" "$assoc" "$c"; done
 }
+
+# append_comment <owner/repo#N> <login> <type> <association> <body>
+# Appends one REST-shaped comment (next numeric id) to an existing fixture,
+# so a single issue can mix authors.
+append_comment() {
+    local node="$1" login="$2" type="$3" assoc="$4" body="$5"
+    local key; key="$(printf '%s' "$node" | tr '/#' '__')"
+    local f="$STUB_DIR/issue-$key.json" tmp; tmp="$(mktemp)"
+    jq --arg l "$login" --arg t "$type" --arg a "$assoc" --arg b "$body" \
+        '.comments += [{"id":((.comments|length)+1),"body":$b,"user":{"login":$l,"type":$t},"author_association":$a}]' \
+        "$f" > "$tmp" && mv "$tmp" "$f"
+}
+
+# issue_fixture <owner/repo#N> [comment-body...]
+# Comments authored by the repo OWNER (an author_association
+# `comment_trust::TRUSTED_ASSOCIATIONS` believes with no roster -- #9548).
+issue_fixture() { issue_fixture_by o User OWNER "$@"; }
+
+# issue_fixture_untrusted <owner/repo#N> [comment-body...]
+# Authored by an OUTSIDER (foreign login, author_association NONE): `forge
+# trusted-comments` drops every comment, so the decision must behave exactly
+# as if the issue had no comments (#9548).
+issue_fixture_untrusted() { issue_fixture_by stranger User NONE "$@"; }
+
+# issue_fixture_fleet_app <owner/repo#N> [comment-body...]
+# Authored by one of THIS fleet's Apps, as the forge reports it: an App login
+# (`[bot]`, type Bot) whose association is CONTRIBUTOR, never an insider one.
+# `loom-fleet-dispatch` is the fleet's default App family, trusted by every
+# roster, so the fixture needs no configured roster. Only the REST listing
+# spells it as an App; `gh issue view --json comments` reduces it to the bare
+# slug, which comment_trust must treat as a user -- which is why the live read
+# has to be REST (#9657 review, live evidence on #9126: 1 of 7 markers kept
+# via `--json comments`, 7 of 7 via REST).
+issue_fixture_fleet_app() { issue_fixture_by 'loom-fleet-dispatch[bot]' Bot CONTRIBUTOR "$@"; }
 
 reset_state() {
     rm -f "$STUB_DIR"/issue-*.json "$STUB_DIR"/patches.log "$STUB_DIR/calls.log"
@@ -416,6 +462,59 @@ assert_eq "2" "$RC" "unreadable root issue exits 2"
 # =====================================================================
 # Doc pins: the Champion prose actually calls the gate
 # =====================================================================
+
+echo
+echo "--- #9548: an OUTSIDER's capacity marker does not defer ---"
+reset_state
+issue_fixture_untrusted 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+champion:capacity-defer-seen: 9"
+run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+assert_eq "1" "$RC" "exit 1 - an untrusted author's deferral marker counts as absent (#9548)"
+assert_contains "$OUT" "POST_COMMENT" "the untrusted marker does not produce SKIP_COMMENT"
+if grep -q "capacity-defer" <<<"$OUT"; then
+    fail "the untrusted marker text leaked into the posted comment"
+else
+    pass "the posted comment quotes no untrusted marker"
+fi
+
+echo
+echo "--- #9548: a TRUSTED author's capacity marker still defers ---"
+reset_state
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+champion:capacity-defer-seen: 9"
+run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+assert_eq "0" "$RC" "exit 0 - a trusted (OWNER-authored) marker still defers (#9548)"
+assert_contains "$OUT" "SKIP_COMMENT" "the trusted marker produces SKIP_COMMENT"
+
+echo
+echo "--- #9657: a FLEET APP's capacity marker (live read, REST shape) still dedupes ---"
+reset_state
+issue_fixture_fleet_app 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+<!-- champion:capacity-defer-seen:$fp_maint:1 -->"
+run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+assert_eq "0" "$RC" "exit 0 - a fleet-App-authored marker (CONTRIBUTOR, [bot]) is believed on the live path"
+assert_contains "$OUT" "SKIP_COMMENT" "the fleet App's marker produces SKIP_COMMENT, not a duplicate deferral comment"
+run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5" --apply
+assert_eq "0" "$RC" "exit 0 - --apply on the fleet App's marker still skips"
+assert_contains "$(patches_log)" "PATCH 1" "--apply bumps the fleet App's own comment"
+
+echo
+echo "--- #9657: a FOREIGN App's capacity marker counts as absent ---"
+reset_state
+issue_fixture_by 'someone-elses-loom[bot]' Bot CONTRIBUTOR 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->"
+run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5"
+assert_eq "1" "$RC" "exit 1 - another installation's App is not this fleet's"
+
+echo
+echo "--- #9657: --apply PATCHes the trusted comment, never an outsider's later copy of the marker ---"
+reset_state
+issue_fixture 'o/r#5' "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+<!-- champion:capacity-defer-seen:$fp_maint:1 -->"
+append_comment 'o/r#5' stranger User NONE "<!-- champion:capacity-defer:tier:maintenance:$fp_maint -->
+<!-- champion:capacity-defer-seen:$fp_maint:1 -->"
+run_ccd --issue 5 --repo o/r --tier tier:maintenance --occupants "$OCCUPANTS_5" --apply
+assert_eq "0" "$RC" "exit 0 - the trusted marker still dedupes"
+assert_eq "PATCH 1" "$(patches_log)" "only the trusted comment (id 1) is PATCHed; the outsider's (id 2) is left alone"
 
 echo
 echo "--- Doc pins: the Champion prose actually calls the gate ---"

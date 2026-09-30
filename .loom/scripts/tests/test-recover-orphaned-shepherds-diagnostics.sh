@@ -157,7 +157,7 @@ fi
 echo "Test 5: script header documents exit code meanings"
 header="$(sed -n '1,40p' "$RECOVER_SCRIPT")"
 for code_desc in "0 " "1 " "2 " "3 "; do
-    if echo "$header" | grep -qE "^#[[:space:]]*${code_desc}—"; then
+    if grep -qE "^#[[:space:]]*${code_desc}—" <<<"$header"; then
         pass "header documents exit code '${code_desc}—'"
     else
         fail "header does not document exit code '${code_desc}—'. Header:\n$header"

@@ -35,9 +35,23 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
+# #8191 slice: both decisions this suite is ABOUT now delegate to
+# `loom-daemon merge-pr reconcile-plan` / `merge-pr reconcile-child`. Pin the
+# binary and verify it HAS the leaf verbs — a binary carrying only the `merge-pr`
+# group predates this slice, and this seam fails OPEN, so every case below would
+# then take the "skip auto-reconciliation" path and report green having measured
+# nothing. That is exactly what the pin exists to prevent: T1-T9 are the evidence
+# the port preserved the retired shell's behaviour, so if they cannot run against
+# the port, this suite FAILS rather than skips.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr reconcile-plan" \
+    "merge-pr reconcile-child"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'   # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -73,6 +87,19 @@ assert_contains() {
         echo "    Expected substring: '$needle'"
         echo "    In: '$haystack'"
     fi
+}
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why it could not
+# survive, and what proves the property now. Counted as run so the totals stay
+# honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
 }
 
 assert_not_contains() {
@@ -181,6 +208,10 @@ if [[ "$1" == "pr" && "$2" == "list" ]]; then
     shift
   done
   safe="${base//\//_}"
+  # Recorded to a SEPARATE log from $LOG (which the comment assertions read),
+  # so T10/T11 can assert the discovery query was never made without perturbing
+  # any existing assertion.
+  echo "pr list --base $base" >> "$STUB_DIR_FROM_ENV/discovery.log"
   canned="$STUB_DIR_FROM_ENV/prlist-$safe.json"
   if [[ -f "$canned" ]]; then cat "$canned"; else echo '[]'; fi
   exit 0
@@ -223,11 +254,69 @@ clear_prlist() { rm -f "$STUB_DIR/prlist-${1//\//_}.json"; }
 
 reset_logs() {
     : > "$STUB_DIR/gh-calls.log"
+    : > "$STUB_DIR/discovery.log"
     : > "$RECON_DIR/recon-calls.log"
     unset LOOM_TEST_RECON_EXIT
 }
 read_gh_log() { cat "$STUB_DIR/gh-calls.log" 2>/dev/null || true; }
 read_recon()  { cat "$RECON_DIR/recon-calls.log" 2>/dev/null || true; }
+read_discovery() { cat "$STUB_DIR/discovery.log" 2>/dev/null || true; }
+
+# --- Fake daemons for the fail-OPEN cases (T10-T13) ---
+#
+# `loom_test_require_daemon_bin` pinned LOOM_DAEMON_SELF_BIN to a snapshot of the
+# real binary, which is what T1-T9 measure against. These let one test swap in a
+# binary that CANNOT answer, which is the disposition the seam has to survive:
+# an unanswered verb must skip, never guess, because `reconcile` force-pushes.
+FAKE_DIR="$(mktemp -d)"
+REAL_DAEMON_BIN="$LOOM_DAEMON_SELF_BIN"
+trap 'rm -rf "$FUNCS_FILE" "$STUB_DIR" "$RECON_DIR" "$FAKE_DIR" 2>/dev/null || true' EXIT
+
+# A binary predating this slice: clap rejects the unknown leaf verb with exit 2
+# and a usage message on stderr, printing NOTHING on stdout.
+cat > "$FAKE_DIR/daemon-no-verbs" <<'FAKE'
+#!/usr/bin/env bash
+echo "error: unrecognized subcommand '${3:-}'" >&2
+exit 2
+FAKE
+
+# A binary that answers `reconcile-plan` for real but cannot answer
+# `reconcile-child` — the partial-availability case that isolates the child
+# verdict, which is the one that decides whether a branch gets force-pushed.
+cat > "$FAKE_DIR/daemon-no-child" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "${2:-}" == "reconcile-child" ]]; then
+  echo "error: unrecognized subcommand 'reconcile-child'" >&2
+  exit 2
+fi
+exec "$LOOM_TEST_REAL_DAEMON" "$@"
+FAKE
+
+# A binary that exits 0 for `reconcile-child` but prints something that is not a
+# verdict. Exit status alone must not be read as consent.
+cat > "$FAKE_DIR/daemon-child-garbage" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "${2:-}" == "reconcile-child" ]]; then
+  echo "warning: token pool refreshed"
+  exit 0
+fi
+exec "$LOOM_TEST_REAL_DAEMON" "$@"
+FAKE
+
+chmod +x "$FAKE_DIR"/daemon-*
+export LOOM_TEST_REAL_DAEMON="$REAL_DAEMON_BIN"
+
+# Run one call with the daemon pinned to a fake, then restore. Explicit
+# save/restore rather than an assignment-prefixed call: whether those persist
+# past a FUNCTION invocation differs between bash's posix and default modes, and
+# a leaked pin would silently un-pin every test after it.
+with_daemon() {
+    local fake="$1" saved_self="${LOOM_DAEMON_SELF_BIN:-}" saved_bin="${LOOM_DAEMON_BIN:-}" rc=0
+    export LOOM_DAEMON_SELF_BIN="$fake" LOOM_DAEMON_BIN="$fake"
+    _auto_reconcile_stacked_children || rc=$?
+    export LOOM_DAEMON_SELF_BIN="$saved_self" LOOM_DAEMON_BIN="$saved_bin"
+    return "$rc"
+}
 
 echo "Testing _auto_reconcile_stacked_children behavior..."
 
@@ -334,6 +423,119 @@ _auto_reconcile_stacked_children
 assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
   "No pre-merge snapshot -> falls back to the live post-merge query (unchanged behavior)"
 
+# --- T10-T13 (#8191 slice): the seam fails OPEN, and silence is never a route ---
+#
+# Both decisions now come from `loom-daemon merge-pr reconcile-plan` /
+# `reconcile-child`. T1-T9 above prove the port agrees with the retired shell
+# when the daemon answers. These prove what happens when it CANNOT — the case
+# that did not exist before this slice and is the only one that can turn a
+# missing binary into a `git rebase --onto` + `push --force-with-lease` over a
+# branch a Builder still has checked out.
+#
+# The rule being pinned: `reconcile` is reachable ONLY through a positive
+# LOOM-RECONCILE-CHILD verdict. No output, a non-zero exit, and a zero exit with
+# unrecognised output must all skip.
+
+# T10: a daemon predating the slice cannot answer the PLAN. Skip the whole pass
+# — and, because an unanswered gate is indistinguishable from NOT-STACKED, do it
+# BEFORE spending a `gh pr list` on a rollup nothing will read.
+reset_logs
+PR_BRANCH="feature/issue-100"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+unset STACKED_CHILDREN_JSON 2>/dev/null || true
+rc=0
+with_daemon "$FAKE_DIR/daemon-no-verbs" 2>/dev/null || rc=$?
+assert_eq "0" "$rc" "Unanswerable reconcile-plan -> still returns 0 (the merge already happened)"
+assert_eq "" "$(read_recon)" "Unanswerable reconcile-plan -> reconcile-stack.sh NOT invoked"
+assert_eq "" "$(read_gh_log)" "Unanswerable reconcile-plan -> no comment posted"
+assert_eq "" "$(read_discovery)" \
+  "Unanswerable reconcile-plan -> the gate skips BEFORE the gh pr list discovery query"
+
+# T11: the same, with a pre-merge snapshot already in hand — the skip must not
+# depend on which rollup source was used.
+reset_logs
+PR_BRANCH="feature/issue-100"
+STACKED_CHILDREN_JSON='[{"number":501,"headRefName":"feature/issue-201"}]'
+with_daemon "$FAKE_DIR/daemon-no-verbs" 2>/dev/null || true
+assert_eq "" "$(read_recon)" \
+  "Unanswerable reconcile-plan with a pre-merge snapshot -> still no reconcile (a snapshot is not a verdict)"
+unset STACKED_CHILDREN_JSON
+
+# T12: the plan is answered but the CHILD verdict is not. The child that WOULD
+# have reconciled must be skipped instead: not knowing whether issue #201 is
+# still claimed is not the same as knowing it is not.
+reset_logs
+PR_BRANCH="feature/issue-100"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+unset STACKED_CHILDREN_JSON 2>/dev/null || true
+with_daemon "$FAKE_DIR/daemon-no-child" 2>/dev/null || true
+assert_eq "" "$(read_recon)" \
+  "Unanswerable reconcile-child -> the safe-looking child is NOT force-pushed on a guess"
+assert_eq "" "$(read_gh_log)" \
+  "Unanswerable reconcile-child -> no deferral comment either (an unknown verdict is not a deferral)"
+
+# T13: exit 0 is not consent. A daemon that succeeds but prints something other
+# than a verdict — a warning line, a truncated write — must still skip.
+reset_logs
+PR_BRANCH="feature/issue-100"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+with_daemon "$FAKE_DIR/daemon-child-garbage" 2>/dev/null || true
+assert_eq "" "$(read_recon)" \
+  "reconcile-child exiting 0 with a non-verdict -> still no reconcile (status alone is not consent)"
+
+# T14: the pin is restored — every later assertion, and every rerun of T1-T9,
+# must still be measuring the real binary rather than a leaked fake.
+reset_logs
+PR_BRANCH="feature/issue-100"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+_auto_reconcile_stacked_children
+assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
+  "The real daemon pin survives the fail-open cases (no leaked LOOM_DAEMON_SELF_BIN)"
+
+# --- T15-T17 (#1298): feature/harness-ops-<N> is a stackable parent too ---
+#
+# Both decisions (the parent-branch gate in `reconcile-plan`, the child-issue
+# derivation in `reconcile-child`) route through `reconcile::issue_from_branch`
+# (loom-daemon/src/merge_pr/reconcile.rs), which now recognizes
+# `feature/harness-ops-<N>` (2AMLogic/harness-ops's Builder convention)
+# alongside `feature/issue-<N>` — mirroring `stacked_children::
+# is_stackable_parent_branch`'s allow-list so the pre-merge and post-merge
+# gates can never disagree. Before this, a harness-ops parent merge silently
+# skipped stacked-child reconciliation and stranded open children
+# (harness-ops#283, #356). These exercise the real daemon binary end-to-end
+# through the shell functions under test, same as T1-T9.
+
+# T15: a feature/harness-ops-<N> parent with an open, unclaimed child ->
+# reconcile-stack.sh invoked.
+reset_logs
+PR_BRANCH="feature/harness-ops-350"
+write_prlist "feature/harness-ops-350" '[{"number":601,"headRefName":"feature/harness-ops-201"}]'
+_auto_reconcile_stacked_children
+assert_contains "$(read_recon)" "reconcile-stack.sh 601 feature/harness-ops-350" \
+  "feature/harness-ops-N parent with an open child -> reconcile-stack.sh invoked (#1298)"
+assert_eq "" "$(read_gh_log)" "harness-ops safe child (issue #201 not building) -> no deferred comment"
+
+# T16: a feature/harness-ops-<N> CHILD whose issue is loom:building is
+# recognized as claimed and deferred, not rebased out from under a live Builder.
+reset_logs
+PR_BRANCH="feature/harness-ops-350"
+write_prlist "feature/harness-ops-350" '[{"number":602,"headRefName":"feature/harness-ops-202"}]'
+_auto_reconcile_stacked_children
+assert_eq "" "$(read_recon)" "harness-ops child #602 (issue #202 building) -> reconcile-stack.sh NOT invoked"
+assert_contains "$(read_gh_log)" "issue comment 602 --repo owner/repo" \
+  "harness-ops building child -> deferred-reconciliation comment posted on PR #602"
+
+# T17: the generalized match stays strict/anchored — near-miss parent branches
+# are still NOT-STACKED.
+reset_logs
+for b in "feature/harness-ops-" "feature/harness-ops-350-extra" "feature/harness-ops-350/sub" \
+         "feature/issue-100-extra" "feature/other-350"; do
+  write_prlist "$b" '[{"number":603,"headRefName":"feature/issue-201"}]'
+  PR_BRANCH="$b"
+  _auto_reconcile_stacked_children
+done
+assert_eq "" "$(read_recon)" "Non-matching near-miss parent branches -> reconcile skipped"
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."
@@ -346,8 +548,10 @@ assert_contains "$src" 'gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --stat
   "merge-pr.sh discovers children via a live forge query, not the daemon registry"
 assert_contains "$src" 'local children_json="${STACKED_CHILDREN_JSON:-}"' \
   "merge-pr.sh's post-merge reconcile prefers the pre-merge STACKED_CHILDREN_JSON snapshot (#8010 item 2)"
-assert_contains "$src" "grep -qx 'loom:building'" \
-  "merge-pr.sh gates safe/unsafe on the child issue's loom:building label"
+retired "source grep for \"grep -qx 'loom:building'\" in merge-pr.sh" \
+  "safe/unsafe is gated on the child issue's loom:building label, matched as a WHOLE LINE (grep -qx) so a different label that merely contains the name cannot authorise a deferral or a rebase" \
+  "the grep is gone — the gate is loom-daemon merge-pr reconcile-child (merge_pr::reconcile::child_route), so there is no grep invocation in merge-pr.sh left to assert the flags of, and a source grep for one can only ever fail" \
+  "T3/T7 above still prove the label DECIDES the route end-to-end through the real binary; merge_pr::reconcile::tests::the_claim_match_is_whole_line_not_substring pins the -x half against loom:building-paused, ' loom:building', 'LOOM:BUILDING' and 'loom:build'; and merge_pr_reconcile_differential.rs replays a label corpus against the frozen retired grep -qx itself"
 assert_contains "$src" '"$SCRIPT_DIR/reconcile-stack.sh" "$child_pr" "$parent_branch"' \
   "merge-pr.sh reuses reconcile-stack.sh unmodified (no inline rebase logic)"
 assert_contains "$src" 'forge_gh_comment_rl_safe "$REPO_NWO" "$child_pr" "$comment"' \

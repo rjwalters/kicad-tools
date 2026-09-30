@@ -61,6 +61,12 @@ _KNOWN_REJECTION_KEYS = {
     "via_trace_blocked_p",
     "via_trace_blocked_n",
     "corridor",
+    # Epic #5509 Phase 3c (#5662): the kernel-backed rail gate.  It existed
+    # before as an unnamed fixed-fill guard that silently ``continue``d, so a
+    # frontier pruned by copper never showed up in the histogram at all --
+    # which is the same blind spot #4459 was filed about, one guard over.
+    "rail_clear_p",
+    "rail_clear_n",
 }
 
 

@@ -206,7 +206,6 @@ make_fixture_repo() {
   printf '[workspace]\nmembers = ["loom-daemon", "loom-api"]\nresolver = "2"\n\n[workspace.package]\nversion = "%s"\n' "$version" > "$dir/Cargo.toml"
   printf '[package]\nname = "loom-daemon"\nversion.workspace = true\n' > "$dir/loom-daemon/Cargo.toml"
   printf '[package]\nname = "loom-api"\nversion.workspace = true\n' > "$dir/loom-api/Cargo.toml"
-  printf '**Loom Version**: %s\n' "$version" > "$dir/CLAUDE.md"
   printf '%s\n' "$version" > "$dir/VERSION"
   cat > "$dir/Cargo.lock" <<EOF
 [[package]]
@@ -303,7 +302,6 @@ make_rebase_base() {
   printf '[workspace]\nmembers = ["loom-daemon", "loom-api"]\nresolver = "2"\n\n[workspace.package]\nversion = "%s"\n' "$version" > "$dir/Cargo.toml"
   printf '[package]\nname = "loom-daemon"\nversion.workspace = true\n' > "$dir/loom-daemon/Cargo.toml"
   printf '[package]\nname = "loom-api"\nversion.workspace = true\n' > "$dir/loom-api/Cargo.toml"
-  printf '**Loom Version**: %s\n' "$version" > "$dir/CLAUDE.md"
   printf '%s\n' "$version" > "$dir/VERSION"
   cat > "$dir/Cargo.lock" <<EOF
 [[package]]
@@ -348,7 +346,6 @@ bump_version_files() {
   local dir="$1" old="$2" new="$3"
   sed -i.bak "s/\"version\": \"$old\"/\"version\": \"$new\"/" "$dir/package.json" "$dir/mcp-loom/package.json"
   sed -i.bak "s/version = \"$old\"/version = \"$new\"/" "$dir/Cargo.toml"
-  sed -i.bak "s/\*\*Loom Version\*\*: $old/\*\*Loom Version\*\*: $new/" "$dir/CLAUDE.md"
   printf '%s\n' "$new" > "$dir/VERSION"
   sed -i.bak "s/version = \"$old\"/version = \"$new\"/g" "$dir/Cargo.lock"
   sed -i.bak "s/\"version\": \"$old\"/\"version\": \"$new\"/g" "$dir/mcp-loom/package-lock.json"

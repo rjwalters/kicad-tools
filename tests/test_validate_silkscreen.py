@@ -17,13 +17,31 @@ plus the check and counting-model change from issue #4612:
   producer for the already-wired ``silk_overlap`` violation type.
 
 All emit ``severity="warning"`` so they do not block the manufacturing gate.
+
+plus the polygon-geometry fix from issue #5811:
+
+- ``_stroke_geometry`` models ``fp_poly`` / ``gr_poly`` silk in BOTH fill
+  states (see ``TestSilkPolygonGeometry`` and the native-parity pair
+  ``test_kct_poly_silk_floor_matches_measured_contract`` /
+  ``test_native_poly_silk_floor_parity``).  Before the fix every polygon
+  returned ``None``, so a filled pin-1 marker contributed no geometry at all
+  and a real native ``silk_over_copper`` violation was invisible to kct.
+- ``check_silk_coverage`` reports the primitives still NOT modeled
+  (circle/arc) as ``info`` findings, so an omitted shape is visible as
+  incomplete coverage instead of reading as a clean board
+  (``TestSilkGeometryCoverage``).
 """
 
 from __future__ import annotations
 
+import json
+import subprocess
+from pathlib import Path
+
 import pytest
 
-from kicad_tools.manufacturers import get_profile
+from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.manufacturers import get_profile, write_drc_constraints
 from kicad_tools.schema.pcb import (
     PCB,
     BoardGraphic,
@@ -34,10 +52,14 @@ from kicad_tools.schema.pcb import (
     GraphicText,
     Pad,
 )
-from kicad_tools.sexp import SExp
+from kicad_tools.sexp import SExp, parse_string
+from kicad_tools.validate.rules.factory_clearance import check_silk_pad_clearance
 from kicad_tools.validate.rules.silkscreen import (
     SILK_EDGE_CLEARANCE_MM,
+    SILK_GEOMETRY_UNMODELED_RULE_ID,
+    _stroke_geometry,
     check_all_silkscreen,
+    check_silk_coverage,
     check_silk_edge_clearance,
     check_silk_over_copper,
     check_silk_overlap,
@@ -1354,3 +1376,761 @@ def test_clean_boards_no_false_positives(rel_path):
     edge = check_silk_edge_clearance(pcb, rules)
     assert len(over) == 0
     assert len(edge) == 0
+
+
+# ---------------------------------------------------------------------------
+# Polygon silk geometry (#5811)
+# ---------------------------------------------------------------------------
+#
+# Before #5811 ``_stroke_geometry`` returned ``None`` for every graphic type
+# other than line/rect, so ``fp_poly`` / ``gr_poly`` silk -- the shape KiCad
+# footprint libraries use for pin-1 and polarity markers -- contributed NO
+# geometry to any of the four silk clearance checks.  A filled pin-1 triangle
+# 0.1052 mm from a pad on a real board was therefore reported clean by kct
+# while native KiCad DRC reported a ``silk_over_copper`` error.
+#
+# Both fill states are modeled because they print different shapes, and the
+# difference is measurable with native KiCad DRC (kicad-cli 10.0.6, JLCPCB
+# ``Silk to Pad`` rule at the 0.15 mm floor; see ``_POLY_FLOOR_CASES`` and
+# ``test_native_poly_silk_floor_parity``):
+#
+#   polygon ring drawn AROUND a pad, (fill no), stroke 0.15 -> 0 findings
+#   the same ring with (fill yes)                           -> 1, actual 0.0000 mm
+#
+# i.e. an unfilled outline leaves its interior blank (a pad inside it is not
+# covered), while a filled one prints the whole interior.
+
+
+def _silk_poly(
+    *,
+    points: list[tuple[float, float]],
+    layer: str = "F.SilkS",
+    stroke_width: float = 0.15,
+    fill: str = "yes",
+    uuid: str = "",
+) -> FootprintGraphic:
+    return FootprintGraphic(
+        graphic_type="poly",
+        layer=layer,
+        stroke_width=stroke_width,
+        points=list(points),
+        fill=fill,
+        uuid=uuid,
+    )
+
+
+#: A square ring of vertices centred on the footprint origin, comfortably
+#: outside a 2x2 mm pad placed there: the ring's own outline never touches the
+#: pad, so only the *filled* interpretation covers it.
+_RING_AROUND_ORIGIN = [(-3.0, -3.0), (3.0, -3.0), (3.0, 3.0), (-3.0, 3.0)]
+
+#: A triangle that straddles the footprint origin -- overlaps a pad there
+#: under either fill state.
+_TRIANGLE_OVER_ORIGIN = [(-1.5, -1.5), (1.5, 0.0), (-1.5, 1.5)]
+
+
+class TestSilkPolygonGeometry:
+    def test_filled_zero_stroke_poly_over_pad_flags(self):
+        """A filled polygon with ``(stroke (width 0))`` is real ink.
+
+        The exact regression: the pre-#5811 zero-width early return dropped
+        this shape even before the graphic-type gate would have, and a filled
+        marker with no outline stroke is the most common pin-1 triangle in
+        KiCad's libraries.
+        """
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[_silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0)],
+            )
+        )
+
+        results = check_silk_over_copper(pcb, _rules())
+        assert len(results) == 1
+        assert "fp_poly" in results.violations[0].items[0]
+
+    def test_unfilled_stroked_poly_outline_over_pad_flags(self):
+        """An unfilled polygon whose outline crosses a pad is flagged."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[
+                    _silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.3, fill="no"),
+                ],
+            )
+        )
+
+        results = check_silk_over_copper(pcb, _rules())
+        assert len(results) == 1
+        assert "fp_poly" in results.violations[0].items[0]
+
+    def test_unfilled_poly_interior_does_not_cover_pad(self):
+        """A pad inside an UNFILLED ring is not covered -- native agrees.
+
+        Measured: kicad-cli 10.0.6 reports zero ``Silk to Pad`` findings for
+        this shape (``ring_unfilled``).  Modeling an unfilled polygon as a
+        solid area would turn every courtyard-style polygon outline into a
+        false positive over the part's own pads.
+        """
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[_silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.15, fill="no")],
+            )
+        )
+
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_filled_poly_interior_does_cover_pad(self):
+        """The same ring, FILLED, covers the pad -- native agrees (actual 0.0mm)."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[_silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.15, fill="yes")],
+            )
+        )
+
+        assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+    @pytest.mark.parametrize("fill", ["yes", "solid", "true"])
+    def test_filled_fill_tokens(self, fill):
+        """KiCad 7+ ``yes`` and the legacy ``solid`` spelling both mean filled.
+
+        Both appear in this repository's committed boards (``(fill yes)`` on
+        board 04, ``(fill solid)`` in ``tests/fixtures/pin1_marker.kicad_pcb``).
+        """
+        graphic = _silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.0, fill=fill)
+        assert graphic.is_filled is True
+        assert _stroke_geometry(graphic, None) is not None
+
+    @pytest.mark.parametrize("fill", ["no", "none", ""])
+    def test_unfilled_fill_tokens_with_zero_stroke_print_nothing(self, fill):
+        """Unfilled AND unstroked prints no ink at all, so there is no geometry."""
+        graphic = _silk_poly(points=_RING_AROUND_ORIGIN, stroke_width=0.0, fill=fill)
+        assert graphic.is_filled is False
+        assert _stroke_geometry(graphic, None) is None
+
+    @pytest.mark.parametrize("points", [[], [(0.0, 0.0)], [(0.0, 0.0), (1.0, 0.0)]])
+    def test_degenerate_poly_is_skipped(self, points):
+        """Fewer than three vertices cannot bound an area; skip, do not raise."""
+        graphic = _silk_poly(points=points, stroke_width=0.15, fill="yes")
+        assert _stroke_geometry(graphic, None) is None
+
+    def test_self_intersecting_poly_is_repaired_not_raised(self):
+        """A bow-tie polygon yields usable geometry instead of an exception."""
+        bowtie = [(-1.0, -1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0)]
+        geom = _stroke_geometry(_silk_poly(points=bowtie, stroke_width=0.0), None)
+        assert geom is not None
+        assert geom.area > 0.0
+
+    @pytest.mark.parametrize("rotation", [0.0, 90.0, 180.0, 270.0, 37.0])
+    def test_footprint_rotation_transforms_poly_vertices(self, rotation):
+        """A marker over a pad stays over it at every footprint rotation.
+
+        Pad and polygon share the same footprint-local frame, so the rotation
+        maps both the same way -- the assertion fails if the poly branch skips
+        the ``xf`` transform (a plausible copy/paste slip, since the vertices
+        are the only coordinates in this branch).
+        """
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                rotation=rotation,
+                pads=[_smd_pad(position=(2.0, 1.0), size=(2.0, 2.0))],
+                graphics=[
+                    _silk_poly(
+                        points=[(1.0, 0.0), (3.0, 0.0), (3.0, 2.0), (1.0, 2.0)],
+                        stroke_width=0.0,
+                    )
+                ],
+            )
+        )
+
+        assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+    def test_rotated_poly_geometry_matches_manual_rotation(self):
+        """The transformed polygon's vertices land where the fp transform says.
+
+        A count assertion alone cannot distinguish "rotation applied" from
+        "rotation applied with the wrong sign" for a symmetric shape, so this
+        pins the actual coordinates: under KiCad's negated-angle convention
+        (the one ``_fp_transform`` implements) a 90-degree footprint at
+        ``(10, 10)`` maps local ``(1, 0)`` to board ``(10, 9)`` -- the
+        opposite y direction from a naive positive-angle rotation.
+        """
+        footprint = _make_footprint(
+            position=(10.0, 10.0),
+            rotation=90.0,
+            graphics=[_silk_poly(points=[(1.0, 0.0), (2.0, 0.0), (2.0, 1.0)], stroke_width=0.0)],
+        )
+        from kicad_tools.validate.rules.silkscreen import _fp_transform
+
+        geom = _stroke_geometry(footprint.graphics[0], _fp_transform(footprint))
+        assert geom is not None
+        corners = {(round(x, 6), round(y, 6)) for x, y in geom.exterior.coords}
+        assert corners == {(10.0, 9.0), (10.0, 8.0), (11.0, 8.0)}
+
+    def test_back_side_poly_not_checked_against_front_copper(self):
+        """A B.SilkS polygon does not collide with F.Cu-only SMD copper."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                layer="F.Cu",
+                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[
+                    _silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0, layer="B.SilkS")
+                ],
+            )
+        )
+
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_back_side_poly_is_checked_against_thru_hole_copper(self):
+        """...but a thru-hole aperture is exposed on both sides, so it fires."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                layer="F.Cu",
+                pads=[_thru_hole_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[
+                    _silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0, layer="B.SilkS")
+                ],
+            )
+        )
+
+        results = check_silk_over_copper(pcb, _rules())
+        assert len(results) == 1
+        assert results.violations[0].layer == "B.SilkS"
+
+    def test_poly_participates_in_silk_overlap_with_uuid_attribution(self):
+        """A filled marker over a refdes is a ``silk_overlap`` pair, UUID-tagged."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                reference="U1",
+                texts=[_ref_text(text="U1", position=(0.0, 0.0))],
+                graphics=[
+                    _silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0, uuid="poly-uuid")
+                ],
+            )
+        )
+
+        results = check_silk_overlap(pcb, _rules())
+        assert len(results) == 1
+        assert {results.violations[0].items[0], results.violations[0].items[1]} == {
+            "U1 (reference)",
+            "U1 (fp_poly) {poly-uuid}",
+        }
+
+    def test_poly_participates_in_silk_edge_clearance(self):
+        """A filled marker straddling Edge.Cuts is flagged; moved inboard it is not."""
+        pcb = _empty_pcb()
+        _square_outline(pcb)
+        footprint = _make_footprint(
+            position=(0.0, 10.0),
+            graphics=[_silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0)],
+        )
+        pcb._footprints.append(footprint)
+
+        assert len(check_silk_edge_clearance(pcb, _rules())) == 1
+
+        footprint.position = (10.0, 10.0)
+        assert len(check_silk_edge_clearance(pcb, _rules())) == 0
+
+    def test_board_level_gr_poly_is_parsed_and_checked(self):
+        """``gr_poly`` silk is parsed into ``PCB.graphics`` and checked (#5811).
+
+        Board-level polygons were previously not parsed *at all*, so the
+        ``_stroke_geometry(board_graphic, None)`` call site could never see
+        one no matter what the geometry helper did.  Built from real
+        S-expression text so the schema path is what is under test.
+        """
+        pcb = PCB(
+            parse_string(
+                """(kicad_pcb
+    (version 20240108)
+    (generator "pcbnew")
+    (setup (pad_to_mask_clearance 0))
+    (net 0 "")
+    (gr_poly
+        (pts (xy 9 9) (xy 11 9) (xy 11 11) (xy 9 11))
+        (stroke (width 0) (type solid))
+        (fill yes)
+        (layer "F.SilkS")
+        (uuid "00000000-0000-0000-0000-0000000000aa"))
+)"""
+            )
+        )
+
+        polys = [g for g in pcb.graphics if g.graphic_type == "poly"]
+        assert len(polys) == 1
+        assert polys[0].points == [(9.0, 9.0), (11.0, 9.0), (11.0, 11.0), (9.0, 11.0)]
+        assert polys[0].fill == "yes"
+        assert polys[0].is_filled is True
+        assert polys[0].uuid == "00000000-0000-0000-0000-0000000000aa"
+        # A gr_poly has no (start ...) node; consumers that report
+        # ``graphic.start`` as the element's location get its first vertex
+        # rather than the board origin.
+        assert polys[0].start == (9.0, 9.0)
+
+        pcb._footprints.append(
+            _make_footprint(position=(10.0, 10.0), pads=[_smd_pad(position=(0.0, 0.0))])
+        )
+        results = check_silk_over_copper(pcb, _rules())
+        assert len(results) == 1
+        assert "gr_poly" in results.violations[0].items[0]
+
+    def test_unfilled_gr_poly_parses_fill_token(self):
+        """``(fill no)`` on a board polygon resolves to not-filled."""
+        pcb = PCB(
+            parse_string(
+                """(kicad_pcb
+    (version 20240108)
+    (generator "pcbnew")
+    (net 0 "")
+    (gr_poly
+        (pts (xy 0 0) (xy 2 0) (xy 2 2))
+        (stroke (width 0.15) (type solid))
+        (fill no)
+        (layer "F.SilkS"))
+)"""
+            )
+        )
+        poly = next(g for g in pcb.graphics if g.graphic_type == "poly")
+        assert poly.fill == "no"
+        assert poly.is_filled is False
+
+
+# ---------------------------------------------------------------------------
+# Silk geometry coverage: unmodeled primitives stay visible (#5811)
+# ---------------------------------------------------------------------------
+
+
+def _silk_circle(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
+    return FootprintGraphic(
+        graphic_type="circle",
+        layer=layer,
+        stroke_width=0.12,
+        center=(0.0, 0.0),
+        end=(0.5, 0.0),
+        fill="yes",
+        uuid=uuid,
+    )
+
+
+def _silk_arc(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
+    graphic = FootprintGraphic(
+        graphic_type="arc",
+        layer=layer,
+        stroke_width=0.12,
+        start=(-1.0, 0.0),
+        end=(1.0, 0.0),
+        uuid=uuid,
+    )
+    graphic.mid = (0.0, 1.0)
+    return graphic
+
+
+class TestSilkGeometryCoverage:
+    def test_circle_is_reported_as_unmodeled_not_clean(self):
+        """A silk circle over a pad: zero clearance findings, one coverage info.
+
+        This is the whole point of the rule.  ``check_silk_over_copper`` cannot
+        see the circle (the geometry model has no circle branch), and the
+        pre-#5811 behaviour was to say nothing at all -- indistinguishable
+        from "checked and clean".  The ``info`` finding makes the gap a
+        reported fact.
+        """
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
+                graphics=[_silk_circle(uuid="circle-uuid")],
+            )
+        )
+
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+        coverage = check_silk_coverage(pcb, _rules())
+        assert len(coverage) == 1
+        violation = coverage.violations[0]
+        assert violation.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID
+        assert violation.severity == "info"
+        assert violation.items == ("U1 (fp_circle) {circle-uuid}",)
+        assert violation.layer == "F.SilkS"
+        assert "circle" in violation.message
+
+    def test_arc_is_reported_as_unmodeled(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(graphics=[_silk_arc(uuid="arc-uuid")]))
+
+        coverage = check_silk_coverage(pcb, _rules())
+        assert len(coverage) == 1
+        assert coverage.violations[0].items == ("U1 (fp_arc) {arc-uuid}",)
+
+    def test_coverage_item_omits_uuid_suffix_when_unset(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(graphics=[_silk_circle()]))
+
+        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_circle)",)
+
+    @pytest.mark.parametrize("layer", ["F.Fab", "F.CrtYd", "F.Cu"])
+    def test_non_silk_layer_shapes_are_not_reported(self, layer):
+        """Coverage is a statement about SILK geometry only."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(graphics=[_silk_circle(layer=layer)]))
+
+        assert len(check_silk_coverage(pcb, _rules())) == 0
+
+    def test_modeled_primitives_produce_no_coverage_finding(self):
+        """line / rect / poly are modeled, so they are not reported as gaps."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_line(start=(0.0, 0.0), end=(1.0, 0.0)),
+                    FootprintGraphic(
+                        graphic_type="rect",
+                        layer="F.SilkS",
+                        stroke_width=0.15,
+                        start=(0.0, 0.0),
+                        end=(1.0, 1.0),
+                    ),
+                    _silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0),
+                ]
+            )
+        )
+
+        assert len(check_silk_coverage(pcb, _rules())) == 0
+
+    def test_board_level_unmodeled_graphic_is_reported(self):
+        pcb = _empty_pcb()
+        pcb._graphics.append(
+            BoardGraphic(
+                graphic_type="circle",
+                layer="F.SilkS",
+                stroke_width=0.12,
+                start=(5.0, 5.0),
+                center=(5.0, 5.0),
+                end=(5.5, 5.0),
+                uuid="gr-circle-uuid",
+            )
+        )
+
+        coverage = check_silk_coverage(pcb, _rules())
+        assert len(coverage) == 1
+        assert coverage.violations[0].items == ("gr_circle {gr-circle-uuid}",)
+
+    def test_coverage_reachable_through_check_all_silkscreen(self):
+        """``kct check --only silkscreen`` surfaces the coverage advisory."""
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(graphics=[_silk_circle(uuid="circle-uuid")]))
+
+        results = check_all_silkscreen(pcb, _rules())
+        unmodeled = [v for v in results.violations if v.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID]
+        assert len(unmodeled) == 1
+        assert unmodeled[0].severity == "info"
+        # An advisory about kct's own model must never fail the gate.
+        assert results.error_count == 0
+
+    def test_coverage_advisory_is_categorized_as_advisory(self):
+        """The new rule id must not default into the fab-blocking bucket.
+
+        ``category_for_rule`` files unknown ids under Manufacturing, which
+        would present a statement about kct's own coverage as a fab defect.
+        """
+        from kicad_tools.validate.checker import DRCChecker
+
+        assert (
+            DRCChecker.category_for_rule(SILK_GEOMETRY_UNMODELED_RULE_ID)
+            == DRCChecker.CATEGORY_ADVISORY
+        )
+
+    def test_committed_board_02_arc_is_reported(self):
+        """Board 02's one F.SilkS ``fp_arc`` is the real-fleet instance."""
+        import os
+
+        path = os.path.join(
+            _BOARD_ROOT, "02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
+        )
+        if not os.path.exists(path):
+            pytest.skip(f"board fixture not present: {path}")
+
+        coverage = check_silk_coverage(PCB.load(path), _rules())
+        assert len(coverage) == 1
+        assert "fp_arc" in coverage.violations[0].items[0]
+
+
+# ---------------------------------------------------------------------------
+# Native parity: a polygon marker straddling the 0.15 mm silk-to-pad floor
+# ---------------------------------------------------------------------------
+#
+# The reduced version of the Chorus U10 witness in #5811: one masked 1x1 mm SMD
+# pad and one polygon marker whose printed ink sits a known distance from that
+# pad's copper.  ``kicad-cli pcb drc`` is the referee via the JLCPCB
+# ``Silk to Pad`` rule emitted by ``write_drc_constraints`` (the #5059
+# measurement established that the project-level ``min_silk_clearance`` key
+# does NOT gate a sub-floor gap -- the explicit .kicad_dru rule does).
+#
+# Measured on kicad-cli 10.0.6 (2026-09-30), and asserted in both directions so
+# the threshold itself is pinned rather than merely proving the rule is noisy:
+#
+#   filled,   stroke 0.00, gap 0.085 -> 1 finding, "actual 0.0850 mm"
+#   filled,   stroke 0.00, gap 0.160 -> 0 findings
+#   unfilled, stroke 0.15, gap 0.085 -> 1 finding, "actual 0.0850 mm"
+#   unfilled, stroke 0.15, gap 0.160 -> 0 findings
+#   filled,   stroke 0.00, gap 0.085, footprint rotated -90 -> 1, "0.0850 mm"
+#
+# Native echoes the fixture's own ``(uuid ...)`` for the offending polygon, so
+# the UUID attribution is compared item-for-item rather than assumed.
+
+#: JLCPCB's published silkscreen-to-pad floor (mm).
+_SILK_PAD_FLOOR_MM = 0.15
+
+#: The polygon's UUID in the probe fixture.  Must be UUID-shaped: kicad-cli
+#: replaces a non-conforming id with a generated one, which would make the
+#: attribution comparison below vacuous.
+_PROBE_POLY_UUID = "00000000-0000-0000-0000-0000000000aa"
+
+# (id, gap_mm, filled, stroke_width, footprint_rotation, expected_finding)
+_POLY_FLOOR_CASES = [
+    ("filled-zero-stroke-below-floor", 0.085, True, 0.0, 0.0, True),
+    ("filled-zero-stroke-above-floor", 0.16, True, 0.0, 0.0, False),
+    ("unfilled-stroked-below-floor", 0.085, False, 0.15, 0.0, True),
+    ("unfilled-stroked-above-floor", 0.16, False, 0.15, 0.0, False),
+    ("filled-rotated-below-floor", 0.085, True, 0.0, -90.0, True),
+]
+
+
+def _write_poly_floor_probe(
+    path: Path,
+    *,
+    gap_mm: float,
+    filled: bool,
+    stroke_width: float,
+    rotation: float,
+) -> Path:
+    """One masked SMD pad and one triangular silk polygon ``gap_mm`` from it.
+
+    The pad is 1x1 mm at the footprint origin with ``pad_to_mask_clearance 0``,
+    so its copper (and mask aperture) edge is at local ``x = 0.5``.  The
+    polygon's near edge is the segment at local ``x``; whichever fill state is
+    in force, the printed ink starts ``stroke_width / 2`` inboard of it (a
+    filled polygon is dilated by the stroke, an unfilled one is the buffered
+    ring), so placing the vertices at ``0.5 + gap + stroke_width / 2`` puts the
+    ink exactly ``gap_mm`` from the copper in both cases.
+
+    The reference designator lives on F.Fab deliberately: a silk refdes would
+    add findings of its own and blur the single-pair assertion.
+    """
+    near = 0.5 + gap_mm + stroke_width / 2.0
+    pts = " ".join(f"(xy {x} {y})" for x, y in [(near, -0.3), (near + 0.6, 0.0), (near, 0.3)])
+    path.write_text(
+        f"""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user) (37 "F.SilkS" user)
+   (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user) (49 "F.Fab" user))
+  (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A")
+  (gr_rect (start 0 0) (end 20 20) (stroke (width .1) (type default))
+   (fill none) (layer "Edge.Cuts"))
+  (footprint "Probe:Probe" (layer "F.Cu") (at 10 10 {rotation})
+    (uuid "00000000-0000-0000-0000-00000000000f")
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-0000000000ef")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (fp_poly (pts {pts})
+      (stroke (width {stroke_width}) (type solid))
+      (fill {"yes" if filled else "no"})
+      (layer "F.SilkS")
+      (uuid "{_PROBE_POLY_UUID}"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "A"))))
+"""
+    )
+    return path
+
+
+def _factory_rules():
+    return get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+
+
+@pytest.mark.parametrize(
+    "gap_mm,filled,stroke_width,rotation,expected",
+    [case[1:] for case in _POLY_FLOOR_CASES],
+    ids=[case[0] for case in _POLY_FLOOR_CASES],
+)
+def test_kct_poly_silk_floor_matches_measured_contract(
+    tmp_path, gap_mm, filled, stroke_width, rotation, expected
+):
+    """kct reports the polygon marker exactly where native DRC does.
+
+    Runs with no native CLI required, so the measured contract is guarded on
+    every machine; ``test_native_poly_silk_floor_parity`` re-derives the same
+    table from kicad-cli when it is installed.
+    """
+    rules = _factory_rules()
+    assert rules.min_silk_to_pad_clearance_mm == _SILK_PAD_FLOOR_MM
+
+    pcb = PCB.load(
+        _write_poly_floor_probe(
+            tmp_path / "probe.kicad_pcb",
+            gap_mm=gap_mm,
+            filled=filled,
+            stroke_width=stroke_width,
+            rotation=rotation,
+        )
+    )
+    results = check_silk_pad_clearance(pcb, rules)
+
+    assert bool(results) == expected, [tuple(v.items) for v in results.violations]
+    if expected:
+        violation = results.violations[0]
+        assert violation.rule_id == "silk_pad_clearance"
+        assert violation.severity == "error"
+        assert violation.actual_value == pytest.approx(gap_mm, abs=1e-4)
+        assert violation.required_value == _SILK_PAD_FLOOR_MM
+        # UUID attribution: the finding names this polygon, not just "U1 poly".
+        assert violation.items[0] == f"U1 poly {{{_PROBE_POLY_UUID}}}"
+        assert violation.items[1] == "U1-1"
+
+
+@pytest.mark.parametrize(
+    "gap_mm,filled,stroke_width,rotation,expected",
+    [case[1:] for case in _POLY_FLOOR_CASES],
+    ids=[case[0] for case in _POLY_FLOOR_CASES],
+)
+def test_native_poly_silk_floor_parity(tmp_path, gap_mm, filled, stroke_width, rotation, expected):
+    """``kicad-cli pcb drc`` is the referee for the same five probe boards.
+
+    Asserts the *native* verdict, its reported ``actual`` distance and the
+    UUID it attributes the finding to -- which is what makes the sibling
+    kct-only test above a parity test rather than a self-consistent fiction.
+    """
+    if find_kicad_cli() is None:
+        pytest.skip("Native KiCad CLI is not installed")
+
+    board = _write_poly_floor_probe(
+        tmp_path / "probe.kicad_pcb",
+        gap_mm=gap_mm,
+        filled=filled,
+        stroke_width=stroke_width,
+        rotation=rotation,
+    )
+    rules = _factory_rules()
+    write_drc_constraints(board, rules, manufacturer_id="jlcpcb", layers=4)
+
+    report = tmp_path / "native.json"
+    proc = subprocess.run(
+        [
+            str(find_kicad_cli()),
+            "pcb",
+            "drc",
+            "--severity-all",
+            "--format",
+            "json",
+            "-o",
+            str(report),
+            str(board),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr
+    violations = json.loads(report.read_text())["violations"]
+    # A malformed custom rule makes KiCad discard the whole .kicad_dru (#4999),
+    # which would turn every "no finding" expectation into a false pass.
+    assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
+
+    findings = [v for v in violations if "Silk to Pad" in v["description"]]
+    assert bool(findings) == expected, violations
+    if expected:
+        assert len(findings) == 1, findings
+        assert findings[0]["type"] == "silk_over_copper"
+        assert f"{gap_mm:.4f} mm" in findings[0]["description"], findings[0]
+        silk_items = [
+            item for item in findings[0]["items"] if "F.Silkscreen" in item["description"]
+        ]
+        assert len(silk_items) == 1, findings[0]
+        assert "Polygon" in silk_items[0]["description"]
+        assert silk_items[0]["uuid"] == _PROBE_POLY_UUID
+
+
+def test_native_and_kct_agree_on_unfilled_polygon_interior(tmp_path):
+    """The fill-state discriminator, measured rather than assumed.
+
+    A polygon ring drawn AROUND a pad is reported by neither engine when it is
+    unfilled (its interior is blank) and by both when it is filled.  Without
+    this pair a model that treats every polygon as a solid area would pass the
+    floor tests above while flagging every polygon outline over its own part's
+    pads.
+    """
+    rules = _factory_rules()
+    cli = find_kicad_cli()
+
+    def probe(fill: str) -> Path:
+        path = tmp_path / f"ring_{fill}.kicad_pcb"
+        path.write_text(
+            f"""(kicad_pcb (version 20240108) (generator pcbnew)
+  (general (thickness 1.6)) (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (36 "B.SilkS" user) (37 "F.SilkS" user)
+   (38 "B.Mask" user) (39 "F.Mask" user) (44 "Edge.Cuts" user) (49 "F.Fab" user))
+  (setup (pad_to_mask_clearance 0)) (net 0 "") (net 1 "A")
+  (gr_rect (start 0 0) (end 20 20) (stroke (width .1) (type default))
+   (fill none) (layer "Edge.Cuts"))
+  (footprint "Probe:Probe" (layer "F.Cu") (at 10 10)
+    (uuid "00000000-0000-0000-0000-00000000000f")
+    (property "Reference" "U1" (at 0 -3 0) (layer "F.Fab")
+      (uuid "00000000-0000-0000-0000-0000000000ef")
+      (effects (font (size 1 1) (thickness 0.15))))
+    (fp_poly (pts (xy -2 -2) (xy 2 -2) (xy 2 2) (xy -2 2))
+      (stroke (width 0.15) (type solid)) (fill {fill}) (layer "F.SilkS")
+      (uuid "{_PROBE_POLY_UUID}"))
+    (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "A"))))
+"""
+        )
+        return path
+
+    def native_findings(path: Path) -> list[dict]:
+        report = path.with_suffix(".json")
+        proc = subprocess.run(
+            [
+                str(cli),
+                "pcb",
+                "drc",
+                "--severity-all",
+                "--format",
+                "json",
+                "-o",
+                str(report),
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert proc.returncode == 0, proc.stderr
+        violations = json.loads(report.read_text())["violations"]
+        assert not [v for v in violations if v["type"] == "drc_rule_error"], violations
+        return [v for v in violations if "Silk to Pad" in v["description"]]
+
+    unfilled = probe("no")
+    filled = probe("yes")
+
+    assert len(check_silk_pad_clearance(PCB.load(unfilled), rules)) == 0
+    filled_results = check_silk_pad_clearance(PCB.load(filled), rules)
+    assert len(filled_results) == 1
+    assert filled_results.violations[0].actual_value == pytest.approx(0.0, abs=1e-6)
+
+    if cli is None:
+        pytest.skip("Native KiCad CLI is not installed (kct-side assertions above still ran)")
+
+    write_drc_constraints(unfilled, rules, manufacturer_id="jlcpcb", layers=4)
+    write_drc_constraints(filled, rules, manufacturer_id="jlcpcb", layers=4)
+    assert native_findings(unfilled) == []
+    native_filled = native_findings(filled)
+    assert len(native_filled) == 1, native_filled
+    assert "0.0000 mm" in native_filled[0]["description"], native_filled[0]

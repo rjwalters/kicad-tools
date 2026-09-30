@@ -9,6 +9,26 @@ on:
 permissions:
   contents: read
 
+# Single source of truth for every KiCad container this workflow runs (#5682).
+# Docker Hub moved the floating kicad/kicad:10.0 tag from 10.0.5 to 10.0.6 on
+# 2026-09-22 with no repo-visible signal, silently changing measured native
+# behaviour and skipping every step after the native mask-to-copper gate
+# (#5678). The digest below is the exact build kicad/kicad:10.0 resolved to
+# when this pin landed (== 10.0.6), so pinning changes nothing today -- it
+# only makes the *next* tag move a deliberate, reviewable PR. Bump procedure
+# (native-gate re-qualification + QUALIFIED_NATIVE_VERSIONS update in the same
+# change): docs/contributing/kicad-image-pin.md.
+#
+# Why an `env:` plus a bridge job rather than `${{ env.KICAD_IMAGE }}` at each
+# `container.image`: GitHub does not allow the `env` context in
+# jobs.<job_id>.container.image (only github/inputs/matrix/needs/strategy/vars
+# -- "Unrecognized named-value: 'env'" otherwise), and this workflow is not a
+# reusable workflow, so `inputs` is unavailable too. The `kicad_pin` job below
+# republishes this one literal into the `needs` context the container jobs CAN
+# reference, keeping the digest to this single line.
+env:
+  KICAD_IMAGE: kicad/kicad@sha256:18693567392b80da435f9fa952ce3a3e534c66eb5a6033f5b9c80aa3b19dd3ec
+
 # One live run per ref (2AMLogic/2am#29, 2026-09-11). PR branches: a new push
 # cancels the run it supersedes -- a third of the ~370 daily runs were
 # superseded and still ran all 18 jobs to completion. main: a running
@@ -22,6 +42,21 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  # Bridge job (#5682): republishes the workflow-level KICAD_IMAGE env value
+  # (the single digest source of truth above) into the `needs` context, since
+  # `container.image` cannot reference the `env` context directly. Runs on
+  # every event with no `if:` gate -- including main pushes, where the
+  # PR-only `changes` job below is skipped -- so the 12 container jobs always
+  # resolve a non-empty image.
+  kicad_pin:
+    name: KiCad image pin (env -> needs bridge)
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.pin.outputs.image }}
+    steps:
+      - name: Publish KICAD_IMAGE into the needs context
+        id: pin
+        run: echo "image=${KICAD_IMAGE}" >> "$GITHUB_OUTPUT"
   # Detect whether a PR touches anything CI can act on. 55 of the last 60 PRs
   # touched src/ or tests/ (measured 2026-09-11, 2AMLogic/2am#29), and every
   # board job legitimately depends on the router source, so this is NOT a
@@ -74,7 +109,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
@@ -129,7 +164,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
@@ -156,18 +191,36 @@ jobs:
 
   test:
     name: Test
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
     # fork PRs route back to GitHub-hosted instead of being skipped, so no
     # outside fork ever executes on our host and required checks never go
-    # missing. Measured here vs ubuntu-latest: Test 17 vs 40 min, Board 06
-    # 19 vs 27, Diff-Pair ~15 vs 25.
+    # missing.
+    #
+    # Measured cost of that fallback (Issue #5747, re-measured 2026-09-28 --
+    # the "Test 17 vs 40 min" figure this comment used to quote was stale in
+    # both directions):
+    # - self-hosted: 23m27s end to end (job 107504917412, main, 2026-09-24),
+    #   of which "Run tests" is 15m24s.
+    # - ubuntu-latest: did NOT finish. Fork run 36282355031 (PR #5736) was
+    #   cancelled by this job's timeout at 45m06s, 28m17s into "Run tests".
+    #   Every step that DID complete there ran ~2.2x its self-hosted time
+    #   (conformance 3m51s -> 8m34s, stitch 2m25s -> 5m15s, zones 21s -> 45s,
+    #   pre-"Run tests" total 7m59s -> 16m43s), which projects the hosted
+    #   total at ~50 min -- structurally above a 45-minute budget, not
+    #   marginally under it. Five Test runs across the fork batch
+    #   #5736/#5737/#5739 were cancelled this way; none could ever go green.
+    # See timeout-minutes below for the split budget that fixes this. The
+    # other two jobs that share this fork fallback had wide margin in that
+    # same fork run (Board 06 15 min vs 35, Diff-Pair 9 min vs 30), so their
+    # timeouts are deliberately left alone.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
     env:
-      # -n auto reads the container's 8-core cpuset on the runner; keep the
-      # worker count at GitHub-hosted parity (4 vCPU) so memory stays bounded.
+      # Pin -n auto's worker count at GitHub-hosted parity (4 vCPU) so memory
+      # stays bounded (the self-hosted container is not CPU-pinned and would
+      # otherwise see every host core).
       PYTEST_XDIST_AUTO_NUM_WORKERS: "4"
       # Issue #5501: bound the number of native KiCad processes across the
       # whole job.
@@ -249,7 +302,21 @@ jobs:
       # into shell or retained. Pushes/absent markers leave the wrapper inert.
       KCT_NATIVE_DIAGNOSTICS: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.body, '<!-- kct:native-diagnostics -->') }}
       KCT_OBSERVER_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-    timeout-minutes: 45
+    # Issue #5747: the budget follows the runner, using the same fork-routing
+    # predicate as runs-on/container.options above (GitHub allows expressions
+    # in timeout-minutes with the same context set as container.image:
+    # github/inputs/matrix/needs/strategy/vars -- no env, hence the repeated
+    # literal rather than a shared variable).
+    # - self-hosted: 45, unchanged -- ~1.9x the 23m27s measured median, so a
+    #   real hang is still caught in a bounded time on our own hardware.
+    # - ubuntu-latest (fork PRs): 90, ~1.8x the ~50 min projected above and
+    #   the same value the other 90-minute jobs in this file use. A blanket
+    #   raise to 90 was rejected: it would double the time a genuinely hung
+    #   self-hosted job holds one of this repo's ten runner slots, and the
+    #   self-hosted path has never needed more than 45. Hosted minutes are
+    #   free on this public repo, and pytest's own --timeout=60 per test
+    #   still bounds a hang long before the job timeout fires.
+    timeout-minutes: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 45 || 90 }}
     # Issue #3436: run inside the official KiCad 10 container (same image
     # as the kicad-cli-smoke job; see its comment for why apt+PPA installs
     # are NOT used). The container provides what dozens of tests need and
@@ -263,18 +330,19 @@ jobs:
     # All of these failures were previously invisible because the Test
     # step had continue-on-error.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
-      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the kicad slots' cores (6-31,38-63: their physical cores plus the
-      # hyperthread siblings, so the runner's org slots on 0-5/32-37 never share a
-      # core with a kicad job; 2AMLogic/2am infra/aws/ci-runner.md) and cap its memory at 12g (6 GB
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 12g (6 GB
       # SIGKILLed kicad-cli under four xdist workers, 2026-09-11; a
       # GitHub-hosted VM has 16 GB).
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 6-31,38-63 --memory 12g' || '--user 0:0' }}
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 12g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the smoke job).
@@ -292,6 +360,21 @@ jobs:
           kicad-cli --version
 
       - uses: actions/checkout@v7
+        with:
+          # Full history + tags: the release repo-introspection tests
+          # (`*_against_this_repo`) need a reachable v* tag, which a default
+          # shallow, tagless checkout does not provide (they would skip).
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Trust the workspace for git
+        # The job runs as root (--user 0:0) over a checkout owned by the
+        # runner's uid, so git refuses the repo ("dubious ownership") and the
+        # repo-introspecting release tests (test_release_plan/test_release_tag
+        # `*_against_this_repo`) could only skip. actions/checkout's own
+        # safe.directory entry lives in a temporary HOME and is removed
+        # afterwards, so persist one for the rest of the job.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Initialize stock KiCad libraries
         run: python3 scripts/ci/init_kicad_libraries.py
@@ -491,7 +574,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
@@ -565,7 +648,7 @@ jobs:
 
   kicad-cli-smoke:
     name: kicad-cli Round-trip Smoke
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -589,7 +672,7 @@ jobs:
     # generator_version 9.0 → 10.0) in PR #2716. KiCad 9 cannot load files
     # in the new format, so the smoke gate has to track the writer.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # Run as root so uv/pip installs go to the system site-packages and
       # actions/checkout can write into $GITHUB_WORKSPACE without permission
       # juggling.
@@ -620,7 +703,7 @@ jobs:
           # version string.
           kicad-cli --version | tee /tmp/kicad-cli-version
           grep -qE '(^|[[:space:]])10\.' /tmp/kicad-cli-version || {
-            echo "::error::kicad/kicad:10.0 container does not provide kicad-cli 10.x"
+            echo "::error::pinned KiCad container ($KICAD_IMAGE) does not provide kicad-cli 10.x"
             exit 1
           }
 
@@ -703,7 +786,7 @@ jobs:
 
       # setup-uv publishes only immutable full-version tags since v8 (no
       # @v8/@v9 major tags exist), hence the exact pin.
-      - uses: astral-sh/setup-uv@v10.1.0
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "latest"
           # setup-uv >=5 auto-enables the Actions cache on hosted runners
@@ -773,7 +856,7 @@ jobs:
           docker run --rm \
             -v "$PWD:$PWD" -w "$PWD" \
             --user 0:0 \
-            kicad/kicad:10.0 \
+            "$KICAD_IMAGE" \
             bash scripts/ci/run_native_routed_drc.sh "${args[@]}"
 
   diffpair-routing-regression:
@@ -822,7 +905,7 @@ jobs:
     # job runs on every PR but is advisory -- its failure does not block
     # the merge button.
     name: Diff-Pair Routing Regression
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
@@ -847,17 +930,18 @@ jobs:
     # REQUIRE_POUR_CONNECTIVITY contract), so a future fill regression
     # fails the job instead of rotting in the log.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
-      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the kicad slots' cores (6-31,38-63: their physical cores plus the
-      # hyperthread siblings, so the runner's org slots on 0-5/32-37 never share a
-      # core with a kicad job; 2AMLogic/2am infra/aws/ci-runner.md) and cap its memory at 8g (same shape as
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 8g (same shape as
       # Board 06: one board, one router run, kicad-cli DRC).
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 6-31,38-63 --memory 8g' || '--user 0:0' }}
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         # The image's /bin/sh is dash; force bash (mirrors the test job).
@@ -1079,7 +1163,7 @@ jobs:
   matchgroup-routing-regression:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Issue #2726 / Epic #2661 Phase 3N: re-route board 07 (the
     # N-trace match-group testbench, #2724 Phase 3L) from scratch on
@@ -1151,7 +1235,7 @@ jobs:
     # + the board recipe's REQUIRE_POUR_CONNECTIVITY contract), so a future
     # fill regression fails the job instead of rotting in the log.
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # Run as root so installs write system locations and actions/checkout
       # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
       options: --user 0:0
@@ -1374,7 +1458,7 @@ jobs:
     # block the merge button.  Same pattern as
     # ``diffpair-routing-regression`` and ``matchgroup-routing-regression``.
     name: Board 00 End-to-End
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     # The recipe is ~30 seconds locally (1 signal net + 2 pour nets),
@@ -1384,7 +1468,7 @@ jobs:
     # ubuntu runner without masking a hang.
     timeout-minutes: 15
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # Run as root so installs write system locations and actions/checkout
       # can write $GITHUB_WORKSPACE (mirrors the test + smoke jobs).
       options: --user 0:0
@@ -1519,12 +1603,12 @@ jobs:
     # advisory (non-required-check) status until a repo admin flips the
     # branch-protection setting.
     name: Board 01 End-to-End
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -1613,12 +1697,12 @@ jobs:
     # the C++ backend build, and the advisory (non-required-check) status
     # until a repo admin flips the branch-protection setting.
     name: Board 02 End-to-End
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -1727,12 +1811,12 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01/02/06/07 e2e jobs).
     name: Board 03 End-to-End (LVS-only)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -1907,7 +1991,7 @@ jobs:
     # Advisory until a repo admin adds it to branch protection (same as the
     # board 00/01 e2e jobs).
     name: Board 06 End-to-End (LVS)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Runs on the fleet's dedicated CI runner (2AMLogic/2am#29; ten slots for
     # this repo since the 2026-09-11 resize) for main pushes AND same-repo PRs;
@@ -1921,17 +2005,18 @@ jobs:
     # Internal routing budgets and all validation gates remain unchanged.
     timeout-minutes: 35
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       # On the runner this is a sibling container of the runner's own, created by
-      # the host daemon, so the slot's cpuset/memory do not apply to it: pin it
-      # to the kicad slots' cores (6-31,38-63: their physical cores plus the
-      # hyperthread siblings, so the runner's org slots on 0-5/32-37 never share a
-      # core with a kicad job; 2AMLogic/2am infra/aws/ci-runner.md) and cap its memory at 8g (passed at 6 GB;
+      # the host daemon, so the slot's cpuset/memory do not apply to it. CPU is
+      # deliberately NOT pinned: a hardcoded --cpuset-cpus breaks every heavy
+      # job whenever the host is resized (#5694), and contention is left to the
+      # scheduler -- if the host overloads, that is signal to resize it. Memory
+      # IS capped, so one runaway job cannot OOM the whole host: 8g (passed at 6 GB;
       # headroom, since the cap SIGKILLs rather than swaps).
       # GitHub-hosted runs get the plain --user 0:0 (nothing to contain). Root
       # either way, so installs write system locations and actions/checkout can
       # write $GITHUB_WORKSPACE (mirrors the smoke job).
-      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --cpuset-cpus 6-31,38-63 --memory 8g' || '--user 0:0' }}
+      options: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '--user 0:0 --memory 8g' || '--user 0:0' }}
     defaults:
       run:
         shell: bash
@@ -2071,7 +2156,7 @@ jobs:
   board-07-end-to-end:
     # Temporarily suspended at user request (#5097) to unblock unrelated PRs.
     # Set BOARD_07_CI_ENABLED=true after #5068/#5069 integration safeguards pass.
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ (vars.BOARD_07_CI_ENABLED == 'true') && !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     # Issue #3779 (LVS honestly dirty per #4012): end-to-end gate for
     # board 07 ("matchgroup-test").  The fixture schematic is now FULLY
@@ -2124,7 +2209,7 @@ jobs:
     # precedent set by ``board-05-routing-regression``.
     timeout-minutes: 90
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -2353,12 +2438,12 @@ jobs:
     # intentionally higher than every other job (next-highest is the 45-min
     # Test job) because no other job runs the board-05 rescue loop from clean.
     name: Board 05 Routing Regression (blocking <= 7)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:
@@ -2473,12 +2558,12 @@ jobs:
     # needs 90 min), so 45 min leaves comfortable headroom over board 03's
     # 30 min for the LQFP-48 escape work.
     name: Board 04 End-to-End (LVS-only + DRC allowlist)
-    needs: changes
+    needs: [changes, kicad_pin]
     if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.code == 'true' || needs.changes.result == 'failure') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     container:
-      image: kicad/kicad:10.0
+      image: ${{ needs.kicad_pin.outputs.image }}
       options: --user 0:0
     defaults:
       run:

@@ -27,7 +27,8 @@
 #   _worktree_resolve_origin_branch_reuse           worktree.sh's whole
 #                                                   "reuse origin/<branch> or
 #                                                   branch fresh?" decision
-#                                                   (#4823 / #5657 / #7765)
+#                                                   (#4823 / #5657 / #7765 /
+#                                                   #9083)
 #
 # They live here rather than inline in worktree.sh per
 # `.loom/docs/file-size-policy.md` — worktree.sh is over the 1000-line ratchet
@@ -39,6 +40,16 @@
 # Both functions depend on worktree.sh's `print_error` / `print_info`, and on
 # fd 3 being open for `--json` output; fallbacks are defined below so the file
 # can also be sourced standalone.
+#
+# INVARIANT (#9109): every `>&3` JSON refusal here is built with `jq -cn` and
+# `--arg`, never by concatenating a value into a quoted JSON literal. The
+# values carried out on fd 3 are forge-derived — `headRefName` in particular
+# may legally contain `"` and `\`, which the old literal form emitted raw,
+# producing UNPARSEABLE JSON on exactly the channel a consumer reads to learn
+# that the refusal happened. Numbers go through `--arg` + `tonumber? // null`
+# rather than `--argjson` so a missing/garbage value degrades to `null` (what
+# the literal form happened to tolerate) instead of aborting jq. Keep new
+# emitters in this shape; `grep '>&3'` over this file is the audit.
 
 if ! declare -F print_error >/dev/null 2>&1; then
     print_error() { echo "ERROR: $1" >&2; }
@@ -127,6 +138,30 @@ _worktree_repo_has_forge_remote() {
 #   _WT_OPEN_PR_HEAD_REF      - head ref name on that repo (found only)
 #   _WT_OPEN_PR_URL           - PR URL, for messaging (found only)
 # Never fails the caller — always returns 0.
+#
+# DELEGATION (#8195 slice 15, epic #7810): `loom-daemon worktree-open-pr`
+# (loom-daemon/src/worktree_cli/open_pr.rs) is the canonical implementation of
+# the forge round-trip below and is tried FIRST. The `jq`/`gh`/`loom-daemon`
+# body kept underneath it is the fallback, unchanged — this function runs on
+# every `worktree.sh <N>` that creates a genuinely NEW branch (no local ref,
+# no `origin/<branch>`), the same "always-taken, no safe hard dependency"
+# shape `acquire_worktree_lock` chose in slice 7, so a host running a daemon
+# that predates this slice must keep answering the question itself rather
+# than degrading to "cannot tell".
+#
+# Trusted only on a well-formed `STATUS<TAB>...` record stream — an empty or
+# unparseable answer (a daemon too old to know this subcommand, one that
+# printed nothing) leaves every global at its initial "unavailable" default,
+# which callers already treat as "refuse rather than guess safe". The
+# `--help` probe ahead of the real call additionally skips a daemon predating
+# the subcommand outright, so its clap exit 2 never reaches this parse loop.
+#
+# No `requires-daemon:` marker here, matching the `worktree-closed-pr-branch`
+# call lower in this file (#9083): `check-daemon-subcommand-versions.sh` only
+# recognizes `$_WT_DAEMON_BIN` as a resolved-binary variable in a file that
+# itself ASSIGNS it from a resolver entry point — this file only ever reads
+# the global worktree.sh (the sourcing script) assigns, so neither call is
+# detected as an invocation here and a marker on either would read as stale.
 _worktree_open_pr_for_branch() {
     local branch="$1"
     _WT_OPEN_PR_STATUS="unavailable"
@@ -136,6 +171,25 @@ _worktree_open_pr_for_branch() {
     _WT_OPEN_PR_HEAD_REF=""
     _WT_OPEN_PR_URL=""
     if [[ -z "$branch" ]]; then
+        return 0
+    fi
+    # Call `loom-daemon worktree-open-pr` through the $_WT_DAEMON_BIN the
+    # sourcing worktree.sh resolved; a non-answer falls through to the body below.
+    if [[ -n "${_WT_DAEMON_BIN:-}" ]] \
+        && "$_WT_DAEMON_BIN" worktree-open-pr --help >/dev/null 2>&1; then
+        local _l _m _out
+        _out="$("$_WT_DAEMON_BIN" worktree-open-pr --branch "$branch" \
+            --repo "${WORKTREE_REPO_ROOT:-$PWD}" 2>/dev/null)" || _out=""
+        while IFS=$'\t' read -r _l _m; do
+            case "$_l" in
+                STATUS)     _WT_OPEN_PR_STATUS="$_m" ;;
+                NUMBER)     _WT_OPEN_PR_NUMBER="$_m" ;;
+                CROSS_REPO) _WT_OPEN_PR_IS_CROSS_REPO="$_m" ;;
+                HEAD_REPO)  _WT_OPEN_PR_HEAD_REPO="$_m" ;;
+                HEAD_REF)   _WT_OPEN_PR_HEAD_REF="$_m" ;;
+                URL)        _WT_OPEN_PR_URL="$_m" ;;
+            esac
+        done <<<"$_out"
         return 0
     fi
     # A missing `jq` is a basic tooling gap, not a forge-reachability signal
@@ -267,7 +321,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
                 # reach it (per the AC: refuse OR fetch; refuse is the
                 # simpler, unambiguous choice here).
                 if [[ "$json_output" == "true" ]]; then
-                    echo '{"success": false, "error": "shadowed-cross-repo-pr", "issueNumber": '"$issue_number"', "prNumber": '"${_WT_OPEN_PR_NUMBER:-null}"', "headRepo": "'"$_WT_OPEN_PR_HEAD_REPO"'", "headRef": "'"$_WT_OPEN_PR_HEAD_REF"'"}' >&3
+                    jq -cn --arg issue "$issue_number" --arg pr "${_WT_OPEN_PR_NUMBER:-}" --arg headRepo "${_WT_OPEN_PR_HEAD_REPO:-}" --arg headRef "${_WT_OPEN_PR_HEAD_REF:-}" '{success: false, error: "shadowed-cross-repo-pr", issueNumber: ($issue | tonumber? // null), prNumber: ($pr | tonumber? // null), headRepo: $headRepo, headRef: $headRef}' >&3
                 else
                     print_error "Open PR #${_WT_OPEN_PR_NUMBER} for '$branch' already exists with its head on a FORK ($_WT_OPEN_PR_HEAD_REPO:$_WT_OPEN_PR_HEAD_REF) - refusing to create a same-named branch from $base_display, which would silently shadow it instead of the real work."
                     echo "  PR: ${_WT_OPEN_PR_URL:-<no url>}"
@@ -289,7 +343,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
             if [[ "$json_output" != "true" ]]; then
                 print_info "Open PR #${_WT_OPEN_PR_NUMBER} already exists for '$branch' on origin (not yet fetched) - fetching and reusing it"
             fi
-            git fetch origin "refs/pull/${_WT_OPEN_PR_NUMBER}/head:refs/remotes/origin/$branch" 2>/dev/null || true
+            git fetch origin -- "refs/pull/${_WT_OPEN_PR_NUMBER}/head:refs/remotes/origin/$branch" 2>/dev/null || true
             if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
                 _WT_REUSE_REMOTE_BRANCH=true
                 return 0
@@ -298,7 +352,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
             # materialize its ref locally - refuse rather than silently
             # branching fresh under its name.
             if [[ "$json_output" == "true" ]]; then
-                echo '{"success": false, "error": "open-pr-ref-fetch-failed", "issueNumber": '"$issue_number"', "prNumber": '"${_WT_OPEN_PR_NUMBER:-null}"'}' >&3
+                jq -cn --arg issue "$issue_number" --arg pr "${_WT_OPEN_PR_NUMBER:-}" '{success: false, error: "open-pr-ref-fetch-failed", issueNumber: ($issue | tonumber? // null), prNumber: ($pr | tonumber? // null)}' >&3
             else
                 print_error "Open PR #${_WT_OPEN_PR_NUMBER} exists for '$branch' but its ref could not be fetched from origin - refusing to create a same-named branch from $base_display."
             fi
@@ -319,7 +373,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
             # independent confirmation either. Silently proceeding here IS the
             # #7765 defect - refuse rather than guess "safe".
             if [[ "$json_output" == "true" ]]; then
-                echo '{"success": false, "error": "forge-check-unavailable", "issueNumber": '"$issue_number"', "originFetch": "'"$origin_fetch_result"'"}' >&3
+                jq -cn --arg issue "$issue_number" --arg originFetch "${origin_fetch_result:-}" '{success: false, error: "forge-check-unavailable", issueNumber: ($issue | tonumber? // null), originFetch: $originFetch}' >&3
             else
                 print_error "Could not verify via the forge whether an open PR already exists for '$branch' (gh unavailable, unauthenticated, or rate-limited) - refusing to create a same-named branch from $base_display blind."
                 if [[ "$origin_fetch_result" == "fetch-failed" ]]; then
@@ -348,6 +402,9 @@ _worktree_guard_fresh_branch_against_open_pr() {
 #     continue the real PR history, not a fresh branch off main)
 #   - origin has the ref but it has already LANDED -> do not reuse; fall
 #     through to a fresh branch (#5657, the reused partial-slice branch name)
+#   - origin has the ref, it has not landed, but its tip is the head of a PR
+#     CLOSED WITHOUT MERGING -> refuse outright, naming the PR (#9083; the
+#     decision is `loom-daemon worktree-closed-pr-branch`)
 #   - origin has no such ref -> hand off to
 #     `_worktree_guard_fresh_branch_against_open_pr` above, which asks the
 #     forge before allowing the fresh branch (#7765)
@@ -365,20 +422,26 @@ _worktree_guard_fresh_branch_against_open_pr() {
 # shim when it is missing. Always returns 0 — refusals exit the script
 # outright, same control flow as when this ran inline.
 _worktree_resolve_origin_branch_reuse() {
-    local branch="$1"
-    local issue_number="$2"
-    local json_output="$3"
-    local base_display="$4"
-    local base_ref="$5"
-    local default_branch="$6"
+    # Declared on one line, sibling-style (`branch_landed` does the same), so
+    # the closed-unmerged dispatch below is paid for out of this function's own
+    # code-line count rather than growing the portable pool (#9083 — this file
+    # is `contract`-category and its growth has no override, see
+    # `.loom/docs/shell-language-policy.md`).
+    local branch="$1" issue_number="$2" json_output="$3" base_display="$4" base_ref="$5" default_branch="$6"
     local origin_fetch_result origin_fetch_output
+    # #9106: $branch reaches `git fetch` as a bare operand. worktree.sh derives
+    # it from the issue number or an explicit --branch argument, but this lib is
+    # sourced rather than exec'd, so it validates its own input instead of
+    # trusting the caller. Refuse — the #7765 stance: a check that cannot run
+    # safely refuses rather than guessing.
+    if ! declare -F check_branch_name >/dev/null 2>&1 || ! check_branch_name "$branch" "worktree branch"; then
+        [[ "$json_output" == "true" ]] && jq -cn --arg issue "$issue_number" '{success: false, error: "unsafe-branch-name", issueNumber: ($issue | tonumber? // null)}' >&3
+        exit 1
+    fi
     origin_fetch_result="ok"
-    if ! origin_fetch_output="$(git fetch origin "$branch" 2>&1)"; then
-        if echo "$origin_fetch_output" | grep -qi "couldn't find remote ref"; then
-            origin_fetch_result="no-such-ref"
-        else
-            origin_fetch_result="fetch-failed"
-        fi
+    if ! origin_fetch_output="$(git fetch origin -- "$branch" 2>&1)"; then
+        origin_fetch_result="fetch-failed"
+        echo "$origin_fetch_output" | grep -qi "couldn't find remote ref" && origin_fetch_result="no-such-ref"
     fi
     _WT_REUSE_REMOTE_BRANCH=false
     if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
@@ -417,6 +480,25 @@ _worktree_resolve_origin_branch_reuse() {
             # AND the tree comparison unavailable — fail open, never block
             # worktree creation on an outage): preserve today's reuse
             # behavior exactly.
+            #
+            # #9083: EXCEPT for the one not-landed shape that is the merged
+            # case's hazard with a worse payload — a tip that is the head of a
+            # PR CLOSED WITHOUT MERGING. `branch_landed` correctly calls that
+            # `not-landed` (and must keep doing so: that verdict is what stops
+            # `branch_delete` force-deleting it), so the question is asked
+            # separately, by the one implementation of it:
+            # `loom-daemon worktree-closed-pr-branch` (exit 1 = refuse, having
+            # already printed its own message; 0 = proceed and reuse, which is
+            # also what EVERY undecidable probe returns). The `--help` probe
+            # ahead of it skips the guard on a daemon predating the
+            # subcommand — degrading to the pre-#9083 reuse rather than
+            # emitting clap usage text — the same shape
+            # `_handle_feature_branch_in_main_worktree` uses for
+            # `worktree-branch-conflict`. One line, because this file is
+            # `contract`-category and the portable-shell ratchet gives its
+            # growth no override; the whole decision lives in
+            # `loom-daemon/src/worktree_cli/closed_pr_branch.rs`.
+            [[ -z "${_WT_DAEMON_BIN:-}" ]] || ! "$_WT_DAEMON_BIN" worktree-closed-pr-branch --help >/dev/null 2>&1 || "$_WT_DAEMON_BIN" worktree-closed-pr-branch --branch "$branch" --issue "$issue_number" --base-display "$base_display" --repo-root "${WORKTREE_REPO_ROOT:-$PWD}" --json-output "$json_output" >&3 || exit 1
             _WT_REUSE_REMOTE_BRANCH=true
         fi
     else

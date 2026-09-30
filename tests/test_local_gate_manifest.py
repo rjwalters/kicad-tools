@@ -39,7 +39,10 @@ LOCAL_GATE = REPO_ROOT / "scripts" / "ci" / "local-gate.sh"
 # local analogue. The changes detector selects remote jobs from PR metadata;
 # it performs no validation. The local gate runs its explicitly requested
 # validation jobs without GitHub event filtering, so no detector is needed.
-CI_ONLY_JOBS: set[str] = {"changes"}
+# The kicad_pin bridge republishes the workflow-level KICAD_IMAGE env value
+# into the `needs` context for the container jobs (#5682); locally there is
+# no `needs` context to feed, so the pin is read straight from the env.
+CI_ONLY_JOBS: set[str] = {"changes", "kicad_pin"}
 
 
 def _ci_job_ids() -> set[str]:

@@ -6,18 +6,19 @@
 # Bug: on a repo with NO GitHub Actions workflows (and `allow_auto_merge`
 # disabled), `GET /repos/{nwo}/commits/{sha}/check-runs` returns a PERSISTENT
 # HTTP 404 for every SHA (the Checks API itself is unavailable). Before this
-# fix, `_wait_for_checks_then_sync_merge()` (the degraded `--auto` path) and
-# the UNSTABLE fallback's matching fetch loop could not distinguish that
-# persistent 404 from a transient fetch blip (network, 5xx) — both were
-# treated as "still pending" and polled all the way to LOOM_AUTO_MERGE_TIMEOUT
-# (600s) even though the PR was already CLEAN/MERGEABLE.
+# fix, `_wait_for_checks_then_sync_merge()` (the `--auto` wait path) could not
+# distinguish that persistent 404 from a transient fetch blip (network, 5xx) —
+# both were treated as "still pending" and polled all the way to
+# LOOM_AUTO_MERGE_TIMEOUT (600s) even though the PR was already
+# CLEAN/MERGEABLE. (A second copy of the loop lived in the UNSTABLE-rejection
+# fallback until #8410 removed the server-side auto-merge arm entirely.)
 #
 # The fix (#6389):
 #   1. `forge_get_check_runs` (GitHub branch) now distinguishes a confirmed
 #      HTTP 404 from any other failure by inspecting `gh api`'s stderr for
 #      "HTTP 404" and returning the dedicated `$FORGE_CHECK_RUNS_RC_NOT_FOUND`
 #      (44) exit code instead of the generic 1.
-#   2. Both poll loops track a per-call "confirmed 404 this iteration"
+#   2. The poll loop tracks a per-call "confirmed 404 this iteration"
 #      signal (BOTH the initial attempt and its retry-once must return the
 #      404 rc) across `LOOM_CHECK_RUNS_404_STREAK` (default 2) consecutive
 #      iterations, spaced a full LOOM_AUTO_MERGE_POLL_INTERVAL apart. Once
@@ -33,8 +34,7 @@
 #      confirmed 404, a 5xx, a network-style failure, and success — asserting
 #      the distinguished exit codes.
 #   2. The streak-tracking decision policy, mirrored from
-#      `_wait_for_checks_then_sync_merge()` / the UNSTABLE fallback's fetch
-#      loop, covering: persistent 404 crossing the threshold; a transient
+#      `_wait_for_checks_then_sync_merge()`'s fetch loop, covering: persistent 404 crossing the threshold; a transient
 #      failure (5xx) that never crosses it; a mixed 404-then-non-404 pair
 #      that does not count as "confirmed"; and a flaky 404-then-200 sequence
 #      that must NOT be misclassified as persistent (the streak resets on the
@@ -55,11 +55,24 @@ FORGE_HELPERS_SRC="$HELPERS_DIR/lib/forge-helpers.sh"
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+
+# A source-text assertion that cannot survive a port to loom-daemon, recorded
+# per defaults/docs/verification-recipes.md §6 rather than silently deleted.
+# Mirrors the convention test-merge-pr-partial-increment.sh established for
+# the #8831 backticked-trailer port.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_eq() {
     local expected="$1"
@@ -105,7 +118,9 @@ fi
 
 if [[ "${1:-}" == "api" ]]; then
   path="${2:-}"
-  if [[ "$path" =~ ^repos/.+/commits/([^/]+)/check-runs$ ]]; then
+  # The endpoint carries a query string since #8895 (`?per_page=100`), so the
+  # SHA capture stops at `?` and a trailing query is accepted.
+  if [[ "$path" =~ ^repos/.+/commits/([^/?]+)/check-runs(\?.*)?$ ]]; then
     sha="${BASH_REMATCH[1]}"
     mode_file="$STUB_DIR_FROM_ENV/gh-check-runs-$sha.mode"
     mode="success"
@@ -174,8 +189,8 @@ export PATH="$_ORIG_PATH"
 # Part 2: streak-tracking decision policy
 # =============================================================================
 # Mirrors the per-iteration classification shared by
-# `_wait_for_checks_then_sync_merge()`'s `not_found_streak` and the UNSTABLE
-# fallback's `_UNSTABLE_NOT_FOUND_STREAK`. Given this iteration's two attempt
+# `_wait_for_checks_then_sync_merge()`'s `not_found_streak`. Given this
+# iteration's two attempt
 # return codes (mirroring the existing retry-once absorption) and the
 # running streak, returns "<new streak> <verdict>" where verdict is one of
 # success | still-pending | proceed-to-merge.
@@ -305,7 +320,7 @@ fi
 # _wait_for_checks_then_sync_merge() must track not_found_streak and short-circuit
 # to the synchronous merge with the documented info line.
 _wfctsm_block="$(awk '/^_wait_for_checks_then_sync_merge\(\)/{f=1} f; /^\}/{if (f) exit}' "$MERGE_PR_SRC")"
-if echo "$_wfctsm_block" | grep -q 'not_found_streak'; then
+if grep -q 'not_found_streak' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge tracks not_found_streak"
 else
@@ -313,7 +328,7 @@ else
     echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing not_found_streak tracking"
 fi
 
-if echo "$_wfctsm_block" | grep -q 'check-runs API unavailable for this repo (no checks configured); proceeding to synchronous merge'; then
+if grep -q 'check-runs API unavailable for this repo (no checks configured); proceeding to synchronous merge' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge logs the documented persistent-404 info line"
 else
@@ -321,71 +336,50 @@ else
     echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the persistent-404 info line"
 fi
 
-if echo "$_wfctsm_block" | grep -q '"\$attempt1_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "\$attempt2_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND"'; then
+retired "_wait_for_checks_then_sync_merge requires BOTH attempts to confirm a 404" \
+  "a 404 on only one of the two attempts must NOT increment the persistent-404 streak" \
+  "the both-attempts-404 comparison moved to loom-daemon (#6389, #8191 slice) — shell no longer spells the literal comparison to grep for" \
+  "loom-daemon/src/merge_pr/check_runs_streak.rs::mixed_404_then_different_failure_is_not_confirmed_and_resets + loom-daemon/tests/merge_pr_check_runs_streak_differential.rs"
+
+# The classification is now delegated to `loom-daemon merge-pr
+# check-runs-streak` (#6389, #8191 slice) rather than computed inline; assert
+# the delegation is wired, which is the behavioural analogue of the retired
+# literal-comparison check above.
+if grep -q 'merge-pr check-runs-streak' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge requires BOTH attempts to confirm a 404"
+    echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge delegates the 404-streak classification to 'loom-daemon merge-pr check-runs-streak'"
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the both-attempts-404 confirmation"
+    echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the check-runs-streak delegation"
 fi
 
-# The UNSTABLE fallback's fetch loop must carry the identical discipline.
-if grep -q '_UNSTABLE_NOT_FOUND_STREAK' "$MERGE_PR_SRC"; then
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: UNSTABLE fallback tracks _UNSTABLE_NOT_FOUND_STREAK"
-else
+# The UNSTABLE-rejection fallback used to carry a SECOND copy of this fetch
+# loop, with its own _UNSTABLE_* streak trackers that had to be kept in
+# lockstep with the copy above. #8410 deleted it along with the server-side
+# auto-merge arm it existed to handle, so there is now exactly ONE fetch loop
+# with this discipline. Assert that: a reintroduced second copy is a
+# lockstep-drift hazard, and (more importantly) a reintroduced arm is the
+# security regression #8410 closed.
+if grep -q '_UNSTABLE_' "$MERGE_PR_SRC"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: UNSTABLE fallback missing _UNSTABLE_NOT_FOUND_STREAK tracking"
-fi
-
-if grep -q '_UNSTABLE_ATTEMPT1_RC" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "\$_UNSTABLE_ATTEMPT2_RC" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND"' "$MERGE_PR_SRC"; then
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: UNSTABLE fallback requires BOTH attempts to confirm a 404"
+    echo -e "  ${RED}FAIL${NC}: a second (_UNSTABLE_*) copy of the check-runs fetch loop is back — #8410 removed it with the server-side arm"
 else
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: UNSTABLE fallback missing the both-attempts-404 confirmation"
-fi
-
-if grep -q '_UNSTABLE_FALLBACK_TO_MERGE=true' "$MERGE_PR_SRC" && \
-   grep -c '_UNSTABLE_FALLBACK_TO_MERGE=true' "$MERGE_PR_SRC" | grep -Eq '^[2-9]$|^[0-9][0-9]$'; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: UNSTABLE fallback's persistent-404 branch reuses _UNSTABLE_FALLBACK_TO_MERGE (>=2 sites: informational-only + persistent-404)"
-else
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: expected _UNSTABLE_FALLBACK_TO_MERGE=true at >=2 sites (informational-only + persistent-404)"
+    echo -e "  ${GREEN}PASS${NC}: exactly one check-runs fetch loop carries the 404-streak discipline (#8410)"
 fi
 
-# Both loops must reset their attempt-rc trackers to 0 at the TOP of every
-# iteration — otherwise a stale confirmed-404 from a prior, unrelated
-# iteration could leak into the next classification. This is the concrete
-# form of the "edge case must not crash/misclassify the distinction logic"
-# requirement for this design (no external base-branch probe is used here;
-# the per-iteration reset is what keeps a one-off glitch from persisting).
+# Both attempt-rc trackers must be reset at the TOP of every iteration —
+# otherwise a stale confirmed-404 from a prior, unrelated iteration could leak
+# into the next classification. This is the concrete form of the "edge case
+# must not crash/misclassify the distinction logic" requirement for this design
+# (no external base-branch probe is used here; the per-iteration reset is what
+# keeps a one-off glitch from persisting).
 if grep -q 'local attempt1_rc=0 attempt2_rc=0 fetch_rc runs_raw' "$MERGE_PR_SRC"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge resets attempt1_rc/attempt2_rc every iteration"
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the per-iteration attempt-rc reset"
-fi
-
-if grep -q '_UNSTABLE_ATTEMPT1_RC=0' "$MERGE_PR_SRC" && grep -q '_UNSTABLE_ATTEMPT2_RC=0' "$MERGE_PR_SRC"; then
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: UNSTABLE fallback resets _UNSTABLE_ATTEMPT1_RC/_UNSTABLE_ATTEMPT2_RC every iteration"
-else
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: UNSTABLE fallback missing the per-iteration attempt-rc reset"
-fi
-
-# The streak vars must be unset at the end of the UNSTABLE block alongside the
-# other per-attempt scratch vars, so a subsequent MERGE_ATTEMPT retry starts
-# clean.
-if grep -q '_UNSTABLE_ATTEMPT1_RC _UNSTABLE_ATTEMPT2_RC _UNSTABLE_NOT_FOUND_STREAK' "$MERGE_PR_SRC"; then
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: UNSTABLE fallback unsets the new streak-tracking vars at block exit"
-else
-    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: UNSTABLE fallback missing cleanup of the new streak-tracking vars"
 fi
 
 # --- Summary ---

@@ -11,10 +11,10 @@ This document defines the record's on-forge shape. Phase 1 (#6179) wrote the
 record at dispatch time and nothing read it; the later phases documented
 below now do read it — reclamation (#6286) and dispatch-time ordering
 (#6287) in Phase 2, the sweep-side pre-push fence (#6309) in Phase 3 — all
-against this same format. There are now **three writers** — the daemon's
-dispatch, the in-session `/loom:sweep` path (#6320) and the in-session builder
-via `worktree.sh` (#8193) (see "Who writes one" below); readers must not
-distinguish them.
+against this same format. There are now **four writers** — the daemon's
+dispatch, the in-session `/loom:sweep` path (#6320), the in-session builder
+via `worktree.sh` (#8193), and the direct hand-claim lane (#9453, see
+"Who writes one" below); readers must not distinguish them.
 
 The sibling issue #6180 (`defaults/docs/lease-renewal.md`) implements the
 other half: a sweep-owned background loop that keeps a lease fresh for the
@@ -25,7 +25,7 @@ documented here.
 **Contents**
 
 - [What a lease record is](#what-a-lease-record-is)
-- [Who writes one (every dispatch path — #6320, #8193)](#who-writes-one-every-dispatch-path--6320-8193)
+- [Who writes one (every claim path — #6320, #8193, #9453)](#who-writes-one-every-claim-path--6320-8193-9453)
 - [When it is written](#when-it-is-written)
 - [What this phase explicitly does not do](#what-this-phase-explicitly-does-not-do)
 - [For Phase 2 (reclamation) and Phase 3 (fencing)](#for-phase-2-reclamation-and-phase-3-fencing)
@@ -151,9 +151,9 @@ The embedded `at=...` timestamp in that prose is for human debugging only —
 it is what the dispatcher *believed* the time was when it wrote the comment,
 not an authoritative value any reader may rely on.
 
-## Who writes one (every dispatch path — #6320, #8193)
+## Who writes one (every claim path — #6320, #8193, #9453)
 
-Three writers publish this record. They are byte-compatible by design: a reader
+Four writers publish this record. They are byte-compatible by design: a reader
 cannot tell them apart, and must not try to.
 
 | Writer | When | Code |
@@ -161,6 +161,7 @@ cannot tell them apart, and must not try to.
 | **Daemon dispatch** (#6179) | Immediately after a confirmed `flip_label_to_building` | `SweepRegistry::write_lease_comment` (`loom-daemon/src/sweep_registry/guards.rs`) |
 | **In-session sweep** (#6320) | Per-issue pre-flight Step 1b, for every candidate the daemon did *not* claim (operator `/loom:sweep`, `--no-daemon`, GH Actions cron) | `defaults/scripts/sweep-lease-publish.sh publish` |
 | **In-session builder** (#8193) | Inside `worktree.sh`, which every builder runs immediately after claiming — so it covers a `/loom:builder` run with no sweep orchestrator above it | `loom-daemon lease ensure <N>` (`loom-daemon/src/cli/lease_ensure.rs`), which calls the same `sweep-lease-publish.sh` |
+| **Direct hand-claim** (#9453) | A manual claim lane that does NOT go through `worktree.sh` (e.g. Superset-managed worktrees + pi subagents claiming via `gh issue edit` per CLAUDE.md manual mode) — it MUST call the same `lease ensure <N> --watch-pid …` itself, right after the label flip (CLAUDE.md Builder step 2) | the same `loom-daemon lease ensure <N>` |
 
 **Why the third writer exists.** The second one closes the hole for a sweep,
 but a Builder dispatched *directly* — an operator running `/loom:builder`, or a
@@ -177,6 +178,19 @@ off the one command every builder already runs. It no-ops when
 published and is renewing, #7672), and it refuses outside an agent session,
 because the pid it would hand renewal has to outlive a single tool call to mean
 anything.
+
+**Why the fourth writer exists, and the runtime-neutral marker (#9453).** The
+#8193 refusal gate is a set of session markers (`CLAUDE_PID`, `CLAUDECODE`,
+`CLAUDE_CODE_ENTRYPOINT`, `LOOM_TERMINAL_ID`) — all Claude-specific. A
+non-Claude harness hosting a hand-claim lane (the pi runtime is the named
+example) exports none of them, so until #9453 its only way in was `--force`
+flag discipline on every call. `SESSION_MARKERS` now also admits
+**`LOOM_AGENT_SESSION_PID`**: a runtime-neutral marker any long-lived agent
+harness exports, self-describing, whose value is the harness process's own
+pid — exactly what `--watch-pid` wants
+(`${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}`). Presence (non-empty) of
+any one marker admits the publish; `--force` semantics are unchanged, and a
+blank marker still refuses.
 
 **Why the second writer exists.** `/loom:sweep`'s in-session path dispatches
 its Builder through the Task tool, one level deep, deliberately (the skill's
@@ -204,10 +218,18 @@ changes the record's format or its reader contract:
    record's forge comment `id` sort *earlier* than a racing daemon
    dispatch's, which is precisely what the ordering check in "Phase 2,
    dispatch-time half" below reads to make that dispatcher yield.
-2. **It refuses to publish over a live peer.** If the freshest lease is
-   fresh and held by a *different* host, `sweep-lease-publish.sh` exits `4`
-   without writing — publishing would hide a live worker from every
-   freshest-wins reader — and the sweep skips that issue. A *stale* lease
+2. **It refuses to publish over a live peer.** If any lease on the issue is
+   fresh and held by a *different* `(host, sweep)` pair — on another host
+   *or this one* — `sweep-lease-publish.sh` exits `4` without writing:
+   publishing would hide a live worker from every freshest-wins reader, and
+   two sweeps on one issue share one `.loom/worktrees/issue-<N>` (a same-host
+   pair once edited the same uncommitted file there at once,
+   rjwalters/kicad-tools#5783). The sweep skips that issue. The check reads
+   only that issue's comments, so it never serializes sweeps working
+   *different* issues on one host. `worktree.sh` backstops it: before
+   handing back an existing worktree with uncommitted changes it runs
+   `loom-daemon lease co-occupancy`, which refuses when 2+ pairs hold fresh
+   leases at once (`WORKTREE_ALLOW_SHARED_LEASE=1` overrides). A *stale* lease
    (this host's or a peer's) never blocks publication: that is exactly the
    abandoned-claim case a new lease should supersede.
 
@@ -311,11 +333,46 @@ its own claim lock, and posts a `<!-- loom:lease-yield ... -->` standdown
 annotation, but deliberately leaves the shared `loom:building` label alone
 (it is already correct — idempotent across both racing flips, and reverting
 it would destroy the winning claimant's only cross-host mutex out from under
-its still-live sweep). The comparison is bounded to comments created within
-a short lookback window of the dispatch attempt's own pre-flip instant
-(`LEASE_ORDER_LOOKBACK_SECS`), so a long-completed prior claim's lease
-comment — an issue accumulates one per dispatch over its whole lifetime,
-never deleted — can never out-rank a normal, uncontested re-dispatch.
+its still-live sweep).
+
+Which comments get compared at all — **claim-episode membership** — is a
+separate question from that ordering, and lives in
+`loom-daemon/src/sweep_registry/lease_episode.rs`. A record is a member when
+EITHER leg holds:
+
+1. Its forge-assigned `created_at` is within a short lookback window of the
+   dispatch attempt's own pre-flip instant (`LEASE_ORDER_LOOKBACK_SECS`) —
+   #6287's original rule, for the near-simultaneous race. This bound is what
+   stops a long-completed prior claim's lease comment (an issue accumulates
+   one per dispatch over its whole lifetime, never deleted) from out-ranking
+   a normal, uncontested re-dispatch.
+2. Its forge-assigned `updated_at` is strictly later than its `created_at`
+   (genuinely **renewed**, not merely created) and still within the
+   reclamation TTL (`LOOM_LEASE_TTL_MINUTES`, default 15 — the same window
+   the #6286 reclamation gate and `sweep-lease-fence.sh` use) — Issue
+   **#8840**.
+
+Leg 2 exists because **a lease is renewed in place**: `sweep-lease-renew.sh`
+PATCHes the same comment, so a live owner's `created_at` stays frozen at the
+instant its claim episode began while only `updated_at` advances. Any owner
+holding its claim longer than the ~90s lookback — a curation phase, a long
+Builder run, an in-session sweep that published its lease *before* promotion
+— therefore fell out of leg 1 entirely and became invisible to a racing
+dispatcher. That is exactly what produced the 2026-09-24 collision on
+loom#8787: an in-session lease created 262s earlier and **renewed 8 seconds**
+before a peer daemon dispatched the same issue was filtered out of the
+comparison, the peer concluded it was the sole claimant, and two live owners
+existed at once. A lease the reclaimer considers too fresh to reclaim must
+never simultaneously be too old for the dispatcher to see.
+
+Membership is decided on the forge's own `created_at`/`updated_at` fields
+only — never on a timestamp embedded in the comment's prose, per this doc's
+load-bearing rule above. Leg 2 is subtracted for exactly one case: a
+`sweep_id` **this** daemon's own registry knows has already terminated (its
+renewal loop is dead, so its `updated_at` is merely not yet aged out), so a
+host's legitimate re-dispatch after its own previous attempt ended is not
+blocked for a full TTL. A record that simply aged out fails both legs, so an
+abandoned claim can never wedge redispatch.
 
 ## Phase 3 (Issue #6309) has now shipped: sweep-side fencing before push/PR-open
 

@@ -8,12 +8,21 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.schema.pcb import PCB
 
 ROOT = Path(__file__).resolve().parents[1] / "boards/09-usbc-pd-power"
 
+# find_kicad_cli() checks PATH plus common non-PATH install locations, so
+# this can't silently disagree with the rest of the suite about which
+# kicad-cli (if any) is available (#5714).
+KICAD_CLI = find_kicad_cli()
 
-@pytest.mark.skipif(shutil.which("kicad-cli") is None, reason="requires native KiCad DRC")
+
+@pytest.mark.skipif(
+    KICAD_CLI is None,
+    reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+)
 def test_native_gate_detects_removed_boot_route(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT))
     spec = importlib.util.spec_from_file_location("board09_check", ROOT / "check_design.py")
@@ -26,7 +35,7 @@ def test_native_gate_detects_removed_boot_route(tmp_path, monkeypatch):
 
     def check_opens():
         subprocess.run(
-            ["kicad-cli", "pcb", "drc", str(path), "--format", "json", "--output", str(report)],
+            [str(KICAD_CLI), "pcb", "drc", str(path), "--format", "json", "--output", str(report)],
             check=True,
             capture_output=True,
             text=True,

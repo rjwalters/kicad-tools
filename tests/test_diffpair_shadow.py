@@ -4324,6 +4324,49 @@ def test_mirrored_z_jog_is_refused_over_a_foreign_pad():
         assert deficient.vias == []
 
 
+def test_via_pad_deficit_ignores_foreign_pad_outside_the_via_layer_span_5676():
+    """A blind via must not be charged against pads on layers it never reaches.
+
+    Judge finding on PR #5676 (Epic #5509 Phase 3c): ``_kernel_pad_deficit``
+    set ``through=True`` unconditionally for every via call (callers always
+    pass ``layer=None``), so a blind/buried via's foreign-pad gate measured
+    EVERY foreign SMD pad on the board regardless of whether the barrel
+    actually spans that pad's layer -- an over-rejection regression relative
+    to the legacy ``grid.worst_via_pad_deficit``, which explicitly skips SMD
+    pads outside the via's layer span.
+    """
+    from kicad_tools.router.core import Autorouter
+    from kicad_tools.router.layers import LayerStack
+    from kicad_tools.router.primitives import Pad
+
+    rules = DesignRules()
+    router = Autorouter(
+        width=20.0, height=10.0, rules=rules, layer_stack=LayerStack.four_layer_all_signal()
+    )
+    dpr = router._diffpair
+    # Blind via F.Cu <-> In1.Cu: its barrel never reaches B.Cu.
+    blind_via = _via((Layer.F_CU, Layer.IN1_CU), x=5.0, y=5.0, net=1)
+    # Foreign SMD pad co-located with the via, but on B.Cu -- outside the span.
+    dpr.autorouter.grid.add_pad(
+        Pad(
+            x=5.0,
+            y=5.0,
+            width=0.3,
+            height=0.3,
+            layer=Layer.B_CU,
+            net=99,
+            net_name="OTHER",
+            ref="J2",
+            pin="1",
+        )
+    )
+
+    assert dpr._via_pad_deficit(blind_via) <= 1e-9
+    assert dpr.autorouter.grid.worst_via_pad_deficit(blind_via, exclude_net=1)[0] <= 1e-9, (
+        "kernel and legacy grid readings must agree on the same via/pad pair"
+    )
+
+
 def test_mirrored_z_jog_is_refused_when_the_partner_occupies_the_jog_layer():
     """The relocated stretch is screened on the layer it MOVES TO.
 

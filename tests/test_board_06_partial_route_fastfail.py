@@ -84,7 +84,7 @@ class TestBoard06PartialRouteFastFail:
             "partial-route failure must be reported with a distinct 'partial "
             f"route' message, got stderr:\n{err}"
         )
-        assert "wall-clock budget" in err.lower()
+        assert "per-pair a* budget" in err.lower()
         assert "BoardNetlistMismatch" not in err, (
             "a partial route must NOT surface as an LVS BoardNetlistMismatch"
         )

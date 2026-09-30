@@ -105,6 +105,11 @@ if [[ -z "$BRANCH" ]]; then
     exit 0
 fi
 
+# (#9106: loom_default_branch refuses an unsafe name at the source and returns
+# non-zero, which leaves $BRANCH empty — so the "could not determine the default
+# branch; skipping" arm above is also the unsafe-name arm, and this advisory
+# script still never exits non-zero. The `--` below is the second mitigation.)
+
 REMOTE_REF="origin/$BRANCH"
 
 # ---------- bounded fetch (degrade gracefully) ----------
@@ -113,13 +118,16 @@ REMOTE_REF="origin/$BRANCH"
 # can't stall the sweep. On any failure (offline, auth, rate-limit, no `timeout`
 # binary) we fall back to whatever refs/remotes/origin/<branch> is already known
 # locally — possibly stale, but the check stays cheap and never blocks.
-if command -v timeout >/dev/null 2>&1; then
-    timeout 5 git fetch origin "$BRANCH" --quiet >/dev/null 2>&1 || true
-else
-    # No `timeout` available (e.g. minimal macOS without coreutils). Still try,
-    # but git's own --quiet keeps it unobtrusive; a hung network is a rare edge.
-    git fetch origin "$BRANCH" --quiet >/dev/null 2>&1 || true
-fi
+# No `timeout` available (e.g. minimal macOS without coreutils)? Still fetch —
+# git's own --quiet keeps it unobtrusive and a hung network is a rare edge — so
+# the bound is a command PREFIX rather than a second copy of the same fetch.
+# `${a[@]+"${a[@]}"}` not `"${a[@]}"`: this script runs under `set -u`, and on
+# bash 3.2 (the macOS default) expanding an EMPTY array that way is an "unbound
+# variable" error — the recurring 3.2 portability class in
+# `.loom/docs/shell-language-policy.md`. The `+` form expands to nothing when
+# the array is unset/empty and to the quoted elements otherwise.
+_CMF_BOUND=(); command -v timeout >/dev/null 2>&1 && _CMF_BOUND=(timeout 5)
+${_CMF_BOUND[@]+"${_CMF_BOUND[@]}"} git fetch origin --quiet -- "$BRANCH" >/dev/null 2>&1 || true
 
 # ---------- verify we have both refs to compare ----------
 

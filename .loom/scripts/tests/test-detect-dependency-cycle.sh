@@ -151,6 +151,15 @@ STUB_DIR="$(cd "$(dirname "$0")" && pwd)"
 printf '%s\n' "$*" >> "$STUB_DIR/calls.log"
 
 [[ "${1:-}" == "--version" ]] && { echo "gh version 0.0.0 (stub)"; exit 0; }
+# REST comment listing (#9548: dep classification reads comments from REST,
+# trusted authors only). A fixture comment without an author is this fleet's
+# default App; one may carry its own `user`/`author_association`.
+if [[ "${1:-}" == "api" && "${2:-}" =~ ^repos/([^/]+/[^/]+)/issues/([0-9]+)/comments$ ]]; then
+  f="$STUB_DIR/issue-$(printf '%s' "${BASH_REMATCH[1]}#${BASH_REMATCH[2]}" | tr '/#' '__').json"
+  [[ -f "$f" ]] || { echo "gh: not found" >&2; exit 1; }
+  jq '[.comments[] | {body, user: (.user // {login: "loom-fleet-dispatch[bot]", type: "Bot"}), author_association: (.author_association // "NONE")}]' "$f"
+  exit 0
+fi
 [[ "${1:-}" != "issue" ]] && { echo "stub gh: unhandled args: $*" >&2; exit 3; }
 
 action="$2"; num="$3"; shift 3

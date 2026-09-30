@@ -1,18 +1,25 @@
 """End-to-end guard for ``kct route --reserve-plane-layers`` (Issue #5014).
 
+Issue #5789 flipped the flag's default from off to on, so this module now
+also pins the opt-out (``--no-reserve-plane-layers``) direction alongside
+the pre-existing coverage.
+
 Unit coverage for the underlying predicates/helpers, and a real-pathfinder
 proof that the derived ``allowed_layers`` value is actually honoured, live
 in ``tests/test_layer_advisories.py``. This module exercises the CLI
 surface reached through ``route_cmd.main``:
 
-* ``--reserve-plane-layers`` threads through to the constructed
-  ``DesignRules.allowed_layers`` for a plane-bearing stack (``--layers
-  4``'s In1.Cu/In2.Cu are excluded, F.Cu/B.Cu remain routable).
-* Without the flag, the Tier-3 advisory recommending it is printed to
-  stderr for a plane-bearing stack.
-* With the flag, the advisory is silent (the hard restriction is already
-  in effect).
-* A stack with no plane layers (``--layers 2``) is a no-op on both counts.
+* By default (no flag passed), a plane-bearing stack's ``DesignRules.
+  allowed_layers`` is hard-restricted to the non-PLANE layers (``--layers
+  4``'s In1.Cu/In2.Cu are excluded, F.Cu/B.Cu remain routable) -- Issue
+  #5789's new default.
+* ``--no-reserve-plane-layers`` opts back out to the pre-#5789 behavior:
+  ``allowed_layers`` stays untouched and the Tier-3 advisory recommending
+  the restriction is printed to stderr.
+* An explicit (redundant) ``--reserve-plane-layers`` behaves identically to
+  the default: the restriction applies and the advisory is silent.
+* A stack with no plane layers (``--layers 2``) is a no-op on both counts,
+  regardless of the flag.
 """
 
 from __future__ import annotations
@@ -122,7 +129,19 @@ def _run_and_capture_design_rules(argv: list[str]) -> list:
 
 
 class TestReservePlaneLayersHardRestriction:
-    def test_allowed_layers_excludes_planes_when_flag_set(self, tmp_path: Path):
+    def test_allowed_layers_excludes_planes_by_default(self, tmp_path: Path):
+        """Issue #5789: no flag needed anymore -- restriction is the default."""
+        pcb_path = _write_pcb(tmp_path)
+        out_path = tmp_path / "out.kicad_pcb"
+
+        captured = _run_and_capture_design_rules(_base_argv(pcb_path, out_path))
+
+        assert captured, "DesignRules must have been constructed at least once"
+        for rules in captured:
+            assert rules.allowed_layers == ["F.Cu", "B.Cu"]
+
+    def test_allowed_layers_excludes_planes_when_flag_explicitly_set(self, tmp_path: Path):
+        # Redundant/explicit spelling of the default; must behave identically.
         pcb_path = _write_pcb(tmp_path)
         out_path = tmp_path / "out.kicad_pcb"
 
@@ -134,11 +153,26 @@ class TestReservePlaneLayersHardRestriction:
         for rules in captured:
             assert rules.allowed_layers == ["F.Cu", "B.Cu"]
 
-    def test_allowed_layers_untouched_without_flag(self, tmp_path: Path):
+    def test_allowed_layers_untouched_with_explicit_opt_out(self, tmp_path: Path):
         pcb_path = _write_pcb(tmp_path)
         out_path = tmp_path / "out.kicad_pcb"
 
-        captured = _run_and_capture_design_rules(_base_argv(pcb_path, out_path))
+        captured = _run_and_capture_design_rules(
+            [*_base_argv(pcb_path, out_path), "--no-reserve-plane-layers"]
+        )
+
+        assert captured
+        for rules in captured:
+            assert rules.allowed_layers is None
+
+    def test_allowed_layers_untouched_for_2layer_stack_by_default(self, tmp_path: Path):
+        # No-op: a 2-layer stack has no PLANE layers to reserve, whether or
+        # not the (now-default) restriction is in effect.
+        pcb_path = _write_pcb(tmp_path)
+        out_path = tmp_path / "out.kicad_pcb"
+        argv = [a if a != "4" else "2" for a in _base_argv(pcb_path, out_path)]
+
+        captured = _run_and_capture_design_rules(argv)
 
         assert captured
         for rules in captured:
@@ -157,8 +191,9 @@ class TestReservePlaneLayersHardRestriction:
             assert rules.allowed_layers is None
 
     def test_baseline_without_flag_still_routes(self, tmp_path: Path):
-        # Sanity: the plain (non-reserved) --layers 4 run still succeeds --
-        # --reserve-plane-layers must not be required for a normal route.
+        # Sanity: the default (restricted) --layers 4 run still succeeds --
+        # excluding the plane layers must not prevent a normal route on
+        # this fixture (both pads are surface-mount on F.Cu already).
         pcb_path = _write_pcb(tmp_path)
         out_path = tmp_path / "out.kicad_pcb"
 
@@ -168,11 +203,21 @@ class TestReservePlaneLayersHardRestriction:
 
 
 class TestPlaneLayerReservationAdvisory:
-    def test_advisory_printed_without_flag(self, tmp_path: Path, capsys):
+    def test_advisory_silent_by_default(self, tmp_path: Path, capsys):
+        """Issue #5789: the restriction is now the default, so the Tier-3
+        advisory recommending it has nothing to recommend."""
         pcb_path = _write_pcb(tmp_path)
         out_path = tmp_path / "out.kicad_pcb"
 
         route_cmd_module.main(_base_argv(pcb_path, out_path))
+        err = capsys.readouterr().err
+        assert "Pass --reserve-plane-layers to hard-restrict" not in err
+
+    def test_advisory_printed_with_explicit_opt_out(self, tmp_path: Path, capsys):
+        pcb_path = _write_pcb(tmp_path)
+        out_path = tmp_path / "out.kicad_pcb"
+
+        route_cmd_module.main([*_base_argv(pcb_path, out_path), "--no-reserve-plane-layers"])
         err = capsys.readouterr().err
         assert "--reserve-plane-layers" in err
         assert "In1.Cu" in err
@@ -390,3 +435,52 @@ class TestEscalationPlaneAudit:
             "net 'AUDIT_SIG' has 1 segment routed on reference-plane layer 'In1.Cu'"
             in capsys.readouterr().err
         )
+
+
+# ---------------------------------------------------------------------------
+# Outer-parser shim forwarding (Issue #5789)
+# ---------------------------------------------------------------------------
+#
+# ``run_route_command`` (``src/kicad_tools/cli/commands/routing.py``) builds
+# the inner ``route_cmd.main`` argv from the outer parsed ``args``. Since the
+# flag now defaults to True on both parsers, the shim only needs to forward
+# the explicit opt-out; an unset or explicitly-true flag must NOT add
+# anything to ``sub_argv`` so the "byte-identical when unset" convention this
+# shim follows for its other flags holds for the opt-out direction instead.
+
+
+class TestReservePlaneLayersShimForwarding:
+    def test_shim_omits_flag_when_unset(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+        from kicad_tools.cli.parser import create_parser
+
+        args = create_parser().parse_args(["route", "board.kicad_pcb"])
+        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as inner_main:
+            assert run_route_command(args) == 0
+        sub_argv = inner_main.call_args[0][0]
+        assert "--reserve-plane-layers" not in sub_argv
+        assert "--no-reserve-plane-layers" not in sub_argv
+
+    def test_shim_omits_flag_when_explicitly_enabled(self):
+        # Explicit --reserve-plane-layers is redundant with the default, so
+        # the shim need not forward it either.
+        from kicad_tools.cli.commands.routing import run_route_command
+        from kicad_tools.cli.parser import create_parser
+
+        args = create_parser().parse_args(["route", "board.kicad_pcb", "--reserve-plane-layers"])
+        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as inner_main:
+            assert run_route_command(args) == 0
+        sub_argv = inner_main.call_args[0][0]
+        assert "--reserve-plane-layers" not in sub_argv
+        assert "--no-reserve-plane-layers" not in sub_argv
+
+    def test_shim_forwards_explicit_opt_out(self):
+        from kicad_tools.cli.commands.routing import run_route_command
+        from kicad_tools.cli.parser import create_parser
+
+        args = create_parser().parse_args(["route", "board.kicad_pcb", "--no-reserve-plane-layers"])
+        with patch("kicad_tools.cli.route_cmd.main", return_value=0) as inner_main:
+            assert run_route_command(args) == 0
+        sub_argv = inner_main.call_args[0][0]
+        assert "--no-reserve-plane-layers" in sub_argv
+        assert "--reserve-plane-layers" not in sub_argv

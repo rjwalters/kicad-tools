@@ -80,6 +80,28 @@ STUB_DIR="$(cd "$(dirname "$0")" && pwd)"
 printf '%s\n' "$*" >> "$STUB_DIR/calls.log"
 
 [[ "${1:-}" == "--version" ]] && { echo "gh version 0.0.0 (stub)"; exit 0; }
+
+# REST comment listing (#9548): `gh api repos/<repo>/issues/<N>/comments
+# --paginate` — the trusted-comments path reads comments from here, not from
+# `issue view --json comments`. Served from the same issue fixtures, reshaped
+# to REST objects authored by the repo OWNER (an association
+# `comment_trust::TRUSTED_ASSOCIATIONS` believes on any machine, no roster
+# needed).
+if [[ "${1:-}" == "api" ]]; then
+    path="${2:-}"
+    if [[ "$path" =~ ^repos/([^/]+)/([^/]+)/issues/([0-9]+)/comments$ ]]; then
+        owner="${BASH_REMATCH[1]}"; repo2="${BASH_REMATCH[2]}"; num="${BASH_REMATCH[3]}"
+        key="$(printf '%s' "$owner/$repo2#$num" | tr '/#' '__')"
+        f="$STUB_DIR/issue-$key.json"
+        [[ -f "$f" ]] || { echo "gh: not found" >&2; exit 1; }
+        jq -c '(.comments // []) | map(. + {user: {login: $owner, type: "User"}, author_association: "OWNER"})' \
+            --arg owner "$owner" < "$f"
+        exit 0
+    fi
+    echo "stub gh: unhandled api path: $path" >&2
+    exit 3
+fi
+
 kind="${1:-}"
 case "$kind" in issue|pr) ;; *) echo "stub gh: unhandled args: $*" >&2; exit 3 ;; esac
 
@@ -135,6 +157,13 @@ reset_state() {
 run_cdb() {
     OUT="$("$CDB" --no-cache "$@" 2>"$STUB_DIR/stderr.log")"
     RC=$?
+    # Exit 2 is could-not-evaluate, never a verdict (#8484): when it happens,
+    # the reason is in stderr — print it instead of failing with blank
+    # actuals, which is undiagnosable from CI output alone.
+    if [[ "$RC" == "2" ]]; then
+        echo "  classify-dependency-block exited 2 (could not evaluate); stderr:" >&2
+        cat "$STUB_DIR/stderr.log" >&2
+    fi
 }
 
 echo

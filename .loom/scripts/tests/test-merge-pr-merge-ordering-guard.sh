@@ -36,6 +36,17 @@
 # test. Extracting from source (rather than replicating) keeps the test in
 # lockstep with the script.
 #
+# #8191 (slice): the decision itself is now `loom-daemon merge-pr
+# stacked-children` (Rust), which merge-pr.sh calls out to. NOTHING about this
+# suite's strategy changes — the extracted stub still reads the same globals,
+# the daemon still queries the SAME stubbed `gh` on PATH and writes the pin into
+# the SAME real git sandbox, so every behavioral assertion below runs unchanged
+# against the port. What could not survive is the handful of assertions that
+# grepped merge-pr.sh for the `jq`/`git` pipelines themselves; each is printed
+# by `retired()` with the behavioral successor that pins the same property, per
+# the three-part test in defaults/docs/verification-recipes.md §6. Two new cases
+# (T11) pin the port's own new failure mode: a verb that cannot answer.
+#
 # Usage:
 #   ./.loom/scripts/tests/test-merge-pr-merge-ordering-guard.sh
 
@@ -51,9 +62,14 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -72,6 +88,18 @@ assert_eq() {
         echo "    Expected: '$expected'"
         echo "    Actual:   '$actual'"
     fi
+}
+
+# An assertion that CANNOT survive the #8191 port of this guard to Rust,
+# retired under the three-part test in defaults/docs/verification-recipes.md §6.
+# Printed, not deleted: a reader must be able to see what was removed, why, and
+# what proves the property now. Counted as run so the totals stay honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
 }
 
 assert_contains() {
@@ -479,27 +507,119 @@ clear_pin_ref "feature/issue-100"
 PR_HEAD_SHA="$PARENT_SHA"
 unset STACKED_CHILDREN_PIN_WRITTEN 2>/dev/null || true
 
+# --- T11 (#8191): a verb that cannot ANSWER is a guard fault, not a refusal ---
+#
+# The port gives this path a failure mode the shell implementation could not
+# have: the subcommand does not answer. Two things must hold, and they pull in
+# opposite directions, which is why both are pinned.
+#
+#   1. It must NOT be mistaken for "merge refused". A stacked-children guard
+#      that hard-blocks whenever its binary is a release behind would stop every
+#      merge on that host — including the overwhelming majority of PRs that have
+#      no stacked children at all. Unlike the review gates further down this
+#      script, this guard establishes a postcondition for a best-effort
+#      POST-merge cleanup step, so it fails OPEN, loudly.
+#   2. It must not be mistaken for "merge succeeded either" — i.e. it must not
+#      be SILENT. The warning has to carry the recovery material (the tip that
+#      would have been pinned), because that SHA is what a manual
+#      reconcile-stack.sh needs once the forge has deleted the branch.
+#
+# An open child is present in all three cases, so the guard is genuinely live:
+# a fault that only showed up on the no-children path would prove nothing.
+echo ""
+echo "Test 11: a stacked-children verb that cannot answer warns and proceeds (fail-open), never blocks"
+
+DRY_RUN=false; ALLOW_STACKED_CHILDREN=false
+PR_BRANCH="feature/issue-100"
+PR_HEAD_SHA="$PARENT_SHA"
+write_prlist "feature/issue-100" '[{"number":501,"headRefName":"feature/issue-201"}]'
+
+# (a) the binary does not exist at all — an un-rolled host, the #8285 case.
+clear_pin_ref "feature/issue-100"
+set +e
+OUT_A="$(LOOM_DAEMON_BIN="$SANDBOX_DIR/no-such-loom-daemon" _check_no_open_stacked_children 2>&1)"
+RC_A=$?
+set -e
+assert_eq "0" "$RC_A" "(a) an unresolvable loom-daemon does not block the merge (exit 0)"
+assert_not_contains "$OUT_A" "Merge blocked" "(a) an unresolvable binary is not read as a refusal"
+assert_contains "$OUT_A" "did not run" "(a) the fault is reported, not swallowed"
+assert_contains "$OUT_A" "$PARENT_SHA" \
+  "(a) the fault warning carries the tip that would have been pinned (the manual-reconcile recovery material)"
+assert_eq "" "$(git_q -C "$REPO_ROOT" rev-parse --verify --quiet refs/loom/parent/feature/issue-100 2>/dev/null || true)" \
+  "(a) nothing ran, so no ref was written"
+
+# (b) a binary that EXITS 1 but prints no BLOCK record. Exit 1 is this verb's
+# refusal code, so this is the case that decides whether the stub trusts the
+# exit code alone or requires the record: clap uses other codes for an unknown
+# subcommand today, but a wrapper, a shim or a future clap could land on 1.
+cat >"$SANDBOX_DIR/silent-one" <<'SILENT'
+#!/usr/bin/env bash
+exit 1
+SILENT
+chmod +x "$SANDBOX_DIR/silent-one"
+clear_pin_ref "feature/issue-100"
+set +e
+OUT_B="$(LOOM_DAEMON_BIN="$SANDBOX_DIR/silent-one" _check_no_open_stacked_children 2>&1)"
+RC_B=$?
+set -e
+assert_eq "0" "$RC_B" "(b) exit 1 with no BLOCK record is a fault, not a refusal (exit 0)"
+assert_contains "$OUT_B" "did not run" "(b) the bare exit 1 is reported as a fault"
+assert_not_contains "$OUT_B" "Merge blocked" "(b) a refusal is never synthesized from an exit code alone"
+
+# (c) the converse: exit 1 WITH a BLOCK record IS a refusal, and the record's
+# own text is what the operator sees. Together with (b) this pins the contract
+# as "code AND record", not either alone.
+cat >"$SANDBOX_DIR/blocking" <<'BLOCKING'
+#!/usr/bin/env bash
+printf 'CHILDREN\t[{"number":501,"headRefName":"feature/issue-201"}]\n'
+printf 'BLOCK\tMerge blocked: synthetic refusal from the stub daemon\n'
+exit 1
+BLOCKING
+chmod +x "$SANDBOX_DIR/blocking"
+clear_pin_ref "feature/issue-100"
+set +e
+OUT_C="$(LOOM_DAEMON_BIN="$SANDBOX_DIR/blocking" _check_no_open_stacked_children 2>&1)"
+RC_C=$?
+set -e
+assert_eq "1" "$RC_C" "(c) exit 1 WITH a BLOCK record refuses the merge (exit 1)"
+assert_contains "$OUT_C" "synthetic refusal from the stub daemon" \
+  "(c) the refusal the operator sees is the daemon's own BLOCK text, replayed through error()"
+
+clear_pin_ref "feature/issue-100"
+unset STACKED_CHILDREN_JSON STACKED_CHILDREN_PIN_WRITTEN 2>/dev/null || true
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."
 src="$(cat "$MERGE_PR_SRC")"
 assert_contains "$src" "_check_no_open_stacked_children" \
   "merge-pr.sh defines and invokes _check_no_open_stacked_children"
-# The #7982 pin behavior: assert the actual ref write and the object-existence
-# check that makes the pinned ref usable. A ref pointing at an object this repo
-# does not have would satisfy a naive "did we write a ref" assertion while
-# being useless to reconcile-stack.sh's later rebase — so both halves are
-# pinned down here.
-assert_contains "$src" 'update-ref "$pin" "$PR_HEAD_SHA"' \
-  "merge-pr.sh pins the parent tip by writing the PR head SHA to the pin ref (#7982)"
-assert_contains "$src" 'pin="refs/loom/parent/$PR_BRANCH"' \
-  "merge-pr.sh pins under the refs/loom/parent/<branch> namespace reconcile-stack.sh reads"
-assert_contains "$src" 'cat-file -e "${PR_HEAD_SHA}^{commit}"' \
-  "merge-pr.sh verifies the commit object exists locally before trusting the pin"
-assert_contains "$src" 'reconcile-stack.sh " + (.number|tostring)' \
-  "merge-pr.sh builds a per-child reconcile-stack.sh invocation for its messages"
-assert_contains "$src" 'gh pr list --repo "$REPO_NWO" --base "$PR_BRANCH" --state open' \
-  "merge-pr.sh discovers children via a live forge query, not the daemon registry"
+# The guard now calls out to `loom-daemon merge-pr stacked-children`, so the
+# five greps below no longer have a pipeline in THIS file to find. Each is
+# retired with the behavioral successor that pins the same property — every one
+# of which is an assertion already in this suite, running against the port.
+assert_contains "$src" "merge-pr stacked-children" \
+  "merge-pr.sh routes the merge-ordering guard through loom-daemon merge-pr stacked-children (#8191)"
+retired "merge-pr.sh's source writes the PR head SHA to the pin ref (update-ref \"\$pin\" \"\$PR_HEAD_SHA\")" \
+    "the guard must ESTABLISH the postcondition reconcile-stack.sh needs, not merely report it — a guard that warns without writing the ref leaves the #3747 race fully live" \
+    "the update-ref call is no longer in this file; it is establish_pin() in loom-daemon/src/merge_pr/stacked_children.rs, so no grep of merge-pr.sh can pass" \
+    "T2's own 'refs/loom/parent/feature/issue-100 actually pinned to the parent's tip SHA' assertion reads the REF back out of the real git sandbox after the port ran — it fails if nothing was written, which a source grep cannot detect. merge_pr::stacked_children::tests::a_resolvable_tip_is_pinned_to_the_ref_reconcile_stack_reads pins the same property directly."
+retired "merge-pr.sh's source contains pin=\"refs/loom/parent/\$PR_BRANCH\"" \
+    "the pin must live in the namespace reconcile-stack.sh's fallback reads; a pin written anywhere else is invisible to the tool that needs it" \
+    "the pin path is now pin_ref() in Rust; this file only names the namespace in the #8010 item-3 re-pin line, which is not this function" \
+    "T2 asserts the ref at the exact path 'refs/loom/parent/feature/issue-100' holds the parent SHA, and T2's message assertions require the warning to NAME that path. merge_pr::stacked_children::tests::the_pin_ref_lives_under_the_namespace_reconcile_stack_reads pins the construction, and test-reconcile-stack.sh independently pins the consumer side of the same namespace."
+retired "merge-pr.sh's source verifies the commit object exists (cat-file -e \"\${PR_HEAD_SHA}^{commit}\")" \
+    "a ref pointing at an object this repo does not have satisfies 'did we write a ref' while being useless to a later rebase — so the object must be verified, and the ^{commit} peel is what rejects a readable non-commit" \
+    "the verify/fetch/re-verify chain is now establish_pin() in Rust; the grep cannot pass against this file" \
+    "T8 is the behavioral successor and is strictly stronger: an unresolvable SHA must both hard-block AND leave NO ref behind, which is exactly the failure a missing object check produces. merge_pr::stacked_children::tests::a_non_commit_object_does_not_satisfy_the_pin pins the ^{commit} peel itself — a property the retired grep did NOT pin, since a naive port could have kept the literal text and dropped the peel."
+retired "merge-pr.sh's source builds the per-child command via jq (reconcile-stack.sh \" + (.number|tostring))" \
+    "each child must get its own paste-ready unblock command; a drift in the indentation, the script path or the argument order hands the operator a command that does not run" \
+    "the command list is now reconcile_commands() in Rust; this file renders no jq" \
+    "T2 and T7 assert the exact strings 'reconcile-stack.sh 501 feature/issue-100' and '… 502 …' appear in the guard's own output, and T8 asserts the block message points at reconcile-stack.sh too. loom-daemon/tests/merge_pr_stacked_children_differential.rs additionally proves the port's rendering is byte-for-byte identical to the RETIRED jq on a 21-entry corpus fed to both sides from one file — a scan checks the jq text is present; the differential checks the output is identical, which subsumes it."
+retired "merge-pr.sh's source contains the gh pr list --base <parent> --state open discovery call" \
+    "children must be discovered by a LIVE forge query, never the ephemeral daemon SweepRegistry — terminal registry entries are GC'd ~1h after transition and the registry only exists while loom-daemon runs, but this guard also runs from Champion's cron" \
+    "the query is now discover_open_children() in Rust; merge-pr.sh issues no gh call for it (the surviving 'gh pr list --base' in this file belongs to the POST-merge reconcile, a different function)" \
+    "every behavioral case in this suite (T1-T9b) is served by the PATH-stubbed \`gh\` that only answers \`pr list --base\`: if the port stopped querying gh, the stub would never be hit and T2/T7/T8 would all fail on an empty child list. merge_pr::stacked_children's discover_open_children owns the argv, and an_unrunnable_gh_discovers_no_children_rather_than_erroring pins the fail-open read."
 assert_contains "$src" "ALLOW_STACKED_CHILDREN" \
   "merge-pr.sh threads the --allow-stacked-children override into the guard"
 assert_contains "$src" "--allow-stacked-children) ALLOW_STACKED_CHILDREN=true" \

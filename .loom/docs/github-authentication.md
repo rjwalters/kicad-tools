@@ -39,6 +39,7 @@ A fine-grained PAT scoped to the target repository needs these permissions:
 | Pull requests | Read & Write | Builder, Judge, Champion, Doctor | PR creation, reviews, merges |
 | Contents | Read & Write | Builder, Champion | Push branches, merge PRs, delete branches |
 | Checks | Read | Auditor, Judge | CI status verification |
+| Actions | Read (optional) | Auditor, Judge, CI telemetry | Read workflow runs and job logs. `merge-pr.sh` reads a job log to derive the base each required check actually tested (#8919); without it the freshness guard falls back to the #8248 timestamp rule and says so on stderr. It no longer *re-runs* anything: an in-place re-run replays the original test merge commit, so it does not keep a verdict valid (#8914, withdrawn by #8919) |
 | Metadata | Read | All roles | Implicit, always granted with any other permission |
 
 ## Creating a Fine-Grained PAT
@@ -53,6 +54,7 @@ A fine-grained PAT scoped to the target repository needs these permissions:
    - **Issues**: Read and write
    - **Pull requests**: Read and write
    - **Checks**: Read-only
+   - **Actions**: Read and write (recommended — see the table above)
 7. Click **Generate token** and copy the value immediately — it won't be shown again
 
 ## Using the Token
@@ -202,7 +204,12 @@ hard-failing.
 
 1. Create a GitHub App (under whichever account/org owns the target repos)
    with **Contents: Read & write**, **Issues: Read & write**, **Pull
-   requests: Read & write**, **Metadata: Read** permissions.
+   requests: Read & write**, **Metadata: Read** permissions, plus
+   **Actions: Read** (optional: lets the #8248/#8919 freshness guard read the
+   base each required check actually tested, instead of falling back to the
+   timestamp rule). GitHub has no API for changing an App's
+   permissions: add it in the App's settings, then accept the updated
+   permission request on each installation.
 2. Generate a private key for the app (downloads a `.pem` file) and copy it to
    each fleet host that should mint tokens for that account/org — e.g.
    `~/.config/loom/github-app-key.pem`, readable only by the daemon's user
@@ -286,6 +293,83 @@ Forge credential: OK — github-app (app 123456 installation 789)
   app is installed on.
 - **Clock skew**: the minted JWT's `iat` is backdated 60 seconds per GitHub's
   own guidance, tolerating modest host clock drift without a manual fix.
+- **Key path must be absolute**: `github-app-token.sh` does not expand `~`,
+  so `"privateKeyPath": "~/.loom/…"` reads as "key not readable" and the
+  host falls back to ambient auth. Write the absolute path.
+
+### Several Apps: one writer, a pool of readers (#9248, #9537)
+
+One App installation has one REST budget. A busy fleet can outrun it, so
+Loom splits its identities by role:
+
+| Role | Used for | Permissions | Author of |
+|---|---|---|---|
+| **writer** (exactly one) | every attributed action: comments, labels, PRs, pushes, merges, leases, claims | the full set above | everything the fleet writes |
+| **readers** (zero or more) | the daemon's forge reads: issue/PR listings, cached views, CI telemetry | **read-only**: `contents`, `issues`, `pull_requests`, `actions`, `checks`, `metadata` all `read` | nothing (they cannot write) |
+
+Every host is configured the same way. There is no per-host pinning:
+
+```json
+"forge": {
+  "githubApp": { "appId": "…", "privateKeyPath": "/abs/path/writer.pem" },
+  "identities": {
+    "writer":  { "appId": "…", "slug": "loom-fleet-dispatch",  "privateKeyPath": "/abs/path/writer.pem" },
+    "readers": [
+      { "appId": "…", "slug": "loom-fleet-reader-1", "privateKeyPath": "/abs/path/reader-1.pem" },
+      { "appId": "…", "slug": "loom-fleet-reader-2", "privateKeyPath": "/abs/path/reader-2.pem" }
+    ],
+    "legacyLogins": []
+  }
+}
+```
+
+- **`forge.githubApp` is the writer, always.** It is the App every write
+  mints from: the daemon's credential delivery, agent sessions, and
+  `merge-pr.sh`. Keep it set. `forge.identities.writer` is optional. If
+  present, it must name the **same** App; it only adds the writer's `slug`.
+  A different App there cannot redirect writes: Loom treats
+  `forge.githubApp` as the writer and reports the mismatch. So does
+  `forge identities`, which also flags an `identities.writer` set without
+  `forge.githubApp`, since writes then fall back to ambient `gh` auth.
+- **Readers** come from `forge.identities.readers`. Without an `identities`
+  block, they come from the older `forge.githubAppReadPool` /
+  `LOOM_GITHUB_APP_READ_POOL`, which have no slugs, so a renamed reader's
+  history is not recognised until the host moves to `forge.identities`.
+  With no readers configured at all, reads share the writer, as before.
+- **Read routing**: each repo's reads go to `hash(owner/repo) mod N`, the same
+  reader on every host. A reader that hits a rate limit or an auth/coverage
+  error is withdrawn (until the reported reset, where GitHub gives one) and
+  the read is retried once on the writer. Reads fall back to the writer when
+  no reader is usable.
+- **Reader tokens** are minted per managed owner every ~5 minutes into
+  `.loom/gh-config-by-owner/<owner>/<app-id>/`, with an `identity.json`
+  recording the expiry. A read only uses a reader token with at least two
+  minutes left.
+- **"Is this login ours?"** means the writer, every reader, the
+  `legacyLogins`, and Loom's default `loom-fleet-dispatch` / `-<digits>`
+  family (exact, never a prefix), in any spelling (`x`, `x[bot]`, `app/x`).
+  Readers count because GitHub shows an App's **current** name on its whole
+  history: renaming a former writer to a reader re-attributes its past
+  comments to the new name.
+- **Renaming an App** changes its login everywhere at once, history included.
+  Update `slug` in config, or add the old name to `legacyLogins`. Nothing
+  keys on the App id's name: token minting and ruleset bypass actors use the
+  id.
+
+Commands (run from a checkout):
+
+```bash
+loom-daemon forge identities            # roster, fleet logins, reader token expiries
+loom-daemon forge is-fleet app/loom-fleet-reader-1 && echo ours   # prints the role; exit 1 if not ours
+loom-daemon forge token --repo owner/repo --access read    # JSON, same shape as github-app-token.sh get-token
+gh api "repos/{owner}/{repo}/issues/42/comments" --paginate | loom-daemon forge trusted-comments
+```
+
+Scripts use `forge is-fleet` instead of hardcoding a login, and
+`forge token --access read|write` instead of choosing an App themselves.
+The same roster decides whose comments Loom believes: a marker counts only from
+a repo insider, one of these Apps, or `forge.trustedCommenters` (#9548, see
+[`comment-trust.md`](comment-trust.md)).
 
 ### The cached-permission window: `403 … not accessible by integration` (#6074)
 
@@ -327,22 +411,21 @@ Wired call sites: `create-pr.sh` (PR creation), `create-issue.sh` /
 (comments), `forge_gh_swap_label_rl_safe` (label edits), and the sweep's
 own Builder-recovery PR creation.
 
-**The merge itself is wired too (#6752).** `merge-pr.sh`'s primary merge path
-calls the *native* `loom-daemon forge auto-merge`, whose forge-write code lives
-in Rust entirely outside this bash ladder, and its synchronous path issued a
-bare `gh api … -X PUT`. Both hard-failed on the integration-403 until #6752 —
-observed on 2026-08-22 (`/loom:sweep 6746`, PR #6751), where comment/label
-writes recovered through the ladder but the merge died, and the operator had to
-`unset GH_CONFIG_DIR` by hand (rung 3, performed manually) to finish it. The
-ladder is now command-agnostic: `forge_cmd_perm_safe <cmd> …` runs the same
-three rungs around **any** command whose credential comes from the environment
+**The merge itself is wired too (#6752).** `merge-pr.sh`'s merge path then
+called the *native* `loom-daemon forge auto-merge` (Rust, outside this bash
+ladder), and its synchronous path issued a bare `gh api … -X PUT`. Both
+hard-failed on the integration-403 until #6752 — observed on 2026-08-22
+(`/loom:sweep 6746`, PR #6751), where comment/label writes recovered through
+the ladder but the merge died, and the operator had to `unset GH_CONFIG_DIR` by
+hand (rung 3, performed manually) to finish it. The ladder is now
+command-agnostic: `forge_cmd_perm_safe <cmd> …` runs the same three rungs
+around **any** command whose credential comes from the environment
 (`loom-daemon forge …` shells out to `gh`, so the same `GH_TOKEN` /
 `GH_CONFIG_DIR` swap reaches it), and `forge_gh_perm_safe` is now just its
 `gh`-prefixed spelling — one implementation, so the two cannot drift. The
-wrapped command's exit code is preserved verbatim, so `loom-daemon forge
-auto-merge`'s meaningful codes (3 = forge declined → shell fallback, 4 =
-head-SHA mismatch → re-queue) still reach `merge-pr.sh` unretried and
-unrewritten.
+wrapped command's exit code is preserved verbatim. Since #8410 `merge-pr.sh`
+merges only via the ladder-protected `forge_merge_pr`; `forge auto-merge` is
+an operator-only verb no Loom path calls (#8427 — see its `--help` caveat).
 
 **Builders never lose work to this window.** `create-pr.sh` adopts an
 already-open PR for the head branch instead of creating a second one, and the
@@ -516,6 +599,43 @@ issues with `./.loom/scripts/create-issue.sh`, never a bare `gh issue create`.
 Full recipe, the atomic create+label requirement, the scripted
 `forge_gh_create_issue_rl_safe` equivalent, and why `loom-daemon forge issue
 create` is NOT a fallback: [`gh-issue-create-rest-fallback.md`](gh-issue-create-rest-fallback.md).
+
+### The duplicate backstop, and what makes it refuse (exit 3)
+
+Before filing, `create-issue.sh` runs `check-duplicate.sh` against **open
+issues** and refuses (exit 3, nothing filed) when the new issue looks like work
+already in flight. The similarity is a true Jaccard percentage over keyword
+sets, scored by `loom-daemon duplicate-scan`. The shipped calibration:
+
+| Signal | Default | Meaning |
+|---|---|---|
+| block threshold | **18%** full-text similarity | at/above this, the filing is refused |
+| corroboration ceiling | **25%** full-text similarity | below this, a block needs a second signal |
+| title threshold | **18%** *title-only* similarity | the second signal a low block must clear |
+| warn band floor | **13%** full-text similarity | reported on stderr, filed anyway |
+
+18% comes from this repo's own history (#4409): the confirmed duplicate pair
+#3550/#3551 scored 19% on full bodies, while unrelated richly-worded issues
+scored 4–13%. But 18% on *full text* alone is cheap — two long issues in the
+same subsystem share enough jargon to reach it — so since #8591 a match between
+18% and 25% must **also** reach 18% similarity on **titles alone** before it
+blocks. Titles are short and specific, so they are the cheap second opinion:
+#3550/#3551 scores 26% on titles and still blocks, while #8561 (a Kimi CLI
+harness adapter) vs. #8505 (an OpenCode metered-runtime budget bug) scores 3%
+and no longer does. At or above 25% the body overlap stands on its own.
+
+An uncorroborated match is **demoted, not discarded**: it appears as a
+`NEAR #<n>: … (similarity: X%, title overlap only Y% — not corroborated, so not
+a block)` row, and the filing proceeds. So does anything in the 13–17% warn
+band. Nothing the check noticed is ever silently dropped.
+
+**When you still need `--force`.** Genuinely distinct work that trips the block
+anyway — re-run with `--force` (or `LOOM_SKIP_DUPLICATE_CHECK=1` for a whole
+filing burst). Reaching for it *reflexively* is the failure mode the
+calibration exists to prevent: a backstop everyone bypasses protects nothing.
+An intentional follow-up needs neither — a filing that already cross-references
+the match by number (`Part of #123`, `Parent: #123`, `split out of #123`) is
+exempt by construction.
 
 ## Troubleshooting
 

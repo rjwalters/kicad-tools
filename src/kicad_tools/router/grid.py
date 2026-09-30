@@ -55,6 +55,15 @@ except ImportError:
 # Based on Parkour's empirical threshold for spatial index break-even.
 RTREE_SEGMENT_THRESHOLD = 32
 
+# Issue #5240: minimum number of tombstoned (lazily deleted) segment entries
+# before a layer's R-tree is compacted.  Below this, the stale entries cost
+# less than a rebuild; above it, compaction is amortised against the live
+# segment count (see ``_rtree_remove_segment``).
+RTREE_TOMBSTONE_MIN_COMPACT = 64
+
+# Axis-aligned (min_x, min_y, max_x, max_y) envelope as stored in the R-tree.
+_SegEnvelope = tuple[float, float, float, float]
+
 # Issue #5166: strength of the NET-AWARE same-component clearance carve-out.
 #
 #   "none"  -- no carve-out; the foreign same-component pad is validated at
@@ -1095,6 +1104,13 @@ class RoutingGrid:
         self._seg_rtree: dict[int, Any] = {}  # layer_idx -> rtree Index
         self._seg_rtree_items: dict[int, dict[int, Segment]] = {}  # layer_idx -> id -> Segment
         self._seg_rtree_count: int = 0  # total indexed segments across all layers
+        # Issue #5240: envelope each segment was inserted with, plus the
+        # entries that have been logically removed but are still physically
+        # present in the tree ("tombstones").  libspatialindex deletion walks
+        # the index, so rip-up-heavy routing pays O(index size) per removed
+        # segment; ``_rtree_remove_segment`` defers that work instead.
+        self._seg_rtree_envelopes: dict[int, dict[int, _SegEnvelope]] = {}
+        self._seg_rtree_pending: dict[int, dict[int, tuple[Segment, _SegEnvelope]]] = {}
         self._rtree_available = RTREE_AVAILABLE
 
         # Issue #2960: Via R-tree spatial index.
@@ -1262,6 +1278,28 @@ class RoutingGrid:
         # sub-clearance copper (routing-diagnostic fixture: NET3 through
         # J1-1's halo at 0.127mm actual vs 0.200mm required).
         self._static_blocked: np.ndarray | None = None
+        # Epic #5509 Phase 3c (#5662, review finding on PR #5676): provenance
+        # for cells blocked by geometry that exists ONLY in the raster.
+        #
+        # ``_blocked`` is a union with no memory of its writers, so a cell
+        # blocked by a keep-out and ALSO covered by a pad's marking rectangle
+        # is indistinguishable from a cell the pad alone blocked -- the pad's
+        # marking pass even overwrites ``cell.net`` 0 -> pad.net, erasing the
+        # obstacle's only trace.  A consumer that re-decides a blocked cell
+        # with exact geometry (``DiffPairRouter._blocked_cells_refined``) can
+        # measure pads (``self._pads``) and committed routes (``self.routes``)
+        # because those carry registries; obstacles, keepouts, region bounds
+        # and board-edge keepouts carry none, so a cell they touched can never
+        # be re-measured and must never be refined away.
+        #
+        # This plane is therefore written by exactly those registry-less
+        # blockers and is **monotone**: bits are set, never cleared.  A stale
+        # bit (the cell was later unblocked, e.g. by the same-component
+        # clearance relaxation) costs a refinement, never soundness, and an
+        # unblocked cell never reaches a refinement consumer in the first
+        # place.  Allocated lazily -- boards with no registry-less geometry
+        # pay nothing.
+        self._raster_only_blocked: np.ndarray | None = None
         # Issue #4794: monotonic occupancy generation.  Allocating (or
         # re-allocating) the planes is itself an occupancy change -- the new
         # buffers share none of the old contents -- so bump rather than reset,
@@ -1346,6 +1384,167 @@ class RoutingGrid:
         if self._static_blocked is None:
             self._static_blocked = to_numpy(self._blocked).copy()
 
+    def _mark_raster_only_region(
+        self,
+        layer_idx: int,
+        gx1: int,
+        gy1: int,
+        gx2: int,
+        gy2: int,
+    ) -> None:
+        """Record that registry-less geometry blocks this cell rectangle.
+
+        Epic #5509 Phase 3c (#5662).  Called by every blocker whose geometry
+        the exact clearance kernel cannot re-measure -- ``add_obstacle``,
+        ``add_keepout``, ``mark_region_bound``, the board-edge keepout -- so a
+        consumer that refines a blocked cell with exact geometry can tell
+        "blocked by a pad I can measure" from "blocked by a keep-out I cannot".
+
+        Marked over the blocker's WHOLE rectangle, not only over the cells it
+        newly blocked: a cell a pad halo had already blocked is exactly the
+        cell the attribution has to refuse, and "already blocked, skip" is how
+        it would otherwise go unrecorded.
+
+        Bits are only ever set; see ``_raster_only_blocked``'s note in
+        :meth:`_init_arrays` for why a stale bit is safe.
+        """
+        if not (0 <= layer_idx < self.num_layers):
+            return
+        ax, ay = max(gx1, 0), max(gy1, 0)
+        bx, by = min(gx2, self.cols - 1), min(gy2, self.rows - 1)
+        if ax > bx or ay > by:
+            return
+        self._ensure_raster_only_plane()[layer_idx, ay : by + 1, ax : bx + 1] = True
+        # Issue #5410: a registry-less blocker is STATIC board geometry.  Once
+        # routing has begun the static snapshot already exists, so without
+        # this a keep-out landing on a cell a routed-copper halo already owns
+        # stays attributed to that route: search-time halo refinement then
+        # re-measures the cell against the route's copper alone (and accepts
+        # it), and ripping the route up frees the cell outright.  Folding the
+        # rectangle into the snapshot keeps it hard for both.  Before the
+        # first route mark the snapshot is ``None`` and will capture these
+        # cells when it is taken.
+        if self._static_blocked is not None:
+            self._static_blocked[layer_idx, ay : by + 1, ax : bx + 1] = True
+
+    def _ensure_raster_only_plane(self) -> np.ndarray:
+        """Allocate the registry-less-blocker plane on first use (#5662)."""
+        if self._raster_only_blocked is None:
+            self._raster_only_blocked = np.zeros(
+                (self.num_layers, self.rows, self.cols), dtype=np.bool_
+            )
+        return self._raster_only_blocked
+
+    def _mark_raster_only_cells(
+        self,
+        layer_indices: list[int],
+        cells: set[tuple[int, int]],
+    ) -> None:
+        """Scattered-cell form of :meth:`_mark_raster_only_region`.
+
+        For blockers whose footprint is not a rectangle (the board-edge
+        keepout's swept disc).  One vectorised write per layer.
+        """
+        if not cells or not layer_indices:
+            return
+        plane = self._ensure_raster_only_plane()
+        xs = np.fromiter((c[0] for c in cells), dtype=np.intp, count=len(cells))
+        ys = np.fromiter((c[1] for c in cells), dtype=np.intp, count=len(cells))
+        inside = (xs >= 0) & (xs < self.cols) & (ys >= 0) & (ys < self.rows)
+        if not inside.all():
+            xs, ys = xs[inside], ys[inside]
+        static = self._static_blocked
+        for layer_idx in layer_indices:
+            if 0 <= layer_idx < self.num_layers:
+                plane[layer_idx, ys, xs] = True
+                # Issue #5410: same static promotion as the rectangle form.
+                if static is not None:
+                    static[layer_idx, ys, xs] = True
+
+    def _registry_less_window(
+        self, layer_idx: int, gx1: int, gy1: int, gx2: int, gy2: int
+    ) -> tuple[int, int, np.ndarray] | None:
+        """Snapshot the blocked plane under a registry-less rectangle (#5410).
+
+        Returns ``(ax, ay, was_blocked)`` for the in-grid part of the
+        rectangle, or ``None`` when it misses the grid or no native mirror is
+        attached (nothing to hand to
+        :meth:`_mirror_registry_less_window_to_cpp`).
+        """
+        if getattr(getattr(self, "_cpp_grid", None), "_impl", None) is None:
+            return None
+        if not (0 <= layer_idx < self.num_layers):
+            return None
+        ax, ay = max(gx1, 0), max(gy1, 0)
+        bx, by = min(gx2, self.cols - 1), min(gy2, self.rows - 1)
+        if ax > bx or ay > by:
+            return None
+        was_blocked = to_numpy(self._blocked[layer_idx, ay : by + 1, ax : bx + 1]).copy()
+        return ax, ay, was_blocked
+
+    def _mirror_registry_less_window_to_cpp(
+        self, layer_idx: int, window: tuple[int, int, np.ndarray] | None
+    ) -> None:
+        """Mirror a keep-out / obstacle rectangle onto the native grid (#5410).
+
+        ``add_keepout`` and ``add_obstacle`` only wrote the Python planes, so
+        one issued after ``CppGrid.from_routing_grid`` (every
+        ``Autorouter.add_obstacle`` call, and every obstacle ``_reset_for_new_trial``
+        replays onto a rebuilt grid) was invisible to the native A*: it
+        routed straight through.  Cells the blocker newly blocked get the same
+        ``mark_blocked`` call the region bound and board-edge keepout already
+        issue.  Cells that were ALREADY blocked keep their native owner and
+        are only flagged static -- the native twin of the static-snapshot
+        promotion in :meth:`_mark_raster_only_region`, so the native
+        ``route_cell_has_geometry`` refuses to refine a keep-out that sits on a
+        routed-copper halo, and native rip-up keeps it blocked.
+        """
+        if window is None:
+            return
+        impl = getattr(getattr(self, "_cpp_grid", None), "_impl", None)
+        if impl is None:
+            return
+        ax, ay, was_blocked = window
+        h, w = was_blocked.shape
+        sl = (layer_idx, slice(ay, ay + h), slice(ax, ax + w))
+        nets = to_numpy(self._net[sl])
+        obstacle = to_numpy(self._is_obstacle[sl])
+        pad = to_numpy(self._pad_blocked[sl])
+        now_blocked = to_numpy(self._blocked[sl])
+        for yy, xx in zip(*np.nonzero(now_blocked & ~was_blocked), strict=True):
+            impl.mark_blocked(
+                int(ax + xx),
+                int(ay + yy),
+                int(layer_idx),
+                int(nets[yy, xx]),
+                bool(obstacle[yy, xx]),
+                bool(pad[yy, xx]),
+            )
+        ys, xs = np.nonzero(was_blocked)
+        if xs.size:
+            impl.set_cells_static_blocked(
+                (xs + ax).tolist(), (ys + ay).tolist(), [int(layer_idx)] * int(xs.size), True
+            )
+
+    def raster_only_blocked_cell(self, gx: int, gy: int, layer_idx: int) -> bool:
+        """Is this cell (partly) blocked by geometry with no registry?
+
+        Epic #5509 Phase 3c (#5662).  ``True`` means at least one obstacle,
+        keepout, region bound or board-edge keepout covers the cell, so its
+        blocked state cannot be fully re-measured from ``self._pads`` and
+        ``self.routes`` -- a refinement that re-decides the cell from exact
+        geometry alone would be authorising occupancy it never accounted for.
+
+        The plane is lazily allocated, so a board with no registry-less
+        geometry answers ``False`` without touching memory.
+        """
+        plane = self._raster_only_blocked
+        if plane is None:
+            return False
+        if not (0 <= gx < self.cols and 0 <= gy < self.rows and 0 <= layer_idx < self.num_layers):
+            return False
+        return bool(plane[layer_idx, gy, gx])
+
     def invalidate_static_blockage_snapshot(self) -> None:
         """Drop the static-blockage snapshot (Issue #3545).
 
@@ -1394,6 +1593,7 @@ class RoutingGrid:
         self._original_net = xp.zeros((0, 0, 0), dtype=np.int32)
         self._present_cost_ema = None
         self._static_blocked = None
+        self._raster_only_blocked = None
         # Congestion planes + cached clearance stamps.
         self._congestion = xp.zeros((0, 0, 0), dtype=np.int32)
         self._congestion_counted = None
@@ -1401,6 +1601,8 @@ class RoutingGrid:
         # Spatial indices (only populated on dense boards).
         self._seg_rtree = {}
         self._seg_rtree_items = {}
+        self._seg_rtree_envelopes = {}
+        self._seg_rtree_pending = {}
         self._seg_rtree_count = 0
         self._via_rtree = None
         self._via_rtree_items = {}
@@ -1711,10 +1913,19 @@ class RoutingGrid:
 
             layer_idx = self.layer_to_index(obs.layer.value)
 
+            # #5662: an obstacle registers no geometry anywhere -- only this
+            # raster mark -- so a consumer can never re-measure it.  Record the
+            # provenance before marking, over the whole rectangle (cells a pad
+            # halo already blocked included: those are exactly the ones a
+            # geometric pad attribution would otherwise launder).
+            self._mark_raster_only_region(layer_idx, gx1, gy1, gx2, gy2)
+            window = self._registry_less_window(layer_idx, gx1, gy1, gx2, gy2)
+
             for gy in range(gy1, gy2 + 1):
                 for gx in range(gx1, gx2 + 1):
                     if 0 <= gx < self.cols and 0 <= gy < self.rows:
                         self.cell_at(layer_idx, gy, gx).blocked = True
+            self._mirror_registry_less_window_to_cpp(layer_idx, window)
 
     def _clearance_for_pin_pitch(
         self,
@@ -1988,6 +2199,19 @@ class RoutingGrid:
         """
         with self._acquire_lock():
             self._add_pad_unsafe(pad, pin_pitch=pin_pitch)
+
+    @property
+    def pads(self) -> tuple[Pad, ...]:
+        """Every registered pad, read-only.
+
+        Epic #5509 Phase 3c (#5662): the clearance consumers being migrated
+        onto the shared kernel need the pad registry to shape it, and reaching
+        into ``grid._pads`` from another module is how two consumers end up
+        holding a mutable list they can append to.  A tuple snapshot gives
+        them the geometry and nothing else -- ``add_pad`` remains the only way
+        in.
+        """
+        return tuple(self._pads)
 
     def _add_pad_unsafe(self, pad: Pad, pin_pitch: float | None = None) -> None:
         """Internal pad addition without locking."""
@@ -3127,10 +3351,14 @@ class RoutingGrid:
             gx2, gy2 = self.world_to_grid(x2, y2)
 
             for layer_idx in layer_indices:
+                # #5662: same registry-less provenance as ``add_obstacle``.
+                self._mark_raster_only_region(layer_idx, gx1, gy1, gx2, gy2)
+                window = self._registry_less_window(layer_idx, gx1, gy1, gx2, gy2)
                 for gy in range(gy1, gy2 + 1):
                     for gx in range(gx1, gx2 + 1):
                         if 0 <= gx < self.cols and 0 <= gy < self.rows:
                             self.cell_at(layer_idx, gy, gx).blocked = True
+                self._mirror_registry_less_window_to_cpp(layer_idx, window)
 
     def mark_region_bound(
         self,
@@ -3190,6 +3418,16 @@ class RoutingGrid:
 
             blocked_count = 0
             for layer_idx in layer_indices:
+                # #5662: the bound is a registry-less keep-out over everything
+                # OUTSIDE the region, recorded as four bands so the cells the
+                # loop below skips ("already blocked", e.g. by a pad halo) are
+                # still attributed to it.
+                self._mark_raster_only_region(layer_idx, 0, 0, self.cols - 1, gy1 - 1)
+                self._mark_raster_only_region(layer_idx, 0, gy2 + 1, self.cols - 1, self.rows - 1)
+                self._mark_raster_only_region(layer_idx, 0, gy1, gx1 - 1, gy2)
+                self._mark_raster_only_region(layer_idx, gx2 + 1, gy1, self.cols - 1, gy2)
+                kept_xs: list[int] = []
+                kept_ys: list[int] = []
                 for gy in range(self.rows):
                     inside_y = gy1 <= gy <= gy2
                     for gx in range(self.cols):
@@ -3198,8 +3436,13 @@ class RoutingGrid:
                         cell = self.cell_at(layer_idx, gy, gx)
                         if cell.blocked:
                             # Already an obstacle (pad halo / existing copper /
-                            # board edge).  Nothing to add, and mirroring is
-                            # handled by whoever set it.
+                            # board edge).  Its native blocked state is
+                            # mirrored by whoever set it; only the static flag
+                            # is new (Issue #5410) -- a routed-copper halo
+                            # here must not be refined or ripped open.
+                            if cpp_grid is not None:
+                                kept_xs.append(int(gx))
+                                kept_ys.append(int(gy))
                             continue
                         cell.blocked = True
                         blocked_count += 1
@@ -3212,6 +3455,10 @@ class RoutingGrid:
                                 False,  # not is_obstacle (a keepout, not pad metal)
                                 False,  # not pad_blocked
                             )
+                if kept_xs and cpp_grid is not None:
+                    cpp_grid._impl.set_cells_static_blocked(
+                        kept_xs, kept_ys, [int(layer_idx)] * len(kept_xs), True
+                    )
             return blocked_count
 
     def mark_static_keepout_cells(self, cells: Iterable[tuple[int, int, int]]) -> int:
@@ -4569,6 +4816,8 @@ class RoutingGrid:
             p.dimension = 2
             self._seg_rtree[layer_idx] = rtree_index.Index(properties=p)
             self._seg_rtree_items[layer_idx] = {}
+            self._seg_rtree_envelopes[layer_idx] = {}
+            self._seg_rtree_pending[layer_idx] = {}
         return self._seg_rtree[layer_idx]
 
     @staticmethod
@@ -4612,8 +4861,24 @@ class RoutingGrid:
             return
         seg_id = id(seg)
         envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
+        pending = self._seg_rtree_pending.get(layer_idx)
+        if pending is not None and seg_id in pending:
+            # Issue #5240: this segment was lazily removed and its entry is
+            # still in the tree.  Re-marking the same Segment object (the
+            # rip-up / re-route cycle) can therefore resurrect the existing
+            # entry instead of paying an insert -- but only when the envelope
+            # is unchanged; in-place geometry mutation (Issue #3507) must
+            # drop the stale entry first.
+            _, stale_envelope = pending.pop(seg_id)
+            if stale_envelope == envelope:
+                self._seg_rtree_items[layer_idx][seg_id] = seg
+                self._seg_rtree_envelopes[layer_idx][seg_id] = envelope
+                self._seg_rtree_count += 1
+                return
+            idx.delete(seg_id, stale_envelope)
         idx.insert(seg_id, envelope)
         self._seg_rtree_items[layer_idx][seg_id] = seg
+        self._seg_rtree_envelopes[layer_idx][seg_id] = envelope
         self._seg_rtree_count += 1
 
     def _rtree_remove_segment(self, seg: Segment, layer_idx: int) -> None:
@@ -4627,13 +4892,83 @@ class RoutingGrid:
             return
         if layer_idx not in self._seg_rtree:
             return
+        items = self._seg_rtree_items.get(layer_idx)
         seg_id = id(seg)
-        if seg_id not in self._seg_rtree_items.get(layer_idx, {}):
+        if items is None or seg_id not in items:
             return
-        envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
-        self._seg_rtree[layer_idx].delete(seg_id, envelope)
-        del self._seg_rtree_items[layer_idx][seg_id]
+        del items[seg_id]
         self._seg_rtree_count = max(0, self._seg_rtree_count - 1)
+
+        # Issue #5240: ``rtree.Index.delete`` searches the whole index for the
+        # matching (id, envelope) pair, so an eager delete costs O(index size)
+        # and dominated board 06's route step (10.7 s of a 221 s cProfile run,
+        # ~51k deletes).  Tombstone the entry instead: every query site maps
+        # candidate ids through ``_seg_rtree_items`` and skips unknown ids, so
+        # a stale entry can only produce an extra broad-phase candidate that
+        # the narrow phase discards -- never a missed one.  The Segment is
+        # retained by the tombstone so CPython cannot recycle its ``id()``
+        # while an entry keyed on it is still in the tree.
+        #
+        # What DOES change is the *order* in which surviving candidates come
+        # back from ``intersection`` (extra ids in the stream; a compacted
+        # layer is bulk-loaded rather than incrementally inserted).  That is
+        # safe for everything ``validate_segment_clearance`` certifies:
+        # ``is_valid`` is a disjunction and ``actual_clearance`` a minimum,
+        # both order-independent.  The third element, ``violation_loc``, is
+        # assigned by whichever violating candidate is visited LAST, so it
+        # can name a different (equally valid) violating pair than before --
+        # exactly as the R-tree and brute-force branches of that method
+        # already name different pairs as each other on unmodified code.  It
+        # is a representative location for diagnostics, never a certified
+        # output; no caller may depend on which violation it names.
+        envelope = self._seg_rtree_envelopes.get(layer_idx, {}).pop(seg_id, None)
+        if envelope is None:
+            # Defensive: entry indexed before the envelope ledger existed (or
+            # cleared out of band) -- fall back to the eager delete.
+            self._seg_rtree[layer_idx].delete(
+                seg_id, self._segment_envelope(seg, self._rtree_clearance_inflation)
+            )
+            return
+        pending = self._seg_rtree_pending.setdefault(layer_idx, {})
+        pending[seg_id] = (seg, envelope)
+        if len(pending) >= max(RTREE_TOMBSTONE_MIN_COMPACT, len(items)):
+            self._compact_segment_index(layer_idx)
+
+    def _compact_segment_index(self, layer_idx: int) -> None:
+        """Rebuild one layer's segment R-tree, dropping tombstoned entries.
+
+        Issue #5240: bulk (STR) loading costs ~1 us per entry against ~6-200 us
+        for a single incremental delete, so rebuilding from the live entries
+        once per ``max(RTREE_TOMBSTONE_MIN_COMPACT, live)`` removals is far
+        cheaper than deleting eagerly.  Envelopes come from the insert-time
+        ledger, so the rebuilt index is entry-for-entry identical to the one
+        it replaces minus the tombstones.
+
+        Every live entry in ``_seg_rtree_items`` is re-indexed: a live segment
+        whose ledger envelope is somehow missing is re-enveloped from its
+        current geometry (the same thing :meth:`_rebuild_segment_index` does)
+        rather than dropped, because a dropped entry would be a *missed*
+        broad-phase candidate -- the one failure mode tombstoning must never
+        introduce.
+        """
+        if not self._rtree_available:
+            return
+        items = self._seg_rtree_items.get(layer_idx, {})
+        envelopes = self._seg_rtree_envelopes.setdefault(layer_idx, {})
+        p = rtree_index.Property()
+        p.dimension = 2
+        stream = []
+        for seg_id, seg in items.items():
+            envelope = envelopes.get(seg_id)
+            if envelope is None:
+                envelope = self._segment_envelope(seg, self._rtree_clearance_inflation)
+                envelopes[seg_id] = envelope
+            stream.append((seg_id, envelope, None))
+        if stream:
+            self._seg_rtree[layer_idx] = rtree_index.Index(iter(stream), properties=p)
+        else:
+            self._seg_rtree[layer_idx] = rtree_index.Index(properties=p)
+        self._seg_rtree_pending[layer_idx] = {}
 
     def _rtree_insert_route(self, route: Route) -> None:
         """Insert all segments of a route into the R-tree index."""
@@ -4800,6 +5135,8 @@ class RoutingGrid:
         # Clear the R-tree structures.
         self._seg_rtree.clear()
         self._seg_rtree_items.clear()
+        self._seg_rtree_envelopes.clear()
+        self._seg_rtree_pending.clear()
         self._seg_rtree_count = 0
 
         # Update inflation from (possibly changed) design rules.
@@ -5781,6 +6118,8 @@ class RoutingGrid:
             return
         self._seg_rtree.clear()
         self._seg_rtree_items.clear()
+        self._seg_rtree_envelopes.clear()
+        self._seg_rtree_pending.clear()
         self._seg_rtree_count = 0
         for route in self.routes:
             self._rtree_insert_route(route)
@@ -6232,6 +6571,81 @@ class RoutingGrid:
                     best_ref = pad.component_key
 
         return best_ref
+
+    def pad_marked_cell(self, gx: int, gy: int, layer_idx: int) -> bool:
+        """Did a registered pad's marking pass write to this cell?
+
+        Epic #5509 Phase 3c (#5662).  The boolean sibling of
+        :meth:`find_pad_ref_at`, and the *geometric* half of a kernel
+        refinement: a consumer that wants to re-decide a blocked cell with
+        exact geometry first has to know **what** blocked it, or it would be
+        bypassing occupancy it cannot account for.
+
+        **This answer is necessary but not sufficient** (PR #5676 review).
+        It says a pad's marking pass wrote this cell -- never that the pad is
+        the *only* reason the cell is blocked.  ``_blocked`` is a union with
+        no memory of its writers, so a keep-out co-located with a pad halo is
+        invisible here; a refining consumer must additionally rule out the
+        occupancy it cannot measure (see
+        :meth:`raster_only_blocked_cell` and
+        ``DiffPairRouter._pad_attributable_cell``).
+
+        Answered in **cell** coordinates, and by reproducing
+        ``_add_pad_unsafe``'s own loop bounds rather than by testing the cell
+        centre against the continuous envelope.  That distinction is
+        load-bearing: the marking pass rounds each envelope corner to a cell
+        index (``world_to_grid``) and then blocks the whole inclusive
+        rectangle, so a border cell can be marked while its centre lies up to
+        half a resolution *outside* the envelope.  A containment test would
+        leave exactly those cells unattributed -- and therefore leave a legal
+        span refused on a pad halo the pad's real copper does not justify,
+        which is the over-rejection this phase exists to remove.  Reproducing
+        the rectangle instead can only ever attribute cells the pad really
+        did mark.
+
+        Args:
+            gx: Cell x index.
+            gy: Cell y index.
+            layer_idx: Layer index; through-hole pads mark every layer.
+
+        Returns:
+            True when at least one registered pad marked this cell.
+        """
+        for pad in self._pads:
+            if not pad.through_hole and self.layer_to_index(pad.layer.value) != layer_idx:
+                continue
+            clearance = self._clearance_for_pin_pitch(self._pad_pin_pitch.get(id(pad)), pad=pad)
+            half_w, half_h = pad_half_extents(pad)
+            if pad.through_hole and not (pad.width > 0 and pad.height > 0):
+                # ``_add_pad_unsafe``'s drill-only / bare fallbacks.
+                side = (pad.drill + 0.7) if pad.drill > 0 else 1.7
+                half_w = half_h = side / 2.0
+
+            # The halo rectangle, exactly as the marking pass derives it.
+            gx1, gy1 = self.world_to_grid(pad.x - half_w - clearance, pad.y - half_h - clearance)
+            gx2, gy2 = self.world_to_grid(pad.x + half_w + clearance, pad.y + half_h + clearance)
+
+            # Issue #3233's half-resolution-inflated metal rectangle, which
+            # ``_add_pad_unsafe`` unions into the same loop bounds so a
+            # fine-pitch pad whose shrunk halo is narrower than the inflation
+            # still marks every cell whose extent touches pad copper.
+            half_res = self.resolution / 2.0
+            gx1 = min(gx1, self._ceil_cell(pad.x - half_w - half_res, self.origin_x))
+            gy1 = min(gy1, self._ceil_cell(pad.y - half_h - half_res, self.origin_y))
+            gx2 = max(gx2, self._floor_cell(pad.x + half_w + half_res, self.origin_x))
+            gy2 = max(gy2, self._floor_cell(pad.y + half_h + half_res, self.origin_y))
+
+            if gx1 <= gx <= gx2 and gy1 <= gy <= gy2:
+                return True
+        return False
+
+    def _ceil_cell(self, world: float, origin: float) -> int:
+        """``ceil`` of a world coordinate in cell units (marking-pass idiom)."""
+        return int(math.ceil((world - origin) / self.resolution))
+
+    def _floor_cell(self, world: float, origin: float) -> int:
+        """``floor`` of a world coordinate in cell units (marking-pass idiom)."""
+        return int(math.floor((world - origin) / self.resolution))
 
     def find_overused_cells(self) -> list[tuple[int, int, int, int]]:
         """Find cells with usage_count > 1 (resource conflicts).
@@ -6985,6 +7399,15 @@ class RoutingGrid:
                 if e2 < dx:
                     err += dx
                     gy += sy
+
+        # #5662: board-edge keep-out copper has no registry the exact
+        # clearance kernel could re-measure, so every cell it covers is
+        # unrefinable.  Recorded for the WHOLE disc union, not only the cells
+        # newly blocked above: the ``if not cell.blocked`` branch skips cells a
+        # pad halo already owns, and those are precisely the ones a geometric
+        # pad attribution would otherwise launder.  Done once, vectorised,
+        # because this runs per outline segment over the whole board edge.
+        self._mark_raster_only_cells(layer_indices, blocked_cells)
 
         return blocked_count
 

@@ -10,6 +10,8 @@
 
 #include "coupled_pathfinder.hpp"
 
+#include "clearance_kernel.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -62,13 +64,94 @@ CoupledPathfinder::CoupledPathfinder(Grid3D& grid,
       rows_(grid.rows()),
       num_layers_(grid.layers()) {}
 
+// Issue #5410: physical clearance of the swept trace step, mirroring
+// ``Pathfinder::trace_halo_cell_clear``.
+//
+// The candidate is built at the net's EFFECTIVE trace width and re-measured
+// against its EFFECTIVE clearance -- ``set_halo_net_dimensions`` carries the
+// net-class values the Python ``RouteHaloRefiner`` reads off ``nc``, and the
+// global ``DesignRules`` scalars are the fallback for a net with no class.
+// Measuring a class-bearing net with the global scalar would waive clearance
+// the raster halo (dilated with the net-class value) had enforced; see the
+// rationale on ``set_halo_net_dimensions``.  This mirrors the single-ended
+// ``Pathfinder``'s ``search_trace_half_width_mm_`` /
+// ``search_fill_trace_clearance_`` threading.
+bool CoupledPathfinder::trace_halo_cell_clear(int cx, int cy, int layer,
+                                              int from_x, int from_y,
+                                              int to_x, int to_y, int net) const {
+    if (!grid_.route_cell_has_geometry(cx, cy, layer)) return false;
+    const HaloNetDims* dims = halo_dims_for(net);
+    const auto [ax, ay] = grid_.grid_to_world(from_x, from_y);
+    const auto [bx, by] = grid_.grid_to_world(to_x, to_y);
+    Segment segment;
+    segment.x1 = ax; segment.y1 = ay; segment.x2 = bx; segment.y2 = by;
+    segment.width = static_cast<float>(dims ? dims->trace_width : rules_.trace_width);
+    segment.layer = layer; segment.net = net;
+    const float clearance =
+        static_cast<float>(dims ? dims->trace_clearance : rules_.trace_clearance);
+    // Issue #5711: the diff-pair intra-pair waiver, mirroring
+    // ``RouteHaloRefiner.trace_clear``'s ``partner_net=`` /
+    // ``partner_clearance=`` arguments to ``RouteHaloGeometry.clear``.  Both
+    // are installed together by ``set_halo_net_dimensions``; a net with no
+    // resolvable ``diffpair_partner`` installs (-1, -1) and keeps the
+    // ordinary class clearance against every foreign net, exactly as the
+    // Python ``partner is None`` branch does.
+    const int partner_net = dims ? dims->partner_net : -1;
+    const float partner_clearance =
+        dims ? static_cast<float>(dims->partner_clearance) : -1.0f;
+    return grid_.route_trace_geometry_clear(segment, clearance,
+                                            partner_net, partner_clearance,
+                                            rules_.via_clearance);
+}
+
+// Issue #5410: physical clearance of a through via, mirroring
+// ``Pathfinder::via_route_geometry_clear``.  The barrel takes the net class's
+// ``via_size`` when one is installed (``RouteHaloRefiner.via_clear`` builds
+// its candidate the same way); the drill and the via clearance scalar are
+// global on both sides.
+bool CoupledPathfinder::via_route_geometry_clear(int x, int y, int net) const {
+    const HaloNetDims* dims = halo_dims_for(net);
+    const auto [wx, wy] = grid_.grid_to_world(x, y);
+    Via via;
+    via.x = wx; via.y = wy; via.net = net;
+    via.drill = rules_.via_drill;
+    via.diameter = static_cast<float>(dims ? dims->via_diameter : rules_.via_diameter);
+    via.layer_from = 0; via.layer_to = grid_.layers() - 1;
+    return grid_.route_via_geometry_clear(via, rules_.via_clearance,
+                                          rules_.min_hole_to_hole,
+                                          rules_.min_drill_clearance);
+}
+
+bool CoupledPathfinder::is_trace_blocked(int gx, int gy, int layer, int net,
+                                         int from_x, int from_y) const {
+    if (!is_cell_blocked(gx, gy, layer, net)) return false;
+    return !trace_halo_cell_clear(gx, gy, layer,
+                                  from_x >= 0 ? from_x : gx,
+                                  from_y >= 0 ? from_y : gy,
+                                  gx, gy, net);
+}
+
 // Mirror of Python ``_is_via_blocked`` (diffpair_routing.py:793-832).
 bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
+    // Issue #5410: the physical verdict for a THROUGH via is identical on
+    // every layer -- compute it at most once per candidate.
+    int physical_clear = -1;
     for (int layer = 0; layer < num_layers_; ++layer) {
+        bool any_blocked = false;
         for (int dy = -via_extra_cells_; dy <= via_extra_cells_; ++dy) {
             for (int dx = -via_extra_cells_; dx <= via_extra_cells_; ++dx) {
-                if (is_cell_blocked(gx + dx, gy + dy, layer, net)) return true;
+                if (!is_cell_blocked(gx + dx, gy + dy, layer, net)) continue;
+                any_blocked = true;
+                // One hard or unverifiable cell in the envelope keeps the
+                // rejection; only a fully verified dynamic-halo envelope is
+                // eligible for the geometric re-measurement below.
+                if (!grid_.route_cell_has_geometry(gx + dx, gy + dy, layer)) return true;
             }
+        }
+        if (any_blocked) {
+            if (physical_clear < 0)
+                physical_clear = via_route_geometry_clear(gx, gy, net) ? 1 : 0;
+            if (physical_clear == 0) return true;
         }
         // Issue #3508: no via-in-pad regardless of net ownership.
         for (int dy = -via_drill_cells_; dy <= via_drill_cells_; ++dy) {
@@ -80,6 +163,122 @@ bool CoupledPathfinder::is_via_blocked(int gx, int gy, int net) const {
         }
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Epic #5509 Phase 3c (#5662): the kernel-backed rail clearance gate.
+// ---------------------------------------------------------------------------
+//
+// Before this phase the gate was an inline lambda inside ``route()`` that
+// consulted ``Grid3D::fixed_fill_clear`` and nothing else.  Combined with the
+// blocked-cell plane, that made **stored route geometry invisible to the
+// coupled search by construction**: ``add_stored_segment`` /
+// ``add_stored_via`` register a committed route's exact copper for clearance
+// purposes, but the C++ blocked plane is only refreshed when the Python grid
+// is re-marshalled -- so copper routed earlier in the same session could sit
+// inside a candidate rail's clearance envelope and the search would happily
+// route through it (#4507).
+//
+// ``stored_route_clear`` closes that by measuring the candidate rail against
+// every nearby stored segment and via with the SHARED exact-geometry kernel
+// (``clearance_kernel.hpp``) rather than with a private predicate.  The
+// broad phase is ``Grid3D::route_geometry_candidates`` -- the same 2 mm bin
+// index the single-ended refinement path uses -- so only copper whose
+// bounding box can reach the rail is ever shaped.
+bool CoupledPathfinder::stored_route_clear(double ax, double ay,
+                                           double bx, double by,
+                                           int layer, int net, int partner_net,
+                                           double half, double gap,
+                                           bool is_via) const {
+    namespace ck = clearance;
+
+    const auto& segments = grid_.stored_segments();
+    const auto& vias = grid_.stored_vias();
+    if (segments.empty() && vias.empty()) return true;
+
+    // The candidate rail as a kernel shape.  A via candidate is copper on
+    // every layer (``ALL_LAYERS``), which is exactly how the old lambda
+    // treated it -- it looped every layer of ``fixed_fill_clear``.
+    ck::KShape candidate;
+    if (is_via) {
+        ck::KVia v;
+        v.x = ax; v.y = ay;
+        v.diameter = 2.0 * half;
+        v.drill = rules_.via_drill;
+        candidate = v;
+    } else {
+        ck::KSegment s;
+        s.x1 = ax; s.y1 = ay; s.x2 = bx; s.y2 = by;
+        s.width = 2.0 * half;
+        s.layer = layer;
+        candidate = s;
+    }
+
+    const double margin = half + gap;
+    const auto near = grid_.route_geometry_candidates(
+        std::min(ax, bx) - margin, std::min(ay, by) - margin,
+        std::max(ax, bx) + margin, std::max(ay, by) + margin);
+
+    for (size_t i : near.first) {
+        const auto& other = segments[i];
+        // Own copper is never an obstacle, and the partner rail's copper is
+        // governed by the search's own spacing constraint plus the
+        // commit-time intra-pair gate -- not by this foreign-copper check.
+        if (other.net == net || (partner_net >= 0 && other.net == partner_net)) continue;
+        ck::KSegment o;
+        o.x1 = other.x1; o.y1 = other.y1; o.x2 = other.x2; o.y2 = other.y2;
+        o.width = other.width;
+        o.layer = other.layer_idx;
+        if (!ck::clear(candidate, o, gap)) return false;
+    }
+    for (size_t i : near.second) {
+        const auto& other = vias[i];
+        if (other.net == net || (partner_net >= 0 && other.net == partner_net)) continue;
+        // A trace candidate only meets a barrel on a layer the barrel spans
+        // (mirrors ``Grid3D::trace_stored_vias_clear``); a via candidate
+        // spans every layer, so it always can.
+        if (!is_via && (layer < other.layer_from || layer > other.layer_to)) continue;
+        ck::KVia o;
+        o.x = other.x; o.y = other.y;
+        o.diameter = other.diameter;
+        o.drill = other.drill;
+        if (!ck::clear(candidate, o, gap)) return false;
+    }
+    return true;
+}
+
+bool CoupledPathfinder::rail_clear(int ax, int ay, int bx, int by, int layer,
+                                   int net, int partner_net, double rail_half,
+                                   double rail_gap, bool is_via) const {
+    const auto [wx, wy] = grid_.grid_to_world(ax, ay);
+    const auto [vx, vy] = grid_.grid_to_world(bx, by);
+    return rail_clear_world(wx, wy, vx, vy, layer, net, partner_net,
+                            rail_half, rail_gap, is_via);
+}
+
+bool CoupledPathfinder::rail_clear_world(double wx, double wy,
+                                         double vx, double vy, int layer,
+                                         int net, int partner_net,
+                                         double rail_half, double rail_gap,
+                                         bool is_via) const {
+    const double half = is_via
+        ? rules_.via_diameter / 2.0
+        : (rail_half >= 0 ? rail_half : rules_.trace_width / 2.0);
+    const double gap = is_via
+        ? rules_.via_clearance
+        : (rail_gap >= 0 ? rail_gap : rules_.trace_clearance);
+
+    if (grid_.has_fixed_fills()) {
+        if (is_via) {
+            for (int l = 0; l < num_layers_; ++l) {
+                if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half + gap)) return false;
+            }
+        } else if (!grid_.fixed_fill_clear(wx, wy, vx, vy, layer, half, half + gap)) {
+            return false;
+        }
+    }
+
+    return stored_route_clear(wx, wy, vx, vy, layer, net, partner_net, half, gap, is_via);
 }
 
 // Mirror of Python ``_heuristic`` partner_aware branch
@@ -450,8 +649,10 @@ CoupledRouteResult CoupledPathfinder::route(
                         at_goal(np_x, np_y, p_start_x, p_start_y);
             bool n_ep = at_goal(nn_x, nn_y, n_goal_x, n_goal_y) ||
                         at_goal(nn_x, nn_y, n_start_x, n_start_y);
-            if (!p_ep && is_trace_blocked(np_x, np_y, np_l, p_net)) { rej("sym_blocked_p"); continue; }
-            if (!n_ep && is_trace_blocked(nn_x, nn_y, nn_l, n_net)) { rej("sym_blocked_n"); continue; }
+            if (!p_ep && is_trace_blocked(np_x, np_y, np_l, p_net,
+                                          current.p_x, current.p_y)) { rej("sym_blocked_p"); continue; }
+            if (!n_ep && is_trace_blocked(nn_x, nn_y, nn_l, n_net,
+                                          current.n_x, current.n_y)) { rej("sym_blocked_n"); continue; }
 
             double sdx = np_x - nn_x, sdy = np_y - nn_y;
             double new_spacing = std::sqrt(sdx * sdx + sdy * sdy);
@@ -494,7 +695,8 @@ CoupledRouteResult CoupledPathfinder::route(
                     int cn_x = current.n_x, cn_y = current.n_y, cn_l = current.n_layer;
                     bool p_ep = at_goal(cp_x, cp_y, p_goal_x, p_goal_y) ||
                                 at_goal(cp_x, cp_y, p_start_x, p_start_y);
-                    bool blocked = !(p_ep || !is_trace_blocked(cp_x, cp_y, cp_l, p_net));
+                    bool blocked = !(p_ep || !is_trace_blocked(cp_x, cp_y, cp_l, p_net,
+                                                               current.p_x, current.p_y));
                     if (blocked) rej("asym_blocked_p");  // #4459
                     if (!blocked) {
                         double sdx = cp_x - cn_x, sdy = cp_y - cn_y;
@@ -544,7 +746,8 @@ CoupledRouteResult CoupledPathfinder::route(
                     int cn_x = current.n_x + dx, cn_y = current.n_y + dy, cn_l = current.n_layer;
                     bool n_ep = at_goal(cn_x, cn_y, n_goal_x, n_goal_y) ||
                                 at_goal(cn_x, cn_y, n_start_x, n_start_y);
-                    if (!(n_ep || !is_trace_blocked(cn_x, cn_y, cn_l, n_net))) {
+                    if (!(n_ep || !is_trace_blocked(cn_x, cn_y, cn_l, n_net,
+                                                    current.n_x, current.n_y))) {
                         rej("asym_blocked_n");  // #4459
                     } else {
                         double sdx = cp_x - cn_x, sdy = cp_y - cn_y;
@@ -623,21 +826,22 @@ CoupledRouteResult CoupledPathfinder::route(
 
         // Expand neighbors into the open set (diffpair_routing.py:1842-1890).
         for (const Cand& c : neighbors) {
-            if (grid_.has_fixed_fills()) {
-                auto rail_clear = [&](int ax, int ay, int bx, int by, int layer, double rail_half, double rail_gap) {
-                    auto [wx, wy] = grid_.grid_to_world(ax, ay);
-                    auto [vx, vy] = grid_.grid_to_world(bx, by);
-                    double half = c.is_via ? rules_.via_diameter / 2.0 : (rail_half >= 0 ? rail_half : rules_.trace_width / 2.0);
-                    double gap = c.is_via ? rules_.via_clearance : (rail_gap >= 0 ? rail_gap : rules_.trace_clearance);
-                    if (c.is_via) {
-                        for (int l = 0; l < num_layers_; ++l)
-                            if (!grid_.fixed_fill_clear(wx, wy, vx, vy, l, half, half+gap)) return false;
-                        return true;
-                    }
-                    return grid_.fixed_fill_clear(wx, wy, vx, vy, layer, half, half+gap);
-                };
-                if (!rail_clear(current.p_x, current.p_y, c.px, c.py, c.pl, p_fill_half_, p_fill_gap_) ||
-                    !rail_clear(current.n_x, current.n_y, c.nx, c.ny, c.nl, n_fill_half_, n_fill_gap_)) continue;
+            // Epic #5509 Phase 3c (#5662): one kernel-backed gate, always
+            // consulted.  The old ``has_fixed_fills()`` guard around the
+            // whole block is gone on purpose: it made the gate a no-op on
+            // every board with no copper pour, which is precisely how
+            // stored-route copper stayed invisible to this search (#4507).
+            // ``rail_clear`` still short-circuits internally when there is
+            // neither a fixed fill nor any stored route to measure against.
+            if (!rail_clear(current.p_x, current.p_y, c.px, c.py, c.pl, p_net, n_net,
+                            p_fill_half_, p_fill_gap_, c.is_via)) {
+                rej("rail_clear_p");  // #4459
+                continue;
+            }
+            if (!rail_clear(current.n_x, current.n_y, c.nx, c.ny, c.nl, n_net, p_net,
+                            n_fill_half_, n_fill_gap_, c.is_via)) {
+                rej("rail_clear_n");  // #4459
+                continue;
             }
             // Corridor pruning (diffpair_routing.py:1864-1871).
             if (have_corridor) {

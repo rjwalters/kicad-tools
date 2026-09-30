@@ -173,7 +173,7 @@ argument; its default placement and routing map stay historical because a fresh
 full-board generation/routing run has **not** been measured with this change.
 Fixed-gap width sizing is explicitly selected by the repair script;
 the committed result comes from the targeted repair of the historical board.
-See [the experiment record](diagnostic-runs/astra-j1-orientation.md).
+See [the experiment record](../diagnostic-runs/astra-j1-orientation.md).
 
 ## Historical routing plateau (before 2026-09-09 repair)
 

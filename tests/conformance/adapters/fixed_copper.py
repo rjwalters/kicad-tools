@@ -49,6 +49,9 @@ non-native engine uses.
 
 from __future__ import annotations
 
+import dataclasses
+from typing import TYPE_CHECKING
+
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     cpp_grid_for,
@@ -62,6 +65,9 @@ from tests.conformance.adapters._support import (
     router_via,
 )
 from tests.conformance.generator import CopperCase, PadSpec, PairKind, SegmentSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = ["FixedCopperAdapter"]
 
@@ -84,11 +90,36 @@ class FixedCopperAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same consumer, driven at the clearance kicad-cli applies.
+
+        The **gated** reading (Epic #5509 Phase 3f switched this group, so
+        ``test_corpus.test_adapter_agrees_with_kicad_cli`` asserts it hard
+        instead of xfailing it).  Only the two copper clearances move onto
+        ``project_clearance`` -- the fill's own clearance floor is derived from
+        ``trace_clearance`` and follows, while ``min_hole_to_hole`` and the via
+        geometry stay the case's own because they feed a different requirement
+        this row does not claim.  Nothing about the consumer changes between
+        the two readings; the adapter has always chosen which rule values to
+        hand ``FixedFillObstacles``, and this is that same choice made twice.
+        """
+        rules = router_rules(case)
+        return self._verdicts(
+            case,
+            dataclasses.replace(
+                rules,
+                trace_clearance=case.rules.project_clearance,
+                via_clearance=case.rules.project_clearance,
+            ),
+        )
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
         from kicad_tools.router.fixed_copper import FixedFill, FixedFillObstacles
 
         router_cpp = router_cpp_module()
         nets = net_ids(case)
-        rules = router_rules(case)
         layer_index = layer_indexer(case)
         found: set[Verdict] = set()
 

@@ -15,8 +15,11 @@
 #   1. `path`, `path:L`, `path:L1-L2` references — backticked or bare — whose
 #      first path segment matches a real top-level entry of `origin/main`
 #      (a "recognized top-level dir/file"). Existence is checked with
-#      `git ls-tree -r origin/main --name-only`; line ranges are checked
-#      against `git show origin/main:<path> | wc -l`.
+#      `git ls-tree -r origin/main --name-only`; line ranges are checked by
+#      `loom-daemon git-blob-lines --range`, which follows a `120000` (symlink)
+#      tree entry to the document it points at before counting (#8656) — a
+#      dangling link is reported as BROKEN SYMLINK and is NOT a miss, because
+#      an unreadable file is an inconclusive check rather than a disproof.
 #   2. "<N> tracked `<pattern>` files" claims (N as a digit or one..ten
 #      spelled out) — checked against `git ls-files -- <pattern>`.
 #
@@ -64,6 +67,30 @@ if ! git -C "$WORKSPACE" rev-parse --verify origin/main >/dev/null 2>&1; then
     echo "  (run 'git fetch origin' in the workspace first)" >&2
     exit 2
 fi
+
+# --- Line-range checking is `loom-daemon git-blob-lines --range` (#8656).
+#
+# This used to be `git show "origin/main:$path" | wc -l` inline. That reads the
+# path THROUGH GIT, and since #7842 every `.loom/docs/*.md` with a
+# `defaults/docs/` counterpart is a SYMLINK on origin/main (tree mode 120000) —
+# so the read returned the link-target STRING, `wc -l` measured the link, and
+# every genuinely in-range citation under `.loom/docs/` was reported as a miss.
+# Since this script BLOCKS FILING, that pushed proposers away from citing the
+# installed doc paths at all.
+#
+# The subcommand follows a 120000 entry to its real blob (bounded hops; the
+# target is relative to the LINK'S OWN directory; normalization is lexical,
+# because the path lives in a commit rather than the working tree), then
+# answers the range question against THAT blob. It also distinguishes the two
+# failures the old one-liner conflated: an out-of-range span is a disproof (a
+# miss), while an unreadable target is an INCONCLUSIVE check and must never
+# block filing — the same distinction #8593 established for Champion.
+#
+# shellcheck source=lib/locate-daemon-bin.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/locate-daemon-bin.sh"
+# requires-daemon: git-blob-lines >= 0.19.307   #8656 — the symlink-aware line-range check; a resolved binary predating this subcommand fails clap's own "unrecognized subcommand" per citation (visible on stderr) and every line range is SKIPPED, never silently passed as in-range, because the alternative is the symlink-blind `git show | wc -l` this replaced
+DAEMON_BIN="$(loom_resolve_self_daemon_bin)"
+[[ -n "$DAEMON_BIN" ]] || echo "WARNING: no loom-daemon binary resolved — line ranges will NOT be checked (inconclusive, never a miss); path existence and tracked-file claims are unaffected" >&2
 
 MISSES=()
 CHECKED_PATHS=0
@@ -184,13 +211,12 @@ for raw_candidate in ${CANDIDATES[@]+"${CANDIDATES[@]}"}; do
         continue
     fi
 
-    if [[ -n "$lines" ]]; then
-        start="${lines%%-*}"
-        end="${lines##*-}"
-        total=$(git -C "$WORKSPACE" show "origin/main:$path" | wc -l | tr -d ' ')
-        if (( start > total )) || (( end > total )); then
-            MISSES+=("BAD LINE RANGE: \`$candidate\` — origin/main:$path has only $total lines")
-        fi
+    # Exit 1 => out of range (a miss, text already rendered, naming the
+    # RESOLVED path). Exit 10 => unreadable, already reported on stderr and
+    # deliberately NOT a miss. Anything else (0, or no binary) => nothing.
+    if [[ -n "$lines" && -n "$DAEMON_BIN" ]]; then
+        miss=$("$DAEMON_BIN" git-blob-lines "$path" --rev origin/main --workspace "$WORKSPACE" --range "$lines" --cite "$candidate")
+        (( $? == 1 )) && MISSES+=("$miss")
     fi
 done
 

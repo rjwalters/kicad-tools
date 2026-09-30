@@ -190,6 +190,48 @@ class TwoPhaseRouter:
         #   - ``"max_iterations"`` — outer loop ran to ``max_iterations``.
         self.last_termination_reason: str | None = None
 
+        # Issue #5765: set the first time a stage wall-clock deadline fires
+        # while the deterministic iteration backstop
+        # (``self.router._max_search_iterations``) is pinned, so
+        # ``_note_stage_deadline_determinism_loss`` logs the loss exactly
+        # once per ``route_all`` call instead of once per timed-out net.
+        self._determinism_loss_logged = False
+
+    def _note_stage_deadline_determinism_loss(self) -> None:
+        """Log once when a stage deadline fires under ``--deterministic-budget``.
+
+        Issue #5765: ``--deterministic-budget`` (``route_cmd.py``,
+        ``_normalize_deterministic_budget``) pins the C++ A* iteration
+        backstop (``self.router._max_search_iterations``) so each per-net
+        search gives up after a fixed, machine-independent node-expansion
+        count rather than a wall-clock cutoff -- that is what makes the
+        routed output reproducible across machines.  The outer
+        ``--timeout`` (and, under ``--auto-layers`` escalation, the
+        per-attempt fair slice computed by
+        ``route_cmd._per_attempt_budgeted_timeout``) is documented as a
+        SAFETY backstop that should not normally bind.  If ``check_timeout``
+        fires anyway -- because the fair slice was smaller than the
+        iteration backstop actually needed on this machine -- the
+        rip-up/reroute loop is cut on WALL CLOCK after all, silently
+        reintroducing the load dependence ``--deterministic-budget`` exists
+        to remove.  Surfacing that here (once per ``route_all`` call, not
+        once per timed-out net) makes the determinism loss attributable in
+        logs instead of looking like an ordinary, harmless deadline trim.
+        """
+        if self._determinism_loss_logged:
+            return
+        if not getattr(self.router, "_max_search_iterations", 0):
+            # Not running under the deterministic iteration backstop --
+            # this is an ordinary wall-clock deadline, not a determinism
+            # loss.
+            return
+        self._determinism_loss_logged = True
+        flush_print(
+            "[deterministic-budget] stage deadline fired -- run is not "
+            "reproducible (outer --timeout / per-attempt slice bound "
+            "before the iteration backstop did; see Issue #5765)"
+        )
+
     def _collect_extra_routes_for_revalidation(
         self,
         net_routes: dict[int, list[Route]],
@@ -347,7 +389,10 @@ class TwoPhaseRouter:
         def check_timeout() -> bool:
             if timeout is None:
                 return False
-            return time.time() - start_time >= timeout
+            fired = time.time() - start_time >= timeout
+            if fired:
+                self._note_stage_deadline_determinism_loss()
+            return fired
 
         def elapsed_str() -> str:
             return f"{time.time() - start_time:.1f}s"
@@ -532,7 +577,10 @@ class TwoPhaseRouter:
         def check_timeout() -> bool:
             if timeout is None:
                 return False
-            return time.time() - start_time >= timeout
+            fired = time.time() - start_time >= timeout
+            if fired:
+                self._note_stage_deadline_determinism_loss()
+            return fired
 
         def elapsed_str() -> str:
             return f"{time.time() - start_time:.1f}s"
@@ -1336,7 +1384,10 @@ class TwoPhaseRouter:
         def check_timeout() -> bool:
             if timeout is None:
                 return False
-            return time.time() - start_time >= timeout
+            fired = time.time() - start_time >= timeout
+            if fired:
+                self._note_stage_deadline_determinism_loss()
+            return fired
 
         total_nets = len(net_order)
         all_routes: list[Route] = []

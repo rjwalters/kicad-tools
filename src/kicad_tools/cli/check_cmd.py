@@ -38,7 +38,7 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
-from kicad_tools.cli.copper_weight import parse_copper_weight_arg
+from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
     get_manufacturer_ids,
     get_profile,
@@ -1208,6 +1208,7 @@ CHECK_CATEGORIES = [
     "match_group_length_skew",
     "netlist",
     "pad_grid",
+    "pin1_marker",
     "placement",
     "sch_fields",
     "silkscreen",
@@ -1215,6 +1216,8 @@ CHECK_CATEGORIES = [
     "solder_mask",
     "mask_to_copper",
     "via_in_pad",
+    "via_under_body",
+    "width_consistency",
     "zero_length_segment",
     "zones",
 ]
@@ -1396,25 +1399,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Number of copper layers (auto-detected from board if not specified)",
     )
-    parser.add_argument(
-        "--copper",
-        "-c",
-        default=None,
-        metavar="OZ",
-        help=(
-            "Copper weight in oz for the ampacity gate. Scalar form "
-            "'--copper 2' applies to both outer and inner layers; keyed "
-            "form '--copper outer=2,inner=0.5' sets each layer class "
-            "independently (e.g. a JLCPCB 2oz-outer / 0.5oz-inner order, "
-            "where the inner stays 0.5oz even on a 2oz build). Precedence: "
-            "explicit --copper (keyed > scalar) > the board's declared "
-            "(setup (stackup ...)) copper weight > profile default "
-            "(1oz outer / 0.5oz inner). When --copper is omitted, an "
-            "explicit board stackup is the source of truth; a stackup that "
-            "disagrees with an explicit --copper emits a WARNING and is "
-            "fatal under --strict."
-        ),
-    )
+    # Issue #5810: shared with the unified ``kct check`` subparser.
+    add_check_copper_argument(parser)
     parser.add_argument(
         "--emit-dru",
         dest="emit_dru",
@@ -2783,6 +2769,7 @@ def run_selected_checks(
         "match_group_length_skew": checker.check_match_group_length_skew,
         "netlist": checker.check_netlist,
         "pad_grid": _pad_grid_check,
+        "pin1_marker": checker.check_pin1_markers,
         "placement": checker.check_footprint_placement,
         "sch_fields": _sch_fields_check,
         "silkscreen": checker.check_silkscreen,
@@ -2790,6 +2777,8 @@ def run_selected_checks(
         "solder_mask": checker.check_solder_mask_pads,
         "mask_to_copper": checker.check_mask_to_copper,
         "via_in_pad": checker.check_via_in_pad,
+        "via_under_body": checker.check_via_under_body,
+        "width_consistency": checker.check_width_consistency,
         "zero_length_segment": checker.check_zero_length_segments,
         "zones": checker.check_zones,
     }
@@ -2800,6 +2789,12 @@ def run_selected_checks(
             and only_set is None
             and checker.mask_copper_request is None
         ):
+            continue
+
+        # width_consistency is a heuristic routing-quality audit; it is
+        # opt-in (``--only width_consistency``) so it never changes the
+        # verdict of an existing board or of gates that count warnings.
+        if category == "width_consistency" and only_set is None:
             continue
 
         # Skip if --only specified and this category not in it

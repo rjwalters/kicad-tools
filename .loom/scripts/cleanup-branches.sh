@@ -19,9 +19,10 @@
 #
 # Safety:
 #   - Only deletes feature/issue-* branches for confirmed CLOSED issues
-#   - Only deletes pr-* review branches for confirmed MERGED/CLOSED PRs,
-#     reusing merge-pr.sh's tip-SHA-verified `_maybe_delete_local_branch`
-#     helper (never a raw `git branch -D`)
+#   - Only deletes pr-* review branches for confirmed MERGED/CLOSED PRs, and
+#     only through `loom-daemon merge-pr delete-branch` — the shared
+#     tip-SHA-verified rule merge-pr.sh and `worktree.sh remove` both use
+#     (never a raw `git branch -D`)
 #   - Preserves branches for OPEN issues/PRs
 #   - Provides summary of actions taken
 
@@ -147,101 +148,76 @@ if [[ -n "$pr_branches" ]]; then
     echo "Checking PR review-branch status..."
     echo
 
-    # Reuse merge-pr.sh's `_maybe_delete_local_branch` (tip-SHA-verified
-    # safety check around lines 1493-1568) instead of duplicating it. Extract
-    # the real function bodies from the live source so the two never drift —
-    # the same technique defaults/scripts/tests/test-merge-pr-local-branch-cleanup.sh
-    # uses to test it.
-    MERGE_PR_SCRIPT="$SCRIPT_DIR/merge-pr.sh"
-
-    # The landed check `_maybe_delete_local_branch` delegates its `-d` → `-D`
-    # upgrade to (#7812). Sourced, not extracted — it is a real shared library.
-    # Fail-closed `unknown` shim when a partially-resynced .loom/ lacks it, so
-    # this pass degrades to the conservative `git branch -d`, never crashes.
-    if [[ -f "$SCRIPT_DIR/lib/branch-landed.sh" ]]; then
-        # shellcheck source=lib/branch-landed.sh
-        source "$SCRIPT_DIR/lib/branch-landed.sh"
+    # Every delete goes through `loom-daemon merge-pr delete-branch` — the
+    # shared, tip-SHA-verified `worktree_cli::branch_delete` rule that
+    # merge-pr.sh's own `_maybe_delete_local_branch` and `worktree.sh remove`
+    # both call (#8191/#8195 slice 3), never a raw `git branch -D`.
+    #
+    # Until #8968 this pass `awk`-extracted that shell function out of
+    # merge-pr.sh and `eval`ed it, alongside three transitive helpers
+    # (`_primary_worktree_path`, `_is_primary_worktree_path`,
+    # `_find_worktree_by_branch`), a `lib/branch-landed.sh` source and a
+    # fail-closed `branch_landed()` shim. Once #8191 made the extraction
+    # target a thin wrapper around this very subcommand, none of that was
+    # reachable from the extracted body — so calling the subcommand directly
+    # keeps the "one implementation, no drift" guarantee the extraction
+    # existed for, with none of the machinery.
+    #
+    # requires-daemon: merge-pr >= 0.19.399   #8191 — `merge-pr delete-branch`
+    # was added in 01982e6be (merge train D, #9020) while VERSION still read
+    # 0.19.398, so 0.19.399 (93df55164) is the first version that shipped it.
+    # Hard, not `optional`: there is no second implementation to degrade to.
+    # Both failure shapes keep every branch, because a guard that cannot run
+    # must never delete a branch on its own authority: no binary resolves at
+    # all -> the whole pass is skipped with the one warning below; a binary
+    # below the floor (or any other non-zero exit) -> one per-branch warning
+    # from _delete_landed_branch, naming the version remedy.
+    LOOM_DAEMON="${LOOM_DAEMON_BIN:-loom-daemon}"
+    if ! command -v "$LOOM_DAEMON" >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠${NC}  Could not resolve '$LOOM_DAEMON' for the branch-delete safety check - skipping PR review-branch cleanup"
     else
-        # shellcheck disable=SC2034  # side-channel globals read by callers
-        branch_landed() {
-            BRANCH_LANDED_VERDICT="unknown"; BRANCH_LANDED_EVIDENCE="inconclusive"
-            BRANCH_LANDED_PR_NUMBER=""; BRANCH_LANDED_PR_HEAD_SHA=""
-            BRANCH_LANDED_FORGE_STATUS="unavailable"
-            printf 'unknown\n'
-        }
-    fi
-
-    # Extract one top-level function definition verbatim from a shell script.
-    # merge-pr.sh defines every function at column 0 with its closing brace
-    # also at column 0, so "first `^}` after the opening line" is exact.
-    _extract_shell_fn() {
-        local fn_name="$1" src="$2"
-        awk -v fn="$fn_name" '
-            $0 ~ "^" fn "\\(\\) \\{" { grab=1 }
-            grab { print }
-            grab && /^}/ { exit }
-        ' "$src"
-    }
-
-    _MAYBE_DELETE_FN=""
-    # _maybe_delete_local_branch's delete-refusal path calls these three
-    # helpers (merge-pr.sh, #4171) to distinguish "checked out in the primary
-    # checkout" from "checked out in some other worktree". They must be
-    # extracted alongside it — otherwise a merged/closed PR whose `pr-<N>`
-    # branch is still checked out in a live review worktree (exactly the
-    # population this pass targets) aborts the whole script with
-    # `_find_worktree_by_branch: command not found` under `set -e` (#4405).
-    # The `-d` → `-D` upgrade's safety predicate is NOT in this list since
-    # #7812: it is `branch_landed` from lib/branch-landed.sh, a real shared
-    # library sourced below, so there is no function body to extract.
-    _MAYBE_DELETE_DEPS=(_primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch)
-    _MAYBE_DELETE_DEP_FNS=""
-    if [[ -f "$MERGE_PR_SCRIPT" ]]; then
-        _MAYBE_DELETE_FN="$(_extract_shell_fn _maybe_delete_local_branch "$MERGE_PR_SCRIPT")"
-        for _dep_fn in "${_MAYBE_DELETE_DEPS[@]}"; do
-            _dep_src="$(_extract_shell_fn "$_dep_fn" "$MERGE_PR_SCRIPT")"
-            if [[ -n "$_dep_src" ]]; then
-                _MAYBE_DELETE_DEP_FNS+="$_dep_src"$'\n'
-            else
-                # Upstream renamed/removed the helper: degrade to the generic
-                # "checked out somewhere" warning instead of crashing. All
-                # shims are safe under `set -e` — the path shims print nothing
-                # and succeed, and `_is_primary_worktree_path` is only ever
-                # used as an `if` test.
-                case "$_dep_fn" in
-                    _is_primary_worktree_path)
-                        _MAYBE_DELETE_DEP_FNS+="$_dep_fn() { return 1; }"$'\n' ;;
-                    *)  _MAYBE_DELETE_DEP_FNS+="$_dep_fn() { :; }"$'\n' ;;
-                esac
-            fi
-        done
-    fi
-
-    if [[ -z "$_MAYBE_DELETE_FN" ]]; then
-        echo -e "${YELLOW}⚠${NC}  Could not load the branch-delete safety helper from $MERGE_PR_SCRIPT - skipping PR review-branch cleanup"
-    else
-        # Minimal logging shims — _maybe_delete_local_branch calls these.
+        # Logging shims the daemon's decision lines are replayed through.
         info() { echo -e "${BLUE}ℹ${NC} $*"; }
         warning() { echo -e "${YELLOW}⚠${NC} $*"; }
         success() { echo -e "${GREEN}✓${NC} $*"; }
-        # shellcheck disable=SC2317  # invoked indirectly via the evaluated function
-        error() { echo -e "${RED}✗${NC} $*" >&2; return 1; }
 
-        # REPO_ROOT / DEFAULT_BRANCH_NAME are read by the evaluated bodies, so
-        # they must be set before the first call (not before the eval itself).
-        # shellcheck disable=SC2034  # read inside the evaluated merge-pr.sh function bodies
         REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-        # shellcheck disable=SC2034  # read inside the evaluated _maybe_delete_local_branch body
         DEFAULT_BRANCH_NAME=""
         if [[ -f "$SCRIPT_DIR/lib/default-branch.sh" ]]; then
             # shellcheck source=lib/default-branch.sh
             source "$SCRIPT_DIR/lib/default-branch.sh"
-            # shellcheck disable=SC2034  # read inside the evaluated _maybe_delete_local_branch body
             DEFAULT_BRANCH_NAME="$(cd "$REPO_ROOT" && loom_default_branch 2>/dev/null || true)"
         fi
 
-        eval "$_MAYBE_DELETE_DEP_FNS"
-        eval "$_MAYBE_DELETE_FN"
+        # _delete_landed_branch <branch> [expected_head_sha]
+        #
+        # The daemon emits one `LEVEL<TAB>message` line per decision on
+        # stdout; replay each through info/warning/success so the
+        # operator-visible text and coloring match merge-pr.sh's. Only stdout
+        # is parsed — stderr (clap errors, logs) passes through untouched,
+        # never replayed as a bogus INFO line. Whatever it DID print is
+        # replayed before a non-zero exit is reported, so a crash after a
+        # delete cannot hide the delete. Never fails the pass: this cleanup is
+        # advisory, so a guard that could not run is a warning, not a blocker.
+        # An unset DEFAULT_BRANCH_NAME omits --default-branch, the
+        # conservative direction (it disables the named default-branch arm and
+        # the #5015 auto-cleanup), exactly as the empty shell var used to.
+        _delete_landed_branch() {
+            local branch="$1" expected_head_sha="${2:-}"
+            local flags=() out rc=0 level text
+            [[ -z "$DEFAULT_BRANCH_NAME" ]] || flags+=(--default-branch "$DEFAULT_BRANCH_NAME")
+            out="$("$LOOM_DAEMON" merge-pr delete-branch --repo-root "$REPO_ROOT" --branch "$branch" --expected-head-sha "$expected_head_sha" ${flags[@]+"${flags[@]}"})" || rc=$?
+            while IFS=$'\t' read -r level text; do
+                [[ -n "$level" ]] || continue
+                case "$level" in
+                    SUCCESS) success "$text" ;;
+                    WARNING) warning "$text" ;;
+                    *) info "$text" ;;
+                esac
+            done <<< "$out"
+            [[ $rc -eq 0 ]] || warning "The local-branch cleanup guard for '$branch' did not complete — '$LOOM_DAEMON merge-pr delete-branch' exited $rc (a binary predating #8191 has no such subcommand). Advisory only: any branch action it did take is reported above, otherwise '$branch' is left as-is."
+            return 0
+        }
 
         for branch in $pr_branches; do
             pr_num=$(echo "$branch" | sed -E 's/^pr-?([0-9]+).*/\1/')
@@ -282,7 +258,7 @@ if [[ -n "$pr_branches" ]]; then
             fi
 
             echo -e "${GREEN}✓${NC} PR #$pr_num is $pr_state - evaluating $branch for deletion"
-            _maybe_delete_local_branch "$branch" "$pr_head_sha"
+            _delete_landed_branch "$branch" "$pr_head_sha"
             if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$branch"; then
                 pr_kept_unsafe=$((pr_kept_unsafe + 1))
             else

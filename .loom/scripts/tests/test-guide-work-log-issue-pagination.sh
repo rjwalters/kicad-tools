@@ -158,8 +158,8 @@ assert_eq "$TOTAL_FIXTURE_COUNT" "2400" \
 stub_total_count() {
     local start="$1" end="$2"
     if [[ -n "$end" ]]; then
-        jq --arg start "$start" --arg end "$end" \
-            '[.[] | select((.closedAt | .[0:10]) >= $start and (.closedAt | .[0:10]) < $end)] | length' \
+        jq --arg start "$start" --arg range_end "$end" \
+            '[.[] | select((.closedAt | .[0:10]) >= $start and (.closedAt | .[0:10]) < $range_end)] | length' \
             "$FIXTURE_JSON"
     else
         jq --arg start "$start" \
@@ -174,8 +174,8 @@ stub_total_count() {
 stub_bounded_fetch() {
     local start="$1" end="$2"
     if [[ -n "$end" ]]; then
-        jq -c --arg start "$start" --arg end "$end" --argjson cap "$SAFETY_CAP" \
-            '[.[] | select((.closedAt | .[0:10]) >= $start and (.closedAt | .[0:10]) < $end)] | .[0:$cap]' \
+        jq -c --arg start "$start" --arg range_end "$end" --argjson cap "$SAFETY_CAP" \
+            '[.[] | select((.closedAt | .[0:10]) >= $start and (.closedAt | .[0:10]) < $range_end)] | .[0:$cap]' \
             "$FIXTURE_JSON"
     else
         jq -c --arg start "$start" --argjson cap "$SAFETY_CAP" \

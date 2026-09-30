@@ -196,10 +196,11 @@ class TestWorkflowYAML:
         )
 
     def test_native_step_uses_official_kicad_image(self, workflow: dict) -> None:
-        """The native step must reuse the SAME official ``kicad/kicad:10.0``
-        image the other jobs in this workflow already use, per the issue's
-        implementation guidance -- not a fresh apt/PPA install (which the
-        ``kicad-cli-smoke`` job's comment documents as unreliable)."""
+        """The native step must reuse the SAME pinned KiCad image the other
+        jobs in this workflow already use -- the workflow-level
+        ``KICAD_IMAGE`` digest (#5682), inherited as a step env var -- not a
+        fresh apt/PPA install (which the ``kicad-cli-smoke`` job's comment
+        documents as unreliable)."""
         steps = workflow["jobs"][JOB_NAME]["steps"]
         native_step = next(
             (
@@ -210,8 +211,9 @@ class TestWorkflowYAML:
             None,
         )
         assert native_step is not None
-        assert "kicad/kicad:10.0" in str(native_step.get("run", "")), (
-            "The native-validation step must run inside kicad/kicad:10.0."
+        assert '"$KICAD_IMAGE"' in str(native_step.get("run", "")), (
+            "The native-validation step must run inside the workflow-pinned "
+            "KiCad image ($KICAD_IMAGE)."
         )
 
     def test_job_has_reasonable_timeout(self, workflow: dict) -> None:

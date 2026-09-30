@@ -306,7 +306,9 @@ def _run_export(pcb: Path, manufacturer: str, output_dir: Path, assembly: bool) 
         archive = output_dir / "kicad_project.zip"
         with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
             present = set(zf.namelist())
-            for source in _project_dependencies(pcb):
+            for source in _project_dependencies(pcb, Path(pcb.anchor)):  # bounded upstream
+                if not source.is_relative_to(pcb.parent):
+                    continue  # Collected later by _normalize_project_archive (#5813).
                 relative = source.relative_to(pcb.parent).as_posix()
                 if relative not in present:
                     zf.write(source, relative)
@@ -457,6 +459,12 @@ class EngineFingerprint:
     digest of the working source when it is dirty, the native KiCad version and
     the resolved rule/profile identity lets a consumer tell "re-qualified under
     the current engine" from "historical evidence from an older engine".
+
+    ``commit``/``dirty`` describe the **engine** and are only filled in from
+    provenance that demonstrably belongs to it (:func:`_engine_provenance`); a
+    wheel install omits ``commit`` rather than guessing.  ``source_digest`` is
+    an independent concept — it is always available, and it, not ``commit``,
+    is what separates two runs of the same revision.
     """
 
     kicad_tools_version: str
@@ -486,9 +494,137 @@ class EngineFingerprint:
         return payload
 
 
+#: PEP 610 records how a distribution was installed.  ``distribution()`` wants
+#: the *distribution* name, which is not the import name.
+_DISTRIBUTION_NAME = "kicad-tools"
+
+
+def _direct_url_metadata() -> dict[str, Any] | None:
+    """Return the installed distribution's PEP 610 ``direct_url.json``, if any.
+
+    A wheel from an index has no such file; a ``pip install git+…`` VCS pin and
+    an editable install both do.  Returns ``None`` whenever the payload is
+    missing, unreadable or not a JSON object.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        raw = distribution(_DISTRIBUTION_NAME).read_text("direct_url.json")
+    except PackageNotFoundError:  # pragma: no cover - kct is always installed
+        return None
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:  # pragma: no cover - defensive
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _vcs_commit(direct_url: dict[str, Any] | None) -> str | None:
+    """Commit recorded by a VCS install (``pip install git+…@<ref>``).
+
+    This is the authoritative provenance when it exists: the installer wrote
+    the exact commit it resolved, so no git checkout — and no guessing from the
+    filesystem — is involved.
+    """
+    if not direct_url:
+        return None
+    vcs_info = direct_url.get("vcs_info")
+    if not isinstance(vcs_info, dict):
+        return None
+    commit = vcs_info.get("commit_id")
+    if not isinstance(commit, str):
+        return None
+    return commit.strip() or None
+
+
+@lru_cache(maxsize=8)
+def _owning_checkout(package_root: Path) -> Path | None:
+    """Return the git checkout that actually *tracks* ``package_root``.
+
+    Git's upward ``.git`` search answers for whatever repository happens to
+    contain the directory it is asked about.  When kct is installed into a
+    consumer repository's ``.venv``, that is the *consumer's* checkout — and
+    recording its HEAD as the engine's commit is how a readiness report came to
+    claim it was produced by an engine revision that never existed (#5812).
+
+    A checkout therefore only counts as the engine's own source when
+    ``git ls-files`` confirms it tracks the imported package.  An editable
+    install or a run straight out of a clone passes; a venv sitting inside an
+    unrelated repository does not.
+    """
+    probe = package_root / "__init__.py"
+    if not probe.is_file():  # pragma: no cover - defensive
+        return None
+    try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(package_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if toplevel.returncode != 0:
+            return None
+        root = toplevel.stdout.strip()
+        if not root:  # pragma: no cover - defensive
+            return None
+        tracked = subprocess.run(
+            ["git", "-C", root, "ls-files", "--error-unmatch", "--", str(probe)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - defensive
+        return None
+    if tracked.returncode != 0:
+        return None
+    return Path(root)
+
+
+def _engine_provenance_for(
+    package_root: Path, *, direct_url: dict[str, Any] | None
+) -> tuple[str | None, bool]:
+    """Resolve ``(commit, dirty)`` for the *engine*, from trusted sources only.
+
+    Two sources, in order:
+
+    1. PEP 610 ``direct_url.json`` — a VCS pin names the exact installed
+       commit and needs neither git nor a checkout on the host.
+    2. The git checkout that tracks the imported package (:func:`_owning_checkout`).
+
+    With neither available — an ordinary wheel install — the provenance is
+    genuinely unknown, and ``commit`` is omitted from the report rather than
+    borrowed from whichever repository happens to contain the venv (#5812).
+    """
+    commit = _vcs_commit(direct_url)
+    if commit is not None:
+        # An installed VCS pin is an immutable snapshot: there is no working
+        # tree whose dirtiness could be observed.  ``source_digest`` remains the
+        # field that distinguishes two runs of the same commit.
+        return commit, False
+    repo_root = _owning_checkout(package_root)
+    if repo_root is None:
+        return None, False
+    return _git_describe(repo_root)
+
+
+def _engine_provenance(package_root: Path) -> tuple[str | None, bool]:
+    """:func:`_engine_provenance_for` against this interpreter's installation."""
+    return _engine_provenance_for(package_root, direct_url=_direct_url_metadata())
+
+
 @lru_cache(maxsize=8)
 def _git_describe(repo_root: Path) -> tuple[str | None, bool]:
-    """Return ``(commit, dirty)`` for the kicad-tools checkout, if available."""
+    """Return ``(commit, dirty)`` for a checkout already verified to own kct.
+
+    Callers must go through :func:`_engine_provenance`; calling this on an
+    arbitrary ancestor directory is the bug behind #5812.
+    """
     try:
         head = subprocess.run(
             ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
@@ -552,7 +688,7 @@ def build_fingerprint(
     import kicad_tools
 
     package_root = Path(kicad_tools.__file__).resolve().parent
-    commit, dirty = _git_describe(package_root.parent.parent)
+    commit, dirty = _engine_provenance(package_root)
     return EngineFingerprint(
         kicad_tools_version=getattr(kicad_tools, "__version__", "unknown"),
         commit=commit,
@@ -601,11 +737,25 @@ class ReadinessOptions:
     archive: bool = True
     net_class_map: Path | None = None
     hv_net_class: str = "HV"
-    hv_requirement: str | None = None
+    hv_min: float | None = None
+    hv_standard: str | None = None
+    hv_working_voltage: float | None = None
+    hv_pollution_degree: int | None = None
+    hv_material_group: str = "IIIa"
     fill_tolerance_mm2: float = DEFAULT_FILL_TOLERANCE_MM2
     check_args: tuple[str, ...] = ()
     recipe: str | None = None
     operation: str = "verify"
+    # Explicit project root (Issue #5813): an ancestor of ``board_dir`` that bounds
+    # where out-of-board-directory dependencies (schematic hierarchy, sibling
+    # symbol/footprint libraries) may be collected from.  ``None`` keeps the
+    # historical boundary (``board_dir``).
+    project_root: Path | None = None
+
+    @property
+    def root(self) -> Path:
+        """The resolved containment boundary for collected dependencies."""
+        return (self.project_root or self.board_dir).resolve()
 
     @property
     def assembly(self) -> bool:
@@ -704,6 +854,22 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         Path(args.schematic).resolve() if args.schematic else _find_sibling(pcb, ".kicad_sch")
     )
 
+    project_root: Path | None = None
+    if getattr(args, "project_root", None):
+        project_root = Path(args.project_root).resolve()
+        if not project_root.is_dir():
+            return None, f"--project-root is not a directory: {project_root}"
+        if not (
+            board_dir.resolve().is_relative_to(project_root)
+            and pcb.resolve().is_relative_to(project_root)
+        ):
+            return None, f"--project-root {project_root} must contain the board {board_dir}"
+    boundary = project_root or board_dir.resolve()
+    if schematic is not None and not schematic.resolve().is_relative_to(boundary):
+        return None, _outside_root_message(str(schematic), "schematic", project_root is not None)
+    if schematic is not None and not schematic.is_file():
+        return None, f"schematic not found: {schematic}"
+
     output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
     evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
     if not (board_dir / "output").is_dir():
@@ -730,9 +896,14 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             archive=not args.no_archive,
             net_class_map=net_class_map,
             hv_net_class=args.hv_net_class,
-            hv_requirement=args.hv_requirement,
+            hv_min=args.hv_min,
+            hv_standard=args.hv_standard,
+            hv_working_voltage=args.hv_working_voltage,
+            hv_pollution_degree=args.hv_pollution_degree,
+            hv_material_group=args.hv_material_group,
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
+            project_root=project_root,
         ),
         None,
     )
@@ -1148,6 +1319,16 @@ def _gate_warning_review(
 def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
     """Gate 4 (conditional) — refuse to sign off an un-evaluated HV path.
 
+    Runs the SAME creepage/clearance audit ``kct audit --hv-standard`` uses
+    (:func:`kicad_tools.audit.check_isolation`, extracted from
+    ``ManufacturingAudit._check_isolation`` for exactly this reuse) against
+    the checked PCB and net-class-map sidecar.  A free-text description of
+    the requirement can no longer establish ``passed`` by itself (issue
+    #5807) — only a measured, thresholded creepage/clearance census bound to
+    *this* PCB and net-class-map can.  There is no stored/cached evidence
+    file this gate trusts as input, so there is nothing that can go stale:
+    every run recomputes the census from the current PCB and sidecar bytes.
+
     Returns ``None`` for boards that declare no HV net class, so the check is
     omitted entirely rather than recorded as a vacuous pass.
     """
@@ -1162,24 +1343,122 @@ def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
     )
     if not hv_nets:
         return None
-    if not options.hv_requirement:
+
+    from kicad_tools.audit import check_isolation
+    from kicad_tools.schema.pcb import PCB
+
+    options.evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = options.evidence_dir / "hv-isolation.json"
+    evidence_rel = _rel(options, evidence_path)
+
+    try:
+        pcb = PCB.load(str(options.pcb))
+    except Exception as exc:
+        evidence = {
+            "pcb_sha256": _sha256_file(options.pcb) if options.pcb.is_file() else None,
+            "error": f"PCB could not be loaded for the isolation audit: {exc}",
+        }
+        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
         return CheckOutcome(
             name="hv_isolation",
             status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=f"HV nets declared but the PCB could not be loaded for isolation audit: {exc}",
+            blockers=[f"Isolation audit could not load the checked PCB: {exc}"],
+        )
+
+    status = check_isolation(
+        pcb,
+        options.pcb,
+        hv_net_class=options.hv_net_class,
+        net_class_map_path=options.net_class_map,
+        hv_min_mm=options.hv_min,
+        hv_standard=options.hv_standard,
+        hv_working_voltage=options.hv_working_voltage,
+        hv_pollution_degree=options.hv_pollution_degree,
+        hv_material_group=options.hv_material_group,
+    )
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "pcb_sha256": _sha256_file(options.pcb),
+                "net_class_map_sha256": _sha256_file(options.net_class_map),
+                "hv_net_class": options.hv_net_class,
+                "hv_min_mm": options.hv_min,
+                "hv_standard": options.hv_standard,
+                "hv_working_voltage": options.hv_working_voltage,
+                "hv_pollution_degree": options.hv_pollution_degree,
+                "hv_material_group": options.hv_material_group,
+                "isolation": status.to_dict(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    if status.mains_suspected_unclassified:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=FAILED,
+            evidence=evidence_rel,
+            detail=status.details,
+            blockers=[status.details],
+        )
+    if not status.hv_present:
+        # The sidecar declares an HV class but the audited PCB resolved none —
+        # a net-class-map/PCB mismatch (e.g. a sidecar left over from a
+        # different board revision).  Never a silent skip once we got this far.
+        return CheckOutcome(
+            name="hv_isolation",
+            status=NOT_RUN,
+            evidence=evidence_rel,
             detail=(
-                f"{len(hv_nets)} HV net(s) present with no isolation requirement "
-                "specified (--hv-requirement)."
+                f"net-class-map declares {len(hv_nets)} HV net(s) but the audited "
+                "PCB resolved none; the sidecar may not match this board."
             ),
             blockers=[
-                f"HV nets present ({', '.join(hv_nets[:5])}) but no isolation "
-                "requirement was supplied; run `kct audit --hv-standard ...` and "
-                "record the verdict with --hv-requirement."
+                "HV net-class-map/PCB mismatch: the checked PCB resolves no HV "
+                "nets under the declared sidecar."
             ],
+        )
+    if status.could_not_verify:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=status.details,
+            blockers=[f"Isolation audit could not verify: {status.details}"],
+        )
+    if not status.threshold_supplied:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=(
+                f"{len(status.hv_nets)} HV net(s) present with no isolation "
+                "requirement specified (--hv-min / --hv-standard)."
+            ),
+            blockers=[
+                f"HV nets present ({', '.join(status.hv_nets[:5])}) but no isolation "
+                "requirement was supplied; pass --hv-standard (with "
+                "--hv-working-voltage/--hv-pollution-degree) or --hv-min, "
+                "the same inputs `kct audit --hv-standard ...` requires."
+            ],
+        )
+    if not status.passed:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=FAILED,
+            evidence=evidence_rel,
+            detail=status.details,
+            blockers=[f"HV isolation audit failed: {status.details}"],
         )
     return CheckOutcome(
         name="hv_isolation",
         status=PASSED,
-        detail=f"{len(hv_nets)} HV net(s) gated against: {options.hv_requirement}.",
+        evidence=evidence_rel,
+        detail=status.details,
     )
 
 
@@ -1230,9 +1509,53 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
     return manifest_path
 
 
-def _project_dependencies(pcb: Path) -> list[Path]:
-    """Inventory native project dependencies independently of the package manifest."""
+_SUPPORTED_LAYOUT = (
+    "Supported layout: keep every dependency inside one project root and pass it "
+    "explicitly with --project-root, e.g. project/{schematics,symbols,pcb}/ run as "
+    "`kct readiness project/pcb/board.kicad_pcb --sch project/schematics/board.kicad_sch "
+    "--project-root project`. Only files the project references are collected; "
+    "ancestor directories are never copied."
+)
+
+
+def _outside_root_message(what: str, kind: str, root_given: bool) -> str:
+    where = "the --project-root" if root_given else "the package root"
+    return f"Project {kind} is outside {where}: {what}. {_SUPPORTED_LAYOUT}"
+
+
+def _schematic_hierarchy(schematic: Path, limit: Path, root_given: bool = True) -> list[Path]:
+    """The schematic plus every sub-sheet it references, contained within *limit*."""
+    found: dict[Path, None] = {}
+    pending = [schematic.resolve()]
+    while pending:
+        sheet = pending.pop()
+        if sheet in found:
+            continue
+        if not sheet.resolve().is_relative_to(limit):
+            raise ValueError(_outside_root_message(str(sheet), "sheet", root_given))
+        if not sheet.is_file():
+            raise ValueError(f"Project dependency is missing: {sheet}")
+        found[sheet] = None
+        text = sheet.read_text(errors="replace")
+        for name in re.findall(r'\(property\s+"Sheet(?:file|name)"\s+"([^"\n]+\.kicad_sch)"', text):
+            pending.append((sheet.parent / name).resolve())
+        for name in re.findall(r'\(file\s+"([^"\n]+\.kicad_sch)"\)', text):
+            pending.append((sheet.parent / name).resolve())
+    return sorted(found)
+
+
+def _project_dependencies(
+    pcb: Path, limit: Path | None = None, explicit_root: bool = False
+) -> list[Path]:
+    """Inventory native project dependencies independently of the package manifest.
+
+    *limit* is the containment boundary (default: the PCB's own directory).  A
+    ``${KIPRJMOD}/../...`` library reference may resolve outside the PCB
+    directory only when it stays inside *limit* (Issue #5813).
+    """
     root = pcb.parent
+    boundary = (limit or root).resolve()
+    real_root = root.resolve()
     files = {
         p
         for p in root.iterdir()
@@ -1252,19 +1575,113 @@ def _project_dependencies(pcb: Path) -> list[Path]:
             continue
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
             if "${KIPRJMOD}" in uri:
-                dependency = Path(uri.replace("${KIPRJMOD}", str(root)))
+                dependency = Path(uri.replace("${KIPRJMOD}", str(real_root)))
             elif not Path(uri).is_absolute() and "$" not in uri:
-                dependency = root / uri
+                dependency = real_root / uri
             else:
                 continue  # Installed KiCad libraries are identified by the native engine.
-            if not dependency.resolve().is_relative_to(root.resolve()):
-                raise ValueError(f"Project dependency is outside the package root: {uri}")
+            # Lexically normalised from the *resolved* PCB directory, so any
+            # remaining difference from ``resolve()`` is a symlink on the path.
+            dependency = Path(os.path.normpath(dependency))
+            resolved = dependency.resolve()
+            if not resolved.is_relative_to(boundary):
+                raise ValueError(_outside_root_message(uri, "dependency", explicit_root))
             if not dependency.exists():
                 raise ValueError(f"Project dependency is missing: {uri}")
-            files.update(
-                p for p in dependency.rglob("*") if p.is_file()
-            ) if dependency.is_dir() else files.add(dependency)
+            if dependency.is_dir():
+                if resolved != root.resolve() and root.resolve().is_relative_to(resolved):
+                    raise ValueError(
+                        f"Project dependency {uri} contains the PCB directory; "
+                        "reference a specific library instead. " + _SUPPORTED_LAYOUT
+                    )
+                members = [p for p in dependency.rglob("*") if p.is_file()]
+            else:
+                members = [dependency]
+            for member in members:
+                if not member.resolve().is_relative_to(boundary):
+                    raise ValueError(
+                        _outside_root_message(str(member), "dependency", explicit_root)
+                    )
+                if member.resolve() != member:
+                    # The archive and the candidate are laid out by real location,
+                    # so an alias would leave the referenced path dangling (#5813).
+                    raise ValueError(
+                        f"Ambiguous project dependency path: {uri} reaches {member} through "
+                        f"a symlink to {member.resolve()}; reference the real file "
+                        "location in the library table instead."
+                    )
+            files.update(members)
     return sorted(files)
+
+
+def _required_sources(options: ReadinessOptions) -> list[Path]:
+    """Every (resolved) file the archived project must contain to be the checked design.
+
+    This is the single inventory shared by archive collection and provenance, so
+    nothing provenance requires can be missing from ``kicad_project.zip``.
+    """
+    explicit = options.project_root is not None
+    sources: set[Path] = set()
+    if options.pcb.is_file():
+        sources.add(options.pcb.resolve())
+        sources.update(
+            p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
+        )
+    if options.schematic is not None and options.schematic.is_file():
+        sources.update(_schematic_hierarchy(options.schematic, options.root, explicit))
+    if options.project is not None:
+        sources.add(options.project.resolve())
+    return sorted(sources)
+
+
+def _external_dependencies(options: ReadinessOptions) -> list[Path]:
+    """Collected files that live outside ``board_dir`` but inside the project root."""
+    board = options.board_dir.resolve()
+    return [p for p in _required_sources(options) if not p.is_relative_to(board)]
+
+
+def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[Path, str]:
+    """Archive member names: PCB-directory relative, or root relative with externals."""
+    base = options.pcb.parent.resolve()
+    if all(s.resolve().is_relative_to(base) for s in sources):
+        return {s: s.resolve().relative_to(base).as_posix() for s in sources}
+    return {s: s.resolve().relative_to(options.root).as_posix() for s in sources}
+
+
+def _normalize_project_archive(options: ReadinessOptions) -> None:
+    """Make kicad_project.zip contain every file provenance requires (#5813).
+
+    The exporter only archives the PCB directory's top level and its library
+    folders.  Sub-sheets in a subdirectory, ``${KIPRJMOD}/../`` libraries and
+    out-of-directory schematics are added here.  When any required file lies
+    outside the PCB directory, members are re-rooted relative to the project
+    root so that ``${KIPRJMOD}/../x`` references keep working inside the archive.
+    Members the exporter already wrote are never overwritten: provenance must
+    still see (and reject) an export that archived the wrong bytes.
+    """
+    archive = options.output_dir / "kicad_project.zip"
+    if not archive.is_file():
+        return
+    required = _required_sources(options)
+    names_for = _archive_names(options, required)
+    base = options.pcb.parent.resolve()
+    rerooted = not all(s.is_relative_to(base) for s in required)
+    with zipfile.ZipFile(archive) as zf:
+        members = {
+            info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
+        }
+    prefix = base.relative_to(options.root).as_posix() if rerooted else "."
+    rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
+    missing = [s for s in required if names_for[s] not in rebuilt]
+    if not missing and not rerooted:
+        return
+    for source in missing:
+        rebuilt[names_for[source]] = source.read_bytes()
+    tmp = archive.with_suffix(".zip.tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(rebuilt):
+            zf.writestr(name, rebuilt[name])
+    os.replace(tmp, archive)
 
 
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
@@ -1272,17 +1689,16 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
     try:
-        sources = set(_project_dependencies(options.pcb)) | {options.pcb}
+        sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
-            sources.add(options.schematic)
-        if options.project is not None:
-            sources.add(options.project)
+            sources.add(options.schematic.resolve())
+        names_for = _archive_names(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
                 problems.append("duplicate file identities in kicad_project.zip")
             for source in sorted(sources):
-                relative = source.relative_to(options.pcb.parent).as_posix()
+                relative = names_for[source]
                 if relative not in names:
                     problems.append(f"{relative} is absent from kicad_project.zip")
                 elif zf.read(relative) != source.read_bytes():
@@ -1448,6 +1864,15 @@ def _gate_artifacts(
             status=NOT_RUN,
             detail=f"kct export did not produce a bundle: {run.detail}",
             blockers=[f"Manufacturing export could not run ({run.detail})."],
+        )
+    try:
+        _normalize_project_archive(options)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return CheckOutcome(
+            name="artifacts",
+            status=NOT_RUN,
+            detail=f"could not collect project dependencies: {exc}",
+            blockers=[f"Project dependencies could not be collected ({exc})."],
         )
 
     problems: list[str] = []
@@ -1718,7 +2143,12 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     """
     root = options.board_dir.resolve()
     paths: set[Path] = (
-        {p.resolve() for p in _project_dependencies(options.pcb)}
+        {
+            p.resolve()
+            for p in _project_dependencies(
+                options.pcb, options.root, options.project_root is not None
+            )
+        }
         if options.pcb.is_file()
         else set()
     )
@@ -1800,6 +2230,13 @@ def build_report(
     report["inputs"] = {
         _rel(options, path): _sha256_file(path) for path in _hashable_inputs(options)
     }
+    external = _external_dependencies(options)
+    if external:
+        # Hash the exact collected out-of-directory dependencies (Issue #5813).
+        report["project_root"] = os.path.relpath(options.root, options.board_dir.resolve())
+        report["external_inputs"] = {
+            p.relative_to(options.root).as_posix(): _sha256_file(p) for p in external
+        }
     return report
 
 
@@ -1938,6 +2375,25 @@ def _publish_candidate_locked(candidate: Path, destination: Path, before: dict[s
             raise
 
 
+def _preflight_failure(
+    options: ReadinessOptions, original: Path, exc: Exception
+) -> ReadinessResult:
+    """Report an unresolvable dependency without touching sources or any release."""
+    name = "readiness-verification" if options.operation == "verify" else "readiness-attempt"
+    diagnostics = original / "output" / name
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    report = {
+        "schema_version": 1,
+        "status": STATUS_BLOCKED,
+        "mode": options.mode,
+        "blockers": [f"Readiness candidate was not published: {exc}"],
+        "checks": [],
+    }
+    report_path = diagnostics / "readiness.json"
+    report_path.write_text(json.dumps(report, indent=2) + "\n")
+    return ReadinessResult(report, report_path, 1)
+
+
 def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> ReadinessResult:
     """Inspect an isolated candidate; publish generation only after all gates pass.
 
@@ -1946,13 +2402,20 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     """
     engines = engines or Engines()
     original = options.board_dir.resolve()
+    project_root = options.root
+    try:
+        externals = _external_dependencies(options)
+    except (OSError, ValueError) as exc:
+        return _preflight_failure(options, original, exc)
+    external_before = {p: _sha256_file(p) for p in externals}
     before = _snapshot_inventory(original)
     diagnostic_name = (
         "readiness-verification" if options.operation == "verify" else "readiness-attempt"
     )
     diagnostics = original / "output" / diagnostic_name
     with tempfile.TemporaryDirectory(prefix="kct-readiness-candidate-") as temporary:
-        candidate = Path(temporary) / "board"
+        candidate_root = Path(temporary) / "board"
+        candidate = candidate_root / original.relative_to(project_root)
         shutil.copytree(
             original,
             candidate,
@@ -1961,13 +2424,21 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             ),
         )
 
+        for source in externals:
+            target = candidate_root / source.relative_to(project_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
         def remap(path: Path | None) -> Path | None:
-            return candidate / path.resolve().relative_to(original) if path is not None else None
+            if path is None:
+                return None
+            return candidate_root / path.resolve().relative_to(project_root)
 
         try:
             staged = replace(
                 options,
                 board_dir=candidate,
+                project_root=candidate_root,
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
                 project=remap(options.project),
@@ -1987,7 +2458,10 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                     )
                 shutil.rmtree(staged.output_dir)
             result = _run_readiness_candidate(staged, engines)
-            if _snapshot_inventory(original) != before:
+            if _snapshot_inventory(original) != before or any(
+                not p.is_file() or _sha256_file(p) != digest
+                for p, digest in external_before.items()
+            ):
                 raise RuntimeError("Release changed while checks were running")
             if options.operation == "generate" and result.exit_code == 0:
                 _publish_candidate(candidate, original, before)
@@ -2060,7 +2534,11 @@ def _run_readiness_candidate(
     checks.append(fill)
 
     checked_sources = {
-        path: _sha256_file(path) for path in [options.pcb, *_project_dependencies(options.pcb)]
+        path: _sha256_file(path)
+        for path in [
+            options.pcb,
+            *_project_dependencies(options.pcb, options.root, options.project_root is not None),
+        ]
     }
     kct_check, check_report = _gate_kct_check(options, engines)
     checks.append(kct_check)
@@ -2236,6 +2714,17 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help="Path to the .kicad_sch (auto-detected by default)",
     )
     parser.add_argument(
+        "--project-root",
+        dest="project_root",
+        default=None,
+        help=(
+            "Directory containing the board directory and every project dependency "
+            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
+            "files outside the board directory but inside this root are collected "
+            "into the staged package and hashed; nothing outside it is ever read."
+        ),
+    )
+    parser.add_argument(
         "--net-class-map",
         default=None,
         help="Net-class map sidecar (auto-discovered by default)",
@@ -2264,12 +2753,48 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help="Net-class name identifying high-voltage nets (default: HV)",
     )
     parser.add_argument(
-        "--hv-requirement",
+        "--hv-min",
+        dest="hv_min",
+        type=float,
         default=None,
         help=(
-            "Record the isolation requirement an HV board was gated against "
-            "(e.g. 'iec60664 250Vrms PD2 MGII'). Required when HV nets exist."
+            "Manual required creepage (surface-path) distance in mm (phase-1). "
+            "When combined with --hv-standard the stricter creepage bound governs."
         ),
+    )
+    parser.add_argument(
+        "--hv-standard",
+        dest="hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table (iec60664 / iec62368) instead of --hv-min. Requires "
+            "--hv-working-voltage and --hv-pollution-degree. Engineering aid, "
+            "NOT a certification."
+        ),
+    )
+    parser.add_argument(
+        "--hv-working-voltage",
+        dest="hv_working_voltage",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    parser.add_argument(
+        "--hv-pollution-degree",
+        dest="hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    parser.add_argument(
+        "--hv-material-group",
+        dest="hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     parser.add_argument(
         "--fill-tolerance",

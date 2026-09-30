@@ -36,6 +36,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
 
+# #8191: the strip-or-skip decision now delegates to `loom-daemon merge-pr
+# closed-building`. Pin the binary the extracted function execs and verify it
+# HAS that subcommand — the same harness the epic's other ported suites use.
+# Without the subcommand check every decision below would come back "did not
+# run", and a pass that never strips anything looks exactly like a pass whose
+# skips are all correct.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr closed-building"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -300,6 +310,48 @@ _strip_one_closed_issue_building_label "100"
 rc=$?
 set -e
 assert_eq "0" "$rc" "A failed removal attempt does not propagate a nonzero exit (best-effort)"
+
+# T11 (#8191): the decision moved to `loom-daemon merge-pr closed-building`,
+# so a daemon that predates the verb must produce a WARNING naming the manual
+# removal and must NOT mutate anything. A guessed strip here would drop a live
+# builder's claim label; a silent skip would hide that the pass stopped
+# running at all.
+reset_log
+fake_no_verb="$STUB_DIR/fake-loom-daemon-no-closed-building"
+cat > "$fake_no_verb" <<'FAKEDAEMON'
+#!/usr/bin/env bash
+echo "error: unrecognized subcommand 'closed-building'" >&2
+exit 2
+FAKEDAEMON
+chmod +x "$fake_no_verb"
+saved_bin="${LOOM_DAEMON_BIN:-}"
+export LOOM_DAEMON_BIN="$fake_no_verb"
+stderr_out="$(_strip_one_closed_issue_building_label "100" 2>&1 >/dev/null)"
+export LOOM_DAEMON_BIN="$saved_bin"
+assert_eq "" "$(read_log)" "Daemon without the verb -> nothing is mutated"
+assert_contains "$stderr_out" "--remove-label loom:building" \
+  "Daemon without the verb -> warning names the manual removal"
+
+# T12 (#8191): exit 0 is not enough — the wrapper accepts only the two known
+# lines. A daemon answering with anything else (a truncated write, a future
+# protocol it does not share) must be treated as "did not run", never replayed
+# as a silent SKIP. This is the whole reason the skip is a positive `SKIP`
+# line rather than empty output.
+reset_log
+fake_garbage="$STUB_DIR/fake-loom-daemon-garbage"
+cat > "$fake_garbage" <<'FAKEDAEMON'
+#!/usr/bin/env bash
+echo "MAYBE"
+exit 0
+FAKEDAEMON
+chmod +x "$fake_garbage"
+saved_bin="${LOOM_DAEMON_BIN:-}"
+export LOOM_DAEMON_BIN="$fake_garbage"
+stderr_out="$(_strip_one_closed_issue_building_label "100" 2>&1 >/dev/null)"
+export LOOM_DAEMON_BIN="$saved_bin"
+assert_eq "" "$(read_log)" "Daemon answering off-protocol at exit 0 -> nothing is mutated"
+assert_contains "$stderr_out" "rather than STRIP or SKIP" \
+  "Daemon answering off-protocol -> warning says what it printed instead"
 
 # --- Invariant guard: merge-pr.sh actually wires this pass in at the
 # confirmed-merge choke point (#6199 AC #1 and #4) ---

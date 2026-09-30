@@ -26,9 +26,11 @@ came out of tracing and measuring it:
 
 The actionable levers are therefore elsewhere and are tracked separately:
 **#8146** (cache-affinity in token selection — the 65%/1.4% gap) and **#8147**
-(`CLAUDE.md`'s `**Loom Version**` stamp, which invalidates every downstream
-cached byte on each bump). This doc records the trace, the three experiments,
-and the recipe, so the ordering question does not have to be re-opened.
+(`CLAUDE.md`'s `**Loom Version**` stamp, which invalidated every downstream
+cached byte on each bump — **fixed**, see
+[§9](#9-resolution-of-8147--the-version-stamp-is-gone)). This doc records the
+trace, the three experiments, and the recipe, so the ordering question does not
+have to be re-opened.
 
 > Sibling finding, same measurement apparatus:
 > [`prompt-prefix-loading.md`](prompt-prefix-loading.md) (#8065/#8110 — progressive
@@ -112,12 +114,13 @@ differing between run 2 and run 3:
 
 Run 3 fell back to the *second* breakpoint (29,373 — base + env matched) and
 re-wrote 27,555 tokens, i.e. `CLAUDE.md` **and the byte-identical command body
-behind it**. `scripts/version.sh` rewrites exactly that line in `CLAUDE.md` on
-every bump (`VERSION_FILES` at `:31`, the `sed` at `:197`), and `main` bumps on
-nearly every merge — so each pull that carries a bump drops every account's warm
-prefix for that repo. Filed as **#8147**; note it cannot be fixed by reordering
-`CLAUDE.md` either (same block-granularity argument), only by keeping the
-volatile bytes out of the prefix.
+behind it**. `scripts/version.sh` rewrote exactly that line in `CLAUDE.md` on
+every bump (pre-#8147: `VERSION_FILES` at `:31`, the `sed` at `:197`), and
+`main` bumps on nearly every merge — so each pull that carried a bump dropped
+every account's warm prefix for that repo. Filed as **#8147**; note it could not
+be fixed by reordering `CLAUDE.md` either (same block-granularity argument),
+only by keeping the volatile bytes out of the prefix — which is what
+[§9](#9-resolution-of-8147--the-version-stamp-is-gone) did.
 
 ## 4. Experiment C — production correlation (→ #8146)
 
@@ -237,3 +240,46 @@ cold run.
 - **Trimming the prefix.** Making the prefix smaller is #8064's scope; measuring
   and budgeting it is #8053's own narrowed scope. This doc only answers whether
   *ordering* it differently would help.
+
+## 9. Resolution of #8147 — the version stamp is gone
+
+§3's finding was fixed by removing the volatile bytes from the prefix entirely,
+which was the only available option (reordering `CLAUDE.md` is a no-op by the
+same block-granularity argument that falsified §2's hypothesis).
+
+What changed:
+
+- `CLAUDE.md` left `scripts/version.sh`'s `VERSION_FILES`, and the `sed` that
+  rewrote its `**Loom Version**:` line on every bump is gone. `version.sh list`
+  — the authoritative set, consumed by `/repo:release` and by
+  `version-check-gate.sh` — now names no file that is read into a session
+  prefix.
+- The header was removed from the repo's own `CLAUDE.md`, from the install
+  template (`defaults/.loom/CLAUDE.md`), and from the generated
+  `defaults/.loom/AGENTS.md` header (`generate-agents-md.sh`), so fresh installs
+  never carry it.
+- `check-defaults-version-bump.sh --forbid-bump` (the #7743 hand-edit guard)
+  dropped `CLAUDE.md` from its own copy of the list in the same change — the two
+  lists must stay identical, or a file no longer stamped by `version.sh` can
+  only produce false FAILs.
+- `resync-installed.sh`'s two restamp steps (#5559 for `.loom/CLAUDE.md`, #6612
+  for root `CLAUDE.md`) became a one-time **removal** migration: a repo
+  installed before this change has the leftover line deleted on its next
+  resync, after which the step is a no-op and the file is left byte-identical
+  forever. The paired `Last updated:` restamp went with it — re-stamping a date
+  in a prefix-injected file is the same defect in another costume.
+
+Where the installed version lives now: **`.loom/install-metadata.json` →
+`loom_version`** (written at install time, refreshed on every resync, and never
+read into a session prefix), with the source-of-truth `VERSION` file in the Loom
+checkout itself. `install-loom.sh`'s idempotency check already preferred that
+field; the two `CLAUDE.md` greps below it are legacy fallbacks for pre-#8147
+installs and degrade to "no version detected → treat as a fresh install" once
+the header is gone. `verify-install.sh` and `install.sh`'s post-install warning
+read the same field rather than the old header.
+
+**What is NOT verifiable from CI** (the out-of-band acceptance criterion this
+change carries): that a real, pulled version bump no longer costs a prefix
+rewrite. Reproduce with §7's recipe — take two same-account, same-role ticks
+straddling a bump that a workspace actually pulled, and confirm the later one
+still reports `cache_creation_input_tokens == 0`.

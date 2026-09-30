@@ -855,18 +855,43 @@ def create_stm32_pcb(output_dir: Path) -> Path:
   )"""
 
     def generate_sot223(ref: str, pos: tuple, value: str) -> str:
-        """Generate SOT-223 footprint for LDO."""
+        """Generate SOT-223 footprint for LDO.
+
+        Silkscreen reproduces the stock ``Package_TO_SOT_SMD:SOT-223-3_TabPin2``
+        artwork (issue #5745): the body outline plus the filled pin-1 triangle
+        beside pad 1.  Two deliberate deviations from the library source:
+
+        * This board's pad order is **Y-mirrored** relative to the stock
+          footprint (pad 1 at ``y=+2.3`` here, ``y=-2.3`` in the library), so
+          the pin-1 triangle's Y coordinates are negated.  Copying the library
+          coordinates verbatim would put the mark beside pad 3.
+        * Strokes are 0.15mm, the ``jlcpcb-tier1`` silkscreen floor, not the
+          library's 0.12mm (which trips ``silkscreen_line_width``).
+
+        The reference designator moves to ``y=-4.8`` so its bounding box clears
+        the outline's lower edge (``silk_overlap``).
+        """
         x, y = pos
         return f"""  (footprint "Package_TO_SOT_SMD:SOT-223-3_TabPin2"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -4) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -4.8) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "{value}" (at 0 4) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_line (start -1.85 -3.41) (end 1.91 -3.41)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.85 3.41) (end 1.91 3.41)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start 1.91 -3.41) (end 1.91 -2.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start 1.91 3.41) (end 1.91 2.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_poly (pts (xy -3.13 3.31) (xy -3.37 3.64) (xy -2.89 3.64))
+      (stroke (width 0.15) (type solid)) (fill yes) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (pad "1" smd rect (at -3.15 2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+5V"]} "+5V"))
     (pad "2" smd rect (at -3.15 0) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["GND"]} "GND"))
     (pad "3" smd rect (at -3.15 -2.3) (size 2 1.5) (layers "F.Cu" "F.Paste" "F.Mask") (net {NETS["+3.3V"]} "+3.3V"))
@@ -913,6 +938,16 @@ def create_stm32_pcb(output_dir: Path) -> Path:
         """Generate 0805 LED footprint with explicit anode/cathode nets.
 
         Pad 1 is the anode, pad 2 is the cathode (KiCad LED_SMD convention).
+
+        Silkscreen reproduces the stock ``LED_SMD:LED_0805_2012Metric``
+        polarity bracket (issue #5745): a full-height vertical bar outside
+        pad 1 with top/bottom legs, left open on the pad-2 side.  Only the
+        vertical bar is closer to pad 1 than to pad 2, which is what makes it
+        a pin-1 identifier rather than a symmetric body outline.  Coordinates
+        are widened from the library's (pads at +/-0.9375) to this board's
+        pad pitch (+/-1.05) and strokes use the 0.15mm ``jlcpcb-tier1``
+        silkscreen floor; the reference designator moves to ``y=-2.0`` so its
+        bounding box clears the upper leg.
         """
         x, y = pos
         a_num = NETS.get(anode_net, 0)
@@ -921,12 +956,18 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -1.5) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -2.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "LED" (at 0 1.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_line (start -1.85 -1.15) (end -1.85 1.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.85 -1.15) (end 1.2 -1.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.85 1.15) (end 1.2 1.15)
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (pad "1" smd roundrect (at -1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {a_num} "{anode_net}"))
     (pad "2" smd roundrect (at 1.05 0) (size 1.0 1.2) (layers "F.Cu" "F.Paste" "F.Mask") (roundrect_rratio 0.25) (net {k_num} "{cathode_net}"))
   )"""
@@ -1002,6 +1043,36 @@ def create_stm32_pcb(output_dir: Path) -> Path:
             )
 
         pads_block = "\n".join(pad_lines)
+
+        # Silkscreen: the stock Package_QFP:LQFP-48_7x7mm_P0.5mm artwork
+        # (issue #5745) -- four corner brackets plus the filled pin-1 triangle
+        # beside pad 1.  The pad coordinates above are identical to the
+        # library footprint's, so the library geometry transfers verbatim with
+        # no mirroring; only the stroke width is raised from the library's
+        # 0.12mm to the 0.15mm jlcpcb-tier1 silkscreen floor.
+        silk_corners = [
+            ((-3.61, -3.61), (-3.16, -3.61)),
+            ((-3.61, -3.16), (-3.61, -3.61)),
+            ((-3.61, 3.61), (-3.61, 3.16)),
+            ((-3.16, 3.61), (-3.61, 3.61)),
+            ((3.16, -3.61), (3.61, -3.61)),
+            ((3.61, -3.61), (3.61, -3.16)),
+            ((3.61, 3.16), (3.61, 3.61)),
+            ((3.61, 3.61), (3.16, 3.61)),
+        ]
+        silk_lines = [
+            f"    (fp_line (start {sx} {sy}) (end {ex} {ey})\n"
+            f'      (stroke (width 0.15) (type solid)) (layer "F.SilkS") '
+            f'(uuid "{generate_uuid()}"))'
+            for (sx, sy), (ex, ey) in silk_corners
+        ]
+        silk_lines.append(
+            "    (fp_poly (pts (xy -4.25 -3.16) (xy -4.59 -3.63) (xy -3.91 -3.63))\n"
+            '      (stroke (width 0.15) (type solid)) (fill yes) (layer "F.SilkS") '
+            f'(uuid "{generate_uuid()}"))'
+        )
+        silk_block = "\n".join(silk_lines)
+
         return f"""  (footprint "Package_QFP:LQFP-48_7x7mm_P0.5mm"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
@@ -1012,23 +1083,51 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (fp_text value "{value}" (at 0 5.5) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+{silk_block}
 {pads_block}
   )"""
 
     def generate_pin_header_6(ref: str, pos: tuple) -> str:
-        """Generate 6-pin header footprint for SWD debug."""
+        """Generate 6-pin header footprint for SWD debug.
+
+        Silkscreen reproduces the stock
+        ``Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical`` artwork
+        (issue #5745): an L-shaped corner mark beside pin 1 plus a closed body
+        rectangle over pins 2..6.  The library footprint puts its origin on
+        pin 1, whereas this one centers the strip, so every Y coordinate is
+        shifted by ``-2.5 * pitch`` (pin 1 sits at ``y=-6.35`` here).  No
+        mirroring is needed -- both number pins toward ``+y``.  Strokes use
+        the 0.15mm ``jlcpcb-tier1`` silkscreen floor rather than the library's
+        0.12mm, and the reference designator moves to ``y=-9.0`` so its
+        bounding box clears the L mark.
+        """
         x, y = pos
         pitch = 2.54
+        # Stock silk, expressed relative to pin 1 and shifted onto this
+        # footprint's centered origin (pin 1 at -2.5 * pitch).
+        pin1_y = -2.5 * pitch
         return f"""  (footprint "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical"
     (layer "F.Cu")
     (uuid "{generate_uuid()}")
     (at {x} {y})
-    (fp_text reference "{ref}" (at 0 -8) (layer "F.SilkS") (uuid "{generate_uuid()}")
+    (fp_text reference "{ref}" (at 0 -9.0) (layer "F.SilkS") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
     (fp_text value "SWD" (at 0 8) (layer "F.Fab") (uuid "{generate_uuid()}")
       (effects (font (size 1 1) (thickness 0.15)))
     )
+    (fp_line (start -1.38 {pin1_y - 1.38:.2f}) (end 0 {pin1_y - 1.38:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y:.2f}) (end -1.38 {pin1_y - 1.38:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y + 1.27:.2f}) (end -1.38 {pin1_y + 14.08:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y + 1.27:.2f}) (end 1.38 {pin1_y + 1.27:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start -1.38 {pin1_y + 14.08:.2f}) (end 1.38 {pin1_y + 14.08:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
+    (fp_line (start 1.38 {pin1_y + 1.27:.2f}) (end 1.38 {pin1_y + 14.08:.2f})
+      (stroke (width 0.15) (type solid)) (layer "F.SilkS") (uuid "{generate_uuid()}"))
     (pad "1" thru_hole rect (at 0 {-2.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["+3.3V"]} "+3.3V"))
     (pad "2" thru_hole oval (at 0 {-1.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWDIO"]} "SWDIO"))
     (pad "3" thru_hole oval (at 0 {-0.5 * pitch:.2f}) (size 1.7 1.7) (drill 1.0) (layers "*.Cu" "*.Mask") (net {NETS["SWCLK"]} "SWCLK"))

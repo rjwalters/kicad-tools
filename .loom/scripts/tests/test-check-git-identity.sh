@@ -95,7 +95,7 @@ if [[ "$rc" -eq 2 ]]; then pass "exit 2 on unknown argument"; else fail "expecte
 echo "Test 4: not inside a git repository exits 2"
 NOTAREPO=$(mktemp -d)
 out=$(cd "$NOTAREPO" && "$SCRIPT" 2>&1); rc=$?
-if [[ "$rc" -eq 2 ]] && echo "$out" | grep -qi "not inside a git repository"; then
+if [[ "$rc" -eq 2 ]] && grep -qi "not inside a git repository" <<<"$out"; then
     pass "exit 2 + message outside a git repo"
 else
     fail "expected 2 + message, got rc=$rc; out=$out"
@@ -132,9 +132,9 @@ git -C "$REPO" config user.email "first@example.com"
 git -C "$REPO" config --add user.email "second@example.com"
 run_check "$REPO"
 if [[ "$RC" -eq 1 ]] \
-   && echo "$OUT" | grep -q "first@example.com" \
-   && echo "$OUT" | grep -q "second@example.com" \
-   && echo "$OUT" | grep -qi "WARNING"; then
+   && grep -q "first@example.com" <<<"$OUT" \
+   && grep -q "second@example.com" <<<"$OUT" \
+   && grep -qi "WARNING" <<<"$OUT"; then
     pass "exit 1 + both stacked values listed"
 else
     fail "expected 1 + both values, got rc=$RC; out=$OUT"
@@ -148,8 +148,8 @@ git -C "$REPO" config user.email "loom-worker@users.noreply.github.com"
 git -C "$REPO" config --add user.email "loom-worker@users.noreply.github.comecho"
 run_check "$REPO"
 if [[ "$RC" -eq 3 ]] \
-   && echo "$OUT" | grep -q "loom-worker@users.noreply.github.comecho" \
-   && echo "$OUT" | grep -qi "ERROR"; then
+   && grep -q "loom-worker@users.noreply.github.comecho" <<<"$OUT" \
+   && grep -qi "ERROR" <<<"$OUT"; then
     pass "exit 3 + corrupted value reported"
 else
     fail "expected 3 + corrupted value, got rc=$RC; out=$OUT"
@@ -157,8 +157,8 @@ fi
 
 # -------- Test 9: corruption output includes the documented remediation --------
 echo "Test 9: corruption output includes the documented one-liner remediation"
-if echo "$OUT" | grep -q "git config --unset-all user.email && git config --unset-all user.name" \
-   && echo "$OUT" | grep -q -- "--replace-all user.email"; then
+if grep -q "git config --unset-all user.email && git config --unset-all user.name" <<<"$OUT" \
+   && grep -q -- "--replace-all user.email" <<<"$OUT"; then
     pass "remediation one-liner + --replace-all fallback both printed"
 else
     fail "expected both remediation commands in output; out=$OUT"
@@ -190,7 +190,7 @@ echo "Test 12: no global identity present -> message mentions --replace-all fall
 REPO=$(make_repo)
 git -C "$REPO" config user.email "loom-curator@users.noreply.github.comecho"
 run_check "$REPO" "$EMPTY_GLOBAL"
-if [[ "$RC" -eq 3 ]] && echo "$OUT" | grep -qi -- "--replace-all"; then
+if [[ "$RC" -eq 3 ]] && grep -qi -- "--replace-all" <<<"$OUT"; then
     pass "no-global-identity case still surfaces the --replace-all fallback"
 else
     fail "expected 3 + --replace-all mention, got rc=$RC; out=$OUT"
@@ -206,8 +206,8 @@ git -C "$REPO" worktree add -q "$WORKDIR/wt13" -b feature-13 >/dev/null 2>&1
 git -C "$WORKDIR/wt13" config --worktree user.email "worktree-only@example.com"
 run_check "$WORKDIR/wt13"
 if [[ "$RC" -eq 1 ]] \
-   && echo "$OUT" | grep -q "main@example.com" \
-   && echo "$OUT" | grep -q "worktree-only@example.com"; then
+   && grep -q "main@example.com" <<<"$OUT" \
+   && grep -q "worktree-only@example.com" <<<"$OUT"; then
     pass "per-worktree config value detected alongside the repo-level value"
 else
     fail "expected 1 + both values, got rc=$RC; out=$OUT"

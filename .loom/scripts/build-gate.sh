@@ -5,8 +5,12 @@
 # meaningful. See .loom/docs/build-gate.md.
 #
 # Scope decisions (issue #3749):
-#   - cargo test covers the Rust crates (loom-daemon, loom-api). As of #3985
-#     the Rust step is scoped to `--lib --bins` (crate unit tests only) and
+#   - The Rust crates (loom-daemon, loom-api) are covered by `cargo nextest run
+#     --profile ci` when cargo-nextest is installed — the same runner and
+#     profile CI uses — falling back to `cargo test` with a loud warning when it
+#     is not (#8326; the shared-process race is #4385). Doctests are a separate
+#     `cargo test --workspace --doc` step because nextest does not run them. As
+#     of #3985 the Rust step is scoped to `--lib --bins` (crate unit tests only) and
 #     deliberately EXCLUDES the integration test TARGETS under
 #     loom-daemon/tests/ (integration_basic.rs et al). Those spin up a real
 #     tmux server and are therefore host-dependent — green only where a live
@@ -14,8 +18,9 @@
 #     running Loom (a busy, sometimes tmux-less machine), so a host-dependent
 #     assertion there measures the host, not `main`. CI (.github/workflows/
 #     ci.yml) controls its environment and still runs the FULL
-#     `cargo test --workspace`, so the integration targets are covered exactly
-#     where their environment is guaranteed. See "Local gate vs. CI" in
+#     `cargo nextest run --workspace --profile ci`, so the integration targets
+#     are covered exactly where their environment is guaranteed. See
+#     "Local gate vs. CI" in
 #     .loom/docs/build-gate.md.
 #   - The gate is ZERO-PYTHON as of epic #4081 Phase 4 (#4557). It used to run
 #     `cd loom-tools && uv run pytest tests/` (full tier) and
@@ -148,11 +153,18 @@ else
   echo "[build-gate] note: lib/bounded-run.sh not found — stages run unbounded (#6192)" >&2
 fi
 
+
+# Guarded source written as one `&&` rather than the `if` block its two
+# siblings above use: those two also set an `_available` flag inside the
+# branch, this one does not, so the short form is equivalent here. It is
+# deliberate rather than cosmetic — the portable-shell ratchet has NO override
+# for growth (.loom/docs/shell-language-policy.md), and the two code lines
+# freed here are what pay for the structural phase added below (#9140). Same
+# `set -e` behaviour either way: a missing lib leaves the AND-list's failing
+# left operand unchecked, exactly as the `if` did.
 _reap_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/reap-process-group.sh"
-if [[ -f "$_reap_lib" ]]; then
-  # shellcheck source=lib/reap-process-group.sh
-  source "$_reap_lib"
-fi
+# shellcheck source=lib/reap-process-group.sh
+[[ -f "$_reap_lib" ]] && source "$_reap_lib"
 
 _build_gate_exit_cleanup() {
   if [[ "$_build_slot_available" == "true" ]]; then
@@ -249,6 +261,36 @@ run_gate_step() {
 
 cd "$(git rev-parse --show-toplevel)"
 
+# STRUCTURAL PHASE — first, and in BOTH tiers (#9140).
+#
+# Until #9140 this gate ran cargo, the doctests and five bash suites and none of
+# the ~30 structural/ratchet gates CI's required `Structural Checks` job
+# enforces, so a Builder could report a fully green local gate and still fail CI
+# on checks that are fast, deterministic and need no build at all. PR #9137 is
+# the receipt: an honest 9300/9303 local green, then five CI failures (markdown
+# token ratchet, role-prompt ratchet, dangling links, docs/defaults parity,
+# install-surface links) — one whole Builder -> CI -> Judge -> Doctor lap spent
+# on findings a pre-push gate returns in seconds.
+#
+# It runs FIRST because it is the cheapest thing here (~30s against the ~700s
+# cargo phases) and because a gate that reports its cheap failures last makes
+# the Builder pay the expensive ones to find out. It runs in the FAST tier too
+# — placed above the tier switch on purpose: conditional execution is the exact
+# mechanism that created this gap, and 30s of grep/wc is not what saturates a
+# host. `scripts/check-structural.sh` derives its gate set from ci.yml's job on
+# every run, so a gate added to CI reaches this one with no second edit; the
+# `-f` guard is for consumer repos, where this file is installed as
+# .loom/scripts/build-gate.sh but that repo-local checker does not exist.
+#
+# Net-zero on portable shell by construction: the two code lines below are
+# exactly the two the `&&`-collapsed reap-lib source above freed. The
+# portable-shell ratchet has no growth override, AND it refuses a change that
+# retires portable lines while growing the floor (the two are indistinguishable
+# from moving them), so this phase must leave build-gate.sh's count untouched —
+# not lower it. See .loom/docs/shell-language-policy.md.
+_structural_gate="scripts/check-structural.sh"
+[[ -f "$_structural_gate" ]] && run_gate_step "bash $_structural_gate" bash "$_structural_gate"
+
 # Tiered gate mode (#4259). LOOM_BUILD_GATE_TIER selects the stage set:
 #
 #   - unset / "full" (the DEFAULT): the full three-stage suite below. CI parity,
@@ -283,22 +325,57 @@ if [[ "${_gate_tier}" == "fast" ]]; then
   exit 0
 fi
 
-echo "[build-gate] cargo test --lib --bins (workspace unit tests; host-dependent integration targets are CI-only, #3985)"
-run_gate_step "cargo test --workspace --lib --bins" cargo test --workspace --lib --bins
+# Rust unit tests — PREFER `cargo nextest run`, the runner CI uses (#8326).
+#
+# `cargo test` executes every test in a binary in ONE shared process on shared
+# threads. That is exactly the execution mode `.config/nextest.toml` and
+# loom-daemon's crate-level "Test isolation convention" (#4385) exist to avoid:
+# the daemon's unit tests mutate the process environment (`std::env::set_var` /
+# `remove_var`) at ~774 call sites while other tests in the same binary
+# `Command::spawn` children, and `Command::spawn` reads the environ
+# non-atomically — so an env mutation racing a spawn can corrupt a child's
+# environment mid-flight. nextest runs each test in its own process, closing
+# that window by construction.
+#
+# Until #8326 this gate ran plain `cargo test` while CI ran nextest, which made
+# the LOCAL gate both slower and less reliable than the runner it is supposed to
+# predict — the origin of #8170's false red (8 `sweep_registry::watchdog` "failures"
+# that were 90/90 green under nextest on the same commit). Every false red the
+# gate produces trains agents to distrust a real signal, so the gate now runs the
+# same runner and the same `--profile ci` as .github/workflows/ci.yml.
+#
+# `nextest-daemon-guard.sh` (#6528) is deliberately NOT used here: it guards the
+# host-global tmux sweep performed by the `integration_*` test TARGETS, and
+# `--lib --bins` never builds or runs those targets at all (#3985).
+#
+# The fallback degrades LOUDLY, never silently: a `cargo test` verdict from this
+# gate is a weaker signal than CI's, and whoever triages a red needs to know that
+# BEFORE they spend an investigation on a failure that only reproduces here.
+# Written as one `printf` and one `||` rather than an if/else block of `echo`s
+# purely to stay inside the `shell-budget --check` portable ratchet: this file is
+# `contract` in scripts/shell-allowlist.txt, so its code-line count may shrink
+# but never grow (see .loom/docs/shell-language-policy.md).
+_rust_unit_cmd=(cargo nextest run --workspace --lib --bins --profile ci)
+command -v cargo-nextest >/dev/null 2>&1 || { _rust_unit_cmd=(cargo test --workspace --lib --bins); printf '[build-gate] WARNING: cargo-nextest is NOT installed -- falling back to cargo test, which shares ONE process\n[build-gate] WARNING: across every test in a binary, so env mutation can race Command::spawn and produce flaky FALSE\n[build-gate] WARNING: REDS that do not reproduce under the runner CI uses (#4385; see .config/nextest.toml, and\n[build-gate] WARNING: #8170 for an investigation spent on exactly such a false red).\n[build-gate] WARNING: Install the runner CI uses for a trustworthy gate:  cargo install cargo-nextest --locked\n' >&2; }
+echo "[build-gate] ${_rust_unit_cmd[*]} (workspace unit tests; host-dependent integration targets are CI-only, #3985)"
+run_gate_step "${_rust_unit_cmd[*]}" "${_rust_unit_cmd[@]}"
 
-echo "[build-gate] bash installer suite"
-run_gate_step "bash scripts/test-installer.sh" bash scripts/test-installer.sh
+# Doctests are their OWN step because nextest does not run them (#4385) — CI
+# keeps a separate "Run doctests" step for exactly this reason. Unconditional:
+# identical on both runner branches, so doctest coverage never depends on which
+# unit-test runner a host happens to have.
+echo "[build-gate] cargo test --workspace --doc (doctests -- nextest does not run these, #4385)"
+run_gate_step "cargo test --workspace --doc" cargo test --workspace --doc
 
-echo "[build-gate] bash changelog generator suite"
-run_gate_step "bash scripts/test-changelog.sh" bash scripts/test-changelog.sh
-
-echo "[build-gate] bash daemon-liveness pgrep suite (#5548)"
-run_gate_step "bash scripts/test-daemon-liveness.sh" bash scripts/test-daemon-liveness.sh
-
-echo "[build-gate] bash install --local/--gitignore mode suite"
-run_gate_step "bash scripts/test-install-local-mode.sh" bash scripts/test-install-local-mode.sh
-
-echo "[build-gate] bash migrate-consumer suite"
-run_gate_step "bash scripts/test-migrate-consumer.sh" bash scripts/test-migrate-consumer.sh
+# The bash suites, in order. A loop rather than five echo/run_gate_step pairs
+# for the same portable-ratchet reason noted above — the stage set and its order
+# are unchanged, and each step is still its own bounded `run_gate_step`. The one
+# behavioural difference is cosmetic: the announced label is now the script path
+# ("bash scripts/test-installer.sh"), which names the thing a reader would go
+# run, rather than a prose description ("bash installer suite").
+for _bash_suite in test-installer test-changelog test-daemon-liveness test-install-local-mode test-migrate-consumer; do
+  echo "[build-gate] bash scripts/${_bash_suite}.sh"
+  run_gate_step "bash scripts/${_bash_suite}.sh" bash "scripts/${_bash_suite}.sh"
+done
 
 echo "[build-gate] all stages passed"

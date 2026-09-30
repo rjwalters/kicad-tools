@@ -107,6 +107,17 @@ class MeshPathfinder:
         xs = [p[0] for p in outline]
         ys = [p[1] for p in outline]
         self._bbox: Rect = (min(xs), min(ys), max(xs), max(ys))
+        # Copper-to-board-edge requirement the 45-fit applies, in mm (Epic
+        # #5509 Phase 3e).  Set by the router that owns this pathfinder from
+        # its ALREADY-resolved ``Autorouter._edge_clearance`` -- the same value
+        # the grid's ``add_edge_keepout`` and the lattice's
+        # ``set_escape_boundary`` are given -- so the mesh engine cannot
+        # disagree with them about the floor.  ``0.0`` (the default, and the
+        # value for a pathfinder built standalone) means no board-edge rule was
+        # resolved and the outline branch stays the pure containment test it
+        # was before that phase: inventing a rule value here is exactly what
+        # the epic's scope guard #1 forbids.
+        self.edge_clearance: float = 0.0
         # Static navmesh + triangulation-call counter (built lazily, once).
         self._navmesh: NavMesh | None = None
         self.triangulation_calls: int = 0
@@ -201,12 +212,18 @@ class MeshPathfinder:
     def _pour_holes(self) -> list[list[Pt]]:
         """Inflated pour polygons that lie inside the outline (poly2tri holes).
 
-        Pours are inflated by the agent radius (half-trace + clearance), exactly
-        as pad keep-outs are (``_keepouts``): the mesh hole is grown so the
-        navmesh corridor is pushed a full clearance off the *true* pour boundary
-        and the funnel geodesic never hugs the copper edge.  The obstacle model
-        still checks legs against the true (un-inflated) pour, so the emitted
-        copper keeps at least the clearance margin from the pour.
+        Pours are inflated by the agent radius (half-trace + clearance): the
+        mesh hole is grown so the navmesh corridor is pushed a full clearance
+        off the *true* pour boundary and the funnel geodesic never hugs the
+        copper edge.  The obstacle model then re-checks each emitted leg against
+        the true (un-inflated) pour outline, so a leg the corridor steered close
+        to one is still declined if it actually enters it.
+
+        These holes are the only inflation left in the mesh engine's *pad*
+        handling too: Epic #5509 Phase 3e retired the inflated pad keep-out
+        rectangles in favour of exact kernel measurements (see
+        :meth:`_foreign_pads`).  Corridor planning is a heuristic and inflation
+        is the right tool for it; the emitted-copper verdict is not.
         """
         bx0, by0, bx1, by1 = self._bbox
         margin = 1e-3
@@ -289,27 +306,28 @@ class MeshPathfinder:
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
-        agent_radius = trace_w / 2.0 + clearance
 
         net = start.net
         start_pt: Pt = (start.x, start.y)
         end_pt: Pt = (end.x, end.y)
 
-        # Authoritative per-net obstacle model: EVERY other-net pad inflated,
-        # plus every pour polygon and every committed cross-net trace.  Cheap to
-        # rebuild (rect + polygon lists, no triangulation).  This is the model
+        # Authoritative per-net obstacle model: EVERY other-net pad (measured
+        # exactly through the clearance kernel since Epic #5509 Phase 3e), plus
+        # every pour polygon and every committed cross-net trace.  Cheap to
+        # rebuild (pad + polygon lists, no triangulation).  This is the model
         # the octilinear fit validates each leg against -- a route that cannot
         # clear it is declined (None).
-        keepouts = self._keepouts(net, agent_radius)
         pour_obstacles = self.pours + (committed or [])
         obstacles = ObstacleModel(
             self.outline,
-            keepouts,
+            [],
             pour_obstacles,
             fixed_fills=self.fixed_fills,
             layer=self._layer_index(start.layer) or 0,
             half=trace_w / 2,
             clearance=clearance,
+            pads=self._foreign_pads(net),
+            edge_clearance=self.edge_clearance,
         )
 
         cost_congestion = self.rules.cost_congestion if negotiated_mode else 0.0
@@ -537,32 +555,32 @@ class MeshPathfinder:
 
     # -- helpers ----------------------------------------------------------
 
-    def _keepouts(self, net: int, agent_radius: float) -> list[Rect]:
-        """Inflated keep-out rects for every OTHER-net pad, clamped + merged."""
-        from .obstacles import merge_overlapping
+    def _foreign_pads(self, net: int) -> list[Pad]:
+        """Every OTHER-net pad, verbatim -- the exact copper the fit clears.
 
-        raw: list[Rect] = []
-        bx0, by0, bx1, by1 = self._bbox
-        # Keep holes a hair inside the outer boundary (poly2tri requirement).
-        margin = 1e-3
-        for pad in self.pads:
-            if pad.net == net:
-                continue  # same-net copper is not an obstacle
-            half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
-            r = (pad.x - hx, pad.y - hy, pad.x + hx, pad.y + hy)
-            r = (
-                max(r[0], bx0 + margin),
-                max(r[1], by0 + margin),
-                min(r[2], bx1 - margin),
-                min(r[3], by1 - margin),
-            )
-            if r[2] - r[0] < margin or r[3] - r[1] < margin:
-                continue  # clamped away to nothing
-            raw.append(r)
+        Epic #5509 Phase 3e: this replaced ``_keepouts``, which grew each pad's
+        ``pad_half_extents`` **bounding box** by the agent radius and handed the
+        resulting rectangle to :class:`~.obstacles.ObstacleModel` as a touch
+        obstacle.  That box is strictly larger than the pad's copper for every
+        circle, oval, roundrect or rotated pad, so the 45-fit refused legs
+        ``kicad-cli pcb drc`` finds clean -- the #5410 failure mode, quantified
+        against ground truth in ``docs/clearance-conformance.md``'s group-10
+        row.
 
-        return merge_overlapping(raw)
+        The model now measures the pad exactly through the shared clearance
+        kernel (:func:`~.kernel_adapter.pad_of`), so there is nothing left to
+        inflate here and nothing to clamp: the bounding-box clamp and the
+        overlap merge existed only to keep the *rectangles* well-formed for
+        poly2tri.  Corridor planning is unaffected -- the navmesh's holes come
+        from :meth:`_pour_holes`, never from these.
+
+        Args:
+            net: The net being routed; its own pads are not obstacles.
+
+        Returns:
+            The foreign pads, in board order.
+        """
+        return [pad for pad in self.pads if pad.net != net]
 
     # -- 2.5D via injection (issue #4276) ---------------------------------
 
@@ -593,42 +611,36 @@ class MeshPathfinder:
         except Exception:
             return None
 
-    def _keepouts_layer(self, net: int, agent_radius: float, layer_idx: int) -> list[Rect]:
-        """Per-layer inflated pad keep-outs (issue #4276 section 3).
+    def _foreign_pads_layer(self, net: int, layer_idx: int) -> list[Pad]:
+        """Per-layer foreign pad copper (issue #4276 section 3).
 
         An SMD pad blocks only its own copper layer; a through-hole pad blocks
         EVERY layer.  Same-net copper is never an obstacle.  The triangulation
-        is shared across layers -- only this obstacle mask is per-layer.
-        """
-        from .obstacles import merge_overlapping
+        is shared across layers -- only this obstacle set is per-layer.
 
+        The per-layer twin of :meth:`_foreign_pads`; see that method on why Epic
+        #5509 Phase 3e retired the inflated rectangles these used to return.
+        The layer mask stays HERE rather than moving onto the kernel shape, so
+        there is exactly one model of "which pads does this layer see".
+
+        Args:
+            net: The net being routed.
+            layer_idx: Routing-graph layer index the model is built for.
+
+        Returns:
+            The foreign pads present on that layer.
+        """
         try:
             layer_enum = self.layer_stack.index_to_layer_enum(layer_idx)
         except Exception:
             layer_enum = None
 
-        raw: list[Rect] = []
-        bx0, by0, bx1, by1 = self._bbox
-        margin = 1e-3
-        for pad in self.pads:
-            if pad.net == net:
-                continue
-            # SMD pad on another layer does not block this one; PTH blocks all.
-            if not pad.through_hole and layer_enum is not None and pad.layer != layer_enum:
-                continue
-            half_w, half_h = pad_half_extents(pad)
-            hx = half_w + agent_radius
-            hy = half_h + agent_radius
-            r = (
-                max(pad.x - hx, bx0 + margin),
-                max(pad.y - hy, by0 + margin),
-                min(pad.x + hx, bx1 - margin),
-                min(pad.y + hy, by1 - margin),
-            )
-            if r[2] - r[0] < margin or r[3] - r[1] < margin:
-                continue
-            raw.append(r)
-        return merge_overlapping(raw)
+        return [
+            pad
+            for pad in self.pads
+            if pad.net != net
+            and (pad.through_hole or layer_enum is None or pad.layer == layer_enum)
+        ]
 
     def _via_allowed_at(
         self,
@@ -709,7 +721,6 @@ class MeshPathfinder:
 
         trace_w = getattr(net_class, "trace_width", None) or self.rules.trace_width
         clearance = getattr(net_class, "clearance", None) or self.rules.trace_clearance
-        agent_radius = trace_w / 2.0 + clearance
         via_radius = self.rules.via_diameter / 2.0 + clearance
         net = start.net
         start_pt: Pt = (start.x, start.y)
@@ -718,16 +729,17 @@ class MeshPathfinder:
         # Per-layer obstacle model for the authoritative octilinear fit.
         obstacles_by_layer: dict[int, ObstacleModel] = {}
         for lidx in range(num_layers):
-            keepouts = self._keepouts_layer(net, agent_radius, lidx)
             pour_obstacles = self.pours + committed_by_layer.get(lidx, [])
             obstacles_by_layer[lidx] = ObstacleModel(
                 self.outline,
-                keepouts,
+                [],
                 pour_obstacles,
                 fixed_fills=self.fixed_fills,
                 layer=lidx,
                 half=trace_w / 2,
                 clearance=clearance,
+                pads=self._foreign_pads_layer(net, lidx),
+                edge_clearance=self.edge_clearance,
             )
 
         # Per-layer portal blocking (issue #4276 section 3): a portal is blocked

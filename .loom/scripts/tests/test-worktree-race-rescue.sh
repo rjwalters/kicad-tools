@@ -51,11 +51,23 @@
 # This is a pure lib-function test (no worktree.sh invocation needed) —
 # follows the pattern in test-disk-headroom.sh: source the lib directly,
 # drive it against a throwaway repo.
+#
+# SINCE #8195 SLICE 6 (epic #7810) the lib is a thin wrapper over
+# `loom-daemon worktree-reset`, so the function this file calls now drives the
+# RUST port. Every assertion below is unchanged from the shell implementation —
+# that is exactly what makes them the equivalence evidence for retiring it — so
+# the binary is pinned via loom_test_require_daemon_bin and this suite FAILS
+# rather than skips when there is none. A suite that skipped would remove the
+# port's evidence from CI while still reporting green.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-reset"
 
 RACE_RESCUE_LIB="$SCRIPTS_DIR/lib/worktree-race-rescue.sh"
 

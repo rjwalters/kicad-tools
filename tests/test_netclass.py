@@ -15,6 +15,7 @@ from kicad_tools.core.netclass_templates import (
     get_netclass_summary,
 )
 from kicad_tools.core.project_file import (
+    DEFAULT_NETCLASS_CLEARANCE_MM,
     DEFAULT_NETCLASS_DEFINITION,
     add_netclass_definition,
     add_netclass_pattern,
@@ -39,7 +40,7 @@ class TestNetclassDefinition:
 
         assert definition["name"] == "Power"
         assert definition["track_width"] == 0.25
-        assert definition["clearance"] == 0.2
+        assert definition["clearance"] == DEFAULT_NETCLASS_CLEARANCE_MM
         assert definition["via_diameter"] == 0.6
         assert definition["via_drill"] == 0.3
 
@@ -401,3 +402,100 @@ class TestProjectFileIntegration:
             assert "clearance" in cls
             assert "via_diameter" in cls
             assert "via_drill" in cls
+
+
+class TestDefaultNetclassClearanceIsNotTheStockTemplateValue:
+    """Issue #5654: no project-creation path may emit KiCad's stock 0.20mm.
+
+    KiCad's project template ships ``Default`` at 0.20mm.  While this writer
+    copied that verbatim, the field was a template default rather than a
+    statement about the board -- which is why Epic #5509 Phase 2 (#5645)
+    deliberately refused to read ``net_settings.classes[].clearance`` as a
+    clearance requirement at all.  It is a resolver input now
+    (``router/clearance_resolver.py``), so every path that *creates* a
+    ``Default`` netclass has to emit the clearance the board is actually
+    routed at.
+    """
+
+    STOCK_KICAD_TEMPLATE_CLEARANCE_MM = 0.2
+
+    def _default_clearance(self, data):
+        classes = data["net_settings"]["classes"]
+        default = next(c for c in classes if c["name"] == "Default")
+        return default["clearance"]
+
+    def test_the_constant_is_the_route_target_not_the_stock_value(self):
+        from kicad_tools.cli.route_cmd import DEFAULT_ROUTE_CLEARANCE_MM
+
+        assert DEFAULT_NETCLASS_CLEARANCE_MM != self.STOCK_KICAD_TEMPLATE_CLEARANCE_MM
+        # The point of the value: it is what `kct route` actually routes at.
+        assert DEFAULT_NETCLASS_CLEARANCE_MM == DEFAULT_ROUTE_CLEARANCE_MM
+        assert DEFAULT_NETCLASS_DEFINITION["clearance"] == DEFAULT_NETCLASS_CLEARANCE_MM
+
+    def test_every_creation_path_emits_the_route_target(self):
+        from kicad_tools.core.project_file import (
+            create_minimal_project,
+            default_netclass_definition,
+        )
+
+        # 1. create_minimal_project -- what every boards/*/generate_design.py uses
+        assert (
+            self._default_clearance(create_minimal_project("board.kicad_pro"))
+            == DEFAULT_NETCLASS_CLEARANCE_MM
+        )
+        # 2. get_net_settings synthesizing a missing net_settings block
+        data: dict = {}
+        get_net_settings(data)
+        assert self._default_clearance(data) == DEFAULT_NETCLASS_CLEARANCE_MM
+        # 3. get_netclass_definitions synthesizing a missing classes list
+        data = {"net_settings": {"meta": {"version": 3}}}
+        get_netclass_definitions(data)
+        assert self._default_clearance(data) == DEFAULT_NETCLASS_CLEARANCE_MM
+        # 4. clear_netclass_definitions restoring a Default that is not there
+        data = {"net_settings": {"classes": [{"name": "Power", "clearance": 0.4}]}}
+        clear_netclass_definitions(data, keep_default=True)
+        assert self._default_clearance(data) == DEFAULT_NETCLASS_CLEARANCE_MM
+        # 5. the template itself
+        assert default_netclass_definition()["clearance"] == DEFAULT_NETCLASS_CLEARANCE_MM
+
+    def test_a_caller_that_knows_the_route_target_can_state_it(self):
+        """The fab tier's floor, when the caller already knows it."""
+        from kicad_tools.core.project_file import (
+            create_minimal_project,
+            default_netclass_definition,
+        )
+
+        tier_floor = 0.1016  # jlcpcb-tier1
+        assert default_netclass_definition(tier_floor)["clearance"] == tier_floor
+        assert (
+            self._default_clearance(create_minimal_project("b.kicad_pro", tier_floor)) == tier_floor
+        )
+
+        data: dict = {}
+        get_net_settings(data, tier_floor)
+        assert self._default_clearance(data) == tier_floor
+
+    def test_an_existing_default_netclass_is_never_rewritten(self):
+        """A board's own declared clearance is not this module's to change."""
+        data = {
+            "net_settings": {
+                "classes": [
+                    {"name": "Default", "clearance": 0.25},
+                    {"name": "Power", "clearance": 0.4},
+                ]
+            }
+        }
+        clear_netclass_definitions(data, keep_default=True)
+        assert self._default_clearance(data) == 0.25
+
+    def test_the_manufacturer_rewrite_path_still_wins(self):
+        """``build_default_netclass`` states the fab tier, not this default."""
+        from kicad_tools.manufacturers import get_profile
+        from kicad_tools.manufacturers.project_generator import build_default_netclass
+
+        rules = get_profile("jlcpcb-tier1").get_design_rules(layers=2, copper_oz=1.0)
+        netclass = build_default_netclass(rules)
+
+        assert netclass["name"] == "Default"
+        assert netclass["clearance"] == rules.min_clearance_mm
+        assert netclass["clearance"] != self.STOCK_KICAD_TEMPLATE_CLEARANCE_MM

@@ -316,15 +316,15 @@ source "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-merge-method.sh"
 # GitHub: PUT /repos/{nwo}/pulls/{n}/merge with merge_method=<MERGE_METHOD>
 # Gitea: POST /repos/{owner}/{repo}/pulls/{n}/merge with Do=<MERGE_METHOD>
 #
-# MERGE_METHOD (optional, #7754): one of "squash"/"merge"/"rebase". Defaults
-# to "squash" when omitted -- preserves this function's pre-#7754 behavior
-# for any caller that has not been updated to pass a detected method (e.g.
-# via forge_detect_merge_method). Callers that need to respect a target
+# MERGE_METHOD (optional, #7754): one of "merge"/"squash"/"rebase". Defaults
+# to "merge" (merge commit, #9105) when omitted, for any caller that has
+# not been updated to pass a detected method (e.g. via
+# forge_detect_merge_method). Callers that need to respect a target
 # repo's actual allowed strategies MUST pass this explicitly.
 #
 # EXPECTED_HEAD_SHA (optional, #5579): an optimistic-concurrency precondition —
 # the SHA the PR's head branch must currently match for the merge to proceed.
-# Without it, both forges will happily squash-merge whatever the CURRENT head
+# Without it, both forges will happily merge whatever the CURRENT head
 # is at the moment the request lands, even if it has commits the caller never
 # saw approved (silently stranding them — squash-merge makes this invisible to
 # an ancestry check afterward, since the new squash commit is not a descendant
@@ -346,7 +346,7 @@ source "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-merge-method.sh"
 # message "head out of date".
 forge_merge_pr() {
   local nwo="$1" pr_number="$2"
-  local expected_head_sha="${3:-}" merge_method="${4:-squash}"
+  local expected_head_sha="${3:-}" merge_method="${4:-merge}"
 
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     forge_split_nwo "$nwo"
@@ -493,48 +493,38 @@ forge_check_auto_delete() {
   fi
 }
 
-# Check whether the repository has GitHub's "Allow auto-merge" setting enabled.
-# Usage: forge_check_auto_merge_allowed NWO [GH_CMD]
-# Returns on stdout: "true", "false", or "unknown".
+# url_encode_path_segment VALUE -> VALUE, safe to interpolate into an API URL
+# path. Percent-encodes (as UTF-8 bytes) everything outside RFC 3986's
+# unreserved set `[A-Za-z0-9._~-]`, per `/`-delimited segment.
 #
-# GitHub only: reads the repo-level `allow_auto_merge` flag. When it is false,
-# GitHub rejects the enablePullRequestAutoMerge mutation outright — no PR-level
-# state (CLEAN/UNSTABLE) will ever let it succeed — so callers that want to
-# degrade gracefully (wait-for-checks-then-merge) can detect it up front rather
-# than reacting to the post-mutation error string (#3820).
+# A branch name is forge-derived, and while git's ref-format forbids `..` (so
+# there is no path traversal here), it permits URL metacharacters — a name
+# containing `?`, `#` or `%` interpolated raw silently addresses a DIFFERENT
+# endpoint than the caller asked for (#9109). Encoding closes that.
 #
-# Gitea returns "unknown" (there is no equivalent single repo flag consumed
-# here; Gitea auto-merge goes through forge_auto_merge's own curl poll-and-merge,
-# which this probe must not perturb). A probe failure (network/auth/unexpected value)
-# also returns "unknown" so callers preserve their existing behavior fail-safe.
-forge_check_auto_merge_allowed() {
-  local nwo="$1"
-  local gh_cmd="${2:-gh}"
-
-  if [[ "$FORGE_TYPE" != "github" ]]; then
-    echo "unknown"
-    return 0
-  fi
-
-  local val
-  val="$("$gh_cmd" api "repos/$nwo" --jq '.allow_auto_merge' 2>/dev/null)" || {
-    echo "unknown"
-    return 0
-  }
-  case "$val" in
-    true)  echo "true" ;;
-    false) echo "false" ;;
-    *)     echo "unknown" ;;
-  esac
-}
+# The `/` SEPARATORS are deliberately preserved rather than encoded: both
+# endpoints this feeds route on literal slashes (GitHub's
+# `git/refs/heads/<a>/<b>`, Gitea's `branches/*` wildcard), so `%2F` would
+# break every ordinary `feature/issue-N` name. Only the characters WITHIN each
+# segment are encoded, which is what the metacharacter problem is about.
+#
+# jq (a hard dependency of this lib already) rather than a bash character loop:
+# `@uri` is exactly the RFC 3986 encoder and handles multi-byte input without
+# locale juggling. Written as a one-liner because `defaults/scripts/lib/` is
+# inside the portable pool `loom-daemon shell-budget --check` ratchets, where
+# comments are free and code lines are not.
+url_encode_path_segment() { printf '%s' "${1:-}" | jq -sRr 'split("/") | map(@uri) | join("/")'; }
 
 # Delete a remote branch.
 # Usage: forge_delete_branch NWO BRANCH_NAME
 # GitHub: DELETE /repos/{nwo}/git/refs/heads/{branch}
 # Gitea: DELETE /repos/{owner}/{repo}/branches/{branch}
 forge_delete_branch() {
-  local nwo="$1"
-  local branch="$2"
+  # Declaration and assignment are separate statements sharing one physical
+  # line: the encode call is net-new code in the portable pool
+  # `loom-daemon shell-budget --check` ratchets, and packing it against the
+  # `local` is what pays for it there.
+  local nwo="$1" branch; branch="$(url_encode_path_segment "$2")"
 
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     forge_split_nwo "$nwo"
@@ -544,77 +534,15 @@ forge_delete_branch() {
   fi
 }
 
-# Enable auto-merge on a PR.
-# Usage: forge_auto_merge NWO PR_NUMBER [EXPECTED_HEAD_SHA] [MERGE_METHOD]
-# GitHub: GraphQL enablePullRequestAutoMerge mutation (pure API, no
-#         working-tree dependency — `gh pr merge --auto` does a local
-#         checkout that collides with worktrees owning the head branch).
-# Gitea: POST /repos/{owner}/{repo}/pulls/{n}/merge with merge_when_checks_succeed
-#
-# MERGE_METHOD (optional, #7754): one of "squash"/"merge"/"rebase" (GitHub is
-# uppercased to the GraphQL enum's SQUASH/MERGE/REBASE). Defaults to "squash"
-# when omitted -- preserves this function's pre-#7754 behavior for any caller
-# that has not been updated to pass a detected method (e.g. via
-# forge_detect_merge_method). Callers that need to respect a target repo's
-# actual allowed strategies MUST pass this explicitly.
-#
-# EXPECTED_HEAD_SHA (optional, #5579): same optimistic-concurrency precondition
-# as forge_merge_pr's — see that function's comment for the general rationale
-# and the Gitea `head_commit_id` citation (identical here; Gitea's `/merge`
-# endpoint carries both the auto-merge poll flags and the mismatch guard).
-#
-# GitHub: the GraphQL mutation's `expectedHeadOid: GitObjectID` input field
-# (confirmed present in GitHub's public GraphQL schema, 2026-08-07). The exact
-# error string GitHub returns on a mismatch could NOT be verified against a
-# live incident or public documentation as of this writing (GraphQL validation
-# error text is not part of the published schema) — merge-pr.sh's classifier
-# for this path therefore matches a best-effort pattern and should be
-# tightened against the first real occurrence, the same way the CLEAN/UNSTABLE
-# classifiers elsewhere in this file were derived from live incident text.
-forge_auto_merge() {
-  local nwo="$1"
-  local pr_number="$2"
-  local expected_head_sha="${3:-}" merge_method="${4:-squash}"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    forge_split_nwo "$nwo"
-    if [[ -n "$expected_head_sha" ]]; then
-      gitea_api POST "repos/$FORGE_OWNER/$FORGE_REPO/pulls/$pr_number/merge" \
-        -d "$(jq -nc --arg method "$merge_method" --arg sha "$expected_head_sha" \
-          '{"Do":$method,"merge_when_checks_succeed":true,"delete_branch_after_merge":true,"head_commit_id":$sha}')"
-    else
-      gitea_api POST "repos/$FORGE_OWNER/$FORGE_REPO/pulls/$pr_number/merge" \
-        -d "$(jq -nc --arg method "$merge_method" '{"Do":$method,"merge_when_checks_succeed":true,"delete_branch_after_merge":true}')"
-    fi
-  else
-    # Resolve PR node_id (required by GraphQL mutation).
-    local node_id
-    node_id=$(gh api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
-    [[ -z "$node_id" ]] && return 1
-
-    # The mutation (a WRITE) goes through the #6074 permission ladder (#6752),
-    # like the native `loom-daemon forge auto-merge` this shell path stands in
-    # for; the node_id lookup above is a read and needs no escalation.
-    # GraphQL's PullRequestMergeMethod enum is uppercase (MERGE/SQUASH/REBASE,
-    # #7754) -- uppercased inline below rather than via a separate variable.
-    if [[ -n "$expected_head_sha" ]]; then
-      local mutation_with_oid='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod, expectedHeadOid: $expectedHeadOid}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
-
-      forge_gh_perm_safe api graphql \
-        -f "query=$mutation_with_oid" \
-        -F "pullRequestId=$node_id" \
-        -F "mergeMethod=$(printf '%s' "$merge_method" | tr '[:lower:]' '[:upper:]')" \
-        -F "expectedHeadOid=$expected_head_sha" 2>/dev/null
-    else
-      local mutation='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
-
-      forge_gh_perm_safe api graphql \
-        -f "query=$mutation" \
-        -F "pullRequestId=$node_id" \
-        -F "mergeMethod=$(printf '%s' "$merge_method" | tr '[:lower:]' '[:upper:]')" 2>/dev/null
-    fi
-  fi
-}
+# forge_auto_merge / forge_check_auto_merge_allowed were RETIRED by #8427.
+# They armed the forge's server-side auto-merge (GitHub
+# enablePullRequestAutoMerge / Gitea merge_when_checks_succeed), which is gated
+# only by the ruleset's REQUIRED checks and never re-reads `loom:pr` or the
+# non-required suites (PR #8220). No Loom merge path arms one since #8410:
+# `merge-pr.sh --auto` waits for check-runs and merges in-process. A human who
+# deliberately wants a queued GitHub merge can use the operator-only
+# `loom-daemon forge auto-merge` (see its --help for the caveat); do NOT
+# reintroduce an arming helper here.
 
 # --- CI Status Helpers ---
 
@@ -629,63 +557,83 @@ forge_auto_merge() {
 # signal (return 1) so existing bounded-poll behavior is unchanged.
 FORGE_CHECK_RUNS_RC_NOT_FOUND=44
 
+# Distinguished exit code forge_get_check_runs returns when the read came back
+# SHORT: the forge's own `total_count` says N check-runs exist for this commit
+# and fewer than N rows were actually retrieved (#8895). This is a fail-closed
+# signal, not a fetch failure — the rollup on hand is a strict SUBSET of the
+# commit's checks, and every consumer uses it to answer "is anything still
+# pending / is a required check failing", a question a subset can only answer
+# wrongly. Callers that poll (merge-pr.sh's `_wait_for_checks_then_sync_merge`)
+# treat any nonzero rc as "not settled yet", so returning this instead of the
+# partial JSON keeps a truncated read from ever being read as settlement.
+FORGE_CHECK_RUNS_RC_TRUNCATED=45
+
+# jq filter mapping ONE page of Gitea commit statuses to GitHub check-run rows,
+# as NDJSON — the per-page shape _forge_gitea_paginate emits (#8987).
+# Gitea status: pending, success, error, failure, warning.
+# GitHub check run: status=completed/queued/in_progress, conclusion=success/…
+_FORGE_GITEA_CHECK_RUN_JQ='.[] | {
+  name: .context,
+  status: (if .status == "pending" then "queued" else "completed" end),
+  conclusion: (if .status == "success" then "success"
+               elif .status == "failure" or .status == "error" then "failure"
+               elif .status == "warning" then "neutral"
+               else null end),
+  html_url: .target_url
+} | tojson'
+
 # Get CI check runs for a commit.
 # Usage: forge_get_check_runs NWO COMMIT_SHA
-# GitHub: GET /repos/{nwo}/commits/{sha}/check-runs
+# GitHub: GET /repos/{nwo}/commits/{sha}/check-runs (fully paginated)
 # Gitea: GET /repos/{owner}/{repo}/commits/{sha}/statuses (mapped to check-run shape)
 #
 # Return codes: 0 success (JSON on stdout); $FORGE_CHECK_RUNS_RC_NOT_FOUND
-# (44) on a confirmed HTTP 404 (GitHub only — see below); 1 for any other
-# failure.
+# (44) on a confirmed HTTP 404 (GitHub only — see below);
+# $FORGE_CHECK_RUNS_RC_TRUNCATED (45) on a short read (GitHub only — Gitea's
+# statuses endpoint publishes no independent count to compare against, so the
+# Gitea branch's equivalent guarantee is exhaustive pagination that returns
+# nonzero rather than a short list, #8987); 1 for any other failure.
 forge_get_check_runs() {
   local nwo="$1"
   local commit="$2"
 
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     forge_split_nwo "$nwo"
-    local statuses
-    statuses=$(gitea_api GET "repos/$FORGE_OWNER/$FORGE_REPO/commits/$commit/statuses" 2>/dev/null) || {
-      echo '{"total_count":0,"check_runs":[]}'
-      return 1
-    }
-
-    # Map Gitea commit statuses to GitHub check-run shape.
-    # Gitea status field: pending, success, error, failure, warning
-    # GitHub check run: status=completed/queued/in_progress, conclusion=success/failure/...
-    echo "$statuses" | jq '{
-      total_count: (. | length),
-      check_runs: [.[] | {
-        name: .context,
-        status: (if .status == "pending" then "queued"
-                 else "completed" end),
-        conclusion: (if .status == "success" then "success"
-                     elif .status == "failure" then "failure"
-                     elif .status == "error" then "failure"
-                     elif .status == "warning" then "neutral"
-                     elif .status == "pending" then null
-                     else null end),
-        html_url: .target_url
-      }]
-    }'
+    # Page to exhaustion (#8987). This used to be ONE unpaginated request, which
+    # Gitea caps at DEFAULT_PAGING_NUM (30) / MAX_RESPONSE_ITEMS (50) — the same
+    # truncation class as #8895 — and its total_count came from `length` of the
+    # rows that arrived, so a truncated read looked self-consistent and no
+    # short-read check could ever fire. _forge_gitea_paginate returns nonzero on
+    # ANY page failure or page-cap trip instead of reporting a short list, so
+    # total_count below counts a COMPLETE read. (Gitea's own CombinedStatus
+    # total_count is itself len() of one fetched page, so it is not a usable
+    # independent cross-check the way GitHub's is.)
+    local rows
+    rows=$(_forge_gitea_paginate \
+      "repos/$FORGE_OWNER/$FORGE_REPO/commits/$commit/statuses" \
+      "$_FORGE_GITEA_CHECK_RUN_JQ") || return 1
+    printf '%s\n' "$rows" | jq -cs '{total_count: length, check_runs: .}'
   else
     # Capture stdout and stderr into separate temp files so a non-2xx
     # response's HTTP status (which `gh api` reports only on stderr, as
     # "... (HTTP <code>)") can be inspected without disturbing the JSON
     # payload on success (#6389).
+    #
+    # `per_page=100` + `--paginate` (#8895): GitHub's default page size for
+    # this endpoint is 30, and one head in this repo already produces 39
+    # check-runs — so an unpaginated read silently hid 9 of them from
+    # merge-pr.sh --auto's settle-wait, both from its pending count and from
+    # its failed-required classification. Since #8410 that settle-wait is the
+    # ONLY check-settling mechanism, so the hidden rows were a live
+    # merge-on-unsettled-CI gap. `--paginate` follows the Link header, so the
+    # rows retrieved no longer depend on how many checks a repo happens to
+    # have; the count check further down fails closed if they ever do again.
     local out_file err_file rc=0
-    out_file=$(mktemp)
-    err_file=$(mktemp)
-    gh api "repos/$nwo/commits/$commit/check-runs" \
+    out_file=$(mktemp); err_file=$(mktemp)
+    gh api "repos/$nwo/commits/$commit/check-runs?per_page=100" --paginate \
       --header "Accept: application/vnd.github+json" \
-      --jq '{
-        total_count: .total_count,
-        check_runs: [.check_runs[] | {
-          name: .name,
-          status: .status,
-          conclusion: .conclusion,
-          html_url: .html_url
-        }]
-      }' >"$out_file" 2>"$err_file" || rc=$?
+      --jq '{total_count: (.total_count // 0), check_runs: [(.check_runs // [])[] | {name: .name, status: .status, conclusion: .conclusion, html_url: .html_url}]}' \
+      >"$out_file" 2>"$err_file" || rc=$?
 
     if [[ $rc -ne 0 ]]; then
       if grep -q "HTTP 404" "$err_file" 2>/dev/null; then
@@ -695,8 +643,25 @@ forge_get_check_runs() {
       rm -f "$out_file" "$err_file"
       return 1
     fi
-    cat "$out_file"
+
+    # `--jq` runs per page, so a multi-page read leaves ONE reshaped object per
+    # page on stdout — fold them into a single rollup (total_count is repeated
+    # identically on every page; `max` is the conservative pick for the
+    # short-read check below). An empty stdout from a `gh` that exited 0 is not
+    # an authoritative "this commit has no checks": treat it as a transient
+    # failure, the same way a nonzero exit is treated.
+    local merged=""; [[ -s "$out_file" ]] && merged=$(jq -cs '{total_count: ([.[].total_count // 0] | max // 0), check_runs: [.[] | (.check_runs // [])[]]}' "$out_file" 2>/dev/null)
     rm -f "$out_file" "$err_file"
+    [[ -n "$merged" ]] || return 1
+
+    # Fail closed on a short read (#8895): the forge told us how many
+    # check-runs exist for this commit and we hold fewer. Refuse to answer
+    # rather than answer from a subset — see FORGE_CHECK_RUNS_RC_TRUNCATED.
+    if [[ "$(jq -r '(.check_runs | length) < (.total_count // 0)' <<<"$merged")" == "true" ]]; then
+      echo "forge_get_check_runs: truncated read for $commit — got $(jq -r '"\(.check_runs | length) of \(.total_count)"' <<<"$merged") check-runs; failing closed" >&2
+      return "$FORGE_CHECK_RUNS_RC_TRUNCATED"
+    fi
+    printf '%s\n' "$merged"
   fi
 }
 
@@ -883,6 +848,10 @@ forge_get_pr_body() {
 #   closing keywords (close/closes/closed, fix/fixes/fixed, resolve/resolves/
 #   resolved). It also follows GitHub's own rule that "Updates #N", "See #N",
 #   and "References #N" do NOT close the issue.
+#   Neither branch is negation-aware: "does not fix #N" reads exactly like
+#   "fixes #N" (#1057). A caller about to ACT on a candidate re-checks it with
+#   `loom-daemon merge-pr-refs has-unnegated-closing-ref --issue N` (text on
+#   stdin), as champion-pr-merge.md Step 4 does before `gh issue close`.
 #
 # Gitea: The Gitea API does not expose an equivalent of closingIssuesReferences,
 #   so this falls back to a word-boundary regex over the PR body. The regex
@@ -1584,6 +1553,28 @@ forge_gh_remove_label_rl_safe() {
 # Usage: forge_gh_create_issue_rl_safe NWO TITLE BODY [LABEL...]
 # Stdout: the new issue's URL (both paths).
 # Returns 0 on success (either path), 1 on failure (message on stderr).
+#
+# NEVER returns silently (#8289). "No URL and no error text" was a reachable
+# outcome here, reproduced with a stubbed forge on 2026-09-19 in three shapes,
+# all of which leave the caller unable to tell a refusal from a crash:
+#   1. `gh issue create` exits non-zero with EMPTY stderr (killed by a signal,
+#      OOM, a wrapper that exits without writing) -> `echo "$err" >&2` printed
+#      one BLANK LINE and returned 1.
+#   2. it exits non-zero with its error text on STDOUT instead -> that text
+#      was captured into $out and dropped on the failure path; stderr empty.
+#   3. it exits ZERO with empty stdout -> the caller was handed an empty
+#      "URL" and a success return, i.e. a filing that silently did nothing.
+# All three now land on one always-populated error line, which quotes the
+# forge's own text when there is any and synthesizes one (exit code + stray
+# stdout) when there is not. (3) returns 1 rather than a bogus success, and
+# the message says the issue MAY exist: "created but URL not reported" and
+# "not created" are indistinguishable from here, so a caller must LOOK before
+# retrying rather than blind-retry into a real duplicate.
+#
+# Implemented as two MODIFIED lines, no added ones, on purpose: this file is
+# frozen by scripts/check-file-size-budget.sh, and a "never silent" guarantee
+# belongs at the point of failure, not in a sibling module the one caller
+# would have to remember to route through.
 forge_gh_create_issue_rl_safe() {
   local nwo="$1" title="$2" body="$3"
   shift 3
@@ -1607,7 +1598,11 @@ forge_gh_create_issue_rl_safe() {
   err=$(cat "$err_file" 2>/dev/null || true)
   rm -f "$err_file"
 
-  if [[ $rc -eq 0 ]]; then
+  # The `-n "$out"` half is load-bearing (#8289): exit 0 with empty stdout is
+  # NOT a success to pass on -- it hands the caller an empty "URL" and a zero
+  # return, i.e. a filing that silently did nothing. Falling through instead
+  # lands on the final, always-populated error line below.
+  if [[ $rc -eq 0 && -n "${out//[[:space:]]/}" ]]; then
     printf '%s\n' "$out"
     return 0
   fi
@@ -1636,25 +1631,14 @@ forge_gh_create_issue_rl_safe() {
     return 1
   fi
 
-  echo "$err" >&2
+  # The forge's own words when it gave any; otherwise a message synthesized
+  # from what we DO know -- exit code, plus whatever it wrote to stdout (an
+  # error routed to the wrong stream, or the empty "URL" of the exit-0 case
+  # above). `$err` is command-substituted, so a stderr of nothing but a
+  # newline arrives here as the empty string and takes the default too. This
+  # line is never allowed to print nothing: that WAS the silent exit (#8289).
+  echo "${err:-gh issue create produced no error text (exit $rc) and no usable issue URL (stdout: ${out:-<empty>}) -- killed, or a wrapper that failed silently? The issue MAY exist; check the forge before re-filing rather than blind-retrying.}" >&2
   return 1
-}
-
-# Get PR comments.
-# Usage: forge_get_pr_comments NWO PR_NUMBER
-# GitHub: gh pr view --comments
-# Gitea: GET /repos/{owner}/{repo}/issues/{n}/comments (PRs use issue comment API)
-forge_get_pr_comments() {
-  local nwo="$1"
-  local pr_number="$2"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    forge_split_nwo "$nwo"
-    gitea_api GET "repos/$FORGE_OWNER/$FORGE_REPO/issues/$pr_number/comments" 2>/dev/null | \
-      jq -r '.[].body // empty'
-  else
-    gh pr view "$pr_number" --comments --json comments --jq '.comments[].body' 2>/dev/null || echo ""
-  fi
 }
 
 # --- Formal review / inline review-comment ingestion (#7647) ----------------
@@ -1939,6 +1923,15 @@ _forge_gitea_paginate() {
 #   in merge-pr.sh already treat a nonzero lookup as "refuse to merge," which
 #   is the correct disposition for an unknown.
 #
+#   ONE narrow exception (#8872, mirroring #8871's Rust
+#   `stale_checks::fetch::is_plan_gated`): a source that answers the exact 403
+#   "upgrade to github ... make this repository public ..." cannot be holding
+#   a rule at all — that's GitHub declining to serve the source because the
+#   repository's PLAN excludes it, not because a rule is unreadable — so it
+#   configures no required checks instead of failing the whole lookup closed,
+#   per source, with a stderr warning. Any OTHER 403 (missing scope, SSO,
+#   rate limit) still fails closed; only that exact message qualifies.
+#
 # Gitea: GET /api/v1/repos/{owner}/{repo}/branch_protections/{name}. Gitea's
 #   branch-protection rule carries both `enable_status_check` (boolean toggle)
 #   and `status_check_contexts` (array of context patterns). The contexts are
@@ -2037,12 +2030,28 @@ forge_get_required_status_check_contexts() {
   # 403, 404 on the repo itself — is a lookup failure, and a failure on EITHER
   # source fails the whole lookup closed: a surviving source's answer is a
   # partial view, and "partial view of what is required" is not a safe input to
-  # a merge decision.
-  local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out=""
+  # a merge decision. `2>&1` (not `2>/dev/null`) so a failing call's stdout IS
+  # its stderr message — on success `gh`/`jq` write nothing to stderr, so this
+  # changes nothing for the happy path — letting the #8872 plan-gate checks
+  # below (inlined rather than a helper, to hold the line-budget cost down;
+  # matching #8871's Rust `stale_checks::fetch::is_plan_gated`: the exact 403
+  # "upgrade to github ... make this repository public ...", never the status
+  # code alone — a missing token scope, SSO enforcement and a rate-limit
+  # refusal are all 403s where required checks may genuinely exist) see the
+  # real failure text without a temp file. A source the gate excuses
+  # configures no required checks, with a stderr warning so the relaxation is
+  # never silent; any other failure still fails the whole lookup closed.
+  #
+  # `$branch` goes through url_encode_path_segment for the REST call because
+  # it lands in a URL path there (#9109). The GraphQL call below deliberately
+  # does NOT encode it: `-F ref=refs/heads/$branch` is a typed variable VALUE
+  # gh serialises into the request body, not a path, so percent-encoding would
+  # send a literally wrong ref name.
+  local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out="" _pg
   local query='query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { branchProtectionRule { requiredStatusCheckContexts } } } }'
-  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/${branch}" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>/dev/null)" || ruleset_rc=1
-  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>/dev/null)" || classic_rc=1
-  if [[ "$ruleset_rc" -ne 0 || "$classic_rc" -ne 0 ]]; then return 1; fi
+  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/$(url_encode_path_segment "${branch}")" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>&1)" || ruleset_rc=1
+  classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>&1)" || classic_rc=1
+  [[ "$ruleset_rc" -eq 0 ]] || { _pg=$(printf '%s' "$ruleset_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: ruleset required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $ruleset_out" >&2; ruleset_out=""; } || return 1; }; [[ "$classic_rc" -eq 0 ]] || { _pg=$(printf '%s' "$classic_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: classic branch-protection required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $classic_out" >&2; classic_out=""; } || return 1; }
   # Union, order-preserving, de-duplicated: a context can legitimately be
   # required by BOTH a ruleset and a classic rule, and the callers' `comm`
   # set-difference needs each name once.

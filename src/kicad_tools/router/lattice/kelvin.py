@@ -1,4 +1,20 @@
-"""Physical isolation of same-net Kelvin branches during lattice search."""
+"""Physical isolation of same-net Kelvin branches during lattice search.
+
+Epic #5509 Phase 3d, deliberately **not** moved onto the clearance kernel.
+:meth:`KelvinBranchGuard.clear` is a same-net *contact* test, not a clearance
+test: it asks whether the moving conductor would touch previously-committed
+root-net metal at all (a ``1e-6`` mm buffer, i.e. zero clearance), and it
+answers that against a **unioned region minus the root pad's contact area**.
+The kernel answers pairwise edge-to-edge gaps; a region subtraction is not
+expressible as any sequence of them -- a path point may sit within the
+conductor radius of root copper and still be legal because it lies inside the
+contact area -- so a per-object kernel loop would change verdicts rather than
+preserve them.  There is no ``required_mm`` term in this module to unify.
+
+The clearance predicates this guard gates -- ``CommittedCopper.seg_clear`` /
+``node_clear`` / ``via_clear``, which consult it before measuring anything --
+are kernel-backed as of that phase.
+"""
 
 from __future__ import annotations
 

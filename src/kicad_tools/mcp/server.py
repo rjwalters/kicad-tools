@@ -20,8 +20,6 @@ if TYPE_CHECKING:
     # dataclass above.
     from mcp.server.mcpserver import MCPServer as SDKMCPServer
 
-from jsonschema import validate  # type: ignore[import-untyped]  # Upstream has no inline types.
-
 from kicad_tools.mcp.observability import record_call
 from kicad_tools.mcp.tools.registry import TOOL_REGISTRY
 
@@ -99,6 +97,16 @@ class MCPServer:
         """
 
         def dispatch(params: dict[str, Any]) -> dict[str, Any]:
+            # Imported here, not at module scope, so that ``jsonschema`` is only
+            # needed on the MCP tool-call path (issue #5804).  ``kicad_tools.mcp``
+            # re-exports from this module, so a module-scope import would make
+            # ``jsonschema`` mandatory for every lazy ``kicad_tools.mcp.*`` import
+            # in the core CLI -- ``kct route-auto``, ``kct screenshot`` and
+            # ``kicad_tools.report`` all reach this package at run time.
+            from jsonschema import (  # type: ignore[import-untyped]  # Upstream has no inline types.
+                validate,
+            )
+
             if name not in self.tools:
                 raise ValueError(f"Unknown tool: {name}")
             tool = self.tools[name]

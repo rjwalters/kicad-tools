@@ -1,5 +1,5 @@
 > **Current assembled demo (revision C):** four real SN65LVDS1DR / SN65LVDS2DR
-> links. See [assembled-demo/README.md](assembled-demo/README.md) for the circuit,
+> links. See [assembled-demo/README.md](../assembled-demo/README.md) for the circuit,
 > procurement and build instructions. `output/` contains that assembly.
 > Historical synthetic USB/PCIe/MIPI regression artifacts are retained in
 > `regression-fixture/`; the old recipe now defaults to `regression-output/`.
@@ -382,7 +382,7 @@ crossover plus the aggregate the per-crossover headers cannot give you
 The diff-pair phase also closes with a `[crosstail-census-summary]` block
 whenever the census is on.  It is report-only and costs ~1 µs per crossover on
 top of the census itself; schema and interpretation live in
-[`docs/reference/crosstail-census-report.md`](../../docs/reference/crosstail-census-report.md).
+[`docs/reference/crosstail-census-report.md`](../../../docs/reference/crosstail-census-report.md).
 
 That report is a post-mortem, but it does not have to be read as one: feeding
 it back in with `kct route --census-advisory <report.json>` (or

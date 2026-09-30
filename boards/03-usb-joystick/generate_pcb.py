@@ -125,16 +125,46 @@ def generate_pcb():
     )
 
 
-if __name__ == "__main__":
-    target = (
-        Path(sys.argv[1])
-        if len(sys.argv) > 1
-        else Path(__file__).parent / "output/usb_joystick.kicad_pcb"
-    )
+def write_pcb(target, *, verbose=True):
+    """Write the generated board to *target* and repair its footprint silk.
+
+    Issue #5744: three of this board's library land patterns (``J3``'s
+    pin-header socket, the ``R3``/``R4`` 0402 pads) draw silkscreen closer to
+    their own pads than the reviewed ``jlcpcb-tier1`` floor
+    (``min_silk_to_pad_clearance_mm`` = 0.15mm) allows.  Those 21
+    ``silk_pad_clearance`` errors were latent only because
+    ``routing_plan.apply_plan()`` used to delete every footprint silk graphic
+    on replay -- the routed artifact carried no silk to measure.  The replay
+    is fixed, so the silk really is there and has to really be manufacturable.
+
+    The repair belongs HERE, not in ``generate_design.py:main()``: every
+    consumer of this generator (the full recipe, a bare
+    ``python generate_pcb.py <dir>``, ``route_demo.py``,
+    ``tests/test_board_03_regression.py``'s regeneration fixture) must get the
+    same repaired placement, because each of them then feeds it to
+    ``apply_plan()``.  Raises if any violation survives.
+    """
+    target = Path(target)
     if target.suffix != ".kicad_pcb":
         target = target / "usb_joystick.kicad_pcb"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(generate_pcb())
+
+    # Board-local sibling module: import by path-insert so this works whatever
+    # the caller's cwd is and whether or not the caller already did so.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from silk_repair import repair_board_silk_pad_clearance
+
+    repair_board_silk_pad_clearance(target, verbose=verbose)
+    return target
+
+
+if __name__ == "__main__":
+    target = write_pcb(
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else Path(__file__).parent / "output/usb_joystick.kicad_pcb"
+    )
     stage_local_footprints(target.parent)
     # KiCad loads project-local libraries only when the matching project exists.
     from kicad_tools.core.project_file import create_minimal_project, save_project

@@ -1981,8 +1981,15 @@ assert_contains "stub-claude ran, args=-p ping" "$output" \
 # Issue #7430: with no explicit cpus/memory config, `--cpus` is omitted
 # (LOOM_SWEEP_CPU_QUOTA=0 above means no host CPU budget was computed) but
 # `--memory` is ALWAYS applied by default, computed from host memory.
-assert_contains "--memory" "$docker_log" \
-    "containerized dispatch: --memory is applied by default even with no config (#7430)"
+assert_contains "--memory" "$docker_log" "containerized dispatch: --memory is applied by default even with no config (#7430)"
+# Issue #8456: the worker env carries CARGO_INCREMENTAL=0 across the docker
+# boundary (exported alongside the build-cache CARGO_TARGET_DIR -e above):
+# sccache cannot cache an incrementally-compiled crate, and cargo keys
+# incremental session state by absolute source path, so on a
+# shared-target-dir host it is orphaned disk (213 GB / 6,402 session dirs on
+# one fleet host). The --memory assert above and this one are single-line so
+# the frozen-at-1822-code-lines file stays within the file-size ratchet.
+assert_contains "-e CARGO_INCREMENTAL=0" "$docker_log" "containerized dispatch: the worker env carries CARGO_INCREMENTAL=0 (#8456)"
 assert_contains "# LOOM_DISPATCH_MODE mode=container" "$output" \
     "containerized dispatch: the canonical LOOM_DISPATCH_MODE marker names mode=container (#7430)"
 assert_contains "cpus=none" "$output" \

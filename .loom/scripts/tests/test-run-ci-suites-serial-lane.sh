@@ -10,6 +10,13 @@
 # (different assertions each time, including one with no timing component)
 # while passing every sequential run on main.
 #
+# Since #8087 that suite (and test-loom-daemon-start.sh, the lane's other
+# occupant) is no longer wired into THIS runner at all — both drive the
+# cli/loom-daemon-start.sh stub over `loom-daemon daemon-start` and moved to
+# ci-excluded.txt / ci.yml's sequential "Native Port Suites" job. The pin is
+# retained for the day either one returns to the concurrent pool; see Part 1's
+# own note for how that changes what is asserted where.
+#
 # This suite asserts the lane's two guarantees:
 #   1. Planning — the pinned suite is still planned to RUN (the lane changes
 #      WHEN a suite runs, never WHETHER), is annotated as such, and the
@@ -74,10 +81,42 @@ plan_full_line() { # <plan output> <suite>
 # running this test happens to have.
 PLAN_NO_DAEMON="$( LOOM_CI_DAEMON_PIDFILE_CANDIDATES=none bash "$RUNNER" --plan 2>/dev/null )"
 
-# The default occupant, as an explicit literal: a silent removal from
-# SERIAL_LANE_SUITES must fail this test rather than quietly returning the
+# The default occupants, as explicit literals: a silent removal from
+# SERIAL_LANE_SUITES must fail this test rather than quietly returning either
 # suite to the concurrent pool.
-PINNED_SUITE="test-loom-daemon-update.sh"
+#
+# Since #8087 BOTH are unwired — cli/loom-daemon-start.sh became a thin stub
+# over `loom-daemon daemon-start`, so test-loom-daemon-start.sh and
+# test-loom-daemon-update.sh (which reaches that script through
+# lib/daemon-update-fixtures.sh) need a built binary and moved to
+# ci-excluded.txt, wired in ci.yml's "Native Port Suites" job instead. So lane
+# MEMBERSHIP and CI WIRING stopped being the same question here exactly as
+# #8086 made them stop being the same question for the live-daemon guard in
+# test-run-ci-suites-daemon-guard.sh — and the response is the same one: assert
+# them DIFFERENTLY, not less.
+#
+#   - retention is asserted against the runner's own literal + their absence
+#     from --plan (which only ever enumerates ci-wired.txt), so neither a
+#     silent removal of the pin NOR a half-applied exclusion can pass;
+#   - the lane MECHANISM (defer-not-drop, the annotation, the disable switch,
+#     the guard outranking it) is exercised through the documented
+#     LOOM_CI_SERIAL_SUITES seam against suites that ARE wired, so it stays
+#     covered rather than becoming vacuous.
+DEFAULT_LANE_SUITES=(
+    test-loom-daemon-update.sh
+    test-loom-daemon-start.sh
+)
+
+# The seam occupant: wired, hermetic, and NOT a LIVE_DAEMON_GUARDED_SUITES
+# member, so the guard never confounds the lane assertions it drives.
+PINNED_SUITE="test-locate-daemon-bin.sh"
+# A wired suite that IS guarded, for the "guard outranks the lane" case below.
+GUARDED_PINNED_SUITE="test-loom-daemon-stop.sh"
+
+lane_plan() { # <lane suites> -> --plan output with the lane pinned to them
+    LOOM_CI_DAEMON_PIDFILE_CANDIDATES=none LOOM_CI_SERIAL_SUITES="$1" \
+        bash "$RUNNER" --plan 2>/dev/null
+}
 
 # Guard every "is NOT annotated" assertion below against passing vacuously on
 # an empty plan (e.g. a manifest-invariant failure, which exits before
@@ -86,23 +125,38 @@ check "$([[ -n "$(plan_verdict "$PLAN_NO_DAEMON" "test-live-state-sandbox.sh")" 
     "--plan produced a plan at all (guards the negative assertions below)" \
     "$PLAN_NO_DAEMON"
 
-check "$([[ "$(plan_verdict "$PLAN_NO_DAEMON" "$PINNED_SUITE")" == "RUN" ]] && echo 0 || echo 1)" \
-    "serial-lane suite is still planned to RUN (the lane defers a suite, never drops it)" \
-    "$(plan_full_line "$PLAN_NO_DAEMON" "$PINNED_SUITE")"
+# ---- the default pin is retained, and its suites really are excluded --------
+unnamed="" still_planned=""
+for suite in "${DEFAULT_LANE_SUITES[@]}"; do
+    grep -q "SERIAL_LANE_SUITES=.*$suite" "$RUNNER" || unnamed="$unnamed $suite"
+    [[ -z "$(plan_verdict "$PLAN_NO_DAEMON" "$suite")" ]] || still_planned="$still_planned $suite"
+done
+check "$([[ -z "$unnamed" ]] && echo 0 || echo 1)" \
+    "the default serial-lane suites are still named in SERIAL_LANE_SUITES (no silent unpinning)" \
+    "not named in the runner:$unnamed"
+check "$([[ -z "$still_planned" ]] && echo 0 || echo 1)" \
+    "the default serial-lane suites are absent from --plan (the #8087 ci-excluded move is real)" \
+    "still planned:$still_planned"
 
-check "$(plan_full_line "$PLAN_NO_DAEMON" "$PINNED_SUITE" | grep -q 'serial lane' && echo 0 || echo 1)" \
+# ---- the lane mechanism, driven through the seam on a wired suite -----------
+PLAN_LANE="$( lane_plan "$PINNED_SUITE" )"
+
+check "$([[ "$(plan_verdict "$PLAN_LANE" "$PINNED_SUITE")" == "RUN" ]] && echo 0 || echo 1)" \
+    "serial-lane suite is still planned to RUN (the lane defers a suite, never drops it)" \
+    "$(plan_full_line "$PLAN_LANE" "$PINNED_SUITE")"
+
+check "$(plan_full_line "$PLAN_LANE" "$PINNED_SUITE" | grep -q 'serial lane' && echo 0 || echo 1)" \
     "serial-lane suite is annotated as such in --plan (the lane is observable, not silent)" \
-    "$(plan_full_line "$PLAN_NO_DAEMON" "$PINNED_SUITE")"
+    "$(plan_full_line "$PLAN_LANE" "$PINNED_SUITE")"
 
 # A pooled control: an ordinary suite must NOT carry the annotation, otherwise
 # the assertion above would pass even if every suite were annotated.
-check "$(plan_full_line "$PLAN_NO_DAEMON" "test-live-state-sandbox.sh" | grep -q 'serial lane' && echo 1 || echo 0)" \
+check "$(plan_full_line "$PLAN_LANE" "test-live-state-sandbox.sh" | grep -q 'serial lane' && echo 1 || echo 0)" \
     "an ordinary suite is NOT annotated as serial lane (control)" \
-    "$(plan_full_line "$PLAN_NO_DAEMON" "test-live-state-sandbox.sh")"
+    "$(plan_full_line "$PLAN_LANE" "test-live-state-sandbox.sh")"
 
 # Empty LOOM_CI_SERIAL_SUITES disables the lane entirely.
-PLAN_NO_LANE="$( LOOM_CI_DAEMON_PIDFILE_CANDIDATES=none LOOM_CI_SERIAL_SUITES='' \
-    bash "$RUNNER" --plan 2>/dev/null )"
+PLAN_NO_LANE="$( lane_plan '' )"
 check "$(plan_full_line "$PLAN_NO_LANE" "$PINNED_SUITE" | grep -q 'serial lane' && echo 1 || echo 0)" \
     "LOOM_CI_SERIAL_SUITES= disables the lane (suite returns to the pool)" \
     "$(plan_full_line "$PLAN_NO_LANE" "$PINNED_SUITE")"
@@ -114,10 +168,11 @@ check "$([[ "$(plan_verdict "$PLAN_NO_LANE" "$PINNED_SUITE")" == "RUN" ]] && ech
 # daemon — the pid recorded is this test process's own.
 LIVE_PID_FILE="$WORKDIR/live.pid"
 echo "$$" > "$LIVE_PID_FILE"
-PLAN_LIVE="$( LOOM_CI_DAEMON_PIDFILE_CANDIDATES="$LIVE_PID_FILE" bash "$RUNNER" --plan 2>/dev/null )"
-check "$([[ "$(plan_verdict "$PLAN_LIVE" "$PINNED_SUITE")" == "SKIP" ]] && echo 0 || echo 1)" \
+PLAN_LIVE="$( LOOM_CI_DAEMON_PIDFILE_CANDIDATES="$LIVE_PID_FILE" \
+    LOOM_CI_SERIAL_SUITES="$GUARDED_PINNED_SUITE" bash "$RUNNER" --plan 2>/dev/null )"
+check "$([[ "$(plan_verdict "$PLAN_LIVE" "$GUARDED_PINNED_SUITE")" == "SKIP" ]] && echo 0 || echo 1)" \
     "live-daemon guard still outranks the serial lane (guarded suite is SKIP, not deferred)" \
-    "$(plan_full_line "$PLAN_LIVE" "$PINNED_SUITE")"
+    "$(plan_full_line "$PLAN_LIVE" "$GUARDED_PINNED_SUITE")"
 
 # ==============================================================
 # Part 2 — execution, against an isolated fixture repo.
@@ -126,10 +181,14 @@ check "$([[ "$(plan_verdict "$PLAN_LIVE" "$PINNED_SUITE")" == "SKIP" ]] && echo 
 FIXTURE="$WORKDIR/fixture"
 FIX_TESTS="$FIXTURE/defaults/scripts/tests"
 FIX_LIB="$FIXTURE/defaults/scripts/lib"
-mkdir -p "$FIX_TESTS" "$FIX_LIB"
+mkdir -p "$FIX_TESTS" "$FIX_LIB" "$FIX_TESTS/lib"
 cp "$RUNNER" "$SCRIPT_DIR/check-ci-suite-manifest.sh" "$FIX_TESTS/"
 cp "$REPO_ROOT/defaults/scripts/lib/live-daemon-guard.sh" \
    "$REPO_ROOT/defaults/scripts/lib/cpu-budget.sh" "$FIX_LIB/"
+# The #8077 live-host leak guard (tests/lib/, not scripts/lib/). The runner
+# sources it fail-CLOSED, so a fixture without it exits 1 before running a
+# single suite.
+cp "$SCRIPT_DIR/lib/live-state-sandbox.sh" "$FIX_TESTS/lib/"
 
 # Fixture suites record their own start/end wall-clock, so overlap is measured
 # rather than inferred. $LANE_OUT is exported below and inherited by every

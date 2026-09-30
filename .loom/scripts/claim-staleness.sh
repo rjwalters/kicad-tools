@@ -287,6 +287,14 @@ fi
 if [[ -z "$CLAIM_STATE" ]]; then
     COMMENTS_JSON="$(_comments_json || true)"
     [[ -n "$COMMENTS_JSON" ]] || COMMENTS_JSON="[]"
+    # #9548: activity and stand-down markers count only from a TRUSTED author
+    # (loom-daemon/src/comment_trust.rs); an outsider's copy is prose and can
+    # neither keep a dead claim alive nor feed the stand-down streak.
+    # requires-daemon: forge optional   Without the `trusted-comments` verb (absent or pre-#9548 binary) the markers cannot be authenticated: CLAIM_STATE=unknown, the script's existing fail-safe (never stomp, never stand down on an unreadable claim).
+    COMMENTS_JSON="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments <<<"$COMMENTS_JSON" 2>/dev/null)" || CLAIM_STATE="unknown"
+fi
+
+if [[ -z "$CLAIM_STATE" ]]; then
 
     AFTER_JSON="$(jq --arg t "$CLAIMED_AT" '[.[] | select(.created_at > $t)]' <<<"$COMMENTS_JSON" 2>/dev/null || echo '[]')"
 
@@ -347,12 +355,12 @@ _emit_evaluation() {
             --argjson standdown "${STANDDOWN_COUNT:-0}" \
             --argjson stale_minutes "$STALE_MINUTES" \
             --argjson max_streak "$MAX_STREAK" \
-            --arg label "$LABEL" \
+            --arg claim_label "$LABEL" \
             --arg extra_key "$extra_key" \
             --arg extra_val "$extra_val" \
             '{
                claim_state: $state,
-               label: $label,
+               label: $claim_label,
                claimed_at: $claimed_at,
                last_activity_at: $last_activity_at,
                claim_age_minutes: $claim_age,

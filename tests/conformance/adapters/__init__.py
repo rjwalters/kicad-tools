@@ -21,6 +21,7 @@ module                     group  consumer
 ``route_halo``               4    ``RouteHaloGeometry.clear`` refinement
 ``route_geometry_cpp``       5    ``Grid3D::route_*_geometry_clear``
 ``fixed_copper``             6    ``FixedFillObstacles`` + ``fixed_fill_clear``
+``coupled``                  7    ``CoupledPathfinder::rail_clear``
 ``diffpair``                 8    the coupled constructor's three gates
 ``lattice``                  9    ``CommittedCopper.seg_clear`` / ``via_clear``
 ``mesh``                    10    ``ObstacleModel.is_clear`` (per-leg consult)
@@ -36,14 +37,20 @@ module                     group  consumer
 ``kernel``                   0    the Phase 1b kernel -- the **control** row
 =========================  =====  ==============================================
 
-Group 7 is the only group with no adapter -- ``CoupledPathfinder::rail_clear``
-is a lambda inside the C++ coupled search loop and is unreachable from Python.
-``report.NOT_MEASURED_REASONS`` states that, and the table renders it in the
-``notes`` column; ``test_corpus.UNWIRED_GROUPS`` pins it to exactly that one
-group.  The kernel's
+**All nineteen groups are wired.**  Phase 1c left exactly one gap -- group 7's
+``rail_clear``, a lambda inside the C++ coupled search loop that no binding
+could reach -- recorded in ``report.NOT_MEASURED_REASONS`` as *unexposed*.
+Epic #5509 Phase 3c (#5662) promoted it to a bound method while migrating it
+onto the clearance kernel, so ``adapters/coupled.py`` measures it and
+``test_corpus.UNWIRED_GROUPS`` is now empty.  The kernel's
 ``group`` is the :data:`~tests.conformance.adapters.kernel.KERNEL_GROUP`
 sentinel ``0``: it is not one of the epic's nineteen consumer groups, it is the
 model they are to be unified onto, so it renders in its own section.
+
+``report.MIGRATED_GROUPS`` records which consumer groups have actually been
+switched onto the kernel.  A migrated group's row stops being report-only:
+see :mod:`tests.conformance.conftest` for exactly what hardens and what does
+not.
 
 Each drives an **unmodified** consumer through
 :mod:`tests.conformance.adapters._support`, which is the single translation
@@ -68,6 +75,7 @@ __all__ = [
     "ConsumerAdapter",
     "Verdict",
 ]
+
 
 # The four clearance-family verdict kinds the oracle and every adapter speak.
 # These are *canonical* names, not kicad-cli's raw ``type`` strings -- the

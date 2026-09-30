@@ -4,6 +4,10 @@ How Loom resolves each worker's model, the Judge-rejection escalation ladder, an
 the suggested-model defaults by role. Retuning these defaults is measurement-gated
 — see [`docs/model-selection-retune.md`](https://github.com/rjwalters/loom/blob/main/docs/model-selection-retune.md).
 
+For *task-oriented* recipes that combine these keys with the runtime, credential-pool
+and spend-bound axes ("put the expensive model on Judge", "minimize wall-clock"), see
+[`configuring-resources.md`](configuring-resources.md).
+
 ### Model Selection Strategy
 
 Model selection is a first-class orchestration concern (issue #3477, Phase 1). Each worker's model is resolved through a fixed precedence chain — highest first:
@@ -12,6 +16,8 @@ Model selection is a first-class orchestration concern (issue #3477, Phase 1). E
 2. **Workspace override** — `.loom/config.json` → `terminals[].roleConfig.model` (optional). Pin exact IDs here (e.g., `claude-sonnet-4-6`) when your workspace needs deterministic cost/behavior.
 3. **Role default** — `.loom/roles/<role>.json` → `suggestedModel` (ships as an alias). The `/loom:sweep` skill passes the resolved model to role subagents via the Task tool's `model` parameter.
 4. **Session default** — when nothing above resolves, NO `--model` flag (and no Task `model` param) is emitted at all, and the worker inherits the parent session/CLI default. This is the zero-config behavior: nothing configured means nothing changes.
+
+Tier 2's keys can also be set per-host without committing them: `config_resolver.rs` merges the committed `.loom-project/project.json` and then the ungitted, highest-precedence `.loom-local/local.json` overlay over `.loom/config.json` (see [`docs/design/config-resolution-tiers.md`](https://github.com/rjwalters/loom/blob/main/docs/design/config-resolution-tiers.md)) — so a one-host model override belongs in `.loom-local/local.json`, which **must stay gitignored**: unignored it is untracked dirt, and `check-main-clean.sh --quarantine` stashes untracked dirt between sweep waves, silently reverting the override (#8075).
 
 The spawn plumbing also honors a `LOOM_MODEL` environment variable (`spawn-claude.sh`, `claude-wrapper.sh`): it is injected as `--model <value>` unless an explicit `--model` is already present in the args. Retries inside `claude-wrapper.sh` always reuse the same model — transport-level failures (token exhaustion, crashes, 5xx) are not quality signals and never change the model.
 
@@ -67,6 +73,14 @@ The ladder is configured in `.loom/config.json`:
 - **opus**: Most capable - for complex reasoning and implementation
 
 **Aliases vs pinned IDs**: shipped role JSONs use aliases so defaults stay sensible across model releases with zero maintenance. The GitHub Actions cron workflows (`.github/workflows/loom-*.yml`) are the exception — they pin exact IDs because scheduled support roles are predictable, cost-sensitive load and a stale pin is visible and cheap to bump in the consuming repo.
+
+Daemon sweep dispatch resolves implicit defaults **after runtime admission**. An
+admitted Claude sweep keeps the cost-safe `sonnet` default (or its canary-gated
+experiment arm); admitted native runtimes use their model profile without a
+Claude default/experiment override. Explicit dispatch models still win, and
+`autonomous.model` keeps its existing precedence and alias handling. An explicit
+native model must match its profile or use `provider/model`; incompatible pins
+remain errors. Claude experiments still outrank `autonomous.model` when enabled.
 
 > **Logical-tier resolution (`sweep.modelAliases`, issue #3982).** A logical alias
 > is not always current on the wire: the bare `opus` alias still resolves to a
@@ -157,3 +171,8 @@ The profile is expressed in the same runtime-neutral logical tiers (`haiku`/`son
   ]
 }
 ```
+
+**Fast-harness default + per-role quality levels** (e.g. a cheap Gemini-Flash
+default with Judge on a higher-quality model, including on native runtimes such
+as Pi/OpenCode) is the runbook recipe in
+[`configuring-resources.md`](configuring-resources.md).

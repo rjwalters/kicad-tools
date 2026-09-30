@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.schematic.models.elements import PowerSymbol
 from kicad_tools.schematic.models.schematic import Schematic, SnapMode
 
@@ -369,17 +370,10 @@ class TestSymLibTableSidecar:
 # ---------------------------------------------------------------------------
 
 
-def _find_kicad_cli() -> str | None:
-    """Locate kicad-cli on macOS or fall back to PATH."""
-    import shutil
-
-    mac_path = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
-    if Path(mac_path).exists():
-        return mac_path
-    return shutil.which("kicad-cli")
-
-
-@pytest.mark.skipif(_find_kicad_cli() is None, reason="kicad-cli not found")
+@pytest.mark.skipif(
+    find_kicad_cli() is None,
+    reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+)
 class TestKicadCliIntegration:
     """End-to-end: write a schematic with a synthesized symbol and run ERC.
 
@@ -394,7 +388,7 @@ class TestKicadCliIntegration:
         import json
         import subprocess
 
-        cli = _find_kicad_cli()
+        cli = find_kicad_cli()
         report = out_dir / "erc.json"
         subprocess.run(
             [
@@ -474,7 +468,7 @@ class TestKicadCliIntegration:
         import json
         import subprocess
 
-        cli = _find_kicad_cli()
+        cli = find_kicad_cli()
         report = out_dir / "erc_all.json"
         subprocess.run(
             [

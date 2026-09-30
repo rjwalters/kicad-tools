@@ -91,10 +91,13 @@ jobs:
       is_install: ${{ steps.detect.outputs.is_install }}
     steps:
       - id: detect
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          if [[ "${{ github.event.pull_request.title }}" == chore\(loom\):* ]]; then
+          if [[ "$PR_TITLE" == chore\(loom\):* ]]; then
             echo "is_install=true" >> "$GITHUB_OUTPUT"
-          elif echo "${{ github.event.pull_request.body }}" | grep -q '^loom-install: true$'; then
+          elif printf '%s\n' "$PR_BODY" | grep -q '^loom-install: true$'; then
             echo "is_install=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_install=false" >> "$GITHUB_OUTPUT"
@@ -107,6 +110,16 @@ jobs:
     steps:
       - run: # ... your slow tests ...
 ```
+
+The title and body reach the script through `env:` rather than as
+`${{ ... }}` expressions inside `run:` on purpose. GitHub substitutes an
+expression into the script text *before* the shell runs, so a PR author
+who controls the title or body controls part of the script source, and
+it runs on the runner with the job's token. An environment variable is
+only ever data: the shell expands `"$PR_TITLE"` as a single quoted word
+and never parses its contents as code. Apply the same rule to any other author-controlled field (branch
+names, commit messages, issue and comment bodies). See GitHub's
+[security hardening guide](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections).
 
 The `Skip-CI-Hint: docs-only` commit trailer can be inspected similarly
 via `git log -1 --format=%B`.

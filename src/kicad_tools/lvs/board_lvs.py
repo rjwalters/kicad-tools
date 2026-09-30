@@ -33,12 +33,16 @@ result should fail the build (it raises
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeGuard
+from typing import TYPE_CHECKING, TypeGuard
 
 from kicad_tools.schema.pcb import _find_all_footprints
 from kicad_tools.sexp import SExp, parse_file
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle guard, types only
+    from kicad_tools.schematic.models.schematic import Schematic
 
 # An auto-generated ("placeholder") net name: the synthetic name a netlister
 # invents for a connected component that carries no label or power symbol.
@@ -70,6 +74,14 @@ NETLIST_VACUOUS_REF = "<vacuous>"
 # the ``null`` a real unconnected pad would carry.
 NETLIST_VACUOUS_NET = "<no-pcb-evidence>"
 
+# Upper bound on sheet *placements* walked by
+# :func:`_walk_hierarchy_schematics`.  Since issue #5815 the walk visits one
+# sheet per ``(sheet ...)`` symbol rather than one per file, so a hierarchy
+# that nests repeated placements can expand exponentially.  Real designs sit
+# in the tens; this cap exists only so a pathological (or maliciously
+# constructed) file fails loudly instead of hanging.
+_MAX_SHEET_VISITS = 10_000
+
 
 def _is_placeholder_net(name: str | None) -> TypeGuard[str]:
     """True when ``name`` is an auto-generated (unnamed-net) placeholder.
@@ -83,6 +95,46 @@ def _is_placeholder_net(name: str | None) -> TypeGuard[str]:
     ``str | None`` to ``str`` for callers.
     """
     return name is not None and bool(_PLACEHOLDER_NET_RE.match(name))
+
+
+def _is_sheet_path_variant(sch_net: str | None, pcb_net: str | None) -> bool:
+    """True when ``pcb_net`` is a less-qualified spelling of ``sch_net``.
+
+    KiCad scopes a plain ``(label "SENSE")`` to its sheet and names the
+    resulting net ``/SENSE`` (root sheet) or ``/MCU/DBG_LED`` (one level
+    down); :func:`_schematic_pin_to_net` reports the same identity.  A board
+    may spell that one node differently depending on who wrote its nets:
+
+    * ``/MCU/DBG_LED`` — KiCad's own netlist (identical: not a variant);
+    * ``MCU/DBG_LED`` — the same path without the leading slash (#5815);
+    * ``DBG_LED`` — kicad-tools' pure-Python netlist fallback, which does
+      not qualify local labels at all (the committed
+      ``boards/00-simple-led`` artifacts use this form; #5809).
+
+    So the pair is nominated only when ``sch_net`` is sheet-qualified
+    (starts with ``/``), ``pcb_net`` is **not** (a board name starting with
+    ``/`` is itself a fully qualified identity and must match exactly), and
+    ``pcb_net`` is either ``sch_net`` minus its leading slash or its leaf.
+
+    That is deliberately narrower than suffix matching (issue #5826): a
+    root-qualified ``/SENSE`` is never a variant of ``/ChildA/SENSE`` —
+    they are two nets at different depths that merely share a leaf — and
+    two different sheet paths (``/MCU/DBG_LED`` vs ``/AUX/DBG_LED``) are
+    never variants either.  The direction is one-way: a *bare* schematic
+    name facing a qualified board name is left alone.
+
+    This predicate only *nominates* a pair; :func:`compare_netlists` still
+    has to prove the spelling cannot mean a second net before accepting
+    it.  Placeholder names are excluded — they have their own, stricter
+    partition rule (issue #4615).
+    """
+    if sch_net is None or pcb_net is None or sch_net == pcb_net:
+        return False
+    if _is_placeholder_net(sch_net) or _is_placeholder_net(pcb_net):
+        return False
+    if not sch_net.startswith("/") or pcb_net.startswith("/") or not pcb_net:
+        return False
+    return pcb_net == sch_net[1:] or pcb_net == sch_net.rsplit("/", 1)[-1]
 
 
 @dataclass(frozen=True)
@@ -173,37 +225,254 @@ def _ref_of(fp: SExp) -> str | None:
     return None
 
 
-def _walk_hierarchy_schematics(sch_path: Path):
-    """Yield every ``Schematic`` in a hierarchy, root first, depth-first.
+@dataclass(frozen=True, eq=False)
+class _SheetVisit:
+    """One sheet reached by :func:`_walk_hierarchy_schematics`.
+
+    Attributes:
+        sheet_path: KiCad **sheet-name path prefix** of this sheet, with no
+            trailing slash: ``""`` for the root sheet, ``"/SubMcu"`` for a
+            child placed under ``(property "Sheetname" "SubMcu")``,
+            ``"/SubMcu/Inner"`` for a grandchild.  A local label ``NAME``
+            on this sheet is the net ``f"{sheet_path}/{NAME}"`` — exactly
+            the identity KiCad writes into its netlist and onto the PCB
+            (``/SENSE`` at the root, ``/SubMcu/DBG_LED`` one level down;
+            verified against ``kicad-cli`` 10.0.6, issues #5809 / #5815).
+        schematic: The loaded :class:`~kicad_tools.schematic.models.schematic.Schematic`.
+        parent: The visit of the sheet whose ``(sheet ...)`` symbol
+            instantiated this one; ``None`` for the root sheet.
+        parent_pin_names: Names of the ``(pin ...)`` children of that
+            ``(sheet ...)`` symbol — the sheet pins this sheet's
+            hierarchical labels mate with.  Empty for the root sheet.
+        uuid_path: KiCad **instance path** of this sheet — the root
+            schematic's ``(uuid ...)`` followed by one sheet-symbol
+            ``(uuid ...)`` per level, e.g.
+            ``"/<root-uuid>/<sheet-a-uuid>"``.  Unlike :attr:`sheet_path`
+            (which is built from human-readable ``Sheetname``s and can
+            legitimately repeat) this is unique per *placement*, which is
+            what a symbol's ``(instances ...)`` block is keyed by.  It is
+            how the two placements of one shared ``Sheetfile`` get their
+            own reference designators (issue #5815).
+        source: Path of the ``.kicad_sch`` file this sheet was loaded from.
+            Two placements of one sub-sheet share a ``source`` but differ
+            in :attr:`sheet_path` and :attr:`uuid_path`.
+    """
+
+    sheet_path: str
+    schematic: Schematic
+    parent: _SheetVisit | None = None
+    parent_pin_names: frozenset[str] = frozenset()
+    uuid_path: str = ""
+    source: Path = Path()
+
+
+def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
+    """Yield every sheet of a hierarchy as a :class:`_SheetVisit`, root first.
 
     Follows ``(sheet ...)`` references the same way
     :func:`kicad_tools.operations.netlist._collect_hierarchy_components`
     does — resolving each ``Sheetfile`` relative to its parent's
     directory and guarding against circular references — so the set of
     ``(ref, pad)`` keys spans the full design, not just the root sheet.
+    The walk is depth-first **pre-order**: a sheet is always yielded after
+    its parent, which :func:`_schematic_pin_to_net` relies on to resolve a
+    child's hierarchical labels against names its parent already resolved.
 
     Yielding the loaded ``Schematic`` objects (rather than only their
     net dict) lets the caller enumerate *every* pin declared on *every*
     symbol across the hierarchy, including pins that never connect to a
     net.  That preserves the "floating pins resolve to ``None``, not
     dropped" contract the single-sheet loader had.
+
+    The sheet path is built from ``Sheetname``, not ``Sheetfile``: the
+    filename is not part of a KiCad net name.  A sheet symbol that omits
+    ``Sheetname`` falls back to its file stem, so an empty segment never
+    collapses a child's labels onto its parent's qualification.
+
+    **One sheet file placed twice is walked twice** (issue #5815).  KiCad
+    treats every ``(sheet ...)`` symbol as its own sheet: placing
+    ``mcu.kicad_sch`` as both ``MCU_A`` and ``MCU_B`` gives two independent
+    sheets whose local labels are ``/MCU_A/DBG_LED`` and ``/MCU_B/DBG_LED``
+    — different nets (verified against ``kicad-cli`` 10.0.6).  An earlier
+    hierarchy-wide ``visited`` set walked the shared file only once, which
+    dropped every pin of the second placement out of the schematic-side map
+    entirely.  Cycle safety does not need that: a hierarchy is only
+    *circular* when a sheet reaches one of its own **ancestors**, so the
+    guard is the ancestor chain of the branch being walked, which leaves
+    sibling re-placement (the legal, common case) free.
+
+    ``_MAX_SHEET_VISITS`` bounds the walk.  Per-placement expansion is
+    exponential in the worst case (N nested levels that each place the same
+    sub-sheet twice yield 2**N sheets) — inherent to the format, and true of
+    KiCad itself — so a pathological hierarchy raises :class:`ValueError`
+    rather than hanging.  Real designs are orders of magnitude below the cap.
     """
     from kicad_tools.operations.netlist import _get_sheet_entries
     from kicad_tools.schematic.models.schematic import Schematic
 
-    visited: set[Path] = set()
+    visits = 0
 
-    def _walk(path: Path):
+    def _walk(
+        path: Path,
+        sheet_path: str,
+        parent: _SheetVisit | None,
+        parent_pin_names: frozenset[str],
+        uuid_path: str,
+        ancestors: frozenset[Path],
+    ) -> Iterator[_SheetVisit]:
+        nonlocal visits
         resolved = path.resolve()
-        if resolved in visited or not path.exists():
+        # Ancestors only: a sheet that re-enters its own chain is circular,
+        # but a sheet placed twice as a *sibling* is two legitimate sheets.
+        if resolved in ancestors or not path.exists():
             return
-        visited.add(resolved)
-        yield Schematic.load(str(path))
+        visits += 1
+        if visits > _MAX_SHEET_VISITS:
+            raise ValueError(
+                f"sheet hierarchy under {sch_path} expands to more than "
+                f"{_MAX_SHEET_VISITS} sheet placements; refusing to walk further"
+            )
+        schematic = Schematic.load(str(path))
+        if parent is None:
+            uuid_path = f"/{getattr(schematic, 'sheet_uuid', '') or ''}"
+        visit = _SheetVisit(
+            sheet_path=sheet_path,
+            schematic=schematic,
+            parent=parent,
+            parent_pin_names=parent_pin_names,
+            uuid_path=uuid_path,
+            source=path,
+        )
+        yield visit
         parent_dir = path.parent
+        child_ancestors = ancestors | {resolved}
         for entry in _get_sheet_entries(path):
-            yield from _walk(parent_dir / entry.filename)
+            segment = entry.sheetname or Path(entry.filename).stem
+            yield from _walk(
+                parent_dir / entry.filename,
+                f"{sheet_path}/{segment}",
+                visit,
+                frozenset(entry.pin_names),
+                f"{uuid_path}/{entry.uuid}",
+                child_ancestors,
+            )
 
-    yield from _walk(Path(sch_path))
+    yield from _walk(Path(sch_path), "", None, frozenset(), "", frozenset())
+
+
+def _instance_reference_map(visit: _SheetVisit) -> dict[str, str]:
+    """Map ``(property "Reference")`` -> this placement's reference designator.
+
+    A ``.kicad_sch`` file stores one ``(property "Reference" ...)`` per
+    symbol — a single value, however many times the sheet is placed — plus
+    an ``(instances ...)`` block that records the *real* designator for each
+    placement, keyed by that placement's instance path::
+
+        (instances
+          (project "chorus"
+            (path "/<root-uuid>/<mcu-a-uuid>" (reference "R1")  (unit 1))
+            (path "/<root-uuid>/<mcu-b-uuid>" (reference "R11") (unit 1))))
+
+    :meth:`Schematic.get_all_pin_nets` keys its result by the *property*
+    reference, so both placements of one file answer ``R1``/``R2`` and the
+    second placement's pads would be attributed to the first's nets.  This
+    returns the rename to apply for :attr:`_SheetVisit.uuid_path`, e.g.
+    ``{"R1": "R11", "R2": "R12"}`` for the ``MCU_B`` placement above
+    (issue #5815).
+
+    Empty — meaning "use the property references as-is" — whenever the file
+    has no ``(instances ...)`` data for this path.
+
+    Callers are expected to invoke this only for a sheet file that really is
+    placed more than once (see :func:`_schematic_pin_to_net`).  A singly
+    placed sheet's property reference *is* its instance reference — KiCad
+    keeps the two in step — so skipping it there costs nothing and spares
+    the common design a second full parse of every sheet.
+    """
+    if not visit.uuid_path:
+        return {}
+    try:
+        doc = parse_file(visit.source)
+    except (OSError, ValueError):  # pragma: no cover - unreadable/odd sheet
+        return {}
+
+    renames: dict[str, str] = {}
+    # Top-level ``(symbol ...)`` children only: ``find_all`` is recursive and
+    # would also return the ``(lib_symbols ...)`` definitions and their nested
+    # unit sub-symbols, none of which describe a placement.
+    for sym in doc.children:
+        if getattr(sym, "name", None) != "symbol" and getattr(sym, "tag", None) != "symbol":
+            continue
+        instances = sym.find("instances")
+        if instances is None:
+            continue
+        prop_ref: str | None = None
+        for prop in sym.find_all("property"):
+            if prop.get_string(0) == "Reference":
+                prop_ref = prop.get_string(1)
+                break
+        if not prop_ref:
+            continue
+        for project in instances.find_all("project"):
+            for path_node in project.find_all("path"):
+                if path_node.get_string(0) != visit.uuid_path:
+                    continue
+                ref_node = path_node.find("reference")
+                inst_ref = ref_node.get_string(0) if ref_node is not None else None
+                if inst_ref and inst_ref != prop_ref:
+                    renames[prop_ref] = inst_ref
+    return renames
+
+
+def _sheet_net_identities(
+    sch: Schematic, sheet_path: str, inherited: dict[str, str]
+) -> dict[str, str]:
+    """Map each label-driven net name on one sheet to its hierarchy-wide identity.
+
+    The result is keyed by the name :meth:`Schematic.get_all_pin_nets`
+    reports for a net on this sheet (a label's text) and valued by the
+    identity KiCad gives that net.  The decision is made from the
+    **provenance of the name on this sheet** — which kind of label drives
+    it *here* — never from the same spelling appearing somewhere else in
+    the hierarchy.  A global ``SENSE`` on the root sheet therefore does not
+    stop a child's unrelated *local* ``SENSE`` from being ``/ChildA/SENSE``
+    (label scope is set by label type, not by text; issue #5826).
+
+    Precedence, highest first, for a name on this sheet:
+
+    1. **Global label or power symbol** — hierarchy-wide by definition;
+       the bare name (``GLOB``, ``GND``, ``+3V3``, ``PWR_FLAG``).
+    2. **Hierarchical label** mating with a named net on the parent — the
+       net crosses the sheet boundary, so it takes the identity the parent
+       already resolved for it (``inherited``).  A root-sheet local label
+       ``BUS`` wired to the ``BUS`` sheet pin makes the child's
+       hierarchical ``BUS`` the net ``/BUS`` too, so the two halves of one
+       physical net share one identity (the case PR #5824 fixed and
+       ``main``'s per-sheet rule missed).  ``kicad-cli`` names such a net
+       after the parent's local label, which is the identity inherited.
+    3. **Hierarchical label with no named parent net** — left bare, as
+       before.  Its KiCad name comes from whatever the parent wires to the
+       sheet pin, which this label-text model cannot see (issue #4099
+       Phase 2).
+    4. **Local label only** — ``f"{sheet_path}/{name}"``.
+
+    Names absent from the result (auto-generated ``Net-(...)``
+    placeholders) are used as-is.
+    """
+    identities: dict[str, str] = {}
+    for label in sch.labels:
+        if label.text:
+            identities[label.text] = f"{sheet_path}/{label.text}"
+    for hl in sch.hier_labels:
+        if hl.text:
+            identities[hl.text] = inherited.get(hl.text, hl.text)
+    for gl in sch.global_labels:
+        if gl.text:
+            identities[gl.text] = gl.text
+    for pwr in sch.power_symbols:
+        if pwr.net_name:
+            identities[pwr.net_name] = pwr.net_name
+    return identities
 
 
 def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
@@ -225,9 +494,7 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     from ``_collect_hierarchy_components``: the latter unifies every pin
     touching a ``PWR_FLAG`` symbol into a single ``PWR_FLAG`` net, which
     loses the VCC/GND distinction and makes LVS spuriously fail on every
-    board that uses PWR_FLAG.  For a single-sheet design (root only) the
-    resolution is byte-identical to the previous behaviour — the loop is
-    simply applied to each recursed sheet in turn.
+    board that uses PWR_FLAG.
 
     The returned value is a net **identity**, not a per-pin display label:
     every pin on one connected component maps to the same string, including
@@ -243,14 +510,48 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     connected to anything on its sheet), matching the convention used for
     unconnected PCB pads.
 
-    Net names local to each sheet are used as-is.  Hierarchical-label /
-    sheet-pin nets therefore resolve to the label name (matching KiCad's
-    common netlist naming).  Full cross-instance sheet-pin unification
-    (the same sub-sheet placed twice under different parent net contexts)
-    is out of scope here (a Phase 2 concern, issue #4099).
+    **Local labels are sheet-qualified** (issues #5809 / #5815 / #5826).
+    A plain ``(label "SENSE")`` is scoped to its sheet, and KiCad names the
+    resulting net with that sheet's path — ``/SENSE`` on the root sheet,
+    ``/SubMcu/DBG_LED`` inside a sheet named ``SubMcu``.  Two sibling
+    sheets that reuse one label text are therefore two nets, not one.
+    Global labels and power-symbol nets keep their bare spelling, and a
+    hierarchical label takes the identity its parent resolved for the
+    mating sheet pin, so a net that crosses a sheet boundary keeps one
+    identity on both sides.  See :func:`_sheet_net_identities` for the
+    precise, per-sheet provenance rules.
+
+    **One sheet file placed twice is two sheets** (issue #5815), each with
+    its own qualification (``/MCU_A/DBG_LED`` vs ``/MCU_B/DBG_LED``) and its
+    own reference designators, taken from each symbol's ``(instances ...)``
+    block via :func:`_instance_reference_map`.  What remains out of scope is
+    the *sheet-pin* half of that story (issue #4099 Phase 2): a hierarchical
+    label whose mating sheet pin is wired to a differently-named net in each
+    parent still resolves from label text alone, so the two placements share
+    one bare identity there instead of inheriting one name per placement.
     """
     out: dict[tuple[str, str], str | None] = {}
-    for sch in _walk_hierarchy_schematics(Path(sch_path)):
+    # Keyed by visit identity (``eq=False`` keeps ``_SheetVisit`` hashable
+    # by object), so a repeated sheet path can never alias another sheet.
+    resolved: dict[_SheetVisit, dict[str, str]] = {}
+    # Materialized because the per-placement reference rename below is only
+    # needed -- and only paid for -- when a sheet *file* carries more than one
+    # placement.  Pre-order is preserved, so ``resolved[visit.parent]`` is
+    # always populated before a child is processed.
+    visits = list(_walk_hierarchy_schematics(Path(sch_path)))
+    placements: dict[Path, int] = {}
+    for visit in visits:
+        key_path = visit.source.resolve()
+        placements[key_path] = placements.get(key_path, 0) + 1
+    for visit in visits:
+        inherited: dict[str, str] = {}
+        if visit.parent is not None:
+            parent_ids = resolved[visit.parent]
+            inherited = {
+                name: parent_ids[name] for name in visit.parent_pin_names if name in parent_ids
+            }
+        identities = _sheet_net_identities(visit.schematic, visit.sheet_path, inherited)
+        resolved[visit] = identities
         # ``get_all_pin_nets`` builds the sheet's connectivity graph once
         # and resolves every ``(ref, number)`` pin against it, instead of
         # ``get_net_for_pin`` rebuilding that graph (an O(wires^2)
@@ -260,7 +561,17 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
         # ``kct check`` run to those redundant rebuilds. Behavior is
         # identical to the historical per-pin loop -- see
         # ``get_all_pin_nets``'s docstring for why.
-        out.update(sch.get_all_pin_nets())
+        # One sheet file placed twice answers the same property-based
+        # reference designators on both placements; rename each placement's
+        # pins to the designator its ``(instances ...)`` block records, so
+        # ``MCU_B``'s pads land on ``R11``/``R12`` rather than overwriting
+        # ``MCU_A``'s ``R1``/``R2`` (issue #5815).  Skipped outright for a
+        # singly-placed sheet -- every sheet in a non-reusing design -- so
+        # the usual case pays no extra parse and is bit-for-bit unchanged.
+        renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
+        for (ref, pad), net in visit.schematic.get_all_pin_nets().items():
+            key = (renames.get(ref, ref), pad)
+            out[key] = identities.get(net, net) if net is not None else None
     return out
 
 
@@ -323,6 +634,23 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
     still mismatches, a pad bound to a *different* unnamed node still
     mismatches because the pad sets differ, and explicitly named nets keep
     exact string equality.
+
+    **A local net's less-qualified spelling is accepted as an alias for
+    its sheet-qualified identity where that is unambiguous** (issues #5809,
+    #5815, #5826).  A local label is a sheet-scoped name: KiCad writes it
+    ``/SENSE`` (root sheet) or ``/SubMcu/SENSE`` (child sheet), while a
+    board may carry ``SubMcu/SENSE`` or, from kicad-tools' pure-Python
+    netlist fallback, bare ``SENSE``.  Such a spelling matches only when it
+    is a variant of exactly one schematic net, is not a net of its own, the
+    board does not also use the qualified spelling, and the schematic net
+    is spelled one consistent way across all of its pads on the board.
+    Nothing broader is relaxed: a different leaf (``/SENSE`` vs
+    ``RETURN``) is a swap and still mismatches; a board name starting with
+    ``/`` must match exactly, so ``/SENSE`` vs ``/SubMcu/SENSE`` (different
+    depths) and ``/MCU/X`` vs ``/AUX/X`` (different sheets) still mismatch;
+    two sibling sheets that each carry a local ``SENSE`` grant no alias at
+    all, so a board that collapses them onto one bare ``SENSE`` still fails
+    on every affected pad.
 
     Args:
         sch_path: Path to a root ``.kicad_sch``.  The full sheet
@@ -448,6 +776,76 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
             sch_groups.setdefault(sch_name, set()).add(key)
             pcb_groups.setdefault(pcb_name, set()).add(key)
 
+    # --- Less-qualified spellings of one local net (#5809 / #5815 / #5826) ---
+    #
+    # A local label's net identity is ``/SENSE`` (root) or ``/SubMcu/SENSE``
+    # (child) in KiCad and in :func:`_schematic_pin_to_net`, but a board may
+    # carry ``SubMcu/SENSE`` (no leading slash) or bare ``SENSE`` (kicad-tools'
+    # pure-Python netlist fallback).  :func:`_is_sheet_path_variant`
+    # nominates such a pair; it is accepted only **where the two documents
+    # prove the spelling cannot mean a second net**.  Four conditions, all
+    # required:
+    #
+    #   1. the board spelling is a variant of exactly one schematic identity.
+    #      Two sibling sheets that each label a net ``SENSE`` give
+    #      ``/A/SENSE`` and ``/B/SENSE``; a board that binds both sheets'
+    #      pads to one bare ``SENSE`` has shorted two nets, so no alias is
+    #      granted and every affected pad is reported (#5815's criterion);
+    #   2. the board spelling is not itself a schematic net identity —
+    #      otherwise a global label / power net named ``SENSE`` would be
+    #      conflated with the local ``/A/SENSE``;
+    #   3. the PCB does not *also* use the qualified spelling anywhere.  A
+    #      board carrying both ``/A/SENSE`` and ``SENSE`` is distinguishing
+    #      two nets; honouring its distinction keeps the mismatch;
+    #   4. the schematic net is spelled **one way** across all of its own
+    #      pads on the board (issue #5826).  A net whose pads carry both
+    #      ``MCU/X`` and ``X`` is split in two on the board — a real open —
+    #      and no pad of it is excused.  Only spellings of *this* net count:
+    #      a pad the board binds to an unrelated net is judged on its own key
+    #      and does not smear its verdict onto the net's other pads.
+    #
+    # This is narrower than "ignore slashes" in every direction that
+    # matters.  A different leaf name is never an alias, so a swap
+    # (``/SENSE`` vs ``RETURN``) is still reported.  A board name that starts
+    # with ``/`` is a fully qualified identity and must match exactly, so
+    # ``/SENSE`` (root) vs ``/SubMcu/SENSE`` (child) — genuinely different
+    # nets in KiCad — and ``/MCU/X`` vs ``/AUX/X`` still mismatch.  And the
+    # tolerance is one-directional: a *schematic* net that is bare while the
+    # PCB is qualified is left alone, because that is the sheet-pin case whose
+    # correct name depends on what the parent wires to the pin (issue #4099
+    # Phase 2); inventing an alias there could paper over a real cross-sheet
+    # binding error.
+    sch_names = {name for name in sch_map.values() if name is not None}
+    pcb_names = {name for name in norm_pcb_map.values() if name is not None}
+    qualified_sch_names = {name for name in sch_names if name.startswith("/")}
+    owners: dict[str, set[str]] = {}
+    for pcb_name in pcb_names:
+        for sch_name in qualified_sch_names:
+            if _is_sheet_path_variant(sch_name, pcb_name):
+                owners.setdefault(pcb_name, set()).add(sch_name)
+    # Every spelling (exact or variant) the board gives each schematic net.
+    spellings: dict[str, set[str]] = {}
+    for key in set(sch_map) & set(pcb_map):
+        sch_name = sch_map[key]
+        pcb_name = norm_pcb_map.get(key)
+        if sch_name is None or pcb_name is None:
+            continue
+        if pcb_name == sch_name or _is_sheet_path_variant(sch_name, pcb_name):
+            spellings.setdefault(sch_name, set()).add(pcb_name)
+
+    def _is_alias_of(qualified: str | None, variant: str | None) -> bool:
+        """True when PCB-side ``variant`` unambiguously means ``qualified``."""
+        if qualified is None or variant is None:
+            return False
+        if not _is_sheet_path_variant(qualified, variant):
+            return False
+        return (
+            owners.get(variant) == {qualified}  # (1) unique owner
+            and variant not in sch_names  # (2) not a net of its own
+            and qualified not in pcb_names  # (3) board keeps the short form
+            and spellings.get(qualified) == {variant}  # (4) one spelling per net
+        )
+
     mismatches: list[LVSMismatch] = []
     for key in all_keys:
         ref, pad = key
@@ -461,6 +859,11 @@ def compare_netlists(sch_path: str | Path, pcb_path: str | Path) -> LVSResult:
             and sch_groups.get(sch_net) == pcb_groups.get(pcb_net)
         ):
             # Same physical node, different invented spelling — not a defect.
+            continue
+        if _is_alias_of(sch_net, pcb_net):
+            # One local net: sheet-qualified on the schematic side, spelled
+            # with a shorter path on the board, and unambiguously the same
+            # net (#5809 / #5815 / #5826).
             continue
         mismatches.append(
             LVSMismatch(

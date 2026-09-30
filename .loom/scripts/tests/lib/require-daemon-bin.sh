@@ -409,7 +409,13 @@ loom_test_require_daemon_bin() {
 
     local sub
     for sub in "$@"; do
-        if ! "$pinned" "$sub" --help >/dev/null 2>&1; then
+        # Deliberately UNQUOTED: an entry may name a NESTED subcommand
+        # ("merge-pr worktree-primary"), and only the leaf distinguishes a
+        # binary that predates the slice under test from one that merely has the
+        # parent group — which for `merge-pr` every daemon since #8124 has. Every
+        # single-word entry splits to itself, so existing callers are unchanged.
+        # shellcheck disable=SC2086
+        if ! "$pinned" $sub --help >/dev/null 2>&1; then
             echo "FATAL: $bin does not know the '$sub' subcommand," >&2
             echo "so it predates the port this suite exists to verify." >&2
             echo "Rebuild it: cargo build --package loom-daemon" >&2

@@ -225,13 +225,25 @@ report still read `kicad-tools 0.20.0`.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `kicad_tools_version` | string | yes | Release string of the producing kicad-tools |
-| `dirty` | boolean | yes | `true` when the producing checkout had uncommitted changes |
+| `dirty` | boolean | yes | `true` when the engine's own checkout had uncommitted changes; always `false` when the engine is a VCS pin or its provenance is unknown |
 | `manufacturer` | string | yes | Resolved fabrication tier the gates ran against |
-| `commit` | string | no | Git commit of the producing checkout; omitted outside a checkout |
+| `commit` | string | no | Commit of the **engine**; omitted when unknown (see below) |
 | `source_digest` | string | no | SHA256 over the installed package's Python sources — distinguishes two runs from the same commit but different working trees |
 | `kicad_cli_version` | string | no | Native KiCad version used for the cross-gate; omitted when `kicad-cli` was unavailable |
 | `rules_digest` | string | no | SHA256 over the resolved `.kicad_pro` / `.kicad_dru` / net-class-map inputs — a rule change with no board edit is visible here |
 | `recipe` | string | no | Board recipe identity, when the board declares one |
+
+`commit` and `dirty` are only filled in from provenance that demonstrably
+belongs to the engine, in this order: the installed distribution's PEP 610
+`direct_url.json` (`vcs_info.commit_id`, written by a `pip install git+…` VCS
+pin), then the git checkout that `git ls-files` confirms tracks the imported
+`kicad_tools` package (an editable install, or a run straight out of a clone).
+With neither available — an ordinary wheel install — `commit` is **omitted**
+and `dirty` is `false`. In particular, kct installed into another repository's
+`.venv` no longer reports that repository's HEAD or dirty state as its own
+(issue #5812). `source_digest` is an independent concept: it is always
+available, so an absent `commit` still leaves a report's engine sources
+identifiable.
 
 Consumers comparing two reports should treat any change in `source_digest`,
 `commit` (with `dirty: false`), `kicad_cli_version` or `rules_digest` as
@@ -327,18 +339,35 @@ schematic pin's net name matches the corresponding PCB pad's net name.
     {
       "ref": "D1",
       "pad": "1",
-      "schematic_net": "LED_ANODE",
-      "pcb_net": "GND"
+      "schematic_net": "GND",
+      "pcb_net": "LED_ANODE"
     },
     {
       "ref": "D1",
       "pad": "2",
-      "schematic_net": "GND",
-      "pcb_net": "LED_ANODE"
+      "schematic_net": "/LED_ANODE",
+      "pcb_net": "GND"
     }
   ]
 }
 ```
+
+### Net-name spelling on the `schematic_net` side
+
+`schematic_net` uses **KiCad's own net-naming rules**, so a net driven by a
+plain schematic label carries its sheet path: `/LED_ANODE` on the root sheet,
+`/SubMcu/DBG_LED` inside a sheet whose `Sheetname` is `SubMcu` (issue #5809 —
+before that fix these were reported bare, which made every locally-labelled
+net a false mismatch against a KiCad-created board). Names that are *not*
+sheet-scoped stay bare: global labels, power-symbol nets (`GND`, `+3V3`,
+`PWR_FLAG`) and hierarchical sheet-pin nets.
+
+`pcb_net` is always the literal `(net K "NAME")` text from the `.kicad_pcb`.
+A board may spell a local net either way — KiCad writes `/LED_ANODE`,
+kicad-tools' pure-Python netlist fallback writes `LED_ANODE` — and the
+comparison accepts the bare spelling as the same net wherever that is
+unambiguous, so a mismatch record can legitimately show the two spellings on
+its two sides without the *other* pads on that net being reported.
 
 ### Field reference
 
@@ -349,7 +378,7 @@ schematic pin's net name matches the corresponding PCB pad's net name.
 | `mismatches`                   | array   | yes      | Always present; empty when clean (never omitted, never `null`) |
 | `mismatches[*].ref`            | string  | yes      | Reference designator (e.g. `"R1"`) |
 | `mismatches[*].pad`            | string  | yes      | Pin/pad number as a string (e.g. `"1"`) |
-| `mismatches[*].schematic_net`  | string &#124; null | yes | Net the pin sits on in the schematic, or `null` for floating |
+| `mismatches[*].schematic_net`  | string &#124; null | yes | Net the pin sits on in the schematic, or `null` for floating. Sheet-qualified for local labels (`"/LED_ANODE"`); bare for global / power / sheet-pin nets |
 | `mismatches[*].pcb_net`        | string &#124; null | yes | Net the pad sits on in the PCB, or `null` for unconnected |
 
 ### `mismatches` is always present

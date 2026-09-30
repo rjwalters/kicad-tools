@@ -3,9 +3,9 @@
 ``load_pcb_for_routing`` / ``load_pads_for_analysis`` special-cased ONLY
 90/270-degree pads (an axis swap); any other rotation (e.g. 30 or 45 degrees)
 left the LOCAL (pre-rotation) width/height in place as if the footprint were
-still axis-aligned.  ``LatticeObstacleModel.pad_rects`` and the mesh engine's
-``_keepouts`` / ``_keepouts_layer`` then built their axis-aligned keep-out
-rectangles directly from ``pad.width`` / ``pad.height`` -- for a rotated pad
+still axis-aligned.  ``LatticeObstacleModel.pad_rects`` and the mesh engine's keep-out builders
+then built their axis-aligned keep-out rectangles directly from
+``pad.width`` / ``pad.height`` -- for a rotated pad
 the TRUE board-space bounding box is wider than either raw side length in
 general, so this under-estimated the keep-out extent (a real clearance-
 avoidance gap).
@@ -18,9 +18,15 @@ This module pins:
    derives ``(width, height, rotation)`` from a pad's absolute board-frame
    angle, preserving the pre-#4910 cardinal-swap ``width``/``height`` values
    byte-for-byte while additionally exposing the residual rotation.
-3. ``LatticeObstacleModel.pad_rects`` and the mesh ``MeshPathfinder._keepouts``
-   / ``_keepouts_layer`` -- the actual search-time obstacle models -- now
-   produce the wider, rotation-correct AABB instead of the under-sized one.
+3. ``LatticeObstacleModel.pad_rects`` -- the lattice's search-time obstacle
+   model -- now produces the wider, rotation-correct AABB instead of the
+   under-sized one.
+4. The mesh engine's per-leg consult.  Epic #5509 Phase 3e retired its
+   ``_keepouts`` / ``_keepouts_layer`` rectangles in favour of measuring
+   the pad exactly through the shared clearance kernel
+   (``MeshPathfinder._foreign_pads`` -> ``ObstacleModel.is_clear``), so the
+   property is pinned on the verdict rather than on a box's dimensions --
+   a leg inside a rotated pad's copper must still be refused.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools.router.clearance_kernel import copper_gap
 from kicad_tools.router.io import (
     _resolve_pad_dims_and_rotation,
     load_pads_for_analysis,
@@ -37,6 +44,8 @@ from kicad_tools.router.io import (
 )
 from kicad_tools.router.lattice.pathfinder import LatticePathfinder
 from kicad_tools.router.layers import Layer, LayerStack
+from kicad_tools.router.mesh.kernel_adapter import copper_leg, pad_of
+from kicad_tools.router.mesh.obstacles import ObstacleModel
 from kicad_tools.router.mesh.pathfinder import MeshPathfinder
 from kicad_tools.router.primitives import Pad, pad_half_extents
 from kicad_tools.router.rules import DesignRules
@@ -194,12 +203,23 @@ def test_lattice_pad_rects_widens_for_non_cardinal_rotation() -> None:
     assert half_h > naive_half_h
 
 
-# -- MeshPathfinder._keepouts / _keepouts_layer -------------------------------
+# -- MeshPathfinder._foreign_pads / _foreign_pads_layer -----------------------
+#
+# Epic #5509 Phase 3e replaced the mesh engine's inflated keep-out rectangles
+# (``_keepouts`` / ``_keepouts_layer``) with the pads themselves, measured
+# exactly through the shared clearance kernel.  The #4910 property survives
+# that switch and is *strengthened* by it -- the kernel rotates the true
+# rectangle rather than bounding it -- so these two items now pin the property
+# where it now lives: on the verdict ``ObstacleModel.is_clear`` returns.
+#
+# The probe leg is placed in the wedge a 45-degree pad's rotated copper
+# occupies but its un-rotated ``width x height`` box does not.  The pre-#4910
+# bug accepted a leg there (the naive box was too small); the exact model must
+# still refuse it.
 
 
-def test_mesh_keepouts_widens_for_non_cardinal_rotation() -> None:
-    rules = _rules()
-    rotated = Pad(
+def _mesh_rotated_pad(rotation: float = 45.0) -> Pad:
+    return Pad(
         x=10.0,
         y=10.0,
         width=2.0,
@@ -209,58 +229,97 @@ def test_mesh_keepouts_widens_for_non_cardinal_rotation() -> None:
         ref="ROT",
         pin="1",
         layer=Layer.F_CU,
-        rotation=45.0,
+        rotation=rotation,
     )
+
+
+def _leg_in_the_rotation_wedge(pad: Pad) -> tuple[tuple[float, float], tuple[float, float]]:
+    """A short leg on copper the pad only has *because* it is rotated.
+
+    Placed at 90 % of the way along the pad's own long axis, carried into the
+    board frame by the same forward transform the pad model uses
+    (:func:`~kicad_tools.core.geometry.rotate_pad_offset`).  That point is
+    inside the rotated copper by construction and -- asserted below -- outside
+    the naive axis-aligned ``width x height`` box the #4910 bug built its
+    keep-out from, which is what makes the refusal a statement about rotation.
+    """
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    dx, dy = rotate_pad_offset(0.9 * pad.width / 2.0, 0.0, pad.rotation)
+    px, py = pad.x + dx, pad.y + dy
+    assert abs(dy) > pad.height / 2.0, "probe point is not outside the naive box"
+    return (px, py), (px + 0.001, py + 0.001)
+
+
+def test_mesh_obstacle_model_refuses_a_leg_inside_the_rotated_pad_copper() -> None:
+    rules = _rules()
+    rotated = _mesh_rotated_pad()
     pf = MeshPathfinder(_OUTLINE, [rotated], rules)
-    agent_radius = rules.trace_width / 2.0 + rules.trace_clearance
 
-    keepouts = pf._keepouts(net=1, agent_radius=agent_radius)
-    assert len(keepouts) == 1
-    rect = keepouts[0]
-    half_w = (rect[2] - rect[0]) / 2.0
-    half_h = (rect[3] - rect[1]) / 2.0
+    pads = pf._foreign_pads(net=1)
+    assert pads == [rotated], "the other-net pad is the obstacle, verbatim"
 
-    expected_half_w, expected_half_h = pad_half_extents(rotated)
-    expected_half_w += agent_radius
-    expected_half_h += agent_radius
-    naive_half_w = rotated.width / 2.0 + agent_radius
-    naive_half_h = rotated.height / 2.0 + agent_radius
+    model = ObstacleModel(
+        _OUTLINE,
+        [],
+        [],
+        half=rules.trace_width / 2.0,
+        clearance=rules.trace_clearance,
+        pads=pads,
+    )
+    a, b = _leg_in_the_rotation_wedge(rotated)
+    assert not model.is_clear(a, b), (
+        "a leg inside the 45-degree pad's rotated copper must be refused -- "
+        "the #4910 regression was accepting it because the obstacle box was "
+        "built from the raw width/height"
+    )
 
-    assert half_w == pytest.approx(expected_half_w)
-    assert half_h == pytest.approx(expected_half_h)
-    assert half_w > naive_half_w
-    assert half_h > naive_half_h
+    # Control: the refusal is about ROTATION, not about the leg being near
+    # some pad.  The same leg overlaps the rotated pad's copper (negative
+    # edge-to-edge gap) but sits outside an otherwise identical UPRIGHT pad's
+    # copper (positive gap) -- so a model built from the raw width/height,
+    # which is the upright box, could never have reached the first verdict.
+    upright = _mesh_rotated_pad(rotation=0.0)
+    probe = copper_leg(a, b, rules.trace_width / 2.0)
+    assert copper_gap(probe, pad_of(rotated)) < 0.0
+    assert copper_gap(probe, pad_of(upright)) > 0.0
 
 
-def test_mesh_keepouts_layer_widens_for_non_cardinal_rotation() -> None:
+def test_mesh_foreign_pads_layer_keeps_the_per_layer_mask() -> None:
+    """An SMD pad blocks only its own layer; a PTH pad blocks every layer."""
     rules = _rules()
     stack = LayerStack.two_layer()
-    rotated = Pad(
+    smd = _mesh_rotated_pad()
+    pf = MeshPathfinder(_OUTLINE, [smd], rules, layer_stack=stack)
+
+    front = stack.layer_enum_to_index(Layer.F_CU)
+    back = stack.layer_enum_to_index(Layer.B_CU)
+    assert pf._foreign_pads_layer(net=1, layer_idx=front) == [smd]
+    assert pf._foreign_pads_layer(net=1, layer_idx=back) == []
+
+    pth = Pad(
         x=10.0,
         y=10.0,
         width=2.0,
         height=1.0,
         net=2,
         net_name="N2",
-        ref="ROT",
+        ref="PTH",
         pin="1",
         layer=Layer.F_CU,
         rotation=45.0,
+        through_hole=True,
     )
-    pf = MeshPathfinder(_OUTLINE, [rotated], rules, layer_stack=stack)
-    agent_radius = rules.trace_width / 2.0 + rules.trace_clearance
-    layer_idx = stack.layer_enum_to_index(Layer.F_CU)
+    pf_pth = MeshPathfinder(_OUTLINE, [pth], rules, layer_stack=stack)
+    assert pf_pth._foreign_pads_layer(net=1, layer_idx=front) == [pth]
+    assert pf_pth._foreign_pads_layer(net=1, layer_idx=back) == [pth]
 
-    keepouts = pf._keepouts_layer(net=1, agent_radius=agent_radius, layer_idx=layer_idx)
-    assert len(keepouts) == 1
-    rect = keepouts[0]
-    half_w = (rect[2] - rect[0]) / 2.0
-    half_h = (rect[3] - rect[1]) / 2.0
 
-    naive_half_w = rotated.width / 2.0 + agent_radius
-    naive_half_h = rotated.height / 2.0 + agent_radius
-    assert half_w > naive_half_w
-    assert half_h > naive_half_h
+def test_mesh_foreign_pads_excludes_same_net_copper() -> None:
+    rules = _rules()
+    own = _mesh_rotated_pad()
+    pf = MeshPathfinder(_OUTLINE, [own], rules)
+    assert pf._foreign_pads(net=own.net) == []
 
 
 # -- End-to-end: the .kicad_pcb parsers actually populate Pad.rotation --------

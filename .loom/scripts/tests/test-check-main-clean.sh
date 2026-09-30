@@ -39,6 +39,10 @@
 #   - the breadcrumb comment never contains the raw machine hostname — it is
 #     redacted behind a short, stable, non-reversible `host-<hash>` identifier
 #     (#6189)
+#   - the host-local config overlay `.loom-local/local.json` is Loom-owned: a
+#     tree whose only untracked path is that overlay reports clean and survives
+#     `--quarantine` untouched, even in a repo whose .gitignore predates the fix
+#     (#8075)
 #
 # Usage:
 #   ./.loom/scripts/tests/test-check-main-clean.sh
@@ -187,8 +191,8 @@ echo "Test 12: baseline flags a genuinely-new file (exit 3)"
 echo "contamination" > "$REPO/new-contamination.txt"
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -q "new-contamination.txt" \
-   && ! echo "$out" | grep -q "preexisting.txt"; then
+   && grep -q "new-contamination.txt" <<<"$out" \
+   && ! grep -q "preexisting.txt" <<<"$out"; then
     pass "exit 3 flagging only the new path, not pre-existing dirt"
 else
     fail "expected 3 reporting only new-contamination.txt, got rc=$RC; out=$out"
@@ -200,8 +204,8 @@ echo "Test 13: baseline offending list excludes pre-existing dirt"
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 offending=$(echo "$out" | sed -n '/Offending changes:/,$p')
 if [[ "$RC" -eq 3 ]] \
-   && echo "$offending" | grep -q "new-contamination.txt" \
-   && ! echo "$offending" | grep -q "preexisting.txt"; then
+   && grep -q "new-contamination.txt" <<<"$offending" \
+   && ! grep -q "preexisting.txt" <<<"$offending"; then
     pass "offending list contains only the new path"
 else
     fail "expected offending list with only new path, got rc=$RC; offending=$offending"
@@ -212,7 +216,7 @@ rm -f "$REPO/new-contamination.txt"
 echo "Test 14: missing baseline file falls back to whole-status (fail-safe)"
 # preexisting.txt is still dirty; with a missing baseline the check must hard-fail.
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$REPO/.loom/does-not-exist.txt" 2>&1 ); RC=$?
-if [[ "$RC" -eq 3 ]] && echo "$out" | grep -qi "missing or unreadable"; then
+if [[ "$RC" -eq 3 ]] && grep -qi "missing or unreadable" <<<"$out"; then
     pass "missing baseline warns and hard-fails on pre-existing dirt"
 else
     fail "expected 3 + fallback warning, got rc=$RC; out=$out"
@@ -265,8 +269,8 @@ git -C "$REPO" add stray_module.py
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 offending=$(echo "$out" | sed -n '/Offending changes:/,$p')
 if [[ "$RC" -eq 3 ]] \
-   && echo "$offending" | grep -q "stray_module.py" \
-   && ! echo "$offending" | grep -q "baseline_mod.py"; then
+   && grep -q "stray_module.py" <<<"$offending" \
+   && ! grep -q "baseline_mod.py" <<<"$offending"; then
     pass "exit 3 naming the new staged module, ignoring the baselined change"
 else
     fail "expected 3 reporting only stray_module.py, got rc=$RC; offending=$offending"
@@ -328,9 +332,9 @@ echo "Test 19: real stray still flagged, Loom transient not (exit 3)"
 echo "real contamination" > "$REPO/stray_source.py"
 out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -q "stray_source.py" \
-   && ! echo "$out" | grep -q "sweep-checkpoint" \
-   && ! echo "$out" | grep -q ".loom-managed"; then
+   && grep -q "stray_source.py" <<<"$out" \
+   && ! grep -q "sweep-checkpoint" <<<"$out" \
+   && ! grep -q ".loom-managed" <<<"$out"; then
     pass "exit 3 naming the real stray, excluding Loom transients"
 else
     fail "expected 3 reporting only stray_source.py, got rc=$RC; out=$out"
@@ -351,8 +355,8 @@ echo '{"phase":"judge-done"}' > "$REPO/.loom/sweep-checkpoint/issue-1.json"
 echo "def widget(): return 42" > "$REPO/leaked_module.py"
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -q "leaked_module.py" \
-   && ! echo "$out" | grep -q "sweep-checkpoint"; then
+   && grep -q "leaked_module.py" <<<"$out" \
+   && ! grep -q "sweep-checkpoint" <<<"$out"; then
     pass "exit 3 flags the real leak, ignores the mid-sweep checkpoint"
 else
     fail "expected 3 reporting only leaked_module.py, got rc=$RC; out=$out"
@@ -510,8 +514,8 @@ echo "Test 25: without --quarantine, detection stays a hard-fail (exit 3)"
 echo "leak" > "$REPO/leaked.txt"
 out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -qi "ALL-OR-NOTHING" \
-   && echo "$out" | grep -q -- "--quarantine"; then
+   && grep -qi "ALL-OR-NOTHING" <<<"$out" \
+   && grep -q -- "--quarantine" <<<"$out"; then
     pass "exit 3 with all-or-nothing remediation guidance (no piecemeal restore)"
 else
     fail "expected 3 + all-or-nothing guidance, got rc=$RC; out=$out"
@@ -1039,6 +1043,73 @@ else
     fail "expected no raw hostname in the posted body and a stable host-<hash> id, got rc1=$RC1 rc2=$RC2 raw_host='$RAW_HOST' body1='$BODY1' body2='$BODY2' out1='$out1' out2='$out2'"
 fi
 rm -rf "$GHDIR" "$REPO"
+
+# ========================================================================
+# The host-local config overlay is Loom-owned, never quarantine fodder (#8075)
+# ========================================================================
+# `.loom-local/local.json` is the highest-precedence config tier and is ungitted
+# by design. In a consumer repo whose installed loom-managed .gitignore block
+# predates #8075 it surfaces as `?? .loom-local/` — untracked dirt that
+# `--quarantine` would stash away between sweep waves, silently reverting
+# whatever the operator overrode there (e.g. a per-repo model pin) with no
+# signal anywhere. The internal LOOM_OWNED_PREFIXES filter must exclude it
+# regardless of the consumer's .gitignore currency, exactly as it does for
+# `.loom/sweep-checkpoint/` above.
+
+echo "Test 45: .loom-local/ overlay survives --quarantine and reports clean (#8075)"
+# make_repo_stale_gitignore's .gitignore ignores ONLY .loom/worktrees/, so this
+# fixture reproduces a consumer repo that has not yet re-synced the fixed block.
+REPO=$(make_repo_stale_gitignore)
+SNAP="$REPO/.loom/sweep-checkpoint/main-clean-baseline-loomlocal.txt"
+( cd "$REPO" && "$SCRIPT" --snapshot "$SNAP" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -ne 0 ]]; then fail "Test 45 setup: --snapshot expected 0, got $RC"; fi
+
+# The operator writes the overlay AFTER the baseline snapshot — i.e. it is new
+# dirt as far as the baseline is concerned, which is the dangerous case.
+mkdir -p "$REPO/.loom-local"
+OVERLAY="$REPO/.loom-local/local.json"
+printf '{"autonomous":{"model":"opus"}}\n' > "$OVERLAY"
+OVERLAY_CONTENT=$(cat "$OVERLAY")
+
+# Sanity: git really does see it as untracked dirt in this fixture.
+RAW_STATUS=$(git -C "$REPO" status --porcelain)
+if ! grep -q '\.loom-local' <<<"$RAW_STATUS"; then
+    fail "Test 45 setup: expected an untracked .loom-local/ in a stale-gitignore repo"
+fi
+
+out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" --quarantine \
+       --label "run=RUNID-8075 issue=8075" 2>&1 ); RC=$?
+STASH_COUNT=$(git -C "$REPO" stash list | wc -l | tr -d ' ')
+
+if [[ "$RC" -eq 0 ]] \
+   && [[ -f "$OVERLAY" ]] \
+   && [[ "$(cat "$OVERLAY")" == "$OVERLAY_CONTENT" ]] \
+   && [[ "$STASH_COUNT" -eq 0 ]] \
+   && ! grep -q '\.loom-local' <<<"$out"; then
+    pass "--quarantine reports clean and leaves .loom-local/local.json in place"
+else
+    fail "expected rc=0, overlay intact, no stash; got rc=$RC exists=$([[ -f "$OVERLAY" ]] && echo y || echo n) stashes=$STASH_COUNT out=$out"
+fi
+
+# The same must hold for plain detection mode (no baseline, no quarantine).
+( cd "$REPO" && "$SCRIPT" >/dev/null 2>&1 ); RC=$?
+if [[ "$RC" -eq 0 && -f "$OVERLAY" ]]; then
+    pass "plain detection also treats .loom-local/ as Loom-owned (exit 0)"
+else
+    fail "expected 0 from plain detection with the overlay still present, got rc=$RC overlay_exists=$([[ -f "$OVERLAY" ]] && echo y || echo n)"
+fi
+
+# ...and a real stray alongside the overlay is still caught, naming only itself.
+echo "def widget(): return 42" > "$REPO/leaked_module.py"
+out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
+if [[ "$RC" -eq 3 ]] \
+   && grep -q "leaked_module.py" <<<"$out" \
+   && ! grep -q '\.loom-local' <<<"$out"; then
+    pass "a real stray beside the overlay is still flagged, the overlay is not"
+else
+    fail "expected 3 naming only leaked_module.py, got rc=$RC; out=$out"
+fi
+rm -rf "$REPO"
 
 # -------- Summary --------
 echo ""

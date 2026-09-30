@@ -114,7 +114,9 @@ file_size() {
     [[ "$v" =~ ^[0-9]+$ ]] || v=0
     printf '%s\n' "$v"
 }
-epoch_to_date()    { date -r "$1" +%Y-%m-%d 2>/dev/null || date -d "@$1" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d; }
+# Issue #8504: -u throughout — this feeds the machine-readable `date` field
+# in index.json, so it must be the UTC calendar day, not the host-local one.
+epoch_to_date()    { date -u -r "$1" +%Y-%m-%d 2>/dev/null || date -u -d "@$1" +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d; }
 iso_now()          { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # ---------------------------------------------- resolve enable + destination ---
@@ -272,7 +274,7 @@ write_index() {
       obj="$(jq -n \
         --arg id "$agent_id" --arg role "$role" --arg desc "$desc" \
         --arg issue "$issue" --arg model "$model" \
-        --arg start "$start" --arg end "$end" \
+        --arg start "$start" --arg range_end "$end" \
         --arg arm "$ARM" --arg attempt "$ATTEMPT" \
         --arg tr "subagents/$agent_id.jsonl" --arg meta "subagents/$agent_id.meta.json" \
         '{agent_id:$id,
@@ -283,7 +285,7 @@ write_index() {
           arm:(($arm|select(.!="")) // null),
           attempt:(($attempt|select(.!="")|tonumber?) // null),
           start_ts:(($start|select(.!="")) // null),
-          end_ts:(($end|select(.!="")) // null),
+          end_ts:(($range_end|select(.!="")) // null),
           transcript:$tr, meta:$meta}')"
       acc="$acc$obj"$'\n'
     done < <(find "$subdir" -maxdepth 1 -name '*.meta.json' 2>/dev/null | sort)

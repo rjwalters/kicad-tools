@@ -87,6 +87,18 @@ field() { # <output> <KEY>
     grep -E "^$2=" <<<"$1" | head -n 1 | cut -d= -f2-
 }
 
+# eval_var <output> <VAR> - the documented curator.md consumer pattern itself:
+# `eval "$(...)"` the whole KEY=VALUE block, then read one variable back. Used
+# for #8323 regression coverage: a naive line-based `field()`/`grep` extractor
+# would still "pass" against the pre-fix unquoted multi-line bug (it only ever
+# reads the first line), so these assertions must go through a real `eval`
+# to catch a value whose second+ line breaks it. `rc` is intentionally left
+# in the caller's hands (not `set -e` here) so a failing eval is itself an
+# assertable outcome rather than aborting the whole suite.
+eval_var() {
+    printf '%s\n' "$1" | bash -c 'eval "$(cat)" && printf "%s" "${!1}"' _ "$2"
+}
+
 echo "Testing dep-recheck-fingerprint.sh..."
 echo ""
 
@@ -119,7 +131,12 @@ assert_ne "" "$(field "$out1" CONCLUSION_HASH)" "T1c: CONCLUSION_HASH is non-emp
 # --- T2: no linked PR at all -> VERDICT=clear, empty BLOCKERS ---------------
 out="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin)"
 assert_eq "clear" "$(field "$out" VERDICT)" "T2: an empty prs list defaults to VERDICT=clear"
-assert_eq "" "$(field "$out" BLOCKERS)" "T2: BLOCKERS is empty when there are no linked PRs"
+# An empty value is now the same shell_quote()'d `''` literal that REFS has
+# always used for its own empty case (#8323 made BLOCKERS/DEPS consistent
+# with REFS's existing quoting) -- eval still resolves it to an empty string,
+# which is the only thing any documented consumer reads.
+assert_eq "''" "$(field "$out" BLOCKERS)" "T2: BLOCKERS renders as an empty shell_quote()'d literal when there are no linked PRs"
+assert_eq "" "$(eval_var "$out" BLOCKERS)" "T2: eval-consumed BLOCKERS resolves to an empty string when there are no linked PRs"
 
 # --- T3: THE #7281 REGRESSION - transient UNKNOWN must not flip the verdict -
 # A PR blocking purely on merge-state (no blocking label): CONFLICTING today.
@@ -164,6 +181,17 @@ assert_eq "clear" "$(field "$out_merged" VERDICT)" "T5d: a MERGED PR no longer b
 assert_ne "$(field "$out1" CONCLUSION_HASH)" "$(field "$out_merged" CONCLUSION_HASH)" \
     "T5e: OPEN -> MERGED (a real change) changes CONCLUSION_HASH"
 
+# T5f/T5g (#8253): once a PR merges, GitHub stops computing mergeability and
+# can read mergeable/mergeStateStatus back as UNKNOWN non-deterministically.
+# That transient reading must not move CONCLUSION_HASH for an already-MERGED
+# PR the way it correctly does for an OPEN one (T3).
+FIXTURE_MERGED_CONCRETE='{"prs":[{"number":4743,"state":"MERGED","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out_merged_concrete="$(echo "$FIXTURE_MERGED_CONCRETE" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "$(field "$out_merged_concrete" CONCLUSION_HASH)" "$(field "$out_merged" CONCLUSION_HASH)" \
+    "T5f: a MERGED PR's mergeable flicker (MERGEABLE/CLEAN <-> UNKNOWN) does NOT change CONCLUSION_HASH"
+assert_eq "4743:MERGED:block-label:n/a" "$(field "$out_merged" BLOCKERS)" \
+    "T5g: a non-OPEN PR's BLOCKERS line reports a fixed n/a merge-state bucket, not its (meaningless) mergeability reading"
+
 # --- T6: label ordering churn from the API never looks like a changed
 #         conclusion (labels are sorted before hashing) -------------------
 FIXTURE_LABELS_A='{"prs":[{"number":1,"state":"OPEN","labels":["loom:blocked","loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
@@ -187,6 +215,15 @@ assert_eq "doctor cycle exhausted" "$(field "$out" BLOCK_REASON)" "T7b: --block-
 out2="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "Sweep coordination: blocking")"
 assert_ne "$(field "$out" CONCLUSION_HASH)" "$(field "$out2" CONCLUSION_HASH)" \
     "T7c: a changed --block-reason (same verdict) still changes CONCLUSION_HASH"
+# #8254: --block-reason is agent-authored prose, so it is canonicalized (trim,
+# collapse internal whitespace, casefold) before hashing -- otherwise three
+# spellings of one unchanged state read as three changed conclusions, which is
+# the #557/#298 churn shape on the one input still open to it.
+out_case="$(echo '{"prs":[]}' | "$TARGET_SCRIPT" dep-recheck --stdin --verdict blocked --block-reason "  Doctor   Cycle	Exhausted ")"
+assert_eq "$(field "$out" CONCLUSION_HASH)" "$(field "$out_case" CONCLUSION_HASH)" \
+    "T7d: a --block-reason differing only in case/whitespace yields the SAME CONCLUSION_HASH"
+assert_eq "  Doctor   Cycle	Exhausted " "$(field "$out_case" BLOCK_REASON)" \
+    "T7e: the echoed BLOCK_REASON stays verbatim -- only the hash input is canonicalized"
 
 # --- T8: --orthogonal folds into the hash without disturbing the ordinary
 #         (empty) case -------------------------------------------------------
@@ -232,52 +269,54 @@ assert_eq "$(field "$p1" CONCLUSION_HASH)" "$(field "$p_reordered" CONCLUSION_HA
 STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
+# The stub is REPO-AWARE (#8502): it looks for a repo-qualified fixture
+# `<owner>__<name>-issue-N.json` first and only then the unqualified
+# `issue-N.json`. Every pre-#8502 test passes `--repo owner/repo` and ships
+# only unqualified fixtures, so all of them keep resolving exactly as before
+# via the fallback. The qualified form is what lets T15i assert *which* repo a
+# cross-repo `owner/repo#N` reference was looked up in — without it the stub
+# answers the same JSON for every repo and the assertion would pass even if
+# the invoking repo were used, which is the bug itself.
 cat >"$STUB_DIR/gh" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 D="${LOOM_TEST_STUB_DIR:?stub gh: LOOM_TEST_STUB_DIR not set}"
 
+# fixture <kind> <number> <repo> - repo-qualified fixture, else unqualified.
+fixture() {
+  local kind="$1" num="$2" repo="${3:-}" f
+  if [[ -n "$repo" ]]; then
+    f="$D/${repo//\//__}-$kind-$num.json"
+    [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+  fi
+  f="$D/$kind-$num.json"
+  [[ -f "$f" ]] && { printf '%s' "$f"; return 0; }
+  return 1
+}
+
 case "${1:-}" in
-  issue)
-    shift
+  issue|pr)
+    kind="$1"; shift
     sub="$1"; shift
     num=""
     jqexpr=""
+    repo=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --json) shift 2 ;;
         --jq) jqexpr="${2:-}"; shift 2 ;;
-        --repo) shift 2 ;;
+        --repo) repo="${2:-}"; shift 2 ;;
         *) [[ -z "$num" ]] && num="$1"; shift ;;
       esac
     done
     if [[ "$sub" == "view" ]]; then
-      f="$D/issue-$num.json"
-      [[ -f "$f" ]] || { echo "stub gh: missing $f" >&2; exit 1; }
+      f="$(fixture "$kind" "$num" "$repo")" || {
+        echo "stub gh: missing fixture for $kind #$num (repo='${repo:-<none>}')" >&2
+        exit 1
+      }
       if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi
     else
-      echo "stub gh: unhandled issue sub '$sub'" >&2; exit 3
-    fi
-    ;;
-  pr)
-    shift
-    sub="$1"; shift
-    num=""
-    jqexpr=""
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --json) shift 2 ;;
-        --jq) jqexpr="${2:-}"; shift 2 ;;
-        --repo) shift 2 ;;
-        *) [[ -z "$num" ]] && num="$1"; shift ;;
-      esac
-    done
-    if [[ "$sub" == "view" ]]; then
-      f="$D/pr-$num.json"
-      [[ -f "$f" ]] || { echo "stub gh: missing $f" >&2; exit 1; }
-      if [[ -n "$jqexpr" ]]; then jq -r "$jqexpr" "$f"; else cat "$f"; fi
-    else
-      echo "stub gh: unhandled pr sub '$sub'" >&2; exit 3
+      echo "stub gh: unhandled $kind sub '$sub'" >&2; exit 3
     fi
     ;;
   *) echo "stub gh: unhandled args: $*" >&2; exit 3 ;;
@@ -365,10 +404,13 @@ assert_eq "clear" "$(field "$out" VERDICT)" "T14e: a checked dependency never bl
 assert_eq "1:checked" "$(field "$out" DEPS)" "T14e: DEPS renders a checked dependency as '<ref>:checked'"
 
 # T14f: no named dependencies at all -> VERDICT=clear, empty DEPS (mirrors
-# dep-recheck's "empty prs -> clear" default).
+# dep-recheck's "empty prs -> clear" default). Like T2/BLOCKERS, the raw
+# value is now the shell_quote()'d `''` literal (#8323); the eval-observable
+# value is still an empty string.
 out="$(echo '{"deps":[]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
 assert_eq "clear" "$(field "$out" VERDICT)" "T14f: an empty deps list defaults to VERDICT=clear"
-assert_eq "" "$(field "$out" DEPS)" "T14f: DEPS is empty when there are no named dependencies"
+assert_eq "''" "$(field "$out" DEPS)" "T14f: DEPS renders as an empty shell_quote()'d literal when there are no named dependencies"
+assert_eq "" "$(eval_var "$out" DEPS)" "T14f: eval-consumed DEPS resolves to an empty string when there are no named dependencies"
 
 # T14g: label churn on a referenced OPEN PR (loom:pr/loom:review-requested/
 # loom:changes-requested/loom:merge-conflict/loom:operator, etc.) is
@@ -378,6 +420,20 @@ out1="$(echo '{"deps":[{"number":6333,"checked":false,"state":"OPEN"}]}' | "$TAR
 out2="$(echo '{"deps":[{"number":6333,"checked":false,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
 assert_eq "$(field "$out1" CONCLUSION_HASH)" "$(field "$out2" CONCLUSION_HASH)" \
     "T14g: identical named-dependency input twice produces an identical hash"
+
+# T14h (#8323 THE REGRESSION): 2+ still-open named dependencies emit a
+# multi-line DEPS value. The documented curator.md consumer is
+# `eval "$(./.loom/scripts/dep-recheck-fingerprint.sh named-dependency ...)"`
+# -- before the fix, an unquoted second+ line (no `KEY=` prefix) was itself
+# executed as a command by `eval` and failed with "command not found" instead
+# of extending the DEPS assignment. Assert the eval actually succeeds AND
+# that DEPS captures every line, not just the first.
+out_2deps="$(echo '{"deps":[{"number":8304,"checked":false,"state":"OPEN"},{"number":8305,"checked":false,"state":"OPEN"}]}' | "$TARGET_SCRIPT" named-dependency --stdin)"
+rc=0
+deps_2="$(eval_var "$out_2deps" DEPS)" || rc=$?
+assert_eq "0" "$rc" "T14h: eval \"\$(...)\" succeeds for a 2-entry DEPS value (#8323)"
+assert_eq "$(printf '8304:OPEN\n8305:OPEN')" "$deps_2" \
+    "T14h: the eval-consumed DEPS variable contains BOTH lines, not just the first (#8323)"
 
 # --- T15: named-dependency live --number mode (stubbed gh) - parses the
 # issue body's own `## Dependencies` checklist and looks up each unchecked
@@ -389,9 +445,12 @@ jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-6333.json"
 out="$("$TARGET_SCRIPT" named-dependency --number 6335 --repo owner/repo)"
 assert_eq "blocked" "$(field "$out" VERDICT)" \
     "T15a: live --number mode parses the body's Dependencies checklist and reports VERDICT=blocked while the named ref is still OPEN"
-# DEPS can span multiple lines (one per named dependency); `field()` above
-# only returns the first, so extract the full multi-line block directly.
-deps="$(printf '%s\n' "$out" | sed -n '/^DEPS=/,/^CONCLUSION_HASH=/p' | sed '$d' | sed 's/^DEPS=//')"
+# DEPS can span multiple lines (one per named dependency); go through the
+# documented eval consumer (#8323) rather than a raw-line grep, since the
+# output is now a single quoted assignment, not a bare multi-line block.
+rc=0
+deps="$(eval_var "$out" DEPS)" || rc=$?
+assert_eq "0" "$rc" "T15b: eval \"\$(...)\" succeeds for named-dependency's live 2-entry DEPS value"
 assert_eq "$(printf '100:checked\n6333:OPEN')" "$deps" \
     "T15b: DEPS includes both the checked (#100) and unchecked-but-open (#6333) entries, and excludes #999 from an unrelated section"
 
@@ -475,6 +534,58 @@ assert_eq "clear" "$(field "$out_phrase3" VERDICT)" \
     "T15h: once every phrase-named reference is resolved, the same body reports VERDICT=clear"
 rm -f "$STUB_DIR/issue-100.json" "$STUB_DIR/issue-6333.json" "$STUB_DIR/issue-8119.json"
 
+# T15i (#8502 THE REGRESSION): a checklist item naming a CROSS-REPO
+# prerequisite as `owner/repo#N` - the shape a Curator in a consumer repo
+# naturally writes, because a bare `#N` would not resolve upstream. Live
+# repro: example-org/example-app#532 named `rjwalters/loom#8257`, the pre-fix regex
+# matched the line not at all (the character after `[ ]` is `r`, which is
+# neither a phrase, a `pr `/`issue ` token, nor a `#`), and the subcommand
+# reported DEPS='' / VERDICT=clear while #8257 was genuinely still OPEN.
+#
+# The two #8257 fixtures are the discriminator, and are deliberately in
+# CONFLICT: the cross-repo one says OPEN, the invoking repo's says CLOSED. A
+# lookup against the invoking repo (`--repo owner/repo`) therefore produces
+# VERDICT=clear, so `blocked` below can ONLY come from resolving the
+# dependency in rjwalters/loom - which is acceptance criterion #2.
+jq -n '{body: "## Dependencies\n\n- [ ] rjwalters/loom#8257: \"dashboard: add an `ephemeral_compute` record type\" — still **OPEN** as of 2026-09-20\n"}' \
+    >"$STUB_DIR/issue-532.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/rjwalters__loom-issue-8257.json"
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/issue-8257.json"
+
+out_xrepo="$("$TARGET_SCRIPT" named-dependency --number 532 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_xrepo" VERDICT)" \
+    "T15i: a '- [ ] owner/repo#N: ...' cross-repo checklist item is parsed AND resolved in that repo, reporting VERDICT=blocked instead of a false clear (#8502)"
+assert_eq "'rjwalters/loom#8257:OPEN'" "$(field "$out_xrepo" DEPS)" \
+    "T15i: DEPS names the cross-repo reference in full (owner/repo#N), not a bare number that could mean either repo"
+assert_eq "rjwalters/loom#8257:OPEN" "$(eval_var "$out_xrepo" DEPS)" \
+    "T15i: the eval-consumed DEPS value survives the '#' in a cross-repo reference (it would otherwise start a bash comment)"
+
+# T15j (#8502): the other direction - once the UPSTREAM issue closes, the same
+# body reports clear and CONCLUSION_HASH moves, exactly as it already does for
+# a same-repo dependency. Note the invoking repo's #8257 fixture is unchanged
+# throughout, so neither the verdict flip nor the hash change can have come
+# from it.
+jq -n '{state: "CLOSED"}' >"$STUB_DIR/rjwalters__loom-issue-8257.json"
+out_xrepo_closed="$("$TARGET_SCRIPT" named-dependency --number 532 --repo owner/repo)"
+assert_eq "clear" "$(field "$out_xrepo_closed" VERDICT)" \
+    "T15j: once the cross-repo dependency closes, the same body reports VERDICT=clear (#8502)"
+assert_ne "$(field "$out_xrepo" CONCLUSION_HASH)" "$(field "$out_xrepo_closed" CONCLUSION_HASH)" \
+    "T15j: a cross-repo dependency's state change moves CONCLUSION_HASH, just as a same-repo one does (#8502)"
+
+# T15k (#8502): a bare `#N` alongside a cross-repo one still resolves against
+# the INVOKING repo - the prefix is optional, and adding it must not redirect
+# every existing same-repo lookup somewhere else. Same number in both repos,
+# deliberately different states, so the two answers cannot be confused.
+jq -n '{state: "OPEN"}' >"$STUB_DIR/rjwalters__loom-issue-8257.json"
+jq -n '{body: "## Dependencies\n\n- [ ] rjwalters/loom#8257: upstream\n- [ ] #8257: local, same number on purpose\n"}' \
+    >"$STUB_DIR/issue-532.json"
+out_mixed="$("$TARGET_SCRIPT" named-dependency --number 532 --repo owner/repo)"
+assert_eq "$(printf '%s\n%s' '8257:CLOSED' 'rjwalters/loom#8257:OPEN')" "$(eval_var "$out_mixed" DEPS)" \
+    "T15k: a bare #N and a cross-repo owner/repo#N with the SAME number are two distinct entries, each resolved in its own repo (#8502)"
+assert_eq "blocked" "$(field "$out_mixed" VERDICT)" \
+    "T15k: the still-OPEN cross-repo half blocks even though the same-numbered local issue is CLOSED (#8502)"
+rm -f "$STUB_DIR/issue-532.json" "$STUB_DIR/issue-8257.json" "$STUB_DIR/rjwalters__loom-issue-8257.json"
+
 # --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
 # among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
 # — none of them a superseding-block label — with no merge-state change must
@@ -520,6 +631,24 @@ assert_ne "$(field "$out_pr" CONCLUSION_HASH)" "$(field "$out_pr_conflicting" CO
     "T18a: mergeable MERGEABLE/CLEAN -> CONFLICTING (labels unchanged) changes CONCLUSION_HASH"
 assert_eq "blocked" "$(field "$out_pr_conflicting" VERDICT)" \
     "T18b: CONFLICTING merge state alone (no superseding label) is still VERDICT=blocked"
+
+# T18c (#8323 THE REGRESSION, dep-recheck side): 2+ blocking PRs emit a
+# multi-line BLOCKERS value -- same eval-breaking shape as T14h/T15b, but for
+# `dep-recheck` rather than `named-dependency`. Assert eval succeeds and
+# BLOCKERS captures every line.
+F_TWO_BLOCKERS='{"prs":[{"number":8304,"state":"OPEN","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"},{"number":8305,"state":"OPEN","labels":["loom:changes-requested"],"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}]}'
+out_two_blockers="$(echo "$F_TWO_BLOCKERS" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+rc=0
+blockers_2="$(eval_var "$out_two_blockers" BLOCKERS)" || rc=$?
+assert_eq "0" "$rc" "T18c: eval \"\$(...)\" succeeds for a 2-entry BLOCKERS value (#8323)"
+assert_eq "$(printf '8304:OPEN:block-label:mergeable\n8305:OPEN:block-label:mergeable')" "$blockers_2" \
+    "T18c: the eval-consumed BLOCKERS variable contains BOTH lines, not just the first (#8323)"
+
+# T18d: the single-entry case (the common case that hid #8323) must keep
+# producing the same unquoted, backward-compatible form it always has.
+out_one_blocker="$(echo "$F_PR" | "$TARGET_SCRIPT" dep-recheck --stdin)"
+assert_eq "6817:OPEN:no-block-label:mergeable" "$(field "$out_one_blocker" BLOCKERS)" \
+    "T18d: a single-entry BLOCKERS value stays unquoted (no shell_quote overhead) after the #8323 fix"
 
 shell_refs() {
     printf '%s\n' "$1" | bash -euc 'eval "$(cat)"; printf "%s" "$REFS"'

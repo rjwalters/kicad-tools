@@ -185,6 +185,19 @@ case "$1" in
     ;;
   api)
     path="$2"
+    # #9548: the REST comment listing, taken from issue-<N>.json's
+    # `comments` (REST-shaped fixtures); fails if comments-fail-<N> exists.
+    if [[ "$path" == repos/*/issues/*/comments ]]; then
+      num="${path#repos/*/issues/}"
+      num="${num%/comments}"
+      if [[ -f "$STUB_DIR_FROM_ENV/comments-fail-$num" ]]; then
+        echo "stub gh: comments fetch failed" >&2
+        exit 1
+      fi
+      canned="$STUB_DIR_FROM_ENV/issue-$num.json"
+      if [[ -f "$canned" ]]; then jq -c '.comments // []' "$canned"; else echo "[]"; fi
+      exit 0
+    fi
     if [[ "$path" == repos/*/issues/*/timeline ]]; then
       num="${path#repos/*/issues/}"
       num="${num%/timeline}"
@@ -207,8 +220,27 @@ esac
 STUB
 chmod +x "$STUB_DIR/gh"
 
+# --- Stub loom-daemon on PATH (#9548) ---------------------------------------
+#   loom-daemon forge trusted-comments  -> stdin filtered to trusted authors,
+#       mirroring the real predicate for these fixtures' shapes (insider
+#       association, or the default fleet App family App-spelled);
+#       $STUB_DIR/trust-verb-missing simulates a binary predating the verb.
+cat > "$STUB_DIR/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub loom-daemon: LOOM_TEST_STUB_DIR not set}"
+if [[ "$1" == "forge" && "$2" == "trusted-comments" && ! -f "$STUB_DIR_FROM_ENV/trust-verb-missing" ]]; then
+  exec jq -c '[.[] | select(
+      ((.author_association // "") | ascii_upcase | IN("OWNER","MEMBER","COLLABORATOR"))
+      or ((.user.login // "") | test("^loom-fleet-dispatch(-[0-9]+)?\\[bot\\]$")))]'
+fi
+echo "error: unrecognized subcommand '$2'" >&2
+exit 2
+STUB
+chmod +x "$STUB_DIR/loom-daemon"
+
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+unset LOOM_DAEMON_BIN
 
 labels_json() {
     # labels_json [label ...] -> the `[{"name":...}, ...]` array body
@@ -220,13 +252,22 @@ labels_json() {
     printf '[%s]' "$labels"
 }
 
+# Fixture comments are REST-shaped and authored by the fleet App unless a test
+# says otherwise: the verdict counts only from a trusted author (#9548).
+FLEET_USER='"user":{"login":"loom-fleet-dispatch[bot]","type":"Bot"},"author_association":"NONE"'
+
 approved_comment() {
     # approved_comment <created_at> <goal-alignment-line>
-    printf '{"createdAt":"%s","body":"**Champion Review: APPROVED**\\n\\nAll criteria passed.\\n\\n%s\\n\\n**Ready for Builder to claim.**"}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"**Champion Review: APPROVED**\\n\\nAll criteria passed.\\n\\n%s\\n\\n**Ready for Builder to claim.**"}' "$FLEET_USER" "$1" "$2"
+}
+
+# authored_approved_comment <created_at> <goal-line> <login> <association>
+authored_approved_comment() {
+    printf '{"user":{"login":"%s"},"author_association":"%s","created_at":"%s","body":"**Champion Review: APPROVED**\\n\\n%s"}' "$3" "$4" "$1" "$2"
 }
 
 plain_comment() {
-    printf '{"createdAt":"%s","body":"%s"}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"%s"}' "$FLEET_USER" "$1" "$2"
 }
 
 # self_generated_comment <created_at> <marker> -- one of THIS SCRIPT's own
@@ -236,7 +277,7 @@ plain_comment() {
 # what let a prior run's own comment get mistaken for a fresh Champion
 # verdict on issue #7287 (#7299).
 self_generated_comment() {
-    printf '{"createdAt":"%s","body":"<!-- champion:promotion-landed-%s -->\\n**Champion: reconciliation note**\\n\\nThis issue carried a `Champion Review: APPROVED` verdict comment, but loom:issue was handled by a prior pass."}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"<!-- champion:promotion-landed-%s -->\\n**Champion: reconciliation note**\\n\\nThis issue carried a `Champion Review: APPROVED` verdict comment, but loom:issue was handled by a prior pass."}' "$FLEET_USER" "$1" "$2"
 }
 
 issue_json() {
@@ -264,6 +305,7 @@ reset_state() {
     rm -f "$STUB_DIR"/issue-fail-* "$STUB_DIR"/verify-fail-* "$STUB_DIR"/timeline-fail-*
     rm -f "$STUB_DIR"/comment-fail-* "$STUB_DIR"/edit-fail-*
     rm -f "$STUB_DIR"/comment-writes.log "$STUB_DIR"/edit-writes.log
+    rm -f "$STUB_DIR"/comments-fail-* "$STUB_DIR"/trust-verb-missing
 }
 
 run_sut() {
@@ -469,7 +511,7 @@ assert_eq "MISMATCH" "$(get_field "$OUT" DECISION)" "(o) DECISION=MISMATCH"
 # (p) Multiple APPROVED comments (re-evaluation): a `labeled loom:issue` event
 #     lands between the two APPROVED comments -- it postdates the OLDEST
 #     comment but predates the NEWEST one. The comparison must use the
-#     NEWEST comment (matching the existing `sort_by(.createdAt) | last`
+#     NEWEST comment (matching the existing `sort_by(.created_at) | last`
 #     selection for APPROVED_COMMENT), so this must still be MISMATCH, not OK.
 reset_state
 issue_json "OPEN" "$(labels_json "loom:auditor")" \
@@ -578,6 +620,43 @@ stage_timeline 408 "[$(labeled_event "2026-08-18T00:05:00Z"), {\"event\":\"label
 run_sut --issue 408
 assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp tier event -> exit 0"
 assert_eq "OK" "$(get_field "$OUT" DECISION)" "(v) DECISION=OK"
+
+echo
+echo "--- #9548: the APPROVED verdict counts only from a trusted author ---"
+
+# (t1) An outsider, a contributor, a user squatting the fleet App's bare name,
+#      and another fleet's App each post the verdict phrase: none of it is a
+#      verdict, so there is nothing to reconcile and nothing is written.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" "[$(authored_approved_comment "2026-09-29T00:00:00Z" "**Goal Alignment**: Tier 1" "drive-by" "NONE"),$(authored_approved_comment "2026-09-29T00:01:00Z" "**Goal Alignment**: Tier 1" "merged-once" "CONTRIBUTOR"),$(authored_approved_comment "2026-09-29T00:02:00Z" "**Goal Alignment**: Tier 1" "loom-fleet-dispatch" "NONE"),$(authored_approved_comment "2026-09-29T00:03:00Z" "**Goal Alignment**: Tier 1" "other-fleet-dispatch[bot]" "NONE")]" > "$STUB_DIR/issue-500.json"
+run_sut --issue 500 --apply
+assert_eq "0" "$RC" "(t1) untrusted APPROVED phrases -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(t1) DECISION=OK (no trusted verdict)"
+assert_eq "" "$EDITS" "(t1) no label edit issued"
+assert_eq "" "$COMMENTS_POSTED" "(t1) no comment posted"
+
+# (t2) An insider's verdict still counts by association.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" "[$(authored_approved_comment "2026-09-29T00:00:00Z" "**Goal Alignment**: Tier 1" "maintainer" "MEMBER")]" > "$STUB_DIR/issue-501.json"
+run_sut --issue 501
+assert_eq "11" "$RC" "(t2) insider APPROVED without loom:issue -> MISMATCH"
+
+# (t3) A binary predating the verb: nothing can be authenticated, so the script
+#      exits 1 and reconciles nothing (never acts on an unverified verdict).
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" "[$(approved_comment "2026-09-29T00:00:00Z" "**Goal Alignment**: Tier 1")]" > "$STUB_DIR/issue-502.json"
+: > "$STUB_DIR/trust-verb-missing"
+run_sut --issue 502 --apply
+assert_eq "1" "$RC" "(t3) old loom-daemon -> exit 1"
+assert_contains "$ERR" "authenticate" "(t3) stderr names the authentication failure"
+assert_eq "" "$EDITS" "(t3) no label edit issued"
+
+# (t4) A failed comment fetch is an environment error, not "no verdict".
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated")" "[]" > "$STUB_DIR/issue-503.json"
+: > "$STUB_DIR/comments-fail-503"
+run_sut --issue 503
+assert_eq "1" "$RC" "(t4) comment fetch failure -> exit 1"
 
 echo
 echo "--- Doc pins: champion-issue-promo.md ships the reordered write-then-verify Step 3b and the Pass 0c reconciliation loop (#6862) ---"

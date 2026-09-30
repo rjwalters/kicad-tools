@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-require-complexity-marker.sh - Tests for require-complexity-marker.sh's
-# fetch-failure vs absent-marker distinction (#4472) and the pre-existing
-# tier-parsing behaviour it must not regress.
+# fetch-failure vs absent-marker distinction (#4472), the pre-existing
+# tier-parsing behaviour it must not regress, and paused story-point estimation.
 #
 # The bug (#4472): the body fetch swallowed every `gh` failure with `|| true`
 # `2>/dev/null`, so a GraphQL quota exhaustion produced an empty body that parsed
@@ -10,6 +10,10 @@
 # a GraphQL->REST fallback and, on total fetch failure, exits 2 ("could not
 # evaluate", the script's existing usage/repo-resolution exit code) with a
 # fetch-error message instead of exit 1 (missing marker).
+#
+# Story points no longer gate curation. Missing, invalid and historical points
+# must not block a valid complexity tier or require a daemon binary. A failing
+# daemon stub below catches accidental reintroduction of the points gate.
 #
 # Style matches test-resolve-tier-model.sh: a fake `gh` stub on PATH answers both
 # the `gh issue view ... -q .body` (GraphQL) and `gh api repos/.../issues/... --jq
@@ -82,14 +86,18 @@ trap cleanup EXIT
 # so a scenario can force GraphQL failure with REST success (fallback), or both
 # failing (fetch error / exit 2).
 #
-#   9001 = valid marker via GraphQL
-#   9002 = no marker via GraphQL (successful fetch, empty tier)
+#   9001 = valid complexity, no points, via GraphQL
+#   9002 = no complexity marker via GraphQL
 #   9003 = invalid/out-of-vocabulary tier via GraphQL
-#   9004 = GraphQL FAILS, REST returns a valid marker (fallback path)
+#   9004 = GraphQL FAILS, REST returns valid complexity, no points
 #   9005 = both GraphQL and REST FAIL (fetch error)
-#   9006 = GraphQL succeeds but returns an EMPTY body (successful fetch, no marker)
-#   9007 = body has prose mentioning the marker syntax BEFORE the real marker
-#          (#4840) -- the real marker must still be found
+#   9006 = GraphQL succeeds but returns an EMPTY body
+#   9007 = prose mentioning complexity syntax before the real marker (#4840)
+#   9010 = valid complexity, NO points marker
+#   9011 = valid complexity, out-of-vocabulary points value
+#   9012 = valid complexity + prose mentioning points syntax + historical points
+#   9013 = valid complexity + conflicting historical points markers
+#   9014 = NEITHER marker present -- complexity must still block
 FAKE_BIN="$WORKDIR/bin"
 mkdir -p "$FAKE_BIN"
 cat > "$FAKE_BIN/gh" <<'FAKEGH'
@@ -115,7 +123,34 @@ legitimately quotes the marker syntax as literal example text before the real
 marker appears (#4840): \`<!-- loom:complexity=<tier> -->\`.
 
 <!-- loom:complexity=mechanical -->
+<!-- loom:points=1 -->
 " ; exit 0 ;;
+        9010) echo "Body with a valid tier but no points marker.
+
+<!-- loom:complexity=routine -->
+" ; exit 0 ;;
+        9011) echo "Body with an out-of-vocabulary points value.
+
+<!-- loom:complexity=routine -->
+<!-- loom:points=21 -->
+" ; exit 0 ;;
+        9012) echo "Meta issue about the points-marker feature itself, quoting
+the syntax as literal example text before the real marker appears: \`<!--
+loom:points=<N> -->\`.
+
+<!-- loom:complexity=routine -->
+<!-- loom:points=5 -->
+" ; exit 0 ;;
+        9013) echo "Drifted points marker, corrected further down.
+
+<!-- loom:complexity=routine -->
+<!-- loom:points=1 -->
+
+Recalibrated:
+
+<!-- loom:points=8 -->
+" ; exit 0 ;;
+        9014) echo "Neither marker present at all." ; exit 0 ;;
         *) echo "" ; exit 0 ;;
     esac
 fi
@@ -136,11 +171,19 @@ exit 1
 FAKEGH
 chmod +x "$FAKE_BIN/gh"
 
+# The validator must not need a daemon while story-point estimation is paused.
+cat > "$FAKE_BIN/loom-daemon" <<'FAKEDAEMON'
+#!/usr/bin/env bash
+echo "UNEXPECTED_DAEMON_CALL" >&2
+exit 99
+FAKEDAEMON
+chmod +x "$FAKE_BIN/loom-daemon"
+
 REPO="owner/repo"
 
 run_marker() {
     local issue="$1"
-    PATH="$FAKE_BIN:$PATH" "$MARKER_SCRIPT" "$issue" "$REPO"
+    LOOM_DAEMON_SELF_BIN="$FAKE_BIN/loom-daemon" PATH="$FAKE_BIN:$PATH" "$MARKER_SCRIPT" "$issue" "$REPO"
 }
 
 # -------- Test 1: script exists and is executable --------
@@ -156,6 +199,7 @@ echo "Test 2: valid marker via GraphQL -> exit 0"
 out="$(run_marker 9001 2>&1)"; rc=$?
 assert_eq "0" "$rc" "valid marker exits 0"
 assert_contains "is tagged routine" "$out" "valid marker reports the tier"
+assert_not_contains "UNEXPECTED_DAEMON_CALL" "$out" "curation needs no daemon"
 
 # -------- Test 3: successful fetch, no marker -> exit 1 BLOCKED --------
 echo "Test 3: successful fetch, absent marker -> exit 1 BLOCKED (unchanged)"
@@ -174,6 +218,7 @@ echo "Test 5: GraphQL fails + REST fallback returns valid marker -> exit 0 on RE
 out="$(run_marker 9004 2>&1)"; rc=$?
 assert_eq "0" "$rc" "REST-fallback body with a valid marker exits 0"
 assert_contains "is tagged complex" "$out" "REST-fallback body's tier is used"
+assert_not_contains "UNEXPECTED_DAEMON_CALL" "$out" "REST fallback needs no daemon"
 assert_not_contains "BLOCKED" "$out" "REST-fallback success never prints BLOCKED"
 
 # -------- Test 6: both GraphQL and REST fail -> exit 2 fetch error --------
@@ -205,7 +250,38 @@ echo "Test 8: prose that mentions the marker syntax before the real marker is ig
 out="$(run_marker 9007 2>&1)"; rc=$?
 assert_eq "0" "$rc" "real marker found despite preceding prose mentions -> exit 0"
 assert_contains "is tagged mechanical" "$out" "real marker (mechanical) is reported, not the empty prose match"
+assert_not_contains "is pointed" "$out" "historical points are not evaluated"
 assert_not_contains "BLOCKED" "$out" "prose mention never triggers BLOCKED"
+
+# ==== Story-point estimation is paused =======================================
+
+echo "Test 9: valid tier, absent points marker -> exit 0"
+out="$(run_marker 9010 2>&1)"; rc=$?
+assert_eq "0" "$rc" "missing points do not block curation"
+assert_contains "is tagged routine" "$out" "the valid tier is still reported"
+assert_not_contains "BLOCKED" "$out" "missing points never print BLOCKED"
+assert_not_contains "UNEXPECTED_DAEMON_CALL" "$out" "missing points need no daemon"
+
+echo "Test 10: valid tier, invalid points value -> exit 0"
+out="$(run_marker 9011 2>&1)"; rc=$?
+assert_eq "0" "$rc" "invalid historical points do not block curation"
+assert_not_contains "BLOCKED" "$out" "invalid points never print BLOCKED"
+
+echo "Test 11: prose and historical points are ignored -> exit 0"
+out="$(run_marker 9012 2>&1)"; rc=$?
+assert_eq "0" "$rc" "points syntax and historical values do not block curation"
+assert_not_contains "is pointed" "$out" "historical points are not evaluated"
+
+echo "Test 12: conflicting historical points are ignored -> exit 0"
+out="$(run_marker 9013 2>&1)"; rc=$?
+assert_eq "0" "$rc" "conflicting historical points do not block curation"
+assert_not_contains "is pointed" "$out" "no historical points winner is selected"
+
+echo "Test 13: neither marker present -> exit 1, complexity BLOCKED text only"
+out="$(run_marker 9014 2>&1)"; rc=$?
+assert_eq "1" "$rc" "missing complexity still blocks curation"
+assert_contains "BLOCKED: issue has no complexity marker" "$out" "complexity BLOCKED text is present"
+assert_not_contains "points" "$out" "the gate does not request points"
 
 # -------- Summary --------
 echo ""

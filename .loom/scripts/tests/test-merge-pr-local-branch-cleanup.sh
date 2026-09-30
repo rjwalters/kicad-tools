@@ -79,8 +79,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 
+# #8191: _maybe_delete_local_branch now delegates to `loom-daemon merge-pr
+# delete-branch`. Pin the binary it execs and verify the `merge-pr` family
+# exists — the same harness this epic's other ported merge-pr suites use.
+# Without this, a stale binary would make the guard warn-and-no-op on every
+# case below instead of exercising the real decision.
+#
+# #8191 slice: the porcelain lookups this suite extracts (_primary_worktree_path
+# / _is_primary_worktree_path / _find_worktree_by_branch) now delegate to
+# `loom-daemon merge-pr worktree-*`, so the LEAF verbs are checked too — a binary
+# with only the `merge-pr` group predates this slice, which every daemon since
+# #8124 does, and would make every lookup fail.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
+    "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
+    "merge-pr worktree-find-by-branch"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -89,6 +107,18 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why, and what proves
+# the property now. Counted as run so the totals stay honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
@@ -111,8 +141,11 @@ assert_grep 'expected_head_sha="\$\{2:-\}"' "$MERGE_PR" \
     "_maybe_delete_local_branch accepts an optional expected_head_sha second arg"
 assert_grep '_maybe_delete_local_branch "\$PR_BRANCH" "\$PR_HEAD_SHA"' "$MERGE_PR" \
     "the unified branch-delete call passes PR_HEAD_SHA (reachable outside allow_unmanaged)"
-assert_grep 'delete_flag="-D"' "$MERGE_PR" \
-    "helper switches to -D (force) when the tip-match safety check passes"
+retired \
+    "helper switches to -D (force) when the tip-match safety check passes" \
+    "the shell literally contains 'delete_flag=\"-D\"'" \
+    "#8191: the escalation decision moved into loom-daemon/src/worktree_cli/branch_delete.rs, called via 'loom-daemon merge-pr delete-branch'; the shell wrapper never spells the flag itself anymore" \
+    "loom-daemon's only_a_landed_verdict_may_escalate_to_force_delete unit test (branch_delete/tests.rs), plus behavioral case (a) below, which still proves force-delete actually happens on a tip match"
 assert_grep "success \"Remote branch '\\\$PR_BRANCH' deleted\"" "$MERGE_PR" \
     "remote-branch success line is disambiguated as 'Remote branch' (was 'Branch')"
 refute_grep "success \"Branch '\\\$PR_BRANCH' deleted\"" "$MERGE_PR" \
@@ -123,10 +156,16 @@ assert_grep "no-cleanup-worktree.*local branch left in place" "$MERGE_PR" \
     "--no-cleanup-worktree emits an explicit skip message covering the local branch"
 assert_grep "LOOM_PRESERVE_WORKTREE=1.*local branch left in place" "$MERGE_PR" \
     "LOOM_PRESERVE_WORKTREE=1 emits an explicit skip message covering the local branch"
-assert_grep "checked out \\(current HEAD or another worktree\\)" "$MERGE_PR" \
-    "checked-out refusal gets a specific message, not the generic unmerged-commits warning"
-assert_grep "it is the repository's default branch" "$MERGE_PR" \
-    "helper refuses to delete the repo's default branch"
+retired \
+    "checked-out refusal gets a specific message, not the generic unmerged-commits warning" \
+    "the shell literally contains the 'checked out (current HEAD or another worktree)' string" \
+    "#8191: that message is now emitted by loom-daemon/src/worktree_cli/branch_delete.rs and replayed here via a WARNING\\tmessage line from 'loom-daemon merge-pr delete-branch' — the shell only re-prints whatever text the daemon sends" \
+    "branch_delete::tests::shell_delegates_rather_than_reimplementing (asserts the shell calls the daemon, not the old inline logic), plus behavioral case (c) below, which still proves the exact message text reaches the operator"
+retired \
+    "helper refuses to delete the repo's default branch" \
+    "the shell literally contains the \"it is the repository's default branch\" string" \
+    "#8191: that refusal is now decided and worded by loom-daemon/src/worktree_cli/branch_delete.rs, reached via 'loom-daemon merge-pr delete-branch'" \
+    "branch_delete::tests::shell_delegates_rather_than_reimplementing, plus behavioral case (d) below, which still proves the default branch is refused"
 
 # --- Extract the ACTUAL function body from the live source (no drift) ---
 extract_fn() {
@@ -150,6 +189,10 @@ error()   { echo "ERROR: $*" >&2; return 1; }
 # auto-cleanup branch actually runs in this harness (an undefined helper
 # silently no-ops instead of erroring, which would otherwise mask the new
 # behavior rather than exercise it).
+# #8191 slice: the porcelain lookups below shell out through _mp_worktree, so it
+# is extracted with them — without it they die with "_mp_worktree: command not
+# found" under `set -e`.
+eval "$(extract_fn _mp_worktree "$MERGE_PR")"
 eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
 eval "$(extract_fn _is_primary_worktree_path "$MERGE_PR")"
 eval "$(extract_fn _find_worktree_by_branch "$MERGE_PR")"

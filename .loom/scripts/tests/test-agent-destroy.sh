@@ -100,7 +100,7 @@ else
     # inside main() rather than in an extractable function).
     active_pids=$(lsof +d "$TMP" -F pf 2>/dev/null | awk '/^p/{pid=substr($0,2)} /^fcwd/{print pid}' | grep -v "$$" || true)
 
-    if echo "$active_pids" | grep -qx "$BG_PID"; then
+    if grep -qx "$BG_PID" <<<"$active_pids"; then
         pass "corrected -F pf / /^fcwd/ pipeline detects a live process with cwd in the scratch dir (PID $BG_PID)"
     else
         fail "corrected pipeline did NOT detect PID $BG_PID (active_pids='$active_pids')"

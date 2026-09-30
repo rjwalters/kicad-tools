@@ -61,6 +61,7 @@ this doc, verified against source:
 | `autonomous.hostBreaker.*` | **Requires a daemon restart** — resolved once at startup, registered as a process-global handle | `loom-daemon/src/daemon_service.rs`: "resolve its config once at startup ... and register the process-global handle" |
 | `autonomous.rateLimitBreaker.*` | **Requires a daemon restart** — resolved once at startup, before any loop is spawned | `loom-daemon/src/daemon_service.rs`, registered unconditionally ahead of the work-finder branch |
 | `autonomous.mainHealthGate.suppressDispatchDuringGate` | **Requires a daemon restart** — resolved once at startup from the primary workspace config | `loom-daemon/src/daemon_service.rs` comment: "Resolved once at startup from the same primary workspace config as the gate's master switch" |
+| `autonomous.transcriptIngest.*` (`enabled`, `intervalSecs`, `windowHours`) | **Requires a daemon restart** — resolved once before the ingestion thread is spawned, then frozen for the life of that thread | `read_transcript_ingest_config` + `resolve_settings` are called inside `try_init_transcript_ingest` (`loom-daemon/src/activity/transcript_ingest.rs`), which `daemon_service.rs` invokes once at bring-up; the spawned thread's `loop` body reads only the already-resolved `interval`/`window_hours` locals |
 
 The full, authoritative per-knob table (env override, default, notes) lives
 in [`daemon-reference.md`](daemon-reference.md) → "Config surface
@@ -71,6 +72,17 @@ convention. **When in doubt about a knob not listed above, check whether its
 once during daemon bring-up before any loop starts (restart-required)** —
 that is the actual mechanical test; "it's in `autonomous.*`" is not enough to
 predict which bucket a given knob falls into.
+
+**This table is narrative, not authoritative (#9597).** `fleet-config
+render` classifies every changed dotted path itself, against a code-owned
+table (`loom-daemon/src/fleet_store/reload.rs`) built on the exact same
+mechanical test above — that table is what `render`'s output and
+`loom-daemon status`'s "Pending restart:" line actually act on, so it cannot
+silently drift the way the rows above already had (`autonomous.workFinder`'s
+`maxConcurrent` / `maxConcurrentPerRepo` / `extraSkipLabels` all went live in
+#9060/#9090/prior work without this table ever being updated to say so). If
+this table and `reload.rs` ever disagree, `reload.rs` is correct; open an
+issue to fix this table's prose.
 
 ## Other known caching surfaces (not daemon-config, same failure shape)
 
@@ -98,6 +110,29 @@ predict which bucket a given knob falls into.
   "systemd user unit" in [`daemon-reference.md`](daemon-reference.md). A
   timer definition changed on disk without the reload step keeps running the
   old one indefinitely.
+
+## Fleet-store hosts: the render happens before the loops (#9596)
+
+On a host with `fleet.repo` set, the "requires a daemon restart" column above
+is satisfied *by the restart itself*, not by a separate manual step. The
+daemon's own startup sync (`loom_daemon::fleet_sync`, see
+[`daemon-reference.md`](daemon-reference.md) → "Automatic sync") fetches the
+store and renders the machine and host-local tiers **before** any
+`read_*_config` call that gates a loop — so a knob landed in the store is live
+on the host's next daemon start, with no `fleet-config render` by hand and no
+second restart to pick up what the first one rendered.
+
+That does not retire the rule at the top of this file; it narrows what counts
+as evidence. A store-landed config change is still not effective until a host
+actually restarted and rendered it, and the observation that it did is now
+directly available: `loom-daemon status`'s `Fleet store:` block names the store
+commit each tier was rendered from, and the timer pass keeps reporting drift
+between passes. A store commit with no host reporting it is exactly the
+"landed != effective" gap, made visible instead of inferred.
+
+The timer half is **detection, not convergence** by default: it reports drift
+and writes nothing unless `fleet.autoApply` is on. A change that must take
+effect without waiting for a restart still needs one.
 
 ## Applying the rule
 
@@ -166,3 +201,15 @@ knobs the table marks "requires a daemon restart." That would retire this
 convention for the daemon-config half of the problem entirely — tracked
 against #5963, deliberately not attempted in the same change that documents
 the guardrail it would replace.
+
+**Partially landed for `fleet-config render` specifically (#9597).** A
+render that changes a live-reloadable path now confirms it against a
+running daemon over IPC and prints so at render time, with nothing further
+to check; a restart-required path is recorded and surfaces in
+`loom-daemon status` until the daemon that saw the drift actually restarts —
+closing the "silent staleness" half of #5963's gap for this one write path.
+This does **not** change what is live vs. restart-required (that split is
+unchanged, and still just as real) — it only makes the render command name
+which bucket a change landed in instead of leaving the closer to work it out
+by hand. Actually hot-reloading a knob currently marked restart-required (so
+that bucket shrinks) is still the open, harder half of this follow-up.

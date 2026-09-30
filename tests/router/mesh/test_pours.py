@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.mesh.geometry import segment_intersects_polygon
+from kicad_tools.router.mesh.geometry import point_in_polygon, segments_intersect
 from kicad_tools.router.mesh.obstacles import ObstacleModel
 from kicad_tools.router.mesh.pathfinder import MeshPathfinder
 from kicad_tools.router.primitives import Pad
@@ -32,18 +32,28 @@ def _pad(x: float, y: float, ref: str) -> Pad:
     )
 
 
+def _segment_enters_polygon(
+    p1: tuple[float, float], p2: tuple[float, float], poly: list[tuple[float, float]]
+) -> bool:
+    """True if segment ``p1-p2`` intersects (or lies within) polygon ``poly``.
+
+    Local test-only helper: standalone check that emitted copper clears the
+    pour, independent of whatever clearance predicate ``ObstacleModel``/
+    ``MeshPathfinder`` use internally (formerly
+    ``geometry.segment_intersects_polygon``, retired as production-dead by
+    #5685 once Epic #5509 Phase 3e moved ``is_clear`` onto the shared
+    clearance kernel).
+    """
+    n = len(poly)
+    if n < 3:
+        return False
+    if point_in_polygon(p1, poly) or point_in_polygon(p2, poly):
+        return True
+    return any(segments_intersect(p1, p2, poly[i], poly[(i + 1) % n]) for i in range(n))
+
+
 def _route_crosses_pour(route) -> bool:
-    return any(
-        segment_intersects_polygon((s.x1, s.y1), (s.x2, s.y2), _POUR) for s in route.segments
-    )
-
-
-def test_segment_vs_polygon_predicate() -> None:
-    # A leg through the pour interior collides; one skirting above it is clear.
-    assert segment_intersects_polygon((10.0, 20.0), (30.0, 20.0), _POUR)  # straight through
-    assert not segment_intersects_polygon((10.0, 30.0), (30.0, 30.0), _POUR)  # above the pour
-    # An endpoint inside the pour also counts as a hit.
-    assert segment_intersects_polygon((20.0, 20.0), (35.0, 35.0), _POUR)
+    return any(_segment_enters_polygon((s.x1, s.y1), (s.x2, s.y2), _POUR) for s in route.segments)
 
 
 def test_obstacle_model_rejects_leg_entering_pour() -> None:

@@ -12,6 +12,86 @@ Different PCB manufacturers have different capabilities:
 
 kicad-tools includes profiles for popular manufacturers and can validate your design against their limits.
 
+## Three gates, not one
+
+A board that is ready to fabricate has to clear **three independent gates**.
+Passing one says nothing about the others, and none of them is a substitute
+for another:
+
+| Gate | Run by | Answers |
+|------|--------|---------|
+| **Native DRC** | `kicad-cli pcb drc` (reads `.kicad_pro` + `.kicad_dru`) | Does the geometry satisfy the constraints KiCad's own engine evaluates? |
+| **`kct check --mfr`** | kicad-tools' own checker | Does the geometry satisfy the manufacturer floors, including the ones KiCad's rule language cannot express? |
+| **Factory DFM** | The fab, after upload | Will *this* supplier, on *this* process and panel, accept the job? |
+
+Two consequences are worth stating plainly:
+
+- **Native DRC is not factory DFM.** A clean `kicad-cli pcb drc` run means the
+  constraints in the sidecars were satisfied. It is not supplier approval:
+  the fab applies its own DFM review, tooling limits, panel utilisation and
+  process-specific allowances, and can reject or silently modify a board that
+  passes every rule here. Conversely, a factory DFM report is not a DRC
+  substitute — it is generated against a specific uploaded revision and is
+  not re-derivable from the board alone (see
+  [Submission Preparation](submission-preparation.md) for how a raster DFM
+  report is bound to the exact upload it audited).
+- **`kct check --mfr` and native DRC are not redundant.** Some manufacturer
+  floors have no native custom-rule equivalent (a numeric solder-mask web
+  floor, for example) and stay Python-side. The different-net
+  SMD-pad-to-SMD-pad floor *is* emitted natively — scoped by
+  `A.Reference != B.Reference`, using KiCad's documented rule that footprint
+  children (pads) carry their parent footprint's reference designator, so
+  package-internal pairs compare equal and stay exempt — but the two engines
+  still disagree on one measured shape: pads under footprints with **blank or
+  duplicated** references compare equal natively and are not discriminated,
+  while `kct check` scopes by footprint *identity* and still catches them.
+  Other floors need the native engine because only it sees the filled/plotted
+  geometry. Run both.
+
+### Emitted constraints are not effective constraints
+
+It is tempting to check a manufacturer profile by reading the numbers it
+writes into `.kicad_pro` / `.kicad_dru`. That only proves kicad-tools
+serialised what it meant to; it cannot detect a constraint the native engine
+declines to apply to the pair you care about. A constraint is only real if a
+board whose geometry sits *below* it produces a finding.
+
+A measured example, which is why this repository tests effective behaviour
+against deliberately below-limit geometry
+(`tests/test_effective_silk_clearance_5059.py`, issue #5059):
+
+On KiCad CLI **10.0.1**, a minimal board with a 0.085 mm gap between a
+silkscreen line and an SMD pad's mask aperture reported **no** silk finding
+from `board.design_settings.rules.min_silk_clearance` alone — not at the
+0.15 mm factory floor, and not with that key raised to 2.0 mm. The same
+project block *was* being read: raising `min_clearance` on the same fixture
+produced `board minimum clearance 0.5000 mm; actual 0.1200 mm`. Adding an
+explicit rule on byte-identical geometry:
+
+```lisp
+(rule "Silk to Pad"
+  (condition "A.Type == 'Pad' || B.Type == 'Pad'")
+  (constraint silk_clearance (min 0.15mm)))
+```
+
+reported `silk_over_copper` with `clearance 0.1500 mm; actual 0.0850 mm`.
+KiCad's built-in silk check does fire with no `min_silk_clearance` key
+present at all, once the silk genuinely *overlaps* the aperture — and reports
+no numeric clearance/actual pair, consistent with an overlap test rather than
+a gap threshold. This is a behavioural characterisation, not a claim about
+KiCad's implementation; the upstream cause has not been established here.
+
+The practical rule that follows: **cross-layer silk clearance needs an
+explicit rule in the `.kicad_dru`.** kicad-tools emits one for the profiles
+that publish a silkscreen-to-pad floor. Do not assume the project key covers
+it, and do not verify a profile change by diffing emitted values alone.
+
+> Care is needed in the other direction too. A blanket same-net
+> `physical_clearance` over every copper object is *not* the way to get
+> net-independent gap checks: on a real board that experiment produced 499
+> warnings, including intentional track joins. Net-independent checks need
+> geometry-aware treatment, not a broader rule.
+
 ## Prerequisites
 
 ```bash
@@ -353,6 +433,60 @@ else:
         print(f"  - {violation}")
 ```
 
+## Advisory: Trace Width Consistency (`width_consistency`)
+
+A board can pass DRC and still be full of width steps that nobody chose,
+such as a short 0.4 mm stub in the middle of a 0.2 mm track, or a power
+trace necked down to signal width where nothing nearby requires it. The
+`width_consistency` category is a geometric heuristic for triaging these.
+It does not check ampacity or impedance; use `ampacity` / `impedance` for
+electrical intent.
+
+```bash
+kct check board.kicad_pcb --only width_consistency --format json
+```
+
+On each copper layer and net, tracks are split into **chains** between
+pads, vias and branch points, and each chain is split into constant-width
+**runs**. The check reports two things:
+
+- **`width_island`** (warning): a run inside a chain that has narrower
+  copper on both sides and is shorter than `max_island_length_mm`
+  (default 3 mm).
+- **`width_transition`** (warning): a width change on a two-terminal
+  (pad/via to pad/via, no branches) chain where the neck-down is **not
+  justified**. A neck-down is justified if widening the whole narrow run
+  to the wide width would come within the clearance of other-net
+  tracks/pads/vias on the same layer, or if the narrow run enters a pad
+  narrower than the wide width. The message gives the nearest other-net
+  obstacle and the gap before and after widening.
+
+Foreign-net zone fills never justify a neck-down, because a pour re-flows
+around a widened track on refill. Board edges, keepouts and T-junctions
+that land in the middle of a track are not modelled.
+
+The check is **opt-in**. A plain `kct check` and `DRCChecker.check_all()`
+don't run it, so enabling it never changes an existing board's verdict.
+Request it with `--only width_consistency` (it can be combined with other
+categories), call `DRCChecker.check_width_consistency()`, or set
+`checker.width_consistency_options = {}` (or a dict of rule options) to
+include it in `check_all()`. Findings are
+in the advisory-quality bucket, so they only fail the run under
+`--strict`, and they can be waived per net or per track UUID in
+`.kct_waivers.json`. To tune the check, construct the rule directly:
+
+```python
+from kicad_tools.validate.rules import WidthConsistencyRule
+
+rule = WidthConsistencyRule(
+    max_island_length_mm=2.0,
+    clearance_mm=0.15,  # default: design_rules.min_clearance_mm
+    report_justified=True,  # also emit justified neck-downs as info
+    severity="warning",
+)
+results = rule.check(pcb, design_rules)
+```
+
 ## Common DRC Issues and Fixes
 
 ### Trace Width Too Small
@@ -386,6 +520,59 @@ else:
 **Fix:** Via annular ring = (via diameter - drill diameter) / 2
 
 Increase via pad size or use larger drill.
+
+### Via Under Package Body
+
+**Warning:** `via_under_body` — `Via-1a2b3c4d (net 'SDA') ... is under the package body of U3 (Package_DFN_QFN:QFN-24-1EP_4x4mm...)`
+
+KiCad's DRC accepts a via hidden under a QFN/DFN/SON/LGA body as long as it
+clears the pads, but after assembly it can't be probed, inspected or
+reworked, and an untented via under a bottom-terminated part can short to
+the exposed body. The body outline is the footprint's `F.Fab`/`B.Fab`
+outline, falling back to the courtyard when the footprint has no Fab
+outline. Thermal vias inside the part's own exposed pad, on that pad's
+net, are allowed.
+
+**Fix:** Move the via outside the package outline, or waive it in
+`.kct_waivers.json` with `"items": ["Via-1a2b3c4d", "U3"]`. The rule is
+advisory (warning severity), so it only fails `kct check` under `--strict`.
+It is on by default, so a board that passed `--strict` (or any gate that
+counts warnings) before upgrading can newly fail on it. To opt out of the
+whole category, run `kct check --strict --skip via_under_body`. Prefer
+waivers when only a few vias are affected, because they keep the check
+active for the rest of the board.
+From the Python API, `ViaUnderBodyRule` takes `footprint_pattern` (default
+`QFN|DFN|SON|LGA`; QFP and BGA are opt-in), `include_references`,
+`exclude_references`, `allow_thermal_pad_vias`, `fallback_to_courtyard`
+and `severity`.
+
+### Missing or Hidden Pin-1 Marker
+
+**Warning:** `pin1_marker_missing` — `U2 (Package_QFP:LQFP-48_7x7mm_P0.5mm) has no silkscreen pin-1 / polarity marker within 2.5mm of pad 1`
+(or `pin1_marker_obscured` when the only mark is under the package body or on pad copper)
+
+ICs, diodes, LEDs, polarized capacitors and connectors (any footprint with
+3+ copper pads including pad `1`/`A1`, plus `Diode_*`, `LED_*` and `CP_*`
+parts) need a silkscreen element next to pad 1 that points at it: closer to
+pad 1 than to any other pad, and at least partly outside the Fab body
+outline and pad copper. Touching silk lines are also judged as one shape, so
+an L-shaped corner (as on KiCad's stock crystal footprints) counts when its
+centroid is closer to pad 1 than to any other pad. A symmetric body outline
+doesn't count, and neither does a mark drawn only on `F.Fab`. Passives, test points, mounting holes,
+switches and keyed USB-C / coax connectors are skipped.
+
+**Fix:** Add a dot, triangle or bar on `F.SilkS`/`B.SilkS` beside pad 1 and
+outside the body. Alternatively, waive it in `.kct_waivers.json` with
+`"items": ["U2"]`. The rule is advisory (warning severity), so it only fails
+`kct check` under `--strict`. It is on by default, so a board that passed
+`--strict` (or any gate that counts warnings) before upgrading can newly
+fail on it. To opt out of the whole category, run
+`kct check --strict --skip pin1_marker`. To skip both new categories at
+once, use `--skip via_under_body,pin1_marker`. Prefer per-reference waivers
+when only a few parts are affected. From the Python API, `Pin1MarkerRule` takes
+`min_pads`, `polarized_pattern`, `exclude_pattern`, `include_references`,
+`exclude_references`, `search_radius_mm`, `require_asymmetry`,
+`include_board_silk` and `severity`.
 
 ## Complete Example: Pre-Fab Validation
 

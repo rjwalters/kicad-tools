@@ -81,8 +81,8 @@ trap 'bg_proc_reap; rm -rf "$WORKDIR"; exit 1' INT TERM
 # 1. --help documents the daemon-stop + agent-drain two-step and --dry-run.
 help_out=$(bash "$QUIESCE_SCRIPT" --help 2>/dev/null)
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out" | grep -qi 'quiesce' && echo "$help_out" | grep -q -- '--dry-run' \
-    && echo "$help_out" | grep -q -- '--force'; then
+if grep -qi 'quiesce' <<<"$help_out" && grep -q -- '--dry-run' <<<"$help_out" \
+    && grep -q -- '--force' <<<"$help_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --help documents the quiesce action, --dry-run, and --force"
 else
@@ -222,7 +222,7 @@ out3=$( cd "$WORKDIR" && PATH="$STUB_DIR:$PATH" LOOM_PID_FILE='' \
 rc3=$?
 assert_eq "0" "$rc3" "--dry-run: exits 0"
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out3" | grep -qi 'DRY-RUN'; then
+if grep -qi 'DRY-RUN' <<<"$out3"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --dry-run: output is labeled DRY-RUN"
 else
@@ -340,7 +340,7 @@ if [[ -n "$LEGACY_BASH" ]]; then
     rc6a=$?
     assert_eq "0" "$rc6a" "bash 3.2: the nothing-to-drain path exits 0 (no empty-array abort)"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if ! echo "$out6a" | grep -q 'unbound variable'; then
+    if ! grep -q 'unbound variable' <<<"$out6a"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "${GREEN}✓${NC} bash 3.2: no 'unbound variable' in the nothing-to-drain path"
     else
@@ -366,7 +366,7 @@ if [[ -n "$LEGACY_BASH" ]]; then
     rc6b=$?
     assert_eq "0" "$rc6b" "bash 3.2: a real drain through the grace-window survivor loop exits 0"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if ! kill -0 "$agent_pid6" 2>/dev/null && ! echo "$out6b" | grep -q 'unbound variable'; then
+    if ! kill -0 "$agent_pid6" 2>/dev/null && ! grep -q 'unbound variable' <<<"$out6b"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "${GREEN}✓${NC} bash 3.2: the agent decoy is stopped and the survivor loop never aborts"
     else

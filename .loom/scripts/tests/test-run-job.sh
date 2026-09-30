@@ -846,6 +846,10 @@ exempt_files=(
     "$SCRIPTS_DIR/spawn-claude.sh"
     "$SCRIPTS_DIR/spawn-codex.sh"
     "$SCRIPTS_DIR/tests/test-spawn-codex.sh"
+    # Sibling of test-spawn-codex.sh (split out by the file-size ratchet,
+    # #8518): asserts the session-exec argv shape, so `docker exec` appears
+    # only inside its expected-string literals, exactly like its parent.
+    "$SCRIPTS_DIR/tests/test-spawn-codex-session-exec.sh"
     "$SCRIPT_DIR/test-run-job.sh"
 )
 _is_exempt() {

@@ -70,6 +70,23 @@
 #   (o2) the same path after `git rm --cached` -> back to the (n) behaviour:
 #                                                 excluded, non-blocking, the
 #                                                 legitimate resync change lands
+#   (p) NO .gitignore at all + untracked    -> every one excluded, never
+#       dirt in EVERY non-gh-config member     committed, never blocking; the
+#       of the credential class (#8005):       legitimate change still lands
+#       .loom/tokens/, .loom/accounts.env,
+#       .loom/api-keys/, .loom/claude-config/
+#   (p2) a TRACKED .loom/tokens/ path       -> hard stop, exit 1 (the #8004
+#                                              rule now applies class-wide)
+#   (p3) NO .gitignore + untracked          -> never staged either: outside the
+#       .loom/account-health.{json,lock}       credential class by design, so
+#                                              refused as foreign dirt (nothing
+#                                              committed at all)
+#   (q)  resync output under .agents/skills/ -> lands normally; neither surface
+#        and in .gitignore (#9345)              is "non-resync dirt" any more
+#   (q2) the a9da48c2 footprint (#9141): a  -> every pool path excluded, none
+#        whole `.loom/tokens.shadow-           reaches origin; the legitimate
+#        disabled-<ts>/` pool copy beside     resync surface beside it lands
+#        a real resync surface, no .gitignore
 #
 # Usage:
 #   ./.loom/scripts/tests/test-land-resync-commit.sh
@@ -747,6 +764,218 @@ if [[ -f "$WORKDIR/primary-o/.loom/gh-config/hosts.yml" ]]; then
     pass "the credential file is still on disk after the untracking (git rm --cached keeps it)"
 else
     fail "the credential file is still on disk after the untracking (git rm --cached keeps it)"
+fi
+
+echo ""
+echo "=== (p) with NO .gitignore, every credential-class path is excluded, not just gh-config (#8005) ==="
+gh_stub_reset
+make_origin origin-p
+make_primary origin-p primary-p
+P="$WORKDIR/primary-p"
+# The acceptance state #8005 names: .gitignore absent ENTIRELY, so the
+# script's own class check is the only thing between these files and a commit.
+rm -f "$P/.gitignore"
+mkdir -p "$P/.loom/tokens" "$P/.loom/api-keys/zai" "$P/.loom/claude-config/builder-1"
+printf 'sk-ant-oat-dummy\n' > "$P/.loom/tokens/acct-1.token"
+printf 'ACCOUNT_1_TOKEN=sk-ant-oat-dummy\n' > "$P/.loom/accounts.env"
+printf 'API_KEY=dummy\n' > "$P/.loom/api-keys/zai/acct.env"
+printf '{"claudeAiOauth":"dummy"}\n' > "$P/.loom/claude-config/builder-1/.credentials.json"
+printf 'updated\n' > "$P/.loom/hooks/foo.sh"
+if [[ ! -e "$P/.gitignore" ]] && ! git -C "$P" check-ignore -q .loom/tokens/acct-1.token; then
+    pass "fixture has no .gitignore: the credential files are plain untracked dirt"
+else
+    fail "fixture still ignores the credential files — this case would pass regardless of the script"
+fi
+OUT="$(cd "$P" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Excluded from the commit" <<< "$OUT" && ! grep -qi "refusing to land" <<< "$OUT"; then
+    pass "all four credential stores are excluded as credential dirt, not refused as foreign dirt"
+else
+    fail "all four credential stores are excluded as credential dirt, not refused as foreign dirt (rc=$RC, out=$OUT)"
+fi
+for cred in .loom/tokens/acct-1.token .loom/accounts.env .loom/api-keys/zai/acct.env \
+    .loom/claude-config/builder-1/.credentials.json; do
+    if grep -qF "$cred" <<< "$OUT"; then
+        pass "$cred is named in the exclusion report"
+    else
+        fail "$cred is named in the exclusion report (out=$OUT)"
+    fi
+done
+ORIGIN_TREE_P="$(git --git-dir="$WORKDIR/origin-p.git" ls-tree -r --name-only main)"
+if ! grep -qE '\.loom/(tokens|accounts\.env|api-keys|claude-config)' <<< "$ORIGIN_TREE_P"; then
+    pass "no credential-class path was committed to origin"
+else
+    fail "no credential-class path was committed to origin (tree=$ORIGIN_TREE_P)"
+fi
+if [[ "$(git --git-dir="$WORKDIR/origin-p.git" log -1 --format='%s' main)" == "chore: resync installed Loom surfaces" ]] && \
+   [[ "$(git --git-dir="$WORKDIR/origin-p.git" show main:.loom/hooks/foo.sh 2>/dev/null)" == "updated" ]]; then
+    pass "the legitimate resync change still landed alongside the excluded credentials"
+else
+    fail "the legitimate resync change still landed alongside the excluded credentials"
+fi
+
+echo ""
+echo "=== (p2) a TRACKED .loom/tokens/ path is a hard stop, like tracked gh-config (#8004/#8005) ==="
+gh_stub_reset
+make_origin origin-p2
+make_primary origin-p2 primary-p2
+P2="$WORKDIR/primary-p2"
+mkdir -p "$P2/.loom/tokens"
+printf 'sk-ant-oat-dummy\n' > "$P2/.loom/tokens/acct-1.token"
+git -C "$P2" add -f .loom/tokens/acct-1.token
+git -C "$P2" commit -q -m "oops: committed the token pool"
+git -C "$P2" push -q origin main
+printf 'sk-ant-oat-rotated\n' > "$P2/.loom/tokens/acct-1.token"
+printf 'updated\n' > "$P2/.loom/hooks/foo.sh"
+OUT="$(cd "$P2" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 1 ]] && grep -q "TRACKED" <<< "$OUT" && grep -qF ".loom/tokens/acct-1.token" <<< "$OUT" && \
+   ! grep -q "resync installed Loom surfaces" <<< "$(git --git-dir="$WORKDIR/origin-p2.git" log --oneline main)"; then
+    pass "a tracked token-pool file stops the run and nothing is committed or pushed"
+else
+    fail "a tracked token-pool file stops the run and nothing is committed or pushed (rc=$RC, out=$OUT)"
+fi
+
+echo ""
+echo "=== (p3) with NO .gitignore, .loom/account-health.{json,lock} is never staged either (#8005) ==="
+gh_stub_reset
+make_origin origin-p3
+make_primary origin-p3 primary-p3
+P3="$WORKDIR/primary-p3"
+rm -f "$P3/.gitignore"
+printf '{"acct-1":"rate_limited"}\n' > "$P3/.loom/account-health.json"
+: > "$P3/.loom/account-health.lock"
+printf 'updated\n' > "$P3/.loom/hooks/foo.sh"
+OUT="$(cd "$P3" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 1 ]] && grep -qi "refusing to land" <<< "$OUT" && \
+   ! grep -q "account-health" <<< "$(git --git-dir="$WORKDIR/origin-p3.git" ls-tree -r --name-only main)" && \
+   [[ -z "$(git -C "$P3" diff --cached --name-only)" ]]; then
+    pass "account-health files are refused as foreign dirt: nothing staged, nothing committed"
+else
+    fail "account-health files are refused as foreign dirt: nothing staged, nothing committed (rc=$RC, out=$OUT)"
+fi
+
+echo ""
+echo "=== (p4) a sibling-renamed credential dir (.loom/tokens.disabled-<ts>/) is excluded when untracked, hard-stop when tracked (#9134) ==="
+gh_stub_reset
+make_origin origin-p4
+make_primary origin-p4 primary-p4
+P4="$WORKDIR/primary-p4"
+mkdir -p "$P4/.loom/tokens.disabled-20260101T000000Z"
+printf 'sk-ant-oat-dummy\n' > "$P4/.loom/tokens.disabled-20260101T000000Z/acct-1.token"
+printf 'updated\n' > "$P4/.loom/hooks/foo.sh"
+if ! git -C "$P4" check-ignore -q .loom/tokens.disabled-20260101T000000Z/acct-1.token; then
+    pass "fixture's sibling-renamed pool dir is plain untracked dirt (not caught by .gitignore alone)"
+else
+    fail "fixture's sibling-renamed pool dir is already gitignored — this case would pass regardless of the script"
+fi
+OUT="$(cd "$P4" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Excluded from the commit" <<< "$OUT" && \
+   grep -qF ".loom/tokens.disabled-20260101T000000Z/acct-1.token" <<< "$OUT"; then
+    pass "the sibling-renamed pool dir is excluded as credential dirt, not staged as foreign dirt"
+else
+    fail "the sibling-renamed pool dir is excluded as credential dirt, not staged as foreign dirt (rc=$RC, out=$OUT)"
+fi
+ORIGIN_TREE_P4="$(git --git-dir="$WORKDIR/origin-p4.git" ls-tree -r --name-only main)"
+if ! grep -q "tokens.disabled-20260101T000000Z" <<< "$ORIGIN_TREE_P4"; then
+    pass "no sibling-renamed pool path was committed to origin"
+else
+    fail "no sibling-renamed pool path was committed to origin (tree=$ORIGIN_TREE_P4)"
+fi
+
+echo ""
+echo "=== (p5) a TRACKED sibling-renamed credential dir is a hard stop too (#9134) ==="
+gh_stub_reset
+make_origin origin-p5
+make_primary origin-p5 primary-p5
+P5="$WORKDIR/primary-p5"
+mkdir -p "$P5/.loom/tokens.disabled-20260101T000000Z"
+printf 'sk-ant-oat-dummy\n' > "$P5/.loom/tokens.disabled-20260101T000000Z/acct-1.token"
+git -C "$P5" add -f .loom/tokens.disabled-20260101T000000Z/acct-1.token
+git -C "$P5" commit -q -m "oops: committed the renamed token pool"
+git -C "$P5" push -q origin main
+printf 'sk-ant-oat-rotated\n' > "$P5/.loom/tokens.disabled-20260101T000000Z/acct-1.token"
+printf 'updated\n' > "$P5/.loom/hooks/foo.sh"
+OUT="$(cd "$P5" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 1 ]] && grep -q "TRACKED" <<< "$OUT" && \
+   grep -qF ".loom/tokens.disabled-20260101T000000Z/acct-1.token" <<< "$OUT" && \
+   ! grep -q "resync installed Loom surfaces" <<< "$(git --git-dir="$WORKDIR/origin-p5.git" log --oneline main)"; then
+    pass "a tracked sibling-renamed pool file stops the run and nothing is committed or pushed"
+else
+    fail "a tracked sibling-renamed pool file stops the run and nothing is committed or pushed (rc=$RC, out=$OUT)"
+fi
+
+echo ""
+echo "=== (q) resync output under .agents/skills/ and in .gitignore lands, not refused as dirt (#9345) ==="
+gh_stub_reset
+make_origin origin-q
+make_primary origin-q primary-q
+Q="$WORKDIR/primary-q"
+# The exact reproduce case from #9345: a plain `resync-installed.sh` run on a
+# current defaults/ touches `.agents/skills/*` (resync_agent_skills(), #8673)
+# and regenerates the loom-daemon-managed `.gitignore` block (#4280). Before
+# the allowlist fix those were classified as "non-resync dirt" and this script
+# refused to land its own sibling's ordinary output.
+mkdir -p "$Q/.agents/skills/loom-builder-pr"
+printf '<!-- loom:generated -->\nbuilder skill\n' > "$Q/.agents/skills/loom-builder-pr/SKILL.md"
+printf '# BEGIN LOOM-MANAGED\n.loom/tokens*\n# END LOOM-MANAGED\n' > "$Q/.gitignore"
+printf 'updated\n' > "$Q/.loom/hooks/foo.sh"
+OUT="$(cd "$Q" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && ! grep -qi "refusing to land" <<< "$OUT"; then
+    pass "a run touching .agents/skills/* and .gitignore is not refused as non-resync dirt"
+else
+    fail "a run touching .agents/skills/* and .gitignore is not refused as non-resync dirt (rc=$RC, out=$OUT)"
+fi
+ORIGIN_TREE_Q="$(git --git-dir="$WORKDIR/origin-q.git" ls-tree -r --name-only main)"
+if grep -qF ".agents/skills/loom-builder-pr/SKILL.md" <<< "$ORIGIN_TREE_Q" && \
+   grep -qxF ".gitignore" <<< "$ORIGIN_TREE_Q"; then
+    pass "both surfaces landed in the resync commit"
+else
+    fail "both surfaces landed in the resync commit (tree=$ORIGIN_TREE_Q)"
+fi
+if [[ "$(git --git-dir="$WORKDIR/origin-q.git" log -1 --format='%s' main)" == "chore: resync installed Loom surfaces" ]]; then
+    pass "they landed under the resync subject, not a hand-made commit"
+else
+    fail "they landed under the resync subject, not a hand-made commit"
+fi
+
+echo ""
+echo "=== (q2) the a9da48c2 footprint: a whole token-pool COPY beside real resync output (#9141) ==="
+gh_stub_reset
+make_origin origin-q2
+make_primary origin-q2 primary-q2
+Q2="$WORKDIR/primary-q2"
+# Reconstructs the leak commit's actual shape: a legitimate resync surface
+# (.loom/install-metadata.json) plus the ENTIRE sibling token-pool directory
+# `.loom/tokens.shadow-disabled-<ts>/` -- .token files AND the pool's
+# bookkeeping files, none of which is the exact path `.loom/tokens`. No
+# .gitignore at all, so the script's own credential class is the only thing
+# between these files and a public commit.
+rm -f "$Q2/.gitignore"
+POOL="$Q2/.loom/tokens.shadow-disabled-20260926T021559Z"
+mkdir -p "$POOL"
+printf 'sk-ant-oat01-dummy\n' > "$POOL/acct-1.token"
+printf 'sk-ant-oat01-dummy\n' > "$POOL/acct-2.token"
+printf 'acct-1\nacct-2\n'     > "$POOL/.ranking"
+printf '{}\n'                 > "$POOL/.ranking.classes.json"
+printf '1\n'                  > "$POOL/.rotation_cursor"
+: > "$POOL/.bad_tokens"
+printf '{"loom_version":"0.19.556"}\n' > "$Q2/.loom/install-metadata.json"
+OUT="$(cd "$Q2" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Excluded from the commit" <<< "$OUT" && ! grep -qi "refusing to land" <<< "$OUT"; then
+    pass "the token-pool copy is excluded as credential dirt, never staged"
+else
+    fail "the token-pool copy is excluded as credential dirt, never staged (rc=$RC, out=$OUT)"
+fi
+ORIGIN_TREE_Q2="$(git --git-dir="$WORKDIR/origin-q2.git" ls-tree -r --name-only main)"
+if ! grep -q "tokens.shadow-disabled" <<< "$ORIGIN_TREE_Q2"; then
+    pass "not one path of the pool copy reached origin (the a9da48c2 regression)"
+else
+    fail "a pool-copy path reached origin (tree=$ORIGIN_TREE_Q2)"
+fi
+if grep -qxF ".loom/install-metadata.json" <<< "$ORIGIN_TREE_Q2" && \
+   [[ "$(git --git-dir="$WORKDIR/origin-q2.git" show main:.loom/install-metadata.json)" == '{"loom_version":"0.19.556"}' ]]; then
+    pass "the legitimate resync surface beside it still landed"
+else
+    fail "the legitimate resync surface beside it still landed (tree=$ORIGIN_TREE_Q2)"
 fi
 
 echo ""

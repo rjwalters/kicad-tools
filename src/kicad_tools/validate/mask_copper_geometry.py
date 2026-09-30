@@ -14,6 +14,18 @@ from typing import Any
 from .mask_export_geometry import MaskExportOptions, _inventory, inspect_exported_mask_geometry
 from .mask_geometry import _validate_structure
 
+#: KiCad versions whose native plot profile has been qualified against this
+#: repository's independent material oracle. Each entry was admitted by running
+#: ``tests/test_mask_copper_native.py`` end to end under that exact KiCad build
+#: (native ``pcbnew`` object plotting compared against Gerbonara's reading of
+#: ``kicad-cli``-plotted Gerbers, 5 nm tolerance) and confirming the whole suite
+#: passes with no skips -- see ``scripts/ci/check_mask_copper_native.py``, which
+#: imports this same set so the CI gate and the library check can never drift
+#: apart. Do not add a version here without repeating that comparison; an
+#: unqualified build must keep failing loudly rather than silently attributing
+#: mask geometry from an unverified plot profile.
+QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")
+
 
 @dataclass
 class AttributedMaskGeometry:
@@ -101,10 +113,25 @@ def inspect_attributed_mask_geometry(
             scratch_dir=scratch_dir,
         )
         result = AttributedMaskGeometry(exported)
+        # Native export stderr is classified once, inside
+        # inspect_exported_mask_geometry, so this caller inherits its
+        # geometry-neutral stderr allowlist (#5707) rather than repeating it.
+        # The separate worker launch below judges returncode and output
+        # presence only -- it never word-matches stderr -- so it has no
+        # equivalent misclassification to fix.
         result.errors.extend(f"{e['feature']}: {e['reason']}" for e in exported.unsupported)
         # Native pcbnew LoadBoard has no exposed general DRC-expression loader.
         # These rule constraints do not change plotted shape. Anything else is
         # an explicit context gap, even if a whole-layer union happens to agree.
+        #
+        # Every entry is a minimum/maximum a DRC run *measures* against already
+        # plotted material; none of them is an input to the plot itself, so
+        # native mask/copper object geometry is identical with and without the
+        # rule present. Constraints that do feed the plot -- zone fill shaping
+        # (``zone_connection``, ``thermal_relief_gap``, ``thermal_spoke_width``,
+        # ``min_resolved_spokes``) above all -- must stay out, and so must any
+        # constraint whose native context has not actually been exercised by a
+        # parity test. Do not widen this set to quiet a failing board.
         if captured[".kicad_dru"]:
             rule_tree = parse_string("(rules " + captured[".kicad_dru"].decode() + ")")
             safe = {
@@ -117,6 +144,13 @@ def inspect_attributed_mask_geometry(
                 "hole_size",
                 "via_diameter",
                 "annular_width",
+                # Silkscreen-to-object minimum, the rule ordinary factory
+                # ``.kicad_dru`` files ship (#5818). It is geometry-neutral for
+                # this checker twice over: it constrains silkscreen, which is
+                # neither a mask nor a copper layer, and it is a measured
+                # minimum rather than a plot input. Parity is pinned by
+                # tests/test_mask_copper_native.py.
+                "silk_clearance",
             }
             for constraint in rule_tree.find_all("constraint"):
                 if constraint.get_string(0) not in safe:
@@ -196,9 +230,12 @@ def inspect_attributed_mask_geometry(
         if data.get("source_sha256") != exported.source_sha256:
             result.errors.append("Native object/source binding mismatch")
             return result
-        if str(data.get("native_version", "")).split()[0] != "10.0.5":
+        native_version = str(data.get("native_version", "")).split()
+        if not native_version or native_version[0] not in QUALIFIED_NATIVE_VERSIONS:
             result.errors.append(
-                "Native object attribution requires the verified KiCad 10.0.5 plot profile"
+                "Native object attribution requires a qualified KiCad plot profile "
+                f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got "
+                f"{data.get('native_version', '') or 'no version'}"
             )
             return result
         if str(data["native_version"]).split()[0] != exported.native_version.split()[0]:

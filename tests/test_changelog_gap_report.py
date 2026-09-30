@@ -193,3 +193,258 @@ def test_an_issue_cited_only_in_an_older_section_is_not_documented() -> None:
 
 def test_extract_section_returns_empty_for_a_missing_section() -> None:
     assert gap_report.extract_section(_CHANGELOG, "Nonexistent") == ""
+
+
+# --- fragments count as documentation (issue #5775) --------------------------
+
+
+def test_fragments_document_their_issue_and_body_citations(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("# not a fragment\n")
+    (tmp_path / "5001.fixed.md").write_text("- **A fix** (Issue #5001, see also #5002).\n")
+    (tmp_path / "5003.upgrade.md").write_text("- **Heads up** (Issue #5003).\n")
+    assert gap_report.fragment_documented_issues(tmp_path) == {5001, 5002, 5003}
+
+
+def test_fragment_dir_none_or_missing_documents_nothing(tmp_path: Path) -> None:
+    assert gap_report.fragment_documented_issues(None) == set()
+    assert gap_report.fragment_documented_issues(tmp_path / "absent") == set()
+
+
+def test_malformed_fragment_name_is_an_error(tmp_path: Path) -> None:
+    import pytest
+
+    (tmp_path / "5001.fix.md").write_text("- typo'd kind\n")
+    with pytest.raises(gap_report.changelog_assemble.FragmentError, match="5001.fix.md"):
+        gap_report.fragment_documented_issues(tmp_path)
+
+
+def _git(repo: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def test_build_report_counts_fragments_as_documented(tmp_path: Path, monkeypatch) -> None:
+    """``--since <tag>`` with a fragment and no [Unreleased] bullet has no gap."""
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "chore: base")
+    _git(tmp_path, "tag", "v0.0.1")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "fix: a (#9)", "-m", "Closes #700")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "feat: b (#10)", "-m", "Closes #701")
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text("# Changelog\n\n## [Unreleased]\n\n- **B** (#701).\n")
+    fragments = tmp_path / "changelog.d"
+    fragments.mkdir()
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+
+    without = gap_report.build_report(
+        "v0.0.1", "HEAD", changelog, "Unreleased", _StubResolver(), fragments
+    )
+    assert without.gaps == [700]
+
+    (fragments / "700.fixed.md").write_text("- **A** (Issue #700).\n")
+    with_fragment = gap_report.build_report(
+        "v0.0.1", "HEAD", changelog, "Unreleased", _StubResolver(), fragments
+    )
+    assert with_fragment.ok and with_fragment.gaps == []
+
+
+# --- per-PR mode (issue #5775) ----------------------------------------------
+
+
+def _pr(
+    title: str,
+    body: str = "",
+    labels: list[str] | None = None,
+    author: str = "rjwalters",
+    head_ref: str = "feature/issue-5800",
+) -> object:
+    return gap_report.PullRequest(
+        number=1, title=title, body=body, labels=labels or [], author=author, head_ref=head_ref
+    )
+
+
+def test_user_visible_pr_without_fragment_fails() -> None:
+    verdict = gap_report.evaluate_pr(_pr("fix(router): x", "Closes #5800\n"), set(), [])
+    assert not verdict.ok
+    assert verdict.issues == [5800]
+    assert "changelog.d/5800.<kind>.md" in verdict.reason
+
+
+def test_same_pr_with_a_fragment_passes() -> None:
+    verdict = gap_report.evaluate_pr(
+        _pr("fix(router): x", "Closes #5800\n"), {5800}, ["changelog.d/5800.fixed.md"]
+    )
+    assert verdict.ok and "#5800" in verdict.reason
+
+
+def test_same_pr_with_skip_label_passes() -> None:
+    verdict = gap_report.evaluate_pr(
+        _pr("fix(router): x", "Closes #5800\n", labels=["changelog:skip"]), set(), []
+    )
+    assert verdict.ok and "changelog:skip" in verdict.reason
+
+
+def test_fragment_citing_a_different_issue_does_not_count() -> None:
+    verdict = gap_report.evaluate_pr(
+        _pr("feat: x", "Closes #5800\n"), {1234}, ["changelog.d/1234.added.md"]
+    )
+    assert not verdict.ok
+    assert "cite none of #5800" in verdict.reason
+
+
+def test_issue_resolves_from_pr_body_when_branch_commits_carry_none() -> None:
+    """Curator case (a): unsquashed commits lack ``Closes #N``; the PR body has it."""
+    pr = _pr("fix: x", "Summary prose.\n\nCloses #5810\n", head_ref="some-branch")
+    assert gap_report.resolve_pr_issues(pr) == ([5810], "closing")
+    assert gap_report.evaluate_pr(pr, {5810}, []).ok
+
+
+def test_issue_falls_back_to_branch_then_part_of() -> None:
+    assert gap_report.resolve_pr_issues(_pr("fix: x", "", head_ref="feature/issue-42")) == (
+        [42],
+        "branch",
+    )
+    assert gap_report.resolve_pr_issues(_pr("fix: x", "Part of #7\n", head_ref="topic")) == (
+        [7],
+        "partial",
+    )
+    assert gap_report.resolve_pr_issues(_pr("fix: x", "", head_ref="topic")) == ([], "none")
+
+
+def test_unattributed_user_visible_pr_passes_only_with_a_fragment() -> None:
+    pr = _pr("fix: x", "", head_ref="topic")
+    assert not gap_report.evaluate_pr(pr, set(), []).ok
+    assert gap_report.evaluate_pr(pr, set(), ["changelog.d/99.fixed.md"]).ok
+
+
+def test_internal_title_types_pass_without_a_fragment() -> None:
+    for title in (
+        "ci: add a job",
+        "test(router): pin a case",
+        "docs: fix a typo",
+        "refactor: split module",
+        "chore(deps): bump x",
+    ):
+        assert gap_report.evaluate_pr(_pr(title, "Closes #5800\n"), set(), []).ok, title
+
+
+def test_loom_resync_passes_structurally() -> None:
+    for title in (
+        "chore: resync installed Loom surfaces",
+        "Resync installed Loom surfaces",  # non-conventional variant
+        "Install Loom 0.19.0",
+    ):
+        verdict = gap_report.evaluate_pr(_pr(title, head_ref="loom/resync"), set(), [])
+        assert verdict.ok, title
+    assert gap_report.Commit(
+        sha="0" * 40, subject="Resync installed Loom surfaces", body=""
+    ).is_internal
+
+
+def test_dependabot_passes_structurally_even_with_a_non_conventional_title() -> None:
+    """Curator case (b): classification is by author/branch, not by ledger."""
+    for author, ref in (
+        ("dependabot[bot]", "dependabot/uv/numpy-3.0"),
+        ("app/dependabot", "dependabot/uv/numpy-3.0"),
+        ("someone", "dependabot/github_actions/x"),
+    ):
+        verdict = gap_report.evaluate_pr(
+            _pr("Bump numpy from 2.0 to 3.0", author=author, head_ref=ref), set(), []
+        )
+        assert verdict.ok and "construction" in verdict.reason, (author, ref)
+
+
+def test_other_bots_are_not_internal() -> None:
+    """Loom's fleet bot authors real feature PRs; only Dependabot is exempt."""
+    verdict = gap_report.evaluate_pr(
+        _pr("feat: x", "Closes #5800\n", author="loom-fleet-dispatch[bot]"), set(), []
+    )
+    assert not verdict.ok
+
+
+def test_internal_issues_ledger_exempts_a_pr() -> None:
+    issue = next(iter(gap_report.INTERNAL_ISSUES))
+    verdict = gap_report.evaluate_pr(_pr("fix: x", f"Closes #{issue}\n"), set(), [])
+    assert verdict.ok and "INTERNAL_ISSUES" in verdict.reason
+
+
+def test_pull_request_from_event_payload() -> None:
+    event = {
+        "action": "labeled",
+        "pull_request": {
+            "number": 12,
+            "title": "fix: y",
+            "body": None,
+            "labels": [{"name": "changelog:skip"}, {"name": "loom:pr"}],
+            "user": {"login": "dependabot[bot]"},
+            "head": {"ref": "dependabot/uv/x"},
+        },
+    }
+    pr = gap_report.PullRequest.from_event(event)
+    assert (pr.number, pr.title, pr.body, pr.author, pr.head_ref) == (
+        12,
+        "fix: y",
+        "",
+        "dependabot[bot]",
+        "dependabot/uv/x",
+    )
+    assert pr.labels == ["changelog:skip", "loom:pr"]
+
+
+def test_pull_request_from_gh_json() -> None:
+    pr = gap_report.PullRequest.from_gh(
+        {
+            "number": 3,
+            "title": "feat: z",
+            "body": "Closes #1",
+            "labels": [{"name": "a"}],
+            "author": {"login": "app/dependabot"},
+            "headRefName": "dependabot/npm/x",
+        }
+    )
+    assert (pr.author, pr.head_ref, pr.labels) == ("app/dependabot", "dependabot/npm/x", ["a"])
+
+
+def test_cli_pr_event_mode_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A fragment-only diff on a user-visible PR passes; without it the PR fails."""
+    import json
+
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n")
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "README.md").write_text("x\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "chore: base")
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps(
+            {"pull_request": {"number": 5, "title": "fix: q", "body": "Closes #900", "labels": []}}
+        )
+    )
+    monkeypatch.setattr(gap_report, "REPO_ROOT", tmp_path)
+    args = [
+        "--pr-event",
+        str(event),
+        "--base",
+        "HEAD^1",
+        "--changelog",
+        str(tmp_path / "CHANGELOG.md"),
+        "--fragments-dir",
+        str(tmp_path / "changelog.d"),
+    ]
+
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "fix: q")
+    assert gap_report.main(args) == 1
+    assert "RESULT: FAIL" in capsys.readouterr().out
+
+    _git(tmp_path, "reset", "-q", "--hard", "HEAD^1")
+    (tmp_path / "changelog.d" / "900.fixed.md").write_text("- **Q** (Issue #900).\n")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "fix: q")
+    assert gap_report.main(args) == 0
+    assert "RESULT: PASS" in capsys.readouterr().out

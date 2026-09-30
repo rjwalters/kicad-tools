@@ -40,6 +40,7 @@ source "$SCRIPT_DIR/lib/script-helper.sh"
 # subcommand instead of the Python module; the forwarded flags are unchanged.
 if [[ "${1:-}" == "--model-experiment" || "${1:-}" == "sweep-experiment" ]]; then
     shift
+    # requires-daemon: sweep-experiment >= 0.17.0   #4275/#4552 — the Rust port landed in 3f147e8f0 (2026-07-29), AFTER v0.16.0 was tagged (57cfec3aa) and while the workspace version still read 0.16.0, so 0.16.0 is the last version WITHOUT it; the next bump, 0.17.0 (3e5a9439e), is the first that shipped it. This declares the `--model-experiment` branch only — the `stats` dependency below is a separate, still-grandfathered pair. Hard, not `optional`: the branch only execs, it never probes or degrades. Default LOOM_SCRIPT_HELPER_MISSING_RC (1) is left alone deliberately — `sweep-experiment harvest` exits 0 or propagates an error and has no data exit code, so the refusal cannot be mistaken for an answer (#8484).
     loom_exec_script_helper sweep-experiment harvest "$@"
 fi
 

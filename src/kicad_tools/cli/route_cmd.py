@@ -214,8 +214,39 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
          of running unbounded when the wall-clock cutoff is removed.
       3. Warns when the outer ``--timeout`` is set, because a firing outer
          deadline re-introduces wall-clock dependence and breaks the
-         reproducibility guarantee (the deadline is kept as a safety
-         backstop, not the binding constraint).
+         reproducibility guarantee.
+
+    Issue #5765: the outer ``--timeout`` is NOT purely a "safety backstop
+    that never binds" the way earlier revisions of this docstring and its
+    printed warning claimed.  Under ``--auto-layers`` escalation (or any
+    other multi-attempt caller of
+    :func:`_per_attempt_budgeted_timeout`), each attempt gets a *fair
+    wall-clock slice* of ``remaining / len(layer_configs)`` -- e.g.
+    ``--timeout 600`` with 8 escalation attempts hands the first (2L)
+    attempt only 75 s, and that slice becomes the detailed router's stage
+    deadline (``two_phase.py`` ``check_timeout()``), which can cut the
+    rip-up/reroute loop between nets on a slow-enough machine even though
+    the iteration backstop from (2)/(2b) never bound.  A time-dilation
+    K-sweep on the frozen board-03 recipe reproduced this directly: K=1..12
+    never bind, K=16 cuts a reroute at 75.1 s and drops 13/13 nets to
+    9/13.  Deliberately not fixed by removing the fair slice here: Issue
+    #3881 / #4770 measured that the fair slice is what recovers throughput
+    on hard fixtures (chorus 13/51 -> more nets attempted) and that
+    removing it costs board-07 real nets, so this normalizer's contract
+    stays "the fair slice can legitimately bind on a slow enough machine or
+    tight enough ``--timeout``" -- the fix here is making that loss
+    ATTRIBUTABLE rather than silent: (a) the warning below states the
+    effective per-attempt slice can be much smaller than ``--timeout``
+    itself, and (b) ``TwoPhaseRouter._note_stage_deadline_determinism_loss``
+    prints ``"[deterministic-budget] stage deadline fired -- run is not
+    reproducible"`` the first time a stage deadline actually fires while the
+    iteration backstop is pinned, so a non-reproducible run is visible in
+    its own log instead of looking identical to a normal, harmless deadline
+    trim.  Production recipes that pair ``--deterministic-budget`` with
+    ``--timeout`` (boards 01/02/03/04/06/07, all naming this normalizer's
+    "SAFETY backstop only" claim in their own comments) are reproducible
+    ONLY when ``--timeout`` is sized generously enough, machine load
+    included, that the fair slice never binds -- not unconditionally.
 
     No-op when ``--deterministic-budget`` is not set, so legacy behaviour is
     preserved bit-for-bit.
@@ -291,10 +322,18 @@ def _normalize_deterministic_budget(args, quiet: bool = False) -> None:
         if timeout and timeout > 0:
             print(
                 "[deterministic-budget] WARNING: --timeout "
-                f"{timeout:g}s is set.  It is retained only as a SAFETY "
-                "backstop; if the outer deadline fires the run is no longer "
-                "machine-independent.  Size it generously (or omit it) so the "
-                "iteration budget -- not wall-clock -- bounds the work."
+                f"{timeout:g}s is set.  It is intended as a SAFETY backstop, "
+                "but under --auto-layers escalation each attempt only gets a "
+                f"FAIR SLICE of it (as little as {timeout:g}s / "
+                "len(layer_configs) for the first attempt -- Issue #5765), "
+                "and that slice becomes the detailed router's stage "
+                "deadline.  If it fires, the run is no longer "
+                "machine-independent even though the iteration backstop "
+                "above never bound; a "
+                "'[deterministic-budget] stage deadline fired' log line "
+                "will mark exactly when that happens.  Size --timeout "
+                "generously (or omit it) so the iteration budget -- not "
+                "wall-clock -- bounds the work."
             )
 
 
@@ -6545,6 +6584,7 @@ _CLEARANCE_SOURCE_TOKENS: dict[str, str] = {
     "board-net-class": "board",
     "fab-floor": "fab-floor",
     "project-min-clearance": "project-min-clearance",
+    "project-net-class": "project-net-class",
     "project-dru": "project-dru",
 }
 
@@ -6576,8 +6616,10 @@ def _decide_route_clearance(
             passed.
         declared: The board's own declared rules
             (:class:`~kicad_tools.router.clearance_resolver.DeclaredClearanceRules`),
-            or ``None`` when nothing was read (an explicit ``--clearance``
-            short-circuits the read).
+            or ``None`` when nothing was read.  Since #5656 the CLI reads them
+            on every invocation, including an explicit ``--clearance`` -- the
+            explicit value still wins, but the resolver needs the declared
+            rules to say so when it undercuts one.
 
     Returns:
         ``(value, source, banner, warning)``.  ``banner`` is ``None`` when no
@@ -6605,6 +6647,8 @@ def _decide_route_clearance(
             return "board .kicad_dru clearance rule"
         if rule_source is RuleSource.PROJECT_MIN_CLEARANCE:
             return "project board minimum clearance"
+        if rule_source is RuleSource.PROJECT_NET_CLASS:
+            return f'project netclass "{class_name}"' if class_name else "project netclass"
         if rule_source is RuleSource.BOARD_NET_CLASS:
             return f'board net_class "{class_name}"'
         return str(rule_source.value)
@@ -6669,11 +6713,15 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
     explicit_clearance = _flag_passed_explicitly(argv, ("--clearance",))
     explicit_manufacturer = _flag_passed_explicitly(argv, ("--manufacturer", "--mfr"))
 
-    declared = None
-    if not explicit_clearance:
-        declared = read_declared_clearance_rules(
-            pcb_path, board_net_classes=_board_declared_net_classes(pcb_path)
-        )
+    # Read the board's declared rules unconditionally -- including when
+    # ``--clearance`` was passed (#5656).  The value is still the operator's
+    # (the resolver returns the explicit target untouched), but the resolver
+    # can only build its "explicit --clearance undercuts a declared rule"
+    # advisory when it has something to compare against; skipping the read on
+    # the explicit path made that warning unreachable from the shipped CLI.
+    declared = read_declared_clearance_rules(
+        pcb_path, board_net_classes=_board_declared_net_classes(pcb_path)
+    )
 
     value, source, banner, warning = _decide_route_clearance(
         clearance=float(getattr(args, "clearance", DEFAULT_ROUTE_CLEARANCE_MM)),
@@ -6747,13 +6795,15 @@ def _warn_plane_layer_reservation(args, layer_stack) -> None:
 
     Advisory only -- stderr, never suppressed by ``--quiet``, exit code
     unchanged. A pure no-op when ``layer_stack`` declares no ``PLANE``
-    layers, or when ``--reserve-plane-layers`` was already passed.
+    layers, or when ``--reserve-plane-layers`` is in effect (the default
+    since Issue #5789 -- the ``getattr`` fallback matches that default so a
+    missing attribute is treated the same as the argparse default).
     """
     from kicad_tools.router.layer_advisories import plane_layer_reservation_advisory
 
     msg = plane_layer_reservation_advisory(
         layer_stack,
-        reserve_plane_layers=getattr(args, "reserve_plane_layers", False),
+        reserve_plane_layers=getattr(args, "reserve_plane_layers", True),
     )
     if msg:
         print(msg, file=sys.stderr)
@@ -6762,11 +6812,14 @@ def _warn_plane_layer_reservation(args, layer_stack) -> None:
 def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
     """Hard-restrict ``rules.allowed_layers`` to non-PLANE layers (#5014).
 
-    A strict no-op unless ``--reserve-plane-layers`` was passed: the early
-    ``return`` leaves ``rules.allowed_layers`` completely untouched,
-    preserving pre-#5014 routing byte for byte.
+    A strict no-op only when ``--reserve-plane-layers`` is explicitly
+    disabled (``--no-reserve-plane-layers``): the early ``return`` leaves
+    ``rules.allowed_layers`` completely untouched, preserving pre-#5014
+    routing byte for byte for that opt-out. Since Issue #5789 the flag
+    defaults to ``True`` (the ``getattr`` fallback matches), so this
+    restriction now applies by default.
 
-    When the flag IS passed, the assignment is **unconditional** -- a
+    When the flag IS in effect, the assignment is **unconditional** -- a
     ``layer_stack`` that declares no ``PLANE`` layers writes ``None``,
     which *clears* any restriction rather than leaving a stale one in
     place.  That distinction matters in
@@ -6785,7 +6838,7 @@ def _apply_plane_layer_reservation(rules, layer_stack, args) -> None:
     without threading a new constructor argument through every relaxation
     tier / escalation loop in this module.
     """
-    if not getattr(args, "reserve_plane_layers", False):
+    if not getattr(args, "reserve_plane_layers", True):
         return
     from kicad_tools.router.layer_advisories import reserve_plane_layers_allowed_layers
 
@@ -7325,6 +7378,11 @@ def route_with_layer_escalation(
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Issue #3155: capture preserved copper ONCE from the staged input before
     # any routing or checkpoint write mutates it.  The escalation loop below
@@ -8557,6 +8615,11 @@ def route_with_rule_relaxation(
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -10854,6 +10917,11 @@ def route_with_combined_escalation(
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Get relaxation tiers
     tiers = get_relaxation_tiers(
@@ -13147,6 +13215,104 @@ def _resolve_route_only_nets(args, pcb_path: Path) -> int:
     return 0
 
 
+def _resolve_preserved_connected_nets(args, pcb_path: Path) -> int:
+    """Hold already-complete nets out of a ``--preserve-existing`` route set (Issue #5788).
+
+    ``--preserve-existing``'s ``--help`` promises that existing copper is
+    re-emitted unchanged "so only unconnected nets are routed".  Only the first
+    half was implemented: :func:`load_pcb_for_routing` marked the copper as a
+    grid obstacle, but ``router.nets`` still contained EVERY multi-pad net --
+    and both engines deliberately let a net that is in the routable set replace
+    its own copper (``fixed_copper = [r for r in self.existing_routes if r.net
+    not in self.nets]``, correct for ``--nets`` / ``--region``).  So a net that
+    was already fully routed in the input was re-routed from scratch and its
+    copper dropped: board 06 lost all 64 of its pre-routed, coupled LVDS
+    segments through a flag whose entire purpose is to keep them.
+
+    This preflight closes the gap the same way ``--complete`` already narrows
+    its own route set: detect the nets that are ALREADY fully connected on the
+    INPUT board (:func:`~kicad_tools.router.preserve_existing.fully_connected_nets`,
+    the connectivity model ``kct check`` itself consumes) and stamp them on
+    ``args._preserved_connected_nets``.  The four routing sub-flows then append
+    them to their local ``skip_nets`` (see
+    :func:`_extend_skip_for_preserved_nets`), which is the established,
+    already-tested way to say "do not route this net": its pads become net-0
+    obstacles, its copper is still loaded into ``router.existing_routes`` (so it
+    is a HARD clearance obstacle for both the mesh and lattice negotiations and
+    is never offered to diff-pair grouping), and the ``--preserve-existing``
+    writer re-emits it verbatim.
+
+    Deliberately scoped to a **bare** ``--preserve-existing``.  It is a no-op
+    when the caller already chose an explicit route set, because there the
+    re-route is the point, not a bug:
+
+    * ``--nets`` / ``--complete`` (both stamp ``args._route_only_nets``) --
+      ``--nets`` promises to route exactly the listed nets, and ``--complete``
+      has already narrowed the set to the stranded ones.
+    * ``--region`` -- confining routing to a box exists precisely to re-route
+      the copper inside it.
+
+    Returns 0 always (detection failures degrade to "nothing preserved", i.e.
+    pre-#5788 behaviour); the int return matches the other preflights so the
+    call site reads uniformly.
+    """
+    args._preserved_connected_nets = []
+    if not getattr(args, "preserve_existing", False):
+        return 0
+    # An explicitly chosen route set (--nets / --complete) or a spatial bound
+    # (--region) means the caller WANTS those nets re-routed.
+    if getattr(args, "_route_only_nets", None) or getattr(args, "nets", None):
+        return 0
+    if getattr(args, "_region_box", None) is not None:
+        return 0
+
+    from kicad_tools.router.preserve_existing import fully_connected_nets
+
+    try:
+        connected = fully_connected_nets(pcb_path)
+    except Exception as e:  # pragma: no cover - a detector that cannot run
+        # must never widen the preserved set (and must never fail the route).
+        if not getattr(args, "quiet", False):
+            print(
+                "Note: --preserve-existing could not determine which nets are "
+                f"already connected ({e}); every multi-pad net stays routable.",
+                file=sys.stderr,
+            )
+        return 0
+
+    if not connected:
+        return 0
+
+    args._preserved_connected_nets = list(connected)
+    if not getattr(args, "quiet", False):
+        preview = ", ".join(connected[:8])
+        more = "" if len(connected) <= 8 else f" (+{len(connected) - 8} more)"
+        print(
+            f"  --preserve-existing: {len(connected)} net(s) already fully "
+            f"connected -- left untouched, not re-routed: {preview}{more}"
+        )
+    return 0
+
+
+def _extend_skip_for_preserved_nets(args, skip_nets: list[str]) -> list[str]:
+    """Append the #5788 already-connected nets to *skip_nets*, in place.
+
+    Mirrors :func:`~kicad_tools.router.auto_pour.auto_skip_pour_nets`'s
+    contract (mutates the caller's list, returns the names it added) and is
+    called from the same spot in every routing sub-flow: AFTER the auto-pour
+    step, so these names are never forwarded as ``force_pour_nets`` pour intent
+    (Issue #3092's ``--skip-nets``-is-pour-intent rule must not pick them up --
+    an already-routed signal net is emphatically not a pour request).
+
+    Returns the list of names appended (empty when the preflight found none, or
+    when the caller opted into an explicit route set).
+    """
+    preserved = list(getattr(args, "_preserved_connected_nets", None) or [])
+    added = [n for n in preserved if n not in skip_nets]
+    skip_nets.extend(added)
+    return added
+
+
 # ---------------------------------------------------------------------------
 # Issue #4263: analytical --dry-run grid/cell/budget plan.
 #
@@ -13929,9 +14095,13 @@ def _route_parser() -> argparse.ArgumentParser:
             "and pins the C++ A* iteration backstop (--max-search-iterations) "
             "to a fixed positive value, so each search either finds a path or "
             "aborts after the SAME node-expansion count on every environment. "
-            "--timeout (the outer wall-clock budget) is kept only as a safety "
-            "backstop; if it fires it is logged as a determinism-breaking "
-            "warning. Combine with --seed for byte-stable re-routes. The fixed "
+            "--timeout (the outer wall-clock budget) is intended as a safety "
+            "backstop, but under --auto-layers escalation each attempt only "
+            "gets a fair slice of it (timeout / attempts, Issue #5765); if a "
+            "stage deadline fires anyway it is logged as "
+            "'[deterministic-budget] stage deadline fired -- run is not "
+            "reproducible'. Size --timeout generously so that never binds. "
+            "Combine with --seed for byte-stable re-routes. The fixed "
             "iteration backstop value can be overridden by passing an explicit "
             "--max-search-iterations N alongside this flag (N is then used "
             "verbatim); see DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS for the "
@@ -14421,23 +14591,28 @@ def _route_parser() -> argparse.ArgumentParser:
             "avoided layer must never carry a given net."
         ),
     )
-    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
-    # plane assignments.  Mirror of the outer parser.py flag; both sites must
-    # stay in sync per ``tests/test_cli_parser_drift.py``.
+    # Issue #5014: HARD signal-layer eligibility for controlled-impedance
+    # plane assignments. Issue #5789: defaults to ON -- a declared reference
+    # plane is hard-excluded from signal routing unless the caller opts out
+    # with --no-reserve-plane-layers. Mirror of the outer parser.py flag;
+    # both sites must stay in sync per ``tests/test_cli_parser_drift.py``.
     parser.add_argument(
         "--reserve-plane-layers",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Hard-restrict signal routing to the resolved layer stack's "
             "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
             "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
-            "reference planes). By default LayerDefinition.is_routable "
-            "treats every copper layer -- including declared reference "
-            "planes -- as signal-eligible, so a controlled-impedance recipe "
-            "can silently lose its continuous reference construction to "
-            "ordinary signal. A no-op on a stack with no PLANE layers "
-            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+            "reference planes). Enabled by default (Issue #5789): "
+            "LayerDefinition.is_routable treats every copper layer as "
+            "signal-eligible, so without this restriction a controlled-"
+            "impedance recipe can silently lose its continuous reference "
+            "construction to ordinary signal. A no-op on a stack with no "
+            "PLANE layers (--layers 2, 4-all, or an all-signal "
+            "auto-detected board). Pass --no-reserve-plane-layers to allow "
+            "signal routing across declared plane layers (pre-#5789 "
+            "behavior)."
         ),
     )
     # Issue #3154: advisory schematic/PCB drift banner.  When a schematic is
@@ -15589,6 +15764,17 @@ def _run_main_impl(args, parser, argv) -> int:
         if rc != 0:
             return rc
 
+    # Issue #5788: a bare --preserve-existing must honour its own --help ("only
+    # unconnected nets are routed") -- detect the nets that are ALREADY fully
+    # connected on the input board and stamp them so every routing sub-flow
+    # holds them out of the routable set (their copper stays a hard obstacle and
+    # is re-emitted verbatim).  Runs AFTER --nets / --region so their explicit
+    # re-route semantics win; a no-op unless --preserve-existing is in effect
+    # without an explicit route set.
+    _pc_rc = _resolve_preserved_connected_nets(args, pcb_path)
+    if _pc_rc != 0:
+        return _pc_rc
+
     # Issue #4472 (epic #4465, Phase 2): localize a --complete pass to a
     # per-link bounding box.  Runs AFTER --region so a user-supplied box wins
     # (the lattice localizes to it); otherwise the union of the stranded nets'
@@ -16146,6 +16332,11 @@ def _run_main_impl(args, parser, argv) -> int:
     # --net-class-map resolver's phase 3 can match sidecar keys naming them —
     # they enter neither router.net_names nor router.existing_routes.
     args._auto_skipped_net_names = list(_skipped)
+    # Issue #5788: hold the input board's ALREADY-fully-connected nets out of the
+    # routable set under a bare --preserve-existing (their copper stays a hard
+    # obstacle and is re-emitted verbatim).  Appended HERE, after auto-pour, so
+    # the names are never forwarded as ``force_pour_nets`` pour intent.
+    _extend_skip_for_preserved_nets(args, skip_nets)
 
     # Issue #3155: capture preserved copper once before routing/checkpoints.
     _preserve = bool(getattr(args, "preserve_existing", False))

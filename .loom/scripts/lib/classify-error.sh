@@ -646,3 +646,19 @@ classification_is_transient() {
             ;;
     esac
 }
+
+# `loom_model_class_marker` -- how NARROW a `.bad_tokens` mark may be (#8058) --
+# used to live here. It is now `loom-daemon retry-classify model-class`
+# (loom_daemon::retry_classify::model_class_marker), ported out of shell by
+# #8138 under epic #7810's shell budget.
+#
+# It moved rather than shrank because the boundary was already drawn: #8037 put
+# every one of claude-wrapper.sh's OTHER rotation predicates behind
+# `retry-classify`, and this is the remedy-shaping half of one of them
+# (is_account_exhaustion decides to rotate and mark; model-class decides how
+# much of the account the mark takes out). The classifier it consults --
+# `classify_error` / `classification_is_transient`, above -- deliberately did
+# NOT move, for the reason in #4501: it is the fleet's single source of truth
+# for what a failure IS, and a second copy of it in Rust could disagree with
+# this one. Shell still says what the failure is; the daemon owns what the
+# wrapper does about it.

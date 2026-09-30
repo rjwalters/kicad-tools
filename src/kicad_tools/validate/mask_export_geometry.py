@@ -22,6 +22,62 @@ from .mask_geometry import _validate_structure
 
 LAYERS = ("F.Mask", "B.Mask", "F.Cu", "B.Cu")
 
+#: Native stderr lines that are environmental bookkeeping and cannot change
+#: plotted geometry (#5707). Each entry is an *anchored* pattern matched with
+#: ``re.fullmatch`` against one stripped stderr line -- never a loosening of
+#: the strict ``\b(error|warning)\b`` classification below, which still judges
+#: every line that is not matched here.
+#:
+#: Adding an entry relaxes a manufacturing-correctness gate. Only admit a
+#: pattern whose condition is external to plotting, keep it anchored and as
+#: narrow as the observed text allows, name the issue that observed it, and
+#: pair it with a test proving a neighbouring non-allowlisted warning still
+#: fails the export.
+GEOMETRY_NEUTRAL_STDERR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        # wxWidgets single-instance checker. KiCad takes one shared lock at
+        # <tmp>/org.kicad.kicad/instances/kicad-cli-<version>, so a second
+        # concurrent kicad-cli (CI runs KCT_NATIVE_MAX_CONCURRENCY=2, #5501)
+        # or a stale lock left by a killed process makes wx report it. It is
+        # emitted during process startup, before any board is loaded or
+        # plotted; the export still runs and writes every requested layer.
+        # Version-agnostic by construction: the lock path embeds whatever
+        # KiCad version is running.
+        "wx-instance-lock",
+        re.compile(
+            r"(?:\d{1,2}:\d{2}:\d{2}:\s+)?"
+            r"Warning:\s+Invalid lock file\s+'[^']*/instances/kicad-cli-\d+(?:\.\d+)*'\.?"
+        ),
+    ),
+)
+
+
+def _suppress_geometry_neutral_stderr(stderr: str) -> tuple[list[dict[str, str]], str]:
+    """Split native stderr into geometry-neutral lines and the residual text.
+
+    Returns the suppressed lines paired with the pattern name that matched
+    each, plus the stderr that classification must still judge. Callers may
+    only apply this to an export that exited ``0``: a failed export is
+    unsupported regardless of what it printed.
+    """
+    suppressed: list[dict[str, str]] = []
+    residual: list[str] = []
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        matched = next(
+            (
+                name
+                for name, pattern in GEOMETRY_NEUTRAL_STDERR_PATTERNS
+                if stripped and pattern.fullmatch(stripped)
+            ),
+            None,
+        )
+        if matched is None:
+            residual.append(line)
+        else:
+            suppressed.append({"pattern": matched, "line": stripped})
+    return suppressed, "\n".join(residual)
+
 
 @dataclass(frozen=True)
 class MaskExportOptions:
@@ -350,7 +406,19 @@ def inspect_exported_mask_geometry(
         )
         snapshot.export_identity["stdout"] = re.sub(re.escape(temp), "<scratch>", completed.stdout)
         snapshot.export_identity["stderr"] = re.sub(re.escape(temp), "<scratch>", completed.stderr)
-        if completed.returncode or re.search(r"\b(error|warning)\b", completed.stderr, re.I):
+        # A non-zero return code is unsupported whatever was printed, so the
+        # geometry-neutral allowlist is only reachable on a clean exit. Every
+        # suppressed line stays visible: verbatim in ``stderr`` above, and
+        # named here with the pattern that matched it.
+        residual = completed.stderr
+        if completed.returncode == 0:
+            suppressed, residual = _suppress_geometry_neutral_stderr(completed.stderr)
+            if suppressed:
+                snapshot.export_identity["suppressed_stderr"] = [
+                    {**entry, "line": re.sub(re.escape(temp), "<scratch>", entry["line"])}
+                    for entry in suppressed
+                ]
+        if completed.returncode or re.search(r"\b(error|warning)\b", residual, re.I):
             snapshot.unsupported.append(
                 {
                     "source_uuid": "",

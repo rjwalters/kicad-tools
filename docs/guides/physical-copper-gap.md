@@ -25,12 +25,27 @@ layer; a filled-zone UUID can represent multiple boundary regions.
 ## Coverage and limits
 
 The checker uses stroked track widths, modern start/mid/end copper arcs, rotated
-circle/oval/rect/roundrect pads, via copper and stored filled-zone polygons. It
-retains source identities separately from the union. Zone outlines are not copper:
-refill zones first. Unfilled zones, custom/unsupported pad shapes, unsupported
-copper graphics and malformed arcs emit blocking `physical_copper_gap_incomplete`
-findings rather than silently claiming full coverage. Keepout areas do not add
-copper. Footprint-library metadata and unplated drill holes are not copper.
+circle/oval/rect/roundrect pads, via copper, footprint copper polygons and stored
+filled-zone polygons. It retains source identities separately from the union. Zone
+outlines are not copper: refill zones first. Unfilled zones, custom/unsupported pad
+shapes, unsupported copper graphics and malformed arcs emit blocking
+`physical_copper_gap_incomplete` findings rather than silently claiming full
+coverage. Keepout areas do not add copper. Footprint-library metadata and unplated
+drill holes are not copper.
+
+A footprint copper polygon (`fp_poly` on a `.Cu` layer) is modeled on the layer the
+polygon itself declares, with the footprint's placement applied: a filled polygon
+(`(fill yes)`, legacy `(fill solid)`) contributes its whole interior, dilated by
+half its stroke width when the outline is also stroked, and an unfilled polygon
+contributes only the stroked ring so a slit inside it stays measurable. This is the
+copper a standard `NetTie-*` footprint uses to join its pads; the join itself is
+removed by the union like any other overlap, so it is not reported as a zero-width
+slit, while a separate boundary closer than the threshold still is (issue #5817).
+Mirroring needs no separate term because KiCad stores a back-side footprint's child
+vertices already mirrored and its orientation already negated. A polygon this rule
+cannot model exactly -- fewer than three vertices, non-finite coordinates, a copper
+layer the board does not declare, a negative/non-numeric stroke, or a polygon that
+is neither filled nor stroked -- produces `physical_copper_gap_incomplete`.
 
 Curves are polygonal approximations, not an exact native-DRC or factory simulator.
 Track arc chord error is at most 0.0001 mm; pad curves use the existing clearance

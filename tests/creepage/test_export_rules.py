@@ -19,7 +19,6 @@ Covers the emitter (``kicad_tools.creepage.export_rules``) and the
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 
 import pytest
@@ -27,6 +26,7 @@ import pytest
 from kicad_tools.cli.commands.creepage_export_rules import run_creepage_export_rules_command
 from kicad_tools.cli.mfr_dru import _extract_design_rules
 from kicad_tools.cli.parser import create_parser
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.core.project_file import (
     add_netclass_definition,
     create_minimal_project,
@@ -475,19 +475,13 @@ def test_cli_missing_voltage_map_file_errors(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
-def _find_kicad_cli():
-    try:
-        from kicad_tools.export import find_kicad_cli
-
-        return find_kicad_cli()
-    except Exception:
-        return shutil.which("kicad-cli")
-
-
-@pytest.mark.skipif(_find_kicad_cli() is None, reason="kicad-cli not available")
+@pytest.mark.skipif(
+    find_kicad_cli() is None,
+    reason="find_kicad_cli() found no kicad-cli install (checked PATH and common install locations)",
+)
 def test_kicad_cli_drc_enforces_emitted_rules(tmp_path):
     """The compliant board is clean; a too-close HV<->LV pair is flagged."""
-    kicad_cli = _find_kicad_cli()
+    kicad_cli = find_kicad_cli()
     pro, pcb, vmap = _write_project(tmp_path)
     rc = _run(["creepage-export-rules", str(pro), "--voltage-map", str(vmap)])
     assert rc == 0

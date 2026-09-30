@@ -4,26 +4,27 @@
 # codecast's `cast blame` answers "which agent session wrote this line" by
 # joining git blame against transcript session records -- a database Loom does
 # not have. Loom does not need one: every Builder/Doctor commit is created in a
-# labeled issue's worktree, its PR is squash-merged with a `(#PR)` subject
-# suffix, and the PR body carries `Closes #N`. That is already an in-band,
-# durable join key from a line of code back to the issue that produced it. This
-# script is a small READ-ONLY reporting wrapper around `git blame` /
-# `git log -S` that walks that chain for a human.
+# labeled issue's worktree, its PR is merged (merge commit, the Loom default
+# since #9105; squash-merged repos use a `(#PR)` subject suffix instead), and
+# the PR body carries `Closes #N`. That is already an in-band, durable join key
+# from a line of code back to the issue that produced it. This script is a
+# small READ-ONLY reporting wrapper around `git blame` / `git log -S` that
+# walks that chain for a human.
 #
 # What it does, per hunk (a contiguous run of lines attributed to one commit):
 #   1. `git blame --porcelain` to find the commit that last touched each line.
 #   2. Resolve that commit to a PR number -- first offline, by matching the
-#      squash-merge commit subject's trailing `(#1234)` (this repo's merge
-#      style, see CLAUDE.md "Merging PRs"); falls back to the GitHub REST
-#      "commit -> associated pulls" endpoint for any commit that doesn't carry
-#      that suffix (direct-to-main commits, non-squash merges).
+#      merge-commit subject ("Merge[d]? pull request #1234 from ...", the Loom
+#      default since #9105) or a squash subject's trailing "(#1234)" suffix;
+#      falls back to the GitHub REST "commit -> associated pulls" endpoint for
+#      any commit carrying neither (direct-to-main commits, non-PR merges).
 #   3. Resolve the PR to its closing issue number(s) via
 #      `closingIssuesReferences` (GitHub's own computed field), falling back to
 #      regexing `Closes/Fixes/Resolves/Part of #N` out of the PR body.
 #   4. Best-effort role: if `loom:changes-requested` was EVER applied to the PR
 #      (per its label timeline), the PR went through a Doctor cycle at least
-#      once -- reported as `builder+doctor` (mixed; a squash commit collapses
-#      per-commit authorship so no finer attribution is possible). Otherwise
+#      once -- reported as `builder+doctor` (mixed; attribution is at the PR
+#      level by design, never per commit). Otherwise
 #      `builder`. `unknown` if the PR can't be resolved.
 #
 # Read-only: only `git blame`/`git log` (local) and `gh api`/`gh pr view` GET
@@ -173,7 +174,14 @@ cache_store() {
 # resolve_pr_from_subject <subject> -> PR number on stdout, or empty
 resolve_pr_from_subject() {
     local subject="$1"
-    if [[ "$subject" =~ \(#([0-9]+)\)[[:space:]]*$ ]]; then
+    # Merge-commit subjects: "Merge[d] pull request #N from ..." (GitHub says
+    # "Merge", Gitea says "Merged"); squash subjects end in "(#N)". Number is
+    # capture group 1 in both patterns. Both alternatives are anchored -- the
+    # merge form at `^` so a subject that merely quotes one (`Revert "Merge
+    # pull request #1234 from ..."`) falls through to the /pulls endpoint
+    # instead of resolving to the quoted PR, mirroring the `$` anchor the
+    # squash form already carries.
+    if [[ "$subject" =~ ^Merged?\ pull\ request\ #([0-9]+)\ from || "$subject" =~ \(#([0-9]+)\)[[:space:]]*$ ]]; then
         printf '%s' "${BASH_REMATCH[1]}"
     fi
 }

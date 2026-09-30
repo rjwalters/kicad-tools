@@ -35,6 +35,19 @@
 # is the regression guard). Every redirect below therefore uses the mechanism
 # the feature actually reclaims: `build.target-dir` in a per-worktree
 # `.cargo/config.toml`, the host-optimize convention issue #7239 describes.
+#
+# Needs a BUILT `loom-daemon` since #8195 slice 3: `worktree.sh remove` is now
+# a thin stub over `loom-daemon worktree-remove`, which drives the RUST
+# reclaim (`worktree_ops/cargo_target.rs`) instead of this lib's bash one. The
+# `worktree.sh remove` cases below are unchanged and are the equivalence
+# evidence for the removal-time half; the resolution-parity cases (Test 7)
+# still compare the two SHELL implementations and are unaffected. So this suite
+# moved to the "Native Port Suites" CI job, which builds the binary, and FAILS
+# rather than skips without one.
+#
+# Usage:
+#   cargo build --package loom-daemon
+#   bash defaults/scripts/tests/test-cargo-target-dir-reclaim.sh
 
 set -uo pipefail
 
@@ -45,6 +58,23 @@ REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 LIB_SH="$SCRIPTS_DIR/lib/cargo-target-dir.sh"
 STANDALONE_SH="$REPO_ROOT/scripts/cargo-target-dir.sh"
+
+# #8191 slice: the porcelain lookups this suite extracts from merge-pr.sh
+# (_primary_worktree_path / _worktree_branch_for) now delegate to `loom-daemon
+# merge-pr worktree-*`, so the LEAF verbs are pinned alongside `worktree-remove`
+# — a binary predating this slice makes every lookup fail, and the #3710
+# primary-worktree guard then refuses to clean up anything at all, which would
+# read here as a logic failure across the whole suite rather than as one
+# environment problem.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+# `cargo-target-dir` too since #9153: Test 8 drives merge-pr.sh's post-merge
+# cleanup, whose resolve/reclaim pair is now that subcommand. A binary predating
+# it would make the reclaim a silent no-op and Test 8 would read as a logic
+# failure rather than an environment one.
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-remove" "cargo-target-dir" \
+    "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
+    "merge-pr worktree-find-by-branch"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -476,6 +506,10 @@ else
 
     # shellcheck source=../lib/cargo-target-dir.sh
     source "$LIB_SH"
+    # #8191 slice: the porcelain lookups below shell out through _mp_worktree,
+    # so it is extracted with them — without it they die with
+    # "_mp_worktree: command not found" under `set -e`.
+    eval "$(extract_fn _mp_worktree "$MERGE_PR")"
     eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
     eval "$(extract_fn _worktree_branch_for "$MERGE_PR")"
     # #7812: _maybe_delete_local_branch's `-d` -> `-D` safety check is now the
@@ -486,7 +520,12 @@ else
     # shellcheck source=../lib/branch-landed.sh
     source "$(dirname "$MERGE_PR")/lib/branch-landed.sh"
     eval "$(extract_fn _maybe_delete_local_branch "$MERGE_PR")"
-    eval "$(extract_fn _mp_report_target_dir_reclaim "$MERGE_PR")"
+    # No `_mp_report_target_dir_reclaim` to extract since #9153: merge-pr.sh's
+    # resolve + reclaim + render sequence is `loom-daemon cargo-target-dir
+    # resolve|reclaim`, so the extracted body below drives the RUST decision
+    # (`worktree_ops::cargo_target::plan_reclaim`) and replays its
+    # `LEVEL<TAB>message` record through the info/warning/success stubs above —
+    # the same binary the `worktree.sh remove` cases already exercise.
     eval "$(extract_fn _remove_loom_worktree "$MERGE_PR")"
 
     MP_REPO="$TMP/mp-repo"

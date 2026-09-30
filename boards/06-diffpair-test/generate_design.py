@@ -4457,12 +4457,15 @@ def main() -> int:
 
             # route_success fast-fail gate (#4066, mirrors board 03's
             # ``route_success`` gate after ``route_pcb`` in
-            # boards/03-usb-joystick/generate_design.py).  route_pcb runs
-            # under a wall-clock ``--timeout`` SAFETY backstop layered above
-            # the load-independent per-net ``--deterministic-budget`` iteration
-            # cap, so on a loaded machine that outer deadline can fire before
-            # every signal net lands and ``route_pcb`` returns ``False``.  If
-            # we fall through, the ``write_lvs_report(require_clean=True)`` call
+            # boards/03-usb-joystick/generate_design.py).  Issue #5765:
+            # unlike board 03, this board's main negotiated stage passes
+            # ``timeout=None`` (Issue #4536, no wall-clock deadline at all)
+            # -- so a partial route here is NOT an outer ``--timeout``
+            # safety backstop firing; it stems from the per-pair coupled A*
+            # budget (``per_pair_timeout=120.0``) or the negotiated loop's
+            # own stagnation/convergence early-stop; either way
+            # ``route_pcb`` returns ``False``.  If we fall through, the
+            # ``write_lvs_report(require_clean=True)`` call
             # below sees a genuinely unrouted signal net as a copper OPEN and
             # raises ``BoardNetlistMismatch``, which the broad ``except`` below
             # reports as exit 1 -- misdirecting the reviewer to the LVS
@@ -4476,15 +4479,17 @@ def main() -> int:
             # by ``route_pcb``.
             if not route_success:
                 raise RuntimeError(
-                    "partial route -- likely wall-clock budget exhaustion "
-                    "under load (the --timeout safety backstop fired before "
-                    "every signal net landed; see the 'PARTIAL: Routed N/M "
-                    "signal nets' line above for the exact count). This is NOT "
-                    "a copper-LVS / GND-stitching failure -- the pipeline "
+                    "partial route -- likely per-pair A* budget exhaustion "
+                    "under load (the 120s per_pair_timeout, or the negotiated "
+                    "loop's stagnation early-stop, fired before every signal "
+                    "net landed; the main negotiated stage itself has no "
+                    "outer --timeout, Issue #4536; see the 'PARTIAL: Routed "
+                    "N/M signal nets' line above for the exact count). This is "
+                    "NOT a copper-LVS / GND-stitching failure -- the pipeline "
                     "stopped before the LVS gate. Re-run "
                     "boards/06-diffpair-test/generate_design.py --step all in "
-                    "isolation on a quiet machine, or raise the --timeout in "
-                    "route_pcb() if this recurs on an unloaded host."
+                    "isolation on a quiet machine, or raise per_pair_timeout "
+                    "in route_pcb() if this recurs on an unloaded host."
                 )
 
             drc_ok = run_drc(routed_path)

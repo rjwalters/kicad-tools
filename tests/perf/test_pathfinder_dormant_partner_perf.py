@@ -19,14 +19,15 @@ dormant partner branch.  It compares two callers:
    (pre-computed once at A* outer-loop entry).  The 4-condition tuple
    evaluation is skipped.
 
-The benchmark asserts that the optimized path is **at least as fast** as
-the legacy path -- expressed as a relative ratio, so absolute timings
-are not gated on (CI hosts have widely varying performance).
+Everything in this module **records**; nothing here gates a PR
+(issue #5708).  The ratio between the two callers is ~0.26% of the
+per-call cost being measured, against a ~+/-35% noise floor even on an
+idle host -- unmeasurable by wall clock.  #2715's actual property is
+asserted deterministically, in the per-PR gate, by
+``tests/test_pathfinder_partner_active_structural.py``.
 """
 
 from __future__ import annotations
-
-import timeit
 
 import pytest
 
@@ -139,116 +140,6 @@ def test_dormant_partner_optimized_path(benchmark, dormant_partner_fixture):
 
     result = benchmark(_call)
     assert result is False or result is True
-
-
-def _measure_dormant_ratio(n_trials: int = 5, n_iters: int = 20_000) -> tuple[float, float, float]:
-    """Measure the optimized/legacy dormant-path timing ratio robustly.
-
-    Runs ``n_trials`` *interleaved* (legacy, optimized) ``timeit`` trials
-    and takes the **minimum** time for each path.  Interleaving means a
-    transient CPU-contention spike (xdist sibling workers, shared CI
-    runner neighbors) hits both paths roughly equally instead of biasing
-    one; taking the min discards trials polluted by scheduler noise --
-    the minimum is the best estimator of true cost for a deterministic
-    micro-benchmark.
-
-    Returns:
-        (ratio, legacy_min, optimized_min)
-    """
-    router, net, radius = _build_dense_grid()
-    gx = router.grid.cols // 2
-    gy = router.grid.rows // 2 - 30
-
-    def legacy() -> bool:
-        return router._is_trace_blocked(
-            gx,
-            gy,
-            0,
-            net,
-            False,
-            radius=radius,
-            partner_net=-1,
-            partner_radius=None,
-        )
-
-    def optimized() -> bool:
-        return router._is_trace_blocked(
-            gx,
-            gy,
-            0,
-            net,
-            False,
-            radius=radius,
-            partner_net=-1,
-            partner_radius=None,
-            partner_active=False,
-        )
-
-    # Warm up -- prime any one-shot caches.
-    for _ in range(1000):
-        legacy()
-        optimized()
-
-    legacy_min = float("inf")
-    optimized_min = float("inf")
-    for _ in range(n_trials):
-        legacy_min = min(legacy_min, timeit.timeit(legacy, number=n_iters))
-        optimized_min = min(optimized_min, timeit.timeit(optimized, number=n_iters))
-
-    return optimized_min / legacy_min, legacy_min, optimized_min
-
-
-def test_dormant_partner_optimized_not_slower():
-    """Per-PR CI guard: optimized path must not be *materially* slower.
-
-    Uses interleaved min-of-N ``timeit`` trials (see
-    ``_measure_dormant_ratio``) so a transient scheduler spike cannot
-    bias a single measurement, then asserts a noise-safe 1.25x bound.
-
-    Noise budget (issue #3581): the previous single-trial 1.05x
-    threshold failed at **1.065x** on a shared GitHub Actions runner
-    (PR #3575, run 27391284030 -- an artifact-only PR with no router
-    code changes; the same commit passed on rerun).  A 5% margin is
-    below the noise floor of shared runners with xdist CPU contention.
-    1.25x sits comfortably above observed noise (~6.5%) while still
-    failing for any genuine regression of the magnitude that motivated
-    this benchmark (issue #2712's bisect measured ~13% per-net A*
-    slowdown; a re-introduced tuple-eval cost or worse, e.g. 2x, trips
-    this immediately).
-
-    The tight 1.05x assertion is preserved in the nightly ``slow``
-    lane (``test_dormant_partner_optimized_not_slower_tight``).
-    """
-    ratio, legacy_min, optimized_min = _measure_dormant_ratio()
-    assert ratio < 1.25, (
-        f"Optimized dormant path is {ratio:.3f}x slower than legacy "
-        f"(legacy_min={legacy_min:.4f}s, optimized_min={optimized_min:.4f}s, "
-        f"min of 5 interleaved trials x 20000 iters).  Expected ratio < 1.25 "
-        f"(CI noise budget; see issue #3581)."
-    )
-
-
-@pytest.mark.slow
-def test_dormant_partner_optimized_not_slower_tight():
-    """Nightly tight guard: optimized path within 5% of legacy.
-
-    Issue #2715 acceptance criterion: dormant-path cost within 2% of
-    pre-#2586 baseline.  Since the pre-#2586 signature did not accept
-    partner kwargs at all, the closest reproducible measurement is the
-    optimized path that skips the tuple eval -- which serves as the
-    "no-tuple-cost" baseline.
-
-    This runs only in the nightly ``slow-tests`` lane (and locally via
-    ``pytest -m slow``), where a 5% margin combined with interleaved
-    min-of-N sampling is reliable.  The per-PR gate uses a 1.25x noise
-    budget instead (see ``test_dormant_partner_optimized_not_slower``).
-    """
-    ratio, legacy_min, optimized_min = _measure_dormant_ratio()
-    assert ratio < 1.05, (
-        f"Optimized dormant path is {ratio:.3f}x slower than legacy "
-        f"(legacy_min={legacy_min:.4f}s, optimized_min={optimized_min:.4f}s, "
-        f"min of 5 interleaved trials x 20000 iters).  Expected ratio < 1.05."
-    )
 
 
 def test_active_partner_branch_still_works():

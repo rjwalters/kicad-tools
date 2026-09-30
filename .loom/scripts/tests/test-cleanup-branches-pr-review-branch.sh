@@ -9,11 +9,14 @@
 # them via `git branch --merged`. cleanup-branches.sh now additionally
 # discovers branches shaped like `pr-<N>` / `pr<N>-*` / `pr-<N>-*`, resolves
 # each to its originating PR, and deletes it only when that PR's state is
-# MERGED or CLOSED — reusing merge-pr.sh's tip-SHA-verified
-# `_maybe_delete_local_branch` helper rather than a raw `git branch -D`.
+# MERGED or CLOSED — through `loom-daemon merge-pr delete-branch`, the shared
+# tip-SHA-verified rule merge-pr.sh and `worktree.sh remove` also use, rather
+# than a raw `git branch -D` (#8968; before that, by awk-extracting and
+# `eval`ing merge-pr.sh's own wrapper around the same subcommand).
 #
 # Verifies:
-#   1. Source contains the pr-* discovery regex and the PR-state gate.
+#   1. Source contains the pr-* discovery regex, the daemon delegation and the
+#      PR-state gate.
 #   2. Behavioral, end-to-end run of the REAL cleanup-branches.sh against a
 #      throwaway git repo with a stubbed `gh`/forge on PATH:
 #      (a) a pr-<N>-style branch whose PR is MERGED gets deleted.
@@ -23,13 +26,12 @@
 #      (d) --dry-run reports the merged-PR branch as "would delete" without
 #          actually deleting it.
 #      (e) a merged-PR branch that is still checked out in a LINKED worktree
-#          exercises _maybe_delete_local_branch's delete-refusal path (which
-#          calls _find_worktree_by_branch / _is_primary_worktree_path): the
-#          run must not abort, the branch must be kept, and the remaining
-#          branches must still be processed.
-#      (f) a merged-PR branch that is the PRIMARY checkout's own HEAD takes
-#          _is_primary_worktree_path's specialized remediation path (which
-#          also reads $DEFAULT_BRANCH_NAME) without aborting.
+#          exercises the delete-refusal path: the run must not abort, the
+#          branch must be kept, and the remaining branches must still be
+#          processed.
+#      (f) a merged-PR branch that is the PRIMARY checkout's own HEAD takes the
+#          specialized primary-checkout remediation path (which also needs
+#          $DEFAULT_BRANCH_NAME to reach the daemon) without aborting.
 #      (g) a CLOSED-issue feature/issue-* branch checked out in a LINKED
 #          worktree: the pre-existing feature loop's raw `git branch -D`
 #          refuses, and under `set -e` a bare delete would abort the whole
@@ -37,19 +39,27 @@
 #          print the pr-* pass header, and still clean a later merged-PR
 #          pr-* branch (#4405 third-pass regression).
 #
-# Companion to test-merge-pr-local-branch-cleanup.sh, which tests
-# `_maybe_delete_local_branch` itself (the safety check this script reuses).
+# Companion to test-merge-pr-local-branch-cleanup.sh, which covers merge-pr.sh's
+# own `_maybe_delete_local_branch` wrapper over the same subcommand.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 CLEANUP_SCRIPT="$SCRIPTS_DIR/cleanup-branches.sh"
-MERGE_PR_SCRIPT="$SCRIPTS_DIR/merge-pr.sh"
 DEFAULT_BRANCH_LIB="$SCRIPTS_DIR/lib/default-branch.sh"
+
+# #8191/#8968: cleanup-branches.sh's pr-* pass IS a call to `loom-daemon
+# merge-pr delete-branch`. Pin the binary built from this tree so a stale
+# installed daemon cannot answer instead — it would warn-and-keep every pr-*
+# branch and fail these cases for the wrong reason.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -59,51 +69,99 @@ TESTS_FAILED=0
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
 
+# An assertion that CANNOT survive #8968's removal of the extract-and-eval
+# wiring, retired under the three-part test in
+# defaults/docs/verification-recipes.md §6. Printed, not deleted: a reader must
+# be able to see what was removed, why, and what proves the property now.
+# Counted as run so the totals stay honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
+
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
     if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (pattern: $pattern)"; fi
 }
 
+refute_grep() {
+    local pattern="$1" file="$2" msg="$3"
+    if grep -qE "$pattern" "$file"; then fail "$msg (unexpectedly matched: $pattern)"; else pass "$msg"; fi
+}
+
 [[ -x "$CLEANUP_SCRIPT" ]] || { echo "ERROR: $CLEANUP_SCRIPT not executable" >&2; exit 1; }
-[[ -x "$MERGE_PR_SCRIPT" ]] || { echo "ERROR: $MERGE_PR_SCRIPT not executable" >&2; exit 1; }
 
 # --- Test 1: source contains the pr-* discovery + reuse wiring ---
 echo "Test 1: cleanup-branches.sh source contains the #4405 pr-* review-branch wiring"
 
 assert_grep "grep -E '\\^pr-\\?\\[0-9\\]\\+\\(-\\.\\*\\)\\?\\\$'" "$CLEANUP_SCRIPT" \
     "discovers pr-<N> / pr<N>-* / pr-<N>-* branches via the shared regex"
-if grep -qF '_MAYBE_DELETE_FN="$(_extract_shell_fn _maybe_delete_local_branch' "$CLEANUP_SCRIPT"; then
-    pass "extracts the real _maybe_delete_local_branch() function body from merge-pr.sh (no duplication)"
-else
-    fail "extracts the real _maybe_delete_local_branch() function body from merge-pr.sh (no duplication)"
-fi
-# The refusal path inside _maybe_delete_local_branch calls these (#4171); if
-# they are not extracted too the script dies with "command not found" (#4405).
-# The `-d` → `-D` upgrade's safety predicate is NOT on that list since #7812:
-# it is `branch_landed` from lib/branch-landed.sh, a real shared library the
-# script sources (asserted separately below) rather than a function body to
-# extract.
+assert_grep 'merge-pr delete-branch --repo-root "\$REPO_ROOT" --branch "\$branch" --expected-head-sha' "$CLEANUP_SCRIPT" \
+    "delegates the delete to 'loom-daemon merge-pr delete-branch' with the PR's head SHA (#8968)"
+assert_grep '_delete_landed_branch "\$branch" "\$pr_head_sha"' "$CLEANUP_SCRIPT" \
+    "the pr-* loop routes every candidate through that one delegating helper"
+assert_grep '^[[:space:]]*# requires-daemon: merge-pr >= [0-9]' "$CLEANUP_SCRIPT" \
+    "declares the daemon version floor the delegation needs (#8285)"
+refute_grep '_extract_shell_fn|_MAYBE_DELETE' "$CLEANUP_SCRIPT" \
+    "no longer awk-extracts any function body out of merge-pr.sh (#8968)"
+refute_grep '(^|[^[:alnum:]_])eval ' "$CLEANUP_SCRIPT" \
+    "no longer evals shell text extracted from another script (#8968)"
+
+# --- Retired source-text assertions (#8968) ---
+#
+# Nine assertions below pinned the extract-and-`eval` contraption this pass used
+# before #8968: the `awk` extraction of merge-pr.sh's `_maybe_delete_local_branch`
+# body, its three transitive helpers (and the matching "still a top-level
+# function in merge-pr.sh" extraction-target checks), the `lib/branch-landed.sh`
+# source and the fail-closed `branch_landed()` shim. #8191 turned the extraction
+# target into a thin wrapper around `loom-daemon merge-pr delete-branch`, which
+# left every one of those helpers unreachable from the extracted body; #8968
+# deleted the whole contraption in favour of calling the subcommand directly.
+# Each is retired with its behavioral successor named — and the successors are
+# stronger than a grep: the scratch repo the behavioral cases run in no longer
+# gets a copy of merge-pr.sh at all (see "no merge-pr.sh" below), so an
+# extraction reintroduced here would fail case (a) outright.
+retired \
+    "extracts the real _maybe_delete_local_branch() function body from merge-pr.sh (no duplication)" \
+    "the cleanup-branches.sh source literally contains '_MAYBE_DELETE_FN=\"\$(_extract_shell_fn _maybe_delete_local_branch'" \
+    "#8968: there is no extraction left to assert on — the pass calls 'loom-daemon merge-pr delete-branch' itself, which is the same worktree_cli::branch_delete rule the extracted wrapper called, so 'no duplication' is now structural rather than textual" \
+    "the 'merge-pr delete-branch --repo-root' assertion above (the call replacing it) plus behavioral case (a) below, which still proves a merged-PR branch is actually deleted end-to-end — now with no merge-pr.sh in the scratch tree to extract from"
+# The refusal path inside the rule distinguishes "checked out in the primary
+# checkout" from "checked out in some other worktree" (#4171). Before #8968
+# those three helpers had to be extracted from merge-pr.sh alongside the
+# wrapper or the script died with "command not found" under `set -e` (#4405);
+# they now live in Rust, reached over the subcommand boundary.
 for dep_fn in _primary_worktree_path _is_primary_worktree_path _find_worktree_by_branch; do
-    if grep -qF "$dep_fn" "$CLEANUP_SCRIPT"; then
-        pass "extracts _maybe_delete_local_branch's transitive helper $dep_fn"
-    else
-        fail "extracts _maybe_delete_local_branch's transitive helper $dep_fn"
-    fi
-    if grep -qE "^${dep_fn}\(\) \{" "$MERGE_PR_SCRIPT"; then
-        pass "$dep_fn is still a top-level function in merge-pr.sh (extraction target intact)"
-    else
-        fail "$dep_fn is no longer a top-level function in merge-pr.sh — update the extraction list"
-    fi
+    retired \
+        "extracts _maybe_delete_local_branch's transitive helper $dep_fn" \
+        "the cleanup-branches.sh source literally mentions $dep_fn" \
+        "#8968: the refusal path is inside loom-daemon (worktree_cli::branch_delete), not in shell text this script evals, so there is no helper for it to carry — and a missing one can no longer produce 'command not found' here at all" \
+        "behavioral cases (e) and (f) below, which drive the linked-worktree refusal and the primary-checkout remediation end-to-end and still assert the exact operator-visible text of each"
+    retired \
+        "$dep_fn is still a top-level function in merge-pr.sh (extraction target intact)" \
+        "merge-pr.sh defines ^$dep_fn() { at column 0, where the awk extractor could find it" \
+        "#8968: nothing here extracts from merge-pr.sh, so merge-pr.sh's internal formatting is no longer this suite's concern" \
+        "test-merge-pr-local-branch-cleanup.sh, whose own eval harness still extracts all three and fails if their shape changes, plus behavioral cases (e)/(f) below"
 done
-assert_grep '_maybe_delete_local_branch "\$branch" "\$pr_head_sha"' "$CLEANUP_SCRIPT" \
-    "invokes the extracted helper with the PR's head SHA for the tip-match safety check"
-assert_grep 'source "\$SCRIPT_DIR/lib/branch-landed.sh"' "$CLEANUP_SCRIPT" \
-    "sources the shared branch-landed primitive the delete safety check needs (#7812)"
-if grep -qF 'branch_landed()' "$CLEANUP_SCRIPT"; then
-    pass "carries a fail-closed 'unknown' shim for a partially-resynced .loom/ (#7812)"
-else
-    fail "carries a fail-closed 'unknown' shim for a partially-resynced .loom/ (#7812)"
-fi
+retired \
+    "invokes the extracted helper with the PR's head SHA for the tip-match safety check" \
+    "the cleanup-branches.sh source literally contains '_maybe_delete_local_branch \"\$branch\" \"\$pr_head_sha\"'" \
+    "#8968: merge-pr.sh's private helper name is no longer in this script; the head SHA now reaches the same rule as the subcommand's --expected-head-sha argument" \
+    "the two assertions above ('--expected-head-sha' on the delegating call, and the loop's _delete_landed_branch invocation), plus behavioral cases (a)/(e), which prove a tip match deletes and a refusal keeps"
+retired \
+    "sources the shared branch-landed primitive the delete safety check needs (#7812)" \
+    "the cleanup-branches.sh source literally contains 'source \"\$SCRIPT_DIR/lib/branch-landed.sh\"'" \
+    "#8968: the extracted body stopped calling branch_landed at #8191 — the landed verdict is computed inside loom-daemon now, so sourcing the shell library here loaded a function nothing called" \
+    "loom-daemon's branch_delete::only_a_landed_verdict_may_escalate_to_force_delete and branch_landed::tokens_match_the_shell_twin unit tests, plus behavioral case (a), which proves the landed escalation still reaches the operator's branch"
+retired \
+    "carries a fail-closed 'unknown' shim for a partially-resynced .loom/ (#7812)" \
+    "the cleanup-branches.sh source literally contains 'branch_landed()'" \
+    "#8968: the shim existed only so the evaled body could call branch_landed when lib/branch-landed.sh was missing; with no eval and no call there is nothing to shim, and a partially-resynced .loom/ now degrades through the single 'could not resolve loom-daemon' skip instead" \
+    "the daemon-resolution skip warning in cleanup-branches.sh (one message, branch kept) and behavioral case (e)'s no-'command not found' assertion, which is what the shim ultimately protected"
+
 assert_grep 'pr view "\$pr_num" --json state,headRefOid' "$CLEANUP_SCRIPT" \
     "resolves PR state + head SHA via \$FORGE/gh pr view"
 assert_grep 'pr_state" == "OPEN"' "$CLEANUP_SCRIPT" \
@@ -136,13 +194,19 @@ git -C "$REPO" branch -M main
 HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
 
 # Scratch scripts/ tree the fake `gh` and cleanup-branches.sh both need
-# (cleanup-branches.sh resolves merge-pr.sh and lib/default-branch.sh
-# relative to its own SCRIPT_DIR).
+# (cleanup-branches.sh resolves lib/default-branch.sh relative to its own
+# SCRIPT_DIR).
+#
+# NO merge-pr.sh is copied here, deliberately (#8968): after dropping the
+# extract-and-eval wiring, cleanup-branches.sh must not need merge-pr.sh at
+# all. That absence is what makes the behavioral cases below successors to the
+# retired "extracts the real function body" source assertion rather than a
+# weaker restatement of it — reintroduce any extraction and the pass would fail
+# to load its helper, so case (a) would fail instead of quietly passing.
 mkdir -p "$REPO/scripts/lib"
 cp "$CLEANUP_SCRIPT" "$REPO/scripts/cleanup-branches.sh"
-cp "$MERGE_PR_SCRIPT" "$REPO/scripts/merge-pr.sh"
 [[ -f "$DEFAULT_BRANCH_LIB" ]] && cp "$DEFAULT_BRANCH_LIB" "$REPO/scripts/lib/default-branch.sh"
-chmod +x "$REPO/scripts/cleanup-branches.sh" "$REPO/scripts/merge-pr.sh"
+chmod +x "$REPO/scripts/cleanup-branches.sh"
 
 # Branches under test:
 #   pr-100      -> PR #100, MERGED, tip == HEAD_SHA  -> should be deleted
@@ -230,12 +294,14 @@ else
 fi
 git -C "$REPO" branch -D pr-101 >/dev/null 2>&1 || true
 
-# --- (e): merged-PR branch checked out in a LINKED worktree exercises
-#     _maybe_delete_local_branch's delete-refusal path. That path calls
-#     _find_worktree_by_branch / _is_primary_worktree_path (merge-pr.sh,
-#     #4171); if cleanup-branches.sh only extracts _maybe_delete_local_branch
-#     itself, the run dies with "_find_worktree_by_branch: command not found"
-#     (exit 127) under `set -e`, aborting the whole cleanup mid-pass.
+# --- (e): merged-PR branch checked out in a LINKED worktree exercises the
+#     delete-refusal path, which classifies "checked out in the primary
+#     checkout" vs "checked out in some other worktree" (#4171). Pre-#8968 that
+#     classifier was shell text extracted from merge-pr.sh, and extracting the
+#     wrapper without its helpers killed the run with
+#     "_find_worktree_by_branch: command not found" (exit 127) under `set -e`;
+#     it now lives in loom-daemon, reached over the subcommand boundary. Either
+#     way the operator-visible contract asserted here is the same.
 git -C "$REPO" branch pr-102 main
 git -C "$REPO" worktree add -q "$TMP_ROOT/wt-102" pr-102 >/dev/null 2>&1
 # A second, deletable branch AFTER pr-102 alphabetically proves the run did
@@ -286,11 +352,12 @@ fi
 git -C "$REPO" worktree remove --force "$TMP_ROOT/wt-102" >/dev/null 2>&1 || true
 git -C "$REPO" branch -D pr-102 >/dev/null 2>&1 || true
 
-# --- (f): merged-PR branch that is the PRIMARY checkout's own HEAD takes
-#     _is_primary_worktree_path's specialized remediation path, which also
-#     reads $DEFAULT_BRANCH_NAME. Same crash class as (e) if the helpers
-#     aren't extracted, plus it proves DEFAULT_BRANCH_NAME reaches the
-#     evaluated body (it is only referenced there, hence the SC2034 waiver).
+# --- (f): merged-PR branch that is the PRIMARY checkout's own HEAD takes the
+#     specialized primary-checkout remediation path, which also needs the
+#     resolved default branch. Same failure class as (e), plus it proves
+#     $DEFAULT_BRANCH_NAME still reaches the rule — now as the subcommand's
+#     --default-branch argument, which cleanup-branches.sh omits when the
+#     resolution came back empty.
 git -C "$REPO" checkout -q -b pr-104 main
 sed -i.bak 's/^    102)/    104) echo '"'"'{"state":"MERGED","headRefOid":"'"$HEAD_SHA"'"}'"'"' ;;\n    102)/' "$FAKE_BIN/gh"
 rm -f "$FAKE_BIN/gh.bak"

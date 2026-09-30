@@ -8,10 +8,11 @@ borrow item 1 — [`docs/research/codecast-evaluation.md`](https://github.com/rj
 codecast's `cast blame` answers "which agent session wrote this line" by joining
 `git blame` against a transcript session database. Loom does not have — or need —
 a transcript database for this: every Builder/Doctor commit is created inside a
-labeled issue's worktree, the PR is squash-merged with a `(#PR)` subject suffix
-(this repo's merge style, see CLAUDE.md "Merging PRs"), and the PR body carries
-`Closes #N`. That is already an in-band, durable join key from a line of code
-back to the issue that produced it — `blame-issue.sh` is a small **read-only**
+labeled issue's worktree, the PR is merged with a merge commit whose subject
+names the PR (the Loom default since #9105 — squash-configured repos get a
+`(#PR)` subject suffix instead; see CLAUDE.md "Merging PRs"), and the PR body
+carries `Closes #N`. That is already an in-band, durable join key from a line of
+code back to the issue that produced it — `blame-issue.sh` is a small **read-only**
 reporting wrapper that walks it for a human.
 
 ## Usage
@@ -36,19 +37,20 @@ PATH  LINES  COMMIT  PR  ISSUES  ROLE  SUBJECT
 
 1. `git blame --porcelain` (or `git log --follow -S<pattern>` in pattern mode)
    finds the commit that last touched each line/hunk.
-2. The commit resolves to a PR number **offline first**: a squash-merge commit
-   subject's trailing `(#1234)` is a reliable join key with no network call. If a
-   commit has no such suffix (a direct-to-main commit, or a non-squash merge),
-   it falls back to the GitHub REST "commit → associated pulls" endpoint
-   (`gh api repos/{owner}/{repo}/commits/<sha>/pulls`).
+2. The commit resolves to a PR number **offline first**, with no network call:
+   a merge-commit subject (`Merge[d] pull request #1234 from …` — the primary
+   path under the merge-commit default, #9105) or a squash subject's trailing
+   `(#1234)` suffix. A commit carrying neither (a direct-to-main commit, or a
+   merge that is not a PR merge) falls back to the GitHub REST "commit →
+   associated pulls" endpoint (`gh api repos/{owner}/{repo}/commits/<sha>/pulls`).
 3. The PR resolves to its closing issue number(s) via `closingIssuesReferences`
    (GitHub's own computed field from `gh pr view --json closingIssuesReferences`),
    falling back to regexing `Closes/Fixes/Resolves/Part of #N` out of the PR body
    when that field is empty.
-4. **Role is best-effort.** A squash commit collapses every commit in the PR
-   (Builder's original push, any Doctor fix-up pushes) into one commit on
-   `main`, so per-line Builder-vs-Doctor attribution below the PR level is not
-   recoverable. `blame-issue.sh` instead reports at the PR level: if
+4. **Role is best-effort.** Attribution is at the **PR** level by design, never
+   per commit — and under a squash merge every commit in the PR (Builder's
+   original push, any Doctor fix-up pushes) is collapsed into one commit on
+   `main`, so finer attribution is not even recoverable there. So: if
    `loom:changes-requested` was **ever** applied to the PR (per its label
    timeline, `gh api repos/{owner}/{repo}/issues/<PR>/timeline`), the PR went
    through at least one Doctor cycle — reported as `builder+doctor` (mixed).

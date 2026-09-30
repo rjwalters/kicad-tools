@@ -32,8 +32,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 
+# #8191: _maybe_delete_local_branch (called directly and via
+# _remove_loom_worktree) now delegates to `loom-daemon merge-pr delete-branch`.
+# Pin the binary built from this tree so a stale installed daemon cannot answer
+# instead — it would warn-and-keep every branch and fail these cases for the
+# wrong reason.
+#
+# The LEAF verbs too since #8191's worktrees slice: `_primary_worktree_path` is
+# now a call to `merge-pr worktree-primary`, and a binary carrying only the
+# `merge-pr` group (every daemon since #8124 does) would make Test 4's
+# space-containing-path cases and Test 5's control read as logic failures rather
+# than as one environment problem.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
+    "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
+    "merge-pr worktree-find-by-branch" "merge-pr worktree-contains"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'   # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -42,6 +60,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why it could not
+# survive, and what proves the property now. Counted as run so the totals stay
+# honest.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
@@ -55,12 +86,21 @@ echo "Test 1: merge-pr.sh source retains the #3710 primary-worktree guard"
 
 assert_grep '_primary_worktree_path\(\) \{' "$MERGE_PR" \
     "merge-pr.sh defines the _primary_worktree_path helper"
-assert_grep "awk '/\^worktree / \{ print substr\(\\\$0, 10\); exit \}'" "$MERGE_PR" \
-    "_primary_worktree_path takes the FIRST worktree entry, space-safe (substr; exit)"
+retired "the awk-body grep for _primary_worktree_path's parse" \
+    "the primary path is the FIRST worktree entry, parsed space-safely (substr, not \$2 — #3717)" \
+    "the awk left merge-pr.sh in the #8191 slice; the parse is Rust in loom-daemon/src/merge_pr/worktrees.rs, so no grep of this file can pass" \
+    "Test 4 below (a space-containing primary checkout, behavioural, unchanged), plus loom-daemon/tests/merge_pr_worktrees_differential.rs — which compares the port against a FROZEN copy of that exact awk body, including space-containing-path corpus entries — and primary_is_the_first_worktree_record / paths_containing_spaces_survive_intact in src/merge_pr/worktrees/tests.rs"
+assert_grep '_mp_worktree worktree-primary' "$MERGE_PR" \
+    "_primary_worktree_path delegates the parse to 'merge-pr worktree-primary'"
 assert_grep 'Refusing to remove the primary/main worktree' "$MERGE_PR" \
     "_remove_loom_worktree refuses when the target resolves to the primary"
 assert_grep 'primary_real="\$\(_primary_worktree_path\)"' "$MERGE_PR" \
     "_remove_loom_worktree resolves the primary path before any removal"
+# The #8191 slice added a SECOND refusal: when the lookup itself cannot run, the
+# removal is refused rather than proceeding on an empty answer (which the
+# comparison above would otherwise read as "not the primary").
+assert_grep 'the primary-worktree guard \(#3710\) could not run' "$MERGE_PR" \
+    "_remove_loom_worktree fails CLOSED when the primary lookup cannot run"
 
 # --- Extract the ACTUAL function bodies from the live source (no drift) ---
 # Grabs from `name() {` to the first line beginning with `}` (column 0). All
@@ -80,6 +120,10 @@ warning() { echo "WARN: $*"; }
 success() { echo "OK: $*"; }
 error()   { echo "ERROR: $*" >&2; return 1; }
 
+# #8191 slice: the porcelain lookups below shell out through _mp_worktree, so it
+# is extracted with them — without it they die with "_mp_worktree: command not
+# found" under `set -e`.
+eval "$(extract_fn _mp_worktree           "$MERGE_PR")"
 eval "$(extract_fn _primary_worktree_path "$MERGE_PR")"
 eval "$(extract_fn _worktree_branch_for   "$MERGE_PR")"
 # #7812: _maybe_delete_local_branch's `-d` -> `-D` safety check is now the
@@ -262,21 +306,70 @@ else
     fail "_worktree_branch_for failed on space path: expected '$SP_BRANCH', got '$sp_branch'"
 fi
 
-# (d) The --worktree-path registered-worktree validation snippet (the same awk
-#     used at merge-pr.sh:~242) must accept the full space-containing path.
+# (d) --worktree-path's registered-worktree check (#8191 slice: `loom-daemon
+#     merge-pr worktree-contains`, the ACTUAL ported verb merge-pr.sh now
+#     calls — not a hand-copied re-implementation of the retired awk) must
+#     accept the full space-containing path.
 if git -C "$SP_PRIMARY" worktree list --porcelain 2>/dev/null | \
-     awk -v p="$SP_SECONDARY_REAL" '/^worktree / { if (substr($0, 10) == p) { found=1; exit } } END { exit !found }'; then
-    pass "--worktree-path validation accepts a registered space-containing worktree"
+     "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr worktree-contains --path "$SP_SECONDARY_REAL"; then
+    pass "merge-pr worktree-contains accepts a registered space-containing worktree"
 else
-    fail "--worktree-path validation rejected a registered space-containing worktree"
+    fail "merge-pr worktree-contains rejected a registered space-containing worktree"
 fi
 
 # (e) Negative control: an unregistered space path must still be rejected.
 if git -C "$SP_PRIMARY" worktree list --porcelain 2>/dev/null | \
-     awk -v p="$SP_ROOT/not a worktree" '/^worktree / { if (substr($0, 10) == p) { found=1; exit } } END { exit !found }'; then
-    fail "--worktree-path validation wrongly accepted an unregistered path"
+     "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr worktree-contains --path "$SP_ROOT/not a worktree"; then
+    fail "merge-pr worktree-contains wrongly accepted an unregistered path"
 else
-    pass "--worktree-path validation still rejects an unregistered space-containing path"
+    pass "merge-pr worktree-contains still rejects an unregistered space-containing path"
+fi
+
+# --- Test 5: the guard fails CLOSED when its lookup cannot run (#8191) ---
+# Porting the parse out of awk introduced a failure mode awk did not have: the
+# binary can be missing, unreadable, or predate the subcommand. The empty string
+# that produces is indistinguishable from "git reported no worktrees", and the
+# guard reads an empty primary path as "the target is not the primary checkout"
+# — i.e. as permission to remove it. So an unusable binary must reach
+# _remove_loom_worktree as a non-zero return and become a REFUSAL, not an empty
+# answer. Verified on a genuine secondary worktree with the real binary as the
+# control, so this cannot pass by refusing everything for an unrelated reason.
+echo ""
+echo "Test 5: an unusable loom-daemon refuses the removal instead of proceeding"
+
+# Back to the plain (space-free) primary for this case.
+# shellcheck disable=SC2034
+REPO_ROOT="$PRIMARY"
+CTRL_WT="$CUSTOM_WT_ROOT/issue-8191"
+git -C "$PRIMARY" worktree add -q -b feature/issue-8191 "$CTRL_WT" >/dev/null 2>&1
+touch "$CTRL_WT/.loom-managed"
+
+set +e
+( export LOOM_DAEMON_SELF_BIN="$TMP_ROOT/no-such-loom-daemon" LOOM_DAEMON_BIN="$TMP_ROOT/no-such-loom-daemon"
+  _remove_loom_worktree "$CTRL_WT" ) >"$TMP_ROOT/failclosed.out" 2>&1
+fc_rc=$?
+set -e
+fc_out="$(cat "$TMP_ROOT/failclosed.out")"
+
+if [[ $fc_rc -eq 0 ]] \
+   && [[ "$fc_out" == *"primary-worktree guard (#3710) could not run"* ]] \
+   && [[ -d "$CTRL_WT" ]]; then
+    pass "an unresolvable loom-daemon refuses the removal (worktree left in place, rc 0 — the merge already succeeded)"
+else
+    fail "expected a refusal that leaves the worktree; rc=$fc_rc, dir_exists=$([[ -d "$CTRL_WT" ]] && echo yes || echo no), out: $fc_out"
+fi
+
+# Control: with the real binary back, the SAME worktree IS removed — so the
+# refusal above is about the unusable binary and nothing else.
+set +e
+ctrl_out="$(_remove_loom_worktree "$CTRL_WT" 2>&1)"
+ctrl_rc=$?
+set -e
+if [[ $ctrl_rc -eq 0 ]] && [[ ! -d "$CTRL_WT" ]] \
+   && [[ "$ctrl_out" != *"could not run"* ]]; then
+    pass "control: with a working loom-daemon the same worktree IS removed"
+else
+    fail "control: expected removal; rc=$ctrl_rc, dir_exists=$([[ -d "$CTRL_WT" ]] && echo yes || echo no), out: $ctrl_out"
 fi
 
 # --- Summary ---

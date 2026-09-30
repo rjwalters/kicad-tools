@@ -16,6 +16,7 @@ from pathlib import Path
 from packaging.version import Version
 
 from kicad_tools.cli.runner import find_kicad_cli
+from kicad_tools.validate.mask_copper_geometry import QUALIFIED_NATIVE_VERSIONS
 
 ROOT = Path(__file__).resolve().parents[2]
 SUITE = "tests/test_mask_copper_native.py"
@@ -68,10 +69,22 @@ def probe(directory: Path) -> dict:
         "gerbonara_version": oracle,
     }
     print(json.dumps(info, indent=2), flush=True)
-    # Match the checker profile in validate/mask_copper_geometry.py. A newer
-    # image must be qualified there before this dedicated gate can pass.
-    if native.split()[:1] != ["10.0.5"] or cli_version.split()[:1] != native.split()[:1]:
-        raise ValueError("Native mask checks require a matching KiCad 10.0.5 CLI/pcbnew pair")
+    # The accepted set is the checker profile in
+    # validate/mask_copper_geometry.py itself (imported, never re-typed here):
+    # a newer image must be qualified there -- by running this suite under it
+    # and confirming the native/oracle comparison still agrees -- before this
+    # dedicated gate can pass.
+    native_release = native.split()[:1]
+    if (
+        not native_release
+        or native_release[0] not in QUALIFIED_NATIVE_VERSIONS
+        or cli_version.split()[:1] != native_release
+    ):
+        raise ValueError(
+            "Native mask checks require a matching KiCad CLI/pcbnew pair at a qualified "
+            f"version ({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got pcbnew "
+            f"{native or 'unknown'} and kicad-cli {cli_version or 'unknown'}"
+        )
     if marker.read_text() != "shared":
         raise ValueError("Native Python does not share the pytest scratch path")
     return info

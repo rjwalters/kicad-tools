@@ -354,12 +354,12 @@ class TestDRUFiles:
             assert version.values[0] == 1, f"{dru_file} has wrong version"
 
             # JLC has a separate plated-component-pad ring floor, plus the
-            # three object-specific factory rules (#5059): Silk to Pad,
-            # PTH Hole to Track and Inner PTH Hole to Copper.  Only the JLC
-            # profiles declare those optional floors, so the other fabs stay
-            # at the 9 base rules.
+            # four object-specific factory rules (#5059): Silk to Pad,
+            # SMD Pad Clearance, PTH Hole to Track and Inner PTH Hole to
+            # Copper.  Only the JLC profiles declare those optional floors,
+            # so the other fabs stay at the 9 base rules.
             rules = sexp.find_children("rule")
-            expected = 13 if dru_file.startswith("jlcpcb-") else 9
+            expected = 14 if dru_file.startswith("jlcpcb-") else 9
             assert len(rules) == expected
 
 
@@ -847,11 +847,10 @@ class TestDruGenerator:
     def test_generate_dru_has_all_jlc_rules(self):
         """JLC: base rules + its PTH ring floor + the object-specific rules.
 
-        The object-specific factory rules (#5059) add three: ``Silk to Pad``,
-        ``PTH Hole to Track`` and ``Inner PTH Hole to Copper``.  The
-        different-net SMD pad floor is deliberately NOT among them -- KiCad's
-        rule language cannot express "different footprint", so it is enforced
-        Python-side only (see ``tests/test_factory_object_clearance.py``).
+        The object-specific factory rules add four: ``Silk to Pad``,
+        ``PTH Hole to Track`` and ``Inner PTH Hole to Copper`` (#5152), plus
+        the different-net ``SMD Pad Clearance`` floor emitted natively,
+        scoped by reference (#5710).
         """
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
@@ -860,11 +859,11 @@ class TestDruGenerator:
         content = generate_dru(rules, manufacturer_name="JLCPCB")
 
         rule_count = content.count("(rule ")
-        assert rule_count == 13, f"Expected 13 rules, got {rule_count}"
+        assert rule_count == 14, f"Expected 14 rules, got {rule_count}"
         assert 'rule "Silk to Pad - JLCPCB"' in content
         assert 'rule "PTH Hole to Track - JLCPCB"' in content
         assert 'rule "Inner PTH Hole to Copper - JLCPCB"' in content
-        assert "SMD Pad Clearance" not in content
+        assert 'rule "SMD Pad Clearance - JLCPCB"' in content
 
     def test_generate_dru_has_condition_expressions(self):
         """Test that generated DRU includes condition expressions."""
@@ -956,15 +955,16 @@ class TestDruGenerator:
             rules = profile.get_design_rules(layers=2, copper_oz=1.0)
             content = generate_dru(rules, manufacturer_name=profile.name)
             assert "(version 1)" in content, f"Failed for {mfr_id}"
-            # 9 base rules, plus one per OPTIONAL floor the profile declares.
-            # ``min_smd_pad_clearance_mm`` is intentionally excluded: it has no
-            # native rule (no "same footprint" predicate in KiCad's rule
-            # language) and is enforced Python-side only (#5059).
+            # 9 base rules, plus one per OPTIONAL floor the profile declares
+            # (including the different-net SMD pad floor, emitted natively
+            # since the Reference-based different-footprint scope was
+            # measured working; #5059).
             expected = 9 + sum(
                 value is not None
                 for value in (
                     rules.min_pth_annular_ring_mm,
                     rules.min_silk_to_pad_clearance_mm,
+                    rules.min_smd_pad_clearance_mm,
                     rules.min_pth_hole_to_track_mm,
                     rules.min_inner_pth_hole_to_copper_mm,
                 )
@@ -1106,43 +1106,38 @@ class TestDruGeneratorAmpacity:
         the generated .kicad_dru.  If kicad-cli is unavailable, falls back to
         asserting the DRU text is well-formed.
         """
-        import re
-        import shutil
         import subprocess
 
+        from kicad_tools.cli.runner import find_kicad_cli
         from kicad_tools.manufacturers.dru_generator import generate_dru
 
         rules = self._rules_2oz()
         nc = self._fused_net_class()
         dru_content = generate_dru(rules, manufacturer_name="JLCPCB", net_classes=[nc])
 
-        kicad_cli = shutil.which("kicad-cli")
+        # find_kicad_cli() also probes the macOS app-bundle path, unlike a
+        # bare shutil.which("kicad-cli") -- see #5702. That matters here: a
+        # bare PATH probe silently pushes every dev machine with KiCad
+        # installed but not on PATH onto the fallback branch below, so only
+        # CI (where kicad-cli IS on PATH) ever exercised the native DRC
+        # round-trip. Aligning on find_kicad_cli() makes local and CI runs
+        # take the same branch.
+        kicad_cli = find_kicad_cli()
         if kicad_cli is None:
-            # Fallback: assert the rule is well-formed KiCad DRU syntax.
+            # Fallback: assert the rule is well-formed KiCad DRU syntax,
+            # scoped to what THIS test is actually about (the two net-scoped
+            # ampacity rules) rather than re-inventorying every rule name
+            # generate_dru emits. A hardcoded full-inventory set here
+            # duplicates test_generate_dru_has_all_jlc_rules and
+            # test_generate_dru_all_manufacturers -- which already assert
+            # the complete rule set, including deriving the expected count
+            # from the profile's optional rule fields instead of typing it
+            # out -- and it drifts every time an unrelated rule is added
+            # anywhere in the generator (twice in one day: #5152, #5710).
             assert dru_content.startswith("(version 1)")
             assert "A.NetClass == 'FUSED_LINE'" in dru_content
-            # Assert on the specific rule names this fixture must produce,
-            # rather than a bare count: a name-based check fails with a
-            # useful diff instead of a number drifting out of sync with the
-            # generator (e.g. solder-mask rules were intentionally dropped
-            # and "PTH Annular Ring" conditionally added in #4999/#5042-era
-            # changes -- see d95b6eff).
-            expected_rule_names = {
-                "Trace Width - JLCPCB",
-                "Clearance - JLCPCB",
-                "Via Drill - JLCPCB",
-                "Via Diameter - JLCPCB",
-                "Annular Ring - JLCPCB",
-                "PTH Annular Ring - JLCPCB",
-                "Copper to Edge - JLCPCB",
-                "Hole to Edge - JLCPCB",
-                "Silkscreen Width - JLCPCB",
-                "Silkscreen Height - JLCPCB",
-                "Ampacity Min Width (FUSED_LINE, external) - JLCPCB",
-                "Ampacity Min Width (FUSED_LINE, internal) - JLCPCB",
-            }
-            actual_rule_names = set(re.findall(r'\(rule "([^"]+)"', dru_content))
-            assert actual_rule_names == expected_rule_names
+            assert '(rule "Ampacity Min Width (FUSED_LINE, external) - JLCPCB"' in dru_content
+            assert '(rule "Ampacity Min Width (FUSED_LINE, internal) - JLCPCB"' in dru_content
             # Balanced parentheses per rule line group.
             assert dru_content.count("(") == dru_content.count(")")
             pytest.skip("kicad-cli not available; asserted DRU text structure only")

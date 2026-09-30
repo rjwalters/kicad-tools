@@ -10,6 +10,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from ...schema.pcb import _fill_token_is_filled
 from ..violations import DRCResults, DRCViolation
 from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon
 
@@ -63,6 +64,108 @@ def _arc_geometry(node):
     ).buffer(width.get_float(0) / 2, quad_segs=64)
 
 
+def _footprint_transform(footprint):
+    """Return the footprint-local -> board coordinate transform.
+
+    KiCad applies the footprint orientation as a negated angle relative to
+    the standard counter-clockwise matrix (``core.geometry.rotate_pad_offset``,
+    issue #3739), which is what the pad path already uses.
+
+    Mirroring needs no separate term: flipping a footprint to the back side
+    rewrites each child's stored local vertices about the local X axis *and*
+    negates the stored orientation, and ``mirror_y(R(theta) v)`` is exactly
+    ``R(-theta) mirror_y(v)``. So the same rotate-and-translate applied to the
+    file's local coordinates reproduces the mirrored board geometry, while the
+    child's own ``(layer "B.Cu")`` carries the side.
+    """
+    origin_x, origin_y = footprint.position
+    angle = math.radians(-footprint.rotation)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+
+    def transform(point):
+        local_x, local_y = point
+        return (
+            origin_x + local_x * cos_a - local_y * sin_a,
+            origin_y + local_x * sin_a + local_y * cos_a,
+        )
+
+    return transform
+
+
+def _fp_poly_geometry(graphic, transform):
+    """Return board-frame copper for a filled or stroked footprint polygon.
+
+    A filled ``fp_poly`` (``(fill yes)``, legacy ``(fill solid)``) prints its
+    whole interior, dilated by half the stroke when the outline is also
+    stroked -- a net tie's pad-joining copper is exactly this shape, usually
+    with ``(stroke (width 0))``. An unfilled polygon prints only its closed
+    vertex ring, so its interior stays air and a genuine slit inside it must
+    still be measurable. Returns ``None`` when nothing is printed; callers
+    treat that as unsupported rather than as clean copper.
+    """
+    from shapely.geometry import LineString, Polygon
+
+    points = [transform(point) for point in graphic.points]
+    if len(points) < 3:
+        return None
+    width = graphic.stroke_width or 0.0
+    if graphic.is_filled:
+        polygon = _repair_fill_polygon(Polygon(points))
+        if width > 0:
+            polygon = polygon.buffer(width / 2, quad_segs=64)
+        return polygon
+    if width <= 0:
+        return None
+    return LineString([*points, points[0]]).buffer(width / 2, quad_segs=64)
+
+
+def _fp_poly_issues(node, layers):
+    """Validate a raw footprint copper polygon before any geometry is built.
+
+    Mirrors the pad/zone contract in :func:`_raw_geometry_issues`: recovered or
+    defaulted values must never manufacture supported copper, so anything this
+    rule cannot model exactly is reported as incomplete coverage instead.
+    Non-copper polygons (silkscreen, fabrication) are outside this rule.
+    """
+    layer_node = node.find_child("layer")
+    name = layer_node.get_string(0) if layer_node is not None else None
+    if not isinstance(name, str) or not name.endswith(".Cu"):
+        return []
+    if name not in layers:
+        return [f"unresolved fp_poly copper layer: {name}"]
+
+    issues = []
+    pts = node.find_child("pts")
+    vertices = [child for child in pts.children if child.name == "xy"] if pts is not None else []
+    if len(vertices) < 3:
+        issues.append("invalid fp_poly points: at least three vertices required")
+    for xy in vertices:
+        values = [xy.get_float(i) for i in range(len(xy.children))]
+        if len(values) != 2 or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for value in values
+        ):
+            issues.append("invalid fp_poly coordinates: finite numeric geometry required")
+            break
+
+    stroke = node.find_child("stroke")
+    width_node = stroke.find_child("width") if stroke is not None else None
+    width = width_node.get_float(0) if width_node is not None else 0.0
+    if width is None or not math.isfinite(width) or width < 0:
+        issues.append("invalid fp_poly stroke: finite non-negative width required")
+        width = 0.0
+
+    fill = node.find_child("fill")
+    token = (fill.get_string(0) or "") if fill is not None else ""
+    if not _fill_token_is_filled(token) and width <= 0:
+        # Neither an interior nor an outline: KiCad prints nothing, but an
+        # unprinted copper primitive is ambiguous enough to stay fail-closed.
+        issues.append("unsupported fp_poly: neither filled nor stroked copper")
+    return issues
+
+
 def _raw_copper_graphic_issues(pcb):
     """Inventory raw layer-bearing objects the typed copper model omits."""
     issues = []
@@ -102,7 +205,7 @@ def _raw_copper_graphic_issues(pcb):
     inspect(pcb._sexp, {"segment", "arc", "via", "zone", "footprint", "module"})
     for node in pcb._sexp.children:
         if node.name in {"footprint", "module"}:
-            inspect(node, {"pad", "zone"})
+            inspect(node, {"pad", "zone", "fp_poly"})
     return issues
 
 
@@ -174,6 +277,10 @@ def _raw_geometry_issues(pcb):
                         issues.append("invalid pad roundrect ratio")
                 if any(pad.find_child(tag) is not None for tag in ("chamfer", "chamfer_ratio")):
                     issues.append("unsupported pad chamfer geometry")
+            # find_all (not find_children) so validation reaches exactly the
+            # nodes Footprint.from_sexp turns into typed poly graphics.
+            for poly in node.find_all("fp_poly"):
+                issues.extend(_fp_poly_issues(poly, layers))
         elif node.name == "zone":
             for fill in node.find_all("filled_polygon"):
                 pts = fill.find_child("pts")
@@ -213,6 +320,22 @@ def _collect(pcb):
             )
         )
     for fp in pcb.footprints:
+        # Filled/stroked footprint copper polygons -- a standard net tie joins
+        # its pads with exactly this primitive (issue #5817). Net membership is
+        # irrelevant to a physical gap, and an fp_poly carries no net, so the
+        # source records the empty net the same way unnetted copper does.
+        transform = None
+        for index, graphic in enumerate(fp.graphics):
+            if graphic.graphic_type != "poly" or graphic.layer not in layer_names:
+                continue
+            if transform is None:
+                transform = _footprint_transform(fp)
+            identity = graphic.uuid or f"{fp.reference}:fp_poly:{index}"
+            geom = _fp_poly_geometry(graphic, transform)
+            if geom is None or geom.is_empty:
+                unsupported.append(f"degenerate fp_poly: {identity}")
+                continue
+            sources.append(CopperSource(geom, graphic.layer, "", identity))
         for index, pad in enumerate(fp.pads):
             if pad.type == "np_thru_hole":
                 continue

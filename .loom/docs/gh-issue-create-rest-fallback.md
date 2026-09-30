@@ -54,6 +54,16 @@ Nothing was created. Either:
   * re-run with --force if this is genuinely distinct work.
 ```
 
+### No exit is silent (#8289)
+
+`create-issue.sh` never returns "no URL and no text". Every refusal, warning
+and fail-open reason goes to **stderr**; the URL alone goes to stdout. Three
+paths that could previously exit with nothing at all were reproduced against a
+stubbed forge and fixed in `forge_gh_create_issue_rl_safe`: a `gh issue create`
+that fails with empty stderr (killed process), one that writes its error to
+stdout instead, and one that exits **0** with no URL — the last of which used
+to be reported to the caller as a successful filing.
+
 **Why here and not in the role prompts.** Eight role prompts already teach a
 `check-duplicate.sh` step — and they are the roles whose *primary job* is
 filing issues (Architect, Hermit, Auditor, Curator, Guide), the ones most

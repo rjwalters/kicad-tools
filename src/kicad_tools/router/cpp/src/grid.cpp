@@ -4,6 +4,7 @@
  */
 
 #include "grid.hpp"
+#include "clearance_kernel.hpp"
 #include "geometry.hpp"
 #include "clearance_kernel.hpp"
 #include <cmath>
@@ -94,8 +95,24 @@ void Grid3D::add_fixed_fill(int layer, double clearance, const std::vector<FillR
     fixed_fills_.push_back(std::move(fill));
 }
 
-// Exact physical predicates; bins only reject edges that cannot affect a
-// query. Even-odd containment includes holes without scanning every vertex.
+// The pour's copper is a ``clearance::KZonePoly`` and the query a
+// ``clearance::KSegment``; this is ``clearance::copper_gap(seg, zone)`` with
+// the bins supplying the iteration order (Epic #5509 Phase 3f, consumer group
+// 6). Every number below comes from the kernel: the per-edge gap from
+// ``copper_gap_ring_edge``, the even-odd containment parity from
+// ``ring_edge_crosses_ray``. The bins only *select* edges -- an edge outside
+// the query box expanded by ``required`` cannot be the nearest one, and the
+// row index holds every edge that can straddle the query's own y -- so the
+// verdict is the kernel's, computed without walking a 2000-vertex pour per A*
+// step. Handing the whole ``KZonePoly`` to ``copper_gap`` instead measures the
+// same thing ~400x slower; the equivalence is asserted in
+// ``tests/router/test_clearance_kernel_parity.py``.
+//
+// ``reach`` and ``required`` stay *centreline* distances (the caller's
+// pre-composed ``half + clearance``), while the kernel answers edge to edge:
+// ``required_gap`` is the same requirement with the query's own half width
+// taken off, so ``gap >= required_gap`` and ``distance >= required`` are one
+// comparison written two ways.
 bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
                              int layer, double half, double reach) const {
     for (const auto& fill : fixed_fills_) {
@@ -110,20 +127,28 @@ bool Grid3D::fixed_fill_clear(double ax, double ay, double bx, double by,
             if (row == fill.rows.end()) return false;
             for (size_t i : row->second) {
                 const auto& e = fill.edges[i];
-                if ((e.ay > y) != (e.by > y) && x < (e.bx-e.ax)*(y-e.ay)/(e.by-e.ay)+e.ax)
+                if (clearance::ring_edge_crosses_ray(x, y, e.ax, e.ay, e.bx, e.by))
                     result = !result;
             }
             return result;
         };
         if (in_copper(ax,ay) || in_copper(bx,by)) return false;
+        const clearance::KSegment probe{ax, ay, bx, by, 2.0 * half, layer};
+        const double required_gap = required - half;
         for (int y = std::floor(std::max(y0,fill.miny)); y <= std::floor(std::min(y1,fill.maxy)); ++y) {
             for (int x = std::floor(std::max(x0,fill.minx)); x <= std::floor(std::min(x1,fill.maxx)); ++x) {
                 auto bin = fill.bins.find({x,y});
                 if (bin == fill.bins.end()) continue;
                 for (size_t i : bin->second) {
                     const auto& e = fill.edges[i];
-                    double distance = segment_to_segment_distance(ax,ay,bx,by,e.ax,e.ay,e.bx,e.by);
-                    if (distance <= 1e-7 || distance < required - 1e-4) return false;
+                    const double gap =
+                        clearance::copper_gap_ring_edge(probe, e.ax, e.ay, e.bx, e.by);
+                    // Touching copper is refused however small the
+                    // requirement (the shapely ``intersects`` short-circuit
+                    // the Python twin has always carried), then the ordinary
+                    // clearance comparison at the kernel's own epsilon.
+                    if (gap + half <= 1e-7 ||
+                        gap < required_gap - clearance::CLEARANCE_EPSILON_MM) return false;
                 }
             }
         }
@@ -680,6 +705,30 @@ bool Grid3D::route_geometry_complete() const {
     }
     route_coverage_dirty_ = false;
     return route_coverage_complete_;
+}
+
+void Grid3D::register_route_mark(int kind, int net, int layer, int x1, int y1,
+                                 int x2, int y2, int radius, bool add) {
+    record_route_mark(kind == 1 ? via_mark_key(x1, y1, net, radius)
+                                : segment_mark_key(x1, y1, x2, y2, layer, net, radius),
+                      add);
+}
+
+void Grid3D::set_cell_static_blocked(int x, int y, int layer, bool value) {
+    if (!is_valid(x, y, layer)) return;
+    at(x, y, layer).static_blocked = value;
+    route_coverage_dirty_ = true;
+}
+
+void Grid3D::set_cells_static_blocked(const std::vector<int>& xs,
+                                      const std::vector<int>& ys,
+                                      const std::vector<int>& layers, bool value) {
+    const size_t n = std::min({xs.size(), ys.size(), layers.size()});
+    for (size_t i = 0; i < n; ++i) {
+        if (!is_valid(xs[i], ys[i], layers[i])) continue;
+        at(xs[i], ys[i], layers[i]).static_blocked = value;
+    }
+    route_coverage_dirty_ = true;
 }
 
 bool Grid3D::route_cell_has_geometry(int x, int y, int layer) const {

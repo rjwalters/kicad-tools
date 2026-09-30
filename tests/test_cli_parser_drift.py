@@ -621,7 +621,7 @@ INNER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
 OUTER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
 
 
-def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
+def _inner_check_parser(prog: str = "kct check") -> argparse.ArgumentParser:
     """Capture the inner ``check_cmd.main`` parser without parsing argv.
 
     ``prog`` is parameterised ONLY so the vacuity control below can prove
@@ -657,7 +657,12 @@ def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
         "check_cmd.main's prog string has changed; update "
         "_inner_check_parser_flags rather than letting this test go vacuous"
     )
-    return _flags_from_parser(captured["parser"])
+    return captured["parser"]
+
+
+def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
+    """Return the ``--long-form`` flags of the inner ``check_cmd`` parser."""
+    return _flags_from_parser(_inner_check_parser(prog))
 
 
 def test_check_inner_only_flags_are_in_allowlist():
@@ -953,4 +958,375 @@ def test_check_shim_omits_drifted_flags_when_unset():
     assert "--waivers" not in sub_argv, (
         "an empty --waivers path should be treated as absent (matching the "
         f"--net-class-map truthiness guard); got {sub_argv}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ``check`` type/default parity (#5810)
+# ---------------------------------------------------------------------------
+#
+# The containment tests above only prove a flag is *present* on both
+# parsers.  #5810 was the next rung of the same bug class: ``--copper`` was
+# on both, but the outer parser declared ``type=float, default=1.0`` while
+# the inner one takes a raw string (``default=None``).  ``kct check --copper
+# outer=2,inner=0.5`` therefore died in argparse with ``invalid float
+# value`` before the shim ever ran, and the shim's ``!= 1.0`` guard silently
+# dropped an explicit ``--copper 1``.  The tests below compare the argparse
+# ``type`` and ``default`` of every flag declared on BOTH check parsers.
+
+
+def _actions_by_long_flag(parser: argparse.ArgumentParser) -> dict[str, argparse.Action]:
+    """Map each ``--long-form`` option string on ``parser`` to its action."""
+    return {
+        option_string: action
+        for action in parser._actions
+        for option_string in action.option_strings
+        if option_string.startswith("--")
+    }
+
+
+def _outer_subparser(name: str) -> argparse.ArgumentParser:
+    """Return the named outer ``kct`` subparser object."""
+    from kicad_tools.cli.parser import create_parser
+
+    main_parser = create_parser()
+    for action in main_parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices and name in choices:
+            return choices[name]
+    raise AssertionError(f"could not find {name!r} subparser on outer parser")
+
+
+# Pre-existing, understood ``type=`` drift between the outer ``kct check``
+# subparser and the inner ``check_cmd.py`` parser.  Each entry must say why
+# the mismatch is harmless.  A new entry is almost always a bug: share the
+# argument definition instead (see ``add_check_copper_argument``).
+CHECK_TYPE_DRIFT_ALLOWLIST: dict[str, str] = {
+    # Outer keeps the raw string; the shim forwards ``str(value)`` and the
+    # inner parser converts it to ``Path``.  Same accepted inputs.
+    "--mask-copper-config": "outer str, inner Path; shim forwards str()",
+}
+
+# Pre-existing, understood ``default=`` drift.  Same rules as above.
+CHECK_DEFAULT_DRIFT_ALLOWLIST: dict[str, str] = {
+    # Outer default 2 vs inner None (auto-detect from the board).  The shim
+    # forwards only ``!= 2``, so an omitted flag still auto-detects -- but an
+    # EXPLICIT ``--layers 2`` is dropped too.  Same shape as the #5810
+    # ``--copper 1`` bug; left for a follow-up to keep #5810 scoped.
+    "--layers": "outer 2 vs inner None; shim forwards only != 2",
+    # Outer None sentinel; the shim forwards only when set so the inner
+    # parser's 15.0mm default stays the single source of truth (#4595).
+    "--sch-field-threshold": "outer None sentinel, inner 15.0; forwarded only when set",
+}
+
+
+def _check_type_default_drift() -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``({flag: detail}, {flag: detail})`` for type / default drift."""
+    inner = _actions_by_long_flag(_inner_check_parser())
+    outer = _actions_by_long_flag(_outer_subparser("check"))
+    type_drift: dict[str, str] = {}
+    default_drift: dict[str, str] = {}
+    for flag in sorted(set(inner) & set(outer)):
+        i, o = inner[flag], outer[flag]
+        if i.type != o.type:
+            type_drift[flag] = f"inner type={i.type!r}, outer type={o.type!r}"
+        if i.default != o.default:
+            default_drift[flag] = f"inner default={i.default!r}, outer default={o.default!r}"
+    return type_drift, default_drift
+
+
+def test_check_shared_flags_agree_on_type_and_default():
+    """Every flag on both check parsers must share ``type`` and ``default``.
+
+    Generalises the #5810 ``--copper`` pin: a flag whose outer ``type=``
+    is narrower than the inner one rejects inputs the implementation
+    accepts; a flag whose outer ``default=`` differs changes behaviour when
+    the flag is omitted (or, via a ``!= default`` shim guard, silently drops
+    an explicit value equal to the outer default).
+    """
+    type_drift, default_drift = _check_type_default_drift()
+    unexpected = [
+        f"{flag}: {detail}"
+        for flag, detail in type_drift.items()
+        if flag not in CHECK_TYPE_DRIFT_ALLOWLIST
+    ] + [
+        f"{flag}: {detail}"
+        for flag, detail in default_drift.items()
+        if flag not in CHECK_DEFAULT_DRIFT_ALLOWLIST
+    ]
+    if unexpected:
+        pytest.fail(
+            "Argparse type/default drift between 'kct check' (parser.py) and "
+            "check_cmd.py:\n  "
+            + "\n  ".join(unexpected)
+            + "\n\nShare one add_argument definition between both parsers "
+            "(see copper_weight.add_check_copper_argument, #5810), or, if the "
+            "mismatch is provably harmless, allowlist it with justification in "
+            "CHECK_TYPE_DRIFT_ALLOWLIST / CHECK_DEFAULT_DRIFT_ALLOWLIST."
+        )
+
+
+def test_check_type_default_drift_allowlists_are_not_stale():
+    """An allowlisted flag that no longer drifts must be removed."""
+    type_drift, default_drift = _check_type_default_drift()
+    stale = [f"type: {f}" for f in CHECK_TYPE_DRIFT_ALLOWLIST if f not in type_drift] + [
+        f"default: {f}" for f in CHECK_DEFAULT_DRIFT_ALLOWLIST if f not in default_drift
+    ]
+    assert not stale, f"stale type/default drift allowlist entries: {stale}"
+
+
+def test_copper_type_and_default_match_on_both_check_parsers():
+    """Direct regression pin for #5810: raw-string ``--copper``, ``None`` default."""
+    inner = _actions_by_long_flag(_inner_check_parser())["--copper"]
+    outer = _actions_by_long_flag(_outer_subparser("check"))["--copper"]
+    for side, action in (("inner", inner), ("outer", outer)):
+        assert action.type is None, f"{side} --copper must stay a raw string, got {action.type!r}"
+        assert action.default is None, (
+            f"{side} --copper default must be None (defer to board stackup / "
+            f"profile), got {action.default!r}"
+        )
+        assert "-c" in action.option_strings, f"{side} --copper lost its -c alias"
+
+
+@pytest.mark.parametrize(
+    ("cli", "forwarded"),
+    [
+        (["--copper", "outer=2,inner=0.5"], "outer=2,inner=0.5"),
+        (["-c", "outer=2"], "outer=2"),
+        (["--copper", "2"], "2"),
+        (["--copper", "1"], "1"),
+        (["--copper", "1.0"], "1.0"),
+        ([], None),
+    ],
+    ids=["keyed", "keyed-short", "scalar", "explicit-1", "explicit-1.0", "omitted"],
+)
+def test_check_shim_forwards_copper_verbatim(cli, forwarded):
+    """The shim forwards ``--copper`` verbatim, and only when supplied (#5810).
+
+    An omitted flag must not be forwarded (so ``check_cmd`` resolves the
+    board stackup / profile default); a supplied value -- including ``1``,
+    which the old ``!= 1.0`` guard dropped -- is forwarded unmangled.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", *cli])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    if forwarded is None:
+        assert "--copper" not in sub_argv, f"omitted --copper was forwarded: {sub_argv}"
+    else:
+        assert sub_argv[sub_argv.index("--copper") + 1] == forwarded, sub_argv
+
+
+# ---------------------------------------------------------------------------
+# ``readiness`` pair (#5816)
+#
+# ``kct readiness`` has the identical three-hop forwarding shape as
+# ``route``/``check``:
+#
+#     parser.py :: _add_readiness_parser
+#         -> commands/readiness.py :: run_readiness_command
+#             -> readiness_cmd.py :: main / add_readiness_arguments
+#
+# #5816: the outer ``_add_readiness_parser`` maintained its own separate,
+# stale argument list instead of calling the shared
+# ``add_readiness_arguments``, and never declared the standalone runner's
+# mutually-exclusive ``--verify``/``--generate`` operation flags at all.
+# ``kct readiness board --generate`` failed argument parsing outright, and a
+# bare ``kct readiness board`` silently verified instead of erroring on a
+# missing package.  Both allowlists below are DELIBERATELY EMPTY -- a
+# user-facing readiness flag belongs on both parsers.
+
+INNER_ONLY_READINESS_ALLOWLIST: frozenset[str] = frozenset(set())
+OUTER_ONLY_READINESS_ALLOWLIST: frozenset[str] = frozenset(set())
+
+
+def _inner_readiness_parser_flags(prog: str = "kct readiness") -> set[str]:
+    """Capture the inner ``readiness_cmd.main`` parser without parsing argv.
+
+    Mirrors ``_inner_check_parser_flags``: ``prog`` is parameterised ONLY so
+    the vacuity control below can prove a wrong prog string fails loudly.
+    """
+    from kicad_tools.cli.readiness_cmd import main as readiness_main
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        if getattr(self, "prog", "") == prog:
+            captured["parser"] = self
+            raise SystemExit(0)
+        return real_parse_args(self, *args, **kwargs)
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            readiness_main([])
+
+    assert "parser" in captured, (
+        f"failed to capture inner readiness parser with prog={prog!r} -- "
+        "readiness_cmd.main's prog string has changed; update "
+        "_inner_readiness_parser_flags rather than letting this test go vacuous"
+    )
+    return _flags_from_parser(captured["parser"])
+
+
+def test_readiness_inner_only_flags_are_in_allowlist():
+    """Every flag on the inner readiness parser must be on the outer one.
+
+    Guards the direction that shipped in #5816: a flag declared on
+    ``readiness_cmd.py`` only, so ``kct readiness --flag`` dies with
+    ``error: unrecognized arguments``.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    unexpected_inner_only = (inner - outer) - INNER_ONLY_READINESS_ALLOWLIST
+
+    if unexpected_inner_only:
+        flag_list = "\n  ".join(sorted(unexpected_inner_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the inner 'readiness_cmd.py' parser but rejected by the outer "
+            "'kct readiness' parser:\n  "
+            f"{flag_list}\n\n"
+            "Fix by adding each flag to BOTH:\n"
+            "  1. src/kicad_tools/cli/parser.py :: _add_readiness_parser\n"
+            "  2. src/kicad_tools/cli/commands/readiness.py :: "
+            "run_readiness_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely internal-only, add it to "
+            "INNER_ONLY_READINESS_ALLOWLIST in tests/test_cli_parser_drift.py "
+            "with justification."
+        )
+
+
+def test_readiness_outer_only_flags_are_in_allowlist():
+    """Every flag on the outer readiness parser must be on the inner one.
+
+    Guards the #2819 direction applied to ``readiness``: a flag the outer
+    parser accepts but the shim never forwards, so the user-supplied value
+    is silently discarded.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    unexpected_outer_only = (outer - inner) - OUTER_ONLY_READINESS_ALLOWLIST
+
+    if unexpected_outer_only:
+        flag_list = "\n  ".join(sorted(unexpected_outer_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the outer 'kct readiness' parser but rejected by the inner "
+            "'readiness_cmd.py' parser:\n  "
+            f"{flag_list}\n\n"
+            "These flags will be silently dropped by the forwarding shim, "
+            "so any user-supplied value is ignored.  Fix by:\n"
+            "  1. src/kicad_tools/cli/readiness_cmd.py :: "
+            "add_readiness_arguments (add matching add_argument)\n"
+            "  2. src/kicad_tools/cli/commands/readiness.py :: "
+            "run_readiness_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely consumed by the shim and intentionally "
+            "never forwarded, add it to OUTER_ONLY_READINESS_ALLOWLIST with "
+            "justification."
+        )
+
+
+def test_inner_readiness_parser_capture_is_not_vacuous():
+    """Negative control for the ``prog``-string trap, mirroring the check pair."""
+    inner = _inner_readiness_parser_flags()
+    assert inner, "inner readiness parser capture returned an empty flag set"
+    assert {"--verify", "--generate", "--mfr"} <= inner, (
+        f"inner readiness capture looks wrong; got {sorted(inner)}"
+    )
+
+    with pytest.raises(AssertionError, match="failed to capture inner readiness parser"):
+        _inner_readiness_parser_flags(prog="kicad-tools readiness")
+
+
+@pytest.mark.parametrize("flag", ["--verify", "--generate"])
+def test_readiness_operation_flags_are_on_both_parsers(flag):
+    """Direct regression pin for #5816.
+
+    ``--generate``/``--verify`` were declared on the standalone
+    ``readiness_cmd.py`` parser only; ``kct readiness board --generate``
+    failed with ``error: unrecognized arguments``.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    assert flag in inner, f"{flag} is missing from the inner readiness_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py readiness subparser "
+        "(this would regress #5816 -- `kct readiness` would reject it with "
+        "'unrecognized arguments')"
+    )
+
+
+def test_readiness_generate_and_verify_are_mutually_exclusive_on_outer_parser():
+    """``kct readiness board --generate --verify`` must be rejected.
+
+    Matches the standalone parser's mutually-exclusive group (#5816).
+    """
+    from kicad_tools.cli.parser import create_parser
+
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(["readiness", "board", "--generate", "--verify"])
+
+
+def test_readiness_shim_forwards_generate_and_defaults_to_verify():
+    """The shim must forward ``--generate`` and omit it (and ``--verify``)
+
+    when unset, preserving verification as the safe default (#5816
+    acceptance criteria).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--generate"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--generate" in sub_argv, f"run_readiness_command dropped --generate; got {sub_argv}"
+    assert "--verify" not in sub_argv, (
+        f"--generate and --verify should not both be forwarded; got {sub_argv}"
+    )
+
+    # No operation flag supplied: default must still be verify, and neither
+    # flag should be forwarded (matching readiness_cmd.py's own default).
+    args = create_parser().parse_args(["readiness", "board"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--generate" not in sub_argv, (
+        f"--generate forwarded even though it was not supplied; got {sub_argv}"
+    )
+    assert "--verify" not in sub_argv, (
+        f"an explicit --verify should not be required to preserve the safe default; got {sub_argv}"
+    )
+
+
+def test_readiness_explicit_verify_dispatches_like_standalone_default():
+    """``kct readiness board --verify`` must dispatch identically to the
+
+    standalone runner's own default (#5816 acceptance criteria: unified and
+    standalone CLI dispatch the operation flags identically).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.readiness_cmd import build_parser as standalone_build_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--verify"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    sub_argv = inner_main.call_args[0][0]
+
+    # Whatever the shim forwards (or omits) must parse through the real
+    # standalone parser to the same resolved operation as the standalone
+    # runner's own no-flag default.
+    unified_operation_args = standalone_build_parser().parse_args(sub_argv)
+    default_operation_args = standalone_build_parser().parse_args(["board"])
+    assert bool(unified_operation_args.generate) == bool(default_operation_args.generate), (
+        "kct readiness --verify must resolve to the same operation as the "
+        f"standalone runner's bare default; got sub_argv={sub_argv}"
     )

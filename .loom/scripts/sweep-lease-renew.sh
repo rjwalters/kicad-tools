@@ -258,10 +258,10 @@ usage() {
 }
 
 # --- Repo-relative `gh` targeting (#6179's convention: LOOM_REPO override) --
-gh_repo_args() {
-    if [[ -n "${LOOM_REPO:-}" ]]; then
-        printf -- '-R\n%s\n' "$LOOM_REPO"
-    fi
+# `gh api` has no -R flag (#9552), so the repo goes in the endpoint path.
+gh_repo_path() {
+    local placeholder='{owner}/{repo}'
+    printf '%s' "${LOOM_REPO:-$placeholder}"
 }
 
 # --- Opaque host id (Issue #6322, ported verbatim from sweep-lease-fence.sh
@@ -617,10 +617,8 @@ cmd_renew_once() {
         esac
     done
 
-    local -a repo_args=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && repo_args+=("$line")
-    done < <(gh_repo_args)
+    local repo_path
+    repo_path="$(gh_repo_path)"
 
     local exact=""
     if [[ -n "$host" && -n "$sweep_id" ]]; then
@@ -639,10 +637,15 @@ cmd_renew_once() {
     # eventual SUCCESS, and merging those into $comments_json would corrupt
     # the JSON this function is about to parse.
     local comments_json
-    if ! comments_json="$(forge_gh_perm_safe api "${repo_args[@]}" "repos/{owner}/{repo}/issues/${issue}/comments" --paginate)"; then
+    if ! comments_json="$(forge_gh_perm_safe api "repos/${repo_path}/issues/${issue}/comments" --paginate)"; then
         echo "ERROR: 'gh api .../issues/${issue}/comments --paginate' failed (escalation ladder exhausted)" >&2
         exit 1
     fi
+    # #9548: renew only a TRUSTED author's lease, and honour only a trusted
+    # yield record; an outsider's copy of either is prose.
+    # requires-daemon: forge optional   Without the `trusted-comments` verb the listing cannot be authenticated: exit 1, the same transient failure as an unreadable listing (nothing is patched).
+    comments_json="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments <<< "$comments_json" 2> /dev/null)" \
+        || { echo "ERROR: lease comments on issue #${issue} could not be authenticated (loom-daemon forge trusted-comments unavailable)" >&2; exit 1; }
 
     local candidate_id
     candidate_id="$(jq -r --arg marker "$LEASE_MARKER_PREFIX" --arg exact "$exact" '
@@ -712,7 +715,7 @@ cmd_renew_once() {
     local patch_body_file
     patch_body_file="$(mktemp)"
     printf '%s' "$new_body" > "$patch_body_file"
-    if ! forge_gh_perm_safe api "${repo_args[@]}" --method PATCH "repos/{owner}/{repo}/issues/comments/${candidate_id}" \
+    if ! forge_gh_perm_safe api --method PATCH "repos/${repo_path}/issues/comments/${candidate_id}" \
         -F "body=@${patch_body_file}" \
         > /dev/null; then
         rm -f "$patch_body_file"
@@ -919,7 +922,17 @@ cmd_start() {
                 break
             fi
             renew_rc=0
-            renew_err="$("$SELF" renew-once "$issue" "${extra_args[@]}" 2>&1 > /dev/null)" || renew_rc=$?
+            # The `${arr[@]+...}` guard below is mandatory -- NOT an
+            # unguarded expansion (Issue #8333, same defect class as #8281):
+            # under bash 3.2 (stock macOS /bin/bash) + `set -u`, expanding an
+            # EMPTY array dies with "extra_args[@]: unbound variable". The
+            # array is empty on every legal invocation that passed neither
+            # --host nor --sweep-id AND could not auto-resolve them above
+            # (any $LOOM_TERMINAL_ID without a `daemon-` prefix), so on those
+            # hosts each cycle's command substitution died and the lease was
+            # never actually renewed -- silently, since `|| renew_rc=$?`
+            # catches it and only a generic FAILED line reached fd 9.
+            renew_err="$("$SELF" renew-once "$issue" "${extra_args[@]+"${extra_args[@]}"}" 2>&1 > /dev/null)" || renew_rc=$?
             if [[ "$renew_rc" -ne 0 && "$renew_rc" -ne 2 && "$renew_rc" -ne 4 ]]; then
                 echo "sweep-lease-renew: renewal cycle for issue #${issue} FAILED (renew-once exit ${renew_rc}): ${renew_err}" >&9
             fi

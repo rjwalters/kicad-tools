@@ -442,6 +442,30 @@ class TestMCPCommandHandler:
         captured = capsys.readouterr()
         assert "FastMCP is required" in captured.out
 
+    @pytest.mark.parametrize("transport", ["stdio", "http"])
+    def test_run_serve_module_import_error(self, monkeypatch, capsys, transport):
+        """The kicad_tools.mcp.server import itself failing names the mcp extra."""
+        import sys
+
+        from kicad_tools.cli.commands.mcp import _run_serve
+
+        class MockArgs:
+            host = "localhost"
+            port = 8080
+
+        MockArgs.transport = transport
+
+        # None in sys.modules makes `from kicad_tools.mcp.server import ...`
+        # raise ImportError before run_server is ever reached.
+        monkeypatch.setitem(sys.modules, "kicad_tools.mcp.server", None)
+
+        result = _run_serve(MockArgs())
+        assert result == 1
+
+        out = capsys.readouterr().out
+        assert "The MCP server requires the 'mcp' extra:" in out
+        assert "pip install 'kicad-tools[mcp]'" in out
+
 
 class TestMCPModuleExports:
     """Tests for MCP module exports."""

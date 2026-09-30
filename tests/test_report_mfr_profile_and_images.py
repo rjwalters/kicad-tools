@@ -196,9 +196,12 @@ class TestProfileThreading:
         checker.check_all(pad_grid_auto_derive=True)
 
         mocks["check_pad_grid_alignment"].assert_called_once_with(auto_derive_threshold=True)
-        # Mask checking is opt-in; all other checks remain unconditional.
+        # Mask checking and width-consistency are opt-in; all other checks
+        # remain unconditional.
         for name, m in mocks.items():
-            if name == "check_mask_to_copper" and not mask_requested:
+            if (
+                name == "check_mask_to_copper" and not mask_requested
+            ) or name == "check_width_consistency":
                 m.assert_not_called()
             elif name != "check_pad_grid_alignment":
                 m.assert_called_once_with()

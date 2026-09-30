@@ -831,6 +831,25 @@ so it does, then re-run the tile.
 > the board, plants the cross-region boundary stubs, and routes the tiles in
 > sequence automatically, making this recipe a single command.
 
+### `--preserve-existing` leaves an already-connected net alone
+
+A bare `--preserve-existing` pass routes **only the nets that still have open
+connections**. A net whose pads are already all on one piece of copper — what
+`kct check` reports as connected, counting traces, vias and same-net filled
+zones — is held out of the route set entirely: its copper stays a hard
+clearance obstacle for everything else and is re-emitted unchanged, rather than
+being replaced by a fresh route
+([#5788](https://github.com/rjwalters/kicad-tools/issues/5788)). Before that
+fix a complete net was re-routed and its copper dropped, which cost board 06 all
+64 of its pre-routed, coupled LVDS segments. The pass prints the nets it left
+untouched.
+
+Selecting nets explicitly overrides the exclusion, because there the re-route
+*is* the request: `--nets NET[,NET...]`, `--region X1,Y1,X2,Y2` and `--complete`
+each choose their own set and route it even when those nets are already
+connected. Reach for `--nets` when you deliberately want a completed net
+rebuilt (say, to re-apply a wider `--net-class-map` trace width to it).
+
 ### Preserved copper keeps its `--net-class-map` clearance (lattice engine)
 
 Any multi-step composition (`--region`, `--nets`, or an explicit

@@ -427,6 +427,10 @@ fi
 # configured for merge-commit-only or rebase-only. It now probes the repo via
 # detect_merge_method() (scripts/install/forge-detect.sh) and passes the
 # detected strategy to `gh pr merge`.
+#
+# Since #9105 the preference order is merge > rebase > squash, so a repo that
+# allows everything gets a merge commit; squash remains reachable only when it
+# is the single allowed strategy.
 # -----------------------------------------------------------------------------
 echo ""
 echo "Group 6: FORCE_AUTO_MERGE uses the detected merge method (issue #7844)"
@@ -435,7 +439,7 @@ STUB_DIR6=$(mktemp -d /tmp/loom-pr-markers-6.XXXXXX)
 trap 'rm -rf "$STUB_DIR6"' EXIT
 make_stub_env "$STUB_DIR6"
 
-# 6a: squash-allowed repo — existing behavior must be unchanged.
+# 6a: all three strategies allowed — the preference order picks --merge (#9105).
 run_create_pr "$STUB_DIR6" \
     "FORCE_AUTO_MERGE=true" \
     "STUB_ALLOW_SQUASH=true" \
@@ -444,10 +448,10 @@ run_create_pr "$STUB_DIR6" \
 
 MERGE_ARGS_OUT=$(cat "$STUB_DIR6/capture/merge_args" 2>/dev/null || echo "")
 
-assert_contains "$MERGE_ARGS_OUT" "--squash" \
-    "squash-allowed repo still merges with --squash (no regression)"
+assert_contains "$MERGE_ARGS_OUT" "--merge" \
+    "all-strategies-allowed repo merges with --merge (merge-first default)"
 assert_contains "$MERGE_ARGS_OUT" "--delete-branch" \
-    "squash-allowed repo still passes --delete-branch"
+    "all-strategies-allowed repo still passes --delete-branch"
 
 # 6b: squash disabled, merge commits allowed — must use --merge, never --squash.
 run_create_pr "$STUB_DIR6" \

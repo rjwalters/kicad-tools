@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # heredoc-body-safety.sh — shared STATIC scan for the #7508 bash-3.2
 # heredoc-in-command-substitution parser trap, used by the watchdog test
-# suites (test-loom-daemon-watchdog.sh, test-loom-daemon-watchdog-dedup.sh).
+# suite (test-loom-daemon-watchdog.sh).
 #
 # The trap (#7508): wrapping a heredoc in `$(...)` makes bash 3.2 (macOS's
 # stock, pre-GPLv3 /bin/bash) mis-track quoting THROUGH the heredoc body while

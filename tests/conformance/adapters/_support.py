@@ -38,6 +38,7 @@ record.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass
 
@@ -72,6 +73,7 @@ __all__ = [
     "net_ids",
     "pad_pad_pairs",
     "pair_contexts",
+    "project_rules",
     "router_cpp_module",
     "router_grid",
     "router_pad",
@@ -175,20 +177,48 @@ def router_rules(case: CopperCase) -> DesignRules:
     )
 
 
-def router_grid(case: CopperCase) -> RoutingGrid:
+def router_grid(case: CopperCase, rules: DesignRules | None = None) -> RoutingGrid:
     """An empty :class:`RoutingGrid` in the case's own coordinate frame.
 
     Boards are written with ``center=False`` (see ``tests/conformance/board.py``)
     so the board origin is ``(0, 0)`` and copper coordinates are already
     grid-absolute; no offset is applied here.
+
+    *rules* defaults to :func:`router_rules` -- the consumer's own values, the
+    published table's reading.  An adapter that also offers a **gated** reading
+    (``verdicts_at_project_rules``) passes the same rules with the copper
+    clearances moved onto ``case.rules.project_clearance`` instead, so the grid
+    it marks and the predicate it drives cannot disagree about the requirement.
     """
     return RoutingGrid(
         width=case.width,
         height=case.height,
-        rules=router_rules(case),
+        rules=router_rules(case) if rules is None else rules,
         origin_x=0.0,
         origin_y=0.0,
         layer_stack=layer_stack_for(case),
+    )
+
+
+def project_rules(case: CopperCase) -> DesignRules:
+    """The consumer's own rules with both copper clearances at kicad-cli's value.
+
+    The shared spelling of the **gated** reading every migrated adapter's
+    ``verdicts_at_project_rules`` needs (Epic #5509 Phase 3; group 9's
+    ``LatticeAdapter`` was the first).  Only the two copper clearances move:
+    ``min_hole_to_hole`` / ``min_drill_clearance`` and the via geometry feed a
+    *different* requirement (the drill floor), which kicad-cli scores under its
+    own verdict kind and which ``project_clearance`` says nothing about.
+
+    With the rule axis pinned to ground truth's own number, a remaining
+    disagreement can only be **geometry** -- which is what makes a hard gate on
+    that reading a statement about the model rather than about #5398 / #5654's
+    rule-resolution defect.
+    """
+    return dataclasses.replace(
+        router_rules(case),
+        trace_clearance=case.rules.project_clearance,
+        via_clearance=case.rules.project_clearance,
     )
 
 

@@ -60,8 +60,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 
+# #8191: the recheck's terminal classification now delegates to
+# `loom-daemon merge-pr mergeable-recheck`. Pin the binary it execs and verify
+# it HAS that subcommand — without the pin an installed stale binary would
+# answer instead of the working-tree build, and without the subcommand check
+# every behavioral case below would collapse onto the wrapper's fault refusal.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+# One quoted entry: the verb is NESTED under `merge-pr`, and the helper checks
+# each argument as a standalone subcommand path (leaf included).
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr mergeable-recheck"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -70,6 +82,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why, and what proves
+# the property now. Counted as run so the totals stay honest (the same
+# convention test-merge-pr-partial-increment.sh established for #8191).
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
@@ -96,22 +121,25 @@ assert_grep 'git -C "\$repo_root" merge-tree --write-tree' "$MERGE_PR" \
     "the recheck corroborates with a local git merge-tree check"
 assert_grep 'refuse-conflict\)' "$MERGE_PR" \
     "the gate branches on the refuse-conflict decision"
-assert_grep 'this branch genuinely conflicts' "$MERGE_PR" \
-    "the genuine-conflict refusal message is present"
+# RETIRED (verification-recipes.md §6, #8191 slice): the reason literals now
+# live in loom-daemon/src/merge_pr/mergeable_recheck.rs — see the retired()
+# calls below the wiring block for property/successor.
 assert_grep "forge's cached mergeable state is stale/unknown and could not be corroborated locally" "$MERGE_PR" \
     "the stale/unknown refusal message is present and textually distinct (AC 3)"
 refute_grep 'error "PR #\$PR_NUMBER has merge conflicts — resolve before merging"$' "$MERGE_PR" \
     "the old bare unconditional refusal (no recheck, no reason) is gone"
 
 # The two refusal messages must be distinct strings (AC 3) -- not the same
-# generic "has merge conflicts" text in both branches.
-_conflict_msg_line=$(grep -n 'this branch genuinely conflicts' "$MERGE_PR" | head -1 | cut -d: -f1)
-_stale_msg_line=$(grep -n "could not be corroborated locally" "$MERGE_PR" | head -1 | cut -d: -f1)
-if [[ -n "$_conflict_msg_line" ]] && [[ -n "$_stale_msg_line" ]] && [[ "$_conflict_msg_line" != "$_stale_msg_line" ]]; then
-    pass "genuine-conflict and stale/unknown refusal messages live on distinct lines"
-else
-    fail "expected two distinct refusal message lines, got conflict=$_conflict_msg_line stale=$_stale_msg_line"
-fi
+# generic "has merge conflicts" text in both branches. RETIRED under §6: the
+# reason literals moved to the Rust module with the terminal classification.
+retired "assert_grep 'this branch genuinely conflicts' on merge-pr.sh" \
+    "the genuine-conflict refusal reason exists verbatim" \
+    "the reason string moved into loom-daemon/src/merge_pr/mergeable_recheck.rs with the rest of the terminal classification; it can no longer be grepped out of the shell file" \
+    "mergeable_recheck.rs unit test conflicting_tree_refuses_as_genuine + tests/merge_pr_mergeable_recheck_differential.rs byte-parity (conflict cases)"
+retired "the genuine-conflict and stale/unknown refusal messages live on distinct source lines" \
+    "the two refusal reasons are distinct strings, not one generic message (AC 3)" \
+    "distinctness was inferred from two different line numbers in merge-pr.sh; both strings now live on different format! arms in the Rust module, so line-number grepping cannot see them" \
+    "mergeable_recheck.rs unit tests missing_refs_refuse_stale_not_conflict / fetch_failure_names_both_refs / conflicting_tree_refuses_as_genuine assert three distinct reason bodies; the differential reaches every action class at least once"
 
 # Ordering: the recheck helper is defined BEFORE the synchronous-merge
 # mergeability gate that calls it (definition-before-use in a linear script).
@@ -167,6 +195,14 @@ extract_fn() {
 }
 
 eval "$(extract_fn _recheck_mergeable_before_refusal "$MERGE_PR")"
+
+# The extracted function validates both forge-supplied refs before its fetch
+# (#9106), and merge-pr.sh's own `source lib/default-branch.sh` is outside the
+# extracted body. Source the REAL library rather than stubbing it: the guard is
+# fail-closed, so an absent validator would turn every case below into a
+# refuse-stale and hide whatever the case was actually asserting.
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "$MERGE_PR")" && pwd)/lib/default-branch.sh"
 
 echo ""
 echo "Test 2: behavioral tests of the real _recheck_mergeable_before_refusal body"

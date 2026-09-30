@@ -45,8 +45,8 @@
       "size": 1869
     },
     "design-source/generate_design.py": {
-      "sha256": "67bb8aa3b2c1ce4825d3d20778c080fd5a75c06633d40895ee65b88a9e147216",
-      "size": 109172
+      "sha256": "5dba22bbf988d0494e06b3f7fc5412554b216568690a74b30b61a7478e0dfab4",
+      "size": 113125
     },
     "design-source/manufacturing_process.py": {
       "sha256": "72a88b1c0cd2f28876544ca4e200326d190fdd4b7a64b93c187d66145ef214f9",
@@ -61,12 +61,12 @@
       "size": 33
     },
     "gerbers/gerbers.zip": {
-      "sha256": "73ae030f9731527b89d077b35ddb69ce2d59fbe76e65b23eb52b10183471a37f",
-      "size": 44752
+      "sha256": "3fc6f792e9a48c3bff5521d66e55adf4e324253599e09b90d7cbc1787ad07dd4",
+      "size": 45217
     },
     "images/assembly.png": {
-      "sha256": "d2863367f12f0c818c74dcd87daefc9b3cf8a3075757c0e289c4f68c99a12976",
-      "size": 165322
+      "sha256": "13c8323b975a1191f79843c910fd5e1e4f3b6b936d0d9efd7a95f30d2e09a28f",
+      "size": 171061
     },
     "images/layer_B_Cu.png": {
       "sha256": "3521d5bce1bc7e94c718183f630f4e3d8cb81052f8575341dca37212ae9b54f9",
@@ -85,16 +85,16 @@
       "size": 123076
     },
     "images/pcb_front.png": {
-      "sha256": "b08e5d689878a213ae8d5534b042010bc8ea0f7ccddc9ee3965dcb198d32344c",
-      "size": 214376
+      "sha256": "c199029e43608545425f43a202e21ebec8b74123c54d2bb028e6dfeba8c6b4a1",
+      "size": 219318
     },
     "images/schematic_stm32_devboard.png": {
       "sha256": "701fa6f1e47427d23becbd4c0d3e509a4dd66b0178ff50d7e61e7e7c5601cb1f",
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "63bd271103b061ac02d52a59fff5707b5ce3402f7df46043ae410f74a0c45929",
-      "size": 69587
+      "sha256": "60ee5f6c022e7d00914423b52afe8a063241b1a314c926f78b49b4344593b936",
+      "size": 70418
     },
     "manual-assembly-bom.csv": {
       "sha256": "0d1620494f1492c9a57ccf7d29840d0643984cd23bdb2969e0d0ea660a4839a1",

@@ -520,14 +520,26 @@ EXTRA_LABELS=()
 # reachable at all since #7717 -- this function previously crashed before
 # these lines ran.
 print_label_check_report() {
-  local n s
+  # Structural check, independent of live forge state (#8875): ported to
+  # `loom-daemon label-duplicates` per the shell language policy rather than
+  # growing this `contract`-category script's own portable-shell line count.
+  # The subcommand prints the count on stdout (captured below) and, when
+  # nonzero, the human-readable per-name report plus a de-duplication
+  # advisory on stderr (passed straight through to the terminal, not
+  # captured) — so this stub needs no formatting or looping of its own. No
+  # binary resolved is inconclusive, not a false negative: dup_count stays 0
+  # and this diagnostic is silently skipped, same as git-blob-lines'
+  # handling in verify-proposal-refs.sh. Resolved here, in the one function
+  # that needs it, rather than at top level; declared alongside the other
+  # locals below to add no further line to this `contract`-category file.
+  local n s dup_count=0 dup_bin; dup_bin="$(source "${SCRIPT_DIR}/lib/locate-daemon-bin.sh" && loom_resolve_self_daemon_bin)"; [[ -n "$dup_bin" ]] && dup_count="$("$dup_bin" label-duplicates "$LABELS_FILE")"
 
-  if [[ "${#MISSING_LABELS[@]}" -eq 0 && "${#STALE_LABELS[@]}" -eq 0 && "${#EXTRA_LABELS[@]}" -eq 0 ]]; then
+  if [[ "${#MISSING_LABELS[@]}" -eq 0 && "${#STALE_LABELS[@]}" -eq 0 && "${#EXTRA_LABELS[@]}" -eq 0 && "$dup_count" -eq 0 ]]; then
     success "Label check: ${#DECL_NAMES[@]} declared label(s), all in sync with $REPO. No unknown loom:-prefixed extras."
     return 0
   fi
 
-  warning "Label drift detected on $REPO (${#DECL_NAMES[@]} declared, ${#MISSING_LABELS[@]} missing, ${#STALE_LABELS[@]} stale, ${#EXTRA_LABELS[@]} unknown extra):"
+  warning "Label drift detected on $REPO (${#DECL_NAMES[@]} declared, ${#MISSING_LABELS[@]} missing, ${#STALE_LABELS[@]} stale, ${#EXTRA_LABELS[@]} unknown extra, $dup_count duplicate name(s) in $LABELS_FILE):"
   for n in ${MISSING_LABELS[@]+"${MISSING_LABELS[@]}"}; do
     echo "  MISSING       $n (declared in labels.yml, absent on $REPO)" >&2
   done

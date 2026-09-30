@@ -190,23 +190,33 @@ EOF
 
 GH_LOG="$TMP/gh.log"
 
-# run_sls [--nwo NWO] [--labels TSV] [--labels-fail] -- <script args...>
+# run_sls [--nwo NWO] [--labels TSV] [--labels-fail] [--daemon-bin PATH] -- <script args...>
 #
 #   --labels        the stub's `gh label list --json name,color,description`
 #                    response: name<TAB>color<TAB>description per line
 #   --labels-fail    make that same call fail (simulated forge error)
+#   --daemon-bin     pins LOOM_DAEMON_SELF_BIN so the `label-duplicates`
+#                    diagnostic (#8875) resolves to a named fixture instead of
+#                    whatever loom-daemon happens to be ambiently resolvable
+#                    (a checkout-local build, PATH, or $HOME/.local/bin) --
+#                    see the DAEMON_FIXTURE block below. Empty (the default)
+#                    behaves exactly as before this flag existed: sync-labels.sh
+#                    falls through to ambient resolution, which every scenario
+#                    except the duplicate-name one is indifferent to since none
+#                    of their scratch labels.yml files contain a duplicate.
 #
 # Sets: RC, OUT (merged stdout+stderr), LOG (recorded gh argv lines).
 RC=0
 OUT=""
 LOG=""
 run_sls() {
-    local nwo="" labels="" labels_fail="0"
+    local nwo="" labels="" labels_fail="0" daemon_bin=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --nwo) nwo="$2"; shift 2 ;;
             --labels) labels="$2"; shift 2 ;;
             --labels-fail) labels_fail="1"; shift ;;
+            --daemon-bin) daemon_bin="$2"; shift 2 ;;
             --) shift; break ;;
             *) break ;;
         esac
@@ -220,6 +230,7 @@ run_sls() {
         LOOM_TEST_GH_LABELS="$labels" \
         LOOM_TEST_GH_LABELS_FAIL="$labels_fail" \
         LOOM_CONFIG_DEFAULTS_FILE="" \
+        LOOM_DAEMON_SELF_BIN="$daemon_bin" \
         bash "$SLS" "$@" 2>&1
     )"
     RC=$?
@@ -299,6 +310,110 @@ assert_contains "$LOG" "label list -R octocat/hello-world" \
     "--check --repo targets the override NWO"
 assert_not_contains "$LOG" "repo view octocat/hello-world --json nameWithOwner,viewerPermission" \
     "--check skips the (mutation-only) --repo preflight"
+
+echo ""
+echo "=== --check: a duplicate declared name is its own diagnostic (#8875) ==="
+
+# The duplicate diagnostic shells out to `loom-daemon label-duplicates`
+# (sync-labels.sh's print_label_check_report, per the shell language policy).
+# Relying on whatever loom-daemon happens to be ambiently resolvable (a
+# checkout-local build, PATH, or $HOME/.local/bin) passed locally -- where a
+# built daemon is normally present -- but failed in the hermetic CI job,
+# which has no Rust toolchain to build one and so silently resolved nothing
+# (#8887). Pin LOOM_DAEMON_SELF_BIN (via --daemon-bin) at a fixture that
+# reimplements exactly loom-daemon/src/cli/label_duplicates.rs's declared-name
+# scan and report lines, so this assertion no longer depends on the runner's
+# ambient state.
+DAEMON_FIXTURE="$TMP/fixture-loom-daemon"
+cat > "$DAEMON_FIXTURE" <<'STUB'
+#!/usr/bin/env bash
+# Targets bash 3.2+ (see .shellcheckrc) even though the hermetic CI job that
+# runs this fixture is ubuntu-only (modern bash) -- no bash 4+ constructs
+# (mapfile, associative arrays) needed here, so there is no reason to require
+# them. The `${arr[@]+"${arr[@]}"}` guard mirrors sync-labels.sh's own
+# empty-array-under-`set -u` idiom.
+set -uo pipefail
+if [[ "${1:-}" != "label-duplicates" ]]; then
+    echo "fixture loom-daemon: unsupported subcommand: $*" >&2
+    exit 3
+fi
+labels_file="$2"
+names=()
+while IFS= read -r line; do
+    names+=("$line")
+done < <(grep '^- name: ' "$labels_file" | sed 's/^- name: //')
+
+dup_count=0
+seen=$'\n'
+for name in ${names[@]+"${names[@]}"}; do
+    case "$seen" in
+        *$'\n'"$name"$'\n'*) continue ;;
+    esac
+    occurrences=0
+    for n in ${names[@]+"${names[@]}"}; do
+        [[ "$n" == "$name" ]] && occurrences=$((occurrences + 1))
+    done
+    if [[ "$occurrences" -gt 1 ]]; then
+        seen="$seen$name"$'\n'
+        dup_count=$((dup_count + 1))
+        echo "  DUPLICATE     $name (declared more than once in $labels_file — structural drift in the file itself, independent of forge state; likely a pre-#4187-upgrade artifact, see #8875)" >&2
+    fi
+done
+if [[ "$dup_count" -gt 0 ]]; then
+    echo "$labels_file declares one or more labels more than once — de-duplicate the file by hand (or reinstall Loom, which now absorbs pre-#4187 duplicates automatically) before --check can converge." >&2
+fi
+echo "$dup_count"
+STUB
+chmod +x "$DAEMON_FIXTURE"
+
+# Simulate a pre-#4187 upgrade that left a legacy, unmarked copy of
+# `loom:issue` sitting outside the managed block alongside the current one --
+# labels.yml itself is structurally broken here independent of what the live
+# forge state is, so this must be flagged even when the live set otherwise
+# fully matches every declared entry (by construction, using the *first*
+# declared copy, since read_declared_labels/diff_declared_against_live_tsv
+# compare in file order and later entries win ties by simply re-matching).
+cat > "$SRC/.github/labels.yml" <<'EOF'
+- name: loom:issue
+  description: "legacy pre-#4187 copy"
+  color: "1D76DB"
+
+# BEGIN LOOM LABELS
+- name: loom:issue
+  description: "Approved and ready for a Builder"
+  color: "3B82F6"
+- name: loom:pr
+  description: "Approved pull request"
+  color: "10B981"
+- name: loom:operator-mechanical
+  description: "Parked pending a mechanical human action"
+  color: "F59E0B"
+# END LOOM LABELS
+EOF
+DUP_TSV=$'loom:issue\t1d76db\tlegacy pre-#4187 copy\nloom:pr\t10b981\tApproved pull request\nloom:operator-mechanical\tf59e0b\tParked pending a mechanical human action'
+run_sls --nwo owner/repo --labels "$DUP_TSV" --daemon-bin "$DAEMON_FIXTURE" -- --check
+assert_eq "3" "$RC" "--check exits 3 when labels.yml declares a name more than once"
+assert_contains "$OUT" "DUPLICATE     loom:issue" "the duplicated name is called out by name"
+assert_contains "$OUT" "1 duplicate name(s)" "the summary counts exactly one duplicate name"
+assert_contains "$OUT" "de-duplicate the file" \
+    "the duplicate diagnostic explains what to do about it"
+assert_not_contains "$LOG" "label create" "a duplicate name performs no mutation"
+assert_not_contains "$LOG" "label edit" "a duplicate name performs no mutation"
+
+# Restore the shared fixture for any tests that might be added below this one.
+cat > "$SRC/.github/labels.yml" <<'EOF'
+# BEGIN LOOM LABELS
+- name: loom:issue
+  description: "Approved and ready for a Builder"
+  color: "3B82F6"
+- name: loom:pr
+  description: "Approved pull request"
+  color: "10B981"
+- name: loom:operator-mechanical
+  description: "Parked pending a mechanical human action"
+  color: "F59E0B"
+# END LOOM LABELS
+EOF
 
 echo ""
 echo "=== --check: a forge lookup failure is a loud, distinct error ==="

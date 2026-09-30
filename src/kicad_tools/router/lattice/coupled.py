@@ -33,12 +33,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from . import kernel_adapter as ka
 from .geometry import (
     Pt,
     Rect,
     dist,
     pt_in_rect,
-    seg_pt_dist,
     seg_rect_intersect,
     seg_seg_dist,
 )
@@ -200,16 +200,26 @@ def committed_seg_clear_grown(
     ):
         return False
     pad = committed.trace_half + committed.clearance + extra + 0.5
+    # Epic #5509 Phase 3d: the gaps come from the shared clearance kernel via
+    # the id-space adapter.  ``extra`` stays a term of the REQUIREMENT (the
+    # fat agent's pair half-envelope) rather than of the copper width, exactly
+    # as before -- the centreline carries it, not the copper.  A fat agent
+    # owns a *set* of net ids rather than one, so the self test stays the
+    # caller's ``nets`` membership and no single-id ``LatticeProbe`` applies.
+    centreline = ka.trace(a, b, committed.trace_half, layer)
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(a, b, pad=pad):
-        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
-        if cnet not in nets and seg_seg_dist(a, b, c, d) < gap - _EPS:
+        if cnet in nets:
+            continue
+        required = max(committed.clearance, iclr) + extra
+        if not ka.satisfies(ka.gap(centreline, ka.trace(c, d, hw, layer)), required):
             return False
     # Issue #4597: honor the stored via's class clearance, mirroring the
     # ``max(clearance, iclr)`` the copper loop above already applies.
-    base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
     for point, vnet, vclr in committed.vias:
-        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
-        if vnet not in nets and seg_pt_dist(a, b, point) < vgap - _EPS:
+        if vnet in nets:
+            continue
+        required = max(committed.clearance, vclr) + extra
+        if not ka.satisfies(ka.gap(centreline, ka.site(point, committed.via_radius)), required):
             return False
     return True
 
@@ -231,16 +241,21 @@ def committed_point_clear_grown(
     ):
         return False
     pad = committed.trace_half + committed.clearance + extra + 0.5
+    # Epic #5509 Phase 3d: kernel gaps, as in ``committed_seg_clear_grown``.
+    site = ka.site(point, committed.trace_half)
     for c, d, cnet, hw, iclr in committed.copper[layer].query_seg(point, point, pad=pad):
-        gap = committed.trace_half + hw + max(committed.clearance, iclr) + extra
-        if cnet not in nets and seg_pt_dist(c, d, point) < gap - _EPS:
+        if cnet in nets:
+            continue
+        required = max(committed.clearance, iclr) + extra
+        if not ka.satisfies(ka.gap(site, ka.trace(c, d, hw, layer)), required):
             return False
     # Issue #4597: honor the stored via's class clearance (see
     # ``committed_seg_clear_grown``).
-    base_vgap = committed.via_radius + committed.trace_half + committed.clearance + extra
     for vpt, vnet, vclr in committed.vias:
-        vgap = base_vgap if vclr <= committed.clearance else base_vgap - committed.clearance + vclr
-        if vnet not in nets and dist(point, vpt) < vgap - _EPS:
+        if vnet in nets:
+            continue
+        required = max(committed.clearance, vclr) + extra
+        if not ka.satisfies(ka.gap(site, ka.site(vpt, committed.via_radius)), required):
             return False
     return True
 

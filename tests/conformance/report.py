@@ -18,9 +18,14 @@ A group with no adapter is never silently omitted, and never merely stamped
 ``not measured`` either: :data:`NOT_MEASURED_REASONS` gives each one a stated
 reason, rendered in the table's ``notes`` column.  ``not measured`` with no
 reason is indistinguishable from "nobody looked", which is the failure mode
-the whole document exists to prevent -- and it is what the epic means by
-"group 7 is the only permitted *unexposed* entry": exactly one consumer is
-unreachable from Python, and every other gap has to justify itself.
+the whole document exists to prevent.
+
+Phase 1c left exactly one such gap -- group 7's ``rail_clear``, an *unexposed*
+C++ lambda no binding could reach.  Epic #5509 Phase 3c (#5662) promoted it to
+a bound method while migrating it onto the kernel, so :data:`NOT_MEASURED_REASONS`
+is now **empty**: all nineteen groups are measured.  The dict and the machinery
+around it stay, because they are what forces the *next* gap to justify itself
+rather than appear as a bare blank cell.
 
 :data:`NOTES` carries the same column for *measured* rows, where it records
 the sub-entry-points a row does **not** cover (the C++ pairwise threshold, the
@@ -52,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from tests.conformance.adapters import ConsumerAdapter
+from tests.conformance.adapters.coupled import CoupledRailAdapter
 from tests.conformance.adapters.diffpair import DiffPairAdapter
 from tests.conformance.adapters.drc_cpp import DrcCppAdapter
 from tests.conformance.adapters.drc_nudge import DrcNudgeAdapter
@@ -93,9 +99,12 @@ __all__ = [
     "ADAPTERS",
     "GROUPS",
     "KERNEL_GROUP",
+    "MIGRATED_GROUPS",
     "NOTES",
     "NOT_MEASURED",
     "NOT_MEASURED_REASONS",
+    "QUANTISED_GROUPS",
+    "REFINEMENT_GATED_GROUPS",
     "TABLE_BEGIN",
     "TABLE_END",
     "KERNEL_TABLE_BEGIN",
@@ -281,6 +290,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
     RouteHaloAdapter(),
     RouteGeometryCppAdapter(),
     FixedCopperAdapter(),
+    CoupledRailAdapter(),
     DiffPairAdapter(),
     LatticeAdapter(),
     MeshAdapter(),
@@ -296,41 +306,123 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-# Why a group has no adapter.  A bare ``not measured`` is indistinguishable
-# from "nobody looked"; every gap here states its kind.  Group 7 is the only
-# entry, and it is the *unexposed* kind -- no Python entry point exists at all,
-# which is exactly the one exception the epic's acceptance criterion permits.
-NOT_MEASURED_REASONS: dict[int, str] = {
-    7: (
-        "**unexposed**: `CoupledPathfinder::rail_clear` "
-        "(`coupled_pathfinder.cpp:627`) is a lambda inside the coupled search "
-        "loop -- not a method, so `bindings.cpp` cannot reach it and no Python "
-        "caller exists. Measured in its own Phase 3 PR, which can add the "
-        "binding; this phase adds no C++."
-    ),
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 6, 7, 8, 9, 10})
+"""Consumer groups already switched onto the shared clearance kernel.
+
+The single registry behind Epic #5509's scope guard #5 (*report-only until
+switched*).  Every group **not** listed here has its adapter-vs-kicad-cli row
+auto-``xfail``\\ ed by ``conftest.pytest_collection_modifyitems``, so a
+measured disagreement is evidence for that consumer's own Phase 3/4 PR and
+never a red build.  A group listed here has had that Phase 3/4 PR: its rows
+are a hard gate, and a disagreement fails the suite.
+
+Adding a group here is the *last* step of its migration, not a convenience --
+``test_corpus`` asserts the flip really happened (the items carry no
+``xfail``) and that the adapter can be driven at ground truth's own rule
+value, and ``tests/router/test_clearance_kernel_parity.py`` asserts the
+consumer really imports the kernel.
+
+Migrated so far:
+
+* **1** -- the Python grid's halo marking (``router/grid.py``), Phase 3a.
+* **2** -- the C++ grid's halo marking (``Grid3D::mark_segment`` /
+  ``mark_via``), Phase 3a.
+* **6** -- the fixed-copper predicate (``router/fixed_copper.py`` and
+  ``grid.cpp``'s ``fixed_fill_clear``), Phase 3f.
+* **7** -- the C++ coupled rail gate (``CoupledPathfinder::rail_clear``), Phase 3c.
+* **8** -- the Python coupled / diff-pair gates (``DiffPairRouter``), Phase 3c.
+* **9** -- the lattice engine (``router/lattice/``), Phase 3d.
+* **10** -- the mesh engine's per-leg consult
+  (``router/mesh/obstacles.py``), Phase 3e.
+"""
+
+_MIGRATION_PHASE: dict[int, str] = {
+    1: "3a",
+    2: "3a",
+    6: "3f",
+    7: "3c",
+    8: "3c",
+    9: "3d",
+    10: "3e",
 }
+"""Which epic phase switched each migrated group, for the table's notes."""
+
+
+QUANTISED_GROUPS: frozenset[int] = frozenset({1, 2})
+"""Migrated groups whose gate tolerates a *pinned* over-rejection ledger.
+
+Groups 1 and 2 answer with a **cell set** (grid occupancy), not a distance, and
+a cell-quantised model over-rejects by construction: its halo radius rounds
+outwards, and the adapter dilates the candidate as well as the existing copper.
+Their gate is therefore *zero under-rejection, always*, plus *exactly* the
+over-rejection recorded in ``test_corpus.QUANTISATION_LEDGER`` /
+``test_named_fixtures.FIXTURE_QUANTISATION_LEDGER`` -- a new entry and a
+vanished one both fail.  Every other migrated group is held to zero
+disagreement in both directions, and ``test_corpus`` asserts no ledger entry
+names a group outside this set.
+"""
+
+
+REFINEMENT_GATED_GROUPS: dict[int, str] = {
+    4: "#5410",
+    5: "#5410",
+}
+"""Groups that are a merge gate **without** having been migrated, and by whose issue.
+
+:data:`MIGRATED_GROUPS` answers *"which consumers are on the shared kernel"*.
+That is not the same question as *"which consumers' rows are allowed to
+disagree"*, and conflating the two leaves a third state unrepresentable: a
+consumer that already agrees with ground truth, whose agreement someone paid
+for, and which no later epic phase is scheduled to re-verify.
+
+Groups 4 and 5 -- the search-time route-halo refinement, Python and native --
+are exactly that.  #5410 drove their over-rejection (a *legal* candidate
+refused because a conservative halo swallowed it, the defect that exhausted
+A*'s expansion budget on Board 07's DQ3) to zero, and driven at kicad-cli's
+own clearance they now agree in both directions.  They still carry their own
+arithmetic, so they are **not** migrated -- the switch onto the Phase 1b
+kernel is Epic #5509 Phase 3b (#5661) -- but leaving them auto-``xfail``\\ ed
+until that phase lands means a regression of the repair would be recorded as
+a number in this table and reddened nothing.
+
+``tests/conformance/test_route_halo_refinement_gate.py`` is where that gate
+lives; it deliberately does not add these groups to :data:`MIGRATED_GROUPS`,
+which would misreport the epic's progress and collide with #5661's diff.
+"""
+
+
+# Why a group has no adapter.  A bare ``not measured`` is indistinguishable
+# from "nobody looked"; every gap here states its kind.
+#
+# EMPTY since Epic #5509 Phase 3c (#5662).  The single entry was group 7's
+# ``CoupledPathfinder::rail_clear``, classified *unexposed*: a lambda inside
+# the coupled search loop that ``bindings.cpp`` could not reach.  Phase 3c
+# promoted it to a bound method as part of migrating it onto the clearance
+# kernel, and ``adapters/coupled.py`` now measures it -- so nineteen of
+# nineteen groups have an adapter.  The dict stays (with its renderer and its
+# ``test_every_unwired_group_states_its_reason`` guard) because it is what
+# would force a *future* gap to state its kind instead of rendering a blank.
+NOT_MEASURED_REASONS: dict[int, str] = {}
 
 # What a *measured* row does not cover.  Every sub-entry-point named in the
 # epic's group inventory that this phase could not score is recorded here, so
 # a measured row cannot imply more coverage than it has.
 NOTES: dict[int, str] = {
     1: (
-        "Cell-set answer, so no mm gap is reported. **Switched to the "
-        "clearance kernel** by #5660 (Epic #5509 Phase 3a): the halo is the "
-        "kernel's exact dilation, not the Chebyshev square that swallowed "
+        "Cell-set answer, so no mm gap is reported. The halo is the kernel's "
+        "exact dilation (#5660), not the Chebyshev square that swallowed "
         "#5410's legal via at a corner. The rate is unchanged by that switch "
         "-- the residual is outward *rounding* along the pair axis "
         "(`int(...) + 1`, doubled because this row's rejection rule dilates "
         "the candidate as well as the existing copper), not the square's "
         "diagonal excess. Retired by groups 4/5's refinement, not by a finer "
-        "halo. This row is now a merge gate, not report-only."
+        "halo."
     ),
     2: (
-        "Write side: `mark_segment` / `mark_via`, **switched to the clearance "
-        "kernel** by #5660 alongside group 1 and gated the same way. Routed "
-        "copper only -- the C++ grid never marks pads itself "
-        "(`CppGrid.from_routing_grid` copies the Python blocked plane), so "
-        "pad pairs would re-measure group 1."
+        "Write side: `mark_segment` / `mark_via`, on the same kernel-derived "
+        "disc as group 1 (#5660). Routed copper only -- the C++ grid never "
+        "marks pads itself (`CppGrid.from_routing_grid` copies the Python "
+        "blocked plane), so pad pairs would re-measure group 1."
     ),
     3: (
         "Read side: the Euclidean-disc acceptance kernel (#3229). Since #5660 "
@@ -338,19 +430,60 @@ NOTES: dict[int, str] = {
         "describe the same shape. Via candidates go through the sibling "
         "`is_via_blocked`."
     ),
-    4: "Raises the requirement to `max(required, via_clearance)` for trace-vs-via.",
+    4: (
+        "Raises the requirement to `max(required, via_clearance)` for "
+        "trace-vs-via. **Gated, though not migrated** (#5410): the "
+        "over-rejection cell is this row's whole point -- it is the "
+        "legal-candidate refusal that exhausted A*'s budget -- and it is 0.0%, "
+        "held there by `tests/conformance/test_route_halo_refinement_gate.py` "
+        "rather than left to a later phase. The under-rejection cell is a "
+        "**rule** reading, not a geometry one, and that attribution is "
+        "asserted pair-by-pair rather than claimed: every under-rejected pair "
+        "is a `seg-seg` one whose gap sits in the 0.15-0.20 mm band the "
+        "router's own `trace_clearance` does not require and the project's "
+        "`Default` netclass does -- the #5398 / #5654 defect this row may not "
+        "close. Driven instead at the clearance kicad-cli itself applies, the "
+        "same unmodified consumer agrees in **both** directions; the switch "
+        "onto the Phase 1b kernel is still outstanding as Phase 3b (#5661)."
+    ),
     5: (
         "Measures the `Grid3D` predicate; the `Pathfinder` wrappers "
         "(`trace_halo_cell_clear`, `via_route_geometry_clear`) are unbound and "
         "add only cell-to-world conversion, per-net `search_fill_*` overrides "
-        "and a `route_cell_has_geometry` pre-check -- no arithmetic."
+        "and a `route_cell_has_geometry` pre-check -- no arithmetic. **Gated, "
+        "though not migrated** (#5410), on the same two readings as group 4 "
+        "and by the same module: 0.0% over-rejection is a hard failure, and "
+        "the under-rejection cell is asserted to be entirely the 0.15-0.20 mm "
+        "`trace_clearance`-versus-`Default`-netclass band (#5398 / #5654) "
+        "rather than geometry. At kicad-cli's own clearance this consumer "
+        "agrees in both directions. Both halves of the refinement move onto "
+        "the shared kernel in Phase 3b (#5661)."
     ),
     6: (
         "Both halves driven (Python `FixedFillObstacles` + native "
         "`Grid3D::fixed_fill_clear`); a pair is flagged when either refuses. "
         "The fill polygon is the pad's exact outline via the `_pad_polygon` "
         "reference model, so the row measures group 6's arithmetic, not a "
-        "harness approximation."
+        "harness approximation. Both halves now ask the kernel *per boundary "
+        "edge* (`copper_gap_ring_edge` / `ring_edge_crosses_ray`) behind their "
+        "own 1 mm index rather than handing it a whole `KZonePoly`: the index "
+        "only selects candidate edges, and "
+        "`tests/router/test_fixed_copper_kernel.py` asserts the indexed verdict "
+        "equals the whole-pour one. The under-rejection cell is a **rule** "
+        "reading, not a geometry one -- this row drives the consumer at the "
+        "router's own `trace_clearance` (0.15 mm) while kicad-cli applies the "
+        "project's `Default` netclass (0.20 mm), the #5398 / #5654 defect no "
+        "Phase 3 PR is allowed to fix."
+    ),
+    7: (
+        "The coupled search's own rail gate, driven through the bound "
+        "`rail_clear_world` (Epic #5509 Phase 3c, #5662) so grid quantisation "
+        "cannot move a verdict. Measures against **stored route geometry** -- "
+        "the committed copper the old lambda could not see, which is #4507 -- "
+        "and against fixed fills. **Not measured**: pad pairs, because "
+        "`rail_clear` never consults `pads_`; pad copper reaches the coupled "
+        "search through the blocked plane (groups 1-3) and through the Python "
+        "constructor's exact pad gate (group 8)."
     ),
     8: (
         "Three gates in series (`_segment_cells_clear` raster walk through the "
@@ -376,31 +509,43 @@ NOTES: dict[int, str] = {
         "Routed copper only -- none of the three predicates consults a pad "
         "(pad keep-outs gate *site availability* on "
         "`LatticeObstacleModel.node_pads`, which is group 9's masking half, not "
-        "its clearance arithmetic). Centreline answers, so no mm gap is "
-        "reported. `pairwise` left `None`, the only path reachable without "
-        "`--voltage-map` (Phase 2's corpus)."
+        "its clearance arithmetic). The predicates return a bool and no gap, so "
+        "no mm gap is reported. `pairwise` left `None`, the only path reachable "
+        "without `--voltage-map` (Phase 2's corpus). The under-rejection cell is "
+        "a **rule** reading, not a geometry one: this row drives the consumer at "
+        "the router's own `trace_clearance` (0.15 mm), so every under-rejected "
+        "pair sits in the 0.15-0.20 mm band the project's `Default` netclass "
+        "requires and the router does not -- the #5398 / #5654 defect, which "
+        "Phase 3d does not touch."
     ),
     10: (
         "`ObstacleModel.is_clear`, constructed directly as "
-        "`MeshPathfinder._route_with_portals` does: other-net pads as keep-out "
-        "rects inflated by the agent radius (`_keepouts`), committed traces as "
-        "capsule polygons "
+        "`MeshPathfinder._route_with_portals` does: other-net pads passed "
+        "**verbatim** (`_foreign_pads`) and measured exactly through the "
+        "kernel's Minkowski pad model, committed traces as capsule polygons "
         "inflated by a **full** `trace_width + clearance` (`_route_obstacles`' "
-        "own over-approximation, square end-caps included). Seg-candidate "
-        "pairs only -- `is_clear(a, b)` takes two points and no width, and a "
-        "committed via is not in this model at all (`_route_via_injection` "
-        "handles those). `fixed_fills` left `None`: group 6 already measures "
-        "`FixedFillObstacles` on both its halves. The `pours` branch is driven "
-        "by `seg-zone` pairs (pour outlines, verbatim, as `_route_obstacles` "
-        "passes them) and the `outline` branch by `copper-edge` pairs (#5644); "
-        "both are pure containment tests with **no clearance term**, so a leg "
-        "that merely comes close to a pour or to `Edge.Cuts` is accepted and "
-        "the under-rejection on those kinds is the consumer's own arithmetic. "
-        "In production the engine keeps legs off the outline through the "
-        "navmesh triangulation rather than through this predicate. "
-        "**Not measured**: `via-zone`, excluded for the same reason `seg-via` "
-        "is -- `is_clear(a, b)` takes two points and no width, so a via "
-        "candidate has no call to make."
+        "own over-approximation, square end-caps included, unchanged by this "
+        "phase). Seg-candidate pairs only -- `is_clear(a, b)` takes two points "
+        "and no width of its own, and a committed via is not in this model at "
+        "all (`_route_via_injection` handles those). `fixed_fills` left "
+        "`None`: group 6 already measures `FixedFillObstacles` on both its "
+        "halves. Before Phase 3e a pad entered as its `pad_half_extents` "
+        "**bounding box** grown by the agent radius -- a legal candidate "
+        "refused during search, #5410's failure mode -- and the `outline` "
+        "branch was a bare containment test with no clearance term; both are "
+        "now kernel measurements against the real copper. The `copper-edge` "
+        "cell that remains is a **rule** reading, not a geometry one: this row "
+        "drives the consumer at the board-edge floor it actually resolves, "
+        "which `MeshPathfinder.edge_clearance` takes from the owning "
+        "`Autorouter._edge_clearance` and which is 0.0 with none configured, "
+        "while kicad-cli applies the `.kicad_pro` board rule -- the #5398 / "
+        "#5654 axis, which Phase 3e does not touch. The `pours` branch is "
+        "still driven by `seg-zone` pairs against pour outlines verbatim, as "
+        "`_route_obstacles` passes them, and is still a touch test with no "
+        "clearance term, so a leg that merely comes close to a pour is "
+        "accepted. **Not measured**: `via-zone`, excluded for the same reason "
+        "`seg-via` is -- `is_clear(a, b)` takes two points and no width, so a "
+        "via candidate has no call to make."
     ),
     11: (
         "`via_clearance.py`'s four pure predicates. **Not measured**: "
@@ -426,7 +571,13 @@ NOTES: dict[int, str] = {
     15: (
         "`VectorCollisionChecker`, which delegates to `GridCollisionChecker` "
         "when the per-layer R-tree is unpopulated, so both citations are "
-        "exercised by this row. `ignore_overflow` left at its stricter default."
+        "exercised by this row. `ignore_overflow` left at its stricter default. "
+        "Since #5625 the delegation no longer changes the answer for routed "
+        "copper: the two checkers apply one shared exact narrow phase, and the "
+        "grid checker's Bresenham-plus-buffer walk is only its broad phase (a "
+        "raster cell whose occupancy is not accountable to registered copper "
+        "still rejects outright, and a pad's halo is still the gate for "
+        "`pad-seg`). The percentages in this row were measured before that fix."
     ),
     16: (
         "**Not measured**: `_post_insertion_clearance_detail_pair_group` "
@@ -592,6 +743,39 @@ def not_measured_reason(number: int) -> str:
     return "no adapter registered and no reason recorded -- this is a harness bug."
 
 
+def _row_note(number: int) -> str:
+    """The ``notes`` cell for a *measured* row, migration status included.
+
+    A migrated group's row is no longer report-only, and a reader of the table
+    must be able to tell that from the table -- otherwise a non-zero cell on a
+    gated row reads like every other outstanding finding.  The prefix also
+    records *which* reading is gated, because for a migrated group the two are
+    deliberately different: the percentages here come from the consumer's own
+    rule values (so the row keeps measuring the rule gap for its own issue),
+    while the merge gate drives the same consumer at the clearance kicad-cli
+    applies, isolating the geometry this epic actually unified.
+    """
+    note = NOTES.get(number, "")
+    if number not in MIGRATED_GROUPS:
+        return note
+    fails_on = (
+        "so it fails on any **under**-rejection and on any over-rejection its "
+        "pinned cell-quantisation ledger (`test_corpus.QUANTISATION_LEDGER`) "
+        "does not record"
+        if number in QUANTISED_GROUPS
+        else "so it fails on a **geometry** disagreement in either direction"
+    )
+    prefix = (
+        f"**Switched to the shared kernel in Phase {_MIGRATION_PHASE[number]} -- "
+        "no longer report-only.** The merge gate "
+        "(`test_corpus.test_adapter_agrees_with_kicad_cli`) drives this same "
+        "consumer at the project netclass clearance kicad-cli itself applies, "
+        f"{fails_on}; the percentages in this row keep the consumer's own rule "
+        "values."
+    )
+    return f"{prefix} {note}".strip()
+
+
 def _escape_cell(text: str) -> str:
     """Make a note safe inside a markdown table cell.
 
@@ -632,7 +816,7 @@ def _rows(
                 m.under_reject_cell,
                 str(m.boundary),
                 ", ".join(m.fill_states) or NOT_MEASURED,
-                _escape_cell(NOTES.get(group.number, "")),
+                _escape_cell(_row_note(group.number)),
             )
         )
     return rows
@@ -730,11 +914,54 @@ def render_document(
         "seeded random copper configurations plus four named fixtures "
         "reproducing known disagreements.",
         "",
-        "**This document is report-only.** A disagreement here is evidence, "
-        "not a bug report and not a patch: consumers are switched to the "
-        "shared kernel in their own epic phase, and only then do their rows "
-        "become a merge gate.",
+        "**A row is report-only until its consumer is switched.** A "
+        "disagreement on an unswitched row is evidence, not a bug report and "
+        "not a patch: consumers move onto the shared kernel in their own epic "
+        "phase, and only then does that row become a merge gate.",
         "",
+        *(
+            [
+                "Already switched, and therefore **gated** rather than "
+                "report-only: "
+                + ", ".join(
+                    f"group {n} (Phase {_MIGRATION_PHASE[n]})" for n in sorted(MIGRATED_GROUPS)
+                )
+                + ". A gated row's merge gate drives that consumer at the "
+                "project netclass clearance kicad-cli itself applies, so it "
+                "fails on a **geometry** disagreement and not on the rule "
+                "value the consumer happens to resolve -- rule selection is "
+                "Phase 2's axis, and the percentages below deliberately keep "
+                "measuring it.",
+                "",
+            ]
+            if MIGRATED_GROUPS
+            else []
+        ),
+        *(
+            [
+                "**Gated without having been migrated**: "
+                + ", ".join(
+                    f"group {n} ({REFINEMENT_GATED_GROUPS[n]})"
+                    for n in sorted(REFINEMENT_GATED_GROUPS)
+                )
+                + ". Being on the shared kernel and being allowed to disagree "
+                "are two different questions, and the search-time route-halo "
+                "refinement is the case where they come apart: its "
+                "over-rejection -- a legal candidate refused because a "
+                "conservative halo swallowed it -- was driven to zero by "
+                "#5410, and driven at kicad-cli's own clearance it now agrees "
+                "in **both** directions, but it still carries its own "
+                "arithmetic and its kernel switch is Phase 3b (#5661). "
+                "`tests/conformance/test_route_halo_refinement_gate.py` holds "
+                "that agreement as a hard failure so a regression reddens the "
+                "build instead of quietly becoming a number in this table; "
+                "the percentages below still keep the consumer's own rule "
+                "values, so the rule axis stays measured rather than gated.",
+                "",
+            ]
+            if REFINEMENT_GATED_GROUPS
+            else []
+        ),
         "## Status",
         "",
         *(

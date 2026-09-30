@@ -112,6 +112,33 @@ unchanged — sharding only ever changes *which* candidates are eligible this
 tick, never how they are ordered against each other. A deferred candidate is
 never dropped: it stays ready and is re-evaluated on the next tick.
 
+Since #9090 both partitions live in `work_finder::repo_cap::shape_queue`
+(`work_finder.rs` is at its file-size ratchet), and
+`tick_multi_with_sharding` is itself the thin `max_concurrent_per_repo: None`
+wrapper over `tick_multi_with_repo_cap`. Nothing above changes.
+
+### How this composes with the per-repo cap (#9090)
+
+`autonomous.workFinder.maxConcurrentPerRepo` adds a second, independent
+repo-level term at this same layer. The two are applied in a fixed order and
+answer different questions:
+
+| | Repo sharding (#6243) | Per-repo cap + affinity (#9090) |
+|---|---|---|
+| Question | *which host* should prefer this repo | *how much of one host's budget* one repo may hold |
+| Scope | cross-host (a shard ring over repo NWO) | single-host (this daemon's own budget) |
+| Mechanism | stable partition: in-slice ahead of out-of-slice, hard preference | stable partition: hot repos ahead of cold (*ordering*) **plus** a deferral at admission (*bound*) |
+| Order applied | **first** — on the globally sorted list | **second** — affinity reorders the slice partition's result; the cap gates admission last, in pass 2 |
+| Counter | `TickReport::deferred_out_of_slice` | `TickReport::deferred_repo_cap` |
+| Default | unsharded ⇒ every repo in-slice (no-op) | absent ⇒ uncapped, affinity off (no-op) |
+
+They cannot fight: sharding decides the candidate *set* for this host,
+affinity reorders within that set, and only the cap refuses an admission. A
+sharded fleet with no `maxConcurrentPerRepo` behaves exactly as it did before
+#9090, and an unsharded host with a cap set gets the cap without any slice
+partition running at all. Full narrative: `daemon-reference.md` §"Per-repo
+dispatch cap + track affinity (#9090)".
+
 ### Preference here, hard filter there
 
 This is the one place the dispatcher deliberately diverges from the role
@@ -234,7 +261,9 @@ duplicated here.
 - `loom-daemon/src/work_finder.rs` — `tick_multi_with_sharding` (new;
   `tick_multi_with_saturation_brake` delegates to it with `None`),
   `TickReport::deferred_out_of_slice`, and the per-tick mask in
-  `spawn_multi_work_finder_task`.
+  `spawn_multi_work_finder_task`. (#9090 moved the partition itself into
+  `work_finder/repo_cap.rs` and made `tick_multi_with_sharding` a wrapper
+  over `tick_multi_with_repo_cap`; the behavior described above is unchanged.)
 - `loom-daemon/src/peer_claims.rs` — the same-issue collision window
   (`record_same_issue_collision_at` / `same_issue_collision_count`).
 - `loom-daemon/src/types.rs` — `PeerClaimStatus::same_issue_collisions`.

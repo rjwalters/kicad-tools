@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from kicad_tools.cli.runner import find_kicad_cli
 from kicad_tools.cli.zones_cmd import main
 
 # Patch targets -- _run_fill imports from .runner at call time, so we patch
@@ -1442,12 +1443,12 @@ def _kicad_cli_available() -> bool:
     """Check whether kicad-cli is installed and can run ``pcb drc``."""
     import subprocess
 
-    cli = shutil.which("kicad-cli")
+    cli = find_kicad_cli()
     if cli is None:
         return False
     try:
         result = subprocess.run(
-            [cli, "pcb", "drc", "--help"],
+            [str(cli), "pcb", "drc", "--help"],
             capture_output=True,
             text=True,
         )
@@ -1458,7 +1459,10 @@ def _kicad_cli_available() -> bool:
 
 @pytest.mark.skipif(
     not _kicad_cli_available(),
-    reason="kicad-cli not installed or 'pcb drc' unavailable",
+    reason=(
+        "find_kicad_cli() found no kicad-cli install (checked PATH and common install "
+        "locations), or its 'pcb drc' subcommand is unavailable"
+    ),
 )
 class TestFillIntegration:
     """Integration tests that actually run kicad-cli to fill zones.

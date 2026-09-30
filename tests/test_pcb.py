@@ -1321,6 +1321,179 @@ class TestAddFootprint:
             assert at_pos < tags_pos, "(at) should appear before (tags)"
 
 
+class TestAddFootprintProjectLibraryResolution:
+    """``PCB.add_footprint(schematic_path=...)`` project-table resolution (issue #5808).
+
+    Mirrors the project-then-global resolution order already exercised for
+    ``sch_suggest_footprint`` / ``sch_assign_footprints`` -- a nickname in the
+    schematic's ``fp-lib-table`` wins over the standard KiCad library search,
+    and a missing/malformed table falls back to that search unchanged.
+    """
+
+    _TWO_PAD_FOOTPRINT = (
+        '(footprint "OnlyHere"\n'
+        "    (version 20240108)\n"
+        '    (generator "kicadtools_test")\n'
+        '    (layer "F.Cu")\n'
+        "    (attr smd)\n"
+        '    (pad "1" smd roundrect (at -1 0) (size 1 1) (layers "F.Cu"))\n'
+        '    (pad "2" smd roundrect (at 1 0) (size 1 1) (layers "F.Cu"))\n'
+        ")\n"
+    )
+
+    @staticmethod
+    def _write_project(
+        tmp_path: Path,
+        *,
+        fp_lib_table_text: str | None,
+        write_pretty_dir: bool = True,
+    ) -> Path:
+        """Build a project root with an optional fp-lib-table and return the schematic path."""
+        (tmp_path / "proj.kicad_pro").write_text("{}", encoding="utf-8")
+        if fp_lib_table_text is not None:
+            (tmp_path / "fp-lib-table").write_text(fp_lib_table_text, encoding="utf-8")
+        if write_pretty_dir:
+            lib_dir = tmp_path / "local.pretty"
+            lib_dir.mkdir()
+            (lib_dir / "OnlyHere.kicad_mod").write_text(
+                TestAddFootprintProjectLibraryResolution._TWO_PAD_FOOTPRINT, encoding="utf-8"
+            )
+        sch_path = tmp_path / "proj.kicad_sch"
+        sch_path.write_text("(kicad_sch)", encoding="utf-8")
+        return sch_path
+
+    _FP_LIB_TABLE = (
+        "(fp_lib_table\n"
+        "  (version 7)\n"
+        '  (lib (name "local") (type "KiCad") (uri "${KIPRJMOD}/local.pretty")'
+        '       (options "") (descr "project-local"))\n'
+        ")"
+    )
+
+    def test_project_nickname_resolves_before_global_search(self, minimal_pcb, tmp_path):
+        """A project-only nickname is found via the project table."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        sch_path = self._write_project(tmp_path, fp_lib_table_text=self._FP_LIB_TABLE)
+
+        fp = pcb.add_footprint(
+            library_id="local:OnlyHere",
+            reference="R1",
+            x=50.0,
+            y=30.0,
+            schematic_path=sch_path,
+        )
+
+        assert fp is not None
+        assert fp.reference == "R1"
+        assert len(fp.pads) == 2
+
+    def test_no_schematic_path_raises_for_project_only_nickname(self, minimal_pcb, tmp_path):
+        """Without ``schematic_path``, a project-only nickname is unresolvable
+        (unchanged pre-existing behavior -- this parameter only adds a
+        resolution path)."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        self._write_project(tmp_path, fp_lib_table_text=self._FP_LIB_TABLE)
+
+        with pytest.raises((FileNotFoundError, ValueError)):
+            pcb.add_footprint(
+                library_id="local:OnlyHere",
+                reference="R1",
+                x=50.0,
+                y=30.0,
+            )
+
+    def test_missing_footprint_in_project_library_raises(self, minimal_pcb, tmp_path):
+        """A nickname that resolves but doesn't contain the requested footprint
+        falls through to the (here: also failing) global search."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        sch_path = self._write_project(tmp_path, fp_lib_table_text=self._FP_LIB_TABLE)
+
+        with pytest.raises((FileNotFoundError, ValueError)):
+            pcb.add_footprint(
+                library_id="local:NotThere",
+                reference="R1",
+                x=50.0,
+                y=30.0,
+                schematic_path=sch_path,
+            )
+
+    def test_malformed_fp_lib_table_does_not_raise_unexpectedly(self, minimal_pcb, tmp_path):
+        """A malformed table degrades to "no project entries" rather than crashing."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        sch_path = self._write_project(tmp_path, fp_lib_table_text="not an s-expression {{{ at all")
+
+        # Falls through to the global search, which (with a real footprint
+        # name it doesn't recognize) still raises -- but a FileNotFoundError/
+        # ValueError, never an unrelated parser exception.
+        with pytest.raises((FileNotFoundError, ValueError)):
+            pcb.add_footprint(
+                library_id="local:OnlyHere",
+                reference="R1",
+                x=50.0,
+                y=30.0,
+                schematic_path=sch_path,
+            )
+
+    def test_missing_fp_lib_table_falls_back_to_global_search(self, minimal_pcb, tmp_path):
+        """No fp-lib-table sibling at all -- same as passing no schematic_path
+        for resolution purposes; global search still runs."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        sch_path = self._write_project(tmp_path, fp_lib_table_text=None, write_pretty_dir=False)
+
+        with pytest.raises((FileNotFoundError, ValueError)):
+            pcb.add_footprint(
+                library_id="local:OnlyHere",
+                reference="R1",
+                x=50.0,
+                y=30.0,
+                schematic_path=sch_path,
+            )
+
+    @requires_kicad_footprint_libs
+    def test_standard_library_fallback_when_no_project_table(self, minimal_pcb, tmp_path):
+        """A standard-library id still resolves when there's no project table
+        at all -- the pre-existing global-only behavior is unaffected."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        sch_path = tmp_path / "proj.kicad_sch"
+        sch_path.write_text("(kicad_sch)", encoding="utf-8")
+
+        fp = pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=50.0,
+            y=30.0,
+            schematic_path=sch_path,
+        )
+
+        assert fp is not None
+        assert fp.reference == "R1"
+
+    @requires_kicad_footprint_libs
+    def test_standard_library_id_not_shadowed_by_project_table(self, minimal_pcb, tmp_path):
+        """A standard-library id that has no matching project nickname still
+        falls through to (and succeeds via) the global search."""
+        doc = load_pcb(str(minimal_pcb))
+        pcb = PCB(doc)
+        sch_path = self._write_project(tmp_path, fp_lib_table_text=self._FP_LIB_TABLE)
+
+        fp = pcb.add_footprint(
+            library_id="Resistor_SMD:R_0603_1608Metric",
+            reference="R1",
+            x=50.0,
+            y=30.0,
+            schematic_path=sch_path,
+        )
+
+        assert fp is not None
+        assert fp.reference == "R1"
+
+
 class TestAddFootprintPadAngleAbsolute:
     """Writer must emit pad angles as ABSOLUTE (fp_rotation + local) (issue #3902).
 

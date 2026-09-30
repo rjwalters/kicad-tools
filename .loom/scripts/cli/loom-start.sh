@@ -211,8 +211,16 @@ check_config() {
             echo "  - $tier_path" >&2
         done < <(_loom_start_config_tiers "$REPO_ROOT")
         echo "" >&2
-        echo "Have you initialized Loom in this repository?" >&2
-        echo "Run: ./scripts/install-loom.sh" >&2
+        # A SESSION MODE install (#8884) reaches this refusal BY DESIGN -- it
+        # wrote `terminals: []` on purpose -- so the hint names both causes
+        # rather than sending such an operator into a needless reinstall. It is
+        # stated unconditionally, not behind a `.mode == "session"` test: this
+        # file is `contract` shell in epic #7810's portable pool, which may not
+        # grow, and a static line costs nothing while a branch costs 7 lines.
+        # The refusal itself is unchanged -- #8884 deliberately added no second
+        # guard, because this function already is the guard.
+        echo "Have you initialized Loom here (./scripts/install-loom.sh)? A session-mode" >&2
+        echo "install (\`\"mode\": \"session\"\`) lands here by design -- see .loom/docs/session-mode.md." >&2
         exit 1
     fi
 }

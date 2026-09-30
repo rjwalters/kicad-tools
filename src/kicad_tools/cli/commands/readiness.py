@@ -20,6 +20,11 @@ def run_readiness_command(args) -> int:
     if manufacturer:
         sub_argv.extend(["--mfr", manufacturer])
 
+    if getattr(args, "readiness_generate", False):
+        sub_argv.append("--generate")
+    elif getattr(args, "readiness_verify", False):
+        sub_argv.append("--verify")
+
     if getattr(args, "readiness_pcb_only", False):
         sub_argv.append("--pcb-only")
     elif getattr(args, "readiness_assembly", False):
@@ -32,6 +37,10 @@ def run_readiness_command(args) -> int:
     schematic = getattr(args, "readiness_schematic", None)
     if schematic:
         sub_argv.extend(["--sch", schematic])
+
+    project_root = getattr(args, "readiness_project_root", None)
+    if project_root:
+        sub_argv.extend(["--project-root", project_root])
 
     net_class_map = getattr(args, "readiness_net_class_map", None)
     if net_class_map:
@@ -51,9 +60,25 @@ def run_readiness_command(args) -> int:
     if hv_net_class and hv_net_class != "HV":
         sub_argv.extend(["--hv-net-class", hv_net_class])
 
-    hv_requirement = getattr(args, "readiness_hv_requirement", None)
-    if hv_requirement:
-        sub_argv.extend(["--hv-requirement", hv_requirement])
+    hv_min = getattr(args, "readiness_hv_min", None)
+    if hv_min is not None:
+        sub_argv.extend(["--hv-min", str(hv_min)])
+
+    hv_standard = getattr(args, "readiness_hv_standard", None)
+    if hv_standard:
+        sub_argv.extend(["--hv-standard", hv_standard])
+
+    hv_working_voltage = getattr(args, "readiness_hv_working_voltage", None)
+    if hv_working_voltage is not None:
+        sub_argv.extend(["--hv-working-voltage", str(hv_working_voltage)])
+
+    hv_pollution_degree = getattr(args, "readiness_hv_pollution_degree", None)
+    if hv_pollution_degree is not None:
+        sub_argv.extend(["--hv-pollution-degree", str(hv_pollution_degree)])
+
+    hv_material_group = getattr(args, "readiness_hv_material_group", None)
+    if hv_material_group and hv_material_group != "IIIa":
+        sub_argv.extend(["--hv-material-group", hv_material_group])
 
     fill_tolerance = getattr(args, "readiness_fill_tolerance", None)
     if fill_tolerance is not None:

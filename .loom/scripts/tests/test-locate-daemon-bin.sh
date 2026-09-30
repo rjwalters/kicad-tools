@@ -428,6 +428,120 @@ assert_contains "LOOM_DAEMON_SELF_BIN" "$stderr_out" \
 assert_contains "LOOM_DAEMON_BIN" "$stderr_out" \
     "…and still names \$LOOM_DAEMON_BIN"
 
+# ============================================================================
+# 23-27. THE #8712 SANITY PROBE on loom_resolve_self_daemon_bin's tier 2.
+#
+# The incident: a test fixture's 472-byte bash fake was left at a fleet host's
+# `loom-daemon/target/release/loom-daemon`. `loom-daemon-update.sh --fetch`
+# delegates the download to `"$rf_bin" release-fetch`, tier 2 handed it that
+# file, and every `auto_update` fetch failed for hours while the machine-level
+# install the update was targeting sat one tier below, working.
+#
+# Each case builds its own throwaway "checkout" holding a COPY of the library,
+# because tier 2's first candidate is script-relative: sourcing the real
+# library would probe the real repo's own `target/` and make the result depend
+# on whether this host happens to have a build there.
+# ============================================================================
+# Tier 2 resolves its script-relative root through `cd … && pwd`, which
+# collapses the doubled slash a `$TMPDIR` ending in `/` leaves in $WORKDIR
+# (macOS). Compare against the same normalisation rather than the raw string.
+WORKDIR_N="$(cd "$WORKDIR" && pwd)"
+
+make_self_lib() { # <checkout-root> -> echoes the copied library's path
+    # The copy must sit at <checkout-root>/defaults/scripts/lib/ exactly: tier 2
+    # derives its script-relative root as `$(dirname "$BASH_SOURCE")/../../..`.
+    local dest="$1/defaults/scripts/lib/locate-daemon-bin.sh"
+    mkdir -p "$(dirname "$dest")"
+    cp "$LIB" "$dest"
+    printf '%s\n' "$dest"
+}
+
+# The exact stub daemon-update-fixtures.sh writes (this is what was found on
+# the host): it answers NOTHING as a loom-daemon would.
+make_poisoned_build() { # <path>
+    mkdir -p "$(dirname "$1")"
+    cat > "$1" <<'EOF'
+#!/usr/bin/env bash
+echo "fake loom-daemon: unsupported subcommand: $*" >&2
+exit 1
+EOF
+    chmod +x "$1"
+}
+
+make_real_daemon() { # <path> <version>
+    mkdir -p "$(dirname "$1")"
+    cat > "$1" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+    echo "loom-daemon $2 (commit abc1234, built 2026-09-22T00:00:00Z)"
+    exit 0
+fi
+echo "invoked: \$*"
+EOF
+    chmod +x "$1"
+}
+
+# ---------- 23. a poisoned repo-local build is ignored; the machine-level
+#                install answers instead (the reported failure, fixed) --------
+T23="$WORKDIR_N/t23"
+LIB23="$(make_self_lib "$T23/checkout")"
+make_poisoned_build "$T23/checkout/target/release/loom-daemon"
+make_real_daemon "$T23/home/.local/bin/loom-daemon" "0.19.297"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T23/home" \
+    bash -c "source '$LIB23'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T23/home/.local/bin/loom-daemon" "$out" \
+    "a repo-local build that fails the \`--version\` sanity probe is skipped for the machine-level install (#8712)"
+
+err23=$( env -i PATH="$MINIMAL_PATH" HOME="$T23/home" \
+    bash -c "source '$LIB23'; loom_resolve_self_daemon_bin >/dev/null" 2>&1 )
+assert_contains "$T23/checkout/target/release/loom-daemon" "$err23" \
+    "…and says on stderr WHICH repo-local build it ignored (never a silent switch)"
+
+# ---------- 24. a repo-local build that DOES answer as a loom-daemon is still
+#                preferred over the install — the probe adds a check, it does
+#                not reorder the tiers ----------
+T24="$WORKDIR_N/t24"
+LIB24="$(make_self_lib "$T24/checkout")"
+make_real_daemon "$T24/checkout/target/release/loom-daemon" "0.19.300"
+make_real_daemon "$T24/home/.local/bin/loom-daemon" "0.19.297"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T24/home" \
+    bash -c "source '$LIB24'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T24/checkout/target/release/loom-daemon" "$out" \
+    "a repo-local build that answers \`--version\` as a loom-daemon is still tier 2 (precedence unchanged)"
+
+# ---------- 25. $LOOM_DAEMON_SELF_BIN is NEVER probed. It is an explicit pin —
+#                every suite that names a deliberately-fake implementation
+#                depends on it being taken at its word. ----------
+T25="$WORKDIR_N/t25"
+LIB25="$(make_self_lib "$T25/checkout")"
+make_poisoned_build "$T25/pinned-loom-daemon"
+make_real_daemon "$T25/home/.local/bin/loom-daemon" "0.19.297"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T25/home" LOOM_DAEMON_SELF_BIN="$T25/pinned-loom-daemon" \
+    bash -c "source '$LIB25'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T25/pinned-loom-daemon" "$out" \
+    "\$LOOM_DAEMON_SELF_BIN is never sanity-probed — an explicit pin stays authoritative (#8134/#8712)"
+
+# ---------- 26. LOOM_SKIP_SELF_BIN_SANITY_PROBE=1 restores the pre-#8712
+#                behaviour wholesale, for a harness that deliberately places a
+#                non-answering binary at a build-output path ----------
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T23/home" LOOM_SKIP_SELF_BIN_SANITY_PROBE=1 \
+    bash -c "source '$LIB23'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T23/checkout/target/release/loom-daemon" "$out" \
+    "LOOM_SKIP_SELF_BIN_SANITY_PROBE=1 disables the probe (pre-#8712 behaviour)"
+
+# ---------- 27. tier 4: with the repo-local build poisoned AND no loom-daemon
+#                on $PATH, the machine-level $LOOM_DAEMON_BIN_DIR install is
+#                still resolved — before #8712 this tier did not exist on the
+#                SELF chain and the answer was the empty string ----------
+T27="$WORKDIR_N/t27"
+LIB27="$(make_self_lib "$T27/checkout")"
+make_poisoned_build "$T27/checkout/target/release/loom-daemon"
+make_real_daemon "$T27/custom-install-dir/loom-daemon" "0.19.297"
+out=$( env -i PATH="$MINIMAL_PATH" HOME="$T27/empty-home" LOOM_DAEMON_BIN_DIR="$T27/custom-install-dir" \
+    bash -c "source '$LIB27'; loom_resolve_self_daemon_bin" 2>/dev/null )
+assert_eq "$T27/custom-install-dir/loom-daemon" "$out" \
+    "\$LOOM_DAEMON_BIN_DIR's machine-level install is the SELF chain's last tier (#8712)"
+
 # ---------- summary ----------
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed"

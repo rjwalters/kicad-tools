@@ -182,12 +182,12 @@ bool point_in_rings(const std::vector<KRing>& rings, double px, double py)
     bool inside = false;
     for (const KRing& ring : rings) {
         for (std::size_t i = 1; i < ring.size(); ++i) {
-            const double ax = ring[i - 1].first;
-            const double ay = ring[i - 1].second;
-            const double bx = ring[i].first;
-            const double by = ring[i].second;
-            if ((ay > py) != (by > py) &&
-                px < (bx - ax) * (py - ay) / (by - ay) + ax) {
+            // One shared crossing test with the indexed consumers (Phase 3f):
+            // ``Grid3D::fixed_fill_clear`` walks the same parity over the
+            // edges a row index selects instead of over whole rings.
+            if (ring_edge_crosses_ray(px, py,
+                                      ring[i - 1].first, ring[i - 1].second,
+                                      ring[i].first, ring[i].second)) {
                 inside = !inside;
             }
         }
@@ -969,6 +969,30 @@ bool clear(const KShape& a, const KShape& b, double required_mm)
     return copper_gap(a, b) >= required_mm - CLEARANCE_EPSILON_MM;
 }
 
+// ---------------------------------------------------------------------------
+// Indexed-consumer primitives (Epic #5509, Phase 3f)
+// ---------------------------------------------------------------------------
+//
+// The two steps ``copper_gap(KSegment, KZonePoly)`` decomposes into, for a
+// consumer that owns a spatial index over the pour's edges.  See the header
+// for why the decomposition exists and for the equivalence it must preserve.
+
+double copper_gap_ring_edge(const KSegment& s,
+                            double ax, double ay, double bx, double by)
+{
+    // ``segment_to_rings_distance`` restricted to one edge, minus the half
+    // width ``copper_gap_zone_seg`` subtracts.
+    return segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2, ax, ay, bx, by)
+           - s.width / 2.0;
+}
+
+bool ring_edge_crosses_ray(double px, double py,
+                           double ax, double ay, double bx, double by)
+{
+    return (ay > py) != (by > py) &&
+           px < (bx - ax) * (py - ay) / (by - ay) + ax;
+}
+
 }  // namespace clearance
 }  // namespace router
 
@@ -1097,6 +1121,17 @@ void register_clearance_kernel(nb::module_& m)
           },
           "a"_a, "b"_a, "required_mm"_a,
           "copper_gap(a, b) >= required_mm - CLEARANCE_EPSILON_MM.");
+
+    m.def("copper_gap_ring_edge",
+          &router::clearance::copper_gap_ring_edge,
+          "s"_a, "ax"_a, "ay"_a, "bx"_a, "by"_a,
+          "The single-edge step of copper_gap(KSegment, KZonePoly), for a "
+          "consumer with its own index over a pour's boundary edges.");
+
+    m.def("ring_edge_crosses_ray",
+          &router::clearance::ring_edge_crosses_ray,
+          "px"_a, "py"_a, "ax"_a, "ay"_a, "bx"_a, "by"_a,
+          "The single-edge step of the kernel's even-odd containment walk.");
 
     m.attr("CLEARANCE_EPSILON_MM") = router::clearance::CLEARANCE_EPSILON_MM;
     m.attr("CLEARANCE_ALL_LAYERS") = router::clearance::ALL_LAYERS;

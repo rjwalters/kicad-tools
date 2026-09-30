@@ -15,6 +15,7 @@ from kicad_tools import __version__
 # TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
 # ``kicad_tools`` -- measured, and well under 1% of CLI startup.
 from kicad_tools.benchmark.cases import Difficulty
+from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
@@ -185,6 +186,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_suggest_parser(subparsers)
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
+    _add_ecosystem_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
@@ -744,7 +746,10 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
-    check_parser.add_argument("--copper", "-c", type=float, default=1.0, help="Copper weight (oz)")
+    # Issue #5810: shared definition with check_cmd.py -- a raw string with a
+    # None default, so the keyed form (outer=2,inner=0.5) parses and an
+    # omitted flag defers to the board stackup / profile default.
+    add_check_copper_argument(check_parser)
     check_parser.add_argument(
         "--only",
         dest="only_checks",
@@ -3550,9 +3555,17 @@ def _add_route_parser(subparsers) -> None:
         help=(
             "Incremental routing: load existing (segment ...)/(via ...) copper "
             "as immovable obstacles and re-emit it unchanged, so only "
-            "unconnected nets are routed. Preserves manually-routed nets, "
-            "skipped nets' geometry, and standalone stitch vias across a "
-            "route pass. Default off (full re-route, existing copper is "
+            "unconnected nets are routed. A net that is ALREADY fully "
+            "connected on the input board is excluded from the route set "
+            "entirely (Issue #5788), so its traces and vias survive instead of "
+            "being replaced by a fresh route -- 'already connected' is exactly "
+            "what 'kct check' reports (traces, vias and same-net filled zones "
+            "all count). Also preserves manually-routed nets, skipped nets' "
+            "geometry, and standalone stitch vias across a route pass. An "
+            "EXPLICIT route set overrides the exclusion, because there the "
+            "re-route is the request: --nets, --region and --complete each "
+            "choose their own nets and re-route them even when already "
+            "connected. Default off (full re-route, existing copper is "
             "replaced by freshly routed nets)."
         ),
     )
@@ -4362,23 +4375,28 @@ def _add_route_parser(subparsers) -> None:
             "avoided layer must never carry a given net."
         ),
     )
-    # Issue #5014: opt-in HARD signal-layer eligibility for controlled-impedance
-    # plane assignments.  Mirror of the inner route_cmd.py flag; both sites
-    # must stay in sync per ``tests/test_cli_parser_drift.py``.
+    # Issue #5014: HARD signal-layer eligibility for controlled-impedance
+    # plane assignments. Issue #5789: defaults to ON -- a declared reference
+    # plane is hard-excluded from signal routing unless the caller opts out
+    # with --no-reserve-plane-layers. Mirror of the inner route_cmd.py flag;
+    # both sites must stay in sync per ``tests/test_cli_parser_drift.py``.
     route_parser.add_argument(
         "--reserve-plane-layers",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Hard-restrict signal routing to the resolved layer stack's "
             "non-PLANE layers (e.g. with --layers 4, only F.Cu/B.Cu stay "
             "routable -- In1.Cu/In2.Cu are reserved for the GND/PWR "
-            "reference planes). By default LayerDefinition.is_routable "
-            "treats every copper layer -- including declared reference "
-            "planes -- as signal-eligible, so a controlled-impedance recipe "
-            "can silently lose its continuous reference construction to "
-            "ordinary signal. A no-op on a stack with no PLANE layers "
-            "(--layers 2, 4-all, or an all-signal auto-detected board)."
+            "reference planes). Enabled by default (Issue #5789): "
+            "LayerDefinition.is_routable treats every copper layer as "
+            "signal-eligible, so without this restriction a controlled-"
+            "impedance recipe can silently lose its continuous reference "
+            "construction to ordinary signal. A no-op on a stack with no "
+            "PLANE layers (--layers 2, 4-all, or an all-signal "
+            "auto-detected board). Pass --no-reserve-plane-layers to allow "
+            "signal routing across declared plane layers (pre-#5789 "
+            "behavior)."
         ),
     )
     route_parser.add_argument(
@@ -7285,6 +7303,19 @@ def _add_readiness_parser(subparsers) -> None:
         default=None,
         help="Fabrication tier (default: discovered from the board's recipe/manifest)",
     )
+    rd_operation = rd_parser.add_mutually_exclusive_group()
+    rd_operation.add_argument(
+        "--verify",
+        dest="readiness_verify",
+        action="store_true",
+        help="Verify a finished package without changing shipped files (default).",
+    )
+    rd_operation.add_argument(
+        "--generate",
+        dest="readiness_generate",
+        action="store_true",
+        help="Generate a generic package transactionally; refuses recipe-finalised packages.",
+    )
     rd_mode = rd_parser.add_mutually_exclusive_group()
     rd_mode.add_argument(
         "--assembly",
@@ -7312,6 +7343,18 @@ def _add_readiness_parser(subparsers) -> None:
         metavar="PATH",
         default=None,
         help="Path to the .kicad_sch (auto-detected by default)",
+    )
+    rd_parser.add_argument(
+        "--project-root",
+        dest="readiness_project_root",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Directory containing the board directory and every project dependency "
+            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
+            "files outside the board directory but inside this root are collected "
+            "into the staged package and hashed; nothing outside it is ever read."
+        ),
     )
     rd_parser.add_argument(
         "--net-class-map",
@@ -7350,14 +7393,49 @@ def _add_readiness_parser(subparsers) -> None:
         help="Net-class name identifying high-voltage nets (default: HV)",
     )
     rd_parser.add_argument(
-        "--hv-requirement",
-        dest="readiness_hv_requirement",
-        metavar="TEXT",
+        "--hv-min",
+        dest="readiness_hv_min",
+        metavar="MM",
+        type=float,
         default=None,
         help=(
-            "Record the isolation requirement an HV board was gated against. "
-            "Required when HV nets are present; otherwise the HV gate is not run."
+            "Manual required creepage (surface-path) distance in mm (phase-1). "
+            "When combined with --hv-standard the stricter bound governs."
         ),
+    )
+    rd_parser.add_argument(
+        "--hv-standard",
+        dest="readiness_hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table instead of --hv-min. Requires --hv-working-voltage and "
+            "--hv-pollution-degree. Engineering aid, NOT a certification."
+        ),
+    )
+    rd_parser.add_argument(
+        "--hv-working-voltage",
+        dest="readiness_hv_working_voltage",
+        metavar="V",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    rd_parser.add_argument(
+        "--hv-pollution-degree",
+        dest="readiness_hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    rd_parser.add_argument(
+        "--hv-material-group",
+        dest="readiness_hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     rd_parser.add_argument(
         "--fill-tolerance",
@@ -9742,3 +9820,79 @@ def _add_export_parser(subparsers) -> None:
         choices=["text", "json"],
         help="Output format for preflight results (default: text)",
     )
+
+
+def _add_ecosystem_parser(subparsers) -> None:
+    """Add the ecosystem parent-subaction parser (Issue #5839)."""
+    from .format_options import add_format_flag
+
+    ecosystem_parser = subparsers.add_parser(
+        "ecosystem",
+        help="Where kicad-tools sits among related projects",
+        description=(
+            "Query the packaged ecosystem registry: which projects produce the "
+            "files we consume, which overlap our surface, whose license forbids "
+            "code reuse, and what we concluded when we evaluated them. Answers "
+            '"have we already looked at X?" without grepping docs/.'
+        ),
+    )
+    ecosystem_subparsers = ecosystem_parser.add_subparsers(
+        dest="ecosystem_command", help="Ecosystem commands"
+    )
+
+    # ecosystem list
+    eco_list = ecosystem_subparsers.add_parser(
+        "list",
+        help="List tracked projects, optionally filtered",
+    )
+    eco_list.add_argument(
+        "--category",
+        dest="ecosystem_category",
+        help=(
+            "Filter by category: autorouter, design-as-code, agent-interface, "
+            "fabrication, bindings, benchmark"
+        ),
+    )
+    eco_list.add_argument(
+        "--relation",
+        dest="ecosystem_relation",
+        help="Filter by relation: upstream, peer, downstream, reference",
+    )
+    eco_list.add_argument(
+        "--verdict",
+        dest="ecosystem_verdict",
+        help=(
+            "Filter by verdict: complementary, benchmarked, ideas-adopted, "
+            "evaluated-not-adopted, watch"
+        ),
+    )
+    eco_list.add_argument(
+        "--license-compat",
+        dest="ecosystem_license_compat",
+        help=(
+            "Filter by code-reuse compatibility: mit-clean, "
+            "permissive-ideas-only, copyleft-ideas-only, unlicensed, cloud-service"
+        ),
+    )
+    add_format_flag(eco_list, dest="ecosystem_format")
+
+    # ecosystem show
+    eco_show = ecosystem_subparsers.add_parser(
+        "show",
+        help="Show one project in full, with our verdict and evaluation notes",
+    )
+    # Positional: argparse forbids an explicit dest here, so the argument is
+    # named for the dest the handler reads and metavar carries the display.
+    eco_show.add_argument(
+        "ecosystem_project_id",
+        metavar="PROJECT_ID",
+        help="Registry id, e.g. kicadroutingtools (see: kct ecosystem list)",
+    )
+    add_format_flag(eco_show, dest="ecosystem_format")
+
+    # ecosystem where-we-sit
+    eco_where = ecosystem_subparsers.add_parser(
+        "where-we-sit",
+        help="Print our invariants, non-goals and the neighbour map",
+    )
+    add_format_flag(eco_where, dest="ecosystem_format")

@@ -89,6 +89,7 @@ kct [--help] [--version] <command> [options]
 | | `run` | Run a Python script with the kicad-tools interpreter |
 | | `build-native` | Build the C++ router backend (10-100x faster routing) |
 | | `doctor` | Diagnose kicad-tools installation health (version-record drift + environment preflight) |
+| | `ecosystem` | Where kicad-tools sits among related projects (verdicts, license reuse rights, our evaluation notes) |
 
 ---
 
@@ -458,16 +459,23 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | Option | Description |
 |--------|-------------|
 | `--mfr TIER`, `-m TIER` | Fabrication tier (default: discovered from the board's recipe/manifest; never guessed) |
+| `--verify` | Verify a finished package without changing shipped files (default) |
+| `--generate` | (Re)generate a generic package transactionally; refuses to replace a recipe-finalized package |
 | `--assembly` | Full assembly package incl. BOM/CPL procurement identities (default) |
 | `--pcb-only` | Bare-board package; makes no component procurement or assembly claim |
 | `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
 | `--sch PATH` | Path to the `.kicad_sch` (auto-detected by default) |
+| `--project-root DIR` | Ancestor of the board directory that bounds where out-of-directory dependencies (a schematic hierarchy, sibling `symbols/` libraries referenced as `${KIPRJMOD}/../...`) may be collected from. Only referenced files are staged, hashed (`external_inputs` in `readiness.json`) and archived, root-relative, in `kicad_project.zip`; anything outside it, missing, symlink-escaping or a whole ancestor directory is refused. |
 | `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
 | `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
 | `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
 | `--no-archive` | Skip building `output/manufacturing.zip` |
 | `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
-| `--hv-requirement TEXT` | Isolation requirement an HV board was gated against (required when HV nets exist) |
+| `--hv-min MM` | Manual required creepage distance in mm (phase-1; stricter of this and `--hv-standard` governs) |
+| `--hv-standard {iec60664,iec62368}` | Derive required creepage AND clearance from an IEC table; requires `--hv-working-voltage`/`--hv-pollution-degree` |
+| `--hv-working-voltage V` | RMS working voltage in volts (required with `--hv-standard`) |
+| `--hv-pollution-degree {1,2,3}` | IEC pollution degree (required with `--hv-standard`) |
+| `--hv-material-group {I,II,IIIa,IIIb}` | Insulation material group by CTI (default: `IIIa`) |
 | `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
 | `--format {text,json}` | Output format (default: `text`) |
 
@@ -483,19 +491,40 @@ named `blockers`. **The command exits non-zero for anything other than `ready`
 and has no flag that produces `ready` on a partial run** — a gate that cannot
 run is a blocker, not a waiver.
 
+`--verify` and `--generate` are mutually exclusive; `--verify` is the default.
+**A bare `kct readiness <board>` verifies an already-generated package — it
+never writes gerbers, BOM/CPL or the manifest.** Pass `--generate` explicitly
+the first time you produce a package for a board, or whenever the checked
+sources have changed and the bundle needs to be rebuilt. `--generate` refuses
+to replace a package that a manufacturing recipe has already finalized (use
+`--verify` and regenerate through that recipe instead) — see
+`_verify_finished_artifacts`/`_gate_artifacts` in
+[`readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py) for the exact
+guard.
+
+The conditional `hv_isolation` gate (when the `--net-class-map` sidecar
+declares an `HV` net class) runs the same measured creepage/clearance audit
+`kct audit --hv-standard`/`--hv-min` uses
+(`kicad_tools.audit.check_isolation`) against the checked PCB — a description
+of the requirement is recorded in the report but can never by itself produce
+`passed`; only a thresholded census bound to that PCB and net-class-map can.
+
 **Examples:**
 ```bash
-# Full assembly sign-off at the tier recorded in the board's own recipe
+# Generate the assembly package at the tier recorded in the board's own recipe
+kct readiness boards/00-demo --generate
+
+# Re-verify a package already on disk without touching shipped files (default)
 kct readiness boards/00-demo
 
 # Bare-board order — no BOM/CPL, no procurement claim
-kct readiness boards/04-demo --pcb-only --mfr jlcpcb
+kct readiness boards/04-demo --generate --pcb-only --mfr jlcpcb
 
 # CI use: machine output, non-zero exit unless the verdict is `ready`
 kct readiness boards/01-demo --format json > readiness.json
 
 # Accept reviewed silkscreen warnings as an explicit, recorded risk
-kct readiness boards/05-demo --ack-warnings silk_over_copper,silk_overlap
+kct readiness boards/05-demo --generate --ack-warnings silk_over_copper,silk_overlap
 ```
 
 See also: [`docs/board-json-schema.md`](../board-json-schema.md) for the
@@ -1749,6 +1778,66 @@ Source of truth: the `Exit Codes:` section of the module docstring in
 | 0 | All surveyed boards are ship-ready |
 | 1 | Argparse / IO error |
 | 2 | One or more boards are not ship-ready (also returned when no boards are found, since "no ship-ready boards" is treated as not-ship-ready). Matches `kct net-status` semantics. |
+
+---
+
+### `ecosystem`
+
+Query the packaged ecosystem registry: which projects produce the files we
+consume, which overlap our surface, whose license forbids code reuse, and what
+we concluded when we evaluated them. Answers "have we already looked at X?"
+without grepping `docs/`.
+
+Implemented in
+[`src/kicad_tools/cli/commands/ecosystem.py`](../../src/kicad_tools/cli/commands/ecosystem.py);
+the data is the packaged
+[`src/kicad_tools/ecosystem/data/projects.toml`](../../src/kicad_tools/ecosystem/data/projects.toml).
+Narrative: [`docs/ecosystem.md`](../ecosystem.md).
+
+```bash
+# Everything we track, grouped by category
+kct ecosystem list
+
+# Narrow by any combination of the four controlled vocabularies
+kct ecosystem list --relation upstream
+kct ecosystem list --category autorouter --verdict benchmarked
+kct ecosystem list --license-compat copyleft-ideas-only
+
+# One project in full, with our verdict and the notes behind it
+kct ecosystem show kicadroutingtools
+
+# Our invariants, non-goals and the neighbour map
+kct ecosystem where-we-sit
+
+# Every sub-action supports machine output
+kct ecosystem list --format json
+```
+
+| Filter | Values |
+|--------|--------|
+| `--category` | `autorouter`, `design-as-code`, `agent-interface`, `fabrication`, `bindings`, `benchmark` |
+| `--relation` | `upstream` (produces files we consume), `peer` (overlaps our surface), `downstream` (consumes our output), `reference` (studied only) |
+| `--verdict` | `complementary`, `benchmarked`, `ideas-adopted`, `evaluated-not-adopted`, `watch` |
+| `--license-compat` | `mit-clean`, `permissive-ideas-only`, `copyleft-ideas-only`, `unlicensed`, `cloud-service` |
+
+`--license-compat` is the load-bearing one: anything other than `mit-clean`
+means upstream code must not be copied into this MIT repo, in either
+direction. `kct ecosystem show` states that per project as
+`code reuse: NOT permitted -- ideas only`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Query succeeded |
+| 1 | No sub-action given, unknown project id, a filter value outside its vocabulary, or a registry that failed to load |
+
+With `--format json`, an error is still a single valid JSON document
+(`{"error": "..."}`) on stdout, per
+[machine-output.md](machine-output.md).
+
+Agents can reach the same data through the `ecosystem_list` and
+`ecosystem_show` MCP tools.
 
 ---
 

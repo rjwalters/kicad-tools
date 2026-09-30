@@ -258,8 +258,18 @@ def _greedy_straight_only(outline: list, pads: list, conns: list) -> int:
     routed = 0
     ordered = sorted(conns, key=lambda c: math.hypot(c[1].x - c[2].x, c[1].y - c[2].y))
     for _key, s, e, _nc in ordered:
-        keep = pf._keepouts(s.net, rules.trace_width / 2.0 + rules.trace_clearance)
-        obst = ObstacleModel(outline, keep, pf.pours + committed)
+        # Mirrors ``_route_with_portals``: foreign pads measured exactly through
+        # the clearance kernel since Epic #5509 Phase 3e, pours and
+        # committed-trace capsules still pre-inflated.
+        obst = ObstacleModel(
+            outline,
+            [],
+            pf.pours + committed,
+            half=rules.trace_width / 2.0,
+            clearance=rules.trace_clearance,
+            pads=pf._foreign_pads(s.net),
+            edge_clearance=pf.edge_clearance,
+        )
         corridor = nm.astar(
             (s.x, s.y),
             (e.x, e.y),

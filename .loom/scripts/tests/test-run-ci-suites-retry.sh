@@ -56,11 +56,15 @@ trap 'rm -rf "$WORKDIR"' EXIT
 FIXTURE="$WORKDIR/fixture"
 FIX_TESTS="$FIXTURE/defaults/scripts/tests"
 FIX_LIB="$FIXTURE/defaults/scripts/lib"
-mkdir -p "$FIX_TESTS" "$FIX_LIB"
+mkdir -p "$FIX_TESTS" "$FIX_LIB" "$FIX_TESTS/lib"
 cp "$RUNNER" "$SCRIPT_DIR/check-ci-suite-manifest.sh" "$FIX_TESTS/"
 cp "$REPO_ROOT/defaults/scripts/lib/live-daemon-guard.sh" \
    "$REPO_ROOT/defaults/scripts/lib/cpu-budget.sh" \
    "$REPO_ROOT/defaults/scripts/lib/ci-suite-excerpt.sh" "$FIX_LIB/"
+# The #8077 live-host leak guard (tests/lib/, not scripts/lib/). The runner
+# sources it fail-CLOSED, so a fixture without it exits 1 before running a
+# single suite — copy it rather than letting that shadow every assertion here.
+cp "$SCRIPT_DIR/lib/live-state-sandbox.sh" "$FIX_TESTS/lib/"
 
 MARKER_DIR="$WORKDIR/markers"
 mkdir -p "$MARKER_DIR"

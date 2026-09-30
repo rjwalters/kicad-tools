@@ -67,13 +67,15 @@ class LayerDefinition:
         designs (Issue #5014): a ``--layers 4``-style stack's PLANE layers
         exist to be a continuous GND/PWR reference for return-current paths,
         and letting ordinary signal land there silently breaks that
-        construction. Nothing in this property (or the pathfinder that
-        consults it) enforces plane-layer exclusivity by default -- pass
-        ``kct route --reserve-plane-layers`` to hard-restrict routing to the
-        stack's non-PLANE layers, or see
+        construction. This property (and the pathfinder that consults it)
+        never enforces plane-layer exclusivity itself -- the restriction is
+        applied one layer up, via ``DesignRules.allowed_layers``. Since
+        Issue #5789, ``kct route`` hard-restricts routing to the stack's
+        non-PLANE layers by default; pass ``--no-reserve-plane-layers`` to
+        opt back into this property's permissive default. See
         :mod:`kicad_tools.router.layer_advisories` for the route-time
         advisory and post-route violation report that surface the
-        consequence without changing this default.
+        consequence either way.
         """
         return True
 

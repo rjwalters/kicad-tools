@@ -26,3 +26,8 @@ session and survives its exit.
 > For single-issue lifecycle orchestration prefer `/loom:sweep <issue>` (Tier 1),
 > and for multi-account autonomous dispatch use the Rust `loom-daemon` binary via
 > `mcp__loom__dispatch_sweep` (Tier 2).
+
+**A repo installed with `--mode session` has no agent pool on purpose** — its
+`.loom/config.json` carries `"mode": "session"` and `terminals: []`, so
+`./.loom/bin/loom start` refuses to start and says so. See
+[`session-mode.md`](session-mode.md).

@@ -33,6 +33,7 @@ from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.rules import NetClassRouting
@@ -40,6 +41,53 @@ if TYPE_CHECKING:
     from kicad_tools.validate.filters import ViolationFilter
     from kicad_tools.validate.mask_copper import MaskCopperRequest
     from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
+
+
+def canonical_source_text(raw: bytes, path: Path | None = None) -> str:
+    """Render saved ``.kicad_pcb`` bytes exactly as :meth:`PCB.load` would hold them.
+
+    ``PCB.load()`` does not keep its parsed tree byte-identical to the file it
+    came from.  A KiCad 10 "name-only net" board -- inline ``(net "SWCLK")``
+    references with no top-level ``(net N "name")`` table, which is what
+    ``kicad-cli pcb drc --save-board`` writes -- has that table **synthesized
+    into** ``PCB._sexp`` during construction
+    (:meth:`PCB._synthesize_net_table`).  Comparing the loaded object against a
+    plain re-parse of the same bytes therefore always differs: zero net
+    declarations on the file side versus one per net on the object side (issue
+    #5814 -- 0 vs 3 on the net-tie fixture, 0 vs 80 on a real board).  A
+    mutation guard built on a plain re-parse rejects boards nobody edited.
+
+    Running the saved bytes back through ``PCB`` puts **both** sides of such a
+    comparison through the same normalization, so a genuine in-memory edit --
+    the only thing the guard exists to catch -- stays the sole remaining
+    difference.
+
+    Args:
+        raw: The saved source bytes to canonicalize.
+        path: Optional path the bytes were read from, passed through to ``PCB``
+            so canonicalization sees the same construction arguments
+            ``PCB.load()`` used.
+
+    Returns:
+        The serialized, load-normalized S-expression text for ``raw``.
+
+    Raises:
+        ValueError: If ``raw`` cannot be decoded, parsed, or built into a
+            ``PCB``.  Callers guarding a saved source fail closed on this
+            rather than treating an unreadable file as unchanged.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    try:
+        return PCB(parse_string(raw.decode()), path=path)._sexp.to_string()
+    except ValueError:
+        # Both failure modes worth distinguishing already subclass ValueError
+        # (UnicodeDecodeError for undecodable bytes, ParseError for malformed
+        # S-expressions) and carry a usable message -- pass them through.
+        raise
+    except Exception as exc:  # pragma: no cover - defensive, fails closed
+        raise ValueError(f"Could not canonicalize PCB source bytes: {exc}") from exc
 
 
 class DRCChecker:
@@ -180,6 +228,10 @@ class DRCChecker:
             ValueError: If manufacturer ID is not recognized
         """
         self.mask_copper_request = mask_copper_request
+        # Opt-in heuristic width-consistency audit: ``None`` keeps it out of
+        # check_all(); set to a (possibly empty) dict of
+        # WidthConsistencyRule options to include it.
+        self.width_consistency_options: dict[str, object] | None = None
         self.pcb = pcb
         self.manufacturer = manufacturer
         self.layers = layers
@@ -284,9 +336,12 @@ class DRCChecker:
         "check_mask_to_copper",
         "check_footprint_placement",
         "check_netlist",
+        "check_pin1_markers",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_via_in_pad",
+        "check_via_under_body",
+        "check_width_consistency",
         "check_zero_length_segments",
         "check_zones",
     )
@@ -371,7 +426,18 @@ class DRCChecker:
         # unknown ids to the fab-blocking Manufacturing bucket.
         "connector_edge_access": CATEGORY_ADVISORY,
         "connector_edge_distance": CATEGORY_ADVISORY,
+        # Via under package body: an inspection / rework advisory, not a
+        # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
+        # prefix fallback would file it under Manufacturing.
+        "via_under_body": CATEGORY_ADVISORY,
         "copper_sliver": CATEGORY_ADVISORY,
+        # Trace width-consistency audit: heuristic routing-quality triage
+        # (width islands / unexplained neck-downs), never fab-blocking.
+        # Explicit entries are REQUIRED: category_for_rule defaults unknown
+        # ids to the fab-blocking Manufacturing bucket.
+        "width_consistency": CATEGORY_ADVISORY,
+        "width_island": CATEGORY_ADVISORY,
+        "width_transition": CATEGORY_ADVISORY,
         # Dangling copper (Issue #4680): warning-severity routing-quality
         # advisories (antenna stubs / under-bonded vias), mirroring
         # KiCad's default severity -- never fab-blocking.  Explicit
@@ -407,8 +473,18 @@ class DRCChecker:
         "diffpair_length_skew": CATEGORY_ADVISORY,
         "diffpair_routing_continuity": CATEGORY_ADVISORY,
         "match_group_length_skew": CATEGORY_ADVISORY,
+        # Pin-1 / polarity silkscreen markers: assembly-legibility
+        # advisories, not fab-blocking.  Explicit entries REQUIRED -- there
+        # is no "pin1" prefix fallback, so they would default to the
+        # Manufacturing bucket.
+        "pin1_marker_missing": CATEGORY_ADVISORY,
+        "pin1_marker_obscured": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
         "silk_edge_clearance": CATEGORY_ADVISORY,
+        # Coverage advisory for silk primitives the geometry model does not
+        # cover (Issue #5811).  Explicit entry REQUIRED -- category_for_rule
+        # defaults unknown ids to the fab-blocking Manufacturing bucket.
+        "silk_geometry_unmodeled": CATEGORY_ADVISORY,
         "silkscreen_line_width": CATEGORY_ADVISORY,
         "silkscreen_over_pad": CATEGORY_ADVISORY,
         "silkscreen_text_height": CATEGORY_ADVISORY,
@@ -575,6 +651,8 @@ class DRCChecker:
         # Run each category of checks (order matches CHECK_ALL_METHODS).
         for method_name in self.CHECK_ALL_METHODS:
             if method_name == "check_mask_to_copper" and self.mask_copper_request is None:
+                continue
+            if method_name == "check_width_consistency" and self.width_consistency_options is None:
                 continue
             method = getattr(self, method_name)
             if method_name == "check_pad_grid_alignment":
@@ -1171,6 +1249,25 @@ class DRCChecker:
             )
         )
 
+    def check_pin1_markers(self) -> DRCResults:
+        """Check that polarized footprints carry a visible pin-1 marker.
+
+        Flags ICs, diodes, LEDs, polarized capacitors and connectors whose
+        silkscreen has no element next to pad 1 that points at it
+        (``pin1_marker_missing``), or whose only such marks are hidden under
+        the package body / on pad copper (``pin1_marker_obscured``).
+        Warning severity, advisory category.  Tune selection and radius
+        through :class:`~kicad_tools.validate.rules.pin1_marker.Pin1MarkerRule`
+        directly; waive individual footprints via ``.kct_waivers.json``.
+
+        Returns:
+            DRCResults containing pin-1 marker findings (one per footprint).
+        """
+        from .rules.pin1_marker import Pin1MarkerRule
+
+        rule = Pin1MarkerRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
     def check_mask_to_copper(self) -> DRCResults:
         """Run the explicitly requested native, immutable-source exposure check."""
 
@@ -1190,10 +1287,11 @@ class DRCChecker:
                     reasons=["Mask geometry requires a saved source PCB"]
                 )
             else:
-                from kicad_tools.sexp import parse_string
-
                 raw = self.pcb.path.read_bytes()
-                if self.pcb._sexp.to_string() != parse_string(raw.decode()).to_string():
+                # Both sides go through PCB's own load-time normalization, so a
+                # freshly loaded name-only-net board is not mistaken for an
+                # edited one (issue #5814); see canonical_source_text().
+                if self.pcb._sexp.to_string() != canonical_source_text(raw, self.pcb.path):
                     assessment = MaskCopperAssessment(
                         coverage="incomplete",
                         reasons=["PCB object differs from current source bytes"],
@@ -1314,6 +1412,51 @@ class DRCChecker:
             (e.g. JLCPCB Capability Plus's 4+ layer POFV process).
         """
         rule = ViaInPadRule()
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_width_consistency(self, **options: object) -> DRCResults:
+        """Audit trace width consistency (width islands, unexplained neck-downs).
+
+        A geometric routing-quality heuristic, not an ampacity check: it
+        reports short constant-width runs bounded by narrower copper
+        (``width_island``) and width changes on two-terminal routes that
+        no nearby other-net clearance explains (``width_transition``).
+        Warning severity by default.  Opt-in, like ``check_mask_to_copper``:
+        :meth:`check_all` skips it unless :attr:`width_consistency_options`
+        is set, and ``kct check`` skips it unless requested with ``--only
+        width_consistency``, so this heuristic does not change the verdict
+        of existing boards or of gates that count warnings.  Explicit
+        ``options`` override :attr:`width_consistency_options`.  See
+        :class:`~kicad_tools.validate.rules.width_consistency.WidthConsistencyRule`
+        for the model and the keyword ``options`` it accepts.
+
+        Returns:
+            DRCResults containing ``width_island`` / ``width_transition``
+            findings.
+        """
+        from .rules.width_consistency import WidthConsistencyRule
+
+        merged = {**(self.width_consistency_options or {}), **options}
+        rule = WidthConsistencyRule(**merged)  # type: ignore[arg-type]
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_via_under_body(self) -> DRCResults:
+        """Check for vias hidden under QFN/DFN/SON/LGA package bodies.
+
+        Flags vias whose copper overlaps the Fab (or courtyard fallback)
+        body outline of a bottom-terminated package, except
+        thermal vias inside the footprint's own exposed pad on its net.
+        Warning severity, advisory category.  Tune selection or severity
+        through :class:`~kicad_tools.validate.rules.via_under_body.ViaUnderBodyRule`
+        directly; waive individual findings via ``.kct_waivers.json``.
+
+        Returns:
+            DRCResults containing ``via_under_body`` violations (one per
+            offending via/footprint pair).
+        """
+        from .rules.via_under_body import ViaUnderBodyRule
+
+        rule = ViaUnderBodyRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_zero_length_segments(self) -> DRCResults:

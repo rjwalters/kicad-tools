@@ -73,6 +73,19 @@ LINE_CITATION_RE = re.compile(r"\.py:\d+")
 # number because a symbol anchor *looks* verifiable.  The real
 # round-trip path is ``Footprint.__setattr__`` -> ``_sync_attr_node``.
 CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
+    # docs/ecosystem.md — the ecosystem registry's load-bearing surface
+    # (#5839): the license-compatibility vocabulary that decides whether
+    # upstream code may be reused at all, the field reference the doc points
+    # contributors at, the README renderer, and the research-doc existence
+    # check that keeps cited notes from rotting.
+    ("docs/ecosystem.md", "LICENSE_COMPAT", "src/kicad_tools/ecosystem/models.py"),
+    ("docs/ecosystem.md", "EcosystemProject", "src/kicad_tools/ecosystem/models.py"),
+    ("docs/ecosystem.md", "render_block", "scripts/ecosystem_render.py"),
+    (
+        "docs/ecosystem.md",
+        "validate_research_docs",
+        "src/kicad_tools/ecosystem/registry.py",
+    ),
     # docs/reference/api.md — footprint attribute round-trip
     ("docs/reference/api.md", "Footprint", "src/kicad_tools/schema/pcb.py"),
     ("docs/reference/api.md", "__setattr__", "src/kicad_tools/schema/pcb.py"),
@@ -350,7 +363,7 @@ CITED_SYMBOLS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "docs/clearance-conformance.md",
-        "_keepouts",
+        "_foreign_pads",
         "src/kicad_tools/router/mesh/pathfinder.py",
     ),
     (

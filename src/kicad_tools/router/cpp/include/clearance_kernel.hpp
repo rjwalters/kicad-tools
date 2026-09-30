@@ -9,11 +9,12 @@
  * `required_mm` for a given pair) belongs to the Phase 2 resolver.
  *
  * Consumers arrive one epic phase at a time.  Phase 1b added the kernel with
- * nothing wired to it; Phase 3a (#5660) switched the first -- `Grid3D`'s
- * route-copper halo marking in src/grid.cpp, and its Python sibling in
- * router/grid.py.  tests/router/test_clearance_kernel_parity.py keeps the
- * ledger of who is on the kernel and fails on an include that appears without
- * an entry, so each phase's before/after measurement stays attributable.
+ * nothing wired to it; Phases 3a-3f switch them over one by one -- Phase 3a
+ * (#5660) is `Grid3D`'s route-copper halo marking in src/grid.cpp, and its
+ * Python sibling in router/grid.py.  tests/router/test_clearance_kernel_parity.py
+ * keeps the ledger of who is on the kernel (MIGRATED_CPP_KERNEL_CALLERS) and
+ * fails on an include that appears without an entry, so each phase's
+ * before/after measurement stays attributable.
  *
  * PORT CONTRACT
  * -------------
@@ -216,6 +217,42 @@ double hole_gap(const KShape& a, const KShape& b);
 // value, so they are not folded in here -- compare ``hole_gap`` against the
 // hole requirement with the same epsilon.
 bool clear(const KShape& a, const KShape& b, double required_mm);
+
+// ---------------------------------------------------------------------------
+// Indexed-consumer primitives (Epic #5509, Phase 3f)
+// ---------------------------------------------------------------------------
+//
+// ``copper_gap(seg, zone)`` walks every edge of every ring.  A consumer that
+// owns a *spatial index* over a pour's boundary edges -- ``Grid3D``'s 1 mm
+// bins, and their Python twin in ``router/fixed_copper_kernel.py`` -- cannot
+// hand the whole ``KZonePoly`` over without throwing that index away: on a
+// 2000-vertex pour the indexed walk is ~400x cheaper, and the fixed-copper
+// predicate sits in the A* step loop.
+//
+// So the kernel exposes the two *steps* that walk decomposes into, and the
+// consumer supplies the iteration order.  This is not a second model: taking
+// the minimum of ``copper_gap_ring_edge`` over every edge of a ring set, with
+// containment from ``ring_edge_crosses_ray`` parity over the same edges,
+// reproduces ``copper_gap(seg, KZonePoly{rings})`` exactly -- asserted over
+// random pours by ``tests/router/test_clearance_kernel_parity.py``.
+
+// The single-edge step of ``copper_gap(KSegment, KZonePoly)``: the edge-to-edge
+// copper gap between a track segment and ONE boundary edge of a ring set.
+//
+// A pour carries no width of its own -- the filled polygon *is* the copper --
+// so only the segment's half width is subtracted.  A ring edge carries no
+// layer either; the caller has already decided that this pour and this segment
+// share one (``copper_gap`` would apply ``layers_interact`` here).
+double copper_gap_ring_edge(const KSegment& s,
+                            double ax, double ay, double bx, double by);
+
+// The single-edge step of the kernel's even-odd containment walk: does the
+// +x ray from ``(px, py)`` cross this ring edge?  A caller that toggles a
+// parity flag across every edge of a ring set -- or across every edge that can
+// possibly straddle ``py``, which is what a row index selects -- reproduces
+// the kernel's own "is this point inside the copper" answer.
+bool ring_edge_crosses_ray(double px, double py,
+                           double ax, double ay, double bx, double by);
 
 }  // namespace clearance
 }  // namespace router

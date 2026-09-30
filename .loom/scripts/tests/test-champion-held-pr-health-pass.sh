@@ -135,6 +135,7 @@ else
 fi
 CHAMPION_MD="$PROMPT_DIR/champion-pr-merge.md"
 CHAMPION_COMMON_MD="$PROMPT_DIR/champion-common.md"
+CHAMPION_HELD_STALENESS_MD="$PROMPT_DIR/champion-held-pr-staleness.md"
 
 # Same two-layout probe for the docs directory: `.loom/docs` when installed,
 # `defaults/docs` in this source repo.
@@ -504,7 +505,7 @@ conflict_since_for() {
 }
 
 _iso_to_epoch() {
-    date -d "$1" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s
+    date -d "$1" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s
 }
 
 conflict_days() {
@@ -1394,6 +1395,27 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     "a \`MERGEABLE\` pass never writes the marker for that PR" \
     "the doc names the CONFLICTING -> MERGEABLE -> CONFLICTING reset edge case explicitly (#7020 Test Plan)"
+
+# --- #8552: Step 1b base-staleness tick is wired in and stays detection-only ---
+assert_doc_contains "$CHAMPION_MD" \
+    "| PR | Hold reason | Status | Base |" \
+    "the per-PR digest table carries a Base column for base-staleness (#8552)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "[\`champion-held-pr-staleness.md\`](champion-held-pr-staleness.md)'s per-PR tick" \
+    "Step 1b links the sibling doc, so it is reachable and not orphaned (#8552)"
+
+assert_doc_contains "$CHAMPION_HELD_STALENESS_MD" \
+    "**Detection only.** This tick changes no label" \
+    "the staleness tick states its detection-only invariant up front (#8552 AC4)"
+
+assert_doc_contains "$CHAMPION_HELD_STALENESS_MD" \
+    "**Never remove or add a label.**" \
+    "the staleness tick's own 'must never do' list pins the no-label-change invariant (#8552 AC4)"
+
+assert_doc_contains "$CHAMPION_HELD_STALENESS_MD" \
+    "**Never trigger a rebase, a force-push, or a Doctor dispatch.**" \
+    "the staleness tick's own 'must never do' list pins the no-routing invariant (#8552 AC4)"
 
 # --- #7048: manual-release-respecting sticky hold ---
 assert_doc_contains "$CHAMPION_MD" \

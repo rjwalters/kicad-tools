@@ -53,6 +53,8 @@ Requires the compiled extension; without it group 5 renders ``not measured``.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     cpp_grid_for,
@@ -61,6 +63,7 @@ from tests.conformance.adapters._support import (
     layer_indexer,
     net_ids,
     pair_contexts,
+    project_rules,
     router_cpp_module,
     router_rules,
     router_segment,
@@ -69,6 +72,9 @@ from tests.conformance.adapters._support import (
     via_radius_cells,
 )
 from tests.conformance.generator import CopperCase, PairKind, SegmentSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = ["RouteGeometryCppAdapter"]
 
@@ -92,12 +98,32 @@ class RouteGeometryCppAdapter:
         return router_cpp_module() is not None
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same unmodified predicates, driven at the clearance kicad-cli applies.
+
+        The **gated** reading, and the C++ half of group 4's
+        :meth:`~tests.conformance.adapters.route_halo.RouteHaloAdapter.verdicts_at_project_rules`.
+        Both copper clearances move onto ``case.rules.project_clearance``; the
+        drill floors (``min_hole_to_hole`` / ``min_drill_clearance``) stay the
+        case's own, because they feed a requirement kicad-cli scores under a
+        different verdict kind and ``project_clearance`` says nothing about.
+
+        With the rule axis pinned, the ``max(via_clearance, required)``
+        widening this row's docstring describes becomes inert -- both terms are
+        the same number -- so what remains measurable is the refinement's
+        geometry, which is exactly what #5410 repaired and what
+        ``tests/conformance/test_route_halo_refinement_gate.py`` gates.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
         router_cpp = router_cpp_module()
         if router_cpp is None:  # pragma: no cover - guarded by available()
             return set()
 
         nets = net_ids(case)
-        rules = router_rules(case)
         layer_index = layer_indexer(case)
         found: set[Verdict] = set()
 

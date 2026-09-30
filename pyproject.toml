@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-tools"
-version = "0.21.1"
+version = "0.22.0"
 description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
 readme = "README.md"
 license = "MIT"
@@ -44,7 +44,6 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.24",
     "pydantic>=2.0",
-    "jsonschema>=4.20",
     # shapely is load-bearing for the correctness-critical copper paths
     # (zone-fill clearance carving and the zone-vs-copper clearance DRC
     # rules), so it is a CORE dependency rather than an optional extra
@@ -141,6 +140,11 @@ ipc = [
 mcp = [
     "fastmcp>=4,<5",
     "pydantic>=2.0",
+    # jsonschema is imported only by src/kicad_tools/mcp/server.py, which is
+    # itself reached exclusively through lazy, function-local imports gated on
+    # invoking the MCP subsystem -- so it belongs here rather than in the core
+    # dependency list (issue #5804).
+    "jsonschema>=4.20",
 ]
 # C++ native router acceleration (requires C++ compiler)
 native = [
@@ -190,6 +194,7 @@ all = [
     "pyyaml>=6.0",
     "fastmcp>=4,<5",
     "pydantic>=2.0",
+    "jsonschema>=4.20",
     "cupy-cuda12x>=13.0",
     "mlx>=0.5",
     "matplotlib>=3.5",
@@ -224,6 +229,10 @@ dev = [
     "pyyaml>=6.0",
     "fastmcp>=4,<5",
     "pydantic>=2.0",
+    # jsonschema moved out of the core dependency list into the `mcp` extra
+    # (issue #5804); the MCP test suite imports kicad_tools.mcp.server, so the
+    # dev environment still needs it explicitly -- same reason fastmcp is here.
+    "jsonschema>=4.20",
     "cmaes>=0.12.0",
     "matplotlib>=3.5",
     "jinja2>=3.1",
@@ -269,15 +278,22 @@ exclude = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# .claude/ and .loom/ hold Loom-vendored markdown (README.md, role/pattern
-# docs) refreshed by `./.loom/scripts/resync-installed.sh` on every Loom
-# update. Their embedded Python code blocks are illustrative examples, not
-# repo source -- ruff's markdown formatting on them just gets clobbered by
-# the next resync (#4895, #4930, #4938, #4940, #4950), breaking `main` CI
-# repeatedly. Exclude the vendored surface instead of re-formatting it.
+# .claude/, .loom/ and .agents/ hold Loom-vendored markdown (README.md,
+# role/pattern docs, generated agent skills) refreshed by
+# `./.loom/scripts/resync-installed.sh` on every Loom update. Their embedded
+# Python code blocks are illustrative examples, not repo source -- ruff's
+# markdown formatting on them just gets clobbered by the next resync (#4895,
+# #4930, #4938, #4940, #4950, #5697), breaking `main` CI repeatedly. Exclude
+# the vendored surface instead of re-formatting it.
+# .agents/skills/ joined this list at #5697: it is the same INSTALLED surface,
+# not repo source. Every file in it is written by a tool installer -- Loom's
+# resync (`loom-<name>/SKILL.md`, marked `<!-- loom-managed-skill -->`, 18 of
+# 47 files) plus the Squad and Repo Skills installers for the rest. None of it
+# is authored here, so formatting it only produces churn the next install
+# clobbers. It was simply missed when that tree was introduced (loom #8673).
 # Manufacturing bundles contain immutable, hash-bound source snapshots. Format
 # the source recipes, not the archived copies used to reproduce a release.
-extend-exclude = [".claude", ".loom", "boards/*/output/manufacturing"]
+extend-exclude = [".claude", ".loom", ".agents", "boards/*/output/manufacturing"]
 
 [tool.ruff.lint]
 select = [

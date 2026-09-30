@@ -43,11 +43,24 @@ instructions)`. The block states three rules:
 | `champion-issue-promo.md` | issue bodies + comments |
 | `champion-pr-merge.md` | PR bodies, review comments, diffs |
 | `champion-epic.md` | epic bodies + comments |
+| `concierge.md` | **safehouse room messages** (+ issue/PR text read while answering) |
 
-All of these ship from `defaults/.claude/commands/loom/`. The five with a
-`defaults/roles/` entry (`curator`, `builder`, `judge`, `doctor`, `guide`) are
-**symlinks** into that same directory, so the role-file and slash-command views
-of a role can never disagree about this block.
+All of these ship from `defaults/.claude/commands/loom/`. The six with a
+`defaults/roles/` entry (`curator`, `builder`, `judge`, `doctor`, `guide`,
+`concierge`) are **symlinks** into that same directory, so the role-file and
+slash-command views of a role can never disagree about this block.
+
+`concierge.md` carries the block verbatim **and** adds a room-specific rider
+(#7947), because its threat model is sharper than an issue body's: the text
+arrives in real time and the persona may turn it into a daemon command within
+seconds. The rider says three things the generic block does not need to —
+an allowlisted sender is not a trusted *instruction* source, the refusal must
+name the shape rather than quote the payload, and forge text read while
+answering is untrusted too. Crucially, the rider is **not** what makes the
+persona safe: see
+[`safehouse.md` § The four relay gates](safehouse.md) for the mechanical
+property (a message cannot authorize itself) that holds with the phrase list
+deleted entirely.
 
 **Maintenance rule**: when a new role — or a new split-out sub-file of an
 existing role — starts reading forge text, add the same block and add a row to
@@ -58,6 +71,22 @@ audit coverage:
 grep -L 'Untrusted External Content' $(grep -rl 'gh issue view\|gh pr view\|gh pr diff' \
   defaults/.claude/commands/loom/*.md)
 ```
+
+### Markers and control phrases: authenticated, not persuasive (#9548)
+
+This convention governs what an agent does with text it *reads*. The text Loom
+*acts on* mechanically (a `loom:verdict-sha` marker, a `Champion Review:
+APPROVED` verdict) is governed by a stricter, mechanical rule: it counts only
+from a trusted author, and a well-formed marker from anyone else (including
+another Loom fleet) is prose, not state. See
+[`comment-trust.md`](comment-trust.md). The block's closing line states that
+rule too. `sweep.md` carries a one-line pointer to both rules in its
+Constraints rather than the full block, because it is always loaded and its
+sub-files are read on demand; every `sweep-*.md` sub-file and the other prompts
+that read forge text without the full block (`champion.md`,
+`champion-common.md`, `champion-reference.md`, `judge-reference.md`,
+`architect.md`, `hermit.md`, `auditor.md`, `epic.md`, `imagine.md`, `loom.md`,
+`watch.md`) carry a shorter one-line pointer near the top.
 
 ## Why a prompt convention and not a hook
 
@@ -90,6 +119,14 @@ becoming a bad *action* is mechanical, and lives elsewhere:
   [`guard-hooks.md` → "The Ungated Denial Floor"](guard-hooks.md).
 - **Worktree confinement** — `guards.worktreeIsolation` denies Edit/Write (and
   the common Bash write idioms) targeting the main checkout.
+- **The MCP tool-argument guard** — until #9108, `Bash` and `Edit|Write` were
+  the *only* `PreToolUse` matchers, so a call to any `mcp__loom__*` tool
+  (mcp-loom is registered at user scope and reachable from every agent Loom
+  spawns) bypassed every guard above, injected text and all. The `mcp__loom__.*`
+  matcher and `guard-mcp-tools.sh` close that gap — see
+  [`guard-hooks.md` → "MCP Tool-Argument Guard"](guard-hooks.md#mcp-tool-argument-guard-guardsmcptoolargs--loom_guard_mcp_tool_args).
+  This is the enforcement half of "refuse and report" above for the one tool
+  class a hook can actually see the arguments of before the call runs.
 - **The `external` label policy** — issues filed by non-collaborators carry
   `external` and are excluded from curation until a maintainer removes it, so
   the highest-risk text never reaches the promotion path unreviewed.

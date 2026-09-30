@@ -135,7 +135,7 @@ out=$( cd "$WORKDIR" && LOOM_LAUNCHD_LABEL="$FAKE_LABEL" bash "$STOP_SCRIPT" 2>&
 rc=$?
 assert_eq "0" "$rc" "no daemon running: exits 0"
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out" | grep -qi "nothing to stop"; then
+if grep -qi "nothing to stop" <<<"$out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} no daemon running: reports 'nothing to stop'"
 else
@@ -200,7 +200,7 @@ fi
 # 4. --help documents the launchd bootout counterpart and LOOM_LAUNCHD_LABEL.
 help_out=$(bash "$STOP_SCRIPT" --help 2>/dev/null)
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out" | grep -qi 'launchd' && echo "$help_out" | grep -q 'LOOM_LAUNCHD_LABEL'; then
+if grep -qi 'launchd' <<<"$help_out" && grep -q 'LOOM_LAUNCHD_LABEL' <<<"$help_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --help documents the launchd bootout counterpart"
 else
@@ -254,7 +254,7 @@ FAKE
 
     assert_eq "1" "$stuck_rc" "relaunched-daemon-still-alive: stop exits non-zero (does not report success)"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if echo "$stuck_out" | grep -qi 'still alive'; then
+    if grep -qi 'still alive' <<<"$stuck_out"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "${GREEN}✓${NC} relaunched-daemon-still-alive: reports the live daemon instead of success"
     else
@@ -301,7 +301,7 @@ else
     echo -e "${RED}✗${NC} decoy: survives a scratch-label stop (label-blind pgrep tier not taken)"
 fi
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$decoy_out" | grep -qi "nothing to stop"; then
+if grep -qi "nothing to stop" <<<"$decoy_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} decoy: reports 'nothing to stop' (does not adopt an unrelated loom-daemon)"
 else
@@ -407,7 +407,7 @@ fi
 # 4011-e. --help documents the marker + --restarting.
 help_out2=$(bash "$STOP_SCRIPT" --help 2>/dev/null)
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out2" | grep -q 'restarting' && echo "$help_out2" | grep -qi 'autonomy-desired'; then
+if grep -q 'restarting' <<<"$help_out2" && grep -qi 'autonomy-desired' <<<"$help_out2"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --help documents --restarting and the autonomy-desired marker"
 else
@@ -505,7 +505,7 @@ stuck_out=$( cd "$WORKDIR" && PATH="$SD_BIN:$PATH" LOOM_SYSTEMD_FORCE=1 \
 stuck_rc=$?
 assert_eq "1" "$stuck_rc" "systemd tier: unit still active after disable --now → stop exits non-zero"
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$stuck_out" | grep -qi 'still active'; then
+if grep -qi 'still active' <<<"$stuck_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} systemd tier: reports the still-active unit instead of success"
 else
@@ -534,7 +534,7 @@ fi
 # SD4. --help documents the systemd disable counterpart + the LOOM_DAEMON_SYSTEMD
 #      escape hatch.
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out" | grep -qi 'systemd' && echo "$help_out" | grep -q 'LOOM_DAEMON_SYSTEMD'; then
+if grep -qi 'systemd' <<<"$help_out" && grep -q 'LOOM_DAEMON_SYSTEMD' <<<"$help_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --help documents the systemd disable counterpart + LOOM_DAEMON_SYSTEMD"
 else
@@ -563,7 +563,7 @@ out_machine=$( cd "$NON_REPO_DIR" && LOOM_PID_FILE='' HOME="$MACHINE_HOME" LOOM_
 rc_machine=$?
 assert_eq "0" "$rc_machine" "machine mode: stop from a non-repo dir exits 0"
 TESTS_RUN=$((TESTS_RUN + 1))
-if ! echo "$out_machine" | grep -qi "Not in a Loom workspace"; then
+if ! grep -qi "Not in a Loom workspace" <<<"$out_machine"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} machine mode: never hits the dev-mode 'Not in a Loom workspace' refusal"
 else
@@ -594,7 +594,7 @@ out_dev=$( cd "$NON_REPO_DIR" && LOOM_LAUNCHD_LABEL="$FAKE_LABEL" bash "$STOP_SC
 rc_dev=$?
 assert_eq "1" "$rc_dev" "dev-mode fallback unchanged: stop from a non-repo dir (no dispatcher) still exits 1"
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$out_dev" | grep -qi "Not in a Loom workspace"; then
+if grep -qi "Not in a Loom workspace" <<<"$out_dev"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} dev-mode fallback unchanged: reports 'Not in a Loom workspace'"
 else
@@ -748,7 +748,7 @@ fi
 # (c) --help documents the new tier, so an operator reading the script's own
 #     contract sees which file a stop will target.
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out" | grep -q 'LOOM_PID_FILE'; then
+if grep -q 'LOOM_PID_FILE' <<<"$help_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} #6386: --help documents LOOM_PID_FILE"
 else
@@ -863,7 +863,7 @@ EOF
 
     # DR3. --help documents the seam.
     TESTS_RUN=$((TESTS_RUN + 1))
-    if echo "$help_out" | grep -q 'LOOM_DAEMON_STOP_DRYRUN'; then
+    if grep -q 'LOOM_DAEMON_STOP_DRYRUN' <<<"$help_out"; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
         echo -e "${GREEN}✓${NC} --help documents LOOM_DAEMON_STOP_DRYRUN"
     else

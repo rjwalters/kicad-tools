@@ -364,6 +364,51 @@ git push -u origin feature/my-feature
 
 Then create a pull request on GitHub.
 
+### 6. What to expect from CI on a fork PR
+
+Most jobs run on this project's self-hosted runner, but a pull request opened
+from a **fork** is routed to a GitHub-hosted `ubuntu-latest` runner instead, so
+no outside branch ever executes on our hardware. Two consequences if you are an
+external contributor:
+
+- **Nothing is skipped.** A fork PR runs the same required checks as a
+  same-repo PR.
+- **The `Test` job takes about 2.2x longer there** — roughly 50 minutes rather
+  than the ~23 it takes on the self-hosted runner. Its job timeout is therefore
+  90 minutes on the hosted path and 45 on the self-hosted one. Before that
+  split budget landed (issue #5747), a flat 45-minute timeout cancelled *every*
+  fork `Test` run, so an external PR could never show a green `Test`.
+
+Nothing is required from you beyond waiting: expect `Test` to finish well after
+the other checks do.
+
+#### Maintainer fallback: verifying a fork PR locally
+
+If a fork `Test` run still cannot complete (runner outage, a new runtime
+regression, a fork PR opened before the timeout fix), reproduce the CI job's
+bulk test command locally against the PR's **merge ref** and record the result
+on the PR:
+
+```bash
+git fetch origin pull/<N>/merge && git checkout FETCH_HEAD
+uv sync --frozen --extra dev && uv run kct build-native
+uv run pytest -n auto -o addopts= --benchmark-disable --timeout=60 -m "not slow" \
+  --ignore=tests/test_board_05_drc_allowlist.py \
+  --ignore=tests/test_mask_copper_native.py \
+  --ignore=tests/test_stitch_physical_completion.py \
+  --ignore=tests/test_zones_cmd.py \
+  --ignore=tests/test_zones_hv_keepout.py \
+  --ignore=tests/conformance
+```
+
+The ignored paths are not being skipped — each has its own dedicated step in
+the `Test` job (Board 05, the native mask/stitch/zone gates, the clearance
+conformance corpus). Run those separately if the PR touches them.
+
+Post the command and pytest's summary line as a PR comment, so the decision to
+merge without a green hosted `Test` is auditable. This is what was done for
+#5736 / #5737 / #5739.
+
 ---
 
 ## Architecture Guidelines

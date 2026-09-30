@@ -30,6 +30,7 @@ To edit a role definition:
 | `auditor` | Main branch build/runtime validation | 10min |
 | `builder` | Feature implementation | Manual |
 | `champion` | Proposal evaluation and PR auto-merge | 10min |
+| `concierge` | Operator-agent persona: room intent → typed daemon ChatOps verbs | 5min, **opt-in twice** |
 | `curator` | Issue enhancement | 5min |
 | `doctor` | Bug fixes and PR feedback | 5min |
 | `driver` | Plain shell environment | Manual |
@@ -37,6 +38,16 @@ To edit a role definition:
 | `hermit` | Code simplification proposals | 15min |
 | `judge` | Code review | 5min |
 | `loom` | Tier 2 daemon-mode operator surface | 1min |
+
+> **`concierge` takes two independent opt-ins**, unlike every other role here.
+> It is excluded from the "unset `autonomous.roleRunner.roles` ⇒ all defaults"
+> fallback (like `architect`), **and** gated a second time on its own config
+> block resolving: naming it in `roles` is not enough — `safehouse.concierge`
+> must also name at least one allowed sender. It is an inbound control channel
+> wired to a chat room, so it must never arrive because a repo forgot to pin
+> `roles`. Run `loom-daemon concierge check` in a workspace to see which of the
+> two gates is closed. Full trust boundary:
+> [`safehouse.md` § Operator-agent persona](../docs/safehouse.md).
 
 > **Note**: the `shepherd` role (Layer 1 issue-lifecycle orchestrator) was
 > removed in v0.10.0. Use `/loom:sweep <issue>` for the same single-issue
@@ -70,6 +81,55 @@ Each role can have an optional JSON metadata file with default settings:
 - **`autonomousRecommended`** (boolean): Whether autonomous mode is recommended
 - **`suggestedWorkerType`** (string): "claude" or "codex"
 - **`stuckThresholds`** (object): Per-role stuck-detection limits (e.g. `maxNoOutput`, `maxNeedsInput`, in milliseconds)
+- **`toolPolicy`** (object): Per-role sensitive-capability allowlist — see below
+
+### `toolPolicy.allowedCapabilities` — the sensitive-capability allowlist
+
+Optional. Declares which **sensitive capabilities** a role may reach; every
+capability it does not name is to be denied at session spawn (issue #8256).
+
+`loom-daemon role-tool-policy` is the **only** implementation of the rules below —
+`deny-specs` gives the Claude path its `--disallowedTools` list, `restricted`
+gives the Codex path its predicate — so the spawn scripts call out to it rather
+than re-deriving the answer, and the two runtimes cannot disagree about the same
+role file. No role shipped in `defaults/roles/` declares a `toolPolicy` yet; the
+spawn-side wiring that enforces one lands with #8256.
+
+```json
+{ "toolPolicy": { "allowedCapabilities": [] } }               // reaches none
+{ "toolPolicy": { "allowedCapabilities": ["cloud-cli"] } }    // reaches only that one
+{ "toolPolicy": { "allowedCapabilities": ["*"] } }            // unrestricted
+```
+
+**The namespace is exactly four literal strings.** There are no others, and the
+list is not extensible from a role file:
+
+| Capability | Denies |
+|---|---|
+| `remote-shell` | `ssh`, `scp`, `sftp`, `ssh-add`/`-agent`/`-keygen`/`-keyscan`/`-copy-id`, `autossh` |
+| `cloud-cli` | `aws`, `gcloud`, `az`, `doctl`, `flyctl`, `fly`, `wrangler`, `heroku`, `kubectl`, `eksctl` |
+| `forge-secrets` | `gh secret`, `gh variable`, `gh auth token`/`login`/`refresh`/`logout`/`setup-git` (never `gh auth status` — every role runs it) |
+| `credential-store` | Read/Edit/Write of `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh` |
+
+**Three rules govern the array's contents** (unified in issue #8943):
+
+1. **Omitting the key is not the same as declaring `[]`.** No `toolPolicy` (or no
+   `allowedCapabilities` array, or unparseable JSON) means *undeclared* —
+   **unrestricted**, so adding the control never silently breaks a consumer repo.
+   `"allowedCapabilities": []` means *declared and empty* — **fully restricted**.
+2. **`"*"` is the only wildcard, matched as a whole element.** `["*"]` waives the
+   restriction. A string that merely *contains* `*` is **not** a wildcard.
+3. **Any other string is inert.** A name outside the four above — a typo
+   (`"cloud_cli"`), an unknown capability (`"database"`), or a glob-shaped name
+   (`"cloud-*"`, `"*-cli"`) — grants nothing and waives nothing. The restriction
+   stays fully in force, so a mistake here **fails closed**. Glob/prefix matching
+   is deliberately unsupported: `"cloud-*"` does not mean "every `cloud-`
+   capability", it means nothing at all.
+
+Rule 3 is the fail-closed choice, and it is a deliberate change from the
+substring test an earlier draft of `spawn-claude.sh` used, where `["cloud-*"]`
+disarmed the restriction entirely. Full reasoning: the "One wildcard rule"
+section of `loom-daemon/src/role_tool_policy.rs`.
 
 ## Creating Custom Roles
 

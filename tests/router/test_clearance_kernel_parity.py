@@ -743,6 +743,121 @@ def test_clear_uses_the_same_epsilon_on_both_sides() -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Indexed-consumer primitives (Phase 3f)
+# ---------------------------------------------------------------------------
+
+
+def _random_ring(rng: random.Random) -> tuple[tuple[float, float], ...]:
+    """A closed, non-convex ring: a star polygon with jittered radii."""
+    cx, cy = rng.uniform(-5.0, 5.0), rng.uniform(-5.0, 5.0)
+    n = rng.randint(5, 14)
+    ring = [
+        (
+            cx + rng.uniform(1.0, 4.0) * math.cos(2.0 * math.pi * i / n),
+            cy + rng.uniform(1.0, 4.0) * math.sin(2.0 * math.pi * i / n),
+        )
+        for i in range(n)
+    ]
+    return (*ring, ring[0])
+
+
+def test_the_per_edge_steps_rebuild_copper_gap_exactly() -> None:
+    """The equivalence Phase 3f's indexed consumers rest on.
+
+    ``copper_gap_ring_edge`` and ``ring_edge_crosses_ray`` exist so a consumer
+    with a spatial index over a pour's edges (``Grid3D``'s 1 mm bins and their
+    Python twin) can ask the kernel per edge instead of per pour.  That is only
+    legitimate if the minimum over every edge, plus the parity over the same
+    edges, *is* ``copper_gap(seg, zone)``.  Asserted here on the kernel itself,
+    so a future kernel edit that broke it fails in the kernel's own suite and
+    not only in a consumer's.
+    """
+    rng = random.Random(90210)
+    for _ in range(200):
+        rings = (_random_ring(rng),)
+        if rng.random() < 0.3:
+            rings = (*rings, _random_ring(rng))
+        zone = ck.KZonePoly(rings=rings, layer=0)
+        seg = ck.KSegment(
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(0.05, 0.4),
+            0,
+        )
+
+        # The decomposition, walked by hand: parity over both endpoints (what
+        # ``_region_segment_distance`` tests) and the minimum over every edge.
+        at_start = at_end = False
+        best = math.inf
+        for ring in rings:
+            for i in range(1, len(ring)):
+                ax, ay = ring[i - 1]
+                bx, by = ring[i]
+                best = min(best, ck.copper_gap_ring_edge(seg, ax, ay, bx, by))
+                if ck.ring_edge_crosses_ray(seg.x1, seg.y1, ax, ay, bx, by):
+                    at_start = not at_start
+                if ck.ring_edge_crosses_ray(seg.x2, seg.y2, ax, ay, bx, by):
+                    at_end = not at_end
+
+        # A query with an endpoint inside the copper reads zero centreline
+        # distance, which is ``-half`` edge to edge.
+        decomposed = -seg.width / 2.0 if (at_start or at_end) else best
+        assert ck.copper_gap(zone, seg) == pytest.approx(decomposed, abs=1e-12)
+
+
+@requires_cpp
+def test_indexed_consumer_primitives_agree_across_the_ports() -> None:
+    """``copper_gap_ring_edge`` / ``ring_edge_crosses_ray``, py vs cpp.
+
+    New kernel API carries the same port contract as the rest of it: the C++
+    side is the model and the Python module is a line-for-line port, so both
+    are driven from the same numbers and compared at :data:`GAP_TOLERANCE_MM`.
+    """
+    from kicad_tools.router import router_cpp
+
+    rng = random.Random(4242)
+    for _ in range(500):
+        seg = ck.KSegment(
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(-9.0, 9.0),
+            rng.uniform(0.0, 0.5),
+            rng.choice([-1, 0, 1]),
+        )
+        ax, ay = rng.uniform(-9.0, 9.0), rng.uniform(-9.0, 9.0)
+        bx, by = rng.uniform(-9.0, 9.0), rng.uniform(-9.0, 9.0)
+
+        py_gap = ck.copper_gap_ring_edge(seg, ax, ay, bx, by)
+        cpp_gap = router_cpp.copper_gap_ring_edge(_to_cpp(seg), ax, ay, bx, by)
+        assert cpp_gap == pytest.approx(py_gap, abs=GAP_TOLERANCE_MM)
+
+        px, py_ = rng.uniform(-9.0, 9.0), rng.uniform(-9.0, 9.0)
+        assert ck.ring_edge_crosses_ray(px, py_, ax, ay, bx, by) == bool(
+            router_cpp.ring_edge_crosses_ray(px, py_, ax, ay, bx, by)
+        )
+
+
+def test_the_per_edge_gap_is_the_zone_reading_with_no_pour_width() -> None:
+    """A closed-form anchor, independent of either implementation.
+
+    A pour carries no width of its own, so the gap to one of its boundary
+    edges is the centreline distance less the *segment's* half width -- the
+    same reading ``copper_gap(KZonePoly, KSegment)`` gives.
+    """
+    seg = ck.KSegment(0.0, 0.0, 0.0, 10.0, 0.2, 0)
+    assert ck.copper_gap_ring_edge(seg, 1.0, 0.0, 1.0, 10.0) == pytest.approx(0.9, abs=1e-12)
+    # A ray that leaves the edge's y-span behind cannot cross it, whichever
+    # way round the edge is written.
+    assert ck.ring_edge_crosses_ray(0.0, 5.0, 1.0, 0.0, 1.0, 10.0) is True
+    assert ck.ring_edge_crosses_ray(0.0, 5.0, 1.0, 10.0, 1.0, 0.0) is True
+    assert ck.ring_edge_crosses_ray(0.0, 50.0, 1.0, 0.0, 1.0, 10.0) is False
+    assert ck.ring_edge_crosses_ray(2.0, 5.0, 1.0, 0.0, 1.0, 10.0) is False
+
+
 def test_cpp_kernel_present_in_ci() -> None:
     """The parity suite above must never be silently skipped in CI.
 
@@ -754,88 +869,187 @@ def test_cpp_kernel_present_in_ci() -> None:
         pytest.fail("router_cpp not built in CI test job -- kernel parity silently skipped")
 
 
-# Epic #5509 switches consumers onto the kernel one phase at a time, and this
-# module is the ledger of which ones have been switched so far.  A phase that
-# wires a new consumer in MUST add it here in the same PR, with the issue
-# number, so "which consumers are on the kernel" is a fact the suite knows
-# rather than something a reader has to reconstruct from git history.
-#
-# Phase 3a (#5660): groups 1 and 2 -- the Python and C++ grid halo marking.
-SWITCHED_PY_CONSUMERS = {
-    "router/grid.py",  # #5660: _mark_segment / _mark_via halo geometry
-}
-SWITCHED_CPP_CONSUMERS = {
-    "src/grid.cpp",  # #5660: Grid3D::mark_segment / mark_via halo geometry
-}
+MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
+    {
+        # Epic #5509 Phase 3a (#5660), consumer group 1: the Python grid's
+        # halo marking.  ``RoutingGrid._mark_segment`` / ``_mark_via`` (and the
+        # read-side ``_get_clearance_mask`` / ``_dilate_blocked``) walk
+        # ``halo_offsets``, whose membership is the kernel's own ``copper_gap``
+        # queried in grid-cell units, instead of a Chebyshev square.
+        "router/grid.py",
+        # Epic #5509 Phase 3c (#5662), consumer groups 7 and 8: the coupled
+        # diff-pair search path.  ``clearance_shapes.py`` is the one
+        # router-primitive -> kernel-shape translation every migrated Python
+        # consumer shares, so two of them cannot end up disagreeing about the
+        # copper rather than about the clearance; ``diffpair_routing.py``
+        # reaches the kernel through it and is listed because its docstrings
+        # cite the kernel by name (this check is a plain text scan).
+        "router/clearance_shapes.py",
+        "router/diffpair_routing.py",
+        # Epic #5509 Phase 3d (#5663), consumer group 9: the lattice engine.
+        # The adapter is the package's single import site on purpose -- the
+        # lattice is geometry-only in an integer net-id space and the kernel is
+        # net-agnostic, so one module owns the projection and every predicate
+        # in ``router/lattice/`` goes through it.
+        "router/lattice/kernel_adapter.py",
+        # Epic #5509 Phase 3f (#5665), consumer group 6: the fixed-copper
+        # predicate.  Same shape of migration -- one adapter module owns the
+        # projection (shapely fills -> kernel ring sets) and the spatial index
+        # the query path needs, and ``router/fixed_copper.py`` calls it.  Every
+        # other fixed-copper caller in the package (``pathfinder``'s
+        # ``_fixed_step_clear``, ``diffpair_routing``, ``pad_access``,
+        # ``cpp_backend``) delegates to ``FixedFillObstacles`` and composes no
+        # gap of its own, so it is switched without referencing the kernel.
+        "router/fixed_copper_kernel.py",
+        # Epic #5509 Phase 3e (#5664), consumer group 10: the mesh engine's
+        # per-leg obstacle consult.  Same shape again -- one adapter module
+        # owns the projection (keep-out rects / pour outlines -> kernel ring
+        # sets, foreign pads -> ``KPad``, the board outline -> ``KEdge``) and
+        # ``router/mesh/obstacles.py`` calls it.  ``mesh/pathfinder.py`` builds
+        # the model but composes no gap of its own, so it is switched without
+        # referencing the kernel.
+        "router/mesh/kernel_adapter.py",
+    }
+)
+"""Python modules allowed to reference the kernel, one entry per migration.
+
+Phases 2-4 switch consumers over **deliberately, one at a time**, each with
+its own before/after measurement.  This set is what keeps "deliberately"
+checkable: a module that starts calling the kernel without being added here
+fails :func:`test_only_migrated_consumers_reference_the_kernel`, and an entry
+added without a migration is dead weight a reviewer can see.
+
+Keep it in step with ``tests/conformance/report.MIGRATED_GROUPS``, which flips
+the same migration's conformance rows from report-only to gated.
+"""
 
 
-def test_only_the_declared_phases_switched_a_python_consumer() -> None:
-    """Consumers reach the kernel by an explicit phase, never by accident.
+def test_only_migrated_consumers_reference_the_kernel() -> None:
+    """The kernel reaches a consumer only where a phase deliberately wired it.
 
-    Phase 1b shipped the kernel with **no** consumer on it; phases 2-4 switch
-    them over deliberately, one at a time, each with its own before/after
-    measurement.  An import that appears without a matching entry in
-    :data:`SWITCHED_PY_CONSUMERS` would make that measurement impossible --
-    so the acceptance criterion is a test, not a grep someone remembers to
-    run.  Both directions are asserted: an *undeclared* import fails, and so
-    does a declared consumer that has quietly stopped using the kernel.
+    Succeeds ``test_no_consumer_switched_to_the_kernel`` (Phase 1b, when the
+    right answer was "none at all").  The property is unchanged -- an
+    *accidental* import would destroy a consumer's before/after measurement --
+    but the expected set is now an enumerated allowlist rather than the empty
+    set, because Phases 3c and 3d really did switch three modules.
     """
     repo_root = Path(__file__).resolve().parents[2]
     src = repo_root / "src" / "kicad_tools"
-    hits: set[str] = set()
+    hits: list[str] = []
     for path in sorted(src.rglob("*.py")):
         rel = path.relative_to(src).as_posix()
-        if rel == "router/clearance_kernel.py":
+        if rel == "router/clearance_kernel.py" or rel in MIGRATED_KERNEL_CALLERS:
             continue
         if "clearance_kernel" in path.read_text(encoding="utf-8"):
-            hits.add(rel)
-    assert hits == SWITCHED_PY_CONSUMERS, (
-        "the set of Python consumers on the clearance kernel has drifted from "
-        f"the declared ledger.\n  unexpected: {sorted(hits - SWITCHED_PY_CONSUMERS)}\n"
-        f"  declared but no longer switched: {sorted(SWITCHED_PY_CONSUMERS - hits)}"
+            hits.append(rel)
+    assert hits == [], (
+        "clearance_kernel is referenced by a consumer that no epic phase has "
+        f"switched; add it to MIGRATED_KERNEL_CALLERS with its phase, or revert: {hits}"
+    )
+
+    stale = sorted(rel for rel in MIGRATED_KERNEL_CALLERS if not (src / rel).exists())
+    assert stale == [], f"MIGRATED_KERNEL_CALLERS names modules that no longer exist: {stale}"
+    silent = sorted(
+        rel
+        for rel in MIGRATED_KERNEL_CALLERS
+        if "clearance_kernel" not in (src / rel).read_text(encoding="utf-8")
+    )
+    assert silent == [], (
+        "MIGRATED_KERNEL_CALLERS names modules that do not reference the "
+        f"kernel at all -- the migration was reverted or never landed: {silent}"
     )
 
 
-def test_only_the_declared_phases_switched_a_cpp_consumer() -> None:
-    """The C++ ledger, mirroring the Python one above."""
+MIGRATED_CPP_KERNEL_CALLERS: frozenset[str] = frozenset(
+    {
+        # Epic #5509 Phase 3f (#5665), consumer group 6: the native half of the
+        # fixed-copper predicate.  ``Grid3D::fixed_fill_clear`` keeps its 1 mm
+        # bins -- they only *select* candidate edges, never judge one -- and
+        # takes every number from ``copper_gap_ring_edge`` /
+        # ``ring_edge_crosses_ray``.
+        "src/grid.cpp",
+        # Epic #5509 Phase 3a (#5660), consumer group 2, also lives in this
+        # translation unit: ``Grid3D::mark_segment`` / ``mark_via`` (and
+        # ``unmark_*`` and ``route_geometry_complete``'s coverage map) walk the
+        # same kernel-derived disc as group 1 rather than the Chebyshev square.
+        # Epic #5509 Phase 3c (#5662), consumer group 7: the coupled rail gate.
+        # ``coupled_pathfinder.cpp``'s ``rail_clear`` measures a candidate rail
+        # step against the grid's stored route geometry with the kernel, which
+        # is what made committed copper visible to the coupled search again
+        # (#4507).  The header is listed too: it documents the migration at
+        # ``rail_clear``'s declaration, and this check is a text scan.
+        "src/coupled_pathfinder.cpp",
+        "include/coupled_pathfinder.hpp",
+    }
+)
+"""C++ translation units allowed to reference the kernel, one per migration.
+
+The native counterpart of :data:`MIGRATED_KERNEL_CALLERS`, kept for the same
+reason: a consumer that starts calling the kernel without a phase behind it
+destroys that consumer's own before/after measurement.
+"""
+
+
+def test_cpp_kernel_is_not_referenced_outside_its_own_translation_units() -> None:
+    """The C++ kernel reaches a consumer only where a phase deliberately wired it.
+
+    The native mirror of
+    :func:`test_only_migrated_consumers_reference_the_kernel`: everything
+    outside the kernel's own translation units and the enumerated migrations
+    must still be kernel-free.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     cpp = repo_root / "src" / "kicad_tools" / "router" / "cpp"
-    registered = {"include/clearance_kernel.hpp", "src/clearance_kernel.cpp", "src/bindings.cpp"}
-    hits = {
+    allowed = {
+        "include/clearance_kernel.hpp",
+        "src/clearance_kernel.cpp",
+        "src/bindings.cpp",
+    } | set(MIGRATED_CPP_KERNEL_CALLERS)
+    hits = [
         p.relative_to(cpp).as_posix()
         for p in sorted([*cpp.rglob("*.cpp"), *cpp.rglob("*.hpp")])
         if "third_party" not in p.parts
-        and p.relative_to(cpp).as_posix() not in registered
+        and p.relative_to(cpp).as_posix() not in allowed
         and ("clearance_kernel" in p.read_text(encoding="utf-8"))
-    }
-    assert hits == SWITCHED_CPP_CONSUMERS, (
-        "the set of C++ consumers on the clearance kernel has drifted from the "
-        f"declared ledger.\n  unexpected: {sorted(hits - SWITCHED_CPP_CONSUMERS)}\n"
-        f"  declared but no longer switched: {sorted(SWITCHED_CPP_CONSUMERS - hits)}"
+    ]
+    assert hits == [], f"C++ clearance kernel referenced by a consumer: {hits}"
+
+    silent = sorted(
+        rel
+        for rel in MIGRATED_CPP_KERNEL_CALLERS
+        if "clearance_kernel" not in (cpp / rel).read_text(encoding="utf-8")
+    )
+    assert silent == [], (
+        "MIGRATED_CPP_KERNEL_CALLERS names translation units that do not "
+        f"reference the kernel at all -- the migration was reverted: {silent}"
     )
 
 
 def test_ripgrep_acceptance_criterion() -> None:
-    """Phase 1b's ``rg`` acceptance criterion, narrowed by the phase ledger.
+    """The issue's ``rg`` acceptance criterion, run as a test.
 
-    The original issue wrote the command as ``rg "clearance_kernel"
-    src/kicad_tools --glob '!router/clearance_kernel.py' --glob
-    '!router/cpp/**'``.  Run from the repo root that excludes nothing:
-    ripgrep anchors a glob containing a ``/`` to the **working directory**,
-    not to the search path, so those two globs would have to read
-    ``src/kicad_tools/router/...``.  Running from ``src/kicad_tools`` instead
-    keeps the globs exactly as the issue wrote them and makes them mean what
-    they say.
+    The issue writes the command as ``rg "clearance_kernel" src/kicad_tools
+    --glob '!router/clearance_kernel.py' --glob '!router/cpp/**'``.  Run from
+    the repo root that excludes nothing: ripgrep anchors a glob containing a
+    ``/`` to the **working directory**, not to the search path, so those two
+    globs would have to read ``src/kicad_tools/router/...``.  Running from
+    ``src/kicad_tools`` instead keeps the globs exactly as the issue wrote
+    them and makes them mean what they say.
 
-    Phase 3a (#5660) switched the two grid-marking consumers on, so the
-    command's expected output is no longer *empty* -- it is exactly the
-    declared ledger.  Excluding those paths in the command itself would make
-    the check unfalsifiable; comparing the files it names keeps it honest.
+    One glob per entry in :data:`MIGRATED_KERNEL_CALLERS` is appended, derived
+    rather than hand-listed so the ledger stays the single place a migration is
+    recorded.  Excluding a migrated consumer is not weakening the criterion:
+    since Phase 3c/3d the question the command asks is *"has anything reached
+    the kernel that no phase signed off"*, and a deliberate migration is not a
+    violation of it.
 
     Skipped where ``rg`` is unavailable; the two structural tests above cover
     the same property without depending on the binary.
     """
     src = Path(__file__).resolve().parents[2] / "src" / "kicad_tools"
+    migrated_globs: list[str] = []
+    for rel in sorted(MIGRATED_KERNEL_CALLERS):
+        migrated_globs += ["--glob", f"!{rel}"]
     try:
         proc = subprocess.run(
             [
@@ -846,7 +1060,7 @@ def test_ripgrep_acceptance_criterion() -> None:
                 "!router/clearance_kernel.py",
                 "--glob",
                 "!router/cpp/**",
-                "--files-with-matches",
+                *migrated_globs,
             ],
             cwd=src,
             capture_output=True,
@@ -855,5 +1069,4 @@ def test_ripgrep_acceptance_criterion() -> None:
         )
     except FileNotFoundError:  # pragma: no cover - environment dependent
         pytest.skip("rg not installed")
-    named = {line.removeprefix("./") for line in proc.stdout.split() if line}
-    assert named == SWITCHED_PY_CONSUMERS, f"unexpected consumer references:\n{proc.stdout}"
+    assert proc.stdout.strip() == "", f"unexpected consumer references:\n{proc.stdout}"

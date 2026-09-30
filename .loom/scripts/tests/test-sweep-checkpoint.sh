@@ -12,6 +12,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$SCRIPT_DIR/../sweep-checkpoint.sh"
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPT_DIR/.." "sweep-checkpoint"
 
 if [[ ! -x "$HELPER" ]]; then
     echo "FAIL: helper not executable at $HELPER" >&2
@@ -25,6 +28,7 @@ trap 'rm -rf "$TMP_REPO"' EXIT
 cd "$TMP_REPO" || exit 1
 git init -q .
 mkdir -p .loom/scripts
+cp -R "$SCRIPT_DIR/../lib" .loom/scripts/lib
 # Use a script-relative copy so `repo_root` lands here, not in the real loom checkout.
 cp "$HELPER" .loom/scripts/sweep-checkpoint.sh
 chmod +x .loom/scripts/sweep-checkpoint.sh
@@ -85,7 +89,7 @@ assert_eq "phase reads back curator-done" "curator-done" "$out"
 
 # 6. read produces valid JSON containing the phase
 out=$("$CHECKPOINT" read 42)
-if echo "$out" | grep -q '"phase": "curator-done"'; then
+if grep -q '"phase": "curator-done"' <<<"$out"; then
     echo "PASS: read JSON contains phase=curator-done"
     PASS=$((PASS + 1))
 else
@@ -96,7 +100,7 @@ fi
 # 7. write builder-done with PR number
 assert "write builder-done with pr-number" "$CHECKPOINT" write 42 builder-done --task-id sweep-test --pr-number 999
 out=$("$CHECKPOINT" read 42)
-if echo "$out" | grep -q '"pr_number": 999'; then
+if grep -q '"pr_number": 999' <<<"$out"; then
     echo "PASS: pr_number persisted as integer"
     PASS=$((PASS + 1))
 else
@@ -148,7 +152,7 @@ done
 # 15b. A rejected Judge outcome is durable and retains its PR routing key.
 assert "write judge-rejected with pr-number" "$CHECKPOINT" write 64 judge-rejected --task-id sweep-test --pr-number 214
 out=$("$CHECKPOINT" read 64)
-if echo "$out" | grep -q '"phase": "judge-rejected"' && echo "$out" | grep -q '"pr_number": 214'; then
+if grep -q '"phase": "judge-rejected"' <<<"$out" && grep -q '"pr_number": 214' <<<"$out"; then
     echo "PASS: judge-rejected persists with its PR number"
     PASS=$((PASS + 1))
 else
@@ -170,7 +174,7 @@ assert_exit "judge-rejected without pr-number exits 1" 1 "$CHECKPOINT" write 65 
 # 16. write with --attempt round-trips through read and attempt
 assert "write doctor-done with --attempt 2" "$CHECKPOINT" write 50 doctor-done --task-id t --pr-number 123 --attempt 2
 out=$("$CHECKPOINT" read 50)
-if echo "$out" | grep -q '"attempt": 2'; then
+if grep -q '"attempt": 2' <<<"$out"; then
     echo "PASS: attempt persisted as integer in JSON"
     PASS=$((PASS + 1))
 else
@@ -182,7 +186,7 @@ assert_eq "attempt command reads back 2" "2" "$out"
 
 # 17. pr_number still intact alongside attempt
 out=$("$CHECKPOINT" read 50)
-if echo "$out" | grep -q '"pr_number": 123'; then
+if grep -q '"pr_number": 123' <<<"$out"; then
     echo "PASS: pr_number coexists with attempt"
     PASS=$((PASS + 1))
 else
@@ -193,7 +197,7 @@ fi
 # 18. Backward compat: write WITHOUT --attempt omits the field entirely
 "$CHECKPOINT" write 51 builder-done --task-id t >/dev/null
 out=$("$CHECKPOINT" read 51)
-if echo "$out" | grep -q '"attempt"'; then
+if grep -q '"attempt"' <<<"$out"; then
     echo "FAIL: attempt field should be omitted when not provided: $out" >&2
     FAIL=$((FAIL + 1))
 else
@@ -237,7 +241,7 @@ assert_eq "attempt cleared after attempt-less rewrite" "" "$out"
 # 24. write with --model round-trips through read and model
 assert "write doctor-done with --model" "$CHECKPOINT" write 60 doctor-done --task-id t --pr-number 321 --attempt 2 --model claude-opus-4-8
 out=$("$CHECKPOINT" read 60)
-if echo "$out" | grep -q '"model": "claude-opus-4-8"'; then
+if grep -q '"model": "claude-opus-4-8"' <<<"$out"; then
     echo "PASS: model persisted as string in JSON"
     PASS=$((PASS + 1))
 else
@@ -249,7 +253,7 @@ assert_eq "model command reads back claude-opus-4-8" "claude-opus-4-8" "$out"
 
 # 25. pr_number and attempt still intact alongside model
 out=$("$CHECKPOINT" read 60)
-if echo "$out" | grep -q '"pr_number": 321' && echo "$out" | grep -q '"attempt": 2'; then
+if grep -q '"pr_number": 321' <<<"$out" && grep -q '"attempt": 2' <<<"$out"; then
     echo "PASS: pr_number and attempt coexist with model"
     PASS=$((PASS + 1))
 else
@@ -260,7 +264,7 @@ fi
 # 26. Backward compat: write WITHOUT --model omits the field entirely
 "$CHECKPOINT" write 61 builder-done --task-id t >/dev/null
 out=$("$CHECKPOINT" read 61)
-if echo "$out" | grep -q '"model"'; then
+if grep -q '"model"' <<<"$out"; then
     echo "FAIL: model field should be omitted when not provided: $out" >&2
     FAIL=$((FAIL + 1))
 else
@@ -311,7 +315,7 @@ assert_eq "model cleared after model-less rewrite" "" "$out"
 # 33. write with --attempt 3 round-trips through read and attempt
 assert "write doctor-done with --attempt 3 (second Doctor cycle)" "$CHECKPOINT" write 70 doctor-done --task-id t --pr-number 700 --attempt 3
 out=$("$CHECKPOINT" read 70)
-if echo "$out" | grep -q '"attempt": 3'; then
+if grep -q '"attempt": 3' <<<"$out"; then
     echo "PASS: attempt 3 persisted as integer in JSON"
     PASS=$((PASS + 1))
 else
@@ -335,7 +339,7 @@ assert_eq "attempt command reads back 6" "6" "$out"
 STABLE_RID="sweep-20260722T231500Z-84213-a3f9c1"
 assert "write with stable RUN_ID task-id" "$CHECKPOINT" write 80 builder-done --task-id "$STABLE_RID" --pr-number 800
 out=$("$CHECKPOINT" read 80)
-if echo "$out" | grep -q "\"task_id\": \"$STABLE_RID\""; then
+if grep -q "\"task_id\": \"$STABLE_RID\"" <<<"$out"; then
     echo "PASS: stable RUN_ID persisted verbatim as task_id"
     PASS=$((PASS + 1))
 else
@@ -351,7 +355,7 @@ assert_eq "legacy sweep-<pid> task_id checkpoint still reads phase" "curator-don
 # 37. Omitted --task-id falls back to a parseable (clearly-labelled fallback) id.
 "$CHECKPOINT" write 82 curator-done >/dev/null
 out=$("$CHECKPOINT" read 82)
-if echo "$out" | grep -Eq '"task_id": "sweep-run-fallback-[0-9]+"'; then
+if grep -Eq '"task_id": "sweep-run-fallback-[0-9]+"' <<<"$out"; then
     echo "PASS: omitted --task-id uses labelled fallback default"
     PASS=$((PASS + 1))
 else

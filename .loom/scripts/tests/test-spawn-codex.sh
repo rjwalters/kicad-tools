@@ -408,6 +408,11 @@ assert_contains "-m sonnet" "$out" "LOOM_CODEX_MODEL_CHECK=0 disables the refusa
 echo ""
 echo "Testing spawn-codex.sh ChatGPT-plan auth-mode guard..."
 
+# Issue #8277: the expected v2 terminal record, built from its four varying
+# fields so the long literal is not repeated at every assertion site.
+_tr() { printf '# LOOM_TERMINAL_RESULT v=2 provider=codex account=%s category=%s exit_code=%s model=%s' "$1" "$2" "$3" "$4"; }
+
+
 AUTHMODE_BIN="$TMPROOT/authmode-bin"
 mkdir -p "$AUTHMODE_BIN"
 AUTHMODE_ARGV_FILE="$TMPROOT/authmode-argv.txt"
@@ -459,6 +464,11 @@ assert_not_contains "-m gpt-5-codex" "$(cat "$AUTHMODE_ARGV_FILE")" \
     "the pinned model is NOT forwarded to the ChatGPT-plan profile's codex invocation"
 assert_contains "AUTHMODE-FINAL" "$out" \
     "the invocation still runs (on the account's own default) rather than being refused outright"
+# Issue #8277: the v2 terminal record reports the model that was ACTUALLY in
+# flight. The pin was stripped before exec, so the account's own default ran —
+# naming the dropped model here would pin a class-scoped credit-exhaustion
+# hold on a class that never ran, and leave the class that DID run selectable.
+assert_contains "$(_tr unknown SUCCESS 0 none)" "$out" "a DROPPED pin reports model=none (#8277)"
 
 # (2) An API-key profile: no conflict, the pinned model passes through
 # unchanged.
@@ -468,6 +478,7 @@ assert_not_contains "authenticated via a ChatGPT plan" "$out" \
     "an API-key profile is never warned about the auth-mode conflict"
 assert_contains "-m gpt-5-codex" "$(cat "$AUTHMODE_ARGV_FILE")" \
     "the pinned model IS forwarded to an API-key profile's codex invocation"
+assert_contains "$(_tr unknown SUCCESS 0 gpt-5-codex)" "$out" "an in-flight model IS named (#8277)"
 
 # (3) No model pinned at all: the guard has nothing to check and never shells
 # out to `codex login status` (the mocked codex still errors if it did, since
@@ -746,10 +757,8 @@ assert_contains "spawn-codex: session=$MOCK_SESSION" "$mock_stderr" \
     "the 'session id:' line is parsed and reported as the transcript join key"
 assert_contains "spawn-codex: tokens_used=2502" "$mock_stderr" \
     "'tokens used' is parsed (comma-stripped) and reported"
-assert_contains \
-    "# LOOM_TERMINAL_RESULT v=1 provider=codex account=unknown category=SUCCESS exit_code=0" \
-    "$mock_stderr" \
-    "a successful child emits one strict structured terminal record"
+assert_contains "$(_tr unknown SUCCESS 0 none)" "$mock_stderr" \
+    "a successful child emits one strict structured record, no model pinned"
 assert_not_contains "MOCK-SAW-STDIN" "$mock_stderr" \
     "the child's stdin is /dev/null (no <stdin> append, no hang)"
 
@@ -777,9 +786,7 @@ set -e
 assert_eq "42" "$classified_rc" \
     "structured classification preserves the original child exit code"
 terminal_record="$(printf '%s\n' "$classified_stderr" | grep '^# LOOM_TERMINAL_RESULT ' || true)"
-assert_eq \
-    "# LOOM_TERMINAL_RESULT v=1 provider=codex account=profile-a category=TOKEN_EXPIRED exit_code=42" \
-    "$terminal_record" \
+assert_eq "$(_tr profile-a TOKEN_EXPIRED 42 none)" "$terminal_record" \
     "the structured record matches the direct Codex classifier and carries account identity"
 assert_not_contains "recognizable-secret" "$terminal_record" \
     "the structured record never copies raw child output"
@@ -833,11 +840,14 @@ assert_contains "session id: $MOCK_SESSION" "$mock_stderr" \
 echo ""
 echo "Testing LOOM_RUNTIME=codex dispatch through spawn-worker.sh..."
 
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$SCRIPTS_DIR" spawn-worker
+
 STAGE="$TMPROOT/stage"
 WS="$TMPROOT/ws"
 mkdir -p "$STAGE/lib" "$WS/.loom"
 cp "$SCRIPTS_DIR/spawn-worker.sh" "$STAGE/spawn-worker.sh"
-cp "$SCRIPTS_DIR/lib/config-resolver.sh" "$STAGE/lib/config-resolver.sh"
+cp "$SCRIPTS_DIR/lib/"{config-resolver,locate-daemon-bin,loom-tools}.sh "$STAGE/lib/"
 cp "$SPAWN_CODEX" "$STAGE/spawn-codex.sh"
 # A stub claude runner so the "available runtimes" list and the default path
 # stay realistic without ever reaching the real token-selection code.
@@ -860,18 +870,16 @@ assert_contains "routed" "$out" "the prompt survives the dispatcher hop"
 assert_not_contains "stub-claude reached" "$out" \
     "codex dispatch does not also reach the claude runner"
 
-if command -v jq >/dev/null 2>&1; then
-    printf '{ "runtimes": { "default": "codex" } }\n' > "$WS/.loom/config.json"
-    out="$(env -u LOOM_RUNTIME -u CODEX_HOME -u LOOM_CODEX_HOME \
-        LOOM_WORKSPACE="$WS" LOOM_CONFIG_DEFAULTS_FILE="" \
-        LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_SPAWN_NO_EXPORT=1 \
-        bash "$STAGE/spawn-worker.sh" -p "cfg" 2>&1 || true)"
-    assert_contains "runtime=codex (from config (runtimes.default))" "$out" \
-        "runtimes.default=codex resolves through the dispatcher"
-    assert_contains "spawn-codex would-exec" "$out" \
-        "config-resolved codex dispatch reaches spawn-codex.sh"
-    rm -f "$WS/.loom/config.json"
-fi
+printf '{ "runtimes": { "default": "codex" } }\n' > "$WS/.loom/config.json"
+out="$(env -u LOOM_RUNTIME -u CODEX_HOME -u LOOM_CODEX_HOME \
+    LOOM_WORKSPACE="$WS" LOOM_CONFIG_DEFAULTS_FILE="" \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_SPAWN_NO_EXPORT=1 \
+    bash "$STAGE/spawn-worker.sh" -p "cfg" 2>&1 || true)"
+assert_contains "runtime=codex (from config (runtimes.default))" "$out" \
+    "runtimes.default=codex resolves through the dispatcher"
+assert_contains "spawn-codex would-exec" "$out" \
+    "config-resolved codex dispatch reaches spawn-codex.sh"
+rm -f "$WS/.loom/config.json"
 
 # codex moving from unknown -> known must not weaken the unknown-runtime guard.
 set +e
@@ -947,9 +955,14 @@ assert_classify "TOKEN_EXPIRED" \
     1 codex "invalid_api_key is TOKEN_EXPIRED"
 
 # --- TOKEN_EXHAUSTED: plan/quota exhaustion ---
-assert_classify "TOKEN_EXHAUSTED" \
-    "You've hit your usage limit. Upgrade to Pro to continue using Codex" \
-    1 codex "\"hit your usage limit\" is TOKEN_EXHAUSTED"
+# Kept on one line each (rather than the usual continuations) so the #8539
+# capture below could be added without growing this over-ratchet file.
+assert_classify "TOKEN_EXHAUSTED" "You've hit your usage limit. Upgrade to Pro to continue using Codex" 1 codex "\"hit your usage limit\" is TOKEN_EXHAUSTED"
+# The wording captured verbatim on the #8539 host (a headless `codex exec`
+# inside an account's session container, every registered account walled). The
+# horizon it names is parsed daemon-side by `tokens_pool::codex_reset`;
+# classification stays this table's job and must not regress when it is.
+assert_classify "TOKEN_EXHAUSTED" "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at September 25, 2026 3:00 PM." 1 codex "the captured usage-limit refusal, reset horizon and all, is TOKEN_EXHAUSTED (#8539)"
 assert_classify "TOKEN_EXHAUSTED" \
     "You've reached your usage limit. Increase your limits to continue using codex." \
     1 codex "\"reached your usage limit\" is TOKEN_EXHAUSTED"
@@ -1335,7 +1348,7 @@ STUB
             LOOM_SWEEP_NICE=0 \
             LOOM_WORKSPACE="$PROVIDER_WS" LOOM_DAEMON_BIN="$PROVIDER_BIN/loom-daemon" \
             PATH="$PROVIDER_BIN:$PATH" \
-            bash "$SPAWN_CODEX" -p "hi" >/dev/null 2>&1 || true
+            bash "$SPAWN_CODEX" "$@" -p "hi" >/dev/null 2>&1 || true
         cat "$PROVIDER_ARGV_LOG" 2>/dev/null || echo "<no selection call captured>"
     }
 
@@ -1347,6 +1360,13 @@ JSON
     argv="$(run_provider_select)"
     assert_contains "--provider codex" "$argv" \
         "spawn-codex.sh passes the manifest's accountProvider (codex) to tokens select (#5609)"
+    assert_not_contains "--model" "$argv" "no --model flag when no model was pinned (#8277)"
+
+    # Issue #8277: an explicitly pinned model narrows account selection past a
+    # class-scoped MODEL_CREDITS_EXHAUSTED hold (#8058 Phase 2) — threaded
+    # into the SAME `tokens select` call this section already exercises.
+    argv="$(run_provider_select -m gpt-5-codex)"
+    assert_contains "--model gpt-5-codex" "$argv" "-m is threaded into tokens select (#8277)"
 
     # A runtime manifest present but missing the accountProvider field falls
     # back to claude (D8's fail-open default), never fails closed.
@@ -1390,8 +1410,8 @@ printf '{"schema_version":1,"container_name":"loom-codex-session-session-acct","
 out="$(run_auth "LOOM_CODEX_HOME=$SESSION_PROFILE" -- -p "hi")"
 assert_contains "profile 'session-acct' is session-managed" "$out" \
     "a session-managed profile is detected via the on-disk marker"
-assert_contains "would-exec: docker exec loom-codex-session-session-acct codex exec" "$out" \
-    "session-exec mode dispatches via docker exec into the account's container"
+assert_contains "session-exec host --container loom-codex-session-session-acct" "$out" \
+    "session-exec mode dispatches via docker exec into the account's container, with CARGO_INCREMENTAL=0 carried across the boundary (#6926, #8456; the --workdir/--env prefix is asserted in test-spawn-codex-session-exec.sh, #8518)"
 would_exec_line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
 assert_not_contains "tmux" "$would_exec_line" \
     "the resolved dispatch invocation itself never mentions tmux (docker exec only, no send-keys)"
@@ -1421,7 +1441,7 @@ NO_MARKER_PROFILE="$TMPROOT/profiles/forced"
 mkdir -p "$NO_MARKER_PROFILE"
 printf '{"token":"stub"}\n' > "$NO_MARKER_PROFILE/auth.json"
 out="$(run_auth "LOOM_CODEX_HOME=$NO_MARKER_PROFILE" LOOM_CODEX_SESSION_EXEC=1 -- -p "hi")"
-assert_contains "would-exec: docker exec loom-codex-session-forced codex exec" "$out" \
+assert_contains "session-exec host --container loom-codex-session-forced" "$out" \
     "LOOM_CODEX_SESSION_EXEC=1 forces session-exec even without the marker file"
 assert_contains "forces session-exec mode though" "$out" \
     "LOOM_CODEX_SESSION_EXEC=1 warns that the profile was never adopted"
@@ -1535,19 +1555,20 @@ cat > "$SESSION_DOCKER_BIN/docker" <<DOCKERSHIM
 # the same fake codex shim Section 8 uses via a plain \`exec\`, so stdin/
 # stdout/stderr and the exit code all flow through exactly as they would for
 # a real container.
-if [[ "\$1" == "inspect" ]]; then
-    echo "true"
-    exit 0
-fi
-if [[ "\$1" == "exec" ]]; then
-    shift
-    _container="\$1"
-    shift
+case "\$1" in inspect) echo true; exit 0;; exec) shift;; *) exit 1;; esac
+while [[ "\$1" == -* ]]; do
+    case "\$1" in -i) shift;; --workdir) cd "\$2"; shift 2;; *) export "\$2"; shift 2;; esac
+done
+_container="\$1"; shift
+if [[ "\$*" == "loom-daemon session-exec protocol" ]]; then echo loom-session-exec-v1; exit 0; fi
+if [[ "\$1 \$2 \$3" == "loom-daemon session-exec worker" ]]; then
+    id="\$5"; shift 6
     printf '%s\n' "\$_container \$*" > "$SESSION_DOCKER_EXEC_ARGV"
-    exec "\$@"
+    "\$@" </dev/null; rc=\$?
+    printf '\036loom-session-clean:%s\037' "\$id" >&2
+    exit "\$rc"
 fi
-echo "unexpected docker invocation: \$*" >&2
-exit 1
+exec "\$@"
 DOCKERSHIM
 chmod +x "$SESSION_DOCKER_BIN/docker"
 
@@ -1572,17 +1593,14 @@ assert_contains "spawn-codex: session=$MOCK_SESSION" "$session_stderr" \
     "session-exec parses the transcript join key identically to bare-metal"
 assert_contains "spawn-codex: tokens_used=2502" "$session_stderr" \
     "session-exec parses tokens_used identically to bare-metal"
-assert_contains \
-    "# LOOM_TERMINAL_RESULT v=1 provider=codex account=session-acct category=SUCCESS exit_code=0" \
-    "$session_stderr" \
-    "session-exec emits the same structured terminal record classify-error.sh bare-metal does"
+assert_contains "$(_tr session-acct SUCCESS 0 none)" "$session_stderr" \
+    "session-exec emits the same structured record classify-error.sh bare-metal does"
 assert_contains "# LOOM_CLI_START runtime=codex" "$session_stderr" \
     "session-exec still emits the LOOM_CLI_START observability marker"
 assert_not_contains "MOCK-SAW-STDIN" "$session_stderr" \
     "session-exec closes the exec'd process's stdin, same as bare-metal (never a hang)"
 
-assert_contains "loom-codex-session-session-acct codex exec" "$(cat "$SESSION_DOCKER_EXEC_ARGV")" \
-    "docker exec targets the account's own session container with the codex exec argv"
+assert_contains "loom-codex-session-session-acct codex exec" "$(cat "$SESSION_DOCKER_EXEC_ARGV")" "docker exec targets the account's own session container with the codex exec argv"
 
 set +e
 run_session_mock MOCK_RC=42 -- -p "hi" >/dev/null 2>&1
@@ -1606,7 +1624,7 @@ assert_contains "spawn-codex: transcript=$SESSION_TRANSCRIPT" "$session_transcri
 #     CODEX_INVOKE, not the file as a whole). ---
 
 TESTS_RUN=$((TESTS_RUN + 1))
-invoke_assembly="$(grep -A3 'CODEX_INVOKE=(docker exec' "$SPAWN_CODEX" || true)"
+invoke_assembly="$(grep -A3 'CODEX_INVOKE=.*session-exec host' "$SPAWN_CODEX" || true)"
 if [[ -n "$invoke_assembly" && "$invoke_assembly" != *tmux* ]]; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: the session-exec dispatch invocation is assembled from docker/codex only, never tmux"

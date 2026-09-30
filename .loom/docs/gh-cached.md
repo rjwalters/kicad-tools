@@ -51,8 +51,9 @@ resolution.
 
 | Command shape | Behavior | TTL |
 |---|---|---|
-| `gh issue view` | cached | 30s |
-| `gh pr view` | cached | 30s |
+| `gh issue view N --json …` (cacheable shape) | **ETag/REST (#9254)** — conditional `GET issues/{n}`, free 304, never stale; TTL fallback | 0s (revalidated) |
+| `gh pr view N --json …` (cacheable shape) | **ETag/REST (#9254)** — conditional `GET pulls/{n}`, free 304, never stale; TTL fallback | 0s (revalidated) |
+| `gh issue view` / `gh pr view` (any other shape) | cached | 30s |
 | `gh issue list` / `pr list` (cacheable shape) | **ETag/REST (#5056)** — free 304, never stale; TTL fallback | 0s (revalidated) |
 | `gh label list`, `gh <x> search/status` | cached | 30s (default) |
 | `gh api` **without** `-X <non-GET>` / `-f` | cached | 30s |
@@ -113,6 +114,19 @@ always safe): a `list` with `--json` limited to
 possibly-truncated full page (>= 100 rows). A bare `list` (human table, no
 `--json`), a freeform `--search` (`head:…`, `in:body`, text), a PR-only field
 (`mergedAt`, `files`), or a merged/closed PR listing all fall back to `gh`.
+
+**Single-object reads (#9254).** `issue view N` / `pr view N` try
+`loom-daemon forge <issue|pr> view --cached …` first: the same conditional
+`GET` + disk ETag store (`view-*` entries, pruned after 7 days unwritten),
+against `issues/{n}` / `pulls/{n}`. Output is `gh`'s non-TTY `--json` bytes for
+`{number,title,state,body,labels,createdAt,updatedAt,closedAt,url,id}`, plus
+`{headRefName,baseRefName,isDraft,mergedAt}` for PRs (PR `state` is `MERGED`
+when `merged_at` is set). Everything else declines to `gh`: no `--json`,
+`author` (gh adds a display `name` REST lacks), `mergeable`/`mergeStateStatus`,
+`reviews`, `statusCheckRollup`, `files`, `comments`, `--comments`/`--web`/
+`--template`, a URL/branch/missing selector, or an `issue view` of a PR number.
+A wrapped mutation of N drops N's view entries so the next read is
+unconditional. `LOOM_ETAG_VIEW_DISABLE=1` turns off just this path.
 
 > **`loom-daemon forge issue` / `forge pr` WITHOUT `--cached` is NOT this path.**
 > The bare passthrough is a byte-identical GraphQL exec of `gh` and inherits its
@@ -176,7 +190,11 @@ merge that should not have happened, or a test that observes its own stale
   landed *during* your review; a cached label set defeats the mechanism.
 - **merge gating** — the 6 Champion safety criteria, `mergeStateStatus` /
   `mergeable`, `gh pr checks`, and the paginated changed-file list (#4613).
-  These are the last read before an irreversible action.
+  These are the last read before an irreversible action. `merge-pr.sh`'s
+  initial PR fetch belongs here too (#8550): it is the sole source of the
+  label set the #8112 verdict-contradiction guard decides on, so a read
+  landing inside the TTL window right after a hold release refuses a merge on
+  a label the operator has already removed.
 - **liveness probes** — the Judge's `gh repo view` environment check must
   observe the live environment, not a cached success from a healthy session.
 - **before/after differential checks** — e.g. sweep's `--dry-run`

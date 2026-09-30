@@ -105,8 +105,9 @@ def test_issue5398_resolves_to_020_for_every_pair_kind(kind_a, kind_b) -> None:
     """
     declared = read_declared_clearance_rules(ISSUE5398_PCB)
     base = resolve_base_clearance(target_mm=ROUTE_TARGET_MM, declared=declared)
-    # via_clearance is the DesignRules default (0.20) -- the same value #5398
-    # recorded next to trace_clearance=0.15, so no kind can drop below it.
+    # via_clearance is the DesignRules default (0.20) -- the value #5398
+    # recorded against the CLI's 0.15mm trace target, so no kind can drop
+    # below it.
     resolver = ClearanceResolver(ClearanceRuleSet(base=base, via_mm=0.20))
 
     required = resolver.required_mm(net_a="/SENSE_A", net_b="/GND", kind_a=kind_a, kind_b=kind_b)
@@ -163,6 +164,61 @@ def test_issue5398_explicit_clearance_still_wins_but_warns() -> None:
     assert resolved.source is RuleSource.EXPLICIT_TARGET
     assert resolved.warning is not None
     assert "0.2mm this board declares" in resolved.warning
+
+
+def test_issue5398_explicit_clearance_warns_through_the_route_cli(capsys) -> None:
+    """Issue #5656: the advisory above must reach the shipped CLI's stderr.
+
+    The case one line up exercises :func:`resolve_base_clearance` directly.
+    ``kct route`` used to skip reading the board's declared rules whenever
+    ``--clearance`` was passed, so ``declared`` reached the resolver as
+    ``None`` and the warning branch could never fire on the path an operator
+    actually runs -- the value was right and the advisory was silently lost.
+    """
+    from kicad_tools.cli.route_cmd import _resolve_route_clearance
+
+    args = SimpleNamespace(clearance=ROUTE_TARGET_MM, manufacturer="jlcpcb", quiet=True)
+    resolved = _resolve_route_clearance(
+        args,
+        ISSUE5398_PCB,
+        [str(ISSUE5398_PCB), "--clearance", str(ROUTE_TARGET_MM)],
+        quiet=True,
+    )
+
+    # The value is untouched: ``--clearance`` is still the one deliberate waiver.
+    assert resolved == pytest.approx(ROUTE_TARGET_MM)
+    assert args.clearance == pytest.approx(ROUTE_TARGET_MM)
+    assert args._clearance_rule_source == "flag"
+
+    captured = capsys.readouterr()
+    assert "WARNING: explicit --clearance" in captured.err
+    assert "0.2mm this board declares" in captured.err
+
+
+def test_explicit_clearance_at_or_above_the_declared_rule_stays_silent(capsys) -> None:
+    """No false positive: nothing is undercut, so nothing is warned about."""
+    from kicad_tools.cli.route_cmd import _resolve_route_clearance
+
+    above = ISSUE5398_REQUIRED_MM + 0.05
+    args = SimpleNamespace(clearance=above, manufacturer="jlcpcb", quiet=True)
+    resolved = _resolve_route_clearance(
+        args, ISSUE5398_PCB, [str(ISSUE5398_PCB), "--clearance", str(above)], quiet=True
+    )
+
+    assert resolved == pytest.approx(above)
+    assert capsys.readouterr().err == ""
+
+    # And on the exact tie, where the operator matched the board's own rule.
+    args = SimpleNamespace(clearance=ISSUE5398_REQUIRED_MM, manufacturer="jlcpcb", quiet=True)
+    resolved = _resolve_route_clearance(
+        args,
+        ISSUE5398_PCB,
+        [str(ISSUE5398_PCB), "--clearance", str(ISSUE5398_REQUIRED_MM)],
+        quiet=True,
+    )
+
+    assert resolved == pytest.approx(ISSUE5398_REQUIRED_MM)
+    assert capsys.readouterr().err == ""
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +397,12 @@ def _via_symmetry_resolver() -> ClearanceResolver:
 def test_a_via_on_either_side_raises_the_requirement(other) -> None:
     """#5398's trace-vs-via asymmetry, resolved once for the unordered pair.
 
-    ``DesignRules`` ships ``trace_clearance=0.15`` next to
-    ``via_clearance=0.20``; consumers disagreed about which applied depending
-    on which object they were called *about*.
+    ``kct route`` builds its ``DesignRules`` with ``trace_clearance`` set from
+    ``route_cmd.DEFAULT_ROUTE_CLEARANCE_MM`` (0.15mm) while ``via_clearance``
+    keeps the dataclass default of 0.20mm -- ``router/rules.py`` ships *both*
+    fields at 0.2, so the 0.15 is the CLI's target, never a ``DesignRules``
+    default.  Consumers disagreed about which of the two applied depending on
+    which object they were called *about*.
     """
     resolver = _via_symmetry_resolver()
 
@@ -452,15 +511,17 @@ def test_a_project_minimum_below_the_target_cannot_loosen_it() -> None:
     assert resolved.warning is None
 
 
-def test_the_project_netclass_is_deliberately_not_a_requirement(tmp_path) -> None:
-    """KiCad's stock template ships ``Default`` at 0.20mm -- not a declaration.
+def test_the_project_netclass_is_a_floor_now_that_the_writer_means_it(tmp_path) -> None:
+    """#5654: ``net_settings.classes[].clearance`` is read, as a **floor**.
 
-    Every project this repo generates inherits that template value verbatim,
-    so honouring it as a hard requirement re-spaces the whole demo fleet for
-    no DRC benefit: the *routed* project and ``.kicad_dru`` are rewritten
-    from the fab tier, and that is what the final gate measures.  Measured on
-    board 04 (``--mfr jlcpcb-tier1``), honouring it moved the post-route
-    violation count from 24 to 28 at an unchanged 9/9 nets connected.
+    Phase 2 refused to read it because KiCad's stock template ships
+    ``Default`` at 0.20mm and every project this repo wrote inherited that
+    verbatim -- a template default, not a declaration (honouring it moved
+    board 04's post-route violation count from 24 to 28 at an unchanged 9/9
+    nets).  #5654 fixed the writer first
+    (``core/project_file.py:DEFAULT_NETCLASS_CLEARANCE_MM``), so the field now
+    states the clearance the board is actually routed at -- and it is the
+    value KiCad's own ``clearance`` DRC test measures against.
     """
     pcb = tmp_path / "board.kicad_pcb"
     pcb.write_text("(kicad_pcb (version 20221018))\n")
@@ -470,9 +531,127 @@ def test_the_project_netclass_is_deliberately_not_a_requirement(tmp_path) -> Non
 
     declared = read_declared_clearance_rules(pcb)
 
-    assert declared.is_empty()
+    assert declared.net_class_clearance_mm == pytest.approx(0.2)
+    assert declared.net_class_name == "Default"
+    assert not declared.is_empty()
+    assert declared.project_requirement() == (0.2, RuleSource.PROJECT_NET_CLASS, "Default")
+
+    resolved = resolve_base_clearance(target_mm=ROUTE_TARGET_MM, declared=declared)
+    assert resolved.required_mm == pytest.approx(0.2)
+    assert resolved.source is RuleSource.PROJECT_NET_CLASS
+    assert resolved.source_label == "Default"
+
+
+def test_a_project_netclass_below_the_target_never_loosens_it(tmp_path) -> None:
+    """Floor, not replacement -- the #5398 divergence in the other direction.
+
+    A tier-relaxed project (``kct route --mfr jlcpcb-tier1`` rewrites the
+    ``Default`` netclass to the 0.1016mm fab floor) declares *less* than the
+    router's 0.15mm target.  Honouring that as a replacement would silently
+    re-space the board downward; as a floor it changes nothing.
+    """
+    pcb = tmp_path / "board.kicad_pcb"
+    pcb.write_text("(kicad_pcb (version 20221018))\n")
+    pcb.with_suffix(".kicad_pro").write_text(
+        '{"net_settings": {"classes": [{"name": "Default", "clearance": 0.1016}]}}'
+    )
+
+    declared = read_declared_clearance_rules(pcb)
+    assert declared.net_class_clearance_mm == pytest.approx(0.1016)
+
     resolved = resolve_base_clearance(target_mm=ROUTE_TARGET_MM, declared=declared)
     assert resolved.required_mm == pytest.approx(ROUTE_TARGET_MM)
+    assert resolved.source is RuleSource.TARGET_DEFAULT
+
+
+def test_a_project_with_no_netclass_block_declares_nothing(tmp_path) -> None:
+    """The field is optional: absent / malformed contributes nothing."""
+    for project_json in (
+        "{}",
+        '{"net_settings": {}}',
+        '{"net_settings": {"classes": []}}',
+        '{"net_settings": {"classes": [{"name": "Default"}]}}',
+        '{"net_settings": {"classes": "not-a-list"}}',
+        '{"net_settings": {"classes": [{"clearance": 0.3}]}}',  # unnamed class
+    ):
+        pcb = tmp_path / "board.kicad_pcb"
+        pcb.write_text("(kicad_pcb (version 20221018))\n")
+        pcb.with_suffix(".kicad_pro").write_text(project_json)
+
+        declared = read_declared_clearance_rules(pcb)
+        assert declared.net_class_clearance_mm is None, project_json
+        assert declared.is_empty(), project_json
+
+
+@pytest.mark.parametrize(
+    "net_class_mm,other,expected_mm,expected_source",
+    [
+        # The netclass competes with the board minimum the same way the
+        # board minimum competes with the DRU rule: highest wins.
+        (0.25, {"project_min_clearance_mm": 0.20}, 0.25, RuleSource.PROJECT_NET_CLASS),
+        (0.18, {"project_min_clearance_mm": 0.20}, 0.20, RuleSource.PROJECT_MIN_CLEARANCE),
+        (0.25, {"dru_mm": 0.20}, 0.25, RuleSource.PROJECT_NET_CLASS),
+        (0.18, {"dru_mm": 0.20}, 0.20, RuleSource.PROJECT_DRU),
+        # Exact ties resolve by RuleSource declaration order, so provenance
+        # never flips between runs.
+        (0.20, {"project_min_clearance_mm": 0.20}, 0.20, RuleSource.PROJECT_MIN_CLEARANCE),
+        (0.20, {"dru_mm": 0.20}, 0.20, RuleSource.PROJECT_DRU),
+        (0.20, {}, 0.20, RuleSource.PROJECT_NET_CLASS),
+    ],
+)
+def test_the_netclass_competes_with_the_other_project_minima(
+    net_class_mm: float,
+    other: dict,
+    expected_mm: float,
+    expected_source: RuleSource,
+) -> None:
+    declared = DeclaredClearanceRules(
+        net_class_clearance_mm=net_class_mm, net_class_name="Default", **other
+    )
+
+    requirement = declared.project_requirement()
+    assert requirement is not None
+    assert requirement[0] == pytest.approx(expected_mm)
+    assert requirement[1] is expected_source
+
+    resolved = resolve_base_clearance(target_mm=ROUTE_TARGET_MM, declared=declared)
+    assert resolved.required_mm == pytest.approx(expected_mm)
+
+
+def test_a_nonpositive_project_netclass_is_ignored() -> None:
+    """A zero/negative netclass clearance is not a requirement of any kind."""
+    for value in (0.0, -0.1):
+        declared = DeclaredClearanceRules(net_class_clearance_mm=value, net_class_name="Default")
+        assert declared.project_requirement() is None
+        assert declared.is_empty()
+
+
+def test_the_fab_floor_still_outranks_a_looser_project_netclass() -> None:
+    """The fab floor is the last ``max``; a netclass below it is warned about."""
+    declared = DeclaredClearanceRules(net_class_clearance_mm=0.05, net_class_name="Default")
+
+    resolved = resolve_base_clearance(
+        target_mm=0.04,
+        declared=declared,
+        fab_floor_mm=0.127,
+        manufacturer="jlcpcb",
+    )
+
+    assert resolved.required_mm == pytest.approx(0.127)
+    assert resolved.warning is not None
+    assert "below the jlcpcb minimum clearance" in resolved.warning
+
+
+def test_an_explicit_target_still_overrides_the_project_netclass(tmp_path) -> None:
+    """``--clearance`` remains the one deliberate waiver (precedence step 1)."""
+    declared = DeclaredClearanceRules(net_class_clearance_mm=0.30, net_class_name="Default")
+
+    resolved = resolve_base_clearance(target_mm=0.15, declared=declared, explicit_target=True)
+
+    assert resolved.required_mm == pytest.approx(0.15)
+    assert resolved.source is RuleSource.EXPLICIT_TARGET
+    assert resolved.warning is not None
+    assert "0.3mm this board declares" in resolved.warning
 
 
 def test_legacy_board_netclass_replaces_the_target_in_both_directions() -> None:
@@ -674,20 +853,35 @@ def test_project_board_minimum_is_read_from_either_block(
 
 
 def test_shipped_boards_declare_only_minima_they_mean(tmp_path) -> None:
-    """The in-repo evidence behind the "netclass is a template default" call.
+    """The in-repo evidence that no shipped board carries a template default.
 
-    Boards 00-04 ship KiCad's stock ``Default`` 0.20mm netclass and no board
-    minimum at all; 05/06/07 ship a minimum that matches their fab tier.  If
-    this ever inverts, the "deliberately not read" decision needs revisiting.
+    Before #5654 boards 00-04 shipped KiCad's stock ``Default`` 0.20mm
+    netclass and no board minimum at all, which is exactly why Phase 2
+    refused to read the netclass.  The writer now emits the clearance the
+    board is actually routed at (0.15mm), so every shipped board declares a
+    value it means -- and the fleet resolves to the same 0.15mm target it
+    always did.  If a board ever reverts to the stock 0.20mm, this fails and
+    the "read the netclass" decision needs revisiting.
     """
-    stock = REPO_ROOT / "boards/00-simple-led/output/simple_led.kicad_pcb"
-    declares = REPO_ROOT / "boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
-    for path in (stock, declares):
+    from kicad_tools.core.project_file import DEFAULT_NETCLASS_CLEARANCE_MM
+
+    writer_default = REPO_ROOT / "boards/00-simple-led/output/simple_led.kicad_pcb"
+    declares_minimum = REPO_ROOT / "boards/06-diffpair-test/output/diffpair_test.kicad_pcb"
+    for path in (writer_default, declares_minimum):
         if not path.exists():
             pytest.skip(f"board input not committed: {path}")
 
-    assert read_declared_clearance_rules(stock).is_empty()
-    assert read_declared_clearance_rules(declares).project_min_clearance_mm == pytest.approx(0.15)
+    stock = read_declared_clearance_rules(writer_default)
+    assert stock.project_min_clearance_mm is None
+    assert stock.net_class_clearance_mm == pytest.approx(DEFAULT_NETCLASS_CLEARANCE_MM)
+    assert stock.net_class_clearance_mm == pytest.approx(ROUTE_TARGET_MM)
+    assert resolve_base_clearance(
+        target_mm=ROUTE_TARGET_MM, declared=stock
+    ).required_mm == pytest.approx(ROUTE_TARGET_MM)
+
+    declares = read_declared_clearance_rules(declares_minimum)
+    assert declares.project_min_clearance_mm == pytest.approx(0.15)
+    assert declares.net_class_clearance_mm == pytest.approx(0.15)
 
 
 def test_legacy_board_netclasses_are_still_read(tmp_path) -> None:

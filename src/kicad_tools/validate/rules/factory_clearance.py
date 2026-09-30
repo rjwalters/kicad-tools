@@ -186,6 +186,15 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
         side_entries = apertures_by_side[silk_side]
         minx, miny, maxx, maxy = geom.bounds
         query_box = shapely.box(minx - minimum, miny - minimum, maxx + minimum, maxy + minimum)
+        # Same-label siblings (a footprint's several fp_poly / fp_line silk
+        # strokes all read as "U10 poly") are otherwise indistinguishable in
+        # ``items``; append the element's own UUID so a finding points at one
+        # specific shape in the board file.  Mirrors the ``silk_overlap``
+        # convention from #4987 (Issue #5811).
+        silk_uuid = getattr(graphic, "uuid", "")
+        silk_item = f"{reference} {graphic.graphic_type}"
+        if silk_uuid:
+            silk_item = f"{silk_item} {{{silk_uuid}}}"
         for idx in trees[silk_side].query(query_box):
             aperture, pad_reference = side_entries[int(idx)]
             distance = geom.distance(aperture)
@@ -199,7 +208,7 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
                         layer=graphic.layer,
                         actual_value=distance,
                         required_value=minimum,
-                        items=(f"{reference} {graphic.graphic_type}", pad_reference),
+                        items=(silk_item, pad_reference),
                     )
                 )
     results.rules_checked = 1

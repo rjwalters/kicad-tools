@@ -48,4 +48,5 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/lib/script-helper.sh"
 
+# requires-daemon: checkpoint >= 0.17.0   #4275/#4552 — the Rust port landed in 3f147e8f0 (2026-07-29), AFTER v0.16.0 was tagged (57cfec3aa) and while the workspace version still read 0.16.0, so 0.16.0 is the last version WITHOUT it; the next bump, 0.17.0 (3e5a9439e), is the first that shipped it. Hard, not `optional`: this stub only execs, it never probes or degrades. Default LOOM_SCRIPT_HELPER_MISSING_RC (1) is left alone deliberately — `loom-daemon checkpoint` uses 1 only for "the write/clear failed", an ERROR, never data a caller branches on (`read` and `stages` always exit 0), so the refusal cannot be mistaken for an answer (#8484).
 loom_exec_script_helper checkpoint "$@"

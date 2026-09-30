@@ -31,6 +31,7 @@
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 
 namespace router {
 
@@ -93,6 +94,43 @@ public:
     void set_fill_rail_dimensions(double ph, double pg, double nh, double ng) {
         p_fill_half_ = ph; p_fill_gap_ = pg; n_fill_half_ = nh; n_fill_gap_ = ng;
     }
+
+    // Issue #5410 (B1): per-net-class dimensions for the dynamic route-halo
+    // refinement, mirroring what ``RouteHaloRefiner`` reads off the net class
+    // on the Python side (``nc.trace_width``, ``nc.clearance``,
+    // ``nc.via_size``).
+    //
+    // WHY this exists.  The halo refinement WAIVES a raster rejection, so the
+    // scalar it re-measures with is a real design rule, not a search radius.
+    // The raster halo it overrides was dilated with the candidate's NET-CLASS
+    // clearance; re-measuring with the global ``DesignRules`` scalar therefore
+    // admits candidates the net class forbids whenever the class is wider than
+    // the global rule -- the under-blocking direction.  The single-ended
+    // ``Pathfinder`` already threads its effective values in
+    // (``search_trace_half_width_mm_`` / ``search_fill_trace_clearance_``);
+    // this is the coupled equivalent, keyed by net id because the coupled
+    // predicates are called for both rails.
+    //
+    // Nets with no entry fall back to the global rules, so a caller that
+    // installs nothing keeps exactly the pre-#5410 global-rule behaviour.
+    //
+    // Issue #5711: ``partner_net`` / ``partner_clearance`` carry the diff-pair
+    // intra-pair waiver ``RouteHaloRefiner.trace_clear`` passes into
+    // ``RouteHaloGeometry.clear`` (``nc.diffpair_partner`` resolved to a net
+    // id, and ``nc.effective_intra_pair_clearance()``).  Omitting them made
+    // partner copper demand the ordinary, wider class clearance -- safe, but
+    // 212 cells more conservative than the Python arm on a class whose
+    // intra-pair gap is narrower than its clearance, which is the normal
+    // reason to author one.  ``partner_net < 0`` or ``partner_clearance < 0``
+    // means "no waiver", matching the Python ``partner is None`` branch.
+    void set_halo_net_dimensions(int net, double trace_width,
+                                 double trace_clearance, double via_diameter,
+                                 int partner_net = -1,
+                                 double partner_clearance = -1.0) {
+        halo_net_dims_[net] = HaloNetDims{trace_width, trace_clearance, via_diameter,
+                                          partner_net, partner_clearance};
+    }
+    void clear_halo_net_dimensions() { halo_net_dims_.clear(); }
     // All construction-time scalars mirror the Python
     // ``CoupledPathfinder.__init__`` derived radii and rule constants.  The
     // Python side pre-computes the trace/via clearance radii (identical
@@ -131,7 +169,77 @@ public:
         int max_iterations_budget,
         double timeout_seconds);
 
+    // Issue #5410: public probes over the two blocked predicates the dynamic-
+    // halo refinement changed.  The joint-state search is a single opaque
+    // ``route`` call, so without these a backend-parity test could only infer
+    // the branch's verdict from whether a whole pair happened to route.
+    bool trace_blocked(int gx, int gy, int layer, int net,
+                       int from_x = -1, int from_y = -1) const {
+        return is_trace_blocked(gx, gy, layer, net, from_x, from_y);
+    }
+    bool via_blocked(int gx, int gy, int net) const {
+        return is_via_blocked(gx, gy, net);
+    }
+    // Epic #5509 Phase 3c (#5662): the coupled search's rail clearance gate,
+    // promoted out of the ``route()`` loop into a named, bindable method.
+    //
+    // Two things changed when it was promoted.  It is now **public and
+    // reachable from Python** (``bindings.cpp`` exposes it), which is what
+    // retires the epic's one genuinely unexposed consumer group -- group 7
+    // used to be a lambda no oracle adapter could drive.  And it now consults
+    // the shared exact-geometry clearance kernel
+    // (``clearance_kernel.hpp``) against the grid's **stored route
+    // geometry**, not just its fixed fills: committed copper that the C++
+    // blocked plane has not been re-synced with was invisible to the coupled
+    // search by construction, which is the #4507 defect.
+    //
+    // ``ax``/``ay`` -> ``bx``/``by`` is the candidate rail step in GRID
+    // coordinates; ``layer`` the layer it is traced on (ignored for a via
+    // candidate, which is copper on every layer); ``net`` the rail's own net;
+    // ``partner_net`` the other rail's net (pass ``-1`` for none), whose
+    // copper is deliberately exempt here -- within-pair spacing is the
+    // search's own spacing constraint plus the commit-time intra-pair gate,
+    // not this foreign-copper check; ``rail_half`` / ``rail_gap`` the
+    // per-rail copper half-width and clearance (negative = fall back to the
+    // ``DesignRules`` scalars), matching ``set_fill_rail_dimensions``.
+    bool rail_clear(int ax, int ay, int bx, int by, int layer, int net,
+                    int partner_net, double rail_half, double rail_gap,
+                    bool is_via) const;
+
+    // The same gate in WORLD millimetres, which is where the arithmetic
+    // actually lives -- ``rail_clear`` is ``grid_to_world`` plus this call.
+    //
+    // Both are bound.  The grid-coordinate form is what the search uses; the
+    // world form is what the Epic #5509 conformance adapter must use, because
+    // snapping a corpus case's copper onto the routing grid first would
+    // measure the raster's quantisation instead of this consumer's clearance
+    // model.
+    bool rail_clear_world(double ax, double ay, double bx, double by,
+                          int layer, int net, int partner_net,
+                          double rail_half, double rail_gap,
+                          bool is_via) const;
+
 private:
+    // The stored-route half of ``rail_clear``.
+    bool stored_route_clear(double ax, double ay, double bx, double by,
+                            int layer, int net, int partner_net,
+                            double half, double gap, bool is_via) const;
+
+    // Issue #5410 (B1): net id -> effective net-class halo dimensions.
+    struct HaloNetDims {
+        double trace_width;
+        double trace_clearance;
+        double via_diameter;
+        // Issue #5711: the diff-pair intra-pair waiver, or (-1, -1) for none.
+        int partner_net = -1;
+        double partner_clearance = -1.0;
+    };
+    std::unordered_map<int, HaloNetDims> halo_net_dims_;
+    const HaloNetDims* halo_dims_for(int net) const {
+        auto it = halo_net_dims_.find(net);
+        return it == halo_net_dims_.end() ? nullptr : &it->second;
+    }
+
     double p_fill_half_ = -1, p_fill_gap_ = -1, n_fill_half_ = -1, n_fill_gap_ = -1;
     Grid3D& grid_;
     DesignRules rules_;
@@ -151,9 +259,27 @@ private:
         const GridCell& cell = grid_.at(gx, gy, layer);
         return cell.blocked && cell.net != net;
     }
-    inline bool is_trace_blocked(int gx, int gy, int layer, int net) const {
-        return is_cell_blocked(gx, gy, layer, net);
-    }
+    // Issue #5410: a conservative dynamic route halo is an acceleration
+    // structure, not a physical constraint.  ``mark_segment`` / ``mark_via``
+    // dilate committed copper to whole grid cells, so a foreign route's halo
+    // covers candidates whose ACTUAL copper and drill gaps satisfy the
+    // effective rules.  PR #5425 taught the per-net ``Pathfinder`` to measure
+    // that geometry before rejecting such a cell; these two helpers apply the
+    // identical refinement to the coupled joint-state search, which until now
+    // consulted the raster alone.
+    //
+    // ``route_cell_has_geometry`` is the provenance gate: it answers false for
+    // out-of-bounds cells, pad metal, static halos, keepouts, reserved cells,
+    // and for any cell whose covering marks lack registered physical geometry
+    // -- so every hard or unverifiable blockage keeps its rejection and only
+    // verified dynamic route copper is ever re-measured.
+    bool trace_halo_cell_clear(int cx, int cy, int layer, int from_x, int from_y,
+                               int to_x, int to_y, int net) const;
+    bool via_route_geometry_clear(int x, int y, int net) const;
+    // ``from_x`` / ``from_y`` (default -1) name the step's ORIGIN cell so the
+    // refinement measures the swept segment, not just its endpoint.
+    bool is_trace_blocked(int gx, int gy, int layer, int net,
+                          int from_x = -1, int from_y = -1) const;
     bool is_via_blocked(int gx, int gy, int net) const;
 
     inline bool at_goal(int x, int y, int gx, int gy) const {

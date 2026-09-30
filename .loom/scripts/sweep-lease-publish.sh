@@ -71,11 +71,21 @@
 #     TTL-bounded, not unconditional: once that lease ages past the TTL, the
 #     next pre-flight publishes a fresh duplicate rather than treating the
 #     stale one as still covering this sweep.
-#   - If a DIFFERENT host holds a lease that is still fresh, this script does
-#     NOT publish (exit 4). Publishing would supersede a live peer's liveness
-#     signal for every freshest-wins reader (`sweep-lease-fence.sh`,
-#     `fetch_freshest_lease_updated_at`) and hand this sweep a claim a live
-#     worker still holds. The caller should skip the issue.
+#   - If a DIFFERENT sweep-id holds a lease on THIS issue that is still
+#     fresh -- whether on a different host, or on THIS SAME host -- this
+#     script does NOT publish (exit 4). Publishing would supersede a live
+#     peer's liveness signal for every freshest-wins reader
+#     (`sweep-lease-fence.sh`, `fetch_freshest_lease_updated_at`) and hand
+#     this sweep a claim a live worker still holds. The caller should skip
+#     the issue. Issue #5783: a same-host peer is exactly as live a
+#     co-occupant as a different-host one -- both can independently reach
+#     `worktree.sh` and edit the SAME shared `.loom/worktrees/issue-<N>`
+#     directory at once, which is precisely what happened on issue #5781
+#     (5 lease records from one host within ~40 minutes, 2 Builders editing
+#     the same uncommitted file concurrently). This host routinely runs many
+#     concurrent sweeps -- but never two on the *same issue*: this check
+#     reads only comments on <issue>, so it can never serialize sweeps
+#     working *different* issues on the same host.
 #   - A stale (past-TTL) lease -- this host's or a peer's -- does not block
 #     publication: it is exactly the abandoned-claim case a new lease should
 #     supersede.
@@ -354,7 +364,7 @@ cmd_publish() {
     # scan below for why a publish-side peer check needs the yield records
     # too (Issue #5331).
     local comments_ndjson read_ok=1
-    if ! comments_ndjson="$(gh api "${repo_args[@]}" "repos/{owner}/{repo}/issues/${issue}/comments" \
+    if ! comments_ndjson="$(gh api "${repo_args[@]+"${repo_args[@]}"}" "repos/{owner}/{repo}/issues/${issue}/comments" \
         --paginate --jq \
         ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body}" \
         2>&1)"; then
@@ -408,8 +418,8 @@ cmd_publish() {
         now_epoch="${LOOM_LEASE_PUBLISH_NOW:-$(date -u +%s)}"
         ttl_seconds="$(awk -v m="$ttl_minutes" 'BEGIN { printf "%d", m * 60 }')"
 
-        local own_fresh=0 same_host_diff_fresh=0
-        local peer_host="" peer_sweep="" peer_updated_at=""
+        local own_fresh=0
+        local peer_host="" peer_sweep="" peer_updated_at="" peer_same_host=0
         local comment_line
         while IFS= read -r comment_line; do
             [[ -z "$comment_line" ]] && continue
@@ -451,39 +461,43 @@ cmd_publish() {
 
             if [[ "$c_host" == "$host" && "$c_sweep" == "$sweep_id" ]]; then
                 own_fresh=1
-            elif [[ "$c_host" != "$host" ]]; then
-                # Remember the first foreign fresh lease found -- any single
-                # one is sufficient to block publication below.
+            else
+                # Any OTHER (host, sweep) pair holding a fresh lease on THIS
+                # issue is a live peer, whether it shares this host or not
+                # (Issue #5783: a same-host, different-sweep-id claim on the
+                # same issue is exactly as live a co-occupancy hazard as a
+                # different-host one -- see the file header). Remember the
+                # first one found -- any single peer is sufficient to block
+                # publication below.
                 if [[ -z "$peer_host" ]]; then
                     peer_host="$c_host"
                     peer_sweep="$c_sweep"
                     peer_updated_at="$c_updated_at"
+                    [[ "$c_host" == "$host" ]] && peer_same_host=1
                 fi
-            else
-                same_host_diff_fresh=1
             fi
         done <<< "$(jq -c '.' <<< "$comments_ndjson" 2>/dev/null || true)"
 
         # Check for a live peer FIRST, even if this host also has its own
         # fresh record -- superseding a genuine peer's lease is the failure
         # mode this script exists to prevent, so it takes priority over the
-        # idempotent-no-op case below.
+        # idempotent-no-op case below. #5783: a peer sharing THIS host is
+        # blocked exactly like a peer on a different host -- see the
+        # peer-detection loop above and the file header for why a same-host,
+        # different-sweep-id claim on the SAME issue is just as live a
+        # co-occupancy hazard.
         if [[ -n "$peer_host" ]]; then
-            echo "SKIP: issue #${issue} carries a FRESH lease held by a different host (host=${peer_host} sweep=${peer_sweep}, updated_at=${peer_updated_at}, within the ${ttl_minutes}m TTL). Not publishing -- a live peer worker holds this claim, and superseding its lease would hide it from every freshest-wins reader (#6320). Skip this issue." >&2
+            if ((peer_same_host == 1)); then
+                echo "SKIP: issue #${issue} carries a FRESH lease held by a different sweep on THIS SAME host (host=${peer_host} sweep=${peer_sweep}, updated_at=${peer_updated_at}, within the ${ttl_minutes}m TTL). Not publishing -- another live sweep on this host is already working this issue, and superseding its lease would let both sweeps edit the same shared worktree concurrently (#5783). Skip this issue." >&2
+            else
+                echo "SKIP: issue #${issue} carries a FRESH lease held by a different host (host=${peer_host} sweep=${peer_sweep}, updated_at=${peer_updated_at}, within the ${ttl_minutes}m TTL). Not publishing -- a live peer worker holds this claim, and superseding its lease would hide it from every freshest-wins reader (#6320). Skip this issue." >&2
+            fi
             exit 4
         fi
         if ((own_fresh == 1)); then
             echo "OK: issue #${issue} already carries a fresh lease for this sweep (host=${host} sweep=${sweep_id}) -- not publishing a duplicate" >&2
             printf '%s %s\n' "$host" "$sweep_id"
             exit 0
-        fi
-        if ((same_host_diff_fresh == 1)); then
-            # Another local sweep/dispatch is (or just was) working this
-            # issue. Publishing our own record is correct -- this sweep is
-            # genuinely the one working it now, and the host-scoped readers
-            # (`sweep-lease-fence.sh`'s host check) treat both records as
-            # this host's either way.
-            echo "NOTE: issue #${issue} carries a fresh lease from a different sweep on this same host -- publishing this sweep's own record on top" >&2
         fi
     fi
 
@@ -502,7 +516,7 @@ cmd_publish() {
     # (#6320, the same trap fixed in sweep-lease-renew.sh).
     local post_out
     if ! post_out="$(printf '%s' "$lease_body" \
-        | gh api "${repo_args[@]}" --method POST "repos/{owner}/{repo}/issues/${issue}/comments" -F body=@- 2>&1)"; then
+        | gh api "${repo_args[@]+"${repo_args[@]}"}" --method POST "repos/{owner}/{repo}/issues/${issue}/comments" -F body=@- 2>&1)"; then
         echo "ERROR: failed to publish lease comment on issue #${issue}: ${post_out}" >&2
         echo "Proceeding without a lease is safe but degrades reclaim evidence (best-effort, mirrors #6179's fail-open dispatch write)." >&2
         exit 2

@@ -3,7 +3,8 @@
 Historical capability tests use the SHA-pinned 32-pad snapshot in
 ``regression-fixture/``. Production DRC below still checks revision B in
 ``output/``. CLI runs retain temporary PCB/log artifacts on timeout (900s
-process cap; 600s routing budget), and never regenerate or overwrite inputs.
+process cap; the route itself is iteration-bounded, with no wall-clock
+``--timeout`` -- issue #5752), and never regenerate or overwrite inputs.
 The June recipe described below is frozen, not the current hardware recipe.
 
 This test pins the **measured routing reach** of
@@ -283,6 +284,11 @@ EXPECTED_TOTAL_NETS = 13
 # dropped from the allowlist set; the board-03 entry is removed from
 # ``.github/routed-drc-tolerance.yml`` (absence = strict 0 gate).  The only
 # BY-RULE entries remaining are ``silkscreen_text_height`` WARNINGS.
+# Issue #5744 (Sep 28 2026): restoring the footprint silkscreen the replay had
+# been deleting changes the WARNING mix (not the 0-error ceiling) -- as measured
+# on the committed artifact it is now ``silkscreen_line_width`` 139 +
+# ``silk_edge_clearance`` 2 warnings + ``connector_edge_distance`` 2 infos, and
+# ``pin1_marker_missing`` 5 is GONE.  See the per-entry notes below.
 MAX_COMMITTED_DRC_ERRORS = 0
 EXPECTED_COMMITTED_DRC_RULES = {
     "silkscreen_text_height",
@@ -308,6 +314,33 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # appears in the BY-RULE breakdown.  Tool-side rule addition, not a board
     # regression.
     "connector_edge_distance",
+    # Issue #5744: the restored footprint silkscreen is stock KiCad library
+    # geometry drawn with a 0.12mm stroke, below jlcpcb-tier1's
+    # min_silkscreen_width_mm of 0.15mm -- 139 WARNINGS, one per footprint silk
+    # graphic.  These are NOT new to the board: the same 0.12mm strokes were
+    # always in the placement, they were simply unmeasurable for as long as
+    # ``routing_plan.apply_plan()`` deleted every footprint silk graphic on
+    # replay (the #5744 defect), so the routed artifact had no silk to check.
+    # Restoring the silk makes them visible; WARNING severity, so the 0-error
+    # ceiling (MAX_COMMITTED_DRC_ERRORS) is unchanged.  Boards 02/05/06/07 all
+    # ship footprint silk at 0.15mm -- board 03 is the outlier, and raising it
+    # to the floor is tracked separately (it also needs ``fp_poly`` support in
+    # ``drc.repair_silkscreen``, which only widens fp_line/rect/circle/arc
+    # today, and a re-run of the silk-to-pad clip against the wider strokes).
+    "silkscreen_line_width",
+    # Issue #5744: 2 WARNINGS on J1's (USB-C receptacle) outline silk running
+    # inside the board-edge clearance.  Same provenance as the entry above --
+    # J1 sits 0.50mm from the edge (see ``connector_edge_distance``), so its
+    # library outline silk was always within the floor; restoring the silk is
+    # what made it measurable.  WARNING severity; ceiling unchanged.
+    "silk_edge_clearance",
+    # ``pin1_marker_missing`` is deliberately NOT listed.  It used to fire 5
+    # WARNINGS (U1 TQFP-44, U2 SOT-23-6, Y1, J2, J3 -- "no silkscreen graphics
+    # at all, so nothing marks pin 1"), which was a direct symptom of #5744:
+    # the replay had deleted every pin-1 marker on the board.  With the silk
+    # restored the rule is clean, so the allowance is withdrawn on purpose --
+    # if this rule ever reappears in the breakdown, the pin-1 markers have gone
+    # missing again and this test SHOULD fail.
 }
 
 
@@ -467,8 +500,21 @@ def _run_kct_route(unrouted: Path, seed: int, artifacts: Path) -> str:
         # per-net wall-clock cutoff, so the seed-42 re-route is
         # byte-identical (UUID-normalized) across machines.
         "--deterministic-budget",
-        "--timeout",
-        "600",
+        # Issue #5752: NO ``--timeout``.  The historical recipe also passed
+        # ``--timeout 600``, but under ``--auto-layers`` escalation that is
+        # not just a safety backstop: ``_per_attempt_budgeted_timeout``
+        # hands the first (2L) attempt a wall-clock fair slice of
+        # 600 / len(layer_configs) = 75s.  The route needs ~10s on an idle
+        # machine, so under enough CPU contention (a long serial run beside
+        # parallel builders) the 2L detailed pass is cut mid-reroute and
+        # the run lands e.g. 9/13 + 4 partial -- exactly the "both reach
+        # tests fail, the 1/16 and Phase-A tests pass" signature.
+        # Reproduced with a time-dilation shim (16x slowdown -> 9/13).
+        # Without --timeout the per-net iteration caps are the only bound:
+        # the routed copper is identical to the --timeout 600 run on an
+        # idle machine, and stays 13/13 with identical copper up to a
+        # 100x simulated slowdown.  ROUTE_TIMEOUT (subprocess) remains
+        # the hang guard and fails loudly and attributably.
         # Issue #3922: --differential-pairs was silently dropped in the
         # #3308/#3410 recipe consolidation, so USB_D+/USB_D- routed
         # through the plain per-net A* loop and the CoupledPathfinder
@@ -543,8 +589,9 @@ def route_stdout(unrouted_pcb_path: Path, tmp_path_factory) -> str:
 class TestBoard03RoutingBaseline:
     """Pin the June 2026 routing reach baseline for board 03.
 
-    The full CLI subprocess takes ~2.5 minutes wall-clock (timeout 600 s
-    on the route step + setup/teardown), so the class is marked
+    The full CLI subprocess takes ~30 s wall-clock on an idle machine
+    (iteration-bounded, no ``--timeout``; ``ROUTE_TIMEOUT`` caps the
+    subprocess -- issue #5752), so the class is marked
     ``@pytest.mark.slow``.  The nightly slow-tests workflow picks it up;
     PR-time CI skips it by default.
     """
@@ -719,6 +766,31 @@ def test_historical_route_timeout_retains_partial_diagnostics(monkeypatch, tmp_p
     assert (tmp_path / "stderr.log").read_text() == "routing deadline\n"
     assert (tmp_path / "usb_joystick_routed.kicad_pcb").read_text() == "partial copper"
     assert UNROUTED_PCB.read_bytes() == before
+
+
+def test_historical_recipe_is_wall_clock_independent(monkeypatch, tmp_path):
+    """The reach recipe must not carry a wall-clock ``kct route`` budget (#5752).
+
+    ``--timeout`` under ``--auto-layers`` escalation gives the 2L attempt a
+    fair slice of ``timeout / len(layer_configs)`` seconds, so a loaded host
+    cut the detailed pass short and the reach tests failed only in long
+    serial runs.  The recipe must stay iteration-bounded
+    (``--deterministic-budget``) with no ``--timeout`` / ``--search-timeout``
+    / ``--per-net-timeout`` so its outcome cannot depend on machine speed.
+    """
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        kwargs["stdout"].write("Nets routed:     13/13\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    _run_kct_route(UNROUTED_PCB, 42, tmp_path)
+    (cmd,) = captured
+    assert "--deterministic-budget" in cmd
+    for flag in ("--timeout", "--search-timeout", "--per-net-timeout"):
+        assert flag not in cmd, f"{flag} reintroduces wall-clock dependence (issue #5752)"
 
 
 def test_historical_geometry_is_32_pad_and_release_is_separate(unrouted_pcb_path):

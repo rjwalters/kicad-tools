@@ -147,7 +147,9 @@ if [[ "$1" == "api" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --method) method="$2"; shift 2 ;;
-      -R) shift 2 ;;
+      -R|--repo)
+        # Real `gh api` has no -R/--repo flag (#9552): fail exactly like it.
+        echo "unknown shorthand flag: 'R' in -R" >&2; exit 1 ;;
       --paginate) shift ;;
       --jq) jq_filter="$2"; shift 2 ;;
       -f) shift 2 ;;
@@ -161,6 +163,7 @@ if [[ "$1" == "api" ]]; then
         ;;
     esac
   done
+  echo "$path" >> "$D/api-paths.log"
   resolve_body() {
     if [[ -n "$have_typed_body" ]]; then
       case "$typed_body" in
@@ -208,6 +211,10 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# #9548: the subject filters lease markers through `forge trusted-comments`.
+# shellcheck source=lib/trust-stub.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/trust-stub.sh"
+loom_trust_stub "$STUB_DIR"
 export STUB_ISSUE_COMMENTS_FILE="$STUB_DIR/comments.json"
 echo "[]" > "$STUB_ISSUE_COMMENTS_FILE"
 

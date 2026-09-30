@@ -77,6 +77,15 @@ if [[ ! -x "$VPR" ]]; then
     exit 2
 fi
 
+# Since #8656 the line-range check is `loom-daemon git-blob-lines --range`, so
+# every range assertion below (fixtures 3 and 6) needs a BUILT binary. FATAL,
+# not a skip: the whole point of #8656 is that the range check now follows a
+# 120000 tree entry to the document it points at, and a suite that quietly
+# skipped itself would report green while re-admitting exactly the bug.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "git-blob-lines"
+
 # Two `..` reaches repo-root/.claude/commands/loom for an INSTALLED copy
 # (SCRIPTS_DIR is .loom/scripts there); one `..` reaches defaults/.claude/
 # commands/loom when running inside this source repo (SCRIPTS_DIR is
@@ -182,6 +191,69 @@ EOF
 OUT="$(run_vpr "$TRUE_TRACKED_BODY")"
 RC=$?
 assert_eq "0" "$RC" "a correct tracked-file count does not miss"
+
+echo
+echo "=== Fixture 6: .loom/docs symlinks (#8656) ==="
+# Since #7842 every `.loom/docs/*.md` with a `defaults/docs/` counterpart is a
+# SYMLINK on origin/main (tree mode 120000, target relative to the link's own
+# directory). Reading such a path with `git show <rev>:<path> | wc -l` — what
+# this script did before #8656 — measures the LINK-TARGET STRING, so every
+# in-range citation under `.loom/docs/` was reported as a miss and the script
+# BLOCKS FILING on it. This fixture reproduces that exact tree shape.
+(
+    cd "$FIXTURE_REPO" || exit 1
+    mkdir -p defaults/docs .loom/docs
+    seq 1 300 > defaults/docs/longdoc.md            # 300 lines, the real document
+    ln -sf ../../defaults/docs/longdoc.md .loom/docs/longdoc.md
+    ln -sf ../../defaults/docs/gone.md .loom/docs/dangling.md   # points at nothing
+    git add -A
+    git commit -qm "symlinked installed docs" >/dev/null
+    git update-ref refs/remotes/origin/main refs/heads/main
+)
+# Guard the fixture itself: if these stop being 120000 entries the three cases
+# below would pass for the wrong reason.
+assert_eq "120000" \
+    "$(git -C "$FIXTURE_REPO" ls-tree origin/main .loom/docs/longdoc.md | awk '{print $1}')" \
+    "fixture: .loom/docs/longdoc.md is a symlink tree entry, as on real origin/main"
+
+IN_RANGE_BODY="$BODY_DIR/symlink-in-range.md"
+cat > "$IN_RANGE_BODY" <<'EOF'
+See `.loom/docs/longdoc.md:100-200` — an in-range span of a 300-line document
+reached through its installed symlink path.
+EOF
+OUT="$(run_vpr "$IN_RANGE_BODY")"
+RC=$?
+assert_eq "0" "$RC" "an in-range span under .loom/docs/ exits 0 (the symlink is followed)"
+assert_contains "$OUT" "all references check out" "the in-range symlink citation is not reported as a miss"
+
+OUT_OF_RANGE_BODY="$BODY_DIR/symlink-out-of-range.md"
+cat > "$OUT_OF_RANGE_BODY" <<'EOF'
+See `.loom/docs/longdoc.md:250-9999` — genuinely past the end of the document.
+EOF
+OUT="$(run_vpr "$OUT_OF_RANGE_BODY")"
+RC=$?
+assert_eq "1" "$RC" "a genuinely out-of-range span under .loom/docs/ still misses"
+assert_contains "$OUT" "BAD LINE RANGE" "the out-of-range symlink citation is labeled"
+assert_contains "$OUT" ".loom/docs/longdoc.md:250-9999" "the citation is quoted as the body wrote it"
+assert_contains "$OUT" "defaults/docs/longdoc.md" "the message names the RESOLVED path, not the link"
+assert_contains "$OUT" "has only 300 lines" "the message reports the resolved document's real line count"
+
+DANGLING_BODY="$BODY_DIR/symlink-dangling.md"
+cat > "$DANGLING_BODY" <<'EOF'
+See `.loom/docs/dangling.md:1-5` — the link exists in the tree but its target
+does not.
+EOF
+OUT="$(run_vpr "$DANGLING_BODY")"
+RC=$?
+assert_eq "0" "$RC" "a dangling symlink does not block filing — unreadable is inconclusive, not a disproof"
+assert_contains "$OUT" "BROKEN SYMLINK" "a dangling symlink is reported as unreadable"
+if [[ "$OUT" == *"has only 0 lines"* ]]; then
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: a dangling symlink must NOT be reported as a 0-line file"
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: a dangling symlink is never reported as a 0-line file"
+fi
 
 echo
 echo "=== Usage / prerequisite errors ==="

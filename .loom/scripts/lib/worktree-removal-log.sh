@@ -51,7 +51,9 @@ loom_record_worktree_removal() {
   mkdir -p "$log_dir" 2>/dev/null || return 0
 
   local ts branch_field
-  ts="$(date -u +%Y-%m-%dT%H:%M:%S+00:00 2>/dev/null)" || return 0
+  # Issue #8504: trailing `Z`, matching the Rust writer
+  # (`removal_log.rs`) this line format must stay byte-identical with.
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || return 0
   if [[ -n "$branch" ]]; then
     branch_field="\"$(_loom_removal_log_json_escape "$branch")\""
   else

@@ -23,3 +23,77 @@ scripts/judge-fallback-guard.sh
 scripts/tests/test-judge-fallback-cap.sh
 commands/loom/judge.md
 roles/judge.md
+
+# #5690: a `Part of #N` trailer written inside an inline code span is
+# deliberately NOT read as a declaration (#5234's code-span exclusion, which is
+# correct and unchanged here), so merge-pr.sh's partial-increment
+# `loom:building` -> `loom:issue` reset (#3667) silently no-ops — the incident
+# on PR #5686 / issue #5240. Two local fixes, neither of which touches the
+# loom-daemon parser: a non-blocking pre-merge warning in merge-pr.sh
+# (_warn_backticked_partial_increment_trailers + its two text helpers, with
+# regression cases in the partial-increment suite) and a plain-text-not-
+# backticked caution next to the trailer example in builder-pr.md (both
+# installed copies, which must stay byte-identical).
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+scripts/merge-pr.sh
+scripts/tests/test-merge-pr-partial-increment.sh
+commands/loom/builder-pr.md
+roles/builder-pr.md
+
+# #5791: `discover_epic_children` (champion-common.md) gained a title-prefix
+# containment source -- issues titled "[Epic #N] Phase " count as strong
+# evidence even with no phase marker, no native sub-issue link, no epic-body
+# task-list entry, and no literal "Epic #N" body phrase. Recurred twice on
+# this repo (#5774's and #5784's children) before the fix landed directly in
+# the vendored copy. Pin both the fixed file and its new regression test so a
+# routine resync cannot silently revert the fix or drop the orphaned test.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+commands/loom/champion-common.md
+scripts/tests/test-champion-epic-children-title-prefix.sh
+
+# #5837: the follow-on half of #5791. champion-epic.md's own PER-PHASE queries
+# -- "Step 2.75: Pre-Creation Existence Check" and "Phase Progression" ->
+# "Detecting Phase Completion" -- still read the phase marker alone, so epic
+# #5784's Phase 4 (child #5798, title-prefix only) counted as OPEN=0 CLOSED=0
+# and would have been narrated "0 closed / 0 total". Both sites now union a
+# phase-scoped `title_prefix_phase_issues()` with the marker source, and the
+# zero-children case says "count unavailable" instead of asserting a zero
+# (epic #3438's Phase 2 is prose-tracked only and is undetectable by design).
+# Pin the fixed file and its new regression test so a routine resync cannot
+# silently revert the fix or drop the orphaned test.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+commands/loom/champion-epic.md
+scripts/tests/test-champion-epic-phase-progress-title-prefix.sh
+
+# #5741: `_check_required_check_freshness`'s `loom-daemon merge-pr stale-checks`
+# call is now wrapped in `forge_cmd_perm_safe` (the #6074/#6752 credential
+# ladder), because the App installation cannot read branch-protection rules on
+# this repo — `403 Resource not accessible by integration` blocked EVERY merge
+# until an operator applied rung 3 by hand. That call lives in merge-pr.sh,
+# already pinned above; these two suites source the extracted function and must
+# therefore source lib/forge-helpers.sh, or every case fails with exit 127.
+# They are pinned so a resync cannot revert the suites while leaving the pinned
+# merge-pr.sh calling a function the harness no longer defines.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+scripts/tests/test-merge-pr-stale-required-checks.sh
+scripts/tests/test-merge-pr-stale-check-redate.sh
+
+# #5783: sweep-lease-publish.sh now blocks on a fresh lease from ANY other
+# (host, sweep) pair on the same issue, not only a different host's; and
+# worktree.sh's "existing worktree has uncommitted changes -> preserve" fast
+# path calls lib/worktree-foreign-lease-guard.sh first (refuses on 2+ fresh
+# leases). Landed directly in the vendored copies (5e193191) after #5781 was
+# claimed by 4 same-host sweeps that collided in one worktree. Unpinned, the
+# local-fix guard blocked every scheduled resync of this repo (exit 2 on all
+# three dispatch hosts, 15-44 consecutive failures, installed Loom stuck at
+# 0.19.487), so none of the other ~70 upstream updates arrived either.
+# The two helper/test files have no upstream counterpart; pinned so a resync
+# can never orphan or remove them.
+# worktree.sh is the costly pin: upstream is actively porting it to
+# loom-daemon subcommands, so unpin as soon as the equivalent fix lands in
+# rjwalters/loom's defaults/ tree.
+scripts/sweep-lease-publish.sh
+scripts/tests/test-sweep-lease-publish.sh
+scripts/worktree.sh
+scripts/lib/worktree-foreign-lease-guard.sh
+scripts/tests/test-worktree-foreign-lease-guard.sh

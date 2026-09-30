@@ -51,12 +51,25 @@
 #   .loom/runtimes/         <- defaults/runtimes/         (recursive; BACKFILLED if absent, #4688)
 #   .loom/bin/              <- defaults/.loom/bin/        (recursive; live consumer CLI)
 #   .claude/commands/loom/  <- defaults/.claude/commands/loom/ (recursive)
+#   .agents/skills/         <- defaults/.agents/skills/       (recursive; BACKFILLED if
+#                                                              absent like .loom/runtimes/
+#                                                              above, #8673 — MARKER-GATED,
+#                                                              not a plain resync_tree(): a
+#                                                              destination SKILL.md missing
+#                                                              the `<!-- loom-managed-skill -->`
+#                                                              marker is left alone and
+#                                                              logged, see resync_agent_skills())
 #   .claude/README.md       <- defaults/.claude/README.md      (single file, #5264)
 #   .github/CONFIGURATION.md <- defaults/.github/CONFIGURATION.md (single file, #5264)
 #   .loom/biome.jsonc       <- defaults/.loom/biome.jsonc      (single file, BACKFILLED
 #                                                              if absent, #6031)
 #   .claude/biome.jsonc     <- defaults/.claude/biome.jsonc    (single file, BACKFILLED
 #                                                              if absent, #6031)
+#   .loom/pricing.json      <- defaults/pricing.json           (single file, BACKFILLED
+#                                                              if absent, #8177 — the
+#                                                              model rate card
+#                                                              loom-daemon prices token
+#                                                              usage from)
 #
 # It also applies one targeted field edit outside the pure-copy model (#4285):
 # a root package.json whose "name" is exactly "loom-workspace" (the Loom
@@ -146,14 +159,33 @@
 # #4669 established.
 #
 # EXPLICITLY OUT OF SCOPE (never touched by resync — updated by other mechanisms):
-#   .loom/config.json       - operator-owned; needs merge-semantics design
+#   .loom/config.json       - operator-owned; needs merge-semantics design.
+#                             LOAD-BEARING for session mode (#8884): the
+#                             install-time `"mode": "session"` marker (and the
+#                             `terminals: []` / `autonomous.*.enabled: false`
+#                             key set it implies) persists precisely BECAUSE
+#                             this file is never touched here -- there is no
+#                             "restore the default terminals array" step to
+#                             suppress. A reinstall goes through
+#                             loom-daemon init's merge_config_file() instead,
+#                             which re-asserts the key set whenever it sees the
+#                             marker. Locked in by
+#                             defaults/scripts/tests/test-session-mode.sh, so a
+#                             future change that DOES start resyncing this file
+#                             fails there rather than silently re-arming the
+#                             tmux pool in a session-mode repo. See
+#                             defaults/docs/session-mode.md.
 #   CLAUDE.md               - repo-customized at install; needs managed-section markers,
-#                             WITH ONE NARROW EXCEPTION (#6612), mirroring
-#                             .loom/CLAUDE.md's #5559 exception below: resync DOES
-#                             restamp just the "**Loom Version**" / "Last updated"
-#                             header lines — a targeted field edit (see
-#                             resync_root_claude_md_version_header() below), NOT a
-#                             whole-file resync/regenerate. That still needs the
+#                             WITH ONE NARROW EXCEPTION (#6612, narrowed further by
+#                             #8147), mirroring .loom/CLAUDE.md's #5559 exception
+#                             below: resync DOES delete a leftover
+#                             "**Loom Version**" header line — a targeted,
+#                             one-time field REMOVAL (see
+#                             strip_claude_md_version_header() below), NOT a
+#                             whole-file resync/regenerate, and no longer a
+#                             restamp: the stamp is gone from the template
+#                             entirely because this file is injected into every
+#                             agent session's prompt prefix. That still needs the
 #                             managed-section-markers design this comment
 #                             references; the rest of the file's body content is
 #                             left untouched.
@@ -162,15 +194,14 @@
 #                             .loom/AGENTS.md is regenerated by install scaffolding
 #                             from defaults/.loom/AGENTS.md, not by resync — same
 #                             posture as .loom/CLAUDE.md, WITH ONE NARROW EXCEPTION
-#                             (#5559): resync DOES restamp just the "**Loom
-#                             Version**" / "Last updated" header lines in
-#                             .loom/CLAUDE.md — a targeted field edit (see
-#                             resync_claude_md_version_header() below, which
-#                             mirrors the package.json version-stub edit's
-#                             pattern), NOT a whole-file resync/regenerate. That
-#                             still needs the managed-section-markers design
-#                             this comment references; the rest of the file's
-#                             body content is left untouched.
+#                             (#5559, narrowed by #8147): resync DOES delete a
+#                             leftover "**Loom Version**" header line from
+#                             .loom/CLAUDE.md — a targeted field removal (see
+#                             strip_claude_md_version_header() below), NOT a
+#                             whole-file resync/regenerate. That still needs the
+#                             managed-section-markers design this comment
+#                             references; the rest of the file's body content is
+#                             left untouched.
 #   .github/labels.yml (the FILE itself), .github/workflows/*
 #                            - the FILE content is repo-customized (a consumer
 #                              may add their own labels above/below the
@@ -209,16 +240,20 @@
 # sweeps in that same checkout, so writing dozens of installed files there
 # mid-sweep risks exactly the contamination this whole restriction exists to
 # prevent. --output <dir> is the safe alternative: it creates a disposable,
-# DETACHED `git worktree` at HEAD under <dir> (never inside .loom/worktrees/,
-# and never touching the primary checkout's own files) and resyncs INTO that
-# staging worktree instead of REPO_ROOT — so it can be run from anywhere
-# (primary checkout or any linked worktree) at any time, including mid-sweep,
-# with zero risk to the live checkout. The staging worktree is a real,
-# independent git checkout: once the sync is complete you `cd` into it,
-# `git add -A && git commit` (and `git push` / open a PR) from there, then
-# `git worktree remove` it. See "OUTPUT-DIR STAGING MODE" further below for
-# the full mechanics. --dry-run + --output still creates (and then
-# auto-removes) the staging worktree, so a preview never leaves any residue.
+# DETACHED `git worktree` under <dir> (never inside .loom/worktrees/, and never
+# touching the primary checkout's own files) and resyncs INTO that staging
+# worktree instead of REPO_ROOT — so it can be run from anywhere (primary
+# checkout or any linked worktree) at any time, including mid-sweep, with zero
+# risk to the live checkout. #9550: the staging worktree is based on the
+# INVOKING checkout's HEAD (the worktree you are standing in), not the primary
+# checkout's, so a commit made there fast-forwards onto the branch you ran it
+# from; `--base <ref>` overrides that explicitly. The staging worktree is a
+# real, independent git checkout: once the sync is complete you `cd` into it,
+# `git add -- <the paths this run wrote>` + `git commit` (and `git push` / open
+# a PR) from there, then `git worktree remove` it. See "OUTPUT-DIR STAGING
+# MODE" further below for the full mechanics. --dry-run + --output still
+# creates (and then auto-removes) the staging worktree, so a preview never
+# leaves any residue.
 #
 # Local-override convention: list a relative path (e.g. `hooks/guard-destructive.sh`,
 # `scripts/foo.sh`, `roles/custom-role.md`, `docs/notes.md`, `bin/loom`,
@@ -263,13 +298,24 @@
 # normally prescribes (which is unsafe precisely when the daemon is actively
 # dispatching sweeps there). Mechanics:
 #   1. <dir> must not already exist. It is created via
-#      `git worktree add --detach <dir> HEAD` against the PRIMARY checkout's
-#      repository — a real, independent git checkout at the primary's current
-#      HEAD, registered as a linked worktree but living wherever the caller
-#      pointed <dir> (never inside .loom/worktrees/, so it can never collide
-#      with worktree.sh's bookkeeping). Creating it only touches git's
-#      worktree-registry metadata (.git/worktrees/) — it does not read, write,
-#      or lock any file in the primary checkout's own working tree.
+#      `git worktree add --detach <dir> <base>` against the PRIMARY checkout's
+#      repository — a real, independent git checkout, registered as a linked
+#      worktree but living wherever the caller pointed <dir> (never inside
+#      .loom/worktrees/, so it can never collide with worktree.sh's
+#      bookkeeping). Creating it only touches git's worktree-registry metadata
+#      (.git/worktrees/) — it does not read, write, or lock any file in the
+#      primary checkout's own working tree.
+#      WHICH HEAD <base> IS (#9550): the INVOKING checkout's HEAD — i.e.
+#      `git rev-parse HEAD` in the worktree you ran this from — not the
+#      primary checkout's. The documented use case is running --output from a
+#      linked feature worktree (the #4563 restriction forbids writing to the
+#      primary from there); basing the staging worktree on the primary's HEAD
+#      meant the staged commit's parent was not on the feature branch, so it
+#      could not be fast-forwarded in and had to be cherry-picked, and
+#      removing the staging worktree first left it dangling. `--base <ref>`
+#      (or LOOM_RESYNC_BASE) overrides the default explicitly; the completion
+#      message then points at `git cherry-pick <sha>` because the invoking
+#      branch may be ahead of the base that was chosen.
 #   2. Every destination this script would otherwise resolve under the
 #      primary checkout (.loom/hooks, .loom/scripts, .loom/roles, .loom/docs,
 #      .loom/runtimes, .loom/bin, .claude/commands/loom, the single-file docs,
@@ -277,10 +323,17 @@
 #      .gitignore) is instead resolved under <dir>. defaults/ itself (the
 #      SOURCE of the sync) is still read from the primary checkout — that is
 #      a read, never a write, so it carries none of the #4563 hazard.
-#   3. On success the run prints the exact `cd <dir> && git add -A && git
-#      commit ... && git push` sequence to turn the staged tree into a
+#   3. On success the run prints the exact `cd <dir> && git add -- <paths>
+#      && git commit ... && git push` sequence to turn the staged tree into a
 #      resync commit (and PR) from a location that was never live-mid-sweep,
-#      plus the `git worktree remove` to clean up afterward.
+#      plus the `git worktree remove` to clean up afterward. #9141: that
+#      `git add` is an ALLOWLIST of the exact paths this run's managed
+#      surfaces cover — never `git add -A` with a credential exclusion list.
+#      An exclusion list stages every path nobody thought to list, which is
+#      how commit a9da48c2 swept an entire token-pool copy
+#      (`.loom/tokens.shadow-disabled-<ts>/`, 21 live `.token` files) into a
+#      resync commit; an allowlist cannot leak a path that is not on it, so no
+#      future credential location has to be predicted for it to stay safe.
 # Because step 1 creates a real worktree, the #4563 linked-worktree refusal
 # itself never applies when --output is given — there is nothing left for it
 # to protect, since nothing is written to the primary checkout either way.
@@ -326,7 +379,12 @@
 #                                                  # generate a COMPLETE resync in an
 #                                                  # isolated staging worktree at <dir>
 #                                                  # instead — safe from anywhere, any
-#                                                  # time, including mid-sweep (#6106)
+#                                                  # time, including mid-sweep (#6106).
+#                                                  # Based on the INVOKING checkout's
+#                                                  # HEAD (#9550)
+#   ./.loom/scripts/resync-installed.sh --output <dir> --base <ref>
+#                                                  # ... based on <ref> instead of the
+#                                                  # invoking checkout's HEAD (#9550)
 #   ./.loom/scripts/resync-installed.sh --force    # also apply an update that would remove
 #                                                  # a locally-diverged installed file's own
 #                                                  # line(s) (see LOCAL-DIVERGENCE PROTECTION, #7864)
@@ -339,6 +397,8 @@
 #   LOOM_RESYNC_OUTPUT=<dir>      - same as --output <dir> (for non-interactive
 #                                   callers). An explicit --output flag wins if
 #                                   both are given.
+#   LOOM_RESYNC_BASE=<ref>        - same as --base <ref> (#9550). Only consulted
+#                                   in --output mode; an explicit --base wins.
 #   LOOM_RESYNC_FORCE=1           - same as --force (for non-interactive callers).
 #
 # Exit codes:
@@ -389,6 +449,9 @@ FORCE=0
 # #6106: generate a complete resync in an isolated staging worktree instead of
 # writing to the primary checkout. Empty means "not requested".
 OUTPUT_DIR="${LOOM_RESYNC_OUTPUT:-}"
+# #9550: the commit the --output staging worktree is based on. Empty means the
+# default: the INVOKING checkout's HEAD (see OUTPUT-DIR STAGING MODE above).
+BASE_REF="${LOOM_RESYNC_BASE:-}"
 
 err()  { printf '%b\n' "${RED}ERROR: $*${NC}" >&2; }
 warn() { printf '%b\n' "${YELLOW}WARN: $*${NC}" >&2; }
@@ -422,6 +485,22 @@ while [[ $# -gt 0 ]]; do
             fi
             shift
             ;;
+        --base)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                err "--base requires a commit-ish argument (try --help)"
+                exit 1
+            fi
+            BASE_REF="$2"
+            shift 2
+            ;;
+        --base=*)
+            BASE_REF="${1#--base=}"
+            if [[ -z "$BASE_REF" ]]; then
+                err "--base requires a commit-ish argument (try --help)"
+                exit 1
+            fi
+            shift
+            ;;
         --help|-h)
             # Print the whole leading comment block (line 2 through the last
             # consecutive `#` line). Derived, not a hard-coded line range — the
@@ -447,6 +526,13 @@ if [[ -n "$OUTPUT_DIR" ]]; then
         /*) ;;
         *)  OUTPUT_DIR="$PWD/$OUTPUT_DIR" ;;
     esac
+fi
+
+# #9550: --base only means anything to the --output staging worktree. Say so
+# rather than silently ignoring it, so a mistyped invocation is visible.
+if [[ -n "$BASE_REF" && -z "$OUTPUT_DIR" ]]; then
+    warn "--base is only used by --output staging mode; ignoring it for this run."
+    BASE_REF=""
 fi
 
 # ---------- resolve the installed repo root (worktree-safe) ----------
@@ -565,6 +651,51 @@ remove_staging_worktree() {
     STAGING_WORKTREE_CREATED=0
 }
 
+# #9550: which commit the staging worktree is based on.
+#
+# INVOKING_HEAD_SHA is HEAD in the checkout the OPERATOR is standing in, which
+# is the documented place to run --output from (the #4563 restriction forbids
+# writing to the primary checkout from a linked worktree, so --output is the
+# sanctioned escape). It used to be based on the PRIMARY checkout's HEAD --
+# so when the invoking feature branch already carried commits, the staged
+# commit's parent was not on that branch: it could not be fast-forwarded in,
+# had to be cherry-picked, and went dangling if the staging worktree was
+# removed first. Defaulting to the invoking HEAD makes the common case
+# fast-forwardable; --base <ref> stays available for "stage against something
+# else on purpose", and then the cherry-pick hint is printed instead.
+#
+# Both sides resolve through the invoking worktree (a linked worktree shares
+# one object database with the primary, so any ref resolvable there resolves
+# here too). An unresolvable HEAD -- an unborn branch in a freshly `git init`ed
+# checkout -- falls back to the primary's HEAD with a warning, which is exactly
+# the pre-#9550 behaviour.
+INVOKING_HEAD_SHA=""
+STAGING_BASE_SHA=""
+STAGING_BASE_DESC=""
+if [[ -n "$OUTPUT_DIR" ]]; then
+    INVOKING_HEAD_SHA="$(git -C "${WORKTREE_TOP:-$PWD}" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    if [[ -n "$BASE_REF" ]]; then
+        STAGING_BASE_SHA="$(git -C "${WORKTREE_TOP:-$PWD}" rev-parse --verify --quiet "${BASE_REF}^{commit}" 2>/dev/null || true)"
+        if [[ -z "$STAGING_BASE_SHA" ]]; then
+            err "--base: not a commit in this repository: $BASE_REF"
+            exit 1
+        fi
+        STAGING_BASE_DESC="--base $BASE_REF"
+    elif [[ -n "$INVOKING_HEAD_SHA" ]]; then
+        STAGING_BASE_SHA="$INVOKING_HEAD_SHA"
+        STAGING_BASE_DESC="HEAD of the invoking checkout ${WORKTREE_TOP:-$PWD}"
+    else
+        STAGING_BASE_SHA="$(git -C "$REPO_ROOT" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+        if [[ -z "$STAGING_BASE_SHA" ]]; then
+            err "Could not resolve a commit to base the --output staging worktree on (no HEAD in ${WORKTREE_TOP:-$PWD} or $REPO_ROOT)."
+            err "Pass one explicitly with --base <ref>."
+            exit 1
+        fi
+        STAGING_BASE_DESC="HEAD of the primary checkout $REPO_ROOT (the invoking checkout has no resolvable HEAD)"
+        warn "The invoking checkout has no resolvable HEAD — basing the staging worktree on the primary checkout's HEAD instead."
+    fi
+fi
+
 if [[ -n "$OUTPUT_DIR" ]]; then
     if [[ -e "$OUTPUT_DIR" ]]; then
         err "--output directory already exists: $OUTPUT_DIR"
@@ -572,15 +703,16 @@ if [[ -n "$OUTPUT_DIR" ]]; then
         exit 1
     fi
     mkdir -p "$(dirname "$OUTPUT_DIR")" 2>/dev/null || true
-    if ! git -C "$REPO_ROOT" worktree add --detach -q "$OUTPUT_DIR" HEAD >/dev/null 2>&1; then
+    if ! git -C "$REPO_ROOT" worktree add --detach -q "$OUTPUT_DIR" "$STAGING_BASE_SHA" >/dev/null 2>&1; then
         err "Failed to create the staging worktree at $OUTPUT_DIR"
-        err "  (git -C $REPO_ROOT worktree add --detach $OUTPUT_DIR HEAD)"
+        err "  (git -C $REPO_ROOT worktree add --detach $OUTPUT_DIR $STAGING_BASE_SHA)"
         exit 1
     fi
     STAGING_WORKTREE_CREATED=1
     WRITE_ROOT="$OUTPUT_DIR"
     info "Staging a complete resync in a disposable worktree — the primary checkout is untouched:"
     info "  $OUTPUT_DIR"
+    info "  based on $STAGING_BASE_SHA ($STAGING_BASE_DESC)"
     # #6138: cover every exit path from this point forward (resolve_defaults
     # failure below, any later early exit, or a signal) until either the
     # dedicated cleanup_staged_tmp+remove_staging_worktree trap is installed
@@ -666,6 +798,121 @@ if ! resolve_defaults; then
 fi
 SOURCE_ROOT="$(dirname "$DEFAULTS_DIR")"
 
+# ---------- dogfood-repo detection (#8841) ----------
+#
+# DOGFOOD_WRITE_ROOT=1 means we are syncing the Loom SOURCE repo onto itself:
+# the repo we were invoked in owns the defaults/ tree (rung 1 above — the only
+# rung that resolves DEFAULTS_DIR inside REPO_ROOT), AND the tree we are writing
+# to carries a defaults/ tree of its own. That covers both shapes:
+#   - the plain self-resync, where WRITE_ROOT *is* REPO_ROOT;
+#   - a #6106 --output staging worktree, which is a full `git worktree add`
+#     checkout of this same repo and therefore has its own defaults/ copy.
+# This is what scripts/install-loom.sh's dogfood branch (`TARGET_PATH ==
+# LOOM_ROOT`, ~line 776) detects at initial-install time — the step that creates
+# the `.loom/docs/*.md -> ../../defaults/docs/*.md` symlinks in the first place.
+#
+# In every CONSUMER repo defaults/ is resolved through the sidecar/metadata
+# rungs above, so SOURCE_ROOT is some other directory entirely, this stays 0,
+# and the install stays what it has always been: real file copies, never
+# symlinks. Nothing below may make a consumer's install depend on a path
+# outside its own repository.
+#
+# The second condition is load-bearing, not belt-and-braces: --output mode
+# resolves DEFAULTS_DIR against the PRIMARY checkout while writing into the
+# staging worktree, so a link computed naively from SOURCE_ROOT would escape the
+# staged tree entirely (`../../../../elsewhere/loom/defaults/...`) and get
+# committed — exactly what check-docs-defaults-parity.sh's escaping-link check
+# rejects. sync_one() therefore links to the WRITE_ROOT-local counterpart of the
+# source file, and only after proving it exists and is byte-identical.
+DOGFOOD_WRITE_ROOT=0
+if [[ "$(abs_path "$SOURCE_ROOT")" == "$(abs_path "$REPO_ROOT")" ]] \
+   && is_usable_defaults_root "$WRITE_ROOT"; then
+    DOGFOOD_WRITE_ROOT=1
+fi
+
+# write_root_counterpart <src>
+#   $src re-rooted from the source checkout onto WRITE_ROOT — e.g.
+#   <primary>/defaults/docs/x.md -> <write-root>/defaults/docs/x.md. Prints
+#   nothing unless the result is an existing file whose bytes match $src, so a
+#   caller can treat an empty result as "no local counterpart to link to".
+#   Identity (same path in, same path out) in the plain self-resync case, where
+#   WRITE_ROOT and SOURCE_ROOT are the same directory.
+write_root_counterpart() {
+    local src="$1" src_abs source_abs write_abs rel candidate
+    src_abs="$(abs_file_path "$src")"
+    source_abs="$(abs_path "$SOURCE_ROOT")"
+    write_abs="$(abs_path "$WRITE_ROOT")"
+    [[ "$src_abs" == "$source_abs/"* ]] || return 0
+    rel="${src_abs#"$source_abs/"}"
+    [[ -n "$rel" ]] || return 0
+    candidate="${write_abs%/}/$rel"
+    [[ -f "$candidate" ]] || return 0
+    cmp -s "$src" "$candidate" 2>/dev/null || return 0
+    printf '%s' "$candidate"
+}
+
+# physical_dir_path <dir>
+#   $dir as a physical (symlink-resolved, `..`-free) absolute path, EVEN WHEN
+#   $dir does not exist yet: walk up to the deepest existing ancestor, resolve
+#   that with `pwd -P`, then re-append the not-yet-created tail. Prints nothing
+#   if not even `/` is reachable.
+#
+#   Plain abs_path() cannot do this — it `cd`s into its argument and falls back
+#   to the raw string when that fails, so a destination whose parent directory
+#   is itself brand new (a new `defaults/docs/<sub>/` subtree) would come back
+#   un-normalised, with any `..` left in place. The `../`-counting in
+#   relative_link_target() below needs a genuinely `..`-free physical path to be
+#   exact, because the kernel resolves `..` against REAL directories.
+physical_dir_path() {
+    local dir="$1" tail="" resolved
+    while [[ "$dir" != "/" && "$dir" != "." && ! -d "$dir" ]]; do
+        tail="$(basename "$dir")${tail:+/$tail}"
+        dir="$(dirname "$dir")"
+    done
+    [[ -d "$dir" ]] || return 0
+    resolved="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+    [[ -n "$resolved" ]] || return 0
+    printf '%s%s' "${resolved%/}" "${tail:+/$tail}"
+}
+
+# relative_link_target <src> <dst>
+#   The shortest `../`-prefixed path that, resolved from $dst's own directory,
+#   names $src — e.g. src=<root>/defaults/docs/x.md, dst=<root>/.loom/docs/x.md
+#   yields "../../defaults/docs/x.md", exactly the spelling every existing
+#   .loom/docs/ symlink (and scripts/check-docs-defaults-parity.sh's own fix
+#   hint, #7752) uses. Prints nothing when $src is not a readable file, when
+#   either path cannot be made physical+absolute, or when the two share no
+#   common ancestor — so a caller can treat an empty result as "not safely
+#   linkable" and fall through to a plain copy.
+#
+#   The caller must still verify the link it creates actually resolves to $src
+#   (sync_one does, and unlinks + copies if it does not) — nothing here touches
+#   the filesystem, which is what keeps --dry-run a true no-op.
+relative_link_target() {
+    local src="$1" dst="$2" src_abs dst_dir_abs up rest target
+    src_abs="$(abs_file_path "$src")"
+    dst_dir_abs="$(physical_dir_path "$(dirname "$dst")")"
+    [[ "$src_abs" == /* && "$dst_dir_abs" == /* ]] || return 0
+    # A `..` surviving in either path would make the `../` count below wrong.
+    [[ "$src_abs" != */../* && "$src_abs" != */.. ]] || return 0
+    [[ "$dst_dir_abs" != */../* && "$dst_dir_abs" != */.. ]] || return 0
+
+    # Walk up from $dst's directory until it is a prefix of $src, counting the
+    # levels climbed. String-prefix comparison on "$dir/" is exact here: both
+    # sides are physical, `..`-free absolute paths.
+    local dir="$dst_dir_abs"
+    up=""
+    while [[ "$dir" != "/" && "$src_abs" != "$dir/"* ]]; do
+        dir="$(dirname "$dir")"
+        up="../$up"
+    done
+    [[ "$src_abs" == "$dir/"* ]] || return 0
+    rest="${src_abs#"$dir/"}"
+    target="$up$rest"
+    [[ -n "$target" && "$target" != /* ]] || return 0
+    printf '%s' "$target"
+}
+
 # ---------- pre-resync shell-syntax gate (#6162 AC2) ----------------------
 #
 # #6162: an abandoned `git stash pop` conflict left live conflict markers in
@@ -733,8 +980,7 @@ else
 fi
 
 # Current source version (from the resolved SOURCE_ROOT's package.json). Used
-# by restamp_metadata() / resync_claude_md_version_header() /
-# resync_root_claude_md_version_header() below AND by the
+# by restamp_metadata() and resync_workspace_stub_version() below AND by the
 # #5980 crash-detection marker, so it is defined here — as soon as
 # SOURCE_ROOT is known — rather than down by its other callers.
 read_source_version() {
@@ -760,6 +1006,12 @@ LABEL_CHECK_BROKEN=0
 # reason LABEL_CHECK_BROKEN is: a surface sync that leaves the guard hooks
 # unrunnable is not a clean bill of health, even though the sync itself worked.
 GUARD_CHECK_BROKEN=0
+
+# The ownership marker every `loom-daemon generate-agent-skills`-produced
+# SKILL.md carries (issue #8673) — see resync_agent_skills() below. Kept as a
+# literal here rather than sourced from the Rust `agent_skills::MARKER`
+# constant: this script must run on a bare checkout with no built binary.
+AGENT_SKILL_MARKER="<!-- loom-managed-skill -->"
 
 IGNORE_FILE="$WRITE_ROOT/.loom/resync-ignore"
 
@@ -1005,17 +1257,363 @@ removed_line_count() {
         2>/dev/null | wc -l | tr -d '[:space:]'
 }
 
-# dst_diverged_from_resync_lineage <dst>
-#   True (0 / success) when $dst's most recent commit (in the checkout it
-#   physically lives in — WRITE_ROOT, which is either the primary checkout or
-#   a #6106 staging worktree; either way a linked worktree of the SAME repo,
-#   so both share one object database and history) is anything OTHER than a
-#   routine resync commit — i.e. this installed copy has diverged from pure
-#   upstream lineage and needs protecting. False (1) when the last commit WAS
-#   a resync, or when $dst has no git history at all (nothing to protect, so
-#   never gates).
+# ---------- content-based lineage proof (#8676) ----------
+#
+# The subject heuristic above answers "who last TOUCHED this file", which is
+# only a proxy for the question that actually matters: "is this installed
+# content something Loom's own tooling put here, or a local fix?". The proxy
+# is wrong for every file that has not been touched since the repo's ORIGINAL
+# install, because that install's commit subject is whatever the installing
+# human typed. Real fleet examples, none of which match any alternative above:
+#
+#     tooling: install Repo Skills and Loom into the map repo
+#     Upgrade Loom to 0.18.0 (resync installed surfaces + role prompts)
+#     Install Loom orchestration (quick install from rjwalters/loom@cd4ab46e)
+#
+# So the first time upstream EDITED such a file, the old upstream text being
+# replaced was read as "lines unique to the installed copy" and the update was
+# blocked as a phantom local fix. #8676's incident: commit 25fbc1bb3 renamed
+# the jq variable `end` to `range_end` in scripts/archive-transcripts.sh for jq
+# 1.6 compatibility, and every repo on an older install reported that legitimate
+# fix blocked, each needing a hand-run --force. (Named without the `--arg` flag
+# prefix on purpose: test-jq-reserved-word-args.sh is a repo-wide `git grep` for
+# that literal shape in `*.sh` and cannot tell a comment from a live binding.)
+#
+# Decide by CONTENT first. If the installed file is byte-identical to its
+# source counterpart as that stood at the version this repo currently has
+# installed, then every byte of it came from a known upstream release and
+# there is no local fix to protect — whatever the last commit's subject says.
+# The installed version comes from .loom/install-metadata.json (loom_commit,
+# re-stamped by restamp_metadata() on every successful resync, else a
+# v<loom_version> tag) resolved in SOURCE_ROOT, the source checkout
+# resolve_defaults() already located.
+#
+# That exact-version comparison alone is not enough, because the RECORDED
+# version drifts ahead of the installed bytes: restamp_metadata() rewrites
+# loom_commit to the source HEAD on every non-dry run and runs BEFORE the
+# blocked-file exit, so the very run that blocks a file also records a version
+# whose content that file no longer matches. So the content proof accepts any
+# revision of that path reachable from the recorded version, not just the
+# recorded one — see dst_matches_any_ancestor_of_lineage_ref() below.
+#
+# This is strictly a NARROWING of the gate: it can only ever turn a BLOCK into
+# an update, never the reverse, and only on positive proof of pure upstream
+# lineage. Anything that makes the proof unobtainable — SOURCE_ROOT is not a
+# git checkout (tarball / vendored source), the recorded commit is absent from
+# it (never fetched, GC'd, shallow clone), no matching tag, missing or
+# "unknown" metadata, an unresolvable source path — falls straight through to
+# the subject heuristic and behaves exactly as it did before #8676. None of
+# Loom's installers clone shallowly today (`scripts/install-loom.sh` and
+# `install.sh` both do a full clone), so on a normal fleet host the recorded
+# short sha resolves and this fallback is the exception rather than the rule.
+#
+# The one local edit this cannot tell from upstream content is a deliberate
+# REVERT of an installed file to an older upstream revision of itself. That is
+# accepted: #7864 protects hand-written fixes that upstream does not have, and
+# resync's whole contract is to carry an installed surface forward to the
+# current release, so pinning an older upstream revision through this guard was
+# never the supported mechanism (.loom/resync-ignore is, and still
+# short-circuits ahead of this gate entirely).
+#
+# Deliberately NOT paired with a widened RESYNC_COMMIT_SUBJECT_RE. Teaching the
+# regex the hand-typed subjects above would mean matching free-form prose,
+# which is the misclassification #8098 removed; worse, it points the wrong way
+# — a subject like "Upgrade Loom to 0.18.0 (...)" that ALSO carried a hand fix
+# would become "routine" and be silently overwritten, the exact #7864 failure.
+# The one forward-looking half of that idea is already true: the only installer
+# path that commits installed surfaces (scripts/install/create-pr.sh) emits
+# `chore(loom): Install Loom <v> orchestration framework`, which the regex
+# already matches. Historical hand-typed subjects are what this content check
+# is for, and it handles them without weakening anything.
+
+# Resolved at most once per run (the answer cannot change mid-run) — "" until
+# INSTALLED_LINEAGE_RESOLVED flips to 1, and "" afterwards means unresolvable.
+INSTALLED_LINEAGE_REF=""
+INSTALLED_LINEAGE_RESOLVED=0
+
+# read_install_metadata_field <field>
+#   First non-empty string value of "<field>" in the installed metadata,
+#   preferring the tree the destination files themselves live in (WRITE_ROOT,
+#   i.e. the #6106 staging worktree when --output is in play) and falling back
+#   to the primary checkout. Deliberately sed-based, like resolve_defaults()
+#   above: this must work before/without jq or python3.
+read_install_metadata_field() {
+    local field="$1" meta value
+    for meta in "$WRITE_ROOT/.loom/install-metadata.json" "$REPO_ROOT/.loom/install-metadata.json"; do
+        [[ -f "$meta" ]] || continue
+        value="$(sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$meta" 2>/dev/null | head -1)"
+        if [[ -n "$value" ]]; then
+            printf '%s' "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# resolve_installed_lineage_ref
+#   0 when INSTALLED_LINEAGE_REF names a commit in SOURCE_ROOT that the
+#   installed surfaces were synced from; 1 when no such commit can be resolved.
+resolve_installed_lineage_ref() {
+    if [[ "$INSTALLED_LINEAGE_RESOLVED" -eq 1 ]]; then
+        [[ -n "$INSTALLED_LINEAGE_REF" ]]
+        return
+    fi
+    INSTALLED_LINEAGE_RESOLVED=1
+    INSTALLED_LINEAGE_REF=""
+
+    git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 1
+
+    local commit version candidate
+    commit="$(read_install_metadata_field loom_commit || true)"
+    version="$(read_install_metadata_field loom_version || true)"
+
+    local candidates=()
+    [[ -n "$commit" ]] && candidates+=("$commit")
+    # Both spellings: Loom tags releases `vX.Y.Z`, but a source checkout of a
+    # fork/mirror may carry the bare version instead.
+    [[ -n "$version" ]] && candidates+=("v$version" "$version")
+
+    for candidate in ${candidates[@]+"${candidates[@]}"}; do
+        # restamp_metadata() writes the literal string "unknown" when it cannot
+        # read the source HEAD; never treat that as a ref.
+        [[ "$candidate" == "unknown" || "$candidate" == "vunknown" ]] && continue
+        if git -C "$SOURCE_ROOT" rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+            INSTALLED_LINEAGE_REF="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# source_rel_path <src>
+#   $src's path relative to SOURCE_ROOT, with symlinks resolved, or "" (and a
+#   non-zero status) when it cannot be expressed that way. Source-side symlinks
+#   are real here: all of defaults/roles/*.md link to ../.claude/commands/loom/
+#   (#5222) and resync_tree() walks them with `find -L`, so without this a
+#   git lookup would fetch the link's TARGET PATH as its blob rather than the
+#   file's content. Resolution is one hop, not a chain — a deeper chain is left
+#   unresolved (falls back to the subject heuristic) rather than guessed at.
+#   `cd`+`pwd -P` rather than `readlink -f`, which is not portable to BSD/macOS.
+source_rel_path() {
+    local src="$1" dir base phys target root
+    dir="$(cd "$(dirname "$src")" 2>/dev/null && pwd -P)" || return 1
+    base="$(basename "$src")"
+    phys="$dir/$base"
+    if [[ -L "$phys" ]]; then
+        target="$(readlink "$phys" 2>/dev/null)" || return 1
+        [[ -n "$target" ]] || return 1
+        case "$target" in
+            /*) phys="$target" ;;
+            *)  dir="$(cd "$dir/$(dirname "$target")" 2>/dev/null && pwd -P)" || return 1
+                phys="$dir/$(basename "$target")" ;;
+        esac
+        [[ -L "$phys" ]] && return 1
+    fi
+    root="$(cd "$SOURCE_ROOT" 2>/dev/null && pwd -P)" || return 1
+    [[ "$phys" == "$root/"* ]] || return 1
+    printf '%s' "${phys#"$root/"}"
+}
+
+# dst_matches_lineage_ref_exactly <rel> <dst>
+#   True (0) when $dst is byte-identical to <rel>'s content at exactly
+#   INSTALLED_LINEAGE_REF. The common case, and a single object lookup.
+dst_matches_lineage_ref_exactly() {
+    local rel="$1" dst="$2"
+    # `<rev>:./<path>` is resolved relative to the -C directory, so this stays
+    # correct even when SOURCE_ROOT is a subdirectory of its git repo.
+    # cat-file -e first so a missing path is distinguished from empty content
+    # (a failed `git show` prints nothing, which `cmp` would call equal to an
+    # empty destination file).
+    git -C "$SOURCE_ROOT" cat-file -e "${INSTALLED_LINEAGE_REF}:./${rel}" 2>/dev/null || return 1
+    git -C "$SOURCE_ROOT" show "${INSTALLED_LINEAGE_REF}:./${rel}" 2>/dev/null \
+        | cmp -s - "$dst" 2>/dev/null
+}
+
+# dst_matches_any_ancestor_of_lineage_ref <rel> <dst>
+#   True (0) when $dst is byte-identical to <rel>'s content at ANY commit
+#   reachable from INSTALLED_LINEAGE_REF — i.e. the installed bytes are some
+#   upstream revision of this very path, not necessarily the recorded one.
+#
+#   Needed because the recorded version DRIFTS AHEAD of the installed bytes.
+#   restamp_metadata() rewrites loom_commit to the source HEAD on every non-dry
+#   run, and it runs BEFORE the blocked-file exit — so the very run that blocks
+#   a file also records a version whose content that file no longer matches.
+#   One blocked run is therefore enough to make the exact-ref rung above fail
+#   forever after, which is precisely the state #8676's 23 fleet repos are
+#   already in: they observed the block, and any `loom update` since stamped
+#   their metadata past the upstream commit that caused it. Without this rung
+#   the fix would only help repos that had not yet run a non-dry resync.
+#
+#   Reachability is anchored at INSTALLED_LINEAGE_REF rather than the source
+#   HEAD so "upstream content this repo could actually have received" stays the
+#   claim being proved; a revision that exists only on some unrelated branch, or
+#   only after the recorded version, proves nothing about how these bytes got
+#   here. Comparison is by blob id via one batched cat-file, so the cost is two
+#   processes and a path-filtered walk (~45ms on a 5k-commit history) on the
+#   rare file that is about to be blocked.
+dst_matches_any_ancestor_of_lineage_ref() {
+    local rel="$1" dst="$2" dst_blob commits hits
+    # --no-filters keeps this consistent with the exact rung, which compares
+    # against `git show` output (canonical, unfiltered repo content). A repo
+    # with a content filter on this path simply fails to match and falls
+    # through to the subject heuristic, which is the conservative direction.
+    dst_blob="$(git -C "$SOURCE_ROOT" hash-object --no-filters -- "$dst" 2>/dev/null)" || return 1
+    [[ -n "$dst_blob" ]] || return 1
+    commits="$(git -C "$SOURCE_ROOT" rev-list "$INSTALLED_LINEAGE_REF" -- "$rel" 2>/dev/null)" || return 1
+    [[ -n "$commits" ]] || return 1
+    # `grep -c`, NOT `grep -q`: this script runs under `set -o pipefail` (line
+    # 368), and `grep -q` exits the instant it matches, which SIGPIPEs the
+    # upstream `git cat-file` into status 141 and makes pipefail report the
+    # whole pipeline as failed — turning a SUCCESSFUL lineage proof into a
+    # phantom block, the very bug class #8676 is about. It only bites once the
+    # id list outgrows the pipe buffer, so it would have passed every small
+    # fixture here and surfaced only on a long-lived path. `-c` reads to EOF,
+    # so no early exit and no SIGPIPE; it exits 1 on zero matches, hence the
+    # `|| true` and the explicit count test.
+    #
+    # `missing`/`dangling` lines from cat-file cannot collide with an object id
+    # under -x (whole-line) matching, so an absent path is simply not a match.
+    hits="$(
+        while IFS= read -r commit; do
+            [[ -n "$commit" ]] && printf '%s:./%s\n' "$commit" "$rel"
+        done <<< "$commits" \
+            | git -C "$SOURCE_ROOT" cat-file --batch-check='%(objectname)' 2>/dev/null \
+            | grep -cxF "$dst_blob"
+    )" || true
+    [[ "$hits" =~ ^[0-9]+$ ]] && [[ "$hits" -gt 0 ]]
+}
+
+# dst_matches_installed_version <src> <dst>
+#   True (0) when $dst's bytes are provably an upstream revision of $src at or
+#   before the installed version — positive proof of pure upstream lineage.
+#   False (1) whenever no such revision matches OR the comparison cannot be
+#   made at all.
+dst_matches_installed_version() {
+    local src="$1" dst="$2" rel
+    [[ -n "$src" && -f "$dst" ]] || return 1
+    resolve_installed_lineage_ref || return 1
+    rel="$(source_rel_path "$src")" || return 1
+    [[ -n "$rel" ]] || return 1
+    dst_matches_lineage_ref_exactly "$rel" "$dst" && return 0
+    dst_matches_any_ancestor_of_lineage_ref "$rel" "$dst"
+}
+
+# ---------- install-baseline rung (#9178) ----------
+#
+# The content proof above needs SOURCE_ROOT to be a git checkout AND the
+# recorded loom_commit/loom_version to resolve inside it. When it cannot —
+# a vendored/tarball source, a GC'd or never-fetched commit, an
+# install-metadata.json with no loom_version at all — everything falls through
+# to the subject heuristic, and there the ORIGINAL install commit is the
+# permanent false positive:
+#
+#   "the copy's last change was not a routine resync" is ALSO true for every
+#   file nothing has touched since the repo's `Install Loom …` commit, because
+#   an install commit is not a resync commit. Condition 1 (the update removes
+#   a line unique to the installed copy) then becomes true on its own as
+#   upstream drifts. Neither condition required a human to touch anything, and
+#   the state is self-perpetuating: the block prevents the write, so the file's
+#   last-touching commit stays the install commit, so the next pass blocks
+#   again. Measured on `2AMLogic/fasterhenry`: ~50 files flagged, three sampled
+#   and all three byte-identical to the install commit; fleet-wide, ~63 of 75
+#   flagged files were this shape, and two repos could never resync at all.
+#
+# So answer the question STRUCTURALLY rather than from the commit's prose: a
+# file whose last-touching commit IS the commit that installed Loom into this
+# repo has, by construction, not been edited since the installer wrote it.
+# There is no local fix to protect.
+#
+# The install commit is identified by what it DID, not by what it was called:
+# it is the first commit to add `.loom/install-metadata.json`, the installer's
+# own stamp file. That deliberately avoids widening RESYNC_COMMIT_SUBJECT_RE,
+# which #8098 narrowed on purpose and #8676 explicitly declined to re-widen —
+# matching free-form install prose would also mark a commit that installed Loom
+# AND carried a hand fix as "routine" and silently overwrite it, the exact
+# #7864 failure. This rung cannot do that: a hand fix applied after the install
+# is a LATER commit, so the file's last-touching commit is no longer the
+# install commit and the file is still protected.
+#
+# Unresolvable (no install-metadata.json in history, a shallow clone, a source
+# tree that was never committed) simply answers "no" and falls through to the
+# subject heuristic, exactly as before.
+#
+# ONE deference, to #8098. The install commit and a commit that installed Loom
+# AND carried a hand fix are structurally identical — one commit, it added the
+# file, nothing has touched the file since — so no structural test can separate
+# them. #8098 already settled how to read that case: a subject that STARTS like
+# routine install/resync tooling output and then says something else
+# ("chore: install Loom v1 and also revert the guard fix") is a human extending
+# a routine subject, and means the commit carried more than routine output. So
+# when the baseline commit's subject has that shape, this rung stands down and
+# the file stays protected. That is prose matching, but only in the
+# CONSERVATIVE direction — it can only ever withhold this rung's amnesty, never
+# grant one — which is the opposite of the widened-regex idea #8676 rejected
+# (that one would have marked such a commit routine and silently overwritten
+# it). Every real #9178 subject is untouched by it: "Install Loom v0.19.174 and
+# Repo Skills v0.11.17 (#7)", "tooling: install Repo Skills and Loom into the
+# map repo" and "Upgrade Loom to 0.18.0 (...)" carry none of these prefixes.
+ROUTINE_SUBJECT_PREFIX_RE='^(\[skip ci\] )?(chore: install Loom v|chore: resync installed Loom surfaces|chore\(loom\): Install Loom )'
+
+INSTALL_BASELINE_COMMIT=""
+INSTALL_BASELINE_RESOLVED=0
+
+resolve_install_baseline_commit() {
+    if [[ "$INSTALL_BASELINE_RESOLVED" -eq 1 ]]; then
+        [[ -n "$INSTALL_BASELINE_COMMIT" ]]
+        return
+    fi
+    INSTALL_BASELINE_RESOLVED=1
+    INSTALL_BASELINE_COMMIT=""
+
+    local meta="$WRITE_ROOT/.loom/install-metadata.json"
+    # `tail -1` = the EARLIEST adding commit, so a repo that deleted and
+    # re-added the stamp keeps its original install as the baseline. `tail`
+    # reads to EOF, so no SIGPIPE under `set -o pipefail` (the trap #8676
+    # documents on dst_matches_any_ancestor_of_lineage_ref()).
+    INSTALL_BASELINE_COMMIT="$(
+        git -C "$WRITE_ROOT" log --diff-filter=A --format='%H' -- "$meta" 2>/dev/null | tail -1
+    )"
+    [[ -n "$INSTALL_BASELINE_COMMIT" ]]
+}
+
+# dst_last_touch_is_install_baseline <dst>
+#   True (0) when $dst has not been touched by any commit since the one that
+#   installed Loom into this repo — and that commit does not carry the #8098
+#   "routine subject a human extended" shape (see above).
+dst_last_touch_is_install_baseline() {
+    local dst="$1" last subject
+    resolve_install_baseline_commit || return 1
+    last="$(git -C "$WRITE_ROOT" log -1 --format='%H' -- "$dst" 2>/dev/null)"
+    [[ -n "$last" && "$last" == "$INSTALL_BASELINE_COMMIT" ]] || return 1
+
+    subject="$(git -C "$WRITE_ROOT" log -1 --format='%s' "$INSTALL_BASELINE_COMMIT" 2>/dev/null)"
+    if [[ "$subject" =~ $ROUTINE_SUBJECT_PREFIX_RE ]] && ! [[ "$subject" =~ $RESYNC_COMMIT_SUBJECT_RE ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# dst_diverged_from_resync_lineage <dst> [src]
+#   True (0 / success) when this installed copy has diverged from pure upstream
+#   lineage and needs protecting. False (1) when it has not.
+#
+#   Three independent ways to be "not diverged", checked in this order:
+#     1. #8676: $dst is byte-identical to some revision of $src at or before the
+#        installed version — proof by content that upstream put every byte there.
+#     2. #9178: $dst's last-touching commit IS the commit that installed Loom
+#        into this repo — so nothing has edited it since the installer wrote it.
+#     3. $dst's most recent commit (in the checkout it physically lives in —
+#        WRITE_ROOT, which is either the primary checkout or a #6106 staging
+#        worktree; either way a linked worktree of the SAME repo, so both share
+#        one object database and history) IS a routine install/resync commit,
+#        or $dst has no git history at all (nothing to protect, so never gates).
+#
+#   $src is optional so the function still answers usefully for a caller that
+#   only holds the destination path; omitting it just skips check 1.
 dst_diverged_from_resync_lineage() {
-    local dst="$1" subject
+    local dst="$1" src="${2:-}" subject
+    dst_matches_installed_version "$src" "$dst" && return 1
+    dst_last_touch_is_install_baseline "$dst" && return 1
     subject="$(git -C "$WRITE_ROOT" log -1 --format='%s' -- "$dst" 2>/dev/null)"
     [[ -n "$subject" ]] || return 1
     [[ "$subject" =~ $RESYNC_COMMIT_SUBJECT_RE ]] && return 1
@@ -1087,7 +1685,7 @@ trap 'cleanup_on_exit; exit 129' HUP
 
 # ---------- per-file sync ----------
 #
-# sync_one <src_file> <dst_file> <rel_label>
+# sync_one <src_file> <dst_file> <rel_label> [link_in_dogfood]
 #   Copies src -> dst when they differ (unless --dry-run), preserving the
 #   installed file's executable bit expectation. Only files that exist in the
 #   source tree ever reach this function, so repo-specific installed files with
@@ -1095,8 +1693,13 @@ trap 'cleanup_on_exit; exit 129' HUP
 #
 #   The copy is ALWAYS staged beside the destination and renamed into place
 #   (#4669) — never written in place — so no reader can observe a partial file.
+#
+#   link_in_dogfood (optional, default 0): when 1 AND this is the dogfood repo
+#   resyncing itself (DOGFOOD_WRITE_ROOT=1) AND the destination does not exist
+#   yet, install a relative symlink back into defaults/ instead of a real copy
+#   (#8841). Only the docs surface opts in — see the call site.
 sync_one() {
-    local src="$1" dst="$2" rel="$3"
+    local src="$1" dst="$2" rel="$3" link_in_dogfood="${4:-0}"
 
     # #4669: never rewrite the script this process is executing while the rest
     # of the run is still in flight. Record it and apply it once every other
@@ -1127,6 +1730,60 @@ sync_one() {
         return 0
     fi
 
+    # #8841: create the dogfood symlink for a BRAND-NEW file. The guard just
+    # above only ever PRESERVED an existing symlink — it never created one — so
+    # a `defaults/docs/*.md` added in the same wave as a resync run had no
+    # `.loom/docs/` counterpart for it to protect and fell through to the
+    # plain-copy "create" branch below, materializing a second real copy of a
+    # file the rest of `.loom/docs/` reaches by symlink. That is exactly the
+    # drift check-docs-defaults-parity.sh's check 1b rejects (#7752), and it
+    # turned `main` red when `private-session-dispatch.md` landed that way.
+    #
+    # Scoped three ways, all of which must hold:
+    #   - the caller opted in (docs only — `.loom/hooks`, `.loom/runtimes` and
+    #     `.loom/bin` are deliberately real copies even here, and `.loom/roles`,
+    #     `.loom/scripts` and `.claude/commands/loom` are whole-DIRECTORY
+    #     symlinks whose members never reach this create branch at all);
+    #   - DOGFOOD_WRITE_ROOT=1, so a consumer repo keeps getting real copies;
+    #   - the source file has a byte-identical counterpart INSIDE WRITE_ROOT to
+    #     aim at, so the link never leaves the tree being written (the --output
+    #     staging case; identity in a plain self-resync);
+    #   - relative_link_target() produced a relative target at all, AND the link
+    #     it created verifiably resolves to $src's bytes (checked below, after
+    #     the fact — a link that resolves anywhere else, or nowhere, is unlinked
+    #     and replaced by an ordinary copy).
+    if [[ "$link_in_dogfood" -eq 1 && "$DOGFOOD_WRITE_ROOT" -eq 1 && ! -e "$dst" && ! -L "$dst" ]]; then
+        local link_src link_target
+        link_src="$(write_root_counterpart "$src")"
+        link_target=""
+        [[ -n "$link_src" ]] && link_target="$(relative_link_target "$link_src" "$dst")"
+        if [[ -n "$link_target" ]]; then
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                N_UPDATED=$((N_UPDATED + 1))
+                printf '%b\n' "  ${BOLD}would create${NC} $rel ${YELLOW}(symlink -> $link_target)${NC}"
+                return 0
+            fi
+            mkdir -p "$(dirname "$dst")" 2>/dev/null
+            if ln -s "$link_target" "$dst" 2>/dev/null; then
+                # Verify through the link: `-f` follows it, so this fails for a
+                # dangling link, and `cmp` proves it landed on THIS source file
+                # rather than some other same-named file up the tree.
+                if [[ -f "$dst" ]] && cmp -s "$src" "$dst" 2>/dev/null; then
+                    N_UPDATED=$((N_UPDATED + 1))
+                    printf '%b\n' "  ${GREEN}created${NC}   $rel ${YELLOW}(symlink -> $link_target)${NC}"
+                    return 0
+                fi
+                rm -f "$dst" 2>/dev/null
+                warn "$rel: dogfood symlink -> $link_target did not resolve to the source file; installing a real copy instead."
+            else
+                # Fall through to a real copy rather than fail the run: a plain
+                # file is still correct content, just drift the parity check
+                # will flag on the next CI run.
+                warn "$rel: could not create the dogfood symlink -> $link_target; installing a real copy instead."
+            fi
+        fi
+    fi
+
     if [[ -f "$dst" ]] && cmp -s "$src" "$dst" 2>/dev/null; then
         note "  ${GREEN}unchanged${NC} $rel"
         N_UNCHANGED=$((N_UNCHANGED + 1))
@@ -1146,11 +1803,20 @@ sync_one() {
     if [[ "$verb_past" == "updated" ]]; then
         local removed=0
         removed="$(removed_line_count "$src" "$dst")"
-        if [[ "${removed:-0}" -gt 0 ]] && dst_diverged_from_resync_lineage "$dst"; then
+        if [[ "${removed:-0}" -gt 0 ]] && dst_diverged_from_resync_lineage "$dst" "$src"; then
             if [[ "$FORCE" -eq 1 ]]; then
                 warn "$rel: forcing past local-divergence protection — this overwrite removes $removed line(s) present only in the installed copy (--force)."
             else
                 warn "$rel: the installed copy has $removed line(s) not present in the new source, and its last change was NOT a routine resync — this looks like a local fix that this sync would silently revert."
+                # #9178: name the commit the decision was made from. Every
+                # reported false positive so far was "this is the INSTALL
+                # commit, not an edit" — visible at a glance here, and no
+                # longer reachable (that case now clears at rung 2 of
+                # dst_diverged_from_resync_lineage), but a future
+                # misclassification is diagnosable without re-deriving it.
+                local last_touch
+                last_touch="$(git -C "$WRITE_ROOT" log -1 --format='%h %ad %s' --date=short -- "$dst" 2>/dev/null || true)"
+                [[ -n "$last_touch" ]] && warn "  Decided from its last-touching commit: $last_touch"
                 warn "  Review before proceeding: diff -u '$dst' '$src'"
                 warn "  Re-run with --force once you've confirmed the removal is intentional (e.g. the fix landed upstream too)."
                 record_blocked "$rel"
@@ -1260,6 +1926,11 @@ apply_deferred_self_sync() {
 #   - defaults_prefix : defaults-relative prefix for the .loom-internal.list
 #                       ownership-boundary check (e.g. "roles", "docs",
 #                       ".claude/commands/loom", ".loom/bin").
+#   link_in_dogfood (optional 5th arg, default 0): forwarded verbatim to
+#   sync_one — 1 opts this surface into installing a brand-new file as a
+#   relative symlink back into defaults/ when (and only when) this is the
+#   dogfood repo resyncing itself (#8841). Only the docs surface passes 1.
+#
 #   A missing src_dir is a silent no-op. Existing sync_one semantics (ignore
 #   list, symlink skip, idempotent copy, --dry-run) apply per file.
 #
@@ -1280,6 +1951,7 @@ apply_deferred_self_sync() {
 #   into defaults/) is untouched and still runs first.
 resync_tree() {
     local src_dir="$1" dst_dir="$2" report_prefix="$3" defaults_prefix="$4"
+    local link_in_dogfood="${5:-0}"
     [[ -d "$src_dir" ]] || return 0
     info "Resyncing ${dst_dir#"$WRITE_ROOT/"}/ from ${src_dir#"$REPO_ROOT/"}/ ..."
     local src rel
@@ -1290,7 +1962,43 @@ resync_tree() {
         if is_loom_internal "$defaults_prefix/$rel"; then
             continue
         fi
-        sync_one "$src" "$dst_dir/$rel" "$report_prefix/$rel"
+        sync_one "$src" "$dst_dir/$rel" "$report_prefix/$rel" "$link_in_dogfood"
+    done < <(find -L "$src_dir" -type f -print0 2>/dev/null | sort -z)
+}
+
+# ---------- .agents/skills/ marker-gated resync (#8673) ----------
+#
+# Every `defaults/.agents/skills/loom-<name>/SKILL.md` is generated by
+# `loom-daemon generate-agent-skills` and carries $AGENT_SKILL_MARKER
+# immediately after its YAML frontmatter — the cross-vendor skill-discovery
+# surface Codex, Kimi Code, Mistral Vibe, and Grok read natively
+# (`runtime-adapters.md` §5). resync_tree()'s ordinary rule ("Loom owns a path
+# iff defaults/ ships it") is not precise enough here: a consumer could
+# author their OWN `.agents/skills/loom-custom/SKILL.md`, or hand-edit a
+# generated one and strip the marker to deliberately detach it from
+# generation — either way that destination file must never be silently
+# overwritten. resync_agent_skills() pre-filters on the marker before
+# deferring to sync_one() for everything else (the ignore-list, symlink
+# guard, staged atomic write, and #7864 local-divergence protection for files
+# that DO carry the marker and have diverged some other way).
+resync_agent_skills() {
+    local src_dir="$1" dst_dir="$2"
+    [[ -d "$src_dir" ]] || return 0
+    info "Resyncing ${dst_dir#"$WRITE_ROOT/"}/ from ${src_dir#"$REPO_ROOT/"}/ (marker-gated, #8673) ..."
+    local src rel dst first_line
+    while IFS= read -r -d '' src; do
+        rel="${src#"$src_dir/"}"
+        dst="$dst_dir/$rel"
+        if [[ -f "$dst" && ! -L "$dst" ]]; then
+            first_line=""
+            IFS= read -r first_line < "$dst" 2>/dev/null || true
+            if [[ "$first_line" != "$AGENT_SKILL_MARKER" ]] && ! grep -qF "$AGENT_SKILL_MARKER" "$dst" 2>/dev/null; then
+                note "  ${YELLOW}skipped${NC}   agents-skills/$rel ${YELLOW}(no $AGENT_SKILL_MARKER marker — consumer-authored or detached from generation)${NC}"
+                N_SKIPPED=$((N_SKIPPED + 1))
+                continue
+            fi
+        fi
+        sync_one "$src" "$dst" "agents-skills/$rel"
     done < <(find -L "$src_dir" -type f -print0 2>/dev/null | sort -z)
 }
 
@@ -1544,7 +2252,13 @@ if [[ -d "$WRITE_ROOT/.loom/roles" ]]; then
     resync_tree "$DEFAULTS_DIR/roles" "$WRITE_ROOT/.loom/roles" "roles" "roles"
 fi
 if [[ -d "$WRITE_ROOT/.loom/docs" ]]; then
-    resync_tree "$DEFAULTS_DIR/docs" "$WRITE_ROOT/.loom/docs" "docs" "docs"
+    # `1` = opt this surface into the #8841 dogfood NEW-FILE symlink path: in
+    # THIS source repo every `.loom/docs/*.md` is a symlink to its
+    # `defaults/docs/` counterpart (#7752, enforced by
+    # scripts/check-docs-defaults-parity.sh check 1b), so a newly-added doc has
+    # to be created as one too rather than as a second real copy. No other
+    # surface passes 1, and a consumer repo (DOGFOOD_WRITE_ROOT=0) ignores it.
+    resync_tree "$DEFAULTS_DIR/docs" "$WRITE_ROOT/.loom/docs" "docs" "docs" 1
 fi
 # `.loom/runtimes/` is deliberately UNCONDITIONAL, unlike the surfaces above
 # (#4688): every one of the gated blocks only backfills a surface the
@@ -1564,6 +2278,11 @@ fi
 if [[ -d "$WRITE_ROOT/.claude/commands/loom" ]]; then
     resync_tree "$DEFAULTS_DIR/.claude/commands/loom" "$WRITE_ROOT/.claude/commands/loom" "commands/loom" ".claude/commands/loom"
 fi
+# `.agents/skills/` (#8673): deliberately UNCONDITIONAL, like `.loom/runtimes/`
+# above (#4688) — it is a provisioning gap for any repo installed before this
+# surface existed, not an opt-in the consumer must already have. Marker-gated
+# (see resync_agent_skills() above), never a plain resync_tree() call.
+resync_agent_skills "$DEFAULTS_DIR/.agents/skills" "$WRITE_ROOT/.agents/skills"
 
 # ---------- single-file consumer-install docs (#5264) ----------
 #
@@ -1604,6 +2323,27 @@ if [[ -f "$DEFAULTS_DIR/.loom/biome.jsonc" ]]; then
 fi
 if [[ -f "$DEFAULTS_DIR/.claude/biome.jsonc" ]]; then
     sync_one "$DEFAULTS_DIR/.claude/biome.jsonc" "$WRITE_ROOT/.claude/biome.jsonc" ".claude/biome.jsonc"
+fi
+
+# ---------- single-file model rate card (#8177) ----------
+#
+# `.loom/pricing.json` is the whole point of the asset: it lets a vendor price
+# change reach the fleet on a RESYNC instead of on a Loom release. Without this
+# call the asset would only ever arrive with a fresh install, which is exactly
+# the release-coupling #8177 set out to remove.
+#
+# Same shape as the Biome configs above and for the same reasons: UNCONDITIONAL
+# (a new payload file no already-installed repo has, so a destination-gated
+# sync would never deliver it) but gated on the SOURCE existing (a resync run
+# against an older `defaults/` checkout is a clean no-op). `sync_one` still
+# honors `.loom/resync-ignore` and still refuses to clobber a symlinked target,
+# so a consumer who deliberately pins a fork of the rate card is untouched.
+#
+# loom-daemon treats a missing or malformed copy as "use the rate card compiled
+# into this build" and says so at warn level, so a partial or skipped sync
+# degrades loudly to correct-as-of-build rates rather than to zero.
+if [[ -f "$DEFAULTS_DIR/pricing.json" ]]; then
+    sync_one "$DEFAULTS_DIR/pricing.json" "$WRITE_ROOT/.loom/pricing.json" ".loom/pricing.json"
 fi
 
 # ---------- remove retired payload files (#5981) ----------
@@ -1706,149 +2446,75 @@ resync_workspace_stub_version
 # (read_source_version() moved up to right after SOURCE_ROOT is resolved,
 # #5980 — the crash-detection marker needs it before this section runs.)
 
-# ---------- targeted field edit: .loom/CLAUDE.md version header (#5559) ----------
+# ---------- targeted field removal: CLAUDE.md version header (#5559/#6612, now #8147) ----------
 #
-# .loom/CLAUDE.md is the full vendored guide, generated ONCE from
-# defaults/.loom/CLAUDE.md's {{LOOM_VERSION}}/{{INSTALL_DATE}} template by
-# install-time scaffolding (`loom-daemon init`) — not by this script (see the
-# "EXPLICITLY OUT OF SCOPE" header comment above). Because resync never
-# touches it, but DOES keep .loom/install-metadata.json's loom_version current
-# every run (restamp_metadata() below), the two stamps silently drift apart:
-# install-metadata.json always reports the freshly-resynced version while the
-# guide's own "**Loom Version**" header keeps showing whatever version was
-# installed originally. scripts/install-loom.sh's idempotency check prefers
-# install-metadata.json, so it never notices the stale header (#5559).
+# Both `.loom/CLAUDE.md` (the full vendored guide, generated ONCE at install
+# time by `loom-daemon init`) and root `CLAUDE.md` (the repo-customized
+# operating core) used to carry a `**Loom Version**: X.Y.Z` header that this
+# script re-stamped to the source version on every run — #5559 and #6612
+# respectively, because nothing else kept them from drifting away from
+# .loom/install-metadata.json's loom_version.
 #
-# Rather than regenerating the whole file (which would need the
-# managed-section-markers design the OUT OF SCOPE comment references, and
-# .loom/CLAUDE.md is not otherwise repo-customized so a full regenerate is
-# arguably safe but out of this fix's scope), this does a targeted field edit
-# of just the "**Loom Version**" and "Last updated" lines — mirroring the
-# resync_workspace_stub_version() pattern above. The "**Installation Date**"
-# header line is deliberately left untouched: it records the ORIGINAL install
-# date, not a last-touched date, and resync has no business rewriting that.
-resync_claude_md_version_header() {
-    local target="$WRITE_ROOT/.loom/CLAUDE.md"
-    [[ -f "$target" ]] || return 0  # pre-#4239 layout: nothing to restamp
+# #8147 removed the stamp itself instead: both files are injected into every
+# agent session's prompt prefix, prompt-cache lookups match the whole prefix up
+# to a content-block boundary, and so a single changed byte in either file
+# invalidates every cached byte downstream of it — the full role prompt
+# included — for every account, on every pulled bump. A header this script
+# re-stamped per resync is exactly that kind of per-release mutable token.
+#
+# What is left is the one-time migration for repos installed BEFORE #8147:
+# delete the leftover header line. After that the file no longer matches and
+# this becomes a no-op forever, so an already-migrated (or freshly installed)
+# guide is left byte-identical — which is the whole point. `.loom/install-
+# metadata.json`'s loom_version (restamp_metadata() below) remains the single
+# authoritative, non-prefix-injected record of the installed version.
+#
+# Only the version line is removed. The "**Installation Date**" header and any
+# "Last updated:" footer are deliberately left alone — the former records the
+# ORIGINAL install date, and re-stamping the latter would reintroduce a
+# per-resync mutable token in a prefix-injected file, which is the very thing
+# this change exists to eliminate.
+strip_claude_md_version_header() {
+    local rel="$1" issue_ref="$2"
+    local target="$WRITE_ROOT/$rel"
+    [[ -f "$target" ]] || return 0  # not installed (pre-#4239 layout, or no root guide)
 
-    if is_ignored ".loom/CLAUDE.md"; then
-        note "  ${YELLOW}skipped${NC}   .loom/CLAUDE.md ${YELLOW}(pinned in .loom/resync-ignore)${NC}"
+    # No legacy header: nothing to migrate. Return BEFORE anything else so an
+    # already-migrated file is neither rewritten nor reported (the #6621
+    # "headerless CLAUDE.md is left byte-unchanged" contract, now the normal
+    # steady state rather than the exception).
+    grep -q '^\*\*Loom Version\*\*:' "$target" || return 0
+
+    if is_ignored "$rel"; then
+        note "  ${YELLOW}skipped${NC}   $rel ${YELLOW}(pinned in .loom/resync-ignore)${NC}"
         N_SKIPPED=$((N_SKIPPED + 1))
         return 0
     fi
 
-    local version current_version
-    version="$(read_source_version)"
-    if [[ "$version" == "unknown" ]]; then
-        warn "Skipped .loom/CLAUDE.md version-header restamp (could not resolve source version). Surface sync still applied."
-        return 0
-    fi
-    current_version="$(sed -n 's/^\*\*Loom Version\*\*: *//p' "$target" | head -1)"
-
-    if [[ "$current_version" == "$version" ]]; then
-        note "  ${GREEN}unchanged${NC} .loom/CLAUDE.md (version header already v${version})"
-        N_UNCHANGED=$((N_UNCHANGED + 1))
-        return 0
-    fi
-
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf '%b\n' "  ${BOLD}would update${NC} .loom/CLAUDE.md (restamp version header ${current_version:-unknown} -> ${version}, #5559)"
+        printf '%b\n' "  ${BOLD}would update${NC} $rel (remove stale version header, ${issue_ref})"
         N_UPDATED=$((N_UPDATED + 1))
         return 0
     fi
 
-    local today tmp
-    today="$(date +%Y-%m-%d)"
-    tmp="${target}.tmp.$$"
-    if sed -e "s/^\*\*Loom Version\*\*: .*/**Loom Version**: ${version}/" \
-           -e "s/^Last updated: .*/Last updated: ${today}/" \
-           "$target" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+    local tmp="${target}.tmp.$$"
+    if sed '/^\*\*Loom Version\*\*:/d' "$target" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
         mv "$tmp" "$target"
-        printf '%b\n' "  ${GREEN}updated${NC}   .loom/CLAUDE.md (restamped version header ${current_version:-unknown} -> ${version}, #5559)"
+        printf '%b\n' "  ${GREEN}updated${NC}   $rel (removed stale version header, ${issue_ref})"
         N_UPDATED=$((N_UPDATED + 1))
     else
         rm -f "$tmp"
-        err "failed to restamp .loom/CLAUDE.md version header"
+        err "failed to remove the stale version header from $rel"
     fi
 }
 
-resync_claude_md_version_header
+strip_claude_md_version_header ".loom/CLAUDE.md" "#5559 -> #8147"
 
-# ---------- targeted field edit: root CLAUDE.md version header (#6612) ----------
-#
-# Root CLAUDE.md (as opposed to .loom/CLAUDE.md, the full vendored guide
-# handled by resync_claude_md_version_header() above) is the repo-customized
-# operating-core guide every consumer repo gets scaffolded at install time and
-# then freely hand-edits (see the "EXPLICITLY OUT OF SCOPE" header comment
-# above) -- resync never regenerates or otherwise touches it. But exactly like
-# .loom/CLAUDE.md before #5559, its own "**Loom Version**" / "Last updated"
-# header lines silently drift from install-metadata.json's loom_version after
-# every resync, since nothing else re-stamps them (#6612).
-#
-# Mirrors resync_claude_md_version_header() closely: same is_ignored /
-# read_source_version / dry-run / counter handling, but targets root
-# CLAUDE.md instead of .loom/CLAUDE.md, and -- just like that function --
-# touches ONLY the version-line field. Root CLAUDE.md remains genuinely
-# repo-customized everywhere else, so a full regenerate (or a broader
-# managed-section-markers design) is unsafe and out of scope for this fix,
-# exactly as #5559 scoped .loom/CLAUDE.md's fix narrowly rather than doing a
-# full regenerate. The "**Installation Date**" header line is deliberately
-# left untouched for the same reason as .loom/CLAUDE.md: it records the
-# ORIGINAL install date, not a last-touched date.
-resync_root_claude_md_version_header() {
-    local target="$WRITE_ROOT/CLAUDE.md"
-    [[ -f "$target" ]] || return 0  # no root CLAUDE.md installed: nothing to restamp
-
-    if is_ignored "CLAUDE.md"; then
-        note "  ${YELLOW}skipped${NC}   CLAUDE.md ${YELLOW}(pinned in .loom/resync-ignore)${NC}"
-        N_SKIPPED=$((N_SKIPPED + 1))
-        return 0
-    fi
-
-    local version current_version
-    version="$(read_source_version)"
-    if [[ "$version" == "unknown" ]]; then
-        warn "Skipped CLAUDE.md version-header restamp (could not resolve source version). Surface sync still applied."
-        return 0
-    fi
-    current_version="$(sed -n 's/^\*\*Loom Version\*\*: *//p' "$target" | head -1)"
-
-    # No Loom version header in this root CLAUDE.md at all: nothing to
-    # restamp. Return BEFORE the sed below, so we neither rewrite the file
-    # nor count a phantom N_UPDATED, and never touch an unrelated
-    # `Last updated:` line that has nothing to do with a Loom version header.
-    if [[ -z "$current_version" ]]; then
-        return 0
-    fi
-
-    if [[ "$current_version" == "$version" ]]; then
-        note "  ${GREEN}unchanged${NC} CLAUDE.md (version header already v${version})"
-        N_UNCHANGED=$((N_UNCHANGED + 1))
-        return 0
-    fi
-
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        printf '%b\n' "  ${BOLD}would update${NC} CLAUDE.md (restamp version header ${current_version:-unknown} -> ${version}, #6612)"
-        N_UPDATED=$((N_UPDATED + 1))
-        return 0
-    fi
-
-    local today tmp
-    today="$(date +%Y-%m-%d)"
-    tmp="${target}.tmp.$$"
-    if sed -e "s/^\*\*Loom Version\*\*: .*/**Loom Version**: ${version}/" \
-           -e "s/^Last updated: .*/Last updated: ${today}/" \
-           "$target" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-        mv "$tmp" "$target"
-        printf '%b\n' "  ${GREEN}updated${NC}   CLAUDE.md (restamped version header ${current_version:-unknown} -> ${version}, #6612)"
-        N_UPDATED=$((N_UPDATED + 1))
-    else
-        rm -f "$tmp"
-        err "failed to restamp CLAUDE.md version header"
-    fi
-}
-
-resync_root_claude_md_version_header
+# Root CLAUDE.md gets the same one-time migration as .loom/CLAUDE.md above
+# (#6612's restamp, superseded by #8147's removal): it is the repo-customized
+# operating-core guide, so resync still touches ONLY this one line and never
+# regenerates the file.
+strip_claude_md_version_header "CLAUDE.md" "#6612 -> #8147"
 
 restamp_metadata() {
     local meta="$WRITE_ROOT/.loom/install-metadata.json"
@@ -1856,8 +2522,41 @@ restamp_metadata() {
 
     local version commit today tmp remote
     version="$(read_source_version)"
-    commit="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
-    today="$(date +%Y-%m-%d)"
+    # #9174: the FULL 40-hex SHA, never `--short`. Git auto-sizes an
+    # abbreviation per repository and per git version when `core.abbrev` is
+    # unset, so two hosts resyncing from the SAME source commit wrote
+    # different strings (measured: `64a325804` on git 2.43 vs `64a32580` on
+    # git 2.54) into a TRACKED file — every scheduled pass on one host then
+    # saw a dirty tree, committed it, and the other host reversed it, forever.
+    # A full SHA is host-independent, unambiguous by construction, and is what
+    # the provenance contract (`marker.rs::prompts_field`, which reports a
+    # non-40-hex value as `unknown`) already requires. Readers that want a
+    # short form abbreviate at display time.
+    commit="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"
+    [[ -n "$commit" ]] || commit="unknown"
+
+    # #9613: NEVER write the literal "unknown" into this tracked file. A
+    # source resolved from `.loom/loom-source-path` that holds a copied
+    # `defaults/` tree but no package.json and no `.git` produced
+    # loom_version=unknown, loom_commit=unknown and an empty source remote —
+    # and that unparseable stamp got committed to a consumer's main, after
+    # which downstream version checks could not compare anything and the
+    # local-fix guard's content-lineage rung had no commit to resolve
+    # against. The surface sync itself is still valid (defaults/ was there and
+    # was copied), so this warns loudly and skips only the re-stamp, leaving
+    # the previous — parseable — stamp in place.
+    if [[ "$version" == "unknown" || "$commit" == "unknown" ]]; then
+        warn "Skipped the install-metadata.json re-stamp: the resolved source has no usable version/commit metadata, and writing \"unknown\" into a tracked file is worse than leaving the previous stamp (#9613)."
+        warn "  source          : $SOURCE_ROOT"
+        warn "  package.json    : $([[ -f "$SOURCE_ROOT/package.json" ]] && echo present || echo MISSING) (loom_version would be: $version)"
+        warn "  git metadata    : $(git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1 && echo present || echo MISSING) (loom_commit would be: $commit)"
+        warn "  install-metadata.json was left unchanged. Point .loom/loom-source-path at a real Loom checkout (a full clone, not a copied defaults/ tree) and re-run to refresh the stamp."
+        return 0
+    fi
+
+    # Issue #8504: -u — `last_resync` is a machine-readable metadata field,
+    # so it is the UTC calendar day, not the host-local one.
+    today="$(date -u +%Y-%m-%d)"
     # Refresh loom_source_remote (#6780 AC3) from the SOURCE_ROOT this resync
     # actually resolved to, so it tracks a repointed sidecar rather than
     # freezing whatever was recorded at install time. Best-effort: empty when
@@ -2350,6 +3049,37 @@ if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
     esac
 fi
 
+# ---------- forge merge-configuration check (#9287) ----------
+#
+# merge-pr.sh can only merge when the repository's allow_* merge flags and
+# every active branch ruleset's allowed_merge_methods / required_linear_history
+# leave it a usable method. That configuration lives on the forge, outside
+# anything this resync syncs, and when it is wrong every merge 405s several
+# phases downstream (#9287: this repo's own ruleset allowed only squash while
+# the repo allowed only merge commits). check-merge-config.sh reports it here.
+#
+# Advisory and READ-ONLY: it never writes a ruleset or a repo setting, always
+# exits 0, and prints nothing when there is nothing to report (a repo with no
+# ruleset sees no new output). Only its stdout -- findings and "could not
+# determine" notes -- is shown; its skip notes (no loom-daemon, an older one)
+# go to stderr and are dropped. It never affects this resync's exit code.
+#
+# Same resolution as the guard-hook check above: the installed copy first,
+# the defaults/ source on the first run after upgrading past #9287. Runs from
+# REPO_ROOT (not WRITE_ROOT, which --output may point at a preview directory)
+# so the forge repository is resolved from the real checkout.
+MERGE_CHECK_SCRIPT="$WRITE_ROOT/.loom/scripts/check-merge-config.sh"
+if [[ ! -x "$MERGE_CHECK_SCRIPT" && -x "$DEFAULTS_DIR/scripts/check-merge-config.sh" ]]; then
+    MERGE_CHECK_SCRIPT="$DEFAULTS_DIR/scripts/check-merge-config.sh"
+fi
+if [[ -x "$MERGE_CHECK_SCRIPT" ]]; then
+    merge_output="$(cd "$REPO_ROOT" && "$MERGE_CHECK_SCRIPT" 2>/dev/null)" || true
+    if [[ -n "$merge_output" ]]; then
+        printf '%b\n' "${YELLOW}[resync] Forge merge configuration (advisory, read-only -- nothing was changed):${NC}"
+        printf '%s\n' "$merge_output" | sed 's/^/    /'
+    fi
+fi
+
 # ---------- forge label drift check + safe auto-create (#6716) ----------
 #
 # .github/labels.yml is kept current by the scripts resync above, but nothing
@@ -2440,27 +3170,52 @@ if [[ -f "$WRITE_ROOT/.github/labels.yml" && -x "$LABELS_SYNC_SCRIPT" ]]; then
     esac
 fi
 
-# ---------- hint: stage + commit resync-only dirt (#4332) ----------
+# ---------- shared: classify this run's working-tree dirt (#9141) ----------
 #
-# In the loom source repo itself (DEFAULTS_DIR resolved locally, i.e. this
-# repo tracks its own installed surfaces under git), a resync that changed
-# tracked files leaves the tree dirty until that dirt is committed — and
-# `main_health_gate.rs`'s dirty-tree check (#4332) only recognizes it as safe
-# *resync* dirt (ignorable, not an operator edit worth halting the gate for),
-# it never commits on the operator's behalf. Print the exact command so this
-# doesn't linger as a standing "not evaluated (dirty-tree)" skip. Cheap and
-# best-effort: only fires when every dirty/untracked path is one this run's
-# surfaces cover (or the re-stamped install-metadata.json); any other dirt
-# (a genuine operator edit) suppresses the hint entirely.
-suggest_commit_if_resync_only_dirt() {
-    [[ "$REPO_ROOT/defaults" == "$DEFAULTS_DIR" ]] || return 0
-    local status
+# ONE `git status --porcelain` walk of WRITE_ROOT, classified into three
+# buckets that every staging recipe printed below is built from:
+#
+#   RESYNC_DIRT_PATHS    the ALLOWLIST — paths this run's managed surfaces
+#                        cover (plus the re-stamped install-metadata.json).
+#                        The ONLY thing any printed `git add` may name.
+#   RESYNC_RETIRED_PATHS pure-copy-surface-shaped paths with no defaults/
+#                        counterpart today (#6613): never committed.
+#   RESYNC_FOREIGN_DIRT  1 when anything else is dirty — a genuine operator
+#                        edit, or (the case this exists for) a credential
+#                        path such as a token-pool copy at
+#                        `.loom/tokens.shadow-disabled-<ts>/`.
+#
+# #9141: the printed --output recipe used to be `git add -A -- . ':!<each
+# credential path>'` — an EXCLUSION list, which stages every path nobody
+# thought to list. That is the shape of command behind commit a9da48c2, which
+# swept an entire token-pool sibling directory (21 live `.token` files, a
+# `.ranking`, a `.rotation_cursor`) into a resync commit because the exclusion
+# named `.loom/tokens` and the copy lived at `.loom/tokens.shadow-disabled-
+# <ts>/`. The classification here is an allowlist in the other direction: a
+# path only reaches RESYNC_DIRT_PATHS by MATCHING a managed surface, so a
+# credential path at any name — listed or not, predicted or not — lands in
+# RESYNC_FOREIGN_DIRT and can never be staged. That is a structural guarantee
+# rather than a list to keep current, which is what both #7818 and #9046
+# showed a list cannot be.
+#
+# Resolved at most once per run: nothing between the two call sites below
+# mutates the tree.
+RESYNC_DIRT_PATHS=()
+RESYNC_RETIRED_PATHS=()
+RESYNC_FOREIGN_DIRT=0
+RESYNC_DIRT_COLLECTED=0
+
+collect_resync_dirt() {
+    [[ "$RESYNC_DIRT_COLLECTED" -eq 1 ]] && return 0
+    RESYNC_DIRT_COLLECTED=1
+    RESYNC_DIRT_PATHS=()
+    RESYNC_RETIRED_PATHS=()
+    RESYNC_FOREIGN_DIRT=0
+
+    local status line path src
     status="$(git -C "$WRITE_ROOT" status --porcelain 2>/dev/null)"
     [[ -z "$status" ]] && return 0
 
-    local line path src
-    local -a resync_paths=()
-    local -a retired_paths=()
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         path="${line:3}"
@@ -2475,40 +3230,69 @@ suggest_commit_if_resync_only_dirt() {
             # is excluded from the commit suggestion below instead.
             src="$(_loom_pure_copy_surface_source_path "$path" 2>/dev/null)"
             if [[ -n "$src" && -e "$src" ]]; then
-                resync_paths+=("$path")
+                RESYNC_DIRT_PATHS+=("$path")
             else
-                retired_paths+=("$path")
+                RESYNC_RETIRED_PATHS+=("$path")
             fi
             continue
         fi
         case "$path" in
-            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes)
-                resync_paths+=("$path")
+            # #9345: `.agents/skills/*` (resync_agent_skills(), #8673) and
+            # `.gitignore` (the loom-daemon-managed block, refreshed by every
+            # run) are as much this script's own output as .loom/hooks/ is --
+            # they were missing here (and from land-resync-commit.sh's
+            # is_resync_surface_path() mirror), so on any repo where a run
+            # touched either surface its own output was classified as foreign
+            # dirt: the hint below went silent and `land-resync-commit.sh`
+            # refused to land the run it was printed for.
+            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
+                RESYNC_DIRT_PATHS+=("$path")
                 ;;
             *)
-                # Non-resync dirt present — do not suggest a commit that would
-                # also stage an unrelated (possibly operator) change.
-                return 0
+                RESYNC_FOREIGN_DIRT=1
                 ;;
         esac
     done <<< "$status"
+    return 0
+}
 
-    if [[ "${#retired_paths[@]}" -gt 0 ]]; then
+# ---------- hint: stage + commit resync-only dirt (#4332) ----------
+#
+# In the loom source repo itself (DEFAULTS_DIR resolved locally, i.e. this
+# repo tracks its own installed surfaces under git), a resync that changed
+# tracked files leaves the tree dirty until that dirt is committed — and
+# `main_health_gate.rs`'s dirty-tree check (#4332) only recognizes it as safe
+# *resync* dirt (ignorable, not an operator edit worth halting the gate for),
+# it never commits on the operator's behalf. Print the exact command so this
+# doesn't linger as a standing "not evaluated (dirty-tree)" skip. Cheap and
+# best-effort: only fires when every dirty/untracked path is one this run's
+# surfaces cover (or the re-stamped install-metadata.json); any other dirt
+# (a genuine operator edit) suppresses the hint entirely.
+suggest_commit_if_resync_only_dirt() {
+    [[ "$REPO_ROOT/defaults" == "$DEFAULTS_DIR" ]] || return 0
+    collect_resync_dirt
+
+    # Non-resync dirt present — do not suggest a commit that would also stage
+    # an unrelated (possibly operator, possibly credential-bearing) change.
+    [[ "$RESYNC_FOREIGN_DIRT" -eq 1 ]] && return 0
+
+    local path
+    if [[ "${#RESYNC_RETIRED_PATHS[@]}" -gt 0 ]]; then
         warn "Untracked-and-unignored file(s) matching a pure-copy surface, but with no defaults/ counterpart today (likely retired, not committed payload) -- excluded from the commit suggestion below:"
-        for path in "${retired_paths[@]}"; do
+        for path in "${RESYNC_RETIRED_PATHS[@]}"; do
             printf '%b\n' "${YELLOW}    $path${NC}" >&2
         done
         warn "These look retired from defaults/ without a defaults/.loom-retired.list entry -- add one there (or delete the file directly if you are working from the source repo). Do NOT commit them."
     fi
 
-    [[ "${#resync_paths[@]}" -eq 0 ]] && return 0
+    [[ "${#RESYNC_DIRT_PATHS[@]}" -eq 0 ]] && return 0
 
     echo ""
     if [[ -n "$OUTPUT_DIR" ]]; then
         note "${BLUE}[resync] The staging worktree is dirty with only resync output above — stage and commit it there:${NC}"
-        printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR && git add ${resync_paths[*]} && git commit -m 'chore: resync installed Loom surfaces'${NC}"
+        printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR && git add -- ${RESYNC_DIRT_PATHS[*]} && git commit -m 'chore: resync installed Loom surfaces'${NC}"
     else
-        note "${BLUE}[resync] The tree is dirty with only resync output above (would be: git add ${resync_paths[*]}) — land it so the main-health gate doesn't skip on it. This commits AND pushes (never rebasing or bypass-pushing — see .loom/docs/troubleshooting.md \"Landing a resync commit on the primary clone (#6646)\"):${NC}"
+        note "${BLUE}[resync] The tree is dirty with only resync output above (would be: git add -- ${RESYNC_DIRT_PATHS[*]}) — land it so the main-health gate doesn't skip on it. This commits AND pushes (never rebasing or bypass-pushing — see .loom/docs/troubleshooting.md \"Landing a resync commit on the primary clone (#6646)\"):${NC}"
         printf '%b\n' "    ${BOLD}./.loom/scripts/land-resync-commit.sh${NC}"
     fi
 }
@@ -2528,20 +3312,40 @@ print_output_mode_next_steps() {
     [[ "$N_FAILED" -gt 0 ]] && return 0
     [[ "$N_BLOCKED" -gt 0 ]] && return 0
 
+    # #9141: the staging recipe is an ALLOWLIST of what this run actually
+    # wrote, never `git add -A` with a credential exclusion list. The old
+    # recipe excluded the six then-known credential paths and staged
+    # everything else -- which is precisely how commit a9da48c2 shipped a
+    # whole `.loom/tokens.shadow-disabled-<ts>/` copy (21 live `.token`
+    # files): the exclusion named `.loom/tokens`, and nobody had thought to
+    # list its sibling. An allowlist has no "everything else" to leak, so it
+    # needs no list of credential paths to stay current -- which is the one
+    # property both the #7818 and #9046 incidents proved a list cannot have.
+    collect_resync_dirt
+
     echo ""
     note "${GREEN}${BOLD}[resync] Complete resync staged — the primary checkout at $REPO_ROOT was never touched.${NC}"
+    note "  staging base: $STAGING_BASE_SHA ($STAGING_BASE_DESC)"
     note "Review it, then turn it into a commit (and PR) from the staging worktree:"
     printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR${NC}"
     printf '%b\n' "    ${BOLD}git status${NC}   # confirm only expected resync output is dirty"
     printf '%b\n' "    ${BOLD}git checkout -b chore/resync-installed-$(date +%Y%m%d)${NC}"
-    # #7818: exclude the daemon-owned GH_CONFIG_DIR credential trees from the
-    # add, belt-and-braces, even though this worktree is a fresh `git worktree
-    # add --detach` checkout that would not normally carry them -- a plain
-    # `git add -A` here is exactly the shape of command that swept a live
-    # GitHub App installation token into a public repo on 2026-08-23.
-    printf '%b\n' "    ${BOLD}git add -A -- . ':!.loom/gh-config' ':!.loom/gh-config-by-owner'${NC}"
+    if [[ "${#RESYNC_DIRT_PATHS[@]}" -eq 0 ]]; then
+        note "    (nothing to stage — this run left the staging worktree clean)"
+    else
+        printf '%b\n' "    ${BOLD}git add -- ${RESYNC_DIRT_PATHS[*]}${NC}"
+    fi
     printf '%b\n' "    ${BOLD}git commit -m 'chore: resync installed Loom surfaces'${NC}"
     printf '%b\n' "    ${BOLD}git push -u origin HEAD${NC}   # then open a PR"
+    if [[ "$RESYNC_FOREIGN_DIRT" -eq 1 ]]; then
+        warn "The staging worktree also holds path(s) OUTSIDE the resync-managed surfaces (see its \`git status\`)."
+        warn "  They are deliberately absent from the \`git add\` above. Do NOT widen it to \`git add -A\` or \`git add .\`:"
+        warn "  an untracked credential copy (e.g. .loom/tokens.<something>/) is exactly what that sweeps in (#9141)."
+    fi
+    if [[ "$STAGING_BASE_SHA" != "$INVOKING_HEAD_SHA" && -n "$INVOKING_HEAD_SHA" ]]; then
+        note "The staging base is NOT the HEAD you invoked this from ($INVOKING_HEAD_SHA), so the commit you make above will not fast-forward onto it. Bring it over with:"
+        printf '%b\n' "    ${BOLD}git -C $WORKTREE_TOP cherry-pick <the sha you just committed>${NC}   # BEFORE removing the staging worktree"
+    fi
     note "When finished, remove the disposable staging worktree (from the primary checkout, not from inside it):"
     printf '%b\n' "    ${BOLD}git -C $REPO_ROOT worktree remove $OUTPUT_DIR${NC}"
 }

@@ -158,7 +158,7 @@ unlabelled issue no queue query finds:
 8. **Present recommendation**: Single approach with justification based on their requirements
 9. **Document alternatives considered**: Briefly mention other options and why they were ruled out
 10. **Estimate impact**: Complexity, risks, dependencies
-11. **Assess priority**: Determine if `loom:urgent` label is warranted
+11. **Assess priority**: If it looks critical, say so in the body (never apply a priority label)
 12. **Create the issue**: Use `./.loom/scripts/create-issue.sh` with focused recommendation
 13. **Add proposal label**: Pass `--label "loom:architect"` on that same creation call — never a follow-up `gh issue edit --add-label`
 
@@ -231,16 +231,10 @@ To avoid overwhelming the backlog:
 
 ## Priority Assessment Details
 
-When creating issues, consider whether the `loom:urgent` label is needed:
-
-- **Default**: No priority label (most issues)
-- **Add `loom:urgent`** only if:
-  - Critical bug affecting users NOW
-  - Security vulnerability requiring immediate patch
-  - Blocks all other work
-  - Production issue that needs hotfix
-
-**Note**: Use urgent sparingly. When in doubt, leave as normal priority and let the user decide.
+Architects never apply a priority label. `loom:operator-priority` is the
+operator's human-only star (#9244). If an issue looks critical (a user-facing
+bug NOW, a security hole, a hotfix, or it blocks all other work), say so in the
+body and let the operator decide whether to star it.
 
 ---
 

@@ -65,6 +65,62 @@ assert_eq "$(SE assign-arm --issue 100 --complexity complex)" "B sonnet" "issue 
 assert_eq "$(SE assign-arm --issue 101 --complexity routine)" "B sonnet" "issue 101 routine -> B sonnet (parity)"
 echo ""
 
+echo "Case 3b: N configurable arms + budget-fraction cap (#9122)"
+CFG="$(mktemp -d "${TMPDIR:-/tmp}/se-cfg.XXXXXX")"
+cat > "$CFG/arms.json" <<'EOF'
+{"sweep": {"modelExperimentArms": [
+  {"id": "OPUS",   "model": "opus",   "weight": 1},
+  {"id": "SONNET", "model": "sonnet", "weight": 1},
+  {"id": "HAIKU",  "model": "haiku",  "weight": 8}
+]}}
+EOF
+N1="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/arms.json")"
+N2="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/arms.json")"
+assert_eq "$N1" "$N2" "3-arm assignment is resume-stable"
+case "$N1" in
+  "OPUS opus"|"SONNET sonnet"|"HAIKU haiku") pass "3-arm assignment names a configured arm ($N1)" ;;
+  *) fail "3-arm assignment names a configured arm (got '$N1')" ;;
+esac
+# The heavy arm must dominate: weight 8/10 over a 200-issue sample.
+HAIKU_N=0
+for i in $(seq 1 200); do
+  [[ "$(SE assign-arm --issue "$i" --complexity routine --config "$CFG/arms.json")" == HAIKU* ]] && HAIKU_N=$((HAIKU_N+1))
+done
+if (( HAIKU_N > 130 && HAIKU_N < 190 )); then
+  pass "weighted assignment converges on the 8/10 arm ($HAIKU_N/200)"
+else
+  fail "weighted assignment converges on the 8/10 arm (got $HAIKU_N/200)"
+fi
+
+# A fable arm and a non-Claude-runtime arm are BOTH refused loudly, and the run
+# falls through to the built-in A/B pair (never a hard failure).
+cat > "$CFG/fable.json" <<'EOF'
+{"sweep": {"modelExperimentArms": [{"id":"A","model":"opus"},{"id":"F","model":"fable"}]}}
+EOF
+OUT="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/fable.json" 2>&1)"
+assert_contains "$OUT" "No-Fable bound" "a fable arm is refused by name"
+assert_contains "$OUT" "A opus" "a rejected roster falls through to the A/B pair"
+cat > "$CFG/glm.json" <<'EOF'
+{"sweep": {"modelExperimentArms": [{"id":"A","model":"opus"},{"id":"GLM","model":"glm-5.3","runtime":"opencode"}]}}
+EOF
+OUT="$(SE assign-arm --issue 100 --complexity routine --config "$CFG/glm.json" 2>&1)"
+assert_contains "$OUT" "Claude-only" "a non-Claude runtime arm is refused, not silently ignored"
+assert_contains "$OUT" "A opus" "the non-Claude roster falls through to the A/B pair"
+
+# Budget fraction: 1.0 (the default) is today's always-forced behavior; 0.0
+# samples every issue out (`none -`, no arm, no forced model).
+assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=1.0 SE assign-arm --issue 100 --complexity routine --config /nonexistent)" \
+  "A opus" "budget fraction 1.0 reproduces the unconfigured default"
+assert_eq "$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 SE assign-arm --issue 100 --complexity routine --config /nonexistent)" \
+  "none -" "budget fraction 0 samples the issue out (null arm)"
+OUT="$(LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=bogus SE assign-arm --issue 100 --complexity routine --config /nonexistent 2>&1)"
+assert_contains "$OUT" "A opus" "a malformed budget fraction falls back to 1.0"
+BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 LOOM_MODEL_EXPERIMENT_BUDGET_FRACTION=0 \
+  SE banner --issue 100 --complexity routine --config /nonexistent 2>/dev/null)"
+assert_contains "$BAN" "NOT IN EXPERIMENT" "the banner names a budget-sampled-out issue"
+rm -rf "$CFG"
+echo ""
+
 echo "Case 4: startup banner names mode + arm"
 BAN="$(LOOM_MODEL_EXPERIMENT=experiment LOOM_MODEL_EXPERIMENT_CANARY=1 SE banner --issue 100 --complexity complex --config /nonexistent 2>/dev/null)"
 assert_contains "$BAN" "mode=EXPERIMENT" "banner names experiment mode"

@@ -124,7 +124,7 @@ case "$1" in
       canned="$STUB_DIR_FROM_ENV/workflow-runs.json"
       if [[ -f "$canned" ]]; then cat "$canned"; else echo '{"workflow_runs": []}'; fi
       exit 0
-    elif [[ "$path" == *"/check-runs" ]]; then
+    elif [[ "$path" == *"/check-runs" || "$path" == *"/check-runs?"* ]]; then
       if [[ -f "$STUB_DIR_FROM_ENV/check-runs-fail" ]]; then
         echo "stub gh: check-runs api call failed" >&2
         exit 1

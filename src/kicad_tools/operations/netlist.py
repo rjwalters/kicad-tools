@@ -428,11 +428,32 @@ def _count_hierarchy_sheets(sch_path: Path, visited: set[Path] | None = None) ->
 
 @dataclass
 class _SheetEntry:
-    """Parsed sheet entry with filename and pin information."""
+    """Parsed sheet entry with filename, sheet name, and pin information.
+
+    ``sheetname`` is the ``(property "Sheetname" ...)`` value — the label
+    KiCad shows on the sheet symbol and, crucially, the component it uses
+    when building a **hierarchical net name**: a local label ``DBG_LED``
+    inside a sheet named ``SubMcu`` is named ``/SubMcu/DBG_LED`` in KiCad's
+    exported netlist and on the PCB (issue #5809).  It is *not* the
+    filename — two sheet instances can share one ``Sheetfile`` under
+    different ``Sheetname``s — so consumers that need KiCad-compatible net
+    identities must use this field, not :attr:`filename`.  Empty when the
+    sheet carries no ``Sheetname`` property.
+
+    ``uuid`` is the sheet *symbol*'s own ``(uuid ...)``.  It is the segment
+    KiCad appends to the parent's instance path, and therefore the key that
+    tells the two placements of one shared ``Sheetfile`` apart: a symbol in
+    the child file records ``(instances (project ... (path
+    "/<root-uuid>/<this-uuid>" (reference "R11") ...)))`` once per placement,
+    so per-instance reference designators can only be resolved through it
+    (issue #5815).  Empty when the sheet symbol carries no ``(uuid ...)``.
+    """
 
     filename: str
+    sheetname: str = ""
     pin_names: list[str] = field(default_factory=list)
     pin_positions: list[tuple[float, float]] = field(default_factory=list)
+    uuid: str = ""
 
 
 def _get_sheet_filenames(sch_path: Path) -> list[str]:
@@ -466,15 +487,22 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
         sch_path: Path to the .kicad_sch file.
 
     Returns:
-        List of :class:`_SheetEntry` objects with filename and pin data.
+        List of :class:`_SheetEntry` objects with filename, sheet name,
+        and pin data.
     """
     doc = parse_string(sch_path.read_text(encoding="utf-8"))
     entries: list[_SheetEntry] = []
     for child in doc.children:
         if getattr(child, "name", None) == "sheet" or getattr(child, "tag", None) == "sheet":
             filename = ""
+            sheetname = ""
             pin_names: list[str] = []
             pin_positions: list[tuple[float, float]] = []
+
+            # The sheet symbol's own UUID -- the instance-path segment that
+            # distinguishes two placements of one shared file (issue #5815).
+            uuid_node = child.find("uuid")
+            sheet_uuid = (uuid_node.get_string(0) or "") if uuid_node else ""
 
             # Extract sheet position for computing absolute pin positions
             sheet_x, sheet_y = 0.0, 0.0
@@ -485,13 +513,19 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                     sheet_x = round(float(atoms[0]), 2)
                     sheet_y = round(float(atoms[1]), 2)
 
-            # Look for (property "Sheetfile" "filename.kicad_sch")
+            # Look for (property "Sheetfile" "filename.kicad_sch") and
+            # (property "Sheetname" "SubMcu") -- the latter is what KiCad
+            # uses to build hierarchical net names (issue #5809).
             for prop in child.find_all("property"):
                 prop_name = prop.get_string(0)
                 if prop_name == "Sheetfile":
                     fname = prop.get_string(1)
                     if fname:
                         filename = fname
+                elif prop_name == "Sheetname":
+                    sname = prop.get_string(1)
+                    if sname:
+                        sheetname = sname
 
             # Extract (pin "name" direction (at x y angle) ...) children.
             # Pin positions in sheet entries are relative to the sheet origin.
@@ -515,8 +549,10 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                 entries.append(
                     _SheetEntry(
                         filename=filename,
+                        sheetname=sheetname,
                         pin_names=pin_names,
                         pin_positions=pin_positions,
+                        uuid=sheet_uuid,
                     )
                 )
     return entries

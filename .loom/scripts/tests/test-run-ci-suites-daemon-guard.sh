@@ -56,15 +56,39 @@ check() {
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
-# The five host-mutating suites the guard owns. Kept as an explicit literal
-# list (not scraped from the runner) so a silent narrowing of the guard's own
+# The host-mutating suites the guard owns. Kept as explicit literal lists (not
+# scraped from the runner) so a silent narrowing of the guard's own
 # LIVE_DAEMON_GUARDED_SUITES is a test failure, not an invisible regression.
-GUARDED_SUITES=(
-    test-loom-daemon-start.sh
+#
+# Split in two by #8086, because guard MEMBERSHIP and CI WIRING stopped being
+# the same question. test-loom-daemon-watchdog.sh moved to ci-excluded.txt (it
+# drives a thin stub over `loom-daemon daemon-watchdog` and so needs a built
+# binary, which run-ci-suites.sh's job has no toolchain for), but it is still
+# every bit as host-mutating as before and must stay named in the guard. It
+# simply cannot be asserted through `--plan`, which only ever enumerates
+# ci-wired.txt.
+#
+# Dropping it from this file instead would be exactly the silent narrowing the
+# literal exists to catch — so it is asserted DIFFERENTLY, not less: named in
+# the runner's own literal, and absent from the plan (proving the exclusion is
+# real rather than a half-applied move).
+#
+# #8087 moved test-loom-daemon-start.sh and test-loom-daemon-update.sh across
+# the same line, for the same reason: cli/loom-daemon-start.sh is now a thin
+# stub over `loom-daemon daemon-start` (the update suite reaches it through
+# lib/daemon-update-fixtures.sh, which copies the script into every fixture).
+# Both remain exactly as host-mutating as they were — they still `kill`, `rm
+# -f` pid files and `launchctl bootout` / `systemctl --user disable` whatever
+# they resolve — so both stay named in the runner's guard and simply move to
+# the unwired half of this assertion.
+GUARDED_WIRED_SUITES=(
     test-loom-daemon-stop.sh
-    test-loom-daemon-update.sh
     test-loom-daemon-quiesce.sh
+)
+GUARDED_UNWIRED_SUITES=(
     test-loom-daemon-watchdog.sh
+    test-loom-daemon-start.sh
+    test-loom-daemon-update.sh
 )
 
 plan_line() { # <plan output> <suite>
@@ -83,12 +107,28 @@ absent_rc=$?
 check "$absent_rc" "no daemon pid file: --plan exits 0"
 
 missing=""
-for suite in "${GUARDED_SUITES[@]}"; do
+for suite in "${GUARDED_WIRED_SUITES[@]}"; do
     [[ "$(plan_line "$ABSENT_PLAN" "$suite")" == "RUN" ]] || missing="$missing $suite"
 done
 check "$([[ -z "$missing" ]] && echo 0 || echo 1)" \
-    "no daemon pid file: all five daemon-lifecycle suites are planned to RUN (guard is not always-on)" \
+    "no daemon pid file: every WIRED daemon-lifecycle suite is planned to RUN (guard is not always-on)" \
     "not planned RUN:$missing"
+
+# The guarded-but-unwired members (#8086): still named in the runner's own
+# LIVE_DAEMON_GUARDED_SUITES literal, and genuinely absent from the plan.
+# Both halves matter — the first catches a silent narrowing of the guard, the
+# second catches a half-applied exclusion that left the suite wired anyway.
+unnamed="" still_planned=""
+for suite in "${GUARDED_UNWIRED_SUITES[@]}"; do
+    grep -q "LIVE_DAEMON_GUARDED_SUITES=.*$suite" "$RUNNER" || unnamed="$unnamed $suite"
+    [[ -z "$(plan_line "$ABSENT_PLAN" "$suite")" ]] || still_planned="$still_planned $suite"
+done
+check "$([[ -z "$unnamed" ]] && echo 0 || echo 1)" \
+    "guarded-but-unwired suites are still named in LIVE_DAEMON_GUARDED_SUITES (no silent narrowing)" \
+    "not named in the runner:$unnamed"
+check "$([[ -z "$still_planned" ]] && echo 0 || echo 1)" \
+    "guarded-but-unwired suites are absent from --plan (the ci-excluded move is real)" \
+    "still planned:$still_planned"
 
 # A non-daemon suite is a control: it must RUN in both directions below.
 check "$([[ "$(plan_line "$ABSENT_PLAN" "test-live-state-sandbox.sh")" == "RUN" ]] && echo 0 || echo 1)" \
@@ -108,11 +148,11 @@ live_rc=$?
 check "$live_rc" "live pid file: --plan still exits 0 (a skip is not a failure)"
 
 not_skipped=""
-for suite in "${GUARDED_SUITES[@]}"; do
+for suite in "${GUARDED_WIRED_SUITES[@]}"; do
     [[ "$(plan_line "$LIVE_PLAN" "$suite")" == "SKIP" ]] || not_skipped="$not_skipped $suite"
 done
 check "$([[ -z "$not_skipped" ]] && echo 0 || echo 1)" \
-    "live pid file: all five daemon-lifecycle suites are SKIPPED (#6386 hazard is unreachable)" \
+    "live pid file: every WIRED daemon-lifecycle suite is SKIPPED (#6386 hazard is unreachable)" \
     "not skipped:$not_skipped"
 
 check "$([[ "$(plan_line "$LIVE_PLAN" "test-live-state-sandbox.sh")" == "RUN" ]] && echo 0 || echo 1)" \

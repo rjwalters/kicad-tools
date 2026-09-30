@@ -2,12 +2,13 @@
 # spawn-aider.sh - Tier-3 "generic passthrough" adapter instantiation for the
 # Aider CLI (https://aider.chat), the worked example for issue #4780.
 #
-# This is deliberately the THINNEST possible adapter: it pins the two facts
-# `spawn-generic.sh` needs (the underlying binary name and its non-interactive
-# prompt flag) and execs the shared template. It does NOT reimplement any of
-# spawn-generic.sh's logic — see that file's header for the full contract
-# (points 1 and 3 only) and for everything a tier-3 adapter deliberately does
-# NOT implement.
+# This is deliberately the THINNEST possible adapter: it pins the runtime
+# name and execs the shared `spawn-generic-launch.sh`, which resolves
+# `defaults/runtimes/aider.json`'s "launch" object (binary name, prompt flag,
+# `--yes-always`) before exec'ing `spawn-generic.sh` itself (issue #8671).
+# Aider's own launch shape now lives entirely in that manifest -- this file
+# carries none of it, which is the point: onboarding the NEXT tier-3 CLI is a
+# manifest edit, not a new script like this one.
 #
 # Aider is unverified by Loom: no guardrail-parity document, no CI smoke leg,
 # no sandbox mapping. Its capability manifest (`defaults/runtimes/aider.json`)
@@ -19,18 +20,7 @@
 # Usage:
 #   .loom/scripts/spawn-aider.sh -p "your prompt"
 #   LOOM_RUNTIME=aider .loom/scripts/spawn-worker.sh -p "your prompt"
-
 set -euo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Aider's non-interactive headless mode is `aider --message "<prompt>" --yes-always`
-# (see https://aider.chat/docs/scripting.html). `--yes-always` auto-confirms
-# every prompt aider would otherwise ask interactively -- required for
-# unattended dispatch, same rationale as spawn-codex.sh's sandbox convention,
-# just with no sandbox to widen (aider has none; this is exactly the
-# "unverified" gap the capability manifest records).
-LOOM_GENERIC_RUNTIME_NAME="aider" \
-LOOM_GENERIC_CLI_BIN="${LOOM_GENERIC_CLI_BIN:-aider}" \
-LOOM_GENERIC_PROMPT_FLAG="${LOOM_GENERIC_PROMPT_FLAG:---message}" \
-    exec "${_SCRIPT_DIR}/spawn-generic.sh" --yes-always "$@"
+exec "${_SCRIPT_DIR}/spawn-generic-launch.sh" aider "$@"

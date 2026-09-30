@@ -8,12 +8,13 @@ rules, net classes, net-pair exemptions, grids or routing state: it answers
 for a given pair -- belongs to the Phase 2 resolver, not here.
 
 **Consumers arrive one epic phase at a time.**  Phase 1b added the kernel and
-its parity/fixture evidence with nothing wired to it; Phase 3a (#5660) switched
-the first consumer -- ``router/grid.py``'s route-copper halo marking, and its
-C++ sibling in ``cpp/src/grid.cpp``.  ``tests/router/test_clearance_kernel_parity.py``
-keeps the ledger of who is on the kernel (``SWITCHED_PY_CONSUMERS`` /
-``SWITCHED_CPP_CONSUMERS``) and fails on an import that appears without one, so
-each phase's before/after measurement stays attributable to that phase.
+its parity/fixture evidence with nothing wired to it; Phases 3a-3f switch the
+consumers over one by one -- Phase 3a (#5660) is ``router/grid.py``'s
+route-copper halo marking and its C++ sibling in ``cpp/src/grid.cpp``.
+``tests/router/test_clearance_kernel_parity.py`` keeps the ledger of who is on
+the kernel (``MIGRATED_KERNEL_CALLERS`` / ``MIGRATED_CPP_KERNEL_CALLERS``) and
+fails on an import that appears without an entry, so each phase's before/after
+measurement stays attributable to that phase.
 
 Port contract
 -------------
@@ -64,9 +65,11 @@ __all__ = [
     "KZonePoly",
     "clear",
     "copper_gap",
+    "copper_gap_ring_edge",
     "hole_gap",
     "make_pad",
     "pad_outline",
+    "ring_edge_crosses_ray",
 ]
 
 CLEARANCE_EPSILON_MM = 1e-4
@@ -524,7 +527,10 @@ def _point_in_rings(rings: tuple[KRing, ...], px: float, py: float) -> bool:
         for i in range(1, len(ring)):
             ax, ay = ring[i - 1]
             bx, by = ring[i]
-            if (ay > py) != (by > py) and px < (bx - ax) * (py - ay) / (by - ay) + ax:
+            # One shared crossing test with the indexed consumers (Phase 3f):
+            # ``fixed_copper_kernel`` walks the same parity over the edges a
+            # row index selects instead of over whole rings.
+            if ring_edge_crosses_ray(px, py, ax, ay, bx, by):
                 inside = not inside
     return inside
 
@@ -917,6 +923,41 @@ def copper_gap(a: KShape, b: KShape) -> float:
     Returns:
         Signed edge-to-edge distance in mm, or :data:`NO_INTERACTION`.
     """
+    # Fast path (issue #5672): segment-segment and segment/via-via are the
+    # only pair kinds the lattice engine's ``CommittedCopper`` predicates
+    # issue (Epic #5509 Phase 3d) -- and they sit inside the A* inner loop,
+    # evaluated once per candidate per nearby obstacle.  An exact ``type()``
+    # check on both arguments (cheaper than the ``isinstance`` chain below,
+    # since these are frozen dataclasses with no subclasses to consider)
+    # reaches the real distance call directly, skipping the rank-sort dict
+    # lookups and the multi-branch ``isinstance`` walk the general path
+    # below still needs for the other twelve pair kinds.  Every other
+    # combination -- pads, edges, zones, or anything not matched here --
+    # falls through unchanged to the general dispatch, so this can only ever
+    # narrow which line answers a query, never change the answer itself.
+    # The check is written directly against ``a`` / ``b`` (never hoisted into
+    # an intermediate ``type(a)`` variable) so mypy narrows each to its exact
+    # class in every branch below -- the same reason ``isinstance`` narrows
+    # but a stored ``type()`` result would not.
+    if type(a) is KSegment:
+        if type(b) is KSegment:
+            # Inline ``_layers_interact`` for the one pair kind where the
+            # layer test is not trivially always-true (see below).
+            if a.layer != ALL_LAYERS and b.layer != ALL_LAYERS and a.layer != b.layer:
+                return NO_INTERACTION
+            return _copper_gap_seg_seg(a, b)
+        if type(b) is KVia:
+            # A via has no ``layer`` field -- ``_shape_layer`` reports
+            # :data:`ALL_LAYERS` for it unconditionally, so a segment/via
+            # pair always interacts and the layer test can be skipped
+            # outright rather than inlined.
+            return _copper_gap_seg_via(a, b)
+    elif type(a) is KVia:
+        if type(b) is KSegment:
+            return _copper_gap_seg_via(b, a)
+        if type(b) is KVia:
+            return _copper_gap_via_via(a, b)
+
     if not _layers_interact(a, b):
         return NO_INTERACTION
 
@@ -1035,3 +1076,67 @@ def clear(a: KShape, b: KShape, required_mm: float) -> bool:
         True when the pair satisfies ``required_mm``.
     """
     return copper_gap(a, b) >= required_mm - CLEARANCE_EPSILON_MM
+
+
+# ---------------------------------------------------------------------------
+# Indexed-consumer primitives (Epic #5509, Phase 3f)
+# ---------------------------------------------------------------------------
+#
+# :func:`copper_gap` on a ``KZonePoly`` walks every edge of every ring.  A
+# consumer that owns a *spatial index* over a pour's boundary edges --
+# ``Grid3D``'s 1 mm bins, and their Python twin in
+# :mod:`kicad_tools.router.fixed_copper_kernel` -- cannot hand the whole zone
+# over without throwing that index away: on a 2000-vertex pour the indexed walk
+# is orders of magnitude cheaper, and the fixed-copper predicate sits in the A*
+# step loop (``pathfinder._fixed_step_clear``).
+#
+# These are not a second model.  Taking the minimum of
+# :func:`copper_gap_ring_edge` over every edge of a ring set, with containment
+# from :func:`ring_edge_crosses_ray` parity over those same edges, reproduces
+# ``copper_gap(seg, KZonePoly(rings))`` exactly -- asserted over random pours by
+# ``tests/router/test_clearance_kernel_parity.py``.
+
+
+def copper_gap_ring_edge(s: KSegment, ax: float, ay: float, bx: float, by: float) -> float:
+    """Edge-to-edge copper gap between a segment and ONE ring edge.
+
+    The single-edge step of ``copper_gap(KSegment, KZonePoly)``.  A pour
+    carries no width of its own -- the filled polygon *is* the copper -- so
+    only the segment's half width is subtracted, exactly as
+    :func:`_copper_gap_zone_seg` does.  A ring edge carries no layer either:
+    the caller has already established that this pour and this segment share
+    one (the layer gate :func:`copper_gap` applies).
+
+    Args:
+        s: The querying track segment (centreline plus copper width).
+        ax: Ring-edge start x.
+        ay: Ring-edge start y.
+        bx: Ring-edge end x.
+        by: Ring-edge end y.
+
+    Returns:
+        The gap in mm, negative when the segment's copper overlaps the edge.
+    """
+    return segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2, ax, ay, bx, by) - s.width / 2.0
+
+
+def ring_edge_crosses_ray(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> bool:
+    """Does the ``+x`` ray from ``(px, py)`` cross this ring edge?
+
+    The single-edge step of :func:`_point_in_rings`.  A caller that toggles a
+    parity flag across every edge of a ring set -- or across every edge that
+    can possibly straddle ``py``, which is what a row index selects --
+    reproduces the kernel's own "is this point inside the copper" answer.
+
+    Args:
+        px: Query point x.
+        py: Query point y.
+        ax: Ring-edge start x.
+        ay: Ring-edge start y.
+        bx: Ring-edge end x.
+        by: Ring-edge end y.
+
+    Returns:
+        True when the ray crosses the edge.
+    """
+    return (ay > py) != (by > py) and px < (bx - ax) * (py - ay) / (by - ay) + ax

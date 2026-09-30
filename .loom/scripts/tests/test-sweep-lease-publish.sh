@@ -20,8 +20,12 @@
 #   (c) a fresh lease held by a DIFFERENT host -> exit 4, nothing posted
 #   (d) a STALE lease (past TTL), same host or a peer's, does not block
 #       publication
-#   (e) a fresh lease from a different sweep on the SAME host -> publishes
-#       anyway (this sweep is the one working the issue now)
+#   (e) regression (#5783): a fresh lease from a DIFFERENT sweep on the SAME
+#       host -> exit 4, nothing posted (a same-host peer is just as live a
+#       worktree co-occupancy hazard as a different-host one -- see the
+#       "sweep-issue-5783-1790637192" style two-call sequence below, which
+#       exercises this via two real, sequential `publish` invocations rather
+#       than a hand-authored fixture)
 #   (f) a `gh` READ failure fails open: publishes anyway
 #   (g) a `gh` WRITE failure -> exit 2 (caller proceeds without a lease)
 #   (h) the POST uses `-F body=@-` (stdin), never `-f` (literal "@-")
@@ -56,6 +60,12 @@
 #       away -- the phantom-block mechanism that lets a multi-host race
 #       churn indefinitely instead of converging. Mirrors sweep-lease-fence.
 #       sh's own #6485 yield-exclusion fix, applied here on the write side.
+#   (p) regression (#5783 AC4): two SEQUENTIAL, real `publish` calls for the
+#       SAME issue with the SAME host but two DIFFERENT --sweep-id values --
+#       exactly the observed #5781 incident shape -- result in exactly ONE
+#       proceeding (the first: exit 0, one comment posted) and the second
+#       exiting 4 with nothing posted, using the script's own freshly-posted
+#       comment as the second call's evidence (not a hand-authored fixture).
 #
 # Usage:
 #   ./.loom/scripts/tests/test-sweep-lease-publish.sh
@@ -323,13 +333,32 @@ run_script publish 6320 --sweep-id sweep-run-A --ttl-minutes 1
 assert_eq "0" "$RC" "(d) --ttl-minutes tightens freshness: a 2-min-old peer lease is stale at ttl=1"
 assert_eq "1" "$(post_count)" "(d) ... and publication proceeds"
 
-# --- (e) fresh lease, same host, DIFFERENT sweep id -> publish anyway -----
+# --- (e) regression (#5783): fresh lease, same host, DIFFERENT sweep id ->
+# exit 4, nothing posted (was: publish anyway, the bug this issue fixes) ---
 reset_state
 lease_json "$OPAQUE_HOST" "sweep-run-OLD" "$FRESH_ISO" > "$STUB_DIR/comments.json"
 run_script publish 6320 --sweep-id sweep-run-A
-assert_eq "0" "$RC" "(e) same-host/different-sweep fresh lease still exits 0"
-assert_eq "1" "$(post_count)" "(e) this sweep publishes its own record on top"
-assert_contains "$ERR" "different sweep on this same host" "(e) stderr explains the same-host case"
+assert_eq "4" "$RC" "(e) same-host/different-sweep fresh lease now exits 4, not 0"
+assert_eq "0" "$(post_count)" "(e) nothing is posted over the same-host peer's live lease"
+assert_contains "$ERR" "different sweep on THIS SAME host" "(e) stderr names the same-host peer condition distinctly from the cross-host one"
+
+# --- (p) regression (#5783 AC4): two sequential real `publish` calls, same
+# issue, same host, different --sweep-id -> exactly one proceeds ----------
+reset_state
+run_script publish 6320 --sweep-id sweep-issue-5783-a
+FIRST_RC="$RC"
+FIRST_POSTS="$(post_count)"
+assert_eq "0" "$FIRST_RC" "(p) the first sweep's publish call proceeds (exit 0)"
+assert_eq "1" "$FIRST_POSTS" "(p) the first call posts exactly one lease comment"
+# Feed the first call's OWN posted comment back as evidence for the second
+# call, exactly as a real forge round trip would: the second sweep's `gh api`
+# read sees the first sweep's just-published record.
+jq --arg body "$(cat "$STUB_DIR/post-1.body")" --arg stamp "$NOW_ISO" \
+    '[{id: 42001, body: $body, updated_at: $stamp}]' -n > "$STUB_DIR/comments.json"
+run_script publish 6320 --sweep-id sweep-issue-5783-b
+assert_eq "4" "$RC" "(p) the second, different-sweep-id call on the same issue exits 4"
+assert_eq "$FIRST_POSTS" "$(post_count)" "(p) the second call posts nothing over the first sweep's live lease (post count unchanged since the first call)"
+assert_contains "$ERR" "different sweep on THIS SAME host" "(p) the second call's stderr identifies a same-host peer"
 
 # --- (m) regression (#6333): a fresher same-host/different-sweep lease must
 # not mask an older-but-still-fresh PEER lease. The peer's lease
@@ -485,6 +514,57 @@ FENCE_RC=$?
 FENCE_ERR="$(cat "$STUB_DIR/fence-stderr.log" 2>/dev/null || true)"
 assert_eq "0" "$FENCE_RC" "(l) a lease this script just published passes its own default fence check as 'own, fresh' -- not a self-fencing deadlock"
 assert_contains "$FENCE_ERR" "host matches this sweep" "(l) fence stderr confirms the published lease is recognized as this sweep's own host"
+
+# --- (o) LOOM_REPO unset -> empty `repo_args[@]` must never surface as
+# "unbound variable" and must not prevent publication (#8281). First on the
+# ambient bash -- always runs -- then again under a real 3.x /bin/bash when one
+# is present (macOS system bash), which is the one environment that actually
+# exhibits the pre-fix bash-3.2 empty-array unbound-variable hazard; skipped,
+# not failed, elsewhere. Mirrors the pattern used in test-sweep-lease-fence.sh's
+# (s) case.
+reset_state
+unset LOOM_REPO
+run_script publish 6320 --sweep-id sweep-repo-unset
+assert_eq "0" "$RC" "(o) ambient bash: LOOM_REPO unset -> exit 0 (publish succeeds)"
+assert_eq "1" "$(post_count)" "(o) ambient bash: the publish actually ran and posted a comment"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$ERR" != *"unbound variable"* ]]; then
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${GREEN}PASS${NC}: (o) ambient bash: no 'unbound variable' on stderr"
+else
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "  ${RED}FAIL${NC}: (o) ambient bash: no 'unbound variable' on stderr"
+    echo "    stderr: $ERR"
+fi
+
+LEGACY_BASH=""
+if [[ -x /bin/bash ]]; then
+    bash_version_output="$(/bin/bash --version 2>/dev/null)"
+    if [[ "$bash_version_output" == *"version 3."* ]]; then
+        LEGACY_BASH=/bin/bash
+    fi
+fi
+if [[ -n "$LEGACY_BASH" ]]; then
+    unset LOOM_REPO
+    # Re-setup for bash 3.2 test run
+    rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail "$STUB_DIR"/post-fail
+    rm -f "$STUB_DIR"/post-*.body "$STUB_DIR"/post-count "$STUB_DIR"/post-calls.log "$STUB_DIR"/post-flags.log
+    OUT="$("$LEGACY_BASH" "$SCRIPT" publish 6320 --sweep-id sweep-repo-unset-3x 2>"$STUB_DIR/stderr-legacy.log")"
+    RC=$?
+    ERR="$(cat "$STUB_DIR/stderr-legacy.log" 2>/dev/null || true)"
+    assert_eq "0" "$RC" "(o) bash 3.2: LOOM_REPO unset -> exit 0 (publish succeeds)"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [[ "$ERR" != *"unbound variable"* ]]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        echo -e "  ${GREEN}PASS${NC}: (o) bash 3.2: no 'unbound variable' on stderr"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        echo -e "  ${RED}FAIL${NC}: (o) bash 3.2: no 'unbound variable' on stderr"
+        echo "    stderr: $ERR"
+    fi
+else
+    echo "· skipped: (o) bash 3.2 unbound-variable regression check (no 3.x /bin/bash on this host)"
+fi
 
 # --- Contract checks (mirrors test-sweep-lease-renew.sh) ------------------
 "$SCRIPT" --help > "$STUB_DIR/help.out" 2>&1

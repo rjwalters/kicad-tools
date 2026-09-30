@@ -18,6 +18,10 @@
 #     execs the machine-checkout hook inside one (AC1), and defers to a present
 #     per-repo .loom/hooks/ copy (transition dedup, design decision 3)
 #   - deprovision removes ONLY Loom-owned entries, preserving operator hooks
+#   - #6544: project-level entries are quoted so a project path containing a
+#     space survives `sh -c` execution, and a pre-existing UNQUOTED entry
+#     self-heals to the quoted form on the next re-provision (not left as an
+#     already-provisioned no-op); the machine-level wrapper is unaffected
 #
 # Sandboxed $HOME per case via mktemp -d, matching test-provision-skills.sh.
 #
@@ -356,8 +360,11 @@ assert_eq "$(count_project_entry "$S10" guard-background-subagents.sh)" "1" "gua
 assert_eq "$PROJECT_HOOKS_WIRED" "6" "PROJECT_HOOKS_WIRED reports all six copies (#4053 verifiable-globals contract)"
 assert_eq "$PROJECT_HOOKS_SETTINGS" "$S10" "PROJECT_HOOKS_SETTINGS points at the project settings file"
 assert_eq "$(jq -r '.permissions.allow[0]' "$S10")" "Bash(gh:*)" "existing project permissions preserved"
-# Every written command must be resolvable by Claude Code from the project root.
-assert_eq "$(jq -r '[(.hooks // {}) | to_entries[] | .value[]? | .hooks[]? | .command | select(startswith("${CLAUDE_PROJECT_DIR}/.loom/hooks/") | not)] | length' "$S10")" "0" "all written commands use the \${CLAUDE_PROJECT_DIR} prefix (#3277)"
+# Every written command must be resolvable by Claude Code from the project root
+# AND be quoted (#6544) so a project path containing a space does not get
+# word-split by `sh` at hook-execution time.
+assert_eq "$(jq -r '[(.hooks // {}) | to_entries[] | .value[]? | .hooks[]? | .command | select(startswith("\"${CLAUDE_PROJECT_DIR}/.loom/hooks/") | not)] | length' "$S10")" "0" "all written commands use the quoted \${CLAUDE_PROJECT_DIR} prefix (#3277, #6544)"
+assert_eq "$(jq -r '[(.hooks // {}) | to_entries[] | .value[]? | .hooks[]? | .command | select(endswith("\"") | not)] | length' "$S10")" "0" "all written commands end on the closing quote (#6544)"
 # The referenced script must exist — a dangling entry is not coverage.
 for n in guard-destructive.sh guard-background-subagents.sh; do
     [[ -x "$R10/.loom/hooks/$n" ]] && pass "wired entry for $n points at an executable copy" \
@@ -548,6 +555,70 @@ if [[ -f "$REPO_ROOT/.claude/settings.json" ]]; then
 else
     echo "  (skipped: no $REPO_ROOT/.claude/settings.json)"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6544: project paths containing a space. `${CLAUDE_PROJECT_DIR}` is expanded
+# by Claude Code into a literal path string BEFORE the command reaches `sh` —
+# so an unquoted emitted command word-splits on any space in the project path.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Test 22: fresh provision into a spaced path survives sh -c (#6544) ───────
+echo "Test 22: fresh provision into a project path containing a space survives sh -c execution (#6544)"
+R22_PARENT=$(mktemp -d)
+R22="$R22_PARENT/has a space"
+mkdir -p "$R22"
+make_transition_repo "$R22"
+printf '{}\n' > "$R22/.claude/settings.json"
+ensure_project_hook_wiring "$R22" >/dev/null 2>&1
+S22="$R22/.claude/settings.json"
+CMD22=$(jq -r '[(.hooks // {}) | to_entries[] | .value[]? | .hooks[]? | .command | select(contains("guard-destructive.sh"))][0]' "$S22")
+assert_eq "$CMD22" '"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh"' "emitted command is quoted"
+# Simulate Claude Code's substitution: ${CLAUDE_PROJECT_DIR} is a literal text
+# replacement into the command string, not a shell-level expansion, so mimic
+# that here rather than exporting the env var and letting sh expand it.
+LITERAL22=${CMD22//\$\{CLAUDE_PROJECT_DIR\}/$R22}
+OUT22=$(sh -c "$LITERAL22" 2>&1); rc22=$?
+assert_eq "$rc22" "0" "quoted command survives sh -c execution against a spaced path"
+assert_eq "$OUT22" "" "no word-split error output from the quoted command"
+# Negative control: confirm the OLD unquoted form really did break on the same
+# path (pins the bug this fixes rather than assuming it).
+LEGACY22='${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh'
+LEGACY_LITERAL22=${LEGACY22//\$\{CLAUDE_PROJECT_DIR\}/$R22}
+sh -c "$LEGACY_LITERAL22" >/dev/null 2>&1
+rc22_legacy=$?
+[[ "$rc22_legacy" != "0" ]] && pass "the pre-#6544 unquoted form fails on the same spaced path (regression pinned)" \
+    || fail "expected the unquoted form to fail on a spaced path (word-split), it did not"
+
+# ── Test 23: a pre-existing UNQUOTED entry self-heals to quoted (#6544) ──────
+echo "Test 23: re-provisioning over a pre-existing UNQUOTED entry rewrites it to the quoted form (#6544)"
+R23=$(mktemp -d)
+make_transition_repo "$R23"
+cat > "$R23/.claude/settings.json" <<'EOF'
+{ "hooks": { "PreToolUse": [ { "matcher": "Bash", "hooks": [
+  { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh" }
+] } ] } }
+EOF
+S23="$R23/.claude/settings.json"
+BEFORE_CMD23=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$S23")
+assert_eq "$BEFORE_CMD23" '${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh' "precondition: the unquoted legacy entry is seeded verbatim"
+ensure_project_hook_wiring "$R23" >/dev/null 2>&1
+AFTER_CMD23=$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$S23")
+assert_eq "$AFTER_CMD23" '"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh"' "the unquoted entry was rewritten to the quoted form (migration, not a no-op)"
+assert_eq "$(count_project_entry "$S23" guard-destructive.sh)" "1" "rewritten in place — still exactly one entry, not duplicated"
+assert_eq "$(count_project_entry "$S23" guard-loom-workflow.sh)" "1" "the missing sibling entry was also added in the same pass"
+# Idempotent: a second re-provision leaves the now-current quoted entry alone.
+ensure_project_hook_wiring "$R23" >/dev/null 2>&1
+assert_eq "$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$S23")" '"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-destructive.sh"' "already-quoted entry left unchanged by a second re-provision"
+assert_eq "$(count_project_entry "$S23" guard-destructive.sh)" "1" "still exactly one entry after a second re-provision"
+
+# ── Test 24: the machine-level (user-scope) wrapper path is unaffected ───────
+echo "Test 24: the machine-level ~/.claude/settings.json wrapper is unaffected by the project-level quoting fix (#6544)"
+HOME24=$(mktemp -d)
+provision_loom_hooks "$HOME24/.claude" >/dev/null 2>&1
+CMD24=$(jq -r '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[] | .command | select(contains("guard-destructive.sh"))' "$HOME24/.claude/settings.json" | head -1)
+assert_contains "$CMD24" "bash -c '" "machine-level entry is still the bash -c wrapper form"
+[[ "$CMD24" != *'"${CLAUDE_PROJECT_DIR}'* ]] && pass "machine-level wrapper does not use the project-level \${CLAUDE_PROJECT_DIR} quoting form at all" \
+    || fail "machine-level wrapper unexpectedly picked up the project-level quoting form"
 
 echo ""
 echo "======================================"

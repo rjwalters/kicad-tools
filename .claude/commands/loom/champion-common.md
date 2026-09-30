@@ -252,8 +252,17 @@ because the two callers need different confidence:
 
 | Tier | Sources | Who may act on it |
 |---|---|---|
-| **Strong** (containment) | (a) `loom:epic-phase` children carrying the phase marker, (b) native GitHub sub-issues, (c) `- [ ] #N` task-list entries in the epic body | Step 2's classification, and `champion-epic.md` → "Step 0" **including its autonomous close** |
+| **Strong** (containment) | (a) `loom:epic-phase` children carrying the phase marker, (b) native GitHub sub-issues, (c) `- [ ] #N` task-list entries in the epic body, (e) issues titled `[Epic #N] Phase ` | Step 2's classification, and `champion-epic.md` → "Step 0" **including its autonomous close** |
 | **Weak** (prose reference) | (d) issues whose body merely names `Epic #N` | Never on its own — it may only downgrade `champion-epic.md`'s Step 0 to an operator ask, and it never affects Step 2 |
+
+Source (e) exists because an epic's phase children are sometimes filed
+directly — by the operator or another role — using only the title convention
+`champion-epic.md`'s own Step 3 template emits (`[Epic #N] Phase M: ...`)
+plus a `Part of #N (Phase M)` body back-reference, never the phase marker, a
+native sub-issue link, a body task-list entry, or the literal `Epic #N`
+phrase source (d) requires. Sources (a)-(c) and (e) all missed this shape for
+two real epics before this source was added — #5774's children (#5775-#5777)
+and #5784's children (#5785-#5787) — see #5791.
 
 ```bash
 # Sets EPIC_CHILD_STRONG_{OPEN,CLOSED}, EPIC_CHILD_WEAK_{OPEN,CLOSED},
@@ -291,6 +300,20 @@ discover_epic_children() {
     c=$(printf '%s' "$c" | jq --argjson n "$r" --arg s "$st" '. + [{number:$n, state:$s}]')
   done
 
+  # (e) title-prefix children: issues titled "[Epic #$num] Phase " — the
+  # literal prefix champion-epic.md's own Step 3 template emits — regardless
+  # of who filed them and regardless of phase marker, sub-issue link, or a
+  # body task-list entry (#5791). This recognizes phase issues filed directly
+  # (operator, another role) whose body says "Part of #$num (Phase M)"
+  # instead of the exact "Epic #$num" phrase source (d) requires. The `gh
+  # search` phrase match is a superset (GitHub's tokenizer strips brackets),
+  # so the jq `startswith` guards against a title that merely contains the
+  # phrase mid-string rather than genuinely starting with it.
+  local e
+  e=$(${GH_READ:-gh} issue list --repo "$repo" --state=all --limit=200 \
+    --search "\"[Epic #$num] Phase\" in:title" --json number,state,title \
+    --jq "[.[] | select(.title | startswith(\"[Epic #$num] Phase \"))] | map({number,state})" 2>/dev/null || echo '[]')
+
   # (d) weak: prose references to this epic, no containment claimed.
   local d
   d=$(${GH_READ:-gh} issue list --repo "$repo" --state=all --limit=200 \
@@ -298,7 +321,7 @@ discover_epic_children() {
 
   local strong weak
   strong=$(jq -s --argjson e "$num" 'add | map(select(.number != $e)) | unique_by(.number)' \
-    <(printf '%s' "$a") <(printf '%s' "$b") <(printf '%s' "$c"))
+    <(printf '%s' "$a") <(printf '%s' "$b") <(printf '%s' "$c") <(printf '%s' "$e"))
   weak=$(jq -s --argjson e "$num" '(.[0] | map(.number)) as $s
     | .[1] | map(select(.number != $e and (.number | IN($s[]) | not))) | unique_by(.number)' \
     <(printf '%s' "$strong") <(printf '%s' "$d"))
@@ -310,6 +333,7 @@ discover_epic_children() {
   [ "$(printf '%s' "$a" | jq 'length')" -gt 0 ] && srcs="$srcs,phase-marker"
   [ "$(printf '%s' "$b" | jq 'length')" -gt 0 ] && srcs="$srcs,sub-issues"
   [ "$(printf '%s' "$c" | jq 'length')" -gt 0 ] && srcs="$srcs,task-list"
+  [ "$(printf '%s' "$e" | jq 'length')" -gt 0 ] && srcs="$srcs,title-prefix"
   [ "$(printf '%s' "$weak" | jq 'length')" -gt 0 ] && srcs="$srcs,prose-reference"
   EPIC_CHILD_SOURCES="${srcs#,}"
 }

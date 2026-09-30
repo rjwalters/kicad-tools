@@ -44,7 +44,8 @@ make_fixture() {
   printf '{"agentType":"loom-builder","description":"Build issue #42","spawnDepth":1}\n' > "$proj/UUID1/subagents/agent-abc.meta.json"
   printf 'big tool output\n' > "$proj/UUID1/tool-results/r1.txt"
   DEST="$ROOT/archive"
-  DATE="$(date +%Y-%m-%d)"
+  # Issue #8504: -u to match epoch_to_date()'s UTC-based archive-subdir day.
+  DATE="$(date -u +%Y-%m-%d)"
 }
 
 echo "Case 1: enabled via env — copies session + subagents + sidecars + index"
@@ -88,12 +89,19 @@ AID="$(jq -r '.agents[0].agent_id' "$S/index.json")"
 MODEL="$(jq -r '.agents[0].model' "$S/index.json")"
 SCHEMA="$(jq -r '.schema' "$S/index.json")"
 SWEEP="$(jq -r '.sweep_issue' "$S/index.json")"
+START_TS="$(jq -r '.agents[0].start_ts' "$S/index.json")"
+END_TS="$(jq -r '.agents[0].end_ts' "$S/index.json")"
 assert_eq "$AID"    "agent-abc"          "index keyed by agent id"
 assert_eq "$ROLE"   "loom-builder"       "role sourced from meta sidecar"
 assert_eq "$ISSUE"  "42"                 "issue parsed from meta description"
 assert_eq "$MODEL"  "claude-sonnet-4"    "model harvested from subagent jsonl"
 assert_eq "$SCHEMA" "loom.transcript-index/v1" "schema tag present"
 assert_eq "$SWEEP"  "42"                 "sweep issue recorded"
+# Regression coverage for #8293: the jq filter used to bind the range-end
+# timestamp to the jq variable named "end" (a reserved word on jq 1.6,
+# renamed to `range_end` internally; the output field stays `end_ts`).
+assert_eq "$START_TS" "2026-07-20T10:01:00Z" "start_ts harvested from subagent jsonl"
+assert_eq "$END_TS"   "2026-07-20T10:03:00Z" "end_ts harvested from subagent jsonl"
 echo ""
 
 echo "Case 4: idempotent — second run copies nothing new"

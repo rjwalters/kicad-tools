@@ -245,5 +245,5 @@ kct check output/bldc_controller_routed.kicad_pcb --copper-weight 2oz
 
 ## Related Examples
 
-- [examples/07-design-feedback/thermal_demo.py](../../examples/07-design-feedback/thermal_demo.py) - Thermal analysis API
-- [boards/04-stm32-devboard](../04-stm32-devboard/) - MCU schematic patterns
+- [examples/07-design-feedback/thermal_demo.py](../../../examples/07-design-feedback/thermal_demo.py) - Thermal analysis API
+- [boards/04-stm32-devboard](../../04-stm32-devboard/) - MCU schematic patterns

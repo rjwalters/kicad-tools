@@ -54,6 +54,9 @@ exactly as the constructor does.
 
 from __future__ import annotations
 
+import dataclasses
+from typing import TYPE_CHECKING
+
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     ALL_PAIR_KINDS,
@@ -63,11 +66,20 @@ from tests.conformance.adapters._support import (
     router_pad,
     router_rules,
     router_segment,
+    router_via,
     single_object_route,
 )
 from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
+
 __all__ = ["DiffPairAdapter"]
+
+#: The consumer's own geometric noise floor for a pad deficit
+#: (``diffpair_routing._SHADOW_PAD_DEFICIT_EPS``).  Restated rather than
+#: imported so the harness never depends on a private consumer constant.
+PAD_DEFICIT_EPS = 1e-4
 
 
 class DiffPairAdapter:
@@ -81,8 +93,34 @@ class DiffPairAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
-        nets = net_ids(case)
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same three gates, at the clearance kicad-cli itself applies.
+
+        The **gated** reading (Epic #5509 Phase 3c, #5662).  Only the two
+        copper clearances move onto ``case.rules.project_clearance``; the via
+        geometry and ``min_hole_to_hole`` stay the case's own, because those
+        feed the drill floor -- a different requirement kicad-cli scores under
+        a different verdict kind, which this row does not claim.
+
+        Nothing is patched: the ``DesignRules`` handed to ``Autorouter`` have
+        always been this adapter's own choice, and this is the same choice
+        made twice.  The raster gate re-marks its grid from the new rules for
+        free, because the router is constructed per pair.
+        """
         rules = router_rules(case)
+        return self._verdicts(
+            case,
+            dataclasses.replace(
+                rules,
+                trace_clearance=case.rules.project_clearance,
+                via_clearance=case.rules.project_clearance,
+            ),
+        )
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
+        nets = net_ids(case)
         layer_index = layer_indexer(case)
         found: set[Verdict] = set()
 
@@ -112,6 +150,13 @@ class DiffPairAdapter:
                     clear = dpr._segment_pad_clear(seg)
                 required = rules.trace_clearance
             else:
+                # The barrel sibling of ``_segment_pad_clear``: production
+                # gates a constructed via against foreign pads through
+                # ``_via_pad_deficit`` / ``_route_pad_violation`` (#4571), so
+                # a ``pad-via`` pair has a real call to make here.  Omitting
+                # it recorded a confident "clear" for the one pair kind only
+                # this gate answers (Epic #5509 Phase 3c, #5662).
+                clear = dpr._via_pad_deficit(router_via(candidate, nets)) <= PAD_DEFICIT_EPS
                 required = rules.via_clearance
 
             if clear:

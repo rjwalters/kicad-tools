@@ -54,6 +54,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 
+# #8191: _maybe_delete_local_branch (called directly and via
+# _remove_loom_worktree) now delegates to `loom-daemon merge-pr delete-branch`.
+# Pin the binary built from this tree so a stale installed daemon cannot answer
+# instead — it would warn-and-keep every branch and fail these cases for the
+# wrong reason.
+#
+# #8191 slice: the porcelain lookups this suite extracts (_primary_worktree_path
+# / _is_primary_worktree_path / _worktree_branch_for / _find_worktree_by_branch)
+# now delegate to `loom-daemon merge-pr worktree-*`, so the LEAF verbs are
+# checked too — a binary with only the `merge-pr` group predates this slice and
+# would make every lookup fail, which the #3710 guard turns into "refuse to
+# clean up anything at all": a whole-suite failure that reads as broken logic
+# rather than as one stale binary.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
+    "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
+    "merge-pr worktree-find-by-branch"
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
@@ -64,6 +83,19 @@ TESTS_FAILED=0
 
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
 fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
+
+# An assertion that CANNOT survive the port to Rust, retired under the
+# three-part test in defaults/docs/verification-recipes.md §6. Printed, not
+# deleted: a reader must be able to see what was removed, why, and what proves
+# the property now. Counted as run so the totals stay honest.
+YELLOW='\033[0;33m'
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
@@ -81,10 +113,16 @@ assert_grep 'if _is_primary_worktree_path "\$DISCOVERED_WT"; then' "$MERGE_PR" \
     "discovery-fallback checks whether the discovered worktree is the primary checkout"
 assert_grep 'not a removable worktree' "$MERGE_PR" \
     "discovery-fallback reports the primary checkout as not removable"
-assert_grep 'checkout_loc="\$\(_find_worktree_by_branch "\$branch"\)"' "$MERGE_PR" \
-    "_maybe_delete_local_branch resolves the branch's checkout location"
-assert_grep "git -C '\\\$checkout_loc' checkout \\\$default_label" "$MERGE_PR" \
-    "_maybe_delete_local_branch prints the two-step checkout+delete advice"
+retired \
+    "_maybe_delete_local_branch resolves the branch's checkout location" \
+    "a checked-out refusal is attributed to WHERE the branch is checked out, so the primary checkout gets primary-specific advice (#4171)" \
+    "#8191: the refusal handling left the shell. _maybe_delete_local_branch calls 'loom-daemon merge-pr delete-branch', and the location lookup is worktree_cli::branch_delete::handle_checked_out's find_worktree_by_branch — there is no checkout_loc assignment in merge-pr.sh to grep for" \
+    "Test 3 below, which runs the real function against a real primary checkout and requires the primary-specific message, plus Test 5a/5b"
+retired \
+    "_maybe_delete_local_branch prints the two-step checkout+delete advice" \
+    "the primary-checkout refusal prints the exact 'git -C <dir> checkout <default> && git -C <dir> branch -D <branch>' remediation" \
+    "#8191: that message is now worded by worktree_cli::branch_delete (Rust) and replayed by the shell from a WARNING<TAB>message line; merge-pr.sh never spells '\$checkout_loc' or '\$default_label' again" \
+    "Test 3 below, which asserts the replayed output contains 'checkout main' and 'branch -D <branch>' behaviourally — stronger than a grep, since it proves the text reaches the operator"
 
 # --- Extract the ACTUAL function bodies from the live source (no drift) ---
 extract_fn() {
@@ -102,6 +140,10 @@ warning() { echo "WARN: $*"; }
 success() { echo "OK: $*"; }
 error()   { echo "ERROR: $*" >&2; return 1; }
 
+# #8191 slice: the porcelain lookups below shell out through _mp_worktree, so it
+# is extracted with them — without it they die with "_mp_worktree: command not
+# found" under `set -e`.
+eval "$(extract_fn _mp_worktree               "$MERGE_PR")"
 eval "$(extract_fn _primary_worktree_path     "$MERGE_PR")"
 eval "$(extract_fn _is_primary_worktree_path  "$MERGE_PR")"
 eval "$(extract_fn _worktree_branch_for       "$MERGE_PR")"

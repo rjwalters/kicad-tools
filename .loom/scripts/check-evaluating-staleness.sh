@@ -137,13 +137,13 @@ TIMELINE_JSON="$(gh api "repos/{owner}/{repo}/issues/$ISSUE/timeline" --paginate
   echo "ERROR: 'gh api .../issues/$ISSUE/timeline' failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   exit 1
 }
-CLAIMED_AT="$(jq -r --arg label "$LABEL" \
-  '[.[] | select(.event=="labeled" and .label.name==$label)] | last | .created_at // empty' \
+CLAIMED_AT="$(jq -r --arg claim_label "$LABEL" \
+  '[.[] | select(.event=="labeled" and .label.name==$claim_label)] | last | .created_at // empty' \
   <<<"$TIMELINE_JSON" 2>/dev/null || true)"
 
 # Portable ISO-8601 -> epoch-seconds: GNU `date -d` first, BSD/macOS `date -j
 # -f` fallback (matches the existing dual-path idiom in judge-fallback-guard.sh,
-# sweep-run-registry.sh, sweep-lease-fence.sh, urgent-flip-guard.sh).
+# sweep-run-registry.sh, sweep-lease-fence.sh).
 iso_to_epoch() {
   date -u -d "$1" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$1" +%s 2>/dev/null || echo ""
 }

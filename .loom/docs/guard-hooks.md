@@ -12,6 +12,7 @@ see "Config tiers" below); the operating-core guides (`CLAUDE.md` and
 - [Machine-Level Execution (Epic #3835 Phase 5, #4262)](#machine-level-execution-epic-3835-phase-5-4262)
 - [The Ungated Denial Floor](#the-ungated-denial-floor)
 - [Ask-Tier Composition (#7795)](#ask-tier-composition-7795)
+- [Credential content scan on commit and push (#9133)](#credential-content-scan-on-commit-and-push-9133)
 - [Custom Guard Hooks](#custom-guard-hooks)
 <!-- toc:end -->
 
@@ -428,6 +429,36 @@ the new data, not on this table. Read a moved count against the two caveats
 above first: check whether a precision fix has already landed for it, and
 whether the new hits are live commands or the guard firing on quoted text.
 
+## Credential content scan on commit and push (#9133)
+
+Every other credential defence is path-based: the managed `.gitignore` block,
+`CREDENTIAL_PATTERNS`, and its shell mirrors. A credential at a path nobody
+listed (a renamed `.loom/tokens.<suffix>/`, a pasted log) is invisible to all
+of them at once. `loom-daemon secret-scan` reads **content** instead: Claude
+OAuth/API keys, GitHub and Tailscale tokens, AWS key ids, Slack tokens, private
+keys and z.ai keys, each matched at its real length so short test fixtures do
+not fire. It never prints a value, only `path:line: class (fp <sha256[:8]>)`.
+
+It runs in three places, with one pattern list:
+
+| Where | Mode | Covers |
+|---|---|---|
+| `guard-loom-workflow.sh` (PreToolUse, every Loom repo) | `--for-command` | `git … commit`: everything the command could stage, including untracked files, since the hook runs before the command's own `git add`. `git … push`: every commit no remote-tracking ref has. |
+| `.githooks/pre-commit`, `.githooks/pre-push` (this repo) | `--staged`, `--pre-push` | Commits made outside a Claude session. Needs `core.hooksPath=.githooks`. |
+| CI `Daemon Checks` → `Secret Scan` | `--range <base>..<head>` | Every PR, and every push to `main`, including one that bypassed the PR rules. |
+
+Commits are scanned one at a time, not as a net diff: a value added and then
+deleted on a branch is still published by the push.
+
+Caveats: `git commit --no-verify` skips the git hooks (the guard and CI still
+apply). The guard scans the repo at the session's `cwd`; a `git -C elsewhere`
+form is left to the hooks and CI. A daemon older than the subcommand makes the
+guard allow, like every other unavailable check.
+
+A synthetic fixture that trips it goes in `.loom/secret-scan-allow`, one
+fingerprint per line with a reason. Never list a real credential there: remove
+it, and rotate it, since anything pushed to a public remote is disclosed.
+
 ## Custom Guard Hooks
 
 Loom ships with several built-in `PreToolUse` guard hooks, registered independently under the `Bash` or `Edit|Write` matcher as noted below:
@@ -438,6 +469,7 @@ Loom ships with several built-in `PreToolUse` guard hooks, registered independen
 - **`guard-worktree-paths.sh`** (`Edit|Write` matcher, issue #2441 / #4007) — confines Edit/Write tool calls to a builder's issue worktree, denying writes that resolve into the main checkout. Two mechanisms: the `LOOM_WORKTREE_PATH` env fast path (tmux/manual sessions pinned to one worktree) and, when that env var is absent, a **path-derived fallback** — it walks up from the target path looking for the `.loom-managed` sentinel `worktree.sh` writes at every worktree root, and denies a write that lands in the main checkout while at least one managed worktree exists. The fallback exists because a daemon-dispatched sweep hosts multiple Task-subagent builders in one shared process env, so a single process-wide `LOOM_WORKTREE_PATH` cannot cover that path (#3719). Toggle: `guards.worktreeIsolation` / `LOOM_GUARD_WORKTREE_ISOLATION`, documented alongside the other guard toggles below. **This confines the Edit/Write tool matcher only** — a session denied here could historically fall back to a Bash-tool write (`>`, `tee`, `sed -i`, `cp`/`mv`) targeting the same path with nothing to stop it (the #4178 incident: sweep #4063 used exactly this to edit live guard hooks in the main checkout). `guard-destructive-generic.sh`'s write-confinement category (bullet above) now closes that gap under the identical toggle. **Second, independent category (issue #7995):** this hook also denies an Edit/Write that edits an **installed Loom file in place** in a repo that is not Loom's own source tree — separate toggle (`guards.installedFileWrites` / `LOOM_GUARD_INSTALLED_FILE_WRITES`, below), separate verdict, neither toggle short-circuits the other.
 - **`guard-codex-bridge.sh`** (Codex `pre_tool_use` hook, issue #4495) — **not a Claude Code hook.** It is installed into a selected `$CODEX_HOME/hooks.json` by `defaults/scripts/provision-codex-hooks.sh` and is the adapter that makes the three `PreToolUse` guards above fire for a **Codex** worker. It validates the Codex event, classifies the tool (shell / native patch / read-only / MCP / unknown), normalizes the payload into the Claude-shaped request those guards already accept, dispatches into them **unmodified** (no second policy table), and encodes the outcome on Codex's wire. Two behavioral differences from the Claude path are structural, not choices: Codex 0.146.0 accepts only `permissionDecision:"deny"` (an `allow` is expressed as *no output*, and `ask` is not on the wire at all), so every `ask` becomes a **deny** with the original reason preserved — correct anyway for headless `codex exec`, where nobody can answer; and the bridge fails **closed** (malformed payload, unknown tool, unextractable command/path, or a sub-guard that misbehaves all deny) where the Claude guards fail open. `spawn-codex.sh` refuses to start a **mutable** role (Builder/Doctor) unless the managed hook is installed, pinned, readable and the profile has established Codex hook trust — exit 78 before the CLI runs, and never `--dangerously-bypass-hook-trust`. Full reference: [`guardrail-parity-codex.md`](guardrail-parity-codex.md).
 - **`guard-background-subagents.sh`** (`Stop` hook, issue #4257) — a mechanical backstop for the hazard documented in `defaults/.claude/commands/loom/sweep.md` under "Subagent dispatch is async-only" (#3822): in headless `claude -p` mode, ending the orchestrator's turn **terminates the process**, which kills every still-running background Task/Agent subagent (the #4195/#4243 incident this issue traces). This hook fires when the session is about to stop, scans the transcript JSONL for `Task`/`Agent` tool_use entries with no observed completion (issue #5086 — the harness names the tool `Agent`, not `Task`), and **blocks the stop once** with a loud reason explaining the hazard when it finds any unresolved dispatch. **The block is headless-only (issue #6645)**: the hook first classifies the session, and in an *interactive* session — where background children survive the turn boundary and their completion notifications arrive on a later turn — it allows the stop and emits at most a one-line `systemMessage` advisory instead. Every path that cannot positively establish "interactive" resolves to headless, so the #4257 safety floor is unchanged; see "Session-mode detection" in the reference section below. It uses `stop_hook_active` to block **at most once per stop sequence** — this is a heuristic over the transcript file (not a live process check), so a second consecutive block could wedge the session on a false positive (e.g. a slow transcript flush); after one block, the guard always allows. When it does block, the reason **names the specific tool-use ids** each detector believes are outstanding (issue #5976, capped at 8 with a `+N more` suffix) — before that it reported bare counts, and confirming a false positive meant eliminating every dispatch in the session by hand. Toggle: `guards.backgroundSubagents` / `LOOM_GUARD_BACKGROUND_SUBAGENTS`, documented alongside the other guard toggles below.
+- **`guard-mcp-tools.sh`** (`PreToolUse`/`mcp__loom__.*` matcher, issue #9108) — the only guard registered under the MCP namespace rather than `Bash` or `Edit|Write`. Before #9108, every `PreToolUse` matcher was `Bash` or `Edit|Write`, so a call to any `mcp__loom__*` tool (mcp-loom is registered at user scope and callable from every agent Loom spawns) ran with **no guard hook on its path at all** — including `get_agent_metrics`, which joined its raw MCP arguments into a shell command line until #9107 replaced that with an `execFile` argv and server-side allow-lists. The matcher is a **namespace wildcard**, not an enumerated tool list, so a tool added to mcp-loom later is covered with no wiring edit. The decision logic itself is `loom-daemon guard-mcp-tools` (native from the start, per the shell-language policy); this hook file is a thin stub that resolves and execs it, routed through `hook-wiring.sh` so a broken/absent install fails **closed** the same way the `Bash`/`Edit|Write` entries do (see "An ABSENT or non-executable hook is no longer a silent allow" above — rung 5 denies rather than silently allows). Full rule detail and toggle: `guards.mcpToolArgs` / `LOOM_GUARD_MCP_TOOL_ARGS`, below.
 
 You can also add project-specific guards to protect read-only directories from accidental edits (see below).
 
@@ -872,6 +904,34 @@ This does not touch `guard-worktree-paths.sh` (the `Edit|Write` matcher):
 every role on the allowlist above structurally has no Write/Edit tool to
 begin with, so that guard was never reachable for them.
 
+**An unquoted heredoc body is not literal (issue #8035).** `cat > /tmp/x
+<<EOF` does **not** make its body inert: the shell performs command
+substitution on an *unquoted*-delimiter body *before* the sink reads a byte,
+so a `cp` / `mv` / `mkdir` / `sed -i` hidden in a `$( … )` or backtick span
+there really executes. The masker already knew this (`<<EOF` bodies keep
+their live spans visible, #7421), but nothing downstream did: every write
+idiom is keyed on the **command word** of a `;`/`&`/`|`-delimited segment,
+and `$(`/`)` is not a segment boundary — the whole heredoc invocation is one
+segment whose command word is `cat`, so the escaping write was never scored
+as a write target at all. `extract_write_targets()` now runs a **second,
+independent pass** over the inner text of each such span
+(`heredoc_unquoted_subst_spans()`), which makes that `cp` the command word of
+its own segment and denies exactly as the bare `cp …` control does. Same
+shape, same discriminator, and the same deliberate quote-blindness as the
+index-mutation side's `im_hd_expand()` (#8003): quote characters carry no
+quoting meaning inside a heredoc body, so a span wrapped in quotes expands
+like a bare one, and only a **backslash** suppresses it (`\$( … )` stays
+inert). A **quoted** delimiter (`<<'EOF'` / `<<"EOF"`) is skipped entirely —
+that body genuinely is literal, which is the whole reason the masker may
+blank it. The pass is purely additive (a separate awk process, never sharing
+lexer state with the primary scan), so it can turn an allow into a deny and
+never the reverse; an unbalanced `$(`, an unterminated backtick, or
+recursion past depth 5 yields **no** span, i.e. the pre-#8035 not-covered
+behaviour rather than a new false positive on prose. The sibling
+`extract_rm_targets()` scan had the same structural blind spot; it was closed
+the same way by #8217 — see § "Same-command literal declaration" → "An unquoted
+heredoc body is not literal here either" below.
+
 The guard is **on by default**. It is resolved in this order (highest precedence first):
 
 1. **`LOOM_GUARD_WORKTREE_ISOLATION` env var** — `0`/`false`/`no` disables the guard; `1`/`true`/`yes` forces it on. Overrides the config value.
@@ -984,6 +1044,29 @@ and an unassigned name stays unresolved. Heredoc bodies are masked before the
 scan, so an inert decoy assignment inside one cannot launder a real
 unresolved target (#6549).
 
+**One exception to the two-assignment rule (#7986)**, shared by the mktemp fast
+path above and its write-confinement sibling `wt_write_mktemp_same_command_safe()`
+(#6949): a `NAME=$(mktemp -d)` / `NAME=$(mktemp)` assignment may be followed by
+**exactly one** self-referential canonicalization of the **same** variable,
+whose entire RHS is exactly `$(realpath "$NAME")` (optionally double-quoted) —
+the routine way to resolve a symlinked temp root (`/tmp` → `/private/tmp`)
+before use. That second assignment cannot escape the directory the first one
+already proved safe: `realpath` either fails (the substitution captures
+nothing and `NAME` becomes empty) or prints the canonical path of that same
+directory. Everything else still fails closed — a third assignment, the
+reverse order, `${NAME}` inside the `realpath` call, a canonicalization of a
+*different* variable, or any prefix/suffix around the admitted form.
+
+**`$(cd "$NAME" && pwd -P)` is deliberately NOT admitted**, even though it
+looks like an equally safe canonicalization of the same shape: `cd ""` is a
+documented no-op *success* on bash 3.2 (macOS stock `/bin/bash`), zsh, and
+`/bin/sh`, so when `mktemp` fails and `NAME` is empty, a `;`/newline-joined
+`NAME=$(cd "$NAME" && pwd -P)` still runs and resolves to the **caller's
+cwd** instead of staying empty — converting a benign `mktemp`-failure no-op
+into `rm -rf <cwd>` or a write into `<cwd>`. `realpath` has no such
+shell-builtin special case for an empty path, so it fails safely on every
+join style.
+
 Because the literal fast path re-runs the ordinary checks on the *resolved*
 path, it is a false-positive refinement rather than a relaxation:
 `WT=/etc/foo; rm -rf "$WT/.snapshots"` still denies as out-of-scope,
@@ -995,6 +1078,36 @@ previously denied at the catastrophic tier purely because the target was
 spelled through a variable.
 
 Anything outside those two shapes still requires an explicit literal path.
+
+**An unquoted heredoc body is not literal here either (issue #8217).** The
+rm-scope analogue of #8035 above (and of #8003 before it — the same structural
+blind spot, third scanner over). `cat > /tmp/x <<EOF` ⏎ `$( rm -rf /opt/vendor )`
+⏎ `EOF` really deletes that directory: the shell expands the *unquoted*-delimiter
+body before `cat` reads a byte. `extract_rm_targets()` keys a local `rm` on the
+**command word** of a `;`/`&`/`|`-delimited segment, and `$(`/`)` is not a
+segment boundary — so the whole invocation was one segment whose command word is
+`cat`, and the target was never scored at all (measured **allow**, where the bare
+`rm -rf /opt/vendor` control denies). It now runs the **same scanner a second,
+independent time** over the inner text of each such span, reusing #8035's
+`heredoc_unquoted_subst_spans()` so the two passes can never disagree about which
+text bash will expand. All of #8035's discriminators carry over unchanged: a
+**quoted** delimiter (`<<'EOF'` / `<<"EOF"`) is skipped entirely, a
+backslash-escaped `\$( … )` stays inert, and an unbalanced `$(` / unterminated
+backtick / recursion past depth 5 yields **no** span — not-covered rather than a
+new false positive on prose.
+
+One rm-specific rule comes with it: a target found inside a span does **not** get
+the two same-command fast paths in the table above. Both prove a claim about the
+*current* shell's binding of a name by scanning a copy with every heredoc body
+masked (#6549), while a `$( … )` span is a subshell whose own assignments live
+inside that masked text — so an assignment outside the heredoc must never vouch
+for a name the span rebinds inside it (`V=$(mktemp -d)` … `$( V=/etc; rm -rf
+"$V" )`). A `$`-rooted span target therefore fails closed on
+`rm-scope-unresolved-var`, whose message names the span explicitly. Stated cost:
+a span target whose variable genuinely *is* mktemp-rooted outside the heredoc
+denies too. That text was entirely unscanned before #8217, so this is a new deny
+on previously-unexamined input rather than a relaxation, and the remedy is the
+one the message already gives — use an explicit literal path.
 
 ### Installed-File Write Guard (`guards.installedFileWrites` / `LOOM_GUARD_INSTALLED_FILE_WRITES`)
 
@@ -1084,6 +1197,135 @@ The guard is **on by default**. It is resolved in this order (highest precedence
 3. **Default** — `true` (guard on).
 
 The config read is best-effort: a missing, empty, or malformed `.loom/config.json` falls through to guard-ON and never causes the hook to exit non-zero; a missing/unreadable/unparseable transcript, or a missing `jq`, also fails open (allow the stop) rather than wedging the session.
+
+### Uncommitted-Work Stop Guard (`guards.uncommittedWork` / `LOOM_GUARD_UNCOMMITTED_WORK`)
+
+`loom-daemon worktree-state stop-hook` (issue #8267) is the sibling of the
+guard above, on the other turn-end hazard. That one blocks a turn that ends
+**too early** (children still running); this one blocks a turn that ends with
+the work **still only on this machine's disk** — an agent reporting success
+while its entire deliverable sits uncommitted in its worktree.
+
+The reported failure, twice in one session: an agent ran a long investigation,
+committed nothing (**zero commits on its branch**), and left six probe scripts
+untracked — recovered by hand only because the files happened to still be on
+disk; and a second agent left a 52 KB tool untracked, then left a further fix
+uncommitted *after reporting done*. In both cases **the completion notification
+was indistinguishable** from one where everything had been committed. Loom does
+not own the harness's `<usage>` completion block, so the fix lives at the turn
+boundary it does own.
+
+It is wired on **both** `Stop` (a headless role agent, whose whole process is
+one turn) and `SubagentStop` (a `Task`-tool Builder/Doctor inside an
+orchestrator session), and it decides in three steps:
+
+1. **Ownership.** It acts only on a worktree this session actually wrote into:
+   the payload `cwd` when that is a `.loom-managed` worktree, otherwise the most
+   recent `Edit`/`Write`/`MultiEdit`/`NotebookEdit` `file_path` in the
+   transcript that lands inside one. A `Bash` command *mentioning* a worktree
+   path is deliberately not ownership — the orchestrator's own transcript is
+   full of those (`check-main-clean.sh --label issue=N`, checkpoint writes), and
+   blocking an orchestrator for a Builder's mess would block a turn that cannot
+   fix it. The primary checkout is never a subject: it legitimately holds an
+   operator's WIP, and `check-main-clean.sh` already covers contamination there.
+2. **Measurement.** `git rev-list --count <base>..HEAD` for commits, plus
+   `git status --porcelain=v1 -z` for working-tree changes, minus the same
+   scratch exclusions `buildGate` documents (`.loom-*` runtime markers, `*.log`,
+   `.no-changes-needed`, `.snapshots/`). A Builder that deliberately concluded
+   "no changes needed" leaves exactly one excluded marker file and is never
+   flagged for it.
+3. **Verdict.** `uncommitted` (deliverable-shaped changes not committed) blocks;
+   `committed`, `unpushed` and `empty` do not. An unverifiable push state
+   renders as `unpushed`, never as `committed` — the same
+   "existence treated as evidence of a property" trap #8265 names.
+
+On a block the reason names the counts, up to 8 at-risk paths (`+N more` beyond
+that) and the three ways out: commit and push, restate explicitly that the files
+are intermediate, or write `.no-changes-needed`. It blocks **at most once per
+stop sequence** (`stop_hook_active`, exactly as the background-subagent guard
+does): the second stop downgrades to a `systemMessage` advisory that still
+records the state, so a deliberate judgement costs one extra turn and can never
+wedge a session. A clean completion **with commits** also emits an advisory —
+that is the "surface repo state in the completion notification" half: a turn
+that ends well says so with evidence rather than an assertion. A session that
+produced nothing at all stays silent.
+
+Read the same numbers directly at any time:
+
+```bash
+loom-daemon worktree-state report --issue 8267        # one key=value line
+loom-daemon worktree-state report --worktree "$PWD" --json
+# exit 0 = nothing at risk · exit 3 = unsaved deliverables (check-main-clean.sh's code)
+```
+
+This is also the executable home of `buildGate`'s documented **has-commits**
+primitive (see [`build-gate.md`](build-gate.md)) — anything else that needs to
+ask "did this agent actually commit anything?" calls it rather than growing a
+second commit-counter.
+
+The guard is **on by default**, resolved highest-precedence-first:
+
+1. **`LOOM_GUARD_UNCOMMITTED_WORK` env var** — `0`/`false`/`no`/`off` disables;
+   `1`/`true`/`yes`/`on` forces on.
+2. **`.loom/config.json`** — `guards.uncommittedWork` (default `true` when
+   absent):
+   ```json
+   {
+     "guards": {
+       "uncommittedWork": false
+     }
+   }
+   ```
+3. **Default** — `true` (guard on).
+
+The config is read from the **main checkout**, resolved from the worktree via
+`git rev-parse --git-common-dir`, not from the worktree itself: the host-local
+override tier (`.loom-local/local.json`) is gitignored and exists only there,
+and an uncommitted edit to the main checkout's `.loom/config.json` is likewise
+invisible inside a worktree. Reading the worktree's own copy would mean an
+operator's opt-out silently did nothing — the same main-checkout-only config
+trap `forge_cmd` hit in #4273.
+
+Every failure path allows the stop: an unreadable payload, a missing transcript,
+an absent `git`, a worktree that no longer exists, or a daemon binary the
+wiring cannot resolve all resolve to "allow, say nothing". A guard that wedges a
+headless sweep on its own parse bug would be worse than the loss it prevents.
+
+**The shell wrapper has to fail open too, and originally did not (#8377).** That
+"always allow" contract is implemented in Rust — but the `bash -c` wrapper in
+`.claude/settings.json` runs *before* any Rust code does, and it used to end in a
+bare `exec "$B" worktree-state stop-hook`. On a host whose installed
+`loom-daemon` predated the `worktree-state` subcommand, clap rejected the unknown
+subcommand with **usage-error exit code 2** — and `exec` made that the *hook's*
+exit code, which Claude Code reads as "block this turn from ending". Every turn
+on such a host wedged, headless sweeps included. The wrapper now ends in
+
+```bash
+"$B" worktree-state stop-hook || exit 0
+```
+
+so **"binary too old to know this subcommand" is treated exactly like "binary
+absent": both exit 0.** Swallowing the exit code costs nothing, because a block
+is signalled by printing `{"decision":"block","reason":"…"}` on **stdout** with
+exit 0 — never by an exit code — so the guard's verdicts still reach Claude Code
+intact while every genuine failure (usage error, panic, missing binary) allows
+the stop. `defaults/scripts/tests/test-stop-hook-subcommand-skew.sh` asserts both
+halves against stub binaries, for both `Stop` and `SubagentStop`. Any future hook
+wrapper that `exec`s a versioned `loom-daemon` subcommand inherits this hazard and
+needs the same `|| exit 0`.
+
+**Where it is wired (deliberately narrow for now).** The `Stop` /`SubagentStop`
+entries live in this repository's project-level `.claude/settings.json` only.
+Consumer repos get their guard hooks from the user-scope wiring
+`scripts/install/provision-hooks.sh` installs, whose set is the six
+`defaults/hooks/*.sh` scripts — this guard is a `loom-daemon` subcommand, not one
+of them, so it does **not** fire in consumer repos yet. That is a choice, not an
+oversight: this is a new *blocking* turn-end guard, and the only other one
+(`guard-background-subagents.sh`) needed eight follow-up corrections
+(#4389/#4462/#4696/#5013/#5086/#5976/#6175/#6645) before its false-positive rate
+was acceptable fleet-wide. It is dogfooded here — where every Loom sweep in this
+repo exercises it — before being offered to every installed workspace at once.
+Issue #8372 tracks the consumer-repo wiring.
 
 ### Workspace Registry Guard (`guards.workspaceRegistry` / `LOOM_GUARD_WORKSPACE_REGISTRY`)
 
@@ -1194,6 +1436,121 @@ every repo on the host). The only automated removals under the install dir are
 the eleven retired loom-tools shims, and `_pmd_cleanup_retired_shims()` gates
 those on a symlink whose target resolves through a `loom-tools` path segment
 **and** no longer exists — never a broad `rm` of a Loom-named path.
+
+#### Session-owned scratch directories (#8460)
+
+The one carve-out in the rm-scope check: **a session may remove its own private
+scratch/build directory, and nothing else.**
+
+**Why it exists.** A worker that needs a hermetic build — a private
+`CARGO_TARGET_DIR`, so a shared cross-worktree cargo target dir cannot
+cross-contaminate its test binaries (#8453) — has to put that directory
+*outside* the repo; a multi-GB build tree inside the worktree is exactly what
+the worktree-removal path is not built to carry. `rmScope=repo` then refused
+the cleanup, so on 2026-09-20 three agents each abandoned 3.5–11 GB of private
+build output on one fleet host. The guard was doing its job; it simply had no
+way to tell "a directory this session just created" from "an arbitrary path
+outside the repo".
+
+**Where the scratch root comes from** — env → config → default, the same
+precedence every other knob in this file uses:
+
+1. **`LOOM_GUARD_SCRATCH_ROOT`** env var (absolute path).
+2. **`.loom/config.json` → `guards.scratchRoot`** (absolute path):
+   ```json
+   { "guards": { "scratchRoot": "/mnt/fast-nvme/loom-scratch" } }
+   ```
+3. **Default** — `$HOME/.cache/loom/session-scratch`.
+
+A root that is `/`, `$HOME`, a bare single-segment directory (`/tmp`, `/opt`,
+…), the repo root, or any ancestor of the repo root is **rejected**: the
+carve-out goes inert (a log line on stderr, and every `rm` is judged exactly as
+it was before). A relative value is dropped the same way. A misconfigured root
+can therefore make this feature stop working; it can never make it broad.
+
+**What is admitted.** Only a path that satisfies *all* of:
+
+1. A scratch root resolves and survives the sanity screen above.
+2. The acting session has a plausible session id (see below).
+3. The target is `<root>/<session-id>` itself, or something **under** it. The
+   root is never admitted — it has no owning session — and `<root>/<some other
+   session's id>` cannot match, because the segment is compared against *this*
+   session's own id.
+4. `<root>/<session-id>` is a real directory, **not a symlink**.
+5. It holds a regular, non-symlink file named `.loom-session-scratch` whose
+   `session=<id>` line names **this** session.
+6. The target's *physical* (symlink-resolved) path is still inside the session
+   directory's physical path — so a symlink planted inside the session dir
+   cannot be used as a tunnel to something outside it.
+7. The target as written contains **no `..` segment**. `..` is resolved
+   lexically by the guard but physically by the kernel, so `<session-dir>/link/../x`
+   (with `link` a symlink elsewhere) would pass 3 and 6 on its normalized
+   spelling while `rm` deletes outside the session dir. Spell targets without
+   `..`; the recipe below never needs one.
+
+Anything unprovable — no root, no session id, no marker, an unreadable or
+malformed marker, a marker naming a different session — **fails closed**: the
+ordinary `rm-scope-outside-repo` deny fires, unchanged. The check runs *after*
+the unconditional catastrophic-path deny (`/`, `$HOME`, `/<one-segment>`), so
+the [ungated denial floor](#the-ungated-denial-floor) is untouched, and it can
+only ever *add* an allow for a path it has positively proven.
+
+**The decision: a guard carve-out, not a `loom-daemon` cleanup subcommand.**
+Issue #8460 asked for exactly one of the two, with the choice written down. The
+guard wins on one decisive property, and the rest is consequence:
+
+| | Guard carve-out (chosen) | `loom-daemon` cleanup subcommand |
+|---|---|---|
+| Where the session identity comes from | `session_id` on the hook's **stdin**, supplied by Claude Code. The hook is spawned by the harness, not by the model. | An env var / argument on a Bash command the model writes. |
+| Can the acting session forge it? | **No.** An inline `CLAUDE_CODE_SESSION_ID=<victim> …` prefix never reaches a separately-spawned hook. | **Yes** — `CLAUDE_CODE_SESSION_ID=<victim> loom-daemon …` is just another command. |
+| New privileged deletion surface | None. `rm` stays `rm`; one more path becomes provable. | A command that deletes directories on request, reachable from any Bash call. |
+
+A spoofable ownership check is precisely the failure #8460's acceptance
+criteria name — "another session's private directory must still be refused" —
+so the mechanism whose identity channel the acting session cannot touch is the
+only one that can meet it. **Both were not built**: there is no daemon-side
+remover for this, deliberately.
+
+**What this does *not* claim to prevent.** A determined session could already
+`mv` an out-of-repo directory into `/tmp` (on the ephemeral allowlist) and
+delete it there — that is true with or without this carve-out, so the carve-out
+adds no capability. What it *does* do is make the correct, self-cleaning path
+the easy one, and refuse the path-shaped shortcut ("anything under the scratch
+root") that would have made cross-session deletion the *default* behaviour.
+
+**The recipe.** Nothing writes the marker for you: creating the directory and
+the marker is two ordinary commands, both already permitted outside the repo.
+
+```bash
+# 1. Read-only: print this session's scratch dir. (Steps 2-4 need the value
+#    spelled out literally — the rm-scope check fails closed on a target that
+#    is an unexpanded variable from the path root down, so copy the printed
+#    path into the commands below rather than passing $D across commands.)
+echo "${LOOM_GUARD_SCRATCH_ROOT:-$HOME/.cache/loom/session-scratch}/$CLAUDE_CODE_SESSION_ID"
+
+# 2. Create it, plus the ownership marker the guard reads.
+mkdir -p /home/you/.cache/loom/session-scratch/<session-id>
+printf 'session=%s\n' '<session-id>' \
+  > /home/you/.cache/loom/session-scratch/<session-id>/.loom-session-scratch
+
+# 3. Build hermetically into it.
+CARGO_TARGET_DIR=/home/you/.cache/loom/session-scratch/<session-id> \
+  cargo test --workspace
+
+# 4. Clean up — admitted by the carve-out, and by nothing else.
+rm -rf /home/you/.cache/loom/session-scratch/<session-id>
+```
+
+If step 4 is denied anyway, the denial says which of the conditions above is
+unmet: an `rm` target under the scratch root that this session cannot prove it
+owns gets a remediation hint naming the marker requirement, while every other
+out-of-repo denial keeps its existing wording verbatim.
+
+Covered by `tests/hooks/test-guard-destructive-session-scratch.sh` (41
+assertions — the admit cases, plus every way the ownership proof can fail:
+peer sessions, the root itself, `..` traversal, symlinked session dirs,
+symlinked/missing/malformed/mis-named markers, absent and implausible session
+ids, and each rejected root shape).
 
 ### Force-Op Branch Scope Guard (`guards.forceScope` / `LOOM_FORCE_SCOPE`)
 
@@ -1661,6 +2018,53 @@ LOOM_GUARD_READONLY_FASTPATH=0 git status
 # Extend the allowlist with a bare read-only utility (jq/wc/head/tail/find/test
 # are already built-in as of #3772 — use this for a genuinely-custom word):
 #   .loom/config.json  ->  { "guards": { "readOnlyFastPathExtra": ["psql"] } }
+```
+
+### MCP Tool-Argument Guard (`guards.mcpToolArgs` / `LOOM_GUARD_MCP_TOOL_ARGS`)
+
+`guard-mcp-tools.sh` (issue #9108) is the `PreToolUse` guard registered under the `mcp__loom__.*` matcher — see the "Custom Guard Hooks" bullet above for why that matcher exists and what routed no guard hook onto MCP tool calls before it. It applies two rules to every `mcp__loom__*` call's `tool_input`, scanning **every string value at any depth** (not a per-tool schema list, so a field a future tool adds is covered automatically):
+
+1. **A shell metacharacter (`;` `|` `&` `<` `>` backtick, a literal newline, or `$(`) in any argument value → DENY.** MCP arguments are data, never code — mcp-loom tools reach subprocesses and tmux panes, and one of them (`get_agent_metrics`) built a shell command line straight from its raw arguments until #9107 — so a metacharacter in an argument is either an injection attempt or a mistake, and neither should reach the server. **One reviewed exemption list** (`(tool, field)` pairs, e.g. `send_terminal_input.input`, whose documented purpose is carrying literal keystrokes or free prose to a non-shell sink) skips the scan for that field only — adding to it is a deliberate, reviewable act, not a default.
+2. **A documented-`enum:` argument off its `inputSchema` allow-list → DENY.** Scoped per `(tool, field)`, taken from mcp-loom's own schema (e.g. `get_agent_metrics.command` must be one of `summary`/`effectiveness`/`costs`/`velocity`) — never a bare field name, since the same field name means something different on a different tool (`configure_terminal.role` is not the `get_agent_metrics.role` enum).
+
+Neither rule ever echoes the offending argument **value** back into the deny reason — only the tool name, the field path, and which rule fired — so the deny message itself cannot become a second copy of whatever the injection attempt was carrying.
+
+The guard is **on by default**. It is resolved in this order (highest precedence first):
+
+1. **`LOOM_GUARD_MCP_TOOL_ARGS` env var** — `0`/`false`/`no`/`off` disables the guard; `1`/`true`/`yes`/`on` forces it on. Overrides the config value.
+2. **`.loom/config.json`** — `guards.mcpToolArgs` (default `true` when absent). Set it to `false` to disable:
+   ```json
+   {
+     "guards": {
+       "mcpToolArgs": false
+     }
+   }
+   ```
+3. **Default** — `true` (guard on).
+
+Like every other Loom guard, every internal failure resolves to **allow** — an unreadable payload, a missing `tool_name`, or a config read that errors never blocks a legitimate MCP call. That is a different question from the guard being **absent**: a missing `guard-mcp-tools.sh` file in a `.loom/hooks`-bearing workspace is a broken install and is denied by `hook-wiring.sh`'s fail-closed rung 5, exactly like the `Bash`/`Edit|Write` guards (see "An ABSENT or non-executable hook is no longer a silent allow" above).
+
+**Decision log.** Unlike the Bash guards, which log only `deny`/`ask` to avoid swamping the file with the ~99% allow case, this guard also logs a clean `allow` when `guards.decisionLog` / `LOOM_GUARD_DECISION_LOG` is on (below) — MCP calls are orders of magnitude rarer, so an audit trail that captured only refusals could not answer "was this call allowed?" The logged `command` field is a tool name plus an offending field path, never an argument value, for the same reason the deny reason never echoes one.
+
+This category is **defense in depth, not a replacement for server-side validation**: `get_agent_metrics`'s own shell join was #9107's job and was fixed there. This guard does not replace it — and it covers every *other* mcp-loom tool, including ones added later, which carry no server-side allow-list of their own. A `PreToolUse` guard decides *whether a call may happen*; only the tool's own implementation decides what its arguments may *become*. Both layers matter — this one denies the payload before the server sees it, the other stops the payload mattering if this guard is ever off or absent. See [`untrusted-external-content.md`](untrusted-external-content.md) for how this fits the rest of Loom's forge-text-is-data convention.
+
+**Examples**:
+
+```bash
+# A clean, documented call — allowed silently
+mcp__loom__get_agent_metrics {"command":"costs","role":"builder","period":"week"}
+
+# A shell metacharacter in an argument — denied, value never echoed
+mcp__loom__get_agent_metrics {"role":"x; touch /tmp/pwn"}   # DENIED (mcp-arg-shell-metachar)
+
+# An enum field off its documented allow-list — denied
+mcp__loom__get_agent_metrics {"command":"drop-everything"}  # DENIED (mcp-arg-off-allowlist)
+
+# Disable the guard for one session
+LOOM_GUARD_MCP_TOOL_ARGS=0 claude
+
+# Persist the opt-out for a whole repo
+#   .loom/config.json  ->  { "guards": { "mcpToolArgs": false } }
 ```
 
 ### Decision Telemetry Log (`guards.decisionLog` / `LOOM_GUARD_DECISION_LOG`)

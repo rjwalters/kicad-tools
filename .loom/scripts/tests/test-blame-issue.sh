@@ -7,8 +7,9 @@
 # harness stubs a fake `gh` binary on PATH that answers the exact `gh pr view`
 # / `gh api .../pulls` / `gh api .../timeline` invocations the script makes,
 # keyed off a synthetic PR number embedded in each fixture commit's subject
-# (the "(#NNN)" squash-merge suffix this repo's merge style produces) --
-# no network access required.
+# (either the squash "(#NNN)" suffix or the "Merge pull request #NNN from ..."
+# merge-commit subject -- #9105 made merge commits Loom's default, so both
+# forms must resolve offline) -- no network access required.
 #
 # Usage:
 #   ./defaults/scripts/tests/test-blame-issue.sh
@@ -84,6 +85,7 @@ case "$1" in
             case "$pr" in
                 101) echo "5001" ;;
                 102) echo "5002" ;;
+                103) echo "5003" ;;
                 *) echo "" ;;
             esac
         fi
@@ -96,10 +98,14 @@ case "$1" in
             case "$pr" in
                 101) printf 'loom:review-requested\nloom:pr\n' ;;
                 102) printf 'loom:review-requested\nloom:changes-requested\nloom:pr\n' ;;
+                103) printf 'loom:review-requested\nloom:pr\n' ;;
             esac
         elif [[ "$path" == *"/pulls" ]]; then
-            # commit -> associated PRs fallback; unused in this fixture since
-            # every fixture commit's subject already carries "(#NNN)".
+            # commit -> associated PRs online fallback. Every resolvable fixture
+            # commit's subject resolves the PR offline, so when $PULLS_LOG is
+            # set we record any call there to assert the fallback stayed unused
+            # for those subjects (#9105).
+            [[ -n "${PULLS_LOG:-}" ]] && echo "$path" >> "$PULLS_LOG"
             echo ""
         fi
         ;;
@@ -131,6 +137,28 @@ git -C "$REPO" commit --quiet -m "fix: add line two (#102)"
 } > "$REPO/file.txt"
 git -C "$REPO" add file.txt
 git -C "$REPO" commit --quiet -m "direct commit, no PR reference"
+
+{
+    echo "line one"
+    echo "line two"
+    echo "line three (no PR suffix)"
+    echo "line four (merge-commit subject)"
+} > "$REPO/file.txt"
+git -C "$REPO" add file.txt
+git -C "$REPO" commit --quiet -m "Merge pull request #103 from feature/merge-style-9105"
+
+# A subject that merely *quotes* a merge subject must not resolve to the quoted
+# PR: the merge pattern is `^`-anchored, so this falls through to the online
+# commit->pulls fallback (which the stub answers empty) instead.
+{
+    echo "line one"
+    echo "line two"
+    echo "line three (no PR suffix)"
+    echo "line four (merge-commit subject)"
+    echo "line five (quoted merge subject)"
+} > "$REPO/file.txt"
+git -C "$REPO" add file.txt
+git -C "$REPO" commit --quiet -m 'Revert "Merge pull request #104 from feature/oops"'
 
 run_blame() {
     ( cd "$REPO" && PATH="$FAKE_BIN:$PATH" "$BLAME_SCRIPT" "$@" )
@@ -213,6 +241,31 @@ status_before="$(git -C "$REPO" status --porcelain)"
 run_blame file.txt >/dev/null
 status_after="$(git -C "$REPO" status --porcelain)"
 assert_eq "$status_after" "$status_before" "repo working tree unchanged after blame-issue.sh runs"
+
+# -------- Test 13: merge-commit subjects resolve PR offline (#9105) --------
+echo "Test 13: merge-commit subject resolves PR 103 without the online fallback"
+rm -f "$WORKDIR/pulls.log"
+out_merge="$(PULLS_LOG="$WORKDIR/pulls.log" run_blame -L 4,4 file.txt)"
+assert_contains "103" "$out_merge" "resolves PR 103 from merge-commit subject"
+assert_contains "5003" "$out_merge" "resolves issue 5003 for PR 103"
+assert_contains "builder" "$out_merge" "reports builder role for PR 103"
+if [[ -s "${PULLS_LOG:-$WORKDIR/pulls.log}" ]]; then
+    fail "online commit->pulls fallback must not be used for a merge-commit subject"
+else
+    pass "merge-commit subject resolved fully offline (no pulls fallback call)"
+fi
+
+# -------- Test 14: a quoted merge subject does NOT resolve offline (#9105) ----
+echo "Test 14: 'Revert \"Merge pull request #104 ...\"' does not resolve to PR 104"
+rm -f "$WORKDIR/pulls.log"
+# JSON form, so the assertion reads the pr field and not the echoed subject.
+out_quoted="$(PULLS_LOG="$WORKDIR/pulls.log" run_blame --format json -L 5,5 file.txt)"
+assert_not_contains '"pr":"104"' "$out_quoted" "quoted merge subject is not mistaken for PR 104"
+if [[ -s "${PULLS_LOG:-$WORKDIR/pulls.log}" ]]; then
+    pass "quoted merge subject fell through to the online commit->pulls fallback"
+else
+    fail "quoted merge subject should have fallen through to the commit->pulls fallback"
+fi
 
 # -------- Summary --------
 echo ""

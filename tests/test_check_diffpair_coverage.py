@@ -352,7 +352,12 @@ class TestWorkflowJob:
             "container -- without kicad-cli the recipe's zone fills fail "
             "and the pour audit can never pass (Issue #3509)."
         )
-        assert str(container.get("image", "")).startswith("kicad/kicad:")
+        assert str(container.get("image", "")) == "${{ needs.kicad_pin.outputs.image }}", (
+            "diffpair-routing-regression must use the workflow's pinned KiCad "
+            "image (workflow-level KICAD_IMAGE digest via the kicad_pin "
+            "bridge, #5682) -- without kicad-cli the recipe's zone fills "
+            "fail and the pour audit can never pass (Issue #3509)."
+        )
 
     def test_job_has_reasonable_timeout(self, workflow: dict) -> None:
         """Issue #2660 AC #5: <= 5 min on ubuntu-latest.  Timeout-minutes
