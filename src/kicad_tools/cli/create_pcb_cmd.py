@@ -219,6 +219,23 @@ def main(argv: list[str] | None = None) -> int:
             workflow.save(str(output_path))
             say(f"\n[green]Saved:[/green] {output_path}")
 
+        # A component that failed to place (e.g. its footprint could not be
+        # resolved through the project's fp-lib-table or the standard KiCad
+        # libraries) means the board is incomplete -- never report success
+        # for that, regardless of whether a diagnostic partial board was
+        # still written. The explicit `--no-place` skip is not a failure:
+        # `placement["failed"]` is only ever populated inside the
+        # `if not args.no_place:` block above, so it stays empty (and this
+        # stays True) for that mode.
+        placement_complete = not placement["failed"]
+
+        if not placement_complete:
+            failed_refs = ", ".join(item["reference"] for item in placement["failed"])
+            say(
+                f"\n[red]Error:[/red] {len(placement['failed'])} component(s) could not be "
+                f"placed ({failed_refs}); board is incomplete."
+            )
+
         if as_json:
             emit_json(
                 {
@@ -239,11 +256,11 @@ def main(argv: list[str] | None = None) -> int:
                     "summary": {str(key): value for key, value in summary.items()},
                     "dry_run": bool(args.dry_run),
                     "saved": not args.dry_run,
-                    "success": True,
+                    "success": placement_complete,
                 }
             )
 
-        return 0
+        return 0 if placement_complete else 1
 
     except FileNotFoundError as e:
         if as_json:
