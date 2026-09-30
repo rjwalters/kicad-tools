@@ -51,6 +51,20 @@ roles/builder-pr.md
 commands/loom/champion-common.md
 scripts/tests/test-champion-epic-children-title-prefix.sh
 
+# #5837: the follow-on half of #5791. champion-epic.md's own PER-PHASE queries
+# -- "Step 2.75: Pre-Creation Existence Check" and "Phase Progression" ->
+# "Detecting Phase Completion" -- still read the phase marker alone, so epic
+# #5784's Phase 4 (child #5798, title-prefix only) counted as OPEN=0 CLOSED=0
+# and would have been narrated "0 closed / 0 total". Both sites now union a
+# phase-scoped `title_prefix_phase_issues()` with the marker source, and the
+# zero-children case says "count unavailable" instead of asserting a zero
+# (epic #3438's Phase 2 is prose-tracked only and is undetectable by design).
+# Pin the fixed file and its new regression test so a routine resync cannot
+# silently revert the fix or drop the orphaned test.
+# Unpin once the equivalent fix lands in rjwalters/loom's defaults/ tree.
+commands/loom/champion-epic.md
+scripts/tests/test-champion-epic-phase-progress-title-prefix.sh
+
 # #5741: `_check_required_check_freshness`'s `loom-daemon merge-pr stale-checks`
 # call is now wrapped in `forge_cmd_perm_safe` (the #6074/#6752 credential
 # ladder), because the App installation cannot read branch-protection rules on
