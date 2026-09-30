@@ -7298,6 +7298,19 @@ def _add_readiness_parser(subparsers) -> None:
         default=None,
         help="Fabrication tier (default: discovered from the board's recipe/manifest)",
     )
+    rd_operation = rd_parser.add_mutually_exclusive_group()
+    rd_operation.add_argument(
+        "--verify",
+        dest="readiness_verify",
+        action="store_true",
+        help="Verify a finished package without changing shipped files (default).",
+    )
+    rd_operation.add_argument(
+        "--generate",
+        dest="readiness_generate",
+        action="store_true",
+        help="Generate a generic package transactionally; refuses recipe-finalised packages.",
+    )
     rd_mode = rd_parser.add_mutually_exclusive_group()
     rd_mode.add_argument(
         "--assembly",

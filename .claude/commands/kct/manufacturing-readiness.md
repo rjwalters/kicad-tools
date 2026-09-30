@@ -131,12 +131,21 @@ If any applicable gate fails or could not run, report **NOT signed off**, name t
 ## Scripted equivalent: `kct readiness`
 
 These gates are also available non-interactively as `kct readiness <board-path>
-[--mfr <tier>] [--assembly | --pcb-only]` (issue #4977). The command runs the
-same ritual — refill + save the canonical PCB, `kct check` at the resolved tier,
-the mandatory `kicad-cli pcb drc --refill-zones` cross-gate, the per-rule
-warning review, export/packaging — and additionally emits the hash-bound
-`output/readiness.json` evidence documented in `docs/board-json-schema.md`. It
-exits non-zero for anything other than a `ready` verdict and has no bypass flag.
+[--mfr <tier>] [--generate | --verify] [--assembly | --pcb-only]` (issue
+#4977). The command runs the same ritual — refill + save the canonical PCB,
+`kct check` at the resolved tier, the mandatory `kicad-cli pcb drc
+--refill-zones` cross-gate, the per-rule warning review, export/packaging —
+and additionally emits the hash-bound `output/readiness.json` evidence
+documented in `docs/board-json-schema.md`. It exits non-zero for anything
+other than a `ready` verdict and has no bypass flag.
+
+`--verify` and `--generate` are mutually exclusive; **`--verify` is the
+default**, so a bare `kct readiness <board-path>` checks an already-produced
+package without writing gerbers, BOM/CPL or the manifest. Pass `--generate`
+explicitly to (re)produce the package — the first sign-off for a board, or any
+time the checked sources changed since the last package was built. `--generate`
+refuses to replace a package a manufacturing recipe has already finalized;
+re-verify or regenerate through that recipe instead (issue #5816).
 
 Use the command for CI and batch sign-off. Use this skill when a human-in-the-loop
 judgment is needed (an ambiguous BOM candidate, an accepted-risk warning decision)
