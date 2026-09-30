@@ -123,6 +123,15 @@ def inspect_attributed_mask_geometry(
         # Native pcbnew LoadBoard has no exposed general DRC-expression loader.
         # These rule constraints do not change plotted shape. Anything else is
         # an explicit context gap, even if a whole-layer union happens to agree.
+        #
+        # Every entry is a minimum/maximum a DRC run *measures* against already
+        # plotted material; none of them is an input to the plot itself, so
+        # native mask/copper object geometry is identical with and without the
+        # rule present. Constraints that do feed the plot -- zone fill shaping
+        # (``zone_connection``, ``thermal_relief_gap``, ``thermal_spoke_width``,
+        # ``min_resolved_spokes``) above all -- must stay out, and so must any
+        # constraint whose native context has not actually been exercised by a
+        # parity test. Do not widen this set to quiet a failing board.
         if captured[".kicad_dru"]:
             rule_tree = parse_string("(rules " + captured[".kicad_dru"].decode() + ")")
             safe = {
@@ -135,6 +144,13 @@ def inspect_attributed_mask_geometry(
                 "hole_size",
                 "via_diameter",
                 "annular_width",
+                # Silkscreen-to-object minimum, the rule ordinary factory
+                # ``.kicad_dru`` files ship (#5818). It is geometry-neutral for
+                # this checker twice over: it constrains silkscreen, which is
+                # neither a mask nor a copper layer, and it is a measured
+                # minimum rather than a plot input. Parity is pinned by
+                # tests/test_mask_copper_native.py.
+                "silk_clearance",
             }
             for constraint in rule_tree.find_all("constraint"):
                 if constraint.get_string(0) not in safe:
