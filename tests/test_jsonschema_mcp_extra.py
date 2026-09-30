@@ -20,13 +20,15 @@ A module-scope ``from jsonschema import validate`` therefore breaks all three on
 a core-only install.  Every CI job installs ``uv sync --frozen --extra dev``,
 which *has* ``jsonschema``, so no other test in the suite exercises a core-only
 import shape.  These tests do, by hiding the module with a ``sys.meta_path``
-blocker (same idea as ``tests/test_shapely_core_dependency.py``).
+blocker inside a fresh child interpreter (see ``_run_without_jsonschema`` for
+why it must not be done in the pytest process).
 """
 
 from __future__ import annotations
 
-import importlib
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -38,34 +40,54 @@ else:  # pragma: no cover - Python < 3.11
     import tomli as tomllib  # type: ignore[import-not-found]
 
 
-# Modules whose cached copies must be dropped so the import is really re-run
-# under the blocker (a cached ``kicad_tools.mcp`` would hide the regression).
-_RELOAD_PREFIXES = ("kicad_tools.mcp", "kicad_tools.report", "jsonschema")
+# The core-only checks run in a *child* interpreter, never in the pytest
+# process.  Simulating a missing ``jsonschema`` in-process means purging the
+# cached ``kicad_tools.mcp`` modules so the import really re-runs under the
+# blocker -- and re-importing them rebinds ``kicad_tools.mcp`` on the parent
+# package to a fresh module object.  ``monkeypatch`` restores ``sys.modules``
+# afterwards but not that attribute, leaving two ``kicad_tools.mcp.server``
+# copies alive in the xdist worker: a later ``monkeypatch.setattr(
+# "kicad_tools.mcp.server.run_server", ...)`` (attribute walk) then patches the
+# orphan while ``from kicad_tools.mcp.server import run_server`` (sys.modules)
+# gets the real one, so ``test_mcp_http.py::...test_run_serve_stdio_import_error``
+# started a real uvicorn server and hit the 60 s timeout.  A subprocess gets a
+# pristine module graph and leaves ours alone.
+_BLOCKER_PRELUDE = textwrap.dedent(
+    """
+    import sys
 
+    class _JsonschemaBlocker:
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == "jsonschema" or fullname.startswith("jsonschema."):
+                raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+            return None
 
-class _JsonschemaBlocker:
-    """A ``sys.meta_path`` finder that makes ``import jsonschema`` fail."""
-
-    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
-        if fullname == "jsonschema" or fullname.startswith("jsonschema."):
-            raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
-        return None
-
-
-@pytest.fixture
-def jsonschema_absent(monkeypatch: pytest.MonkeyPatch):
-    """Simulate a core-only install where ``jsonschema`` is not installed."""
-    for name in list(sys.modules):
-        if name in _RELOAD_PREFIXES or name.startswith(tuple(p + "." for p in _RELOAD_PREFIXES)):
-            monkeypatch.delitem(sys.modules, name, raising=False)
-
-    # Replace (not mutate) the list so monkeypatch restores it verbatim.
-    monkeypatch.setattr(sys, "meta_path", [_JsonschemaBlocker(), *sys.meta_path])
+    sys.meta_path.insert(0, _JsonschemaBlocker())
 
     # Sanity: the blocker is actually in force.
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("jsonschema")
-    yield
+    try:
+        import jsonschema  # noqa: F401
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise SystemExit("jsonschema blocker is not in force")
+    """
+)
+
+
+def _run_without_jsonschema(body: str) -> None:
+    """Run ``body`` in a fresh interpreter where ``import jsonschema`` fails."""
+    code = _BLOCKER_PRELUDE + textwrap.dedent(body)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        f"core-only check failed (exit {proc.returncode}):\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -87,16 +109,24 @@ def jsonschema_absent(monkeypatch: pytest.MonkeyPatch):
         "kicad_tools.mcp.server",
     ],
 )
-def test_core_paths_import_without_jsonschema(jsonschema_absent, module: str) -> None:
+def test_core_paths_import_without_jsonschema(module: str) -> None:
     """Importing these must not require the ``mcp`` extra (issue #5804)."""
-    assert importlib.import_module(module) is not None
+    _run_without_jsonschema(
+        f"""
+        import importlib
+        assert importlib.import_module({module!r}) is not None
+        """
+    )
 
 
-def test_route_auto_entrypoint_resolves_without_jsonschema(jsonschema_absent) -> None:
+def test_route_auto_entrypoint_resolves_without_jsonschema() -> None:
     """The exact lazy import `kct route-auto` performs at run time."""
-    from kicad_tools.mcp.tools.routing import route_net_auto
-
-    assert callable(route_net_auto)
+    _run_without_jsonschema(
+        """
+        from kicad_tools.mcp.tools.routing import route_net_auto
+        assert callable(route_net_auto)
+        """
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -128,24 +158,31 @@ def test_tool_dispatch_still_validates_arguments() -> None:
         server.call_tool("_probe", {"n": "not-an-integer"})
 
 
-def test_tool_dispatch_requires_jsonschema(jsonschema_absent) -> None:
+def test_tool_dispatch_requires_jsonschema() -> None:
     """On a core-only install the failure is confined to tool dispatch."""
-    from kicad_tools.mcp.server import MCPServer, ToolDefinition
+    _run_without_jsonschema(
+        """
+        from kicad_tools.mcp.server import MCPServer, ToolDefinition
 
-    server = MCPServer()
-    server.tools["_probe"] = ToolDefinition(
-        name="_probe",
-        description="test-only tool",
-        parameters={"type": "object", "properties": {}},
-        handler=lambda params: {"success": True},
+        server = MCPServer()
+        server.tools["_probe"] = ToolDefinition(
+            name="_probe",
+            description="test-only tool",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda params: {"success": True},
+        )
+
+        # tools/list is pure metadata -- unaffected.
+        assert any(t["name"] == "_probe" for t in server.get_tools_list())
+
+        try:
+            server.call_tool("_probe", {})
+        except ModuleNotFoundError as exc:
+            assert "jsonschema" in str(exc), exc
+        else:
+            raise AssertionError("call_tool succeeded without jsonschema")
+        """
     )
-
-    # tools/list is pure metadata -- unaffected.
-    assert any(t["name"] == "_probe" for t in server.get_tools_list())
-
-    with pytest.raises(ModuleNotFoundError) as excinfo:
-        server.call_tool("_probe", {})
-    assert "jsonschema" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
