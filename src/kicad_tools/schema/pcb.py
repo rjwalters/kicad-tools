@@ -622,6 +622,18 @@ class FootprintText:
         return self.font_size[1]
 
 
+#: ``(fill ...)`` tokens that mean "the interior is printed".  KiCad 7+
+#: writes ``yes``/``no``; files written by older versions (and some
+#: third-party exporters) use ``solid``/``none``.  Both spellings appear in
+#: this repository's committed boards, so both are recognised (Issue #5811).
+_FILLED_FILL_TOKENS = frozenset({"yes", "solid", "true"})
+
+
+def _fill_token_is_filled(token: str) -> bool:
+    """Resolve a raw ``(fill ...)`` token to a filled/not-filled boolean."""
+    return token.strip().lower() in _FILLED_FILL_TOKENS
+
+
 @dataclass
 class FootprintGraphic:
     """Graphic element within a footprint (fp_line, fp_rect, fp_circle, fp_arc, fp_poly).
@@ -629,6 +641,13 @@ class FootprintGraphic:
     Used for silkscreen outlines, courtyard outlines, and markings on
     footprints.  ``fp_poly`` graphics store their vertices in ``points``;
     all other types leave ``points`` empty.
+
+    ``fill`` carries the raw ``(fill ...)`` token verbatim (``"yes"`` /
+    ``"no"`` on KiCad 7+, ``"solid"`` / ``"none"`` on older files, ``""``
+    when the node is absent).  Consumers should read :pyattr:`is_filled`
+    rather than comparing the token themselves -- a filled shape renders
+    its whole interior, which is what silk clearance geometry must model
+    (Issue #5811).
     """
 
     graphic_type: str  # line, rect, circle, arc, poly
@@ -641,6 +660,12 @@ class FootprintGraphic:
     points: list[tuple[float, float]] = field(default_factory=list)
     uuid: str = ""
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
+    fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+
+    @property
+    def is_filled(self) -> bool:
+        """True when the shape's interior is printed, not just its outline."""
+        return _fill_token_is_filled(self.fill)
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> FootprintGraphic:
@@ -681,6 +706,12 @@ class FootprintGraphic:
             if pts := sexp.find("pts"):
                 for xy in pts.find_all("xy"):
                     graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
+
+        # Fill state: (fill yes|no) on KiCad 7+, (fill solid|none) on older
+        # files.  A filled shape prints its whole interior, so silk clearance
+        # geometry must not reduce it to a stroked outline (Issue #5811).
+        if fill := sexp.find("fill"):
+            graphic.fill = fill.get_string(0) or ""
 
         # UUID
         if uuid := sexp.find("uuid"):
@@ -754,12 +785,19 @@ class GraphicText:
 
 @dataclass
 class BoardGraphic:
-    """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc).
+    """Board-level graphic element (gr_line, gr_rect, gr_circle, gr_arc, gr_poly).
 
     Used for board outlines, silkscreen graphics, and other board-level drawings.
+
+    Mirrors :class:`FootprintGraphic`: ``gr_poly`` vertices land in
+    ``points`` and the ``(fill ...)`` token in ``fill`` (read it through
+    :pyattr:`is_filled`).  Before Issue #5811 ``gr_poly`` was not parsed at
+    all, so a board-level polygon silk marker was invisible to every
+    consumer of :pyattr:`PCB.graphics` -- including the silkscreen
+    clearance geometry.
     """
 
-    graphic_type: str  # line, rect, circle, arc
+    graphic_type: str  # line, rect, circle, arc, poly
     layer: str
     stroke_width: float  # in mm
     start: tuple[float, float] = (0.0, 0.0)
@@ -767,6 +805,13 @@ class BoardGraphic:
     center: tuple[float, float] | None = None
     uuid: str = ""
     mid: tuple[float, float] | None = None  # Appended for positional compatibility
+    points: list[tuple[float, float]] = field(default_factory=list)
+    fill: str = ""  # raw (fill ...) token: yes/no (KiCad 7+), solid/none (legacy)
+
+    @property
+    def is_filled(self) -> bool:
+        """True when the shape's interior is printed, not just its outline."""
+        return _fill_token_is_filled(self.fill)
 
     @classmethod
     def from_sexp(cls, sexp: SExp, graphic_type: str) -> BoardGraphic:
@@ -798,6 +843,24 @@ class BoardGraphic:
         # Center (for circle/arc)
         if center := sexp.find("center"):
             graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
+
+        # Polygon vertices (for gr_poly): (pts (xy X Y) ...).
+        if graphic_type == "poly":
+            if pts := sexp.find("pts"):
+                for xy in pts.find_all("xy"):
+                    graphic.points.append((xy.get_float(0) or 0.0, xy.get_float(1) or 0.0))
+            # A ``gr_poly`` has no ``(start ...)`` node, and several consumers
+            # report ``graphic.start`` as the element's location (e.g.
+            # ``check_silkscreen_line_width``, ``_iter_silk_geometries``).
+            # Seed it from the first vertex so a board-level polygon does not
+            # report itself at the origin.  This is new behaviour only in the
+            # sense that ``gr_poly`` was not parsed at all before #5811.
+            if graphic.points:
+                graphic.start = graphic.points[0]
+
+        # Fill state -- see FootprintGraphic.from_sexp (Issue #5811).
+        if fill := sexp.find("fill"):
+            graphic.fill = fill.get_string(0) or ""
 
         # UUID
         if uuid := sexp.find("uuid"):
@@ -2539,7 +2602,20 @@ class PCB:
             elif tag == "gr_text":
                 text = GraphicText.from_sexp(child)
                 self._texts.append(text)
-            elif tag in ("gr_rect", "gr_circle"):
+            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
+                # ``gr_poly`` joined this dispatch in Issue #5811: a
+                # board-level polygon silk marker was previously parsed
+                # nowhere, so the silkscreen clearance geometry could not
+                # see it at all.
+                #
+                # Edge.Cuts ``gr_poly`` outlines are unaffected, on two
+                # independent counts: ``_edge_cuts_poly_chains_sexp`` walks
+                # ``self._sexp`` directly and never consults ``_graphics``,
+                # and ``BoardOutline``'s ``_graphics`` loop
+                # (``pcb/board_geometry.py``) dispatches only on ``rect`` /
+                # ``circle`` / ``bezier``, so a new ``poly`` entry there
+                # contributes no outline segments.  Nothing is
+                # double-counted.
                 graphic_type = tag[3:]  # Remove "gr_" prefix
                 graphic = BoardGraphic.from_sexp(child, graphic_type)
                 self._graphics.append(graphic)
@@ -3214,11 +3290,17 @@ class PCB:
     def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
         """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
 
-        ``gr_poly`` and ``gr_curve`` graphics are not parsed into the in-memory
-        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections, so this
+        ``gr_curve`` is not parsed into the in-memory
+        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections at all,
+        and while ``gr_poly`` now lands in ``_graphics`` (Issue #5811, so that
+        board-level polygon *silk* is visible to the clearance checks) its
+        ``BoardGraphic`` carries no outline-chain accessor.  So this still
         walks ``self._sexp`` directly (like :meth:`_edge_cuts_bbox_sexp`) and
         returns each polygon/curve's ordered ``(pts (xy ...))`` vertex list in
-        **sheet-absolute** coordinates.
+        **sheet-absolute** coordinates.  It is the sole Edge.Cuts reader for
+        these two tags: ``BoardOutline``'s ``_graphics`` loop dispatches only
+        on ``rect``/``circle``/``bezier``, so the added ``poly`` entries
+        cannot double-count an outline.
 
         Returns:
             A list of vertex chains; each chain is an ordered list of
@@ -4586,7 +4668,7 @@ class PCB:
                 elif tag == "gr_arc":
                     self._graphic_arcs.append(GraphicArc.from_sexp(child))
                     self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
-                elif tag in ("gr_rect", "gr_circle"):
+                elif tag in ("gr_rect", "gr_circle", "gr_poly"):
                     graphic_type = tag[3:]
                     self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
 
@@ -4643,7 +4725,7 @@ class PCB:
             elif tag == "gr_arc":
                 self._graphic_arcs.append(GraphicArc.from_sexp(child))
                 self._graphics.append(BoardGraphic.from_sexp(child, "arc"))
-            elif tag in ("gr_rect", "gr_circle"):
+            elif tag in ("gr_rect", "gr_circle", "gr_poly"):
                 graphic_type = tag[3:]
                 self._graphics.append(BoardGraphic.from_sexp(child, graphic_type))
 

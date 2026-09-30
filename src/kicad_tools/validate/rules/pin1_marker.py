@@ -48,7 +48,8 @@ Out of scope: the rule does not judge whether a mark is *unambiguous*
 (e.g. a SOIC outline's corner segments are closer to pin 1 than pin 8 and
 so count), and it does not generate markers -- adding polarity marks is a
 listed follow-up of :mod:`kicad_tools.silkscreen.generator`.  Board-level
-``gr_poly`` silk is not modeled (not parsed by the PCB schema).
+``gr_poly`` silk became visible here in Issue #5811, which taught the PCB
+schema to parse it into :pyattr:`PCB.graphics` like any other board graphic.
 """
 
 from __future__ import annotations
