@@ -271,9 +271,7 @@ class TestGitlabLicenseNormalization:
             def read(self):
                 return _json.dumps(payload).encode("utf-8")
 
-        monkeypatch.setattr(
-            refresh.urllib.request, "urlopen", lambda *_a, **_k: _FakeResponse()
-        )
+        monkeypatch.setattr(refresh.urllib.request, "urlopen", lambda *_a, **_k: _FakeResponse())
 
     def _facts_for(self, refresh, monkeypatch, license_key: str | None, name: str = "") -> object:
         payload = {
