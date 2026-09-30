@@ -225,13 +225,25 @@ report still read `kicad-tools 0.20.0`.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `kicad_tools_version` | string | yes | Release string of the producing kicad-tools |
-| `dirty` | boolean | yes | `true` when the producing checkout had uncommitted changes |
+| `dirty` | boolean | yes | `true` when the engine's own checkout had uncommitted changes; always `false` when the engine is a VCS pin or its provenance is unknown |
 | `manufacturer` | string | yes | Resolved fabrication tier the gates ran against |
-| `commit` | string | no | Git commit of the producing checkout; omitted outside a checkout |
+| `commit` | string | no | Commit of the **engine**; omitted when unknown (see below) |
 | `source_digest` | string | no | SHA256 over the installed package's Python sources — distinguishes two runs from the same commit but different working trees |
 | `kicad_cli_version` | string | no | Native KiCad version used for the cross-gate; omitted when `kicad-cli` was unavailable |
 | `rules_digest` | string | no | SHA256 over the resolved `.kicad_pro` / `.kicad_dru` / net-class-map inputs — a rule change with no board edit is visible here |
 | `recipe` | string | no | Board recipe identity, when the board declares one |
+
+`commit` and `dirty` are only filled in from provenance that demonstrably
+belongs to the engine, in this order: the installed distribution's PEP 610
+`direct_url.json` (`vcs_info.commit_id`, written by a `pip install git+…` VCS
+pin), then the git checkout that `git ls-files` confirms tracks the imported
+`kicad_tools` package (an editable install, or a run straight out of a clone).
+With neither available — an ordinary wheel install — `commit` is **omitted**
+and `dirty` is `false`. In particular, kct installed into another repository's
+`.venv` no longer reports that repository's HEAD or dirty state as its own
+(issue #5812). `source_digest` is an independent concept: it is always
+available, so an absent `commit` still leaves a report's engine sources
+identifiable.
 
 Consumers comparing two reports should treat any change in `source_digest`,
 `commit` (with `dirty: false`), `kicad_cli_version` or `rules_digest` as
