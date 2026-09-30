@@ -2606,10 +2606,16 @@ class PCB:
                 # ``gr_poly`` joined this dispatch in Issue #5811: a
                 # board-level polygon silk marker was previously parsed
                 # nowhere, so the silkscreen clearance geometry could not
-                # see it at all.  Edge.Cuts ``gr_poly`` outlines keep using
-                # the separate S-expression walk in
-                # ``_edge_cuts_poly_chains_sexp`` (that reader filters
-                # ``_graphics`` to ``rect``, so nothing is double-counted).
+                # see it at all.
+                #
+                # Edge.Cuts ``gr_poly`` outlines are unaffected, on two
+                # independent counts: ``_edge_cuts_poly_chains_sexp`` walks
+                # ``self._sexp`` directly and never consults ``_graphics``,
+                # and ``BoardOutline``'s ``_graphics`` loop
+                # (``pcb/board_geometry.py``) dispatches only on ``rect`` /
+                # ``circle`` / ``bezier``, so a new ``poly`` entry there
+                # contributes no outline segments.  Nothing is
+                # double-counted.
                 graphic_type = tag[3:]  # Remove "gr_" prefix
                 graphic = BoardGraphic.from_sexp(child, graphic_type)
                 self._graphics.append(graphic)
@@ -3284,11 +3290,17 @@ class PCB:
     def _edge_cuts_poly_chains_sexp(self) -> list[list[tuple[float, float]]]:
         """Collect ``gr_poly``/``gr_curve`` Edge.Cuts vertex chains.
 
-        ``gr_poly`` and ``gr_curve`` graphics are not parsed into the in-memory
-        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections, so this
+        ``gr_curve`` is not parsed into the in-memory
+        ``_graphic_lines``/``_graphic_arcs``/``_graphics`` collections at all,
+        and while ``gr_poly`` now lands in ``_graphics`` (Issue #5811, so that
+        board-level polygon *silk* is visible to the clearance checks) its
+        ``BoardGraphic`` carries no outline-chain accessor.  So this still
         walks ``self._sexp`` directly (like :meth:`_edge_cuts_bbox_sexp`) and
         returns each polygon/curve's ordered ``(pts (xy ...))`` vertex list in
-        **sheet-absolute** coordinates.
+        **sheet-absolute** coordinates.  It is the sole Edge.Cuts reader for
+        these two tags: ``BoardOutline``'s ``_graphics`` loop dispatches only
+        on ``rect``/``circle``/``bezier``, so the added ``poly`` entries
+        cannot double-count an outline.
 
         Returns:
             A list of vertex chains; each chain is an ordered list of
