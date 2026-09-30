@@ -457,6 +457,12 @@ class EngineFingerprint:
     digest of the working source when it is dirty, the native KiCad version and
     the resolved rule/profile identity lets a consumer tell "re-qualified under
     the current engine" from "historical evidence from an older engine".
+
+    ``commit``/``dirty`` describe the **engine** and are only filled in from
+    provenance that demonstrably belongs to it (:func:`_engine_provenance`); a
+    wheel install omits ``commit`` rather than guessing.  ``source_digest`` is
+    an independent concept — it is always available, and it, not ``commit``,
+    is what separates two runs of the same revision.
     """
 
     kicad_tools_version: str
@@ -486,9 +492,137 @@ class EngineFingerprint:
         return payload
 
 
+#: PEP 610 records how a distribution was installed.  ``distribution()`` wants
+#: the *distribution* name, which is not the import name.
+_DISTRIBUTION_NAME = "kicad-tools"
+
+
+def _direct_url_metadata() -> dict[str, Any] | None:
+    """Return the installed distribution's PEP 610 ``direct_url.json``, if any.
+
+    A wheel from an index has no such file; a ``pip install git+…`` VCS pin and
+    an editable install both do.  Returns ``None`` whenever the payload is
+    missing, unreadable or not a JSON object.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        raw = distribution(_DISTRIBUTION_NAME).read_text("direct_url.json")
+    except PackageNotFoundError:  # pragma: no cover - kct is always installed
+        return None
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return None
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:  # pragma: no cover - defensive
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _vcs_commit(direct_url: dict[str, Any] | None) -> str | None:
+    """Commit recorded by a VCS install (``pip install git+…@<ref>``).
+
+    This is the authoritative provenance when it exists: the installer wrote
+    the exact commit it resolved, so no git checkout — and no guessing from the
+    filesystem — is involved.
+    """
+    if not direct_url:
+        return None
+    vcs_info = direct_url.get("vcs_info")
+    if not isinstance(vcs_info, dict):
+        return None
+    commit = vcs_info.get("commit_id")
+    if not isinstance(commit, str):
+        return None
+    return commit.strip() or None
+
+
+@lru_cache(maxsize=8)
+def _owning_checkout(package_root: Path) -> Path | None:
+    """Return the git checkout that actually *tracks* ``package_root``.
+
+    Git's upward ``.git`` search answers for whatever repository happens to
+    contain the directory it is asked about.  When kct is installed into a
+    consumer repository's ``.venv``, that is the *consumer's* checkout — and
+    recording its HEAD as the engine's commit is how a readiness report came to
+    claim it was produced by an engine revision that never existed (#5812).
+
+    A checkout therefore only counts as the engine's own source when
+    ``git ls-files`` confirms it tracks the imported package.  An editable
+    install or a run straight out of a clone passes; a venv sitting inside an
+    unrelated repository does not.
+    """
+    probe = package_root / "__init__.py"
+    if not probe.is_file():  # pragma: no cover - defensive
+        return None
+    try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(package_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if toplevel.returncode != 0:
+            return None
+        root = toplevel.stdout.strip()
+        if not root:  # pragma: no cover - defensive
+            return None
+        tracked = subprocess.run(
+            ["git", "-C", root, "ls-files", "--error-unmatch", "--", str(probe)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):  # pragma: no cover - defensive
+        return None
+    if tracked.returncode != 0:
+        return None
+    return Path(root)
+
+
+def _engine_provenance_for(
+    package_root: Path, *, direct_url: dict[str, Any] | None
+) -> tuple[str | None, bool]:
+    """Resolve ``(commit, dirty)`` for the *engine*, from trusted sources only.
+
+    Two sources, in order:
+
+    1. PEP 610 ``direct_url.json`` — a VCS pin names the exact installed
+       commit and needs neither git nor a checkout on the host.
+    2. The git checkout that tracks the imported package (:func:`_owning_checkout`).
+
+    With neither available — an ordinary wheel install — the provenance is
+    genuinely unknown, and ``commit`` is omitted from the report rather than
+    borrowed from whichever repository happens to contain the venv (#5812).
+    """
+    commit = _vcs_commit(direct_url)
+    if commit is not None:
+        # An installed VCS pin is an immutable snapshot: there is no working
+        # tree whose dirtiness could be observed.  ``source_digest`` remains the
+        # field that distinguishes two runs of the same commit.
+        return commit, False
+    repo_root = _owning_checkout(package_root)
+    if repo_root is None:
+        return None, False
+    return _git_describe(repo_root)
+
+
+def _engine_provenance(package_root: Path) -> tuple[str | None, bool]:
+    """:func:`_engine_provenance_for` against this interpreter's installation."""
+    return _engine_provenance_for(package_root, direct_url=_direct_url_metadata())
+
+
 @lru_cache(maxsize=8)
 def _git_describe(repo_root: Path) -> tuple[str | None, bool]:
-    """Return ``(commit, dirty)`` for the kicad-tools checkout, if available."""
+    """Return ``(commit, dirty)`` for a checkout already verified to own kct.
+
+    Callers must go through :func:`_engine_provenance`; calling this on an
+    arbitrary ancestor directory is the bug behind #5812.
+    """
     try:
         head = subprocess.run(
             ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
@@ -552,7 +686,7 @@ def build_fingerprint(
     import kicad_tools
 
     package_root = Path(kicad_tools.__file__).resolve().parent
-    commit, dirty = _git_describe(package_root.parent.parent)
+    commit, dirty = _engine_provenance(package_root)
     return EngineFingerprint(
         kicad_tools_version=getattr(kicad_tools, "__version__", "unknown"),
         commit=commit,

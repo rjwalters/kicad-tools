@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -917,6 +918,192 @@ def test_engine_fingerprint_survives_the_consumer_validator(tmp_path):
     validated = read_readiness(board)
     assert validated["status"] == "ready"
     assert validated["engine"]["manufacturer"] == "jlcpcb"
+
+
+# ---------------------------------------------------------------------------
+# Engine provenance: whose commit is it, anyway? (issue #5812)
+#
+# ``commit``/``dirty`` describe the *engine*.  Git's upward ``.git`` search
+# happily answers for whatever repository contains the venv kct was installed
+# into, so a consumer repository's HEAD used to be recorded as the checker's
+# own revision.  These tests pin the three installation shapes and the two
+# states of an unrelated consumer repository.
+# ---------------------------------------------------------------------------
+
+
+GIT_IDENTITY = (
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+)
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *GIT_IDENTITY, "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _make_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    return path
+
+
+def make_consumer_repo_with_venv(tmp_path: Path) -> tuple[Path, Path]:
+    """An unrelated repo whose ``.venv`` holds a non-editable kct install.
+
+    Returns ``(repo, package_root)``.  This is the issue's own scenario: kct
+    lives under ``site-packages``, which the consumer repo does not track.
+    """
+    repo = _make_repo(tmp_path / "consumer")
+    package_root = repo / ".venv" / "lib" / "python3.12" / "site-packages" / "kicad_tools"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("__version__ = '0.22.0'\n")
+    (repo / ".gitignore").write_text(".venv/\n")
+    (repo / "design.kicad_pcb").write_text("(kicad_pcb)\n")
+    _git(repo, "add", ".gitignore", "design.kicad_pcb")
+    _git(repo, "commit", "-qm", "consumer board")
+    return repo, package_root
+
+
+def make_editable_checkout(tmp_path: Path) -> tuple[Path, Path]:
+    """A genuine kicad-tools clone with ``src/kicad_tools`` tracked."""
+    repo = _make_repo(tmp_path / "kicad-tools")
+    package_root = repo / "src" / "kicad_tools"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_text("__version__ = '0.22.0'\n")
+    _git(repo, "add", "src/kicad_tools/__init__.py")
+    _git(repo, "commit", "-qm", "engine source")
+    return repo, package_root
+
+
+@pytest.fixture(autouse=True)
+def _clear_provenance_caches():
+    """``_owning_checkout``/``_git_describe`` are ``lru_cache``d per path.
+
+    Cleared on setup only: a test may have replaced ``_owning_checkout`` with a
+    plain callable via ``monkeypatch``, and fixture teardown can run before the
+    ``monkeypatch`` undo restores the cached original.
+    """
+    readiness_cmd._owning_checkout.cache_clear()
+    readiness_cmd._git_describe.cache_clear()
+
+
+def test_vcs_pin_provenance_wins_over_the_surrounding_consumer_repository(tmp_path):
+    """The issue's reproduction: a VCS-pinned kct inside a consumer's venv."""
+    repo, package_root = make_consumer_repo_with_venv(tmp_path)
+    consumer_head = _git(repo, "rev-parse", "HEAD")
+    pinned = "14d52b1e007bc652df15cba5b6dd3932ed104967"
+
+    commit, dirty = readiness_cmd._engine_provenance_for(
+        package_root,
+        direct_url={
+            "url": "https://github.com/rjwalters/kicad-tools",
+            "vcs_info": {"vcs": "git", "requested_revision": "main", "commit_id": pinned},
+        },
+    )
+
+    assert commit == pinned
+    assert commit != consumer_head
+    assert dirty is False
+
+
+def test_wheel_install_reports_unknown_rather_than_an_ancestor_repository(tmp_path):
+    """No VCS provenance and no ownership: the commit is genuinely unknown."""
+    repo, package_root = make_consumer_repo_with_venv(tmp_path)
+    consumer_head = _git(repo, "rev-parse", "HEAD")
+
+    commit, dirty = readiness_cmd._engine_provenance_for(package_root, direct_url=None)
+
+    assert consumer_head  # the ambient walk *would* have found something
+    assert commit is None
+    assert dirty is False
+
+
+@pytest.mark.parametrize("consumer_dirty", [False, True])
+def test_consumer_repository_dirt_is_never_attributed_to_the_engine(tmp_path, consumer_dirty):
+    repo, package_root = make_consumer_repo_with_venv(tmp_path)
+    if consumer_dirty:
+        (repo / "design.kicad_pcb").write_text("(kicad_pcb edited)\n")
+        assert _git(repo, "status", "--porcelain")
+
+    assert readiness_cmd._owning_checkout(package_root) is None
+    assert readiness_cmd._engine_provenance_for(package_root, direct_url=None) == (None, False)
+
+
+def test_editable_checkout_still_reports_its_own_head(tmp_path):
+    """Regression guard: the case ``_git_describe`` was written for."""
+    repo, package_root = make_editable_checkout(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD")
+
+    assert readiness_cmd._owning_checkout(package_root) == repo
+    assert readiness_cmd._engine_provenance_for(package_root, direct_url=None) == (head, False)
+
+    # An editable install records a directory, not a VCS pin, so the checkout
+    # remains the source of truth.
+    editable = {"url": repo.as_uri(), "dir_info": {"editable": True}}
+    assert readiness_cmd._engine_provenance_for(package_root, direct_url=editable) == (head, False)
+
+
+def test_editable_checkout_reports_its_own_dirty_state(tmp_path):
+    repo, package_root = make_editable_checkout(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD")
+    (package_root / "__init__.py").write_text("__version__ = '0.22.0'  # local fix\n")
+
+    assert readiness_cmd._engine_provenance_for(package_root, direct_url=None) == (head, True)
+
+
+def test_build_fingerprint_prefers_the_installed_vcs_commit(tmp_path, monkeypatch):
+    pinned = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+    monkeypatch.setattr(
+        readiness_cmd,
+        "_direct_url_metadata",
+        lambda: {"url": "https://example.invalid/kicad-tools", "vcs_info": {"commit_id": pinned}},
+    )
+
+    fingerprint = readiness_cmd.build_fingerprint("jlcpcb", [], kicad_cli_version=None)
+
+    assert fingerprint.commit == pinned
+    assert fingerprint.dirty is False
+    assert fingerprint.to_dict()["commit"] == pinned
+
+
+def test_build_fingerprint_omits_commit_when_provenance_is_unknown(monkeypatch):
+    monkeypatch.setattr(readiness_cmd, "_direct_url_metadata", lambda: None)
+    monkeypatch.setattr(readiness_cmd, "_owning_checkout", lambda _root: None)
+
+    fingerprint = readiness_cmd.build_fingerprint("jlcpcb", [], kicad_cli_version=None)
+
+    assert fingerprint.commit is None
+    assert fingerprint.dirty is False
+    assert "commit" not in fingerprint.to_dict()
+    # The digest is a separate concept and stays available regardless.
+    assert len(fingerprint.source_digest or "") == 64
+
+
+def test_source_digest_is_independent_of_the_provenance_source(monkeypatch):
+    """Whose commit we record must not change *what source* we digested."""
+    monkeypatch.setattr(readiness_cmd, "_direct_url_metadata", lambda: None)
+    monkeypatch.setattr(readiness_cmd, "_owning_checkout", lambda _root: None)
+    unknown = readiness_cmd.build_fingerprint("jlcpcb", [], kicad_cli_version=None)
+
+    monkeypatch.setattr(
+        readiness_cmd,
+        "_direct_url_metadata",
+        lambda: {"vcs_info": {"commit_id": "a" * 40}},
+    )
+    pinned = readiness_cmd.build_fingerprint("jlcpcb", [], kicad_cli_version=None)
+
+    assert unknown.source_digest == pinned.source_digest
+    assert unknown.commit != pinned.commit
 
 
 # ---------------------------------------------------------------------------
