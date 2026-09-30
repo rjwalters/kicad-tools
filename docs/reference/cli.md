@@ -465,6 +465,7 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
 | `--sch PATH` | Path to the `.kicad_sch` (auto-detected by default) |
 | `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
+| `--project-root DIR` | Boundary for dependency collection (see "Project layouts" below); defaults to the board directory, widened to the nearest common ancestor of any named input |
 | `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
 | `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
 | `--no-archive` | Skip building `output/manufacturing.zip` |
@@ -499,6 +500,46 @@ to replace a package that a manufacturing recipe has already finalized (use
 `_verify_finished_artifacts`/`_gate_artifacts` in
 [`readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py) for the exact
 guard.
+
+#### Project layouts
+
+Readiness does not require the PCB's own directory to be the whole project.
+A schematic kept in a sibling directory and a custom symbol library shared
+through a parent-relative library-table entry are both supported (Issue #5813):
+
+```text
+project/
+  schematics/board.kicad_sch
+  symbols/custom.kicad_sym
+  pcb/board.kicad_pcb
+  pcb/board.kicad_pro
+  pcb/sym-lib-table      # (uri "${KIPRJMOD}/../symbols/custom.kicad_sym")
+```
+
+```bash
+kct readiness project/pcb --generate --sch project/schematics/board.kicad_sch
+```
+
+Inputs found outside the PCB directory are **collected** into the package under
+`<pcb-dir>/kct-collected/`, keeping their layout relative to the project root,
+and are hashed into `inputs` and `collected_dependencies` exactly like any other
+input. The library tables inside `kicad_project.zip` are rewritten to name the
+collected copies, so the exported project opens without the surrounding
+checkout; **the checkout's own tables are never rewritten**, so a later edit to
+a shared library is still picked up and re-collected by the next run.
+`kct-collected/` is machine-owned — it is rebuilt from the current sources on
+every run, so a copy never outlives the reference that produced it.
+
+The **project root** bounds that collection. It is the board directory, widened
+to the nearest common ancestor of the paths you name with `--sch` /
+`--net-class-map`, and never by more than two levels; a wider layout must be
+declared with `--project-root DIR`. Nothing outside the root is ever collected:
+a missing file, an undeclared dependency, a `${KIPRJMOD}/../../` or symlink
+escape, an out-of-root `--project-root`, and a collected sheet that references a
+file back inside the PCB directory are all refused **before anything is
+written** (exit 2, with the layout named in the message). Verification never
+writes to the sources, and a failed `--generate` leaves the previous release
+byte-identical.
 
 The conditional `hv_isolation` gate (when the `--net-class-map` sidecar
 declares an `HV` net class) runs the same measured creepage/clearance audit

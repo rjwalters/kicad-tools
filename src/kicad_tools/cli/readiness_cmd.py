@@ -49,7 +49,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ASSEMBLY_AFFECTING_RULES",
     "CheckOutcome",
+    "CollectedDependency",
     "EngineFingerprint",
     "EngineRun",
     "Engines",
@@ -137,6 +138,26 @@ DEFAULT_FILL_TOLERANCE_MM2 = 0.01
 _ARCHIVE_NAME = "manufacturing.zip"
 _EVIDENCE_DIRNAME = "readiness"
 _REPORT_NAME = "readiness.json"
+
+#: Package-local directory that receives project inputs collected from *outside*
+#: the PCB's own directory (issue #5813).  It is machine-owned: readiness rebuilds
+#: it from the current sources on every run, so a collected copy can never drift
+#: from the file it was collected from.
+COLLECTED_DIRNAME = "kct-collected"
+
+#: How far above the board directory an *implicit* project root may reach when a
+#: named input lives outside it.  Anything wider has to be declared with
+#: ``--project-root`` so collection can never quietly climb towards ``/``.
+MAX_IMPLICIT_ROOT_ASCENT = 2
+
+#: Named in every collection refusal, so the message says what to do next.
+_LAYOUT_HINT = (
+    "collected project inputs must live inside the project root - the board "
+    "directory, widened to the nearest common ancestor of the paths named with "
+    f"--sch/--net-class-map (at most {MAX_IMPLICIT_ROOT_ASCENT} level(s) above "
+    "it), or declared explicitly with --project-root; see docs/reference/cli.md "
+    "(`readiness` -> Project layouts)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -303,13 +324,9 @@ def _run_export(pcb: Path, manufacturer: str, output_dir: Path, assembly: bool) 
             ).export(output_dir)
         if not result.success:
             return EngineRun(False, "Generic manufacturing export failed")
-        archive = output_dir / "kicad_project.zip"
-        with zipfile.ZipFile(archive, "a", zipfile.ZIP_DEFLATED) as zf:
-            present = set(zf.namelist())
-            for source in _project_dependencies(pcb):
-                relative = source.relative_to(pcb.parent).as_posix()
-                if relative not in present:
-                    zf.write(source, relative)
+        # The project dependencies (and any collected copies) are folded into
+        # kicad_project.zip by _augment_project_zip(), which knows the run's
+        # collection map; the engine only has to produce the bundle.
         return EngineRun(True)
     except Exception as exc:
         return EngineRun(False, f"Generic export failed: {exc}")
@@ -584,6 +601,24 @@ class CheckOutcome:
         return {"name": self.name, "status": self.status, "detail": self.detail}
 
 
+@dataclass(frozen=True)
+class CollectedDependency:
+    """One project input collected from outside the PCB's own directory.
+
+    ``source`` is the file (or library directory) as it exists in the checkout;
+    ``package_path`` is its copy inside the package, under
+    ``<pcb-dir>/kct-collected/``.  ``uri`` / ``table`` are set when the input was
+    reached through a ``sym-lib-table`` / ``fp-lib-table`` entry, which is what
+    lets the exported project rewrite that entry to the collected copy.
+    """
+
+    source: Path
+    package_path: Path
+    origin: str
+    uri: str | None = None
+    table: str | None = None
+
+
 @dataclass
 class ReadinessOptions:
     """Fully resolved inputs for one readiness run."""
@@ -596,6 +631,12 @@ class ReadinessOptions:
     mode: str
     output_dir: Path
     evidence_dir: Path
+    #: Containment boundary for dependency collection (issue #5813).  ``None``
+    #: means "the board directory" — the pre-#5813 boundary, unchanged.
+    project_root: Path | None = None
+    #: Inputs collected into the package from outside the PCB directory.  Only
+    #: ever populated on the staged candidate, never on the caller's options.
+    collected: tuple[CollectedDependency, ...] = ()
     ack_warnings: frozenset[str] = frozenset()
     include_tht: bool = False
     archive: bool = True
@@ -614,6 +655,11 @@ class ReadinessOptions:
     @property
     def assembly(self) -> bool:
         return self.mode == "assembly"
+
+    @property
+    def substitutions(self) -> dict[str, Path]:
+        """Library-table URI -> the collected copy that stands in for it."""
+        return {dep.uri: dep.package_path for dep in self.collected if dep.uri is not None}
 
 
 @dataclass
@@ -719,31 +765,46 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
-    return (
-        ReadinessOptions(
-            board_dir=board_dir,
-            pcb=pcb,
-            schematic=schematic,
-            project=project,
-            manufacturer=manufacturer,
-            mode="pcb_only" if args.pcb_only else "assembly",
-            output_dir=output_dir,
-            evidence_dir=evidence_dir,
-            ack_warnings=ack,
-            include_tht=bool(args.include_tht),
-            archive=not args.no_archive,
-            net_class_map=net_class_map,
-            hv_net_class=args.hv_net_class,
-            hv_min=args.hv_min,
-            hv_standard=args.hv_standard,
-            hv_working_voltage=args.hv_working_voltage,
-            hv_pollution_degree=args.hv_pollution_degree,
-            hv_material_group=args.hv_material_group,
-            fill_tolerance_mm2=float(args.fill_tolerance),
-            operation="generate" if args.generate else "verify",
-        ),
-        None,
+    project_root, root_error = _resolve_project_root(
+        board_dir,
+        named=[args.schematic, getattr(args, "net_class_map", None)],
+        explicit=getattr(args, "project_root", None),
     )
+    if project_root is None:
+        return None, root_error
+
+    options = ReadinessOptions(
+        board_dir=board_dir,
+        pcb=pcb,
+        schematic=schematic,
+        project=project,
+        manufacturer=manufacturer,
+        mode="pcb_only" if args.pcb_only else "assembly",
+        output_dir=output_dir,
+        evidence_dir=evidence_dir,
+        project_root=project_root,
+        ack_warnings=ack,
+        include_tht=bool(args.include_tht),
+        archive=not args.no_archive,
+        net_class_map=net_class_map,
+        hv_net_class=args.hv_net_class,
+        hv_min=args.hv_min,
+        hv_standard=args.hv_standard,
+        hv_working_voltage=args.hv_working_voltage,
+        hv_pollution_degree=args.hv_pollution_degree,
+        hv_material_group=args.hv_material_group,
+        fill_tolerance_mm2=float(args.fill_tolerance),
+        operation="generate" if args.generate else "verify",
+    )
+
+    # Preflight the dependency collection: an unreachable, escaping or ambiguous
+    # project input is refused here, before a single byte is written anywhere.
+    try:
+        _plan_collection(options)
+    except ValueError as exc:
+        return None, str(exc)
+
+    return options, None
 
 
 def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
@@ -759,6 +820,51 @@ def _discover_tier(board_dir: Path, pcb: Path) -> str | None:
             if stripped.startswith("manufacturer") and "=" in stripped:
                 return stripped.split("=", 1)[1].strip().strip("\"'") or None
     return None
+
+
+def _resolve_project_root(
+    board_dir: Path,
+    *,
+    named: Sequence[str | None],
+    explicit: str | None,
+) -> tuple[Path | None, str | None]:
+    """Resolve the containment boundary for dependency collection (issue #5813).
+
+    Returns ``(root, error)`` — exactly one is non-``None``.  The root is the
+    board directory unless the user *named* an input outside it, in which case it
+    widens to the nearest common ancestor, and never by more than
+    :data:`MAX_IMPLICIT_ROOT_ASCENT` levels.  A wider layout is not guessed: it
+    has to be declared with ``--project-root``, so collection can never walk up
+    into arbitrary ancestor directories on its own.
+    """
+    board = board_dir.resolve()
+    if explicit is not None:
+        root = Path(explicit).resolve()
+        if not root.is_dir():
+            return None, f"project root not found: {root}"
+        if not board.is_relative_to(root):
+            return None, (f"--project-root {root} does not contain the board directory {board}")
+        return root, None
+
+    root = board
+    for name in named:
+        if not name:
+            continue
+        target = Path(name).resolve()
+        if target.is_relative_to(root):
+            continue
+        ancestor = board
+        while not target.is_relative_to(ancestor) and ancestor.parent != ancestor:
+            ancestor = ancestor.parent
+        ascent = len(board.parts) - len(ancestor.parts)
+        if not target.is_relative_to(ancestor) or ascent > MAX_IMPLICIT_ROOT_ASCENT:
+            return None, (
+                f"{target} is not inside the board directory {board} and is too far "
+                f"outside it to collect implicitly; {_LAYOUT_HINT}"
+            )
+        if len(ancestor.parts) < len(root.parts):
+            root = ancestor
+    return root, None
 
 
 def _find_net_class_map(pcb: Path) -> Path | None:
@@ -1346,41 +1452,304 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
     return manifest_path
 
 
-def _project_dependencies(pcb: Path) -> list[Path]:
-    """Inventory native project dependencies independently of the package manifest."""
-    root = pcb.parent
+def _lib_table_references(base: Path) -> list[tuple[str, str, Path]]:
+    """``(table name, uri, target)`` for every project-relative library URI.
+
+    Absolute paths and other ``$``-variable URIs are skipped: those are installed
+    KiCad libraries, identified by the native engine rather than packaged.
+    """
+    references: list[tuple[str, str, Path]] = []
+    for table in (base / "fp-lib-table", base / "sym-lib-table"):
+        if not table.exists():
+            continue
+        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
+            if "${KIPRJMOD}" in uri:
+                target = Path(uri.replace("${KIPRJMOD}", str(base)))
+            elif not Path(uri).is_absolute() and "$" not in uri:
+                target = base / uri
+            else:
+                continue
+            references.append((table.name, uri, target))
+    return references
+
+
+def _project_dependencies(
+    pcb: Path,
+    *,
+    project_root: Path | None = None,
+    substitutions: Mapping[str, Path] | None = None,
+) -> list[Path]:
+    """Inventory native project dependencies independently of the package manifest.
+
+    ``project_root`` widens the *containment boundary* only — a dependency may
+    live anywhere inside it, but nothing outside it is ever accepted (issue
+    #5813).  ``substitutions`` maps a library-table URI to the collected copy
+    that stands in for it inside the package, so a staged candidate inventories
+    the copy it actually carries instead of the original it was taken from.
+    """
+    base = pcb.parent
+    boundary = (project_root or base).resolve()
     files = {
         p
-        for p in root.iterdir()
+        for p in base.iterdir()
         if p.is_file()
         and (
             p.suffix in {".kicad_pro", ".kicad_dru", ".kicad_sch"}
             or p.name in {"fp-lib-table", "sym-lib-table"}
         )
     }
-    for directory in root.iterdir():
+    for directory in base.iterdir():
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
             files.update(p for p in directory.rglob("*") if p.is_file())
-    for table in (root / "fp-lib-table", root / "sym-lib-table"):
-        if not table.exists():
-            continue
-        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
-            if "${KIPRJMOD}" in uri:
-                dependency = Path(uri.replace("${KIPRJMOD}", str(root)))
-            elif not Path(uri).is_absolute() and "$" not in uri:
-                dependency = root / uri
-            else:
-                continue  # Installed KiCad libraries are identified by the native engine.
-            if not dependency.resolve().is_relative_to(root.resolve()):
-                raise ValueError(f"Project dependency is outside the package root: {uri}")
-            if not dependency.exists():
-                raise ValueError(f"Project dependency is missing: {uri}")
-            files.update(
-                p for p in dependency.rglob("*") if p.is_file()
-            ) if dependency.is_dir() else files.add(dependency)
+    for _table, uri, target in _lib_table_references(base):
+        dependency = (substitutions or {}).get(uri, target)
+        if not dependency.resolve().is_relative_to(boundary):
+            raise ValueError(f"Project dependency is outside the package root: {uri}")
+        if not dependency.exists():
+            raise ValueError(f"Project dependency is missing: {uri}")
+        files.update(
+            p for p in dependency.rglob("*") if p.is_file()
+        ) if dependency.is_dir() else files.add(dependency)
     return sorted(files)
+
+
+def _dependencies_of(options: ReadinessOptions) -> list[Path]:
+    """``_project_dependencies`` bound to one run's boundary and collected copies."""
+    return _project_dependencies(
+        options.pcb,
+        project_root=options.project_root,
+        substitutions=options.substitutions,
+    )
+
+
+def _collected_files(options: ReadinessOptions) -> list[Path]:
+    """Every collected *file* in the package (library directories expanded)."""
+    files: set[Path] = set()
+    for dep in options.collected:
+        if dep.package_path.is_dir():
+            files.update(p for p in dep.package_path.rglob("*") if p.is_file())
+        elif dep.package_path.is_file():
+            files.add(dep.package_path)
+    return sorted(files)
+
+
+def _collected_origin(dep: CollectedDependency, path: Path) -> str:
+    """Project-root-relative identity of one collected file, for provenance."""
+    if path == dep.package_path:
+        return dep.origin
+    return f"{dep.origin}/{path.relative_to(dep.package_path).as_posix()}"
+
+
+def _collected_provenance(options: ReadinessOptions) -> list[dict[str, str]]:
+    """Hash every collected dependency against the source it was taken from."""
+    base = options.pcb.parent
+    records: list[dict[str, str]] = []
+    for dep in options.collected:
+        members = (
+            sorted(p for p in dep.package_path.rglob("*") if p.is_file())
+            if dep.package_path.is_dir()
+            else [dep.package_path]
+        )
+        for path in members:
+            record = {
+                "source": _collected_origin(dep, path),
+                "path": path.relative_to(base).as_posix(),
+                "sha256": _sha256_file(path),
+            }
+            if dep.uri is not None:
+                record["uri"] = dep.uri
+            records.append(record)
+    return sorted(records, key=lambda record: record["path"])
+
+
+def _rewritten_tables(options: ReadinessOptions) -> dict[str, bytes]:
+    """Library tables rewritten to name the collected copies, for the exported project.
+
+    Only the *exported* copy is rewritten.  The checkout's own tables keep
+    pointing at the shared libraries they name, so a later edit there is still
+    picked up (and re-collected) by the next run instead of silently ignored.
+    """
+    base = options.pcb.parent
+    rewritten: dict[str, str] = {}
+    for dep in options.collected:
+        if dep.uri is None or dep.table is None:
+            continue
+        text = rewritten.get(dep.table)
+        if text is None:
+            source = base / dep.table
+            if not source.is_file():  # pragma: no cover - defensive
+                continue
+            text = source.read_text()
+        relative = dep.package_path.relative_to(base).as_posix()
+        rewritten[dep.table] = text.replace(f'"{dep.uri}"', f'"${{KIPRJMOD}}/{relative}"')
+    return {name: text.encode() for name, text in rewritten.items()}
+
+
+_SHEET_FILE_RE = re.compile(r'\(property\s+"Sheet\s?[Ff]ile"\s+"([^"\n]+)"')
+
+
+@dataclass(frozen=True)
+class _PlannedCollection:
+    """One resolved source and the package-relative slot it will be copied into."""
+
+    source: Path
+    relative: str
+    uri: str | None = None
+    table: str | None = None
+
+
+def _sheet_references(schematic: Path) -> list[Path]:
+    """Child sheets named by *schematic*, resolved against its own directory."""
+    try:
+        text = schematic.read_text(errors="replace")
+    except OSError:  # pragma: no cover - defensive
+        return []
+    children: list[Path] = []
+    for name in _SHEET_FILE_RE.findall(text):
+        if "$" in name:
+            continue
+        child = Path(name)
+        children.append(child if child.is_absolute() else schematic.parent / name)
+    return children
+
+
+def _plan_collection(options: ReadinessOptions) -> list[_PlannedCollection]:
+    """Decide which project inputs must be collected into the package (issue #5813).
+
+    Refuses rather than guesses, and refuses *before* anything is written: a
+    dependency outside the project root, a dependency that does not exist, and a
+    collected sheet that reaches back into the PCB directory (a mapping the
+    collected copy could not address) are all errors, never silent omissions.
+    """
+    base = options.pcb.resolve().parent
+    root = (options.project_root or options.board_dir).resolve()
+    if not base.is_relative_to(root):
+        raise ValueError(f"The PCB directory is outside the project root: {base}; {_LAYOUT_HINT}")
+    # When the root *is* the PCB directory nothing can be collected — every
+    # reference outside it is then outside the root, and still refused here.
+    planned: dict[Path, _PlannedCollection] = {}
+
+    def collect(
+        source: Path, label: str, *, uri: str | None = None, table: str | None = None
+    ) -> Path | None:
+        """Plan *source*; return its resolved path, or ``None`` if already packaged."""
+        resolved = source.resolve()
+        if resolved.is_relative_to(base):
+            return None
+        if not resolved.is_relative_to(root):
+            raise ValueError(
+                f"Project dependency is outside the package root: {label}; {_LAYOUT_HINT}"
+            )
+        if not resolved.exists():
+            raise ValueError(f"Project dependency is missing: {label}")
+        relative = resolved.relative_to(root)
+        previous = planned.get(relative)
+        if previous is None:
+            planned[relative] = _PlannedCollection(resolved, relative.as_posix(), uri, table)
+        elif previous.source != resolved:  # pragma: no cover - destinations are 1:1 with sources
+            raise ValueError(
+                f"Ambiguous dependency mapping: {previous.source} and {resolved} both "
+                f"collect to {COLLECTED_DIRNAME}/{relative.as_posix()}"
+            )
+        return resolved
+
+    pending: list[Path] = []
+    if options.schematic is not None and collect(options.schematic, str(options.schematic)):
+        pending.append(options.schematic.resolve())
+    for named in (options.project, options.net_class_map):
+        if named is not None:
+            collect(named, str(named))
+
+    visited: set[Path] = set()
+    while pending:
+        sheet = pending.pop()
+        if sheet in visited:
+            continue
+        visited.add(sheet)
+        for child in _sheet_references(sheet):
+            if child.resolve().is_relative_to(base):
+                raise ValueError(
+                    f"Ambiguous dependency mapping: {sheet} references {child}, which is "
+                    "already inside the PCB directory; a collected sheet cannot address "
+                    f"it. {_LAYOUT_HINT}"
+                )
+            resolved = collect(child, f"{sheet.name} -> {child.name}")
+            if resolved is not None:
+                pending.append(resolved)
+
+    for table, uri, target in _lib_table_references(base):
+        collect(target, uri, uri=uri, table=table)
+
+    return sorted(planned.values(), key=lambda item: item.relative)
+
+
+def _apply_collection(
+    options: ReadinessOptions, candidate: Path, plans: Sequence[_PlannedCollection]
+) -> tuple[CollectedDependency, ...]:
+    """Copy the planned inputs into *candidate* under ``<pcb-dir>/kct-collected/``.
+
+    The collected tree is rebuilt from the current sources whenever anything is
+    collected, so a copy can never survive the reference that produced it.
+    Nothing outside the candidate is touched: the checkout keeps its own layout.
+    """
+    if not plans:
+        return ()
+    base = options.pcb.resolve().parent
+    package_base = candidate / base.relative_to(options.board_dir.resolve())
+    destination_root = package_base / COLLECTED_DIRNAME
+    if destination_root.exists():
+        shutil.rmtree(destination_root)
+    collected: list[CollectedDependency] = []
+    for item in plans:
+        destination = destination_root / item.relative
+        if destination.exists():  # pragma: no cover - the reserved directory was just rebuilt
+            raise ValueError(
+                f"Ambiguous dependency mapping: {item.source} would replace {destination}"
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if item.source.is_dir():
+            shutil.copytree(item.source, destination)
+        else:
+            shutil.copy2(item.source, destination)
+        collected.append(
+            CollectedDependency(
+                source=item.source,
+                package_path=destination,
+                origin=item.relative,
+                uri=item.uri,
+                table=item.table,
+            )
+        )
+    return tuple(collected)
+
+
+def _augment_project_zip(options: ReadinessOptions) -> None:
+    """Make ``kicad_project.zip`` the complete, self-contained checked design.
+
+    Every native dependency is stored under its package-relative name, collected
+    copies included, and the library tables inside the archive are rewritten to
+    name those copies — so the exported project opens without the surrounding
+    checkout, while the checkout's own tables stay untouched.
+    """
+    archive = options.output_dir / "kicad_project.zip"
+    if not archive.is_file():
+        return
+    base = options.pcb.parent
+    contents: dict[str, bytes] = {}
+    with zipfile.ZipFile(archive) as zf:
+        for info in zf.infolist():
+            if not info.is_dir():
+                contents[info.filename] = zf.read(info.filename)
+    for source in [*_dependencies_of(options), *_collected_files(options)]:
+        contents[source.relative_to(base).as_posix()] = source.read_bytes()
+    contents.update(_rewritten_tables(options))
+    staged = archive.with_name(archive.name + ".tmp")
+    with zipfile.ZipFile(staged, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in sorted(contents):
+            zf.writestr(name, contents[name])
+    os.replace(staged, archive)
 
 
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
@@ -1388,11 +1757,14 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
     try:
-        sources = set(_project_dependencies(options.pcb)) | {options.pcb}
+        sources = set(_dependencies_of(options)) | set(_collected_files(options)) | {options.pcb}
         if options.schematic is not None:
             sources.add(options.schematic)
         if options.project is not None:
             sources.add(options.project)
+        # The archived library tables name the collected copies they ship with;
+        # everything else must be the checked bytes, unchanged.
+        rewritten = _rewritten_tables(options)
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]
             if len(names) != len(set(names)):
@@ -1401,7 +1773,7 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
                 relative = source.relative_to(options.pcb.parent).as_posix()
                 if relative not in names:
                     problems.append(f"{relative} is absent from kicad_project.zip")
-                elif zf.read(relative) != source.read_bytes():
+                elif zf.read(relative) != rewritten.get(relative, source.read_bytes()):
                     problems.append(
                         f"{relative} inside kicad_project.zip differs from the checked source"
                     )
@@ -1565,6 +1937,7 @@ def _gate_artifacts(
             detail=f"kct export did not produce a bundle: {run.detail}",
             blockers=[f"Manufacturing export could not run ({run.detail})."],
         )
+    _augment_project_zip(options)
 
     problems: list[str] = []
 
@@ -1834,10 +2207,10 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
     """
     root = options.board_dir.resolve()
     paths: set[Path] = (
-        {p.resolve() for p in _project_dependencies(options.pcb)}
-        if options.pcb.is_file()
-        else set()
+        {p.resolve() for p in _dependencies_of(options)} if options.pcb.is_file() else set()
     )
+    # Collected copies are ordinary package files: same digest, same contract.
+    paths.update(p.resolve() for p in _collected_files(options))
 
     for candidate in (options.pcb, options.schematic, options.project, options.net_class_map):
         if candidate is not None and candidate.is_file():
@@ -1916,6 +2289,9 @@ def build_report(
     report["inputs"] = {
         _rel(options, path): _sha256_file(path) for path in _hashable_inputs(options)
     }
+    collected = _collected_provenance(options)
+    if collected:
+        report["collected_dependencies"] = collected
     return report
 
 
@@ -2077,13 +2453,32 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             ),
         )
 
+        collected_paths: dict[Path, Path] = {}
+
         def remap(path: Path | None) -> Path | None:
-            return candidate / path.resolve().relative_to(original) if path is not None else None
+            """Locate *path* inside the candidate, following the collection map."""
+            if path is None:
+                return None
+            resolved = path.resolve()
+            if resolved.is_relative_to(original):
+                return candidate / resolved.relative_to(original)
+            destination = collected_paths.get(resolved)
+            if destination is None:
+                raise ValueError(
+                    f"Project dependency is outside the package root: {path}; {_LAYOUT_HINT}"
+                )
+            return destination
 
         try:
+            if _snapshot_inventory(candidate) != before:
+                raise RuntimeError("Source changed while creating candidate snapshot")
+            collected = _apply_collection(options, candidate, _plan_collection(options))
+            collected_paths = {dep.source: dep.package_path for dep in collected}
             staged = replace(
                 options,
                 board_dir=candidate,
+                project_root=None,
+                collected=collected,
                 pcb=candidate / options.pcb.resolve().relative_to(original),
                 schematic=remap(options.schematic),
                 project=remap(options.project),
@@ -2093,8 +2488,6 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 / "output"
                 / ("readiness" if options.operation == "generate" else diagnostic_name),
             )
-            if _snapshot_inventory(candidate) != before:
-                raise RuntimeError("Source changed while creating candidate snapshot")
             if options.operation == "generate" and options.output_dir.exists():
                 manifest = _read_json(options.output_dir / "manifest.json")
                 if manifest.get("producer") != "kct readiness":
@@ -2176,7 +2569,8 @@ def _run_readiness_candidate(
     checks.append(fill)
 
     checked_sources = {
-        path: _sha256_file(path) for path in [options.pcb, *_project_dependencies(options.pcb)]
+        path: _sha256_file(path)
+        for path in [options.pcb, *_dependencies_of(options), *_collected_files(options)]
     }
     kct_check, check_report = _gate_kct_check(options, engines)
     checks.append(kct_check)
@@ -2355,6 +2749,18 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         "--net-class-map",
         default=None,
         help="Net-class map sidecar (auto-discovered by default)",
+    )
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help=(
+            "Directory that bounds dependency collection: inputs under it but "
+            "outside the PCB directory (a sibling schematics/ or symbols/ tree) "
+            "are collected into the package; anything outside it is refused. "
+            "Defaults to the board directory, widened to the nearest common "
+            f"ancestor of any named input, at most {MAX_IMPLICIT_ROOT_ASCENT} "
+            "level(s) up."
+        ),
     )
     parser.add_argument(
         "--ack-warnings",

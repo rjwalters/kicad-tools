@@ -7347,6 +7347,19 @@ def _add_readiness_parser(subparsers) -> None:
         help="Net-class map sidecar (auto-discovered by default)",
     )
     rd_parser.add_argument(
+        "--project-root",
+        dest="readiness_project_root",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Directory that bounds dependency collection: inputs under it but "
+            "outside the PCB directory (a sibling schematics/ or symbols/ tree) "
+            "are collected into the package; anything outside it is refused "
+            "(Issue #5813).  Defaults to the board directory, widened to the "
+            "nearest common ancestor of any named input, at most 2 level(s) up."
+        ),
+    )
+    rd_parser.add_argument(
         "--ack-warnings",
         dest="readiness_ack_warnings",
         metavar="RULES",

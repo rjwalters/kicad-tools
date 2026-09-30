@@ -201,6 +201,43 @@ separate from that gallery report. `ready` requires all applicable gates to
 pass; other results are `blocked` or `unverified` with named blockers and a
 nonzero exit. There is no flag that declares a partial run ready.
 
+### Collected project dependencies
+
+`collected_dependencies` is an additive optional array in schema v1 (no
+`schema_version` bump). It is present only when a run collected project inputs
+from **outside the PCB's own directory** — a schematic in a sibling
+`schematics/` tree, or a `sym-lib-table` / `fp-lib-table` entry naming a shared
+`../symbols/` library (Issue #5813):
+
+```json
+"collected_dependencies": [
+  {
+    "source": "symbols/custom.kicad_sym",
+    "path": "kct-collected/symbols/custom.kicad_sym",
+    "sha256": "<SHA256>",
+    "uri": "${KIPRJMOD}/../symbols/custom.kicad_sym"
+  }
+]
+```
+
+`source` is the file relative to the **project root** (the collection boundary:
+the board directory, widened to the nearest common ancestor of the paths the
+caller named, or declared with `--project-root`). `path` is its copy inside the
+package, relative to the PCB's directory, and always under the machine-owned
+`kct-collected/` directory. `uri` is present when the input was reached through
+a library table.
+
+Every collected file is also an ordinary `inputs` entry with the same digest —
+collection widens *where an input may come from*, never *how strongly it is
+bound*. The copies are rebuilt from the current sources on every run, and the
+checkout's own library tables are never rewritten, so an edit to a shared
+library is still seen by the next run. Only the library tables stored inside
+`kicad_project.zip` name the collected copies, so the exported project opens
+without the surrounding checkout. Anything outside the project root — a missing
+file, an undeclared dependency, a `../../` or symlink escape, or a collected
+sheet that reaches back into the PCB directory — is refused before any file is
+written, never collected silently.
+
 ### Engine fingerprint
 
 `engine` is an additive optional object in schema v1 (no `schema_version` bump,

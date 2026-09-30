@@ -42,6 +42,10 @@ def run_readiness_command(args) -> int:
     if net_class_map:
         sub_argv.extend(["--net-class-map", net_class_map])
 
+    project_root = getattr(args, "readiness_project_root", None)
+    if project_root:
+        sub_argv.extend(["--project-root", project_root])
+
     ack = getattr(args, "readiness_ack_warnings", "")
     if ack:
         sub_argv.extend(["--ack-warnings", ack])

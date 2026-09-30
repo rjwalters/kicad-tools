@@ -213,9 +213,15 @@ class FakeEngines:
                     writer.writerow([ref, "1k", "Package", "1mm", "1mm", "0.0", "Top"])
 
         zip_pcb = b"(kicad_pcb stale)\n" if self.zip_pcb_stale else pcb.read_bytes()
+        try:
+            # Dependencies reached through a collected library table are added by
+            # the runner's own augmentation step, which knows the collection map.
+            dependencies = readiness_cmd._project_dependencies(pcb)
+        except ValueError:
+            dependencies = []
         with zipfile.ZipFile(output_dir / "kicad_project.zip", "w") as zf:
             zf.writestr(pcb.name, zip_pcb)
-            for source in readiness_cmd._project_dependencies(pcb):
+            for source in dependencies:
                 zf.write(source, source.relative_to(pcb.parent).as_posix())
         (output_dir / "manifest.json").write_text(
             json.dumps({"version": "1.0", "manufacturer": mfr, "files": {}}, indent=2)
