@@ -23,6 +23,7 @@ from kicad_tools.sexp import SExp
 from ..core.board_outline import board_outline_bounds, legacy_arc_points
 from ..core.sexp_file import load_footprint, load_pcb, save_pcb
 from ..core.version import KICAD_BOARD_FORMAT_VERSION, KICAD_GENERATOR_VERSION
+from ..footprints.fp_lib_table import find_project_fp_lib_table, parse_fp_lib_table
 from ..footprints.library_path import (
     detect_kicad_library_path,
     guess_standard_library,
@@ -5686,6 +5687,7 @@ class PCB:
         rotation: float = 0.0,
         layer: str = "F.Cu",
         value: str = "",
+        schematic_path: str | Path | None = None,
     ) -> Footprint:
         """
         Add a footprint from KiCad standard libraries to the PCB.
@@ -5709,6 +5711,18 @@ class PCB:
             rotation: Rotation angle in degrees (default: 0)
             layer: Layer to place footprint on ("F.Cu" or "B.Cu", default: "F.Cu")
             value: Component value (e.g., "100nF", "10k")
+            schematic_path: Optional path to the ``.kicad_sch``/``.kicad_pro``
+                that ``library_id`` was sourced from. When given, the
+                project's ``fp-lib-table`` (found by walking upward from
+                this path, so ``${KIPRJMOD}`` always resolves against the
+                *input* schematic's project root even if the PCB is saved
+                elsewhere) is consulted **before** the standard KiCad
+                library search, so project-local library nicknames resolve
+                the same way they do for ``kct suggest-footprint`` /
+                ``assign-footprints``. A missing, malformed, or
+                non-matching project table silently falls back to the
+                standard library search below -- this parameter only ever
+                adds a resolution path, never removes one.
 
         Returns:
             The Footprint object that was added to the PCB
@@ -5747,6 +5761,34 @@ class PCB:
                     f"Cannot determine library for footprint '{footprint_name}'. "
                     "Please specify the library explicitly using 'Library:Footprint' format."
                 )
+
+        fp_filename = footprint_name
+        if not fp_filename.endswith(".kicad_mod"):
+            fp_filename = f"{fp_filename}.kicad_mod"
+
+        # Project fp-lib-table resolution first -- matches KiCad's own
+        # project-then-global nickname resolution order and the pattern
+        # already used by sch_suggest_footprint.py / sch_assign_footprints.py.
+        if schematic_path is not None:
+            table_path = find_project_fp_lib_table(Path(schematic_path))
+            if table_path is not None:
+                for entry in parse_fp_lib_table(table_path):
+                    if entry.name != library_name:
+                        continue
+                    if entry.type != "KiCad" or entry.resolved_path is None:
+                        continue
+                    candidate = entry.resolved_path / fp_filename
+                    if candidate.is_file():
+                        return self.add_footprint_from_file(
+                            kicad_mod_path=candidate,
+                            reference=reference,
+                            x=x,
+                            y=y,
+                            rotation=rotation,
+                            layer=layer,
+                            value=value,
+                        )
+                    break
 
         # Detect KiCad library path
         lib_paths = detect_kicad_library_path()

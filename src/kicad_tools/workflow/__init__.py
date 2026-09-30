@@ -292,6 +292,7 @@ class PCBFromSchematic:
                 rotation=rotation,
                 layer=layer,
                 value=comp.value,
+                schematic_path=self.schematic_path,
             )
         except (FileNotFoundError, ValueError):
             return None
