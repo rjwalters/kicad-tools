@@ -72,6 +72,23 @@ def read_readiness(board_dir: Path) -> dict:
             actual = hashlib.sha256(target.read_bytes()).hexdigest()
             if actual != expected:
                 raise ValueError(f"Evidence is stale: {name} changed")
+        external = data.get("external_inputs")
+        if external is not None:
+            declared = data.get("project_root")
+            if not isinstance(external, dict) or not isinstance(declared, str):
+                raise ValueError("invalid external inputs")
+            project_root = (root / declared).resolve()
+            if project_root == root or not root.is_relative_to(project_root):
+                raise ValueError("project root must be an ancestor of the board directory")
+            for name, expected in external.items():
+                path = Path(name)
+                if path.is_absolute() or ".." in path.parts or "\\" in name:
+                    raise ValueError("external input path must be project-root-relative")
+                target = (project_root / path).resolve()
+                if not target.is_relative_to(project_root):
+                    raise ValueError("external input path leaves project root")
+                if hashlib.sha256(target.read_bytes()).hexdigest() != expected:
+                    raise ValueError(f"Evidence is stale: {name} changed")
         output = board_dir / "output"
         required = {
             p.relative_to(board_dir).as_posix()
@@ -92,7 +109,7 @@ def read_readiness(board_dir: Path) -> dict:
                 raise ValueError("Ready requires kct_check, native_drc, artifacts and bom checks")
             if (
                 not any(n.endswith(".kicad_pcb") for n in inputs)
-                or not any(n.endswith(".kicad_sch") for n in inputs)
+                or not any(n.endswith(".kicad_sch") for n in (*inputs, *(external or ())))
                 or "output/manufacturing/manifest.json" not in inputs
             ):
                 raise ValueError("Ready requires PCB, schematic and manufacturing evidence")
