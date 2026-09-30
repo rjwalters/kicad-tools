@@ -44,7 +44,6 @@ dependencies = [
     "pyyaml>=6.0",
     "numpy>=1.24",
     "pydantic>=2.0",
-    "jsonschema>=4.20",
     # shapely is load-bearing for the correctness-critical copper paths
     # (zone-fill clearance carving and the zone-vs-copper clearance DRC
     # rules), so it is a CORE dependency rather than an optional extra
@@ -141,6 +140,11 @@ ipc = [
 mcp = [
     "fastmcp>=4,<5",
     "pydantic>=2.0",
+    # jsonschema is imported only by src/kicad_tools/mcp/server.py, which is
+    # itself reached exclusively through lazy, function-local imports gated on
+    # invoking the MCP subsystem -- so it belongs here rather than in the core
+    # dependency list (issue #5804).
+    "jsonschema>=4.20",
 ]
 # C++ native router acceleration (requires C++ compiler)
 native = [
@@ -190,6 +194,7 @@ all = [
     "pyyaml>=6.0",
     "fastmcp>=4,<5",
     "pydantic>=2.0",
+    "jsonschema>=4.20",
     "cupy-cuda12x>=13.0",
     "mlx>=0.5",
     "matplotlib>=3.5",
@@ -224,6 +229,10 @@ dev = [
     "pyyaml>=6.0",
     "fastmcp>=4,<5",
     "pydantic>=2.0",
+    # jsonschema moved out of the core dependency list into the `mcp` extra
+    # (issue #5804); the MCP test suite imports kicad_tools.mcp.server, so the
+    # dev environment still needs it explicitly -- same reason fastmcp is here.
+    "jsonschema>=4.20",
     "cmaes>=0.12.0",
     "matplotlib>=3.5",
     "jinja2>=3.1",
