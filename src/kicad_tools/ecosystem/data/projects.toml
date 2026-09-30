@@ -164,6 +164,35 @@ a non-trivial commit history -- the feature list it advertises overlaps \
 ours closely enough to be worth measuring.\
 """
 
+[projects.tscircuit-autorouter]
+name = "tscircuit autorouter"
+slug = "tscircuit/tscircuit-autorouter"
+repo_url = "https://github.com/tscircuit/tscircuit-autorouter"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "watch"
+license = "MIT"
+license_compat = "mit-clean"
+language = "TypeScript"
+stars = 85
+last_push = "2026-09-30"
+last_verified = "2026-09-30"
+research_docs = ["docs/research/tscircuit-evaluation.md"]
+summary = """
+tscircuit's built-in router (`@tscircuit/capacity-autorouter`): a \
+pipeline of hypergraph / successive-approximation solvers rather than \
+net-by-net A\\*, fed a `SimpleRouteJson` problem instead of a KiCad file. \
+It ships a public benchmark (`dataset-srj18`, derived from real Arduino \
+and Antmicro KiCad boards) and a bug-report-to-fixture workflow. Not yet \
+measured against us.\
+"""
+reeval_trigger = """
+Benchmark it on the dataset-srj18 source boards through \
+`benchmarks/external/` under the shared `kicad-cli` referee, as was done \
+for KiCadRoutingTools.\
+"""
+
 # ------------------------------------------------------------ design-as-code
 
 [projects.atopile]
@@ -227,25 +256,28 @@ slug = "tscircuit/tscircuit"
 repo_url = "https://github.com/tscircuit/tscircuit"
 vcs = "github"
 category = "design-as-code"
-relation = "reference"
-verdict = "watch"
+relation = "upstream"
+verdict = "complementary"
 license = "MIT"
 license_compat = "mit-clean"
 language = "TypeScript"
-stars = 2775
+stars = 2776
 last_push = "2026-09-30"
 last_verified = "2026-09-30"
+research_docs = ["docs/research/tscircuit-evaluation.md"]
 summary = """
-"React for Electronics" -- circuits described in TypeScript/React, with a \
-web-based autorouter in development. Recorded rather than featured: it \
-exports gerbers, pick-and-place and BOM directly rather than KiCad \
-project files, so it sits beside the KiCad ecosystem rather than inside \
-it and shares no artifact with us.\
+"React for Electronics" -- circuits described in TypeScript/React and \
+compiled to its own Circuit JSON. Its `circuit-json-to-kicad` converter \
+now emits `.kicad_sch`, `.kicad_pcb` (with traces, vias and pours) and \
+`.kicad_pro`, and `kicad-to-circuit-json` reads them back, so it is an \
+upstream producer of the files we consume, like atopile and SKiDL. \
+Whether its KiCad output passes our checks has not been measured yet.\
 """
 reeval_trigger = """
-If tscircuit gains first-class `.kicad_pcb` / `.kicad_sch` emission it \
-becomes a genuine upstream producer, the same relation atopile and SKiDL \
-already have.\
+Re-evaluate once its emitted KiCad projects have been run through \
+`kct check`, LVS and `kicad-cli` DRC -- a clean pass would make \
+tscircuit a supported front end, and systematic failures are bugs to \
+report upstream.\
 """
 
 [projects.component-importer]
