@@ -4,6 +4,7 @@ Set KCT_MASK_NATIVE_PYTHON to a JSON argv for KiCad's Python interpreter.
 The selected native CLI and Python must both see the scratch paths unchanged.
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,128 @@ def native_options(tmp_path):
         "artifact_dir": tmp_path / "native",
         "scratch_dir": tmp_path,
     }
+
+
+# A factory-style rule file, the shape a fabricator ships with an order: a
+# handful of silkscreen clearance rules alongside the plain copper clearance
+# that native attribution has always accepted. Nothing here changes plotted
+# mask or copper geometry, so attribution must be identical to the same board
+# without the sidecar (issue #5818).
+FACTORY_SILK_DRU = """(version 1)
+(rule "Factory silk to pads"
+  (condition "A.Type == 'Pad'")
+  (constraint silk_clearance (min 0.15mm)))
+(rule "Factory silk to holes"
+  (condition "A.Type == 'Via'")
+  (constraint silk_clearance (min 0.2mm)))
+(rule "Factory silk to footprint courtyards"
+  (condition "A.Type == 'Footprint'")
+  (constraint silk_clearance (min 0.1mm)))
+(rule "Factory copper clearance"
+  (constraint clearance (min 0.15mm)))
+"""
+
+# Two pads and an escaping conductor: enough plotted mask and copper for the
+# per-object/full-layer parity comparison to be meaningful, small enough to
+# export twice without inflating the native gate's runtime.
+PARITY_BODY = """(net 1 "N")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "N"))
+       (pad "2" smd roundrect (at 2 0) (size 1 1) (roundrect_rratio .25) (layers "F.Cu" "F.Mask")))
+      (segment (start 10.9 9) (end 10.9 11) (width .1) (layer "F.Cu") (net 1)
+       (uuid "00000000-0000-0000-0000-000000000099"))"""
+
+
+def _dru_board(directory, body, rules=None, *, setup="(pad_to_mask_clearance .05)"):
+    """Write a fixture board, optionally with a same-stem ``.kicad_dru``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _board(directory / f"{directory.name}.kicad_pcb", body, setup=setup)
+    if rules is not None:
+        path.with_suffix(".kicad_dru").write_text(rules, encoding="utf-8")
+    return path
+
+
+def _attribution(result):
+    """Per-object attribution coverage: identity -> plotted geometry per layer."""
+    return {
+        identity: dict(item["layers_wkt"])
+        for identity, item in result.geometry_provenance["source_objects"].items()
+    }
+
+
+def test_factory_silk_clearance_rules_leave_native_attribution_unchanged(tmp_path, native_options):
+    """A geometry-neutral silk rule context must not invalidate attribution.
+
+    Issue #5818: ``silk_clearance`` was missing from the custom-rule safe set,
+    so an ordinary factory ``.kicad_dru`` made an otherwise-passing board fail
+    with ``Native object rule context unsupported: silk_clearance``.
+    """
+    plain = _dru_board(tmp_path / "plain", PARITY_BODY)
+    ruled = _dru_board(tmp_path / "ruled", PARITY_BODY, FACTORY_SILK_DRU)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    assert not any("silk_clearance" in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert (
+        ruled_result.binding.rules_sha256 == hashlib.sha256(FACTORY_SILK_DRU.encode()).hexdigest()
+    )
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
+@pytest.mark.parametrize(
+    "constraint", ["zone_connection (with solid)", "thermal_relief_gap (min 0.3mm)"]
+)
+def test_geometry_altering_rule_context_still_fails_beside_silk_rules(
+    tmp_path, native_options, constraint
+):
+    """The allowlist addition is narrow: unsupported contexts still fail closed.
+
+    ``zone_connection`` and ``thermal_relief_gap`` genuinely change the filled
+    shape native plotting produces, so they must keep being reported even when
+    the same rule file also carries accepted ``silk_clearance`` rules.
+    """
+    rules = FACTORY_SILK_DRU + f'(rule "Fab fill" (constraint {constraint}))\n'
+    path = _dru_board(tmp_path / "altering", PARITY_BODY, rules)
+
+    result = check_mask_to_copper(path, POLICY, **native_options)
+
+    name = constraint.split()[0]
+    assert result.coverage == "incomplete"
+    assert not result.passed
+    assert f"Native object rule context unsupported: {name}" in result.reasons
+    assert not any("silk_clearance" in reason for reason in result.reasons)
+
+
+def test_silk_rules_do_not_suppress_an_unsupported_native_graphic(tmp_path, native_options):
+    """A silk rule file must not blanket-excuse other attribution gaps."""
+    identity = "00000000-0000-0000-0000-000000000098"
+    body = (
+        PARITY_BODY
+        + f'''(gr_line (start 14 9) (end 14 11) (stroke (width .2) (type dash))
+          (layer "F.Mask") (uuid "{identity}"))'''
+    )
+    path = _dru_board(tmp_path / "dashed", body, FACTORY_SILK_DRU)
+
+    result = check_mask_to_copper(path, POLICY, **native_options)
+
+    assert result.coverage == "incomplete"
+    assert f"{identity}: dashed native graphic attribution unsupported" in result.reasons
+    assert not any("silk_clearance" in reason for reason in result.reasons)
 
 
 @pytest.mark.parametrize("case", ["custom_rotated", "chamfer", "padstack", "graphics_text", "zone"])
