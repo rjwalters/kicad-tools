@@ -460,7 +460,7 @@ def test_walk_yields_sheet_name_paths_not_filenames() -> None:
     filenames (``collision_child_a.kicad_sch``) deliberately differ from the
     sheet names so a filename-based path would be visible here.
     """
-    paths = [sheet_path for sheet_path, _sch in _walk_hierarchy_schematics(_COLLISION_SCH)]
+    paths = [visit.sheet_path for visit in _walk_hierarchy_schematics(_COLLISION_SCH)]
 
     assert paths == ["", "/ChildA", "/ChildB"]
 
