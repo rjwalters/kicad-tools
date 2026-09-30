@@ -57,7 +57,12 @@ WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 
 # shellcheck source=lib/require-daemon-bin.sh
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-upstream"
+# #8195 slice 14 folded this arm's correction into `worktree-branch-reuse`,
+# which calls `worktree_cli::upstream` IN-PROCESS: the shell's
+# `_worktree_upstream_check local-branch` call site is gone, so the subcommand
+# this suite reaches through worktree.sh is the reuse arm, not `worktree-upstream`
+# directly. Both are named so a binary missing either is diagnosed at once.
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-upstream" "worktree-branch-reuse"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

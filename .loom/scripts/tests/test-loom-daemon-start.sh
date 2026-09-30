@@ -388,6 +388,8 @@ chmod +x "$BG_FAKE_BIN"
 # real ~/.loom/autonomy-desired. LOOM_WATCHDOG_LABEL is a scratch label so even
 # if the watchdog script were resolvable here, provisioning could not touch the
 # real com.rjwalters.loom-daemon-watchdog LaunchAgent.
+# #9588: seed an operator-stop record, which an explicit start must clear.
+mkdir -p "$WORKDIR/.loom" && echo 'operator_stop_reason=then-exit' > "$WORKDIR/.loom/autonomy-desired.stopped"
 ( cd "$WORKDIR" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE \
     LOOM_DAEMON_BIN="$BG_FAKE_BIN" \
     LOOM_SOCKET_PATH="$WORKDIR/.loom/loom-daemon.sock" \
@@ -396,14 +398,8 @@ chmod +x "$BG_FAKE_BIN"
     bash "$START_SCRIPT" --no-launchd --no-systemd >/dev/null 2>&1 )
 bg_rc=$?
 assert_eq "0" "$bg_rc" "bare (zero-arg) background start exits 0 (no unbound-variable crash, #3968)"
-TESTS_RUN=$((TESTS_RUN + 1))
-if [[ -f "$WORKDIR/.loom/.daemon.flags" && ! -s "$WORKDIR/.loom/.daemon.flags" ]]; then
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "${GREEN}✓${NC} bare start persists an EMPTY .loom/.daemon.flags (no autonomy flags to record)"
-else
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "${RED}✗${NC} bare start persists an EMPTY .loom/.daemon.flags (no autonomy flags to record)"
-fi
+flags_state=$([[ -f "$WORKDIR/.loom/.daemon.flags" && ! -s "$WORKDIR/.loom/.daemon.flags" ]] && echo empty || echo other)
+assert_eq "empty" "$flags_state" "bare start persists an EMPTY .loom/.daemon.flags (no autonomy flags to record)"
 # #4011: a successful start writes the durable autonomy-desired intent marker
 # (into the isolated WORKDIR location pinned above — never the real ~/.loom).
 TESTS_RUN=$((TESTS_RUN + 1))
@@ -416,6 +412,11 @@ else
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}✗${NC} bare start writes the autonomy-desired marker with heartbeat + liveness fields (#4011)"
 fi
+# #9588: an explicit start is the operator's "run again" — it clears the
+# operator-stop record so the new daemon does not come up held and the watchdog
+# is re-armed by the marker written above.
+stop_state=$([[ -e "$WORKDIR/.loom/autonomy-desired.stopped" ]] && echo present || echo cleared)
+assert_eq "cleared" "$stop_state" "explicit start clears the operator-stop record (#9588)"
 
 # Clean up the background daemon this test started.
 if [[ -f "$WORKDIR/.loom/.daemon.pid" ]]; then

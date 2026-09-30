@@ -240,16 +240,20 @@
 # sweeps in that same checkout, so writing dozens of installed files there
 # mid-sweep risks exactly the contamination this whole restriction exists to
 # prevent. --output <dir> is the safe alternative: it creates a disposable,
-# DETACHED `git worktree` at HEAD under <dir> (never inside .loom/worktrees/,
-# and never touching the primary checkout's own files) and resyncs INTO that
-# staging worktree instead of REPO_ROOT — so it can be run from anywhere
-# (primary checkout or any linked worktree) at any time, including mid-sweep,
-# with zero risk to the live checkout. The staging worktree is a real,
-# independent git checkout: once the sync is complete you `cd` into it,
-# `git add -A && git commit` (and `git push` / open a PR) from there, then
-# `git worktree remove` it. See "OUTPUT-DIR STAGING MODE" further below for
-# the full mechanics. --dry-run + --output still creates (and then
-# auto-removes) the staging worktree, so a preview never leaves any residue.
+# DETACHED `git worktree` under <dir> (never inside .loom/worktrees/, and never
+# touching the primary checkout's own files) and resyncs INTO that staging
+# worktree instead of REPO_ROOT — so it can be run from anywhere (primary
+# checkout or any linked worktree) at any time, including mid-sweep, with zero
+# risk to the live checkout. #9550: the staging worktree is based on the
+# INVOKING checkout's HEAD (the worktree you are standing in), not the primary
+# checkout's, so a commit made there fast-forwards onto the branch you ran it
+# from; `--base <ref>` overrides that explicitly. The staging worktree is a
+# real, independent git checkout: once the sync is complete you `cd` into it,
+# `git add -- <the paths this run wrote>` + `git commit` (and `git push` / open
+# a PR) from there, then `git worktree remove` it. See "OUTPUT-DIR STAGING
+# MODE" further below for the full mechanics. --dry-run + --output still
+# creates (and then auto-removes) the staging worktree, so a preview never
+# leaves any residue.
 #
 # Local-override convention: list a relative path (e.g. `hooks/guard-destructive.sh`,
 # `scripts/foo.sh`, `roles/custom-role.md`, `docs/notes.md`, `bin/loom`,
@@ -294,13 +298,24 @@
 # normally prescribes (which is unsafe precisely when the daemon is actively
 # dispatching sweeps there). Mechanics:
 #   1. <dir> must not already exist. It is created via
-#      `git worktree add --detach <dir> HEAD` against the PRIMARY checkout's
-#      repository — a real, independent git checkout at the primary's current
-#      HEAD, registered as a linked worktree but living wherever the caller
-#      pointed <dir> (never inside .loom/worktrees/, so it can never collide
-#      with worktree.sh's bookkeeping). Creating it only touches git's
-#      worktree-registry metadata (.git/worktrees/) — it does not read, write,
-#      or lock any file in the primary checkout's own working tree.
+#      `git worktree add --detach <dir> <base>` against the PRIMARY checkout's
+#      repository — a real, independent git checkout, registered as a linked
+#      worktree but living wherever the caller pointed <dir> (never inside
+#      .loom/worktrees/, so it can never collide with worktree.sh's
+#      bookkeeping). Creating it only touches git's worktree-registry metadata
+#      (.git/worktrees/) — it does not read, write, or lock any file in the
+#      primary checkout's own working tree.
+#      WHICH HEAD <base> IS (#9550): the INVOKING checkout's HEAD — i.e.
+#      `git rev-parse HEAD` in the worktree you ran this from — not the
+#      primary checkout's. The documented use case is running --output from a
+#      linked feature worktree (the #4563 restriction forbids writing to the
+#      primary from there); basing the staging worktree on the primary's HEAD
+#      meant the staged commit's parent was not on the feature branch, so it
+#      could not be fast-forwarded in and had to be cherry-picked, and
+#      removing the staging worktree first left it dangling. `--base <ref>`
+#      (or LOOM_RESYNC_BASE) overrides the default explicitly; the completion
+#      message then points at `git cherry-pick <sha>` because the invoking
+#      branch may be ahead of the base that was chosen.
 #   2. Every destination this script would otherwise resolve under the
 #      primary checkout (.loom/hooks, .loom/scripts, .loom/roles, .loom/docs,
 #      .loom/runtimes, .loom/bin, .claude/commands/loom, the single-file docs,
@@ -308,10 +323,17 @@
 #      .gitignore) is instead resolved under <dir>. defaults/ itself (the
 #      SOURCE of the sync) is still read from the primary checkout — that is
 #      a read, never a write, so it carries none of the #4563 hazard.
-#   3. On success the run prints the exact `cd <dir> && git add -A && git
-#      commit ... && git push` sequence to turn the staged tree into a
+#   3. On success the run prints the exact `cd <dir> && git add -- <paths>
+#      && git commit ... && git push` sequence to turn the staged tree into a
 #      resync commit (and PR) from a location that was never live-mid-sweep,
-#      plus the `git worktree remove` to clean up afterward.
+#      plus the `git worktree remove` to clean up afterward. #9141: that
+#      `git add` is an ALLOWLIST of the exact paths this run's managed
+#      surfaces cover — never `git add -A` with a credential exclusion list.
+#      An exclusion list stages every path nobody thought to list, which is
+#      how commit a9da48c2 swept an entire token-pool copy
+#      (`.loom/tokens.shadow-disabled-<ts>/`, 21 live `.token` files) into a
+#      resync commit; an allowlist cannot leak a path that is not on it, so no
+#      future credential location has to be predicted for it to stay safe.
 # Because step 1 creates a real worktree, the #4563 linked-worktree refusal
 # itself never applies when --output is given — there is nothing left for it
 # to protect, since nothing is written to the primary checkout either way.
@@ -357,7 +379,12 @@
 #                                                  # generate a COMPLETE resync in an
 #                                                  # isolated staging worktree at <dir>
 #                                                  # instead — safe from anywhere, any
-#                                                  # time, including mid-sweep (#6106)
+#                                                  # time, including mid-sweep (#6106).
+#                                                  # Based on the INVOKING checkout's
+#                                                  # HEAD (#9550)
+#   ./.loom/scripts/resync-installed.sh --output <dir> --base <ref>
+#                                                  # ... based on <ref> instead of the
+#                                                  # invoking checkout's HEAD (#9550)
 #   ./.loom/scripts/resync-installed.sh --force    # also apply an update that would remove
 #                                                  # a locally-diverged installed file's own
 #                                                  # line(s) (see LOCAL-DIVERGENCE PROTECTION, #7864)
@@ -370,6 +397,8 @@
 #   LOOM_RESYNC_OUTPUT=<dir>      - same as --output <dir> (for non-interactive
 #                                   callers). An explicit --output flag wins if
 #                                   both are given.
+#   LOOM_RESYNC_BASE=<ref>        - same as --base <ref> (#9550). Only consulted
+#                                   in --output mode; an explicit --base wins.
 #   LOOM_RESYNC_FORCE=1           - same as --force (for non-interactive callers).
 #
 # Exit codes:
@@ -420,6 +449,9 @@ FORCE=0
 # #6106: generate a complete resync in an isolated staging worktree instead of
 # writing to the primary checkout. Empty means "not requested".
 OUTPUT_DIR="${LOOM_RESYNC_OUTPUT:-}"
+# #9550: the commit the --output staging worktree is based on. Empty means the
+# default: the INVOKING checkout's HEAD (see OUTPUT-DIR STAGING MODE above).
+BASE_REF="${LOOM_RESYNC_BASE:-}"
 
 err()  { printf '%b\n' "${RED}ERROR: $*${NC}" >&2; }
 warn() { printf '%b\n' "${YELLOW}WARN: $*${NC}" >&2; }
@@ -453,6 +485,22 @@ while [[ $# -gt 0 ]]; do
             fi
             shift
             ;;
+        --base)
+            if [[ $# -lt 2 || -z "$2" ]]; then
+                err "--base requires a commit-ish argument (try --help)"
+                exit 1
+            fi
+            BASE_REF="$2"
+            shift 2
+            ;;
+        --base=*)
+            BASE_REF="${1#--base=}"
+            if [[ -z "$BASE_REF" ]]; then
+                err "--base requires a commit-ish argument (try --help)"
+                exit 1
+            fi
+            shift
+            ;;
         --help|-h)
             # Print the whole leading comment block (line 2 through the last
             # consecutive `#` line). Derived, not a hard-coded line range — the
@@ -478,6 +526,13 @@ if [[ -n "$OUTPUT_DIR" ]]; then
         /*) ;;
         *)  OUTPUT_DIR="$PWD/$OUTPUT_DIR" ;;
     esac
+fi
+
+# #9550: --base only means anything to the --output staging worktree. Say so
+# rather than silently ignoring it, so a mistyped invocation is visible.
+if [[ -n "$BASE_REF" && -z "$OUTPUT_DIR" ]]; then
+    warn "--base is only used by --output staging mode; ignoring it for this run."
+    BASE_REF=""
 fi
 
 # ---------- resolve the installed repo root (worktree-safe) ----------
@@ -596,6 +651,51 @@ remove_staging_worktree() {
     STAGING_WORKTREE_CREATED=0
 }
 
+# #9550: which commit the staging worktree is based on.
+#
+# INVOKING_HEAD_SHA is HEAD in the checkout the OPERATOR is standing in, which
+# is the documented place to run --output from (the #4563 restriction forbids
+# writing to the primary checkout from a linked worktree, so --output is the
+# sanctioned escape). It used to be based on the PRIMARY checkout's HEAD --
+# so when the invoking feature branch already carried commits, the staged
+# commit's parent was not on that branch: it could not be fast-forwarded in,
+# had to be cherry-picked, and went dangling if the staging worktree was
+# removed first. Defaulting to the invoking HEAD makes the common case
+# fast-forwardable; --base <ref> stays available for "stage against something
+# else on purpose", and then the cherry-pick hint is printed instead.
+#
+# Both sides resolve through the invoking worktree (a linked worktree shares
+# one object database with the primary, so any ref resolvable there resolves
+# here too). An unresolvable HEAD -- an unborn branch in a freshly `git init`ed
+# checkout -- falls back to the primary's HEAD with a warning, which is exactly
+# the pre-#9550 behaviour.
+INVOKING_HEAD_SHA=""
+STAGING_BASE_SHA=""
+STAGING_BASE_DESC=""
+if [[ -n "$OUTPUT_DIR" ]]; then
+    INVOKING_HEAD_SHA="$(git -C "${WORKTREE_TOP:-$PWD}" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    if [[ -n "$BASE_REF" ]]; then
+        STAGING_BASE_SHA="$(git -C "${WORKTREE_TOP:-$PWD}" rev-parse --verify --quiet "${BASE_REF}^{commit}" 2>/dev/null || true)"
+        if [[ -z "$STAGING_BASE_SHA" ]]; then
+            err "--base: not a commit in this repository: $BASE_REF"
+            exit 1
+        fi
+        STAGING_BASE_DESC="--base $BASE_REF"
+    elif [[ -n "$INVOKING_HEAD_SHA" ]]; then
+        STAGING_BASE_SHA="$INVOKING_HEAD_SHA"
+        STAGING_BASE_DESC="HEAD of the invoking checkout ${WORKTREE_TOP:-$PWD}"
+    else
+        STAGING_BASE_SHA="$(git -C "$REPO_ROOT" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+        if [[ -z "$STAGING_BASE_SHA" ]]; then
+            err "Could not resolve a commit to base the --output staging worktree on (no HEAD in ${WORKTREE_TOP:-$PWD} or $REPO_ROOT)."
+            err "Pass one explicitly with --base <ref>."
+            exit 1
+        fi
+        STAGING_BASE_DESC="HEAD of the primary checkout $REPO_ROOT (the invoking checkout has no resolvable HEAD)"
+        warn "The invoking checkout has no resolvable HEAD — basing the staging worktree on the primary checkout's HEAD instead."
+    fi
+fi
+
 if [[ -n "$OUTPUT_DIR" ]]; then
     if [[ -e "$OUTPUT_DIR" ]]; then
         err "--output directory already exists: $OUTPUT_DIR"
@@ -603,15 +703,16 @@ if [[ -n "$OUTPUT_DIR" ]]; then
         exit 1
     fi
     mkdir -p "$(dirname "$OUTPUT_DIR")" 2>/dev/null || true
-    if ! git -C "$REPO_ROOT" worktree add --detach -q "$OUTPUT_DIR" HEAD >/dev/null 2>&1; then
+    if ! git -C "$REPO_ROOT" worktree add --detach -q "$OUTPUT_DIR" "$STAGING_BASE_SHA" >/dev/null 2>&1; then
         err "Failed to create the staging worktree at $OUTPUT_DIR"
-        err "  (git -C $REPO_ROOT worktree add --detach $OUTPUT_DIR HEAD)"
+        err "  (git -C $REPO_ROOT worktree add --detach $OUTPUT_DIR $STAGING_BASE_SHA)"
         exit 1
     fi
     STAGING_WORKTREE_CREATED=1
     WRITE_ROOT="$OUTPUT_DIR"
     info "Staging a complete resync in a disposable worktree — the primary checkout is untouched:"
     info "  $OUTPUT_DIR"
+    info "  based on $STAGING_BASE_SHA ($STAGING_BASE_DESC)"
     # #6138: cover every exit path from this point forward (resolve_defaults
     # failure below, any later early exit, or a signal) until either the
     # dedicated cleanup_staged_tmp+remove_staging_worktree trap is installed
@@ -1397,14 +1498,111 @@ dst_matches_installed_version() {
     dst_matches_any_ancestor_of_lineage_ref "$rel" "$dst"
 }
 
+# ---------- install-baseline rung (#9178) ----------
+#
+# The content proof above needs SOURCE_ROOT to be a git checkout AND the
+# recorded loom_commit/loom_version to resolve inside it. When it cannot —
+# a vendored/tarball source, a GC'd or never-fetched commit, an
+# install-metadata.json with no loom_version at all — everything falls through
+# to the subject heuristic, and there the ORIGINAL install commit is the
+# permanent false positive:
+#
+#   "the copy's last change was not a routine resync" is ALSO true for every
+#   file nothing has touched since the repo's `Install Loom …` commit, because
+#   an install commit is not a resync commit. Condition 1 (the update removes
+#   a line unique to the installed copy) then becomes true on its own as
+#   upstream drifts. Neither condition required a human to touch anything, and
+#   the state is self-perpetuating: the block prevents the write, so the file's
+#   last-touching commit stays the install commit, so the next pass blocks
+#   again. Measured on `2AMLogic/fasterhenry`: ~50 files flagged, three sampled
+#   and all three byte-identical to the install commit; fleet-wide, ~63 of 75
+#   flagged files were this shape, and two repos could never resync at all.
+#
+# So answer the question STRUCTURALLY rather than from the commit's prose: a
+# file whose last-touching commit IS the commit that installed Loom into this
+# repo has, by construction, not been edited since the installer wrote it.
+# There is no local fix to protect.
+#
+# The install commit is identified by what it DID, not by what it was called:
+# it is the first commit to add `.loom/install-metadata.json`, the installer's
+# own stamp file. That deliberately avoids widening RESYNC_COMMIT_SUBJECT_RE,
+# which #8098 narrowed on purpose and #8676 explicitly declined to re-widen —
+# matching free-form install prose would also mark a commit that installed Loom
+# AND carried a hand fix as "routine" and silently overwrite it, the exact
+# #7864 failure. This rung cannot do that: a hand fix applied after the install
+# is a LATER commit, so the file's last-touching commit is no longer the
+# install commit and the file is still protected.
+#
+# Unresolvable (no install-metadata.json in history, a shallow clone, a source
+# tree that was never committed) simply answers "no" and falls through to the
+# subject heuristic, exactly as before.
+#
+# ONE deference, to #8098. The install commit and a commit that installed Loom
+# AND carried a hand fix are structurally identical — one commit, it added the
+# file, nothing has touched the file since — so no structural test can separate
+# them. #8098 already settled how to read that case: a subject that STARTS like
+# routine install/resync tooling output and then says something else
+# ("chore: install Loom v1 and also revert the guard fix") is a human extending
+# a routine subject, and means the commit carried more than routine output. So
+# when the baseline commit's subject has that shape, this rung stands down and
+# the file stays protected. That is prose matching, but only in the
+# CONSERVATIVE direction — it can only ever withhold this rung's amnesty, never
+# grant one — which is the opposite of the widened-regex idea #8676 rejected
+# (that one would have marked such a commit routine and silently overwritten
+# it). Every real #9178 subject is untouched by it: "Install Loom v0.19.174 and
+# Repo Skills v0.11.17 (#7)", "tooling: install Repo Skills and Loom into the
+# map repo" and "Upgrade Loom to 0.18.0 (...)" carry none of these prefixes.
+ROUTINE_SUBJECT_PREFIX_RE='^(\[skip ci\] )?(chore: install Loom v|chore: resync installed Loom surfaces|chore\(loom\): Install Loom )'
+
+INSTALL_BASELINE_COMMIT=""
+INSTALL_BASELINE_RESOLVED=0
+
+resolve_install_baseline_commit() {
+    if [[ "$INSTALL_BASELINE_RESOLVED" -eq 1 ]]; then
+        [[ -n "$INSTALL_BASELINE_COMMIT" ]]
+        return
+    fi
+    INSTALL_BASELINE_RESOLVED=1
+    INSTALL_BASELINE_COMMIT=""
+
+    local meta="$WRITE_ROOT/.loom/install-metadata.json"
+    # `tail -1` = the EARLIEST adding commit, so a repo that deleted and
+    # re-added the stamp keeps its original install as the baseline. `tail`
+    # reads to EOF, so no SIGPIPE under `set -o pipefail` (the trap #8676
+    # documents on dst_matches_any_ancestor_of_lineage_ref()).
+    INSTALL_BASELINE_COMMIT="$(
+        git -C "$WRITE_ROOT" log --diff-filter=A --format='%H' -- "$meta" 2>/dev/null | tail -1
+    )"
+    [[ -n "$INSTALL_BASELINE_COMMIT" ]]
+}
+
+# dst_last_touch_is_install_baseline <dst>
+#   True (0) when $dst has not been touched by any commit since the one that
+#   installed Loom into this repo — and that commit does not carry the #8098
+#   "routine subject a human extended" shape (see above).
+dst_last_touch_is_install_baseline() {
+    local dst="$1" last subject
+    resolve_install_baseline_commit || return 1
+    last="$(git -C "$WRITE_ROOT" log -1 --format='%H' -- "$dst" 2>/dev/null)"
+    [[ -n "$last" && "$last" == "$INSTALL_BASELINE_COMMIT" ]] || return 1
+
+    subject="$(git -C "$WRITE_ROOT" log -1 --format='%s' "$INSTALL_BASELINE_COMMIT" 2>/dev/null)"
+    if [[ "$subject" =~ $ROUTINE_SUBJECT_PREFIX_RE ]] && ! [[ "$subject" =~ $RESYNC_COMMIT_SUBJECT_RE ]]; then
+        return 1
+    fi
+    return 0
+}
+
 # dst_diverged_from_resync_lineage <dst> [src]
 #   True (0 / success) when this installed copy has diverged from pure upstream
 #   lineage and needs protecting. False (1) when it has not.
 #
-#   Two independent ways to be "not diverged", checked in this order:
+#   Three independent ways to be "not diverged", checked in this order:
 #     1. #8676: $dst is byte-identical to some revision of $src at or before the
 #        installed version — proof by content that upstream put every byte there.
-#     2. $dst's most recent commit (in the checkout it physically lives in —
+#     2. #9178: $dst's last-touching commit IS the commit that installed Loom
+#        into this repo — so nothing has edited it since the installer wrote it.
+#     3. $dst's most recent commit (in the checkout it physically lives in —
 #        WRITE_ROOT, which is either the primary checkout or a #6106 staging
 #        worktree; either way a linked worktree of the SAME repo, so both share
 #        one object database and history) IS a routine install/resync commit,
@@ -1415,6 +1613,7 @@ dst_matches_installed_version() {
 dst_diverged_from_resync_lineage() {
     local dst="$1" src="${2:-}" subject
     dst_matches_installed_version "$src" "$dst" && return 1
+    dst_last_touch_is_install_baseline "$dst" && return 1
     subject="$(git -C "$WRITE_ROOT" log -1 --format='%s' -- "$dst" 2>/dev/null)"
     [[ -n "$subject" ]] || return 1
     [[ "$subject" =~ $RESYNC_COMMIT_SUBJECT_RE ]] && return 1
@@ -1609,6 +1808,15 @@ sync_one() {
                 warn "$rel: forcing past local-divergence protection — this overwrite removes $removed line(s) present only in the installed copy (--force)."
             else
                 warn "$rel: the installed copy has $removed line(s) not present in the new source, and its last change was NOT a routine resync — this looks like a local fix that this sync would silently revert."
+                # #9178: name the commit the decision was made from. Every
+                # reported false positive so far was "this is the INSTALL
+                # commit, not an edit" — visible at a glance here, and no
+                # longer reachable (that case now clears at rung 2 of
+                # dst_diverged_from_resync_lineage), but a future
+                # misclassification is diagnosable without re-deriving it.
+                local last_touch
+                last_touch="$(git -C "$WRITE_ROOT" log -1 --format='%h %ad %s' --date=short -- "$dst" 2>/dev/null || true)"
+                [[ -n "$last_touch" ]] && warn "  Decided from its last-touching commit: $last_touch"
                 warn "  Review before proceeding: diff -u '$dst' '$src'"
                 warn "  Re-run with --force once you've confirmed the removal is intentional (e.g. the fix landed upstream too)."
                 record_blocked "$rel"
@@ -2314,7 +2522,38 @@ restamp_metadata() {
 
     local version commit today tmp remote
     version="$(read_source_version)"
-    commit="$(git -C "$SOURCE_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+    # #9174: the FULL 40-hex SHA, never `--short`. Git auto-sizes an
+    # abbreviation per repository and per git version when `core.abbrev` is
+    # unset, so two hosts resyncing from the SAME source commit wrote
+    # different strings (measured: `64a325804` on git 2.43 vs `64a32580` on
+    # git 2.54) into a TRACKED file — every scheduled pass on one host then
+    # saw a dirty tree, committed it, and the other host reversed it, forever.
+    # A full SHA is host-independent, unambiguous by construction, and is what
+    # the provenance contract (`marker.rs::prompts_field`, which reports a
+    # non-40-hex value as `unknown`) already requires. Readers that want a
+    # short form abbreviate at display time.
+    commit="$(git -C "$SOURCE_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")"
+    [[ -n "$commit" ]] || commit="unknown"
+
+    # #9613: NEVER write the literal "unknown" into this tracked file. A
+    # source resolved from `.loom/loom-source-path` that holds a copied
+    # `defaults/` tree but no package.json and no `.git` produced
+    # loom_version=unknown, loom_commit=unknown and an empty source remote —
+    # and that unparseable stamp got committed to a consumer's main, after
+    # which downstream version checks could not compare anything and the
+    # local-fix guard's content-lineage rung had no commit to resolve
+    # against. The surface sync itself is still valid (defaults/ was there and
+    # was copied), so this warns loudly and skips only the re-stamp, leaving
+    # the previous — parseable — stamp in place.
+    if [[ "$version" == "unknown" || "$commit" == "unknown" ]]; then
+        warn "Skipped the install-metadata.json re-stamp: the resolved source has no usable version/commit metadata, and writing \"unknown\" into a tracked file is worse than leaving the previous stamp (#9613)."
+        warn "  source          : $SOURCE_ROOT"
+        warn "  package.json    : $([[ -f "$SOURCE_ROOT/package.json" ]] && echo present || echo MISSING) (loom_version would be: $version)"
+        warn "  git metadata    : $(git -C "$SOURCE_ROOT" rev-parse --git-dir >/dev/null 2>&1 && echo present || echo MISSING) (loom_commit would be: $commit)"
+        warn "  install-metadata.json was left unchanged. Point .loom/loom-source-path at a real Loom checkout (a full clone, not a copied defaults/ tree) and re-run to refresh the stamp."
+        return 0
+    fi
+
     # Issue #8504: -u — `last_resync` is a machine-readable metadata field,
     # so it is the UTC calendar day, not the host-local one.
     today="$(date -u +%Y-%m-%d)"
@@ -2931,27 +3170,52 @@ if [[ -f "$WRITE_ROOT/.github/labels.yml" && -x "$LABELS_SYNC_SCRIPT" ]]; then
     esac
 fi
 
-# ---------- hint: stage + commit resync-only dirt (#4332) ----------
+# ---------- shared: classify this run's working-tree dirt (#9141) ----------
 #
-# In the loom source repo itself (DEFAULTS_DIR resolved locally, i.e. this
-# repo tracks its own installed surfaces under git), a resync that changed
-# tracked files leaves the tree dirty until that dirt is committed — and
-# `main_health_gate.rs`'s dirty-tree check (#4332) only recognizes it as safe
-# *resync* dirt (ignorable, not an operator edit worth halting the gate for),
-# it never commits on the operator's behalf. Print the exact command so this
-# doesn't linger as a standing "not evaluated (dirty-tree)" skip. Cheap and
-# best-effort: only fires when every dirty/untracked path is one this run's
-# surfaces cover (or the re-stamped install-metadata.json); any other dirt
-# (a genuine operator edit) suppresses the hint entirely.
-suggest_commit_if_resync_only_dirt() {
-    [[ "$REPO_ROOT/defaults" == "$DEFAULTS_DIR" ]] || return 0
-    local status
+# ONE `git status --porcelain` walk of WRITE_ROOT, classified into three
+# buckets that every staging recipe printed below is built from:
+#
+#   RESYNC_DIRT_PATHS    the ALLOWLIST — paths this run's managed surfaces
+#                        cover (plus the re-stamped install-metadata.json).
+#                        The ONLY thing any printed `git add` may name.
+#   RESYNC_RETIRED_PATHS pure-copy-surface-shaped paths with no defaults/
+#                        counterpart today (#6613): never committed.
+#   RESYNC_FOREIGN_DIRT  1 when anything else is dirty — a genuine operator
+#                        edit, or (the case this exists for) a credential
+#                        path such as a token-pool copy at
+#                        `.loom/tokens.shadow-disabled-<ts>/`.
+#
+# #9141: the printed --output recipe used to be `git add -A -- . ':!<each
+# credential path>'` — an EXCLUSION list, which stages every path nobody
+# thought to list. That is the shape of command behind commit a9da48c2, which
+# swept an entire token-pool sibling directory (21 live `.token` files, a
+# `.ranking`, a `.rotation_cursor`) into a resync commit because the exclusion
+# named `.loom/tokens` and the copy lived at `.loom/tokens.shadow-disabled-
+# <ts>/`. The classification here is an allowlist in the other direction: a
+# path only reaches RESYNC_DIRT_PATHS by MATCHING a managed surface, so a
+# credential path at any name — listed or not, predicted or not — lands in
+# RESYNC_FOREIGN_DIRT and can never be staged. That is a structural guarantee
+# rather than a list to keep current, which is what both #7818 and #9046
+# showed a list cannot be.
+#
+# Resolved at most once per run: nothing between the two call sites below
+# mutates the tree.
+RESYNC_DIRT_PATHS=()
+RESYNC_RETIRED_PATHS=()
+RESYNC_FOREIGN_DIRT=0
+RESYNC_DIRT_COLLECTED=0
+
+collect_resync_dirt() {
+    [[ "$RESYNC_DIRT_COLLECTED" -eq 1 ]] && return 0
+    RESYNC_DIRT_COLLECTED=1
+    RESYNC_DIRT_PATHS=()
+    RESYNC_RETIRED_PATHS=()
+    RESYNC_FOREIGN_DIRT=0
+
+    local status line path src
     status="$(git -C "$WRITE_ROOT" status --porcelain 2>/dev/null)"
     [[ -z "$status" ]] && return 0
 
-    local line path src
-    local -a resync_paths=()
-    local -a retired_paths=()
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
         path="${line:3}"
@@ -2966,40 +3230,69 @@ suggest_commit_if_resync_only_dirt() {
             # is excluded from the commit suggestion below instead.
             src="$(_loom_pure_copy_surface_source_path "$path" 2>/dev/null)"
             if [[ -n "$src" && -e "$src" ]]; then
-                resync_paths+=("$path")
+                RESYNC_DIRT_PATHS+=("$path")
             else
-                retired_paths+=("$path")
+                RESYNC_RETIRED_PATHS+=("$path")
             fi
             continue
         fi
         case "$path" in
-            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes)
-                resync_paths+=("$path")
+            # #9345: `.agents/skills/*` (resync_agent_skills(), #8673) and
+            # `.gitignore` (the loom-daemon-managed block, refreshed by every
+            # run) are as much this script's own output as .loom/hooks/ is --
+            # they were missing here (and from land-resync-commit.sh's
+            # is_resync_surface_path() mirror), so on any repo where a run
+            # touched either surface its own output was classified as foreign
+            # dirt: the hint below went silent and `land-resync-commit.sh`
+            # refused to land the run it was printed for.
+            .claude/commands/loom/*|.claude/README.md|.github/CONFIGURATION.md|.loom/install-metadata.json|.loom/CLAUDE.md|.gitattributes|.gitignore|.agents/skills/*)
+                RESYNC_DIRT_PATHS+=("$path")
                 ;;
             *)
-                # Non-resync dirt present — do not suggest a commit that would
-                # also stage an unrelated (possibly operator) change.
-                return 0
+                RESYNC_FOREIGN_DIRT=1
                 ;;
         esac
     done <<< "$status"
+    return 0
+}
 
-    if [[ "${#retired_paths[@]}" -gt 0 ]]; then
+# ---------- hint: stage + commit resync-only dirt (#4332) ----------
+#
+# In the loom source repo itself (DEFAULTS_DIR resolved locally, i.e. this
+# repo tracks its own installed surfaces under git), a resync that changed
+# tracked files leaves the tree dirty until that dirt is committed — and
+# `main_health_gate.rs`'s dirty-tree check (#4332) only recognizes it as safe
+# *resync* dirt (ignorable, not an operator edit worth halting the gate for),
+# it never commits on the operator's behalf. Print the exact command so this
+# doesn't linger as a standing "not evaluated (dirty-tree)" skip. Cheap and
+# best-effort: only fires when every dirty/untracked path is one this run's
+# surfaces cover (or the re-stamped install-metadata.json); any other dirt
+# (a genuine operator edit) suppresses the hint entirely.
+suggest_commit_if_resync_only_dirt() {
+    [[ "$REPO_ROOT/defaults" == "$DEFAULTS_DIR" ]] || return 0
+    collect_resync_dirt
+
+    # Non-resync dirt present — do not suggest a commit that would also stage
+    # an unrelated (possibly operator, possibly credential-bearing) change.
+    [[ "$RESYNC_FOREIGN_DIRT" -eq 1 ]] && return 0
+
+    local path
+    if [[ "${#RESYNC_RETIRED_PATHS[@]}" -gt 0 ]]; then
         warn "Untracked-and-unignored file(s) matching a pure-copy surface, but with no defaults/ counterpart today (likely retired, not committed payload) -- excluded from the commit suggestion below:"
-        for path in "${retired_paths[@]}"; do
+        for path in "${RESYNC_RETIRED_PATHS[@]}"; do
             printf '%b\n' "${YELLOW}    $path${NC}" >&2
         done
         warn "These look retired from defaults/ without a defaults/.loom-retired.list entry -- add one there (or delete the file directly if you are working from the source repo). Do NOT commit them."
     fi
 
-    [[ "${#resync_paths[@]}" -eq 0 ]] && return 0
+    [[ "${#RESYNC_DIRT_PATHS[@]}" -eq 0 ]] && return 0
 
     echo ""
     if [[ -n "$OUTPUT_DIR" ]]; then
         note "${BLUE}[resync] The staging worktree is dirty with only resync output above — stage and commit it there:${NC}"
-        printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR && git add ${resync_paths[*]} && git commit -m 'chore: resync installed Loom surfaces'${NC}"
+        printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR && git add -- ${RESYNC_DIRT_PATHS[*]} && git commit -m 'chore: resync installed Loom surfaces'${NC}"
     else
-        note "${BLUE}[resync] The tree is dirty with only resync output above (would be: git add ${resync_paths[*]}) — land it so the main-health gate doesn't skip on it. This commits AND pushes (never rebasing or bypass-pushing — see .loom/docs/troubleshooting.md \"Landing a resync commit on the primary clone (#6646)\"):${NC}"
+        note "${BLUE}[resync] The tree is dirty with only resync output above (would be: git add -- ${RESYNC_DIRT_PATHS[*]}) — land it so the main-health gate doesn't skip on it. This commits AND pushes (never rebasing or bypass-pushing — see .loom/docs/troubleshooting.md \"Landing a resync commit on the primary clone (#6646)\"):${NC}"
         printf '%b\n' "    ${BOLD}./.loom/scripts/land-resync-commit.sh${NC}"
     fi
 }
@@ -3019,26 +3312,40 @@ print_output_mode_next_steps() {
     [[ "$N_FAILED" -gt 0 ]] && return 0
     [[ "$N_BLOCKED" -gt 0 ]] && return 0
 
+    # #9141: the staging recipe is an ALLOWLIST of what this run actually
+    # wrote, never `git add -A` with a credential exclusion list. The old
+    # recipe excluded the six then-known credential paths and staged
+    # everything else -- which is precisely how commit a9da48c2 shipped a
+    # whole `.loom/tokens.shadow-disabled-<ts>/` copy (21 live `.token`
+    # files): the exclusion named `.loom/tokens`, and nobody had thought to
+    # list its sibling. An allowlist has no "everything else" to leak, so it
+    # needs no list of credential paths to stay current -- which is the one
+    # property both the #7818 and #9046 incidents proved a list cannot have.
+    collect_resync_dirt
+
     echo ""
     note "${GREEN}${BOLD}[resync] Complete resync staged — the primary checkout at $REPO_ROOT was never touched.${NC}"
+    note "  staging base: $STAGING_BASE_SHA ($STAGING_BASE_DESC)"
     note "Review it, then turn it into a commit (and PR) from the staging worktree:"
     printf '%b\n' "    ${BOLD}cd $OUTPUT_DIR${NC}"
     printf '%b\n' "    ${BOLD}git status${NC}   # confirm only expected resync output is dirty"
     printf '%b\n' "    ${BOLD}git checkout -b chore/resync-installed-$(date +%Y%m%d)${NC}"
-    # #7818/#8005: exclude the whole credential-bearing class from the add,
-    # belt-and-braces, even though this worktree is a fresh `git worktree
-    # add --detach` checkout that would not normally carry them -- a plain
-    # `git add -A` here is exactly the shape of command that swept a live
-    # GitHub App installation token into a public repo on 2026-08-23. The
-    # `:!` list is a machine-checked copy of post_init.rs CREDENTIAL_PATTERNS
-    # (init/credential_class_tests.rs) -- add a credential path there first.
-    # #9134: each exclusion carries a trailing `*` so the pathspec also
-    # excludes a sibling rename/backup (e.g. `.loom/tokens.bak-<ts>/`), not
-    # just the exact credential path -- see CREDENTIAL_PATTERNS' own matching
-    # contract doc comment for the full rationale.
-    printf '%b\n' "    ${BOLD}git add -A -- . ':!.loom/claude-config*' ':!.loom/tokens*' ':!.loom/accounts.env*' ':!.loom/api-keys*' ':!.loom/gh-config*' ':!.loom/gh-config-by-owner*'${NC}"
+    if [[ "${#RESYNC_DIRT_PATHS[@]}" -eq 0 ]]; then
+        note "    (nothing to stage — this run left the staging worktree clean)"
+    else
+        printf '%b\n' "    ${BOLD}git add -- ${RESYNC_DIRT_PATHS[*]}${NC}"
+    fi
     printf '%b\n' "    ${BOLD}git commit -m 'chore: resync installed Loom surfaces'${NC}"
     printf '%b\n' "    ${BOLD}git push -u origin HEAD${NC}   # then open a PR"
+    if [[ "$RESYNC_FOREIGN_DIRT" -eq 1 ]]; then
+        warn "The staging worktree also holds path(s) OUTSIDE the resync-managed surfaces (see its \`git status\`)."
+        warn "  They are deliberately absent from the \`git add\` above. Do NOT widen it to \`git add -A\` or \`git add .\`:"
+        warn "  an untracked credential copy (e.g. .loom/tokens.<something>/) is exactly what that sweeps in (#9141)."
+    fi
+    if [[ "$STAGING_BASE_SHA" != "$INVOKING_HEAD_SHA" && -n "$INVOKING_HEAD_SHA" ]]; then
+        note "The staging base is NOT the HEAD you invoked this from ($INVOKING_HEAD_SHA), so the commit you make above will not fast-forward onto it. Bring it over with:"
+        printf '%b\n' "    ${BOLD}git -C $WORKTREE_TOP cherry-pick <the sha you just committed>${NC}   # BEFORE removing the staging worktree"
+    fi
     note "When finished, remove the disposable staging worktree (from the primary checkout, not from inside it):"
     printf '%b\n' "    ${BOLD}git -C $REPO_ROOT worktree remove $OUTPUT_DIR${NC}"
 }

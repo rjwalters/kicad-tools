@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-resync-installed-gh-config-guard.sh - the printed `--output` staging
-# mode "next steps" never suggest a bare `git add -A` that could sweep a live
-# GitHub App installation token into a commit (#7818).
+# mode "next steps" recipe can never stage a credential path, whatever that
+# path is called (#7818, #8005, #9141).
 #
 # Split out of test-resync-installed.sh (which is frozen by the file-size
 # ratchet, .loom/docs/file-size-policy.md) rather than grown in place -- see
@@ -10,18 +10,30 @@
 #
 # Background: `.loom/gh-config/` and `.loom/gh-config-by-owner/` are the
 # daemon-owned GH_CONFIG_DIR trees holding host-local GitHub App installation
-# tokens (#4458/#5401). They are now in loom-daemon's managed `.gitignore`
-# block (post_init.rs EPHEMERAL_PATTERNS), but a resync commit on
-# rjwalters/anvil (2026-08-23) landed before that fix existed and swept a live
-# token into a public repo via a bare `git add -A`. This suite pins the
-# belt-and-braces fix in `print_output_mode_next_steps()`: the printed
-# staging-worktree "next steps" recipe must exclude both credential trees via
-# an explicit pathspec, unconditionally -- so the suggestion is safe to
-# copy-paste even on a host whose `.gitignore` is missing/stale.
+# tokens (#4458/#5401). They are in loom-daemon's managed `.gitignore` block
+# (post_init.rs EPHEMERAL_PATTERNS), but a resync commit on rjwalters/anvil
+# (2026-08-23) landed before that fix existed and swept a live token into a
+# public repo via a bare `git add -A`.
+#
+# HOW THE CONTRACT CHANGED (#9141). #7818's fix, which this suite used to pin,
+# was an EXCLUSION list: `git add -A -- . ':!<each known credential path>'`.
+# That holds only for the paths somebody predicted, and commit a9da48c2 proved
+# it does not hold in general -- it swept an entire token-pool COPY
+# (`.loom/tokens.shadow-disabled-<ts>/`: 21 live `.token` files plus the pool's
+# `.ranking` / `.rotation_cursor` bookkeeping) into a resync commit, because
+# the exclusion named `.loom/tokens` and the copy was its sibling. So the
+# recipe is now an ALLOWLIST of the paths the run actually wrote. This suite
+# pins the stronger property that buys: not "the six known credential paths
+# are excluded" but "NOTHING outside the resync-managed surfaces can be
+# staged", which needs no list of credential paths to stay current.
+#
+# Both groups run the command the script ACTUALLY emitted, against a staging
+# worktree with NO `.gitignore` at all, so the recipe itself is the only thing
+# standing between a seeded credential and the index.
 #
 # `land-resync-commit.sh` (the OTHER path that commits "chore: resync
 # installed Loom surfaces") has its own dedicated coverage for the same
-# belt-and-braces contract in test-land-resync-commit.sh test (n).
+# contract in test-land-resync-commit.sh tests (n), (p4) and (q2).
 #
 # Usage:
 #   ./.loom/scripts/tests/test-resync-installed-gh-config-guard.sh
@@ -94,7 +106,7 @@ make_fixture() {
     echo "$repo"
 }
 
-echo "Test group 1: --output staging mode's printed next-steps exclude the credential class from git add (#7818/#8005)"
+echo "Test group 1: --output staging mode's printed next-steps stage an allowlist, never an exclusion list (#9141)"
 REPO="$(make_fixture)"
 STAGE="$WORKDIR/output-stage"
 rm -rf "$STAGE"
@@ -105,34 +117,41 @@ if [[ $RC -eq 0 ]]; then
 else
     fail "(#7818) --output apply exits 0 (got $RC)"
 fi
-if grep -q "git add -A" <<< "$OUT"; then
-    pass "(#7818) the next-steps recipe still suggests a git add -A (sanity: this test would be vacuous otherwise)"
+# Capture the recipe line ONCE into a variable and match against that, rather
+# than piping `grep -A1` into `grep -qF`: a pipe into an early-exit consumer
+# under `pipefail` can SIGPIPE the producer and report a spurious failure
+# (scripts/check-pipefail-early-exit.sh, #7790).
+ADD_LINE_CTX="$(grep -A1 "git add" <<< "$OUT")"
+if grep -q "git add -- " <<< "$ADD_LINE_CTX"; then
+    pass "(#9141) the next-steps recipe stages an explicit path list (sanity: this suite would be vacuous otherwise)"
 else
-    fail "(#7818) no 'git add -A' suggestion found at all — test fixture/assumptions are stale (out=$OUT)"
+    fail "(#9141) no 'git add -- <paths>' suggestion found at all — test fixture/assumptions are stale (out=$OUT)"
 fi
-# Capture the `git add -A` line plus its continuation ONCE into a variable and
-# match against that, rather than piping `grep -A1` into `grep -qF`: a pipe into
-# an early-exit consumer under `pipefail` can SIGPIPE the producer and report a
-# spurious failure (scripts/check-pipefail-early-exit.sh, #7790).
-ADD_LINE_CTX="$(grep -A1 "git add -A" <<< "$OUT")"
-if grep -q "git add -A" <<< "$OUT" && \
-   grep -qF -- ":!.loom/gh-config" <<< "$ADD_LINE_CTX" && \
-   grep -qF -- ":!.loom/gh-config-by-owner" <<< "$ADD_LINE_CTX"; then
-    pass "(#7818) the git add -A line's own pathspec excludes both .loom/gh-config and .loom/gh-config-by-owner"
+# The two shapes #9141 retired. `-A` stages everything not excluded; a `:!`
+# pathspec is the exclusion list that made that "safe" only for predicted
+# paths. Neither may reappear -- an allowlist that also carries `-A` is not an
+# allowlist.
+if ! grep -q "git add -A" <<< "$OUT"; then
+    pass "(#9141) no 'git add -A' anywhere in the printed next steps"
 else
-    fail "(#7818) the git add -A suggestion does not exclude the credential trees (out=$OUT)"
+    fail "(#9141) the next-steps recipe still prints 'git add -A' (out=$OUT)"
+fi
+if ! grep -qF -- ":!" <<< "$OUT"; then
+    pass "(#9141) no ':!' exclusion pathspec anywhere in the printed next steps"
+else
+    fail "(#9141) the next-steps recipe still prints a ':!' exclusion pathspec (out=$OUT)"
 fi
 
 echo ""
-echo "Test group 2: the excluding pathspec works against a real git add, for the whole credential class (#7818/#8005)"
+echo "Test group 2: the emitted recipe, actually run, stages no credential path — listed or not (#7818/#8005/#9141)"
 # Belt-and-braces: don't just assert the printed string, prove the emitted
-# pathspec really does what it claims against a real `git add -A` invocation,
-# the same way an operator/agent following the suggestion would run it.
+# command really does what it claims when an operator/agent pastes it into a
+# shell.
 #
 # #8006: run the command the script ACTUALLY emitted -- extracted from
 # $ADD_LINE_CTX above -- never a hand-maintained literal copy of it. A
 # hardcoded copy would only re-prove git's pathspec semantics (never in doubt)
-# and would keep passing after the script's own pathspec regressed: exactly the
+# and would keep passing after the script's own recipe regressed: exactly the
 # circular-fixture smell judge.md names, where both sides of the comparison come
 # from the fixture instead of from the subject under test.
 #
@@ -141,15 +160,31 @@ echo "Test group 2: the excluding pathspec works against a real git add, for the
 # filters read a HERE-STRING, not a pipe: an early-exit consumer (`grep -m1`)
 # at the end of a pipeline can SIGPIPE its producer under `pipefail`
 # (scripts/check-pipefail-early-exit.sh, #7790).
+#
+# In --output mode the script prints the allowlist TWICE -- once in
+# suggest_commit_if_resync_only_dirt()'s one-liner (`cd <dir> && git add -- …
+# && git commit …`) and once in print_output_mode_next_steps()' step list.
+# Both are built from the same RESYNC_DIRT_PATHS array, so either is a valid
+# sample; this takes the first. Everything from the first ` && ` on is dropped
+# so only the `git add` runs: the chained `git commit` would consume the index
+# and leave `git diff --cached` empty, making every check below vacuous for a
+# reason that has nothing to do with what was staged.
 ADD_LINE_PLAIN="$(sed -e $'s/\033\\[[0-9;]*m//g' <<< "$ADD_LINE_CTX")"
-ADD_CMD="$(grep -m1 -o "git add -A.*" <<< "$ADD_LINE_PLAIN")"
+ADD_CMD="$(grep -m1 -o "git add -- .*" <<< "$ADD_LINE_PLAIN")"
+ADD_CMD="${ADD_CMD%% && *}"
 if [[ -n "$ADD_CMD" ]]; then
-    pass "(#7818) the emitted git add command was extracted verbatim from the script's own output: $ADD_CMD"
+    pass "(#9141) the emitted git add command was extracted verbatim from the script's own output: $ADD_CMD"
 else
-    fail "(#7818) could not extract the emitted git add command to execute (ctx=$ADD_LINE_CTX)"
+    fail "(#9141) could not extract the emitted git add command to execute (ctx=$ADD_LINE_CTX)"
 fi
 # #8005: seed EVERY member of the credential class (post_init.rs
 # CREDENTIAL_PATTERNS), not just the two gh-config trees #7818 started with.
+#
+# #9141: plus the two paths that are NOT in that class by name -- the a9da48c2
+# token-pool copy and a `-` separated sibling of it. Under the retired
+# exclusion recipe these are the ones that leaked; under an allowlist they are
+# no different from any other unmanaged path, which is the whole point. A
+# credential location nobody has thought of yet behaves exactly like these two.
 CRED_FILES=(
     .loom/gh-config/hosts.yml
     .loom/gh-config-by-owner/some-owner/hosts.yml
@@ -157,44 +192,54 @@ CRED_FILES=(
     .loom/accounts.env
     .loom/api-keys/zai/acct.env
     .loom/claude-config/builder-1/.credentials.json
+    .loom/tokens.shadow-disabled-20260926T021559Z/acct-1.token
+    .loom/tokens.shadow-disabled-20260926T021559Z/.rotation_cursor
+    .loom/tokens-archive/acct-2.token
 )
 for f in "${CRED_FILES[@]}"; do
     mkdir -p "$STAGE/$(dirname "$f")"
     printf 'live-secret-dummy\n' > "$STAGE/$f"
 done
-# #8006/#8005: the pathspec is belt-and-braces FOR A HOST WHOSE .gitignore IS
-# MISSING OR STALE -- and resync-installed.sh refreshes the loom-managed
-# .gitignore block in this very staging worktree, which already lists every
-# credential path. Leave it in place and a BARE `git add -A` skips them too,
-# so this group would pass no matter what pathspec the script emitted. Remove
-# the .gitignore ENTIRELY (the #8005 acceptance state) so the emitted pathspec
-# is the ONLY thing that can keep a credential out of the index.
-rm -f "$STAGE/.gitignore"
+# #8006/#8005: the recipe is belt-and-braces FOR A HOST WHOSE MANAGED
+# .gitignore BLOCK IS MISSING OR STALE -- and resync-installed.sh refreshes
+# that block in this very staging worktree, which then lists every credential
+# path. Leave it in place and even a BARE `git add -A` skips them, so this
+# group would pass no matter what the script emitted. So STRIP the managed
+# block, leaving a .gitignore that ignores nothing: the emitted command is
+# then the only thing that can keep a credential out of the index.
+#
+# Stripped rather than deleted, deliberately. `.gitignore` is itself a resync
+# surface (#9345), so the run's allowlist NAMES it -- and `git add -- <paths>`
+# fails the whole invocation if any named path is absent, which would stage
+# nothing and make every check below vacuous. A present-but-stale block is
+# also the more faithful model of the hosts #7818 documents: the file exists,
+# its Loom block is out of date.
+printf '# stale: no loom-managed block on this host\n' > "$STAGE/.gitignore"
 STILL_IGNORED=0
 for f in "${CRED_FILES[@]}"; do
     git -C "$STAGE" check-ignore -q "$f" && STILL_IGNORED=1
 done
-if [[ ! -e "$STAGE/.gitignore" && "$STILL_IGNORED" -eq 0 ]]; then
-    pass "(#8005) fixture now models a host with NO .gitignore (the pathspec is the only guard left)"
+if [[ "$STILL_IGNORED" -eq 0 ]]; then
+    pass "(#8005) fixture now models a host whose .gitignore ignores no credential path (the emitted recipe is the only guard left)"
 else
-    fail "(#8005) a credential path is still gitignored — this group would pass regardless of the emitted pathspec"
+    fail "(#8005) a credential path is still gitignored — this group would pass regardless of what was emitted"
 fi
 # Run it the way an operator pasting the suggestion into a shell would.
 (cd "$STAGE" && bash -c "$ADD_CMD")
 STAGED="$(git -C "$STAGE" diff --cached --name-only)"
-# Sensitivity guard: an empty stage would make the exclusion assertion below
-# pass for the wrong reason (nothing staged => no credential path staged), so
-# prove the emitted command really added the worktree's non-credential content.
+# Sensitivity guard: an empty stage would make the assertions below pass for
+# the wrong reason (nothing staged => no credential path staged), so prove the
+# emitted command really added this run's own resync output.
 if [[ -n "$STAGED" ]]; then
-    pass "(#7818) the emitted command really staged the staging worktree's content (the exclusion check below is not vacuous)"
+    pass "(#7818) the emitted command really staged this run's resync output (the checks below are not vacuous)"
 else
-    fail "(#7818) the emitted command staged nothing at all — the exclusion check below would pass vacuously (cmd=$ADD_CMD)"
+    fail "(#7818) the emitted command staged nothing at all — the checks below would pass vacuously (cmd=$ADD_CMD)"
 fi
 for f in "${CRED_FILES[@]}"; do
     if ! grep -qxF "$f" <<< "$STAGED"; then
-        pass "(#8005) $f was not staged by the printed pathspec"
+        pass "(#8005/#9141) $f was not staged by the printed recipe"
     else
-        fail "(#8005) credential path $f was staged: $STAGED"
+        fail "(#8005/#9141) credential path $f was staged: $STAGED"
     fi
     if [[ -f "$STAGE/$f" ]]; then
         pass "(#8005) $f is left on disk, untouched"
@@ -202,6 +247,28 @@ for f in "${CRED_FILES[@]}"; do
         fail "(#8005) $f was unexpectedly removed"
     fi
 done
+# The property an exclusion list could never have: EVERYTHING staged is a
+# resync-managed surface. A path is in the index only because the recipe named
+# it, so there is no "everything else" bucket for a future credential location
+# to hide in. Asserted positively rather than as one more exclusion, so a new
+# unmanaged path fails here by default instead of needing to be predicted.
+UNMANAGED=""
+while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    case "$p" in
+        .loom/hooks/*|.loom/scripts/*|.loom/roles/*|.loom/docs/*|.loom/bin/*|\
+        .loom/runtimes/*|.agents/skills/*|.claude/commands/loom/*|\
+        .claude/README.md|.github/CONFIGURATION.md|.loom/biome.jsonc|\
+        .claude/biome.jsonc|.loom/install-metadata.json|.loom/CLAUDE.md|\
+        .gitattributes|.gitignore) ;;
+        *) UNMANAGED+="$p"$'\n' ;;
+    esac
+done <<< "$STAGED"
+if [[ -z "$UNMANAGED" ]]; then
+    pass "(#9141) every staged path is a resync-managed surface — the recipe has no 'everything else'"
+else
+    fail "(#9141) the recipe staged path(s) outside the resync-managed surfaces: $UNMANAGED"
+fi
 # --- summary -----------------------------------------------------------------
 echo ""
 echo "========================================"

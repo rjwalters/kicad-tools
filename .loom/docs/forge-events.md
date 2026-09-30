@@ -30,7 +30,8 @@ in-process EventBus topic `forge.event`   (summary payload only)
         └── Phase 2 early-tick consumers (#8766), each opt-in and default off
                 ├── work-finder tick      (forgeEvents.events.workFinderTick)
                 ├── claim-reconcile wake  (forgeEvents.events.claimReconcileWake)
-                └── in-flight PR watch    (forgeEvents.events.inFlightPrWatch)
+                ├── in-flight PR watch    (forgeEvents.events.inFlightPrWatch)
+                └── ci-telemetry runs     (forgeEvents.events.ciTelemetryRuns, #9201 — §4.2)
 ```
 
 **The feed never replaces polling.** It is additive prompt pressure: every
@@ -55,6 +56,7 @@ the same as every other daemon subsystem.
 | `events.workFinderTick` | `LOOM_FORGE_EVENTS_WORK_FINDER_TICK` | `false` | Let a claimable-shaped page tick the work-finder loop early (§4.1). |
 | `events.claimReconcileWake` | `LOOM_FORGE_EVENTS_CLAIM_RECONCILE_WAKE` | `false` | Let a claim-relevant page tick the claim-reconciliation pass early (§4.1). |
 | `events.inFlightPrWatch` | `LOOM_FORGE_EVENTS_IN_FLIGHT_PR_WATCH` | `false` | Let a PR-lifecycle page tick the watch monitor early (§4.1). |
+| `events.ciTelemetryRuns` | `LOOM_FORGE_EVENTS_CI_TELEMETRY_RUNS` | `false` | Let a finished `workflow_run` key make the CI telemetry poller record that run directly, and stretch its repo sweep to a correction floor (§4.2). |
 | `events.minSpacingSecs` | `LOOM_FORGE_EVENTS_WAKE_MIN_SPACING_SECS` | `30` | Minimum distance between any tick and a following **early** tick. The rate bound, shared by every consumer. |
 
 ```json
@@ -142,6 +144,18 @@ Routing hints only: no repo, no issue or PR number, no title, no actor. A
 subscriber that wants forge state has to go ask the forge — which is ADR-0014
 invariant 1 made structural rather than merely intended.
 
+**One exception, under the ADR-0021 2026-09-27 amendment (#9201):** a page
+carrying finished `workflow_run` events also carries their **invalidation
+keys**, and nothing else from them:
+
+```json
+{"source":"forge-event-feed", …, "types":["workflow_run"],
+ "runs":[{"repo":"2amlogic/widget","run_id":123456789}]}
+```
+
+A key only chooses which run to re-query (§4.2). `runs` is absent from any
+page without one, so every other payload is unchanged.
+
 **Publication is unconditional; subscription is not.** With every
 `forgeEvents.events.*` flag at its default (off), nothing subscribes: the topic
 is published into an empty bus and a host with the feed on behaves identically
@@ -214,6 +228,50 @@ PR-verdict reconciles, per registered workspace root). Raising
 
 A page that qualifies for no armed consumer is simply journaled; that is the
 common case, and it is why the payload carries event-type names at all.
+
+### 4.2 CI telemetry run capture (`events.ciTelemetryRuns`, #9201)
+
+The CI telemetry poller normally finds finished runs by sweeping **every repo
+of every owner** every `intervalSecs`. That cost scales with repos × cycles.
+With this consumer armed (and `autonomous.ciTelemetry.enabled`), a page's run
+keys make the poller fetch **exactly those runs** within one feed poll — the
+run, then its jobs, then the same ledger / story stitching / export path the
+sweep uses — and the sweep becomes a slow **correction floor**.
+
+- **Nothing from the event is recorded.** The run is re-read from GitHub.
+  Completion, attempt, conclusion and repository come from that answer. A key
+  is dropped without a request when its repo is not under a configured owner
+  or is excluded. A fetched run is dropped when GitHub's `repository` disagrees
+  with the key, or when the run is not `completed`. Batches are capped at 50
+  runs, and a rate limit backs off the whole poller exactly as a sweep's does.
+- **Exactly-once is unchanged.** Both paths commit through the same
+  `seen.jsonl` ledger, so a run recorded by one is `seen` by the other.
+- **The sweep is never disabled.** It stretches from `intervalSecs` to
+  `autonomous.ciTelemetry.feedFloorIntervalSecs` (env
+  `LOOM_CI_TELEMETRY_FEED_FLOOR_INTERVAL_SECS`, default `3600`, clamped
+  between `intervalSecs` and 12 h so a dropped run is always re-listed inside
+  the sweep's 24 h rescan window). It only stretches while **all three** hold:
+  the flag is on, the feed is `healthy` and polled within the last
+  max(3 × `pollIntervalSecs`, 60 s), and at least one run key has arrived since
+  the daemon started. The last condition proves the Worker forwards run keys.
+  Lose any of the three and the next tick is back on `intervalSecs`, with no
+  grace period.
+- **Worker requirement.** The operator's App and Worker must subscribe to
+  `workflow_run` and forward the repo and run id. The daemon reads the repo
+  from `repo` or `repository.full_name`, and the run id from `run_id` or
+  `workflow_run.id` (either may also sit under a `payload` object). An
+  `action` other than `completed`, when present, is ignored. A Worker that
+  forwards the type but no run id produces no keys, so the sweep never
+  stretches.
+
+On `loom-daemon status` it shows as a `Forge event wakes: ci-telemetry runs`
+line: `prompts` counts qualifying pages, the batch count is the number of
+targeted record passes, and `run key(s) dropped` counts keys that were out of
+scope, over the cap, or turned out unfinished on the forge.
+`ci-telemetry status` staleness is measured against the cadence the sweep is
+actually running at, so a deliberate 60-minute floor does not read as `stale`.
+The request arithmetic is in
+[`ci-observability.md`](ci-observability.md#feed-driven-capture-9201).
 
 ## 5. Reading the status
 

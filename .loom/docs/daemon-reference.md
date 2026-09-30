@@ -1384,13 +1384,17 @@ config, and per-host run state. Hosts read it straight from the forge — the
 forge is the state store, and a fleet change lands as a reviewed commit to that
 repo. `loom-daemon fleet-config` is the reader. Nothing names a store by
 default: with `fleet.repo` unset the feature is off and the daemon behaves
-exactly as it always has. This version only runs **on command**; nothing
-fetches, renders or applies the store automatically.
+exactly as it always has. With it set, the daemon syncs from the store on its
+own — see [Automatic sync](#automatic-sync-startup--timer) — as well as
+answering the on-command verbs below.
 
 | Config key | Env override | Default | Meaning |
 |---|---|---|---|
 | `fleet.repo` | `LOOM_FLEET_REPO` | *(unset: feature off)* | The store, `OWNER/REPO`. Read from the daemon workspace's effective config (any tier) |
 | `fleet.ref` | `LOOM_FLEET_REF` | `main` | Branch, tag or commit to read |
+| `fleet.syncIntervalSecs` | `LOOM_FLEET_SYNC_INTERVAL_SECS` | `300` | Cadence of the daemon's own sync timer; clamped up to a `30`s floor |
+| `fleet.autoApply` | `LOOM_FLEET_AUTO_APPLY` | `false` | Let a **timer** pass write (render) and apply (roster) on its own. Off by default — `roster --apply` deregisters workspaces |
+| *(startup cap)* | `LOOM_FLEET_SYNC_STARTUP_TIMEOUT_SECS` | `60` | Wall-clock cap on the startup pass, so a hanging forge cannot hold up boot. `0` waits indefinitely |
 | *(host identity)* | `LOOM_HOST_ID` | `$HOSTNAME` → `hostname` | This host's name in the store (`fleet/hosts/<host>/`, `fleet/state.yml`); `--host` overrides it per command |
 | `fleet.repo` | `LOOM_FLEET_REPO` | *(unset: off)* | The operator's fleet state store (`OWNER/REPO`) read by `loom-daemon fleet-config`; `fleet.ref` / `LOOM_FLEET_REF` picks the ref (default `main`). Unset changes nothing. See [Fleet store](#fleet-store--fleet-config-fleetrepo) |
 
@@ -1514,6 +1518,100 @@ Prints the host's desired run state: its `hosts.<H>` entry if it sets
 `state`, else the `fleet` default, with `since`/`by`/`reason` from the entry
 that decided it. A state other than `running`/`paused`/`stopped`, or no state
 at all, is an error. Report only — the daemon does not enforce it yet.
+
+### `fleet-config propose <state|priority|adopt>` (#9599)
+
+Every other sub-verb above only reads the store. `propose` is the one place
+`fleet-config` writes to it — and it never writes directly: each sub-verb
+edits a fresh fetch of the relevant store file in memory, then opens a
+**branch + PR** (never a direct push) carrying that one change and the hidden
+`<!-- loom:provenance v1 … -->` marker every Loom-authored PR body carries
+(`loom-daemon/src/provenance`), with `base=` the store commit it branched
+from. Merges stay the operator's, per the store's own branch policy — this command
+has no auto-merge path, and it never touches `repos.yml`'s `fleet`/`firewall`
+flags. `--dry-run` prints the diff and stops before opening anything.
+
+Every edit is **format-preserving**: it patches only the lines the change
+requires (a small line-oriented editor, not a YAML re-serialize), so a
+reviewer's diff is exactly that change — comments, ordering and unrelated
+records in `repos.yml` / `fleet/state.yml` are untouched.
+
+- **`propose state <running|paused|stopped> [--host H] --reason … [--by WHO]
+  [--dry-run]`** — sets `fleet/state.yml`'s `hosts.<H>.state` (or, with no
+  `--host`, the top-level `fleet.state` default), always (re)writing
+  `since`/`by`; `reason` is required. Creates `hosts:` and/or the host's own
+  entry when either is missing; editing the fleet default requires that
+  block to already exist. `--by` defaults to this host's identity.
+- **`propose priority <repo> <priority> [--dry-run]`** — sets the named
+  `repos[]` record's `fleet_priority` in `repos.yml`, inserting the key if
+  the record does not have one yet. Every other key on that record, and
+  every other record, is untouched.
+- **`propose adopt [--host H] [--dry-run]`** — turns this host's `render
+  --check` drift into the store-side edit that would make it the new
+  rendered value: the host-local tier (`fleet/hosts/<H>/local.json`) is
+  adopted verbatim (including creating it when the store has never had one
+  for this host); the machine tier (`fleet/hosts/<H>/defaults.json`) is
+  patched leaf-by-leaf, so the host's other overrides survive untouched.
+  Exits with nothing to propose (and no PR) when the host has no drift.
+
+Any sub-verb whose edit came out a no-op — the store already says what it
+was asked to say — prints `nothing to propose` and exits 0 without opening
+anything, so a re-run is never an empty PR for someone to review. A failure
+partway through a submit leaves an inert `loom/fleet-propose/…` branch and
+no PR (the store's own ref is never touched); re-running takes a fresh,
+differently-stamped branch rather than resuming the broken one.
+
+**Credentials — the write half.** Every write call (`POST
+git/refs`/`PUT contents`/`POST pulls`) runs under the **writer App** only,
+never a reader (a reader is never granted write scope). This needs an
+explicit operator grant — `contents: write` and `pull_requests: write` on the
+store — beyond the read-only `contents: read` the rest of `fleet-config`
+needs; without it, a write fails with a clear error naming the missing
+scope, not a crash. Calls are counted in the forge-call stats as
+`fleet_store_write`.
+
+### Automatic sync (startup + timer)
+
+With `fleet.repo` set the daemon does not wait to be told. `loom_daemon::fleet_sync`
+runs the same reader the verbs above use, twice over:
+
+- **At startup**, before any `autonomous.*` loop is spawned: fetch, then render
+  the machine tier and the host-local tier — so the process that goes on to read
+  `maxConcurrent`, `roleRunner.roles` and the rest is the one the store
+  configures, without a second restart. It runs *after* the forge-credential
+  preflight (the store is read through `gh`), so within one boot the fetch uses
+  the credentials already on the host; a credential change landing in the store
+  takes effect on the next start.
+- **On a timer** (`fleet.syncIntervalSecs`): fetch + a render check + a roster
+  check. The steady state is one conditional `304` per tick. Drift is logged,
+  published on the event bus as `fleet.sync.drift`, and recorded for
+  `loom-daemon status` — and **nothing is written**, unless `fleet.autoApply` is
+  on, in which case a timer pass renders and applies exactly as `render` /
+  `roster --apply` would. `autoApply` is ignored (with a warning) on a repo that
+  sets `daemon.delegatedTo`.
+
+Three properties are preserved deliberately:
+
+- **Unset `fleet.repo` changes nothing.** No task is spawned, no file is read or
+  written, and `status` renders no extra line. A snapshot left over from an
+  earlier configured run is removed, so `status` never reports a store the host
+  has stopped reading.
+- **An unreachable forge at startup does not block boot.** The config half loads
+  with the same cached fallback `render` has (`CACHED … last confirmed current
+  <age> ago`), and the whole pass is capped by
+  `LOOM_FLEET_SYNC_STARTUP_TIMEOUT_SECS`; a failure or a timeout is recorded and
+  boot continues on the config already on disk.
+- **The roster stays fail-closed.** It is read only from a snapshot the forge
+  confirmed current in that same pass — no cached fallback, and a
+  `fleet: true` + `firewall: true` record is still a hard error for the whole
+  roster. A pass whose config half came from the cache reports the roster as
+  *not checked* rather than inventing a drift or an error for it.
+
+`loom-daemon status` renders the last pass as a `Fleet store:` block (per-tier
+drift, roster drift, and whether anything was written), and `status --json`
+carries the same record under `fleet_store`. Both are read host-locally from
+`~/.loom/fleet-sync-status.json`, so they still answer when the daemon does not
+— including when the startup pass itself is what went wrong.
 
 ## Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)
 
@@ -9964,26 +10062,30 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
   **refuses** the restart — it never cancels a sweep, never silently restarts, and
   never silently gives up. `--force-after-timeout` opts into cancelling the
   stragglers via the existing `cancel_sweep` path, then restarts. What happens to
-  *dispatch* at that refusal depends on which kind of drain it is (#6007):
-  - **A relaunch drain (the version roll)** keeps the roll **pending**: the drain
-    flag stays set, so dispatch stays paused, and the supervisor keeps polling and
-    fires the restart the instant in-flight reaches **zero** — no operator, no
-    re-run, no guessed `--timeout`. Retry windows widen geometrically from the
-    requested timeout (`base × 2ⁿ`, capped at 2h each) and the whole sequence is
-    bounded by a total paused-dispatch budget of `4 × --timeout` (capped at 4h).
-    Once that budget is spent the roll is **abandoned**: dispatch resumes exactly
-    as it did pre-#6007, so a wedged sweep can never starve the host of work
-    indefinitely, and the note then says to cancel the stuck sweep rather than
-    widen the window again. Escape hatches while pending:
-    `restart --abort-drain` (give up now, resume dispatch) and
-    `restart --drain --force-after-timeout` (cancel the stragglers and roll on the
-    next supervisor tick — on a *pending* roll this escalates the active drain in
-    place and pulls its re-armed deadline in to now; on a first-attempt drain the
-    #4521 pinning still applies).
-  - **A then-exit teardown drain** (`fleet drain`'s path) keeps the historical
-    behavior byte-for-byte: it clears the flag, resumes dispatch, and stays up —
-    `fleet drain` detects that remote refusal by observing `drain.draining: false`
-    on a still-reachable daemon and reports its documented exit code `2`.
+  *dispatch* at that refusal depends on **who started the drain** (#6007, #9588):
+  - **An operator drain** (every IPC request: `restart --drain [--then-exit]`,
+    `loom-daemon-update.sh --drain`, `fleet drain`) **holds**: dispatch stays
+    paused, the deadline clears, the note and a `daemon.drain.timeout`
+    (`paused: true`) event name the stragglers, and the terminal action still
+    fires when in-flight reaches zero. It never resumes on its own — only
+    `restart --abort-drain` does. `status` shows `timed_out`/`origin`;
+    `fleet drain` maps a held remote to its exit code `2`.
+  - **The auto-update roll** keeps the roll **pending**: dispatch stays paused
+    and the restart fires the instant in-flight reaches zero. Retry windows
+    widen geometrically (`base × 2ⁿ`, capped at 2h each) within a total
+    paused-dispatch budget of `4 × --timeout` (capped at 4h); once spent the
+    roll is **abandoned** and dispatch resumes, so a version roll nobody asked
+    for can never starve a host of work. An operator request against it
+    promotes it to an operator drain (one-way).
+  - **Escalation (#9588):** a later `restart --drain --force-after-timeout`
+    escalates ANY active drain in place — the deadline only moves earlier
+    (`now` for a held or pending drain) — and `--then-exit` escalates
+    relaunch → stay-down (#4521).
+  - **Operator-stop record (#9588):** accepting a then-exit drain moves
+    `autonomy-desired` aside into `autonomy-desired.stopped`. The watchdog
+    never revives past it, startup healing never re-arms the marker, and a
+    supervised relaunch (`RunAtLoad`, reboot) comes up with dispatch **held**.
+    `restart --abort-drain` restores the marker; an explicit start clears it.
   Why this asymmetry: on a host that is actually working, resuming dispatch at the
   deadline handed the admission window straight back to the work finder, which
   admitted more sweeps, which made the *next* drain strictly harder to satisfy. In

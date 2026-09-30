@@ -7286,32 +7286,99 @@ _mktemp_canon_mask() {
 }
 
 # =============================================================================
-# SAME-COMMAND REBINDING RECOGNITION FOR THE TWO MKTEMP FAST PATHS (#8221)
+# SAME-COMMAND REBINDING RECOGNITION FOR THE rm-scope/write FAST PATHS
+# (#8221, widened to the full bash rebinding set by #9331)
 #
-# Both same-command mktemp fast paths below poison their ambiguity proof by
-# scanning for a `NAME=...` assignment whose segment text LITERALLY BEGINS
-# WITH `varname "="`. That misses every OTHER shell mechanism that rebinds the
-# same name: a leading declaration keyword (`export`/`readonly`/`declare`/
-# `typeset`/`local NAME=...`, already recognized by the general assignment
-# machinery above -- see match_assignword()'s and record_assign()'s header
-# comments and the identical keyword-stripping regex extract_write_targets()
-# applies, reused verbatim here rather than inventing a second copy) and three
-# rebindings-without-an-`=` at all: `read NAME`, `printf -v NAME`, and
-# `for NAME in ...`. Left unrecognized, `total` stayed at 1 for the FIRST
-# (mktemp-shaped, provably safe) assignment while the SECOND, dangerous
-# rebinding sailed through invisibly, so `total == 1 && safe == 1` still fired
-# and allowed a target the guard could no longer account for.
+# The `_mktemp_` name prefix is HISTORICAL — #8221 built this for the two
+# mktemp fast paths, and #9331 gave the same helpers to the third consumer,
+# rm_scope_literal_same_command_resolve(). All THREE now share exactly one
+# rebinding recognizer, so a form closed in one is closed in all of them and
+# they cannot drift apart on what they call "the only binding of NAME".
+#
+# Each fast path poisons its ambiguity proof by scanning for a `NAME=...`
+# assignment whose segment text LITERALLY BEGINS WITH `varname "="`. That
+# misses every OTHER shell mechanism that rebinds the same name. Left
+# unrecognized, `total` stayed at 1 for the FIRST (provably safe) assignment
+# while the SECOND, dangerous rebinding sailed through invisibly, so the
+# single-binding proof still fired and allowed a target the guard could no
+# longer account for. #9331 measured `d=/tmp/a; d+=/../../etc; rm -rf "$d"`
+# ALLOWING an `rm -rf /etc` on `main` — a live bypass of the UNGATED
+# catastrophic top-level floor, which is what makes the set below a floor
+# requirement rather than a refinement.
 #
 # _mktemp_strip_decl_kw() strips a leading declaration keyword (and its
-# flags) so the caller's existing `varname "="` prefix test also recognizes
+# flags) so the mktemp callers' `varname "="` prefix test also recognizes
 # `export NAME=...`/`declare NAME=...`/etc, not just a bare `NAME=...`
-# segment.
+# segment. It is the identical keyword-stripping regex extract_write_targets()
+# applies, reused verbatim rather than a second copy; see match_assignword()'s
+# and record_assign()'s header comments.
 #
-# _mktemp_is_other_rebind() recognizes the three `=`-free rebindings.
-# Deliberately permissive: a coincidental word match (e.g. a `read` argument
-# that happens to equal `varname`) still counts. The caller only ever adds
-# this to a POISONING total, never removes anything from it, so a false
-# positive here can only WIDEN a deny, never manufacture a new allow --
+# _mktemp_strip_cmd_prefix() strips what stands between the start of a segment
+# and its real COMMAND WORD: leading one-shot variable assignments
+# (`IFS= read -r NAME`, `LC_ALL=C read NAME`) and `command`/`builtin`/`exec`
+# wrappers. #8221's anchors were `/^read/` and `/^printf/`, so a var-assignment
+# prefix — the single most common spelling of `read` in real scripts — moved
+# the builtin off position 1 and hid the rebinding completely.
+#
+# _mktemp_is_other_rebind() recognizes every rebinding of NAME that is NOT a
+# bare `NAME=<value>` segment head:
+#
+#   NAME+=…      append. `$NAME` afterwards is the CONCATENATION, so the
+#                lexically proved value is not the runtime value: this is
+#                #9331's `rm -rf /etc` repro, and `/tmp/a` + `/../../etc`
+#                needs no shell feature beyond bash itself.
+#   NAME[…]=…    array-element / associative assignment. A bare `$NAME` IS
+#                `${NAME[0]}`, so `NAME[0]=/etc` rebinds exactly what the rm
+#                target expands to.
+#   NAME=        an EMPTY-RHS rebind. The callers' prefix test requires
+#                `length > length(prefix)`, so `d=` alone fell through it;
+#                caught here instead (a hole the PR #9324 review reproduced).
+#   export/…     a declaration-keyword assignment in ANY of the three forms
+#                above, since _mktemp_strip_decl_kw() runs first.
+#   read/mapfile/readarray/getopts NAME    builtins that bind a named
+#                variable from input. `mapfile`/`readarray` make NAME an
+#                ARRAY, so `$NAME` becomes its first line.
+#   for/select NAME in …                   loop headers that bind NAME.
+#   printf -v NAME                         (also `-vNAME`).
+#   eval …, source …, . …                  NAME-AGNOSTIC and deliberately so:
+#                what these execute is not in the command's own text at all
+#                (`eval d=/etc`, a sourced file that rebinds anything), so
+#                there is nothing to prove and no shape of them can be
+#                admitted. They poison every fast path in this family
+#                regardless of which name they are near.
+#
+#   unset NAME   (also `unset -v NAME`, `unset NAME[0]`) — INCLUDED, and the
+#                reasoning that would exclude it is worth recording because it
+#                is a trap. `unset NAME` looks like the one harmless form: a
+#                BARE `$NAME` target expands to the empty string and
+#                `rm -rf ""` deletes nothing. But this family resolves a
+#                target of the shape `$NAME<suffix>` too (#6805), and there an
+#                empty expansion is not harmless, it is the WHOLE ATTACK:
+#
+#                    d=/tmp/a; unset d; rm -rf "$d/etc"      # -> rm -rf /etc
+#
+#                which is byte-for-byte the runtime effect of the `d=` empty
+#                rebind one line above, a form nobody disputes must poison.
+#                Exempting `unset` would therefore have left the catastrophic
+#                top-level floor open on the suffix shape while closing it on
+#                the empty-`=` spelling of the identical expansion — two
+#                opposite verdicts for one runtime behaviour. Measured, not
+#                reasoned: an exemption was drafted for this helper and
+#                `d=/tmp/a; unset d; rm -rf "$d/etc"` still ALLOWED.
+#
+#                The cost is the `…; rm -rf "$tmp"; unset tmp` same-command
+#                cleanup idiom, which this order-blind scan cannot distinguish
+#                from a LEADING `unset` and so now denies. That is the correct
+#                side to err on: the idiom needs all three of mktemp, rm and
+#                unset inside ONE command text (splitting them into two
+#                commands restores the allow), whereas the bypass needs only
+#                bash. If an ordering model ever lands, a trailing `unset` is
+#                the first row it may reclaim.
+#
+# Deliberately permissive otherwise: a coincidental word match (e.g. a `read`
+# argument that happens to equal `varname`) still counts. Every caller only
+# ever adds this to a POISONING total and never removes anything from it, so a
+# false positive here can only WIDEN a deny, never manufacture a new allow --
 # anything the scanner cannot confidently classify as NOT a rebinding of
 # `varname` counts as one (fail closed, per the issue's own framing).
 # =============================================================================
@@ -7326,13 +7393,37 @@ function _mktemp_strip_decl_kw(seg,   out) {
     }
     return out
 }
-function _mktemp_is_other_rebind(seg, varname,   n, i, toks) {
-    if (seg ~ /^printf([ \t]|$)/ && seg ~ ("(^|[ \t])-v[ \t]+" varname "([ \t]|$)")) return 1
-    if (seg ~ ("^for[ \t]+" varname "[ \t]+in([ \t]|$)")) return 1
-    if (seg ~ /^read([ \t]|$)/) {
-        n = split(seg, toks, /[ \t]+/)
+function _mktemp_strip_cmd_prefix(seg,   out) {
+    out = seg
+    while (1) {
+        if (sub(/^[A-Za-z_][A-Za-z0-9_]*(\[[^]]*\])?\+?=[^ \t]*[ \t]+/, "", out)) continue
+        if (sub(/^(command|builtin|exec)[ \t]+/, "", out)) continue
+        break
+    }
+    return out
+}
+function _mktemp_is_other_rebind(seg, varname,   n, i, toks, tok, bseg, cseg) {
+    bseg = _mktemp_strip_decl_kw(seg)
+    cseg = _mktemp_strip_cmd_prefix(bseg)
+    if (bseg ~ ("^" varname "(=|\\+=|\\[)")) return 1
+    if (cseg ~ ("^" varname "(=|\\+=|\\[)")) return 1
+    if (cseg ~ /^(eval|source|\.)([ \t]|$)/) return 1
+    if (cseg ~ /^printf([ \t]|$)/ && cseg ~ ("(^|[ \t])-v[ \t]*" varname "([ \t]|$)")) return 1
+    if (cseg ~ ("^(for|select)[ \t]+" varname "[ \t]+in([ \t]|$)")) return 1
+    if (cseg ~ /^(read|mapfile|readarray|getopts|unset)([ \t]|$)/) {
+        n = split(cseg, toks, /[ \t]+/)
         for (i = 2; i <= n; i++) {
-            if (toks[i] == varname) return 1
+            # Whitespace splitting alone leaves the bound name GLUED to what
+            # follows it, and both glues are ordinary spellings that hid the
+            # rebinding completely: a redirection (`read d</tmp/list`,
+            # `read -r d<<<"$x"` -- token `d</tmp/list`) and an array
+            # subscript (`unset d[0]` -- token `d[0]`). Reduce each token to
+            # the NAME it binds before comparing. Both subs only ever widen
+            # what counts as a rebinding, so both fail closed.
+            tok = toks[i]
+            sub(/[<>].*$/, "", tok)
+            sub(/\[[^]]*\]$/, "", tok)
+            if (tok == varname) return 1
         }
     }
     return 0
@@ -7373,9 +7464,12 @@ rm_scope_mktemp_same_command_safe() {
                     if (canonat == 0) canonat = total
                 }
             } else if (_mktemp_is_other_rebind(seg, varname)) {
-                # #8221: read NAME / printf -v NAME / for NAME in ... rebind
-                # NAME without an `=` at all -- poison the count exactly like
-                # a second `NAME=` assignment, never treated as safe/canon.
+                # #8221 + #9331: every rebinding of NAME that does not produce
+                # a segment beginning `NAME=` -- read/mapfile/readarray/
+                # getopts/unset/printf -v/for/select naming NAME, `NAME+=`,
+                # `NAME[i]=`, an empty `NAME=`, and any eval/source. Poison
+                # the count exactly like a second `NAME=` assignment, never
+                # treated as safe/canon.
                 total++
             }
         }
@@ -7515,9 +7609,12 @@ wt_write_mktemp_same_command_safe() {
                     if (canonat == 0) canonat = total
                 }
             } else if (_mktemp_is_other_rebind(seg, varname)) {
-                # #8221: read NAME / printf -v NAME / for NAME in ... rebind
-                # NAME without an `=` at all -- poison the count exactly like
-                # a second `NAME=` assignment, never treated as safe/canon.
+                # #8221 + #9331: every rebinding of NAME that does not produce
+                # a segment beginning `NAME=` -- read/mapfile/readarray/
+                # getopts/unset/printf -v/for/select naming NAME, `NAME+=`,
+                # `NAME[i]=`, an empty `NAME=`, and any eval/source. Poison
+                # the count exactly like a second `NAME=` assignment, never
+                # treated as safe/canon.
                 total++
             }
         }
@@ -7549,12 +7646,21 @@ wt_write_mktemp_same_command_safe() {
 # #6152) to resolve a same-command `NAME=<value>` assignment, then judges the
 # result:
 #
-#   1. Exactly ONE assignment to NAME exists anywhere in the SAME command
+#   1. Exactly ONE BINDING of NAME exists anywhere in the SAME command
 #      text — mirrors the mktemp fast path's own ambiguity rule (its own doc
 #      comment, point 3, above): a second assignment to the same name — even
 #      an identical or otherwise-safe-looking one — poisons the resolution
 #      and fails closed, since the guard cannot tell which assignment's value
-#      the shell sees at the `rm` word.
+#      the shell sees at the `rm` word. "Binding" is the full bash set, not
+#      just a segment beginning `NAME=`: since #9331 this path shares
+#      _mktemp_is_other_rebind() with both mktemp fast paths, so `NAME+=`,
+#      `NAME[0]=`, an empty `NAME=`, `export NAME=`, `read`/`mapfile`/
+#      `readarray`/`getopts`/`unset`/`printf -v`/`for`/`select` naming NAME,
+#      and any `eval`/`source` all poison it. The resolvable form itself is
+#      UNCHANGED (a bare `NAME=<literal>` segment head), so that sharing is a
+#      pure tightening — see _MKTEMP_REBIND_AWK's header for each form, and
+#      for why `unset NAME` is in the set despite looking harmless (it is not
+#      harmless on the `$NAME<suffix>` target shape this path also resolves).
 #   2. The (quote-stripped) RHS is a PURE LITERAL absolute path: starts with
 #      `/`, and contains neither `$` nor a backtick anywhere — so a RHS that
 #      itself still carries an unresolved expansion (`NAME="$OTHER/sub"`,
@@ -7637,7 +7743,7 @@ rm_scope_literal_same_command_resolve() {
     varname="${split%%$'\t'*}"
     suffix="${split#*$'\t'}"
     [[ -n "$varname" ]] || return 1
-    resolved=$(printf '%s' "$cmdtext" | awk -v varname="$varname" "$_QSPLIT_AWK"'
+    resolved=$(printf '%s' "$cmdtext" | awk -v varname="$varname" "$_QSPLIT_AWK""$_MKTEMP_REBIND_AWK"'
     BEGIN {
         DQ = sprintf("%c", 34)
         SQ = sprintf("%c", 39)
@@ -7654,11 +7760,28 @@ rm_scope_literal_same_command_resolve() {
             if (length(seg) > plen && substr(seg, 1, plen) == prefix) {
                 total++
                 val = substr(seg, plen + 1)
+            } else if (_mktemp_is_other_rebind(seg, varname)) {
+                # #9331: NAME+= / NAME[i]= / an EMPTY NAME= / a
+                # declaration-keyword assignment / read|mapfile|readarray|
+                # getopts|unset|printf -v|for|select naming NAME / any eval
+                # or source. Each rebinds NAME (or can) without producing a
+                # segment that BEGINS `NAME=`, so each was invisible to the
+                # test above and the resolution below ran on a value the shell
+                # would no longer be holding at the `rm` word. Poison it: this
+                # resolver is a RELAXATION of the catastrophic floor, so
+                # "cannot account for NAME" must reach the fail-closed deny,
+                # never an allow. Counted separately from `total` because the
+                # only resolvable form here stays a BARE `NAME=<literal>`
+                # segment head -- recognizing a decl-keyword assignment as
+                # RESOLVABLE would newly ALLOW `export d=/tmp/x; rm -rf "$d"`,
+                # which is a relaxation this tightening must not smuggle in
+                # (#9601 is where a widening like that belongs).
+                rebind++
             }
         }
     }
     END {
-        if (total == 1) {
+        if (total == 1 && rebind == 0) {
             vlen = length(val)
             if (vlen >= 2) {
                 c1 = substr(val, 1, 1)

@@ -2362,10 +2362,10 @@ if grep -qi "primary checkout" <<<"$OUT" || grep -qi "never touched" <<<"$OUT"; 
 else
     fail "(#6106) apply did not confirm the primary checkout was untouched"
 fi
-if grep -q "git add -A" <<<"$OUT" && grep -q "git commit" <<<"$OUT" && grep -q "worktree remove" <<<"$OUT"; then
-    pass "(#6106) apply prints the commit + cleanup next-steps"
+if grep -q "git add -- " <<<"$OUT" && ! grep -q "git add -A" <<<"$OUT" && grep -q "git commit" <<<"$OUT" && grep -q "worktree remove" <<<"$OUT"; then
+    pass "(#6106/#9141) apply prints allowlist-staging commit + cleanup next-steps, never 'git add -A'"
 else
-    fail "(#6106) apply did not print the expected next-steps"
+    fail "(#6106/#9141) apply did not print the expected next-steps (or still prints 'git add -A')"
 fi
 git -C "$REPO" worktree remove --force "$STAGE" >/dev/null 2>&1 || true
 

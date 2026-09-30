@@ -616,16 +616,85 @@ fi
 # When the installed version cannot be resolved at all (no usable loom_commit,
 # no matching tag -- e.g. a tarball/vendored source tree or a GC'd commit), the
 # subject heuristic remains the fallback and behaviour is exactly as before.
-echo "Test group 11e: an unresolvable installed version falls back to the subject heuristic (#8676)"
+# #9178 supersedes what this group used to assert. When the content rung
+# cannot run (a tarball/vendored source, a GC'd commit, metadata with no
+# loom_version at all) the old fallback was the subject heuristic alone -- and
+# there the ORIGINAL install commit is a permanent false positive: "its last
+# change was not a routine resync" is also true for every file nothing has
+# touched since the installer wrote it. The block then prevented the write, so
+# the file's last-touching commit stayed the install commit, so the next pass
+# blocked again -- ~63 of 75 flagged files fleet-wide, and two repos that could
+# never resync at all. The install-baseline rung answers that structurally
+# (last-touching commit == the commit that added .loom/install-metadata.json),
+# without widening RESYNC_COMMIT_SUBJECT_RE to match free-form install prose.
+echo "Test group 11e: an unresolvable installed version no longer blocks a file untouched since install (#9178)"
 REPO11F="$(make_lineage_fixture repo-lineage-unresolvable 'tooling: install Repo Skills and Loom into the map repo' unresolvable)"
 bump_upstream "$REPO11F"
+# Preconditions: the content rung genuinely cannot resolve here, and the
+# installed copy really is untouched since the install commit -- otherwise
+# this fixture would pass without exercising the install-baseline rung.
+if [[ "$(git -C "$REPO11F" log -1 --format='%s' -- .loom/hooks/guard.sh)" == 'tooling: install Repo Skills and Loom into the map repo' ]] \
+    && [[ "$(git -C "$REPO11F" log -1 --format='%H' -- .loom/hooks/guard.sh)" == "$(git -C "$REPO11F" log --diff-filter=A --format='%H' -- .loom/install-metadata.json | tail -1)" ]]; then
+    pass "(#9178) fixture precondition: the file's last touch IS the install commit, under a non-routine subject"
+else
+    fail "(#9178) fixture precondition unmet: the file was touched after the install commit"
+fi
 OUT="$(cd "$REPO11F" && bash "$SCRIPT" 2>&1)"
 RC=$?
-if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
-    && [[ "$(cat "$REPO11F/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three' ]]; then
-    pass "(#8676) an unresolvable installed version keeps the pre-#8676 (conservative) verdict"
+if [[ $RC -eq 0 ]] && ! grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11F/.loom/hooks/guard.sh")" == $'line-one\nline-three' ]]; then
+    pass "(#9178) a file untouched since the install commit is updated, not blocked as a phantom local fix"
 else
-    fail "(#8676) the unresolvable-version fallback did not behave conservatively (rc=$RC); out=$OUT"
+    fail "(#9178) a file untouched since the install commit was still blocked (rc=$RC); out=$OUT"
+fi
+
+# The install-baseline rung must not become a blanket amnesty for the
+# unresolvable-version case: a hand edit made AFTER the install is a LATER
+# commit, so the file's last-touching commit is no longer the install commit
+# and the pre-#8676 conservative verdict still stands.
+echo "Test group 11e2: an unresolvable installed version still blocks a POST-install hand edit (#9178)"
+REPO11F2="$(make_lineage_fixture repo-lineage-unresolvable-handedit 'tooling: install Repo Skills and Loom into the map repo' unresolvable)"
+printf 'line-one\nline-two\nline-three\nLOCAL-HOTFIX\n' > "$REPO11F2/.loom/hooks/guard.sh"
+git -C "$REPO11F2" add .loom/hooks/guard.sh >/dev/null 2>&1
+git -C "$REPO11F2" commit -qm "fix(guard): hand-applied hotfix upstream never took" >/dev/null 2>&1
+bump_upstream "$REPO11F2"
+OUT="$(cd "$REPO11F2" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11F2/.loom/hooks/guard.sh")" == $'line-one\nline-two\nline-three\nLOCAL-HOTFIX' ]]; then
+    pass "(#9178) a post-install hand edit is still protected when no content proof is available"
+else
+    fail "(#9178) the install-baseline rung weakened protection for a real hand edit (rc=$RC); out=$OUT"
+fi
+if grep -q "Decided from its last-touching commit:" <<<"$OUT" \
+    && grep -q "hand-applied hotfix upstream never took" <<<"$OUT"; then
+    pass "(#9178) the block message names the commit the decision was based on"
+else
+    fail "(#9178) the block message did not name the deciding commit; out=$OUT"
+fi
+
+# The install commit and "a commit that installed Loom AND carried a hand fix"
+# are structurally identical (one commit, it added the file, nothing since), so
+# the install-baseline rung defers to #8098's reading of the SUBJECT: one that
+# starts like routine tooling output and then says something else is a human
+# extending it. Group 9 asserts the end-to-end verdict for three such subjects;
+# this pins that the deference -- not some accident of the fixture -- is what
+# produces it, by checking the precondition the rung would otherwise clear on.
+echo "Test group 11e3: the install-baseline rung defers to #8098's extended-subject shape (#9178)"
+REPO11F3="$(make_fixture)"
+git -C "$REPO11F3" commit --amend -qm 'chore: install Loom v1 and also revert the guard fix' >/dev/null 2>&1
+if [[ "$(git -C "$REPO11F3" log -1 --format='%H' -- .loom/hooks/guard.sh)" == "$(git -C "$REPO11F3" log --diff-filter=A --format='%H' -- .loom/install-metadata.json | tail -1)" ]]; then
+    pass "(#9178) precondition: the file's last touch IS the install baseline, so only the deference can block it"
+else
+    fail "(#9178) precondition unmet: the file was touched after the install baseline"
+fi
+OUT="$(cd "$REPO11F3" && bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 1 ]] && grep -q "BLOCKED" <<<"$OUT" \
+    && [[ "$(cat "$REPO11F3/.loom/hooks/guard.sh")" == "OLD" ]]; then
+    pass "(#9178) an extended routine subject on the install commit keeps #8098's protection"
+else
+    fail "(#9178) the install-baseline rung overrode #8098's extended-subject protection (rc=$RC); out=$OUT"
 fi
 
 # The recorded version DRIFTS AHEAD of the installed bytes: restamp_metadata()

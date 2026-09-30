@@ -10,10 +10,18 @@ the next person to add one will have an equally good argument.
    cheaper than an unverified merge, and far cheaper than a misattributed
    failure that costs an agent a triage cycle.
 
-2. **Never cancel verification of a distinct commit.** Superseding is correct
-   on a PR branch, where a newer push replaces an older one and the older
-   result is worthless. It is never correct on the default branch, where every
-   commit is distinct work that nothing else will verify.
+2. **Never cancel verification of a distinct commit once it has started.**
+   Superseding is correct on a PR branch, where a newer push replaces an
+   older one and the older result is worthless. On the default branch every
+   commit is distinct work, so a started `main` run is never cancelled.
+   Bounding the *queue* is the one exception (#9608): `main` shares one
+   concurrency group with `cancel-in-progress: false`, so at most one run is
+   in progress and one waits, and a newer push supersedes only a run that has
+   not started. The tip is always verified. What a merge burst loses is the
+   per-commit result for the intermediate commits that never started; if the
+   tip is red, bisect across the burst to find the culprit. Without the bound,
+   a burst of ~45 merges queued ~30 full runs and left the tip unverified for
+   hours.
 
 3. **Path-filtering is an optimisation, not a correctness tool.** A check that
    can fail because of a file *outside* its path group must not be filtered by
@@ -61,7 +69,7 @@ the next person to add one will have an equally good argument.
    The freshness guard asks a different question — "can merging this PR turn
    a check that already ran and passed red?" — and answering it needs the
    input set the check actually read (`merge_pr/stale_checks/inputs.rs`).
-   Two narrowings live there, and both must obey the same three constraints:
+   Three narrowings live there, and both must obey the same three constraints:
    **derive the scope from the repo's own text, never a hand-maintained
    second copy**; **keep it per-file, never per-commit**; and **fail closed
    to the broader answer on any doubt**.
@@ -81,6 +89,68 @@ the next person to add one will have an equally good argument.
      guard's component table all restore the whole-file meaning on that side.
      Nothing is skipped and no check's coverage narrows — every gate still
      runs on every PR.
+   - *Per-repo declarations* (#9589): a consumer repo's required contexts are
+     absent from loom's table, so each is stale on any base move unless the
+     repo declares its inputs in `.loom/stale-check-inputs.json`
+     ([stale-check-inputs](stale-check-inputs.md)). The declaration is the
+     repo's own text, read from the base tip, and is itself a global input of
+     every check it declares. An unlisted context gets no guessed default, and
+     any malformed or unreadable file is ignored with a warning.
+
+10. **Every speed trade-off on the merge gate is owed a slow run somewhere
+    else.** Rules 7 and 8 make a fast gate legitimate; they do not make it
+    sufficient. Partitioning, sharding, a shared debug build, a restored
+    cache and a path filter each remove a *class* of observation, not just
+    wall time — a cross-partition test interaction, a non-hermetic suite, a
+    release-profile-only break, a cold-build break, an unedited-path break.
+    The daily backstop below is where each of those is paid back. When the
+    next optimisation lands on `ci.yml`, the question is not "is this safe on
+    its own" but "which run still makes the observation this removes".
+
+## The daily backstop and its tracking issues
+
+`.github/workflows/ci-daily.yml` (#9085) is the slow run rule 10 requires. It
+is scheduled, never required, never path-filtered, and never cancelled — its
+concurrency group is keyed on `github.run_id`, which is unique per run, so a
+manual dispatch racing the scheduled one cannot supersede it (rule 2). It
+undoes each of `ci.yml`'s speed trade-offs: an unpartitioned full run with no
+`rust-cache` and an explicit assertion that `target/` did not exist before the
+first build, the whole release target matrix minus signing, every
+`package-lock.json`, `cargo deny` against `deny.toml`, the shell suites at
+parallelism 1 and 8 and on macOS/bash 3.2, `nextest` three times over for
+flakes, Rust beta, and the Docker smokes without their path filter.
+
+**A red daily run nobody reads is worse than none**, because it trains people
+to ignore red. So the `report` job is part of the mechanism, not a nicety:
+
+- **One tracking issue per failing job**, never per run and never per failing
+  step. Title is exactly `[ci-daily] <job name>`; the lookup is an exact
+  title match against **all** open issues (not a label query), so a second
+  consecutive failure comments on the existing issue instead of opening a
+  duplicate, however the issue has been relabelled since. Matrix legs are
+  distinct jobs and get distinct issues.
+- **The next green run for that same job closes it**, with a comment naming
+  the run that went green.
+- **Only `failure` and `timed_out` open an issue, and only `success` closes
+  one.** `skipped`, `cancelled` and `neutral` leave any open issue exactly as
+  it is — rule 6 applied to the reporter itself: a job that did not run is
+  not a job that passed, and must not close a standing failure.
+- **`(warn-only)` in a job's name is a contract**, not decoration: the
+  reporter never files for such a job. `continue-on-error: true` alone is not
+  enough, because the job still reports a `failure` conclusion to the jobs
+  API. Rust beta is the only job that carries it today — an upcoming-toolchain
+  regression is information, not a defect in this repo.
+- **The tracking issues use an existing label, never a new one.** They are
+  filed with `loom:triage` — the ordinary intake label — so they enter the
+  normal pipeline like any other filed issue. The workflow creates no labels:
+  the label set is intentional and `.github/labels.yml` is authoritative.
+  Identity lives in the title, which is why the lookup ignores labels and the
+  issue body asks that the title be left unchanged.
+
+SigNoz needs nothing workflow-side: `loom-daemon ci-telemetry` captures every
+run of every workflow of the configured owners by auto-discovery, so the daily
+run's durations, outcomes and logs are queryable from the day it lands
+([`ci-observability.md`](ci-observability.md)).
 
 ## What prompted this
 
@@ -129,12 +199,15 @@ a cancellation rate.
 
 ## Related
 
-- #7779 / PR #7803 — the cancellation fix
+- #7779 / PR #7803 — the cancellation fix; #9608 — the bounded `main` queue
+  (one running + newest pending) that rule 2 now allows
 - #7789 / #7791 — flake tracking, and why retry must *record* rather than hide
 - #7745 / #7761 — the same "a skipped check must not read as a pass" rule,
   learned in the resync and guard layers
 - #8248 / #8919 / #9065 — the required-check freshness guard, its input-scoped
   predicate, and rule 9's two narrowings
+- #9065 / #9069 — the wall-time work rule 10 exists to balance, and #9085 —
+  `ci-daily.yml`, the slow run that balances it
 - [`ci-observability.md`](ci-observability.md) — the observability face of
   the same family: every run, job, duration, outcome and log is captured in
   SigNoz as standing policy, so a regression like #7779's cancellation storm

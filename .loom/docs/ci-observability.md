@@ -343,7 +343,7 @@ listing for good.
 |---|---|
 | `loom-daemon ci-telemetry --once [--owner OWNER]… [--org ORG] [--workspace PATH]` | One poll cycle (`--owner` repeatable; `--org` is the deprecated alias). Runs whether or not `enabled` is set. |
 | `loom-daemon ci-telemetry status [--json]` | Health, each owner (kind, repo count, skip reason), ledger size, per-repo watermarks, records emitted/exported. |
-| Daemon poller | Runs every `intervalSecs` when `autonomous.ciTelemetry.enabled=true`. |
+| Daemon poller | Runs every `intervalSecs` when `autonomous.ciTelemetry.enabled=true`. With `forgeEvents.events.ciTelemetryRuns` it is feed-driven instead; see [Feed-driven capture](#feed-driven-capture-9201). |
 
 `--once` exit codes:
 
@@ -378,6 +378,7 @@ never shows as healthy:
 | `intervalSecs` | `LOOM_CI_TELEMETRY_INTERVAL_SECS` | `120` |
 | `excludedRepos` | none (committed config only) | `[]`. Each entry is `{"repo": "<name or owner/name>", "reason": "<why>"}`, and `repo` matches case-insensitively. See [Capture scope & exclusions](#capture-scope--exclusions). |
 | `logCaptureEnabled` | `LOOM_CI_TELEMETRY_LOG_CAPTURE_ENABLED` | `false`. Honoured since phase 2 (#8825); see [Phase 2 reference](#phase-2-reference-completed-job-logs-8825). |
+| `feedFloorIntervalSecs` | `LOOM_CI_TELEMETRY_FEED_FLOOR_INTERVAL_SECS` | `3600`. The sweep interval while the forge event feed drives capture. It is clamped to `[intervalSecs, 43200]`. See [Feed-driven capture](#feed-driven-capture-9201). |
 
 `logCaptureEnabled` is the switch for the job-log download. Phase 1 (#8824)
 shipped the key with no code behind it and refused a request by name; phase 2
@@ -440,6 +441,39 @@ whole poller** (every owner), never a single repo:
 
 Any other failure in a repo is recorded, and the cycle moves on to the next
 repo.
+
+### Feed-driven capture (#9201)
+
+When `forgeEvents.events.ciTelemetryRuns` is on, a finished `workflow_run`
+event on the forge event feed makes the poller record **that one run**. It
+fetches `repos/{repo}/actions/runs/{id}`, then the run's jobs, then commits
+through the same ledger, story-stitching, and export path as a sweep. While
+the feed is healthy and carrying run keys, the repo sweep stretches to
+`feedFloorIntervalSecs` as a correction floor. Otherwise it keeps
+`intervalSecs`. The mechanism, the trust rules, and the Worker requirement
+are in [`forge-events.md` §4.2](forge-events.md#42-ci-telemetry-run-capture-eventscitelemetryruns-9201).
+
+**Request arithmetic (estimated, not measured).** Each sweep costs one
+runs-listing request per repo. The runs listing is not a conditional request,
+so it always counts. Discovery pages are ETag-cached and are ignored here.
+Each newly finished run costs one jobs listing on the sweep path, or one run
+`GET` plus one jobs listing on the feed path. With `R` eligible repos and `F`
+finished runs per hour, and ignoring job logs, suite artifacts and story
+lookups (the same on both paths):
+
+| Mode | Requests/hour | `R = 118`, `F = 100` |
+|---|---|---|
+| Sweep every 120 s (default `intervalSecs`) | `30·R + F` | ≈ 3,640 |
+| Sweep every 600 s (#9199) | `6·R + F` | ≈ 808 |
+| Feed-driven, 3600 s floor | `R + 2·F` | ≈ 318 |
+
+The floor sweep re-lists runs the feed already recorded. Those are `seen` in
+the ledger and cost no jobs listing, so the floor adds only its `R` listings.
+**These figures are arithmetic, not a measurement.** No captain was running
+the poller when #9201 landed: #9199, which enables it, was still held. To
+measure, compare `last_cycle.requests` in `ci-telemetry status --json` and the
+`feed batch: … request(s)` log lines over an hour, with the flag off and
+then on.
 
 ### Dedup contract: never record the same job twice
 

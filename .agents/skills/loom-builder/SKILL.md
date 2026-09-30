@@ -316,7 +316,7 @@ If no argument is provided, use the normal "Finding Work" workflow below.
 | Block issue | `loom:building` | `loom:blocked` |
 | Create PR | - | `loom:review-requested` (on new PR only) |
 
-**IMPORTANT**: `loom:building` and `loom:blocked` are **mutually exclusive** - an issue cannot be in both states. Always use atomic transitions:
+**IMPORTANT**: `loom:building` and `loom:blocked` are **mutually exclusive** — use atomic transitions:
 ```bash
 # CORRECT: Atomic transition to blocked state
 gh issue edit <number> --remove-label "loom:building" --add-label "loom:blocked"
@@ -324,7 +324,7 @@ gh issue edit <number> --remove-label "loom:building" --add-label "loom:blocked"
 # WRONG: Leaves issue in invalid state with both labels
 gh issue edit <number> --add-label "loom:blocked"
 ```
-**Record the blocker before the label (#9102).** Before any `--add-label "loom:blocked"`, the issue **body** must declare each **open** blocker — a park record (`loom-daemon park-record render --blocked-by N --by builder`; `.loom/docs/park-record.md`), a `## Dependencies` entry, or a `Blocked by #N` / `Depends on #N` / `Requires #N` line. That is what `check-stale-blocked` (#8927), Guide's unblock sweep and `merge-pr.sh` (comments when #N closes) read; a comment is not enough. Never cite an already-closed item (the unblock sweeps would release it at once). No open numbered blocker? Say so in a comment posted just before the label; never invent one.
+**Record the blocker before the label (#9102).** Before any `--add-label "loom:blocked"`, the issue **body** must declare each **open** blocker — a park record (`loom-daemon park-record render --blocked-by N --by builder`; `.loom/docs/park-record.md`), a `## Dependencies` entry, or a `Blocked by #N` / `Depends on #N` / `Requires #N` line. That is what `check-stale-blocked` (#8927), Guide's unblock sweep and `merge-pr.sh` read; a comment is not enough. Never cite an already-closed item (the unblock sweeps would release it at once). No open numbered blocker? Say so in a comment posted just before the label; never invent one.
 
 ### Labels You NEVER Touch
 
@@ -408,11 +408,11 @@ workflow) that require maintainer approval before being worked on.
 
 **Workflow**:
 
-- **Find work**: Use the three-tier priority order in "Finding Work: Priority System" below (urgent → curated → approved-only). FIFO (oldest-first) is only the tiebreak **within** a single tier — not a top-level rule.
-- **Check dependencies**: Verify all task list items are checked before claiming
-- **Guard, then claim**: `loom-daemon forge check-open-pr <number>` must not exit 0 (exit 0 = an open linked PR already exists — take another issue), then `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`
+- **Find work**: Use the three-tier priority order in "Finding Work: Priority System" below (urgent → curated → approved-only); FIFO (oldest-first) is only the tiebreak **within** a tier.
+- **Check dependencies**: all task-list items checked before claiming
+- **Guard, then claim**: `loom-daemon forge check-claim <number>` must not exit 0 (exit 0 = blocked — open PR, claim label, fresh lease, or remote branch; take another issue), then `gh issue edit <number> --remove-label "loom:issue" --add-label "loom:building"`, then lease it: `loom-daemon lease ensure <number> --watch-pid "${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}"`. `worktree.sh` (below) runs this itself; a lane NOT using it MUST call `lease ensure` directly — a leaseless claim is invisible to other lanes and reclaimable (#9453)
 - **Do the work**: Implement, test, commit, create PR
-- **Mark PR for review**: `./.loom/scripts/create-pr.sh --label "loom:review-requested"` — never a bare `gh pr create` (#6074). MUST use the structured body template — canonical in builder-pr.md § "Creating the PR"
+- **Mark PR for review**: `./.loom/scripts/create-pr.sh --label "loom:review-requested"` — never a bare `gh pr create` (#6074); the structured body template is canonical in builder-pr.md § "Creating the PR"
 - **Complete**: Issue auto-closes when PR merges, or mark `loom:blocked` if stuck
 
 ## Exception: Explicit User Instructions
@@ -430,11 +430,11 @@ When the user explicitly instructs you to work on a specific issue or PR by numb
 ```
 
 **Behavior**:
-1. **Proceed immediately** - Don't check for required labels
-2. **Interpret as approval** - User instruction = implicit approval
-3. **Apply working label** - Add `loom:building` to track work
-4. **Document override** - Note in comments: "Working on this per user request"
-5. **Follow normal completion** - Apply end-state labels when done
+1. **Proceed immediately** — skip label checks
+2. **Interpret as approval** — user instruction = implicit approval
+3. **Apply working label** — add `loom:building`
+4. **Document override** — comment: "Working on this per user request"
+5. **Follow normal completion** — apply end-state labels
 
 **Example**:
 ```bash
@@ -449,16 +449,13 @@ gh issue comment 592 --body "Starting work on this issue per user request"
 ./.loom/scripts/worktree.sh 592
 # ... do the work ...
 
-# Complete normally with a PR — use the canonical structured body template from
-# builder-pr.md § "Creating the PR" (Summary / Changes / Acceptance Criteria /
-# Test Plan + `Closes #592`), with the loom:review-requested label at creation.
+# Complete normally with a PR — the canonical structured body template
+# (builder-pr.md § "Creating the PR") with loom:review-requested at creation.
 ```
 
-**Why This Matters**:
-- Users may want to prioritize specific work outside normal flow
-- Users may want to test workflows with specific issues
-- Users may want to override Curator/Guide triage decisions
-- Flexibility is important for manual orchestration mode
+**Why This Matters**: users may prioritize work outside the normal flow, test
+workflows on specific issues, or override Curator/Guide triage decisions —
+flexibility matters in manual orchestration mode.
 
 **When NOT to Override**:
 - When user says "find work" or "look for issues" -> Use label-based workflow
@@ -1127,10 +1124,10 @@ gh issue list --label="loom:issue" --state=open --json number,title,labels \
 **Step 4 (every tier): guard the claim before you flip the label**
 
 ```bash
-loom-daemon forge check-open-pr <number>   # exit 0 PRINTS an open linked PR
+loom-daemon forge check-claim <number>   # exit 0 PRINTS the blocker token
 ```
 
-**Exit 0 means an open linked PR already exists — do NOT claim; take the next candidate.** Exit 1 (verified "none open") is the only safe-to-claim answer; any other code means the probe could not answer (rate limit, `gh` failure, Gitea) and is **not** an all-clear. Same #4123 probe the daemon's dispatch refuses on, so a hand-claim cannot race past a guard a dispatched sweep would have honored — skipping it once burned a verification pass re-doing already-shipped PR #8462 (#8551).
+**Exit 0 means blocked** — stdout names why (`OPEN_PR #X` / `BUILDING` / `LEASE_ALREADY_HELD <host> <sweep-id>` / `BRANCH_EXISTS feature/issue-N`); take the next issue. Exit 1 is the only all-clear answer; any other code is unanswered — **not** an all-clear. Same signals a dispatched sweep honors (#4123/#4085/#6286 + branch) — a hand-claim cannot race past a fleet guard (#8551/#9453). `--force-claim` overrides label/lease/branch legs only, never `OPEN_PR`.
 
 ### Priority Guidelines
 

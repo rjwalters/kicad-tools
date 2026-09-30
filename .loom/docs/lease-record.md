@@ -11,10 +11,10 @@ This document defines the record's on-forge shape. Phase 1 (#6179) wrote the
 record at dispatch time and nothing read it; the later phases documented
 below now do read it — reclamation (#6286) and dispatch-time ordering
 (#6287) in Phase 2, the sweep-side pre-push fence (#6309) in Phase 3 — all
-against this same format. There are now **three writers** — the daemon's
-dispatch, the in-session `/loom:sweep` path (#6320) and the in-session builder
-via `worktree.sh` (#8193) (see "Who writes one" below); readers must not
-distinguish them.
+against this same format. There are now **four writers** — the daemon's
+dispatch, the in-session `/loom:sweep` path (#6320), the in-session builder
+via `worktree.sh` (#8193), and the direct hand-claim lane (#9453, see
+"Who writes one" below); readers must not distinguish them.
 
 The sibling issue #6180 (`defaults/docs/lease-renewal.md`) implements the
 other half: a sweep-owned background loop that keeps a lease fresh for the
@@ -25,7 +25,7 @@ documented here.
 **Contents**
 
 - [What a lease record is](#what-a-lease-record-is)
-- [Who writes one (every dispatch path — #6320, #8193)](#who-writes-one-every-dispatch-path--6320-8193)
+- [Who writes one (every claim path — #6320, #8193, #9453)](#who-writes-one-every-claim-path--6320-8193-9453)
 - [When it is written](#when-it-is-written)
 - [What this phase explicitly does not do](#what-this-phase-explicitly-does-not-do)
 - [For Phase 2 (reclamation) and Phase 3 (fencing)](#for-phase-2-reclamation-and-phase-3-fencing)
@@ -151,9 +151,9 @@ The embedded `at=...` timestamp in that prose is for human debugging only —
 it is what the dispatcher *believed* the time was when it wrote the comment,
 not an authoritative value any reader may rely on.
 
-## Who writes one (every dispatch path — #6320, #8193)
+## Who writes one (every claim path — #6320, #8193, #9453)
 
-Three writers publish this record. They are byte-compatible by design: a reader
+Four writers publish this record. They are byte-compatible by design: a reader
 cannot tell them apart, and must not try to.
 
 | Writer | When | Code |
@@ -161,6 +161,7 @@ cannot tell them apart, and must not try to.
 | **Daemon dispatch** (#6179) | Immediately after a confirmed `flip_label_to_building` | `SweepRegistry::write_lease_comment` (`loom-daemon/src/sweep_registry/guards.rs`) |
 | **In-session sweep** (#6320) | Per-issue pre-flight Step 1b, for every candidate the daemon did *not* claim (operator `/loom:sweep`, `--no-daemon`, GH Actions cron) | `defaults/scripts/sweep-lease-publish.sh publish` |
 | **In-session builder** (#8193) | Inside `worktree.sh`, which every builder runs immediately after claiming — so it covers a `/loom:builder` run with no sweep orchestrator above it | `loom-daemon lease ensure <N>` (`loom-daemon/src/cli/lease_ensure.rs`), which calls the same `sweep-lease-publish.sh` |
+| **Direct hand-claim** (#9453) | A manual claim lane that does NOT go through `worktree.sh` (e.g. Superset-managed worktrees + pi subagents claiming via `gh issue edit` per CLAUDE.md manual mode) — it MUST call the same `lease ensure <N> --watch-pid …` itself, right after the label flip (CLAUDE.md Builder step 2) | the same `loom-daemon lease ensure <N>` |
 
 **Why the third writer exists.** The second one closes the hole for a sweep,
 but a Builder dispatched *directly* — an operator running `/loom:builder`, or a
@@ -177,6 +178,19 @@ off the one command every builder already runs. It no-ops when
 published and is renewing, #7672), and it refuses outside an agent session,
 because the pid it would hand renewal has to outlive a single tool call to mean
 anything.
+
+**Why the fourth writer exists, and the runtime-neutral marker (#9453).** The
+#8193 refusal gate is a set of session markers (`CLAUDE_PID`, `CLAUDECODE`,
+`CLAUDE_CODE_ENTRYPOINT`, `LOOM_TERMINAL_ID`) — all Claude-specific. A
+non-Claude harness hosting a hand-claim lane (the pi runtime is the named
+example) exports none of them, so until #9453 its only way in was `--force`
+flag discipline on every call. `SESSION_MARKERS` now also admits
+**`LOOM_AGENT_SESSION_PID`**: a runtime-neutral marker any long-lived agent
+harness exports, self-describing, whose value is the harness process's own
+pid — exactly what `--watch-pid` wants
+(`${LOOM_AGENT_SESSION_PID:-${CLAUDE_PID:-$PPID}}`). Presence (non-empty) of
+any one marker admits the publish; `--force` semantics are unchanged, and a
+blank marker still refuses.
 
 **Why the second writer exists.** `/loom:sweep`'s in-session path dispatches
 its Builder through the Task tool, one level deep, deliberately (the skill's

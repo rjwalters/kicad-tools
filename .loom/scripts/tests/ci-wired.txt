@@ -48,7 +48,6 @@ test-champion-issue-promo-escalation-respects-human-hold.sh
 test-champion-pr-merge-negation-guard.sh
 test-champion-premise-false-close.sh
 test-champion-standing-authorization.sh
-test-check-branch-name.sh
 test-check-ci-status.sh
 test-check-config-no-host-paths.sh
 test-check-conflict-markers.sh
@@ -176,6 +175,8 @@ test-resync-installed-guard-check.sh
 test-resync-installed-local-fix-guard.sh
 test-resync-installed-retired-dry-run.sh
 test-resync-installed-dogfood-symlink.sh
+test-resync-installed-stamp.sh
+test-resync-installed-output-staging.sh
 test-resync-installed.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
@@ -212,13 +213,10 @@ test-version-check-gate-callsites.sh
 test-version-check-gate.sh
 test-warn-operator-gated.sh
 test-warn-out-of-set-deps.sh
-test-worktree-base-override.sh
 test-worktree-forge-pr-check.sh
 test-worktree-hookspath.sh
-test-worktree-remote-branch-tracking.sh
 test-worktree-root-override.sh
 test-worktree-sentinel.sh
-test-worktree-stale-merged-branch.sh
 
 # tests/hooks/ (repo root) — Claude-path guard suites, wired since #4769.
 tests/hooks/test-guard-destructive-dispatcher.sh

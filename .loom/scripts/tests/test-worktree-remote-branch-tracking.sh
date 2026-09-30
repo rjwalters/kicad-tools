@@ -40,11 +40,25 @@
 # Pattern follows test-worktree-base-override.sh: throwaway bare origin + repo
 # in a mktemp dir, copy worktree.sh + lib/, run.
 
+# SINCE #8195 SLICE 14 (epic #7810) Tests 3-4's local-reuse arm — including the
+# "already exists - reusing it" line both of them key on to prove WHICH arm
+# ran, and the divergence warning itself — is `loom-daemon
+# worktree-branch-reuse`. Every assertion below is unchanged from the shell
+# implementation, so the binary is pinned via loom_test_require_daemon_bin and
+# this suite FAILS rather than skips when there is none: without a binary the
+# arm prints nothing at all (the documented degradation), and Tests 3-4 would
+# be asserting on output nothing produced. Tests 1-2 (the REMOTE arm) are
+# untouched by that slice.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-branch-reuse"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

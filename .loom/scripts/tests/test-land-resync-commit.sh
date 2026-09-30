@@ -81,6 +81,12 @@
 #       .loom/account-health.{json,lock}       credential class by design, so
 #                                              refused as foreign dirt (nothing
 #                                              committed at all)
+#   (q)  resync output under .agents/skills/ -> lands normally; neither surface
+#        and in .gitignore (#9345)              is "non-resync dirt" any more
+#   (q2) the a9da48c2 footprint (#9141): a  -> every pool path excluded, none
+#        whole `.loom/tokens.shadow-           reaches origin; the legitimate
+#        disabled-<ts>/` pool copy beside     resync surface beside it lands
+#        a real resync surface, no .gitignore
 #
 # Usage:
 #   ./.loom/scripts/tests/test-land-resync-commit.sh
@@ -895,6 +901,81 @@ if [[ $RC -eq 1 ]] && grep -q "TRACKED" <<< "$OUT" && \
     pass "a tracked sibling-renamed pool file stops the run and nothing is committed or pushed"
 else
     fail "a tracked sibling-renamed pool file stops the run and nothing is committed or pushed (rc=$RC, out=$OUT)"
+fi
+
+echo ""
+echo "=== (q) resync output under .agents/skills/ and in .gitignore lands, not refused as dirt (#9345) ==="
+gh_stub_reset
+make_origin origin-q
+make_primary origin-q primary-q
+Q="$WORKDIR/primary-q"
+# The exact reproduce case from #9345: a plain `resync-installed.sh` run on a
+# current defaults/ touches `.agents/skills/*` (resync_agent_skills(), #8673)
+# and regenerates the loom-daemon-managed `.gitignore` block (#4280). Before
+# the allowlist fix those were classified as "non-resync dirt" and this script
+# refused to land its own sibling's ordinary output.
+mkdir -p "$Q/.agents/skills/loom-builder-pr"
+printf '<!-- loom:generated -->\nbuilder skill\n' > "$Q/.agents/skills/loom-builder-pr/SKILL.md"
+printf '# BEGIN LOOM-MANAGED\n.loom/tokens*\n# END LOOM-MANAGED\n' > "$Q/.gitignore"
+printf 'updated\n' > "$Q/.loom/hooks/foo.sh"
+OUT="$(cd "$Q" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && ! grep -qi "refusing to land" <<< "$OUT"; then
+    pass "a run touching .agents/skills/* and .gitignore is not refused as non-resync dirt"
+else
+    fail "a run touching .agents/skills/* and .gitignore is not refused as non-resync dirt (rc=$RC, out=$OUT)"
+fi
+ORIGIN_TREE_Q="$(git --git-dir="$WORKDIR/origin-q.git" ls-tree -r --name-only main)"
+if grep -qF ".agents/skills/loom-builder-pr/SKILL.md" <<< "$ORIGIN_TREE_Q" && \
+   grep -qxF ".gitignore" <<< "$ORIGIN_TREE_Q"; then
+    pass "both surfaces landed in the resync commit"
+else
+    fail "both surfaces landed in the resync commit (tree=$ORIGIN_TREE_Q)"
+fi
+if [[ "$(git --git-dir="$WORKDIR/origin-q.git" log -1 --format='%s' main)" == "chore: resync installed Loom surfaces" ]]; then
+    pass "they landed under the resync subject, not a hand-made commit"
+else
+    fail "they landed under the resync subject, not a hand-made commit"
+fi
+
+echo ""
+echo "=== (q2) the a9da48c2 footprint: a whole token-pool COPY beside real resync output (#9141) ==="
+gh_stub_reset
+make_origin origin-q2
+make_primary origin-q2 primary-q2
+Q2="$WORKDIR/primary-q2"
+# Reconstructs the leak commit's actual shape: a legitimate resync surface
+# (.loom/install-metadata.json) plus the ENTIRE sibling token-pool directory
+# `.loom/tokens.shadow-disabled-<ts>/` -- .token files AND the pool's
+# bookkeeping files, none of which is the exact path `.loom/tokens`. No
+# .gitignore at all, so the script's own credential class is the only thing
+# between these files and a public commit.
+rm -f "$Q2/.gitignore"
+POOL="$Q2/.loom/tokens.shadow-disabled-20260926T021559Z"
+mkdir -p "$POOL"
+printf 'sk-ant-oat01-dummy\n' > "$POOL/acct-1.token"
+printf 'sk-ant-oat01-dummy\n' > "$POOL/acct-2.token"
+printf 'acct-1\nacct-2\n'     > "$POOL/.ranking"
+printf '{}\n'                 > "$POOL/.ranking.classes.json"
+printf '1\n'                  > "$POOL/.rotation_cursor"
+: > "$POOL/.bad_tokens"
+printf '{"loom_version":"0.19.556"}\n' > "$Q2/.loom/install-metadata.json"
+OUT="$(cd "$Q2" && "$SCRIPT" 2>&1)"; RC=$?
+if [[ $RC -eq 0 ]] && grep -q "Excluded from the commit" <<< "$OUT" && ! grep -qi "refusing to land" <<< "$OUT"; then
+    pass "the token-pool copy is excluded as credential dirt, never staged"
+else
+    fail "the token-pool copy is excluded as credential dirt, never staged (rc=$RC, out=$OUT)"
+fi
+ORIGIN_TREE_Q2="$(git --git-dir="$WORKDIR/origin-q2.git" ls-tree -r --name-only main)"
+if ! grep -q "tokens.shadow-disabled" <<< "$ORIGIN_TREE_Q2"; then
+    pass "not one path of the pool copy reached origin (the a9da48c2 regression)"
+else
+    fail "a pool-copy path reached origin (tree=$ORIGIN_TREE_Q2)"
+fi
+if grep -qxF ".loom/install-metadata.json" <<< "$ORIGIN_TREE_Q2" && \
+   [[ "$(git --git-dir="$WORKDIR/origin-q2.git" show main:.loom/install-metadata.json)" == '{"loom_version":"0.19.556"}' ]]; then
+    pass "the legitimate resync surface beside it still landed"
+else
+    fail "the legitimate resync surface beside it still landed (tree=$ORIGIN_TREE_Q2)"
 fi
 
 echo ""

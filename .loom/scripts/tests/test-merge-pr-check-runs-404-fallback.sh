@@ -55,11 +55,24 @@ FORGE_HELPERS_SRC="$HELPERS_DIR/lib/forge-helpers.sh"
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'  # retired() below
 NC='\033[0m'
 
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+
+# A source-text assertion that cannot survive a port to loom-daemon, recorded
+# per defaults/docs/verification-recipes.md §6 rather than silently deleted.
+# Mirrors the convention test-merge-pr-partial-increment.sh established for
+# the #8831 backticked-trailer port.
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 assert_eq() {
     local expected="$1"
@@ -323,12 +336,21 @@ else
     echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the persistent-404 info line"
 fi
 
-if grep -q '"\$attempt1_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "\$attempt2_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND"' <<<"$_wfctsm_block"; then
+retired "_wait_for_checks_then_sync_merge requires BOTH attempts to confirm a 404" \
+  "a 404 on only one of the two attempts must NOT increment the persistent-404 streak" \
+  "the both-attempts-404 comparison moved to loom-daemon (#6389, #8191 slice) — shell no longer spells the literal comparison to grep for" \
+  "loom-daemon/src/merge_pr/check_runs_streak.rs::mixed_404_then_different_failure_is_not_confirmed_and_resets + loom-daemon/tests/merge_pr_check_runs_streak_differential.rs"
+
+# The classification is now delegated to `loom-daemon merge-pr
+# check-runs-streak` (#6389, #8191 slice) rather than computed inline; assert
+# the delegation is wired, which is the behavioural analogue of the retired
+# literal-comparison check above.
+if grep -q 'merge-pr check-runs-streak' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge requires BOTH attempts to confirm a 404"
+    echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge delegates the 404-streak classification to 'loom-daemon merge-pr check-runs-streak'"
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the both-attempts-404 confirmation"
+    echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the check-runs-streak delegation"
 fi
 
 # The UNSTABLE-rejection fallback used to carry a SECOND copy of this fetch

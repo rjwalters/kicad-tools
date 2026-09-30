@@ -5,6 +5,11 @@ a naive `|| handle_failure` caller but are not: the merge did not happen,
 nothing is wrong, and the correct response is to re-queue the PR for a later
 pass.
 
+A fourth outcome joined them in #9096 and is covered here too: **no exit code at
+all**, when the caller is killed before the script can return one. It is not a
+"not a failure" outcome — it is a *not-an-outcome*, and unlike the three below
+it does get a PR comment.
+
 Champion's operative handling lives in
 `.claude/commands/loom/champion-pr-merge.md` →
 "Exception: exit codes 3, 4 and 5". This file holds the rationale, the design
@@ -17,6 +22,7 @@ does not need loaded to act correctly.
 | `4` | The #8248/#8919 required-check freshness guard blocked the merge and `--redate-stale-checks` re-dated the checks with a tree-identical no-op push (#8508). | this run |
 | `5` | `--auto`'s bounded settle-wait expired before this head's checks finished, or before the check-runs API became readable (#8896). | nobody |
 | `1` | Everything else, including a #8248 block with no remedy left. | — |
+| *(none)* | The caller was killed before the script could exit at all — not an exit code, and the only outcome that leaves no forge-visible trace (#9096). | unknown |
 
 ## Exit 3 — a foreign push raced the merge (#5579)
 
@@ -145,21 +151,42 @@ If CI on the re-dated head takes longer than the interval between merges on
 would push a fresh no-op commit every tick forever, burning a full CI run and a
 Judge re-review each time while never out-racing the base branch.
 
-So the remedy is bounded to **one push per head**. Each push records
+So the remedy has a **budget per re-date chain** (#9590; #8508 allowed one
+push per head, which parked about ten approved PRs on `loom:operator` when `main`
+moved faster than CI). A chain is the run of consecutive tree-identical re-date
+commits that started from a head Loom did not create. Each push records
 
 ```
 <!-- loom:stale-check-redate to=<new-sha> -->
+<!-- loom:stale-check-redate-attempt to=<new-sha> n=<k> -->
 ```
 
-on the PR. Finding that marker for the *current* head means the full re-date →
-CI → block cycle already completed with no forward progress, which is a
-strictly stronger signal than a tick counter (and needs no process to own the
-count — it is durable forge state).
+on the PR: the #8508 marker, kept so an older daemon still escalates
+conservatively, plus the head's position `k` in its chain. A legacy-only marker
+counts as position 1. A head with no marker (a human, Builder, Doctor or
+head-sync push) starts a fresh chain.
+
+| Setting | env (wins) | `.loom/config.json` | default |
+|---|---|---|---|
+| re-dates per chain (1–10) | `LOOM_REDATE_BUDGET` | `champion.redateBudget` | 3 |
+| backoff base, seconds (≤ 86400) | `LOOM_REDATE_BACKOFF_SECS` | `champion.redateBackoffSecs` | 600 |
+
+Re-date `k+1` is pushed only once `base × 2^(k-1)` has elapsed since the comment
+recording re-date `k`. Inside that window the remedy writes nothing and prints
+`LOOM-REDATE-DEFERRED … retry_after=<time>`; `merge-pr.sh` exits **4**, so the
+merge is retried later.
+
+It is still a bound. The count is durable, trusted forge state rather than a
+tick counter no process owns, and only trusted authors' markers count (#9548).
+Each step needs a full re-date → CI → block cycle, and the remedy's own pushes
+can never reset the chain; only a push from outside the remedy can.
 
 ### Escalation when the bound is reached
 
-The PR is escalated the same way `champion-pr-merge.md`'s merge-risk hold
-escalates:
+Once the chain has spent the whole budget and the guard still blocks, the PR is
+escalated the same way `champion-pr-merge.md`'s merge-risk hold escalates. The
+notice and the `LOOM-REDATE-ESCALATED … spent=<k> budget=<N>` line both say the
+budget is exhausted:
 
 - one idempotent notice keyed on the blocked head
   (`<!-- loom:stale-check-hold head=<sha> -->`), so a later push re-opens the
@@ -262,6 +289,128 @@ The remedy, if a repo hits it every pass, is configuration rather than a PR
 action: raise `LOOM_AUTO_MERGE_TIMEOUT` past the repo's slowest suite (or
 shrink the required set). A Champion tick that ends in exit 5 should
 cost nothing but a log line.
+
+**…but raising it past the caller's own timeout is not a remedy, it is #9096.**
+Exit 5 only exists if the script is still alive to return it. See the next
+section.
+
+## No exit code at all — the caller was killed (#9096)
+
+This is the fourth outcome, and the only one that is not an exit code: the
+merge call produced **no classifiable result whatsoever** because the process
+running it was terminated. Champion's Step 3 runs `merge-pr.sh --auto` inside a
+Bash tool call whose timeout caps at 600s, and `LOOM_AUTO_MERGE_TIMEOUT`
+*defaults to 600s* — exactly equal. On any repo whose CI legitimately
+approaches that budget the tool wins the race, the script is killed mid-wait,
+and the exit-5 branch above never runs.
+
+What that leaves on the forge is worse than any of exits 3/4/5: Step 2 has
+already posted "Proceeding with merge…", and then there is nothing. No merge,
+no failure, no label change, no comment — indistinguishable from a dead host.
+That is the 2026-09-26 incident on a private fleet repo: a "Proceeding with
+squash merge…" comment at 14:34:43Z, then silence until a human merged by hand
+at 15:02:11Z — the same timeline #9091 traced to the unbounded zero-row
+re-poll. #9091 removed the common *cause*; it did not make the outcome
+visible, which is this section.
+
+### Two independent fixes, both required
+
+1. **Make exit 5 win the race.** Champion sets `LOOM_AUTO_MERGE_TIMEOUT=420`
+   on the callsite itself, strictly below the 600s tool timeout it runs under,
+   leaving ~180s of headroom for the guard re-validation, merge API call and
+   post-merge cleanup that all run *after* the wait returns. The assignment is
+   deliberately **not** `${LOOM_AUTO_MERGE_TIMEOUT:-420}`: an ambient value
+   above the tool's timeout is not a longer wait, it is this failure mode, and
+   honouring it would let a repo re-arm #9096 by config. A repo whose CI
+   genuinely outruns 420s is *supposed* to exit 5 and re-queue — the wait is
+   bounded by design, and a later pass costs one log line. Raising the budget
+   for real therefore means raising the **caller's** timeout first, and both
+   numbers together; the prompt's "Timeout invariant" says so at the callsite.
+2. **Make the unclassified case visible.** A sentinel line
+   (`CHAMPION-MERGE-OUTCOME pr=… rc=…`) is the last statement of Step 3's
+   block. A killed call never reaches it, so its **absence** is the caller's
+   only evidence that no `MERGE_RC` was ever evaluated. On absence, Champion
+   re-reads the PR state and — if it is not merged — posts a
+   **"Merge Outcome Unknown"** notice.
+
+### The recipe
+
+Champion's prompt states the rule; this is the exact shape it describes, to be
+run when Step 3's output ends without the sentinel. The `exit 0`s below are
+written for a single-PR invocation — in a batch loop they are `continue`, the
+same convention Step 2's pre-merge comment uses. Afterwards `loom:pr` stays on
+the PR and the tick records an *unknown outcome*, never an error.
+
+```bash
+# Re-read first: a killed call may still have merged and lost only its report.
+# Plain `gh`, NOT "$GH_READ" — a cached read could mask your own merge.
+PR_JSON=$(gh pr view "$PR_NUMBER" --json state,headRefOid 2>/dev/null || echo '{}')
+STATE=$(printf '%s' "$PR_JSON" | jq -r '.state // "UNREADABLE"')
+HEAD_SHA=$(printf '%s' "$PR_JSON" | jq -r '.headRefOid // "unknown"')
+MARKER="<!-- champion:merge-outcome-unknown pr=$PR_NUMBER sha=$HEAD_SHA -->"
+
+case "$STATE" in
+  MERGED)
+    echo "PR #$PR_NUMBER merged; only the report was lost — continue to Step 4"
+    exit 0 ;;
+  OPEN)       STATE_LINE="As of this comment the PR is **not merged** and is still Judge-approved" ;;
+  *)          STATE_LINE="The re-read of this PR's state also failed, so even whether it merged is unconfirmed" ;;
+esac
+
+# Idempotency, same shape as every other Champion notice (champion:ac-hold,
+# champion:merge-risk-hold, …): one notice per PR per head. A head that moves
+# is a new episode and gets a fresh notice.
+if gh pr view "$PR_NUMBER" --json comments \
+     --jq '.comments[].body' 2>/dev/null | grep -qF "$MARKER"; then
+  echo "PR #$PR_NUMBER already carries an unknown-outcome notice for $HEAD_SHA"
+  exit 0
+fi
+
+gh pr comment "$PR_NUMBER" --body "**Champion: Merge Outcome Unknown**
+
+Champion started an auto-merge for this PR (see \`Proceeding with merge...\` above) and the call was cut off before reporting anything — its worker timed out or was killed.
+
+This is **not** a merge failure: no error was returned, because no result was returned at all. $STATE_LINE, and a later Champion pass re-evaluates and retries it — no human action is required unless this recurs on the same PR.
+
+---
+*Automated by Champion role*
+$MARKER"
+```
+
+The three-way `case` matters: the notice's value is that every sentence in it
+is something Champion actually knows. On an `OPEN` re-read it can say the PR is
+not merged; on an unreadable one it cannot, and saying so is still strictly
+better than silence. Never collapse the two into the `OPEN` wording — that
+turns an honest state report into the same unverified assertion the "Merge
+Failed" comment is being avoided for.
+
+### Why the notice is not the "Merge Failed" comment
+
+The distinction is load-bearing in both directions, and it is the rule conflict
+this section exists to settle:
+
+- **It is not a failure.** "Merge Failed" asserts an error was returned and
+  ends with "a human will need to investigate and merge manually." Here no
+  error was returned because *no result was returned at all*, and no human
+  action is required — the PR is still Judge-approved and a later pass retries
+  it. Posting the failure wording would manufacture an incident out of a
+  timeout and park a mergeable PR on a human.
+- **It is also not covered by the exits-3/4/5 silence rule.** Those runs stay
+  silent on the forge because they *reported themselves*: the caller knows the
+  outcome, records it, and re-queues; commenting on a self-resolving race
+  would be noise (see exit 3 above). A killed call reports nothing, so silence
+  there is not "an ordinary operational event went unremarked" but "Champion
+  announced a merge and vanished." **The silence rule is conditioned on having
+  an outcome to be silent about**, and must never be generalised to cover its
+  absence — nor may the notice ever be extended to fire on exits 3/4/5, which
+  stay exactly as silent as they are today.
+
+The notice is therefore worded as a *state report*, not a verdict: what
+Champion started, that the result is unknown, that the PR is not merged as of
+that comment, that it re-queues automatically, and that a human should look
+only if it recurs on the same PR. Re-reading the PR first keeps it honest —
+a killed call can still have merged and lost only its report, in which case
+there is nothing to announce and Step 4 proceeds normally.
 
 ## Merge-ancestry detection trap (applies to all three)
 

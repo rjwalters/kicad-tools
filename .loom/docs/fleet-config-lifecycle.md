@@ -100,6 +100,29 @@ predict which bucket a given knob falls into.
   timer definition changed on disk without the reload step keeps running the
   old one indefinitely.
 
+## Fleet-store hosts: the render happens before the loops (#9596)
+
+On a host with `fleet.repo` set, the "requires a daemon restart" column above
+is satisfied *by the restart itself*, not by a separate manual step. The
+daemon's own startup sync (`loom_daemon::fleet_sync`, see
+[`daemon-reference.md`](daemon-reference.md) → "Automatic sync") fetches the
+store and renders the machine and host-local tiers **before** any
+`read_*_config` call that gates a loop — so a knob landed in the store is live
+on the host's next daemon start, with no `fleet-config render` by hand and no
+second restart to pick up what the first one rendered.
+
+That does not retire the rule at the top of this file; it narrows what counts
+as evidence. A store-landed config change is still not effective until a host
+actually restarted and rendered it, and the observation that it did is now
+directly available: `loom-daemon status`'s `Fleet store:` block names the store
+commit each tier was rendered from, and the timer pass keeps reporting drift
+between passes. A store commit with no host reporting it is exactly the
+"landed != effective" gap, made visible instead of inferred.
+
+The timer half is **detection, not convergence** by default: it reports drift
+and writes nothing unless `fleet.autoApply` is on. A change that must take
+effect without waiting for a restart still needs one.
+
 ## Applying the rule
 
 Any role about to close an issue, or merge/label a PR `Closes #N`, whose

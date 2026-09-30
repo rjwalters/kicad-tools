@@ -44,6 +44,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-base"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 LIB="$SCRIPTS_DIR/lib/default-branch.sh"
 

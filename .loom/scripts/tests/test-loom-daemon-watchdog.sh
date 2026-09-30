@@ -173,30 +173,23 @@ back_date_file() { # <file> <seconds_ago>
 # on the test host) or file a real forge issue. Listed BEFORE "$@" so the
 # dedicated recovery cases in section 30+ can re-enable both, pointing
 # LOOM_WATCHDOG_RECOVER_CMD at a recorder stub.
-run_watchdog() {
+run_watchdog() { run_watchdog_with_args "" "$@"; }
+run_watchdog_with_args() { # <watchdog-flag-or-empty> [KEY=VAL...]
+    local flag="$1"; shift
     : > "$OUT"
     env LOOM_WATCHDOG_IPC_PROBE=0 LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
         LOOM_WATCHDOG_AUTO_RECOVER=0 LOOM_WATCHDOG_ESCALATE=0 \
         LOOM_WATCHDOG_RECOVERY_STATE="$WORKDIR/.watchdog-recovery-state" \
         "$@" LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
         LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" \
-        LOOM_DAEMON_LAUNCHD=0 bash "$WATCHDOG" > "$OUT" 2>&1
+        LOOM_DAEMON_LAUNCHD=0 bash "$WATCHDOG" ${flag:+"$flag"} > "$OUT" 2>&1
     RC=$?
 }
 
 # As run_watchdog, but with --verbose so the OK/skip diagnostics (which the
 # non-verbose report() deliberately suppresses on stderr but always writes to the
 # log) are asserted from the same log the operator would read.
-run_watchdog_verbose() {
-    : > "$OUT"
-    env LOOM_WATCHDOG_IPC_PROBE=0 LOOM_PID_FILE= LOOM_WORKSPACE= LOOM_MACHINE_CHECKOUT= \
-        LOOM_WATCHDOG_AUTO_RECOVER=0 LOOM_WATCHDOG_ESCALATE=0 \
-        LOOM_WATCHDOG_RECOVERY_STATE="$WORKDIR/.watchdog-recovery-state" \
-        "$@" LOOM_AUTONOMY_MARKER="$MARKER" LOOM_WATCHDOG_LOG="$WDLOG" \
-        LOOM_SOCKET_PATH="$WORKDIR/loom-daemon.sock" \
-        LOOM_DAEMON_LAUNCHD=0 bash "$WATCHDOG" --verbose > "$OUT" 2>&1
-    RC=$?
-}
+run_watchdog_verbose() { run_watchdog_with_args --verbose "$@"; }
 
 # #5118: the supervisor-gate cases (8/9/10/10a/10b) drive a STUBBED
 # launchctl/systemctl and assert on the OUT-OF-BAND branch alone, so they pin
@@ -483,16 +476,10 @@ echo "$live_pid" > "$WORKDIR/.daemon.pid"
 run_watchdog
 kill "$live_pid" 2>/dev/null || true
 assert_rc 1 "$RC" "marker absent + daemon alive: exits 1 (state mismatch, crash protection disarmed)"
-if log_hasi "mismatch"; then
-    pass "marker absent + daemon alive: WARN reports the state mismatch"
-else
-    fail "marker absent + daemon alive: missing the state-mismatch WARN"
-fi
-if log_has DIVERGENCE; then
-    fail "marker absent + daemon alive: should be a WARN, not a DIVERGENCE"
-else
-    pass "marker absent + daemon alive: reported as WARN, not DIVERGENCE"
-fi
+if log_hasi "mismatch"; then pass "marker absent + daemon alive: WARN reports the state mismatch"
+else fail "marker absent + daemon alive: missing the state-mismatch WARN"; fi
+if log_has DIVERGENCE; then fail "marker absent + daemon alive: should be a WARN, not a DIVERGENCE"
+else pass "marker absent + daemon alive: reported as WARN, not DIVERGENCE"; fi
 rm -f "$WORKDIR/.daemon.pid"
 
 # ===================================================================
@@ -2718,6 +2705,28 @@ retired "#7508/#7834: the scan locates each heredoc body rather than passing vac
     "there is no opener to locate; the differential either matches the exact bytes or fails" \
     "the two differentials above assert an exact 1314/1415-byte match, which cannot pass vacuously: there is no pattern to stop matching, only bytes to differ."
 
+
+# ===================================================================
+# 56. #9588: an OPERATOR-STOP record (`<marker>.stopped`, written when a
+#     `restart --drain --then-exit` / `fleet drain` is accepted) is a
+#     deliberate stop: no recovery, exit 0 — even with auto-recovery ON and a
+#     stale marker still present (loom-worker-2, 2026-09-30: drained, exited,
+#     revived 60s later). `control` is the same dead-daemon state WITHOUT the
+#     record, proving the exit 0 is the record's doing.
+# ===================================================================
+LOG56="$WORKDIR/rec56.log" STOPPED="$MARKER.stopped"
+for variant in moved-aside stale-marker control; do
+    rm -f "$MARKER" "$STOPPED" "$WDLOG" "$LOG56" "$WORKDIR/.watchdog-recovery-state"
+    if [[ "$variant" != moved-aside ]]; then write_marker "$WORKDIR/pid56-dead" 60; fi
+    if [[ "$variant" != control ]]; then echo 'operator_stop_reason=then-exit' > "$STOPPED"; fi
+    REC56="$(make_recover_stub noop "$LOG56")"
+    run_watchdog LOOM_WATCHDOG_AUTO_RECOVER=1 LOOM_WATCHDOG_RECOVER_CMD="$REC56"
+    rm -rf "$(dirname "$REC56")"
+    if [[ "$variant" == control ]]; then verdict="rc=$RC"; [[ "$RC" -ne 0 ]] && ! log_hasi 'operator stop recorded' && verdict=not-deliberate
+    else verdict="rc=$RC"; [[ "$RC" -eq 0 && ! -s "$LOG56" ]] && log_hasi 'operator stop recorded' && verdict=deliberate; fi
+    [[ "$verdict" == *deliberate ]] && pass "#9588 $variant: $verdict stop (no recovery unless unrecorded)" || fail "#9588 $variant: $verdict ($(cat "$WDLOG" "$LOG56" 2>/dev/null))"
+done
+rm -f "$MARKER" "$STOPPED"
 
 echo
 echo "Ran $TESTS_RUN tests: $TESTS_PASSED passed, $TESTS_FAILED failed, $TESTS_RETIRED retired"

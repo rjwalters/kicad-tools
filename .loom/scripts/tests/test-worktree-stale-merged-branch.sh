@@ -44,11 +44,27 @@
 # the fake-forge-binary pattern from test-worktree-remove-squash-merge.sh
 # (#4889).
 
+# SINCE #8195 SLICE 14 (epic #7810) Tests 4-5's LOCAL arm is
+# `loom-daemon worktree-branch-reuse`: the #8280 already-landed refusal, its
+# degenerate-tip guard and the fail-open-on-`unknown` direction all live in
+# `loom-daemon/src/worktree_cli/branch_reuse.rs`. Every assertion below is
+# unchanged from the shell implementation — that is what makes them the
+# equivalence evidence for retiring it — so the binary is pinned via
+# loom_test_require_daemon_bin and this suite FAILS rather than skips when
+# there is none. Without a binary the refusal does not happen at all (a
+# correct, documented degradation: the pre-#8280 behaviour), which would leave
+# Test 4 asserting on something nothing ran. Tests 1-3 (the REMOTE arm, in
+# lib/worktree-forge-pr-check.sh) are untouched by that slice.
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
+
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-branch-reuse"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
