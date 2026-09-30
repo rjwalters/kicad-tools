@@ -439,12 +439,21 @@ class _SheetEntry:
     different ``Sheetname``s — so consumers that need KiCad-compatible net
     identities must use this field, not :attr:`filename`.  Empty when the
     sheet carries no ``Sheetname`` property.
+
+    ``uuid`` is the sheet *symbol*'s own ``(uuid ...)``.  It is the segment
+    KiCad appends to the parent's instance path, and therefore the key that
+    tells the two placements of one shared ``Sheetfile`` apart: a symbol in
+    the child file records ``(instances (project ... (path
+    "/<root-uuid>/<this-uuid>" (reference "R11") ...)))`` once per placement,
+    so per-instance reference designators can only be resolved through it
+    (issue #5815).  Empty when the sheet symbol carries no ``(uuid ...)``.
     """
 
     filename: str
     sheetname: str = ""
     pin_names: list[str] = field(default_factory=list)
     pin_positions: list[tuple[float, float]] = field(default_factory=list)
+    uuid: str = ""
 
 
 def _get_sheet_filenames(sch_path: Path) -> list[str]:
@@ -489,6 +498,11 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
             sheetname = ""
             pin_names: list[str] = []
             pin_positions: list[tuple[float, float]] = []
+
+            # The sheet symbol's own UUID -- the instance-path segment that
+            # distinguishes two placements of one shared file (issue #5815).
+            uuid_node = child.find("uuid")
+            sheet_uuid = (uuid_node.get_string(0) or "") if uuid_node else ""
 
             # Extract sheet position for computing absolute pin positions
             sheet_x, sheet_y = 0.0, 0.0
@@ -538,6 +552,7 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                         sheetname=sheetname,
                         pin_names=pin_names,
                         pin_positions=pin_positions,
+                        uuid=sheet_uuid,
                     )
                 )
     return entries

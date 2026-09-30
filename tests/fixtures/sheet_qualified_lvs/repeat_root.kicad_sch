@@ -1,0 +1,61 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "58150012-0000-4000-8000-000000005815")
+	(paper "A4")
+	(title_block
+		(title "Repeated sheet instance - root")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+	)
+	(sheet
+		(at 50 30) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "58150013-0000-4000-8000-000000005815")
+		(property "Sheetname" "MCU_A"
+			(at 50 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "repeat_child.kicad_sch"
+			(at 50 51 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(instances
+			(project "repeat_root"
+				(path "/58150012-0000-4000-8000-000000005815"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 140 30) (size 30 20)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "58150014-0000-4000-8000-000000005815")
+		(property "Sheetname" "MCU_B"
+			(at 140 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "repeat_child.kicad_sch"
+			(at 140 51 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(instances
+			(project "repeat_root"
+				(path "/58150012-0000-4000-8000-000000005815"
+					(page "3")
+				)
+			)
+		)
+	)
+	(sheet_instances
+		(path "/" (page "1"))
+		(path "/58150013-0000-4000-8000-000000005815" (page "2"))
+		(path "/58150014-0000-4000-8000-000000005815" (page "3"))
+	)
+)
