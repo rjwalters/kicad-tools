@@ -7344,6 +7344,18 @@ def _add_readiness_parser(subparsers) -> None:
         help="Path to the .kicad_sch (auto-detected by default)",
     )
     rd_parser.add_argument(
+        "--project-root",
+        dest="readiness_project_root",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Directory containing the board directory and every project dependency "
+            "(schematic hierarchy, sibling symbol/footprint libraries). Referenced "
+            "files outside the board directory but inside this root are collected "
+            "into the staged package and hashed; nothing outside it is ever read."
+        ),
+    )
+    rd_parser.add_argument(
         "--net-class-map",
         dest="readiness_net_class_map",
         metavar="PATH",

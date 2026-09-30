@@ -38,6 +38,10 @@ def run_readiness_command(args) -> int:
     if schematic:
         sub_argv.extend(["--sch", schematic])
 
+    project_root = getattr(args, "readiness_project_root", None)
+    if project_root:
+        sub_argv.extend(["--project-root", project_root])
+
     net_class_map = getattr(args, "readiness_net_class_map", None)
     if net_class_map:
         sub_argv.extend(["--net-class-map", net_class_map])

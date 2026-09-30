@@ -216,7 +216,9 @@ class FakeEngines:
         zip_pcb = b"(kicad_pcb stale)\n" if self.zip_pcb_stale else pcb.read_bytes()
         with zipfile.ZipFile(output_dir / "kicad_project.zip", "w") as zf:
             zf.writestr(pcb.name, zip_pcb)
-            for source in readiness_cmd._project_dependencies(pcb):
+            for source in readiness_cmd._project_dependencies(pcb, Path(pcb.anchor)):
+                if not source.is_relative_to(pcb.parent):
+                    continue
                 zf.write(source, source.relative_to(pcb.parent).as_posix())
         (output_dir / "manifest.json").write_text(
             json.dumps({"version": "1.0", "manufacturer": mfr, "files": {}}, indent=2)

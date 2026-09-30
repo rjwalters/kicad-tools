@@ -464,6 +464,7 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--pcb-only` | Bare-board package; makes no component procurement or assembly claim |
 | `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
 | `--sch PATH` | Path to the `.kicad_sch` (auto-detected by default) |
+| `--project-root DIR` | Ancestor of the board directory that bounds where out-of-directory dependencies (a schematic hierarchy, sibling `symbols/` libraries referenced as `${KIPRJMOD}/../...`) may be collected from. Only referenced files are staged, hashed (`external_inputs` in `readiness.json`) and archived, root-relative, in `kicad_project.zip`; anything outside it, missing, symlink-escaping or a whole ancestor directory is refused. |
 | `--net-class-map PATH` | Net-class map sidecar (auto-discovered by default) |
 | `--ack-warnings RULES` | Comma-separated `rule_id`s whose assembly-affecting warnings are explicitly accepted |
 | `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
