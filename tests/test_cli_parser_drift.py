@@ -621,7 +621,7 @@ INNER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
 OUTER_ONLY_CHECK_ALLOWLIST: frozenset[str] = frozenset(set())
 
 
-def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
+def _inner_check_parser(prog: str = "kct check") -> argparse.ArgumentParser:
     """Capture the inner ``check_cmd.main`` parser without parsing argv.
 
     ``prog`` is parameterised ONLY so the vacuity control below can prove
@@ -657,7 +657,12 @@ def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
         "check_cmd.main's prog string has changed; update "
         "_inner_check_parser_flags rather than letting this test go vacuous"
     )
-    return _flags_from_parser(captured["parser"])
+    return captured["parser"]
+
+
+def _inner_check_parser_flags(prog: str = "kct check") -> set[str]:
+    """Return the ``--long-form`` flags of the inner ``check_cmd`` parser."""
+    return _flags_from_parser(_inner_check_parser(prog))
 
 
 def test_check_inner_only_flags_are_in_allowlist():
@@ -954,6 +959,165 @@ def test_check_shim_omits_drifted_flags_when_unset():
         "an empty --waivers path should be treated as absent (matching the "
         f"--net-class-map truthiness guard); got {sub_argv}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ``check`` type/default parity (#5810)
+# ---------------------------------------------------------------------------
+#
+# The containment tests above only prove a flag is *present* on both
+# parsers.  #5810 was the next rung of the same bug class: ``--copper`` was
+# on both, but the outer parser declared ``type=float, default=1.0`` while
+# the inner one takes a raw string (``default=None``).  ``kct check --copper
+# outer=2,inner=0.5`` therefore died in argparse with ``invalid float
+# value`` before the shim ever ran, and the shim's ``!= 1.0`` guard silently
+# dropped an explicit ``--copper 1``.  The tests below compare the argparse
+# ``type`` and ``default`` of every flag declared on BOTH check parsers.
+
+
+def _actions_by_long_flag(parser: argparse.ArgumentParser) -> dict[str, argparse.Action]:
+    """Map each ``--long-form`` option string on ``parser`` to its action."""
+    return {
+        option_string: action
+        for action in parser._actions
+        for option_string in action.option_strings
+        if option_string.startswith("--")
+    }
+
+
+def _outer_subparser(name: str) -> argparse.ArgumentParser:
+    """Return the named outer ``kct`` subparser object."""
+    from kicad_tools.cli.parser import create_parser
+
+    main_parser = create_parser()
+    for action in main_parser._actions:
+        choices = getattr(action, "choices", None)
+        if choices and name in choices:
+            return choices[name]
+    raise AssertionError(f"could not find {name!r} subparser on outer parser")
+
+
+# Pre-existing, understood ``type=`` drift between the outer ``kct check``
+# subparser and the inner ``check_cmd.py`` parser.  Each entry must say why
+# the mismatch is harmless.  A new entry is almost always a bug: share the
+# argument definition instead (see ``add_check_copper_argument``).
+CHECK_TYPE_DRIFT_ALLOWLIST: dict[str, str] = {
+    # Outer keeps the raw string; the shim forwards ``str(value)`` and the
+    # inner parser converts it to ``Path``.  Same accepted inputs.
+    "--mask-copper-config": "outer str, inner Path; shim forwards str()",
+}
+
+# Pre-existing, understood ``default=`` drift.  Same rules as above.
+CHECK_DEFAULT_DRIFT_ALLOWLIST: dict[str, str] = {
+    # Outer default 2 vs inner None (auto-detect from the board).  The shim
+    # forwards only ``!= 2``, so an omitted flag still auto-detects -- but an
+    # EXPLICIT ``--layers 2`` is dropped too.  Same shape as the #5810
+    # ``--copper 1`` bug; left for a follow-up to keep #5810 scoped.
+    "--layers": "outer 2 vs inner None; shim forwards only != 2",
+    # Outer None sentinel; the shim forwards only when set so the inner
+    # parser's 15.0mm default stays the single source of truth (#4595).
+    "--sch-field-threshold": "outer None sentinel, inner 15.0; forwarded only when set",
+}
+
+
+def _check_type_default_drift() -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``({flag: detail}, {flag: detail})`` for type / default drift."""
+    inner = _actions_by_long_flag(_inner_check_parser())
+    outer = _actions_by_long_flag(_outer_subparser("check"))
+    type_drift: dict[str, str] = {}
+    default_drift: dict[str, str] = {}
+    for flag in sorted(set(inner) & set(outer)):
+        i, o = inner[flag], outer[flag]
+        if i.type != o.type:
+            type_drift[flag] = f"inner type={i.type!r}, outer type={o.type!r}"
+        if i.default != o.default:
+            default_drift[flag] = f"inner default={i.default!r}, outer default={o.default!r}"
+    return type_drift, default_drift
+
+
+def test_check_shared_flags_agree_on_type_and_default():
+    """Every flag on both check parsers must share ``type`` and ``default``.
+
+    Generalises the #5810 ``--copper`` pin: a flag whose outer ``type=``
+    is narrower than the inner one rejects inputs the implementation
+    accepts; a flag whose outer ``default=`` differs changes behaviour when
+    the flag is omitted (or, via a ``!= default`` shim guard, silently drops
+    an explicit value equal to the outer default).
+    """
+    type_drift, default_drift = _check_type_default_drift()
+    unexpected = [
+        f"{flag}: {detail}"
+        for flag, detail in type_drift.items()
+        if flag not in CHECK_TYPE_DRIFT_ALLOWLIST
+    ] + [
+        f"{flag}: {detail}"
+        for flag, detail in default_drift.items()
+        if flag not in CHECK_DEFAULT_DRIFT_ALLOWLIST
+    ]
+    if unexpected:
+        pytest.fail(
+            "Argparse type/default drift between 'kct check' (parser.py) and "
+            "check_cmd.py:\n  "
+            + "\n  ".join(unexpected)
+            + "\n\nShare one add_argument definition between both parsers "
+            "(see copper_weight.add_check_copper_argument, #5810), or, if the "
+            "mismatch is provably harmless, allowlist it with justification in "
+            "CHECK_TYPE_DRIFT_ALLOWLIST / CHECK_DEFAULT_DRIFT_ALLOWLIST."
+        )
+
+
+def test_check_type_default_drift_allowlists_are_not_stale():
+    """An allowlisted flag that no longer drifts must be removed."""
+    type_drift, default_drift = _check_type_default_drift()
+    stale = [f"type: {f}" for f in CHECK_TYPE_DRIFT_ALLOWLIST if f not in type_drift] + [
+        f"default: {f}" for f in CHECK_DEFAULT_DRIFT_ALLOWLIST if f not in default_drift
+    ]
+    assert not stale, f"stale type/default drift allowlist entries: {stale}"
+
+
+def test_copper_type_and_default_match_on_both_check_parsers():
+    """Direct regression pin for #5810: raw-string ``--copper``, ``None`` default."""
+    inner = _actions_by_long_flag(_inner_check_parser())["--copper"]
+    outer = _actions_by_long_flag(_outer_subparser("check"))["--copper"]
+    for side, action in (("inner", inner), ("outer", outer)):
+        assert action.type is None, f"{side} --copper must stay a raw string, got {action.type!r}"
+        assert action.default is None, (
+            f"{side} --copper default must be None (defer to board stackup / "
+            f"profile), got {action.default!r}"
+        )
+        assert "-c" in action.option_strings, f"{side} --copper lost its -c alias"
+
+
+@pytest.mark.parametrize(
+    ("cli", "forwarded"),
+    [
+        (["--copper", "outer=2,inner=0.5"], "outer=2,inner=0.5"),
+        (["-c", "outer=2"], "outer=2"),
+        (["--copper", "2"], "2"),
+        (["--copper", "1"], "1"),
+        (["--copper", "1.0"], "1.0"),
+        ([], None),
+    ],
+    ids=["keyed", "keyed-short", "scalar", "explicit-1", "explicit-1.0", "omitted"],
+)
+def test_check_shim_forwards_copper_verbatim(cli, forwarded):
+    """The shim forwards ``--copper`` verbatim, and only when supplied (#5810).
+
+    An omitted flag must not be forwarded (so ``check_cmd`` resolves the
+    board stackup / profile default); a supplied value -- including ``1``,
+    which the old ``!= 1.0`` guard dropped -- is forwarded unmangled.
+    """
+    from kicad_tools.cli.commands.validation import run_check_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["check", "board.kicad_pcb", *cli])
+    with patch("kicad_tools.cli.check_cmd.main", return_value=0) as inner_main:
+        assert run_check_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    if forwarded is None:
+        assert "--copper" not in sub_argv, f"omitted --copper was forwarded: {sub_argv}"
+    else:
+        assert sub_argv[sub_argv.index("--copper") + 1] == forwarded, sub_argv
 
 
 # ---------------------------------------------------------------------------
