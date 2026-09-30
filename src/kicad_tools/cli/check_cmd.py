@@ -38,7 +38,7 @@ from kicad_tools.analysis.routing_quality import (
     evaluate_routing_quality_thresholds,
     routing_quality_gate_dict,
 )
-from kicad_tools.cli.copper_weight import parse_copper_weight_arg
+from kicad_tools.cli.copper_weight import add_check_copper_argument, parse_copper_weight_arg
 from kicad_tools.manufacturers import (
     get_manufacturer_ids,
     get_profile,
@@ -1399,25 +1399,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Number of copper layers (auto-detected from board if not specified)",
     )
-    parser.add_argument(
-        "--copper",
-        "-c",
-        default=None,
-        metavar="OZ",
-        help=(
-            "Copper weight in oz for the ampacity gate. Scalar form "
-            "'--copper 2' applies to both outer and inner layers; keyed "
-            "form '--copper outer=2,inner=0.5' sets each layer class "
-            "independently (e.g. a JLCPCB 2oz-outer / 0.5oz-inner order, "
-            "where the inner stays 0.5oz even on a 2oz build). Precedence: "
-            "explicit --copper (keyed > scalar) > the board's declared "
-            "(setup (stackup ...)) copper weight > profile default "
-            "(1oz outer / 0.5oz inner). When --copper is omitted, an "
-            "explicit board stackup is the source of truth; a stackup that "
-            "disagrees with an explicit --copper emits a WARNING and is "
-            "fatal under --strict."
-        ),
-    )
+    # Issue #5810: shared with the unified ``kct check`` subparser.
+    add_check_copper_argument(parser)
     parser.add_argument(
         "--emit-dru",
         dest="emit_dru",

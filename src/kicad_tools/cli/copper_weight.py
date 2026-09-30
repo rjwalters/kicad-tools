@@ -12,7 +12,50 @@ Behavior is unchanged from the original ``check_cmd._parse_copper_weight_arg``
 
 from __future__ import annotations
 
-__all__ = ["parse_copper_weight_arg"]
+import argparse
+
+__all__ = ["add_check_copper_argument", "parse_copper_weight_arg"]
+
+#: Help text for ``kct check --copper``.  Shared by the standalone
+#: ``check_cmd`` parser and the unified ``kct check`` subparser so the two
+#: cannot drift apart again (Issue #5810).
+CHECK_COPPER_HELP = (
+    "Copper weight in oz for the ampacity gate. Scalar form "
+    "'--copper 2' applies to both outer and inner layers; keyed "
+    "form '--copper outer=2,inner=0.5' sets each layer class "
+    "independently (e.g. a JLCPCB 2oz-outer / 0.5oz-inner order, "
+    "where the inner stays 0.5oz even on a 2oz build). Precedence: "
+    "explicit --copper (keyed > scalar) > the board's declared "
+    "(setup (stackup ...)) copper weight > profile default "
+    "(1oz outer / 0.5oz inner). When --copper is omitted, an "
+    "explicit board stackup is the source of truth; a stackup that "
+    "disagrees with an explicit --copper emits a WARNING and is "
+    "fatal under --strict."
+)
+
+
+def add_check_copper_argument(parser: argparse.ArgumentParser) -> None:
+    """Declare ``--copper/-c`` for ``kct check`` on ``parser`` (Issue #5810).
+
+    The value is kept as a **raw string** (no ``type=``) with a ``None``
+    default: argparse must not coerce it, because the keyed form
+    (``outer=2,inner=0.5``) is not a float, and ``None`` is the sentinel
+    that lets the board's declared stackup / profile default win when the
+    flag is omitted.  The string is parsed later by
+    :func:`parse_copper_weight_arg`.
+
+    Both the standalone ``check_cmd`` parser and the unified ``kct check``
+    subparser call this helper.  Before #5810 the unified parser kept its
+    own ``type=float, default=1.0`` spec, so ``kct check --copper
+    outer=2,inner=0.5`` died with ``invalid float value``.
+    """
+    parser.add_argument(
+        "--copper",
+        "-c",
+        default=None,
+        metavar="OZ",
+        help=CHECK_COPPER_HELP,
+    )
 
 
 def parse_copper_weight_arg(raw: str) -> tuple[float | None, float | None]:

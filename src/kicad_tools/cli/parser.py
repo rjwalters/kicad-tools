@@ -15,6 +15,7 @@ from kicad_tools import __version__
 # TYPE_CHECKING), so this costs ~2.5 ms on top of an already-imported
 # ``kicad_tools`` -- measured, and well under 1% of CLI startup.
 from kicad_tools.benchmark.cases import Difficulty
+from kicad_tools.cli.copper_weight import add_check_copper_argument
 from kicad_tools.cli.format_options import add_format_flag
 from kicad_tools.manufacturers import get_all_manufacturer_names
 
@@ -744,7 +745,10 @@ def _add_check_parser(subparsers) -> None:
         ),
     )
     check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
-    check_parser.add_argument("--copper", "-c", type=float, default=1.0, help="Copper weight (oz)")
+    # Issue #5810: shared definition with check_cmd.py -- a raw string with a
+    # None default, so the keyed form (outer=2,inner=0.5) parses and an
+    # omitted flag defers to the board stackup / profile default.
+    add_check_copper_argument(check_parser)
     check_parser.add_argument(
         "--only",
         dest="only_checks",

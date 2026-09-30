@@ -303,3 +303,96 @@ class TestTier3KeyedCopper:
         rc = _run_check(pcb, ncm, report, extra=["--copper", "outer=2,bogus=3"])
         assert rc == 1
         assert "Error:" in capsys.readouterr().err
+
+
+def _run_kct_check(pcb: Path, ncm: Path, report: Path, *, extra: list[str] | None = None) -> int:
+    """Run ``kct check`` through the unified entry point (Issue #5810).
+
+    ``kicad_tools.cli:main`` is the function the installed ``kct`` /
+    ``kicad-tools`` console scripts call, so this exercises the unified
+    parser (``parser.py``) and the forwarding shim
+    (``commands/validation.py``) -- the two hops that drifted -- rather than
+    only ``check_cmd.main``.
+    """
+    from kicad_tools.cli import main
+
+    argv = [
+        "check",
+        str(pcb),
+        "--mfr",
+        "jlcpcb",
+        "--net-class-map",
+        str(ncm),
+        "--output",
+        str(report),
+        "--format",
+        "json",
+    ]
+    if extra:
+        argv.extend(extra)
+    return main(argv)
+
+
+class TestUnifiedKctCheckCopper:
+    """Issue #5810: ``kct check --copper`` must match standalone ``check_cmd``.
+
+    The unified parser used to declare ``--copper`` as ``type=float,
+    default=1.0``, so the keyed form died with ``invalid float value`` and
+    the shim's ``!= 1.0`` guard silently dropped an explicit ``--copper 1``.
+    """
+
+    @pytest.mark.parametrize(
+        ("stackup", "extra", "expected_errors"),
+        [
+            # Keyed form: 5.0 mm clears the 2 oz outer floor -> PASS.
+            (False, ["--copper", "outer=2,inner=0.5"], 0),
+            # Scalar form still works: 2 oz -> PASS.
+            (False, ["--copper", "2"], 0),
+            # Omitted: the declared 2 oz stackup wins (not a hardcoded 1.0).
+            (True, [], 0),
+            # Omitted, no stackup: 1 oz profile default -> FAIL.
+            (False, [], 1),
+            # Explicit 1 oz against a 2 oz stackup must be honoured (FAIL);
+            # the old ``!= 1.0`` guard dropped it and the stackup won.
+            (True, ["--copper", "1"], 1),
+        ],
+        ids=["keyed", "scalar", "omitted-stackup", "omitted-default", "explicit-1oz"],
+    )
+    def test_kct_check_matches_standalone(
+        self, tmp_path: Path, stackup: bool, extra: list[str], expected_errors: int
+    ):
+        pcb = _write_board(tmp_path, 5.0, stackup=stackup)
+        ncm = _write_ncm(tmp_path)
+
+        report_kct = tmp_path / "kct.json"
+        rc_kct = _run_kct_check(pcb, ncm, report_kct, extra=extra)
+        report_std = tmp_path / "standalone.json"
+        rc_std = _run_check(pcb, ncm, report_std, extra=extra)
+
+        kct_errors = _ampacity_errors(report_kct)
+        std_errors = _ampacity_errors(report_std)
+        assert len(kct_errors) == expected_errors
+        assert rc_kct == rc_std
+        assert [e["required_value"] for e in kct_errors] == [
+            e["required_value"] for e in std_errors
+        ]
+
+    def test_installed_entrypoint_accepts_keyed_copper(self, tmp_path: Path):
+        """The real console-script path must not reject the keyed form.
+
+        Mirrors the issue's minimal repro: a nonexistent board separates
+        option parsing (argparse exits 2) from input validation (exit 1).
+        """
+        import subprocess
+        import sys
+
+        missing = tmp_path / "DOES_NOT_EXIST.kicad_pcb"
+        for module in ("kicad_tools.cli", "kicad_tools.cli.check_cmd"):
+            argv = [sys.executable, "-m", module]
+            if module == "kicad_tools.cli":
+                argv.append("check")
+            argv += [str(missing), "--copper", "outer=2,inner=0.5"]
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            assert "invalid float value" not in proc.stderr, (module, proc.stderr)
+            assert proc.returncode == 1, (module, proc.returncode, proc.stderr)
+            assert "Path not found" in proc.stderr, (module, proc.stderr)

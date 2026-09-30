@@ -277,8 +277,14 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--mfr", args.mfr])
     if args.layers != 2:
         sub_argv.extend(["--layers", str(args.layers)])
-    if args.copper != 1.0:
-        sub_argv.extend(["--copper", str(args.copper)])
+    # Issue #5810: --copper is a raw string (scalar "2" or keyed
+    # "outer=2,inner=0.5") with a None default, forwarded verbatim whenever
+    # it was supplied -- including an explicit "1", which the old
+    # ``!= 1.0`` guard silently dropped (letting the board stackup override
+    # an explicit 1oz request).  Omitted stays omitted so check_cmd resolves
+    # the board stackup / profile default itself.
+    if args.copper is not None:
+        sub_argv.extend(["--copper", args.copper])
     if args.only_checks:
         sub_argv.extend(["--only", args.only_checks])
     if args.skip_checks:
