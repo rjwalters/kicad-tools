@@ -601,7 +601,11 @@ class ReadinessOptions:
     archive: bool = True
     net_class_map: Path | None = None
     hv_net_class: str = "HV"
-    hv_requirement: str | None = None
+    hv_min: float | None = None
+    hv_standard: str | None = None
+    hv_working_voltage: float | None = None
+    hv_pollution_degree: int | None = None
+    hv_material_group: str = "IIIa"
     fill_tolerance_mm2: float = DEFAULT_FILL_TOLERANCE_MM2
     check_args: tuple[str, ...] = ()
     recipe: str | None = None
@@ -730,7 +734,11 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             archive=not args.no_archive,
             net_class_map=net_class_map,
             hv_net_class=args.hv_net_class,
-            hv_requirement=args.hv_requirement,
+            hv_min=args.hv_min,
+            hv_standard=args.hv_standard,
+            hv_working_voltage=args.hv_working_voltage,
+            hv_pollution_degree=args.hv_pollution_degree,
+            hv_material_group=args.hv_material_group,
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
         ),
@@ -1148,6 +1156,16 @@ def _gate_warning_review(
 def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
     """Gate 4 (conditional) — refuse to sign off an un-evaluated HV path.
 
+    Runs the SAME creepage/clearance audit ``kct audit --hv-standard`` uses
+    (:func:`kicad_tools.audit.check_isolation`, extracted from
+    ``ManufacturingAudit._check_isolation`` for exactly this reuse) against
+    the checked PCB and net-class-map sidecar.  A free-text description of
+    the requirement can no longer establish ``passed`` by itself (issue
+    #5807) — only a measured, thresholded creepage/clearance census bound to
+    *this* PCB and net-class-map can.  There is no stored/cached evidence
+    file this gate trusts as input, so there is nothing that can go stale:
+    every run recomputes the census from the current PCB and sidecar bytes.
+
     Returns ``None`` for boards that declare no HV net class, so the check is
     omitted entirely rather than recorded as a vacuous pass.
     """
@@ -1162,24 +1180,122 @@ def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
     )
     if not hv_nets:
         return None
-    if not options.hv_requirement:
+
+    from kicad_tools.audit import check_isolation
+    from kicad_tools.schema.pcb import PCB
+
+    options.evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = options.evidence_dir / "hv-isolation.json"
+    evidence_rel = _rel(options, evidence_path)
+
+    try:
+        pcb = PCB.load(str(options.pcb))
+    except Exception as exc:
+        evidence = {
+            "pcb_sha256": _sha256_file(options.pcb) if options.pcb.is_file() else None,
+            "error": f"PCB could not be loaded for the isolation audit: {exc}",
+        }
+        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
         return CheckOutcome(
             name="hv_isolation",
             status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=f"HV nets declared but the PCB could not be loaded for isolation audit: {exc}",
+            blockers=[f"Isolation audit could not load the checked PCB: {exc}"],
+        )
+
+    status = check_isolation(
+        pcb,
+        options.pcb,
+        hv_net_class=options.hv_net_class,
+        net_class_map_path=options.net_class_map,
+        hv_min_mm=options.hv_min,
+        hv_standard=options.hv_standard,
+        hv_working_voltage=options.hv_working_voltage,
+        hv_pollution_degree=options.hv_pollution_degree,
+        hv_material_group=options.hv_material_group,
+    )
+    evidence_path.write_text(
+        json.dumps(
+            {
+                "pcb_sha256": _sha256_file(options.pcb),
+                "net_class_map_sha256": _sha256_file(options.net_class_map),
+                "hv_net_class": options.hv_net_class,
+                "hv_min_mm": options.hv_min,
+                "hv_standard": options.hv_standard,
+                "hv_working_voltage": options.hv_working_voltage,
+                "hv_pollution_degree": options.hv_pollution_degree,
+                "hv_material_group": options.hv_material_group,
+                "isolation": status.to_dict(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    if status.mains_suspected_unclassified:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=FAILED,
+            evidence=evidence_rel,
+            detail=status.details,
+            blockers=[status.details],
+        )
+    if not status.hv_present:
+        # The sidecar declares an HV class but the audited PCB resolved none —
+        # a net-class-map/PCB mismatch (e.g. a sidecar left over from a
+        # different board revision).  Never a silent skip once we got this far.
+        return CheckOutcome(
+            name="hv_isolation",
+            status=NOT_RUN,
+            evidence=evidence_rel,
             detail=(
-                f"{len(hv_nets)} HV net(s) present with no isolation requirement "
-                "specified (--hv-requirement)."
+                f"net-class-map declares {len(hv_nets)} HV net(s) but the audited "
+                "PCB resolved none; the sidecar may not match this board."
             ),
             blockers=[
-                f"HV nets present ({', '.join(hv_nets[:5])}) but no isolation "
-                "requirement was supplied; run `kct audit --hv-standard ...` and "
-                "record the verdict with --hv-requirement."
+                "HV net-class-map/PCB mismatch: the checked PCB resolves no HV "
+                "nets under the declared sidecar."
             ],
+        )
+    if status.could_not_verify:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=status.details,
+            blockers=[f"Isolation audit could not verify: {status.details}"],
+        )
+    if not status.threshold_supplied:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=NOT_RUN,
+            evidence=evidence_rel,
+            detail=(
+                f"{len(status.hv_nets)} HV net(s) present with no isolation "
+                "requirement specified (--hv-min / --hv-standard)."
+            ),
+            blockers=[
+                f"HV nets present ({', '.join(status.hv_nets[:5])}) but no isolation "
+                "requirement was supplied; pass --hv-standard (with "
+                "--hv-working-voltage/--hv-pollution-degree) or --hv-min, "
+                "the same inputs `kct audit --hv-standard ...` requires."
+            ],
+        )
+    if not status.passed:
+        return CheckOutcome(
+            name="hv_isolation",
+            status=FAILED,
+            evidence=evidence_rel,
+            detail=status.details,
+            blockers=[f"HV isolation audit failed: {status.details}"],
         )
     return CheckOutcome(
         name="hv_isolation",
         status=PASSED,
-        detail=f"{len(hv_nets)} HV net(s) gated against: {options.hv_requirement}.",
+        evidence=evidence_rel,
+        detail=status.details,
     )
 
 
@@ -2264,12 +2380,48 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help="Net-class name identifying high-voltage nets (default: HV)",
     )
     parser.add_argument(
-        "--hv-requirement",
+        "--hv-min",
+        dest="hv_min",
+        type=float,
         default=None,
         help=(
-            "Record the isolation requirement an HV board was gated against "
-            "(e.g. 'iec60664 250Vrms PD2 MGII'). Required when HV nets exist."
+            "Manual required creepage (surface-path) distance in mm (phase-1). "
+            "When combined with --hv-standard the stricter creepage bound governs."
         ),
+    )
+    parser.add_argument(
+        "--hv-standard",
+        dest="hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table (iec60664 / iec62368) instead of --hv-min. Requires "
+            "--hv-working-voltage and --hv-pollution-degree. Engineering aid, "
+            "NOT a certification."
+        ),
+    )
+    parser.add_argument(
+        "--hv-working-voltage",
+        dest="hv_working_voltage",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    parser.add_argument(
+        "--hv-pollution-degree",
+        dest="hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    parser.add_argument(
+        "--hv-material-group",
+        dest="hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     parser.add_argument(
         "--fill-tolerance",

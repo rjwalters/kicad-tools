@@ -467,7 +467,11 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | `--include-tht` | Accept through-hole parts in the CPL (excluded by default) |
 | `--no-archive` | Skip building `output/manufacturing.zip` |
 | `--hv-net-class NAME` | Net-class name identifying high-voltage nets (default: `HV`) |
-| `--hv-requirement TEXT` | Isolation requirement an HV board was gated against (required when HV nets exist) |
+| `--hv-min MM` | Manual required creepage distance in mm (phase-1; stricter of this and `--hv-standard` governs) |
+| `--hv-standard {iec60664,iec62368}` | Derive required creepage AND clearance from an IEC table; requires `--hv-working-voltage`/`--hv-pollution-degree` |
+| `--hv-working-voltage V` | RMS working voltage in volts (required with `--hv-standard`) |
+| `--hv-pollution-degree {1,2,3}` | IEC pollution degree (required with `--hv-standard`) |
+| `--hv-material-group {I,II,IIIa,IIIb}` | Insulation material group by CTI (default: `IIIa`) |
 | `--fill-tolerance MM2` | Per-layer filled-copper tolerance for the saved-vs-refilled equivalence check |
 | `--format {text,json}` | Output format (default: `text`) |
 
@@ -482,6 +486,13 @@ is `blocked` (a gate failed) or `unverified` (a gate could not run), always with
 named `blockers`. **The command exits non-zero for anything other than `ready`
 and has no flag that produces `ready` on a partial run** — a gate that cannot
 run is a blocker, not a waiver.
+
+The conditional `hv_isolation` gate (when the `--net-class-map` sidecar
+declares an `HV` net class) runs the same measured creepage/clearance audit
+`kct audit --hv-standard`/`--hv-min` uses
+(`kicad_tools.audit.check_isolation`) against the checked PCB — a description
+of the requirement is recorded in the report but can never by itself produce
+`passed`; only a thresholded census bound to that PCB and net-class-map can.
 
 **Examples:**
 ```bash

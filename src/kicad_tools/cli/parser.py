@@ -7363,14 +7363,49 @@ def _add_readiness_parser(subparsers) -> None:
         help="Net-class name identifying high-voltage nets (default: HV)",
     )
     rd_parser.add_argument(
-        "--hv-requirement",
-        dest="readiness_hv_requirement",
-        metavar="TEXT",
+        "--hv-min",
+        dest="readiness_hv_min",
+        metavar="MM",
+        type=float,
         default=None,
         help=(
-            "Record the isolation requirement an HV board was gated against. "
-            "Required when HV nets are present; otherwise the HV gate is not run."
+            "Manual required creepage (surface-path) distance in mm (phase-1). "
+            "When combined with --hv-standard the stricter bound governs."
         ),
+    )
+    rd_parser.add_argument(
+        "--hv-standard",
+        dest="readiness_hv_standard",
+        choices=["iec60664", "iec62368"],
+        default=None,
+        help=(
+            "Derive the required creepage AND clearance from an IEC standard "
+            "table instead of --hv-min. Requires --hv-working-voltage and "
+            "--hv-pollution-degree. Engineering aid, NOT a certification."
+        ),
+    )
+    rd_parser.add_argument(
+        "--hv-working-voltage",
+        dest="readiness_hv_working_voltage",
+        metavar="V",
+        type=float,
+        default=None,
+        help="RMS working voltage in volts (required with --hv-standard).",
+    )
+    rd_parser.add_argument(
+        "--hv-pollution-degree",
+        dest="readiness_hv_pollution_degree",
+        type=int,
+        choices=[1, 2, 3],
+        default=None,
+        help="IEC pollution degree 1/2/3 (required with --hv-standard).",
+    )
+    rd_parser.add_argument(
+        "--hv-material-group",
+        dest="readiness_hv_material_group",
+        choices=["I", "II", "IIIa", "IIIb"],
+        default="IIIa",
+        help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     rd_parser.add_argument(
         "--fill-tolerance",
