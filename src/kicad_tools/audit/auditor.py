@@ -311,6 +311,243 @@ class IsolationStatus:
         }
 
 
+def check_isolation(
+    pcb: PCB,
+    pcb_path: Path | None,
+    *,
+    hv_net_class: str = "HV",
+    net_class_map_path: str | Path | None = None,
+    hv_min_mm: float | None = None,
+    hv_standard: str | None = None,
+    hv_working_voltage: float | None = None,
+    hv_pollution_degree: int | None = None,
+    hv_material_group: str = "IIIa",
+) -> IsolationStatus:
+    """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
+
+    Reuses the phase-1/phase-2 creepage engine end-to-end -- HV-net
+    resolution (:func:`resolve_hv_nets`), the surface-path census
+    (:func:`compute_creepage_census`), and (in standard mode) the IEC
+    table derivation (:meth:`CreepageStandard.required_creepage` /
+    ``required_clearance``).  No geometry or table math is reimplemented.
+
+    Extracted from :meth:`ManufacturingAudit._check_isolation` (issue #5807)
+    so a second caller -- the ``kct readiness`` HV gate -- can run the exact
+    same audit machinery ``kct audit --hv-standard`` uses, rather than
+    re-deriving (or worse, trusting free text for) a verdict.
+
+    The returned status gates a verdict: a resolved below-standard pair ->
+    hard FAIL; HV present but not gateable (no threshold / shapely absent /
+    lookup error) -> WARNING; no HV nets -> inert (``checked=False``).
+    """
+    status = IsolationStatus(standard=hv_standard)
+
+    # Parse the net-class-map sidecar with the SAME block ``kct check``'s
+    # DRC rules use so HV selection agrees with the diff-pair DRC rules
+    # (issue #2684).  Canonical loader (issue #4683): the board path resolves
+    # layer-name tokens like "B.Cu" so the HV ISOLATION SAFETY GATE cannot
+    # silently run without its HV classes on a sidecar that `kct route`
+    # accepts.
+    resolved_net_class_map = None
+    if net_class_map_path is not None:
+        try:
+            from kicad_tools.router.rules import net_class_map_from_path
+
+            resolved_net_class_map = net_class_map_from_path(
+                Path(net_class_map_path), pcb_path=pcb_path
+            )
+        except (OSError, ValueError, TypeError) as e:
+            logger.warning(
+                "Isolation check: failed to load net-class-map from %s: %s",
+                net_class_map_path,
+                e,
+            )
+
+    from kicad_tools.creepage.engine import resolve_hv_nets
+
+    try:
+        hv_nets = resolve_hv_nets(pcb, hv_net_class, resolved_net_class_map)
+    except Exception as e:  # pragma: no cover - defensive
+        # Never let HV-net resolution crash the whole audit.
+        logger.warning("Isolation check: HV-net resolution failed: %s", e)
+        status.could_not_verify = True
+        status.hv_present = True
+        status.details = f"HV-net resolution failed: {e}"
+        return status
+
+    if not hv_nets:
+        # Vacuity guard (issue #4354): an empty HV group is only legitimately
+        # "inert" on a genuinely low-voltage board.  When the board carries
+        # mains-named copper OR a mains-level working voltage was supplied,
+        # the HV insulation path was never evaluated -- a safety-gate false
+        # pass.  Hard-fail the verdict (mirrors the LVS zero-bound guard,
+        # #4011) rather than silently reporting READY.
+        from kicad_tools.creepage.engine import (
+            SELV_WORKING_VOLTAGE_V,
+            mains_suspect_nets,
+        )
+
+        suspects = mains_suspect_nets(pcb)
+        wv = hv_working_voltage
+        high_working_voltage = wv is not None and float(wv) >= SELV_WORKING_VOLTAGE_V
+        if suspects or high_working_voltage:
+            status.mains_suspected_unclassified = True
+            status.mains_suspect_nets = suspects
+            reasons = []
+            if suspects:
+                shown = ", ".join(suspects[:8])
+                more = "" if len(suspects) <= 8 else f" (+{len(suspects) - 8} more)"
+                reasons.append(f"mains-named nets present ({shown}{more})")
+            if high_working_voltage and wv is not None:
+                reasons.append(
+                    f"working voltage {float(wv):g} V >= {SELV_WORKING_VOLTAGE_V:g} V SELV boundary"
+                )
+            status.details = (
+                f"0 '{hv_net_class}' nets resolved but the board looks "
+                f"like mains/HV ({'; '.join(reasons)}) -- the HV insulation "
+                "path was NOT evaluated.  Map the mains nets to the HV class "
+                "(--net-class-map) or set --hv-net-class.  NOT_READY."
+            )
+            return status
+        # No HV-class nets on a genuinely low-voltage board -> inert.
+        status.details = f"No '{hv_net_class}' nets found -- HV/isolation audit skipped."
+        return status
+
+    status.hv_present = True
+    status.hv_nets = [hv_nets[num] for num in sorted(hv_nets)]
+
+    threshold_supplied = hv_min_mm is not None or hv_standard is not None
+    status.threshold_supplied = threshold_supplied
+
+    # Shapely is required for the surface-path census.  Guard it fail-loud
+    # (mirrors the connectivity could-not-verify policy) so a missing core
+    # dependency degrades to WARNING rather than crashing the audit.
+    from kicad_tools._shapely import has_shapely
+
+    if not has_shapely():
+        status.could_not_verify = True
+        status.details = (
+            "HV nets present but creepage analysis requires shapely "
+            "(not importable) -- isolation NOT verified."
+        )
+        return status
+
+    # Derive the required creepage/clearance from an IEC standard table when
+    # requested (phase-2), mirroring the ``kct creepage`` wiring exactly.
+    required_creepage_mm: float | None = None
+    required_clearance_mm: float | None = None
+    creepage_prov: dict | None = None
+    clearance_prov: dict | None = None
+    if hv_standard is not None:
+        from kicad_tools.creepage.standards import (
+            RMS_TO_PEAK,
+            StandardLookupError,
+            get_standard,
+        )
+
+        if hv_working_voltage is None or hv_pollution_degree is None:
+            status.could_not_verify = True
+            status.details = (
+                "HV standard supplied but --hv-working-voltage and "
+                "--hv-pollution-degree are both required -- isolation NOT verified."
+            )
+            return status
+        try:
+            std = get_standard(hv_standard)
+            required_creepage_mm, creepage_prov = std.required_creepage(
+                float(hv_working_voltage),
+                int(hv_pollution_degree),
+                hv_material_group,
+            )
+            peak_voltage = float(hv_working_voltage) * RMS_TO_PEAK
+            required_clearance_mm, clearance_prov = std.required_clearance(
+                peak_voltage, int(hv_pollution_degree)
+            )
+            status.standard_edition = std.edition
+        except StandardLookupError as e:
+            # Safety-critical: fail LOUD, never emit a guessed number.
+            status.could_not_verify = True
+            status.details = f"standard-table lookup failed: {e}"
+            return status
+
+    from kicad_tools.creepage.engine import compute_creepage_census
+
+    try:
+        report = compute_creepage_census(
+            pcb,
+            hv_nets,
+            hv_min_mm,
+            net_class=hv_net_class,
+            board=str(pcb_path) if pcb_path is not None else "",
+            required_creepage_mm=required_creepage_mm,
+            required_clearance_mm=required_clearance_mm,
+            standard=hv_standard,
+            standard_edition=status.standard_edition,
+            working_voltage=hv_working_voltage,
+            pollution_degree=hv_pollution_degree,
+            material_group=(hv_material_group if hv_standard is not None else None),
+            creepage_provenance=creepage_prov,
+            clearance_provenance=clearance_prov,
+        )
+    except Exception as e:
+        # A genuine census crash must NOT be coerced into a clean PASS.
+        logger.warning("Isolation check: creepage census failed: %s", e)
+        status.could_not_verify = True
+        status.details = f"creepage census could not run: {e}"
+        return status
+
+    status.report = report.to_dict()
+    status.pair_count = len(report.pairs)
+    status.required_creepage_mm = required_creepage_mm
+    status.required_clearance_mm = required_clearance_mm
+    if report.pairs:
+        status.min_creepage_mm = min(p.creepage_mm for p in report.pairs)
+        status.min_clearance_mm = min(p.clearance_mm for p in report.pairs)
+
+    if threshold_supplied:
+        # Fully gated: the verdict can hard-fail on this result.
+        status.checked = True
+        status.passed = report.passed
+        status.failing_pairs = [
+            {
+                "net_a": p.net_a,
+                "net_b": p.net_b,
+                "kind": p.kind,
+                "creepage_mm": round(p.creepage_mm, 4),
+                "clearance_mm": round(p.clearance_mm, 4),
+                "margin_mm": round(p.margin_mm, 4),
+                "required_creepage_mm": (
+                    round(p.governing_creepage_mm, 4) if p.governing_creepage_mm else None
+                ),
+                "required_clearance_mm": (
+                    round(p.required_clearance_mm, 4)
+                    if p.required_clearance_mm is not None
+                    else None
+                ),
+            }
+            for p in report.pairs
+            if not p.passed
+        ]
+        if status.passed:
+            status.details = (
+                f"All {status.pair_count} HV pair(s) clear the required creepage/clearance."
+            )
+        else:
+            status.details = (
+                f"{len(status.failing_pairs)}/{status.pair_count} HV pair(s) "
+                "below the required creepage/clearance."
+            )
+    else:
+        # HV present, census rendered informationally, but no requirement
+        # was supplied -> cannot gate (verdict downgrades to WARNING).
+        status.details = (
+            "HV nets present but no isolation requirement specified "
+            "(--hv-min / --hv-standard) -- cannot gate."
+        )
+
+    return status
+
+
 @dataclass
 class LayerUtilization:
     """PCB layer utilization statistics."""
@@ -1216,223 +1453,21 @@ class ManufacturingAudit:
     def _check_isolation(self, pcb: PCB) -> IsolationStatus:
         """Check HV creepage/clearance isolation (issue #4333, phase 3).
 
-        Reuses the phase-1/phase-2 creepage engine end-to-end -- HV-net
-        resolution (:func:`resolve_hv_nets`), the surface-path census
-        (:func:`compute_creepage_census`), and (in standard mode) the IEC
-        table derivation (:meth:`CreepageStandard.required_creepage` /
-        ``required_clearance``).  No geometry or table math is reimplemented.
-
-        The returned status gates the verdict via :attr:`AuditResult.verdict`:
-        a resolved below-standard pair -> ``NOT_READY``; HV present but not
-        gateable (no threshold / shapely absent / lookup error) -> ``WARNING``;
-        no HV nets -> inert (``checked=False``, no verdict change).
+        Thin instance wrapper over the standalone :func:`check_isolation`
+        (issue #5807), which a second caller -- the ``kct readiness`` HV gate
+        -- also uses so both entry points run the identical audit.
         """
-        status = IsolationStatus(standard=self.hv_standard)
-
-        # Parse the net-class-map sidecar with the SAME block _check_drc uses
-        # so HV selection agrees with the diff-pair DRC rules (issue #2684).
-        # Canonical loader (issue #4683): the board path resolves layer-name
-        # tokens like "B.Cu" so the HV ISOLATION SAFETY GATE cannot silently
-        # run without its HV classes on a sidecar that `kct route` accepts.
-        net_class_map = None
-        if self.net_class_map_path is not None:
-            try:
-                from kicad_tools.router.rules import net_class_map_from_path
-
-                net_class_map = net_class_map_from_path(
-                    self.net_class_map_path, pcb_path=self.pcb_path
-                )
-            except (OSError, ValueError, TypeError) as e:
-                logger.warning(
-                    "Isolation check: failed to load net-class-map from %s: %s",
-                    self.net_class_map_path,
-                    e,
-                )
-
-        from kicad_tools.creepage.engine import resolve_hv_nets
-
-        try:
-            hv_nets = resolve_hv_nets(pcb, self.hv_net_class, net_class_map)
-        except Exception as e:  # pragma: no cover - defensive
-            # Never let HV-net resolution crash the whole audit.
-            logger.warning("Isolation check: HV-net resolution failed: %s", e)
-            status.could_not_verify = True
-            status.hv_present = True
-            status.details = f"HV-net resolution failed: {e}"
-            return status
-
-        if not hv_nets:
-            # Vacuity guard (issue #4354): an empty HV group is only legitimately
-            # "inert" on a genuinely low-voltage board.  When the board carries
-            # mains-named copper OR a mains-level working voltage was supplied,
-            # the HV insulation path was never evaluated -- a safety-gate false
-            # pass.  Hard-fail the verdict (mirrors the LVS zero-bound guard,
-            # #4011) rather than silently reporting READY.
-            from kicad_tools.creepage.engine import (
-                SELV_WORKING_VOLTAGE_V,
-                mains_suspect_nets,
-            )
-
-            suspects = mains_suspect_nets(pcb)
-            wv = self.hv_working_voltage
-            high_working_voltage = wv is not None and float(wv) >= SELV_WORKING_VOLTAGE_V
-            if suspects or high_working_voltage:
-                status.mains_suspected_unclassified = True
-                status.mains_suspect_nets = suspects
-                reasons = []
-                if suspects:
-                    shown = ", ".join(suspects[:8])
-                    more = "" if len(suspects) <= 8 else f" (+{len(suspects) - 8} more)"
-                    reasons.append(f"mains-named nets present ({shown}{more})")
-                if high_working_voltage and wv is not None:
-                    reasons.append(
-                        f"working voltage {float(wv):g} V >= "
-                        f"{SELV_WORKING_VOLTAGE_V:g} V SELV boundary"
-                    )
-                status.details = (
-                    f"0 '{self.hv_net_class}' nets resolved but the board looks "
-                    f"like mains/HV ({'; '.join(reasons)}) -- the HV insulation "
-                    "path was NOT evaluated.  Map the mains nets to the HV class "
-                    "(--net-class-map) or set --hv-net-class.  NOT_READY."
-                )
-                return status
-            # No HV-class nets on a genuinely low-voltage board -> inert.
-            status.details = f"No '{self.hv_net_class}' nets found -- HV/isolation audit skipped."
-            return status
-
-        status.hv_present = True
-        status.hv_nets = [hv_nets[num] for num in sorted(hv_nets)]
-
-        threshold_supplied = self.hv_min_mm is not None or self.hv_standard is not None
-        status.threshold_supplied = threshold_supplied
-
-        # Shapely is required for the surface-path census.  Guard it fail-loud
-        # (mirrors the connectivity could-not-verify policy) so a missing core
-        # dependency degrades to WARNING rather than crashing the audit.
-        from kicad_tools._shapely import has_shapely
-
-        if not has_shapely():
-            status.could_not_verify = True
-            status.details = (
-                "HV nets present but creepage analysis requires shapely "
-                "(not importable) -- isolation NOT verified."
-            )
-            return status
-
-        # Derive the required creepage/clearance from an IEC standard table when
-        # requested (phase-2), mirroring the ``kct creepage`` wiring exactly.
-        required_creepage_mm: float | None = None
-        required_clearance_mm: float | None = None
-        creepage_prov: dict | None = None
-        clearance_prov: dict | None = None
-        if self.hv_standard is not None:
-            from kicad_tools.creepage.standards import (
-                RMS_TO_PEAK,
-                StandardLookupError,
-                get_standard,
-            )
-
-            if self.hv_working_voltage is None or self.hv_pollution_degree is None:
-                status.could_not_verify = True
-                status.details = (
-                    "HV standard supplied but --hv-working-voltage and "
-                    "--hv-pollution-degree are both required -- isolation NOT verified."
-                )
-                return status
-            try:
-                std = get_standard(self.hv_standard)
-                required_creepage_mm, creepage_prov = std.required_creepage(
-                    float(self.hv_working_voltage),
-                    int(self.hv_pollution_degree),
-                    self.hv_material_group,
-                )
-                peak_voltage = float(self.hv_working_voltage) * RMS_TO_PEAK
-                required_clearance_mm, clearance_prov = std.required_clearance(
-                    peak_voltage, int(self.hv_pollution_degree)
-                )
-                status.standard_edition = std.edition
-            except StandardLookupError as e:
-                # Safety-critical: fail LOUD, never emit a guessed number.
-                status.could_not_verify = True
-                status.details = f"standard-table lookup failed: {e}"
-                return status
-
-        from kicad_tools.creepage.engine import compute_creepage_census
-
-        try:
-            report = compute_creepage_census(
-                pcb,
-                hv_nets,
-                self.hv_min_mm,
-                net_class=self.hv_net_class,
-                board=str(self.pcb_path),
-                required_creepage_mm=required_creepage_mm,
-                required_clearance_mm=required_clearance_mm,
-                standard=self.hv_standard,
-                standard_edition=status.standard_edition,
-                working_voltage=self.hv_working_voltage,
-                pollution_degree=self.hv_pollution_degree,
-                material_group=(self.hv_material_group if self.hv_standard is not None else None),
-                creepage_provenance=creepage_prov,
-                clearance_provenance=clearance_prov,
-            )
-        except Exception as e:
-            # A genuine census crash must NOT be coerced into a clean PASS.
-            logger.warning("Isolation check: creepage census failed: %s", e)
-            status.could_not_verify = True
-            status.details = f"creepage census could not run: {e}"
-            return status
-
-        status.report = report.to_dict()
-        status.pair_count = len(report.pairs)
-        status.required_creepage_mm = required_creepage_mm
-        status.required_clearance_mm = required_clearance_mm
-        if report.pairs:
-            status.min_creepage_mm = min(p.creepage_mm for p in report.pairs)
-            status.min_clearance_mm = min(p.clearance_mm for p in report.pairs)
-
-        if threshold_supplied:
-            # Fully gated: the verdict can hard-fail on this result.
-            status.checked = True
-            status.passed = report.passed
-            status.failing_pairs = [
-                {
-                    "net_a": p.net_a,
-                    "net_b": p.net_b,
-                    "kind": p.kind,
-                    "creepage_mm": round(p.creepage_mm, 4),
-                    "clearance_mm": round(p.clearance_mm, 4),
-                    "margin_mm": round(p.margin_mm, 4),
-                    "required_creepage_mm": (
-                        round(p.governing_creepage_mm, 4) if p.governing_creepage_mm else None
-                    ),
-                    "required_clearance_mm": (
-                        round(p.required_clearance_mm, 4)
-                        if p.required_clearance_mm is not None
-                        else None
-                    ),
-                }
-                for p in report.pairs
-                if not p.passed
-            ]
-            if status.passed:
-                status.details = (
-                    f"All {status.pair_count} HV pair(s) clear the required creepage/clearance."
-                )
-            else:
-                status.details = (
-                    f"{len(status.failing_pairs)}/{status.pair_count} HV pair(s) "
-                    "below the required creepage/clearance."
-                )
-        else:
-            # HV present, census rendered informationally, but no requirement
-            # was supplied -> cannot gate (verdict downgrades to WARNING).
-            status.details = (
-                "HV nets present but no isolation requirement specified "
-                "(--hv-min / --hv-standard) -- cannot gate."
-            )
-
-        return status
+        return check_isolation(
+            pcb,
+            self.pcb_path,
+            hv_net_class=self.hv_net_class,
+            net_class_map_path=self.net_class_map_path,
+            hv_min_mm=self.hv_min_mm,
+            hv_standard=self.hv_standard,
+            hv_working_voltage=self.hv_working_voltage,
+            hv_pollution_degree=self.hv_pollution_degree,
+            hv_material_group=self.hv_material_group,
+        )
 
     def _check_compatibility(self, pcb: PCB) -> ManufacturerCompatibility:
         """Check manufacturer design rule compatibility."""

@@ -23,6 +23,7 @@ from .auditor import (
     IsolationStatus,
     ManufacturingAudit,
     SyncStatus,
+    check_isolation,
 )
 from .net_audit import (
     AffectedPad,
@@ -39,6 +40,7 @@ __all__ = [
     "SyncStatus",
     "AffectedPad",
     "StaleNetGroup",
+    "check_isolation",
     "find_stale_nets",
     "fix_stale_nets",
 ]

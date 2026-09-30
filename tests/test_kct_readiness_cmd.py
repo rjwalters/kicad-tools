@@ -17,9 +17,11 @@ from pathlib import Path
 
 import pytest
 
+from kicad_tools._shapely import has_shapely
 from kicad_tools.cli import readiness_cmd
 from kicad_tools.cli.board_readiness import read_readiness
 from kicad_tools.cli.readiness_cmd import EngineRun, Engines
+from tests.creepage.fixtures import board_close_hv_source, board_no_hv_source, board_source
 
 PCB_NAME = "demo_routed.kicad_pcb"
 SCH_NAME = "demo.kicad_sch"
@@ -704,19 +706,52 @@ def test_excluded_tht_parts_are_named_as_hand_solder_items(tmp_path):
 
 # ---------------------------------------------------------------------------
 # HV / isolation gate
+#
+# Issue #5807: this gate used to treat ANY nonempty ``--hv-requirement`` free
+# text as proof the isolation requirement was met -- no measurement, no audit,
+# no binding to the checked PCB.  The flag is gone; the gate now runs the SAME
+# creepage/clearance audit ``kct audit --hv-standard``/``--hv-min`` uses
+# (``kicad_tools.audit.check_isolation``, extracted from
+# ``ManufacturingAudit._check_isolation`` for exactly this reuse) against the
+# checked PCB.  These tests exercise real KiCad geometry via the synthetic HV
+# fixtures in ``tests/creepage/fixtures.py`` -- a physically failing pair and
+# a compliant control -- rather than fakes, so the gate is proven to actually
+# measure, not merely echo a description.
 # ---------------------------------------------------------------------------
 
 
-def _write_hv_map(board: Path) -> None:
+class _NoOpRefillEngines(FakeEngines):
+    """``FakeEngines`` whose ``refill`` leaves the on-disk PCB bytes alone.
+
+    The base ``FakeEngines.refill`` overwrites ``options.pcb`` with a dummy
+    placeholder string during ``--generate`` preparation, which is harmless
+    for gates that never parse the PCB. The HV gate now genuinely parses it
+    (``PCB.load``), so these tests need the real synthetic KiCad
+    S-expression content to survive that preparation step.
+    """
+
+    def refill(self, pcb: Path) -> EngineRun:
+        self.calls.append("refill")
+        if not self.refill_ok:
+            return EngineRun(ok=False, detail="kicad-cli not found on PATH")
+        return EngineRun(ok=True)
+
+
+def _write_hv_pcb(board: Path, source: str) -> None:
+    (board / "output" / PCB_NAME).write_text(source)
+
+
+def _write_net_class_map(board: Path, mapping: dict[str, str]) -> None:
     (board / "output" / "net_class_map.json").write_text(
-        json.dumps({"L_IN": {"name": "HV"}, "GND": {"name": "Power"}})
+        json.dumps({net: {"name": cls} for net, cls in mapping.items()})
     )
 
 
 def test_hv_board_without_an_isolation_requirement_is_not_signed_off(tmp_path):
     board = make_board(tmp_path)
-    _write_hv_map(board)
-    fake = FakeEngines(board)
+    _write_hv_pcb(board, board_source(with_slot=False))
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    fake = _NoOpRefillEngines(board)
 
     code, report = run(board, fake)
 
@@ -725,15 +760,114 @@ def test_hv_board_without_an_isolation_requirement_is_not_signed_off(tmp_path):
     assert any("HV nets present" in blocker for blocker in report["blockers"])
 
 
-def test_hv_board_with_a_recorded_requirement_passes(tmp_path):
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_board_with_a_measured_compliant_pair_passes(tmp_path):
+    """Compliant control: an 18mm gap clears the 250Vrms/PD2/IIIa bound (~2.5mm)."""
     board = make_board(tmp_path)
-    _write_hv_map(board)
-    fake = FakeEngines(board)
+    _write_hv_pcb(board, board_source(with_slot=False))
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    fake = _NoOpRefillEngines(board)
 
-    code, report = run(board, fake, "--hv-requirement", "iec60664 250Vrms PD2 MGII")
+    code, report = run(
+        board,
+        fake,
+        "--hv-standard",
+        "iec60664",
+        "--hv-working-voltage",
+        "250",
+        "--hv-pollution-degree",
+        "2",
+    )
 
     assert code == 0
     assert check_status(report, "hv_isolation") == "passed"
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_board_with_a_measured_failing_pair_is_blocked(tmp_path):
+    """Physically failing HV fixture: a ~1mm gap is far below the derived bound.
+
+    Same net-class-map and threshold as the compliant-control test above --
+    only the PCB geometry changes -- so this also proves the verdict tracks
+    the checked PCB, not a description of it.
+    """
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    fake = _NoOpRefillEngines(board)
+
+    code, report = run(
+        board,
+        fake,
+        "--hv-standard",
+        "iec60664",
+        "--hv-working-voltage",
+        "250",
+        "--hv-pollution-degree",
+        "2",
+    )
+
+    assert code != 0
+    assert check_status(report, "hv_isolation") == "failed"
+    assert any("HV isolation audit failed" in blocker for blocker in report["blockers"])
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_board_with_a_manual_hv_min_also_gates(tmp_path):
+    """The phase-1 manual override (``--hv-min``) gates just like ``--hv-standard``."""
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    fake = _NoOpRefillEngines(board)
+
+    code, report = run(board, fake, "--hv-min", "5.0")
+
+    assert code != 0
+    assert check_status(report, "hv_isolation") == "failed"
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_a_net_class_map_that_does_not_match_the_pcb_blocks_the_gate(tmp_path):
+    """Changed/stale net-class-map input: the sidecar names an HV net the
+    checked PCB does not carry (and no net on the board looks mains-suspect
+    by name). A wrong-board sidecar must block, never pass.
+    """
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_no_hv_source())
+    _write_net_class_map(board, {"NOT_ON_THIS_BOARD": "HV"})
+    fake = _NoOpRefillEngines(board)
+
+    # No mains-level working voltage supplied -- otherwise the *stronger*
+    # mains-vacuity guard (issue #4354) would fire instead, which is a
+    # separate, already-covered failure mode.
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "hv_isolation") == "not_run"
+    assert any("mismatch" in blocker.lower() for blocker in report["blockers"])
+
+
+def test_a_malformed_pcb_blocks_the_isolation_gate(tmp_path):
+    """Changed PCB input that fails to parse must block, never silently skip."""
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, "(kicad_pcb (not a real board\n")
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    fake = _NoOpRefillEngines(board)
+
+    code, report = run(
+        board,
+        fake,
+        "--hv-standard",
+        "iec60664",
+        "--hv-working-voltage",
+        "250",
+        "--hv-pollution-degree",
+        "2",
+    )
+
+    assert code != 0
+    assert check_status(report, "hv_isolation") == "not_run"
+    assert any("could not" in blocker.lower() for blocker in report["blockers"])
 
 
 def test_board_without_hv_nets_omits_the_gate_entirely(tmp_path):
