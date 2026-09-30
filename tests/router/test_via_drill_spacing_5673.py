@@ -182,7 +182,10 @@ def test_the_rejection_tracks_min_hole_to_hole_not_min_drill_clearance() -> None
 
     router.rules.min_hole_to_hole = 0.102
     grid.rules.min_hole_to_hole = 0.102
-    router._via_cache.clear()
+    # A rule change is exactly what ``clear_via_cache`` exists for: since
+    # #5669 it also drops the route-halo via memo (``_via_halo_cache``), which
+    # would otherwise serve the verdict computed under the 0.500 mm floor.
+    router.clear_via_cache()
     assert not router._is_via_blocked(cgx, cgy, 0, NET), (
         "with the fab floor relaxed to the merge threshold the candidate is legal again"
     )
