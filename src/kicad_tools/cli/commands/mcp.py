@@ -53,19 +53,19 @@ def _run_serve(args) -> int:
     Returns:
         Exit code (0 for success)
     """
-    from kicad_tools.mcp.server import run_server
-
     transport = getattr(args, "transport", "stdio")
     host = getattr(args, "host", "localhost")
     port = getattr(args, "port", 8080)
 
     try:
+        from kicad_tools.mcp.server import run_server
+
         run_server(transport=transport, host=host, port=port)
         return 0
     except ImportError as e:
         print(f"Error: {e}")
         print()
-        print("To use HTTP transport, install the MCP dependencies:")
+        print("The MCP server requires the 'mcp' extra:")
         print("  pip install 'kicad-tools[mcp]'")
         return 1
     except KeyboardInterrupt:
