@@ -400,3 +400,203 @@ def test_visible_literal_hide_is_not_a_visibility_marker(kind):
     if kind.startswith("fp_") or kind == "property":
         item = f'(footprint "test" (layer "F.Cu") (at 0 0) {item})'
     assert check_physical_copper_gap(board(item), 0.25).violations
+
+
+# --- Footprint copper polygons (fp_poly), Issue #5817 ----------------------
+#
+# A standard ``NetTie-2_SMD_Pad0.5mm`` joins its two pads with a filled
+# ``F.Cu`` ``fp_poly``.  Before #5817 that primitive was inventoried as
+# "unsupported copper graphic" and the whole assessment came back
+# incomplete.
+
+# Verbatim reduced fixture from Issue #5817 (one net tie plus a board
+# outline; no routing, no zone fill).
+NET_TIE_FIXTURE = """(kicad_pcb (version 20260115) (generator "pcbnew")
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal)
+        (44 "Edge.Cuts" user)) (setup (pad_to_mask_clearance 0))
+      (gr_rect (start 100 70) (end 190 160)
+        (stroke (width 0.05) (type default)) (fill none)
+        (layer "Edge.Cuts") (uuid "e4af335a-9b4d-5c17-90e3-7320110fa3bc"))
+      (footprint "NetTie-2_SMD_Pad0.5mm"
+        (layer "F.Cu")
+        (uuid "80f92f63-7d6e-418b-978d-20000011cde0")
+        (at 140.852007 85.488825 -90)
+        (descr "Net tie, 2 pin, 0.5mm square SMD pads")
+        (tags "net tie")
+        (property "Reference" "NT3" (at 0 -1.2 0) (layer "F.SilkS") (hide yes)
+          (uuid "ed86465d-16b2-4087-88d6-25aa25885dfd")
+          (effects (font (size 1 1) (thickness 0.15))))
+        (property "Value" "BOOT0_TIE" (at 0 1.2 0) (layer "F.Fab") (hide yes)
+          (uuid "55decc6c-ccba-49a9-9c58-e53b55d22ed2")
+          (effects (font (size 1 1) (thickness 0.15))))
+        (attr exclude_from_pos_files exclude_from_bom allow_missing_courtyard)
+        (net_tie_pad_groups "1, 2")
+        (duplicate_pad_numbers_are_jumpers no)
+        (fp_poly (pts (xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25))
+          (stroke (width 0) (type solid)) (fill yes) (layer "F.Cu")
+          (uuid "4c587801-35de-4fc4-895b-9942aca7f89f"))
+        (pad "1" smd circle (at -0.5 0 270) (size 0.5 0.5) (layers "F.Cu")
+          (net "SWCLK") (uuid "1745e8e7-cb05-4e0c-be57-60ff31465fb9"))
+        (pad "2" smd circle (at 0.5 0 270) (size 0.5 0.5) (layers "F.Cu")
+          (net "BOOT0") (uuid "b531e0f4-5d47-4a72-8a54-a3eaafb85b86"))
+        (embedded_fonts no)))"""
+
+
+def poly_footprint(
+    identity="tie",
+    at="10 10 0",
+    layer="F.Cu",
+    fill="yes",
+    stroke="0",
+    pts="(xy -0.5 -0.4) (xy 0.5 -0.4) (xy 0.5 0.4) (xy -0.5 0.4)",
+    reference="NT1",
+    pads="",
+    uuid=True,
+):
+    """A footprint whose only copper is one ``fp_poly`` (plus optional pads)."""
+    tag = f'(uuid "{identity}")' if uuid else ""
+    return f'''(footprint "NetTie-2_SMD_Pad0.5mm" (layer "{layer}") (at {at})
+      (property "Reference" "{reference}")
+      (fp_poly (pts {pts}) (stroke (width {stroke}) (type solid))
+        (fill {fill}) (layer "{layer}") {tag})
+      {pads})'''
+
+
+def tie_pads(layer="F.Cu", prefix="tie"):
+    return f'''(pad "1" smd circle (at -0.5 0 270) (size .5 .5) (layers "{layer}")
+        (net 1 "GND") (uuid "{prefix}-p1"))
+      (pad "2" smd circle (at 0.5 0 270) (size .5 .5) (layers "{layer}")
+        (net 2 "VCC") (uuid "{prefix}-p2"))'''
+
+
+def test_net_tie_filled_polygon_is_modeled_not_incomplete():
+    """The issue's own fixture: complete coverage and no phantom slit."""
+    pcb = PCB(parse_string(NET_TIE_FIXTURE))
+    result = check_physical_copper_gap(pcb, 0.1)
+    assert result.violations == []
+
+
+@pytest.mark.parametrize("minimum", [0.1, 0.25, 0.6])
+def test_net_tie_joined_copper_is_never_a_zero_width_slit(minimum):
+    """Pad-to-pad copper is an intentional join, not facing boundaries."""
+    item = poly_footprint(
+        pts="(xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)",
+        pads=tie_pads(),
+    )
+    assert check_physical_copper_gap(board(item), minimum).violations == []
+
+
+@pytest.mark.parametrize(
+    "near,expected_layer",
+    [
+        (((10.6, 9), (10.6, 11)), "F.Cu"),  # vertical neighbour, x gap 0.1
+        (((9, 10.7), (11, 10.7)), "F.Cu"),  # horizontal neighbour, y gap 0.1
+    ],
+)
+def test_rotated_polygon_gap_to_separate_boundary(near, expected_layer):
+    """A -90 deg footprint turns the 1.0 x 0.8 local rect on its side.
+
+    Board extent becomes x 9.6..10.4 / y 9.5..10.5, so BOTH neighbours sit
+    0.1 mm off the copper.  An untransformed polygon would put the vertical
+    neighbour inside the copper and the horizontal one 0.2 mm away, so the
+    measured value discriminates the rotation in each axis.
+    """
+    result = gaps(board(poly_footprint(at="10 10 -90"), track(*near, "near")))
+    assert len(result) == 1
+    assert result[0].actual_value == pytest.approx(0.1, abs=0.001)
+    assert result[0].layer == expected_layer
+    assert "tie" in result[0].items
+    # Footprint copper carries no net of its own; the finding is geometric.
+    assert result[0].nets == ("", "GND")
+
+
+def test_polygon_provenance_falls_back_to_reference_when_uuid_absent():
+    result = gaps(
+        board(poly_footprint(at="10 10 -90", uuid=False), track((10.6, 9), (10.6, 11), "near"))
+    )
+    assert result and "NT1:fp_poly:0" in result[0].items
+
+
+def test_polygon_connected_elsewhere_still_reports_the_slit():
+    """A track leaving pad 1 and doubling back over the tie is a hairpin."""
+    item = poly_footprint(
+        pts="(xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)",
+        pads=tie_pads(),
+    )
+    result = gaps(
+        board(
+            item,
+            track((9.5, 10), (9.5, 10.45), "riser"),
+            track((9.5, 10.45), (11.5, 10.45), "return"),
+        )
+    )
+    assert result
+    assert min(v.actual_value or 0 for v in result) == pytest.approx(0.1, abs=0.001)
+    assert any("tie" in v.items for v in result)
+
+
+def test_unfilled_polygon_is_a_stroked_ring_not_solid_copper():
+    """``(fill no)`` prints only the outline, so the interior stays air."""
+    item = poly_footprint(
+        fill="no",
+        stroke="0.2",
+        pts="(xy -0.6 -0.35) (xy 0.6 -0.35) (xy 0.6 0.35) (xy -0.6 0.35)",
+    )
+    assert not gaps(board(item), 0.25)
+    interior = gaps(board(item), 0.6)
+    assert interior
+    assert interior[0].items == ("tie",)
+    assert interior[0].actual_value == pytest.approx(0.5, abs=0.001)
+
+
+def test_filled_polygon_is_dilated_by_its_stroke_width():
+    item = poly_footprint(
+        stroke="0.2", pts="(xy -0.5 -0.25) (xy 0.5 -0.25) (xy 0.5 0.25) (xy -0.5 0.25)"
+    )
+    result = gaps(board(item, track((9, 10.55), (11, 10.55), "near")))
+    assert result and result[0].actual_value == pytest.approx(0.1, abs=0.001)
+
+
+def test_back_side_polygon_stays_on_the_back_layer():
+    item = poly_footprint(layer="B.Cu", at="10 10 -90")
+    back = track((10.6, 9), (10.6, 11), "near").replace('"F.Cu"', '"B.Cu"')
+    result = gaps(board(item, back))
+    assert len(result) == 1
+    assert result[0].layer == "B.Cu"
+    assert "tie" in result[0].items
+    assert not gaps(board(item, track((10.6, 9), (10.6, 11), "near")))
+
+
+def test_non_copper_polygon_is_out_of_scope():
+    item = poly_footprint(layer="F.SilkS")
+    assert check_physical_copper_gap(board(item), 0.25).violations == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"pts": "(xy banana 0) (xy 1 0) (xy 1 1)"},
+        {"pts": "(xy 0 0) (xy 1 0)"},
+        {"pts": "(xy 0 0 0) (xy 1 0) (xy 1 1)"},
+        {"stroke": "banana"},
+        {"stroke": "-0.2"},
+        {"fill": "no", "stroke": "0"},
+        {"layer": "In1.Cu"},
+    ],
+)
+def test_invalid_polygon_geometry_is_incomplete_not_clean(kwargs):
+    pcb = board(poly_footprint(**kwargs))
+    result = check_physical_copper_gap(pcb, 0.25)
+    assert result.violations
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+def test_missing_polygon_points_is_incomplete_not_clean():
+    item = """(footprint "NT" (layer "F.Cu") (at 10 10)
+      (property "Reference" "NT1")
+      (fp_poly (stroke (width 0) (type solid)) (fill yes) (layer "F.Cu")
+        (uuid "tie")))"""
+    result = check_physical_copper_gap(board(item), 0.25)
+    assert result.violations
+    assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
