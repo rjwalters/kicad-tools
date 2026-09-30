@@ -1389,7 +1389,7 @@ def _outside_root_message(what: str, kind: str, root_given: bool) -> str:
     return f"Project {kind} is outside {where}: {what}. {_SUPPORTED_LAYOUT}"
 
 
-def _schematic_hierarchy(schematic: Path, limit: Path) -> list[Path]:
+def _schematic_hierarchy(schematic: Path, limit: Path, root_given: bool = True) -> list[Path]:
     """The schematic plus every sub-sheet it references, contained within *limit*."""
     found: dict[Path, None] = {}
     pending = [schematic.resolve()]
@@ -1398,7 +1398,7 @@ def _schematic_hierarchy(schematic: Path, limit: Path) -> list[Path]:
         if sheet in found:
             continue
         if not sheet.resolve().is_relative_to(limit):
-            raise ValueError(_outside_root_message(str(sheet), "sheet", True))
+            raise ValueError(_outside_root_message(str(sheet), "sheet", root_given))
         if not sheet.is_file():
             raise ValueError(f"Project dependency is missing: {sheet}")
         found[sheet] = None
@@ -1421,6 +1421,7 @@ def _project_dependencies(
     """
     root = pcb.parent
     boundary = (limit or root).resolve()
+    real_root = root.resolve()
     files = {
         p
         for p in root.iterdir()
@@ -1440,12 +1441,15 @@ def _project_dependencies(
             continue
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text()):
             if "${KIPRJMOD}" in uri:
-                dependency = Path(uri.replace("${KIPRJMOD}", str(root)))
+                dependency = Path(uri.replace("${KIPRJMOD}", str(real_root)))
             elif not Path(uri).is_absolute() and "$" not in uri:
-                dependency = root / uri
+                dependency = real_root / uri
             else:
                 continue  # Installed KiCad libraries are identified by the native engine.
-            resolved = Path(os.path.normpath(dependency)).resolve()
+            # Lexically normalised from the *resolved* PCB directory, so any
+            # remaining difference from ``resolve()`` is a symlink on the path.
+            dependency = Path(os.path.normpath(dependency))
+            resolved = dependency.resolve()
             if not resolved.is_relative_to(boundary):
                 raise ValueError(_outside_root_message(uri, "dependency", explicit_root))
             if not dependency.exists():
@@ -1461,24 +1465,45 @@ def _project_dependencies(
                 members = [dependency]
             for member in members:
                 if not member.resolve().is_relative_to(boundary):
-                    raise ValueError(_outside_root_message(str(member), "dependency", True))
+                    raise ValueError(
+                        _outside_root_message(str(member), "dependency", explicit_root)
+                    )
+                if member.resolve() != member:
+                    # The archive and the candidate are laid out by real location,
+                    # so an alias would leave the referenced path dangling (#5813).
+                    raise ValueError(
+                        f"Ambiguous project dependency path: {uri} reaches {member} through "
+                        f"a symlink to {member.resolve()}; reference the real file "
+                        "location in the library table instead."
+                    )
             files.update(members)
     return sorted(files)
+
+
+def _required_sources(options: ReadinessOptions) -> list[Path]:
+    """Every (resolved) file the archived project must contain to be the checked design.
+
+    This is the single inventory shared by archive collection and provenance, so
+    nothing provenance requires can be missing from ``kicad_project.zip``.
+    """
+    explicit = options.project_root is not None
+    sources: set[Path] = set()
+    if options.pcb.is_file():
+        sources.add(options.pcb.resolve())
+        sources.update(
+            p.resolve() for p in _project_dependencies(options.pcb, options.root, explicit)
+        )
+    if options.schematic is not None and options.schematic.is_file():
+        sources.update(_schematic_hierarchy(options.schematic, options.root, explicit))
+    if options.project is not None:
+        sources.add(options.project.resolve())
+    return sorted(sources)
 
 
 def _external_dependencies(options: ReadinessOptions) -> list[Path]:
     """Collected files that live outside ``board_dir`` but inside the project root."""
     board = options.board_dir.resolve()
-    root = options.root
-    sources: set[Path] = set()
-    if options.pcb.is_file():
-        sources.update(
-            p.resolve()
-            for p in _project_dependencies(options.pcb, root, options.project_root is not None)
-        )
-    if options.schematic is not None and options.schematic.is_file():
-        sources.update(_schematic_hierarchy(options.schematic, root))
-    return sorted(p for p in sources if not p.is_relative_to(board))
+    return [p for p in _required_sources(options) if not p.is_relative_to(board)]
 
 
 def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[Path, str]:
@@ -1490,23 +1515,34 @@ def _archive_names(options: ReadinessOptions, sources: Sequence[Path]) -> dict[P
 
 
 def _normalize_project_archive(options: ReadinessOptions) -> None:
-    """Re-root kicad_project.zip so collected out-of-directory dependencies fit (#5813).
+    """Make kicad_project.zip contain every file provenance requires (#5813).
 
-    Members are laid out relative to the project root so that ``${KIPRJMOD}/../x``
-    references keep working inside the archive.
+    The exporter only archives the PCB directory's top level and its library
+    folders.  Sub-sheets in a subdirectory, ``${KIPRJMOD}/../`` libraries and
+    out-of-directory schematics are added here.  When any required file lies
+    outside the PCB directory, members are re-rooted relative to the project
+    root so that ``${KIPRJMOD}/../x`` references keep working inside the archive.
+    Members the exporter already wrote are never overwritten: provenance must
+    still see (and reject) an export that archived the wrong bytes.
     """
-    external = _external_dependencies(options)
     archive = options.output_dir / "kicad_project.zip"
-    if not external or not archive.is_file():
+    if not archive.is_file():
         return
-    prefix = options.pcb.parent.resolve().relative_to(options.root).as_posix()
+    required = _required_sources(options)
+    names_for = _archive_names(options, required)
+    base = options.pcb.parent.resolve()
+    rerooted = not all(s.is_relative_to(base) for s in required)
     with zipfile.ZipFile(archive) as zf:
         members = {
             info.filename: zf.read(info.filename) for info in zf.infolist() if not info.is_dir()
         }
+    prefix = base.relative_to(options.root).as_posix() if rerooted else "."
     rebuilt = {(f"{prefix}/{n}" if prefix != "." else n): d for n, d in members.items()}
-    for source in external:
-        rebuilt[source.relative_to(options.root).as_posix()] = source.read_bytes()
+    missing = [s for s in required if names_for[s] not in rebuilt]
+    if not missing and not rerooted:
+        return
+    for source in missing:
+        rebuilt[names_for[source]] = source.read_bytes()
     tmp = archive.with_suffix(".zip.tmp")
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in sorted(rebuilt):
@@ -1519,13 +1555,9 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
     try:
-        sources = set(
-            _project_dependencies(options.pcb, options.root, options.project_root is not None)
-        ) | {options.pcb}
+        sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
-            sources.update(_schematic_hierarchy(options.schematic, options.root))
-        if options.project is not None:
-            sources.add(options.project)
+            sources.add(options.schematic.resolve())
         names_for = _archive_names(options, sorted(sources))
         with zipfile.ZipFile(archive) as zf:
             names = [info.filename for info in zf.infolist() if not info.is_dir()]

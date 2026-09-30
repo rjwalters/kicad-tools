@@ -3,8 +3,6 @@
 import json
 import zipfile
 
-import pytest
-
 from kicad_tools.cli import readiness_cmd as cmd
 from tests.test_kct_readiness_cmd import FakeEngines
 from tests.test_readiness_package_preservation_5391 import inventory
@@ -77,22 +75,28 @@ def test_sibling_schematic_and_symbols_are_collected_with_project_root(tmp_path)
             assert (project / name).read_bytes() == data
 
 
-def test_without_project_root_error_is_actionable(tmp_path):
+def test_without_project_root_error_is_actionable(tmp_path, capsys):
     project = make_project(tmp_path)
     before = inventory(project)
     rc, _ = go(project)
     assert rc != 0
     assert inventory(project) == before
+    captured = capsys.readouterr()
+    message = captured.out + captured.err
+    assert "outside the package root" in message
+    assert "--project-root" in message  # names the supported layout
 
 
-def test_without_project_root_symbol_reference_names_layout(tmp_path):
+def test_missing_schematic_path_is_refused_without_changes(tmp_path, capsys):
     project = make_project(tmp_path)
     (project / "schematics/board.kicad_sch").rename(project / "pcb/output/board.kicad_sch")
     before = inventory(project)
-    rc, _ = go(project, generate=True)
+    rc, _ = go(project, "--project-root", str(project))
     # The schematic path passed no longer exists, so preflight refuses it.
     assert rc != 0
     assert inventory(project) == before
+    captured = capsys.readouterr()
+    assert "schematic not found" in captured.out + captured.err
 
 
 def test_symbol_only_outside_reports_supported_layout(tmp_path):
@@ -200,14 +204,109 @@ def test_stale_external_input_invalidates_evidence(tmp_path):
 
     project = make_project(tmp_path)
     assert go(project, "--project-root", str(project))[0] == 0
+    before = read_readiness(project / "pcb")
+    assert before["status"] == "ready", before["blockers"]
     (project / "symbols/custom.kicad_sym").write_text("(changed)\n")
-    with pytest.raises(ValueError, match="stale"):
-        read_readiness(project / "pcb", strict=True) if False else _raise_stale(project)
+    after = read_readiness(project / "pcb")
+    assert after["status"] == "unverified"
+    assert any("symbols/custom.kicad_sym changed" in b for b in after["blockers"])
 
 
-def _raise_stale(project):
-    from kicad_tools.cli import board_readiness
+# --- Sub-sheets and libraries inside the board dir but outside the PCB dir ---
 
-    result = board_readiness.read_readiness(project / "pcb")
-    blockers = " ".join(result.get("blockers", []))
-    raise ValueError(blockers or "Evidence is stale")
+SUB_SHEET = '(kicad_sch (sheet (property "Sheetfile" "sheets/sub.kicad_sch")))\n'
+
+
+def make_in_board_hierarchy(tmp_path, table=None):
+    """``pcb/output/board.kicad_sch`` with its sub-sheet in ``pcb/output/sheets/``."""
+    project = make_project(tmp_path, table=table or TABLE)
+    out = project / "pcb/output"
+    (out / "board.kicad_sch").write_text(SUB_SHEET)
+    (out / "sheets").mkdir()
+    (out / "sheets/sub.kicad_sch").write_text("(kicad_sch sub)\n")
+    return project
+
+
+def run_board(project, *extra):
+    pcb = project / "pcb"
+    fake = FakeEngines(pcb)
+    args = [
+        str(pcb / "output/board.kicad_pcb"),
+        "--mfr",
+        "jlcpcb",
+        "--sch",
+        str(pcb / "output/board.kicad_sch"),
+        "--generate",
+        *extra,
+    ]
+    rc = cmd.main(args, engines=fake.bundle())
+    detail = attempt_report(pcb) if (pcb / "output/readiness-attempt").exists() else "no report"
+    return rc, detail
+
+
+def archive_members(project):
+    zpath = project / "pcb/output/manufacturing/kicad_project.zip"
+    with zipfile.ZipFile(zpath) as zf:
+        return {name: zf.read(name) for name in zf.namelist()}
+
+
+def test_sub_sheet_in_subdirectory_is_archived_without_project_root(tmp_path):
+    project = make_in_board_hierarchy(tmp_path, table="(sym_lib_table)\n")
+    rc, detail = run_board(project)
+    assert rc == 0, detail
+    members = archive_members(project)
+    assert members["sheets/sub.kicad_sch"] == b"(kicad_sch sub)\n"
+    assert members["board.kicad_sch"] == SUB_SHEET.encode()
+
+
+def test_sub_sheet_in_subdirectory_is_archived_with_project_root(tmp_path):
+    project = make_in_board_hierarchy(tmp_path)
+    rc, detail = run_board(project, "--project-root", str(project))
+    assert rc == 0, detail
+    members = archive_members(project)
+    assert members["pcb/output/sheets/sub.kicad_sch"] == b"(kicad_sch sub)\n"
+    assert members["pcb/output/board.kicad_sch"] == SUB_SHEET.encode()
+    assert "symbols/custom.kicad_sym" in members
+
+
+def test_in_board_library_outside_pcb_dir_is_archived(tmp_path):
+    """``${KIPRJMOD}/../symbols`` lands in the board dir, not the PCB dir."""
+    table = TABLE.replace("../../symbols/custom", "../symbols/custom")
+    project = make_in_board_hierarchy(tmp_path, table=table)
+    (project / "pcb/symbols").mkdir()
+    (project / "pcb/symbols/custom.kicad_sym").write_text(LIB)
+    rc, detail = run_board(project)
+    assert rc == 0, detail
+    members = archive_members(project)
+    # Re-rooted at the board dir so ${KIPRJMOD}/../symbols still resolves.
+    assert members["symbols/custom.kicad_sym"] == LIB.encode()
+    assert "output/sym-lib-table" in members
+    assert "output/sheets/sub.kicad_sch" in members
+
+
+def test_sub_sheet_outside_board_without_project_root_names_package_root(tmp_path):
+    project = make_in_board_hierarchy(tmp_path, table="(sym_lib_table)\n")
+    (project / "pcb/output/board.kicad_sch").write_text(
+        '(kicad_sch (sheet (property "Sheetfile" "../../schematics/board.kicad_sch")))\n'
+    )
+    rc, detail = run_board(project)
+    assert rc != 0
+    blocker = detail["blockers"][0]
+    assert "outside the package root" in blocker
+    assert "outside the --project-root" not in blocker
+
+
+def test_symlink_alias_inside_root_is_rejected_as_ambiguous(tmp_path):
+    """A library-table path that is a symlink to another in-root file is ambiguous:
+    staging by real location would leave the referenced path dangling."""
+    project = make_project(tmp_path)
+    (project / "symbols/lib").mkdir()
+    (project / "symbols/custom.kicad_sym").rename(project / "symbols/lib/custom.kicad_sym")
+    (project / "symbols/custom.kicad_sym").symlink_to(project / "symbols/lib/custom.kicad_sym")
+    before = inventory(project)
+    rc, _ = go(project, "--project-root", str(project))
+    assert rc != 0
+    blocker = attempt_report(project / "pcb")["blockers"][0]
+    assert "Ambiguous project dependency path" in blocker
+    assert "symbols/lib/custom.kicad_sym" in blocker
+    assert {k: v for k, v in inventory(project).items() if "readiness-attempt" not in k} == before
