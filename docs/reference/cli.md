@@ -458,6 +458,8 @@ kct readiness <board-dir|board.kicad_pcb> [options]
 | Option | Description |
 |--------|-------------|
 | `--mfr TIER`, `-m TIER` | Fabrication tier (default: discovered from the board's recipe/manifest; never guessed) |
+| `--verify` | Verify a finished package without changing shipped files (default) |
+| `--generate` | (Re)generate a generic package transactionally; refuses to replace a recipe-finalized package |
 | `--assembly` | Full assembly package incl. BOM/CPL procurement identities (default) |
 | `--pcb-only` | Bare-board package; makes no component procurement or assembly claim |
 | `--output DIR`, `-o DIR` | Manufacturing bundle directory (default: `<pcb-dir>/manufacturing/`) |
@@ -487,6 +489,17 @@ named `blockers`. **The command exits non-zero for anything other than `ready`
 and has no flag that produces `ready` on a partial run** — a gate that cannot
 run is a blocker, not a waiver.
 
+`--verify` and `--generate` are mutually exclusive; `--verify` is the default.
+**A bare `kct readiness <board>` verifies an already-generated package — it
+never writes gerbers, BOM/CPL or the manifest.** Pass `--generate` explicitly
+the first time you produce a package for a board, or whenever the checked
+sources have changed and the bundle needs to be rebuilt. `--generate` refuses
+to replace a package that a manufacturing recipe has already finalized (use
+`--verify` and regenerate through that recipe instead) — see
+`_verify_finished_artifacts`/`_gate_artifacts` in
+[`readiness_cmd.py`](../../src/kicad_tools/cli/readiness_cmd.py) for the exact
+guard.
+
 The conditional `hv_isolation` gate (when the `--net-class-map` sidecar
 declares an `HV` net class) runs the same measured creepage/clearance audit
 `kct audit --hv-standard`/`--hv-min` uses
@@ -496,17 +509,20 @@ of the requirement is recorded in the report but can never by itself produce
 
 **Examples:**
 ```bash
-# Full assembly sign-off at the tier recorded in the board's own recipe
+# Generate the assembly package at the tier recorded in the board's own recipe
+kct readiness boards/00-demo --generate
+
+# Re-verify a package already on disk without touching shipped files (default)
 kct readiness boards/00-demo
 
 # Bare-board order — no BOM/CPL, no procurement claim
-kct readiness boards/04-demo --pcb-only --mfr jlcpcb
+kct readiness boards/04-demo --generate --pcb-only --mfr jlcpcb
 
 # CI use: machine output, non-zero exit unless the verdict is `ready`
 kct readiness boards/01-demo --format json > readiness.json
 
 # Accept reviewed silkscreen warnings as an explicit, recorded risk
-kct readiness boards/05-demo --ack-warnings silk_over_copper,silk_overlap
+kct readiness boards/05-demo --generate --ack-warnings silk_over_copper,silk_overlap
 ```
 
 See also: [`docs/board-json-schema.md`](../board-json-schema.md) for the

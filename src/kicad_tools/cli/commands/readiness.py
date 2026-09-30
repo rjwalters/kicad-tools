@@ -20,6 +20,11 @@ def run_readiness_command(args) -> int:
     if manufacturer:
         sub_argv.extend(["--mfr", manufacturer])
 
+    if getattr(args, "readiness_generate", False):
+        sub_argv.append("--generate")
+    elif getattr(args, "readiness_verify", False):
+        sub_argv.append("--verify")
+
     if getattr(args, "readiness_pcb_only", False):
         sub_argv.append("--pcb-only")
     elif getattr(args, "readiness_assembly", False):

@@ -954,3 +954,215 @@ def test_check_shim_omits_drifted_flags_when_unset():
         "an empty --waivers path should be treated as absent (matching the "
         f"--net-class-map truthiness guard); got {sub_argv}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ``readiness`` pair (#5816)
+#
+# ``kct readiness`` has the identical three-hop forwarding shape as
+# ``route``/``check``:
+#
+#     parser.py :: _add_readiness_parser
+#         -> commands/readiness.py :: run_readiness_command
+#             -> readiness_cmd.py :: main / add_readiness_arguments
+#
+# #5816: the outer ``_add_readiness_parser`` maintained its own separate,
+# stale argument list instead of calling the shared
+# ``add_readiness_arguments``, and never declared the standalone runner's
+# mutually-exclusive ``--verify``/``--generate`` operation flags at all.
+# ``kct readiness board --generate`` failed argument parsing outright, and a
+# bare ``kct readiness board`` silently verified instead of erroring on a
+# missing package.  Both allowlists below are DELIBERATELY EMPTY -- a
+# user-facing readiness flag belongs on both parsers.
+
+INNER_ONLY_READINESS_ALLOWLIST: frozenset[str] = frozenset(set())
+OUTER_ONLY_READINESS_ALLOWLIST: frozenset[str] = frozenset(set())
+
+
+def _inner_readiness_parser_flags(prog: str = "kct readiness") -> set[str]:
+    """Capture the inner ``readiness_cmd.main`` parser without parsing argv.
+
+    Mirrors ``_inner_check_parser_flags``: ``prog`` is parameterised ONLY so
+    the vacuity control below can prove a wrong prog string fails loudly.
+    """
+    from kicad_tools.cli.readiness_cmd import main as readiness_main
+
+    captured: dict[str, argparse.ArgumentParser] = {}
+    real_parse_args = argparse.ArgumentParser.parse_args
+
+    def fake_parse_args(self, *args, **kwargs):
+        if getattr(self, "prog", "") == prog:
+            captured["parser"] = self
+            raise SystemExit(0)
+        return real_parse_args(self, *args, **kwargs)
+
+    with patch.object(argparse.ArgumentParser, "parse_args", fake_parse_args):
+        with pytest.raises(SystemExit):
+            readiness_main([])
+
+    assert "parser" in captured, (
+        f"failed to capture inner readiness parser with prog={prog!r} -- "
+        "readiness_cmd.main's prog string has changed; update "
+        "_inner_readiness_parser_flags rather than letting this test go vacuous"
+    )
+    return _flags_from_parser(captured["parser"])
+
+
+def test_readiness_inner_only_flags_are_in_allowlist():
+    """Every flag on the inner readiness parser must be on the outer one.
+
+    Guards the direction that shipped in #5816: a flag declared on
+    ``readiness_cmd.py`` only, so ``kct readiness --flag`` dies with
+    ``error: unrecognized arguments``.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    unexpected_inner_only = (inner - outer) - INNER_ONLY_READINESS_ALLOWLIST
+
+    if unexpected_inner_only:
+        flag_list = "\n  ".join(sorted(unexpected_inner_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the inner 'readiness_cmd.py' parser but rejected by the outer "
+            "'kct readiness' parser:\n  "
+            f"{flag_list}\n\n"
+            "Fix by adding each flag to BOTH:\n"
+            "  1. src/kicad_tools/cli/parser.py :: _add_readiness_parser\n"
+            "  2. src/kicad_tools/cli/commands/readiness.py :: "
+            "run_readiness_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely internal-only, add it to "
+            "INNER_ONLY_READINESS_ALLOWLIST in tests/test_cli_parser_drift.py "
+            "with justification."
+        )
+
+
+def test_readiness_outer_only_flags_are_in_allowlist():
+    """Every flag on the outer readiness parser must be on the inner one.
+
+    Guards the #2819 direction applied to ``readiness``: a flag the outer
+    parser accepts but the shim never forwards, so the user-supplied value
+    is silently discarded.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    unexpected_outer_only = (outer - inner) - OUTER_ONLY_READINESS_ALLOWLIST
+
+    if unexpected_outer_only:
+        flag_list = "\n  ".join(sorted(unexpected_outer_only))
+        pytest.fail(
+            "Argparse drift detected: the following flags are accepted by "
+            "the outer 'kct readiness' parser but rejected by the inner "
+            "'readiness_cmd.py' parser:\n  "
+            f"{flag_list}\n\n"
+            "These flags will be silently dropped by the forwarding shim, "
+            "so any user-supplied value is ignored.  Fix by:\n"
+            "  1. src/kicad_tools/cli/readiness_cmd.py :: "
+            "add_readiness_arguments (add matching add_argument)\n"
+            "  2. src/kicad_tools/cli/commands/readiness.py :: "
+            "run_readiness_command (forward to sub_argv)\n\n"
+            "If the flag is genuinely consumed by the shim and intentionally "
+            "never forwarded, add it to OUTER_ONLY_READINESS_ALLOWLIST with "
+            "justification."
+        )
+
+
+def test_inner_readiness_parser_capture_is_not_vacuous():
+    """Negative control for the ``prog``-string trap, mirroring the check pair."""
+    inner = _inner_readiness_parser_flags()
+    assert inner, "inner readiness parser capture returned an empty flag set"
+    assert {"--verify", "--generate", "--mfr"} <= inner, (
+        f"inner readiness capture looks wrong; got {sorted(inner)}"
+    )
+
+    with pytest.raises(AssertionError, match="failed to capture inner readiness parser"):
+        _inner_readiness_parser_flags(prog="kicad-tools readiness")
+
+
+@pytest.mark.parametrize("flag", ["--verify", "--generate"])
+def test_readiness_operation_flags_are_on_both_parsers(flag):
+    """Direct regression pin for #5816.
+
+    ``--generate``/``--verify`` were declared on the standalone
+    ``readiness_cmd.py`` parser only; ``kct readiness board --generate``
+    failed with ``error: unrecognized arguments``.
+    """
+    inner = _inner_readiness_parser_flags()
+    outer = _outer_subparser_flags("readiness")
+
+    assert flag in inner, f"{flag} is missing from the inner readiness_cmd.py parser"
+    assert flag in outer, (
+        f"{flag} is missing from the outer parser.py readiness subparser "
+        "(this would regress #5816 -- `kct readiness` would reject it with "
+        "'unrecognized arguments')"
+    )
+
+
+def test_readiness_generate_and_verify_are_mutually_exclusive_on_outer_parser():
+    """``kct readiness board --generate --verify`` must be rejected.
+
+    Matches the standalone parser's mutually-exclusive group (#5816).
+    """
+    from kicad_tools.cli.parser import create_parser
+
+    with pytest.raises(SystemExit):
+        create_parser().parse_args(["readiness", "board", "--generate", "--verify"])
+
+
+def test_readiness_shim_forwards_generate_and_defaults_to_verify():
+    """The shim must forward ``--generate`` and omit it (and ``--verify``)
+
+    when unset, preserving verification as the safe default (#5816
+    acceptance criteria).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--generate"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert "--generate" in sub_argv, f"run_readiness_command dropped --generate; got {sub_argv}"
+    assert "--verify" not in sub_argv, (
+        f"--generate and --verify should not both be forwarded; got {sub_argv}"
+    )
+
+    # No operation flag supplied: default must still be verify, and neither
+    # flag should be forwarded (matching readiness_cmd.py's own default).
+    args = create_parser().parse_args(["readiness", "board"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    sub_argv = inner_main.call_args[0][0]
+    assert "--generate" not in sub_argv, (
+        f"--generate forwarded even though it was not supplied; got {sub_argv}"
+    )
+    assert "--verify" not in sub_argv, (
+        f"an explicit --verify should not be required to preserve the safe default; got {sub_argv}"
+    )
+
+
+def test_readiness_explicit_verify_dispatches_like_standalone_default():
+    """``kct readiness board --verify`` must dispatch identically to the
+
+    standalone runner's own default (#5816 acceptance criteria: unified and
+    standalone CLI dispatch the operation flags identically).
+    """
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+    from kicad_tools.cli.readiness_cmd import build_parser as standalone_build_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--verify"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    sub_argv = inner_main.call_args[0][0]
+
+    # Whatever the shim forwards (or omits) must parse through the real
+    # standalone parser to the same resolved operation as the standalone
+    # runner's own no-flag default.
+    unified_operation_args = standalone_build_parser().parse_args(sub_argv)
+    default_operation_args = standalone_build_parser().parse_args(["board"])
+    assert bool(unified_operation_args.generate) == bool(default_operation_args.generate), (
+        "kct readiness --verify must resolve to the same operation as the "
+        f"standalone runner's bare default; got sub_argv={sub_argv}"
+    )
