@@ -236,9 +236,13 @@ def test_issue5410_dq3_candidate_is_outside_the_python_via_halo() -> None:
 def test_issue5410_dq3_candidate_is_outside_the_cpp_via_halo() -> None:
     """Group 2: the C++ marking agrees, cell for cell.
 
-    The C++ backend receives its radius from Python
-    (``cpp_backend.CppPathfinder.route``), so the contrast is drawn against
-    that call site's ``ceil`` form rather than the Python grid's ``int + 1``.
+    The C++ grid receives its radius from Python, so the contrast is drawn
+    against the radius the **production** call sites pass --
+    ``RoutingGrid``'s C++ mirror and ``RoutingCore._mark_route_on_cpp_grid``
+    both compute ``ceil((diameter/2 + via_clearance + trace_width/2) /
+    resolution) + 1`` -- rather than the Python grid's ``int + 1``.  With a
+    smaller radius the DQ3 offset would fall outside even the Chebyshev
+    square, and the final assertion would pass on the old halo too.
     """
     from kicad_tools.router import router_cpp  # type: ignore[attr-defined]
 
@@ -251,16 +255,28 @@ def test_issue5410_dq3_candidate_is_outside_the_cpp_via_halo() -> None:
         0.0,
         0.0,
     )
-    radius = max(
-        1,
+    radius = (
         math.ceil(
-            (ISSUE_5410_VIA_DIAMETER_MM / 2 + rules.via_clearance) / ISSUE_5410_RESOLUTION_MM
-        ),
+            (ISSUE_5410_VIA_DIAMETER_MM / 2 + rules.via_clearance + rules.trace_width / 2)
+            / ISSUE_5410_RESOLUTION_MM
+        )
+        + 1
     )
     egx, egy = grid.world_to_grid(*ISSUE_5410_DQS_N)
-    grid.mark_via(egx, egy, 1, radius)
-
     cgx, cgy = grid.world_to_grid(*ISSUE_5410_DQ3)
+    offset = (cgx - egx, cgy - egy)
+    assert offset == (-5, -4), "the fixture's cell offset drifted; re-derive the contrast below"
+
+    # The contrast, as in the Python sibling: the square at this radius really
+    # did cover the candidate, and the kernel's disc does not.
+    assert offset in _square_offsets(radius), (
+        "the Chebyshev square at the production radius really did swallow this "
+        "candidate -- without that the assertion below would not be evidence"
+    )
+    assert math.dist((0, 0), offset) > radius
+    assert offset not in set(halo_offsets(radius))
+
+    grid.mark_via(egx, egy, 1, radius)
     cell = grid.at(cgx, cgy, 0)
     assert not cell.blocked, "the DQ3 candidate cell is still blocked by DQS_N's C++ halo"
 

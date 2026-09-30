@@ -59,6 +59,12 @@ const std::vector<std::pair<int, int>>& halo_offsets(int radius_cells) {
         for (int dx = -r; dx <= r; ++dx) {
             const clearance::KShape probe = clearance::KVia{
                 static_cast<double>(dx), static_cast<double>(dy), 0.0, 0.0};
+            // Units: copper_gap is queried in *cells* here, and the tolerance
+            // is the kernel's mm-domain CLEARANCE_EPSILON_MM (1e-4) reused as
+            // a cell-unit slack.  Harmless at any realistic radius: squared
+            // integer distances are integers, so a false inclusion needs
+            // sqrt(r^2 + 1) - r ~= 1/(2r) < 1e-4, i.e. r >~ 5000 cells.  The
+            // Python port (router/grid.py halo_offsets) does the same.
             if (clearance::copper_gap(centre, probe) <=
                 r + clearance::CLEARANCE_EPSILON_MM) {
                 offsets.emplace_back(dx, dy);
