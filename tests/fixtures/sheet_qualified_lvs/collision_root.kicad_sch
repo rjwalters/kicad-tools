@@ -1,0 +1,131 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "sqlvs-root-uuid")
+	(paper "A4")
+	(title_block
+		(title "Sheet-qualified local names: same bare label on three sheets")
+		(date "2026-09-30")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+		(symbol "power:GND"
+			(power)
+			(pin_names (offset 0) hide)
+			(symbol "GND_0_1"
+				(polyline (pts (xy 0 0) (xy 0 -1.27)) (stroke (width 0)) (fill (type none)))
+			)
+			(symbol "GND_1_1"
+				(pin power_in line (at 0 0 270) (length 0) (name "GND") (number "1"))
+			)
+		)
+	)
+	(sheet
+		(at 40 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sqlvs-sheet-a-uuid")
+		(property "Sheetname" "ChildA"
+			(at 40 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "collision_child_a.kicad_sch"
+			(at 40 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(instances
+			(project "collision"
+				(path "/sqlvs-root-uuid" (page "2"))
+			)
+		)
+	)
+	(sheet
+		(at 100 30) (size 40 30)
+		(stroke (width 0.1524) (type solid))
+		(fill (color 255 255 194 1.0))
+		(uuid "sqlvs-sheet-b-uuid")
+		(property "Sheetname" "ChildB"
+			(at 100 29 0)
+			(effects (font (size 1.27 1.27)) (justify left bottom))
+		)
+		(property "Sheetfile" "collision_child_b.kicad_sch"
+			(at 100 61 0)
+			(effects (font (size 1.27 1.27)) (justify left top) hide)
+		)
+		(instances
+			(project "collision"
+				(path "/sqlvs-root-uuid" (page "3"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 150 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "sqlvs-r1-uuid")
+		(property "Reference" "R1"
+			(at 152 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "10k"
+			(at 152 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 150 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "sqlvs-r1-pin1"))
+		(pin "2" (uuid "sqlvs-r1-pin2"))
+		(instances
+			(project "collision"
+				(path "/sqlvs-root-uuid" (reference "R1") (unit 1))
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 150 60 0)
+		(unit 1)
+		(uuid "sqlvs-root-gnd-uuid")
+		(property "Reference" "#PWR01"
+			(at 150 66 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "GND"
+			(at 150 64 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "sqlvs-root-gnd-pin1"))
+		(instances
+			(project "collision"
+				(path "/sqlvs-root-uuid" (reference "#PWR01") (unit 1))
+			)
+		)
+	)
+	(wire (pts (xy 150 46.19) (xy 150 40))
+		(stroke (width 0) (type default))
+		(uuid "sqlvs-root-wire-1")
+	)
+	(wire (pts (xy 150 53.81) (xy 150 60))
+		(stroke (width 0) (type default))
+		(uuid "sqlvs-root-wire-2")
+	)
+	(label "SENSE"
+		(at 150 40 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "sqlvs-root-label-sense")
+	)
+)

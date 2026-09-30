@@ -327,18 +327,35 @@ schematic pin's net name matches the corresponding PCB pad's net name.
     {
       "ref": "D1",
       "pad": "1",
-      "schematic_net": "LED_ANODE",
-      "pcb_net": "GND"
+      "schematic_net": "GND",
+      "pcb_net": "LED_ANODE"
     },
     {
       "ref": "D1",
       "pad": "2",
-      "schematic_net": "GND",
-      "pcb_net": "LED_ANODE"
+      "schematic_net": "/LED_ANODE",
+      "pcb_net": "GND"
     }
   ]
 }
 ```
+
+### Net-name spelling on the `schematic_net` side
+
+`schematic_net` uses **KiCad's own net-naming rules**, so a net driven by a
+plain schematic label carries its sheet path: `/LED_ANODE` on the root sheet,
+`/SubMcu/DBG_LED` inside a sheet whose `Sheetname` is `SubMcu` (issue #5809 —
+before that fix these were reported bare, which made every locally-labelled
+net a false mismatch against a KiCad-created board). Names that are *not*
+sheet-scoped stay bare: global labels, power-symbol nets (`GND`, `+3V3`,
+`PWR_FLAG`) and hierarchical sheet-pin nets.
+
+`pcb_net` is always the literal `(net K "NAME")` text from the `.kicad_pcb`.
+A board may spell a local net either way — KiCad writes `/LED_ANODE`,
+kicad-tools' pure-Python netlist fallback writes `LED_ANODE` — and the
+comparison accepts the bare spelling as the same net wherever that is
+unambiguous, so a mismatch record can legitimately show the two spellings on
+its two sides without the *other* pads on that net being reported.
 
 ### Field reference
 
@@ -349,7 +366,7 @@ schematic pin's net name matches the corresponding PCB pad's net name.
 | `mismatches`                   | array   | yes      | Always present; empty when clean (never omitted, never `null`) |
 | `mismatches[*].ref`            | string  | yes      | Reference designator (e.g. `"R1"`) |
 | `mismatches[*].pad`            | string  | yes      | Pin/pad number as a string (e.g. `"1"`) |
-| `mismatches[*].schematic_net`  | string &#124; null | yes | Net the pin sits on in the schematic, or `null` for floating |
+| `mismatches[*].schematic_net`  | string &#124; null | yes | Net the pin sits on in the schematic, or `null` for floating. Sheet-qualified for local labels (`"/LED_ANODE"`); bare for global / power / sheet-pin nets |
 | `mismatches[*].pcb_net`        | string &#124; null | yes | Net the pad sits on in the PCB, or `null` for unconnected |
 
 ### `mismatches` is always present
