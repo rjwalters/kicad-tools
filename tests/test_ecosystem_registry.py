@@ -20,6 +20,7 @@ import pytest
 
 from kicad_tools.ecosystem import (
     CATEGORIES,
+    CATEGORY_HEADINGS,
     LICENSE_COMPAT,
     REGISTRY_PATH,
     RELATIONS,
@@ -309,6 +310,41 @@ class TestFiltering:
 
     def test_to_dict_is_json_serializable(self, registry) -> None:
         json.dumps(registry.to_dict())
+
+
+class TestCategoryHeadings:
+    """Issue #5843: an unmapped category must fail loudly, not vanish.
+
+    ``CATEGORY_HEADINGS`` (``src/kicad_tools/ecosystem/models.py``) is the
+    single source both ``kct ecosystem list`` and
+    ``scripts/ecosystem_render.py``'s README renderer import -- before this
+    issue each kept its own independently-maintained copy, and only the
+    renderer guarded against a category with no heading.
+    """
+
+    def test_every_category_has_a_heading(self) -> None:
+        """A category added to the vocabulary without a heading must fail
+        this test rather than silently disappearing from a listing."""
+        assert set(CATEGORY_HEADINGS) == CATEGORIES
+
+    def test_cli_list_guards_against_an_unmapped_category(self, monkeypatch, registry) -> None:
+        """Reproduces the issue's own repro: drop one mapped category's
+        heading and confirm the CLI now fails loudly instead of printing
+        fewer projects than the trailing count claims."""
+        import kicad_tools.ecosystem as ecosystem_pkg
+        from kicad_tools.cli.commands.ecosystem import _run_list
+
+        incomplete = dict(CATEGORY_HEADINGS)
+        incomplete.pop("autorouter")
+        monkeypatch.setattr(ecosystem_pkg, "CATEGORY_HEADINGS", incomplete)
+
+        class _Args:
+            ecosystem_category = None
+            ecosystem_relation = None
+            ecosystem_verdict = None
+            ecosystem_license_compat = None
+
+        assert _run_list(_Args(), registry, "text") != 0
 
 
 class TestCli:

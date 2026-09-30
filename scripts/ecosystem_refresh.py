@@ -78,6 +78,41 @@ SEVERITY: dict[str, str] = {
 #: Default age (days) past which `last_verified` is itself reported.
 DEFAULT_MAX_AGE_DAYS = 90
 
+#: GitLab's ``license.key`` -> the canonical SPDX identifier it names.
+#:
+#: GitLab's API returns license keys lowercased (``apache-2.0``,
+#: ``bsd-3-clause``), but SPDX ids are mixed-case for multi-part names
+#: (``Apache-2.0``, ``BSD-3-Clause``). A bare ``.upper()`` only happens to
+#: round-trip for single-word ids (``mit`` -> ``MIT``) or ids that are
+#: already all-caps apart from the version (``gpl-3.0`` -> ``GPL-3.0``);
+#: for anything else it produces a string ``compare()`` treats as a real
+#: license change (severity ``error``) even though nothing changed
+#: (Issue #5843). Table drawn from GitLab's own canonical
+#: ``GET /licenses`` list; extend it if a GitLab-hosted registry entry
+#: reports a key not covered here.
+GITLAB_LICENSE_SPDX: dict[str, str] = {
+    "agpl-3.0": "AGPL-3.0",
+    "apache-2.0": "Apache-2.0",
+    "bsd-2-clause": "BSD-2-Clause",
+    "bsd-3-clause": "BSD-3-Clause",
+    "bsl-1.0": "BSL-1.0",
+    "cc0-1.0": "CC0-1.0",
+    "ecl-2.0": "ECL-2.0",
+    "epl-2.0": "EPL-2.0",
+    "eupl-1.1": "EUPL-1.1",
+    "gpl-2.0": "GPL-2.0",
+    "gpl-3.0": "GPL-3.0",
+    "isc": "ISC",
+    "lgpl-2.1": "LGPL-2.1",
+    "lgpl-3.0": "LGPL-3.0",
+    "mit": "MIT",
+    "mpl-2.0": "MPL-2.0",
+    "ofl-1.1": "OFL-1.1",
+    "unlicense": "Unlicense",
+    "wtfpl": "WTFPL",
+    "zlib": "Zlib",
+}
+
 
 @dataclass
 class Finding:
@@ -168,8 +203,27 @@ def probe_gitlab(slug: str) -> UpstreamFacts:
         return UpstreamFacts(error=f"gitlab probe failed: {exc}")
 
     licence = payload.get("license") or {}
+    key = licence.get("key") if licence else None
+    if key is None:
+        upstream_license = "NONE"
+    elif key in GITLAB_LICENSE_SPDX:
+        upstream_license = GITLAB_LICENSE_SPDX[key]
+    else:
+        # An unrecognized key: guessing via `.upper()` risks manufacturing a
+        # false-positive `license-changed` (error, severity that opens a
+        # tracking issue -- see .github/workflows/ecosystem-drift.yml).
+        # Degrade to `probe-failed` (info) instead and name the gap so a
+        # human can extend GITLAB_LICENSE_SPDX (Issue #5843).
+        return UpstreamFacts(
+            error=(
+                f"gitlab probe: unrecognized license key {key!r} "
+                f"(name={licence.get('name')!r}); add it to GITLAB_LICENSE_SPDX "
+                "in scripts/ecosystem_refresh.py"
+            )
+        )
+
     return UpstreamFacts(
-        license=(licence.get("key") or "NONE").upper() if licence else "NONE",
+        license=upstream_license,
         stars=payload.get("star_count"),
         last_push=_to_date(payload.get("last_activity_at")),
         archived=bool(payload.get("archived")),

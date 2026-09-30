@@ -247,6 +247,88 @@ class TestProbeFailureHandling:
         )
 
 
+class TestGitlabLicenseNormalization:
+    """Issue #5843: GitLab license keys must map to correct SPDX casing.
+
+    GitLab returns license keys lowercased (``mit``, ``apache-2.0``); SPDX
+    ids are mixed-case for multi-part names (``Apache-2.0``,
+    ``BSD-3-Clause``). A bare ``.upper()`` only happened to round-trip for
+    single-word/all-caps-prefix ids -- these tests cover the success path
+    that the pre-#5843 test suite never exercised.
+    """
+
+    @staticmethod
+    def _mock_gitlab_response(refresh, monkeypatch, payload: dict) -> None:
+        import json as _json
+
+        class _FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return _json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr(refresh.urllib.request, "urlopen", lambda *_a, **_k: _FakeResponse())
+
+    def _facts_for(self, refresh, monkeypatch, license_key: str | None, name: str = "") -> object:
+        payload = {
+            "license": ({"key": license_key, "name": name} if license_key is not None else None),
+            "star_count": 42,
+            "last_activity_at": "2026-09-30T12:00:00Z",
+            "archived": False,
+            "path_with_namespace": "acme/example",
+        }
+        self._mock_gitlab_response(refresh, monkeypatch, payload)
+        return refresh.probe_gitlab("acme/example")
+
+    def test_single_word_license_round_trips(self, refresh, monkeypatch) -> None:
+        facts = self._facts_for(refresh, monkeypatch, "mit", "MIT License")
+        assert facts.error is None
+        assert facts.license == "MIT"
+
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            ("apache-2.0", "Apache-2.0"),
+            ("bsd-3-clause", "BSD-3-Clause"),
+            ("gpl-3.0", "GPL-3.0"),
+            ("agpl-3.0", "AGPL-3.0"),
+        ],
+    )
+    def test_multi_part_license_gets_correct_spdx_casing(
+        self, refresh, monkeypatch, key, expected
+    ) -> None:
+        facts = self._facts_for(refresh, monkeypatch, key)
+        assert facts.error is None
+        assert facts.license == expected
+        # The regression this guards: `.upper()` mismatches for a
+        # mixed-case multi-part SPDX id.
+        if key.upper() != expected:
+            assert facts.license != key.upper()
+
+    def test_no_license_reports_none(self, refresh, monkeypatch) -> None:
+        facts = self._facts_for(refresh, monkeypatch, None)
+        assert facts.error is None
+        assert facts.license == "NONE"
+
+    def test_unrecognized_license_key_degrades_to_probe_failed_not_license_changed(
+        self, refresh, monkeypatch
+    ) -> None:
+        """An un-mappable key must not risk a false-positive error-severity
+        ``license-changed`` finding -- it degrades to info-severity
+        ``probe-failed`` instead (Issue #5843's suggested fallback)."""
+        facts = self._facts_for(refresh, monkeypatch, "some-future-license", "Some Future License")
+        assert facts.error is not None
+        assert "unrecognized license key" in facts.error
+
+        (finding,) = refresh.compare(_project(), facts, TODAY)
+        assert finding.drift_class == "probe-failed"
+        assert finding.severity == "info"
+
+
 class TestTimestampNormalization:
     @pytest.mark.parametrize(
         ("raw", "expected"),
