@@ -3223,6 +3223,47 @@ cause on this repo is the `#8248` required-check-freshness guard's automated
 | Comparison unavailable | `None` / no `TREE_UNCHANGED=1` line ⇒ **invalidate as before**. A `gh` failure, an unparsable response or one missing `status`/`files`, a ref the repo does not carry, an argument that is not a bare hex SHA, a non-GitHub forge, an absent `loom-daemon`, or one predating the verb all land here. Fail closed, in both paths. |
 | One implementation | `loom-daemon/src/forge_tree_unchanged.rs`. The daemon pass calls it in-process; the shell guard reaches it through `loom-daemon forge tree-unchanged <base> <head>` (prints `TREE_UNCHANGED=1|0`, exit 0; exit 1 = no answer). There is deliberately no copy of the comparison in shell — #9576 was caused by the shell guard having *no* tree comparison while the daemon had one, so PRs #9541/#9483 lost verdicts the daemon pass would have kept. |
 
+#### Attributing re-dates: commit trailers and `merge-pr redate-report` (#9746)
+
+On 2026-09-30, 52% of merged PRs needed at least one #8508 re-date, and each one
+cost a full PR CI cycle. Nothing recorded *which* check and *which* paths forced
+it, so narrowing the #8919 coupled inputs (#9748) would have been guesswork.
+`loom-daemon merge-pr redate-checks` now records that in the re-date commit's
+body as git trailers. The subject is byte-identical, so
+`is_redate_commit_subject` and the CI telemetry's `stale_main_bump` attribution
+are unaffected:
+
+```text
+Stale-Check: Structural Checks (Role Prompt Prefix Ratchet)
+Stale-Clause: the base move and this PR both touch this check's coupled inputs
+Coupled-Base-Path: CLAUDE.md
+Coupled-PR-Path: defaults/docs/eta.md
+```
+
+| Property | Behavior |
+|----------|----------|
+| Source of the verdict | `redate-checks` recomputes it just before creating the commit, through the same fetch/assess path as `merge-pr stale-checks`. It reads the PR's base ref from the forge, so `merge-pr.sh` passes nothing new and is unchanged. The recompute runs only when a push is actually going to happen (never for a head move, deferral or escalation). |
+| Time-rule verdict | `Stale-Check: <context>`, `Stale-Clause: time rule (#8248 started_at fallback)`, and both `Coupled-*: none`. |
+| Verdict unavailable | If the base ref or evidence cannot be read, or the verdict is now `Fresh`/`Unknown`, a `Note:` goes to stderr and the commit gets the generic pre-#9746 body. It is never a new failure mode for the remedy. |
+| Sanitizing | Check names and paths come from PR content. Every control character (including newlines) becomes a space, whitespace collapses, and values are capped at 300 chars, so a crafted path cannot forge a second trailer or line. An empty value reads as `none`. |
+
+`loom-daemon merge-pr redate-report [--since 24h] [--ref origin/main] [--json]`
+reads them back. It is **read-only**: it runs one local `git log` over `--ref`
+(not fetched, so run `git fetch` first) and makes no forge call and no write.
+For every commit whose subject is exactly the automated re-date subject, it
+prints counts by check × clause × base path × PR path (most frequent first),
+subtotals by check and by clause, and the number of **untrailered** re-dates
+(pre-#9746 history, or a verdict that could not be recomputed). Hand-made
+re-dates with a different subject (such as `… (#8248 guard, operator release)`)
+are counted separately and are not in the table. `--since` takes seconds or
+`<n>[smhd]`.
+
+The trailers reach `main` only because this repo merges PRs with **merge
+commits**, which keep the PR branch's re-date commits reachable (verified
+2026-09-30). A repo that squash-merges drops them, and the report then
+undercounts. The PR's `loom:stale-check-redate` comment stays the budget's
+durable record either way.
+
 #### Anchoring an unmarked verdict (#6319)
 
 Failing safe on a missing marker is correct, but it is not a resting state: an

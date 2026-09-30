@@ -1641,23 +1641,6 @@ forge_gh_create_issue_rl_safe() {
   return 1
 }
 
-# Get PR comments.
-# Usage: forge_get_pr_comments NWO PR_NUMBER
-# GitHub: gh pr view --comments
-# Gitea: GET /repos/{owner}/{repo}/issues/{n}/comments (PRs use issue comment API)
-forge_get_pr_comments() {
-  local nwo="$1"
-  local pr_number="$2"
-
-  if [[ "$FORGE_TYPE" == "gitea" ]]; then
-    forge_split_nwo "$nwo"
-    gitea_api GET "repos/$FORGE_OWNER/$FORGE_REPO/issues/$pr_number/comments" 2>/dev/null | \
-      jq -r '.[].body // empty'
-  else
-    gh pr view "$pr_number" --comments --json comments --jq '.comments[].body' 2>/dev/null || echo ""
-  fi
-}
-
 # --- Formal review / inline review-comment ingestion (#7647) ----------------
 #
 # The three helpers below are the ONLY supported way to read a PR's formal

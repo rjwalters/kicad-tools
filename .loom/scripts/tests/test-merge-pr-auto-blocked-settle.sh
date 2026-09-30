@@ -191,7 +191,6 @@ forge_get_required_status_check_contexts() {
 # the re-validation).
 FRESH_PR_JSON="$PR_JSON"
 forge_get_pr_nocache() { printf '%s\n' "$FRESH_PR_JSON"; }
-forge_get_pr_comments() { printf '%s\n' ""; }
 
 # Comment stub with a call counter (a FILE, for the same subshell reason as
 # CHECK_RUNS_COUNTER) plus an opt-in "first post fails" mode, so #8896's

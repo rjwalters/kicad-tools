@@ -16,7 +16,7 @@
 # Strategy (mirrors test-merge-pr-merge-ordering-guard.sh): the functions
 # under test (_check_loom_pr_label, _check_champion_hold_state_staleness)
 # depend on globals (PR_NUMBER, REPO_NWO, PR_LABELS, PR_HEAD_SHA, DRY_RUN,
-# ALLOW_UNAPPROVED) plus forge_get_pr_comments() and forge_gh_comment_rl_safe()
+# ALLOW_UNAPPROVED) plus _trusted_pr_comments() and forge_gh_comment_rl_safe()
 # (both stubbed as shell functions here, not real forge-helpers.sh — this test
 # does not source that file). We extract the function definitions from
 # merge-pr.sh and source them, stub their forge calls, then assert on exit
@@ -33,8 +33,9 @@
 #
 # A later #8191 slice moved _check_champion_hold_state_staleness's
 # marker-extraction and staleness comparison to `loom-daemon merge-pr
-# hold-state` as well; only the forge_get_pr_comments() read stays in the
-# shell, so the stub below still drives both. T6-T8 pass unchanged against
+# hold-state` as well; the comment read stays in the shell too, routed
+# through _trusted_pr_comments() (#9548: trusted authors only), so the stub
+# below still drives both. T6-T8 pass unchanged against
 # that port, and T8a/T8b are new assertions for the two ways the retired
 # `grep | tail -1 | sed` pipeline lost the warning silently (an empty
 # `[0-9a-f]*` capture from a quoted template winning `tail -1`, and a bare
@@ -130,7 +131,7 @@ error()   { echo "ERROR: $*" >&2; exit 1; }
 COMMENT_POST_LOG="$(mktemp)"
 FAKE_PR_COMMENTS=""
 FAKE_COMMENT_POST_RC=0
-forge_get_pr_comments() { printf '%s' "$FAKE_PR_COMMENTS"; }
+_trusted_pr_comments() { printf '%s' "$FAKE_PR_COMMENTS"; }
 forge_gh_comment_rl_safe() {
     printf '%s' "$3" >> "$COMMENT_POST_LOG"
     printf '\n---CALL-BOUNDARY---\n' >> "$COMMENT_POST_LOG"
@@ -436,7 +437,7 @@ run_guard_strict() {
     export PR_NUMBER REPO_NWO PR_LABELS PR_HEAD_SHA DRY_RUN ALLOW_UNAPPROVED \
         FAKE_PR_COMMENTS FAKE_COMMENT_POST_RC COMMENT_POST_LOG
     export -f _check_loom_pr_label _check_champion_hold_state_staleness \
-        info success warning error forge_get_pr_comments forge_gh_comment_rl_safe
+        info success warning error _trusted_pr_comments forge_gh_comment_rl_safe
     bash -c 'set -euo pipefail; _check_loom_pr_label' >"$outfile" 2>&1 &
     local pid=$!
     set +e

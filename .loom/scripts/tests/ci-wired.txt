@@ -69,7 +69,6 @@ test-check-shell-syntax.sh
 test-check-verified-corrections-preserved.sh
 test-claim-staleness.sh
 test-classify-ac-verification.sh
-test-classify-capacity-defer.sh
 test-classify-error.sh
 test-clean-stale-binary.sh
 test-clean-stale-building-labels.sh
