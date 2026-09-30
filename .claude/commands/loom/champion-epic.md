@@ -355,9 +355,11 @@ EPIC_BODY=$(printf '%s\n' "$EPIC_JSON" | jq -r '.body // ""')   # fetched by the
 ```
 
 **Do NOT substitute "Detecting Phase Completion" below for this.** That query
-matches `<!-- loom:epic:N:phase:M -->`, so it sees only children Step 3 created
-— exactly what an epic decomposed some other way lacks. Depending on the marker
-here would reproduce the #6516 blind spot.
+matches `<!-- loom:epic:N:phase:M -->` or an `[Epic #N] Phase M` title prefix
+(#5837), and it is scoped to a single phase — so it still cannot see a child
+linked as a native sub-issue or listed as a `- [ ] #N` task-list entry in the
+epic body, exactly what an epic decomposed some other way has. Depending on
+those two sources here would reproduce the #6516 blind spot.
 
 | Discovery result | Outcome |
 |---|---|
@@ -548,6 +550,18 @@ unrelated). `canonicalize_phase()` maps both forms (`A`/`B`/`C`/… and
 `1`/`2`/`3`/…, case-insensitively) to the same integer; an unrecognized token
 is left as-is so it can never *falsely* collapse into a match.
 
+**Title-prefix source (#5837)**: the marker query alone sees only phase issues
+*Champion itself* created. A phase child filed directly — by the operator or
+another role — commonly carries neither `loom:epic-phase` nor the body marker,
+only the `[Epic #N] Phase M: …` title convention. That is the same shape
+`champion-common.md`'s `discover_epic_children` source (e) was widened to
+recognize in #5791, and it is added here (narrowed to *one* phase) so this
+existence check and "Detecting Phase Completion" below read the **same** child
+set. Both sites must be widened together: widening only the completion query
+would let a title-prefix-only phase read as complete while this check still saw
+nothing for phase N+1 — a duplicate phase set, which is exactly the failure
+#6601 added this section to prevent.
+
 ```bash
 EPIC_NUMBER=<number>
 PHASE=<N>   # 1 at Step 3; N+1 at "Creating Next Phase Issues"
@@ -567,6 +581,35 @@ canonicalize_phase() {
   fi
 }
 CANONICAL_PHASE=$(canonicalize_phase "$PHASE")
+
+# (e) TITLE-PREFIX source, narrowed to ONE phase (#5837). Mirrors
+# champion-common.md's `discover_epic_children` source (e) (#5791): an issue
+# titled "[Epic #<epic>] Phase <token>: …" is a phase child even with no
+# `loom:epic-phase` label and no body marker — the shape a phase issue filed
+# directly by the operator or another role has. The forge phrase search is a
+# superset (GitHub's tokenizer strips brackets), so jq `startswith` re-verifies
+# a genuine prefix rather than a mid-title mention; the title's own phase token
+# is then canonicalized exactly like a marker's, so `Phase B` counts toward
+# PHASE=2 while `Phase 1` never does. Defined identically at both call sites
+# (here and "Detecting Phase Completion"), like canonicalize_phase above —
+# the two must never disagree about which issues belong to a phase.
+title_prefix_phase_issues() {
+  local epic="$1" canonical="$2" candidates
+  candidates=$(${GH_READ:-gh} issue list \
+    --state=all \
+    --limit=200 \
+    --search="\"[Epic #$epic] Phase\" in:title" \
+    --json number,title,state \
+    --jq "[.[] | select(.title | startswith(\"[Epic #$epic] Phase \"))]" 2>/dev/null || printf '[]')
+  printf '%s\n' "$candidates" | jq -c '.[]' | while IFS= read -r issue; do
+    local title_phase
+    title_phase=$(printf '%s' "$issue" | jq -r '.title' \
+      | sed -E "s/^\[Epic #$epic\] Phase[[:space:]]+([A-Za-z0-9]+).*/\1/")
+    if [ "$(canonicalize_phase "$title_phase")" = "$canonical" ]; then
+      printf '%s\n' "$issue"
+    fi
+  done | jq -s 'unique_by(.number) | map({number, title, state})'
+}
 
 # Any state — a materialized-and-CLOSED phase must dedupe exactly like an
 # open one (that's precisely the incident this fixes: the canonical set was
@@ -592,7 +635,7 @@ CANDIDATE_PHASE_ISSUES=$(${GH_READ:-gh} issue list \
 # Extract each candidate's own marker phase token and keep only the ones that
 # canonicalize to THIS phase — this is what makes `phase:B` match `PHASE=2`
 # (both canonicalize to 2) while `phase:1` never matches `PHASE=2` (#6967).
-EXISTING_PHASE_ISSUES=$(printf '%s\n' "$CANDIDATE_PHASE_ISSUES" | jq -c '.[]' | while IFS= read -r issue; do
+MARKER_PHASE_ISSUES=$(printf '%s\n' "$CANDIDATE_PHASE_ISSUES" | jq -c '.[]' | while IFS= read -r issue; do
   MARKER_PHASE=$(printf '%s' "$issue" | jq -r '.body' | \
     grep -oE "loom:epic:$EPIC_NUMBER:phase:[A-Za-z0-9]+" | head -1 | \
     sed -E "s/^loom:epic:$EPIC_NUMBER:phase://")
@@ -601,6 +644,12 @@ EXISTING_PHASE_ISSUES=$(printf '%s\n' "$CANDIDATE_PHASE_ISSUES" | jq -c '.[]' | 
     printf '%s\n' "$issue" | jq 'del(.body)'
   fi
 done | jq -s '.')
+
+# Union of the two sources, deduped by issue number — a phase child carrying
+# BOTH the marker and the title prefix must count once (#5837).
+TITLE_PHASE_ISSUES=$(title_prefix_phase_issues "$EPIC_NUMBER" "$CANONICAL_PHASE")
+EXISTING_PHASE_ISSUES=$(jq -s 'add | unique_by(.number)' \
+  <(printf '%s' "$MARKER_PHASE_ISSUES") <(printf '%s' "$TITLE_PHASE_ISSUES"))
 EXISTING_COUNT=$(printf '%s\n' "$EXISTING_PHASE_ISSUES" | jq 'length')
 
 if [ "$EXISTING_COUNT" -gt 0 ]; then
@@ -618,7 +667,7 @@ if [ "$EXISTING_COUNT" -gt 0 ]; then
     gh issue comment "$EPIC_NUMBER" --body "$STANDDOWN_MARKER
 **Champion: Phase $PHASE Issues Already Exist — Skipping Creation**
 
-Found $EXISTING_COUNT existing issue(s) already covering phase $PHASE (matched by canonical phase form, e.g. \`$PHASE_MARKER\` or an equivalent letter-form marker — #6967):
+Found $EXISTING_COUNT existing issue(s) already covering phase $PHASE (matched by canonical phase form — \`$PHASE_MARKER\`, an equivalent letter-form marker (#6967), or an \`[Epic #$EPIC_NUMBER] Phase $PHASE\` title prefix (#5837)):
 
 $ISSUE_LIST
 
@@ -822,8 +871,21 @@ This checks whether **this epic's own** Phase N children are all closed, to
 decide whether to create Phase N+1 — one phase at a time. `champion-common.md`
 → "Epic-Aware Blocker Check" Step 2 generalizes the same query across every
 phase of a *different* epic named as a blocker (#5211); **Step 0** answers "is
-*this* epic finished overall" via `discover_epic_children`, since this query
-sees only children Champion created itself (#6516).
+*this* epic finished overall" via `discover_epic_children`, which unions two
+further containment sources this phase-scoped query deliberately does not read
+(native sub-issues and epic-body task-list entries, #6516).
+
+**Two sources, both phase-scoped (#5837)**: the phase marker
+(`<!-- loom:epic:$EPIC_NUMBER:phase:M -->` on a `loom:epic-phase` issue) **and**
+the `[Epic #$EPIC_NUMBER] Phase M: …` title prefix — the same title convention
+`discover_epic_children`'s source (e) was widened to recognize in #5791. This
+query was left on the marker alone by that fix, so a phase whose children were
+filed directly (operator, another role) read as `OPEN=0 CLOSED=0` and produced a
+"0 closed / 0 total" progress comment while a child was open and active: epic
+#5784's Phase 4 (child #5798) on 2026-09-30. Both this query and "Step 2.75:
+Pre-Creation Existence Check" above now read the identical union — never widen
+one without the other, or a phase can read *complete* here while 2.75 still sees
+no Phase N+1 and creates a duplicate set.
 
 **Idempotency guard on the "not yet complete" branch
 (`champion:epic-phase-progress:*`, #7188)**: a `**Champion: Phase progress
@@ -859,6 +921,35 @@ canonicalize_phase() {
 }
 CANONICAL_PHASE=$(canonicalize_phase "$PHASE")
 
+# (e) TITLE-PREFIX source, narrowed to ONE phase (#5837). Mirrors
+# champion-common.md's `discover_epic_children` source (e) (#5791): an issue
+# titled "[Epic #<epic>] Phase <token>: …" is a phase child even with no
+# `loom:epic-phase` label and no body marker — the shape a phase issue filed
+# directly by the operator or another role has. The forge phrase search is a
+# superset (GitHub's tokenizer strips brackets), so jq `startswith` re-verifies
+# a genuine prefix rather than a mid-title mention; the title's own phase token
+# is then canonicalized exactly like a marker's, so `Phase B` counts toward
+# PHASE=2 while `Phase 1` never does. Defined identically at both call sites
+# (Step 2.75 above and here), like canonicalize_phase above — the two must
+# never disagree about which issues belong to a phase.
+title_prefix_phase_issues() {
+  local epic="$1" canonical="$2" candidates
+  candidates=$(${GH_READ:-gh} issue list \
+    --state=all \
+    --limit=200 \
+    --search="\"[Epic #$epic] Phase\" in:title" \
+    --json number,title,state \
+    --jq "[.[] | select(.title | startswith(\"[Epic #$epic] Phase \"))]" 2>/dev/null || printf '[]')
+  printf '%s\n' "$candidates" | jq -c '.[]' | while IFS= read -r issue; do
+    local title_phase
+    title_phase=$(printf '%s' "$issue" | jq -r '.title' \
+      | sed -E "s/^\[Epic #$epic\] Phase[[:space:]]+([A-Za-z0-9]+).*/\1/")
+    if [ "$(canonicalize_phase "$title_phase")" = "$canonical" ]; then
+      printf '%s\n' "$issue"
+    fi
+  done | jq -s 'unique_by(.number) | map({number, title, state})'
+}
+
 # Get all issues with loom:epic-phase that reference this epic, on the
 # epic-number prefix only (NOT the exact `:$PHASE` suffix — narrowing to one
 # literal phase string misses an existing marker in a different form for the
@@ -878,15 +969,22 @@ CANDIDATE_PHASE_ISSUES=$(gh issue list \
 # Keep only the candidates whose own marker phase token canonicalizes to THIS
 # phase — this is what makes `phase:B` count toward `PHASE=2` (both
 # canonicalize to 2) while `phase:1` never counts toward `PHASE=2` (#6967).
-PHASE_ISSUES=$(printf '%s\n' "$CANDIDATE_PHASE_ISSUES" | jq -c '.[]' | while IFS= read -r issue; do
+MARKER_PHASE_ISSUES=$(printf '%s\n' "$CANDIDATE_PHASE_ISSUES" | jq -c '.[]' | while IFS= read -r issue; do
   MARKER_PHASE=$(printf '%s' "$issue" | jq -r '.body' | \
     grep -oE "loom:epic:$EPIC_NUMBER:phase:[A-Za-z0-9]+" | head -1 | \
     sed -E "s/^loom:epic:$EPIC_NUMBER:phase://")
   [ -z "$MARKER_PHASE" ] && continue
   if [ "$(canonicalize_phase "$MARKER_PHASE")" = "$CANONICAL_PHASE" ]; then
-    printf '%s\n' "$issue" | jq 'del(.body)'
+    printf '%s\n' "$issue" | jq 'del(.body) | {number, state}'
   fi
 done | jq -s '.')
+
+# Union of the two sources, deduped by issue number — a phase child carrying
+# BOTH the marker and the title prefix must count once, and one carrying
+# EITHER must count at all (#5837). Same union Step 2.75 above computes.
+TITLE_PHASE_ISSUES=$(title_prefix_phase_issues "$EPIC_NUMBER" "$CANONICAL_PHASE")
+PHASE_ISSUES=$(jq -s 'add | unique_by(.number) | map({number, state})' \
+  <(printf '%s' "$MARKER_PHASE_ISSUES") <(printf '%s' "$TITLE_PHASE_ISSUES"))
 
 # Count open vs closed (`printf`, never `echo`, into jq — #5094).
 OPEN_COUNT=$(printf '%s\n' "$PHASE_ISSUES" | jq '[.[] | select(.state == "OPEN")] | length')
@@ -904,6 +1002,21 @@ else
     # open/closed while the totals happen to match is still seen as a change.
     OPEN_NUMBERS=$(printf '%s\n' "$PHASE_ISSUES" | jq -c '[.[] | select(.state == "OPEN") | .number] | sort')
     CLOSED_NUMBERS=$(printf '%s\n' "$PHASE_ISSUES" | jq -c '[.[] | select(.state == "CLOSED") | .number] | sort')
+
+    # ZERO machine-detectable children for this phase (#5837). Neither source
+    # found anything, so "0 closed / 0 total" is an ABSENCE OF EVIDENCE, not a
+    # measurement: a phase can be referred to only in prose — the epic body, or
+    # Champion's own earlier progress comments — by an issue carrying no phase
+    # marker and no `[Epic #N] Phase M` title prefix, which no mechanical query
+    # here or in `discover_epic_children` can attribute to this phase (epic
+    # #3438's Phase 2, tracked in comments via #5410, is the live example).
+    # Widening the query does not close that shape, so the comment must not
+    # read as a count. Say the count is unavailable instead of asserting zero.
+    if [ "$OPEN_COUNT" -eq 0 ] && [ "$CLOSED_COUNT" -eq 0 ]; then
+      PROGRESS_LINE="Phase $PHASE: **no machine-detectable children found** — neither a \`<!-- loom:epic:$EPIC_NUMBER:phase:$PHASE -->\` marker nor an \`[Epic #$EPIC_NUMBER] Phase $PHASE\` title prefix matched any issue. Read this as *count unavailable*, not as zero work: this phase's children may be tracked in prose only (epic body or a prior comment), which this query cannot attribute. Not treating the phase as complete."
+    else
+      PROGRESS_LINE="Phase $PHASE: $CLOSED_COUNT closed / $((OPEN_COUNT + CLOSED_COUNT)) total — not yet complete."
+    fi
 
     # Any epic-text gate status this phase names (e.g. "2C still unfiled,
     # waiting on X") — the same "Blocked by" reference Step 2.5 above reads.
@@ -938,7 +1051,7 @@ else
       # unchanged pass can detect the match.
       gh issue comment "$EPIC_NUMBER" --body "**Champion: Phase progress update**
 
-Phase $PHASE: $CLOSED_COUNT closed / $((OPEN_COUNT + CLOSED_COUNT)) total — not yet complete.
+$PROGRESS_LINE
 
 $GATE_STATUS
 
@@ -955,6 +1068,18 @@ fi
 | Phase complete (`OPEN_COUNT -eq 0 && CLOSED_COUNT -gt 0`) | Proceed to "Creating Next Phase Issues" below — a state transition, never gated by this guard |
 | Phase not complete, marker match (state unchanged since the last progress comment) | Silent skip — no comment, no label change |
 | Phase not complete, marker mismatch or no prior marker for this phase | Post the "Phase progress update" status comment, with `PROGRESS_MARKER` embedded |
+| **No machine-detectable children at all** (`OPEN_COUNT -eq 0 && CLOSED_COUNT -eq 0`, #5837) | Never complete. When the state-hash guard lets a comment through, post the *count-unavailable* wording — never "0 closed / 0 total", which reads as a measured zero when it is an absence of evidence |
+
+**Never narrate a phase as "0 total" (#5837).** Both mechanical sources are
+containment conventions a phase issue can simply lack: `discover_epic_children`
+recognizes a prose-only child as **weak** evidence at best, and a child that
+neither carries the marker nor starts its title with `[Epic #N] Phase M` is
+invisible to every query in this file. A zero here means *this pass found
+nothing to measure*, and the comment must say so. The same caution applies when
+you write a progress narration by hand: if your own prior comments on the epic
+name a child this query did not return, say that the count is incomplete and
+name the issue — do not let the machine-readable zero overwrite what you already
+know.
 
 Unlike the rejection-path guard's `PRIOR_REJECTIONS` / `SKIP_STREAK` tally and
 `LOOM_MAX_UNREVISED_EVALUATIONS` cap, there is no escalation counter here and
