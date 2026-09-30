@@ -33,6 +33,7 @@ from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec
     from kicad_tools.router.rules import NetClassRouting
@@ -40,6 +41,53 @@ if TYPE_CHECKING:
     from kicad_tools.validate.filters import ViolationFilter
     from kicad_tools.validate.mask_copper import MaskCopperRequest
     from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
+
+
+def canonical_source_text(raw: bytes, path: Path | None = None) -> str:
+    """Render saved ``.kicad_pcb`` bytes exactly as :meth:`PCB.load` would hold them.
+
+    ``PCB.load()`` does not keep its parsed tree byte-identical to the file it
+    came from.  A KiCad 10 "name-only net" board -- inline ``(net "SWCLK")``
+    references with no top-level ``(net N "name")`` table, which is what
+    ``kicad-cli pcb drc --save-board`` writes -- has that table **synthesized
+    into** ``PCB._sexp`` during construction
+    (:meth:`PCB._synthesize_net_table`).  Comparing the loaded object against a
+    plain re-parse of the same bytes therefore always differs: zero net
+    declarations on the file side versus one per net on the object side (issue
+    #5814 -- 0 vs 3 on the net-tie fixture, 0 vs 80 on a real board).  A
+    mutation guard built on a plain re-parse rejects boards nobody edited.
+
+    Running the saved bytes back through ``PCB`` puts **both** sides of such a
+    comparison through the same normalization, so a genuine in-memory edit --
+    the only thing the guard exists to catch -- stays the sole remaining
+    difference.
+
+    Args:
+        raw: The saved source bytes to canonicalize.
+        path: Optional path the bytes were read from, passed through to ``PCB``
+            so canonicalization sees the same construction arguments
+            ``PCB.load()`` used.
+
+    Returns:
+        The serialized, load-normalized S-expression text for ``raw``.
+
+    Raises:
+        ValueError: If ``raw`` cannot be decoded, parsed, or built into a
+            ``PCB``.  Callers guarding a saved source fail closed on this
+            rather than treating an unreadable file as unchanged.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.sexp import parse_string
+
+    try:
+        return PCB(parse_string(raw.decode()), path=path)._sexp.to_string()
+    except ValueError:
+        # Both failure modes worth distinguishing already subclass ValueError
+        # (UnicodeDecodeError for undecodable bytes, ParseError for malformed
+        # S-expressions) and carry a usable message -- pass them through.
+        raise
+    except Exception as exc:  # pragma: no cover - defensive, fails closed
+        raise ValueError(f"Could not canonicalize PCB source bytes: {exc}") from exc
 
 
 class DRCChecker:
@@ -1239,10 +1287,11 @@ class DRCChecker:
                     reasons=["Mask geometry requires a saved source PCB"]
                 )
             else:
-                from kicad_tools.sexp import parse_string
-
                 raw = self.pcb.path.read_bytes()
-                if self.pcb._sexp.to_string() != parse_string(raw.decode()).to_string():
+                # Both sides go through PCB's own load-time normalization, so a
+                # freshly loaded name-only-net board is not mistaken for an
+                # edited one (issue #5814); see canonical_source_text().
+                if self.pcb._sexp.to_string() != canonical_source_text(raw, self.pcb.path):
                     assessment = MaskCopperAssessment(
                         coverage="incomplete",
                         reasons=["PCB object differs from current source bytes"],
