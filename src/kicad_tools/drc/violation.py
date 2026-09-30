@@ -243,6 +243,12 @@ class ViolationType(Enum):
     SILKSCREEN_LINE_WIDTH = "silkscreen_line_width"
     SILKSCREEN_TEXT_HEIGHT = "silkscreen_text_height"
     SILKSCREEN_OVER_PAD = "silkscreen_over_pad"
+    # Coverage advisory, not a board defect (Issue #5811): a silk primitive
+    # kct's clearance geometry does not model (circle/arc) was skipped, so
+    # the silk checks are incomplete for it and native DRC stays the referee.
+    # The direct enum-value match in ``from_string`` resolves this id before
+    # the fuzzy ``"silk"`` fallback (which would misfile it as SILK_OVERLAP).
+    SILK_GEOMETRY_UNMODELED = "silk_geometry_unmodeled"
 
     # Solder mask
     SOLDER_MASK_BRIDGE = "solder_mask_bridge"

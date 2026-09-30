@@ -7,6 +7,15 @@ This module implements DRC checks for silkscreen elements:
 - Silkscreen-over-copper detection (geometric, vs pad mask apertures)
 - Silkscreen-over-silkscreen detection (geometric, silk vs silk)
 - Silkscreen-to-edge clearance (geometric, vs Edge.Cuts outline)
+- Silkscreen geometry coverage (which silk primitives were NOT modeled)
+
+**Modeled silk geometry.**  :func:`_stroke_geometry` builds the printed ink
+for ``line``, ``rect`` and (since #5811) ``poly`` primitives -- the latter in
+both fill states, because a filled polygon prints its interior and routinely
+carries a zero stroke width.  Primitives outside
+:data:`MODELED_SILK_GRAPHIC_TYPES` contribute no geometry at all; rather than
+letting that silence read as a clean board, :func:`check_silk_coverage`
+reports each one as an ``info`` finding.
 
 **Cross-gate counting model.**  The three geometric checks are designed to be
 count-comparable with ``kicad-cli pcb drc``, which is used as kct's referee at
@@ -98,6 +107,16 @@ _MIN_OVERLAP_AREA_MM2 = 0.05
 # margin) while still rejecting numerically-degenerate hairline touches between
 # two axis-aligned text bounding boxes.
 _MIN_SILK_OVERLAP_AREA_MM2 = 0.005
+
+# Silk graphic primitives whose printed ink :func:`_stroke_geometry` models.
+# ``poly`` joined the set in #5811 (filled and outline, both fill states).
+# Anything outside this set contributes NO geometry to the clearance checks,
+# which is a coverage gap, not a clean result -- :func:`check_silk_coverage`
+# reports each occurrence so it cannot pass unnoticed.
+MODELED_SILK_GRAPHIC_TYPES = ("line", "rect", "poly")
+
+#: Rule id for the coverage advisory emitted per unmodeled silk primitive.
+SILK_GEOMETRY_UNMODELED_RULE_ID = "silk_geometry_unmodeled"
 
 
 def is_silkscreen_layer(layer: str) -> bool:
@@ -466,25 +485,84 @@ def _text_bbox_geometry(
     )
 
 
+def _poly_geometry(
+    graphic: FootprintGraphic | BoardGraphic,
+    xf: _Transform,
+    width: float,
+) -> _Geometry | None:
+    """Build the printed ink of an ``fp_poly`` / ``gr_poly`` silk polygon.
+
+    Issue #5811.  Both KiCad fill states are modeled, because they print
+    different shapes and the distinction decides whether a pad *inside* the
+    polygon is covered by ink:
+
+    * **filled** (``(fill yes)`` / legacy ``(fill solid)``) -- the interior
+      is printed, so the geometry is the polygon itself, dilated by
+      ``width / 2`` when the outline is also stroked.  A filled marker
+      routinely carries ``(stroke (width 0))``, which is why the zero-width
+      early return that guards line/rect must NOT apply here: a
+      zero-stroke filled polygon is the single most common pin-1 marker
+      shape and used to be dropped entirely.
+    * **unfilled** -- only the boundary is printed, so the geometry is the
+      closed vertex ring buffered by ``width / 2``.  The interior stays
+      empty, so a pad inside an unfilled outline is correctly NOT reported
+      as covered.
+
+    Vertices are transformed through ``xf`` first, so footprint rotation
+    and board placement apply exactly as they do for line/rect strokes.
+    Returns ``None`` when the polygon prints nothing: fewer than three
+    vertices, or an unfilled outline with no stroke width.
+    """
+    from shapely.geometry import LineString, Polygon
+
+    points = [xf(p) for p in getattr(graphic, "points", ()) or ()]
+    if len(points) < 3:
+        return None
+
+    if getattr(graphic, "is_filled", False):
+        polygon = Polygon(points)
+        if not polygon.is_valid:
+            # Self-intersecting outlines (bow-ties, repeated vertices) are
+            # normalised the same way pin1_marker._graphic_geometry does.
+            polygon = polygon.buffer(0)
+        if width > 0:
+            polygon = polygon.buffer(width / 2.0)
+        return None if polygon.is_empty else polygon
+
+    if width <= 0:
+        # Neither filled nor stroked: nothing is printed.
+        return None
+    return LineString([*points, points[0]]).buffer(width / 2.0)
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
 ) -> _Geometry | None:
-    """Build a shapely polygon for a silk line/rect graphic stroke.
+    """Build a shapely polygon for a silk line/rect/poly graphic's printed ink.
 
-    Returns ``None`` for graphic types we do not model (circle/arc) or zero
-    stroke width.
+    Returns ``None`` for graphic types we do not model (circle/arc -- see
+    :func:`iter_unmodeled_silk_graphics`, which keeps those visible as
+    incomplete coverage rather than letting them read as clean) and for
+    primitives that print nothing (zero stroke width on a line/rect or on
+    an unfilled polygon).
     """
     from shapely.geometry import LineString
 
-    if graphic.graphic_type not in ("line", "rect"):
+    if graphic.graphic_type not in MODELED_SILK_GRAPHIC_TYPES:
         return None
     width = graphic.stroke_width
-    if width <= 0:
-        return None
 
     def xf(p: tuple[float, float]) -> tuple[float, float]:
         return transform(p) if transform is not None else p
+
+    if graphic.graphic_type == "poly":
+        # Checked BEFORE the zero-width return: a filled polygon prints its
+        # interior even with ``(stroke (width 0))`` (#5811).
+        return _poly_geometry(graphic, xf, width)
+
+    if width <= 0:
+        return None
 
     if graphic.graphic_type == "line":
         coords = [xf(graphic.start), xf(graphic.end)]
@@ -509,17 +587,36 @@ def _pad_aperture_geometry(
     """Build a shapely polygon for a pad's solder-mask aperture (exposed copper).
 
     Aperture = pad copper expanded by the mask margin (``pad.solder_mask_margin``
-    if set, else the profile default).  Approximated as an axis-aligned box;
-    pad rotation is not modeled (first-order, matches the text-box
-    approximation).
+    if set, else the profile default).  Approximated as a rectangle -- rounded
+    corners are over-approximated, matching the text-box approximation used
+    elsewhere in this module.
+
+    The rectangle is **oriented by the pad's absolute angle** (``pad.rotation``
+    already includes ``footprint.rotation`` per KiCad's file convention, see
+    :func:`~kicad_tools.validate.rules.clearance._pad_polygon` and #3902).
+    Issue #5811: while every silk element was a refdes box or a thin stroke,
+    ignoring that angle was harmless; once real polygon markers are modeled it
+    is not.  A TQFP pad of size ``1.475 x 0.55`` on a footprint rotated -90
+    degrees occupies a ``0.55 x 1.475`` board-frame footprint, and the
+    unrotated box spilled ~0.5 mm sideways into the neighbouring pin-1
+    triangle -- manufacturing a ``silk_over_copper`` pair on board 03 that
+    neither the true copper outline (``silk_pad_clearance`` measures 0
+    findings on the same board) nor native DRC sees.
     """
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
     from shapely.geometry import box
 
     margin = pad.solder_mask_margin if pad.solder_mask_margin is not None else min_mask_clearance
     w = pad.size[0] + 2.0 * margin
     h = pad.size[1] + 2.0 * margin
     cx, cy = pad_pos
-    return box(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+    aperture = box(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+    # KiCad's board-frame forward transform negates the stored angle, whereas
+    # shapely rotates by the usual positive-angle matrix.
+    rotation = getattr(pad, "rotation", 0.0) or 0.0
+    if rotation % 360.0:
+        aperture = rotate(aperture, -rotation, origin=(cx, cy))
+    return aperture
 
 
 def _via_aperture_geometry(via: Via, min_mask_clearance: float) -> _Geometry:
@@ -675,6 +772,101 @@ def _iter_silk_geometries(
             board_graphic.layer,
             board_graphic.uuid,
         )
+
+
+def iter_unmodeled_silk_graphics(
+    pcb: PCB,
+) -> Iterator[tuple[str, str, tuple[float, float], str, str]]:
+    """Yield ``(label, graphic_type, location, layer, uuid)`` per unmodeled silk shape.
+
+    A silk primitive outside :data:`MODELED_SILK_GRAPHIC_TYPES` (today:
+    ``circle`` and ``arc``, plus anything a future KiCad version adds)
+    contributes no geometry to ``silk_over_copper`` / ``silk_overlap`` /
+    ``silk_edge_clearance`` / ``silk_pad_clearance``.  That is a **gap in
+    coverage, not a clean result**: before #5811 the same silence also hid
+    every polygon marker, and a real native-DRC ``silk_over_copper``
+    violation on a filled pin-1 triangle went unreported by kct.
+
+    This iterator is the inventory of what the model still cannot see, and
+    :func:`check_silk_coverage` turns it into visible ``info`` findings so
+    the gap is reported rather than inferred from silence.
+    """
+    for footprint in pcb.footprints:
+        for graphic in footprint.graphics:
+            if _silk_side(graphic.layer) is None:
+                continue
+            if graphic.graphic_type in MODELED_SILK_GRAPHIC_TYPES:
+                continue
+            yield (
+                f"{footprint.reference} (fp_{graphic.graphic_type})",
+                graphic.graphic_type,
+                footprint.position,
+                graphic.layer,
+                graphic.uuid,
+            )
+
+    for board_graphic in pcb.graphics:
+        if _silk_side(board_graphic.layer) is None:
+            continue
+        if board_graphic.graphic_type in MODELED_SILK_GRAPHIC_TYPES:
+            continue
+        yield (
+            f"gr_{board_graphic.graphic_type}",
+            board_graphic.graphic_type,
+            board_graphic.start,
+            board_graphic.layer,
+            board_graphic.uuid,
+        )
+
+
+def check_silk_coverage(
+    pcb: PCB,
+    design_rules: DesignRules,
+) -> DRCResults:
+    """Report silk primitives the clearance geometry model does not cover.
+
+    Emits one ``silk_geometry_unmodeled`` **info** finding per silk
+    ``fp_circle`` / ``fp_arc`` / ``gr_circle`` / ``gr_arc`` (and any other
+    unmodeled type) so ``kct check`` states the coverage gap instead of
+    letting an omitted shape read as a clean board (#5811).  ``info``
+    severity keeps the manufacturing gate unaffected: this is a statement
+    about kct's model, not a defect in the board, and native DRC remains
+    the referee for those shapes.
+
+    Findings carry the element's own UUID so a specific unmodeled shape can
+    be located in the board file, matching the ``silk_overlap`` convention
+    from #4987.
+
+    Args:
+        pcb: The PCB to inventory.
+        design_rules: Design rules (unused; coverage is a property of the
+            geometry model, not of the profile).
+
+    Returns:
+        DRCResults containing any ``silk_geometry_unmodeled`` infos.
+    """
+    del design_rules  # coverage is a property of the model, not the profile
+    results = DRCResults(rules_checked=1)
+
+    for label, graphic_type, location, layer, uuid in iter_unmodeled_silk_graphics(pcb):
+        item = f"{label} {{{uuid}}}" if uuid else label
+        results.add(
+            DRCViolation(
+                rule_id=SILK_GEOMETRY_UNMODELED_RULE_ID,
+                severity="info",
+                message=(
+                    f"Silkscreen {label} is a {graphic_type!r} primitive that kct's silk "
+                    "clearance geometry does not model; it was NOT checked for "
+                    "silk-over-copper / silk-to-pad / silk-to-edge clearance "
+                    "(native DRC remains authoritative for it)"
+                ),
+                location=location,
+                layer=layer,
+                items=(item,),
+            )
+        )
+
+    return results
 
 
 def _iter_pad_apertures(
@@ -882,6 +1074,13 @@ def check_silk_overlap(
     # A library outline is often several joined line primitives. Their round
     # stroke caps overlap at the common vertex, which is intentional artwork,
     # not the line crossings or text collisions this rule detects.
+    #
+    # The ``graphic_type != "line"`` gate below stays line-ONLY on purpose, and
+    # #5811's new poly support does not widen it: the exemption is defined by
+    # :func:`_shared_endpoint` over a primitive's TWO endpoints, which a
+    # polygon (a closed ring, already one primitive) does not have.  A polygon
+    # overlapping an adjacent stroke is a genuine overlap of two separately
+    # drawn shapes, exactly as a rect overlapping a line already is.
     line_endpoints = {}
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
@@ -1055,5 +1254,8 @@ def check_all_silkscreen(
     results.merge(check_silk_pad_clearance(pcb, design_rules))
     results.merge(check_silk_overlap(pcb, design_rules))
     results.merge(check_silk_edge_clearance(pcb, design_rules))
+    # Last: state what the geometry model could NOT check, so an omitted
+    # primitive is reported rather than read as a clean board (#5811).
+    results.merge(check_silk_coverage(pcb, design_rules))
 
     return results

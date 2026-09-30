@@ -433,6 +433,10 @@ class DRCChecker:
         "pin1_marker_obscured": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
         "silk_edge_clearance": CATEGORY_ADVISORY,
+        # Coverage advisory for silk primitives the geometry model does not
+        # cover (Issue #5811).  Explicit entry REQUIRED -- category_for_rule
+        # defaults unknown ids to the fab-blocking Manufacturing bucket.
+        "silk_geometry_unmodeled": CATEGORY_ADVISORY,
         "silkscreen_line_width": CATEGORY_ADVISORY,
         "silkscreen_over_pad": CATEGORY_ADVISORY,
         "silkscreen_text_height": CATEGORY_ADVISORY,
