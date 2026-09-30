@@ -73,6 +73,17 @@ once during daemon bring-up before any loop starts (restart-required)** —
 that is the actual mechanical test; "it's in `autonomous.*`" is not enough to
 predict which bucket a given knob falls into.
 
+**This table is narrative, not authoritative (#9597).** `fleet-config
+render` classifies every changed dotted path itself, against a code-owned
+table (`loom-daemon/src/fleet_store/reload.rs`) built on the exact same
+mechanical test above — that table is what `render`'s output and
+`loom-daemon status`'s "Pending restart:" line actually act on, so it cannot
+silently drift the way the rows above already had (`autonomous.workFinder`'s
+`maxConcurrent` / `maxConcurrentPerRepo` / `extraSkipLabels` all went live in
+#9060/#9090/prior work without this table ever being updated to say so). If
+this table and `reload.rs` ever disagree, `reload.rs` is correct; open an
+issue to fix this table's prose.
+
 ## Other known caching surfaces (not daemon-config, same failure shape)
 
 - **Installed prompt/role/doc/script surfaces** (`.loom/roles/`,
@@ -190,3 +201,15 @@ knobs the table marks "requires a daemon restart." That would retire this
 convention for the daemon-config half of the problem entirely — tracked
 against #5963, deliberately not attempted in the same change that documents
 the guardrail it would replace.
+
+**Partially landed for `fleet-config render` specifically (#9597).** A
+render that changes a live-reloadable path now confirms it against a
+running daemon over IPC and prints so at render time, with nothing further
+to check; a restart-required path is recorded and surfaces in
+`loom-daemon status` until the daemon that saw the drift actually restarts —
+closing the "silent staleness" half of #5963's gap for this one write path.
+This does **not** change what is live vs. restart-required (that split is
+unchanged, and still just as real) — it only makes the render command name
+which bucket a change landed in instead of leaving the closer to work it out
+by hand. Actually hot-reloading a knob currently marked restart-required (so
+that bucket shrinks) is still the open, harder half of this follow-up.

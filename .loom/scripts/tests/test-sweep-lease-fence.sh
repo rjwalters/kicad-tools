@@ -40,6 +40,11 @@
 #   (q) a yield record for a DIFFERENT sweep on the SAME host does not
 #       exclude a later, legitimately-reclaimed lease from that host --
 #       matched by exact (host, sweep), not by host alone (#6485)
+#   (u) `forge check-branch` reports the branch already exists -> ABORT
+#       BRANCH_COLLISION (exit 5), checked BEFORE any lease comment is
+#       fetched (#9453 Phase 4)
+#   (v) `forge check-branch` fails closed (exit 5) -> also ABORT
+#       BRANCH_COLLISION -- unlike the lease checks, this leg fails CLOSED
 #   (s) LOOM_REPO unset (the common case -- this script has no --repo CLI
 #       flag) leaves `repo_args` a genuinely empty array; expanding
 #       `"${repo_args[@]}"` unguarded there is an "unbound variable" under
@@ -171,7 +176,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/trust-stub.sh"
 loom_trust_stub "$STUB_DIR"
 
 reset_state() {
-    rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail
+    rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail \
+        "$STUB_DIR"/check-branch-rc "$STUB_DIR"/check-branch-stdout
     unset LOOM_LEASE_FENCE_NOW LOOM_HOST_ID LOOM_LEASE_TTL_MINUTES HOSTNAME \
         LOOM_LEASE_PUBLISH_HOSTNAME LOOM_REPO 2> /dev/null || true
 }
@@ -488,6 +494,35 @@ assert_eq "0" "$RC" "(t) untrusted fresher leases do not supersede this sweep's 
 LOOM_TEST_NO_TRUST_VERB=1 LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
 assert_eq "0" "$RC" "(t) no trust filter -> unverifiable, fails open (PASS)"
 assert_contains "$ERR" "could not be authenticated" "(t) stderr names the missing authentication"
+
+# --- (u) #9453 Phase 4: `forge check-branch` reports the branch already
+# exists on origin -> ABORT BRANCH_COLLISION (exit 5), BEFORE the lease
+# comments are ever fetched -- even though the lease fixture below, on its
+# own, would otherwise PASS. api-paths.log staying empty proves the
+# short-circuit.
+reset_state
+: > "$STUB_DIR/api-paths.log"
+echo "0" > "$STUB_DIR/check-branch-rc"
+echo "2026-09-29T03:48:22+00:00" > "$STUB_DIR/check-branch-stdout"
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"}]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "5" "$RC" "(u) confirmed branch collision -> exit 5 (ABORT BRANCH_COLLISION)"
+assert_contains "$ERR" "BRANCH_COLLISION" "(u) stderr names the collision"
+assert_contains "$ERR" "feature/issue-6309" "(u) stderr names the colliding branch"
+assert_contains "$ERR" "suffix branch" "(u) stderr forbids the #9447 suffix-branch fallback"
+assert_eq "" "$(cat "$STUB_DIR/api-paths.log" 2>/dev/null || true)" "(u) the lease-comment fetch never ran -- the branch check short-circuits first"
+
+# --- (v) #9453 Phase 4: `forge check-branch` itself fails (exit 5, fail
+# CLOSED) -> also ABORT BRANCH_COLLISION. Unlike every lease-comment failure
+# above (which all fail OPEN), an unverifiable branch answer still aborts --
+# the asymmetry this script's header doc calls out explicitly.
+reset_state
+echo "5" > "$STUB_DIR/check-branch-rc"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "5" "$RC" "(v) branch probe failure -> exit 5 (ABORT BRANCH_COLLISION, fail CLOSED)"
+assert_contains "$ERR" "BRANCH_COLLISION" "(v) stderr names the collision even though it is unverified"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

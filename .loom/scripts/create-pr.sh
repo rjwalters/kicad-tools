@@ -34,6 +34,16 @@
 #      403: force a fresh installation-token mint (bypassing the ~1h cache),
 #      then a personal token. See `forge_gh_perm_safe` in lib/forge-helpers.sh
 #      for the full ladder and why this is NOT the rate-limit fallback.
+#   4. 1:1 ISSUE-TO-PR REVIEW-GATE GUARD (#9453 phase 5). Immediately before
+#      creating a brand-new PR, re-run `loom-daemon forge check-open-pr` on
+#      the issue THIS PR's own body references (closing OR `Part of` /
+#      `Contributes to`). If that probe finds an open linked PR on a
+#      DIFFERENT head branch than ours, refuse -- a second builder racing the
+#      same issue on its own branch must stand down rather than push a
+#      competing PR into the same review pipeline (`loom:review-requested` /
+#      `loom:reviewing` / `loom:pr`). Same-head-branch adoption (#6074, item 1
+#      above) always takes precedence: it already returns 0 before this guard
+#      runs.
 #
 # Usage:
 #   create-pr.sh --title TITLE (--body BODY | --body-file PATH) \
@@ -67,6 +77,11 @@
 #   1 - Creation failed, or the target issue was already closed by a
 #       superseding PR (message on stderr in both cases).
 #   2 - Invalid arguments.
+#   6 - Refused: the issue this PR's body references (closing OR `Part of` /
+#       `Contributes to`) already has an open linked PR on a DIFFERENT head
+#       branch than ours (1:1 issue-to-PR review-gate guard, #9453 phase 5).
+#       Stand down instead of pushing a second PR into the same review
+#       pipeline -- message on stderr names the existing PR.
 #
 # NOTE: GitHub-specific, like create-issue.sh. On a Gitea forge it exits 2 --
 # Gitea has no GitHub App installation tokens, so it has no equivalent
@@ -223,6 +238,68 @@ if [[ -n "$EXISTING_URL" && "$EXISTING_URL" != "null" ]]; then
   echo "create-pr.sh: an open PR already exists for $HEAD_BRANCH — adopting it" >&2
   printf '%s\n' "$EXISTING_URL"
   exit 0
+fi
+
+# --- 1:1 issue-to-PR review-gate guard (#9453 phase 5) -----------------------
+#
+# Adopt-first above only catches a race when both builders share a head
+# branch. Two builders racing the SAME issue on DIFFERENT branches (a second
+# hand-claim that never saw the first's branch, or a re-dispatch that created
+# a fresh branch name) reach `gh pr create` unchecked otherwise. Reuse
+# `loom-daemon forge check-open-pr` (#8551) -- the identical
+# closes-graph ∪ timeline union the dispatch guard and the pre-claim
+# hand-check both already use -- against whichever issue THIS PR's own body
+# references (a closing keyword OR a `Part of` / `Contributes to` partial
+# reference; a family/epic issue that intentionally stays open across many
+# PRs is exactly the case this guard must also cover).
+#
+# EX_REVIEW_GATE_COLLISION=6 is intentionally a NEW code distinct from every
+# other exit this script already uses (0 create/adopt, 1 create-failed/
+# superseded, 2 bad args) and from `forge check-open-pr`'s OWN codes
+# (0 open / 1 none / 3 gitea / 5 probe-failed) -- a caller must be able to
+# tell "refused: review-gate collision" apart from all of those.
+#
+# Fail-open by construction, matching every other lookup in this script: no
+# daemon binary resolvable, a probe failure (exit 5), or a Gitea decline
+# (exit 3, unreachable here since the forge-type check above already exited
+# on non-GitHub) all fall through and let `gh pr create` be the final
+# authority -- this is a defense-in-depth pre-check, not the only gate.
+EX_REVIEW_GATE_COLLISION=6
+
+TARGET_ISSUE=""
+if [[ -n "$BODY" ]]; then
+  TARGET_ISSUE="$(grep -ioE '\b(close[sd]?|closing|fix(e[sd])?|resolve[sd]?|part of|contributes to)[[:space:]]+#[0-9]+' <<< "$BODY" \
+    | head -1 | grep -oE '[0-9]+' || true)"
+fi
+
+if [[ -n "$TARGET_ISSUE" ]]; then
+  # shellcheck source=./lib/locate-daemon-bin.sh
+  source "$SCRIPT_DIR/lib/locate-daemon-bin.sh"
+  # requires-daemon: forge optional   #9453 phase 5 -- without a resolvable daemon binary (absent, or predating `forge check-open-pr`, #8551) this pre-check is skipped and `gh pr create` remains the sole authority
+  _cpr_daemon_bin="$(loom_resolve_self_daemon_bin 2>/dev/null || true)"
+  if [[ -n "$_cpr_daemon_bin" ]]; then
+    _cpr_opr_rc=0
+    _cpr_opr_pr="$("$_cpr_daemon_bin" forge check-open-pr "$TARGET_ISSUE" 2>/dev/null)" || _cpr_opr_rc=$?
+    if [[ "$_cpr_opr_rc" -eq 0 && -n "$_cpr_opr_pr" ]]; then
+      _cpr_opr_head_args=(pr view "$_cpr_opr_pr" --json headRefName --jq '.headRefName')
+      if [[ -n "$REPO_NWO" ]]; then
+        _cpr_opr_head_args+=(--repo "$REPO_NWO")
+      fi
+      _cpr_opr_head="$(gh "${_cpr_opr_head_args[@]}" 2>/dev/null || true)"
+      if [[ -n "$_cpr_opr_head" && "$_cpr_opr_head" != "$HEAD_BRANCH" ]]; then
+        echo "create-pr.sh: issue #$TARGET_ISSUE already has an open linked PR: \
+#$_cpr_opr_pr (branch $_cpr_opr_head) — refusing to open a second PR into the \
+same review pipeline (1:1 issue-to-PR review-gate guard, #9453 phase 5). \
+Stand down: do NOT push further on $HEAD_BRANCH. If your work supersedes \
+#$_cpr_opr_pr, say so on the issue and let Judge/a human decide; otherwise \
+close this branch as a duplicate." >&2
+        exit "$EX_REVIEW_GATE_COLLISION"
+      fi
+    fi
+    # _cpr_opr_rc == 1 (verified no open PR), 3 (gitea — unreachable here),
+    # or 5 (probe failed): all fall through, matching the fail-open posture
+    # of every other lookup in this script.
+  fi
 fi
 
 # --- Superseded-target-issue freshness check (#6277) -------------------------

@@ -59,6 +59,16 @@ FALLBACK='<!-- loom:provenance v1 build=unknown unknown unknown prompts=unknown 
 
 cat > "$STUB_DIR/daemon-ok" <<STUB
 #!/usr/bin/env bash
+# create-pr.sh also consults the daemon for the #9453 phase 5 1:1
+# review-gate guard (\`forge check-open-pr <issue>\`) before it ever gets to
+# the provenance call this suite is pinning -- log that invocation
+# separately so it never shows up in daemon-args.txt / daemon-stdin.txt,
+# which stay scoped to the \`provenance pr-marker\` call this suite tests.
+# Exit 1 (verified no open PR) so the review-gate guard never refuses.
+if [[ "\$1" == "forge" && "\$2" == "check-open-pr" ]]; then
+  printf '%s\n' "\$*" > "\$LOOM_TEST_STUB_DIR/daemon-forge-args.txt"
+  exit 1
+fi
 printf '%s\n' "\$*" > "\$LOOM_TEST_STUB_DIR/daemon-args.txt"
 cat > "\$LOOM_TEST_STUB_DIR/daemon-stdin.txt"
 echo '$MARKER'
@@ -80,7 +90,7 @@ export LOOM_FORGE_TYPE=github
 export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-check-ok.sh"
 
 run_create_pr() {
-  rm -f "$STUB_DIR/body.txt" "$STUB_DIR/daemon-args.txt"
+  rm -f "$STUB_DIR/body.txt" "$STUB_DIR/daemon-args.txt" "$STUB_DIR/daemon-forge-args.txt"
   "$CREATE_PR" --title "fix: x" --head "feature/issue-42" "$@" > /dev/null 2>&1
 }
 

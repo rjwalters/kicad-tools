@@ -900,13 +900,15 @@ if [[ "$FENCE_RC" -eq 3 ]]; then
   echo "Lease fence: EXPIRED — MY OWN claim's lease record is stale on the forge's own clock (my renewal loop died). Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
   # Stop here for issue $N. Do not push, do not create a PR, do not touch
   # the loom:building label or contest any peer's claim — report this issue
-  # as not-contributed-this-run, same as any other Builder failure marker.
+  # as not-contributed-this-run.
   # (Issue #6783: exit 3 now means the EXPIRED lease is THIS sweep's own —
   # an expired lease owned by a DIFFERENT, abandoned host is no longer a
   # fencing abort; that case is folded into FENCE_RC == 0 below.)
 elif [[ "$FENCE_RC" -eq 4 ]]; then
   echo "Lease fence: SUPERSEDED — a different host's lease is now the freshest for issue $N. Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
   # Same stop-here handling as the EXPIRED branch above.
+elif [[ "$FENCE_RC" -eq 5 ]]; then
+  echo "Lease fence: BRANCH_COLLISION — feature/issue-$N exists on origin, unpushed by this worktree. Yours: adopt via create-pr.sh. Else: stand down. NEVER a suffix branch." >&2
 else
   # FENCE_RC == 0 (fresh & own host, OR no lease evidence to fence against —
   # fail-open, see the script's own header doc — OR an EXPIRED lease owned
@@ -928,12 +930,10 @@ the comment is still fresh (`now - updated_at <= LEASE_TTL_MINUTES`, default
 `host=` still names **this** host (`--host`, defaulting to this host's own
 identity — same `LOOM_HOST_ID` > `$HOSTNAME` > `hostname` precedence
 `sweep_registry::host_identity()` uses). It aborts (exit `3` = expired-and-
-own-host, `4` = superseded — the two are logged distinctly so a
-post-incident read can tell them apart) **before doing anything
-externally-visible**: no push, no PR. It never contests or cleans up a peer's
-claim — the `loom:building` label is left exactly as-is; that is out of
-scope for this check (see the script's own header doc,
-`defaults/scripts/sweep-lease-fence.sh`). Since #6320 an in-session run
+own-host, `4` = superseded, `5` = branch collision)
+**before doing anything externally-visible**: no push, no PR. It
+never touches a peer's claim — the `loom:building` label is
+left as-is. Since #6320 an in-session run
 (manual `/loom:sweep`, GH Actions cron, `--no-daemon`) publishes its own
 lease at pre-flight (`sweep-lease-publish.sh`, sweep.md Step 1b), so this
 check is now meaningful on both dispatch paths rather than only the
@@ -956,7 +956,7 @@ live peer genuinely holds the claim.
 ### Creating the PR
 
 **Open the PR with `./.loom/scripts/create-pr.sh`, never a bare `gh pr create` (#6074).**
-The flags are a subset of `gh pr create`'s, so the call below reads the same — but three
+The flags are a subset of `gh pr create`'s, so the call below reads the same — but four
 things a bare `gh pr create` cannot do are load-bearing here:
 
 - **It adopts an already-open PR for your branch** (prints that PR's URL, exits 0, creates
@@ -969,6 +969,11 @@ things a bare `gh pr create` cannot do are load-bearing here:
   supersede it refuses to open a duplicate PR (names the superseding PR, exits non-zero,
   does not push further, does not delete the branch). `Part of #N` / `Contributes to #N`
   partial-increment references are exempt by construction — see "Multi-PR landings" below.
+- **It enforces a 1:1 issue-to-PR review-gate (#9453 phase 5)** — the race adopt-first
+  above can't catch: two builders on *different* branches for the *same* issue. Re-runs
+  `forge check-open-pr` on your body's referenced issue (closing OR `Part of`); an open PR
+  on a different head branch refuses (exit `6`, names it). **If refused: stand down** —
+  close your branch, or escalate to Judge/a human if yours genuinely supersedes it.
 - **It survives the GitHub App permission window.** A cached App installation token can
   hold `Contents:write` while `Pull-requests:write` has not propagated into it yet, so
   your `git push` succeeds and the very next `gh pr create` returns `403 Resource not

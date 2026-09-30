@@ -29,7 +29,7 @@ Normalize a requested name by stripping a leading `/`, a leading `loom:` namespa
 
 ## Overview Mode (`/loom:help`)
 
-Print a one-screen, grouped overview of the **primary, user-facing** Loom commands. Use the curated list below as the source of truth for grouping and descriptions — it is deliberately hand-maintained so that reference sub-docs and deprecated stubs never leak into the listing.
+Print a one-screen, grouped overview of the **primary, user-facing** Loom commands. Use the curated list below as the source of truth for grouping and descriptions (hand-maintained so sub-docs and deprecated stubs never leak in).
 
 Present it grouped like this (keep descriptions terse, one line each):
 
@@ -52,6 +52,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:architect` | Analyze the codebase and file architectural proposals (`loom:architect`). |
 | `/loom:hermit` | Find bloat and file simplification proposals (`loom:hermit`). |
 | `/loom:auditor` | Build and run `main` to verify it actually works; file bugs on failure. |
+| `/loom:concierge` | Opt-in operator persona: room intent to typed daemon verbs. |
 | `/loom:driver` | Plain shell environment with no assumed role, for ad-hoc tasks. |
 
 ### Project / meta
@@ -76,17 +77,18 @@ After printing the overview, do a lightweight accuracy check against what is act
 
 1. List the installed command files: `ls .claude/commands/loom/*.md` (read-only). If that path is missing, try `ls defaults/.claude/commands/loom/*.md` (the loom source repo's canonical copy).
 2. Reduce each result to its base name without `.md`.
-3. **Exclude** the known reference sub-docs and deprecated stubs — these are internal building blocks, not invocable entry points, and must never appear in the listing:
+3. **Exclude** the known reference sub-docs and deprecated stubs:
    - anything ending in `-patterns` or `-reference` (e.g. `architect-patterns`, `architect-reference`, `champion-reference`, `hermit-patterns`, `loom-reference`)
    - the builder sub-docs: `builder-pr`, `builder-worktree`, `builder-complexity`
    - the champion helper docs: `champion-common`, `champion-epic`, `champion-issue-promo`, `champion-pr-merge` (any `champion-*` other than `champion` itself)
+   - `sweep-*` sub-docs, plus `cargo-target-isolation`, `comment-body-literal-path`, `probe-protocol`
    - the deprecated stubs: `loom-iteration`, `loom-parent`
 4. Compare the surviving set against the curated command names above.
    - If an installed primary command is **missing** from the curated list, warn: `Note: /loom:<name> is installed here but not described above — this help text may be out of date (please report).`
    - If a curated command is **not** installed here, note it as possibly-not-installed rather than dropping it silently: `Note: /loom:<name> is described above but not found in this install.`
    - If everything matches, you may add a single line: `(Command list verified against this install.)`
 
-Keep the warnings brief — a drift safety net, not the main event.
+Keep warnings brief.
 
 ---
 

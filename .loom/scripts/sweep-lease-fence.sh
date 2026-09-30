@@ -138,6 +138,36 @@
 # unaffected by this change: that case still means a live peer genuinely
 # holds the claim, and aborting there remains unambiguously correct.
 #
+# ## Branch-collision hard stop (Issue #9453 Phase 4)
+#
+# `check` also answers a SECOND, independent question before the lease logic
+# above ever runs: does `feature/issue-<N>` already exist on `origin`? This
+# is the #9447 incident's other failure mode -- a worker that found the
+# branch already pushed by a racing claimant, and improvised a SUFFIX branch
+# (`feature/issue-9447-install-merge`) rather than stopping, opening a second,
+# competing PR. There is no scripted fallback here: a collision is always a
+# hard abort, never a rename-and-push.
+#
+# The check delegates to `loom-daemon forge check-branch <issue>`
+# (`loom-daemon/src/forge_check_branch.rs`) -- a single `git ls-remote
+# --heads origin feature/issue-N`, zero forge-API calls. Its own exit
+# contract is `0` = branch exists, `1` = verified absent, `5` = the probe
+# itself failed (fail CLOSED, not a verified absence). This script treats
+# every code OTHER than exactly `1` as a collision -- including `5` -- unlike
+# the lease checks above, which fail OPEN on an unreadable answer. The
+# asymmetry is deliberate: an unverifiable BRANCH question is cheap to check
+# by hand and expensive to get wrong (a second competing PR), while an
+# unverifiable LEASE comment is common (predates the lease feature, a
+# transient `gh` hiccup) and blocking on it would strand legitimate sweeps.
+#
+# Before asking the daemon, the check first looks at THIS worktree's own
+# push-tracking state: if `feature/issue-<N>` already has an `origin`
+# upstream configured locally (this exact worktree already ran `git push -u`
+# for it -- e.g. a resumed session pushing a follow-up commit within the same
+# claim), the branch's existence on `origin` is expected and is NOT a
+# collision -- this claim created it. Only a branch this worktree has never
+# itself pushed counts as foreign.
+#
 # ## Commands
 #
 #   sweep-lease-fence.sh check <issue> [--host HOST] [--ttl-minutes N]
@@ -167,6 +197,13 @@
 #          above).
 #       4  ABORT: SUPERSEDED -- the freshest lease comment is still FRESH but
 #          its host= differs from this sweep's own host.
+#       5  ABORT: BRANCH_COLLISION -- `feature/issue-<N>` already exists on
+#          `origin` and this worktree never pushed it itself (Issue #9453
+#          Phase 4, see "Branch-collision hard stop" above). Checked BEFORE
+#          the lease logic, so it takes precedence over 0/3/4. NEVER retry
+#          with a suffix branch -- adopt the existing branch (if it is
+#          genuinely this claim's own from an earlier session) via
+#          `create-pr.sh`'s adopt-first path, or stand down.
 #
 # Usage:
 #   .loom/scripts/sweep-lease-fence.sh check 6309
@@ -334,6 +371,46 @@ parse_lease_yield_marker_line() {
     printf '%s\t%s' "$host" "$sweep_id"
 }
 
+# check_branch_collision <issue> -- the #9453 Phase 4 hard stop. Aborts
+# (exit 5, BRANCH_COLLISION) when `feature/issue-<issue>` already exists on
+# `origin` and this worktree never pushed it itself. Returns (does not exit)
+# on every other outcome, so the caller proceeds to the lease-fencing logic
+# below exactly as before this check existed.
+#
+# See this script's own header doc, "Branch-collision hard stop", for the
+# fail-closed-vs-fail-open asymmetry with the lease checks below and why the
+# local upstream-tracking probe is the "did THIS claim create it" signal.
+check_branch_collision() {
+    local issue="$1"
+
+    # This worktree already has push-tracking configured for
+    # feature/issue-<issue> -- a prior `git push -u` from THIS exact worktree
+    # (e.g. a resumed session pushing a follow-up commit within the same
+    # claim). The branch's existence on origin is then expected, not a
+    # foreign collision.
+    local upstream
+    upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2> /dev/null || true)"
+    if [[ "$upstream" == "origin/feature/issue-${issue}" ]]; then
+        return 0
+    fi
+
+    local branch_out branch_rc
+    set +e
+    branch_out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge check-branch "$issue" 2>&1)"
+    branch_rc=$?
+    set -e
+
+    # Mirrors `forge check-branch`'s own contract: exactly `1` is the only
+    # verified-safe answer. Every other code -- `0` (confirmed collision),
+    # `5` (fail-closed probe failure), or anything else (e.g. the binary
+    # itself missing) -- is treated as a collision here, deliberately FAIL
+    # CLOSED (unlike the lease checks below) -- see the header doc.
+    if [[ "$branch_rc" -ne 1 ]]; then
+        echo "ABORT: BRANCH_COLLISION -- remote branch feature/issue-${issue} may already exist on origin and this worktree has not pushed it (loom-daemon forge check-branch exit ${branch_rc}: ${branch_out}). Aborting BEFORE push/PR-open (Issue #9447, #9453 Phase 4). NEVER create a suffix branch past it (e.g. feature/issue-${issue}-*) -- if it is genuinely this claim's own branch from an earlier session, adopt it via create-pr.sh's adopt-first path instead; otherwise comment on the issue and stand down." >&2
+        exit 5
+    fi
+}
+
 cmd_check() {
     local issue="${1:-}"
     shift || true
@@ -371,6 +448,12 @@ cmd_check() {
         echo "ERROR: check: --ttl-minutes must be a non-negative number (got: '$ttl_minutes')" >&2
         exit 1
     fi
+
+    # Issue #9453 Phase 4: the branch-collision hard stop runs FIRST and
+    # independently of the lease logic below -- it can abort (exit 5) before
+    # any lease comment is even fetched. See "Branch-collision hard stop" in
+    # this script's header doc.
+    check_branch_collision "$issue" # -> loom-daemon forge check-branch <issue>
 
     local repo_path
     repo_path="$(gh_repo_path)"

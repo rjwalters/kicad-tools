@@ -243,7 +243,7 @@ Use this playbook when refreshing an already-approved (`loom:issue`) issue again
 **Default behavior** (recommended unless the four questions below indicate otherwise):
 
 1. **Retain `loom:issue`** — Do not remove human approval for non-material updates.
-2. **Add `loom:curated`** — Signals fresh enrichment against current main. `loom:curated` is *additive*, not exclusive; it coexists with `loom:issue`. Builders prioritize `loom:issue` + `loom:curated` over `loom:issue` alone. **Re-pick `points:<N>`** per the rubric from the current scope, replacing the prior label (#9638).
+2. **Add `loom:curated`** — Signals fresh enrichment against current main. `loom:curated` is *additive*, not exclusive; it coexists with `loom:issue`. Builders prioritize `loom:issue` + `loom:curated` over `loom:issue` alone.
 3. **Prefer body edits over comments for stale references** — Keep the body as the single source of truth for Builders. Use a dated curator comment summarizing what changed.
 4. **For material scope changes** — When you rewrite the problem statement, re-narrow root cause, or change acceptance criteria materially, remove `loom:issue` and leave only `loom:curated`. This forces fresh human re-approval.
 
@@ -252,7 +252,7 @@ Use this playbook when refreshing an already-approved (`loom:issue`) issue again
 | Question | Default | Deviate when |
 |----------|---------|--------------|
 | Retain `loom:issue`? | Yes | Material scope or AC change |
-| (Re-)add `loom:curated`? | Always yes (re-pick points) | Never skip |
+| (Re-)add `loom:curated`? | Always yes | Never skip |
 | Comment vs body edit? | Body edit + dated comment | Pure context/links → comment |
 | Substantive rewrite? | Drop `loom:issue`, keep `loom:curated` | Minor refresh → keep both |
 
@@ -1174,21 +1174,18 @@ There are **three, and only three**, cost-of-being-wrong strata (issue #4238 add
 **Required before applying `loom:curated`**: run the validator below and confirm exit 0. This is not optional — do not apply `loom:curated` if it fails:
 
 ```bash
-./.loom/scripts/require-complexity-marker.sh <issue>   # 0 = BOTH markers valid; 1 = either missing/invalid
-                                                       # 2 = could not evaluate (NOT a curation defect)
+./.loom/scripts/require-complexity-marker.sh <issue>   # 0 = complexity valid; 1 = missing/invalid
+                                                    # 2 = could not evaluate (NOT a curation defect)
 ```
 
-Exit 2 is not an absent marker: fetch failed (usually quota; retry later) or `loom-daemon` is missing/below its `requires-daemon` floor (`loom update`; waiting won't help). Don't edit the body.
+Exit 2 means repo resolution or the body fetch failed (usually quota; retry later), not an absent marker. Don't edit the body.
 
-### Points estimate marker (`<!-- loom:points=<N> -->`, #9056)
+### Story points (paused)
 
-Points are **labels** (#9431): pick exactly one `points:<N>` — `N` one of `1`, `2`, `3`, `5`, `8`, `13`, the `loom:complexity` closed-vocabulary rule — per the rubric in `.loom/docs/story-points.md`: size of one clean landing, not sweep cost or the tier; above 13, split — never size 21. Attach it **in the same `gh issue edit` that applies `loom:curated`** (no second API call); re-assignment **replaces** the prior label (never stacks); a rescope to `loom:triage` updates or removes it in the same mutation; a re-curation pass re-picks `N` from the **current** scope and replaces label + marker (#9638) — stale points never survive a scope change or a re-size:
-
-```bash
-gh issue edit <number> --remove-label "points:<old>" --add-label "loom:curated,points:<new>"
-```
-
-Still emit the body marker with the same N — `require-complexity-marker.sh` blocks `loom:curated` on it.
+Story-point estimation is disabled for now. Do not assign or refresh `points:*`
+labels or `<!-- loom:points=<N> -->` markers during curation, re-curation or
+rescoping. Leave existing estimates as historical data; missing or invalid
+points never block `loom:curated`. The complexity routing marker remains required.
 
 **Related but distinct**: `<!-- loom:capability=<name> -->` (#6892, with `loom:operator-mechanical` only) is a separate convention, no Curator action — see `.loom/docs/label-state-machine.md` → "Capability-declaration convention" (#6885/#6893).
 

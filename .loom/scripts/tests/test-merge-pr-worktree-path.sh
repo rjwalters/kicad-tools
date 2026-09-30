@@ -149,8 +149,11 @@ assert_grep "forge_get_issue_state" "$FORGE_HELPERS" \
 # --- Test 2c: co-existing Judge review worktree cleanup (#6264) source surface ---
 assert_grep "JUDGE_PR_WT_PATH" "$MERGE_PR" \
     "merge-pr.sh declares JUDGE_PR_WT_PATH for the co-existing pr-<N> check"
-assert_grep 'JUDGE_PR_WT_PATH="\$WT_ROOT_DIR/pr-\$PR_NUMBER"' "$MERGE_PR" \
-    "JUDGE_PR_WT_PATH is set to pr-\$PR_NUMBER only on the feature/issue-<N> branch"
+retired \
+    "JUDGE_PR_WT_PATH is set to pr-\$PR_NUMBER only on the feature/issue-<N> branch" \
+    "#6264's asymmetry: a co-existing Judge/Doctor pr-<N> review worktree is named only for an ordinary feature/issue-<N> PR, never for an external-fork/ad-hoc branch whose own default path is already pr-<N> (naming it there would make the second call site a pure duplicate of the first)" \
+    "#8191: the assignment left the shell. All three names now arrive together from \`loom-daemon merge-pr cleanup-paths\` through one \`IFS=\$'\\t' read -r DEFAULT_WT_PATH ISSUE_NUM JUDGE_PR_WT_PATH\` (default path FIRST: tab is IFS whitespace, so an empty LEADING field cannot survive that read), so there is no JUDGE_PR_WT_PATH= assignment — and no \$WT_ROOT_DIR at all — left in this file to grep for" \
+    "loom-daemon/tests/merge_pr_cleanup_paths_differential.rs, which drives the frozen retired block (tests/fixtures/merge-pr-cleanup-paths-retired.sh) against the port over every branch shape and asserts the asymmetry as an invariant of every case (issue field non-empty <=> judge-pr field non-empty), plus merge_pr::cleanup_paths::tests::a_non_issue_branch_names_only_the_pr_worktree; cases O-R below still exercise the behaviour"
 retired \
     "co-existing pr-<N> removal logs a clear reason (#6264)" \
     "the operator-visible removal message for a co-existing Judge/Doctor review worktree names why (#6264)" \
@@ -765,6 +768,214 @@ FAKEDAEMON
         fail "T8d: control: expected the verified path to be removed; got: $out"
     fi
     rm -rf "$WTC_TMP"
+fi
+
+# --- Test 9: an older daemon lacking `cleanup-paths` removes NOTHING (#8191
+# slice). This is a fail-DIRECTION test, not a "does cleanup work" test, and the
+# direction it pins is counter-intuitive enough to be worth stating: when
+# `merge-pr cleanup-paths` cannot answer, all three names ($ISSUE_NUM,
+# $DEFAULT_WT_PATH, $JUDGE_PR_WT_PATH) are empty, and an empty
+# $DEFAULT_WT_PATH fails `[[ -d ]]` -- so WITHOUT the `elif [[ -n
+# "$DEFAULT_WT_PATH" ]]` gate the script would fall into the porcelain discovery
+# fallback, rediscover this very worktree by branch (a builder worktree at
+# issue-<N> tracks feature/issue-<N> and carries .loom-managed), and remove it
+# with $ISSUE_NUM empty -- i.e. with #4186's still-open-issue protection
+# skipped. The degraded daemon would delete what the healthy one preserves.
+# So T9 asserts the *absence* of a removal, and T9d's control proves the harness
+# can see a real one.
+#
+# Runs the REAL post-merge cleanup block extracted from merge-pr.sh against a
+# real repo with a real registered worktree; discovery is stubbed to SUCCEED, so
+# the only thing standing between the fail-open path and a removal is the gate.
+echo ""
+echo "Test 9: a daemon lacking 'cleanup-paths' names no targets and removes nothing"
+
+if [[ "$WTC_CLEANUP" != *"merge-pr cleanup-paths"* ]]; then
+    fail "could not find the 'merge-pr cleanup-paths' call in the extracted cleanup block"
+else
+    CP_TMP="$(mktemp -d)"; CP_TMP="$(cd "$CP_TMP" && pwd -P)"
+    git init -q "$CP_TMP/repo"
+    git -C "$CP_TMP/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    # The worktree at the Loom-convention path the plan would name, tracking the
+    # PR branch -- so both the convention call site and discovery can reach it.
+    CP_WT="$CP_TMP/repo/.loom/worktrees/issue-4242"
+    git -C "$CP_TMP/repo" worktree add -q -b feature/issue-4242 "$CP_WT" 2>/dev/null
+    : > "$CP_WT/.loom-managed"
+    cat > "$CP_TMP/no-verb-daemon" <<'FAKEDAEMON'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "error: unrecognized subcommand 'cleanup-paths'" >&2
+exit 2
+FAKEDAEMON
+    chmod +x "$CP_TMP/no-verb-daemon"
+
+    # run_cp <daemon-bin> [block]: the real cleanup block on the NON-override
+    # path. [block] defaults to $WTC_CLEANUP; T9b passes a deliberately weakened
+    # copy so the gate it pins is the only difference between two live runs.
+    # _worktree_cleanup_decide is stubbed to report which call site fired, with
+    # what $ISSUE_NUM, and to really remove -- so a wrongly-reached removal both
+    # shows up in the log and destroys the worktree.
+    # shellcheck disable=SC2030,SC2034,SC2329  # subshell-local on purpose; the stubs and vars serve the eval'd block
+    run_cp() (
+        set +e
+        export LOOM_DAEMON_BIN="$1"; unset LOOM_PRESERVE_WORKTREE
+        REPO_ROOT="$CP_TMP/repo"; CLEANUP_WORKTREE=true; WORKTREE_PATH_OVERRIDE=""
+        PR_BRANCH="feature/issue-4242"; PR_NUMBER="777"; PR_HEAD_SHA=""
+        SCRIPT_DIR="$SCRIPTS_DIR"
+        info() { echo "INFO: $*"; }; warning() { echo "WARN: $*"; }
+        error() { echo "ERROR: $*"; exit 1; }
+        _remove_loom_worktree() { git -C "$REPO_ROOT" worktree remove --force "$1"; }
+        _worktree_cleanup_decide() {
+            echo "DECIDE: kind=$1 path=$2 issue-num='${ISSUE_NUM:-}'"
+            _remove_loom_worktree "$2"
+        }
+        # Discovery deliberately SUCCEEDS: the gate, not a dead stub, is what
+        # must stop the fail-open path from reaching a removal.
+        _find_worktree_by_branch() { echo "$CP_WT"; }
+        _is_primary_worktree_path() { return 1; }
+        _maybe_delete_local_branch() { echo "INFO: branch-delete considered for $1"; }
+        eval "${2:-$WTC_CLEANUP}"
+    )
+
+    out="$(run_cp "$CP_TMP/no-verb-daemon" 2>&1)"
+    if [[ "$out" != *"DECIDE:"* ]] && [[ -d "$CP_WT" ]] && \
+       wl=$(git -C "$CP_TMP/repo" worktree list --porcelain) && grep -qxF "worktree $CP_WT" <<<"$wl"; then
+        pass "T9a: no cleanup-paths answer => no removal decision at all; the worktree survives"
+    else
+        fail "T9a: a daemon without 'cleanup-paths' must remove nothing; got: $out"
+    fi
+    # The specific inversion, named -- and pinned LIVE rather than by restating
+    # T9a: run the SAME block with only the `elif [[ -n "$DEFAULT_WT_PATH" ]]`
+    # gate weakened back to a bare `else`, and require the removal to APPEAR.
+    # Without this half, "no DECIDE: kind=discovered in the output" is only
+    # reachable when T9a already established there is no DECIDE: line at all, so
+    # it could pass for a reason unrelated to the gate. With it, the assertion
+    # pair says: gate present => no discovery; gate absent => discovery removes
+    # the worktree with ISSUE_NUM empty (#4186's protection bypassed).
+    # Exact-line awk rather than `${var//…}`: the gate's text contains `[[`,
+    # which bash would read as a glob bracket expression, so the parameter
+    # expansion would silently never match.
+    # shellcheck disable=SC2016  # literal merge-pr.sh source text, not an expansion
+    WTC_UNGATED="$(printf '%s\n' "$WTC_CLEANUP" \
+        | awk -v g='    elif [[ -n "$DEFAULT_WT_PATH" ]]; then' \
+              '$0 == g { print "    else"; next } { print }')"
+    if [[ "$WTC_UNGATED" == "$WTC_CLEANUP" ]]; then
+        fail "T9b: could not find the 'elif [[ -n \"\$DEFAULT_WT_PATH\" ]]' gate to weaken -- the gate this test exists to pin is not in the extracted block"
+    else
+        ungated_out="$(run_cp "$CP_TMP/no-verb-daemon" "$WTC_UNGATED" 2>&1)"
+        if [[ "$out" != *"DECIDE: kind=discovered"* ]] \
+           && [[ "$ungated_out" == *"DECIDE: kind=discovered"*"issue-num=''"* ]] \
+           && [[ ! -d "$CP_WT" ]]; then
+            pass "T9b: the gate is what stops discovery -- removing it makes the degraded path delete the worktree with ISSUE_NUM empty"
+        else
+            fail "T9b: expected gated=no-discovery / ungated=discovered-removal; gated: $out || ungated: $ungated_out"
+        fi
+        # Re-register the worktree the ungated run deliberately destroyed, so
+        # T9c/T9d below still see the same fixture state T9a did.
+        git -C "$CP_TMP/repo" worktree prune 2>/dev/null
+        git -C "$CP_TMP/repo" worktree add -q --force "$CP_WT" feature/issue-4242 2>/dev/null
+        : > "$CP_WT/.loom-managed"
+    fi
+    if [[ "$out" == *"WARN:"*"cleanup-paths"*"Nothing is removed rather than guessed"* ]]; then
+        pass "T9c: the warning says which verb was missing and that nothing was removed"
+    else
+        fail "T9c: expected a warning naming cleanup-paths; got: $out"
+    fi
+
+    # Control: the real daemon names the plan, so the convention call site IS
+    # reached, WITH the issue number -- proves T9a/T9b are live assertions.
+    # shellcheck disable=SC2031  # the outer, unmodified value is the one wanted
+    out="$(run_cp "${LOOM_DAEMON_BIN:-loom-daemon}" 2>&1)"
+    if [[ "$out" == *"DECIDE: kind=default path=$CP_WT issue-num='4242'"* && ! -d "$CP_WT" ]]; then
+        pass "T9d: control -- a real plan reaches the convention call site with ISSUE_NUM set"
+    else
+        fail "T9d: control: expected the planned convention path to be decided/removed; got: $out"
+    fi
+    rm -rf "$CP_TMP"
+fi
+
+# --- Test 10: a NON-`feature/issue-<N>` branch survives the tab-framed parse
+# (#8191 slice). This is the mirror image of T9d's control, and it exists because
+# T9 only ever drove an issue branch -- where field 1 (the issue number) is
+# non-empty, so nothing about the framing is under strain.
+#
+# For a PR-only branch (`docs/...`, `security/...`, `fix/...`, or a slice branch
+# like `feature/issue-8195-slice-13` that the strict anchor rejects) the verb has
+# no issue number and no #6264 review path to name, so TWO of the four fields are
+# empty. Tab is an IFS *whitespace* character, so bash's `read` strips a leading
+# run of it and collapses runs of it: an empty LEADING field is unrecoverable.
+# With the fields ordered issue-first, `LOOM-CLEANUP-PATHS\t\t<default>\t` parsed
+# as ISSUE_NUM=<default> with BOTH path names empty -- and because the verb had
+# exited 0 with a well-formed sentinel, the fail-open warning never fired and the
+# `elif [[ -n "$DEFAULT_WT_PATH" ]]` gate then swallowed the whole removal path.
+# Post-merge cleanup silently did nothing for ~18% of merged PRs (and the local
+# branch leaked too, still checked out in the surviving worktree).
+#
+# So this drives the SAME real extracted $WTC_CLEANUP block and the SAME real
+# daemon as T9d, changing only $PR_BRANCH, and requires the default-path field to
+# survive the round-trip non-empty -- observable as the convention call site
+# firing at <root>/pr-<PR> with an empty ISSUE_NUM.
+echo ""
+echo "Test 10: a non-feature/issue-<N> branch's default path survives the tab-framed parse"
+
+if [[ "$WTC_CLEANUP" != *"merge-pr cleanup-paths"* ]]; then
+    fail "T10: could not find the 'merge-pr cleanup-paths' call in the extracted cleanup block"
+else
+    NI_TMP="$(mktemp -d)"; NI_TMP="$(cd "$NI_TMP" && pwd -P)"
+    git init -q "$NI_TMP/repo"
+    git -C "$NI_TMP/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    # The path the plan names for a PR-only branch: pr-<PR_NUMBER>, which is this
+    # branch's DEFAULT target (not a co-existing #6264 review worktree).
+    NI_WT="$NI_TMP/repo/.loom/worktrees/pr-777"
+    git -C "$NI_TMP/repo" worktree add -q -b fix/foo-bar "$NI_WT" 2>/dev/null
+    : > "$NI_WT/.loom-managed"
+
+    # shellcheck disable=SC2030,SC2034,SC2329  # subshell-local on purpose; the stubs and vars serve the eval'd block
+    run_ni() (
+        set +e
+        export LOOM_DAEMON_BIN="$1"; unset LOOM_PRESERVE_WORKTREE
+        REPO_ROOT="$NI_TMP/repo"; CLEANUP_WORKTREE=true; WORKTREE_PATH_OVERRIDE=""
+        PR_BRANCH="fix/foo-bar"; PR_NUMBER="777"; PR_HEAD_SHA=""
+        SCRIPT_DIR="$SCRIPTS_DIR"
+        info() { echo "INFO: $*"; }; warning() { echo "WARN: $*"; }
+        error() { echo "ERROR: $*"; exit 1; }
+        _remove_loom_worktree() { git -C "$REPO_ROOT" worktree remove --force "$1"; }
+        _worktree_cleanup_decide() {
+            echo "DECIDE: kind=$1 path=$2 issue-num='${ISSUE_NUM:-}'"
+            _remove_loom_worktree "$2"
+        }
+        # Discovery must never be needed here: the convention path EXISTS, so a
+        # correctly-parsed plan takes the `[[ -d ]]` branch. If it is reached,
+        # the parse lost $DEFAULT_WT_PATH.
+        _find_worktree_by_branch() { echo "$NI_WT"; }
+        _is_primary_worktree_path() { return 1; }
+        _maybe_delete_local_branch() { echo "INFO: branch-delete considered for $1"; }
+        eval "${2:-$WTC_CLEANUP}"
+    )
+
+    # shellcheck disable=SC2031  # the outer, unmodified value is the one wanted
+    ni_out="$(run_ni "${LOOM_DAEMON_BIN:-loom-daemon}" 2>&1)"
+    if [[ "$ni_out" == *"DECIDE: kind=default path=$NI_WT issue-num=''"* && ! -d "$NI_WT" ]]; then
+        pass "T10a: the default-path field survives the read non-empty; the pr-<N> worktree is cleaned up"
+    else
+        fail "T10a: expected the convention call site at $NI_WT with an empty ISSUE_NUM (an empty \$DEFAULT_WT_PATH means the tab framing lost the leading field); got: $ni_out"
+    fi
+    # The parse succeeded, so the fail-open warning must NOT have fired. Without
+    # this, a future regression that broke the verb outright would still satisfy
+    # T10a's "no removal" half if the assertion were ever weakened to that.
+    if [[ "$ni_out" != *"WARN:"*"cleanup-paths"* ]]; then
+        pass "T10b: no fail-open warning -- the verb answered and the shell parsed its answer"
+    else
+        fail "T10b: unexpected cleanup-paths fail-open warning on a healthy daemon; got: $ni_out"
+    fi
+    # #6264's asymmetry, end to end: a PR-only branch names no SECOND pr-<N>
+    # path, so exactly one decision is taken -- not a duplicate of the first.
+    if [[ "$(grep -c "DECIDE:" <<<"$ni_out")" == "1" && "$ni_out" != *"DECIDE: kind=judge-pr"* ]]; then
+        pass "T10c: exactly one decision -- the #6264 judge-pr call site stays empty for a PR-only branch"
+    else
+        fail "T10c: expected exactly one DECIDE line and no judge-pr call site; got: $ni_out"
+    fi
+    rm -rf "$NI_TMP"
 fi
 
 # --- Summary ---

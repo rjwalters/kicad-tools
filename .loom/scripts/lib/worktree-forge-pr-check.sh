@@ -138,6 +138,30 @@ _worktree_repo_has_forge_remote() {
 #   _WT_OPEN_PR_HEAD_REF      - head ref name on that repo (found only)
 #   _WT_OPEN_PR_URL           - PR URL, for messaging (found only)
 # Never fails the caller — always returns 0.
+#
+# DELEGATION (#8195 slice 15, epic #7810): `loom-daemon worktree-open-pr`
+# (loom-daemon/src/worktree_cli/open_pr.rs) is the canonical implementation of
+# the forge round-trip below and is tried FIRST. The `jq`/`gh`/`loom-daemon`
+# body kept underneath it is the fallback, unchanged — this function runs on
+# every `worktree.sh <N>` that creates a genuinely NEW branch (no local ref,
+# no `origin/<branch>`), the same "always-taken, no safe hard dependency"
+# shape `acquire_worktree_lock` chose in slice 7, so a host running a daemon
+# that predates this slice must keep answering the question itself rather
+# than degrading to "cannot tell".
+#
+# Trusted only on a well-formed `STATUS<TAB>...` record stream — an empty or
+# unparseable answer (a daemon too old to know this subcommand, one that
+# printed nothing) leaves every global at its initial "unavailable" default,
+# which callers already treat as "refuse rather than guess safe". The
+# `--help` probe ahead of the real call additionally skips a daemon predating
+# the subcommand outright, so its clap exit 2 never reaches this parse loop.
+#
+# No `requires-daemon:` marker here, matching the `worktree-closed-pr-branch`
+# call lower in this file (#9083): `check-daemon-subcommand-versions.sh` only
+# recognizes `$_WT_DAEMON_BIN` as a resolved-binary variable in a file that
+# itself ASSIGNS it from a resolver entry point — this file only ever reads
+# the global worktree.sh (the sourcing script) assigns, so neither call is
+# detected as an invocation here and a marker on either would read as stale.
 _worktree_open_pr_for_branch() {
     local branch="$1"
     _WT_OPEN_PR_STATUS="unavailable"
@@ -147,6 +171,25 @@ _worktree_open_pr_for_branch() {
     _WT_OPEN_PR_HEAD_REF=""
     _WT_OPEN_PR_URL=""
     if [[ -z "$branch" ]]; then
+        return 0
+    fi
+    # Call `loom-daemon worktree-open-pr` through the $_WT_DAEMON_BIN the
+    # sourcing worktree.sh resolved; a non-answer falls through to the body below.
+    if [[ -n "${_WT_DAEMON_BIN:-}" ]] \
+        && "$_WT_DAEMON_BIN" worktree-open-pr --help >/dev/null 2>&1; then
+        local _l _m _out
+        _out="$("$_WT_DAEMON_BIN" worktree-open-pr --branch "$branch" \
+            --repo "${WORKTREE_REPO_ROOT:-$PWD}" 2>/dev/null)" || _out=""
+        while IFS=$'\t' read -r _l _m; do
+            case "$_l" in
+                STATUS)     _WT_OPEN_PR_STATUS="$_m" ;;
+                NUMBER)     _WT_OPEN_PR_NUMBER="$_m" ;;
+                CROSS_REPO) _WT_OPEN_PR_IS_CROSS_REPO="$_m" ;;
+                HEAD_REPO)  _WT_OPEN_PR_HEAD_REPO="$_m" ;;
+                HEAD_REF)   _WT_OPEN_PR_HEAD_REF="$_m" ;;
+                URL)        _WT_OPEN_PR_URL="$_m" ;;
+            esac
+        done <<<"$_out"
         return 0
     fi
     # A missing `jq` is a basic tooling gap, not a forge-reachability signal

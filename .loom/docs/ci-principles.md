@@ -23,6 +23,21 @@ the next person to add one will have an equally good argument.
    a burst of ~45 merges queued ~30 full runs and left the tip unverified for
    hours.
 
+   Measured on `main` `CI` push runs (Actions API), #9619 merged 2026-09-30
+   04:20 UTC:
+
+   | Window | Runs | Peak overlapping runs | Push → done, p50 / p90 |
+   |---|---|---|---|
+   | 09-28 16:00 → 09-30 04:20 (before) | 198 | 32 | 16 min / 64 min |
+   | 09-30 04:20 → 16:00 (after) | 76 | 3 | 8 min / 12 min |
+
+   The price is visible and expected: about a third of `main` runs now conclude
+   `cancelled`. A `cancelled` `main` run is **no verdict**, neither a pass nor
+   a rule violation. `main_health_gate.rs` reduces it to `Unknown`, and
+   `work_finder/main_red_fix.rs` counts only `failure`/`timed_out`/
+   `startup_failure`. Do not re-run it to "complete" the record, and do not
+   treat it as a skipped check.
+
 3. **Path-filtering is an optimisation, not a correctness tool.** A check that
    can fail because of a file *outside* its path group must not be filtered by
    path. `conflict-markers` states this in its own comment and is right:

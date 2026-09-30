@@ -1,5 +1,10 @@
 # Story Points (Fibonacci size classes)
 
+**Paused as of 2026-09-30.** Curators no longer assign or refresh story-point
+labels or body markers, and points do not gate curation. Existing estimates,
+telemetry and the rubric below are retained for historical analysis and a
+possible restart. Complexity routing remains active.
+
 Curator rubric for sizing an issue at curation time: 1, 2, 3, 5, 8 or 13.
 Epic #9429; derived in #9430. Points measure **size of the landed change**,
 not urgency, risk or wall-clock.

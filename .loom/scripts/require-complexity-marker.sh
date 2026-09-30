@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 # require-complexity-marker.sh - Check that an issue carries a complexity tier
-# AND a points estimate before it is marked curated (#4238, #9056).
+# before it is marked curated (#4238). Story-point estimation is paused.
 #
 # The tier drives the downstream Builder model choice, so an unclassified issue
 # silently costs either quality (cheap model on money/security work) or money
-# (frontier model on a file split). The points marker is a coarse, uncalibrated
-# holistic estimate of expected total sweep cost, laying the groundwork for
-# comparing it against the actual token/duration/cycle burn a successful sweep
-# already assembles (Issue #9056). This turns "please remember to classify" into
-# a command the Curator can run that fails loudly on either marker.
+# (frontier model on a file split). This turns "please remember to classify"
+# into a command the Curator can run that fails loudly on a missing tier.
 #
-#   require-complexity-marker.sh <issue> [repo]   # exit 0 = both markers valid
-#                                                 # exit 1 = missing/invalid marker
-#                                                 # exit 2 = could not fetch (retry/check quota)
+#   require-complexity-marker.sh <issue> [repo]   # exit 0 = complexity marker valid
+#                                              # exit 1 = missing/invalid marker
+#                                              # exit 2 = could not fetch (retry/check quota)
 set -uo pipefail
 
 ISSUE="${1:-}"
@@ -41,8 +38,7 @@ fi
 # to REST (which draws on a separate quota), and only if BOTH fail exit 2
 # ("could not evaluate", already this script's semantics for repo-resolution
 # failures) rather than 1 (missing marker). An empty body from a *successful*
-# fetch remains exit 1. Fetched ONCE and reused for both the tier and points
-# checks below (#9056) — no second round trip.
+# fetch remains exit 1.
 body="$(gh issue view "$ISSUE" -R "$REPO" --json body -q .body 2>/dev/null)" ||
   body="$(gh api "repos/$REPO/issues/$ISSUE" --jq .body 2>/dev/null)" || {
     echo "BLOCKED: could not fetch issue $REPO#$ISSUE body (both GraphQL and REST failed — likely GitHub API quota exhaustion). Retry or check quota; this is not a curation defect." >&2
@@ -87,22 +83,3 @@ EOF
     exit 1
     ;;
 esac
-
-# ---- Points estimate marker (Issue #9056) ------------------------------
-#
-# Validated by `loom-daemon check-points-marker`, not inline shell: epic
-# #7810's `shell-budget` CI gate ratchets `contract`-category portable shell
-# DOWN, never up, and .loom/docs/shell-language-policy.md's answer is new
-# executable logic is a daemon subcommand, not more portable shell. The body
-# is piped on stdin -- already fetched above for the tier check, so this
-# costs no second `gh` call. `loom_exec_script_helper` (lib/script-helper.sh)
-# resolves the binary and `exec`s the subcommand -- never returns -- so this
-# is deliberately this script's LAST statement; its own exit code (0 valid,
-# 1 missing/invalid marker) becomes this script's exit code unmodified.
-# LOOM_SCRIPT_HELPER_MISSING_RC=2 overrides the library's default missing-
-# binary code (1): a missing daemon is an environment problem here, the same
-# bucket as a body-fetch failure above, never a curation defect.
-# requires-daemon: check-points-marker >= 0.19.446   #9056 -- brand-new subcommand landing in this same PR; the exact shipping version is set by the next post-merge auto-bump and cannot be known at authoring time, so this pins to the current VERSION as the best available floor (scripts/check-daemon-subcommand-versions.sh's own doc: a declared floor is not asserted as the historically-exact first release, only bounded to not exceed VERSION).
-# shellcheck source=lib/script-helper.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/script-helper.sh"
-printf '%s' "$body" | LOOM_SCRIPT_HELPER_MISSING_RC=2 loom_exec_script_helper check-points-marker --issue "$ISSUE" --repo "$REPO"

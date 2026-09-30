@@ -488,10 +488,14 @@ vocabulary (`loom.queue.disposition`'s wire values):
 | "lower tier" (ranked behind others) | `deferred_capacity` (machine concurrency cap full), `deferred_ramp_cap` (per-tick admission cap), `deferred_repo_cap` (per-repo cap), or `deferred_out_of_slice` (repo sharding) — `tier:*` labels do not affect dispatch order, only `loom.queue.rank` does |
 | "repo locked by an open PR" | `open_pr` (the #4123 guard's `pr-open-skip`). Since #9674 the repo's `open_pr` rows carry the repo-level `lockout.frozen_candidates_count` / `lockout.frozen_points_sum` / `lockout.duration_seconds` attributes, so rank which repo's lockout is starving the most ready work by grouping those spans on `loom.repo` |
 
-For a `workspace_halted` row, join to the parent `loom.dispatch.tick` span
-(`loom.dispatch.result="halted_main_red"`) through `parentSpanID` — the row
-itself does not say which of red-main / gate / token pool / drain / breaker
-caused the halt (out of scope for #9222; file separately if wanted).
+A `workspace_halted` row names its cause on `loom.queue.halt_cause` (#9673):
+the closed-vocabulary `work_finder::halt_cause` token (#9017) — `main_red`,
+`gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `breaker` — so
+"which hold is this repo under" is filterable straight from the span, no
+join needed. The attribute is absent on a cause-less legacy row (a
+pre-#9017 caller); the `loom.dispatch.tick`-span join
+(`loom.dispatch.result="halted_main_red"` through `parentSpanID`) remains
+the fallback there.
 
 A runnable copy of the "why hasn't `owner/repo#N` started" query is query 5 of
 `defaults/observability/signoz/queue-dwell.sql` — that file's other four
