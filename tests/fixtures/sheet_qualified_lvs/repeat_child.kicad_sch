@@ -1,0 +1,176 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(generator_version "8.0")
+	(uuid "58150000-0000-4000-8000-000000005815")
+	(paper "A4")
+	(title_block
+		(title "Repeated sheet instance - shared child sheet")
+		(date "2025-01-01")
+		(rev "1.0")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(symbol "R_0_1"
+				(rectangle (start -1.016 -2.54) (end 1.016 2.54) (stroke (width 0.254)) (fill (type none)))
+			)
+			(symbol "R_1_1"
+				(pin passive line (at 0 3.81 270) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27)))))
+				(pin passive line (at 0 -3.81 90) (length 1.27) (name "~" (effects (font (size 1.27 1.27)))) (number "2" (effects (font (size 1.27 1.27)))))
+			)
+		)
+		(symbol "power:GND"
+			(power)
+			(pin_names (offset 0)) (in_bom no) (on_board yes)
+			(symbol "GND_0_1"
+				(polyline (pts (xy 0 0) (xy 0 -1.27)) (stroke (width 0)) (fill (type none)))
+			)
+			(symbol "GND_1_1"
+				(pin power_in line (at 0 0 270) (length 0) (name "GND") (number "1"))
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "58150008-0000-4000-8000-000000005815")
+		(property "Reference" "R1"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "1k"
+			(at 102 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "58150006-0000-4000-8000-000000005815"))
+		(pin "2" (uuid "58150007-0000-4000-8000-000000005815"))
+		(instances
+			(project "repeat_root"
+				(path "/58150012-0000-4000-8000-000000005815/58150013-0000-4000-8000-000000005815"
+					(reference "R1") (unit 1)
+				)
+				(path "/58150012-0000-4000-8000-000000005815/58150014-0000-4000-8000-000000005815"
+					(reference "R11") (unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 120 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(uuid "58150011-0000-4000-8000-000000005815")
+		(property "Reference" "R2"
+			(at 122 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "2k"
+			(at 122 52 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "Resistor_SMD:R_0402_1005Metric"
+			(at 120 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(pin "1" (uuid "58150009-0000-4000-8000-000000005815"))
+		(pin "2" (uuid "58150010-0000-4000-8000-000000005815"))
+		(instances
+			(project "repeat_root"
+				(path "/58150012-0000-4000-8000-000000005815/58150013-0000-4000-8000-000000005815"
+					(reference "R2") (unit 1)
+				)
+				(path "/58150012-0000-4000-8000-000000005815/58150014-0000-4000-8000-000000005815"
+					(reference "R12") (unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 100 40 0)
+		(unit 1)
+		(in_bom no)
+		(on_board yes)
+		(uuid "58150002-0000-4000-8000-000000005815")
+		(property "Reference" "#PWR01"
+			(at 100 36 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "GND"
+			(at 100 34 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "58150001-0000-4000-8000-000000005815"))
+		(instances
+			(project "repeat_root"
+				(path "/58150012-0000-4000-8000-000000005815/58150013-0000-4000-8000-000000005815"
+					(reference "#PWR01") (unit 1)
+				)
+				(path "/58150012-0000-4000-8000-000000005815/58150014-0000-4000-8000-000000005815"
+					(reference "#PWR11") (unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 120 40 0)
+		(unit 1)
+		(in_bom no)
+		(on_board yes)
+		(uuid "58150004-0000-4000-8000-000000005815")
+		(property "Reference" "#PWR02"
+			(at 120 36 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+		(property "Value" "GND"
+			(at 120 34 0)
+			(effects (font (size 1.27 1.27)))
+		)
+		(pin "1" (uuid "58150003-0000-4000-8000-000000005815"))
+		(instances
+			(project "repeat_root"
+				(path "/58150012-0000-4000-8000-000000005815/58150013-0000-4000-8000-000000005815"
+					(reference "#PWR02") (unit 1)
+				)
+				(path "/58150012-0000-4000-8000-000000005815/58150014-0000-4000-8000-000000005815"
+					(reference "#PWR12") (unit 1)
+				)
+			)
+		)
+	)
+	(wire (pts (xy 100 46.19) (xy 100 40))
+		(stroke (width 0) (type default))
+		(uuid "58150018-0000-4000-8000-000000005815")
+	)
+	(wire (pts (xy 120 46.19) (xy 120 40))
+		(stroke (width 0) (type default))
+		(uuid "58150019-0000-4000-8000-000000005815")
+	)
+	(wire (pts (xy 100 53.81) (xy 100 60))
+		(stroke (width 0) (type default))
+		(uuid "58150015-0000-4000-8000-000000005815")
+	)
+	(wire (pts (xy 100 60) (xy 120 60))
+		(stroke (width 0) (type default))
+		(uuid "58150016-0000-4000-8000-000000005815")
+	)
+	(wire (pts (xy 120 60) (xy 120 53.81))
+		(stroke (width 0) (type default))
+		(uuid "58150017-0000-4000-8000-000000005815")
+	)
+	(label "DBG_LED"
+		(at 110 60 0)
+		(effects (font (size 1.27 1.27)) (justify left bottom))
+		(uuid "58150005-0000-4000-8000-000000005815")
+	)
+)

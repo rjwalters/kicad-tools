@@ -74,6 +74,14 @@ NETLIST_VACUOUS_REF = "<vacuous>"
 # the ``null`` a real unconnected pad would carry.
 NETLIST_VACUOUS_NET = "<no-pcb-evidence>"
 
+# Upper bound on sheet *placements* walked by
+# :func:`_walk_hierarchy_schematics`.  Since issue #5815 the walk visits one
+# sheet per ``(sheet ...)`` symbol rather than one per file, so a hierarchy
+# that nests repeated placements can expand exponentially.  Real designs sit
+# in the tens; this cap exists only so a pathological (or maliciously
+# constructed) file fails loudly instead of hanging.
+_MAX_SHEET_VISITS = 10_000
+
 
 def _is_placeholder_net(name: str | None) -> TypeGuard[str]:
     """True when ``name`` is an auto-generated (unnamed-net) placeholder.
@@ -236,12 +244,26 @@ class _SheetVisit:
         parent_pin_names: Names of the ``(pin ...)`` children of that
             ``(sheet ...)`` symbol — the sheet pins this sheet's
             hierarchical labels mate with.  Empty for the root sheet.
+        uuid_path: KiCad **instance path** of this sheet — the root
+            schematic's ``(uuid ...)`` followed by one sheet-symbol
+            ``(uuid ...)`` per level, e.g.
+            ``"/<root-uuid>/<sheet-a-uuid>"``.  Unlike :attr:`sheet_path`
+            (which is built from human-readable ``Sheetname``s and can
+            legitimately repeat) this is unique per *placement*, which is
+            what a symbol's ``(instances ...)`` block is keyed by.  It is
+            how the two placements of one shared ``Sheetfile`` get their
+            own reference designators (issue #5815).
+        source: Path of the ``.kicad_sch`` file this sheet was loaded from.
+            Two placements of one sub-sheet share a ``source`` but differ
+            in :attr:`sheet_path` and :attr:`uuid_path`.
     """
 
     sheet_path: str
     schematic: Schematic
     parent: _SheetVisit | None = None
     parent_pin_names: frozenset[str] = frozenset()
+    uuid_path: str = ""
+    source: Path = Path()
 
 
 def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
@@ -267,35 +289,63 @@ def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
     ``Sheetname`` falls back to its file stem, so an empty segment never
     collapses a child's labels onto its parent's qualification.
 
-    A sheet *file* reached twice is still walked only once (the ``visited``
-    guard, needed for circular-reference safety).  Two instances of one
-    sub-sheet therefore contribute a single sheet path rather than one per
-    instance; per-instance identities need the cross-instance sheet-pin
-    unification that is still out of scope here (issue #4099 Phase 2).
+    **One sheet file placed twice is walked twice** (issue #5815).  KiCad
+    treats every ``(sheet ...)`` symbol as its own sheet: placing
+    ``mcu.kicad_sch`` as both ``MCU_A`` and ``MCU_B`` gives two independent
+    sheets whose local labels are ``/MCU_A/DBG_LED`` and ``/MCU_B/DBG_LED``
+    — different nets (verified against ``kicad-cli`` 10.0.6).  An earlier
+    hierarchy-wide ``visited`` set walked the shared file only once, which
+    dropped every pin of the second placement out of the schematic-side map
+    entirely.  Cycle safety does not need that: a hierarchy is only
+    *circular* when a sheet reaches one of its own **ancestors**, so the
+    guard is the ancestor chain of the branch being walked, which leaves
+    sibling re-placement (the legal, common case) free.
+
+    ``_MAX_SHEET_VISITS`` bounds the walk.  Per-placement expansion is
+    exponential in the worst case (N nested levels that each place the same
+    sub-sheet twice yield 2**N sheets) — inherent to the format, and true of
+    KiCad itself — so a pathological hierarchy raises :class:`ValueError`
+    rather than hanging.  Real designs are orders of magnitude below the cap.
     """
     from kicad_tools.operations.netlist import _get_sheet_entries
     from kicad_tools.schematic.models.schematic import Schematic
 
-    visited: set[Path] = set()
+    visits = 0
 
     def _walk(
         path: Path,
         sheet_path: str,
         parent: _SheetVisit | None,
         parent_pin_names: frozenset[str],
+        uuid_path: str,
+        ancestors: frozenset[Path],
     ) -> Iterator[_SheetVisit]:
+        nonlocal visits
         resolved = path.resolve()
-        if resolved in visited or not path.exists():
+        # Ancestors only: a sheet that re-enters its own chain is circular,
+        # but a sheet placed twice as a *sibling* is two legitimate sheets.
+        if resolved in ancestors or not path.exists():
             return
-        visited.add(resolved)
+        visits += 1
+        if visits > _MAX_SHEET_VISITS:
+            raise ValueError(
+                f"sheet hierarchy under {sch_path} expands to more than "
+                f"{_MAX_SHEET_VISITS} sheet placements; refusing to walk further"
+            )
+        schematic = Schematic.load(str(path))
+        if parent is None:
+            uuid_path = f"/{getattr(schematic, 'sheet_uuid', '') or ''}"
         visit = _SheetVisit(
             sheet_path=sheet_path,
-            schematic=Schematic.load(str(path)),
+            schematic=schematic,
             parent=parent,
             parent_pin_names=parent_pin_names,
+            uuid_path=uuid_path,
+            source=path,
         )
         yield visit
         parent_dir = path.parent
+        child_ancestors = ancestors | {resolved}
         for entry in _get_sheet_entries(path):
             segment = entry.sheetname or Path(entry.filename).stem
             yield from _walk(
@@ -303,9 +353,75 @@ def _walk_hierarchy_schematics(sch_path: Path) -> Iterator[_SheetVisit]:
                 f"{sheet_path}/{segment}",
                 visit,
                 frozenset(entry.pin_names),
+                f"{uuid_path}/{entry.uuid}",
+                child_ancestors,
             )
 
-    yield from _walk(Path(sch_path), "", None, frozenset())
+    yield from _walk(Path(sch_path), "", None, frozenset(), "", frozenset())
+
+
+def _instance_reference_map(visit: _SheetVisit) -> dict[str, str]:
+    """Map ``(property "Reference")`` -> this placement's reference designator.
+
+    A ``.kicad_sch`` file stores one ``(property "Reference" ...)`` per
+    symbol — a single value, however many times the sheet is placed — plus
+    an ``(instances ...)`` block that records the *real* designator for each
+    placement, keyed by that placement's instance path::
+
+        (instances
+          (project "chorus"
+            (path "/<root-uuid>/<mcu-a-uuid>" (reference "R1")  (unit 1))
+            (path "/<root-uuid>/<mcu-b-uuid>" (reference "R11") (unit 1))))
+
+    :meth:`Schematic.get_all_pin_nets` keys its result by the *property*
+    reference, so both placements of one file answer ``R1``/``R2`` and the
+    second placement's pads would be attributed to the first's nets.  This
+    returns the rename to apply for :attr:`_SheetVisit.uuid_path`, e.g.
+    ``{"R1": "R11", "R2": "R12"}`` for the ``MCU_B`` placement above
+    (issue #5815).
+
+    Empty — meaning "use the property references as-is" — whenever the file
+    has no ``(instances ...)`` data for this path.
+
+    Callers are expected to invoke this only for a sheet file that really is
+    placed more than once (see :func:`_schematic_pin_to_net`).  A singly
+    placed sheet's property reference *is* its instance reference — KiCad
+    keeps the two in step — so skipping it there costs nothing and spares
+    the common design a second full parse of every sheet.
+    """
+    if not visit.uuid_path:
+        return {}
+    try:
+        doc = parse_file(visit.source)
+    except (OSError, ValueError):  # pragma: no cover - unreadable/odd sheet
+        return {}
+
+    renames: dict[str, str] = {}
+    # Top-level ``(symbol ...)`` children only: ``find_all`` is recursive and
+    # would also return the ``(lib_symbols ...)`` definitions and their nested
+    # unit sub-symbols, none of which describe a placement.
+    for sym in doc.children:
+        if getattr(sym, "name", None) != "symbol" and getattr(sym, "tag", None) != "symbol":
+            continue
+        instances = sym.find("instances")
+        if instances is None:
+            continue
+        prop_ref: str | None = None
+        for prop in sym.find_all("property"):
+            if prop.get_string(0) == "Reference":
+                prop_ref = prop.get_string(1)
+                break
+        if not prop_ref:
+            continue
+        for project in instances.find_all("project"):
+            for path_node in project.find_all("path"):
+                if path_node.get_string(0) != visit.uuid_path:
+                    continue
+                ref_node = path_node.find("reference")
+                inst_ref = ref_node.get_string(0) if ref_node is not None else None
+                if inst_ref and inst_ref != prop_ref:
+                    renames[prop_ref] = inst_ref
+    return renames
 
 
 def _sheet_net_identities(
@@ -403,16 +519,31 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
     hierarchical label takes the identity its parent resolved for the
     mating sheet pin, so a net that crosses a sheet boundary keeps one
     identity on both sides.  See :func:`_sheet_net_identities` for the
-    precise, per-sheet provenance rules.  Full cross-instance sheet-pin
-    unification (the same sub-sheet placed twice under different parent
-    net contexts, or a sheet pin wired to a differently-named parent net)
-    is still out of scope here (a Phase 2 concern, issue #4099).
+    precise, per-sheet provenance rules.
+
+    **One sheet file placed twice is two sheets** (issue #5815), each with
+    its own qualification (``/MCU_A/DBG_LED`` vs ``/MCU_B/DBG_LED``) and its
+    own reference designators, taken from each symbol's ``(instances ...)``
+    block via :func:`_instance_reference_map`.  What remains out of scope is
+    the *sheet-pin* half of that story (issue #4099 Phase 2): a hierarchical
+    label whose mating sheet pin is wired to a differently-named net in each
+    parent still resolves from label text alone, so the two placements share
+    one bare identity there instead of inheriting one name per placement.
     """
     out: dict[tuple[str, str], str | None] = {}
     # Keyed by visit identity (``eq=False`` keeps ``_SheetVisit`` hashable
     # by object), so a repeated sheet path can never alias another sheet.
     resolved: dict[_SheetVisit, dict[str, str]] = {}
-    for visit in _walk_hierarchy_schematics(Path(sch_path)):
+    # Materialized because the per-placement reference rename below is only
+    # needed -- and only paid for -- when a sheet *file* carries more than one
+    # placement.  Pre-order is preserved, so ``resolved[visit.parent]`` is
+    # always populated before a child is processed.
+    visits = list(_walk_hierarchy_schematics(Path(sch_path)))
+    placements: dict[Path, int] = {}
+    for visit in visits:
+        key_path = visit.source.resolve()
+        placements[key_path] = placements.get(key_path, 0) + 1
+    for visit in visits:
         inherited: dict[str, str] = {}
         if visit.parent is not None:
             parent_ids = resolved[visit.parent]
@@ -430,7 +561,16 @@ def _schematic_pin_to_net(sch_path: Path) -> dict[tuple[str, str], str | None]:
         # ``kct check`` run to those redundant rebuilds. Behavior is
         # identical to the historical per-pin loop -- see
         # ``get_all_pin_nets``'s docstring for why.
-        for key, net in visit.schematic.get_all_pin_nets().items():
+        # One sheet file placed twice answers the same property-based
+        # reference designators on both placements; rename each placement's
+        # pins to the designator its ``(instances ...)`` block records, so
+        # ``MCU_B``'s pads land on ``R11``/``R12`` rather than overwriting
+        # ``MCU_A``'s ``R1``/``R2`` (issue #5815).  Skipped outright for a
+        # singly-placed sheet -- every sheet in a non-reusing design -- so
+        # the usual case pays no extra parse and is bit-for-bit unchanged.
+        renames = _instance_reference_map(visit) if placements[visit.source.resolve()] > 1 else {}
+        for (ref, pad), net in visit.schematic.get_all_pin_nets().items():
+            key = (renames.get(ref, ref), pad)
             out[key] = identities.get(net, net) if net is not None else None
     return out
 
