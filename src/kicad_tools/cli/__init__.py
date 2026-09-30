@@ -428,6 +428,11 @@ def _dispatch_command(args) -> int:
 
         return run_fleet_command(args)
 
+    elif args.command == "ecosystem":
+        from .commands.ecosystem import run_ecosystem_command
+
+        return run_ecosystem_command(args)
+
     elif args.command == "render":
         return _run_render_command(args)
 

@@ -906,8 +906,62 @@ kicad-tools ships its own Claude agent skills under `.claude/commands/kct/` (inv
 
 ## Related Projects
 
-- **[Zeo](https://github.com/zeodotdev/zeo)** — A KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
-- **[kipy](https://gitlab.com/kicad/code/kicad-python)** — the official KiCad Python bindings (`kicad-python` on PyPI) for the KiCad IPC API. Requires a **running KiCad instance** with the IPC API enabled and a document open in an editor — every accessor is an RPC to the live editor; there is no offline file-reading path, so it cannot participate in headless/CI workflows. Evaluated and not adopted: see [docs/research/kipy-ipc-api-evaluation.md](docs/research/kipy-ipc-api-evaluation.md).
+<!-- BEGIN kct:ecosystem -->
+
+kicad-tools is one piece of a fast-moving KiCad automation ecosystem. This
+section is generated from `src/kicad_tools/ecosystem/data/projects.toml` --
+run `kct ecosystem where-we-sit` for our invariants and non-goals, `kct
+ecosystem show <id>` for any entry below, and see [docs/ecosystem.md](docs/ecosystem.md)
+for the full positioning narrative. Where we have evaluated a project in
+depth, the linked note carries the method, the measurements and the verdict,
+including the cases where the other tool wins.
+
+Licenses are the SPDX id from the upstream `LICENSE` file, and are
+load-bearing: an AGPL or unlicensed neighbour is studied at the capability
+level only, never copied from. Facts below were last verified on the date each
+registry entry records; `.github/workflows/ecosystem-drift.yml` re-checks them
+weekly.
+
+### Autorouters
+
+- **[KiCadRoutingTools](https://github.com/drandyhaas/KiCadRoutingTools)** (MIT, Python + Rust, 488★) -- **Benchmarked against us.** The closest peer to `kct route`: octilinear multi-layer A\* with via insertion, diff pairs, length matching, BGA/QFN fanout and plane pours, shipped as both a KiCad 9/10 action plugin and a CLI. Benchmarked head-to-head against us on eight demo boards under one shared `kicad-cli` referee: it is faster and completes more nets on the sparse and medium boards, while on the dense boards it emits literal shorts where we instead run out of time. Our evaluation: [docs/research/kicad-routing-tools-comparison.md](docs/research/kicad-routing-tools-comparison.md).
+- **[freerouting](https://github.com/freerouting/freerouting)** (GPL-3.0, Java, 2045★) -- the long-standing Specctra DSN/SES autorouter and the baseline most KiCad users try first. Has a headless CLI, but the DSN round-trip is a lossy interchange boundary: it routes a translated view of the board rather than the `.kicad_pcb` itself. We operate on the board file directly, which is what lets LVS and the manufacturing gates run against the same artifact that gets fabricated.
+- **[OrthoRoute](https://github.com/bbenchoff/OrthoRoute)** (MIT, Python + CUDA/Metal, 411★) -- GPU-accelerated PathFinder routing, with plugin and headless modes. Its author is explicit that it targets a narrow class of very large, dense, highly regular multilayer backplanes and BGA escape patterns and does poorly on typical boards -- the opposite end of the board-size spectrum from our demo fleet.
+- **[DeepPCB KiCad plugin](https://github.com/instadeepai/deeppcb-kicad-plugin)** (Apache-2.0, Python, 66★) -- **Evaluated and not adopted.** An open-source plugin in front of a closed, credit-metered cloud router. The plugin is local; the routing is not. It requires an account and API key, so it cannot participate in an offline or air-gapped CI pipeline. DeepPCB's own published benchmark numbers are recorded in `benchmarks/external/boards.toml` for side-by-side comparison. Our evaluations: [benchmarks/external/README.md](benchmarks/external/README.md), [benchmarks/external/results/report.md](benchmarks/external/results/report.md).
+
+### Design as code (upstream of us)
+
+- **[atopile](https://github.com/atopile/atopile)** (MIT, Python, 3964★) -- **Ideas adopted.** A language and compiler for describing boards as code (`.ato`), with constraint solving, a package registry and parametric part selection via its Faebryk library; it emits a netlist and updates a KiCad layout, but deliberately stops at "place and route in KiCad". That is exactly where we start, which makes the two complementary rather than competing. Our MCP server exists because of this evaluation. Our evaluations: [docs/research/atopile-research-synthesis.md](docs/research/atopile-research-synthesis.md), [docs/research/faebryk-component-library.md](docs/research/faebryk-component-library.md), [docs/research/atopile-constraint-solving.md](docs/research/atopile-constraint-solving.md), [docs/research/atopile-interface-patterns.md](docs/research/atopile-interface-patterns.md), [docs/research/atopile-layout-reuse.md](docs/research/atopile-layout-reuse.md), [docs/research/atopile-lsp-analysis.md](docs/research/atopile-lsp-analysis.md), [docs/research/atopile-mcp-analysis.md](docs/research/atopile-mcp-analysis.md), [docs/research/atopile-package-registry.md](docs/research/atopile-package-registry.md), [docs/research/atopile-error-handling.md](docs/research/atopile-error-handling.md).
+- **[SKiDL](https://github.com/devbisme/skidl)** (MIT, Python, 1675★) -- the original Python-as-schematic-capture tool: a program describes the circuit and SKiDL emits netlists, XML BOMs and (for KiCad 6-10) editable schematics, with its own ERC. Another upstream producer of the files we consume.
+- **[component-importer-for-kicad](https://github.com/robertxdx/component-importer-for-kicad)** (MIT, Python, 55★) -- **Evaluated and not adopted.** Evaluated as a vendor-ZIP (SnapEDA / Ultra Librarian) ingestion backend for symbol and footprint import. Verdict was borrow-with-refactor rather than vendor: its headless modules are PyQt6-free and close to the surface we need, but a clean-room re-implementation of roughly 600 LoC plus a `kct ingest-zip` CLI is the smaller change. Not built yet. Our evaluation: [docs/research/component-importer-for-kicad-evaluation.md](docs/research/component-importer-for-kicad-evaluation.md).
+
+### Agent and MCP interfaces
+
+- **[Zeo](https://github.com/zeodotdev/zeo)** (AGPL-3.0, C++, 31★) -- a KiCad fork with an integrated AI agent sidebar and MCP server. Takes a complementary approach: live editor manipulation via IPC vs. our offline file-based analysis and optimization.
+- **[Konnect](https://github.com/mixelpixx/Konnect)** (AGPL-3.0, Rust, 841★) -- **Ideas adopted.** A single-binary native KiCad 10 plugin exposing a very large LLM tool surface (217 tools) across schematic, layout, routing, placement, review and manufacturing. AGPL means no code can move between it and this MIT repo in either direction, so our engagement is capability-level only: we audited its connectivity primitives, its tool-economy design and its design-rule handling against our own surface. Five of its six connectivity primitives we already had; the sixth (near-miss auto-snap repair) was a real gap. Our evaluations: [docs/research/konnect-connectivity-audit.md](docs/research/konnect-connectivity-audit.md), [docs/konnect-item1-toolset-economy-audit.md](docs/konnect-item1-toolset-economy-audit.md), [docs/konnect-item8-design-rules-audit.md](docs/konnect-item8-design-rules-audit.md).
+- **[copperhead](https://github.com/copperheadhq/copperhead)** (Apache-2.0, TypeScript, 312★) -- **Ideas adopted.** "cursor for circuit boards": a natural-language brief drives direct edits to `.kicad_sch` / `.kicad_pcb`, gated by an LLM-free `check` and wrapped in a git snapshot that auto-rolls-back on failure. It does not route, and verifies with `kicad-cli` ERC/DRC only -- no LVS, no manufacturing cross-gate. Its *process* design (design memory as committed artifacts, a constraints registry, a per-run audit trail) is the part worth borrowing. Note: moved from `chouhanindustries/copperhead` since our note was written. Our evaluation: [docs/research/copperhead-workflow-ideas.md](docs/research/copperhead-workflow-ideas.md).
+- **[Seeed-Studio/kicad-mcp-server](https://github.com/Seeed-Studio/kicad-mcp-server)** (no `LICENSE` committed, Python, 135★) -- the closest peer to `kct mcp serve`: an MCP server that reads schematic and PCB files offline (shelling out to `kicad-cli` for validation) to trace pin-level connections and edit designs. Overlaps our read/analyze tools; carries no router, LVS or fab-readiness gates. Its README claims MIT but the repo commits no LICENSE file, so we treat it as all-rights-reserved and copy nothing.
+
+### Fabrication and CI
+
+- **[KiBot](https://github.com/INTI-CMNB/KiBot)** (AGPL-3.0, Python, 747★) -- the mature, scriptable fabrication- and documentation-output generator for KiCad (gerbers, drill, position, BOM, 3D, plots), with a GitHub Action. Deeper than `kct export` on output *variety* and configuration; it assumes a board that is already routed and signed off, which is the part we automate.
+
+### KiCad bindings
+
+- **[kipy](https://gitlab.com/kicad/code/kicad-python)** (GPL-3.0, Python) -- **Evaluated and not adopted.** The official KiCad Python bindings (`kicad-python` on PyPI) for the KiCad IPC API. Requires a **running KiCad instance** with the IPC API enabled and a document open in an editor -- every accessor is an RPC to the live editor; there is no offline file-reading path, so it cannot participate in headless/CI workflows. Our evaluation: [docs/research/kipy-ipc-api-evaluation.md](docs/research/kipy-ipc-api-evaluation.md).
+
+### Benchmarks and evaluation protocols
+
+- **[OmniLayout / OmniRouting](https://omnieda.com)** (no `LICENSE` committed) -- **Ideas adopted.** A published routing benchmark and leaderboard. We adopted its *metric vocabulary and evaluation protocol* -- the sharpest external definition of "routed well" we have found -- and declined the dataset and tooling: no license grant on the data, and the evaluation harness is unpublished. Our evaluation: [docs/research/omnilayout-recon.md](docs/research/omnilayout-recon.md).
+
+### Watching
+
+Recorded in the registry with a re-evaluation trigger, deliberately not featured above yet:
+
+- **[AutoRoute](https://github.com/pingpongshow/AutoRoute)** (MIT, Rust, 0★) -- Rust negotiated-congestion router with an exact-DRC clearance model, a headless CLI and DSN/SES KiCad integration. Recorded rather than featured: 8 commits and no adoption signal yet, so there is nothing stable to measure against.
+- **[tscircuit](https://github.com/tscircuit/tscircuit)** (MIT, TypeScript, 2775★) -- "React for Electronics" -- circuits described in TypeScript/React, with a web-based autorouter in development. Recorded rather than featured: it exports gerbers, pick-and-place and BOM directly rather than KiCad project files, so it sits beside the KiCad ecosystem rather than inside it and shares no artifact with us.
+
+<!-- END kct:ecosystem -->
 
 ## License
 

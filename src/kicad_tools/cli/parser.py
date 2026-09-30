@@ -186,6 +186,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_suggest_parser(subparsers)
     _add_net_status_parser(subparsers)
     _add_fleet_parser(subparsers)
+    _add_ecosystem_parser(subparsers)
     _add_render_parser(subparsers)
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
@@ -9819,3 +9820,79 @@ def _add_export_parser(subparsers) -> None:
         choices=["text", "json"],
         help="Output format for preflight results (default: text)",
     )
+
+
+def _add_ecosystem_parser(subparsers) -> None:
+    """Add the ecosystem parent-subaction parser (Issue #5839)."""
+    from .format_options import add_format_flag
+
+    ecosystem_parser = subparsers.add_parser(
+        "ecosystem",
+        help="Where kicad-tools sits among related projects",
+        description=(
+            "Query the packaged ecosystem registry: which projects produce the "
+            "files we consume, which overlap our surface, whose license forbids "
+            "code reuse, and what we concluded when we evaluated them. Answers "
+            '"have we already looked at X?" without grepping docs/.'
+        ),
+    )
+    ecosystem_subparsers = ecosystem_parser.add_subparsers(
+        dest="ecosystem_command", help="Ecosystem commands"
+    )
+
+    # ecosystem list
+    eco_list = ecosystem_subparsers.add_parser(
+        "list",
+        help="List tracked projects, optionally filtered",
+    )
+    eco_list.add_argument(
+        "--category",
+        dest="ecosystem_category",
+        help=(
+            "Filter by category: autorouter, design-as-code, agent-interface, "
+            "fabrication, bindings, benchmark"
+        ),
+    )
+    eco_list.add_argument(
+        "--relation",
+        dest="ecosystem_relation",
+        help="Filter by relation: upstream, peer, downstream, reference",
+    )
+    eco_list.add_argument(
+        "--verdict",
+        dest="ecosystem_verdict",
+        help=(
+            "Filter by verdict: complementary, benchmarked, ideas-adopted, "
+            "evaluated-not-adopted, watch"
+        ),
+    )
+    eco_list.add_argument(
+        "--license-compat",
+        dest="ecosystem_license_compat",
+        help=(
+            "Filter by code-reuse compatibility: mit-clean, "
+            "permissive-ideas-only, copyleft-ideas-only, unlicensed, cloud-service"
+        ),
+    )
+    add_format_flag(eco_list, dest="ecosystem_format")
+
+    # ecosystem show
+    eco_show = ecosystem_subparsers.add_parser(
+        "show",
+        help="Show one project in full, with our verdict and evaluation notes",
+    )
+    # Positional: argparse forbids an explicit dest here, so the argument is
+    # named for the dest the handler reads and metavar carries the display.
+    eco_show.add_argument(
+        "ecosystem_project_id",
+        metavar="PROJECT_ID",
+        help="Registry id, e.g. kicadroutingtools (see: kct ecosystem list)",
+    )
+    add_format_flag(eco_show, dest="ecosystem_format")
+
+    # ecosystem where-we-sit
+    eco_where = ecosystem_subparsers.add_parser(
+        "where-we-sit",
+        help="Print our invariants, non-goals and the neighbour map",
+    )
+    add_format_flag(eco_where, dest="ecosystem_format")
