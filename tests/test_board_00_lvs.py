@@ -143,14 +143,24 @@ class TestCompareNetlistsDetectsReversedLed:
             f"Expected D1.1 and D1.2 in the mismatch list; got "
             f"{[(m.ref, m.pad) for m in result.mismatches]}"
         )
+
         # And the nets must be crossed (schematic still says cathode/anode
         # on the original pads; PCB now binds them the other way around).
+        #
+        # Names are compared on their last sheet-path segment: since issue
+        # #5815 the schematic side reports a local label with the sheet path
+        # KiCad gives it (``/LED_ANODE`` on the root sheet), while the board's
+        # spelling depends on which netlister wrote it.  The crossing itself
+        # -- which net each pad is bound to -- is what this test pins.
+        def leaf(name: str | None) -> str | None:
+            return None if name is None else name.rsplit("/", 1)[-1]
+
         m1 = d1_mismatches[("D1", "1")]
         m2 = d1_mismatches[("D1", "2")]
-        assert m1.schematic_net == "GND" and m1.pcb_net == "LED_ANODE", (
+        assert leaf(m1.schematic_net) == "GND" and leaf(m1.pcb_net) == "LED_ANODE", (
             f"D1.1 mismatch wrong: schematic={m1.schematic_net!r} pcb={m1.pcb_net!r}"
         )
-        assert m2.schematic_net == "LED_ANODE" and m2.pcb_net == "GND", (
+        assert leaf(m2.schematic_net) == "LED_ANODE" and leaf(m2.pcb_net) == "GND", (
             f"D1.2 mismatch wrong: schematic={m2.schematic_net!r} pcb={m2.pcb_net!r}"
         )
 

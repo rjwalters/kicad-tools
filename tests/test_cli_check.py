@@ -835,7 +835,9 @@ class TestCheckLVSFullFidelity:
         assert lvs["detail"].startswith("copper: ")
         # ...but the label leg is no longer discarded.
         assert [(m["ref"], m["pad"]) for m in lvs["mismatches"]] == [("D1", "1"), ("D1", "2")]
-        assert {m["schematic_net"] for m in lvs["mismatches"]} == {"GND", "LED_ANODE"}
+        # ``/LED_ANODE`` carries the root sheet's path: since issue #5815 the
+        # schematic side reports a local label the way KiCad names it.
+        assert {m["schematic_net"] for m in lvs["mismatches"]} == {"GND", "/LED_ANODE"}
         assert len(lvs["copper_mismatches"]) >= 1
 
     def test_payload_enumerates_every_copper_mismatch(self, tmp_path: Path, capsys):

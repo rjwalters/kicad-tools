@@ -428,11 +428,22 @@ def _count_hierarchy_sheets(sch_path: Path, visited: set[Path] | None = None) ->
 
 @dataclass
 class _SheetEntry:
-    """Parsed sheet entry with filename and pin information."""
+    """Parsed sheet entry with filename, display name and pin information.
+
+    ``sheetname`` is the ``(property "Sheetname" ...)`` value — the name
+    KiCad shows on the sheet symbol and, crucially, the component it uses
+    when building a **sheet path** (``/MCU/``) for netlist net names.  It
+    is *not* the filename: ``sub_mcu.kicad_sch`` may well be named
+    ``MCU``.  Consumers that need a sheet path (see
+    :func:`kicad_tools.lvs.board_lvs._walk_hierarchy_schematics`) must use
+    this field; it is empty only when the property is missing, in which
+    case the caller picks its own fallback.
+    """
 
     filename: str
     pin_names: list[str] = field(default_factory=list)
     pin_positions: list[tuple[float, float]] = field(default_factory=list)
+    sheetname: str = ""
 
 
 def _get_sheet_filenames(sch_path: Path) -> list[str]:
@@ -485,13 +496,20 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                     sheet_x = round(float(atoms[0]), 2)
                     sheet_y = round(float(atoms[1]), 2)
 
-            # Look for (property "Sheetfile" "filename.kicad_sch")
+            # Look for (property "Sheetfile" "filename.kicad_sch") and
+            # (property "Sheetname" "MCU") — the latter is what KiCad uses
+            # to build the sheet path in net names (``/MCU/DBG_LED``).
+            sheetname = ""
             for prop in child.find_all("property"):
                 prop_name = prop.get_string(0)
                 if prop_name == "Sheetfile":
                     fname = prop.get_string(1)
                     if fname:
                         filename = fname
+                elif prop_name == "Sheetname":
+                    sname = prop.get_string(1)
+                    if sname:
+                        sheetname = sname
 
             # Extract (pin "name" direction (at x y angle) ...) children.
             # Pin positions in sheet entries are relative to the sheet origin.
@@ -517,6 +535,7 @@ def _get_sheet_entries(sch_path: Path) -> list[_SheetEntry]:
                         filename=filename,
                         pin_names=pin_names,
                         pin_positions=pin_positions,
+                        sheetname=sheetname,
                     )
                 )
     return entries
