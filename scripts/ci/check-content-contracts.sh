@@ -12,4 +12,5 @@ exec uv run --extra dev --frozen pytest -q -o addopts= --no-cov --timeout=60 \
   tests/test_kct_skills_consumer_generic.py \
   tests/install/test_install_kct.py \
   tests/test_check_doc_drift.py \
+  tests/test_ecosystem_readme_block.py \
   tests/test_board_07_matchgroup_test.py::TestBoardsReadmeUpdated

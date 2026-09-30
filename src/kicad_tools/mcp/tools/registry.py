@@ -2283,3 +2283,106 @@ register_tool(
     handler=_handler_get_recent_calls,
     category="observability",
 )
+
+
+# -----------------------------------------------------------------------------
+# Ecosystem Tools (Issue #5839)
+# -----------------------------------------------------------------------------
+
+
+def _handler_ecosystem_list(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle ecosystem_list tool call."""
+    from kicad_tools.mcp.tools.ecosystem import ecosystem_list
+
+    return ecosystem_list(
+        category=params.get("category"),
+        relation=params.get("relation"),
+        verdict=params.get("verdict"),
+        license_compat=params.get("license_compat"),
+    )
+
+
+register_tool(
+    name="ecosystem_list",
+    description=(
+        "List the projects kicad-tools tracks in the KiCad automation ecosystem, "
+        "with our verdict on each, whether its license permits code reuse, and "
+        "paths to any evaluation we have already written. Use this before "
+        "researching or reimplementing something a neighbouring project already "
+        "does. Also returns our own invariants and non-goals."
+    ),
+    parameters=_make_params(
+        properties={
+            "category": {
+                "type": "string",
+                "description": "Optional filter by kind of tool",
+                "enum": [
+                    "autorouter",
+                    "design-as-code",
+                    "agent-interface",
+                    "fabrication",
+                    "bindings",
+                    "benchmark",
+                ],
+            },
+            "relation": {
+                "type": "string",
+                "description": ("Optional filter by pipeline position relative to kicad-tools"),
+                "enum": ["upstream", "peer", "downstream", "reference"],
+            },
+            "verdict": {
+                "type": "string",
+                "description": "Optional filter by what we concluded about the project",
+                "enum": [
+                    "complementary",
+                    "benchmarked",
+                    "ideas-adopted",
+                    "evaluated-not-adopted",
+                    "watch",
+                ],
+            },
+            "license_compat": {
+                "type": "string",
+                "description": "Optional filter by whether upstream code may be reused",
+                "enum": [
+                    "mit-clean",
+                    "permissive-ideas-only",
+                    "copyleft-ideas-only",
+                    "unlicensed",
+                    "cloud-service",
+                ],
+            },
+        },
+        required=[],
+    ),
+    handler=_handler_ecosystem_list,
+    category="ecosystem",
+)
+
+
+def _handler_ecosystem_show(params: dict[str, Any]) -> dict[str, Any]:
+    """Handle ecosystem_show tool call."""
+    from kicad_tools.mcp.tools.ecosystem import ecosystem_show
+
+    return ecosystem_show(project_id=params["project_id"])
+
+
+register_tool(
+    name="ecosystem_show",
+    description=(
+        "Show one tracked ecosystem project in full: our verdict, its license "
+        "and whether its code may be reused here, the commit we benchmarked (if "
+        "any), and the repo-relative paths of our own evaluation notes."
+    ),
+    parameters=_make_params(
+        properties={
+            "project_id": {
+                "type": "string",
+                "description": "Registry id, e.g. 'kicadroutingtools' (see ecosystem_list)",
+            },
+        },
+        required=["project_id"],
+    ),
+    handler=_handler_ecosystem_show,
+    category="ecosystem",
+)

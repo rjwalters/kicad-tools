@@ -81,6 +81,29 @@ change; run with `--ask` to review first, and `--prune` to allow irreversible
 removals. Managed by `install.sh` — edit outside the markers only.
 <!-- END REPO-SKILLS -->
 
+## "Have we already evaluated X?" -- ask the ecosystem registry
+
+Before researching, benchmarking or reimplementing something a neighbouring
+project already does, check what this repo already concluded about it:
+
+```bash
+kct ecosystem list                  # everything we track, with verdicts
+kct ecosystem show kicadroutingtools
+kct ecosystem where-we-sit          # our invariants and non-goals
+```
+
+Eight evaluation notes sat in `docs/research/` unlinked from anywhere before
+issue #5839; grepping `docs/` is no longer the way to find them. The registry
+is `src/kicad_tools/ecosystem/data/projects.toml` and each entry carries the
+paths of our own notes, plus a `license_compat` field that says whether that
+project's code may be reused here at all (**AGPL and unlicensed neighbours are
+ideas-only, in both directions** -- never copy). Agents can reach the same data
+through the `ecosystem_list` / `ecosystem_show` MCP tools.
+
+Adding or editing an entry means re-rendering the README block:
+`uv run python scripts/ecosystem_render.py --write`. A test fails if you
+forget. Narrative: [`docs/ecosystem.md`](docs/ecosystem.md).
+
 ## Changelog: every user-visible PR adds a `changelog.d/` fragment
 
 Don't edit `CHANGELOG.md`'s `[Unreleased]` in a PR — ~20 merges a day would

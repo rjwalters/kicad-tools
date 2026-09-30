@@ -89,6 +89,7 @@ kct [--help] [--version] <command> [options]
 | | `run` | Run a Python script with the kicad-tools interpreter |
 | | `build-native` | Build the C++ router backend (10-100x faster routing) |
 | | `doctor` | Diagnose kicad-tools installation health (version-record drift + environment preflight) |
+| | `ecosystem` | Where kicad-tools sits among related projects (verdicts, license reuse rights, our evaluation notes) |
 
 ---
 
@@ -1777,6 +1778,66 @@ Source of truth: the `Exit Codes:` section of the module docstring in
 | 0 | All surveyed boards are ship-ready |
 | 1 | Argparse / IO error |
 | 2 | One or more boards are not ship-ready (also returned when no boards are found, since "no ship-ready boards" is treated as not-ship-ready). Matches `kct net-status` semantics. |
+
+---
+
+### `ecosystem`
+
+Query the packaged ecosystem registry: which projects produce the files we
+consume, which overlap our surface, whose license forbids code reuse, and what
+we concluded when we evaluated them. Answers "have we already looked at X?"
+without grepping `docs/`.
+
+Implemented in
+[`src/kicad_tools/cli/commands/ecosystem.py`](../../src/kicad_tools/cli/commands/ecosystem.py);
+the data is the packaged
+[`src/kicad_tools/ecosystem/data/projects.toml`](../../src/kicad_tools/ecosystem/data/projects.toml).
+Narrative: [`docs/ecosystem.md`](../ecosystem.md).
+
+```bash
+# Everything we track, grouped by category
+kct ecosystem list
+
+# Narrow by any combination of the four controlled vocabularies
+kct ecosystem list --relation upstream
+kct ecosystem list --category autorouter --verdict benchmarked
+kct ecosystem list --license-compat copyleft-ideas-only
+
+# One project in full, with our verdict and the notes behind it
+kct ecosystem show kicadroutingtools
+
+# Our invariants, non-goals and the neighbour map
+kct ecosystem where-we-sit
+
+# Every sub-action supports machine output
+kct ecosystem list --format json
+```
+
+| Filter | Values |
+|--------|--------|
+| `--category` | `autorouter`, `design-as-code`, `agent-interface`, `fabrication`, `bindings`, `benchmark` |
+| `--relation` | `upstream` (produces files we consume), `peer` (overlaps our surface), `downstream` (consumes our output), `reference` (studied only) |
+| `--verdict` | `complementary`, `benchmarked`, `ideas-adopted`, `evaluated-not-adopted`, `watch` |
+| `--license-compat` | `mit-clean`, `permissive-ideas-only`, `copyleft-ideas-only`, `unlicensed`, `cloud-service` |
+
+`--license-compat` is the load-bearing one: anything other than `mit-clean`
+means upstream code must not be copied into this MIT repo, in either
+direction. `kct ecosystem show` states that per project as
+`code reuse: NOT permitted -- ideas only`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Query succeeded |
+| 1 | No sub-action given, unknown project id, a filter value outside its vocabulary, or a registry that failed to load |
+
+With `--format json`, an error is still a single valid JSON document
+(`{"error": "..."}`) on stdout, per
+[machine-output.md](machine-output.md).
+
+Agents can reach the same data through the `ecosystem_list` and
+`ecosystem_show` MCP tools.
 
 ---
 

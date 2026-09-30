@@ -1,0 +1,204 @@
+name: Ecosystem Drift
+
+# Issue #5839: weekly re-check of the ecosystem registry against upstream.
+#
+# The registry at `src/kicad_tools/ecosystem/data/projects.toml` records
+# facts about other projects -- their license, whether their code may be
+# reused here, and what we concluded when we evaluated them. Those facts go
+# stale silently: a license flip retroactively forbids code reuse, a rename
+# rots every link we published, an archive invalidates a verdict. Nobody
+# remembers to re-check sixteen repositories by hand.
+#
+# WARN-ONLY by design, for the same reason as nightly-ship-ready.yml: upstream
+# is outside our control. A required check that fails because someone else
+# relicensed their repository would stall every unrelated PR. The job always
+# exits 0, surfaces findings as ::warning:: annotations plus a job summary,
+# and is NOT wired into the required-status checks on the default branch.
+#
+# It also never edits the registry. `scripts/ecosystem_refresh.py` prints the
+# TOML to apply and a human ratifies it -- that is the whole point of the
+# `last_verified` field. An auto-committing bot would turn a
+# human-verified record into an unverified one.
+
+on:
+  schedule:
+    # 07:00 UTC Mondays -- after nightly-ship-ready (06:00 daily) so the two
+    # are not contending for free runner capacity.
+    - cron: "0 7 * * 1"
+  workflow_dispatch: {}
+  # Re-check on any change to the registry or its tooling, so a PR that edits
+  # the data gets the same probe the weekly run would have given it.
+  pull_request:
+    paths:
+      - "src/kicad_tools/ecosystem/**"
+      - "scripts/ecosystem_refresh.py"
+      - "scripts/ecosystem_render.py"
+      - ".github/workflows/ecosystem-drift.yml"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ecosystem-drift-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    name: Registry vs upstream (warn-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-uv publishes only immutable full-version tags since v8 (no
+      # @v8/@v9 major tags exist), hence the exact pin.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "latest"
+          enable-cache: false
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Probe upstream and report drift
+        id: drift
+        # The script exits 0 without --strict; continue-on-error is
+        # belt-and-braces against a future maintainer adding --strict here.
+        continue-on-error: true
+        env:
+          # scripts/ecosystem_refresh.py shells out to `gh api` for GitHub
+          # projects; the default token is enough for public metadata.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ecosystem-drift
+          uv run python scripts/ecosystem_refresh.py --format json \
+            > ecosystem-drift/drift.json
+          uv run python scripts/ecosystem_refresh.py \
+            | tee ecosystem-drift/drift.txt
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Ecosystem drift"
+            echo
+            if [ -f ecosystem-drift/drift.txt ]; then
+              echo '```'
+              cat ecosystem-drift/drift.txt
+              echo '```'
+            else
+              echo "The drift probe produced no output (see the step log)."
+            fi
+            echo
+            echo "Registry: \`src/kicad_tools/ecosystem/data/projects.toml\`"
+            echo "Apply suggested edits by hand -- this job never writes the registry."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Annotate error-class findings
+        if: always()
+        run: |
+          if [ ! -f ecosystem-drift/drift.json ]; then
+            echo "::warning::ecosystem drift probe produced no JSON report"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          report = json.loads(pathlib.Path("ecosystem-drift/drift.json").read_text())
+          for finding in report.get("findings", []):
+              if finding["severity"] in ("error", "warn"):
+                  print(
+                      f"::warning title=ecosystem {finding['class']}::"
+                      f"{finding['project_id']}: {finding['detail']}"
+                  )
+          counts = report.get("counts", {})
+          print(
+              f"::notice::ecosystem drift: {counts.get('error', 0)} error, "
+              f"{counts.get('warn', 0)} warn, {counts.get('info', 0)} info"
+          )
+          PY
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ecosystem-drift
+          path: ecosystem-drift/
+          if-no-files-found: warn
+
+      # A license flip, a rename or an archive invalidates something we have
+      # published. Those get a tracking issue; staleness does not. One issue
+      # is reused and updated rather than filed weekly.
+      - name: File or update the tracking issue on error-class drift
+        if: always() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ ! -f ecosystem-drift/drift.json ]; then
+            echo "No JSON report; nothing to file."
+            exit 0
+          fi
+
+          ERRORS=$(python3 -c "
+          import json, pathlib
+          r = json.loads(pathlib.Path('ecosystem-drift/drift.json').read_text())
+          print(r.get('counts', {}).get('error', 0))
+          ")
+
+          if [ "$ERRORS" -eq 0 ]; then
+            echo "No error-class drift; no issue needed."
+            exit 0
+          fi
+
+          TITLE="Ecosystem registry drift: upstream license/rename/archive change"
+          BODY_FILE=ecosystem-drift/issue-body.md
+          {
+            echo "\`scripts/ecosystem_refresh.py\` found **$ERRORS error-class"
+            echo "finding(s)**: an upstream license change, rename or archive."
+            echo "Each one invalidates something this repo has published -- a"
+            echo "code-reuse right, a link, or a verdict."
+            echo
+            echo "Run locally to see the suggested registry edits:"
+            echo
+            echo '```bash'
+            echo 'uv run python scripts/ecosystem_refresh.py'
+            echo '```'
+            echo
+            echo '<details><summary>Report</summary>'
+            echo
+            echo '```'
+            cat ecosystem-drift/drift.txt 2>/dev/null || echo "(text report missing)"
+            echo '```'
+            echo
+            echo '</details>'
+            echo
+            echo "Registry: \`src/kicad_tools/ecosystem/data/projects.toml\`."
+            echo "Facts are human-ratified: apply the edits by hand, bump"
+            echo "\`last_verified\`, then re-render the README with"
+            echo "\`uv run python scripts/ecosystem_render.py --write\`."
+            echo
+            echo "Filed by [\`ecosystem-drift.yml\`](../blob/main/.github/workflows/ecosystem-drift.yml)"
+            echo "from run \`${GITHUB_RUN_ID}\`. Tracking issue for #5839."
+          } > "$BODY_FILE"
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            # --body-file is correct here; `--body @path` would post the
+            # literal string "@path" (see .loom/docs comment-body-literal-path).
+            gh issue comment "$EXISTING" --body-file "$BODY_FILE"
+            echo "Updated existing issue #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body-file "$BODY_FILE" \
+              --label "loom:triage"
+          fi
+
+      - name: Always succeed (warn-only gate)
+        if: always()
+        run: |
+          echo "Ecosystem drift is warn-only: upstream state is outside our"
+          echo "control, so it never blocks integration. See the job summary."
