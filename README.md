@@ -948,7 +948,7 @@ weekly.
 
 ### KiCad bindings
 
-- **[kipy](https://gitlab.com/kicad/code/kicad-python)** (GPL-3.0, Python) -- **Evaluated and not adopted.** The official KiCad Python bindings (`kicad-python` on PyPI) for the KiCad IPC API. Requires a **running KiCad instance** with the IPC API enabled and a document open in an editor -- every accessor is an RPC to the live editor; there is no offline file-reading path, so it cannot participate in headless/CI workflows. Our evaluation: [docs/research/kipy-ipc-api-evaluation.md](docs/research/kipy-ipc-api-evaluation.md).
+- **[kipy](https://gitlab.com/kicad/code/kicad-python)** (MIT, Python, 19★) -- **Evaluated and not adopted.** The official KiCad Python bindings (`kicad-python` on PyPI) for the KiCad IPC API. Requires a **running KiCad instance** with the IPC API enabled and a document open in an editor -- every accessor is an RPC to the live editor; there is no offline file-reading path, so it cannot participate in headless/CI workflows. Our evaluation: [docs/research/kipy-ipc-api-evaluation.md](docs/research/kipy-ipc-api-evaluation.md).
 
 ### Benchmarks and evaluation protocols
 

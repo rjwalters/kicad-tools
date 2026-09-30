@@ -411,13 +411,30 @@ automate.\
 [projects.kipy]
 name = "kipy"
 repo_url = "https://gitlab.com/kicad/code/kicad-python"
-vcs = "other"
+# GitLab-hosted, and pollable: the numeric-or-path project id below is what
+# `probe_gitlab` URL-encodes. Leaving this `vcs = "other"` is what let the
+# license below go unchecked in the first place.
+vcs = "gitlab"
+slug = "kicad/code/kicad-python"
 category = "bindings"
 relation = "reference"
 verdict = "evaluated-not-adopted"
-license = "GPL-3.0"
-license_compat = "copyleft-ideas-only"
+# MIT, not GPL-3.0. Issue #5839's seed table said GPL-3.0 -- understandable,
+# since KiCad itself is GPL-3.0 -- but the root LICENSE file of
+# gitlab.com/kicad/code/kicad-python is verbatim MIT ("Permission is hereby
+# granted, free of charge, ..."), its `pyproject.toml` declares
+# `license = "MIT"`, and GitLab's own license detector reports `mit`
+# (all three checked 2026-09-30). Recording GPL here would have been exactly
+# the rot this registry exists to prevent, and would have made the first
+# `ecosystem_refresh.py` run report a phantom error-class `license-changed`.
+#
+# The not-adopted verdict is architectural -- kipy needs a running KiCad --
+# and is unaffected by the license being permissive.
+license = "MIT"
+license_compat = "mit-clean"
 language = "Python"
+stars = 19
+last_push = "2026-09-29"
 last_verified = "2026-09-30"
 research_docs = ["docs/research/kipy-ipc-api-evaluation.md"]
 summary = """
