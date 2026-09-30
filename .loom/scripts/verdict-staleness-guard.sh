@@ -32,8 +32,9 @@
 #                     says (#6781).
 #   2. NO_VERDICT   — the PR carries neither `loom:pr` nor
 #                     `loom:changes-requested`. Nothing to invalidate.
-#   3. UNVERIFIABLE — a verdict label is present, but no marker comment exists
-#                     for THAT verdict kind. Fail safe: the verdict is kept.
+#   3. UNVERIFIABLE — a verdict label is present, but no TRUSTED marker exists
+#                     for THAT verdict kind (#9548: an untrusted author's marker is
+#                     prose, not state). Fail safe: the verdict is kept.
 #                     This is the pre-migration/rollout case (verdicts written
 #                     before this guard shipped carry no marker), the
 #                     mixed-fleet case (a host still running the older prompt),
@@ -44,10 +45,13 @@
 #  3b. ANCHORED      — --anchor was passed and the UNVERIFIABLE verdict was
 #                     given a marker recording the CURRENT head, so it becomes
 #                     invalidatable from here on (#6319).
-#   4. FRESH        — the newest matching marker's SHA equals the current head
-#                     SHA. The verdict still describes the tree in front of it.
+#   4. FRESH        — the verdict still describes the tree in front of it,
+#                     either because the newest matching marker's SHA equals the
+#                     current head SHA, or because the head moved but the two
+#                     commits' TREES are byte-identical (#9576 — see below).
 #   5. STALE        — the newest matching marker's SHA differs from the current
-#                     head SHA. The verdict describes a tree that no longer
+#                     head SHA AND the trees differ (or the comparison could not
+#                     be made). The verdict describes a tree that no longer
 #                     exists; it must not be trusted.
 #
 # NOT_OPEN is first for a reason (#6781). A merge that lands between a caller's
@@ -71,6 +75,37 @@
 # appended commit is just as much "not the tree I reviewed" as a rebase is,
 # and the extra machinery would not change a single answer (#5686 explicitly
 # scopes it out).
+#
+# ONE exception, and it is evidence rather than a heuristic (#9124/#9576): a head
+# move whose TREE is byte-identical to the marker's. `loom-daemon forge
+# tree-unchanged <marker> <head>` asks GitHub's own `compare/{base}...{head}`,
+# and `files: []` proves the reviewed code is still exactly what is at the new
+# head — so the verdict does describe it and clearing buys a full extra Judge
+# cycle and nothing else. The measured cause on this repo is the #8248
+# required-check-freshness guard's automated `chore: re-date required checks …`
+# commit (#8508), whose whole purpose is to change nothing in the tree. This is
+# NOT a shape inference: nothing is read from the commit message, the author, or
+# the ref-update shape.
+#
+# THE COMPARISON IS NOT IMPLEMENTED HERE, for the same reason the #8900 disarm
+# below is not: it already existed in loom-daemon (#9124 taught the daemon's
+# periodic `reconcile_pr_verdicts` pass this exemption), and a second copy in
+# shell is what `.loom/docs/shell-language-policy.md` forbids. That divergence
+# is exactly the bug #9576 reports — this guard had NO tree comparison at all
+# while the daemon did, so PRs #9541 and #9483 lost `loom:pr` here to a re-date
+# commit the daemon pass would have kept, on a host already running #9124.
+#
+# FAIL CLOSED: only a literal `TREE_UNCHANGED=1` suppresses the invalidation.
+# An absent binary, one predating the verb (clap exits non-zero with nothing on
+# stdout), a `gh` outage, a non-GitHub forge, or an unparsable compare all leave
+# the answer empty and the verdict reads STALE exactly as it did before #9576 —
+# the same fail-open-into-invalidation arm as the daemon's own `None`.
+#
+# This guard does NOT re-anchor the marker to the new head when it takes that
+# exemption (the daemon's carve-out does, in-process). Anchoring is a comment
+# write and the marker prose lives in loom-daemon; the cost of not doing it is
+# one extra compare call per pass until the daemon's periodic pass re-anchors it
+# itself, which is strictly cheaper than a wrongly-cleared verdict.
 #
 # Usage:
 #   verdict-staleness-guard.sh <pr-number>            # report only
@@ -394,6 +429,20 @@ COMMENTS_JSON="$(gh api "repos/{owner}/{repo}/issues/$PR/comments" --paginate 2>
   exit 1
 }
 
+# #9548: a marker counts only from a TRUSTED author — a repo insider by
+# author_association, one of this fleet's Apps, this daemon's own identity, or
+# forge.trustedCommenters. Anyone can post a well-formed marker on a public
+# repo, and another Loom fleet's markers are not ours; an untrusted marker is
+# prose and reads exactly as if it were absent (so it can neither vouch for a
+# verdict nor invalidate one). The predicate lives in the daemon
+# (`loom-daemon forge trusted-comments`, loom-daemon/src/comment_trust.rs);
+# this script owns none of it. If the filter cannot run, EVERY marker is
+# treated as absent: the verdict reads UNVERIFIABLE (never FRESH on
+# unauthenticated markers) and --anchor is suppressed, since anchoring an
+# unverified verdict to the current head would itself mint a FRESH marker.
+# requires-daemon: forge optional   Without the `trusted-comments` verb (an absent binary, or one predating #9548: clap exits 2 with nothing on stdout) every marker counts as absent, so the verdict reads UNVERIFIABLE with the cause named in REASON and --anchor does not post. No version floor on purpose: the degraded answer is the fail-safe one.
+COMMENTS_JSON="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments <<<"$COMMENTS_JSON" 2>/dev/null)" && TRUSTED=1 || { COMMENTS_JSON='[]'; TRUSTED=0; }
+
 # One "<created_at>\t<sha>" line per matching marker, oldest first (matches
 # --paginate's page order). `test(...)` guards `capture(...)` so a non-matching
 # body is filtered out via `select` rather than raising a per-item jq error.
@@ -418,7 +467,8 @@ MARKER_LINES="$(jq -r --arg t "$MARKER_TEST" --arg c "$MARKER_CAPTURE" '
 MARKER_SHA="$(tail -n 1 <<<"$MARKER_LINES" | cut -f2)"
 
 if [[ -z "$MARKER_SHA" ]]; then
-  UNVERIFIABLE_REASON="verdict label $VERDICT_LABEL present but no <!-- loom:verdict-sha ... verdict=$VERDICT_TOKEN --> marker found (marker never written) — failing safe, verdict kept"
+  UNVERIFIABLE_REASON="verdict label $VERDICT_LABEL present but no <!-- loom:verdict-sha ... verdict=$VERDICT_TOKEN --> marker from a trusted author found — failing safe, verdict kept"
+  [[ "$TRUSTED" -eq 1 ]] || UNVERIFIABLE_REASON="$UNVERIFIABLE_REASON; markers could not be authenticated (loom-daemon forge trusted-comments unavailable), so every marker was treated as absent and --anchor is suppressed (#9548)"
 
   # --- Step 3b: UNVERIFIABLE — optionally anchor to the current head (#6319) -
   # Note the asymmetry with --clear below, and that it is deliberate: this
@@ -426,7 +476,7 @@ if [[ -z "$MARKER_SHA" ]]; then
   # re-queue anything. It only makes the standing verdict checkable from here
   # on. Without it the verdict stays permanently unverifiable and keeps the
   # full pre-#5686 hazard for as long as the label sits there.
-  if [[ "$ANCHOR" -eq 1 ]]; then
+  if [[ "$ANCHOR" -eq 1 && "$TRUSTED" -eq 1 ]]; then
     HOLD_LABEL="$(hold_label)"
     if [[ -n "$HOLD_LABEL" ]]; then
       emit "UNVERIFIABLE" "$UNVERIFIABLE_REASON; anchor suppressed — PR is on an explicit $HOLD_LABEL hold" \
@@ -464,10 +514,30 @@ fi
 # --- Step 4: fresh or stale? ------------------------------------------------
 # Compare on the marker's own length so a legitimately abbreviated marker SHA
 # still matches the full head SHA it prefixes (the roles stamp full SHAs; this
-# only guards a hand-written or truncated marker).
+# only guards a hand-written or truncated marker). That string compare is the
+# first arm on purpose: it is the common case and needs no binary, no network
+# and no forge, so a host that cannot resolve loom-daemon still reads FRESH
+# normally and only loses the #9576 exemption.
+#
+# The second arm delegates whole to `loom-daemon forge tree-unchanged`
+# (loom-daemon/src/forge_tree_unchanged.rs) — the SAME function the daemon's
+# periodic pass calls in-process, so the two can no longer disagree. It prints
+# TREE_UNCHANGED=1|0 and exits 0 for both; anything else (exit 1, an absent
+# binary, a daemon predating the verb, LOOM_VERDICT_TREE_CARVEOUT switched off —
+# the verb evaluates the kill switch itself) leaves this empty, which is not "1"
+# and therefore falls through to STALE. "1" requires compare `status`
+# identical/ahead, never `files: []` alone (a rewound head reads `behind`, no
+# files). See the header for why that is fail-closed.
+# requires-daemon: forge optional   Without the `tree-unchanged` verb (an absent binary, or one predating #9576: clap exits non-zero with nothing on stdout) a tree-identical head move reads STALE — the pre-#9576 behavior, which only ever costs a redundant Judge cycle. No version floor on purpose: the degraded answer is the fail-safe one.
+FRESH_REASON=""
 if [[ "${HEAD_SHA:0:${#MARKER_SHA}}" == "$MARKER_SHA" ]]; then
-  emit "FRESH" "verdict $VERDICT_LABEL was rendered against the current head SHA" \
-    "$HEAD_SHA" "$VERDICT_LABEL" "$MARKER_SHA" 0
+  FRESH_REASON="verdict $VERDICT_LABEL was rendered against the current head SHA"
+elif [[ "$("${LOOM_DAEMON_BIN:-loom-daemon}" forge tree-unchanged "$MARKER_SHA" "$HEAD_SHA" 2>/dev/null | sed -n 's/^TREE_UNCHANGED=//p')" == "1" ]]; then
+  FRESH_REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA and head is now $HEAD_SHA, but the two trees are byte-identical (compare reports zero file differences) — the reviewed code is unchanged, so the verdict still describes it (#9576)"
+fi
+
+if [[ -n "$FRESH_REASON" ]]; then
+  emit "FRESH" "$FRESH_REASON" "$HEAD_SHA" "$VERDICT_LABEL" "$MARKER_SHA" 0
   exit 0
 fi
 

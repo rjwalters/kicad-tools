@@ -77,10 +77,19 @@ default(disabled)**:
   "enabled": false,       // default off — additive, opt-in
   "socket": null,         // default: $SAFEHOUSED_SOCKET
   "room": null,           // omit only if safehoused joined exactly one room
-  "persona": "loom_daemon"
+  "persona": "loom_daemon",
+  "operatorMention": null // who an operator-priority escalation pings (#9321)
   // "rooms": { … }       // optional attention-class routing — see below (#4225)
 }
 ```
+
+**`operatorMention` is a handle, not a credential.** It is the Matrix display
+name or user id (`"@operator:example.org"`) prepended to an operator-priority
+escalation line so the room actually notifies a human (#9321). Nothing about it
+authenticates anything — the `persona` does that — so it belongs beside the room
+ids rather than in an owner-only credential store. Leave it `null` and the
+escalation is still posted, just without a ping: a missing handle never drops an
+ask.
 
 Env overrides (each wins over config for that key):
 
@@ -90,6 +99,7 @@ Env overrides (each wins over config for that key):
 | `LOOM_SAFEHOUSE_SOCKET` | `socket` |
 | `LOOM_SAFEHOUSE_ROOM` | `room` |
 | `LOOM_SAFEHOUSE_PERSONA` | `persona` |
+| `LOOM_SAFEHOUSE_OPERATOR_MENTION` | `operatorMention` (#9321) |
 | `LOOM_SAFEHOUSE_ROOM_SIGNAL` | `rooms.signal` (#4225) |
 | `LOOM_SAFEHOUSE_ROOMS_BY_REPO` | `rooms.byRepo`, as `repo=room[,repo=room…]` (#4225) |
 | `LOOM_SAFEHOUSE_ROOM_CLAIMS` | `rooms.claims` — dedicated peer-claim coordination room (#4713) |
@@ -585,6 +595,41 @@ each one lands in is decided by its envelope `type` — see
 `task` lines (dispatch/phase) go to that repo's firehose, while `handoff` /
 `ack` / `completion` (blockers, crashes, terminal outcomes) go to the signal room.
 With no `rooms` map configured they all go to the one `room`, as before.
+
+### Operator-priority escalations (#9321)
+
+`operator_priority.escalation` — a starred (`loom:operator-priority`) issue that
+reached a state only the operator can move — is narrated as a **`handoff`**, so
+it lands in the signal room the operator actually watches rather than a muted
+per-repo firehose. That routing *is* the feature: the escalation already exists
+as a forge comment (#9301), and a forge comment is what nobody read for seven
+hours in #9268.
+
+```
+@operator:example.org: loom#9268 · OPERATOR NEEDED · merge-refused at needs-operator
+Allow merge commits on the repository, or re-run the merge with squash.
+https://github.com/rjwalters/loom/issues/9268 · observed by host-a
+```
+
+- **The mention** comes from `safehouse.operatorMention` above; unset ⇒ the same
+  line without the ping, never a dropped ask.
+- **Exactly one post per ask, fleet-wide.** The publisher emits only on the pass
+  that actually posts that ask's forge comment, so the comment's
+  `<!-- loom:operator-priority-escalation key=<kind>:<specifics> -->` marker —
+  already the fleet's shared lock — is the *only* dedupe: no repeat across
+  ticks (a per-process ledger), across hosts (a peer finds the marker), or
+  across restarts (the marker is re-read). A non-starred issue produces no
+  liveness row, hence no post.
+- **Recovery.** When the ask clears, one `resolved ✓` line lands in the same
+  thread, **without** re-pinging the operator — summoning a human to say
+  "never mind" is noise. Only the host that announced the ask narrates its
+  recovery, and a repo whose pass could not be read resolves nothing (an
+  unreadable repo must not read as "everything cleared").
+- **No `meta`.** Envelope-v1 allows `meta` only on a `completion`, so every fact
+  the operator needs is in the body; the structured payload stays on the bus
+  event for other consumers.
+- **`safehouse.enabled` false ⇒ unchanged behavior**: the forge comment and the
+  `health`/`status`/`queue` surfaces still carry the ask, nothing reaches Matrix.
 
 ### Repo qualification (issue #4201)
 
@@ -1328,7 +1373,7 @@ heartbeats, so the genuine-break signature above is unaffected.
 above landed (#8739 2026-09-23, #8817 2026-09-24), and two independent
 per-host trackers went DEGRADED again afterward showing exactly this
 signature — `robb-studio` (#8509, flap #10, `0 received / 4373 advertised`)
-and `ip-172-31-74-176` (#8779, flap #6, `0 received / 1782 advertised`), both
+and `ip-198-51-100-42` (#8779, flap #6, `0 received / 1782 advertised`), both
 well after both merges. On both hosts the local daemon's own safehouse RPC
 socket reports `state: "connected"` — healthy — so a genuine break here, if
 one exists, lives **above** the RPC link: inside the `safehoused` sidecar's
@@ -1345,7 +1390,7 @@ one today without a protocol change on the `rjwalters/safehouse` side.
 That capability request has been filed as #8888 (external, since this repo
 does not vendor `rjwalters/safehouse` and cannot implement its side). Until
 it lands, telling "genuine mesh break" apart from "still-undiscovered local
-false positive" for `robb-studio`/`ip-172-31-74-176` needs live host SSH —
+false positive" for `robb-studio`/`ip-198-51-100-42` needs live host SSH —
 routed to #8889 (`loom:operator-mechanical`) rather than guessed at here.
 
 ### Fleet-wide completion dedup: reusing the peer-claim channel (#6352)
@@ -1536,7 +1581,9 @@ announces itself when it does not:
    Note that the cooldown lane deliberately does not touch `counters.received`
    (see the "Consume" bullet), so `received` counts **dispatch-claim** traffic —
    it is a proxy for "does anything at all reach me from a peer", not a direct
-   count of cooldown ads.
+   count of cooldown ads. **It is a weak proxy** — see
+   "`received=0` does not mean nothing arrives" below, which #9294 measured and
+   which is why `advertised`/`received` alone must never be the whole diagnosis.
 
 Reported as a bug in #8912 (a peer re-claimed `example-org/tool-repo#1` 196 s
 into a 3600 s cooldown on 2026-09-25); the recording host honoured its own window
@@ -1557,6 +1604,72 @@ peer-claim publisher is attached on this host" — and `grep HOST-LOCAL
 says nothing about precondition 2: a host that never prints it can still be
 receiving nothing, which is why the `advertised`/`received` counters above are
 the second thing to check.
+
+#### `received=0` does not mean nothing arrives (#9294)
+
+Precondition 2's symptom — `advertised` climbing, `received` pinned at zero —
+was read on #8912 as "this host's **receive** path is dead". It was measured on
+`loom-worker-1` on 2026-09-29 and it is not what happened. **The claims room
+itself was dead, for every host, in both directions.**
+
+The evidence, all reproducible against a live daemon:
+
+1. The claims room's most recent event of any kind was **2026-09-23T17:54:52Z**,
+   six days before the measurement, while the narration room was accepting
+   events seconds apart:
+
+   ```bash
+   # Read-only, using safehoused's own session (state/session.json).
+   curl -sH "Authorization: Bearer $TOKEN" \
+     "$HOMESERVER/_matrix/client/v3/rooms/$CLAIMS_ROOM/messages?dir=b&limit=3"
+   ```
+
+2. The homeserver had lost that room's forward extremities, so every send into
+   it fails server-side. The daemon had logged exactly this, twice, and then
+   gone quiet (the WARN is deduped per connection, #4464):
+
+   ```text
+   [2026-09-23T18:08:57.710] [WARN] safehouse: peer claim-ad rejected (safehoused
+     rejected send: sending to room: the server returned an error: [500 /
+     M_UNKNOWN] cannot create a non-create event in a room with no forward
+     extremities in !…); peer-claim dedup disabled, dispatch unaffected
+   ```
+
+3. Live, the failure no longer even produces a rejection: a probe `send`
+   addressed at the claims room over safehoused's socket got **no reply at all**
+   within 60 s (neither `ok:true` nor `ok:false`), because matrix-sdk retries the
+   500 internally and the op never returns. The identical send addressed at the
+   narration room returned `ok:true` in under a second and was relayed straight
+   back to a second socket connection. Same daemon, same socket, same Matrix
+   user, both rooms joined (`GET /_matrix/client/v3/joined_rooms`).
+
+So `received=0` was the honest reading of a room nobody could write to — the
+receive path, own-host filtering, room-id resolution and the #7477 brake logic
+were all working. **When you see `advertised>0 received=0`, check whether the
+room is accepting writes before concluding anything about the receive path**:
+the two cheapest checks are the room's last event timestamp (1 above) and
+whether a send into it is ever acknowledged (3 above).
+
+The remedy for this shape is operational and lives on the homeserver, not in
+Loom: the room has to be repaired or recreated, and every host's
+`LOOM_SAFEHOUSE_ROOM_CLAIMS` repointed at the new id. Loom's own gap was
+visibility, which #9294 closed:
+
+- **The publish side is now tracked.** `PeerClaimView` counts refused sends
+  (`rejected=` on the counters line) *and* sends written to the socket that are
+  never acknowledged. Either one degrades peer coordination immediately, with a
+  reason naming the transport's own error — refusal and silence are the two
+  shapes this outage produced, and a rejection counter alone would have missed
+  the second entirely.
+- **`advertised` is attempts, always.** It counts at enqueue time, before the
+  socket write, and it always did. It is a measure of this host's *intent*, and
+  on its own it can never tell you anything landed.
+- **`loom-daemon status` now renders the verdict.** The #6157 degraded verdict
+  had been firing correctly all along — `loom-daemon health` reported
+  `peer_coordination DEGRADED` throughout — but the `Peer claims:` block printed
+  only counters, so the one command an operator actually runs showed a six-day
+  fleet-wide outage as ordinary output. A DEGRADED channel now prints a
+  `DEGRADED (…)` line with its reason directly under the counters.
 
 ### Fleet-wide token-pool exhaustion hold: the third brake lane (#8001)
 
@@ -1616,6 +1729,79 @@ it. Two more `ClaimKind`s on the same envelope close that:
   pre-#8001 local-only pre-flight — which still stops that host on its own next
   tick. The broadcast removes doomed dispatches; it is never the only thing that
   can stop them.
+
+### Fleet-wide PR-less retry tally: the fourth brake lane (#9292)
+
+The three lanes above all broadcast a **window** — "do not dispatch this
+issue/pool until T". The PR-less retry bound (#7972) needs something the other
+three do not: a **count**. Its `loom:blocked` hold fires on the `threshold`-th
+consecutive claim of an issue that produced no pull request, and until #9292
+that tally was a plain per-process `HashMap` — the same fleet-scope gap #7477
+closed for the cooldown lanes, one mechanism later.
+
+The cost is arithmetic. Four dispatch hosts, each counting only its own
+attempts, spend up to `4 × threshold` claim/release cycles before **any** one
+of them reaches `threshold` — and post up to four near-identical "Attempt N of
+M" notes on the way. Observed on `rjwalters/loom#8812`, 2026-09-24: nine
+claim/release cycles at roughly 90 s apart, four `Attempt 2 of 3` notes (one
+per host, none of them a hold), and only then one host's third release applying
+`loom:blocked`.
+
+One more `ClaimKind` on the same envelope closes it:
+
+- **Publish every recorded release.** `SweepRegistry::record_prless_release`
+  broadcasts `ClaimKind::PrlessReleaseArmed` via
+  `publish_peer_prless_release_claim` — a dedicated publisher for the same
+  reason `publish_peer_cooldown_claim` is one: the payload carries a field the
+  generic method has no parameter for. Here that field is `consecutive:
+  Option<u32>`, **this host's own** running count, never a fleet total (a
+  fleet total on the wire would be re-summed by every receiver). Fire-and-forget
+  / fail-open like every other publish on this channel.
+- **Consume into a per-`(repo, issue, host)` map.** `ClaimKind::is_cooldown_lane`
+  already covers this kind, so `PeerClaimSink` routes it through
+  `observe_brake_ad` into `PeerClaimView::observe_prless_release_at` with no
+  change to the socket layer. The **host** is in the key because each peer
+  reports only its own count and the fleet total is their sum: keying on
+  `(repo, issue)` alone would let the last ad to arrive overwrite a different
+  host's contribution and silently restore the per-host threshold. An ad
+  reports a running total rather than an increment, so a redelivered or
+  duplicated ad is idempotent.
+- **Read at the threshold, and at the skip-set seam.**
+  `record_prless_release` compares `local + Σ peers` against
+  `PrlessRetryConfig::threshold`, so the hold trips at `threshold` claims
+  fleet-wide. `prless_retry_issues` unions the peer-advertised windows into the
+  work finder's existing `prless_retry()` pre-filter — the "fleet-wide
+  broadcast of the sub-threshold window" `prless_retry.rs` had explicitly
+  deferred — with no change at the work-finder layer.
+- **One attempt note per streak per _issue_.** The note is posted when the
+  **fleet** total first reaches 2, not on every sub-threshold release per host.
+  Because the fleet total is strictly increasing across a streak, `== 2` is
+  reached exactly once, wherever in the fleet the second release lands. (Two
+  hosts recording simultaneously, neither having yet seen the other's ad, can
+  still both compute 2 — a bounded one-duplicate race, against the
+  four-per-streak floor it replaces.)
+- **Two clocks, both measured against local receipt, both capped.** The
+  advertised **window** expires at
+  `received_at + min(remaining_secs, MAX_PEER_PRLESS_RELEASE_TTL)` (6 h, well
+  above the 1 h default `maxBackoffSecs`) and is what suppresses dispatch. The
+  **tally** expires at `received_at + max(that, PEER_PRLESS_STREAK_TTL)` (1 h,
+  matching the local `maxBackoffSecs` streak-cold rule) and is what counts
+  toward the threshold. They are separate on purpose: a backoff window is by
+  construction the interval after which the *next* host may claim, so a tally
+  keyed to the window would lapse at exactly the moment the fleet's next release
+  landed — the sum could never grow past one, and the fix would silently be the
+  per-host tally again. The tally clock is still finite, so a crashed peer stops
+  contributing rather than pinning an issue one release short of `loom:blocked`
+  forever. A missing/zero `consecutive` (a pre-#9292 peer) contributes `0`; a
+  missing/zero `remaining_secs` reads as an already-elapsed window whose release
+  still counts for the streak hour.
+- **Degrades to the pre-#9292 tally, loudly.** No publisher/view attached, a
+  dropped ad, a pre-#9292 peer, or a poisoned view all reduce the peer term to
+  what could be read, leaving this host's own exact count behind. Precondition 1
+  from the #8912 section above applies verbatim here, and is reported the same
+  way: `record_prless_release` logs "issue #N's PR-less retry tally is
+  HOST-LOCAL only" when no publisher is attached, so `grep HOST-LOCAL
+  ~/.loom/daemon.log` answers it per host.
 
 # Phase 2 — worker-side `safehouse-mcp` injection (#3999)
 

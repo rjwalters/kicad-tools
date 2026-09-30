@@ -298,6 +298,34 @@ for phrase in "${OUT_OF_BAND_PHRASES[@]}"; do
 done
 assert_eq "0" "$BARE_WORD_FOUND" "no bare single-word phrase is in the vocabulary"
 
+# -------- Test 21: forge evidence counts only via the trust filter (#9548) --------
+echo "Test 21: --issue evidence is read through forge trusted-comments, never raw"
+T21="$WORK_DIR/t21"; mkdir -p "$T21"
+SHA21="abcdef1234567890abcdef1234567890abcdef12"
+# gh: the issue body carries an out-of-band criterion; any raw comment read
+# would see an (outsider's) marker for the head.
+cat > "$T21/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"--json body"*) printf '## Acceptance Criteria\n\n- [ ] Confirm it works on the next real run\n' ;;
+  *"--json headRefOid"*) echo "$SHA21" ;;
+  *) printf '<!-- loom:ac-verified sha=$SHA21 -->\n' ;;
+esac
+STUB
+# loom-daemon stub: prints the listing in \$T21_LISTING, or fails.
+cat > "$T21/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+[[ -n "${T21_LISTING:-}" ]] || exit 1
+printf '%s\n' "$T21_LISTING"
+STUB
+chmod +x "$T21/gh" "$T21/loom-daemon"
+run21() { PATH="$T21:$PATH" LOOM_DAEMON_BIN="$T21/loom-daemon" T21_LISTING="$1" \
+    "$CLASSIFY_SCRIPT" --issue 5 --pr 6 --repo o/r >/dev/null 2>&1; echo $?; }
+assert_eq "12" "$(run21 '[]')" "no trusted marker -> 12, whatever raw comments say"
+assert_eq "12" "$(run21 '')" "filter unavailable -> 12 (held open, fail safe)"
+assert_eq "11" "$(run21 "[{\"body\":\"ran it <!-- loom:ac-verified sha=$SHA21 -->\"}]")" "a trusted marker for the head -> 11"
+echo ""
+
 # -------- Summary --------
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

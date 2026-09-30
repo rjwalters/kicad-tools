@@ -121,7 +121,7 @@ if [[ "$status_human" -ne 0 ]]; then
 else
     fail "validate-roles.sh (human) exited 0 with no terminals anywhere"
 fi
-if echo "$out_human" | grep -qi "terminals"; then
+if grep -qi "terminals" <<<"$out_human"; then
     pass "validate-roles.sh (human) error names terminals, not a single legacy path"
 else
     fail "validate-roles.sh (human) error message unexpected: $out_human"
@@ -176,7 +176,7 @@ else
     else
         fail "loom-start.sh exited 0 despite malformed .loom/config.json (silent-degrade regression)"
     fi
-    if echo "$out" | grep -qi "Invalid JSON"; then
+    if grep -qi "Invalid JSON" <<<"$out"; then
         pass "loom-start.sh names the malformed file explicitly (does not silently report 'no terminals')"
     else
         fail "loom-start.sh malformed-JSON error message unexpected: $out"
@@ -196,7 +196,7 @@ else
     else
         fail "loom-start.sh exited 0 with no terminals anywhere"
     fi
-    if echo "$out" | grep -qi "terminals"; then
+    if grep -qi "terminals" <<<"$out"; then
         pass "loom-start.sh error names terminals, not a single legacy path"
     else
         fail "loom-start.sh error message unexpected: $out"
@@ -220,7 +220,7 @@ JSON
     else
         fail "loom-start.sh --dry-run failed with project-tier-only terminals (exit $status): $out"
     fi
-    if echo "$out" | grep -q "cfgtier-start-t1"; then
+    if grep -q "cfgtier-start-t1" <<<"$out"; then
         pass "loom-start.sh --dry-run lists the project-tier-only terminal"
     else
         fail "loom-start.sh --dry-run did not list the project-tier terminal: $out"
@@ -273,12 +273,12 @@ JSON
         echo "URL=$_GITEA_BASE_URL"
     )
 
-    if echo "$result" | grep -q "^TYPE=gitea$"; then
+    if grep -q "^TYPE=gitea$" <<<"$result"; then
         pass "forge_detect resolves forge.type from the canonical repo root inside a worktree"
     else
         fail "forge_detect did not resolve gitea from canonical root (got: $result)"
     fi
-    if echo "$result" | grep -q "^TOKEN=tok-main-root$"; then
+    if grep -q "^TOKEN=tok-main-root$" <<<"$result"; then
         pass "_load_gitea_config resolves the token from the canonical repo root, not worktree CWD"
     else
         fail "_load_gitea_config did not resolve the main-repo token (got: $result)"

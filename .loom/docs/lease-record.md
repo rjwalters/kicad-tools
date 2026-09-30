@@ -204,10 +204,18 @@ changes the record's format or its reader contract:
    record's forge comment `id` sort *earlier* than a racing daemon
    dispatch's, which is precisely what the ordering check in "Phase 2,
    dispatch-time half" below reads to make that dispatcher yield.
-2. **It refuses to publish over a live peer.** If the freshest lease is
-   fresh and held by a *different* host, `sweep-lease-publish.sh` exits `4`
-   without writing — publishing would hide a live worker from every
-   freshest-wins reader — and the sweep skips that issue. A *stale* lease
+2. **It refuses to publish over a live peer.** If any lease on the issue is
+   fresh and held by a *different* `(host, sweep)` pair — on another host
+   *or this one* — `sweep-lease-publish.sh` exits `4` without writing:
+   publishing would hide a live worker from every freshest-wins reader, and
+   two sweeps on one issue share one `.loom/worktrees/issue-<N>` (a same-host
+   pair once edited the same uncommitted file there at once,
+   rjwalters/kicad-tools#5783). The sweep skips that issue. The check reads
+   only that issue's comments, so it never serializes sweeps working
+   *different* issues on one host. `worktree.sh` backstops it: before
+   handing back an existing worktree with uncommitted changes it runs
+   `loom-daemon lease co-occupancy`, which refuses when 2+ pairs hold fresh
+   leases at once (`WORKTREE_ALLOW_SHARED_LEASE=1` overrides). A *stale* lease
    (this host's or a peer's) never blocks publication: that is exactly the
    abandoned-claim case a new lease should supersede.
 

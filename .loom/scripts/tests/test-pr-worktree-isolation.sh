@@ -257,17 +257,17 @@ if [[ "$PR_RC" -ne 0 ]]; then
 else
     fail "pr-worktree.sh exited 0 despite the checkout failure — got: $PR_OUT"
 fi
-if echo "$PR_OUT" | grep -q "already checked out in another worktree"; then
+if grep -q "already checked out in another worktree" <<<"$PR_OUT"; then
     pass "failure message explicitly names the collision (not just the raw git error)"
 else
     fail "expected an explicit collision diagnostic; got: $PR_OUT"
 fi
-if echo "$PR_OUT" | grep -qF "$COLLIDING_WT_ABS"; then
+if grep -qF "$COLLIDING_WT_ABS" <<<"$PR_OUT"; then
     pass "failure message names the specific colliding worktree path"
 else
     fail "expected the colliding worktree path ($COLLIDING_WT_ABS) in the output; got: $PR_OUT"
 fi
-if echo "$PR_OUT" | grep -qi "do NOT evaluate code in it as-is"; then
+if grep -qi "do NOT evaluate code in it as-is" <<<"$PR_OUT"; then
     pass "failure message warns against evaluating the detached worktree as-is"
 else
     fail "expected an explicit do-not-evaluate warning; got: $PR_OUT"
@@ -335,12 +335,12 @@ if [[ "$PR_RC2" -ne 0 ]]; then
 else
     fail "pr-worktree.sh exited 0 despite the up-front collision — got: $PR_OUT2"
 fi
-if echo "$PR_OUT2" | grep -q "already checked out in another worktree"; then
+if grep -q "already checked out in another worktree" <<<"$PR_OUT2"; then
     pass "up-front failure message explicitly names the collision"
 else
     fail "expected an explicit up-front collision diagnostic; got: $PR_OUT2"
 fi
-if echo "$PR_OUT2" | grep -qF "$COLLIDING_WT2_ABS"; then
+if grep -qF "$COLLIDING_WT2_ABS" <<<"$PR_OUT2"; then
     pass "up-front failure message names the specific colliding worktree path"
 else
     fail "expected the colliding worktree path ($COLLIDING_WT2_ABS) in the output; got: $PR_OUT2"

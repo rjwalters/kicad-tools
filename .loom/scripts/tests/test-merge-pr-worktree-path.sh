@@ -30,14 +30,16 @@ MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 FORGE_HELPERS="$SCRIPTS_DIR/lib/forge-helpers.sh"
 
 # #8191: `_issue_is_closed_for_cleanup`'s decision now delegates to
-# `loom-daemon merge-pr issue-close-gate`. Pin the binary Test 7 below execs
-# and verify it HAS that subcommand, mirroring every other ported-decision
-# suite in this family (e.g. test-merge-pr-closed-issue-cleanup.sh). Tests
-# 1-6 above never invoke the real function (they re-simulate the decision
-# tree in pure bash), so this does not gate them.
+# `loom-daemon merge-pr issue-close-gate`, and the CLI's own --worktree-path
+# validation (Test 1 below) now delegates to `loom-daemon merge-pr
+# worktree-contains`. Pin the binary those exec and verify it HAS the
+# subcommands, mirroring every other ported-decision suite in this family
+# (e.g. test-merge-pr-closed-issue-cleanup.sh). Tests 2-6 above never invoke
+# the real function (they re-simulate the decision tree in pure bash), so
+# this does not gate them.
 # shellcheck source=lib/require-daemon-bin.sh
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr issue-close-gate"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr issue-close-gate" "merge-pr worktree-preserve" "merge-pr worktree-contains"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -136,10 +138,11 @@ assert_grep "forge_pr_close_targets" "$MERGE_PR" \
     "merge-pr.sh's cleanup gate consults forge_pr_close_targets (async-close-race adaptation)"
 assert_grep "forge_get_issue_state" "$MERGE_PR" \
     "merge-pr.sh's cleanup gate consults forge_get_issue_state for non-close-target issues"
-assert_grep "Preserving worktree at" "$MERGE_PR" \
-    "default-path preserved-worktree case logs a clear reason"
-assert_grep "Preserving discovered worktree at" "$MERGE_PR" \
-    "discovered-path preserved-worktree case logs a clear reason"
+retired \
+    "default-path preserved-worktree case logs a clear reason" \
+    "the operator-visible preserve message names why a worktree at the Loom-convention path was left in place" \
+    "#8191: the #4186/#6694 remove-vs-preserve decision, and the message text it builds, moved to loom-daemon/src/merge_pr/worktree_preserve.rs — merge-pr.sh's own text is now just \`_worktree_cleanup_decide default \"\$DEFAULT_WT_PATH\"\`, and the retired \"Preserving worktree at\" string is not a shell string anywhere in this file to grep for" \
+    "loom-daemon/tests/merge_pr_worktree_preserve_differential.rs, which drives the frozen retired block (tests/fixtures/merge-pr-worktree-preserve-retired.sh) against the real CLI on a shared corpus and asserts the preserve message is unchanged byte for byte, plus loom-daemon's merge_pr::worktree_preserve::tests::preserve_check_and_not_landed_preserves_with_two_lines"
 assert_grep "forge_get_issue_state" "$FORGE_HELPERS" \
     "forge-helpers.sh defines forge_get_issue_state"
 
@@ -148,10 +151,16 @@ assert_grep "JUDGE_PR_WT_PATH" "$MERGE_PR" \
     "merge-pr.sh declares JUDGE_PR_WT_PATH for the co-existing pr-<N> check"
 assert_grep 'JUDGE_PR_WT_PATH="\$WT_ROOT_DIR/pr-\$PR_NUMBER"' "$MERGE_PR" \
     "JUDGE_PR_WT_PATH is set to pr-\$PR_NUMBER only on the feature/issue-<N> branch"
-assert_grep "Found co-existing Judge/Doctor review worktree" "$MERGE_PR" \
-    "co-existing pr-<N> removal logs a clear reason (#6264)"
-assert_grep "Preserving Judge/Doctor review worktree at" "$MERGE_PR" \
-    "co-existing pr-<N> preserved-worktree case logs a clear reason (#6264)"
+retired \
+    "co-existing pr-<N> removal logs a clear reason (#6264)" \
+    "the operator-visible removal message for a co-existing Judge/Doctor review worktree names why (#6264)" \
+    "#8191: same consolidation as the default/discovered messages above — the text is now loom-daemon/src/merge_pr/worktree_preserve.rs's Kind::JudgePr branch, reached via \`_worktree_cleanup_decide judge-pr \"\$JUDGE_PR_WT_PATH\"\`" \
+    "loom-daemon/tests/merge_pr_worktree_preserve_differential.rs's Kind::JudgePr cases, plus merge_pr::worktree_preserve::tests::no_preserve_check_judge_pr_removes_with_a_note"
+retired \
+    "co-existing pr-<N> preserved-worktree case logs a clear reason (#6264)" \
+    "the operator-visible preserve message for a co-existing Judge/Doctor review worktree names why (#6264)" \
+    "#8191: same consolidation — the \"Preserving Judge/Doctor review worktree at\" text is loom-daemon/src/merge_pr/worktree_preserve.rs's Kind::JudgePr preserve branch, not a shell string" \
+    "loom-daemon/tests/merge_pr_worktree_preserve_differential.rs's Kind::JudgePr preserve cases, plus merge_pr::worktree_preserve::tests::judge_pr_kind_uses_its_own_noun_in_both_6694_messages"
 
 # --- Test 2d: never-closing-issue worktree/branch cleanup (#6694) source surface ---
 assert_grep 'source "\$SCRIPT_DIR/lib/branch-landed.sh"' "$MERGE_PR" \
@@ -165,10 +174,16 @@ assert_grep 'merge-pr delete-branch .*--expected-head-sha "\$expected_head_sha"'
     "_maybe_delete_local_branch hands the merged head SHA to the shared rule (loom-daemon merge-pr delete-branch, #8191)"
 assert_grep 'branch_has_landed "\$PR_BRANCH" "\$DEFAULT_BRANCH_NAME" "\$PR_HEAD_SHA"' "$MERGE_PR" \
     "the worktree-preserve decision reuses the shared primitive at every call site (#6694/#7812)"
-assert_grep "holds nothing unmerged; removing it \\(#6694\\)" "$MERGE_PR" \
-    "a fully-captured branch is cleaned up even when the issue-close gate says preserve (#6694)"
-assert_grep "designed never to close \\(#6694\\), that retry never fires: remove manually" "$MERGE_PR" \
-    "the reworded preserve message names a remedy that does not depend on the issue closing (#6694)"
+retired \
+    "a fully-captured branch is cleaned up even when the issue-close gate says preserve (#6694)" \
+    "when the #4186 issue gate says preserve but branch_has_landed says the branch's content is already on the default branch, cleanup proceeds anyway and says so" \
+    "#8191: the landed-branch override IS the decision that moved — it is now loom-daemon/src/merge_pr/worktree_preserve.rs's \`ctx.preserve_check && ctx.landed\` arm, and the \"holds nothing unmerged; removing it (#6694)\" text is a Rust format string, not a shell string this file can grep for" \
+    "loom-daemon/tests/merge_pr_worktree_preserve_differential.rs, whose corpus asserts (via saw_landed_override_remove) that the override fires for all three kinds with byte-identical text to the frozen pre-port shell, plus merge_pr::worktree_preserve::tests::preserve_check_and_landed_removes_with_one_line — and, behaviourally end to end, cases T/V/W in Test 5b below, which still drive the real merge-pr.sh and observe the worktree actually being removed"
+retired \
+    "the reworded preserve message names a remedy that does not depend on the issue closing (#6694)" \
+    "the preserve message tells an operator how to clean up by hand when the issue is a programme issue that will never close, so the automatic retry never fires" \
+    "#8191: same move — the second (info) line of the preserve branch is built in loom-daemon/src/merge_pr/worktree_preserve.rs and replayed through the shell's \`info\`, so \"designed never to close (#6694), that retry never fires: remove manually\" is not a shell string in this file" \
+    "loom-daemon/tests/merge_pr_worktree_preserve_differential.rs (the preserve cases compare both lines byte for byte against the frozen shell, so a dropped or reworded remedy line fails), plus merge_pr::worktree_preserve::tests::preserve_check_and_not_landed_preserves_with_two_lines"
 
 # --- Test 3: Precedence — --no-cleanup-worktree warns when combined ---
 echo ""
@@ -672,6 +687,85 @@ FAKEDAEMON
     fi
 fi
 rm -rf "$GATE_FUNCS_FILE" "$GATE_STUB_DIR" 2>/dev/null || true
+
+# --- Test 8: an older daemon lacking `worktree-contains` never removes the
+# unverified --worktree-path (#8191 slice; Judge's fail-safe fix on PR #9602).
+# The registered-worktree check is a guard, and a guard that did not run must
+# refuse the removal -- never lean on `git worktree remove` to refuse it. Runs
+# the REAL parse-time validation block and the REAL post-merge cleanup dispatch,
+# both extracted from merge-pr.sh, against a real repo + registered worktree.
+# `_remove_loom_worktree` is stubbed to really `git worktree remove --force`
+# the path, so a wrongly-dispatched removal would destroy it here.
+echo ""
+echo "Test 8: --worktree-path with a daemon lacking 'worktree-contains' (exit 2)"
+
+extract_top_block() { # <exact-first-line> <file>: top-level `if` through its `fi`
+    FIRST="$1" awk '$0 == ENVIRON["FIRST"] { grab=1 } grab { print } grab && /^fi$/ { exit }' "$2"
+}
+# The block headers and the expected call are literal merge-pr.sh source text.
+# shellcheck disable=SC2016
+WTC_VALIDATE="$(extract_top_block 'if [[ -n "$WORKTREE_PATH_OVERRIDE" ]]; then' "$MERGE_PR")"
+# shellcheck disable=SC2016
+WTC_CLEANUP="$(extract_top_block 'if [[ "$CLEANUP_WORKTREE" == "true" ]]; then' "$MERGE_PR")"
+# shellcheck disable=SC2016
+if [[ "$WTC_VALIDATE" != *"merge-pr worktree-contains"* || "$WTC_CLEANUP" != *'_remove_loom_worktree "$WORKTREE_PATH_OVERRIDE" "true"'* ]]; then
+    fail "could not extract the --worktree-path validation / cleanup dispatch blocks from $MERGE_PR"
+else
+    WTC_TMP="$(mktemp -d)"; WTC_TMP="$(cd "$WTC_TMP" && pwd -P)"
+    git init -q "$WTC_TMP/repo"
+    git -C "$WTC_TMP/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    git -C "$WTC_TMP/repo" worktree add -q -b feature/issue-8191 "$WTC_TMP/wt" 2>/dev/null
+    cat > "$WTC_TMP/no-verb-daemon" <<'FAKEDAEMON'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "error: unrecognized subcommand 'worktree-contains'" >&2
+exit 2
+FAKEDAEMON
+    chmod +x "$WTC_TMP/no-verb-daemon"
+
+    # run_wtc <daemon-bin>: validation block, a merge marker, then the cleanup
+    # dispatch -- in a subshell so the eval'd `error` exit cannot kill the suite.
+    # shellcheck disable=SC2030,SC2034,SC2329  # subshell-local on purpose; the stubs and vars serve the eval'd blocks
+    run_wtc() (
+        set +e
+        export LOOM_DAEMON_BIN="$1"; unset LOOM_PRESERVE_WORKTREE
+        REPO_ROOT="$WTC_TMP/repo"; CLEANUP_WORKTREE=true; WORKTREE_PATH_OVERRIDE="$WTC_TMP/wt"
+        info() { echo "INFO: $*"; }; warning() { echo "WARN: $*"; }
+        error() { echo "ERROR: $*"; exit 1; }
+        _remove_loom_worktree() { echo "REMOVED: $1"; git -C "$REPO_ROOT" worktree remove --force "$1"; }
+        eval "$WTC_VALIDATE"; echo "validated; merge proceeds"
+        eval "$WTC_CLEANUP"
+    )
+
+    out="$(run_wtc "$WTC_TMP/no-verb-daemon" 2>&1)"
+    if [[ "$out" == *"validated; merge proceeds"* && "$out" != *"ERROR:"* ]]; then
+        pass "T8a: an older daemon (exit 2) does not block the merge"
+    else
+        fail "T8a: expected the validation to fall through to the merge; got: $out"
+    fi
+    if [[ -d "$WTC_TMP/wt" && "$out" != *"REMOVED:"* ]] && \
+       wl=$(git -C "$WTC_TMP/repo" worktree list --porcelain) && grep -qxF "worktree $WTC_TMP/wt" <<<"$wl"; then
+        pass "T8b: the unverified --worktree-path survives untouched (no removal attempted)"
+    else
+        fail "T8b: the unverified worktree must never be removed; got: $out"
+    fi
+    if [[ "$out" == *"WARN:"*"did not run"*"$WTC_TMP/wt is left untouched and worktree cleanup is skipped"* ]]; then
+        pass "T8c: the warning names the preserved path and why cleanup was skipped"
+    else
+        fail "T8c: expected a warning naming the preserved path; got: $out"
+    fi
+
+    # Control: the real daemon verifies the same path, so cleanup IS dispatched
+    # to it -- proves T8b's survival is the fail-safe, not a dead harness.
+    # shellcheck disable=SC2031  # the outer, unmodified value is the one wanted
+    out="$(run_wtc "${LOOM_DAEMON_BIN:-loom-daemon}" 2>&1)"
+    if [[ "$out" == *"REMOVED: $WTC_TMP/wt"* && ! -d "$WTC_TMP/wt" ]]; then
+        pass "T8d: control -- a verified --worktree-path is still cleaned up"
+    else
+        fail "T8d: control: expected the verified path to be removed; got: $out"
+    fi
+    rm -rf "$WTC_TMP"
+fi
 
 # --- Summary ---
 echo ""

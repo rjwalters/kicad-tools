@@ -149,7 +149,7 @@ label, then posts one audit comment carrying
 `<!-- loom:operator-priority-intent=<id> action=<a> requested_at=<ts> -->`,
 unless a trusted comment with that intent id already exists, so resending an
 intent, or several hosts managing the repo, is harmless. Trusted means an
-`OWNER` / `MEMBER` / `COLLABORATOR`, the fleet App (the configured slug, else `loom-fleet-dispatch*`, as a `…[bot]` login only), or
+`OWNER` / `MEMBER` / `COLLABORATOR`, a fleet App identity (any identity in the forge roster, or `loom-fleet-dispatch` / `-<digits>` exactly, as a `…[bot]` login only), or
 the daemon's own login: a marker an outside commenter posts neither suppresses
 the audit comment nor sets the starred-at. `requested_by` is shown inside a
 code span, so an email address stays whole and an `@name` pings no one. `requested_at` becomes the
@@ -732,6 +732,16 @@ time, epic #9429). With it on the record, "story points landed per day" (#9433)
 and the estimate-vs-actual calibration loop (#9434) are a `GROUP BY` over this
 journal instead of a join against the forge.
 
+The throughput question is implemented: this field becomes the `story_points`
+column of `sweep_facts`, and **SF8** in
+`defaults/observability/sweep-facts/sweep-facts-queries.sql` answers "points
+landed per day / per ISO week" from it (#9433). Two things that question set
+fixes, and that any other consumer of this field must honour too: absent is a
+reported **data gap**, never a zero (the four omission situations below), and the
+values are **ordinal, not a unit** — sum the measured point value per bucket
+(`landed-size.sql`'s `measured_point_values`), never the raw labels. See
+`sweep-facts-questions.md` for the definitions and the capacity-tuning ops note.
+
 | Field | Type | Source | Notes |
 |---|---|---|---|
 | `story_points` | integer (`1` \| `2` \| `3` \| `5` \| `8` \| `13`) | The `points:*` label in the label list the **same** REST read that sources `complexity` and the disposition end state already returns (`sweep_registry::outcome_journal::complexity_signal`), folded by `crate::story_points`. | **No extra forge round trip** — that read's `--jq` projection already includes `labels`, and using it is what makes the estimate provably about the same issue as `complexity`. The paired `sweep.started` record carries the same field resolved at *dispatch* time, from the label list the #4444 park-label guard already read. |
@@ -992,9 +1002,53 @@ the terminal outcome samples the file for its own issue and window. The
 default classification when the writer omits one: `rejudge` ⇒
 **`substantive`** (the work was hard); `rebase`, `merge_conflict`,
 `ci_rerun` ⇒ **`environmental`** (the ground moved). Absent (never `[]`)
-when no event was marked. *Writer status:* the reflog reader above is shipped and is the primary
-source; the marker file remains the protocol for events a reflog cannot
-show (a CI rerun, an explicit rejudge).
+when no event was marked.
+
+*Writers.* The reflog source above is the primary one and needs no writer
+(#9511). The marker is appended by **`loom-daemon record-rework`**
+(`--kind` ∈ the four above, `--issue N` or `--branch feature/issue-N`,
+optional `--reason` / `--classification` / `--duration-sec`). It **always
+exits 0** — a marker is telemetry attached to an operation that matters, so
+an unwritable log directory or an unresolvable issue prints a reason and
+records nothing rather than failing the merge it describes; an unknown
+`kind`/`classification` is a clap-level argument error (exit 2), because a
+typo that widens the vocabulary is a silent cardinality leak into every
+rollup. Format, vocabulary, classification table and writer live in
+`loom-daemon/src/rework_events.rs`; both readers
+(`sweep_registry::outcome_journal::rework` — the marker reader and the
+reflog reader) take the path, the `kind` and the classification from it, so
+no end can drift.
+
+*The two sources are disjoint by construction.* A marker records only
+rework the worktree reflog **cannot** show — a forge-side branch update, a
+merge refusal, a CI rerun, a rejudge. A rebase or merge performed with local
+git in the sweep's worktree is **never** marked: the reflog already reports
+it, and a marker would count it twice. The terminal turn therefore
+concatenates both sources rather than de-duplicating them.
+
+The first caller is `merge-pr.sh`, at two sites (#9444): a **`rebase`** when
+the merge retry loop syncs a base branch that moved under the PR (via the
+forge's update-branch API, which never touches the local worktree, so the
+reflog cannot see it; `--duration-sec` is the settle wait it slept, the only
+measured part), and a **`merge_conflict`** when it refuses a PR whose
+`mergeable=false` was *corroborated* by a local `git merge-tree` check. The
+uncorroborated refusal — "the forge's cached state is stale/unknown" — is
+deliberately **not** marked: that is "nobody could tell", not "this branch
+conflicts", and marking it would inflate the environmental bucket with
+unanswered checks. Still unwritten, and the natural next callers:
+`rejudge` (a Doctor claimed for `loom:changes-requested`) and `ci_rerun`. A
+Doctor's own conflict rebase needs no marker — the reflog reports it.
+
+The committed question set that turns these payload fields into the per-issue split lives in
+`defaults/observability/issue-effort-queries.sql`, executed verbatim on
+bundled SQLite by `loom-daemon/tests/issue_effort_sqlite.rs` and
+vocabulary-checked by `loom-daemon/tests/issue_effort_artifacts.rs`: IE1 (the
+per-issue clean / substantive-rework / environmental-rework split), IE2 (the
+issues whose cost was mostly environment), IE3 (the attempt/trigger
+distribution), IE4 (in-sweep rework by kind), IE5 (how much of the cost the
+classification can attribute at all). It reads the raw `records` store,
+complementing #9446's `sweep_facts` rollup (whose rework columns are
+per-classification *counts*, not per-event durations).
 
 **PR linkage and the model that ran** (Issue #9465): `pr_numbers` (integer
 array, first-seen order) lists every PR the sweep's lifecycle was observed to
@@ -1676,7 +1730,7 @@ describe a different order from the one the tick ran. The `plan` block:
 
 | Field | Type | Notes |
 |---|---|---|
-| `slots` | object | `max_concurrent`, `occupancy` (after the tick), `free` (`max_concurrent − occupancy`), `max_admissions_per_tick`, `saturation_held`, `any_halted` |
+| `slots` | object | `max_concurrent`, `occupancy` (after the tick), `free` (`max_concurrent − occupancy`), `max_admissions_per_tick`, `saturation_held`, `any_halted`, `overflow_free` (bool, optional: whether the host's single `loom:operator-priority` overflow slot, #9244, is unused — a starred issue can still start past the configured cap) |
 | `tick_interval_secs` | integer, optional | the work finder's tick interval |
 | `shard` | object | `configured` (`false` when unsharded), `host_shard`, `shard_count` |
 | `scope` | array | the labels the plan covers: `["loom:issue", "loom:blocked"]` |
@@ -2115,6 +2169,73 @@ redaction unchanged (`dashboard/src/redaction.ts`): `is_captain` describes
 this host's own role in an operator-assigned fleet-wide designation, and a
 singleton job name is an allowlisted identifier a repo declares — the same
 footing as a role name — neither names a repo, issue, branch, or operator.
+
+**Memory pressure state (`memory`).** An optional object carrying the
+host's RAM/swap/pressure readings at the sampling moment — the slice that lets
+an operator distinguish a role attempt **deferred for memory** (PSI
+`some`/`full`, swapping, no runtime span) from one **killed**
+(`oom_kill_total` grew around the span's end, exit unobserved) from one that
+simply **timed out** (no pressure in either bound, no OOM growth):
+
+```json
+{
+  "mem_total_bytes": 34359738368,
+  "mem_available_bytes": 4294967296,
+  "mem_compressed_bytes": 17179869184,
+  "swap_total_bytes": 29696549888,
+  "swap_used_bytes": 29201163776,
+  "swap_in_bytes_total": 536870912000,
+  "swap_out_bytes_total": 644245094400,
+  "swap_in_bytes_per_sec": 51200.5,
+  "swap_out_bytes_per_sec": 71680.0,
+  "memory_pressure": "some",
+  "oom_kill_total": 12
+}
+```
+
+- `mem_total_bytes` — physical RAM installed (`hw.memsize` on macOS,
+  `MemTotal` on Linux), in bytes.
+- `mem_available_bytes` — memory a new allocation can take **without
+  reclaim**, in bytes (macOS: free + inactive pages × page size; Linux:
+  `MemAvailable`). The single most direct "about to run out" gauge.
+- `mem_compressed_bytes` — bytes held by the kernel's page compressor instead
+  of paged to swap (macOS `vm_stat` "Pages occupied by compressor"); **absent
+  on Linux** — the sources this daemon reads there expose no equivalent — never a
+  fake `0`.
+- `swap_total_bytes` / `swap_used_bytes` — capacity and current use, in
+  bytes, **when the platform exposes one** (macOS `vm.swapusage`).
+- `swap_in_bytes_total` / `swap_out_bytes_total` — cumulative host-lifetime
+  swap volume, normalized to **bytes**: both macOS `vm_stat` and Linux
+  `pswpin`/`pswpout` count pages, and the daemon converts both (using each
+  platform's actual page size) so one gauge means one thing fleet-wide.
+  Counters reset only across a reboot; a rollback (daemon seeing a reset)
+  reads as *unknown*, never negative.
+- `swap_in_bytes_per_sec` / `swap_out_bytes_per_sec` — rates computed by the
+  emitting daemon **between successive samples** from the two cumulative
+  totals; absent on the first sample after daemon start, after any counter
+  rollback, or when the cumulative pair is unmeasurable on either side. This is
+  the live "the host is swapping right now" signal, in metric form.
+- `memory_pressure` — PSI memory-pressure class over the last 10 seconds,
+  exactly `"none"` / `"some"` / `"full"` (Linux `/proc/pressure/memory`
+  `avg10`); **absent on macOS** (no PSI), where compression + swap carry the
+  pressure signal instead.
+- `oom_kill_total` — cumulative kernel OOM kills for the host's lifetime
+  (Linux `/proc/vmstat oom_kill`), when the kernel exposes the counter
+  (none on macOS). A growth of this counter between the two host snapshots
+  bound of a role span is the kill, not a deferral.
+
+The whole `memory` object is **omitted** when the platform measured nothing
+at all, or on a record from a daemon that predates the field — the same
+absence contract `protection`/`admission_brake` hold: absent means
+"unmeasured", never zero. Inside the object, every source that is genuinely
+unmeasurable on that platform stays an absent key, not a fabricated value
+("unknown != zero"). Additive, so no `schema_version` bump (see
+"`schema_version` semantics" above); the fields all describe the machine, not
+any repo, issue, or operator, so they pass through public redaction unchanged,
+like `worktree_root_free_gb`. The same fields ride **span-boundary trace
+attributes** (`loom.host.*`) on role attempts — see
+[tracing.md](tracing.md) — so the state is captured at the decision moment,
+not only on each 30 s sampling cadence.
 
 ## Persistence & read surface (`sweep.outcome`, Issue #4704)
 

@@ -59,3 +59,26 @@ paired n=240 test. This document defines the units; it is not tuned prose.
   (`observability/story-points-queries.sql`); see
   `observability/story-points-evidence.md` for what ran and what remains.
   Bounds are provisional until SP4 is run against fitted params.
+
+## Revision history
+
+**Updating this rubric from calibration output is a normal, expected change,
+not an incident.** The calibration loop (issue #9434,
+`observability/story-points-calibration-queries.sql`) scores assigned points
+against actual landed cost; when its CAL4 view reports a class `drifted`
+outside the stated tolerance ([0.5x, 2x] of the claimed median, n >= 20),
+moving that bound is the loop working. A revision:
+
+1. records itself below with a marker, date, what moved, and the calibration
+   run that motivated it;
+2. adds its window row to `rubric_revisions` and its class medians to
+   `rubric_classes` in the calibration queries file, so every calibration
+   view groups by the marker — a mid-window change shows up as two
+   populations, never a silent average;
+3. keeps the markers identical across this doc and that SQL. The contract
+   test (`loom-daemon/tests/story_points_calibration/static_contracts.rs`) fails if
+   the two copies disagree, so neither can drift alone.
+
+| revision | date | what changed | source |
+|---|---|---|---|
+| v1 | 2026-09-29 | Initial rubric: the #9430 tuning-set medians, quoted verbatim into the table above. No calibration output exists yet (the joined population is still empty), so v1 stands as issued. | #9520 |

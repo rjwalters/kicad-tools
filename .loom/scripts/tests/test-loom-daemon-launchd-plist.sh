@@ -238,7 +238,7 @@ fi
 # 8. --help documents --no-launchd and --print-plist.
 help_out=$(bash "$START_SCRIPT" --help 2>/dev/null)
 TESTS_RUN=$((TESTS_RUN + 1))
-if echo "$help_out" | grep -q -- '--no-launchd' && echo "$help_out" | grep -q -- '--print-plist'; then
+if grep -q -- '--no-launchd' <<<"$help_out" && grep -q -- '--print-plist' <<<"$help_out"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "${GREEN}✓${NC} --help documents --no-launchd and --print-plist"
 else

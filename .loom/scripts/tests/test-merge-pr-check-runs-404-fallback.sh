@@ -307,7 +307,7 @@ fi
 # _wait_for_checks_then_sync_merge() must track not_found_streak and short-circuit
 # to the synchronous merge with the documented info line.
 _wfctsm_block="$(awk '/^_wait_for_checks_then_sync_merge\(\)/{f=1} f; /^\}/{if (f) exit}' "$MERGE_PR_SRC")"
-if echo "$_wfctsm_block" | grep -q 'not_found_streak'; then
+if grep -q 'not_found_streak' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge tracks not_found_streak"
 else
@@ -315,7 +315,7 @@ else
     echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing not_found_streak tracking"
 fi
 
-if echo "$_wfctsm_block" | grep -q 'check-runs API unavailable for this repo (no checks configured); proceeding to synchronous merge'; then
+if grep -q 'check-runs API unavailable for this repo (no checks configured); proceeding to synchronous merge' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge logs the documented persistent-404 info line"
 else
@@ -323,7 +323,7 @@ else
     echo -e "  ${RED}FAIL${NC}: _wait_for_checks_then_sync_merge missing the persistent-404 info line"
 fi
 
-if echo "$_wfctsm_block" | grep -q '"\$attempt1_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "\$attempt2_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND"'; then
+if grep -q '"\$attempt1_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND" && "\$attempt2_rc" -eq "\$FORGE_CHECK_RUNS_RC_NOT_FOUND"' <<<"$_wfctsm_block"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: _wait_for_checks_then_sync_merge requires BOTH attempts to confirm a 404"
 else

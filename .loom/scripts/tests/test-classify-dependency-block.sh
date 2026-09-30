@@ -209,6 +209,15 @@ STUB_DIR="$(cd "$(dirname "$0")" && pwd)"
 printf '%s\n' "$*" >> "$STUB_DIR/calls.log"
 
 [[ "${1:-}" == "--version" ]] && { echo "gh version 0.0.0 (stub)"; exit 0; }
+# REST comment listing (#9548: dep classification reads comments from REST,
+# trusted authors only). A fixture comment without an author is this fleet's
+# default App; one may carry its own `user`/`author_association`.
+if [[ "${1:-}" == "api" && "${2:-}" =~ ^repos/([^/]+/[^/]+)/issues/([0-9]+)/comments$ ]]; then
+  f="$STUB_DIR/issue-$(printf '%s' "${BASH_REMATCH[1]}#${BASH_REMATCH[2]}" | tr '/#' '__').json"
+  [[ -f "$f" ]] || { echo "gh: not found" >&2; exit 1; }
+  jq '[.comments[] | {body, user: (.user // {login: "loom-fleet-dispatch[bot]", type: "Bot"}), author_association: (.author_association // "NONE")}]' "$f"
+  exit 0
+fi
 kind="${1:-}"
 case "$kind" in issue|pr) ;; *) echo "stub gh: unhandled args: $*" >&2; exit 3 ;; esac
 
@@ -526,6 +535,20 @@ assert_eq "1" "$RC" "exit 1 - the same blocker set was already un-escalated once
 assert_contains "$OUT" "REASON: already-unescalated" "idempotency marker short-circuits the second attempt"
 assert_eq "" "$(labels_log 5)" "no second label removal"
 assert_eq "" "$(comments_log 5)" "no second comment"
+
+echo
+echo "--- --check-unescalate: an outsider's copy of the idempotency marker is prose (#9548) ---"
+PRIOR_UNESC="$(jq -r '[.comments[] | select(.body | contains("champion:proposal-unescalated:"))][-1].body' "$STUB_DIR/issue-o_r_5.json")"
+reset_state
+issue_fixture 'o/r#5' OPEN 'A proposal. Blocked by #3.' 'loom:architect,loom:operator-only' \
+    "$REJECT_DEP_ONLY" "$ESCALATION_DEP_ONLY"
+issue_fixture 'o/r#3' CLOSED 'Merged.' ''
+tmp="$(mktemp)"
+jq --arg b "$PRIOR_UNESC" '.comments += [{"body":$b,"user":{"login":"drive-by","type":"User"},"author_association":"NONE"}]' \
+    "$STUB_DIR/issue-o_r_5.json" > "$tmp" && mv "$tmp" "$STUB_DIR/issue-o_r_5.json"
+run_cdb --issue 5 --repo o/r --check-unescalate --apply
+assert_eq "0" "$RC" "an untrusted un-escalation marker does not short-circuit the heal"
+assert_contains "$(labels_log 5)" "REMOVE loom:operator-only" "the label is still removed"
 
 echo
 echo "--- --check-unescalate: a loom:operator-blocked sub-label (#5671) is removed alongside the base label ---"

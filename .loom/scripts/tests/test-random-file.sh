@@ -145,17 +145,17 @@ cleanup_repo() {
 echo "Test 1/2: find fallback — top-level dir exclusion + negation re-inclusion"
 REPO=$(setup_repo)
 SELECTED=$(PATH="$NO_FD_PATH" sample_selected "$REPO")
-if echo "$SELECTED" | grep -qx "build/foo.txt"; then
+if grep -qx "build/foo.txt" <<<"$SELECTED"; then
     fail "top-level ignored directory (build/) file was selected"
 else
     pass "top-level ignored directory (build/) file never selected"
 fi
-if echo "$SELECTED" | grep -qx "regular.dat"; then
+if grep -qx "regular.dat" <<<"$SELECTED"; then
     fail "blanket-excluded *.dat file (regular.dat) was selected"
 else
     pass "blanket-excluded *.dat file (regular.dat) never selected"
 fi
-if echo "$SELECTED" | grep -qx "important/keep.dat"; then
+if grep -qx "important/keep.dat" <<<"$SELECTED"; then
     pass "negated re-inclusion (important/keep.dat) was selected"
 else
     fail "negated re-inclusion (important/keep.dat) was never selected"
@@ -173,17 +173,17 @@ else
     ln -s "$FD_BIN" "$FD_DIR/fd"
     REPO=$(setup_repo)
     SELECTED=$(PATH="$FD_DIR:$PATH" sample_selected "$REPO")
-    if echo "$SELECTED" | grep -q "build/foo.txt"; then
+    if grep -q "build/foo.txt" <<<"$SELECTED"; then
         fail "fd path: top-level ignored directory (build/) file was selected"
     else
         pass "fd path: top-level ignored directory (build/) file never selected"
     fi
-    if echo "$SELECTED" | grep -q "^regular.dat$"; then
+    if grep -q "^regular.dat$" <<<"$SELECTED"; then
         fail "fd path: blanket-excluded *.dat file (regular.dat) was selected"
     else
         pass "fd path: blanket-excluded *.dat file (regular.dat) never selected"
     fi
-    if echo "$SELECTED" | grep -q "important/keep.dat"; then
+    if grep -q "important/keep.dat" <<<"$SELECTED"; then
         pass "fd path: negated re-inclusion (important/keep.dat) was selected"
     else
         fail "fd path: negated re-inclusion (important/keep.dat) was never selected"
@@ -200,7 +200,7 @@ git init -q "$REPO"
 (cd "$REPO" && git config user.email t@t && git config user.name t && echo a > a.txt && echo b > b.txt)
 copy_script_into "$REPO" >/dev/null
 SELECTED=$(PATH="$NO_FD_PATH" sample_selected "$REPO" --include "*.txt")
-if echo "$SELECTED" | grep -qx "a.txt" && echo "$SELECTED" | grep -qx "b.txt"; then
+if grep -qx "a.txt" <<<"$SELECTED" && grep -qx "b.txt" <<<"$SELECTED"; then
     pass "both files discoverable with no .gitignore present"
 else
     fail "expected both a.txt and b.txt, got: $SELECTED"

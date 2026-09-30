@@ -150,7 +150,9 @@ triggers:
 An unchanged estimate is refreshed every `refreshSecs` (300); a changed stage,
 rework count or refusal reason emits at once; a series is capped at 20
 emissions per rolling hour. Every emitted estimate waits for its outcome in
-`.loom/state/eta/pending.jsonl`, which survives a restart.
+`.loom/state/eta/pending.jsonl`, which survives a restart. It is per-host
+runtime state and is never git-tracked (the managed gitignore block ignores
+all of `.loom/state/*`, #9592).
 
 **The stage-sample journal** (`.loom/logs/eta-stage-samples.jsonl`) records
 every boundary the tracker observes, the moment it observes it, with its raw

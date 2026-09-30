@@ -313,6 +313,91 @@ fi
 rm -f "$OUT" "$OLD_DAEMON"
 cleanup_repo "$REPO"
 
+# --- Test 7/8: "worktree already exists" exit-0 paths emit JSON too (#9111) -
+#
+# Before #9111, `--json N` against an EXISTING worktree that carries real work
+# (uncommitted changes, or commits ahead of base) exited 0 with COMPLETELY
+# EMPTY stdout — the "preserve existing work" branch never wrote to fd 3, so a
+# caller piping into `jq` got a parse error on nothing rather than a document.
+# These reuse the newbranch/reusebranch setup: create the worktree once, leave
+# real work in it, then run `--json N` again to hit the preserve branch.
+#
+# assert_worktree_json_shape checks the emitted document's key set against the
+# --sparse/--full reconfigure fast path's own shape (worktree.sh's sibling
+# "worktree already exists" answer, loom-daemon/src/worktree_cli/sparse.rs's
+# `{"success": true, "worktreePath": ..., "branchName": ..., "issueNumber":
+# ..., "sparse": ..., "cone": ...}`) — not just "parses", which trivially
+# passes on empty input from jq -e's perspective is a parse failure, not a
+# pass, so assert_pure_json alone already catches the pre-fix regression; this
+# adds the shape check the issue specifically asked for.
+assert_worktree_json_shape() {
+    local out_file="$1" label="$2"
+    local want='["branchName","cone","issueNumber","sparse","success","worktreePath"]'
+    local keys
+    keys=$(jq -S -c 'keys' "$out_file" 2>/dev/null)
+    if [[ "$keys" == "$want" ]]; then
+        pass "$label: JSON key set matches the sparse-fast-path shape"
+    else
+        fail "$label: JSON key set mismatch (got '${keys:-parse-error}', want '$want') — content: $(cat "$out_file")"
+    fi
+}
+
+echo ""
+echo "Test 7: preserve-existing-work path (uncommitted change) produces pure JSON (#9111)"
+REPO=$(setup_repo preserveuncommitted)
+OUT=$(mktemp /tmp/loom-wtjson-out.XXXXXX)
+(
+    cd "$REPO" || exit 1
+    ./.loom/scripts/worktree.sh --json 106 >/dev/null 2>&1
+    # A tracked-file edit left uncommitted, WITHOUT removing the worktree dir
+    # (unlike Test 2's branch-reuse setup) — this is what routes the second
+    # run into the registered-worktree "preserve" branch rather than reuse.
+    echo "dirty" >> .loom/worktrees/issue-106/.gitignore
+    ./.loom/scripts/worktree.sh --json 106 >"$OUT" 2>/dev/null
+)
+assert_pure_json "$OUT" "preserve-uncommitted"
+assert_worktree_json_shape "$OUT" "preserve-uncommitted"
+rm -f "$OUT"
+cleanup_repo "$REPO"
+
+echo ""
+echo "Test 8: preserve-existing-work path (commit ahead of base) produces pure JSON (#9111)"
+REPO=$(setup_repo preserveahead)
+OUT=$(mktemp /tmp/loom-wtjson-out.XXXXXX)
+(
+    cd "$REPO" || exit 1
+    ./.loom/scripts/worktree.sh --json 107 >/dev/null 2>&1
+    (
+        cd .loom/worktrees/issue-107 || exit 1
+        git config user.email t@t
+        git config user.name t
+        echo "work" > work.txt
+        git add work.txt
+        git commit -q -m "wip"
+    )
+    ./.loom/scripts/worktree.sh --json 107 >"$OUT" 2>/dev/null
+)
+assert_pure_json "$OUT" "preserve-ahead"
+assert_worktree_json_shape "$OUT" "preserve-ahead"
+rm -f "$OUT"
+cleanup_repo "$REPO"
+
+echo ""
+echo "Test 9: stale-worktree-reset path (no work) produces pure JSON (#9111)"
+# A clean worktree with nothing ahead routes the second run into the "stale
+# worktree reset" arm, which since #9111 shares the preserve arm's exit.
+REPO=$(setup_repo stalereset)
+OUT=$(mktemp /tmp/loom-wtjson-out.XXXXXX)
+(
+    cd "$REPO" || exit 1
+    ./.loom/scripts/worktree.sh --json 108 >/dev/null 2>&1
+    ./.loom/scripts/worktree.sh --json 108 >"$OUT" 2>/dev/null
+)
+assert_pure_json "$OUT" "stale-reset"
+assert_worktree_json_shape "$OUT" "stale-reset"
+rm -f "$OUT"
+cleanup_repo "$REPO"
+
 # --- Summary ---
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

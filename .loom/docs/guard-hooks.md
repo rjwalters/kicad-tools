@@ -1437,6 +1437,121 @@ the eleven retired loom-tools shims, and `_pmd_cleanup_retired_shims()` gates
 those on a symlink whose target resolves through a `loom-tools` path segment
 **and** no longer exists — never a broad `rm` of a Loom-named path.
 
+#### Session-owned scratch directories (#8460)
+
+The one carve-out in the rm-scope check: **a session may remove its own private
+scratch/build directory, and nothing else.**
+
+**Why it exists.** A worker that needs a hermetic build — a private
+`CARGO_TARGET_DIR`, so a shared cross-worktree cargo target dir cannot
+cross-contaminate its test binaries (#8453) — has to put that directory
+*outside* the repo; a multi-GB build tree inside the worktree is exactly what
+the worktree-removal path is not built to carry. `rmScope=repo` then refused
+the cleanup, so on 2026-09-20 three agents each abandoned 3.5–11 GB of private
+build output on one fleet host. The guard was doing its job; it simply had no
+way to tell "a directory this session just created" from "an arbitrary path
+outside the repo".
+
+**Where the scratch root comes from** — env → config → default, the same
+precedence every other knob in this file uses:
+
+1. **`LOOM_GUARD_SCRATCH_ROOT`** env var (absolute path).
+2. **`.loom/config.json` → `guards.scratchRoot`** (absolute path):
+   ```json
+   { "guards": { "scratchRoot": "/mnt/fast-nvme/loom-scratch" } }
+   ```
+3. **Default** — `$HOME/.cache/loom/session-scratch`.
+
+A root that is `/`, `$HOME`, a bare single-segment directory (`/tmp`, `/opt`,
+…), the repo root, or any ancestor of the repo root is **rejected**: the
+carve-out goes inert (a log line on stderr, and every `rm` is judged exactly as
+it was before). A relative value is dropped the same way. A misconfigured root
+can therefore make this feature stop working; it can never make it broad.
+
+**What is admitted.** Only a path that satisfies *all* of:
+
+1. A scratch root resolves and survives the sanity screen above.
+2. The acting session has a plausible session id (see below).
+3. The target is `<root>/<session-id>` itself, or something **under** it. The
+   root is never admitted — it has no owning session — and `<root>/<some other
+   session's id>` cannot match, because the segment is compared against *this*
+   session's own id.
+4. `<root>/<session-id>` is a real directory, **not a symlink**.
+5. It holds a regular, non-symlink file named `.loom-session-scratch` whose
+   `session=<id>` line names **this** session.
+6. The target's *physical* (symlink-resolved) path is still inside the session
+   directory's physical path — so a symlink planted inside the session dir
+   cannot be used as a tunnel to something outside it.
+7. The target as written contains **no `..` segment**. `..` is resolved
+   lexically by the guard but physically by the kernel, so `<session-dir>/link/../x`
+   (with `link` a symlink elsewhere) would pass 3 and 6 on its normalized
+   spelling while `rm` deletes outside the session dir. Spell targets without
+   `..`; the recipe below never needs one.
+
+Anything unprovable — no root, no session id, no marker, an unreadable or
+malformed marker, a marker naming a different session — **fails closed**: the
+ordinary `rm-scope-outside-repo` deny fires, unchanged. The check runs *after*
+the unconditional catastrophic-path deny (`/`, `$HOME`, `/<one-segment>`), so
+the [ungated denial floor](#the-ungated-denial-floor) is untouched, and it can
+only ever *add* an allow for a path it has positively proven.
+
+**The decision: a guard carve-out, not a `loom-daemon` cleanup subcommand.**
+Issue #8460 asked for exactly one of the two, with the choice written down. The
+guard wins on one decisive property, and the rest is consequence:
+
+| | Guard carve-out (chosen) | `loom-daemon` cleanup subcommand |
+|---|---|---|
+| Where the session identity comes from | `session_id` on the hook's **stdin**, supplied by Claude Code. The hook is spawned by the harness, not by the model. | An env var / argument on a Bash command the model writes. |
+| Can the acting session forge it? | **No.** An inline `CLAUDE_CODE_SESSION_ID=<victim> …` prefix never reaches a separately-spawned hook. | **Yes** — `CLAUDE_CODE_SESSION_ID=<victim> loom-daemon …` is just another command. |
+| New privileged deletion surface | None. `rm` stays `rm`; one more path becomes provable. | A command that deletes directories on request, reachable from any Bash call. |
+
+A spoofable ownership check is precisely the failure #8460's acceptance
+criteria name — "another session's private directory must still be refused" —
+so the mechanism whose identity channel the acting session cannot touch is the
+only one that can meet it. **Both were not built**: there is no daemon-side
+remover for this, deliberately.
+
+**What this does *not* claim to prevent.** A determined session could already
+`mv` an out-of-repo directory into `/tmp` (on the ephemeral allowlist) and
+delete it there — that is true with or without this carve-out, so the carve-out
+adds no capability. What it *does* do is make the correct, self-cleaning path
+the easy one, and refuse the path-shaped shortcut ("anything under the scratch
+root") that would have made cross-session deletion the *default* behaviour.
+
+**The recipe.** Nothing writes the marker for you: creating the directory and
+the marker is two ordinary commands, both already permitted outside the repo.
+
+```bash
+# 1. Read-only: print this session's scratch dir. (Steps 2-4 need the value
+#    spelled out literally — the rm-scope check fails closed on a target that
+#    is an unexpanded variable from the path root down, so copy the printed
+#    path into the commands below rather than passing $D across commands.)
+echo "${LOOM_GUARD_SCRATCH_ROOT:-$HOME/.cache/loom/session-scratch}/$CLAUDE_CODE_SESSION_ID"
+
+# 2. Create it, plus the ownership marker the guard reads.
+mkdir -p /home/you/.cache/loom/session-scratch/<session-id>
+printf 'session=%s\n' '<session-id>' \
+  > /home/you/.cache/loom/session-scratch/<session-id>/.loom-session-scratch
+
+# 3. Build hermetically into it.
+CARGO_TARGET_DIR=/home/you/.cache/loom/session-scratch/<session-id> \
+  cargo test --workspace
+
+# 4. Clean up — admitted by the carve-out, and by nothing else.
+rm -rf /home/you/.cache/loom/session-scratch/<session-id>
+```
+
+If step 4 is denied anyway, the denial says which of the conditions above is
+unmet: an `rm` target under the scratch root that this session cannot prove it
+owns gets a remediation hint naming the marker requirement, while every other
+out-of-repo denial keeps its existing wording verbatim.
+
+Covered by `tests/hooks/test-guard-destructive-session-scratch.sh` (41
+assertions — the admit cases, plus every way the ownership proof can fail:
+peer sessions, the root itself, `..` traversal, symlinked session dirs,
+symlinked/missing/malformed/mis-named markers, absent and implausible session
+ids, and each rejected root shape).
+
 ### Force-Op Branch Scope Guard (`guards.forceScope` / `LOOM_FORCE_SCOPE`)
 
 By default `guard-destructive.sh` **asks** for confirmation on every `git push

@@ -223,6 +223,30 @@ All of this is best-effort after the tick's child has exited; it never fails
 the tick. Non-Claude runtimes record no transcript actions, so their ticks
 join no story yet.
 
+Role attempts and their runtime spans additionally carry a measured host
+memory state at each observed boundary — span begin and span end — as
+`loom.host.*` attributes (physical and available memory, the compressed page
+store, swap capacity/usage and cumulative in/out volume in bytes, the kernel
+OOM-kill counter, the PSI pressure class, and per-core load). These are read
+from OS-native probes at the span edge itself, not modeled: state at the
+decision moment, not only the 30-second `host.health` sampling cadence. A
+source that is unmeasurable on the host (macOS has no PSI or OOM counter,
+Linux exposes no compression figure) is absent, never zero — the "unknown !=
+zero" contract the telemetry schema states for every measured field.
+
+Role-attempt completion attributes close the same gap on the *why*: a fixed
+`loom.admission.reason` literal — `failure`, `runtime-rejected`,
+`no-token-pool`, `pool-exhausted`, `model-runtime-mismatch`, `load-ceiling`,
+plus `preflight-rejected` (stamped on the runtime-preflight span itself, not a
+role-attempt finish) — plus the measured context that distinguishes them: the
+actual load against the ceiling on a load deferral, which pool gated and its
+total size, and the runtime's missing capabilities. The free-form text these
+outcomes carry in daemon and role logs is deliberately not exported: span
+attributes stay allowlisted, 256-byte bounded, and free of untrusted content.
+Together the two boundaries' host state and the admission reason let an
+operator separate an attempt deferred for memory pressure from one the kernel
+killed from one that simply timed out, directly in the trace.
+
 ## Journals and recovery
 
 Workers append bounded records to per-execution journals under

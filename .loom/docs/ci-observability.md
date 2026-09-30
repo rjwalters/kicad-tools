@@ -194,7 +194,8 @@ sources and are `clickhouse-client`-only).
 | 11 | **Where did a job's time go, step by step?** (#9089) P50/P90/max/total `loom.ci.step` span duration per repo + workflow + job + step, ranked by p90 — "did this Rust leg's ~250s go to compiling or to running tests?". The first section reading traces rather than logs or metrics | `loom.ci.step` spans (7 days) |
 | 12 | **Which shell test suites are the slow ones?** (#9089) P50/P90/max/total `loom.ci.suite` span duration per repo + workflow + job + suite, ranked by total time, with the #7791 retry count and the failure count for the same window beside it — so a suite that is slow because it runs twice is distinguishable from one that is simply slow | `loom.ci.suite` spans (7 days) |
 | 13 | **Which suites should move between shards?** (#9089) Per run attempt and leg, the summed suite time that leg carried and its slowest suite. Section 10 says *whether* the legs are imbalanced; this says what to **move** | `loom.ci.suite` spans (7 days) |
-| 14 | **What set a run's floor — one slow job, queueing, or a `needs:` chain?** (#9089) Per run attempt, the job with the largest queue + running sum (`critical_job`), its queue share kept separate from its work, the run's own queue segment, and the residual `unexplained_s` that is the serialized-dependency time. Section 6 could only say queueing *or* a chain dominated; with per-job `queued_ms` these separate | `ci.run` + `ci.job` records (7 days) |
+| 14 | **What set a run's floor — one slow job, queueing, or a `needs:` chain?** (#9089) Per run attempt, the job with the largest dependency + queue + running sum (`critical_job`), each of those three segments kept separate, the run's own queue segment, and the `unexplained_s` residual. Section 6 could only say queueing *or* a chain dominated; the three per-job segments separate them | `ci.run` + `ci.job` records (7 days) |
+| 15 | **Is this job family gated or capacity-starved?** (#9089) P50/P90/max `loom.ci.dependency_wait_ms` per repo + workflow + job beside the same family's p90 runner-queue wait and p90 running time, with a `gated_jobs` count that excludes sub-2s job-creation lag. Alert when `p90_dep_s` exceeds `p90_queue_s`: that family is gated by `needs:`, and adding runner capacity will not move it | `ci.job` records (7 days) |
 
 Section 7's join key is the **issue** number, not a PR number: `ci.run`/
 `ci.job` **log** records carry no PR/issue attribute of their own (only
@@ -443,7 +444,7 @@ repo.
 ### Dedup contract: never record the same job twice
 
 Everything below lives under `.loom/state/ci-telemetry/`, which is
-gitignored.
+gitignored (the managed block ignores all of `.loom/state/*`, #9592).
 
 - **`seen.jsonl` is the ledger.** It is append-only. Each `unit` line holds
   one run or job's key `(repo, run_id, job_id)` and its run attempt, a
@@ -526,7 +527,7 @@ spans](#suite-spans-9089)):
 | `record.kind` | Fields | OTLP signal |
 |---|---|---|
 | `ci.run` | `repo`, `visibility`, `run_id`, `run_attempt`, `workflow`, `ref`, `head_sha`, `event`, `status`, `conclusion`, `triggered_by`, `started_at`, `completed_at`, `duration_ms`, `queued_ms` (`run_started_at − created_at`, #9007 follow-up; absent when GitHub reported no start), `trigger_reason` (#9337, see [Trigger attribution](#trigger-attribution-9337)) | log record `ci.run`, timestamped at `completed_at` |
-| `ci.job` | `repo`, `visibility`, `run_id`, `job_id`, `workflow`, `job`, `runner` (first runner label), `attempts` (the job's run attempt), `status`, `conclusion`, `timed_out`, `started_at`, `completed_at`, `duration_ms`, `queued_ms` (`started_at − created_at`, #9089; absent when GitHub reported no `created_at` for the job), `shard_index` / `shard_total` / `shard_kind` (#9089, see [Per-job queue wait and shard attributes](#per-job-queue-wait-and-shard-attributes-9089)) | log record `ci.job` |
+| `ci.job` | `repo`, `visibility`, `run_id`, `job_id`, `workflow`, `job`, `runner` (first runner label), `attempts` (the job's run attempt), `status`, `conclusion`, `timed_out`, `started_at`, `completed_at`, `duration_ms`, `queued_ms` (`started_at − created_at`, #9089; absent when GitHub reported no `created_at` for the job), `dependency_wait_ms` (`created_at` − the run attempt's earliest job creation, #9089, see [Dependency wait](#dependency-wait-9089)), `shard_index` / `shard_total` / `shard_kind` (#9089, see [Per-job queue wait and shard attributes](#per-job-queue-wait-and-shard-attributes-9089)) | log record `ci.job` |
 | `ci.duration` | `metric` (`run`\|`job`), `repo`, `visibility`, `run_id`, `run_attempt`, `job_id`, `workflow`, `job`, `runner`, `conclusion`, `started_at`, `completed_at`, `duration_ms` | one data point of the `loom.ci.run.duration_ms` / `loom.ci.job.duration_ms` delta histogram |
 | `trace.span` | `loom.ci.run` (root), `loom.ci.job` (child of its run span), `loom.ci.step` (#9089, child of its job span), or `loom.ci.suite` (#9089, also a child of its job span) | trace: one per run attempt, one span per job, one span per executed step, one span per executed suite of a sharded shell-suite leg |
 
@@ -573,6 +574,10 @@ The attribute and label vocabulary is declared once, in
 - Both lists also carry `loom.ci.shard.index`, `loom.ci.shard.total` and
   `loom.ci.shard.kind` (#9089, `ci.job` / job span only) — see [Per-job queue
   wait and shard attributes](#per-job-queue-wait-and-shard-attributes-9089).
+- Both lists also carry `loom.ci.dependency_wait_ms` (#9089, `ci.job` / job
+  span only — deliberately **not** repeated on step or suite spans, which
+  would multiply one job's wait across its children in any sum). See
+  [Dependency wait](#dependency-wait-9089).
 - `CI_SPAN_ATTRIBUTE_KEYS` alone also carries `loom.ci.step` and
   `loom.ci.step_number` (#9089, `loom.ci.step` spans only — there is no
   `ci.step` log record and no step metric series). See [Step
@@ -645,6 +650,66 @@ from data the poller already fetches — no extra API calls:
 `ci-queries.sql` sections 9 (job queue-wait percentiles, alert when p90 >
 60s) and 10 (shard imbalance: spread between a run's slowest and fastest leg
 sharing one `shard_kind`) consume these.
+
+### Dependency wait (#9089)
+
+A third `ci.job` / `loom.ci.job` quantity from the same listing:
+**`dependency_wait_ms`**, the time a job spent blocked on its `needs:`
+predecessors *before GitHub created it at all*. A job's life has three
+segments, and they are now separately reported rather than summed into "the
+run was slow but no job was":
+
+```
+attempt's first job created ── dependency_wait_ms ─▶ created_at
+                                        ── queued_ms ─▶ started_at
+                                          ── duration_ms ─▶ completed_at
+    (blocked on `needs:`)   (waiting for a runner)   (doing work)
+```
+
+**How it is derived.** `created_at` minus the **earliest `created_at` across
+the run attempt's jobs**, floored at zero. GitHub creates a `needs:`-gated job
+only once its predecessors finish, so a job's own creation instant already
+encodes its dependency closure's elapsed time. Measured on a `main` CI run
+(run `36508530424`, 2026-09-29): every ungated job reported `created_at`
+`01:34:16`, while every job with `needs: build-daemon` reported `01:35:15` —
+one second after `Build loom-daemon (debug, shared)` completed at `01:35:14`.
+The gap **is** the dependency wait, and reading it this way needs no second API
+call and no knowledge of the workflow's `needs:` graph.
+
+**Why the baseline is the first job, not the run row.** The run row's
+`run_started_at` measures a different thing — `ci.run`'s own `queued_ms`
+(#9007) is time before *any* job existed — and subtracting it per job would
+double-count the run's queue wait into every one of its legs. Taking the
+baseline from the same listing the waits come from keeps the quantity
+internally consistent: the earliest job of a run attempt measures exactly `0`,
+by construction.
+
+**Scoped to one attempt.** The poller lists jobs with `filter=all` (GitHub's
+"include jobs from old executions of this run" mode), so on a **re-run** that
+one response carries every attempt's jobs — attempt 2's rows are stamped at the
+re-run instant, tens of minutes after attempt 1's. The baseline is therefore
+taken per `run_attempt` and each job is measured against its **own** attempt's
+first job; a baseline spanning the listing would charge attempt 2 the whole
+inter-attempt gap as a `needs:` wait and fire section 15's alert on every
+re-run.
+
+**What it is not.** It does not name *which* dependency a job waited on, and it
+does not split a multi-level `needs:` chain into its links — it is the whole
+closure's elapsed time. For an ungated job it is GitHub's own job-creation lag
+(sub-second in the run above), not a dependency; read a second or two as noise,
+which is why `ci-queries.sql` section 15 reports a `gated_jobs` count beside
+the percentiles. `None` when GitHub reported no `created_at` for the job or for
+any job of its run attempt (a pre-#9089 recording) — never a zero, which would
+read as "waited on nothing".
+
+It is carried on the `ci.job` record and the `loom.ci.job` span only. Step and
+suite spans deliberately do **not** repeat it (unlike the shard trio): it is a
+property of the job, and repeating it on every child would multiply one job's
+wait across them in any sum.
+
+`ci-queries.sql` section 15 (dependency wait beside runner-queue wait per job
+family; alert when `p90_dep_s` exceeds that family's own `p90_queue_s`) and
+section 14 (which now includes it in the critical-path total) consume it.
 
 ### Step spans (#9089)
 
@@ -755,26 +820,29 @@ section 10's "whether it is imbalanced") consume these.
 ### Critical path per run (#9089)
 
 Section 14 of `ci-queries.sql` is the fourth view the issue asks for, and needs
-no new attribute — only the per-job `queued_ms` above. It ranks each run's jobs
-by **queue + running** and names the one that set the floor (`critical_job`),
-keeping that job's queue wait (`critical_queued_s`) separate from its work, and
-reports the run's own pre-job queue segment (`run_queued_s`, #9007) beside it.
+no new attribute — only the three per-job segments above. It ranks each run's
+jobs by **dependency wait + queue + running** and names the one that set the
+floor (`critical_job`), keeping that job's dependency wait
+(`critical_dep_wait_s`) and its runner-queue wait (`critical_queued_s`)
+separate from each other and from its work, and reports the run's own pre-job
+queue segment (`run_queued_s`, #9007) beside them.
 
-The residual — run wall time minus (run queue + critical job total) — is
-`unexplained_s`, and it is the number to act on: it is large exactly when jobs
-ran in **sequence** rather than one job being slow, so a `needs: build-daemon`
-fan-in is the suspect rather than any single leg. It is explicitly **not** a
-dependency-wait measurement: a real one needs the predecessor job's
-`completed_at`, which is a distinct computation and still future work. Expect it
-to go slightly negative on a run whose jobs overlap the run's own reported
-window.
+Read `critical_dep_wait_s` first: a large value there is the `needs:
+build-daemon` fan-in, now **measured** rather than inferred, and the fix is to
+shorten the predecessor (or to stop depending on it), not to speed up the leg.
+
+The residual — run wall time minus (run queue + critical job total) —
+survives as `unexplained_s`, but it is no longer the dependency signal it was
+before `dependency_wait_ms` existed. It now covers only what the three
+segments do not: a **multi-level** `needs:` chain whose critical job is not the
+last link, and clock/window mismatch between the run row and its jobs. Expect
+it near zero on a run with a single dependency level, and slightly negative on
+a run whose jobs overlap the run's own reported window. It remains a residual,
+not a measurement.
 
 Still future work, tracked separately from what shipped here: per-**test**
 spans from nextest JUnit output (`[profile.ci.junit]`), which would give the
-`nextest-partition` legs what these give the shell-suite legs, and a dependency
-wait span/attribute for the time a job spent waiting on `needs: build-daemon`
-(not derivable from a single job row — it needs the predecessor job's
-`completed_at`).
+`nextest-partition` legs what suite spans give the shell-suite legs.
 
 ### Story stitching (#9088)
 

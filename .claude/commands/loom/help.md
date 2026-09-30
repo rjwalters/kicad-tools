@@ -60,6 +60,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:imagine <idea>` | Bootstrap a new Loom-powered project from a natural-language description. |
 | `/loom:epic <goal>` | Break a large goal into a phased epic with implementation issues. |
 | `/loom:bump <level>` | Bump the version + tag for a generic (non-Loom) project. |
+| `/loom:mail-send` | Send one blocking ask to the operator via loom-ui inbox + Matrix; reports each leg. |
 | `/loom:help [command]` | This command — describe the Loom command surface. |
 
 After the tables, close with a short **where to start**:
@@ -73,7 +74,7 @@ After the tables, close with a short **where to start**:
 
 After printing the overview, do a lightweight accuracy check against what is actually installed:
 
-1. List the installed command files: `ls .claude/commands/loom/*.md` (read-only). If that path is missing, try `ls defaults/.claude/commands/loom/*.md` (the loom source repo keeps the canonical source there and materializes a real, gitignored copy at `.claude/commands`).
+1. List the installed command files: `ls .claude/commands/loom/*.md` (read-only). If that path is missing, try `ls defaults/.claude/commands/loom/*.md` (the loom source repo's canonical copy).
 2. Reduce each result to its base name without `.md`.
 3. **Exclude** the known reference sub-docs and deprecated stubs — these are internal building blocks, not invocable entry points, and must never appear in the listing:
    - anything ending in `-patterns` or `-reference` (e.g. `architect-patterns`, `architect-reference`, `champion-reference`, `hermit-patterns`, `loom-reference`)
@@ -85,7 +86,7 @@ After printing the overview, do a lightweight accuracy check against what is act
    - If a curated command is **not** installed here, note it as possibly-not-installed rather than dropping it silently: `Note: /loom:<name> is described above but not found in this install.`
    - If everything matches, you may add a single line: `(Command list verified against this install.)`
 
-Keep the warnings brief — they are a safety net for version/partial-install drift, not the main event.
+Keep the warnings brief — a drift safety net, not the main event.
 
 ---
 

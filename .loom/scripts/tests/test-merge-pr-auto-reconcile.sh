@@ -492,6 +492,50 @@ _auto_reconcile_stacked_children
 assert_contains "$(read_recon)" "reconcile-stack.sh 501 feature/issue-100" \
   "The real daemon pin survives the fail-open cases (no leaked LOOM_DAEMON_SELF_BIN)"
 
+# --- T15-T17 (#1298): feature/harness-ops-<N> is a stackable parent too ---
+#
+# Both decisions (the parent-branch gate in `reconcile-plan`, the child-issue
+# derivation in `reconcile-child`) route through `reconcile::issue_from_branch`
+# (loom-daemon/src/merge_pr/reconcile.rs), which now recognizes
+# `feature/harness-ops-<N>` (2AMLogic/harness-ops's Builder convention)
+# alongside `feature/issue-<N>` — mirroring `stacked_children::
+# is_stackable_parent_branch`'s allow-list so the pre-merge and post-merge
+# gates can never disagree. Before this, a harness-ops parent merge silently
+# skipped stacked-child reconciliation and stranded open children
+# (harness-ops#283, #356). These exercise the real daemon binary end-to-end
+# through the shell functions under test, same as T1-T9.
+
+# T15: a feature/harness-ops-<N> parent with an open, unclaimed child ->
+# reconcile-stack.sh invoked.
+reset_logs
+PR_BRANCH="feature/harness-ops-350"
+write_prlist "feature/harness-ops-350" '[{"number":601,"headRefName":"feature/harness-ops-201"}]'
+_auto_reconcile_stacked_children
+assert_contains "$(read_recon)" "reconcile-stack.sh 601 feature/harness-ops-350" \
+  "feature/harness-ops-N parent with an open child -> reconcile-stack.sh invoked (#1298)"
+assert_eq "" "$(read_gh_log)" "harness-ops safe child (issue #201 not building) -> no deferred comment"
+
+# T16: a feature/harness-ops-<N> CHILD whose issue is loom:building is
+# recognized as claimed and deferred, not rebased out from under a live Builder.
+reset_logs
+PR_BRANCH="feature/harness-ops-350"
+write_prlist "feature/harness-ops-350" '[{"number":602,"headRefName":"feature/harness-ops-202"}]'
+_auto_reconcile_stacked_children
+assert_eq "" "$(read_recon)" "harness-ops child #602 (issue #202 building) -> reconcile-stack.sh NOT invoked"
+assert_contains "$(read_gh_log)" "issue comment 602 --repo owner/repo" \
+  "harness-ops building child -> deferred-reconciliation comment posted on PR #602"
+
+# T17: the generalized match stays strict/anchored — near-miss parent branches
+# are still NOT-STACKED.
+reset_logs
+for b in "feature/harness-ops-" "feature/harness-ops-350-extra" "feature/harness-ops-350/sub" \
+         "feature/issue-100-extra" "feature/other-350"; do
+  write_prlist "$b" '[{"number":603,"headRefName":"feature/issue-201"}]'
+  PR_BRANCH="$b"
+  _auto_reconcile_stacked_children
+done
+assert_eq "" "$(read_recon)" "Non-matching near-miss parent branches -> reconcile skipped"
+
 # --- Source-contains guards (fail if a refactor drops the key behavior) ---
 echo ""
 echo "Testing merge-pr.sh source guards..."

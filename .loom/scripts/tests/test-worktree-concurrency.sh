@@ -323,7 +323,7 @@ EOF
         ./.loom/scripts/worktree.sh --json 97 2>&1)
     rc=$?
     set -e
-    if [[ $rc -ne 0 ]] && echo "$OUT" | grep -q 'worktree-lock-timeout' && echo "$OUT" | grep -q "\"holderPid\": \"$$\""; then
+    if [[ $rc -ne 0 ]] && grep -q 'worktree-lock-timeout' <<<"$OUT" && grep -q "\"holderPid\": \"$$\"" <<<"$OUT"; then
         pass "lock-timeout error JSON includes 'worktree-lock-timeout' and holder PID $$"
     else
         fail "lock-timeout JSON output missing expected fields (rc=$rc, output: $OUT)"

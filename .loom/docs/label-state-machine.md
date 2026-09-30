@@ -15,9 +15,10 @@ hours).
 One auxiliary vocabulary rides the curation transition: when the Curator
 applies `loom:curated`, it attaches exactly one `points:*` story-point size
 label (`1`/`2`/`3`/`5`/`8`/`13`, rubric in `.loom/docs/story-points.md`,
-#9431) in the same `gh issue edit` — re-assignment replaces it, and a rescope
-back to `loom:triage` updates or removes it, so stale points never survive a
-scope change.
+#9431) in the same `gh issue edit` — re-assignment replaces it, a re-curation
+pass re-picks it from the current scope (#9638), and a rescope back to
+`loom:triage` updates or removes it, so stale points never survive a scope
+change or a re-size.
 
 `loom:operator` moves that state onto the label substrate, where every other
 pipeline state already lives.

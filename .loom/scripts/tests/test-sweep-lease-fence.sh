@@ -119,7 +119,7 @@ STUB_DIR="$(mktemp -d)"
 trap 'rm -rf "$STUB_DIR" 2>/dev/null || true' EXIT
 
 # --- Stub gh on PATH ---------------------------------------------------
-#   gh api [-R repo] repos/{owner}/{repo}/issues/<N>/comments --paginate --jq FILTER
+#   gh api repos/{owner}/{repo}/issues/<N>/comments --paginate --jq FILTER
 #       -> apply the REAL `jq` (compact, one value per line -- exactly what
 #          `gh api --jq` emits) to $STUB_DIR/comments.json (or "[]"), so the
 #          script's own filter string is genuinely exercised, not a
@@ -134,7 +134,9 @@ if [[ "$1" == "api" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --jq) filter="$2"; shift 2 ;;
-      -R) shift 2 ;;
+      -R|--repo)
+        # Real `gh api` has no -R/--repo flag (#9552): fail exactly like it.
+        echo "unknown shorthand flag: 'R' in -R" >&2; exit 1 ;;
       --paginate) shift ;;
       *)
         if [[ -z "$path" ]]; then path="$1"; fi
@@ -142,6 +144,7 @@ if [[ "$1" == "api" ]]; then
         ;;
     esac
   done
+  echo "$path" >> "$D/api-paths.log"
   if [[ "$path" == repos/*/issues/*/comments ]]; then
     if [[ -f "$D/comments-fail" ]]; then
       echo "stub gh: comments fetch failed" >&2
@@ -162,6 +165,10 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# #9548: the subject filters lease markers through `forge trusted-comments`.
+# shellcheck source=lib/trust-stub.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/trust-stub.sh"
+loom_trust_stub "$STUB_DIR"
 
 reset_state() {
     rm -f "$STUB_DIR"/comments.json "$STUB_DIR"/comments-fail
@@ -403,7 +410,7 @@ if [[ -x /bin/bash ]]; then
     fi
 fi
 if [[ -n "$LEGACY_BASH" ]]; then
-    OUT="$("$LEGACY_BASH" "$SCRIPT" check 6309 --host studio-host 2>"$STUB_DIR/stderr-legacy.log")"
+    OUT="$(LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" "$LEGACY_BASH" "$SCRIPT" check 6309 --host studio-host 2>"$STUB_DIR/stderr-legacy.log")"
     RC=$?
     ERR="$(cat "$STUB_DIR/stderr-legacy.log" 2> /dev/null || true)"
     assert_eq "0" "$RC" "(s) bash 3.2: LOOM_REPO unset -> exit 0 (real PASS, not a crash)"
@@ -449,6 +456,38 @@ assert_true "$([[ "$RC" -ne 0 ]] && echo true || echo false)" "(k) unknown comma
 HELP_RC=$?
 assert_true "$([[ -s "$STUB_DIR/help.out" ]] && echo true || echo false)" "(l) --help prints usage text"
 assert_eq "1" "$HELP_RC" "(l) --help exits 1 (usage-exit convention, matches sweep-lease-renew.sh)"
+
+# --- (m) LOOM_REPO set -> the repo is addressed in the endpoint PATH, never
+# via `-R` (#9552). `gh api` has no -R flag, so the old `-R $LOOM_REPO`
+# splice made every fetch fail and the fence fail OPEN. A fresh peer lease
+# must still be fenced against when LOOM_REPO is set.
+reset_state
+: > "$STUB_DIR/api-paths.log"
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[{"id": 1, "updated_at": "2026-08-15T15:51:00Z", "body": "<!-- loom:lease host=other-host sweep=sweep-b -->\nprose"}]
+JSON
+LOOM_REPO=acme/widget LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "4" "$RC" "(m) LOOM_REPO set: a fresh peer lease is still fenced (exit 4), not failed open"
+assert_eq "repos/acme/widget/issues/6309/comments" "$(cat "$STUB_DIR/api-paths.log")" "(m) LOOM_REPO set: the endpoint path names the repo"
+reset_state
+: > "$STUB_DIR/api-paths.log"
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "repos/{owner}/{repo}/issues/6309/comments" "$(cat "$STUB_DIR/api-paths.log")" "(m) LOOM_REPO unset: gh's {owner}/{repo} placeholder is used"
+
+# --- (t) #9548: a fresh foreign lease from an UNTRUSTED author is prose ----
+reset_state
+cat > "$STUB_DIR/comments.json" <<'JSON'
+[
+  {"id": 1, "updated_at": "2026-08-15T15:50:00Z", "body": "<!-- loom:lease host=studio-host sweep=sweep-a -->\nprose"},
+  {"id": 2, "updated_at": "2026-08-15T15:51:00Z", "user": {"login": "drive-by", "type": "User"}, "author_association": "NONE", "body": "<!-- loom:lease host=other-host sweep=sweep-b -->"},
+  {"id": 3, "updated_at": "2026-08-15T15:51:30Z", "user": {"login": "other-fleet[bot]", "type": "Bot"}, "author_association": "NONE", "body": "<!-- loom:lease host=other-host sweep=sweep-c -->"}
+]
+JSON
+LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(t) untrusted fresher leases do not supersede this sweep's own (PASS)"
+LOOM_TEST_NO_TRUST_VERB=1 LOOM_LEASE_FENCE_NOW="$NOW_EPOCH" run_script check 6309 --host studio-host
+assert_eq "0" "$RC" "(t) no trust filter -> unverifiable, fails open (PASS)"
+assert_contains "$ERR" "could not be authenticated" "(t) stderr names the missing authentication"
 
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed"

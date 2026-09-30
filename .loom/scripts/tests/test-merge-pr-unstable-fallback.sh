@@ -649,7 +649,7 @@ echo ""
 echo "Testing the unstable-status-substring matcher shape..."
 
 unstable_error="Failed to enable auto-merge: gh: Pull request Pull request is in unstable status (enablePullRequestAutoMerge)"
-if echo "$unstable_error" | grep -q "is in unstable status"; then
+if grep -q "is in unstable status" <<<"$unstable_error"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
     echo -e "  ${GREEN}PASS${NC}: 'is in unstable status' substring matches GitHub's doubled-word error"
 else
@@ -658,7 +658,7 @@ else
 fi
 
 clean_error="gh: Pull request Pull request is in clean status (enablePullRequestAutoMerge)"
-if echo "$clean_error" | grep -q "is in unstable status"; then
+if grep -q "is in unstable status" <<<"$clean_error"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "  ${RED}FAIL${NC}: substring matcher fired on CLEAN error (false positive)"
 else

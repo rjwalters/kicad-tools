@@ -118,7 +118,7 @@ fi
 
 # 5. A run never lists itself as a peer.
 out=$("$REG" peers "$RID1")
-if echo "$out" | grep -q "$RID1"; then
+if grep -q "$RID1" <<<"$out"; then
     echo "FAIL: run listed itself as a peer: $out" >&2
     FAIL=$((FAIL + 1))
 else
@@ -128,7 +128,7 @@ fi
 
 # 6. peers of RID1 report RID2 as a live peer (pid + timestamp columns present).
 out=$("$REG" peers "$RID1")
-if echo "$out" | grep -q "^$RID2 $LIVE2 "; then
+if grep -q "^$RID2 $LIVE2 " <<<"$out"; then
     echo "PASS: live peer reported with pid and timestamp"
     PASS=$((PASS + 1))
 else
@@ -177,7 +177,7 @@ fi
 
 # 8. list shows only the surviving run 1.
 out=$("$REG" list)
-if echo "$out" | grep -q "^$RID1 " && ! echo "$out" | grep -q "$RID2"; then
+if grep -q "^$RID1 " <<<"$out" && ! grep -q "$RID2" <<<"$out"; then
     echo "PASS: list shows surviving run only"
     PASS=$((PASS + 1))
 else
@@ -281,7 +281,7 @@ RID_SELF=$("$REG" new --pid "$LIVE4")
 RID_EPERM=$("$REG" new --pid 1)
 : > "$BASELINE_DIR/main-clean-baseline-${RID_EPERM}.txt"
 out=$("$REG" peers "$RID_SELF")
-if echo "$out" | grep -q "^$RID_EPERM 1 "; then
+if grep -q "^$RID_EPERM 1 " <<<"$out"; then
     echo "PASS: unsignallable-but-existing pid reported as a live peer"
     PASS=$((PASS + 1))
 else
@@ -344,7 +344,7 @@ cat > "$OLD_FILE" <<EOF
 }
 EOF
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_OLD $LIVE5 [^ ]+ [^ ]+ stale-same-pid:[0-9]+m$"; then
+if grep -qE "^$RID_OLD $LIVE5 [^ ]+ [^ ]+ stale-same-pid:[0-9]+m$" <<<"$out"; then
     echo "PASS: same-PID stale-heartbeat entry classified stale-same-pid"
     PASS=$((PASS + 1))
 else
@@ -368,7 +368,7 @@ fi
 #      an ambiguous/live case as dead) extended to the new same-PID path.
 "$REG" heartbeat "$RID_OLD" >/dev/null
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_OLD $LIVE5 [^ ]+ [^ ]+ live-same-pid$"; then
+if grep -qE "^$RID_OLD $LIVE5 [^ ]+ [^ ]+ live-same-pid$" <<<"$out"; then
     echo "PASS: same-PID fresh-heartbeat entry classified live-same-pid, not stale"
     PASS=$((PASS + 1))
 else
@@ -380,7 +380,7 @@ fi
 #      existing self-skip in cmd_peers (matched by RUN_ID) — not accidentally
 #      caught (or exempted) by the new same-PID heartbeat logic.
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -q "$RID_NEW"; then
+if grep -q "$RID_NEW" <<<"$out"; then
     echo "FAIL: run listed itself as a peer under the new same-PID classification" >&2
     FAIL=$((FAIL + 1))
 else
@@ -394,7 +394,7 @@ fi
 LIVE6=$(spawn_live); LIVE_PIDS+=("$LIVE6")
 RID_DIFF=$("$REG" new --pid "$LIVE6")
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$"; then
+if grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$" <<<"$out"; then
     echo "PASS: different-pid fresh-heartbeat peer still classified plain 'live'"
     PASS=$((PASS + 1))
 else
@@ -422,7 +422,7 @@ cat > "$DIFF_FILE" <<EOF
 }
 EOF
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ stale-heartbeat:[0-9]+m$"; then
+if grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ stale-heartbeat:[0-9]+m$" <<<"$out"; then
     echo "PASS: different-pid stale-heartbeat entry classified stale-heartbeat"
     PASS=$((PASS + 1))
 else
@@ -444,7 +444,7 @@ fi
 #      back to plain `live` once its sweep proves it is still driving work.
 "$REG" heartbeat "$RID_DIFF" >/dev/null
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$"; then
+if grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$" <<<"$out"; then
     echo "PASS: heartbeat refresh returns a stale-heartbeat entry to 'live'"
     PASS=$((PASS + 1))
 else
@@ -464,7 +464,7 @@ cat > "$DIFF_FILE" <<EOF
 }
 EOF
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$"; then
+if grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$" <<<"$out"; then
     echo "PASS: pre-#5896 entry with no heartbeat field stays plain 'live'"
     PASS=$((PASS + 1))
 else
@@ -483,7 +483,7 @@ cat > "$DIFF_FILE" <<EOF
 }
 EOF
 out=$("$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$"; then
+if grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$" <<<"$out"; then
     echo "PASS: unparseable heartbeat on a different-pid entry stays 'live'"
     PASS=$((PASS + 1))
 else
@@ -502,7 +502,7 @@ cat > "$DIFF_FILE" <<EOF
 }
 EOF
 out=$(SWEEP_RUN_HEARTBEAT_STALE_SECS=999999999999 "$REG" peers "$RID_NEW")
-if echo "$out" | grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$"; then
+if grep -qE "^$RID_DIFF $LIVE6 [^ ]+ [^ ]+ live$" <<<"$out"; then
     echo "PASS: SWEEP_RUN_HEARTBEAT_STALE_SECS raises the different-pid threshold"
     PASS=$((PASS + 1))
 else

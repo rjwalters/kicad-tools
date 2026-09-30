@@ -69,6 +69,16 @@
 # there is none: without one the block does not run at all (a correct,
 # documented degradation to the pre-#6257 behaviour) and Tests 1 and 3 would
 # be asserting on something nothing produced.
+#
+# SINCE #8195 SLICE 12 the arm those five cases drive is ITSELF `loom-daemon
+# worktree-existing` — the registration probe, this drift check, the staleness
+# reference, the preserve-vs-reset verdict and the reset, one decision in one
+# place — so `worktree-existing` joins the pin above. Every assertion below is
+# still unchanged, and still runs the real `worktree.sh` end to end, which is
+# what makes this suite the wiring evidence for that slice too. The arm's own
+# corpus (symlinked roots, space- and metacharacter-bearing paths, a
+# lookalike prefix sibling) lives in loom-daemon/tests/worktree_existing_differential.rs;
+# none of those shapes appears below, which is exactly why that harness exists.
 
 set -euo pipefail
 
@@ -78,7 +88,7 @@ WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 
 # shellcheck source=lib/require-daemon-bin.sh
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-upstream" "worktree-stale-ref"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-upstream" "worktree-stale-ref" "worktree-existing"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'

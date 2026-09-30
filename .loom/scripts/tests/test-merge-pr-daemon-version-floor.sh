@@ -293,7 +293,9 @@ version-policy open -
 partial-reset open -
 closed-building open -
 issue-close-gate open -
-dirty-guard open -"
+dirty-guard open -
+worktree-contains open -
+worktree-preserve open -"
 
 # Shared comparison, so the controls below exercise the SAME logic the real
 # assertion does rather than a paraphrase of it. `sort -V` over a here-string

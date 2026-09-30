@@ -56,6 +56,7 @@ test-check-dependabot-labels.sh
 test-check-evaluating-staleness.sh
 test-check-git-identity.sh
 test-check-guards-installed.sh
+test-check-merge-config.sh
 test-check-host-sleep.sh
 test-check-defaults-version-bump.sh
 test-check-ingest-key-file.sh
@@ -79,6 +80,7 @@ test-cpu-budget.sh
 test-create-pr-provenance.sh
 test-create-pr-superseded-issue.sh
 test-create-pr-version-check.sh
+test-curator-rightsizing.sh
 test-default-branch.sh
 test-dependency-parse.sh
 test-detect-unlabeled-epics.sh
@@ -90,7 +92,6 @@ test-epic-label-preserved-on-escalation.sh
 test-extract-capability-markers.sh
 test-filing-lock.sh
 test-fleet-check.sh
-test-fleet-send.sh
 test-forge-check-runs-pagination.sh
 test-forge-helpers.sh
 test-forge-helpers-rate-limit-fallback.sh
@@ -187,6 +188,7 @@ test-run-job.sh
 test-safe-stash-pop.sh
 test-safehoused-service.sh
 test-script-helper-version-floor.sh
+test-session-mode.sh
 test-spawn-codex-session-exec.sh
 test-stale-claim-standdown-suppression.sh
 test-stop-hook-subcommand-skew.sh
@@ -233,6 +235,7 @@ tests/hooks/test-guard-destructive-mkdir-confinement.sh
 tests/hooks/test-guard-destructive-mktemp-canon.sh
 tests/hooks/test-guard-destructive-readonly-fastpath.sh
 tests/hooks/test-guard-destructive-rm-scope.sh
+tests/hooks/test-guard-destructive-session-scratch.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
 tests/hooks/test-guard-destructive-write-confinement.sh
 tests/hooks/test-guard-loom-workflow.sh

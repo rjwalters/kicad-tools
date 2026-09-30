@@ -191,8 +191,8 @@ echo "Test 12: baseline flags a genuinely-new file (exit 3)"
 echo "contamination" > "$REPO/new-contamination.txt"
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -q "new-contamination.txt" \
-   && ! echo "$out" | grep -q "preexisting.txt"; then
+   && grep -q "new-contamination.txt" <<<"$out" \
+   && ! grep -q "preexisting.txt" <<<"$out"; then
     pass "exit 3 flagging only the new path, not pre-existing dirt"
 else
     fail "expected 3 reporting only new-contamination.txt, got rc=$RC; out=$out"
@@ -204,8 +204,8 @@ echo "Test 13: baseline offending list excludes pre-existing dirt"
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 offending=$(echo "$out" | sed -n '/Offending changes:/,$p')
 if [[ "$RC" -eq 3 ]] \
-   && echo "$offending" | grep -q "new-contamination.txt" \
-   && ! echo "$offending" | grep -q "preexisting.txt"; then
+   && grep -q "new-contamination.txt" <<<"$offending" \
+   && ! grep -q "preexisting.txt" <<<"$offending"; then
     pass "offending list contains only the new path"
 else
     fail "expected offending list with only new path, got rc=$RC; offending=$offending"
@@ -216,7 +216,7 @@ rm -f "$REPO/new-contamination.txt"
 echo "Test 14: missing baseline file falls back to whole-status (fail-safe)"
 # preexisting.txt is still dirty; with a missing baseline the check must hard-fail.
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$REPO/.loom/does-not-exist.txt" 2>&1 ); RC=$?
-if [[ "$RC" -eq 3 ]] && echo "$out" | grep -qi "missing or unreadable"; then
+if [[ "$RC" -eq 3 ]] && grep -qi "missing or unreadable" <<<"$out"; then
     pass "missing baseline warns and hard-fails on pre-existing dirt"
 else
     fail "expected 3 + fallback warning, got rc=$RC; out=$out"
@@ -269,8 +269,8 @@ git -C "$REPO" add stray_module.py
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 offending=$(echo "$out" | sed -n '/Offending changes:/,$p')
 if [[ "$RC" -eq 3 ]] \
-   && echo "$offending" | grep -q "stray_module.py" \
-   && ! echo "$offending" | grep -q "baseline_mod.py"; then
+   && grep -q "stray_module.py" <<<"$offending" \
+   && ! grep -q "baseline_mod.py" <<<"$offending"; then
     pass "exit 3 naming the new staged module, ignoring the baselined change"
 else
     fail "expected 3 reporting only stray_module.py, got rc=$RC; offending=$offending"
@@ -332,9 +332,9 @@ echo "Test 19: real stray still flagged, Loom transient not (exit 3)"
 echo "real contamination" > "$REPO/stray_source.py"
 out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -q "stray_source.py" \
-   && ! echo "$out" | grep -q "sweep-checkpoint" \
-   && ! echo "$out" | grep -q ".loom-managed"; then
+   && grep -q "stray_source.py" <<<"$out" \
+   && ! grep -q "sweep-checkpoint" <<<"$out" \
+   && ! grep -q ".loom-managed" <<<"$out"; then
     pass "exit 3 naming the real stray, excluding Loom transients"
 else
     fail "expected 3 reporting only stray_source.py, got rc=$RC; out=$out"
@@ -355,8 +355,8 @@ echo '{"phase":"judge-done"}' > "$REPO/.loom/sweep-checkpoint/issue-1.json"
 echo "def widget(): return 42" > "$REPO/leaked_module.py"
 out=$( cd "$REPO" && "$SCRIPT" --baseline "$SNAP" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -q "leaked_module.py" \
-   && ! echo "$out" | grep -q "sweep-checkpoint"; then
+   && grep -q "leaked_module.py" <<<"$out" \
+   && ! grep -q "sweep-checkpoint" <<<"$out"; then
     pass "exit 3 flags the real leak, ignores the mid-sweep checkpoint"
 else
     fail "expected 3 reporting only leaked_module.py, got rc=$RC; out=$out"
@@ -514,8 +514,8 @@ echo "Test 25: without --quarantine, detection stays a hard-fail (exit 3)"
 echo "leak" > "$REPO/leaked.txt"
 out=$( cd "$REPO" && "$SCRIPT" 2>&1 ); RC=$?
 if [[ "$RC" -eq 3 ]] \
-   && echo "$out" | grep -qi "ALL-OR-NOTHING" \
-   && echo "$out" | grep -q -- "--quarantine"; then
+   && grep -qi "ALL-OR-NOTHING" <<<"$out" \
+   && grep -q -- "--quarantine" <<<"$out"; then
     pass "exit 3 with all-or-nothing remediation guidance (no piecemeal restore)"
 else
     fail "expected 3 + all-or-nothing guidance, got rc=$RC; out=$out"

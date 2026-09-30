@@ -248,10 +248,10 @@ usage() {
 }
 
 # --- Repo-relative `gh` targeting (mirrors sweep-lease-renew.sh) -----------
-gh_repo_args() {
-    if [[ -n "${LOOM_REPO:-}" ]]; then
-        printf -- '-R\n%s\n' "$LOOM_REPO"
-    fi
+# `gh api` has no -R flag (#9552), so the repo goes in the endpoint path.
+gh_repo_path() {
+    local placeholder='{owner}/{repo}'
+    printf '%s' "${LOOM_REPO:-$placeholder}"
 }
 
 # --- Host identity, mirroring sweep_registry::host_identity()'s precedence -
@@ -372,10 +372,8 @@ cmd_check() {
         exit 1
     fi
 
-    local -a repo_args=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && repo_args+=("$line")
-    done < <(gh_repo_args)
+    local repo_path
+    repo_path="$(gh_repo_path)"
 
     # NDJSON, one lease-marker comment per line (id, updated_at, body) --
     # deliberately NOT a `[...]`-wrapped array: `gh api --paginate --jq`
@@ -386,13 +384,18 @@ cmd_check() {
     # fetched together in ONE round trip so the yield-exclusion filter below
     # never needs a second `gh api` call.
     local comments_ndjson
-    if ! comments_ndjson="$(gh api "${repo_args[@]+"${repo_args[@]}"}" "repos/{owner}/{repo}/issues/${issue}/comments" \
+    if ! comments_ndjson="$(gh api "repos/${repo_path}/issues/${issue}/comments" \
         --paginate --jq \
-        ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body}" \
+        ".[] | select(.body != null and ((.body | startswith(\"${LEASE_MARKER_PREFIX}\")) or (.body | startswith(\"${YIELD_MARKER_PREFIX}\")))) | {updated_at: .updated_at, body: .body, user: {login: .user.login, type: .user.type}, author_association: .author_association}" \
         2>&1)"; then
         echo "PASS: could not fetch comments for issue #${issue} (${comments_ndjson}) -- unverifiable, failing open (proceeding with push/PR-open)" >&2
         exit 0
     fi
+    # #9548: lease/yield markers count only from a TRUSTED author; an outsider's
+    # is prose and can neither fence this push nor yield our lease.
+    # requires-daemon: forge optional   Without the `trusted-comments` verb the markers are unverifiable, and this fence fails open exactly as it does on an unreadable listing (its documented direction: never block a push on unverifiable evidence).
+    comments_ndjson="$(jq -s -c '.' <<< "$comments_ndjson" | "${LOOM_DAEMON_BIN:-loom-daemon}" forge trusted-comments 2> /dev/null | jq -c '.[]')" \
+        || { echo "PASS: lease comments on issue #${issue} could not be authenticated (loom-daemon forge trusted-comments unavailable) -- unverifiable, failing open (proceeding with push/PR-open)" >&2; exit 0; }
 
     if [[ -z "$(printf '%s' "$comments_ndjson" | tr -d '[:space:]')" ]]; then
         echo "PASS: no lease comment found on issue #${issue} (predates the lease feature, a manually-launched sweep, or a lease write that failed) -- no evidence to fence against; proceeding with push/PR-open" >&2

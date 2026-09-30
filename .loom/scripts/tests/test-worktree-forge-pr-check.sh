@@ -407,6 +407,113 @@ cleanup_repo "$REPO"
 rm -rf "$FAKE_BIN"
 rm -f "$OUT_LOG"
 
+# --- Test 9: the fd-3 refusals stay parseable for adversarial forge values ---
+#
+# #9109: every refusal above used to be a quoted JSON literal with the forge's
+# own `headRefName` / `headRepository` concatenated into it. A `"` is legal in
+# neither of those on GitHub today, but nothing in this code path enforced that
+# — and the failure mode is the worst one available: UNPARSEABLE JSON on the
+# exact channel a consumer reads to learn that a refusal happened at all.
+#
+# Driving worktree.sh end-to-end cannot reach this: it derives the branch name
+# from the issue number, so the adversarial value has to be injected at the
+# forge-lookup boundary. These call the decision function directly with
+# `_worktree_open_pr_for_branch` stubbed, capture fd 3, and require `jq -e .`
+# to accept the result AND the values to round-trip byte-identically.
+echo ""
+echo "Test 9: fd-3 refusal JSON survives adversarial forge values (#9109)"
+
+ADV_REF='evil"ref\with<>chars'
+ADV_REPO='fork"user/loom'
+# Run outside any git repo: the same-repo arm shells out to git, and we only
+# care about the JSON it emits when that cannot resolve the ref.
+JSON_TMP=$(mktemp -d /tmp/loom-wtforge-json.XXXXXX)
+
+# Driven entirely by STUB_* env vars: STUB_STATUS / STUB_CROSS / STUB_PR /
+# STUB_FETCH. Echoes ONLY what the decision function wrote to fd 3.
+emit_refusal() {
+    (
+        cd "$JSON_TMP" || exit 1
+        # shellcheck source=../lib/worktree-forge-pr-check.sh
+        source "$SCRIPTS_DIR/lib/worktree-forge-pr-check.sh"
+        _worktree_open_pr_for_branch() {
+            _WT_OPEN_PR_STATUS="$STUB_STATUS"
+            _WT_OPEN_PR_IS_CROSS_REPO="$STUB_CROSS"
+            _WT_OPEN_PR_NUMBER="$STUB_PR"
+            _WT_OPEN_PR_HEAD_REPO="$ADV_REPO"
+            _WT_OPEN_PR_HEAD_REF="$ADV_REF"
+            _WT_OPEN_PR_URL=""
+        }
+        _worktree_guard_fresh_branch_against_open_pr \
+            "feature/issue-77" "77" "true" "main" "origin/main" "$STUB_FETCH" \
+            3>&1 >/dev/null 2>/dev/null
+    )
+}
+
+assert_json() {
+    local got
+    got=$(printf '%s' "$2" | jq -r "$3" 2>/dev/null || true)
+    if [[ "$got" == "$4" ]]; then pass "$1"; else fail "$1 (got '$got', want '$4')"; fi
+}
+
+CROSS_JSON=$(STUB_STATUS=found STUB_CROSS=true STUB_PR=1234 STUB_FETCH=ok emit_refusal || true)
+if printf '%s' "$CROSS_JSON" | jq -e . >/dev/null 2>&1; then
+    pass "shadowed-cross-repo-pr refusal is valid JSON with a headRefName containing \" \\ < >"
+else
+    fail "shadowed-cross-repo-pr refusal is NOT valid JSON: $CROSS_JSON"
+fi
+assert_json "headRef round-trips byte-identically" "$CROSS_JSON" '.headRef' "$ADV_REF"
+assert_json "headRepo round-trips byte-identically" "$CROSS_JSON" '.headRepo' "$ADV_REPO"
+assert_json "prNumber stays a JSON number" "$CROSS_JSON" '.prNumber|tostring + ":" + type' "1234:number"
+assert_json "issueNumber stays a JSON number" "$CROSS_JSON" '.issueNumber|tostring + ":" + type' "77:number"
+assert_json "error code is unchanged" "$CROSS_JSON" '.error' "shadowed-cross-repo-pr"
+
+# Same-repo arm, with an EMPTY PR number — the empty/null case the old literal
+# form tolerated via ${_WT_OPEN_PR_NUMBER:-null}. It must still degrade to
+# JSON null rather than abort the emitter.
+SAME_JSON=$(STUB_STATUS=found STUB_CROSS=false STUB_PR="" STUB_FETCH=ok emit_refusal || true)
+if printf '%s' "$SAME_JSON" | jq -e . >/dev/null 2>&1; then
+    pass "open-pr-ref-fetch-failed refusal is valid JSON with an empty PR number"
+else
+    fail "open-pr-ref-fetch-failed refusal is NOT valid JSON: $SAME_JSON"
+fi
+assert_json "empty PR number degrades to JSON null" "$SAME_JSON" '.prNumber|type' "null"
+
+# forge-check-unavailable arm carries origin_fetch_result, which is the one
+# other non-numeric value this file interpolates.
+UNAVAIL_JSON=$(STUB_STATUS=unavailable STUB_CROSS=false STUB_PR="" STUB_FETCH='fetch-failed"; rm -rf /' emit_refusal || true)
+if printf '%s' "$UNAVAIL_JSON" | jq -e . >/dev/null 2>&1; then
+    pass "forge-check-unavailable refusal is valid JSON with a quote-bearing originFetch"
+else
+    fail "forge-check-unavailable refusal is NOT valid JSON: $UNAVAIL_JSON"
+fi
+assert_json "originFetch round-trips byte-identically" "$UNAVAIL_JSON" '.originFetch' 'fetch-failed"; rm -rf /'
+rm -rf "$JSON_TMP"
+
+# --- Test 10: grep-auditable — no literal-JSON fd-3 emitter remains ---
+echo ""
+echo "Test 10: every >&3 emitter builds its JSON with jq, not string concatenation (#9109)"
+FORGE_LIB="$SCRIPTS_DIR/lib/worktree-forge-pr-check.sh"
+# Every >&3 CODE line (comments excluded — the invariant is documented in the
+# file header, which naturally mentions `>&3`).
+EMITTERS=$(grep -n '>&3' "$FORGE_LIB" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+# The splice signature: a shell quote immediately followed by the opposite
+# quote is how a variable gets concatenated into a quoted JSON literal
+# (`'{"headRef": "'"$VAR"'"}'`). jq-built emitters never have adjacent
+# opposite quotes.
+LITERAL_EMITTERS=$(printf '%s\n' "$EMITTERS" | grep -E "'\"|\"'" || true)
+if [[ -z "$LITERAL_EMITTERS" ]]; then
+    pass "no >&3 line concatenates a value into a quoted JSON literal"
+else
+    fail "literal-JSON >&3 emitter(s) remain:"$'\n'"$LITERAL_EMITTERS"
+fi
+UNVETTED=$(printf '%s\n' "$EMITTERS" | grep -vE '^$|jq -cn|worktree-closed-pr-branch' || true)
+if [[ -z "$UNVETTED" ]]; then
+    pass "every >&3 emitter is either 'jq -cn' or the loom-daemon passthrough"
+else
+    fail "unvetted >&3 emitter(s):"$'\n'"$UNVETTED"
+fi
+
 # --- Summary ---
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

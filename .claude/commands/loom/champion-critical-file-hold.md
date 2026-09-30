@@ -58,9 +58,8 @@ plus a guard change, for state the marker and label already carry).
 
 ## The state machine
 
-The state is whichever of these three markers is the **latest** comment on the PR
-(`startswith`, never `contains` — #5371: a later comment quoting a marker in
-prose must not be mistaken for the state-owning one):
+The state is whichever of these three markers is the **latest** trusted comment
+on the PR (`startswith`, never `contains` — #5371):
 
 | Latest marker | State |
 |---|---|
@@ -86,9 +85,8 @@ side effects. On **FAIL**:
 | `released`, recorded head == current head | nothing at all: no label, no comment |
 | either, recorded head != current head (or none recorded — a legacy hold) | re-arm: a new hold episode at the current head |
 
-The last row is the conservative direction for the one race state alone cannot
-resolve: a push landing between the operator's removal and the next tick makes
-the removal *possibly* a decision about the older diff. Re-arming costs one more
+The last row is conservative for the one race state cannot resolve: a push
+between the operator's removal and the next tick. Re-arming costs one more
 removal (after which the recorded head is current and the release is honored);
 reading it as a release for an unseen diff would cost a critical-file change
 merged with nobody having looked at it.
@@ -103,10 +101,11 @@ HOLD_MARKER="<!-- champion:critical-file-hold -->"
 CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"
 RELEASED_MARKER="<!-- champion:critical-file-release-respected -->"
 
-# Plain `gh` — NOT "$GH_READ": this read decides whether `loom:operator` goes
-# back on over a decision a human already made, and a cached label set is
-# exactly how that decision gets missed. One call serves the whole block.
+# Plain `gh` — NOT "$GH_READ": a cached label set misses a human's decision.
+# Markers count from TRUSTED authors only (#9548). Unauthenticated -> the raw
+# read: it only books notices/labels, and criterion #3's FAIL never merges.
 CF_JSON=$(gh pr view "$PR_NUMBER" --json comments,labels,headRefOid)
+T=$(loom-daemon forge trusted-comments --fetch "$PR_NUMBER" --gh-shape) && CF_JSON=$(jq --argjson c "$T" '.comments = $c' <<<"$CF_JSON")
 HEAD_SHA=$(jq -r '.headRefOid' <<<"$CF_JSON")
 OPERATOR_LABEL_NOW=$(jq -r '[.labels[].name] | any(. == "loom:operator")' <<<"$CF_JSON")
 

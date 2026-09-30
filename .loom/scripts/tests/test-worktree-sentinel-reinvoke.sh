@@ -27,10 +27,15 @@
 # pinned via loom_test_require_daemon_bin and this suite FAILS rather than
 # skips when there is none: without one, --sparse/--full refuse with exit 2
 # before touching anything, and Tests 3/4 would be asserting on a refusal.
-# Test 5's structural awk check still holds for the plain arm's refusal, which
-# stays in the shell; the moved arm's "an unregistered directory gets no
-# sentinel" property is asserted behaviourally by the port's own tests
-# (worktree_cli::sparse unit tests + tests/worktree_sparse_differential.rs).
+#
+# SINCE #8195 SLICE 12 the "worktree directory already exists" arm that Tests 1
+# and 2 drive is `loom-daemon worktree-existing`, which now owns that arm's
+# registration probe, its preserve-vs-reset verdict and its sentinel back-fill.
+# Tests 1-4 are unchanged and still drive the real `worktree.sh` end to end,
+# which is what makes them the equivalence evidence; the binary is pinned for
+# both subcommands below. Test 5 could not survive that move and is RETIRED
+# in place — see its own block for the property, the structural reason and the
+# successor.
 
 set -euo pipefail
 
@@ -40,12 +45,13 @@ REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 
 # shellcheck source=lib/require-daemon-bin.sh
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-sparse"
+loom_test_require_daemon_bin "$SCRIPTS_DIR" "worktree-sparse" "worktree-existing"
 
 WORKTREE_SH="$SCRIPTS_DIR/worktree.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 TESTS_RUN=0
@@ -164,38 +170,37 @@ grep -qi "converted to full checkout" "$TMP_ROOT/t4.out" \
 assert_file_exists "$REPO/.loom/worktrees/issue-44/.loom-managed" \
     "--full re-config re-creates .loom-managed"
 
-# --- Test 5: NEGATIVE - the "not a registered worktree" exit-1 paths write no
-#     sentinel. This is asserted structurally: an empty orphan directory is
-#     auto-healed by cleanup_partial_worktree_state() into a fresh managed
-#     worktree (legitimate), so the exit-1 branches are not reachable via a
-#     plain empty dir. What must hold is that those exit-1 branches never call
-#     write_loom_sentinel — an orphan-debris path must stay sentinel-less so
-#     merge-pr.sh keeps refusing it.
+# --- Test 5: RETIRED (#8195 slice 12) ------------------------------------
+#
+# What it was: a structural scan of worktree.sh asserting that no
+# `write_loom_sentinel` call sits between a "not a registered worktree" marker
+# and its `exit 1`, plus a sanity grep that such a refusal branch still exists.
+#
+# Why it cannot survive: slice 12 moved the last of those refusal branches out
+# of worktree.sh into `loom-daemon worktree-existing`. The phrase now appears in
+# that file exactly once, inside a COMMENT, so both halves of the scan would
+# keep passing — against a comment, for the wrong reason. An assertion that
+# passes because of a comment is worse than no assertion.
+#
+# The three-part test (defaults/docs/verification-recipes.md §6) is spelled out
+# in the retired() call below rather than only here, so it travels with the
+# suite.
 echo ""
-echo "Test 5: unregistered-worktree exit-1 paths write no sentinel (structural)"
+echo "Test 5: unregistered-worktree exit-1 paths write no sentinel"
 
-# awk: while inside a block bounded by a "not a registered worktree" marker and
-# the next "exit 1", flag any write_loom_sentinel call as a violation.
-violations=$(awk '
-    /not a registered worktree/ { inblock = 1 }
-    inblock && /write_loom_sentinel/ { count++ }
-    inblock && /exit 1/ { inblock = 0 }
-    END { print count + 0 }
-' "$WORKTREE_SH")
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
-if [[ "$violations" -eq 0 ]]; then
-    pass "no write_loom_sentinel between 'not a registered worktree' and its exit 1"
-else
-    fail "found $violations write_loom_sentinel call(s) on an unregistered-worktree exit-1 path"
-fi
-
-# Sanity: the exit-1 refusal branches still exist (guards the awk above against
-# silently passing if the messages were renamed/removed).
-if grep -qc 'not a registered worktree' "$WORKTREE_SH"; then
-    pass "worktree.sh still contains 'not a registered worktree' refusal branch(es)"
-else
-    fail "worktree.sh no longer contains the 'not a registered worktree' refusal branch"
-fi
+retired \
+    "static scan: no write_loom_sentinel on an unregistered-worktree exit-1 path" \
+    "an orphan-debris directory must never receive a .loom-managed sentinel — that marker is what merge-pr.sh and the reaper read as authorization to rm -rf it (#3334/#3548)" \
+    "the refusal branch the scan read is no longer in worktree.sh: #8195 slice 12 moved the whole 'worktree dir already exists' arm into loom-daemon worktree-existing, and the sentinel write there is unreachable from the Unregistered outcome by control flow, not by care" \
+    "loom_daemon::worktree_cli::existing::tests::an_unregistered_directory_is_refused_and_gets_no_sentinel and ::a_prefix_of_a_registered_worktree_path_is_not_registered assert the absence behaviourally; tests/worktree_existing_differential.rs::a_prefix_of_a_registered_path_makes_the_shell_accept_debris additionally compares the port against the retired shell on the very input that made the old scan's subject write one"
 
 # --- Summary ---
 echo ""

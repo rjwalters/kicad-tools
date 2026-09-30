@@ -293,6 +293,83 @@ Forge credential: OK — github-app (app 123456 installation 789)
   app is installed on.
 - **Clock skew**: the minted JWT's `iat` is backdated 60 seconds per GitHub's
   own guidance, tolerating modest host clock drift without a manual fix.
+- **Key path must be absolute**: `github-app-token.sh` does not expand `~`,
+  so `"privateKeyPath": "~/.loom/…"` reads as "key not readable" and the
+  host falls back to ambient auth. Write the absolute path.
+
+### Several Apps: one writer, a pool of readers (#9248, #9537)
+
+One App installation has one REST budget. A busy fleet can outrun it, so
+Loom splits its identities by role:
+
+| Role | Used for | Permissions | Author of |
+|---|---|---|---|
+| **writer** (exactly one) | every attributed action: comments, labels, PRs, pushes, merges, leases, claims | the full set above | everything the fleet writes |
+| **readers** (zero or more) | the daemon's forge reads: issue/PR listings, cached views, CI telemetry | **read-only**: `contents`, `issues`, `pull_requests`, `actions`, `checks`, `metadata` all `read` | nothing (they cannot write) |
+
+Every host is configured the same way. There is no per-host pinning:
+
+```json
+"forge": {
+  "githubApp": { "appId": "…", "privateKeyPath": "/abs/path/writer.pem" },
+  "identities": {
+    "writer":  { "appId": "…", "slug": "loom-fleet-dispatch",  "privateKeyPath": "/abs/path/writer.pem" },
+    "readers": [
+      { "appId": "…", "slug": "loom-fleet-reader-1", "privateKeyPath": "/abs/path/reader-1.pem" },
+      { "appId": "…", "slug": "loom-fleet-reader-2", "privateKeyPath": "/abs/path/reader-2.pem" }
+    ],
+    "legacyLogins": []
+  }
+}
+```
+
+- **`forge.githubApp` is the writer, always.** It is the App every write
+  mints from: the daemon's credential delivery, agent sessions, and
+  `merge-pr.sh`. Keep it set. `forge.identities.writer` is optional. If
+  present, it must name the **same** App; it only adds the writer's `slug`.
+  A different App there cannot redirect writes: Loom treats
+  `forge.githubApp` as the writer and reports the mismatch. So does
+  `forge identities`, which also flags an `identities.writer` set without
+  `forge.githubApp`, since writes then fall back to ambient `gh` auth.
+- **Readers** come from `forge.identities.readers`. Without an `identities`
+  block, they come from the older `forge.githubAppReadPool` /
+  `LOOM_GITHUB_APP_READ_POOL`, which have no slugs, so a renamed reader's
+  history is not recognised until the host moves to `forge.identities`.
+  With no readers configured at all, reads share the writer, as before.
+- **Read routing**: each repo's reads go to `hash(owner/repo) mod N`, the same
+  reader on every host. A reader that hits a rate limit or an auth/coverage
+  error is withdrawn (until the reported reset, where GitHub gives one) and
+  the read is retried once on the writer. Reads fall back to the writer when
+  no reader is usable.
+- **Reader tokens** are minted per managed owner every ~5 minutes into
+  `.loom/gh-config-by-owner/<owner>/<app-id>/`, with an `identity.json`
+  recording the expiry. A read only uses a reader token with at least two
+  minutes left.
+- **"Is this login ours?"** means the writer, every reader, the
+  `legacyLogins`, and Loom's default `loom-fleet-dispatch` / `-<digits>`
+  family (exact, never a prefix), in any spelling (`x`, `x[bot]`, `app/x`).
+  Readers count because GitHub shows an App's **current** name on its whole
+  history: renaming a former writer to a reader re-attributes its past
+  comments to the new name.
+- **Renaming an App** changes its login everywhere at once, history included.
+  Update `slug` in config, or add the old name to `legacyLogins`. Nothing
+  keys on the App id's name: token minting and ruleset bypass actors use the
+  id.
+
+Commands (run from a checkout):
+
+```bash
+loom-daemon forge identities            # roster, fleet logins, reader token expiries
+loom-daemon forge is-fleet app/loom-fleet-reader-1 && echo ours   # prints the role; exit 1 if not ours
+loom-daemon forge token --repo owner/repo --access read    # JSON, same shape as github-app-token.sh get-token
+gh api "repos/{owner}/{repo}/issues/42/comments" --paginate | loom-daemon forge trusted-comments
+```
+
+Scripts use `forge is-fleet` instead of hardcoding a login, and
+`forge token --access read|write` instead of choosing an App themselves.
+The same roster decides whose comments Loom believes: a marker counts only from
+a repo insider, one of these Apps, or `forge.trustedCommenters` (#9548, see
+[`comment-trust.md`](comment-trust.md)).
 
 ### The cached-permission window: `403 … not accessible by integration` (#6074)
 

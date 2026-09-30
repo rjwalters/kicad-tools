@@ -493,13 +493,38 @@ forge_check_auto_delete() {
   fi
 }
 
+# url_encode_path_segment VALUE -> VALUE, safe to interpolate into an API URL
+# path. Percent-encodes (as UTF-8 bytes) everything outside RFC 3986's
+# unreserved set `[A-Za-z0-9._~-]`, per `/`-delimited segment.
+#
+# A branch name is forge-derived, and while git's ref-format forbids `..` (so
+# there is no path traversal here), it permits URL metacharacters — a name
+# containing `?`, `#` or `%` interpolated raw silently addresses a DIFFERENT
+# endpoint than the caller asked for (#9109). Encoding closes that.
+#
+# The `/` SEPARATORS are deliberately preserved rather than encoded: both
+# endpoints this feeds route on literal slashes (GitHub's
+# `git/refs/heads/<a>/<b>`, Gitea's `branches/*` wildcard), so `%2F` would
+# break every ordinary `feature/issue-N` name. Only the characters WITHIN each
+# segment are encoded, which is what the metacharacter problem is about.
+#
+# jq (a hard dependency of this lib already) rather than a bash character loop:
+# `@uri` is exactly the RFC 3986 encoder and handles multi-byte input without
+# locale juggling. Written as a one-liner because `defaults/scripts/lib/` is
+# inside the portable pool `loom-daemon shell-budget --check` ratchets, where
+# comments are free and code lines are not.
+url_encode_path_segment() { printf '%s' "${1:-}" | jq -sRr 'split("/") | map(@uri) | join("/")'; }
+
 # Delete a remote branch.
 # Usage: forge_delete_branch NWO BRANCH_NAME
 # GitHub: DELETE /repos/{nwo}/git/refs/heads/{branch}
 # Gitea: DELETE /repos/{owner}/{repo}/branches/{branch}
 forge_delete_branch() {
-  local nwo="$1"
-  local branch="$2"
+  # Declaration and assignment are separate statements sharing one physical
+  # line: the encode call is net-new code in the portable pool
+  # `loom-daemon shell-budget --check` ratchets, and packing it against the
+  # `local` is what pays for it there.
+  local nwo="$1" branch; branch="$(url_encode_path_segment "$2")"
 
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     forge_split_nwo "$nwo"
@@ -2033,9 +2058,15 @@ forge_get_required_status_check_contexts() {
   # real failure text without a temp file. A source the gate excuses
   # configures no required checks, with a stderr warning so the relaxation is
   # never silent; any other failure still fails the whole lookup closed.
+  #
+  # `$branch` goes through url_encode_path_segment for the REST call because
+  # it lands in a URL path there (#9109). The GraphQL call below deliberately
+  # does NOT encode it: `-F ref=refs/heads/$branch` is a typed variable VALUE
+  # gh serialises into the request body, not a path, so percent-encoding would
+  # send a literally wrong ref name.
   local ruleset_rc=0 classic_rc=0 ruleset_out="" classic_out="" _pg
   local query='query($owner: String!, $name: String!, $ref: String!) { repository(owner: $owner, name: $name) { ref(qualifiedName: $ref) { branchProtectionRule { requiredStatusCheckContexts } } } }'
-  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/${branch}" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>&1)" || ruleset_rc=1
+  ruleset_out="$("$gh_cmd" api "repos/${FORGE_OWNER}/${FORGE_REPO}/rules/branches/$(url_encode_path_segment "${branch}")" --jq '.[]? | select(.type == "required_status_checks") | .parameters.required_status_checks[]?.context' 2>&1)" || ruleset_rc=1
   classic_out="$("$gh_cmd" api graphql -f "query=$query" -F "owner=$FORGE_OWNER" -F "name=$FORGE_REPO" -F "ref=refs/heads/$branch" --jq '.data.repository.ref.branchProtectionRule.requiredStatusCheckContexts // [] | .[]' 2>&1)" || classic_rc=1
   [[ "$ruleset_rc" -eq 0 ]] || { _pg=$(printf '%s' "$ruleset_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: ruleset required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $ruleset_out" >&2; ruleset_out=""; } || return 1; }; [[ "$classic_rc" -eq 0 ]] || { _pg=$(printf '%s' "$classic_out" | tr '[:upper:]' '[:lower:]'); [[ "$_pg" == *"upgrade to github"* && "$_pg" == *"make this repository public"* ]] && { echo "forge-helpers: classic branch-protection required-checks lookup for '$branch' is plan-gated (#8872) -- treating as no required checks: $classic_out" >&2; classic_out=""; } || return 1; }
   # Union, order-preserving, de-duplicated: a context can legitimately be

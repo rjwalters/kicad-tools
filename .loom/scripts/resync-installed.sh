@@ -159,7 +159,22 @@
 # #4669 established.
 #
 # EXPLICITLY OUT OF SCOPE (never touched by resync — updated by other mechanisms):
-#   .loom/config.json       - operator-owned; needs merge-semantics design
+#   .loom/config.json       - operator-owned; needs merge-semantics design.
+#                             LOAD-BEARING for session mode (#8884): the
+#                             install-time `"mode": "session"` marker (and the
+#                             `terminals: []` / `autonomous.*.enabled: false`
+#                             key set it implies) persists precisely BECAUSE
+#                             this file is never touched here -- there is no
+#                             "restore the default terminals array" step to
+#                             suppress. A reinstall goes through
+#                             loom-daemon init's merge_config_file() instead,
+#                             which re-asserts the key set whenever it sees the
+#                             marker. Locked in by
+#                             defaults/scripts/tests/test-session-mode.sh, so a
+#                             future change that DOES start resyncing this file
+#                             fails there rather than silently re-arming the
+#                             tmux pool in a session-mode repo. See
+#                             defaults/docs/session-mode.md.
 #   CLAUDE.md               - repo-customized at install; needs managed-section markers,
 #                             WITH ONE NARROW EXCEPTION (#6612, narrowed further by
 #                             #8147), mirroring .loom/CLAUDE.md's #5559 exception
@@ -2793,6 +2808,37 @@ if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
             GUARD_CHECK_BROKEN=1
             ;;
     esac
+fi
+
+# ---------- forge merge-configuration check (#9287) ----------
+#
+# merge-pr.sh can only merge when the repository's allow_* merge flags and
+# every active branch ruleset's allowed_merge_methods / required_linear_history
+# leave it a usable method. That configuration lives on the forge, outside
+# anything this resync syncs, and when it is wrong every merge 405s several
+# phases downstream (#9287: this repo's own ruleset allowed only squash while
+# the repo allowed only merge commits). check-merge-config.sh reports it here.
+#
+# Advisory and READ-ONLY: it never writes a ruleset or a repo setting, always
+# exits 0, and prints nothing when there is nothing to report (a repo with no
+# ruleset sees no new output). Only its stdout -- findings and "could not
+# determine" notes -- is shown; its skip notes (no loom-daemon, an older one)
+# go to stderr and are dropped. It never affects this resync's exit code.
+#
+# Same resolution as the guard-hook check above: the installed copy first,
+# the defaults/ source on the first run after upgrading past #9287. Runs from
+# REPO_ROOT (not WRITE_ROOT, which --output may point at a preview directory)
+# so the forge repository is resolved from the real checkout.
+MERGE_CHECK_SCRIPT="$WRITE_ROOT/.loom/scripts/check-merge-config.sh"
+if [[ ! -x "$MERGE_CHECK_SCRIPT" && -x "$DEFAULTS_DIR/scripts/check-merge-config.sh" ]]; then
+    MERGE_CHECK_SCRIPT="$DEFAULTS_DIR/scripts/check-merge-config.sh"
+fi
+if [[ -x "$MERGE_CHECK_SCRIPT" ]]; then
+    merge_output="$(cd "$REPO_ROOT" && "$MERGE_CHECK_SCRIPT" 2>/dev/null)" || true
+    if [[ -n "$merge_output" ]]; then
+        printf '%b\n' "${YELLOW}[resync] Forge merge configuration (advisory, read-only -- nothing was changed):${NC}"
+        printf '%s\n' "$merge_output" | sed 's/^/    /'
+    fi
 fi
 
 # ---------- forge label drift check + safe auto-create (#6716) ----------

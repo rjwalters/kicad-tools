@@ -40,6 +40,16 @@
 # Both functions depend on worktree.sh's `print_error` / `print_info`, and on
 # fd 3 being open for `--json` output; fallbacks are defined below so the file
 # can also be sourced standalone.
+#
+# INVARIANT (#9109): every `>&3` JSON refusal here is built with `jq -cn` and
+# `--arg`, never by concatenating a value into a quoted JSON literal. The
+# values carried out on fd 3 are forge-derived — `headRefName` in particular
+# may legally contain `"` and `\`, which the old literal form emitted raw,
+# producing UNPARSEABLE JSON on exactly the channel a consumer reads to learn
+# that the refusal happened. Numbers go through `--arg` + `tonumber? // null`
+# rather than `--argjson` so a missing/garbage value degrades to `null` (what
+# the literal form happened to tolerate) instead of aborting jq. Keep new
+# emitters in this shape; `grep '>&3'` over this file is the audit.
 
 if ! declare -F print_error >/dev/null 2>&1; then
     print_error() { echo "ERROR: $1" >&2; }
@@ -268,7 +278,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
                 # reach it (per the AC: refuse OR fetch; refuse is the
                 # simpler, unambiguous choice here).
                 if [[ "$json_output" == "true" ]]; then
-                    echo '{"success": false, "error": "shadowed-cross-repo-pr", "issueNumber": '"$issue_number"', "prNumber": '"${_WT_OPEN_PR_NUMBER:-null}"', "headRepo": "'"$_WT_OPEN_PR_HEAD_REPO"'", "headRef": "'"$_WT_OPEN_PR_HEAD_REF"'"}' >&3
+                    jq -cn --arg issue "$issue_number" --arg pr "${_WT_OPEN_PR_NUMBER:-}" --arg headRepo "${_WT_OPEN_PR_HEAD_REPO:-}" --arg headRef "${_WT_OPEN_PR_HEAD_REF:-}" '{success: false, error: "shadowed-cross-repo-pr", issueNumber: ($issue | tonumber? // null), prNumber: ($pr | tonumber? // null), headRepo: $headRepo, headRef: $headRef}' >&3
                 else
                     print_error "Open PR #${_WT_OPEN_PR_NUMBER} for '$branch' already exists with its head on a FORK ($_WT_OPEN_PR_HEAD_REPO:$_WT_OPEN_PR_HEAD_REF) - refusing to create a same-named branch from $base_display, which would silently shadow it instead of the real work."
                     echo "  PR: ${_WT_OPEN_PR_URL:-<no url>}"
@@ -299,7 +309,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
             # materialize its ref locally - refuse rather than silently
             # branching fresh under its name.
             if [[ "$json_output" == "true" ]]; then
-                echo '{"success": false, "error": "open-pr-ref-fetch-failed", "issueNumber": '"$issue_number"', "prNumber": '"${_WT_OPEN_PR_NUMBER:-null}"'}' >&3
+                jq -cn --arg issue "$issue_number" --arg pr "${_WT_OPEN_PR_NUMBER:-}" '{success: false, error: "open-pr-ref-fetch-failed", issueNumber: ($issue | tonumber? // null), prNumber: ($pr | tonumber? // null)}' >&3
             else
                 print_error "Open PR #${_WT_OPEN_PR_NUMBER} exists for '$branch' but its ref could not be fetched from origin - refusing to create a same-named branch from $base_display."
             fi
@@ -320,7 +330,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
             # independent confirmation either. Silently proceeding here IS the
             # #7765 defect - refuse rather than guess "safe".
             if [[ "$json_output" == "true" ]]; then
-                echo '{"success": false, "error": "forge-check-unavailable", "issueNumber": '"$issue_number"', "originFetch": "'"$origin_fetch_result"'"}' >&3
+                jq -cn --arg issue "$issue_number" --arg originFetch "${origin_fetch_result:-}" '{success: false, error: "forge-check-unavailable", issueNumber: ($issue | tonumber? // null), originFetch: $originFetch}' >&3
             else
                 print_error "Could not verify via the forge whether an open PR already exists for '$branch' (gh unavailable, unauthenticated, or rate-limited) - refusing to create a same-named branch from $base_display blind."
                 if [[ "$origin_fetch_result" == "fetch-failed" ]]; then
@@ -382,7 +392,7 @@ _worktree_resolve_origin_branch_reuse() {
     # trusting the caller. Refuse — the #7765 stance: a check that cannot run
     # safely refuses rather than guessing.
     if ! declare -F check_branch_name >/dev/null 2>&1 || ! check_branch_name "$branch" "worktree branch"; then
-        [[ "$json_output" == "true" ]] && echo '{"success": false, "error": "unsafe-branch-name", "issueNumber": '"$issue_number"'}' >&3
+        [[ "$json_output" == "true" ]] && jq -cn --arg issue "$issue_number" '{success: false, error: "unsafe-branch-name", issueNumber: ($issue | tonumber? // null)}' >&3
         exit 1
     fi
     origin_fetch_result="ok"

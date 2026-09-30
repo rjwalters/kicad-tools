@@ -47,7 +47,7 @@ MERGE_PR="$SCRIPTS_DIR/merge-pr.sh"
 source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "merge-pr" \
     "merge-pr worktree-primary" "merge-pr worktree-branch-for" \
-    "merge-pr worktree-find-by-branch"
+    "merge-pr worktree-find-by-branch" "merge-pr worktree-contains"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -306,21 +306,23 @@ else
     fail "_worktree_branch_for failed on space path: expected '$SP_BRANCH', got '$sp_branch'"
 fi
 
-# (d) The --worktree-path registered-worktree validation snippet (the same awk
-#     used at merge-pr.sh:~242) must accept the full space-containing path.
+# (d) --worktree-path's registered-worktree check (#8191 slice: `loom-daemon
+#     merge-pr worktree-contains`, the ACTUAL ported verb merge-pr.sh now
+#     calls — not a hand-copied re-implementation of the retired awk) must
+#     accept the full space-containing path.
 if git -C "$SP_PRIMARY" worktree list --porcelain 2>/dev/null | \
-     awk -v p="$SP_SECONDARY_REAL" '/^worktree / { if (substr($0, 10) == p) { found=1; exit } } END { exit !found }'; then
-    pass "--worktree-path validation accepts a registered space-containing worktree"
+     "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr worktree-contains --path "$SP_SECONDARY_REAL"; then
+    pass "merge-pr worktree-contains accepts a registered space-containing worktree"
 else
-    fail "--worktree-path validation rejected a registered space-containing worktree"
+    fail "merge-pr worktree-contains rejected a registered space-containing worktree"
 fi
 
 # (e) Negative control: an unregistered space path must still be rejected.
 if git -C "$SP_PRIMARY" worktree list --porcelain 2>/dev/null | \
-     awk -v p="$SP_ROOT/not a worktree" '/^worktree / { if (substr($0, 10) == p) { found=1; exit } } END { exit !found }'; then
-    fail "--worktree-path validation wrongly accepted an unregistered path"
+     "${LOOM_DAEMON_BIN:-loom-daemon}" merge-pr worktree-contains --path "$SP_ROOT/not a worktree"; then
+    fail "merge-pr worktree-contains wrongly accepted an unregistered path"
 else
-    pass "--worktree-path validation still rejects an unregistered space-containing path"
+    pass "merge-pr worktree-contains still rejects an unregistered space-containing path"
 fi
 
 # --- Test 5: the guard fails CLOSED when its lookup cannot run (#8191) ---

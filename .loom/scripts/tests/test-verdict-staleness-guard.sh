@@ -202,9 +202,57 @@ chmod +x "$STUB_DIR/gh"
 #      read as "nothing was armed"
 #   -> $STUB_DIR/daemon-declined: exit 3 (EX_FORGE_DECLINED) with nothing on
 #      stdout — the Gitea shape, where there is no server-side arm at all
+#
+# #9548: `loom-daemon forge trusted-comments` filters the comment listing on
+# stdin to trusted authors. The stub mirrors the real predicate for the shapes
+# these fixtures use (insider association, or the default fleet App family
+# App-spelled) and logs to trust-calls.log, NOT daemon-writes.log, so the
+# #8900 assertions about daemon WRITES are unaffected. $STUB_DIR/trust-verb-
+# missing simulates a binary predating the verb (clap: exit 2, empty stdout).
+#
+# #9576: `loom-daemon forge tree-unchanged <base> <head>` answers whether the
+# two commits' trees are byte-identical. It is a READ, so it logs to
+# tree-calls.log — also NOT daemon-writes.log, for the same reason: (q5)/(q6)/
+# (q10) assert the guard makes no daemon WRITES on those paths, and a read that
+# every STALE path now performs must not falsify them.
+#   -> default: TREE_UNCHANGED=0, exit 0 — the trees differ, i.e. every
+#      pre-#9576 fixture keeps its existing STALE expectations untouched
+#   -> $STUB_DIR/tree-identical: TREE_UNCHANGED=1, exit 0 — the #9541/#9483
+#      re-date shape the exemption exists for
+#   -> $STUB_DIR/tree-compare-fail: exit 1, nothing on stdout — the `gh api
+#      compare` failure / unparsable-response shape, which must FAIL CLOSED
+#   -> $STUB_DIR/tree-verb-missing: exit 2, nothing on stdout — a binary
+#      predating the verb (clap), which must fail closed identically
 cat > "$STUB_DIR/loom-daemon" <<'STUB'
 #!/usr/bin/env bash
 STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub loom-daemon: LOOM_TEST_STUB_DIR not set}"
+if [[ "$1" == "forge" && "$2" == "tree-unchanged" ]]; then
+  printf 'TREE %s\n' "$*" >> "$STUB_DIR_FROM_ENV/tree-calls.log"
+  if [[ -f "$STUB_DIR_FROM_ENV/tree-verb-missing" ]]; then
+    echo "error: unrecognized subcommand 'tree-unchanged'" >&2
+    exit 2
+  fi
+  if [[ -f "$STUB_DIR_FROM_ENV/tree-compare-fail" ]]; then
+    echo "stub loom-daemon: could not compare $3...$4" >&2
+    exit 1
+  fi
+  if [[ -f "$STUB_DIR_FROM_ENV/tree-identical" ]]; then
+    echo "TREE_UNCHANGED=1"
+  else
+    echo "TREE_UNCHANGED=0"
+  fi
+  exit 0
+fi
+if [[ "$1" == "forge" && "$2" == "trusted-comments" ]]; then
+  printf 'TRUST %s\n' "$*" >> "$STUB_DIR_FROM_ENV/trust-calls.log"
+  if [[ -f "$STUB_DIR_FROM_ENV/trust-verb-missing" ]]; then
+    echo "error: unrecognized subcommand 'trusted-comments'" >&2
+    exit 2
+  fi
+  exec jq -c '[.[] | select(
+      ((.author_association // "") | ascii_upcase | IN("OWNER","MEMBER","COLLABORATOR"))
+      or ((.user.login // "") | test("^loom-fleet-dispatch(-[0-9]+)?\\[bot\\]$")))]'
+fi
 printf 'DAEMON %s\n' "$*" >> "$STUB_DIR_FROM_ENV/daemon-writes.log"
 if [[ "$1" == "forge" && "$2" == "disable-auto-merge" ]]; then
   if [[ -f "$STUB_DIR_FROM_ENV/daemon-declined" ]]; then
@@ -304,13 +352,22 @@ pr_json_state_no_merged() {
         "$sha" "$state" "$(labels_json "$@")" > "$STUB_DIR/pr-$num.json"
 }
 
+# Fixture comments are authored by the fleet App (REST shape) unless a test
+# says otherwise: the guard believes markers only from trusted authors (#9548).
+FLEET_USER='"user":{"login":"loom-fleet-dispatch[bot]","type":"Bot"},"author_association":"NONE"'
+
 verdict_comment() {
     # verdict_comment <created_at> <sha> <approved|changes-requested>
-    printf '{"created_at":"%s","body":"Reviewed.\\n\\n<!-- loom:verdict-sha sha=%s verdict=%s -->"}' "$1" "$2" "$3"
+    printf '{%s,"created_at":"%s","body":"Reviewed.\\n\\n<!-- loom:verdict-sha sha=%s verdict=%s -->"}' "$FLEET_USER" "$1" "$2" "$3"
+}
+
+authored_verdict_comment() {
+    # authored_verdict_comment <created_at> <sha> <verdict> <login> <association>
+    printf '{"user":{"login":"%s"},"author_association":"%s","created_at":"%s","body":"<!-- loom:verdict-sha sha=%s verdict=%s -->"}' "$4" "$5" "$1" "$2" "$3"
 }
 
 plain_comment() {
-    printf '{"created_at":"%s","body":"%s"}' "$1" "$2"
+    printf '{%s,"created_at":"%s","body":"%s"}' "$FLEET_USER" "$1" "$2"
 }
 
 reset_state() {
@@ -322,6 +379,9 @@ reset_state() {
     rm -f "$STUB_DIR"/graphql-writes.log "$STUB_DIR"/graphql-fail
     rm -f "$STUB_DIR"/daemon-writes.log "$STUB_DIR"/armed-*
     rm -f "$STUB_DIR"/disarm-fail "$STUB_DIR"/daemon-declined
+    rm -f "$STUB_DIR"/trust-calls.log "$STUB_DIR"/trust-verb-missing
+    rm -f "$STUB_DIR"/tree-calls.log "$STUB_DIR"/tree-identical
+    rm -f "$STUB_DIR"/tree-compare-fail "$STUB_DIR"/tree-verb-missing
 }
 
 run_guard() {
@@ -332,6 +392,7 @@ run_guard() {
     COMMENTS_POSTED="$(cat "$STUB_DIR/comment-writes.log" 2>/dev/null || true)"
     GRAPHQL="$(cat "$STUB_DIR/graphql-writes.log" 2>/dev/null || true)"
     DAEMON="$(cat "$STUB_DIR/daemon-writes.log" 2>/dev/null || true)"
+    TREE_CALLS="$(cat "$STUB_DIR/tree-calls.log" 2>/dev/null || true)"
 }
 
 get_field() {
@@ -1036,21 +1097,187 @@ assert_eq "14" "$RC" "(q10) Merged PR -> exit 14"
 assert_eq "" "$DAEMON" "(q10) No disarm on a finished PR"
 
 # (q11) No resolvable `loom-daemon` — a consumer host that never installed one,
-#       or a PATH that lost it. The gap must be LOUD but must not break the
-#       clear: AUTO_MERGE_DISARMED=0, REASON names the failure, and the verdict
-#       is still invalidated. This is the cost of delegating instead of keeping a
-#       duplicate inline mutation (PR #8990); it is reported, not hidden.
+#       or a PATH that lost it. Since #9548 the guard cannot authenticate any
+#       marker without the daemon, so every marker counts as absent: the
+#       verdict reads UNVERIFIABLE (never FRESH, never STALE on an unverified
+#       marker), nothing is written, REASON names the cause, and there is still
+#       no inline mutation as a fallback (PR #8990).
 reset_state
 pr_json_armed 250 "$SHA_B" "loom:pr"
 { echo "["; verdict_comment "2026-09-22T22:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-250.json"
 mv "$STUB_DIR/loom-daemon" "$STUB_DIR/loom-daemon.hidden"
 run_guard 250 --clear
 mv "$STUB_DIR/loom-daemon.hidden" "$STUB_DIR/loom-daemon"
-assert_eq "12" "$RC" "(q11) Missing loom-daemon does not break the clear -> exit 12"
-assert_eq "1" "$(get_field "$OUT" CLEARED)" "(q11) Verdict still cleared"
-assert_eq "0" "$(get_field "$OUT" AUTO_MERGE_DISARMED)" "(q11) AUTO_MERGE_DISARMED=0, never a false 1"
-assert_contains "$OUT" "could not resolve loom-daemon" "(q11) REASON names the unresolvable binary"
+assert_eq "11" "$RC" "(q11) Missing loom-daemon -> markers unauthenticated -> exit 11"
+assert_eq "UNVERIFIABLE" "$(get_field "$OUT" DECISION)" "(q11) DECISION=UNVERIFIABLE"
+assert_eq "" "$WRITES" "(q11) No label writes on unauthenticated markers"
+assert_contains "$OUT" "could not be authenticated" "(q11) REASON names the missing authentication"
 assert_eq "" "$GRAPHQL" "(q11) And no inline mutation is attempted as a fallback"
+
+# --- #9548: markers count only from trusted authors -------------------------
+
+# (t1) THE #9548 CASE: the fleet approved SHA_A, the head moved to SHA_B, and
+#      untrusted authors then posted well-formed markers naming SHA_B — a
+#      drive-by user, a contributor, a user squatting the fleet App's bare
+#      name, and another fleet's App. None of them may keep the approval: the
+#      verdict is STALE on the fleet's own marker and is cleared.
+reset_state
+pr_json 260 "$SHA_B" "loom:pr"
+{
+  echo "["
+  verdict_comment "2026-09-29T01:00:00Z" "$SHA_A" "approved"; echo ","
+  authored_verdict_comment "2026-09-29T02:00:00Z" "$SHA_B" "approved" "drive-by" "NONE"; echo ","
+  authored_verdict_comment "2026-09-29T02:01:00Z" "$SHA_B" "approved" "merged-once" "CONTRIBUTOR"; echo ","
+  authored_verdict_comment "2026-09-29T02:02:00Z" "$SHA_B" "approved" "loom-fleet-dispatch" "NONE"; echo ","
+  authored_verdict_comment "2026-09-29T02:03:00Z" "$SHA_B" "approved" "other-fleet-dispatch[bot]" "NONE"
+  echo "]"
+} > "$STUB_DIR/comments-260.json"
+run_guard 260 --clear
+assert_eq "12" "$RC" "(t1) Untrusted fresh-looking markers are ignored -> STALE"
+assert_eq "$SHA_A" "$(get_field "$OUT" MARKER_SHA)" "(t1) MARKER_SHA is the fleet's own"
+assert_contains "$WRITES" "--remove-label loom:pr" "(t1) Stale approval cleared"
+assert_contains "$(cat "$STUB_DIR/trust-calls.log" 2>/dev/null)" "forge trusted-comments" "(t1) The daemon's filter was consulted"
+
+# (t2) An untrusted STALE-looking marker cannot revoke a fresh approval.
+reset_state
+pr_json 261 "$SHA_A" "loom:pr"
+{
+  echo "["
+  verdict_comment "2026-09-29T01:00:00Z" "$SHA_A" "approved"; echo ","
+  authored_verdict_comment "2026-09-29T02:00:00Z" "$SHA_C" "approved" "drive-by" "NONE"
+  echo "]"
+} > "$STUB_DIR/comments-261.json"
+run_guard 261 --clear
+assert_eq "0" "$RC" "(t2) Untrusted stale-looking marker ignored -> FRESH"
+assert_eq "" "$WRITES" "(t2) No label writes"
+
+# (t3) Only untrusted markers -> absent -> UNVERIFIABLE (never FRESH).
+reset_state
+pr_json 262 "$SHA_B" "loom:pr"
+{ echo "["; authored_verdict_comment "2026-09-29T02:00:00Z" "$SHA_B" "approved" "drive-by" "NONE"; echo "]"; } > "$STUB_DIR/comments-262.json"
+run_guard 262
+assert_eq "11" "$RC" "(t3) Only an untrusted marker -> exit 11"
+assert_contains "$OUT" "trusted author" "(t3) REASON says no trusted marker"
+
+# (t4) An insider's marker counts by association.
+reset_state
+pr_json 263 "$SHA_B" "loom:pr"
+{ echo "["; authored_verdict_comment "2026-09-29T02:00:00Z" "$SHA_B" "approved" "maintainer" "COLLABORATOR"; echo "]"; } > "$STUB_DIR/comments-263.json"
+run_guard 263
+assert_eq "0" "$RC" "(t4) Collaborator's marker -> FRESH"
+
+# (t5) A binary predating the verb (clap exit 2): every marker is treated as
+#      absent, the verdict reads UNVERIFIABLE, and --anchor does NOT post (it
+#      would otherwise mint a FRESH marker over an unverified verdict).
+reset_state
+pr_json 264 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-29T01:00:00Z" "$SHA_B" "approved"; echo "]"; } > "$STUB_DIR/comments-264.json"
+: > "$STUB_DIR/trust-verb-missing"
+run_guard 264 --anchor
+assert_eq "11" "$RC" "(t5) Old daemon -> exit 11, never FRESH"
+assert_eq "UNVERIFIABLE" "$(get_field "$OUT" DECISION)" "(t5) DECISION=UNVERIFIABLE"
+assert_eq "" "$COMMENTS_POSTED" "(t5) --anchor suppressed"
+assert_contains "$OUT" "--anchor is suppressed" "(t5) REASON names the suppression"
+
+# --- #9576: a tree-identical head move is not a stale verdict ---------------
+#
+# THE #9576 INCIDENT: PR #9541's approval was anchored at 490fb81a8; the #8248
+# required-check-freshness guard's automated `chore: re-date required checks`
+# commit (#8508) moved the head to 42ea7263a with an IDENTICAL tree
+# (`compare/490fb81a8...42ea7263a` → `files=0`). The daemon's own pass has
+# skipped that since #9124, but this guard had no tree comparison at all, so it
+# stripped `loom:pr` anyway and forced a full Judge re-cycle. #9483 lost its
+# verdict the same way. The guard now asks `loom-daemon forge tree-unchanged`,
+# the SAME implementation the daemon pass calls in-process.
+
+# (u1) The incident itself: head moved, trees byte-identical -> FRESH, and with
+#      --clear NOTHING is written (no label flip, no comment, no disarm).
+reset_state
+pr_json 270 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-270.json"
+: > "$STUB_DIR/tree-identical"
+run_guard 270 --clear
+assert_eq "0" "$RC" "(u1) Tree-identical head move -> exit 0"
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u1) DECISION=FRESH"
+assert_eq "$SHA_A" "$(get_field "$OUT" MARKER_SHA)" "(u1) MARKER_SHA is still the reviewed SHA"
+assert_eq "$SHA_B" "$(get_field "$OUT" HEAD_SHA)" "(u1) HEAD_SHA is the moved head"
+assert_eq "" "$WRITES" "(u1) loom:pr is NOT removed on a tree-identical move"
+assert_eq "" "$COMMENTS_POSTED" "(u1) No stale-verdict comment posted"
+assert_eq "" "$DAEMON" "(u1) No auto-merge disarm — the reviewed tree IS what is at the head"
+assert_contains "$TREE_CALLS" "forge tree-unchanged $SHA_A $SHA_B" "(u1) The comparison is asked marker...head, in that order"
+assert_contains "$OUT" "byte-identical" "(u1) REASON says why the verdict survived"
+
+# (u2) The other half of AC1: a head move that DOES change the tree still
+#      invalidates, exactly as before #9576.
+reset_state
+pr_json 271 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-271.json"
+run_guard 271 --clear
+assert_eq "12" "$RC" "(u2) Tree-changed head move -> still exit 12"
+assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(u2) DECISION=STALE"
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u2) CLEARED=1"
+assert_contains "$WRITES" "--remove-label loom:pr" "(u2) The approval is still cleared on a real change"
+assert_contains "$TREE_CALLS" "forge tree-unchanged" "(u2) The comparison was consulted"
+
+# (u3) FAIL CLOSED (AC2): the comparison itself failed (`gh api compare` error,
+#      unparsable response). The verdict must still be invalidated — matching
+#      the daemon's `None` arm, never an assumed equivalence.
+reset_state
+pr_json 272 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-272.json"
+: > "$STUB_DIR/tree-compare-fail"
+run_guard 272 --clear
+assert_eq "12" "$RC" "(u3) Failed compare -> exit 12 (fail closed)"
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u3) CLEARED=1 — an unavailable comparison never keeps a verdict"
+assert_contains "$WRITES" "--remove-label loom:pr" "(u3) The approval is cleared"
+
+# (u4) FAIL CLOSED on a daemon predating the verb (clap: non-zero, empty
+#      stdout) — indistinguishable from a failed compare, and must behave
+#      identically. A mixed fleet therefore degrades to the pre-#9576 answer.
+reset_state
+pr_json 273 "$SHA_B" "loom:changes-requested"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "changes-requested"; echo "]"; } > "$STUB_DIR/comments-273.json"
+: > "$STUB_DIR/tree-verb-missing"
+run_guard 273 --clear
+assert_eq "12" "$RC" "(u4) Daemon predating tree-unchanged -> exit 12"
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u4) CLEARED=1"
+
+# (u5) The common FRESH path costs NO comparison: when the marker already names
+#      the current head there is nothing to compare, so the extra call must not
+#      be made at all (and a host with no daemon still reads FRESH).
+reset_state
+pr_json 274 "$SHA_A" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-274.json"
+: > "$STUB_DIR/tree-identical"
+run_guard 274 --clear
+assert_eq "0" "$RC" "(u5) Marker == head -> exit 0"
+assert_eq "" "$TREE_CALLS" "(u5) No compare call on the unchanged-head fast path"
+
+# (u6) Report-only (no --clear) on a tree-identical move: FRESH, exit 0, and
+#      still nothing written — a caller that only reports must see the
+#      exemption too, or Champion's janitor and Judge's sweep disagree.
+reset_state
+pr_json 275 "$SHA_C" "loom:changes-requested"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "changes-requested"; echo "]"; } > "$STUB_DIR/comments-275.json"
+: > "$STUB_DIR/tree-identical"
+run_guard 275
+assert_eq "0" "$RC" "(u6) Report-only tree-identical move -> exit 0"
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u6) DECISION=FRESH"
+assert_eq "" "$WRITES" "(u6) Nothing written in report-only mode"
+
+# (u7) An armed auto-merge on a tree-identical move is deliberately left armed:
+#      the code at the head is provably the reviewed code, so there is nothing
+#      unsafe about the queued merge landing it. Same reasoning as the daemon's
+#      re-anchor path, which also disarms nothing.
+reset_state
+pr_json_armed 276 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-276.json"
+: > "$STUB_DIR/tree-identical"
+run_guard 276 --clear
+assert_eq "0" "$RC" "(u7) Armed + tree-identical -> exit 0"
+assert_eq "0" "$(get_field "$OUT" AUTO_MERGE_DISARMED)" "(u7) AUTO_MERGE_DISARMED=0"
+assert_eq "" "$DAEMON" "(u7) The disarm subcommand is not invoked at all"
+assert_eq "" "$GRAPHQL" "(u7) And no inline mutation either"
 
 # --- Summary -------------------------------------------------------------
 echo ""

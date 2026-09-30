@@ -72,6 +72,22 @@ grep -L 'Untrusted External Content' $(grep -rl 'gh issue view\|gh pr view\|gh p
   defaults/.claude/commands/loom/*.md)
 ```
 
+### Markers and control phrases: authenticated, not persuasive (#9548)
+
+This convention governs what an agent does with text it *reads*. The text Loom
+*acts on* mechanically (a `loom:verdict-sha` marker, a `Champion Review:
+APPROVED` verdict) is governed by a stricter, mechanical rule: it counts only
+from a trusted author, and a well-formed marker from anyone else (including
+another Loom fleet) is prose, not state. See
+[`comment-trust.md`](comment-trust.md). The block's closing line states that
+rule too. `sweep.md` carries a one-line pointer to both rules in its
+Constraints rather than the full block, because it is always loaded and its
+sub-files are read on demand; every `sweep-*.md` sub-file and the other prompts
+that read forge text without the full block (`champion.md`,
+`champion-common.md`, `champion-reference.md`, `judge-reference.md`,
+`architect.md`, `hermit.md`, `auditor.md`, `epic.md`, `imagine.md`, `loom.md`,
+`watch.md`) carry a shorter one-line pointer near the top.
+
 ## Why a prompt convention and not a hook
 
 A `PreToolUse` guard hook (see [`guard-hooks.md`](guard-hooks.md)) sits between
