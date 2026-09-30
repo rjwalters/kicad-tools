@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from .models import (
     CATEGORIES,
+    CATEGORY_HEADINGS,
     LICENSE_COMPAT,
     RELATIONS,
     VERDICTS,
@@ -44,6 +45,7 @@ from .registry import (
 
 __all__ = [
     "CATEGORIES",
+    "CATEGORY_HEADINGS",
     "DATA_DIR",
     "LICENSE_COMPAT",
     "REGISTRY_PATH",

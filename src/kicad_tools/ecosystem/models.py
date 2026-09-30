@@ -20,6 +20,7 @@ from typing import Any
 
 __all__ = [
     "CATEGORIES",
+    "CATEGORY_HEADINGS",
     "LICENSE_COMPAT",
     "RELATIONS",
     "VERDICTS",
@@ -48,6 +49,26 @@ CATEGORIES: frozenset[str] = frozenset(
         "benchmark",
     }
 )
+
+#: Section heading per category, in canonical render order.
+#:
+#: This is the single source consumed by both ``kct ecosystem list``
+#: (``kicad_tools.cli.commands.ecosystem``) and the README's generated block
+#: (``scripts/ecosystem_render.py``) -- before Issue #5843 each kept its own
+#: copy, so a category added to ``CATEGORIES`` without a matching heading
+#: entry silently dropped that category's projects from the CLI listing
+#: (the renderer already guarded against this; the CLI did not). Keeping one
+#: dict here, plus the ``set(CATEGORY_HEADINGS) == CATEGORIES`` test in
+#: ``tests/test_ecosystem_registry.py``, makes a missing heading a loud
+#: failure at test time instead of a silent listing gap.
+CATEGORY_HEADINGS: dict[str, str] = {
+    "autorouter": "Autorouters",
+    "design-as-code": "Design as code (upstream of us)",
+    "agent-interface": "Agent and MCP interfaces",
+    "fabrication": "Fabrication and CI",
+    "bindings": "KiCad bindings",
+    "benchmark": "Benchmarks and evaluation protocols",
+}
 
 #: How the project sits relative to kicad-tools in a pipeline.
 #:

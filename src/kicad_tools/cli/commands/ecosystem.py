@@ -25,16 +25,6 @@ if TYPE_CHECKING:
 
 __all__ = ["run_ecosystem_command"]
 
-#: Section headings for the ``category`` vocabulary, in render order.
-CATEGORY_HEADINGS: dict[str, str] = {
-    "autorouter": "Autorouters",
-    "design-as-code": "Design as code",
-    "agent-interface": "Agent and MCP interfaces",
-    "fabrication": "Fabrication and CI",
-    "bindings": "Bindings",
-    "benchmark": "Benchmarks",
-}
-
 #: Short gloss per relation, for the text listing.
 RELATION_GLOSS: dict[str, str] = {
     "upstream": "produces files we consume",
@@ -84,7 +74,13 @@ def _fail(message: str, fmt: str) -> int:
 
 def _run_list(args: Namespace, registry: EcosystemRegistry, fmt: str) -> int:
     """List registry entries, optionally filtered."""
-    from kicad_tools.ecosystem import CATEGORIES, LICENSE_COMPAT, RELATIONS, VERDICTS
+    from kicad_tools.ecosystem import (
+        CATEGORIES,
+        CATEGORY_HEADINGS,
+        LICENSE_COMPAT,
+        RELATIONS,
+        VERDICTS,
+    )
 
     filters = {
         "category": (getattr(args, "ecosystem_category", None), CATEGORIES),
@@ -127,6 +123,20 @@ def _run_list(args: Namespace, registry: EcosystemRegistry, fmt: str) -> int:
     grouped: dict[str, list[EcosystemProject]] = {}
     for project in selected:
         grouped.setdefault(project.category, []).append(project)
+
+    # Defense in depth: CATEGORY_HEADINGS is asserted to cover all of
+    # CATEGORIES by a test (tests/test_ecosystem_registry.py), but a category
+    # present in `selected` and absent here would otherwise silently print
+    # fewer rows than the trailing count below reports (Issue #5843) -- fail
+    # loudly instead, matching scripts/ecosystem_render.py's existing guard.
+    unmapped = set(grouped) - set(CATEGORY_HEADINGS)
+    if unmapped:
+        return _fail(
+            f"no heading for category/categories {sorted(unmapped)!r} in "
+            "kicad_tools.ecosystem.CATEGORY_HEADINGS -- the listing would "
+            "silently omit these projects",
+            fmt,
+        )
 
     for category, heading in CATEGORY_HEADINGS.items():
         members = grouped.get(category)

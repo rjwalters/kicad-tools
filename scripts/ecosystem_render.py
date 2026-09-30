@@ -31,6 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from kicad_tools.ecosystem import (  # noqa: E402  (path bootstrap above)
+    CATEGORY_HEADINGS,
     EcosystemProject,
     EcosystemRegistry,
     load_registry,
@@ -39,16 +40,6 @@ from kicad_tools.ecosystem import (  # noqa: E402  (path bootstrap above)
 
 BEGIN_MARKER = "<!-- BEGIN kct:ecosystem -->"
 END_MARKER = "<!-- END kct:ecosystem -->"
-
-#: README section heading per category, in render order.
-CATEGORY_HEADINGS: dict[str, str] = {
-    "autorouter": "Autorouters",
-    "design-as-code": "Design as code (upstream of us)",
-    "agent-interface": "Agent and MCP interfaces",
-    "fabrication": "Fabrication and CI",
-    "bindings": "KiCad bindings",
-    "benchmark": "Benchmarks and evaluation protocols",
-}
 
 #: Bold lead-in per verdict. Empty means the summary already carries it.
 VERDICT_LEADIN: dict[str, str] = {
@@ -130,7 +121,7 @@ def render_block(registry: EcosystemRegistry) -> str:
     if unknown:
         raise SystemExit(
             f"ecosystem_render: no README heading for category/categories {sorted(unknown)!r}; "
-            "add one to CATEGORY_HEADINGS in scripts/ecosystem_render.py"
+            "add one to CATEGORY_HEADINGS in src/kicad_tools/ecosystem/models.py"
         )
 
     for category, heading in CATEGORY_HEADINGS.items():
