@@ -34,7 +34,7 @@ import base64
 import logging
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
@@ -3212,6 +3212,51 @@ class RoutingGrid:
                                 False,  # not is_obstacle (a keepout, not pad metal)
                                 False,  # not pad_blocked
                             )
+            return blocked_count
+
+    def mark_static_keepout_cells(self, cells: Iterable[tuple[int, int, int]]) -> int:
+        """Mark explicit ``(layer, gx, gy)`` cells as net-0 static obstacles.
+
+        Issue #5700: the per-cell sibling of :meth:`mark_region_bound`, used by
+        :func:`kicad_tools.router.plane_via_sites.reserve_plane_via_sites` to
+        hold a via site open for a plane-net pad.  Net ``0`` is exactly how
+        ``skip_nets`` encodes the plane pads themselves, so every routed net
+        treats a marked cell like plane copper -- a hard obstacle for traces
+        and vias alike.
+
+        Cells already blocked (pad metal, clearance halos, existing copper) are
+        left untouched, so no other obstacle's net is overwritten.  Out-of-range
+        cells are ignored.  Each newly-blocked cell is mirrored to an attached
+        C++ grid via ``mark_blocked`` (which records it as STATIC geometry), and
+        recorded in the Python static snapshot when one already exists, the
+        same way the board-outline keepout does (Issue #3545).  Rip-up only
+        clears cells owned by the ripped route's net, so a net-0 keep-out
+        cell is never erased.
+
+        Args:
+            cells: ``(layer_idx, gx, gy)`` grid cells to block.
+
+        Returns:
+            Number of cells newly blocked.
+        """
+        with self._acquire_lock():
+            cpp_grid = getattr(self, "_cpp_grid", None)
+            blocked_count = 0
+            for layer_idx, gx, gy in cells:
+                if not (0 <= layer_idx < self.num_layers):
+                    continue
+                if not (0 <= gx < self.cols and 0 <= gy < self.rows):
+                    continue
+                cell = self.cell_at(layer_idx, gy, gx)
+                if cell.blocked:
+                    continue
+                cell.blocked = True
+                cell.net = 0
+                blocked_count += 1
+                if self._static_blocked is not None:
+                    self._static_blocked[layer_idx, gy, gx] = True
+                if cpp_grid is not None:
+                    cpp_grid._impl.mark_blocked(int(gx), int(gy), int(layer_idx), 0, False, False)
             return blocked_count
 
     def reopen_stub_terminal(self, x: float, y: float, layer: Layer, net: int) -> tuple[int, int]:
