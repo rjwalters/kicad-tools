@@ -145,12 +145,20 @@ class TestCompareNetlistsDetectsReversedLed:
         )
         # And the nets must be crossed (schematic still says cathode/anode
         # on the original pads; PCB now binds them the other way around).
+        #
+        # ``LED_ANODE`` is a plain local label on board 00's root sheet, so
+        # the schematic side now reports KiCad's sheet-qualified identity
+        # ``/LED_ANODE`` (issue #5809); ``GND`` comes from a power symbol
+        # and stays unqualified.  The board's own bindings are bare, which
+        # is why the *clean* comparison above still passes — but a swap
+        # changes the leaf name, so it is still reported here, with the
+        # qualified spelling on the schematic side.
         m1 = d1_mismatches[("D1", "1")]
         m2 = d1_mismatches[("D1", "2")]
         assert m1.schematic_net == "GND" and m1.pcb_net == "LED_ANODE", (
             f"D1.1 mismatch wrong: schematic={m1.schematic_net!r} pcb={m1.pcb_net!r}"
         )
-        assert m2.schematic_net == "LED_ANODE" and m2.pcb_net == "GND", (
+        assert m2.schematic_net == "/LED_ANODE" and m2.pcb_net == "GND", (
             f"D1.2 mismatch wrong: schematic={m2.schematic_net!r} pcb={m2.pcb_net!r}"
         )
 
