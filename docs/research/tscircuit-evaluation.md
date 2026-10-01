@@ -303,15 +303,20 @@ Reading the table.
 ### Verdict
 
 Registry: `benchmarked`, pinned at the autorouter commit above. Two things
-come out of the single-board run:
+come out of the 16-board sweep:
 
 1. The SRJ abstraction, as shipped, cannot carry our constraints (netclass
-   widths, clearance, via size, zones, keepouts). A head-to-head on equal
-   terms needs either rules injected into the SRJ problem or the tscircuit
-   output re-judged after being widened. Without that, its completion
-   numbers are not comparable.
-2. The boards still need a 15-board sweep, with `.kicad_pro` netclasses
-   fetched, before anyone quotes a completion-rate comparison.
+   widths, clearance, via size, zones, keepouts). tscircuit solved 9 of 16
+   boards and timed out on 7, but on a relaxed problem, so those numbers are
+   not comparable with a router that honors the board's rules. A head-to-head
+   on equal terms needs either rules injected into the SRJ problem or the
+   tscircuit output re-judged after being widened.
+2. The sweep is done, but it is not an equal-terms comparison. kct completed
+   0 of 16: 10 boards hit the deadline checkpoint (unverified) and 6 were
+   refused at load. Both routers hit their caps on 5 boards. Quote the
+   completion rates only with the caveats stated above (unverified
+   checkpoints, relaxed SRJ problem, host load, the 199-item cap in the DRC
+   report). A longer kct cap is the open follow-up.
 
 Defects found along the way:
 
