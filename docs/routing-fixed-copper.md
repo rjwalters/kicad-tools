@@ -86,11 +86,11 @@ rather than approximating:
   layer-specific padstacks, non-positive sizes, pads with no copper layer, and a
   copper layer absent from the routing stack.
 
-Routable (non-excluded) custom pads and every other caller of
-`_pad_shape_from_block` / `_schema_pad_shape` -- standalone pad parsing,
-`optim/place_route.py`, `mcp/tools/routing.py`, `cli/placement_cmd.py` -- keep
-rejecting custom geometry exactly as before. Support for fixed excluded copper
-is not custom-pad target routing.
+The `analysis` loader and every other caller of `_pad_shape_from_block` /
+`_schema_pad_shape` -- standalone pad parsing, `optim/place_route.py`,
+`mcp/tools/routing.py`, `cli/placement_cmd.py` -- keep rejecting custom
+geometry exactly as before. Support for fixed excluded copper is not
+custom-pad target routing.
 
 On the pinned BeagleConnect Freedom input, custom pad U6.9 (B.Cu, GND, rect
 anchor, 270-degree pad rotation, one filled zero-width `gr_poly`) is now
@@ -104,3 +104,44 @@ It verifies SH1/GND exclusion and independently transformed U6.9 copper using
 the native backend. This completes the pinned loader prerequisite in #5357;
 default CLI routing and final routed/exported artifact and report acceptance
 remain separate work in #5348 and parent #4946.
+
+## Routable custom/trapezoid pads with unsupported geometry (#5863)
+
+Before #5863, a pad with unsupported copper geometry on an otherwise
+**routable** net refused the whole board at the `routing` loader -- a single
+mechanical or connector pad could take out boards with hundreds of otherwise
+routable nets. The `routing` loader (`load_pcb_for_routing`) now degrades such
+a pad instead, via `degraded_pad_copper` (`fixed_copper.py`):
+
+- exact copper when `custom_pad_copper` can reproduce it (the #5357 surface
+  above), entered the same way (`FixedPadCopper.degraded=True`, same
+  `fixed_fills` collection);
+- otherwise a conservative **bounding** box per primitive
+  (`bounding_pad_copper`) that is guaranteed to contain the real copper --
+  never an under-estimate, since that would let the router place a trace where
+  the board already has metal. A `gr_arc`'s bound includes the swept circle's
+  axis extremes, not just its three authored points, and a stroked primitive's
+  bound is widened by half the stroke width;
+- `None` (no fixed copper at all) for a pad with no copper layer -- a paste-
+  or mask-only mechanical pad is neither a target nor an obstacle;
+- still a hard refusal for a layer-specific `padstack` -- its true per-layer
+  copper cannot be derived from the common pad block, so bounding it could
+  under-estimate real metal, which is strictly worse than refusing.
+
+A degraded pad's **net** (not just the pad) is excluded from routing --
+`Autorouter.unsupported_geometry_nets` / `.unsupported_geometry_pads` record
+what was lost, and `load_pcb_for_routing` prints a one-line-per-pad warning
+plus a summary line. A `trapezoid` pad whose `rect_delta` is zero or absent
+needs no degrading at all: KiCad's trapezoid corners are the nominal
+rectangle's, each shifted by half the *other* axis' `rect_delta`
+(`pad.cpp`, `PAD_SHAPE::TRAPEZOID`), so a zero delta is exactly a `rect` and
+`_pad_shape_from_block` reduces it before the shape check ever runs.
+
+This is scoped to the `routing` loader only: the `analysis` loader and the
+other `_pad_shape_from_block` / `_schema_pad_shape` callers listed above are
+unchanged and still refuse. Five of the six real `dataset-srj18` boards that
+#5863 found (`gmsl_serializer`, `hdmi_edid_debug_board`,
+`oculink_pcie_adapter`, `ov9281_camera_board`, `usb_c_power_adapter`) load and
+route under this change; the sixth, `dual_gmsl_serializer_adapter`, clears the
+geometry refusal but then meets an unrelated duplicate-pad-number guard
+(`J5.MP`), filed separately as #5873.

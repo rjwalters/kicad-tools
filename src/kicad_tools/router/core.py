@@ -1695,6 +1695,12 @@ class Autorouter:
         self.placement_preserved_copper: str = ""
         self.placement_preserved_zones: tuple[str, ...] = ()
         self.placement_preserved_arcs: tuple[str, ...] = ()
+        # Issue #5863: nets the loader dropped from routing because a pad on
+        # them carries geometry this router cannot represent, and the pads
+        # (id, net, disposition) responsible. Empty on every board whose pads
+        # all reduce to routable geometry.
+        self.unsupported_geometry_nets: frozenset[str] = frozenset()
+        self.unsupported_geometry_pads: tuple[tuple[str, str, str], ...] = ()
 
         # Physics integration
         self._stackup = stackup

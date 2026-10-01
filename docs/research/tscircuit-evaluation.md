@@ -335,7 +335,12 @@ Defects found along the way:
 - `kct route` ships shorts on the Nano while its self-check reports zero
   clearance violations: filed as #5862 (one completed run, not yet
   reproduced to completion on a loaded host; see the issue).
-- `kct route` refuses 6 of 16 real boards on custom-shaped pads: #5863.
+- `kct route` refuses 6 of 16 real boards on custom-shaped pads: #5863
+  (**fixed**: the loader now degrades such a pad to obstacle copper and
+  excludes only its net, so 5 of those 6 load and route; the sixth,
+  `dual_gmsl_serializer_adapter`, then meets a separate duplicate-pad-number
+  guard, filed as #5873. The table above is the pre-fix measurement and is
+  left as recorded).
 - `kct route` aborts under default `--auto-pour` on Leonardo
   (`ZonePartitionError`): #5864.
 - Fixed in this change: `normalize.py` failing on `job_oculink_expansion`,

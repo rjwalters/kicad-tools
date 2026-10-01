@@ -16,12 +16,15 @@ gap of their own, so they are switched by delegation.
 
 from __future__ import annotations
 
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Any
 
 from .fixed_copper_kernel import KernelFill, fixed_fill_clear, kernel_fill, polygon_rings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,14 @@ class FixedPadCopper:
     layers: tuple[str, ...]
     local_clearance: float
     geometry: Any
+    # Issue #5863: True when this record stands in for a pad the router could
+    # not carry as a routable Pad on an OTHERWISE ROUTABLE net (its net is
+    # excluded instead of the board being refused). ``geometry`` may then be a
+    # conservative OVER-approximation, and a copper layer outside the routing
+    # stack is skipped rather than refused: a layer nothing routes on cannot
+    # host a conflict, and refusing it would restore the #5863 whole-board
+    # abort through the back door.
+    degraded: bool = False
 
 
 @dataclass(frozen=True)
@@ -248,6 +259,243 @@ def custom_pad_copper(
     )
 
 
+def _refuse_bound(reference: str, pad_number: str, detail: str) -> ValueError:
+    return ValueError(
+        f"Cannot bound the copper of pad {reference}.{pad_number}: {detail}; "
+        "routing cannot treat this pad as an obstacle without under-estimating "
+        "its copper. Route this board with a router supporting its full copper "
+        "geometry."
+    )
+
+
+def _stroke_half_width(node, reference: str, pad_number: str) -> float:
+    """Half the primitive's pen width -- how far its stroke leaves the outline."""
+    stroke = node.find_child("stroke")
+    width_node = stroke.find_child("width") if stroke is not None else node.find_child("width")
+    width = width_node.get_float(0) if width_node is not None else 0.0
+    if width is None or not math.isfinite(width) or width < 0:
+        raise _refuse_bound(reference, pad_number, f"unusable stroke width {width}")
+    return width / 2.0
+
+
+def _node_points(node) -> list[tuple[float, float]] | None:
+    """Every point this primitive is defined by, or None if one is unreadable."""
+    points: list[tuple[float, float]] = []
+    for child in node.children:
+        if child.is_atom:
+            continue
+        if child.name in ("xy", "start", "mid", "end", "center"):
+            px, py = child.get_float(0), child.get_float(1)
+            if px is None or py is None:
+                return None
+            points.append((px, py))
+            continue
+        nested = _node_points(child)
+        if nested is None:
+            return None
+        points.extend(nested)
+    return points
+
+
+def _arc_extremes(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Points whose bounding box contains the whole start-mid-end arc.
+
+    The three authored points alone do NOT bound an arc (it bulges outside
+    their hull), so this adds the axis extremes of the circumscribed circle
+    that the swept angle actually reaches. Collinear (degenerate) points
+    describe a straight segment, which the authored points do bound.
+    """
+    (x1, y1), (x2, y2), (x3, y3) = points
+    det = 2.0 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(det) < 1e-12:
+        return points
+    s1, s2, s3 = x1 * x1 + y1 * y1, x2 * x2 + y2 * y2, x3 * x3 + y3 * y3
+    cx = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / det
+    cy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / det
+    radius = math.hypot(x1 - cx, y1 - cy)
+    if not math.isfinite(radius):
+        return points
+
+    def sweep(angle: float) -> float:
+        return angle % (2.0 * math.pi)
+
+    a_start = math.atan2(y1 - cy, x1 - cx)
+    a_mid = sweep(math.atan2(y2 - cy, x2 - cx) - a_start)
+    a_end = sweep(math.atan2(y3 - cy, x3 - cx) - a_start)
+    # KiCad stores the arc through its midpoint, so the swept direction is
+    # whichever one reaches ``mid`` before ``end``.
+    counter_clockwise = a_mid <= a_end
+    if a_end == 0.0:
+        counter_clockwise, a_end = True, 2.0 * math.pi
+    extremes = list(points)
+    for quadrant in range(4):
+        angle = quadrant * math.pi / 2.0
+        offset = sweep(angle - a_start) if counter_clockwise else sweep(a_start - angle)
+        limit = a_end if counter_clockwise else 2.0 * math.pi - a_end
+        if offset <= limit:
+            extremes.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+    return extremes
+
+
+def _primitive_bound(node, reference: str, pad_number: str):
+    """A box that is guaranteed to contain one primitive's copper.
+
+    Over-approximation is the whole point: a bound that misses copper would
+    let the router place a trace where the board already has metal, which is
+    strictly worse than the over-blocking an enclosing box causes.
+    """
+    from shapely.geometry import box
+
+    half = _stroke_half_width(node, reference, pad_number)
+    points = _node_points(node)
+    if not points:
+        raise _refuse_bound(reference, pad_number, f"primitive {node.name!r} has no usable points")
+    if node.name == "gr_circle" and len(points) >= 2:
+        (cx, cy), (ex, ey) = points[0], points[1]
+        radius = math.hypot(ex - cx, ey - cy)
+        points = [(cx - radius, cy - radius), (cx + radius, cy + radius)]
+    elif node.name == "gr_arc":
+        if len(points) != 3:
+            raise _refuse_bound(reference, pad_number, "gr_arc needs start, mid and end")
+        points = _arc_extremes(points)
+    xs = [px for px, _ in points]
+    ys = [py for _, py in points]
+    if not all(math.isfinite(value) for value in (*xs, *ys)):
+        raise _refuse_bound(reference, pad_number, f"primitive {node.name!r} has non-finite points")
+    return box(min(xs) - half, min(ys) - half, max(xs) + half, max(ys) + half)
+
+
+def bounding_pad_copper(
+    pad_block: str,
+    *,
+    reference: str,
+    pad_number: str,
+    x: float,
+    y: float,
+    rotation: float,
+    source_net: str,
+    source_net_id: int,
+) -> FixedPadCopper | None:
+    """Conservative bounding copper of a pad the router cannot route (#5863).
+
+    Returns ``None`` when the pad carries no copper layer at all (a paste- or
+    mask-only pad, e.g. the QFN thermal-paste patterns on half the pinned
+    dataset-srj18 boards): there is no copper to preserve, so the pad is
+    neither a target nor an obstacle.
+
+    Otherwise the result's ``geometry`` is the union of per-primitive boxes
+    (plus the anchor), each an over-approximation of that primitive's copper --
+    never an under-approximation. A layer-specific padstack still refuses:
+    its per-layer copper is not derivable from the common block, and a bound
+    that silently assumed otherwise could under-estimate real metal.
+    """
+    from shapely.affinity import rotate, translate
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    from kicad_tools.sexp import parse_string
+
+    node = parse_string(pad_block)
+    atoms = [str(atom) for atom in node.get_atoms()]
+    shape = atoms[2] if node.name == "pad" and len(atoms) >= 3 else ""
+    layers_node = node.find_child("layers")
+    names = tuple(str(name) for name in (layers_node.get_atoms() if layers_node else ()))
+    copper_layers = tuple(name for name in names if name.endswith(".Cu"))
+    if not copper_layers:
+        return None
+    if node.find_child("padstack") is not None:
+        raise _refuse_bound(reference, pad_number, "layer-specific padstack copper")
+    size = node.find_child("size")
+    width = size.get_float(0) if size is not None else None
+    height = size.get_float(1) if size is not None else None
+    if width is None or height is None or not (width > 0 and height > 0):
+        raise _refuse_bound(
+            reference, pad_number, f"missing or non-positive size ({width}, {height})"
+        )
+    if shape == "custom":
+        options = node.find_child("options")
+        anchor_node = options.find_child("anchor") if options is not None else None
+        anchor = str(
+            anchor_node.get_string(0) or "" if anchor_node is not None else "circle"
+        ).lower()
+        # A circle anchor is KiCad's size.x disc; bound both axes by the larger
+        # nominal dimension so an unequal (malformed) size cannot clip it.
+        half_x, half_y = (
+            (width / 2.0, height / 2.0) if anchor == "rect" else (max(width, height) / 2.0,) * 2
+        )
+        shapes = [box(-half_x, -half_y, half_x, half_y)]
+        primitives = node.find_child("primitives")
+        for child in primitives.children if primitives is not None else []:
+            if child.is_atom:
+                continue
+            shapes.append(_primitive_bound(child, reference, pad_number))
+    elif shape == "trapezoid":
+        # KiCad's trapezoid corners are the nominal rectangle's, each shifted
+        # by half the rect_delta of the OTHER axis, so the copper reaches
+        # |delta|/2 past the nominal box (pad.cpp, PAD_SHAPE::TRAPEZOID).
+        delta = node.find_child("rect_delta")
+        dx = (delta.get_float(0) if delta is not None else 0.0) or 0.0
+        dy = (delta.get_float(1) if delta is not None else 0.0) or 0.0
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            raise _refuse_bound(reference, pad_number, f"non-finite rect_delta ({dx}, {dy})")
+        half_x = width / 2.0 + abs(dy) / 2.0
+        half_y = height / 2.0 + abs(dx) / 2.0
+        shapes = [box(-half_x, -half_y, half_x, half_y)]
+    else:
+        raise _refuse_bound(reference, pad_number, f"unsupported pad shape {shape!r}")
+    local = unary_union(shapes)
+    if local.is_empty or local.geom_type not in ("Polygon", "MultiPolygon"):
+        raise _refuse_bound(reference, pad_number, "bounds enclose no copper")
+    clearance_node = node.find_child("clearance")
+    local_clearance = clearance_node.get_float(0) if clearance_node is not None else None
+    return FixedPadCopper(
+        reference=reference,
+        pad_number=pad_number,
+        source_net=source_net,
+        source_net_id=source_net_id,
+        layers=copper_layers,
+        local_clearance=local_clearance or 0.0,
+        geometry=translate(rotate(local, -rotation, origin=(0, 0)), x, y),
+        degraded=True,
+    )
+
+
+def degraded_pad_copper(
+    pad_block: str,
+    *,
+    reference: str,
+    pad_number: str,
+    x: float,
+    y: float,
+    rotation: float,
+    source_net: str,
+    source_net_id: int,
+) -> FixedPadCopper | None:
+    """Obstacle copper for a pad on a ROUTABLE net the router cannot route.
+
+    Issue #5863: an unsupported pad shape used to refuse the whole board even
+    when only one pad was affected. The pad now degrades instead -- exact
+    copper when :func:`custom_pad_copper` can reproduce it, else the
+    conservative bound of :func:`bounding_pad_copper`, and ``None`` when the
+    pad has no copper at all. The caller excludes the pad's net from routing,
+    so nothing downstream mistakes this copper for a routable terminal.
+    """
+    kwargs: dict[str, Any] = {
+        "reference": reference,
+        "pad_number": pad_number,
+        "x": x,
+        "y": y,
+        "rotation": rotation,
+        "source_net": source_net,
+        "source_net_id": source_net_id,
+    }
+    try:
+        exact = custom_pad_copper(pad_block, **kwargs)
+    except ValueError:
+        return bounding_pad_copper(pad_block, **kwargs)
+    return replace(exact, degraded=True)
+
+
 def pad_fixed_fills(pads, grid, net_class_map) -> tuple[FixedFill, ...]:
     """One physical obstacle per copper layer the excluded pad actually covers.
 
@@ -272,6 +520,19 @@ def pad_fixed_fills(pads, grid, net_class_map) -> tuple[FixedFill, ...]:
             try:
                 indices.add(grid.layer_to_index(Layer.from_kicad_name(name).value))
             except Exception as exc:
+                if pad.degraded:
+                    # Issue #5863: this pad's net is excluded from routing and
+                    # nothing routes on a layer outside the stack, so copper
+                    # there cannot conflict -- skip it instead of restoring the
+                    # whole-board refusal this path exists to remove.
+                    logger.warning(
+                        "Pad %s.%s copper layer %r is outside the routing stack; "
+                        "skipped as an obstacle (its net is excluded from routing)",
+                        pad.reference,
+                        pad.pad_number,
+                        name,
+                    )
+                    continue
                 raise _refuse(
                     pad.reference, pad.pad_number, f"copper layer {name!r} is not in the stack"
                 ) from exc
