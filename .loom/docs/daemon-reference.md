@@ -4163,7 +4163,21 @@ repository is now the parallelism boundary:
   `loom:review-requested` count is unfiltered: Judge's queue has no label
   exclusions. The labels come from the same listing rows. A failed listing records nothing, and an entry older than
   `demandWidth.staleSecs` is ignored, so an axis nobody has observed recently is
-  **unobserved** and changes nothing. For a PR role,
+  **unobserved** and changes nothing. An axis has **two** readings (#9414): the
+  **fresh** sum (only entries younger than `staleSecs`), which the reservation
+  below and the #9410 build back-off use; and the **width** sum, which adds in
+  every stale entry's *last-known* count and is unobserved only when the axis
+  has no fresh entry at all **or** its total is zero. A judge/doctor entry
+  refreshes only when that role *runs* in that repository, and width is what
+  decides how often it does, so a fresh-only sum made width its own input:
+  a few stale repositories read as `0`, width dropped, fewer repositories were
+  visited, more entries went stale — which could hold judge at width 1 while
+  the real host review debt justified the whole Phase 1 budget. Over-counting
+  is safe on the width side only: width is clamped at
+  `min(max, roleMaxConcurrent budget)`, so its worst case is exactly the Phase
+  1 budget, and judge/doctor are queue-gated, so a wider budget cannot start a
+  run on a repository whose queue is actually empty (an empty queue returns
+  without spawning and does not use up the tick's budget). For a PR role,
   `width = clamp(ceil(debt / perRun), 1, min(max, roleMaxConcurrent budget))`
   (the Phase 1 budget when unobserved). Judge and doctor use that width as their
   effective budget, and a refusal at it is logged naming the width and the
@@ -4178,6 +4192,10 @@ repository is now the parallelism boundary:
   only on an admission, so every repository with debt is still reached within a
   bounded number of ticks. One `INFO` line is logged when a role's width or
   reservation changes, naming the debt, `perRun`, `max` and the Phase 1 budget.
+  It reports **both** readings as `debt <last-known> (fresh <fresh>)`, so a
+  drained host (`debt unobserved (fresh 0)`) is distinguishable from an
+  unvisited one (`debt unobserved (fresh unobserved)`) and the gap between the
+  two sums — how far behind the fresh sum has fallen — is visible (#9414).
   Idle-edge runs keep the Phase 1 budget. `demandWidth.enabled: false` restores
   exactly the Phase 1 admission (no ledger reads, no reservation, no `loom:pr`
   count).
@@ -4217,8 +4235,10 @@ of its own.
   runner's in-memory demand ledger (see [Concurrent across
   repositories](#concurrent-across-repositories-one-instance-per-repository-role-9391))
   with `autonomous.roleRunner.demandWidth.staleSecs`:
-  `debt = review + changes + merge` over the axes with a fresh entry. **No
-  forge call** is added. Each axis leaves out the PRs its role will not
+  `debt = review + changes + merge` over the axes with a fresh entry — the
+  **fresh** sum only, never the width reading that counts stale entries at
+  their last-known value (#9414), because an over-count here would keep new
+  builds held off. **No forge call** is added. Each axis leaves out the PRs its role will not
   drain: merge excludes operator-held PRs (`loom:blocked` / `loom:operator` /
   `loom:operator-only`), changes excludes parked PRs (`loom:blocked` /
   `loom:operator-only` — not `loom:operator`, which Doctor still drains;
@@ -5125,7 +5145,7 @@ knobs not yet audited here.
 | `autonomous.roleRunner.demandWidth.max` | *(config only)* | `4` | Upper clamp on judge, doctor and champion width. Still capped by the role's `roleMaxConcurrent` budget, so at the default ceiling of 7 (budget 3) it binds only where the budget is 4 or more — demand never raises a role above its budget. Zero, negative or non-integer drops to the default. **Live** |
 | `autonomous.roleRunner.demandWidth.reserve` | *(config only)* | `true` | Champion-first ceiling reservation: admitting a role leaves free the unfilled `min(width, repositories with debt)` of each higher-priority PR role (champion > judge > doctor > others). `false` keeps the width but reserves nothing. **Live** |
 | `autonomous.roleRunner.demandWidth.nonPrFloor` | *(config only)* | `1` | Ceiling slots the reservation always leaves for non-PR roles: the reservation never exceeds `maxConcurrent − nonPrFloor`. Zero, negative or non-integer drops to the default. **Live** |
-| `autonomous.roleRunner.demandWidth.staleSecs` | *(config only)* | `1800` | Demand-ledger entries older than this many seconds are ignored; an axis with no fresh entry is unobserved and falls back to Phase 1 behaviour. Zero, negative or non-integer drops to the default. **Live** |
+| `autonomous.roleRunner.demandWidth.staleSecs` | *(config only)* | `1800` | Demand-ledger entries older than this many seconds are stale; an axis with no fresh entry is unobserved and falls back to Phase 1 behaviour. The reservation and the #9410 build back-off sum only fresh entries; the PR-role **width** adds in every stale entry's last-known count (#9414), so it is unobserved only when the axis has no fresh entry or a zero total. Zero, negative or non-integer drops to the default. **Live** |
 | `autonomous.roleRunner.model` | *(config only)* | `sonnet` | Model every role child is pinned to via `--model` (#4501). Resolved through the same `resolve_dispatch_model` chain as sweep dispatch: this key > `autonomous.model` > shipped default; blanks treated as unset. A role child never inherits the account's interactive CLI default |
 | `autonomous.roleRunner.onIdle` | *(config only)* | `[]` (none) | Subset of all **8** shipped roles — the 7 above **plus `architect`**, which is reachable here and nowhere else by default (#5656) — to fire on the work-finder **idle edge** (#4364) — the non-idle → idle transition (0 in-flight sweeps AND nothing dispatched this tick), in addition to the interval cadence. Absent → none (opposite default from `roles`); unknown names ignored with a warning. Debounced to min 60s per (root, role) and skipped while that role's interval/idle run is in progress. **Requires the work finder enabled** to observe idleness (a startup warning fires if set with the work finder off). **Also gated by that same root's own `enabled`** (#4377) — see below |
 | `autonomous.roleRunner.onIdleMaxWait` | *(config only)* | *(unset — no promotion, today's idle-edge-only firing)* | **Per-role starvation guard for an `onIdle` role (#7511).** A `{"<role>": "<duration>"}` object (e.g. `{"hermit": "24h", "auditor": "72h"}`, duration strings `<n>s`/`<n>m`/`<n>h`/`<n>d`) naming the longest a role may go without a completed tick before it is **promoted** into the next interval-cadence pass — see [`onIdleMaxWait` — promoting a starved `onIdle` role](#onidlemaxwait--promoting-a-starved-onidle-role-7511) below |
@@ -8093,7 +8113,7 @@ leaves the daemon's behavior byte-for-byte unchanged:
 | — | `autonomous.roleRunner.demandWidth.max` | config only | `4` (width clamp, still capped by the role budget) |
 | — | `autonomous.roleRunner.demandWidth.reserve` | config only | `true` (Champion-first ceiling reservation) |
 | — | `autonomous.roleRunner.demandWidth.nonPrFloor` | config only | `1` (slots always left for non-PR roles) |
-| — | `autonomous.roleRunner.demandWidth.staleSecs` | config only | `1800` (ledger entries older than this are unobserved) |
+| — | `autonomous.roleRunner.demandWidth.staleSecs` | config only | `1800` (ledger entries older than this are stale: unobserved for the reservation and the #9410 back-off, counted at their last-known value for PR-role width, #9414) |
 | — | `autonomous.roleRunner.onIdle` | config only | `[]` (none; may name any of the 8 shipped roles, `architect` included) |
 | — | `autonomous.roleRunner.model` | config only (`roleRunner.model` > `autonomous.model` > default) | `sonnet` (`DEFAULT_DISPATCH_MODEL`) |
 | — | `autonomous.roleRunner.effort` | config only (`roleRunner.roleEfforts.<role>` > `roleRunner.effort` > unset) | *(unset ⇒ **no** `--effort` argument; the runtime CLI's own session default, #8054)* |
