@@ -511,14 +511,32 @@ answers, against `signoz_logs.distributed_logs_v2`:
   is what says whether the figures below rest on anything.
 - **Q1**: MAE, 25–75 coverage and bias per heuristic, revision, kind, repo
   and horizon bucket.
-- **Q2**: mean pinball loss per heuristic × kind, and per revision.
+- **Q2**: mean pinball loss per heuristic × kind, and per revision. `ROLLUP`
+  supplies the subtotals, and `rolled_up` says how many of the three
+  dimensions a given row aggregated away — **0 is a real group, 3 is the grand
+  total**. Read it: ROLLUP blanks an aggregated column to `''`, which is also
+  what a record with no `loom.eta.heuristic` reads as, so the query can emit
+  two rows with the identical key `('', '', '')`.
 - **Q3**: feature ranking. Each outcome joins its estimate on
   `loom.eta.estimate_id`, and every numeric feature is correlated with the
-  error (`rankCorr`, `corr`).
+  error (`rankCorr`, `corr`). Two traps, both measured on the engine rather
+  than reasoned about:
+  - A feature that **never varied** scores `rank_corr` = **0.5**, not 0 and
+    not `nan` — `rankCorr` average-ranks ties — while `pearson_corr` is `nan`.
+    `distinct_values` = 1 is what identifies it. Since the section orders by
+    `abs(rank_corr)`, an unvarying feature outranks any genuine correlation
+    weaker than 0.5.
+  - The estimate side carries the same `since` bound as the outcome side, so a
+    scored outcome whose **estimate predates the window** appears in section 0,
+    Q1 and Q2 but contributes no features here. Widen `since` past the longest
+    lead time before treating a ranking as complete.
 
 Q1–Q3 group by `(heuristic, revision)` as well as by heuristic, so a daemon
 roll shows as two rows, and all three exclude rows with incomplete
 provenance. Every `loom.eta.*` attribute they read is pinned to the emitted
 schema by `loom-daemon/tests/eta_artifacts.rs`, so a renamed or dropped
 attribute fails CI here rather than silently returning empty columns in
-SigNoz.
+SigNoz. `loom-daemon/tests/signoz_eta_queries.rs` goes further: it executes the
+whole file verbatim against the pinned ClickHouse the SigNoz trial deploys and
+checks the answers, with the mutation of the committed SQL that breaks each one
+run as a counterfactual.
