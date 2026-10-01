@@ -1262,6 +1262,7 @@ CHECK_CATEGORIES = [
     "impedance",
     "isolated_copper",
     "match_group_length_skew",
+    "netclass_floor",
     "netlist",
     "pad_grid",
     "pin1_marker",
@@ -2342,6 +2343,7 @@ def main(argv: list[str] | None = None) -> int:
         sch_path=sch_path,
         sch_field_threshold=args.sch_field_threshold,
         pcb_path=pcb_path,
+        layers=layers,
     )
 
     # Issue #4417: apply general waivers centrally, once, AFTER all checks run.
@@ -2725,6 +2727,7 @@ def run_selected_checks(
     sch_path: Path | None = None,
     sch_field_threshold: float = DEFAULT_SCH_FIELD_THRESHOLD_MM,
     pcb_path: Path | None = None,
+    layers: int | None = None,
 ) -> DRCResults:
     """Run the selected DRC checks based on filters.
 
@@ -2748,12 +2751,20 @@ def run_selected_checks(
             that only exercise PCB-scoped checks are unaffected.
         sch_field_threshold: ``sch_field_offset`` distance threshold in
             mm (issue #4595; strictly-greater-than comparison).
-        pcb_path: Path of the ``.kicad_pcb`` under check, used only by
-            the ``doc_drift`` category (issue #4540) to locate the board
-            README and repo root -- the PCB is never re-parsed.  Must
-            default to ``None`` so library callers that only exercise
-            PCB-object-scoped checks are unaffected; the category is
-            then a silent no-op.
+        pcb_path: Path of the ``.kicad_pcb`` under check, used by the
+            ``doc_drift`` category (issue #4540) to locate the board
+            README and repo root, and by ``netclass_floor`` (issue #5875)
+            to locate the sibling ``.kicad_pro`` -- the PCB is never
+            re-parsed.  Must default to ``None`` so library callers that
+            only exercise PCB-object-scoped checks are unaffected; both
+            categories are then a silent no-op.
+        layers: Effective copper-layer count (the same value that
+            resolved ``checker.design_rules``, so an explicit
+            ``--layers`` is honoured).  Used only by ``netclass_floor``
+            (issue #5875) to decide whether a via-hostile netclass is
+            fab-blocking (2+ copper layers) or advisory (a 1-layer board
+            can carry no via at all).  ``None`` falls back to the PCB's
+            own copper-layer count.
     """
     results = DRCResults()
 
@@ -2796,6 +2807,25 @@ def run_selected_checks(
 
         return check_doc_drift(pcb_path)
 
+    # Issue #5875: ``.kicad_pro`` netclass defaults vs the active ``--mfr``
+    # floors.  Dispatched as a CLI-level closure (like ``doc_drift`` /
+    # ``sch_fields``) because it needs the PCB *path* to locate the sibling
+    # ``.kicad_pro`` -- it is intentionally NOT a ``DRCChecker`` method and
+    # NOT part of ``CHECK_ALL_METHODS``.  With no pcb_path it is a silent
+    # no-op.  Reads ``checker.design_rules``, so it enforces exactly the
+    # floors the ``dimension_*`` rules enforce on routed copper.
+    def _netclass_floor_check() -> DRCResults:
+        if pcb_path is None:
+            return DRCResults()
+        from kicad_tools.validate.rules.netclass_floor import check_netclass_floor
+
+        effective_layers = layers if layers is not None else len(checker.pcb.copper_layers)
+        return check_netclass_floor(
+            pcb_path,
+            checker.design_rules,
+            copper_layers=effective_layers,
+        )
+
     # Map of category to check method.  This dict MUST stay a superset
     # of the methods invoked by ``DRCChecker.check_all`` (i.e., every
     # name in ``DRCChecker.CHECK_ALL_METHODS`` must be referenced as a
@@ -2823,6 +2853,7 @@ def run_selected_checks(
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,
+        "netclass_floor": _netclass_floor_check,
         "netlist": checker.check_netlist,
         "pad_grid": _pad_grid_check,
         "pin1_marker": checker.check_pin1_markers,
