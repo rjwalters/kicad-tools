@@ -67,7 +67,25 @@ class TestManifestParsing:
         boards = fetch_boards.load_manifest(MANIFEST_PATH)
         # #4934's JSON report schema references these slugs -- keep them
         # stable (curator enhancement on #4933).
-        assert set(boards.keys()) == {"strf", "pocketbeagle", "beagleconnect_freedom"}
+        deep_pcb = {k for k in boards if not k.startswith("srj18_")}
+        assert deep_pcb == {"strf", "pocketbeagle", "beagleconnect_freedom"}
+
+    def test_srj18_boards_are_license_checked_and_pinned(self, fetch_boards):
+        """Issue #5848: the 16 dataset-srj18 source boards, permissive only."""
+        boards = fetch_boards.load_manifest(MANIFEST_PATH)
+        srj18 = {k: v for k, v in boards.items() if k.startswith("srj18_")}
+        assert len(srj18) == 16
+        for spec in srj18.values():
+            assert spec.license in {"WTFPL", "Apache-2.0"}
+            assert len(spec.commit) == 40
+            assert spec.vcs == "github"
+            assert spec.opt_in
+        # An unqualified 'all boards' run still covers only the DeepPCB trio.
+        assert set(fetch_boards.default_boards(boards)) == {
+            "strf",
+            "pocketbeagle",
+            "beagleconnect_freedom",
+        }
 
     def test_strf_fields(self, fetch_boards):
         boards = fetch_boards.load_manifest(MANIFEST_PATH)

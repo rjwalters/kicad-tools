@@ -171,26 +171,28 @@ repo_url = "https://github.com/tscircuit/tscircuit-autorouter"
 vcs = "github"
 category = "autorouter"
 relation = "peer"
-verdict = "watch"
+verdict = "benchmarked"
 license = "MIT"
 license_compat = "mit-clean"
 language = "TypeScript"
 stars = 85
 last_push = "2026-09-30"
 last_verified = "2026-09-30"
+pinned_commit = "911963b2f539f38140386cb0073332053b2d4582"
 research_docs = ["docs/research/tscircuit-evaluation.md"]
 summary = """
 tscircuit's built-in router (`@tscircuit/capacity-autorouter`): a \
 pipeline of hypergraph / successive-approximation solvers rather than \
 net-by-net A\\*, fed a `SimpleRouteJson` problem instead of a KiCad file. \
 It ships a public benchmark (`dataset-srj18`, derived from real Arduino \
-and Antmicro KiCad boards) and a bug-report-to-fixture workflow. Not yet \
-measured against us.\
+and Antmicro KiCad boards) and a bug-report-to-fixture workflow. Partly \
+benchmarked against us (Arduino Nano only): SRJ drops netclass width, \
+clearance, zones and keepouts, so its completion is not comparable.\
 """
 reeval_trigger = """
-Benchmark it on the dataset-srj18 source boards through \
-`benchmarks/external/` under the shared `kicad-cli` referee, as was done \
-for KiCadRoutingTools.\
+Re-run the remaining 15 dataset-srj18 boards once netclasses (`.kicad_pro`) \
+are fetched and SRJ can carry per-net width/clearance; or if tscircuit adds \
+zone/keepout/netclass fields to SimpleRouteJson.\
 """
 
 # ------------------------------------------------------------ design-as-code
