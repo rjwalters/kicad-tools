@@ -12,6 +12,10 @@ from shapely.ops import nearest_points  # type: ignore[import-untyped]
 
 from kicad_tools.acceleration import to_numpy
 
+from .clearance_kernel import KSegment as _KSegment
+from .clearance_kernel import KVia as _KVia
+from .clearance_kernel import clear as _kernel_clear
+
 if TYPE_CHECKING:
     from .grid import RoutingGrid
     from .primitives import Segment, Via
@@ -276,6 +280,22 @@ class RouteHaloGeometry:
         Callers must check cell_known for every blocked cell they refine.
         With require_geometry=False, absent geometry is clear; use that mode
         only to reject known conflicts, never to authorize raster relaxation.
+
+        Issue #5661 (Epic #5509 Phase 3b): the copper verdict itself -- "is
+        this edge-to-edge gap at least ``required``" -- is delegated to
+        :func:`~kicad_tools.router.clearance_kernel.clear` rather than a
+        private ``distance - half - other_half`` subtraction. Before this
+        phase a trace candidate against a stored via had its ``required``
+        separately WIDENED to ``max(required, rules.via_clearance)``, which
+        made this search-time predicate stricter than the commit-time
+        validator for the identical pair (the validator applies
+        ``trace_clearance``) -- a legal 0.18 mm gap the commit gates accept
+        could be refused here.  The kernel is handed the same ``required``
+        the commit path resolves and answers once, so the two can no longer
+        disagree about the same pair.  Hole-to-hole/drill floors below are
+        unaffected -- they are a different rule value than copper clearance
+        and the kernel's :func:`~kicad_tools.router.clearance_kernel.clear`
+        does not fold them in either.
         """
         from .pairwise_clearance import _attach_zone_exempts
         from .primitives import Segment
@@ -296,6 +316,10 @@ class RouteHaloGeometry:
         # Built on first use: a call whose neighbours are all pruned below
         # never needs a shapely geometry at all.
         shape = None
+        # The same candidate, as a kernel shape (issue #5661) -- built once
+        # per call, lazily alongside ``shape``, and reused for every
+        # surviving neighbour's :func:`~.clearance_kernel.clear` query.
+        kernel_shape: _KSegment | _KVia | None = None
         names = router._route_halo_names
         own_name = names.get(candidate.net, "")
         nc = router._halo_net_class(candidate.net)
@@ -419,10 +443,18 @@ class RouteHaloGeometry:
                         shared_layer,
                     ):
                         required = pair
-            if is_trace and not other_trace:
-                required = max(required, router.rules.via_clearance)
-            other_half = other.width / 2 if other_trace else other.diameter / 2
-            if distance - half - other_half < required - 1e-4:
+            if kernel_shape is None:
+                kernel_shape = (
+                    _KSegment(cax, cay, cbx, cby, candidate.width)
+                    if is_trace
+                    else _KVia(cax, cay, candidate.diameter)
+                )
+            other_kernel_shape = (
+                _KSegment(other.x1, other.y1, other.x2, other.y2, other.width)
+                if other_trace
+                else _KVia(other.x, other.y, other.diameter)
+            )
+            if not _kernel_clear(kernel_shape, other_kernel_shape, required):
                 return False
         return True
 

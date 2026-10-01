@@ -11,9 +11,16 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 23 vias / 322.77mm total
+- **Deterministic output**: 22 routes / 24 vias / 321.46mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (24 vias / 326.73mm before the 2026-09-22
+  has fully converged.  (24 vias / 322.39mm before the 2026-10-01
+  #5661 re-baseline, which switched the SEARCH-time halo refinement to
+  the clearance kernel and retired its ``max(required, via_clearance)``
+  widening for trace-vs-via pairs: A* stops refusing legal candidates
+  the commit gates accept, so a slightly shorter solution is reachable.
+  Reach is UNCHANGED at 8/8 and vias at 24 -- see the #5661 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (23 vias / 322.77mm before the 2026-09-22
   #5660 re-baseline, which switched the grid halo from a Chebyshev
   square to the clearance kernel's exact disc: strictly less copper
   is marked, so one escape via that the square's diagonal corner had
@@ -752,7 +759,29 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # the physical delta is a 1.981623mm shorter NODE_C route.
     # Retained evidence: .loom/sweep-checkpoint/evidence/pr-5425-board02/.
     # Keep exact length and cross-seed guards; no tolerance changes.
-    EXPECTED_LENGTH = 322.39
+    #
+    # Re-baselined 2026-10-01 for Issue #5661 (Epic #5509 Phase 3b: the
+    # SEARCH-time halo refinement switched to the clearance kernel).  The
+    # ``max(required, via_clearance)`` widening a trace candidate's
+    # requirement against a stored via used to carry -- in
+    # ``RouteHaloGeometry.clear`` and in
+    # ``Grid3D::route_trace_geometry_clear`` -- is retired: the pair is now
+    # held to the clearance it actually resolves, which is the same number
+    # the commit-time validator applies to it.  So A* stops refusing
+    # candidates its own commit gates accept and a marginally shorter
+    # solution becomes reachable.  Seeds 42/43/44 all yield
+    # (22, 224, 24, 321.46), bit-identical across seeds.  Routes (22),
+    # vias (24) and reach (8/8) are UNCHANGED -- the epic's scope guard #2
+    # -- and length moves 322.39 -> 321.46 (-0.93 mm).  Less copper on
+    # unchanged reach and an unchanged via count is an improvement, not a
+    # regression, and it cannot be an under-rejection: the requirement the
+    # search now applies is the commit validator's own, not a looser one.
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
+    # tier1 profile on this output (same scope caveat as the "SCOPE OF THE
+    # CLEANLINESS CLAIM" note: pure-Python checker at jlcpcb-tier1; CI's
+    # containerized kicad-cli run is authoritative for the live board).
+    # Prior pin (22, 229-segment-era, 24, 322.39).
+    EXPECTED_LENGTH = 321.46
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -813,6 +842,8 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # macOS 226 / Linux CI 224; exact routes/vias/length are pinned above.
     # #5660: retain the band unchanged -- the kernel-disc halo measures
     # 227 on Linux-x86_64, comfortably inside it.
+    # #5661: retain the band unchanged -- the kernel-backed search-time
+    # refinement measures 224 on Linux-x86_64, also inside it.
     EXPECTED_SEGMENTS_RANGE = (220, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)

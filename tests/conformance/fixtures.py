@@ -228,20 +228,27 @@ def build_issue5410_dqs_n_halo() -> CopperCase:
 
 
 def build_search_vs_commit_seg_via_max() -> CopperCase:
-    """A 0.18 mm segment/via gap that search refuses and commit accepts.
+    """A 0.18 mm segment/via gap that search refused and commit accepted.
 
     Here the project's ``Default`` class is **0.15 mm**, so kicad-cli is
-    clean.  The router disagrees with itself:
+    clean.  The router used to disagree with itself:
 
-    * ``RouteHaloGeometry.clear`` raises the requirement to
-      ``max(required, rules.via_clearance)`` for a trace-vs-via pair
-      (``route_halo_geometry.py:278``; C++ twin ``grid.cpp:957``), i.e. 0.20 --
-      so A* **refuses** this candidate;
+    * ``RouteHaloGeometry.clear`` raised the requirement to
+      ``max(required, rules.via_clearance)`` for a trace-vs-via pair (C++ twin
+      ``Grid3D::route_trace_geometry_clear``), i.e. 0.20 -- so A* **refused**
+      this candidate;
     * the commit validators compare the same pair against ``trace_clearance``
-      (0.15) and **accept** it (``grid.cpp:1394``).
+      (0.15) and **accept** it.
 
     Same run, same backend, same two objects, opposite answers -- which is why
-    a net can look unroutable and still pass validation once routed.
+    a net could look unroutable and still pass validation once routed.
+
+    **Resolved by Epic #5509 Phase 3b (#5661).**  Both search-time predicates
+    now ask :func:`kicad_tools.router.clearance_kernel.clear` with the
+    requirement the pair actually resolves, so the widening is gone and the
+    search accepts what commit accepts.  The fixture stays as the regression
+    guard: ``test_named_fixtures._PREDICTIONS`` pins groups 4/5 to ACCEPT, so
+    a consumer that re-derives its own ``max(...)`` reddens the build.
     """
     rules = CaseRules(
         project_clearance=TRACE_CLEARANCE_MM,  # 0.15 -- deliberately below the gap
@@ -289,10 +296,13 @@ def build_search_vs_commit_seg_via_max() -> CopperCase:
         ),
         notes=(
             "Search-vs-commit asymmetry: 0.18 mm gap with the project Default "
-            "class at 0.15 mm, so kicad-cli is clean. Expected today: the "
-            "route-halo geometry consumer REJECTS (max(required, "
-            "via_clearance) = 0.20) while the Python and C++ commit gates "
-            "ACCEPT (trace_clearance = 0.15)."
+            "class at 0.15 mm, so kicad-cli is clean. Before Epic #5509 Phase "
+            "3b (#5661) the route-halo geometry consumers REJECTED "
+            "(max(required, via_clearance) = 0.20) while the Python and C++ "
+            "commit gates ACCEPTED (trace_clearance = 0.15). Expected today: "
+            "both ACCEPT -- the search-time predicates ask the shared "
+            "clearance kernel for the requirement the pair resolves, so the "
+            "widening is gone and search agrees with commit."
         ),
     )
 

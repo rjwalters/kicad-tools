@@ -1053,11 +1053,19 @@ bool Grid3D::edge_foreign_pad_clear(
 
 bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
                                     int partner_net, float partner_clearance) const {
+    // Issue #5661 (Epic #5509 Phase 3b): the copper verdict is delegated to
+    // the shared kernel rather than a private ``hypot(...) - (s.width +
+    // via.diameter) / 2`` subtraction.  ``ck`` (not ``clearance``, the
+    // namespace's own name) because this function already has a parameter
+    // named ``clearance`` that would otherwise shadow it; the leading ``::``
+    // reaches the namespace regardless of that shadowing.
+    namespace ck = ::router::clearance;
     if (stored_vias_.empty()) return true;
     const float margin = s.width / 2 + std::max({clearance, partner_clearance, max_pairwise_clearance_});
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
         std::max(s.x1, s.x2) + margin, std::max(s.y1, s.y2) + margin);
+    const ck::KSegment candidate{s.x1, s.y1, s.x2, s.y2, s.width, s.layer};
     for (size_t i : candidates.second) {
         const auto& via = stored_vias_[i];
         if (via.net == s.net || s.layer < via.layer_from || s.layer > via.layer_to) continue;
@@ -1070,15 +1078,29 @@ bool Grid3D::trace_stored_vias_clear(const Segment& s, float clearance,
             if (pair > required && !attach_zone_exempts((via.x + cp.first) / 2,
                     (via.y + cp.second) / 2, s.net, via.net, s.layer)) required = pair;
         }
-        const float gap = std::hypot(via.x - cp.first, via.y - cp.second)
-            - (s.width + via.diameter) / 2;
-        if (gap < required - CLEARANCE_EPSILON_MM) return false;
+        const ck::KVia other{via.x, via.y, via.diameter, via.drill};
+        if (!ck::clear(candidate, other, required)) return false;
     }
     return true;
 }
 
 bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
                                        int partner_net, float partner_clearance, float via_clearance) const {
+    // Issue #5661 (Epic #5509 Phase 3b): both branches below ask the shared
+    // kernel for the copper verdict instead of composing it from a private
+    // ``centre_distance - half_a - half_b`` subtraction.  ``ck`` rather than
+    // ``clearance`` because this function already has a parameter of that
+    // name; the leading ``::`` reaches the namespace regardless of the
+    // shadowing.  ``via_clearance`` still widens the *search margin* below --
+    // a conservative widening of which stored copper gets looked at can only
+    // cost extra work, never a missed candidate -- but it is DELIBERATELY no
+    // longer folded into the seg-via branch's own ``required`` the way it
+    // used to be (``max(via_clearance, required(...))``): that extra floor
+    // made this search-time predicate stricter than the commit-time
+    // validator for the identical pair, which applies ``clearance``/the
+    // pairwise table and never ``via_clearance`` here -- the asymmetry
+    // #5410's own fixture named.
+    namespace ck = ::router::clearance;
     const float margin = s.width / 2 + std::max({clearance, via_clearance, partner_clearance, max_pairwise_clearance_});
     const auto candidates = route_geometry_candidates(
         std::min(s.x1, s.x2) - margin, std::min(s.y1, s.y2) - margin,
@@ -1090,23 +1112,23 @@ bool Grid3D::route_trace_geometry_clear(const Segment& s, float clearance,
             return pair;
         return clearance;
     };
+    const ck::KSegment candidate{s.x1, s.y1, s.x2, s.y2, s.width, s.layer};
     for (size_t i : candidates.first) {
         const auto& other = stored_segments_[i];
         if (other.net == s.net || other.layer_idx != s.layer) continue;
-        const float gap = segment_to_segment_distance(s.x1, s.y1, s.x2, s.y2,
-            other.x1, other.y1, other.x2, other.y2) - (s.width + other.width) / 2;
         const auto point = closest_gap_midpoint(s.x1, s.y1, s.x2, s.y2,
             other.x1, other.y1, other.x2, other.y2);
-        if (gap < required(other.net, point) - CLEARANCE_EPSILON_MM) return false;
+        const ck::KSegment other_shape{other.x1, other.y1, other.x2, other.y2, other.width, other.layer_idx};
+        if (!ck::clear(candidate, other_shape, required(other.net, point))) return false;
     }
     for (size_t i : candidates.second) {
         const auto& other = stored_vias_[i];
         if (other.net == s.net) continue;
         const auto cp = closest_point_on_segment(other.x, other.y, s.x1, s.y1, s.x2, s.y2);
-        const float gap = std::hypot(other.x - cp.first, other.y - cp.second)
-            - (s.width + other.diameter) / 2;
-        if (gap < std::max(via_clearance, required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2}))
-                  - CLEARANCE_EPSILON_MM) return false;
+        const ck::KVia other_shape{other.x, other.y, other.diameter, other.drill};
+        if (!ck::clear(candidate, other_shape,
+                       required(other.net, {(other.x + cp.first) / 2, (other.y + cp.second) / 2})))
+            return false;
     }
     return true;
 }
@@ -1146,6 +1168,15 @@ bool Grid3D::component_holes_clear(float x, float y, float drill, float clearanc
 
 bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
                                      float hole_clearance, float same_net_drill_clearance) const {
+    // Issue #5661 (Epic #5509 Phase 3b): the two COPPER checks below (via-vs-
+    // segment, via-vs-via) ask the shared kernel instead of composing their
+    // own ``centre_distance - half_a - half_b``.  ``ck`` rather than
+    // ``clearance`` because this function already has a parameter of that
+    // name; the leading ``::`` reaches the namespace regardless of the
+    // shadowing.  The hole/drill-to-drill floor just below stays untouched --
+    // it is a different rule value than copper clearance, and the kernel's
+    // own ``clear()`` does not fold it in either.
+    namespace ck = ::router::clearance;
     const float margin = std::max(v.diameter, v.drill) / 2
         + std::max({clearance, hole_clearance, same_net_drill_clearance, max_pairwise_clearance_});
     const auto candidates = route_geometry_candidates(v.x - margin, v.y - margin, v.x + margin, v.y + margin);
@@ -1155,14 +1186,16 @@ bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
             return pair;
         return clearance;
     };
+    const ck::KVia candidate{v.x, v.y, v.diameter, v.drill};
     for (size_t i : candidates.first) {
         const auto& s = stored_segments_[i];
         if (s.net == v.net || s.layer_idx < std::min(v.layer_from, v.layer_to)
             || s.layer_idx > std::max(v.layer_from, v.layer_to)) continue;
         const auto cp = closest_point_on_segment(v.x, v.y, s.x1, s.y1, s.x2, s.y2);
-        const float gap = std::hypot(v.x - cp.first, v.y - cp.second) - (v.diameter + s.width) / 2;
-        if (gap < required(s.net, s.layer_idx, {(v.x + cp.first) / 2, (v.y + cp.second) / 2})
-                  - CLEARANCE_EPSILON_MM) return false;
+        const ck::KSegment other_shape{s.x1, s.y1, s.x2, s.y2, s.width, s.layer_idx};
+        if (!ck::clear(candidate, other_shape,
+                       required(s.net, s.layer_idx, {(v.x + cp.first) / 2, (v.y + cp.second) / 2})))
+            return false;
     }
     for (size_t i : candidates.second) {
         const auto& other = stored_vias_[i];
@@ -1182,9 +1215,10 @@ bool Grid3D::route_via_geometry_clear(const Via& v, float clearance,
             ? std::max(same_net_drill_clearance, hole_clearance) : hole_clearance;
         if (drill_gap < drill_required - CLEARANCE_EPSILON_MM) return false;
         if (other.net == v.net) continue;
-        const float gap = distance - (v.diameter + other.diameter) / 2;
-        if (gap < required(other.net, -1, {(v.x + other.x) / 2, (v.y + other.y) / 2})
-                  - CLEARANCE_EPSILON_MM) return false;
+        const ck::KVia other_shape{other.x, other.y, other.diameter, other.drill};
+        if (!ck::clear(candidate, other_shape,
+                       required(other.net, -1, {(v.x + other.x) / 2, (v.y + other.y) / 2})))
+            return false;
     }
     return true;
 }

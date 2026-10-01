@@ -118,7 +118,14 @@ def test_python_refinement_preserves_authored_partner_gap(gap, blocked):
 def test_python_refinement_checks_swept_step():
     grid, router = _context()
     grid.unmark_route(grid.routes[0], max_trace_width=HALO_TRACE_WIDTH_MM)
-    router.rules.trace_width, router.rules.trace_clearance = 0.15, 0.1
+    # Issue #5661: ``trace_clearance`` set to 0.2 (not 0.1) so the swept-vs-point
+    # distinction this test is about is driven by the pair's own resolved
+    # requirement rather than by the retired ``max(required, via_clearance)``
+    # widening.  The real geometric gap is ~0.2025 mm from either endpoint
+    # alone but ~0.199 mm from the swept segment between them -- just below
+    # 0.2 mm -- so this still exercises the ``from_cell`` sweep without
+    # depending on the asymmetry #5661 fixes.
+    router.rules.trace_width, router.rules.trace_clearance = 0.15, 0.2
     x, y = grid.grid_to_world(55, 56)
     route = Route(net=2, net_name="N2")
     route.vias.append(
@@ -146,19 +153,41 @@ def test_python_overlap_checks_hidden_owner_and_ripup_removes_only_its_geometry(
 
 
 @pytest.mark.parametrize("sharing", [False, True])
-def test_python_trace_halo_preserves_larger_via_clearance(sharing):
+def test_python_trace_halo_ignores_via_clearance_for_seg_via_pairs(sharing):
+    """Issue #5661: a trace-vs-via requirement tracks ``trace_clearance`` only.
+
+    Before this phase ``RouteHaloGeometry.clear`` separately widened a trace
+    candidate's requirement against a stored via to
+    ``max(required, rules.via_clearance)`` -- stricter than the commit-time
+    validator for the identical pair, which applies ``trace_clearance``. The
+    real gap here (~0.168 mm) sits in exactly that band: legal by
+    ``trace_clearance`` (0.15 mm, this fixture's default) and illegal only by
+    the retired ``via_clearance`` override. Switching onto the shared kernel
+    means ``via_clearance`` alone can no longer move this verdict.
+    """
     _, router = _context()
     router.rules.via_clearance = 0.15
     assert not router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
     router.rules.via_clearance = 0.2
-    assert router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
+    assert not router._is_trace_blocked(58, 56, 2, 1, sharing, radius=2)
 
 
-def test_python_trace_via_clearance_expands_geometry_lookup_across_bins():
+def test_python_trace_clearance_expands_geometry_lookup_across_bins():
+    """The bins-based search margin still reaches a cross-bin via (#5425).
+
+    Issue #5661: the margin's own ``max(scalar, via_clearance, ...)`` still
+    includes ``via_clearance`` (a conservative widening of the *search*, never
+    of the *verdict*), but the verdict a found via is held to is now purely
+    ``trace_clearance`` -- the pair's own resolved requirement, not a
+    via-specific override. Driving the gap past that requirement with
+    ``trace_clearance`` itself (rather than ``via_clearance``, as before
+    #5661) keeps this test's property -- a via only reachable across a 2 mm
+    bin boundary is still found and still measured exactly.
+    """
     from kicad_tools.router.primitives import Segment
 
     grid, router = _context()
     _, y = grid.grid_to_world(60, 60)
-    router.rules.via_clearance = 2.0
+    router.rules.trace_clearance = 2.0
     segment = Segment(5.5, y, 5.5, y + 0.1, 0.2, Layer.F_CU, 1)
     assert not grid._route_halo.clear(segment, router)

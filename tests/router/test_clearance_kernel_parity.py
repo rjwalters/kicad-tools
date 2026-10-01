@@ -877,6 +877,14 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # ``halo_offsets``, whose membership is the kernel's own ``copper_gap``
         # queried in grid-cell units, instead of a Chebyshev square.
         "router/grid.py",
+        # Epic #5509 Phase 3b (#5661), consumer group 4: the Python search-time
+        # route-halo refinement.  ``RouteHaloGeometry.clear`` builds a
+        # ``KSegment``/``KVia`` for the candidate and for each surviving
+        # neighbour and asks ``clearance_kernel.clear`` rather than
+        # subtracting both half-widths from a private shapely distance and
+        # separately widening a trace-vs-via requirement to
+        # ``max(required, rules.via_clearance)``.
+        "router/route_halo_geometry.py",
         # Epic #5509 Phase 3c (#5662), consumer groups 7 and 8: the coupled
         # diff-pair search path.  ``clearance_shapes.py`` is the one
         # router-primitive -> kernel-shape translation every migrated Python
@@ -972,6 +980,14 @@ MIGRATED_CPP_KERNEL_CALLERS: frozenset[str] = frozenset(
         # translation unit: ``Grid3D::mark_segment`` / ``mark_via`` (and
         # ``unmark_*`` and ``route_geometry_complete``'s coverage map) walk the
         # same kernel-derived disc as group 1 rather than the Chebyshev square.
+        # Epic #5509 Phase 3b (#5661), consumer group 5, is the third
+        # migration in this same file: ``route_trace_geometry_clear`` /
+        # ``route_via_geometry_clear`` / ``trace_stored_vias_clear`` -- the
+        # search-time refinement the C++ A* calls through ``Pathfinder``'s
+        # ``trace_halo_cell_clear`` / ``via_route_geometry_clear`` wrappers --
+        # ask ``clearance::clear`` instead of subtracting both half-extents
+        # from their own centre distance, and the seg-via branch no longer
+        # widens its requirement to ``max(via_clearance, required(...))``.
         # Epic #5509 Phase 3c (#5662), consumer group 7: the coupled rail gate.
         # ``coupled_pathfinder.cpp``'s ``rail_clear`` measures a candidate rail
         # step against the grid's stored route geometry with the kernel, which

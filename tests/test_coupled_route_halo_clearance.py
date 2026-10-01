@@ -235,7 +235,12 @@ def test_refinement_preserves_pairwise_hv_widening():
 def test_refinement_checks_the_swept_step_not_only_its_endpoint():
     grid, pathfinder = _context()
     grid.unmark_route(grid.routes[0], max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
-    pathfinder.rules.trace_width, pathfinder.rules.trace_clearance = 0.15, 0.1
+    # Issue #5661: ``trace_clearance`` set to 0.2 (not 0.1) so the swept-vs-point
+    # distinction under test is driven by the pair's own resolved requirement
+    # rather than the retired ``max(required, via_clearance)`` widening -- the
+    # real geometric gap is ~0.2025 mm from either endpoint alone but
+    # ~0.199 mm from the swept segment between them, just below 0.2 mm.
+    pathfinder.rules.trace_width, pathfinder.rules.trace_clearance = 0.15, 0.2
     x, y = grid.grid_to_world(55, 56)
     route = Route(net=2, net_name="N2")
     route.vias.append(
@@ -264,12 +269,21 @@ def test_overlapping_route_ownership_and_ripup():
     assert not pathfinder._is_via_blocked(*LEGAL, 1)
 
 
-def test_trace_refinement_preserves_the_larger_via_clearance():
+def test_trace_refinement_ignores_via_clearance_for_seg_via_pairs():
+    """Issue #5661: a trace-vs-via requirement tracks ``trace_clearance`` only.
+
+    Before this phase the refinement separately widened a trace candidate's
+    requirement against a stored via to ``max(required, rules.via_clearance)``
+    -- stricter than the commit-time validator for the identical pair, which
+    applies ``trace_clearance``. The real gap here (~0.168 mm) sits in exactly
+    that band: legal by ``trace_clearance`` (0.15 mm, this fixture's default)
+    and illegal only by the retired ``via_clearance`` override.
+    """
     _, pathfinder = _context()
     pathfinder.rules.via_clearance = 0.15
     assert not pathfinder._is_trace_blocked(58, 56, LAYER, 1)
     pathfinder.rules.via_clearance = 0.2
-    assert pathfinder._is_trace_blocked(58, 56, LAYER, 1)
+    assert not pathfinder._is_trace_blocked(58, 56, LAYER, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +570,11 @@ def test_cpp_preserves_hard_blockage_inside_the_halo():
 def test_cpp_checks_the_swept_step_not_only_its_endpoint():
     grid, pathfinder = _context()
     grid.unmark_route(grid.routes[0], max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
-    pathfinder.rules.trace_width, pathfinder.rules.trace_clearance = 0.15, 0.1
+    # Issue #5661: ``trace_clearance`` set to 0.2 (not 0.1) so the swept-vs-point
+    # distinction under test is driven by the pair's own resolved requirement
+    # rather than the retired ``max(required, via_clearance)`` widening -- see
+    # ``test_refinement_checks_the_swept_step_not_only_its_endpoint`` above.
+    pathfinder.rules.trace_width, pathfinder.rules.trace_clearance = 0.15, 0.2
     x, y = grid.grid_to_world(55, 56)
     route = Route(net=2, net_name="N2")
     route.vias.append(

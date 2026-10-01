@@ -24,11 +24,14 @@ blockage laid down by ``add_pad``, and ``cell_known`` deliberately returns
 production either.  Counting ``pad-seg`` / ``pad-via`` pairs here would record
 the absence of a check that lives in group 1, not a disagreement in group 4.
 
-The disagreement this row is expected to carry is the one
+Before Epic #5509 Phase 3b (#5661) this row carried the disagreement
 ``search-vs-commit-seg-via-max`` reproduces: for a trace candidate against a
-via, ``clear`` raises the requirement to ``max(required, via_clearance)``,
-so it refuses a 0.18 mm gap that the commit gates (and kicad-cli, at a 0.15 mm
-project class) both accept.
+via, ``clear`` raised the requirement to ``max(required, via_clearance)``, so
+it refused a 0.18 mm gap that the commit gates (and kicad-cli, at a 0.15 mm
+project class) both accept.  #5661 switched ``clear`` onto the shared
+clearance kernel and retired that widening, so this row and
+``search-vs-commit-seg-via-max`` now agree with ground truth; see
+``report.MIGRATED_GROUPS`` and ``report.NOTES[4]``.
 """
 
 from __future__ import annotations
@@ -76,9 +79,9 @@ class RouteHaloAdapter:
         0.15-0.20 mm band the router does not require and the project's
         ``Default`` netclass does (#5398 / #5654).  Pinning the rule axis to
         ground truth's own number leaves **geometry** as the only thing a
-        disagreement can be -- which is what
-        ``tests/conformance/test_route_halo_refinement_gate.py`` gates #5410's
-        repair on.
+        disagreement can be -- which is what ``test_corpus.py`` hard-gates now
+        that this group is in ``report.MIGRATED_GROUPS`` (Epic #5509 Phase 3b,
+        #5661).
         """
         return self._verdicts(case, project_rules(case))
 
