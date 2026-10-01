@@ -11,9 +11,17 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 24 vias / 321.46mm total
+- **Deterministic output**: 22 routes / 24 vias / 321.75mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (24 vias / 322.39mm before the 2026-10-01
+  has fully converged.  (24 vias / 321.46mm before the 2026-10-01
+  #5854 re-baseline, which switched the POST-ROUTE trace optimizer's
+  two collision checkers to the clearance kernel: their pad gate stops
+  comparing two already-grown raster halos and measures the exact
+  edge-to-edge gap instead, so a different subset of the optimizer's
+  shortcut candidates survives.  Routes (22), vias (24) and reach
+  (8/8) are UNCHANGED -- see the #5854 note in
+  ``test_routing_output_deterministic_across_seeds``.)
+  (24 vias / 322.39mm before the 2026-10-01
   #5661 re-baseline, which switched the SEARCH-time halo refinement to
   the clearance kernel and retired its ``max(required, via_clearance)``
   widening for trace-vs-via pairs: A* stops refusing legal candidates
@@ -781,7 +789,36 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # CLEANLINESS CLAIM" note: pure-Python checker at jlcpcb-tier1; CI's
     # containerized kicad-cli run is authoritative for the live board).
     # Prior pin (22, 229-segment-era, 24, 322.39).
-    EXPECTED_LENGTH = 321.46
+    #
+    # Re-baselined 2026-10-01 for Issue #5854 (Epic #5509 Phase 4a: the
+    # POST-ROUTE trace optimizer's two ``CollisionChecker`` implementations
+    # switched to the clearance kernel).  Their pad gate used to be the
+    # raster: a pad's blocked footprint is its metal grown by the pad's own
+    # clearance halo AND the candidate is grown again by
+    # ``width / 2 + trace_clearance``, so shortcuts up to roughly twice the
+    # real requirement from a pad were refused.  The gate now measures the
+    # exact edge-to-edge gap (at the per-component requirement the grid
+    # resolved for that pad, with the #2842 stitch-via reservation kept as a
+    # floor for plane-net pads -- PR #5874 review), so a different subset of
+    # ``merge_collinear`` / ``compress_staircase`` / ``convert_45_corners`` /
+    # ``pull_tight`` candidates survives.  Seeds 42/43/44 all yield
+    # (22, 219, 24, 321.75), bit-identical across seeds.  Routes (22), vias
+    # (24) and reach (8/8) are UNCHANGED -- the epic's scope guard #2 -- and
+    # length moves 321.46 -> 321.75 (+0.29 mm, +0.09%).  Length is not
+    # monotone in the number of accepted shortcuts: the passes run in
+    # sequence per net, so accepting a different early candidate changes
+    # which later chamfer/pull-tight moves are reachable.  It cannot be an
+    # under-rejection: every requirement the gate applies is the one the
+    # grid already resolved for that pair, and the two directions this
+    # revision changed (the per-component requirement, the stitch-via floor)
+    # both refuse MORE than a flat ``trace_clearance`` would.
+    # ``test_drc_clean_at_jlcpcb_tier1`` above still reports 0 errors at the
+    # tier1 profile on this output (same scope caveat as the "SCOPE OF THE
+    # CLEANLINESS CLAIM" note: pure-Python checker at jlcpcb-tier1; CI's
+    # containerized kicad-cli run is authoritative for the live board), and
+    # CI's "Board 02 End-to-End" / "Routed PCB DRC Check" jobs pass on this
+    # output.  Prior pin (22, 224-segment-era, 24, 321.46).
+    EXPECTED_LENGTH = 321.75
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability
@@ -844,7 +881,16 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # 227 on Linux-x86_64, comfortably inside it.
     # #5661: retain the band unchanged -- the kernel-backed search-time
     # refinement measures 224 on Linux-x86_64, also inside it.
-    EXPECTED_SEGMENTS_RANGE = (220, 240)
+    # #5854: the band's LOWER bound is widened 220 -> 212.  The kernel-backed
+    # post-route optimizer measures 219 on Linux-x86_64 (local and CI agree,
+    # bit-identical across seeds 42/43/44) -- just under the old floor, in the
+    # COARSER direction this band has always been loose about: the optimizer
+    # merging one more collinear run is exactly the "change in collinear
+    # segmentation" the assertion message below names, and the exact
+    # routes/vias/length pins above are what would signal a real regression.
+    # Widened rather than moved, so both platforms' deterministic values stay
+    # covered (macOS-arm64 last measured 226 at #5410).
+    EXPECTED_SEGMENTS_RANGE = (212, 240)
     got_routes, got_segments, got_vias, got_length = ref
     exact = (got_routes, got_vias, got_length)
     expected_exact = (EXPECTED_ROUTES, EXPECTED_VIAS, EXPECTED_LENGTH)
@@ -861,7 +907,8 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     lo, hi = EXPECTED_SEGMENTS_RANGE
     assert lo <= got_segments <= hi, (
         f"Board 02 segment count {got_segments} outside the documented "
-        f"platform band [{lo}, {hi}] (macOS-arm64: 226 / Linux: 224 post-#5410; "
+        f"platform band [{lo}, {hi}] (macOS-arm64: 226 post-#5410 / "
+        "Linux: 219 post-#5854; "
         "pre-#4732 it was 476 on macOS-arm64 / ~390-399 on Linux-x86_64 -- "
         "see PLATFORM NOTE above and the #4196 / #4732 re-baselines).  "
         "Routes/vias/length matched the exact pin, so this is a change in "
