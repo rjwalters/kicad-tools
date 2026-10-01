@@ -102,14 +102,16 @@ benchmark data.
 
 ## Benchmark results (Issue #5848)
 
-**Status: partial.** 16 source boards are license-checked and pinned, 15 of
-16 normalize, and the SRJ conversion is audited on all 16. The head-to-head
-routing run covers **one board (Arduino Nano) out of 16**. Nothing below is
-extrapolated to the other 15. The rest was not run: on the shared dev host
-(load average about 38) the tscircuit solver needed 465 s for the *smallest*
-board and `kct route` needed about 650 s, so a 16-board sweep was not
-practical in one session. The harness is committed so it can be rerun
-(`benchmarks/external/tscircuit/`).
+**Status: sweep done within a 600 s per-router cap; no kct completion.**
+16 source boards are license-checked and pinned, all 16 normalize, and the SRJ
+conversion is audited on all 16. Both routers were run on all 16 boards with a
+hard 600 s wall-clock cap per (board, router). Within that cap `kct route`
+**completed no board** (10 hit the deadline, 6 refused to load), and the
+tscircuit autorouter completed 9 of 16 (7 hit the cap). The 600 s cap and a
+loaded shared host (load average 15 to 40) mean "did not finish" is a
+statement about this budget, not about either router's ceiling. The earlier
+single-board Nano run (see below) needed 653 s for kct. The harness is
+committed (`benchmarks/external/tscircuit/run_srj18.py`).
 
 ### License check and pins
 
@@ -131,9 +133,17 @@ regenerated from the pinned boards. The SRJ boards in the dataset are
 derived from the same upstream files, but from `main` at the dataset's own
 build time, not from our pinned SHAs.
 
-Normalization (`normalize.py`): 15/16 succeed. `job_oculink_expansion` fails
-with `Copper arc points must define a nondegenerate circle` after a
-successful `kicad-cli pcb upgrade`.
+Normalization (`normalize.py`): 16/16 succeed after two fixes in this
+change. (1) `job_oculink_expansion` contains degenerate (collinear) copper
+`(arc ...)` tracks, which `PCB.load` rejects; normalization now strips copper
+arcs from the tree before building the board when that is the failure.
+(2) `rip_up` removed only segments and vias, so **copper arcs survived
+normalization** on the 7 boards that have any (dual_gmsl 288, ov9281 88,
+ov5640 60, gmsl 42, oculink_pcie 40, hdmi 28, sdi 8). Those boards were not
+actually copper-free in the earlier Nano-only write-up's tooling; they are now.
+`fetch_boards.py` also now fetches the sibling `.kicad_pro` (netclasses) and
+`normalize.py` copies it next to the normalized board, so `kct route` and
+`kicad-cli` both see the source board's netclass rules.
 
 ### What the SRJ abstraction loses
 
@@ -151,18 +161,24 @@ Audited on all 16 `samples/*.json` against the pinned `.kicad_pcb` files.
 | Board outline | present | `outline` polyline | Preserved. Edge clearance is not enforced (see below). |
 | Layer count | per board | `layerCount` | Preserved. |
 
-Our side has a related loss. `fetch_boards.py` fetches only the
-`.kicad_pcb`, and KiCad 6 and later keep netclasses and custom rules in the
-sibling `.kicad_pro` / `.kicad_dru`. So the `kct route` run used kct
-defaults plus whatever rules were in the `.kicad_pcb`, not the board's
-netclasses. **Both routers therefore ran without the source board's
-netclass widths.** That is a loss on both sides, not only on the SRJ path.
+Our side had a related loss in the first (Nano-only) run: `fetch_boards.py`
+fetched only the `.kicad_pcb`, and KiCad 6 and later keep netclasses in the
+sibling `.kicad_pro`. That is fixed (see above), and **the sweep below uses
+the `.kicad_pro` for the referee on every board**. `kct route` reads it from
+next to its input. The SRJ path still cannot use it: the autorouter only ever
+sees the SRJ.
 
 Consequence: any completion score from the SRJ path is for an easier
 problem than the board's real one (thinner copper, no pours, no keepouts).
 It cannot be compared with a router that honors the board's rules.
 
 ### Head-to-head: Arduino Nano (`srj18_arduino_nano`, 2 layers)
+
+> This first run predates the `.kicad_pro` fix: the referee ran with KiCad's
+> default rules, not the board's. The sweep table further down re-judges
+> the same Nano tscircuit output with the project rules (991 routing-type
+> items instead of 1247, `track_width` items gone, `via_diameter` /
+> `annular_width` unchanged).
 
 Pinned autorouter: `@tscircuit/capacity-autorouter` 0.0.951, default
 `AutoroutingPipelineSolver`, repo HEAD `911963b2` on 2026-09-30. SRJ traces
@@ -216,29 +232,119 @@ Notes on reading the table.
   indicative of order of magnitude only. Do not read the 465 s vs 653 s gap
   as a speed result.
 
+### Sweep: all 16 boards, 600 s cap per router
+
+Setup: `kct route <normalized> --layers N --grid 0.1 --no-auto-pour
+--backend cpp --timeout 600` (N from the SRJ `layerCount`; `--grid 0.1`
+because the default grid fails fine-pitch escape; `--no-auto-pour` because
+default auto-pour aborts one board, #5864). tscircuit: default
+`AutoroutingPipelineSolver` on the dataset's SRJ (`b38e23cb`), 600 s cap,
+`node --max-old-space-size=8192`. Referee for every board: `kicad-cli pcb
+drc --refill-zones` with the board's `.kicad_pro` next to it
+(`referee.py`). 6 concurrent jobs on a shared host, so wall times are not
+comparable across rows. KiCad's DRC report appears to cap each violation type
+at 199 (several boards show exactly 199 `track_width` items). "DRC" below is
+the sum of routing-type items (clearance, shorting, hole, edge, dangling,
+width, via, annular, co-located holes). The "Human" and "Normalized" columns
+are the same referee on the source board and on the copper-stripped input,
+so they give the pre-existing floor.
+
+"kct @600 s" is the **unverified checkpoint** kct writes when its deadline
+fires (`*_timeout_unverified_*`), not a finished route, so its shorts and
+dangling items are not a verdict on a completed run.
+
+| Board | Layers | Human: unconn / DRC | Normalized: unconn / DRC | tscircuit: result | tscircuit: unconn / shorts / DRC | kct @600 s: unconn / shorts / DRC |
+|---|---|---|---|---|---|---|
+| arduino_leonardo | 2 | 0 / 2 | 159 / 2 | solved (202 s) | 0 / 2 / 337 | 133 / 28 / 47 |
+| arduino_mega_2560 | 2 | 0 / 2 | 193 / 0 | timeout (600 s) | n/a | 183 / 0 / 25 |
+| arduino_micro | 4 | 0 / 3 | 95 / 3 | solved (163 s) | 0 / 0 / 197 | 71 / 10 / 24 |
+| arduino_nano | 2 | 0 / 2 | 80 / 2 | solved (505 s) | 0 / 0 / 991 | 71 / 14 / 101 |
+| arduino_uno | 2 | 0 / 2 | 133 / 0 | solved (80 s) | 0 / 0 / 478 | 65 / 1 / 27 |
+| ddr5_testbed | 6 | 0 / 0 | 243 / 0 | timeout (600 s) | n/a | 215 / 72 / 309 |
+| dual_gmsl_serializer_adapter | 4 | 0 / 11 | 217 / 0 | solved (186 s) | 0 / 0 / 578 | refused at load (custom pad) |
+| ftdi_toolkit | 4 | 0 / 6 | 352 / 6 | timeout (600 s) | n/a | 342 / 70 / 183 |
+| gmsl_serializer | 4 | 0 / 1 | 199 / 0 | solved (233 s) | 0 / 0 / 397 | refused at load (custom pad) |
+| hdmi_edid_debug_board | 4 | 0 / 10 | 299 / 4 | solved (335 s) | 0 / 2 / 722 | refused at load (custom pad) |
+| job_oculink_expansion | 4 | 0 / 0 | 264 / 0 | solved (291 s) | 1 / 0 / 680 | 256 / 20 / 104 |
+| oculink_pcie_adapter | 4 | 0 / 4 | 414 / 4 | timeout (600 s) | n/a | refused at load (custom pad) |
+| ov5640_dual_camera_board | 4 | 0 / 4 | 165 / 4 | timeout (600 s) | n/a | 115 / 1 / 86 |
+| ov9281_camera_board | 4 | 0 / 0 | 236 / 0 | timeout (600 s) | n/a | refused at load (custom pad) |
+| sdi_fiber_adapter | 4 | 0 / 14 | 377 / 14 | timeout (600 s) | n/a | 319 / 25 / 119 |
+| usb_c_power_adapter | 4 | 0 / 6 | 166 / 6 | solved (290 s) | 0 / 1 / 561 | refused at load (custom pad) |
+
+Reading the table.
+
+- **tscircuit completed 9 of 16 within 600 s** with 0 unconnected on 8 of them
+  (1 unconnected on `job_oculink_expansion`). It timed out on 7: Mega 2560,
+  DDR5 testbed, FTDI toolkit, OCuLink PCIe adapter, OV5640, OV9281 and SDI
+  fiber adapter. "Complete" is for the relaxed SRJ problem (0.1 mm tracks,
+  0.3 mm vias, no pours or keepouts). Every completed output is **not
+  manufacturable as written** under the board's own rules: all 9 carry
+  `via_diameter` violations (0.3 mm vias; 90 to 199 each), 8 of 9 carry
+  `clearance` items (2 to 498), 5 of 9 carry `track_width` items (the
+  0.1 mm tracks), and shorts appear on Leonardo (2), HDMI EDID (2) and
+  USB-C (1) with dangling copper on Nano (2), Leonardo (1) and gmsl (3).
+- **`kct route` completed 0 of 16 within the cap.** 10 boards reached the
+  deadline mid-route (the checkpoint column shows 65 to 342 unconnected
+  items left), and 6 were refused at load because of custom-shaped pads
+  (#5863: dual_gmsl, gmsl, hdmi, oculink_pcie, ov9281, usb_c). Leonardo is
+  among the 10 only because the sweep passes `--no-auto-pour`; with the
+  default it aborts before routing (#5864).
+- Nothing here says kct is slower than tscircuit in general. Where tscircuit
+  finished, it solved a strictly easier problem; where kct was cut off it was
+  still routing under the board's real rules. The one honest speed note is
+  that on the 5 boards where both routers ran to their caps (Mega 2560, DDR5,
+  FTDI, OV5640, SDI fiber), neither finished.
+- Not measured: kct with a longer cap on the larger boards, multiple seeds,
+  `kct check` (exits 2 on every board including the human originals, so it
+  does not separate anything), tscircuit with its rule-aware options (if any
+  exist for this version).
+
 ### Verdict
 
 Registry: `benchmarked`, pinned at the autorouter commit above. Two things
-come out of the single-board run:
+come out of the 16-board sweep:
 
 1. The SRJ abstraction, as shipped, cannot carry our constraints (netclass
-   widths, clearance, via size, zones, keepouts). A head-to-head on equal
-   terms needs either rules injected into the SRJ problem or the tscircuit
-   output re-judged after being widened. Without that, its completion
-   numbers are not comparable.
-2. The boards still need a 15-board sweep, with `.kicad_pro` netclasses
-   fetched, before anyone quotes a completion-rate comparison.
+   widths, clearance, via size, zones, keepouts). tscircuit solved 9 of 16
+   boards and timed out on 7, but on a relaxed problem, so those numbers are
+   not comparable with a router that honors the board's rules. A head-to-head
+   on equal terms needs either rules injected into the SRJ problem or the
+   tscircuit output re-judged after being widened.
+2. The sweep is done, but it is not an equal-terms comparison. kct completed
+   0 of 16: 10 boards hit the deadline checkpoint (unverified) and 6 were
+   refused at load. Both routers hit their caps on 5 boards. Quote the
+   completion rates only with the caveats stated above (unverified
+   checkpoints, relaxed SRJ problem, host load, the 199-item cap in the DRC
+   report). A longer kct cap is the open follow-up.
 
-Defects found along the way, **not yet filed as issues** (the build
-environment refused the issue-write):
+Defects found along the way:
 
 - `kct route` ships shorts on the Nano while its self-check reports zero
-  clearance violations.
-- `normalize.py` fails on `job_oculink_expansion` (degenerate copper arc).
-- `fetch_boards.py` does not fetch `.kicad_pro`, so netclasses never reach a
-  benchmark.
+  clearance violations: filed as #5862 (one completed run, not yet
+  reproduced to completion on a loaded host; see the issue).
+- `kct route` refuses 6 of 16 real boards on custom-shaped pads: #5863.
+- `kct route` aborts under default `--auto-pour` on Leonardo
+  (`ZonePartitionError`): #5864.
+- Fixed in this change: `normalize.py` failing on `job_oculink_expansion`,
+  `normalize.py` leaving copper arcs behind on 7 boards, and
+  `fetch_boards.py` not fetching `.kicad_pro`.
 
 ### Reproducing
+
+Sweep (all 16 boards, both routers, results as JSON lines):
+
+```bash
+export KCT_BENCHMARK_EXTERNAL_CACHE_DIR=/tmp/srj18cache
+# fetch and normalize every srj18_* slug first (fetch_boards.py / normalize.py --board ...)
+git clone https://github.com/tscircuit/dataset-srj18 /tmp/ds18      # b38e23cb
+mkdir /tmp/tsc && (cd /tmp/tsc && npm i @tscircuit/capacity-autorouter@0.0.951)
+uv run python benchmarks/external/tscircuit/run_srj18.py --cache /tmp/srj18cache \
+  --dataset /tmp/ds18 --tsc-dir /tmp/tsc --work /tmp/srj18work \
+  --results /tmp/srj18work/results.jsonl --timeout 600 --jobs 6
+```
+
+Single board (Nano):
 
 ```bash
 export KCT_BENCHMARK_EXTERNAL_CACHE_DIR=/tmp/srj18cache
@@ -262,7 +368,9 @@ uv run python benchmarks/external/tscircuit/referee.py nano_tsc.kicad_pcb
    try `kct route` on an unrouted export. Report systematic defects
    upstream and record the result here.
 2. **Benchmark the tscircuit autorouter on the dataset-srj18 source
-   boards** (Issue #5848) -- *partly done, see "Benchmark results": boards
-   pinned and audited, one of 16 routed.*  Original task: Add license-checked boards to `benchmarks/external/boards.toml`,
+   boards** (Issue #5848) -- *done, see "Benchmark results": 16 boards
+   pinned, audited and swept under a 600 s cap. Open follow-up: rerun with
+   a longer kct cap and rules injected into the SRJ so the comparison is on
+   equal terms.*  Original task: Add license-checked boards to `benchmarks/external/boards.toml`,
    rip up their copper, and route each one with both routers under the shared
    `kicad-cli` referee, as was done for KiCadRoutingTools.

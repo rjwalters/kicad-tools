@@ -199,6 +199,19 @@ def fetch_board(
             if extracted is None:
                 raise FetchError(f"{spec.slug}: {member_path!r} is not a regular file")
             board_bytes = extracted.read()
+
+            # Netclasses (widths, clearances, via sizes) live in the sibling
+            # ``.kicad_pro`` for KiCad 6+ boards (Issue #5848). Fetch it when
+            # present; absence is not an error (older boards keep netclasses
+            # inside the .kicad_pcb).
+            pro_member_path = f"{top_dir}/{Path(spec.board_path).with_suffix('.kicad_pro')}"
+            pro_bytes: bytes | None = None
+            try:
+                pro_file = tar.extractfile(tar.getmember(pro_member_path))
+                if pro_file is not None:
+                    pro_bytes = pro_file.read()
+            except KeyError:
+                pro_bytes = None
     except tarfile.TarError as exc:
         raise FetchError(
             f"{spec.slug}: fetched archive is not a valid tar.gz ({url}): {exc}"
@@ -206,6 +219,8 @@ def fetch_board(
 
     dest = board_dir / Path(spec.board_path).name
     dest.write_bytes(board_bytes)
+    if pro_bytes is not None:
+        dest.with_suffix(".kicad_pro").write_bytes(pro_bytes)
     return dest
 
 

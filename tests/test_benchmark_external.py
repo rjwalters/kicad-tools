@@ -23,7 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from kicad_tools.schema.pcb import PCB
+from kicad_tools.schema.pcb import PCB, Arc
+from kicad_tools.sexp import parse_string
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXTERNAL_DIR = REPO_ROOT / "benchmarks" / "external"
@@ -209,6 +210,29 @@ class TestFetchBoard:
         assert dest.name == "fake.kicad_pcb"
         assert dest.parent == tmp_path / spec.slug
 
+    def test_fetch_also_extracts_sibling_kicad_pro(self, fetch_boards, tmp_path):
+        spec = self._spec(fetch_boards)
+        top_dir = f"fakeboard-{spec.commit}"
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name, content in (
+                (f"{top_dir}/{spec.board_path}", b"(kicad_pcb)"),
+                (f"{top_dir}/sub/dir/fake.kicad_pro", b'{"net_settings": {}}'),
+            ):
+                info = tarfile.TarInfo(name=name)
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+        dest = fetch_boards.fetch_board(
+            spec, tmp_path, opener=lambda url: _FakeResponse(buf.getvalue())
+        )
+        assert dest.with_suffix(".kicad_pro").read_bytes() == b'{"net_settings": {}}'
+
+    def test_fetch_without_kicad_pro_is_not_an_error(self, fetch_boards, tmp_path):
+        spec = self._spec(fetch_boards)
+        tar_bytes = _make_tarball(f"fakeboard-{spec.commit}", spec.board_path, b"(kicad_pcb)")
+        dest = fetch_boards.fetch_board(spec, tmp_path, opener=lambda url: _FakeResponse(tar_bytes))
+        assert not dest.with_suffix(".kicad_pro").exists()
+
     def test_fetch_rejects_commit_mismatch(self, fetch_boards, tmp_path):
         spec = self._spec(fetch_boards)
         # Top-level dir does NOT reference the pinned commit -- simulates a
@@ -361,9 +385,41 @@ class TestNormalize:
 
         removed = normalize.rip_up(pcb)
 
-        assert removed == {"segments": 5, "vias": 2}
+        assert removed == {"segments": 5, "vias": 2, "arcs": 0}
         assert pcb.segment_count == 0
         assert pcb.via_count == 0
+
+    def test_rip_up_removes_copper_arcs(self, normalize):
+        pcb = PCB.load(FIXTURE_PCB)
+        arc = parse_string(
+            '(arc (start 1 1) (mid 2 1.5) (end 3 1) (width 0.2) (layer "F.Cu") '
+            '(net 0) (uuid "arc-1"))'
+        )
+        pcb._sexp.append(arc)
+        pcb._arcs.append(Arc.from_sexp(arc))
+
+        removed = normalize.rip_up(pcb)
+
+        assert removed["arcs"] == 1
+        assert pcb._arcs == []
+        assert not [c for c in pcb._sexp.children if not c.is_atom and c.name == "arc"]
+
+    def test_degenerate_copper_arc_does_not_block_normalization(self, normalize, tmp_path):
+        text = FIXTURE_PCB.read_text()
+        bad_arc = (
+            '  (arc (start 1 1) (mid 2 1) (end 3 1) (width 0.2) (layer "F.Cu") '
+            '(net 0) (uuid "bad-arc"))\n'
+        )
+        src = tmp_path / "bad.kicad_pcb"
+        src.write_text(text.rstrip().rstrip(")") + bad_arc + ")\n")
+        with pytest.raises(ValueError, match="Copper arc"):
+            PCB.load(src)
+
+        out = tmp_path / "out.kicad_pcb"
+        normalize.normalize_board(src, out)
+
+        assert "bad-arc" not in out.read_text()
+        assert PCB.load(out).segment_count == 0
 
     def test_capture_baseline_matches_routing_status(self, normalize):
         pcb = PCB.load(FIXTURE_PCB)
