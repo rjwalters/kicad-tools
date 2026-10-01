@@ -14,7 +14,7 @@ in pad-to-pad clearance computation by using:
 
 Epic #5509 Phase 4d / issue #5857 scope note: this is consumer group 19 of
 the epic's clearance-kernel inventory and is deliberately EXEMPTED from the
-switch to ``router.clearance_kernel`` -- see
+switch onto the epic's shared exact-geometry kernel -- see
 ``drc/cpp/src/drc_clearance.cpp``'s module docstring and
 https://github.com/rjwalters/kicad-tools/issues/5509#issuecomment-5930182050
 for the rationale (a real-time placement screen outside ``kct check``'s

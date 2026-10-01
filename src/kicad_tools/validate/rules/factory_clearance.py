@@ -6,8 +6,7 @@ our geometry model. These checks never substitute a blanket same-net clearance.
 Epic #5509 Phase 4d scope note
 -------------------------------
 This module is named in issue #5857's group-18 file list, but neither of its
-two checks is switched to the shared clearance kernel
-(:mod:`kicad_tools.router.clearance_kernel`):
+two checks is switched onto Epic #5509's shared exact-geometry kernel:
 
 * :func:`check_pth_hole_clearance` already measures *exact* shapely geometry
   (``hole.distance(geom)``) -- there is no approximation here for the kernel
@@ -16,8 +15,8 @@ two checks is switched to the shared clearance kernel
   represent (a drilled hole is always a circle centred on the shape's own
   ``cx``/``cy`` there).  Routing it through the kernel would mean adding an
   oval/offset hole primitive -- a kernel *model* change, which scope guard #3
-  reserves for a phase that updates ``test_clearance_kernel_parity.py``
-  alongside it, not this one.
+  reserves for a phase that updates the kernel's own parity suite alongside
+  it, not this one.
 * :func:`check_silk_pad_clearance` compares silkscreen strokes to pad
   apertures.  Silk is not copper, so it has no representation in the kernel's
   domain (segments, vias, pads, zone fills, the board edge) at all.

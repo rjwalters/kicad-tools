@@ -9,8 +9,8 @@
  *
  * Epic #5509 (one clearance kernel) Phase 4d / issue #5857 scope note:
  * this is consumer group 19 of the epic's implementation inventory, and
- * was EXEMPTED from the switch to the shared clearance kernel
- * (router/clearance_kernel.{hpp,cpp}), not migrated. Every pad here is
+ * was EXEMPTED from the switch onto the epic's shared exact-geometry
+ * kernel module, not migrated. Every pad here is
  * modelled as a disc of radius max(w, h) / 2 -- a deliberate, conservative
  * (over-reject-only, never under-reject) approximation used only by
  * drc/incremental.py's real-time placement feedback loop (full_check() /
