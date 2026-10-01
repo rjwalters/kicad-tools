@@ -524,3 +524,63 @@ class TestCliShortGate:
         monkeypatch.setattr(router_io, "validate_routes", lambda *a, **k: [near_miss])
 
         assert route_main([str(pcb), "-o", str(out), "--skip-drc", "--no-optimize"]) == 0
+
+
+class TestShortHelpersIssue5872:
+    """Issue #5872: shared predicate, rc mapping, loud audit failure."""
+
+    @staticmethod
+    def _v(distance: float, **kwargs: object):
+        return TestCountShortingViolations._violation(distance, **kwargs)  # type: ignore[arg-type]
+
+    def test_shorting_violations_filters_and_matches_count(self) -> None:
+        from kicad_tools.router.io import shorting_violations
+
+        vs = [self._v(-0.1), self._v(0.05), self._v(0.0)]
+        out = shorting_violations(vs)
+        assert out == [vs[0], vs[2]]
+        assert count_shorting_violations(vs) == len(out)
+
+    def test_shorting_violations_excludes_component_inherent(self) -> None:
+        from kicad_tools.router.io import shorting_violations
+
+        assert shorting_violations([self._v(-0.1, component_inherent=True)]) == []
+
+    @pytest.mark.parametrize(("rc", "expected"), [(0, 3), (2, 4), (1, 1), (3, 3), (4, 4), (5, 5)])
+    def test_short_escalation_exit_mapping(self, rc: int, expected: int) -> None:
+        from kicad_tools.cli.route_cmd import _short_escalation_exit
+
+        assert _short_escalation_exit(rc, [self._v(-0.1)]) == expected
+
+    @pytest.mark.parametrize("rc", [0, 1, 2, 3, 4])
+    def test_short_escalation_exit_noop_without_shorts(self, rc: int) -> None:
+        from kicad_tools.cli.route_cmd import _short_escalation_exit
+
+        assert _short_escalation_exit(rc, []) == rc
+
+    def _result(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(router=SimpleNamespace(routes=[object()]))
+
+    def test_audit_failure_is_loud(self, monkeypatch, capsys) -> None:
+        from kicad_tools.cli.route_cmd import _audit_shorts_for_escalation
+
+        def boom(_router):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(router_io, "validate_routes", boom)
+        assert _audit_shorts_for_escalation(self._result(), quiet=False) == []
+        out = capsys.readouterr().out
+        assert "WARNING: post-route short audit failed to run (kaboom)" in out
+        assert "shorts were NOT checked" in out
+
+    def test_audit_failure_quiet_is_silent(self, monkeypatch, capsys) -> None:
+        from kicad_tools.cli.route_cmd import _audit_shorts_for_escalation
+
+        def boom(_router):
+            raise RuntimeError("kaboom")
+
+        monkeypatch.setattr(router_io, "validate_routes", boom)
+        assert _audit_shorts_for_escalation(self._result(), quiet=True) == []
+        assert capsys.readouterr().out == ""

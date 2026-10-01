@@ -314,6 +314,15 @@ class ClearanceViolation:
         return self.distance <= 0.0
 
 
+def shorting_violations(violations: list[ClearanceViolation]) -> list[ClearanceViolation]:
+    """Return the violations that are hard cross-net shorts (Issue #5872).
+
+    Single source of truth for the short predicate: used by both the CLI
+    exit-code gates and :func:`count_shorting_violations`.
+    """
+    return [v for v in violations if v.is_short and not v.component_inherent]
+
+
 def count_shorting_violations(violations: list[ClearanceViolation]) -> int:
     """Count violations whose copper physically overlaps (Issue #5862).
 
@@ -323,7 +332,7 @@ def count_shorting_violations(violations: list[ClearanceViolation]) -> int:
     is never forced by component geometry), so in practice every overlap
     detected by :func:`validate_routes` is counted here.
     """
-    return sum(1 for v in violations if v.is_short and not v.component_inherent)
+    return len(shorting_violations(violations))
 
 
 def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
