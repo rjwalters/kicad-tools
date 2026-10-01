@@ -433,6 +433,36 @@ If a LICENSE file lands and it is permissive, `license_compat` moves to \
 from directly.\
 """
 
+[projects.circuit-skills]
+name = "circuit-skills"
+slug = "punkfab/circuit-skills"
+repo_url = "https://github.com/punkfab/circuit-skills"
+vcs = "github"
+category = "agent-interface"
+relation = "peer"
+verdict = "watch"
+# No LICENSE file is committed; treat as all-rights-reserved -- ideas only.
+license = "NONE"
+license_compat = "unlicensed"
+language = "Python"
+stars = 4
+last_push = "2026-10-01"
+last_verified = "2026-10-01"
+pinned_commit = "bc1322f9de7c37f8692b30e53debbd2cd537f774"
+summary = """
+Claude Code skills for code-driven electronics: ngspice/Falstad circuit \
+simulation, a tscircuit-placement -> capped Freerouting -> KiCad IPC (`kipy`) \
+route-and-DRC loop, board/enclosure fit co-design and 3D renders. Overlaps \
+our `/kct:*` skills, but assumes autorouters are immature and the tail is \
+hand-finished in KiCad -- the opposite of our fully automated bar. No \
+LICENSE committed, so ideas only; mining tracked in issue #5886.\
+"""
+reeval_trigger = """
+Once issue #5886 lands its evaluation note, move the verdict to \
+`ideas-adopted` or `complementary`. If a permissive LICENSE file lands, \
+`license_compat` moves accordingly.\
+"""
+
 # ------------------------------------------------------ fabrication and CI
 
 [projects.kibot]

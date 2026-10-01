@@ -977,6 +977,7 @@ weekly.
 Recorded in the registry with a re-evaluation trigger, deliberately not featured above yet:
 
 - **[AutoRoute](https://github.com/pingpongshow/AutoRoute)** (MIT, Rust, 0★) -- Rust negotiated-congestion router with an exact-DRC clearance model, a headless CLI and DSN/SES KiCad integration. Recorded rather than featured: 8 commits and no adoption signal yet, so there is nothing stable to measure against.
+- **[circuit-skills](https://github.com/punkfab/circuit-skills)** (no `LICENSE` committed, Python, 4★) -- Claude Code skills for code-driven electronics: ngspice/Falstad circuit simulation, a tscircuit-placement -> capped Freerouting -> KiCad IPC (`kipy`) route-and-DRC loop, board/enclosure fit co-design and 3D renders. Overlaps our `/kct:*` skills, but assumes autorouters are immature and the tail is hand-finished in KiCad -- the opposite of our fully automated bar. No LICENSE committed, so ideas only; mining tracked in issue #5886.
 
 <!-- END kct:ecosystem -->
 
