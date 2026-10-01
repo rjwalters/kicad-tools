@@ -25,6 +25,13 @@ measured by the published table.
 :func:`test_migrated_consumer_items_are_hard_gates` asserts the flip really
 reached the collected items.
 
+**Groups 1 and 2 carry a pinned quantisation ledger.**  They were migrated by
+#5660 (Phase 3a) and answer with a *cell set*, which over-rejects by
+construction, so :data:`QUANTISATION_LEDGER` records the exact residual they
+are still allowed; zero under-rejection stays unconditional.  Every other
+migrated group has no entry and is held to zero disagreement in both
+directions (``conftest.assert_migrated_group_agrees``).
+
 **Hard assertions here are about the adapters, not the consumers.**  An
 adapter must satisfy the protocol, must be deterministic, and must only ever
 speak about nets the case actually declares.  Those are properties of the
@@ -48,10 +55,15 @@ import pytest
 from tests.conformance.adapters import BOARD_EDGE, ConsumerAdapter, Verdict
 from tests.conformance.adapters.kernel import KERNEL_GROUP
 from tests.conformance.board import write_case
-from tests.conformance.conftest import item_group, requires_adapter, requires_kicad_cli
+from tests.conformance.conftest import (
+    assert_migrated_group_agrees,
+    item_group,
+    requires_adapter,
+    requires_kicad_cli,
+)
 from tests.conformance.generator import PairKind, generate_case
 from tests.conformance.oracle import run_oracle
-from tests.conformance.report import ADAPTERS, MIGRATED_GROUPS, main
+from tests.conformance.report import ADAPTERS, MIGRATED_GROUPS, QUANTISED_GROUPS, main
 
 _ADAPTERS_BY_GROUP = {adapter.group: adapter for adapter in ADAPTERS}
 
@@ -75,6 +87,37 @@ UNWIRED_GROUPS: set[int] = set()
 
 # Every group row the table measures, plus the Phase 1b kernel's control row.
 WIRED_GROUPS = {n for n in range(1, 20) if n not in UNWIRED_GROUPS} | {KERNEL_GROUP}
+
+# The residual over-rejection a migrated *cell-set* group is still allowed, per
+# ``(group, seed)``, measured on the gated reading (the consumer driven at
+# kicad-cli's own clearance, ``verdicts_at_project_rules``).  Entries use the
+# same string form the failure message prints, so re-pinning is a copy-paste
+# rather than a transcription.  A ``(group, seed)`` with no key is held to an
+# empty set -- which is every migrated group other than 1 and 2, so this ledger
+# widens nothing for groups 6-10.
+#
+# Every entry below is cell quantisation, and it survives Phase 3a (#5660) by
+# construction rather than by oversight.  Groups 1 and 2 answer with a *cell
+# set*, and the adapter's rejection rule dilates **both** sides -- the existing
+# copper's halo and the candidate's own -- so two objects whose copper is a
+# comfortable 0.23 mm apart still share a marked cell once each has been grown
+# by a radius that rounds outwards (``int(...) + 1``, plus a second ``+ 1`` for
+# a segment).  #5660 replaced the halo's *shape* (Chebyshev square -> the
+# kernel's exact disc), which removes the sqrt(2) diagonal excess; it does not
+# and cannot remove the outward rounding along the pair axis, which is where
+# every entry here sits.
+#
+# These are retired by search-time *refinement* (Epic #5509 groups 4 and 5,
+# Phase 3b), which re-reads the exact geometry of a cell the halo marked -- not
+# by making the halo itself finer, which would spend the grid-quantisation
+# safety margin (#1666, #1692, #1797) that keeps the marking conservative.
+QUANTISATION_LEDGER: dict[tuple[int, int], tuple[str, ...]] = {
+    (1, 0): ("pad-seg ['N3', 'N4'] gap=0.2468",),
+    (1, 1): ("seg-seg ['N3', 'N4'] gap=0.2289",),
+    (1, 2): ("seg-via ['N1', 'N2'] gap=0.2336",),
+    (2, 1): ("seg-seg ['N3', 'N4'] gap=0.2289",),
+    (2, 2): ("seg-via ['N1', 'N2'] gap=0.2336",),
+}
 
 _ADAPTER_PARAMS = [
     pytest.param(adapter, id=adapter.name, marks=(requires_adapter(adapter),))
@@ -305,13 +348,19 @@ def test_adapter_agrees_with_kicad_cli(adapter: ConsumerAdapter, seed: int, tmp_
             "re-pin CI_SEEDS or widen the scope"
         )
 
-    gated = (
-        " (GATED: this consumer is on the shared kernel)"
-        if adapter.group in MIGRATED_GROUPS
-        else ""
-    )
+    if adapter.group in MIGRATED_GROUPS:
+        assert_migrated_group_agrees(
+            adapter,
+            over=over,
+            under=under,
+            expected_over=QUANTISATION_LEDGER.get((adapter.group, seed), ()),
+            what=f"seed {seed}",
+            context=result.describe(),
+        )
+        return
+
     assert not over and not under, (
-        f"{adapter.name} (group {adapter.group}) disagrees with kicad-cli on seed {seed}{gated}\n"
+        f"{adapter.name} (group {adapter.group}) disagrees with kicad-cli on seed {seed}\n"
         f"  over-rejected (consumer flags, KiCad clean): {over}\n"
         f"  under-rejected (KiCad flags, consumer clean): {under}\n"
         f"{result.describe()}"
@@ -510,6 +559,31 @@ def test_migrated_groups_are_wired_and_drivable_at_ground_truths_rule_value() ->
             f"{adapter.name} (group {group}) is migrated but cannot be driven "
             "at the project netclass clearance"
         )
+
+
+def test_the_quantisation_ledger_only_names_migrated_cell_set_rows() -> None:
+    """Every ledger key is a migrated group on a seed the gate actually runs.
+
+    The gate itself already fails on an entry that stopped reproducing (the
+    recorded set must *equal* the measured one), so this guards the other way a
+    ledger rots: an entry for a group that is not migrated, or for a seed that
+    left ``CI_SEEDS``, would sit there looking authoritative while nothing ever
+    consulted it.  It is also where "only the cell-set groups may carry
+    over-rejection" is a test rather than a comment.
+    """
+    stale = sorted(
+        key
+        for key in QUANTISATION_LEDGER
+        if key[0] not in MIGRATED_GROUPS or key[1] not in CI_SEEDS
+    )
+    assert not stale, f"quantisation-ledger entries no gated row consults: {stale}"
+    assert {group for group, _ in QUANTISATION_LEDGER} <= QUANTISED_GROUPS, (
+        "only report.QUANTISED_GROUPS (the cell-set occupancy rows) may carry "
+        "a quantisation ledger; every other migrated group is held to zero "
+        "disagreement"
+    )
+    assert QUANTISED_GROUPS <= MIGRATED_GROUPS, "a quantised group must be a migrated one"
+    assert all(QUANTISATION_LEDGER.values()), "an empty ledger entry is the default -- drop the key"
 
 
 def _consumer_items(request: pytest.FixtureRequest) -> list[pytest.Item]:

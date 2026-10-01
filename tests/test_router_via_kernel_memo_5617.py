@@ -281,7 +281,13 @@ class TestHaloLayerSpanCache:
         x, y = grid.grid_to_world(60, 60)
         route = Route(net=2, net_name="N2")
         route.vias.append(Via(x, y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "N2"))
-        grid.mark_route(route)
+        # Issue #5660: the route halo is the kernel's exact disc, and the
+        # (55, 56) probe is sqrt(41) = 6.40 cells from this via -- inside the
+        # old Chebyshev square, outside the rule-derived 5-cell disc.  Marking
+        # with ``max_trace_width=0.6`` (a 7-cell halo) restores the premise,
+        # exactly as ``test_python_route_halo_clearance._context`` does; the
+        # predicates read rule values, never the marking radius.
+        grid.mark_route(route, max_trace_width=0.6)
         router = Router(grid, rules)
         router.set_net_name_to_id({"N1": 1, "N2": 2})
         return grid, router

@@ -35,13 +35,16 @@ from __future__ import annotations
 
 import numpy as np
 
+from kicad_tools.router.rules import DesignRules
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     ALL_PAIR_KINDS,
     net_ids,
     pair_contexts,
+    project_rules,
     router_grid,
     router_pad,
+    router_rules,
     single_object_route,
 )
 from tests.conformance.generator import CopperCase, PadSpec, SegmentSpec
@@ -60,6 +63,20 @@ class OccupancyAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same consumer, marked at the clearance kicad-cli applies.
+
+        The **gated** reading (Epic #5509 Phase 3a, #5660, migrated this
+        group): both grids are built with :func:`project_rules`, so the halo
+        radii the consumer computes come from ``project_clearance`` and a
+        remaining disagreement is the *marking geometry*, never the #5398 /
+        #5654 rule-resolution gap.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
         nets = net_ids(case)
         found: set[Verdict] = set()
 
@@ -67,7 +84,7 @@ class OccupancyAdapter:
             if context.kind not in self.pair_kinds:
                 continue
 
-            board = router_grid(case)
+            board = router_grid(case, rules)
             existing = context.existing
             if isinstance(existing, PadSpec):
                 board.add_pad(router_pad(existing, nets))
@@ -77,7 +94,7 @@ class OccupancyAdapter:
             candidate = context.candidate
             candidate_net = nets[candidate.net]
 
-            probe = router_grid(case)
+            probe = router_grid(case, rules)
             probe.mark_route(single_object_route(candidate, nets))
             cells = np.argwhere(probe._blocked)
 

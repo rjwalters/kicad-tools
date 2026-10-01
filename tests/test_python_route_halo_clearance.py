@@ -1,4 +1,15 @@
-"""Pure-Python coverage and geometry controls for dynamic route halos."""
+"""Pure-Python coverage and geometry controls for dynamic route halos.
+
+Issue #5660 (Epic #5509 Phase 3a): route halos are the clearance kernel's
+exact disc, not the Chebyshev square they used to be.  Every probe below sits
+at ``(55, 56)`` -- offset ``(-5, -4)`` from the via at ``(60, 60)``, Euclidean
+distance ``sqrt(41) = 6.40`` cells -- which the old square covered at its
+corner and the disc does not.  ``_context`` therefore marks with a seven-cell
+radius (via ``max_trace_width``, the only knob on ``_mark_via``'s reach), which
+restores the premise these tests are about: a cell inside a *conservative*
+halo whose real geometry is legal.  The physical predicates are untouched --
+they read rule values, never the marking radius.
+"""
 
 import pytest
 
@@ -7,6 +18,10 @@ from kicad_tools.router.layers import LayerStack
 from kicad_tools.router.pathfinder import Router
 from kicad_tools.router.primitives import Layer, Route, Via
 from kicad_tools.router.rules import DesignRules
+
+#: Fed to ``mark_route`` as ``max_trace_width`` so ``_mark_via`` reaches seven
+#: cells on this 0.127 mm grid -- see the module docstring (#5660).
+HALO_TRACE_WIDTH_MM = 0.6
 
 
 def _context():
@@ -25,7 +40,7 @@ def _context():
     x, y = grid.grid_to_world(60, 60)
     route = Route(net=2, net_name="N2")
     route.vias.append(Via(x, y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "N2"))
-    grid.mark_route(route)
+    grid.mark_route(route, max_trace_width=HALO_TRACE_WIDTH_MM)
     router = Router(grid, rules)
     router.set_net_name_to_id({"N1": 1, "N2": 2})
     return grid, router
@@ -102,7 +117,7 @@ def test_python_refinement_preserves_authored_partner_gap(gap, blocked):
 
 def test_python_refinement_checks_swept_step():
     grid, router = _context()
-    grid.unmark_route(grid.routes[0])
+    grid.unmark_route(grid.routes[0], max_trace_width=HALO_TRACE_WIDTH_MM)
     router.rules.trace_width, router.rules.trace_clearance = 0.15, 0.1
     x, y = grid.grid_to_world(55, 56)
     route = Route(net=2, net_name="N2")

@@ -3008,6 +3008,7 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         TraceOptimizer,
         optimize_routes_grid_synced,
     )
+    from kicad_tools.router.plane_via_sites import reserve_plane_via_sites
 
     print("\n" + "=" * 60)
     print("Routing PCB...")
@@ -3084,6 +3085,27 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         max_search_iterations=DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
         per_net_iterations=DETERMINISTIC_BUDGET_PER_NET_ITERATIONS,
     )
+
+    # Issue #5700: hold a stitch-via site open for every VBUS_USB SMD pad
+    # BEFORE routing.  VBUS_USB is skipped by the trace router, so its pads
+    # (J1's A4/A9/B4/B9 and U1.9) reach the In2.Cu pour only through a
+    # post-route stitch via.  Once the exact-disc halo (#5660) stopped
+    # over-blocking diagonals, signal routing legally consumed the last via
+    # site beside J1.A4 and the pad was stranded (pours=BROKEN), with no
+    # escape left for the stitcher or the pour repair to find.  The
+    # reservation makes that site the router's obstacle instead of the
+    # post-pass's problem.  GND is deliberately NOT listed: its BGA-field
+    # pads connect through escape traces, and a via site beside each would
+    # block the escape channels they need.
+    plane_via_nets = ["VBUS_USB"]
+    reservation = reserve_plane_via_sites(router.grid, plane_via_nets)
+    print(
+        f"   Reserved {len(reservation.sites)} plane-net via site(s) for "
+        f"{plane_via_nets} (#5700): "
+        + ", ".join(f"{'/'.join(s.pads)}@({s.x:.2f},{s.y:.2f})" for s in reservation.sites)
+    )
+    if reservation.unreserved:
+        print(f"   No pre-route via site for: {reservation.unreserved}")
 
     # Install per-protocol net classes.  The router consumes:
     #   - intra_pair_clearance via effective_intra_pair_clearance()

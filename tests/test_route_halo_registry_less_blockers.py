@@ -18,6 +18,16 @@ The fixture is the same measured separation as
 (60, 60) and a candidate at (55, 56) that is physically legal against it,
 so every "blocked" assertion below is load-bearing -- the paired control
 without the keep-out refines the same cell open.
+
+Issue #5660 (Epic #5509 Phase 3a) made the route halo the clearance kernel's
+exact disc.  ``(-5, -4)`` is ``sqrt(41) = 6.40`` cells from the via, which the
+Chebyshev square covered at its corner and the rule-derived disc (5 cells in
+Python, 6 in C++) does not -- and since a legal via drop needs ~6.3 cells here,
+no cell inside those discs is legal for *every* predicate below.  So the route
+is marked with ``max_trace_width`` = :data:`HALO_MAX_TRACE_WIDTH_MM`, the
+production knob that widens only the *marking* (#1692), giving a 7-cell halo
+that contains the candidate again.  Every predicate under test reads rule
+values, never the marking radius, so no physical verdict moves.
 """
 
 from __future__ import annotations
@@ -42,6 +52,12 @@ LAYER = 2  # an inner layer: the via halo covers every layer
 BLOCKERS = ["none", "keepout", "obstacle", "region_bound"]
 
 native = pytest.mark.skipif(not is_cpp_available(), reason="native router required")
+
+#: Widest-trace buffer the route is marked with: ``int((0.3 + 0.2 + 0.3) /
+#: 0.127) + 1 == 7`` cells, so the ``(-5, -4)`` candidate (6.40 cells) is
+#: inside the exact halo -- see the module docstring (#5660).
+HALO_MAX_TRACE_WIDTH_MM = 0.6
+HALO_RADIUS_CELLS = 7
 
 
 def _rules() -> DesignRules:
@@ -101,7 +117,7 @@ def _apply_blocker(grid: RoutingGrid, kind: str) -> None:
 
 def _python(kind: str) -> tuple[RoutingGrid, Router]:
     grid = _grid()
-    grid.mark_route(_route(grid))
+    grid.mark_route(_route(grid), max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     _apply_blocker(grid, kind)
     router = Router(grid, grid.rules)
     router.set_net_name_to_id({"N1": 1, "N2": 2})
@@ -111,7 +127,7 @@ def _python(kind: str) -> tuple[RoutingGrid, Router]:
 def _native_replayed(kind: str) -> tuple[CppGrid, CppPathfinder]:
     """The coupled search's path: bulk copy + stored geometry + mark replay."""
     grid = _grid()
-    grid.mark_route(_route(grid))
+    grid.mark_route(_route(grid), max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     _apply_blocker(grid, kind)
     cpp = CppGrid.from_routing_grid(grid)
     sync_stored_routes(cpp, grid)
@@ -126,9 +142,9 @@ def _native_incremental(kind: str) -> tuple[RoutingGrid, CppGrid, CppPathfinder]
     grid = _grid()
     cpp = CppGrid.from_routing_grid(grid)  # attaches grid._cpp_grid
     route = _route(grid)
-    grid.mark_route(route)
+    grid.mark_route(route, max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     gx, gy = grid.world_to_grid(route.vias[0].x, route.vias[0].y)
-    cpp.mark_via(gx, gy, 2, 6)
+    cpp.mark_via(gx, gy, 2, HALO_RADIUS_CELLS)
     sync_stored_routes(cpp, grid)
     _apply_blocker(grid, kind)
     pathfinder = CppPathfinder(cpp, grid.rules, diagonal_routing=True)
@@ -186,7 +202,7 @@ def test_python_ripup_keeps_a_blocker_that_landed_on_the_route_halo(kind):
     grid, _ = _python(kind)
     route = grid.routes[0]
     x, y = CANDIDATE
-    grid.unmark_route(route)
+    grid.unmark_route(route, max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     assert grid._blocked[LAYER, y, x], "rip-up erased the keep-out"
     assert int(grid._net[LAYER, y, x]) != 2
     # Cells the blocker never covered are released as before.
@@ -197,7 +213,7 @@ def test_python_blocker_before_the_first_route_is_captured_by_the_snapshot():
     grid = _grid()
     assert grid._static_blocked is None
     _apply_blocker(grid, "keepout")
-    grid.mark_route(_route(grid))
+    grid.mark_route(_route(grid), max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     x, y = CANDIDATE
     assert grid._static_blocked[LAYER, y, x]
     assert not grid._route_halo.cell_known(x, y, LAYER)
@@ -248,8 +264,8 @@ def test_native_ripup_keeps_a_blocker_that_landed_on_the_route_halo(kind):
     grid, cpp, _ = _native_incremental(kind)
     x, y = CANDIDATE
     gx, gy = grid.world_to_grid(*grid.grid_to_world(60, 60))
-    cpp._impl.unmark_via(gx, gy, 2, 6)
-    grid.unmark_route(grid.routes[0])
+    cpp._impl.unmark_via(gx, gy, 2, HALO_RADIUS_CELLS)
+    grid.unmark_route(grid.routes[0], max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     cell = cpp._impl.at(x, y, LAYER)
     assert cell.blocked, "native rip-up erased the keep-out"
     assert cell.net != 2

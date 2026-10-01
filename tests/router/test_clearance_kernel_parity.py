@@ -871,6 +871,12 @@ def test_cpp_kernel_present_in_ci() -> None:
 
 MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
     {
+        # Epic #5509 Phase 3a (#5660), consumer group 1: the Python grid's
+        # halo marking.  ``RoutingGrid._mark_segment`` / ``_mark_via`` (and the
+        # read-side ``_get_clearance_mask`` / ``_dilate_blocked``) walk
+        # ``halo_offsets``, whose membership is the kernel's own ``copper_gap``
+        # queried in grid-cell units, instead of a Chebyshev square.
+        "router/grid.py",
         # Epic #5509 Phase 3c (#5662), consumer groups 7 and 8: the coupled
         # diff-pair search path.  ``clearance_shapes.py`` is the one
         # router-primitive -> kernel-shape translation every migrated Python
@@ -962,6 +968,10 @@ MIGRATED_CPP_KERNEL_CALLERS: frozenset[str] = frozenset(
         # takes every number from ``copper_gap_ring_edge`` /
         # ``ring_edge_crosses_ray``.
         "src/grid.cpp",
+        # Epic #5509 Phase 3a (#5660), consumer group 2, also lives in this
+        # translation unit: ``Grid3D::mark_segment`` / ``mark_via`` (and
+        # ``unmark_*`` and ``route_geometry_complete``'s coverage map) walk the
+        # same kernel-derived disc as group 1 rather than the Chebyshev square.
         # Epic #5509 Phase 3c (#5662), consumer group 7: the coupled rail gate.
         # ``coupled_pathfinder.cpp``'s ``rail_clear`` measures a candidate rail
         # step against the grid's stored route geometry with the kernel, which

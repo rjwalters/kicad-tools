@@ -4,6 +4,16 @@ import pytest
 
 from kicad_tools.router.primitives import Layer, Via
 
+# Issue #5660 (Epic #5509 Phase 3a): route halos are the clearance kernel's
+# exact disc, not the Chebyshev square they used to be.  Every probe below
+# sits at ``(55, 56)`` -- offset ``(-5, -4)`` from the via at ``(60, 60)``,
+# Euclidean distance ``sqrt(41) = 6.40`` cells -- which the old six-cell
+# square covered at its corner and the disc does not.  A seven-cell marking
+# radius restores the premise these tests are about: a cell inside a
+# *conservative* halo whose real geometry is legal.  The physical predicates
+# are untouched by this -- they read rule values, never the marking radius.
+HALO_RADIUS_CELLS = 7
+
 
 @pytest.fixture(params=["native", "python"])
 def context(request):
@@ -33,20 +43,22 @@ def context(request):
             pytest.skip("native router required")
         native = CppGrid.from_routing_grid(grid)
         native._impl.add_stored_via(x, y, 0.3, 0.6, 2)
-        native._impl.mark_via(60, 60, 2, 6)
+        native._impl.mark_via(60, 60, 2, HALO_RADIUS_CELLS)
         router = CppPathfinder(native, rules)
         router.set_routable_layers(native.get_routable_indices())
     else:
         native = None
         route = Route(net=2, net_name="N2")
         route.vias.append(Via(x, y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "N2"))
-        grid.mark_route(route)
+        # ``max_trace_width`` is the only knob on ``_mark_via``'s radius; 0.6 mm
+        # yields HALO_RADIUS_CELLS on this 0.127 mm grid.
+        grid.mark_route(route, max_trace_width=0.6)
         grid._test_unknown_snapshots = {}
         router = Router(grid, rules)
     return grid, native, router
 
 
-def unknown(context, x, y, net=3, radius=6, add=True):
+def unknown(context, x, y, net=3, radius=HALO_RADIUS_CELLS, add=True):
     grid, native, _ = context
     if native:
         method = native._impl.mark_via if add else native._impl.unmark_via
@@ -194,14 +206,14 @@ def test_repeated_unknown_mark_requires_all_unmarks(context):
     grid, native, _ = context
     unknown(context, 60, 60)
     if native:
-        native._impl.mark_via(60, 60, 3, 6)
-        native._impl.unmark_via(60, 60, 3, 6)
+        native._impl.mark_via(60, 60, 3, HALO_RADIUS_CELLS)
+        native._impl.unmark_via(60, 60, 3, HALO_RADIUS_CELLS)
     else:
         x, y = grid.grid_to_world(60, 60)
         via = Via(x, y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 3, "N3")
         key = grid._route_halo.via_key(via)
-        grid._route_halo.record(key, 6, True)
-        grid._route_halo.record(key, 6, False)
+        grid._route_halo.record(key, HALO_RADIUS_CELLS, True)
+        grid._route_halo.record(key, HALO_RADIUS_CELLS, False)
     assert not known(context)
     assert blocked(context, "trace")
     unknown(context, 60, 60, add=False)

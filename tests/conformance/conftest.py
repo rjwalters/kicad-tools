@@ -41,6 +41,18 @@ disagreement can only be geometry.  An under-rejection at the consumer's
 *own* ``trace_clearance`` is a rule-resolution gap Phase 2's resolver owns,
 and one a migration phase may not close by changing a rule value (scope guard
 #1); it stays in the published table's percentages rather than in the gate.
+
+**A migrated group may carry a quantisation ledger** -- and only groups 1 and
+2 do.  Their consumer answers with a *cell set* (grid occupancy, switched onto
+the kernel's exact dilation by #5660, Phase 3a), and a cell-quantised model
+over-rejects by construction: its halo radius rounds outwards, and the
+adapter dilates the candidate as well as the existing copper.  Demanding zero
+over-rejection there would demand the row be deleted rather than gated, so
+:func:`assert_migrated_group_agrees` holds such a row to *zero
+under-rejection, always* plus *exactly* the over-rejection its ledger records
+(``test_corpus.QUANTISATION_LEDGER`` / ``test_named_fixtures.FIXTURE_QUANTISATION_LEDGER``).
+A group with no ledger entry is held to an empty one, which is the plain
+zero-disagreement gate above -- so the ledger widens nothing for groups 6-10.
 """
 
 from __future__ import annotations
@@ -94,7 +106,12 @@ CONSUMER_XFAIL_REASON = "consumer verdict is report-only until that consumer's e
 
 
 def item_group(item: pytest.Item) -> int | None:
-    """The Epic #5509 group an item measures, from its ``adapter`` parameter.
+    """The Epic #5509 group an item measures, from its adapter parameter.
+
+    Two parametrisation styles are in use and both resolve: ``test_corpus.py``
+    passes the adapter *object* as ``adapter`` (so ``.group`` is right there),
+    while ``test_named_fixtures.py`` passes the adapter's *name* as
+    ``adapter_name``, because its params double as readable test ids.
 
     ``None`` for an item that is not parametrised by a single adapter -- the
     refilled-zone row, for instance, loops over every adapter inside one item,
@@ -109,7 +126,73 @@ def item_group(item: pytest.Item) -> int | None:
     if callspec is None:
         return None
     group = getattr(callspec.params.get("adapter"), "group", None)
-    return group if isinstance(group, int) else None
+    if isinstance(group, int):
+        return group
+    name = callspec.params.get("adapter_name")
+    if isinstance(name, str):
+        from tests.conformance.report import ADAPTERS
+
+        for adapter in ADAPTERS:
+            if adapter.name == name:
+                return adapter.group
+    return None
+
+
+def assert_migrated_group_agrees(
+    adapter: object,
+    *,
+    over: list[str],
+    under: list[str],
+    expected_over: tuple[str, ...] = (),
+    what: str,
+    context: str = "",
+) -> None:
+    """The gate a migrated group's rows are held to, in place of the xfail.
+
+    Two clauses, deliberately asymmetric because the two directions of
+    disagreement mean opposite things:
+
+    * **Under-rejection is never permitted.**  The consumer accepting copper
+      kicad-cli flags is the failure mode the whole epic exists to remove, and
+      no quantisation argument excuses it -- a coarse model errs outwards.
+      There is no ledger entry that can allow one.
+    * **Over-rejection is permitted only where it is already recorded.**
+      *expected_over* is empty for every group except the cell-quantised
+      occupancy rows (groups 1 and 2), so for the rest this is exactly the
+      zero-disagreement gate.  Pinning the exact set rather than a budget means
+      any *new* over-rejection, and any that silently disappears, turns the
+      build red with the evidence that has to be re-measured.
+
+    Args:
+        adapter: The adapter under test; used for the failure message only.
+        over: Over-rejection descriptions, as the caller formats them.
+        under: Under-rejection descriptions, same format.
+        expected_over: The pinned over-rejection set for this (group, case).
+        what: Human label for the case, e.g. ``"seed 2"``.
+        context: Optional extra provenance appended to a failure.
+    """
+    group = getattr(adapter, "group", None)
+    name = getattr(adapter, "name", repr(adapter))
+    suffix = f"\n{context}" if context else ""
+
+    assert not under, (
+        f"{name} (group {group}) UNDER-rejects on {what}: it accepts copper "
+        f"kicad-cli flags (GATED: this consumer is on the shared kernel).\n"
+        f"  under-rejected (KiCad flags, consumer clean): {under}\n"
+        f"  over-rejected (consumer flags, KiCad clean): {over}\n"
+        "An under-rejection is a real defect, never a ledger entry."
+        f"{suffix}"
+    )
+    assert sorted(over) == sorted(expected_over), (
+        f"{name} (group {group}) over-rejects differently than recorded on {what} "
+        "(GATED: this consumer is on the shared kernel).\n"
+        f"  measured: {sorted(over)}\n"
+        f"  recorded: {sorted(expected_over)}\n"
+        "A new entry means the consumer grew; a missing one means it shrank. "
+        "Either way re-measure, re-pin the quantisation ledger (groups 1/2 "
+        "only -- every other migrated group is held to none), and regenerate "
+        f"docs/clearance-conformance.md in the same PR.{suffix}"
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:

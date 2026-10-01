@@ -7,9 +7,14 @@ rules, net classes, net-pair exemptions, grids or routing state: it answers
 ``required_mm``".  Rule resolution -- deciding which number ``required_mm`` is
 for a given pair -- belongs to the Phase 2 resolver, not here.
 
-**Nothing in the shipped router calls this yet.**  Phase 1b adds the kernel and
-its parity/fixture evidence only; ``tests/router/test_clearance_kernel_parity.py``
-asserts that no consumer has been switched.
+**Consumers arrive one epic phase at a time.**  Phase 1b added the kernel and
+its parity/fixture evidence with nothing wired to it; Phases 3a-3f switch the
+consumers over one by one -- Phase 3a (#5660) is ``router/grid.py``'s
+route-copper halo marking and its C++ sibling in ``cpp/src/grid.cpp``.
+``tests/router/test_clearance_kernel_parity.py`` keeps the ledger of who is on
+the kernel (``MIGRATED_KERNEL_CALLERS`` / ``MIGRATED_CPP_KERNEL_CALLERS``) and
+fails on an import that appears without an entry, so each phase's before/after
+measurement stays attributable to that phase.
 
 Port contract
 -------------

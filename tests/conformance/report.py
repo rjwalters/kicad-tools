@@ -103,6 +103,7 @@ __all__ = [
     "NOTES",
     "NOT_MEASURED",
     "NOT_MEASURED_REASONS",
+    "QUANTISED_GROUPS",
     "REFINEMENT_GATED_GROUPS",
     "TABLE_BEGIN",
     "TABLE_END",
@@ -305,7 +306,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({6, 7, 8, 9, 10})
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 6, 7, 8, 9, 10})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -323,6 +324,9 @@ consumer really imports the kernel.
 
 Migrated so far:
 
+* **1** -- the Python grid's halo marking (``router/grid.py``), Phase 3a.
+* **2** -- the C++ grid's halo marking (``Grid3D::mark_segment`` /
+  ``mark_via``), Phase 3a.
 * **6** -- the fixed-copper predicate (``router/fixed_copper.py`` and
   ``grid.cpp``'s ``fixed_fill_clear``), Phase 3f.
 * **7** -- the C++ coupled rail gate (``CoupledPathfinder::rail_clear``), Phase 3c.
@@ -333,6 +337,8 @@ Migrated so far:
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
+    1: "3a",
+    2: "3a",
     6: "3f",
     7: "3c",
     8: "3c",
@@ -340,6 +346,21 @@ _MIGRATION_PHASE: dict[int, str] = {
     10: "3e",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
+
+
+QUANTISED_GROUPS: frozenset[int] = frozenset({1, 2})
+"""Migrated groups whose gate tolerates a *pinned* over-rejection ledger.
+
+Groups 1 and 2 answer with a **cell set** (grid occupancy), not a distance, and
+a cell-quantised model over-rejects by construction: its halo radius rounds
+outwards, and the adapter dilates the candidate as well as the existing copper.
+Their gate is therefore *zero under-rejection, always*, plus *exactly* the
+over-rejection recorded in ``test_corpus.QUANTISATION_LEDGER`` /
+``test_named_fixtures.FIXTURE_QUANTISATION_LEDGER`` -- a new entry and a
+vanished one both fail.  Every other migrated group is held to zero
+disagreement in both directions, and ``test_corpus`` asserts no ledger entry
+names a group outside this set.
+"""
 
 
 REFINEMENT_GATED_GROUPS: dict[int, str] = {
@@ -387,17 +408,27 @@ NOT_MEASURED_REASONS: dict[int, str] = {}
 # epic's group inventory that this phase could not score is recorded here, so
 # a measured row cannot imply more coverage than it has.
 NOTES: dict[int, str] = {
-    1: "Cell-set answer, so no mm gap is reported; square Chebyshev halo (#5410).",
+    1: (
+        "Cell-set answer, so no mm gap is reported. The halo is the kernel's "
+        "exact dilation (#5660), not the Chebyshev square that swallowed "
+        "#5410's legal via at a corner. The rate is unchanged by that switch "
+        "-- the residual is outward *rounding* along the pair axis "
+        "(`int(...) + 1`, doubled because this row's rejection rule dilates "
+        "the candidate as well as the existing copper), not the square's "
+        "diagonal excess. Retired by groups 4/5's refinement, not by a finer "
+        "halo."
+    ),
     2: (
-        "Write side: `mark_segment` / `mark_via` square halo. Routed copper "
-        "only -- the C++ grid never marks pads itself "
-        "(`CppGrid.from_routing_grid` copies the Python blocked plane), so "
-        "pad pairs would re-measure group 1."
+        "Write side: `mark_segment` / `mark_via`, on the same kernel-derived "
+        "disc as group 1 (#5660). Routed copper only -- the C++ grid never "
+        "marks pads itself (`CppGrid.from_routing_grid` copies the Python "
+        "blocked plane), so pad pairs would re-measure group 1."
     ),
     3: (
-        "Read side: the Euclidean-disc acceptance kernel (#3229), narrower "
-        "than group 2's square by construction. Via candidates go through the "
-        "sibling `is_via_blocked`."
+        "Read side: the Euclidean-disc acceptance kernel (#3229). Since #5660 "
+        "the group 1/2 write side stamps a disc too, so read and write finally "
+        "describe the same shape. Via candidates go through the sibling "
+        "`is_via_blocked`."
     ),
     4: (
         "Raises the requirement to `max(required, via_clearance)` for "
@@ -727,13 +758,20 @@ def _row_note(number: int) -> str:
     note = NOTES.get(number, "")
     if number not in MIGRATED_GROUPS:
         return note
+    fails_on = (
+        "so it fails on any **under**-rejection and on any over-rejection its "
+        "pinned cell-quantisation ledger (`test_corpus.QUANTISATION_LEDGER`) "
+        "does not record"
+        if number in QUANTISED_GROUPS
+        else "so it fails on a **geometry** disagreement in either direction"
+    )
     prefix = (
         f"**Switched to the shared kernel in Phase {_MIGRATION_PHASE[number]} -- "
         "no longer report-only.** The merge gate "
         "(`test_corpus.test_adapter_agrees_with_kicad_cli`) drives this same "
         "consumer at the project netclass clearance kicad-cli itself applies, "
-        "so it fails on a **geometry** disagreement in either direction; the "
-        "percentages in this row keep the consumer's own rule values."
+        f"{fails_on}; the percentages in this row keep the consumer's own rule "
+        "values."
     )
     return f"{prefix} {note}".strip()
 
@@ -1099,8 +1137,11 @@ def render_document(
         "**accept** when the via is inserted first, **reject** when the "
         "segment is (#5398) |",
         "| `issue5410-dqs-n-halo-vs-legal-via` | clean (0.213 mm copper, "
-        "0.513 mm drill vs 0.20 / 0.50) | grid occupancy **rejects** -- "
-        "six-cell Chebyshev square halo on a 0.127 mm grid (#5410) |",
+        "0.513 mm drill vs 0.20 / 0.50) | grid occupancy **rejects**. Since "
+        "#5660 DQS_N's own halo no longer covers the DQ3 cell (Euclidean "
+        "6.40 cells against a six-cell disc, where the Chebyshev square "
+        "covered it at its corner); this row still rejects because the "
+        "adapter grows DQ3's halo too and the two discs touch (#5410) |",
         "| `search-vs-commit-seg-via-max` | clean (project `Default` class "
         "0.15 mm) | route-halo geometry **rejects** via "
         "`max(required, via_clearance)`; commit gates **accept** |",
