@@ -23,6 +23,8 @@ call, never auto-deleted.
 /repo:tidy --caches           # Also clear regenerable caches (__pycache__/, dist/, .mypy_cache/, …)
 /repo:tidy --ask              # Walk every category interactively before deleting anything
 /repo:tidy --sizes            # Also measure worktree root sizes (slow: du has no prune)
+/repo:tidy --fast             # Skip the reference scans entirely; unscanned candidates land in ASK, not SAFE
+/repo:tidy --deep             # One reference scan per candidate instead of one batched pass (audit only)
 /repo:tidy packages/core      # Scope to one subtree
 ```
 
@@ -32,6 +34,23 @@ the cache tier into the auto-delete set for the non-interactive default.
 `--sizes` only adds the per-worktree size column described in step 1 — it never
 changes what is deleted.)
 
+**`--fast` / `--deep` are the two ends of the reference-scan cost dial, and
+neither is the default.** The default is **one batched reference pass** over the
+whole candidate set, described in step 2 — that is what every run does unless
+one of these flags is passed:
+
+- **`--fast`** skips the reference scans entirely. Candidates that would have
+  been scanned are still inventoried and reported, but they are routed to
+  **ASK** rather than SAFE/CACHE, because a check that was not run is not a
+  check that passed (safety rule 11).
+- **`--deep`** restores the pre-batching behaviour: one scan per candidate.
+  It exists to **audit** the batched pass, not to get a different answer —
+  batching is a traversal optimization, so if `--deep` and the default ever
+  disagree, that is a bug in the batched pass and not a feature of `--deep`.
+- They are mutually exclusive. If both are passed, `--fast` wins: skipping is
+  both the cheaper option and the one that cannot delete more than the default
+  would.
+
 ## Steps
 
 ### 1. Inventory
@@ -39,8 +58,27 @@ changes what is deleted.)
 Gather candidates without deleting anything:
 
 ```bash
-# Ignored files that exist on disk (usually build output/caches)
-git clean -ndX
+# Ignored files that exist on disk (usually build output/caches).
+#
+# STREAM this and bucket as you go — never collect the raw output. Every line
+# whose path is at or under one of the CACHE-tier directory names below folds
+# into a SINGLE entry for that directory; the per-file lines are discarded
+# without being categorized individually. On a repo whose multi-gigabyte
+# regenerable tree is ignored file-by-file (rather than by a directory-level
+# rule git can collapse), that is the difference between one CACHE line and
+# hundreds of thousands of them. Bound it like the `--sizes` du below: a walk
+# that exceeds the budget must degrade the ignored-file inventory to partial
+# (say so in the report) rather than stall the whole step.
+timeout 120 git clean -ndX   # bucket-as-you-stream; see the CACHE-tree note below
+
+# The CACHE-tier trees, at DIRECTORY granularity — the cheap path that makes the
+# bucketing above complete without anyone enumerating their contents. `-prune`
+# stops the walk AT the match, so a 3 GB dist/ costs one stat, not a descent.
+find . \( -name .git -o -name node_modules -o -name .venv \) -prune \
+     -o -type d \( -name dist -o -name .turbo -o -name .astro \
+                   -o -name __pycache__ -o -name .pytest_cache \
+                   -o -name .mypy_cache -o -name .ruff_cache \
+                   -o -name htmlcov \) -prune -print
 
 # Untracked files (may include work-in-progress — treat carefully)
 git clean -nd
@@ -85,17 +123,56 @@ git worktree list --porcelain | sed -n 's/^worktree //p' \
     done
 ```
 
-Both `find` walks `-prune` the heavy trees rather than filtering them out with
+**The CACHE-tier trees are excluded from the ignored-file listing, because the
+directory-level `find` above already reports them.** `git clean -ndX` is the
+expensive half of this step: it visits every ignored tree, and a multi-gigabyte
+regenerable tree that is ignored file-by-file (rather than by a directory-level
+rule git can collapse to one line) is enumerated in full — the walk that blew
+the five-minute command timeout in the reported case. The seven CACHE-tier trees
+step 2 names — `dist`, `.turbo`, `.astro`, `__pycache__`, `.pytest_cache`,
+`.mypy_cache`, `.ruff_cache` (plus `htmlcov`) — are the ones worth excluding,
+because they are re-entered for no new information: the CACHE tier already
+treats each of them as a **whole directory** in both the report
+(`dist/ (gitignored, 380 MB)`) and the apply step (`git clean -fdX -- dist/`),
+so their contents never appear individually in any output. The exclusion
+therefore changes **how** a CACHE tree is discovered, never **whether** it is
+reported or what tier it lands in — the same invariant the prune list below
+states for the `find` walks.
+
+The mechanism is **bucket-as-you-stream plus the directory-level `find`**, and
+it is that way because the obvious alternatives are verified not to work:
+
+- **Pathspec exclude magic does not apply.** `git clean -ndX -- .
+  ':(exclude)dist'` (and `':!dist/'`, and `':(exclude,glob)**/dist/**'`) still
+  prints `Would remove dist/` — checked on git 2.55.0. `git clean` collapses a
+  wholly-ignored directory to a single entry and matches it by leading
+  directory, which exclude magic does not suppress. Do not "fix" this step by
+  adding one; it reads as an exclusion and silently is not one.
+- **`-e <pattern>` is the wrong direction.** `git clean -e` *adds* a pattern to
+  the ignore rules in effect, so under `-X` it makes **more** paths eligible for
+  removal, not fewer.
+
+So: pipe `git clean -ndX` instead of collecting it, fold every line at or under
+a CACHE-tier directory name into one entry for that directory, and take the
+authoritative CACHE list from the pruned directory-level `find` — which costs
+one `stat` per tree instead of a descent. Bound the `git clean` walk with
+`timeout` the way `--sizes` bounds `du`, and if it trips, report the
+ignored-file inventory as **partial** in the report rather than silently
+dropping it or stalling the step.
+
+The `find` walks `-prune` the heavy trees rather than filtering them out with
 `-not -path`. `-not -path` only suppresses *printing* — `find` still descends
 into `.git/`, `node_modules/`, and every other excluded directory, which is why
 the inventory stalls on a repo with a multi-GB build tree. Pruning is a
 **traversal optimization only and must never change what is reported**: junk
 outside the pruned trees (an empty `build/`, an 11 MB file under `src/`) is
-still listed exactly as before, and `git clean -ndX`/`-nd` are unaffected since
-git does its own traversal. When editing the prune list:
+still listed exactly as before. When editing the prune list:
 
-- **Keep both invocations' lists identical.** If they drift, one command
-  silently reintroduces the stall.
+- **Keep the empty-directory and large-file walks' lists identical.** If they
+  drift, one command silently reintroduces the stall. The CACHE-tier walk is
+  deliberately **not** in that pair: it must *match* `dist/` and the other cache
+  dirs to report them, so it prunes only `.git`, `node_modules`, and `.venv` and
+  then prunes at each match instead.
 - **Draw entries from the denylist and CACHE categories already named in step 2**
   (`node_modules/`, `.venv/`, `dist/`, plus `target/` for Rust builds) instead
   of growing a second, inconsistent list.
@@ -125,6 +202,26 @@ gigabytes in worktrees — because the count and the paths are what carry that
 signal, and they are free (`git worktree list` reads
 `.git/worktrees/`, it does not walk the trees). The size column is the
 refinement, not the point.
+
+**Expected cost of this step, and where the reference scans fit.** The three
+pieces that scale with repo size, in the order they bite:
+
+| Piece | Cost | Bound |
+|---|---|---|
+| `git clean -ndX` | one pass over every ignored tree | `timeout`, minus the CACHE-tier trees excluded above; degrades to a partial ignored-file inventory |
+| the `find` walks | one pass over the tree, pruned at the heavy roots | the prune list |
+| step 2's reference scans | **one** batched pass over tracked files, whatever the candidate count | `--fast` skips them; `--deep` opts back into one pass per candidate |
+| `du` over worktree roots | one unpruned pass per root | opt-in behind `--sizes`, `timeout 20` per root |
+
+The reference scans are the piece that used to be unbounded in the *number of
+candidates* rather than in repo size: written as "for each candidate, scan the
+tree", six empty directories meant six full-tree scans (twelve, when each was
+scanned for both its path and its basename) and blew a further two-minute
+budget on top of the inventory. Step 2 now specifies **one** pass over the whole
+candidate set instead, which is the same call `--sizes` and `--caches` already
+make — bound the cost first, then offer the expensive shape as an explicit flag
+(`--deep`) rather than as the default. `--fast` is the other end of the same
+dial: skip the scans, and route what they would have checked to ASK.
 
 When `--sizes` is passed, the sizes are **best-effort**: wrap each root in
 `timeout 20` and print `size unavailable` for any root that exceeds it rather
@@ -173,10 +270,11 @@ regenerable build output, kept unless `--caches`); a **never-delete denylist**
 overrides both; everything else gitignored falls through to ASK.
 
 Apply these tests in order — **denylist first, then the SAFE and CACHE
-allowlists, then fall through to ASK**. For empty directories specifically, a
-**reference scan runs after the allowlist match, as an additional net, not a
-replacement for it** — see the SAFE empty-directory bullet below; the
-denylist/allowlist check still runs first and still wins:
+allowlists, then fall through to ASK**. For empty directories and for
+CACHE-tier build-output directories, a **reference scan runs after the
+allowlist match, as an additional net, not a replacement for it** — see the
+SAFE empty-directory bullet and the CACHE bullet below; the denylist/allowlist
+check still runs first and still wins:
 
 **Never-delete denylist (always ASK, never SAFE or CACHE — checked first,
 overrides everything below, regardless of gitignore status):**
@@ -246,20 +344,57 @@ reserved for tracked files.
     output before anything is deleted.
 
     **Reference scan (additional net, after the denylist check, not instead of
-    it).** The denylist above is an enumerated/prefix-matched allowlist of known
+    it) — ONE batched pass over every candidate, never one scan per directory.**
+    The denylist above is an enumerated/prefix-matched allowlist of known
     tools (`.loom/`, `.anvil/`, `.wrangler/`, git worktree roots); it does not
     cover a tool that is not on that list — a custom app's own state/spool dir,
-    or a future tool's coordination root not yet added here. For any empty
-    directory that clears the denylist check, run a cheap cross-reference scan
-    before finalizing SAFE: `grep -rl` its path (or just its dirname, for a
-    generic name) across tracked files. Any hit — a script, config, or source
-    file that names the directory — demotes it from SAFE to ASK, reported with
-    its reason (e.g. "referenced by N files"), regardless of whether the
-    directory matched a named tool-scaffolding prefix. A directory with no
-    reference hit and no denylist match remains SAFE. This scan never *promotes*
-    anything the denylist already routed to ASK — it only ever demotes a
-    would-be SAFE empty directory, and only when the allowlist match already let
-    it through.
+    or a future tool's coordination root not yet added here. So every empty
+    directory that clears the denylist check gets cross-referenced against
+    tracked files before SAFE is final. **Collect the candidates first, then
+    scan once** — the scan is one pass over the tree whatever the candidate
+    count, not a pass per candidate:
+
+    1. **Collect.** Build the candidate list: every empty directory from step
+       1 that cleared the denylist check. Nothing is scanned yet.
+    2. **Short-circuit on empty.** If the candidate list is empty, the scan is
+       a **no-op** — skip it entirely. Never invoke the scan with an empty
+       pattern file: an empty `-f` file is not portably "matches nothing", and
+       an empty pattern is "matches everything", so either shape would report
+       every candidate as referenced or error out.
+    3. **Build one pattern file.** One fixed string per line: each candidate's
+       repo-relative path, plus its bare basename when the path is generic
+       enough that a config is likely to name only the leaf. This is the same
+       pair of patterns the per-directory form used to search for; it is now
+       two *lines*, not two *scans*.
+    4. **Scan once.**
+       `git grep -I -n -F -f "$PATTERNS" -- .` — a single pass over tracked
+       files for all candidates at once. `-F` keeps every pattern a fixed
+       string (a path with `.` in it must not be read as a regex), and `-n`
+       gives `path:line:text` so the next step can attribute hits.
+    5. **Attribute.** For each hit line, the candidate is whichever pattern the
+       matched text contains; count distinct referencing files per candidate.
+       A candidate with at least one hit is demoted; a candidate with none is
+       not. If the candidate set is large enough that one pattern file is
+       unwieldy, **chunk it** — the bound is one pass per chunk, never one pass
+       per candidate.
+
+    **Batching is a traversal optimization only and must never change what is
+    reported** — the same invariant step 1's prune list states for the `find`
+    walks. Any hit — a script, config, or source file that names the directory —
+    demotes it from SAFE to ASK, reported with its reason (e.g. "referenced by N
+    files"), regardless of whether the directory matched a named
+    tool-scaffolding prefix, exactly as before. A directory with no reference
+    hit and no denylist match remains SAFE. This scan never *promotes* anything
+    the denylist already routed to ASK — it only ever demotes a would-be SAFE
+    empty directory, and only when the allowlist match already let it through.
+
+    `--deep` runs the pre-batching shape instead: one scan per candidate, for
+    both its path and its basename. It is an **audit** of the batched pass, and
+    the two must agree on every candidate; a disagreement is a bug in the
+    batched pass. `--fast` skips the scan entirely, in which case every
+    denylist-cleared empty directory is reported under **ASK** with the reason
+    `reference scan skipped (--fast)` — never auto-deleted as SAFE on the
+    strength of a check that did not run (safety rule 11).
 
   Nothing in this category may be tracked by git or match a source-code
   extension.
@@ -272,6 +407,49 @@ reserved for tracked files.
     `.ruff_cache/`
   - Build output: stale `dist/`, `.turbo/`, `.astro/`, `htmlcov/`, `.coverage`,
     coverage output, `site/dist`
+
+  **Reference scan (additional net, after the allowlist match, not instead of
+  it) — the same mechanism as the empty-directory reference scan above,
+  applied to a different question.** "Regenerable" and "harmless to delete
+  right now" are different properties: a `dist/` can be truly rebuildable by
+  re-running the tool and still be the exact bytes a live, registered process
+  is reading from disk this second — clearing it would not lose source, but it
+  would break that process until the next build. Every path that clears the
+  CACHE allowlist match is cross-referenced against registered MCP server
+  configs before CACHE is final — and, like the empty-directory scan,
+  **collect the candidates first, then read each config source exactly once
+  per run, never once per candidate.** The four sources below are a handful of
+  small JSON files: read them once into a single set of referenced paths, then
+  match every CACHE candidate against that in-memory set. The sources are:
+
+  1. `.mcp.json` in the repo root, if present —
+     `jq -r '.mcpServers[]?.args[]?' .mcp.json`
+  2. `~/.claude.json` `.mcpServers[]?.args[]?` (top-level, user-scope servers)
+  3. `~/.claude.json` `.projects["<repo-root-abs-path>"].mcpServers[]?.args[]?`
+     (project-scoped servers) — resolve `<repo-root-abs-path>` the same way
+     this command already resolves the repo root elsewhere (step 1's `git
+     rev-parse --show-toplevel`), never hardcoded
+  4. Best-effort: any installed tool's tracked `install-metadata.json` whose
+     `installed_files` (or equivalent) names a path under the candidate
+     directory
+
+  This is a **path-prefix** match, not an exact one — a candidate directory
+  demotes when any scanned path starts with it (`mcp-loom/dist/` demotes on a
+  hit for `mcp-loom/dist/index.js`). A hit on any source demotes the path from
+  CACHE to **ASK**, reported with the reason, mirroring the empty-directory
+  wording: `← live MCP bundle (referenced by <config-path>)`. Like the
+  empty-directory scan, this is purely a **demotion** — it never promotes
+  anything the denylist already routed to ASK, and a CACHE entry with no
+  reference hit stays CACHE exactly as before, so `--caches` still clears
+  every regenerable dir that nothing is currently loading from.
+
+  The same cost dial applies here as to the empty-directory scan, with the same
+  safety asymmetry. `--deep` re-reads the config sources per candidate (an audit
+  of the batched read — the two must agree). `--fast` skips the scan, and every
+  unscanned CACHE candidate is reported under **ASK** with the reason
+  `reference scan skipped (--fast)` instead of being cleared by `--caches`:
+  under `--fast`, `--caches` clears strictly less than it would by default,
+  never more (safety rule 11).
 
   Like SAFE, nothing here may be tracked by git or match a source-code extension.
   (`node_modules/` and virtualenvs are **not** CACHE — they are denylisted
@@ -288,6 +466,19 @@ reserved for tracked files.
     empty-directory bullet above) — a tracked file references its path even
     though it matched no denylist entry. Report it with the reason, e.g.
     "referenced by N files", rather than silently skipping it.
+  - **Any CACHE-tier directory demoted by the MCP-config reference scan**
+    (see the CACHE bullet above) — its path is referenced by `.mcp.json`,
+    `~/.claude.json` `mcpServers`, or an installed tool's
+    `install-metadata.json`, so a registered MCP server loads from it right
+    now. Report it with the reason, e.g. "referenced by ~/.claude.json"; it is
+    regenerable but not currently harmless to delete, so `--caches` must not
+    reach it.
+  - **Any candidate whose reference scan was skipped because `--fast` was
+    passed** — an empty directory that cleared the denylist, or a CACHE-tier
+    directory that cleared the allowlist, but that was never cross-referenced.
+    Report it with the reason `reference scan skipped (--fast)`. A check that
+    was not run is not a check that passed, so these land here rather than in
+    SAFE or CACHE (safety rule 11).
   - **Any git worktree root** detected in step 1 — surfaced on its own
     `worktree:` inventory line (see Report), never auto-deleted, whether or not
     it is gitignored and whether or not it sits under a recognized tool
@@ -471,6 +662,7 @@ ASK:
   .venv/                   gitignored, 240 MB  ← virtualenv, expensive to rebuild
   node_modules/            gitignored, 310 MB  ← environment, reinstall via npm; not a --caches target
   prune node_modules       pnpm-lock.yaml detected  ← run `pnpm prune` to drop lockfile-unreferenced packages
+  mcp-loom/dist/           gitignored, 796K  ← live MCP bundle (referenced by ~/.claude.json); --caches will not clear it
   .loom/locks/             gitignored, empty  ← coordination root, empty is normal state
   .wrangler/tmp/           gitignored, empty  ← tool runtime dir, empty between builds
   notes-scratch.md         untracked, 3 KB, modified today  ← might be real work
@@ -518,6 +710,21 @@ WORKTREES (66 GB across 4 roots — never auto-deleted, listed for visibility):
   Pruning stale worktrees is /repo:reset's call, not tidy's.
 ```
 
+With `--fast`, the tiers are the same shape but the SAFE and CACHE tiers shrink
+and ASK grows by exactly the candidates whose reference scan did not run, each
+carrying the skip as its reason:
+
+```
+ASK:
+  build/                   empty  ← reference scan skipped (--fast)
+  packages/ui/dist/        gitignored, 88 MB  ← reference scan skipped (--fast)
+```
+
+Print that reason literally rather than folding these into a generic "needs a
+human call" line: the operator has to be able to tell a candidate tidy *checked
+and could not clear* from one it *never checked*, and the remedy for the second
+is simply to re-run without `--fast`.
+
 The `WORKTREES` block is a **distinct inventory section**, not folded into the
 generic denylist ASK lines, and under `--sizes` its bytes are summed
 **separately** from the SAFE/CACHE/ASK totals (a worktree's contents are neither
@@ -550,6 +757,12 @@ guessing** at a command that may not exist.
   CACHE; delete only what they approve. (`--ask` already surfaces caches for a
   decision, so `--caches` is redundant with it — the flag only affects the
   non-interactive default.)
+- With `--fast`: the tiers are unchanged, but the reference scans in step 2 do
+  not run, so every candidate that would have been scanned sits in ASK with the
+  reason `reference scan skipped (--fast)`. The auto-delete set is therefore a
+  **subset** of what the default run would delete — `--fast` can only ever
+  delete less, never more or something different. `--deep` is the reverse trade
+  (same set, more scans) and changes nothing about this step.
 - **KEEP is never part of the apply step, under any flag.** Both sub-cases are
   tracked files, so both are report-only: `/repo:tidy` never runs `git rm`,
   never stages a tracked-file deletion, and never prompts to do either — not
@@ -630,3 +843,14 @@ inventory to confirm and report bytes freed.
    so rule 7's `--caches` opt-in does not reach it and no flag makes it
    automatic — `node_modules/` full-tree deletion remains denylisted and ASK
    exactly as under rule 6.
+11. **A skipped check never widens what is deleted** — `--fast` skips step 2's
+   reference scans, so the candidates they would have cross-referenced are
+   reported under ASK (`reference scan skipped (--fast)`), never auto-deleted as
+   SAFE or cleared by `--caches`. A check that was not run is not a check that
+   passed. The same asymmetry governs any future cost flag: making tidy cheaper
+   may shrink the auto-delete set, never grow it. Its companion is the
+   invariant on the other side of the dial — **batching a scan is a traversal
+   optimization only and must never change what is reported** (step 1 states it
+   for the `find` prune list, step 2 for the batched reference pass), which is
+   why `--deep` exists as an audit of the default rather than as a second
+   answer.

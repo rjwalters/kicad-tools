@@ -26,6 +26,7 @@ locally to drive the cloud CLI; they are **never** copied to the VM.
 /repo:remote gcp               # Override REPO_REMOTE_PROVIDER for this run
 /repo:remote aws
 /repo:remote --status          # List instances created by this command
+/repo:remote --verify          # Prove the SSH alias still reaches THIS repo's instance
 /repo:remote --down            # Stop instances created by this command
 /repo:remote --down --delete   # Terminate/delete them
 ```
@@ -46,6 +47,7 @@ repo-remote up [aws|gcp]              # DRY RUN: print the resolved plan + estim
 repo-remote up --yes [--json]        # provision (or reuse) with no prompts; requires pre-supplied cost-relevant config
 repo-remote up --yes --force         # additionally override the fleet-marker guard (see below)
 repo-remote status [--json]          # list instances tagged repo-remote=<name>
+repo-remote verify [--json]          # prove the SSH alias still reaches this repo's instance (exit 6 if not)
 repo-remote down [--yes] [--delete]  # dry-run listing without --yes; stop (or --delete to terminate) with --yes
 ```
 
@@ -74,8 +76,11 @@ relax the cost gate — `--force` without a pre-supplied
 
 Exit codes: `0` success (including a dry-run plan), `2` missing/invalid required
 config (the cost gate), `3` provider authentication failed, `4` cloud operation
-failed, `5` refused to reuse a fleet-marked instance (pass `--force`), `64`
-usage error.
+failed, `5` refused to reuse a fleet-marked instance (pass `--force`), `6`
+host-identity verification failed — the host reachable at the SSH alias is not
+this repo's instance, or its identity could not be established (see [Stale SSH
+aliases and released public IPs](#stale-ssh-aliases-and-released-public-ips-host-identity-verification);
+**not** overridable with `--force`), `64` usage error.
 
 ## Configuration — two layers
 
@@ -93,6 +98,35 @@ shared defaults:
    `REPO_REMOTE_INSTANCE_ID` and the hardware/software/session knobs live. A
    repo that needs a *different* cloud account/region can also override the
    credentials here.
+
+**Keeping the per-repo file out of the tree (`REPO_REMOTE_ENV_FILE`).** Some
+repos forbid *any* `.env` in the checkout or its worktrees — worktrees are
+copied and rsynced constantly, and a gitignored file is one `git add -f` away
+from leaking. Set `REPO_REMOTE_ENV_FILE=<absolute path>` (e.g.
+`~/.config/<repo>/remote.env`) in the process environment or in the shared
+`remote.env`, and layer 2 becomes that file instead of `<repo>/.env`: it is
+loaded second (overriding the shared file) and it is where `up` writes the
+instance id back. A leading `~/` is expanded; an environment value wins over one
+set in the shared file. Setting it inside the per-repo file itself has no
+effect (that file has already been chosen by then).
+
+**Write-back never creates `<repo>/.env`.** After a successful provision `up`
+writes `REPO_REMOTE_INSTANCE_ID=<id>` into the resolved per-repo file only when
+`REPO_REMOTE_ENV_FILE` is set (that file, and its parent directory, are created
+if missing) or when `<repo>/.env` already exists (`--configure` creates it with
+an empty pin). Otherwise it logs the id with a hint to pin it and writes
+nothing — the instance still carries its `repo-remote=<name>` tag, so the next
+`up` finds it. `REPO_REMOTE_NO_WRITEBACK=1` disables the write-back entirely
+(the id is still logged).
+
+**Linked worktrees warn about an in-tree `.env`.** When the checkout is a
+linked git worktree (`git worktree add`, e.g. `.loom/worktrees/issue-N` —
+`git rev-parse --git-dir` differs from `--git-common-dir`) and
+`REPO_REMOTE_ENV_FILE` is not set, loading a pre-existing `<repo>/.env` or
+writing the instance id back into it prints a loud warning naming the file and
+recommending `REPO_REMOTE_ENV_FILE`. The read/write still happens; the primary
+checkout never warns. When operating by hand from a linked worktree, say the
+same thing to the user rather than silently updating that file.
 
 Variables are namespaced `REPO_REMOTE_*` so they don't collide with the app's
 own vars; the provisioning credentials use their standard cloud names. Either
@@ -141,7 +175,13 @@ ACCOUNT_TOKEN_FILE_1=you-example.token    # relative to ~/.config/repo/tokens/
 # ── <repo>/.env  (per-repo; overrides the shared file) ───────────────────
 # --- instance (hardware) ---
 REPO_REMOTE_INSTANCE_TYPE=m5.2xlarge      # gcp: machineType; a GPU family (g6e.*, g2-*) implies a GPU host
-REPO_REMOTE_INSTANCE_ID=                  # reuse this exact instance when set (ALWAYS per-repo)
+REPO_REMOTE_INSTANCE_ID=                  # RECOMMENDED: pin the exact instance (ALWAYS per-repo).
+                                           # `up` writes it back here after a successful provision
+                                           # (if this file exists, or REPO_REMOTE_ENV_FILE names it).
+                                           # It is the expectation `repo-remote verify` checks the
+                                           # live host against, and the only handle that survives a
+                                           # stop/start unambiguously — see "Stale SSH aliases and
+                                           # released public IPs" below.
 REPO_REMOTE_DISK_GB=100
 REPO_REMOTE_IMAGE=                         # optional host-image override (else: Ubuntu LTS, or the GPU AMI on GPU hosts)
 REPO_REMOTE_GPU=                          # GCP accelerator (e.g. nvidia-l4:1); AWS infers GPU from the instance family
@@ -159,14 +199,27 @@ REPO_REMOTE_FLEET_TAG_KEY=Fleet           # tag (AWS) / label (GCP) key that mar
 REPO_REMOTE_FLEET_TAG_VALUE=loom          # required value for that key; empty means "any non-empty value counts"
 
 # --- SSH ingress (AWS only; see "Security group and SSH ingress" below) ---
-REPO_REMOTE_SSH_CIDR=                     # optional: pin the SG's SSH-ingress CIDR (e.g. 203.0.113.7/32, or
-                                           # 0.0.0.0/0 as a deliberate opt-in); overrides current-IP detection outright
+REPO_REMOTE_SSH_CIDR=                     # optional: pin the SG's SSH-ingress CIDR (e.g. 203.0.113.7/32);
+                                           # overrides current-IP detection outright. Validated — see below
+REPO_REMOTE_SSH_MIN_PREFIX=32             # narrowest IPv4 prefix accepted for SSH ingress (default 32 = one address;
+                                           # set e.g. 24 to allow a known ISP block)
+REPO_REMOTE_ALLOW_WORLD_SSH=              # "1" opts in, loudly, to a CIDR wider than the minimum (0.0.0.0/0, ::/0)
 ```
 
 Only `REPO_REMOTE_PROVIDER` (or a provider argument) and that provider's
 credentials are required — from **either** layer. Everything else falls back to
 built-in defaults: GCP `e2-standard-4` / AWS `m5.xlarge`, 50 GB disk, latest
 Ubuntu LTS, no GPU, 120-minute idle shutdown.
+
+**Pin `REPO_REMOTE_INSTANCE_ID` — treat it as the default, not an option.** Any
+session expected to outlive a stop/start cycle should carry an explicit pin in
+the per-repo config file (a successful `up` writes one back for you when that
+file exists or `REPO_REMOTE_ENV_FILE` names it). Unpinned, this
+tooling re-derives its target from the never-expiring `repo-remote=<name>`
+tag — the same stale handle the fleet-marker guard exists to distrust — and
+`repo-remote verify` has no explicit expectation to check the live host against.
+Full rationale: [Stale SSH aliases and released public
+IPs](#stale-ssh-aliases-and-released-public-ips-host-identity-verification).
 
 **Two classes of secret — treat them differently:**
 - **Provisioning credentials** (`AWS_*`, `GCP_*`) drive the cloud CLI *locally*
@@ -206,7 +259,9 @@ machine.
 By default it writes **credentials to the shared `~/.config/repo/remote.env`**
 (so you set them up once for every repo) and **machine settings to the repo's
 `.env`**. Offer to put credentials in the repo `.env` instead only if the user
-wants a repo-specific account/region.
+wants a repo-specific account/region. If `REPO_REMOTE_ENV_FILE` is set (see
+above), every "repo `.env`" below means that file instead — write machine
+settings there and never create an in-tree `.env`.
 
 1. **Protect both files first.** Before writing any credential: ensure the
    repo's `.env` is gitignored (add it and say so if not); and create
@@ -228,6 +283,12 @@ wants a repo-specific account/region.
    with rough hourly prices), disk size, and idle-shutdown window. A GPU
    instance family (AWS `g6e.*`, GCP `g2-*`) implies a GPU host — on GCP also
    ask the accelerator (`REPO_REMOTE_GPU`, e.g. `nvidia-l4:1`) with rough cost.
+   Also write `REPO_REMOTE_INSTANCE_ID=` into the repo `.env` (empty, with the
+   explanatory comment above it) so the pin is visibly *expected* rather than
+   absent — `up` fills it in on the first successful provision, and from then on
+   it is what `repo-remote verify` checks the live host against. If the user
+   expects a long-lived box, mention that an Elastic IP / static external IP
+   removes public-IP churn across stop/start at a per-hour cost.
 6. **Dev environment (software).** Detect a checked-in Dockerfile
    (`./Dockerfile`, `docker/Dockerfile`, …) and offer to use it as the dev
    environment (`REPO_REMOTE_DOCKERFILE`) — the recommended path, and what makes
@@ -263,15 +324,29 @@ region/zone) without printing secret values.
 
 ### 2. Authenticate the provider with the resolved credentials
 
-Load the shared file first, then the repo `.env` on top, into the environment
+Load the shared file first, then the per-repo file (`REPO_REMOTE_ENV_FILE` if
+set, else the repo `.env`) on top, into the environment
 for the provisioning calls only — scoped to this command, never persisted to
-the VM. Repo values override shared ones because the repo file is sourced last:
+the VM. Repo values override shared ones because the repo file is sourced last.
+`REPO_REMOTE_ENV_FILE` itself resolves the other way round — the caller's
+environment value is captured *before* the shared file is sourced, so it wins
+over one the shared file sets — and a leading `~`/`~/` is expanded explicitly
+(the shell does not expand it inside a quoted or environment-supplied value):
 
 ```bash
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/repo/remote.env"
+ENV_FILE_FROM_ENV="${REPO_REMOTE_ENV_FILE:-}"                  # capture BEFORE sourcing
 set -a
 [ -f "$CONFIG_HOME" ] && . "$CONFIG_HOME"                      # shared cloud creds + defaults
-[ -f "$(git rev-parse --show-toplevel)/.env" ] && . "$(git rev-parse --show-toplevel)/.env"  # per-repo (overrides)
+set +a
+# environment value first, then whatever the shared file set, else <git-root>/.env
+REPO_FILE="${ENV_FILE_FROM_ENV:-${REPO_REMOTE_ENV_FILE:-$(git rev-parse --show-toplevel)/.env}}"
+case "$REPO_FILE" in                                           # expand a leading ~ / ~/
+  "~")   REPO_FILE="$HOME" ;;
+  "~/"*) REPO_FILE="$HOME/${REPO_FILE#\~/}" ;;
+esac
+set -a
+[ -f "$REPO_FILE" ] && . "$REPO_FILE"                          # per-repo (overrides)
 set +a
 ```
 
@@ -310,6 +385,27 @@ RUNNING → offer reuse; STOPPED → offer to start.
    stop unless `--force` was given — see **Fleet-marked hosts: the reuse and
    teardown guard** below (the same guard applies to `--down`/`down`). A
    freshly created instance is never subject to this check.
+4. **A reused instance is re-aliased and its SSH ingress re-authorized, every
+   time.** A stop/start cycle (e.g. the idle guard powered the box off)
+   **releases** the old auto-assigned public IP and assigns a **new** one — the
+   released address goes on to serve some other instance, possibly another AWS
+   customer's — and the operator's own IP may have changed since the
+   group's tcp/22 rule was first authorized — so on AWS, reuse re-runs the full
+   ingress chain for the *currently* detected CIDR (see **Security group and SSH
+   ingress (AWS)** below) and re-points the SSH alias at the freshly resolved
+   public IP. The public IP is polled with a short bounded retry
+   (`REPO_REMOTE_IP_POLL_ATTEMPTS` × `REPO_REMOTE_IP_POLL_INTERVAL`, default 6 ×
+   2s) because AWS does not always have the new address attached the moment the
+   instance reports `running`. If that budget is exhausted with still no IP,
+   `up` prints an explicit warning that the **alias was not refreshed** — the
+   previously written `HostName` is therefore stale — rather than silently
+   leaving the old value in place.
+5. **The refreshed alias is then proved to reach the right box.** After writing
+   the alias, `up` asks the host at the other end for its own instance id and
+   refuses (exit `6`) if it is not the instance this run resolved — see **Stale
+   SSH aliases and released public IPs** below. This only covers the alias `up`
+   itself just wrote; a *later* reconnect over that alias must run
+   `repo-remote verify`, which fails closed.
 
 ### 4. Create the instance (with confirmation)
 
@@ -360,24 +456,54 @@ landed before it ever calls `run-instances`:
    `repo-remote=<repo-name>` from a prior run; otherwise create one with that
    tag. This makes repeated `up` runs idempotent — no new SG accumulates per
    invocation.
-2. **Resolve the CIDR.** `REPO_REMOTE_SSH_CIDR`, if set, wins outright
-   (including an explicit `0.0.0.0/0` opt-in). Otherwise, detect the current
-   IP via an HTTPS echo service (`checkip.amazonaws.com`) and use it as a
-   `/32` — but treat that detection as **unverified**: there is no reliable
-   way for this tooling to confirm the detected address is the one SSH egress
-   will actually use. Behind an HTTPS proxy it commonly isn't (an increasingly
-   common failure mode on agent hosts) — the echo service returns the proxy's
-   address, producing a correct-looking `/32` rule that can never match. If
-   detection fails outright (or you know it will be unreliable), set
-   `REPO_REMOTE_SSH_CIDR` yourself.
-3. **Fall back loudly, never silently.** If IP detection fails and
-   `REPO_REMOTE_SSH_CIDR` is unset, the rule falls back to `0.0.0.0/0` (SSH
-   remains key-only auth, so this is a scan-noise tradeoff, not an auth
-   bypass) with an explicit printed notice — never a `/32` that looks correct
-   but can never match.
-4. **Authorize idempotently.** `authorize-security-group-ingress` for tcp/22
-   from the resolved CIDR; a duplicate rule on a reused group counts as
-   success.
+2. **Resolve the CIDR.** `REPO_REMOTE_SSH_CIDR`, if set, wins outright.
+   Otherwise, detect the current IP via an HTTPS echo service
+   (`checkip.amazonaws.com`) and use it as a `/32` — but treat that detection
+   as **unverified**: there is no reliable way for this tooling to confirm the
+   detected address is the one SSH egress will actually use. Behind an HTTPS
+   proxy it commonly isn't (an increasingly common failure mode on agent
+   hosts) — the echo service returns the proxy's address, producing a
+   correct-looking `/32` rule that can never match. If detection fails
+   outright (or you know it will be unreliable), set `REPO_REMOTE_SSH_CIDR`
+   yourself.
+3. **Validate the CIDR, and fail closed.** Whatever the source, the CIDR is
+   checked before anything is authorized from it, and a CIDR that cannot be
+   established is a **refusal**, not a wider rule:
+   - An IPv4 prefix wider than `REPO_REMOTE_SSH_MIN_PREFIX` (default `32` — a
+     single address) is **refused** (exit `2`). Raise the knob deliberately
+     for a known block (`REPO_REMOTE_SSH_MIN_PREFIX=24`) rather than widening
+     by accident.
+   - `0.0.0.0/0`, `::/0`, and anything else wider than that minimum are
+     accepted **only** with `REPO_REMOTE_ALLOW_WORLD_SSH=1`, and that opt-in
+     prints a `WARNING` naming the exposure so it is visible in the run log.
+   - A malformed value (`not-a-cidr`, a missing prefix length) is a loud
+     config failure (exit `2`), never something that reaches the AWS API.
+   - **If IP detection fails and `REPO_REMOTE_SSH_CIDR` is unset, the run
+     fails closed** (exit `2`, naming `REPO_REMOTE_SSH_CIDR` as the fix) and
+     creates **no** ingress rule and **no** instance. There is deliberately no
+     `0.0.0.0/0` fallback: one flaky HTTPS call is not consent to open tcp/22
+     to the internet, and an account-wide audit cannot tell an accidental
+     opening from a deliberate one. (Before this, detection failure fell back
+     to `0.0.0.0/0` with only a printed notice.)
+4. **Authorize idempotently, and label the rule.** `authorize-security-group-ingress`
+   for tcp/22 from the resolved CIDR, via `--ip-permissions` so the rule
+   carries a `Description` of `repo-remote:<repo-name>:<YYYY-MM-DD>`; a
+   duplicate rule on a reused group counts as success. That marker is what
+   makes each rule traceable to its owner in an audit — and what step 4a keys
+   on.
+
+   4a. **Replace, don't accumulate.** Before authorizing the current address,
+   any tcp/22 rule on the group whose `Description` carries this tooling's
+   `repo-remote:<repo-name>:` marker — i.e. one *this* tooling wrote on an
+   earlier run — is revoked. Without this, every `up` from a new address added
+   a `/32` and removed none, so a few weeks of roaming left a group admitting
+   every address the operator had ever had. A rule for the address being
+   authorized now is kept (a repeat run from the same place does not flap it),
+   and **rules without that marker are never touched** — an operator-added or
+   pre-existing rule is not this tooling's to revoke. A revoke that fails
+   (e.g. credentials without `RevokeSecurityGroupIngress`) is a loud notice
+   with the manual command, not a failed `up`: it leaves a stale-but-narrow
+   rule behind, never a wider one.
 5. **Verify before spending money.** `describe-security-groups` on the
    resolved group must show a tcp/22 rule, or the run fails loudly (exit `4`)
    before `run-instances` is ever called — this is what would have caught the
@@ -387,6 +513,56 @@ landed before it ever calls `run-instances`:
    StrictHostKeyChecking=accept-new <alias> true` — and fails loudly (exit
    `4`) if it doesn't succeed, so an unreachable instance is caught in-run
    rather than discovered on the next manual SSH attempt.
+
+   A freshly booted guest routinely refuses connections for tens of seconds
+   while cloud-init and `sshd` come up, so the probe is **retried across a
+   bounded window** rather than judged on a single attempt (repo#449):
+   `REPO_REMOTE_SSH_READY_TIMEOUT` (default `120`) seconds in total, one
+   attempt every `REPO_REMOTE_SSH_READY_POLL_INTERVAL` (default `5`) seconds.
+   Only "the host is not listening yet" errors (`Connection refused`,
+   `Operation timed out`, `No route to host`, …) are retried; an
+   authentication or configuration failure (`Permission denied`, or any
+   unrecognized error) fails **immediately** instead of burning the window on
+   something waiting cannot fix. The retry re-runs only the `ssh` probe — it
+   never relaunches or restarts the instance — and the instance id is written
+   back to the per-repo config file *before* the first attempt, so even a readiness
+   timeout leaves the created box addressable rather than orphaned. Raise
+   `REPO_REMOTE_SSH_READY_TIMEOUT` for an image that is simply slow to boot.
+
+**Steps 1–5 run on every `up`, including one that REUSES an existing
+instance** — not only at creation. The authorized CIDR is pinned to whatever
+the operator's IP was when the rule was first written, and that address moves
+(an observed incident: `52.119.115.124` → `104.7.12.215` between sessions), so
+an instance created days ago and restarted today would otherwise still be
+admitting SSH only from an address that no longer reaches it — an indefinite
+SSH timeout whose only fix was revoking and re-authorizing the `/32` by hand.
+Re-running the chain on reuse re-authorizes for the current CIDR, so `up`
+self-heals. It is safe to repeat: the group is resolved via
+`REPO_REMOTE_SECURITY_GROUP` or the `repo-remote=<repo-name>` tag (never
+created anew per run), and a duplicate tcp/22 rule counts as success.
+
+**On reuse, the refresh never *widens* an existing rule.** No path widens on a
+failed detection any more (step 3), but reuse is the case where *doing nothing*
+is better than failing: when detection fails and the resolved group *already*
+has a tcp/22 rule, `up` leaves that rule exactly as it is and prints a notice
+pointing at `REPO_REMOTE_SSH_CIDR` — the previously-working `/32` is more
+likely to be right than anything this run could guess. A group with **no**
+tcp/22 rule at all has nothing to preserve and nothing safe to invent, so that
+case fails closed (exit `2`) instead. An explicit, opted-in
+`REPO_REMOTE_SSH_CIDR=0.0.0.0/0` is not a detection failure and is still
+honored verbatim; the same validation gate in step 3 applies on this path too,
+so an un-opted-in `0.0.0.0/0` is refused here exactly as it is at create time.
+
+**On reuse, step 1 resolves only — it never creates.** If no group is pinned
+and none carries the `repo-remote=<repo-name>` tag, `up` prints a notice
+saying ingress was **not** refreshed (with the manual
+`authorize-security-group-ingress` command) and carries on. Creating a group
+there would be worse than doing nothing: a new group is not attached to an
+already-running instance, so it would neither restore SSH nor be reachable —
+it would just leak an unused group per repo while looking like a repair. The
+same limitation applies whenever a reused instance is attached to some *other*
+security group (created outside this tooling): the group refreshed here is not
+the one guarding it, and that group must be fixed by hand.
 
 #### The idle-shutdown guard
 
@@ -412,6 +588,29 @@ future daemon-presence veto is ever wanted, it must be added as a deliberate,
 documented change to `idle_guard_userdata()`; it is not implied by the current
 text. (This corrects an earlier problem statement that assumed a
 `pgrep -f loom-daemon` veto existed — it never did in this repo.)
+
+**⚠️ A backgrounded/`nohup` job does NOT hold the guard open.** Running work as
+`ssh <alias> 'nohup ./long-build.sh > build.log 2>&1 &'` is the classic way to
+lose a host mid-job: the moment that single non-interactive SSH command
+returns, the login shell that launched the job has already exited, so `who`
+reports **no session at all** — the first of the two activity signals is gone
+from that instant, not when the job finishes. The job is then protected *only*
+by its own CPU usage keeping the load average above `0.2`, with no
+process-name veto to fall back on, so any I/O-bound, download, or license-wait
+lull long enough to cover a full `REPO_REMOTE_IDLE_SHUTDOWN_MIN` window powers
+the box off mid-run. (Observed: a ~20-minute `nohup`'d build on an otherwise
+idle host, discovered only when the next SSH attempt timed out.) For work that
+may go CPU-idle, do one of:
+
+- **Hold a real session for the job's duration** — run it inside `tmux` (or
+  `screen`) on the host and keep the SSH connection open, or simply run it in
+  the foreground of an interactive session. A held session keeps `who`
+  non-empty regardless of CPU load, which is the only signal that is
+  unconditionally under your control.
+- **Size the window to the job** — set `REPO_REMOTE_IDLE_SHUTDOWN_MIN` to
+  comfortably exceed the job's longest expected quiet stretch (and remember
+  `0` disables the guard entirely, which is the right choice only for hosts
+  that must never self-shut-down).
 
 **Idle window — pick per host role:**
 
@@ -473,8 +672,8 @@ ephemeral dev session can since have been repurposed into a persistent,
 daemon-managed fleet worker while still carrying the old tag, at which point
 ephemeral dev-session tooling would silently start-and-re-alias it (`up`) or
 stop/terminate it (`down`) as if it were still just a throwaway dev box. That is
-the second finding of the 2AMLogic/2am#52 incident, where `repo-remote=anvil`
-tooling kept rediscovering the host that had become `loom-worker-1`; `down
+the second finding of an operator incident (private tracker), where `repo-remote=anvil`
+tooling kept rediscovering the host that had become a fleet host; `down
 --delete` against that same stale handle is the strictly worse outcome — the
 disk is gone, unrecoverable.
 
@@ -528,6 +727,90 @@ that is the idle guard's `REPO_REMOTE_IDLE_SHUTDOWN_MIN=0` opt-out above. This
 guard stops *this tooling* from touching the host; that one stops the *host*
 from shutting itself down.
 
+#### Stale SSH aliases and released public IPs: host-identity verification
+
+**An EC2 instance's auto-assigned public IPv4 address is released the moment the
+instance stops**, and a *different* address is assigned on its next start. The
+address it gave up does not sit idle — AWS hands it to whoever launches an
+instance next, which is routinely **another AWS customer** entirely. Nothing
+about "the disk is retained across a stop/start" extends to the address: the
+volume survives, the IP does not. GCP behaves the same way for an ephemeral
+external IP.
+
+**The SSH alias this tooling writes is a cached copy of that address.** It is
+**only as fresh as** the last `up` (or `verify`) run — nothing keeps it current
+between sessions. `up` does re-resolve the public IP and rewrite the
+`repo-remote-<name>` stanza on *every* invocation, including every reuse branch
+(see step 3 above) — but if a session is stopped and restarted without an
+intervening `up`, or an agent simply reconnects over an alias written an hour
+ago, the stanza still carries the **old** address.
+
+**Why every other check passes anyway.** This is what makes the failure mode
+dangerous rather than merely annoying: the alias resolves, `ssh` connects, and
+key authentication succeeds — on the *stranger's* box, because SSH ingress and
+your public key are attributes of *your* config, and a wide-open `sshd` on a
+third party's host will still complete a connection. In the incident behind this
+check, three agents worked for a stretch against a machine that was not theirs,
+wrote work products to it (lost), and drew conclusions from its disk contents.
+The only thing that eventually refused was an unrelated per-file SHA-256
+precondition.
+
+**The check.** `repo-remote verify` (`/repo:remote --verify`) opens **one** SSH
+session over `repo-remote-<name>`, asks the host for its **own instance id**, and
+compares it with the id this repo expects — a pinned `REPO_REMOTE_INSTANCE_ID`,
+else the instance discovered via the `repo-remote=<name>` tag (on GCP, the
+derived instance *name*). The id is the one property that cannot be inherited
+along with a recycled IP address. It is read, in order, from:
+
+1. `/etc/repo-remote-instance-id` — a marker file this tool writes at provision
+   time via cloud-init user-data. The value is read by the *host* from its own
+   metadata service, so the marker can only ever name the box it sits on.
+   Override the path with `REPO_REMOTE_HOST_ID_FILE`.
+2. The instance metadata service — IMDSv2 (token first), then IMDSv1, then GCP's
+   `computeMetadata/v1/instance/name`. This is why an instance provisioned
+   *before* the marker existed is still verifiable.
+3. cloud-init's `/var/lib/cloud/data/instance-id`.
+
+Outcomes:
+
+- **Match** → exit `0` (with `--json`: `"verified":true` plus
+  `expected_instance_id` / `host_instance_id`).
+- **Mismatch** → exit `6`, with a refusal naming both ids, the alias, and the
+  remediation. **`--force` does not override this** — that flag is the
+  fleet-marker override and nothing else.
+- **Identity could not be established** (host unreachable, no marker and no
+  reachable metadata service) → also exit `6`. It **fails closed**: "I could not
+  tell" is not evidence that the host is the right one.
+
+**It is also wired into `up`**, immediately after the SSH alias is written and
+the reachability probe passes, so a normal session-start sequence exercises it
+without anyone having to remember. There, a **mismatch is still fatal (exit
+`6`)** — the alias `up` just wrote does not reach the instance `up` just
+resolved — but an identity it *cannot establish* is a loud warning rather than a
+failure: `up` re-resolved the address from the cloud API in that same run, so the
+alias is fresh by construction, and failing the run would break provisioning on
+any box with IMDS locked down and no marker yet. The fail-closed half is
+`verify`, which exists precisely for the reconnect case where nothing re-derived
+the address.
+
+**Two things that make this a non-issue rather than a near-miss:**
+
+- **Pin `REPO_REMOTE_INSTANCE_ID`.** This is the recommended default for any
+  session expected to survive a stop/start cycle, not merely one option among
+  several — see the configuration walkthrough above. `up` writes it back to the
+  per-repo config file for you after a successful provision (see
+  `REPO_REMOTE_ENV_FILE` above for when it does and does not). A pinned id makes the
+  expectation *explicit* (and makes `verify` need no cloud call at all, so it is
+  cheap enough to run before every session); an unpinned run re-derives the
+  expectation from the same never-expiring `repo-remote=<name>` tag the
+  fleet-marker guard exists to distrust.
+- **Consider an Elastic IP (AWS) / static external IP (GCP)** for a long-lived
+  box, which removes the churn at its source — the address stays yours across
+  stop/start, so the alias cannot go stale. It bills per hour while *not*
+  attached to a running instance, so it is a deliberate cost trade-off this
+  tooling does not make on your behalf; allocate and associate one by hand if
+  the box is long-lived enough to be worth it.
+
 #### GPU hosts
 
 Treat the host as a GPU box when the instance type is a GPU family (AWS
@@ -557,9 +840,12 @@ Detect that specific error and print the exact remediation instead of the raw
 message: **Service Quotas → EC2 → quota code `L-DB2E81BA`** → request a limit
 ≥ the instance's vCPU count, then retry once approved.
 
-**After a successful create, write the new ID back to the repo's `.env`** (the
-git root, never the shared file — the instance handle is per-repo) so the next
-run reuses it automatically:
+**After a successful create, write the new ID back to the per-repo config
+file** — `REPO_REMOTE_ENV_FILE` if set, else the repo's `.env` at the git root;
+never the shared file, the instance handle is per-repo — so the next run reuses
+it automatically. Never *create* `<repo>/.env` for this: if neither the override
+nor an existing `.env` is present (or `REPO_REMOTE_NO_WRITEBACK=1`), report the
+id and suggest pinning it instead:
 
 ```
 REPO_REMOTE_INSTANCE_ID=<new-id>
@@ -680,13 +966,28 @@ Host repo-remote-<name>
 
 ### 7. Open the SSH session
 
-Verify reachability first:
+**Verify the host identity first — before you trust the session**, and do not
+substitute a plain reachability ping for it. A bare `ssh … 'echo SSH OK'` proves
+only that *something* answered; it passes just as happily on an unrelated AWS
+customer's instance that inherited the public IP released when yours was last
+stopped (see [Stale SSH aliases and released public
+IPs](#stale-ssh-aliases-and-released-public-ips-host-identity-verification)).
+This check subsumes reachability — it cannot pass without a working session — so
+it replaces that ping rather than adding a step to it:
 
 ```bash
-ssh -o ConnectTimeout=30 repo-remote-<name> 'echo "SSH OK: $(hostname)"'
+repo-remote verify            # exit 0 = this alias really is your instance
+                              # exit 6 = WRONG HOST (or unverifiable) — stop here
 ```
 
-Then open a new terminal window with the session. Where it lands depends on the
+**A non-zero exit is a full stop.** Do not open the session, do not read from the
+host, and above all do not write to it: on a mismatch the box at the other end
+belongs to someone else. Re-run `repo-remote up --yes` to re-resolve the public
+IP and rewrite the alias, then verify again. This applies to *every* reconnect,
+not just the first one after provisioning — an alias written before a stop/start
+cycle is exactly the stale handle this guards against.
+
+Once it passes, open a new terminal window with the session. Where it lands depends on the
 environment path:
 
 - **Dev container running** → drop straight into it, at the mounted repo:
@@ -714,6 +1015,17 @@ passwordless-sudo drop-in is installed.
 End with a compact status block: instance name/ID, zone, machine type (and GPU),
 hourly cost estimate, idle-shutdown window, the SSH alias, whether the ID was
 written back to `.env`, and the teardown command (`/repo:remote --down`).
+
+## `--verify`
+
+Delegates to `repo-remote verify`. Opens one SSH session over
+`repo-remote-<name>`, reads the host's own instance id, and compares it with the
+id this repo expects. Exit `0` means the alias really does reach your instance;
+exit `6` means it does not, or that the identity could not be established at all
+(it fails closed). Mutates nothing and — with `REPO_REMOTE_INSTANCE_ID` pinned —
+makes no cloud API call, so it is cheap enough to run before every session. Full
+rationale: [Stale SSH aliases and released public
+IPs](#stale-ssh-aliases-and-released-public-ips-host-identity-verification).
 
 ## `--status` and `--down`
 
@@ -753,3 +1065,9 @@ path — see **Fleet-marked hosts: the reuse and teardown guard** above.
 5. **Always install the idle-shutdown guard** — a VM that outlives the session
    should turn itself off, unless the guard is explicitly disabled via
    `REPO_REMOTE_IDLE_SHUTDOWN_MIN=0`
+6. **Never trust the SSH alias without verifying the host identity** — run
+   `repo-remote verify` before opening a session or writing anything through
+   `repo-remote-<name>`, and treat exit `6` as a full stop. An auto-assigned
+   public IP is released on stop and reassigned to another AWS customer, so a
+   resolving alias and a successful login prove nothing about *which* machine
+   you reached

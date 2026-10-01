@@ -34,8 +34,8 @@ the text first — a `[text](path)` inside backticks is a description of a link,
 not a link:
 
 ```python
-text = re.sub(r"```.*?```", "", text, flags=re.S)  # fenced blocks
-text = re.sub(r"`[^`]*`", "", text)  # inline spans
+text = re.sub(r'```.*?```', '', text, flags=re.S)   # fenced blocks
+text = re.sub(r'`[^`]*`', '', text)                  # inline spans
 ```
 
 Without this the checker flags the sentences in this very file, and in
@@ -462,3 +462,42 @@ changes.
 If a fix is gone on re-check, report it on its own line as **reverted after
 apply — needs re-run**. Do not silently re-apply it, and do not count it in the
 fixed total — that total must only ever include edits confirmed still on disk.
+
+### Loom-managed repo: land fixes where a sweep cannot take them
+
+The check above catches an edit reverted *during* the run. It cannot catch the
+likelier failure in a Loom-managed repo, which happens *after* it: a sweep runs
+`check-main-clean.sh --quarantine`, which polices the **primary checkout's
+working tree as a whole** — not the branch it happens to be on — and stashes
+every uncommitted delta it finds (stash label
+`loom-quarantine: run=<sweep-id> issue=<N>`), so the fixes this command reported
+as applied are off disk minutes later. Branching does not help — the quarantine
+is branch-blind.
+
+**The destination ladder lives in one place: [[docs]] → "Loom-managed repo: land
+fixes where a sweep cannot take them".** Follow it exactly as written — the
+`loom_managed` detection, the four destinations in order (dedicated issue
+worktree / `chore/repo-hygiene-<date>` branch + PR in a worktree off
+`origin/<default>` when the default branch is PR-protected or the operator asks
+/ commit on an otherwise-clean current branch / uncommitted plus a warning), the
+`.loom-managed`-sentinel rule for the hygiene worktree, and the quarantine
+recovery path. It is not restated here so the two copies cannot drift apart.
+
+Two substitutions are yours, and only these two. **Decide the destination before
+applying the first fix** and report it once, up front:
+
+- The one-line warning under the last arm names link fixes:
+
+  ```
+  Loom-managed repo: uncommitted link fixes in the primary checkout can be quarantined by a sweep — commit or stash them now.
+  ```
+
+- **Name the destination in the report, not just the count** — with this
+  command's own noun:
+
+  ```
+  Links: 2 fixed on feature/issue-448 (worktree .loom/worktrees/issue-448, a1b2c3d)
+  Links: 2 fixed on chore/repo-hygiene-2026-09-30 (worktree .loom/worktrees/repo-hygiene-2026-09-30, a1b2c3d) — main protected; push + PR offered
+  Links: 2 fixed, committed on main (a1b2c3d)
+  Links: 2 fixed — uncommitted, at risk
+  ```

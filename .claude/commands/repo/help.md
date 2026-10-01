@@ -57,6 +57,8 @@ stashes, untracked files) always need an explicit opt-in.
 | Command | When to reach for it |
 |---------|----------------------|
 | /repo:reset | Done with a task — get back on main, synced, stale state reviewed |
+| /repo:followups | End of session — file follow-on work surfaced this session as issues, here or in the right upstream tool repo |
+| /repo:decide | Blocked on the operator — put the decision as ranked options (best to worst, each with why) they can answer with a number |
 | /repo:handoff | Rolling the session (context full, CLI update) — preserve what only the session knows, then restart |
 | /repo:tidy  | Working tree cluttered with build artifacts and temp files |
 | /repo:remote | Need a cloud dev box (GCP/AWS) with this repo ready to go |
@@ -64,11 +66,14 @@ stashes, untracked files) always need an explicit opt-in.
 | /repo:release | Cut a release — pre-flight, semver, CHANGELOG, version bump, tag, GitHub Release. Supports per-project release policy via named phase-boundary seams in `.repo/release-policy.md` |
 
 ### Periodic maintenance
+| /repo:all | The whole hygiene pass in order — audit, scrub, docs, tidy, update-tools, deps check, reset |
 | /repo:audit | Monthly sweep, or after a big refactor/import |
 | /repo:scrub | What does the public surface expose? Code, history, issues, PRs, forks — report-only |
 | /repo:host-optimize | Prep/re-check a Mac (or Linux box) for heavy Loom/agent build use — Gatekeeper churn, backup-agent interference, build-tree bloat |
 | /repo:update-tools | Keep Loom/Anvil/Repo Skills installs current |
-| /repo:deps | Keep third-party deps current — verify/scaffold Dependabot (config + security flag), triage open Dependabot PRs |
+| /repo:deps | Keep third-party deps current — reconcile organization policy, Renovate or Dependabot, and bot PRs |
+| /repo:optimize-ci | CI slow or expensive — find unfiltered jobs, broken cache keys, superseded runs; ranked by measured minutes saved |
+| /repo:org-policy | Preview/install canonical organization preferences from the current client repo |
 
 ### Focused checks
 | /repo:docs | Documentation health — content, README structure, cross-refs |
@@ -97,7 +102,7 @@ their frontmatter descriptions.
   `.claude/commands/repo/`
 - Updating: `/repo:update-tools` for installed tool packages (source:
   https://github.com/rjwalters/repo); `/repo:deps` for third-party dependencies
-  (Dependabot setup + bot-PR triage)
+  (organization policy + updater setup + bot-PR triage)
 
 ## Steps — with a command argument
 

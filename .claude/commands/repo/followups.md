@@ -128,6 +128,12 @@ Every candidate has to land in *some* repo. Build the routing table by reusing
   the slug can be read straight off `source_ref` (a `<git-url>@<tag-or-rev>`
   string) without a `git -C <source> config` lookup.
 
+  **Loom's sidecar is named differently, but still conforms to C6's ladder.**
+  Where C6 step 1 names the sidecar `<tool-root>/.install-local.json`, Loom's
+  actual sidecar is the plain-text `.loom/loom-source-path` (a single path,
+  not JSON) — check that file, not `.install-local.json`, when resolving
+  Loom's source clone here. Full detail: `/repo:update-tools` step 1.
+
   Then derive the slug from the resolved clone's remote:
 
   ```bash
@@ -172,8 +178,18 @@ the candidate so nothing is re-filed. Query the **REST search** endpoint, not
 
 ```bash
 gh api "search/issues?q=repo:<slug>+state:open+<key+terms>&per_page=30" \
-  --jq '.items[] | "#\(.number) \(.title) \(.html_url)"'
+  --jq '.items[] | "#\(.number) [\(if .pull_request then "PR" else "issue" end)] \(.title) \(.html_url)"'
 ```
+
+**A dedup query MUST carry the match type, not only the URL.** The
+`[\(if .pull_request then "PR" else "issue" end)]` expression above is
+load-bearing, not decoration: it is the only field that classifies each row
+*as output*, without the reader having to notice `/pull/` inside a URL. If you
+write your own `--jq` instead of using this one, it **must** emit the type as
+well as `html_url` — a query that prints only `#number title` is not a valid
+dedup query for this step, however convenient its output looks. This rule is
+not hypothetical: a live run hand-rolled a `#number title` query, lost the
+type, reported an open PR as a duplicate issue, and closed it (repo#515).
 
 **Pull requests are deliberately in scope.** `search/issues` returns both
 issues **and pull requests** — the `issues` in the route name is GitHub's
@@ -184,14 +200,17 @@ the work is already in flight rather than merely proposed. Filtering PRs out
 would discard exactly the signal that matters most for "don't re-file something
 already being worked on". The cost of the wider result set is absorbed by
 safety rule 2 — near-matches are always flagged to the user, never
-auto-skipped or auto-filed-over — and `html_url` discloses which kind each
-match is.
+auto-skipped or auto-filed-over — and by the type expression above, which
+states which kind each match is instead of leaving it to be inferred from
+`html_url`.
 
-Search result items already carry `number`, `title`, and `html_url`, so this is
-a straight replacement for the old `--json number,title,url` output shape — no
-second-pass mapping needed. That parity covers the output **shape** only, not
-the result **set**: the old `gh issue list --search` form returned issues only,
-while this one is deliberately broader (see above).
+Search result items already carry `number`, `title`, and `html_url` — plus a
+`pull_request` object that is present only on pull requests, which is what the
+type expression tests — so this is a straight replacement for the old
+`--json number,title,url` output shape with no second-pass mapping needed.
+That parity covers the output **shape** only, not the result **set**: the old
+`gh issue list --search` form returned issues only, while this one is
+deliberately broader (see above).
 
 Terms go into `q` as `+`-joined tokens; URL-encode anything that isn't
 alphanumeric, and quote the whole URL so the shell leaves it alone.
@@ -204,19 +223,42 @@ nothing from the pool step 5 needs to actually file. Check live budgets with
 `gh api rate_limit --jq .resources` if either step starts failing.
 
 Classify each candidate against its target repo's open issues **and pull
-requests** (the search returns both, per the note above):
+requests** (the search returns both, per the note above). **Every
+classification names the match type** — there is no type-less near-match:
 
-- **New** — no match; propose to file.
-- **Near-match** — a similar item exists; **flag it for the user** with the
-  existing item's number/URL and let them choose: file anyway, skip, or
-  comment on the existing one. Never silently file over it or silently drop it.
-- **A near-match may itself be a pull request.** Check `html_url` for `/pull/`
-  vs `/issues/` to tell which, and say so when flagging it — e.g. "near #99
-  (PR, work already in flight)" alongside "near #217 (issue)". A PR match
-  normally argues *more* strongly for skip-or-comment than an issue match does.
+- **New** — no match; propose to file. Reported as `NEW`.
+- **Near-match on an issue** — a similar *issue* exists; **flag it for the
+  user** with the existing issue's number and URL and let them choose: file
+  anyway, skip, or comment on the existing one. Reported as
+  `near #N (issue)`. Never silently file over it or silently drop it.
+- **Near-match on a pull request** — the match is a PR, so the work is already
+  **in flight**. Reported as `in flight: #N (PR)` — never as a "duplicate",
+  and never with the word *duplicate* attached to a PR number at all. A PR
+  match argues *more* strongly for skip-or-comment than an issue match does.
   Commenting works either way (`POST /issues/<n>/comments` accepts a PR
   number), but on a PR the comment lands in that PR's conversation rather than
   on a standalone issue, so confirm that's what the user wants.
+
+**Verify the type before you write a number into a row.** The search output's
+type expression is the primary signal; when a number reaches this step from
+anywhere else (an earlier turn, the operator, a hand-rolled query), re-derive
+it from the forge before classifying:
+
+```bash
+gh api "repos/<slug>/issues/<n>" --jq '.pull_request != null'   # true => it is a PR
+```
+
+`gh issue view <n>` is **not** a type check: it accepts a PR number and none
+of `title`/`state`/`createdAt` reveals which kind it is. Neither is
+`gh issue close` / `gh issue comment` — both act on a PR number without
+warning, and `gh issue close` prints `✓ Closed issue …` for a closed *pull
+request* (repo#515).
+
+**An implementation is not a duplicate.** If one item lists the other in its
+`closingIssuesReferences`, the PR *implements* that issue — that is the
+strongest possible "already in flight" signal and the weakest possible case
+for treating either as redundant. Report it as `in flight`, never as a
+duplicate of the thing it implements.
 
 ### 3b. Scrub cross-repo candidates before they are proposed
 
@@ -328,6 +370,20 @@ confidentiality flag there (e.g. `source_confidential = true`), treat that as
 authoritative and skip the keyword scan; a deliberate flag is a more reliable
 signal than prose matching and should not need re-confirming every session.
 
+`.repo/scrub.toml` also accepts a third, stricter value: the **string**
+`source_confidential = "block"` (distinct from the boolean `true` above).
+Where the boolean only strengthens step 4's warning, `"block"` changes step
+4's default disposition for `public`/`unknown` rows — see step 4 below. This
+is a separate, deliberate opt-in, not a stronger keyword match: the CLAUDE.md
+keyword scan above never sets block mode on its own, no matter how many
+confidentiality phrases it matches, because — as the next paragraph explains —
+a keyword scan cannot tell a real firewall statement apart from an unrelated
+use of the same word, which is a poor basis for something that changes what
+gets filed rather than just what gets printed. Only an explicit
+`.repo/scrub.toml` opt-in can select block mode. The default (no
+`source_confidential` key) and the boolean `true` case are unaffected by this
+paragraph and keep today's warn-only behavior exactly as described below.
+
 **When in doubt, warn** — this follows the same fail-closed convention step 3b
 already uses for an unresolved target visibility. A match on any phrase above
 sets `source-looks-confidential = true` regardless of the surrounding context
@@ -338,8 +394,10 @@ The one case that does **not** set the flag is a **missing** `CLAUDE.md` — no
 file means no signal to read, not a signal to assume one way or the other.
 
 This step reads no candidate bodies and re-derives no target visibility — it
-produces exactly one repo-wide boolean that step 4 combines with 3b's already-resolved
-`Vis` column.
+produces exactly one repo-wide boolean (`source-looks-confidential`), plus a
+second, independent repo-wide flag (`source-block-mode`, set only by the
+`.repo/scrub.toml` `"block"` string above and never by the keyword scan), that
+step 4 combines with 3b's already-resolved `Vis` column.
 
 ### 4. Report the proposed set and confirm
 
@@ -361,18 +419,49 @@ says nothing about whether the *source* considers itself off-limits:
 
 FOLLOW-UPS FROM THIS SESSION
 ============================
-| # | Target repo        | Vis     | Title                              | Dedup                   |
-|---|--------------------|---------|------------------------------------|-------------------------|
-| 1 | rjwalters/repo     | public  | orphans check misses nested dirs   | NEW                     |
-| 2 | rjwalters/loom     | public  | worktree.sh fails on detached HEAD | near #217 (issue, flag) |
-| 3 | rjwalters/repo     | public  | followups dedup also matches PRs   | near #99 (PR, flag)     |
-| 4 | rjwalters/anvil    | public  | (docs gap) …                       | NEW                     |
-| 5 | UNKNOWN            | unknown | kicad-tools DRC false positive     | ask — no slug           |
+| # | Target repo        | Vis     | Title                              | Dedup                    |
+|---|--------------------|---------|------------------------------------|--------------------------|
+| 1 | rjwalters/repo     | public  | orphans check misses nested dirs   | NEW                      |
+| 2 | rjwalters/loom     | public  | worktree.sh fails on detached HEAD | near #217 (issue)        |
+| 3 | rjwalters/repo     | public  | followups dedup also matches PRs   | in flight: #99 (PR)      |
+| 4 | rjwalters/anvil    | public  | (docs gap) …                       | NEW                      |
+| 5 | UNKNOWN            | unknown | kicad-tools DRC false positive     | ask — no slug            |
 ```
 
 When 3c found no confidentiality signal, or every row's `Vis` is `private`
 (the one case that is not treated as public), show the table alone with no
 preamble warning — the ordinary confirm is sufficient.
+
+**If step 3c set `source-block-mode = true` (the `.repo/scrub.toml`
+`source_confidential = "block"` opt-in), replace the warning above with a
+hold instead** — this is a different posture from the advisory warning, not a
+louder version of it. Every row whose `Vis` is `public` or `unknown` is marked
+`HOLD — source firewall` in the table by default, the same convention step 3b
+already uses for `HOLD — needs redaction`, and that row is **not** filed by
+the ordinary "approve the set" confirmation below — filing it requires the
+operator to give a separate, explicit per-run override naming the held row(s)
+after being told the hold exists, not a bare "yes" to the table as a whole:
+
+```
+🔒 SOURCE FIREWALL ACTIVE — this repo's .repo/scrub.toml sets
+    source_confidential = "block". Every row below marked HOLD — source
+    firewall is held by default; approving the set below does NOT file
+    it. To file a held row anyway, say so explicitly for that row number
+    after this warning — a plain "yes" to the table is not an override.
+
+FOLLOW-UPS FROM THIS SESSION
+============================
+| # | Target repo        | Vis     | Title                              | Dedup                   | Hold                    |
+|---|--------------------|---------|------------------------------------|--------------------------|-------------------------|
+| 1 | rjwalters/repo     | public  | orphans check misses nested dirs   | NEW                     | HOLD — source firewall  |
+| 2 | rjwalters/repo     | private | internal note about this repo      | NEW                     | —                       |
+```
+
+A row targeting this repo, or any row whose `Vis` is `private`, is never held
+by block mode — only `public`/`unknown` rows are, the same fail-closed set the
+advisory warning above already targets. `--dry-run` still stops before any
+filing, block mode included, and does not by itself count as reviewing (let
+alone overriding) a hold.
 
 For each proposed issue show the target repo, its visibility, title, a body
 preview (context / repro / suggested acceptance criteria), and dedup status.
@@ -388,16 +477,28 @@ targeting this repo still shows its visibility but carries no scrub obligation
 (step 3b skips it) — say so rather than leaving the cell blank.
 
 Like the rest of this command's confirmation gate, the step 3c warning is
-**purely advisory** — it never blocks filing and never auto-redacts a body;
-it exists only to put the source/target mismatch in front of the user at the
-moment they decide, the same "confirm, never auto-apply" posture the rest of
-the command already holds.
+**purely advisory** in the default case (no `.repo/scrub.toml`
+`source_confidential` key) and in the boolean `source_confidential = true`
+case — it never blocks filing and never auto-redacts a body; it exists only to
+put the source/target mismatch in front of the user at the moment they decide,
+the same "confirm, never auto-apply" posture the rest of the command already
+holds. Block mode (`source_confidential = "block"`), described just above, is
+the one deliberate exception: it is opt-in, structured, and never triggered by
+the CLAUDE.md keyword scan on its own.
 
-The `Dedup` column carries step 3's classification: `NEW`, a flagged
-near-match, or `ask` for an unresolved target. A flagged near-match may resolve
-to **either an open issue or an open pull request** — step 3 searches both on
-purpose — so name which kind it is (rows 2 and 3 above), since a PR match means
-the work is already in flight and usually changes the user's choice.
+The `Dedup` column carries step 3's classification: `NEW`, a match, or `ask`
+for an unresolved target. **A match cell always states the type** — step 3
+searches open issues *and* open pull requests on purpose, so the cell is
+`near #N (issue)` or `in flight: #N (PR)` (rows 2 and 3 above), never a bare
+`near #N` and never the word "duplicate" against a PR number. A PR match means
+the work is already in flight, which usually changes the user's choice; a
+type-less cell is what let a live run propose closing an approved PR as a
+duplicate issue (repo#515).
+
+**This table proposes filings, not actions on existing items.** A match row
+records what exists and hands the decision to the user; it is never a
+"close #N" / "relabel #N" instruction, and approving the table never authorizes
+one. See safety rule 9.
 
 ### 5. File the approved issues
 
@@ -458,6 +559,26 @@ gh api --method POST "repos/<slug>/issues/<n>/comments" \
   --input /tmp/followup-payload.json --jq '.html_url'
 ```
 
+**Re-check the type immediately before posting**, even if step 3 already
+classified it — the comment endpoint accepts a PR number silently, and on a PR
+the comment lands in that PR's conversation:
+
+```bash
+gh api "repos/<slug>/issues/<n>" --jq '.pull_request != null'   # true => it is a PR
+```
+
+**Those two POSTs are the only writes this command makes.** Creating a new
+issue, and — when the user explicitly picks it for a match — posting one
+comment. `/repo:followups` **never closes, edits, relabels, reopens, assigns,
+or otherwise changes the state of an existing issue or pull request**, and
+there is no flag, mode, or approval phrasing that unlocks one: it files, or it
+reports. If a candidate duplicates an existing **issue**, the row says so and
+closing that issue is the user's call, made outside this command. If the match
+is a **pull request**, there is nothing to close at all — the work is in
+flight. `gh issue close` is not part of this command's vocabulary; a run that
+reaches for it has left the command's rules, which is exactly how an approved
+PR was closed as a "duplicate" in repo#515.
+
 Leave UNKNOWN / skipped candidates unfiled and list them so nothing is silently
 lost.
 
@@ -468,8 +589,9 @@ Filed issues are triaged like any other afterward — this command does not appl
 
 1. **Never file without confirmation** — present the full proposed set (target
    repo, title, body preview, dedup status) and file only what's approved.
-2. **Dedup before filing** — check open issues in each target repo; show
-   near-matches and let the user decide file / skip / comment-on-existing.
+2. **Dedup before filing** — check open issues **and pull requests** in each
+   target repo; show matches, typed, and let the user decide file / skip /
+   comment-on-existing.
 3. **Never guess a target repo** — unresolved or ambiguous targets are reported
    as UNKNOWN for the user to name, never filed to a guessed slug.
 4. **`--dry-run` files nothing** — pure proposal mode for review.
@@ -489,8 +611,35 @@ Filed issues are triaged like any other afterward — this command does not appl
    step 3c checks this repo's own `CLAUDE.md` (and any `.repo/scrub.toml`
    opt-in) for a confidentiality/pre-disclosure signal; when one is found and
    any row's `Vis` is `public` or `unknown`, step 4 shows a distinct warning
-   above the table, additive to the `Vis` column. This is advisory only,
-   exactly like the rest of this command's confirm-first posture — it never
-   blocks filing and never auto-redacts a body, and an unreadable or
-   ambiguous `CLAUDE.md` fails closed to warning rather than silently
-   skipping it.
+   above the table, additive to the `Vis` column. This is advisory only in the
+   default case (no `.repo/scrub.toml` `source_confidential` key) and in the
+   boolean `source_confidential = true` case, exactly like the rest of this
+   command's confirm-first posture — it never blocks filing and never
+   auto-redacts a body in those cases, and an unreadable or ambiguous
+   `CLAUDE.md` fails closed to warning rather than silently skipping it.
+8. **Hold, don't warn, when the source repo opts into block mode** —
+   `.repo/scrub.toml` may set `source_confidential = "block"`, a separate
+   structured opt-in from rule 7's boolean/default case. When set, step 4
+   marks every `public`/`unknown` row `HOLD — source firewall` by default and
+   does not file it under the ordinary set-level confirmation; filing a held
+   row requires an explicit per-run operator override naming that row. The
+   CLAUDE.md keyword scan alone never selects block mode — only the
+   structured `.repo/scrub.toml` opt-in does.
+9. **Never act on an existing issue or pull request** — this command **files,
+   or it reports**. It never closes, edits, relabels, reopens, or assigns an
+   existing item, and its only writes are creating a new issue and posting one
+   comment on a match the user explicitly chose to comment on (step 5).
+   Approving the step 4 table authorizes filings only; it is never consent to
+   close or modify anything. A candidate that duplicates an existing **issue**
+   is reported as such and the close is the user's, made outside this command.
+   `gh issue close` has no place in this command at any step.
+10. **Classify every match by type, and verify the type before using a
+    number** — step 3's dedup query must emit the type inline
+    (`[PR]`/`[issue]`), not just `html_url`, and every `Dedup` cell states it:
+    `near #N (issue)` or `in flight: #N (PR)`. A pull-request match is **in
+    flight**, never a "duplicate". Any number arriving from outside that query
+    is re-checked with
+    `gh api repos/<slug>/issues/<n> --jq '.pull_request != null'` before it is
+    reported or commented on — `gh issue view` / `close` / `comment` all accept
+    a PR number without saying so — and an item that lists the other in
+    `closingIssuesReferences` is an implementation, not a duplicate.

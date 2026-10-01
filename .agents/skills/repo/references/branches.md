@@ -154,6 +154,7 @@ fired:
 | `landed, identical tree` | the branch's tree equals `<default>`'s | 5b arm 2 |
 | `landed (squash), patch-id equivalent (git cherry)` | every commit's patch is already in `<default>` | 5b arm 3 |
 | `landed (squash), merged PR #N (<date>)` | the forge says the branch's PR merged | 5b arm 4 |
+| `landed (squash), merged PR #N via <head-ref> (<date>)` | the branch's tip commit is in a merged PR opened from a *different* head | 5b arm 4b |
 | `unique work: N commits found nowhere else` | no arm could establish containment | 5b exhausted → KEEP |
 | `unverifiable: <reason>` | a check errored or could not run | 5c → KEEP |
 
@@ -267,6 +268,37 @@ cheaper bucket is the one to spend. REST's `pulls` endpoint has no
 `state=merged` value — only `open`, `closed`, and `all` — so merged-ness is the
 client-side `.merged_at != null` filter above, which correctly ignores an older
 closed-but-unmerged PR on the same head.
+
+**Arm 4b — commit containment via forge** → `landed (squash), merged PR #N via <head-ref> (<date>)`
+
+Only run when arm 4 finds nothing. Arm 4 keys on the **branch's own name** as
+the PR head, which misses a review/scratch branch that tracks *someone else's*
+PR head — the motivating case is a local `pr-<N>-review`-style branch checked
+out to review PR #N, where PR #N was itself opened from a differently-named
+branch (e.g. `fix/...`). Once that PR squash-merges, the review branch matches
+none of arms 1–4: `<default>` has moved on so the trees differ, `git cherry`
+reports `+` (a squash never patch-id matches), and no PR was ever opened from
+the review branch's own head name — yet the work is fully landed.
+
+`GET repos/{owner}/{repo}/commits/{commit_sha}/pulls` answers this directly: it
+lists every PR containing a given commit, **regardless of what head it was
+opened from**. Resolve the branch's tip SHA first, then make the one REST call:
+
+```bash
+tip=$(git rev-parse <branch>)
+gh api "repos/{owner}/{repo}/commits/${tip}/pulls" \
+  --jq '[.[] | select(.merged_at != null)] | "\(length) \(.[0].number // "") \(.[0].head.ref // "") \((.[0].merged_at // "")[0:10])"'
+```
+
+A leading count `>= 1` means the branch's tip commit is contained in a merged
+PR — safe to delete — and the same line carries the PR number, the head branch
+that PR was actually opened from (`.head.ref`, not the review branch's own
+name), and the merge date. The report tag is deliberately distinct from arm
+4's — it adds `via <head-ref>` — so the operator can see the branch name never
+matched: `landed (squash), merged PR #N via <head-ref> (<date>)`.
+
+Same failure direction as every other arm: a non-zero exit, an unresolvable
+tip SHA, or unparseable output is 5c (`unverifiable: ...`), never SAFE.
 
 If no arm establishes containment, the 5a commits would be **permanently
 lost**. Do NOT auto-delete even under `--prune`. Reclassify the branch as

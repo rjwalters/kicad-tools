@@ -45,7 +45,7 @@ and belong in a deliberate invocation.
 |---|---|
 | `0` | Clean — no findings at or above the reporting threshold |
 | `1` | Findings **at HEAD** |
-| `2` | Could not check — no `gh`, not authenticated, API failure, scan aborted |
+| `2` | Could not check — no `gh`, not authenticated, API failure, scan aborted, or a declared repo-local check that could not run |
 
 **History-only findings never set exit 1 on their own.** Nearly every repo with
 any history has some, none of them fixable without a rewrite nobody is going to
@@ -172,13 +172,23 @@ and the first one is vacuous. Use one of:
 
 - `git grep -P` — PCRE mode honors `\b`, where the local `git` was built with
   PCRE support (not guaranteed; check `git grep -P` doesn't error before
-  relying on it).
+  relying on it). On a host whose system `grep` is BSD grep, note that the
+  same failure mode can bite a second time: BSD grep has no `-P` at all (it
+  exits `2`, "invalid option"), so a caller that falls back from `git grep -P`
+  to a piped `grep -P` fails again — and if stderr is suppressed, that second
+  failure also reads as a clean zero.
 - `git ls-files -z | xargs -0 grep -nE` — keeps the tracked-files-at-HEAD scope
   while using a grep that honors `\b` unconditionally.
 
-Verify the tool actually matches before trusting a "0 findings" result from
-this scope — a silent `\b` failure produces a confident, clean-looking exit
-`0` while having checked nothing.
+Don't trust a "0 findings" result from this scope on status alone. `git grep`'s
+own exit status is `1` on a silent `\b` failure — identical to the exit status
+of a genuine no-match, so the failure cannot be detected from `git grep`'s
+exit code by itself; only the *scrub run's* own reported exit is `0` here
+("0 findings"), and that clean-looking `0` is the confident-but-wrong signal
+this section warns about. The reliable check is a **positive control**: run
+the same pattern against a line you already know matches (e.g. a scratch file
+containing `10.0.1.5`) and confirm it is found before trusting an absence of
+findings on real input.
 
 ## Severity gates verbosity, not just ordering
 
@@ -296,27 +306,76 @@ affiliated-entity names and aliases for this repo. Absent the file, the
 affiliated-entity class simply does not run — it has nothing to match on, and
 guessing at org names from the remote URL produces noise.
 
+### Repo-local checks — `.repo/scrub-local-checks.md`
+
+If the repo ships `.repo/scrub-local-checks.md`, **read it and run the checks it lists**,
+folding their findings into this report under the class each one names. A check
+that cannot run — missing script, non-zero exit that is not its documented
+"findings" code, unparseable output — is reported as **"check incomplete"**,
+never as clean. That rule is the whole point: a local check that silently fails
+is worse than no local check, because the report still says `CRITICAL none`.
+
+The machine-readable form is a `[[local_check]]` array in `.repo/scrub.toml`,
+which is preferred when both are present (the prose file then documents what the
+table declares):
+
+```toml
+[[local_check]]
+name    = "allowlist-drift"                      # names the check in the report
+command = "scripts/scrub-allowlist-drift.sh"     # repo-relative; run from the repo root
+class   = "allowlist"                            # which report class its findings join
+findings_exit = 1                                # exit code meaning "findings", not "broke"
+```
+
+Exit-code contract, so a check's own failure can never read as a pass:
+
+| Check exits | Folded in as |
+|---|---|
+| `0` | clean — nothing added to the report |
+| its `findings_exit` (default `1`) | findings, under its declared class |
+| anything else, or not executable, or absent | **check incomplete** — and the scrub run's own exit becomes `2` (inconclusive), never `0` |
+
+A local check is **report-only, like everything else here** — if one edits
+files, issues, or history, that is a bug in the check, and this command's
+[[orphans]]-style posture does not cover it.
+
+**Why this hook exists rather than an edit to this file.** This file is a
+vendored copy, so a repo-local subsection added to it is **deleted by the next reinstall**
+or `resync-installed.sh` refresh. That is not hypothetical — one
+consumer re-added the same allowlist-drift wiring to its installed `scrub.md`
+four times over a few months (repo#511) before moving it into `.repo/`, where
+the repo owns it. `.repo/` is the sanctioned home for anything repo-specific;
+the fallback for a customization that genuinely cannot live there is a pin in
+`.claude/skills/repo/resync-ignore`, which declares the vendored file
+repo-owned so neither writer overwrites it. Prefer this hook — a pin stops
+receiving upstream fixes to the rest of the file.
+
 ## Report
 
 Group by class, then by severity, consistent with [[audit]]'s critical/warn/info
 levels. Every finding carries: surface, location, class, **removability class**,
-and recommended action.
+and recommended action. Repo-local check findings are grouped by the class each
+check declares, tagged with the check's name so the report says where the rule
+came from.
 
 ```
 REPO:SCRUB — rjwalters/repo
 ===========================
 CRITICAL  none
 
-WARN      2 findings at HEAD
+WARN      3 findings at HEAD
   identity          docs/runbook.md:41        removable          third-party address — not yours to publish
   cloud-resource    .anvil/config.example:8   removable*         32-hex near "account_id" (context: promoted)
-                    * vendored tree — a local edit reverts on reinstall; fix upstream in rjwalters/anvil
+                    * vendored tree — a local edit reverts on reinstall; fix upstream in rjwalters/anvil,
+                      or pin the path in .claude/skills/repo/resync-ignore to declare it repo-owned
+  allowlist         .repo/scrub.toml:12       removable          [local: allowlist-drift] paths= no longer matches where value occurs
 
 INFO      history-only, not fixable by commit (63) — rerun with --deep
           network topology (18) — rerun with --deep
 
 Not checked: PR bodies/comments, fork network (--forks)
-Exit 1 (findings at HEAD)
+check incomplete: [local: secret-scan-mirror] scripts/scrub-mirror.sh exited 127
+Exit 2 (inconclusive — a declared check did not run)
 ```
 
 Every issue/PR finding must carry the **redaction-is-not-remediation** caveat:
@@ -344,6 +403,8 @@ file, issue, PR, or history ([[orphans]]' posture, for the same reason: the
 remedy is a judgment call with irreversible forms). **Don't be noisy** —
 severity gates verbosity, because a check that cries wolf on every routine run
 is a check nobody reads. **General by design** — anything repo-specific
-(affiliated entities, allowlisted values) is read from the consumer repo's own
-`.repo/scrub.toml`, never hardcoded. And **never claim more cleanliness than
-was verified**: name the surfaces you did not check, every time.
+(affiliated entities, allowlisted values, repo-local checks) is read from the
+consumer repo's own `.repo/scrub.toml` and `.repo/scrub-local-checks.md`, never
+hardcoded and never added by editing this vendored file. And **never claim more
+cleanliness than was verified**: name the surfaces you did not check, every
+time — and report a check that could not run as incomplete, never as clean.

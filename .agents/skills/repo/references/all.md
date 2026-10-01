@@ -19,7 +19,7 @@ keeping the same safety gates on destructive steps that each uses on its own.
 
 It deliberately does **not** launch cloud dev sessions ([[remote]]) — that
 provisions paid infrastructure and is never part of a routine hygiene pass. And
-it only ever runs [[deps]]' read-only half (`--check`): scaffolding Dependabot
+it only ever runs [[deps]]' read-only half (`--check`): configuring dependency automation
 config, flipping repository flags, and merging bot PRs all stay behind
 `/repo:deps`' own confirmations.
 
@@ -204,6 +204,24 @@ the end. Unpushed work on the working branch, a dirty tree, and an
 already-on-default-but-merely-behind run all land here, and none of them
 behave any differently than they did before this check existed.
 
+**One narrow exception to "say nothing": a dirty tree in a Loom-managed repo.**
+There, a dirty primary checkout is not merely a tree this stage declines to
+switch — it is a tree other processes actively rewrite. A sweep runs
+`check-main-clean.sh --quarantine`, which stashes the primary clone's entire
+uncommitted delta (labelled `loom-quarantine: run=<sweep-id> issue=<N>`) to give
+its worktrees a clean base, regardless of which branch that delta sits on. That
+is a finding rather than a fix, so — like `diverged_on_default` above — it does
+not need permission to say, and it changes nothing about eligibility:
+
+```
+Reset: not eligible for early switch — tree dirty; Loom-managed repo, so uncommitted work here can be quarantined by a sweep mid-run
+```
+
+Say it once, here, so the Docs stage's choice of where to put its fixes (stage 4)
+reads as a consequence rather than a surprise. Detect the same way [[docs]] does
+(`.loom/` root with `worktrees/`, or a running `loom-daemon`, and not already
+inside a `.loom-managed` worktree); in any other repo this line never appears.
+
 **If `diverged_on_default=yes`**, this is the shape this issue exists for: the
 checkout is already on the default branch, so there is no branch to switch
 to — but Scrub, Docs, Tidy, and Update tools are still about to run against a
@@ -272,6 +290,19 @@ prose, out-of-date command/feature tables, CHANGELOG drift), README structure,
 and internal cross-references. This is the explicit, named home for the doc
 fixes the audit surfaced — apply the ones the user approves.
 
+**Report where those fixes landed, not only that they were applied.** In a
+Loom-managed repo [[docs]] picks a destination up front — its "Loom-managed
+repo: land fixes where a sweep cannot take them" step: a commit in a dedicated
+issue worktree, a commit on a `chore/repo-hygiene-<date>` branch plus a PR when
+the default branch is PR-protected, a commit on an otherwise-clean current
+branch, or uncommitted plus an explicit quarantine warning. [[gitignore]] and
+[[links]] point at that same canonical ladder, so the one choice governs the
+rule fixes stage 1 applied and any link fixes made here. Carry that destination
+into this stage's line and into the final summary — a branch or worktree name
+when the fixes were committed,
+`uncommitted, at risk` when they were not. In a repo that is not Loom-managed
+there is no destination to name and the line is exactly what it always was.
+
 ### 5. Tidy (see [[tidy]])
 
 Inventory filesystem clutter — build artifacts, caches, temp files, empty dirs
@@ -291,44 +322,23 @@ Two currency checks run here, both report-first.
 **Installed tool packages** (see [[update-tools]]): check Loom, Anvil, Repo
 itself, … against their sources. Report what's behind and offer to update.
 
-**Third-party dependencies** (see [[deps]]): run the report-only form,
-`[[deps]] --check`. Report three independent items — never collapsed into one
-"Dependabot: on":
+**Third-party dependencies** (see [[deps]]): run `[[deps]] --check`. Report the
+installed organization policy/source, detected provider (Renovate, Dependabot,
+or intentional mixed coverage), config/app status, vulnerability alerts,
+security PR ownership, cooldown and automerge policy, and open dependency PRs.
+These are independent states: an intentionally disabled Dependabot security-PR
+flag is expected when Renovate owns fixes. Missing Dependabot config does not
+mean automation is absent.
 
-- whether `.github/dependabot.yml` is present (that file governs **version**
-  updates only),
-- the repo-level **security-updates** flag — report it **UNKNOWN (needs
-  admin)**, not `disabled`, when the token can't read the setting, exactly as
-  [[deps]] does; "can't see it" and "it's off" are different answers,
-- the **count of open Dependabot PRs**, split into how many are real forward
-  majors and how many are **stale** — proposing a version the manifest on the
-  base branch already satisfies (or exceeds). [[deps]]' stale check does this
-  comparison; a stale PR is never counted as a major and is **never** presented
-  here as pending upgrade work. This split matters right after a bulk-update
-  merge — the exact moment someone runs `/repo:all` to confirm the repo is
-  clean — because Dependabot's still-open PRs from a pre-merge scan are stale,
-  and reporting them as majors is a false upgrade-pressure signal.
+Summarize open PRs as real forward majors, other pending work, and genuinely
+stale PRs. Use [[deps]]' base-manifest **and lockfile** comparison; a permissive
+manifest range alone cannot establish that a lockfile security update is stale.
+Full diff/CI triage remains with `/repo:deps --review`.
 
-Those counts — open, real majors, stale — are all `/repo:all` needs. Computing
-the stale count requires [[deps]]' cheap per-PR manifest comparison (base-branch
-manifest vs. the PR's target), but the rest of the per-PR classification table
-(ecosystem, CI status, diff notes) stays with `/repo:deps --review`, which is a
-separate, confirm-gated activity.
-
-Only `--check` runs from here. `/repo:all` **never** scaffolds
-`.github/dependabot.yml`, **never** flips a repository flag, and **never**
-merges a Dependabot PR. Those are [[deps]]' always-confirm-first actions and
-stay out of the sweep entirely — if any of them is warranted, say so and let
-the user run `/repo:deps` themselves. Under `--ask` this half is unchanged;
-it is already report-only, so there is nothing to confirm.
-
-Dependabot is a GitHub feature, and [[deps]] refuses to run against another
-forge. So if `origin` is not a GitHub remote, skip this half, report it on its
-own line, and continue — it never fails the stage or the run:
-
-```
-Deps: check skipped (not a GitHub remote)
-```
+This stage is always report-only, including under `--ask`: it does not deploy
+organization policy, change client files/settings, or merge PRs. Refer policy
+drift to [[org-policy]] and client adoption to [[deps]]. If origin is not GitHub,
+report `Deps: check skipped (not a GitHub remote)` and continue the sweep.
 
 ### 7. Reset (see [[reset]])
 
@@ -364,7 +374,7 @@ Scrub:        1 at HEAD deferred (identity: docs/runbook.md:41); 63 history-only
 Docs:         2 fixed (README table, CHANGELOG entry), 1 deferred: docs/analysis/ missing README
 Tidy:         freed 240 MB (build/, .cache/, 3 empty dirs)
 Tools:        Anvil updated 1.4.0 → 1.5.1; Loom current
-Deps:         dependabot.yml present, security updates OFF, 3 open PRs (0 majors, 2 stale — already satisfied by manifest)
+Deps:         Renovate, org policy current, alerts ON, security PRs: Renovate, age: 14d/1d, automerge OFF, 3 open PRs (0 majors, 2 stale)
 Reset:        on main (up to date), tree clean, 4 branches deleted, 1 stash kept
 Skipped:      remote (never part of /repo:all); deps install/review (confirm-first — run /repo:deps); scrub --deep/--owner/--forks (run /repo:scrub)
 ```
@@ -387,6 +397,36 @@ Reset:        synced early (feature/x → main, was 6 behind), tree clean, 4 bra
 
 Never drop the pruning reporting just because the switch moved earlier, and
 never describe the same switch in both places.
+
+### Where the fixes live (Loom-managed repos)
+
+The example above is a repo that is not Loom-managed, so `N fixed` is the whole
+story. In a Loom-managed one it is not: uncommitted edits in the primary
+checkout are quarantined by the next sweep's `check-main-clean.sh --quarantine`
+(stash label `loom-quarantine: run=<sweep-id> issue=<N>`), so `2 fixed` can be
+true when it prints and false ten minutes later. The Docs stage therefore picks
+a destination up front — see [[docs]]' "Loom-managed repo: land fixes where a
+sweep cannot take them", the canonical copy [[gitignore]] and [[links]] point at
+— and **the summary names that destination**:
+
+| Where the fixes landed | Summary line |
+|---|---|
+| Committed in a dedicated issue worktree | `Docs: 2 fixed on feature/issue-448 (worktree .loom/worktrees/issue-448, a1b2c3d)` |
+| Committed on a hygiene branch (PR-protected default) | `Docs: 2 fixed on chore/repo-hygiene-2026-09-30 (worktree .loom/worktrees/repo-hygiene-2026-09-30, a1b2c3d) — main protected; push + PR offered` |
+| Committed on the current branch | `Docs: 2 fixed, committed on main (a1b2c3d)` |
+| Left uncommitted in the primary checkout | `Docs: 2 fixed — uncommitted, at risk` |
+| Not a Loom-managed repo | `Docs: 2 fixed (README table, CHANGELOG entry)` — unchanged |
+
+The same applies to the `Audit:` line when stage 1 applied gitignore rule fixes:
+name where those landed too, on the same four shapes.
+
+The `uncommitted, at risk` row carries the warning [[docs]] prints, once, on its
+own line beneath the summary — it is the one arm where the run ends with work
+that something else may take:
+
+```
+Loom-managed repo: uncommitted doc fixes in the primary checkout can be quarantined by a sweep — commit or stash them now.
+```
 
 ### Re-verify before printing
 

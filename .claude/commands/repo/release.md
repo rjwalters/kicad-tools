@@ -701,14 +701,42 @@ fi
 
 If a release workflow exists (`.github/workflows/release.yml`, typically
 triggered on Release creation rather than tag push), create a GitHub Release so
-it fires; use the CHANGELOG entry as the notes. `gh release create` can hit a
-brief propagation-lag race even immediately after the tag is confirmed on the
-remote above — give it one short retry before treating it as a real failure:
+it fires; use the CHANGELOG entry as the notes.
+
+Extract the notes with `awk`, not `sed \?` — `\?` (zero-or-one) is a **GNU sed
+extension**; on BSD/macOS sed it is not recognized inside a basic-regex
+address, so the range silently never matches, `sed -n` prints nothing, and
+`gh release create` would publish an **empty** body with no error (hit live
+cutting v0.11.1 on macOS). The `awk` range below needs no optional-bracket
+regex, so it is portable across GNU and BSD. Extract **once** into a temp file
+and guard against an empty result before either the initial attempt or the
+retry runs — this also means the retry reuses the exact same extracted notes
+rather than re-running the pattern a second time:
 
 ```bash
-gh release create "v$NEW" --title "v$NEW" --notes-file <(sed -n "/^## \[\?$NEW/,/^## /p" CHANGELOG.md) \
+extract_release_notes() {   # <version> -> writes matching CHANGELOG range to stdout
+  awk -v v="$1" '
+    $0 ~ "^##[[:space:]]+v?\\[?" v "([[:space:]]|\\]|$)" {f=1; next}
+    /^##[[:space:]]/ {f=0}
+    f' CHANGELOG.md
+}
+
+NOTES_FILE="$(mktemp)"
+extract_release_notes "$NEW" > "$NOTES_FILE"
+if [ ! -s "$NOTES_FILE" ]; then
+  echo "ERROR: extracted release notes are empty — CHANGELOG header for $NEW not matched" >&2
+  exit 1
+fi
+```
+
+`gh release create` can hit a brief propagation-lag race even immediately
+after the tag is confirmed on the remote above — give it one short retry
+before treating it as a real failure:
+
+```bash
+gh release create "v$NEW" --title "v$NEW" --notes-file "$NOTES_FILE" \
   || { echo "gh release create failed — retrying once after a short pause (tag-propagation lag)"; sleep 10; \
-       gh release create "v$NEW" --title "v$NEW" --notes-file <(sed -n "/^## \[\?$NEW/,/^## /p" CHANGELOG.md); }
+       gh release create "v$NEW" --title "v$NEW" --notes-file "$NOTES_FILE"; }
 ```
 
 Otherwise the tag push alone completes the release.
