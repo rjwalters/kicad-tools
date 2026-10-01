@@ -499,9 +499,16 @@ def auto_pour_if_missing(
 
     Returns:
         Tuple of ``(zones_created, pour_net_names)`` where
-        *pour_net_names* lists the nets that received new zones.
+        *pour_net_names* lists the nets that received new zones.  A net
+        whose pour the outline allocator could not satisfy (issue #5864)
+        is reported as a warning, excluded from *pour_net_names*, and
+        left zone-less so the router routes it as traces -- it does not
+        abort the call.
     """
-    from kicad_tools.zones.generator import auto_create_zones_for_pour_nets
+    from kicad_tools.zones.generator import (
+        ZonePartitionError,
+        auto_create_zones_for_pour_nets,
+    )
 
     pcb_path = Path(pcb_path)
     pcb_text = pcb_path.read_text()
@@ -604,11 +611,35 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     # 5. Create zones via the shared generator
     # ------------------------------------------------------------------
-    count = auto_create_zones_for_pour_nets(pcb_path, new_pour_nets, edge_clearance=edge_clearance)
+    # Issue #5864: an auto-pour that cannot be partitioned for ONE net
+    # must not abort the caller (``kct route`` wrote no board at all on
+    # the normalized Arduino Leonardo, whose authored GND zone fully
+    # covers the AGND pad region on B.Cu).  Opt into the generator's
+    # degrade-gracefully mode: the unsatisfiable net is skipped, every
+    # other pour net still gets its zone, and the skip is reported here.
+    # The skipped net keeps no zone, so the downstream auto-skip pass
+    # leaves it to the router to route as ordinary traces.
+    skipped: list[ZonePartitionError] = []
+    count = auto_create_zones_for_pour_nets(
+        pcb_path,
+        new_pour_nets,
+        edge_clearance=edge_clearance,
+        skipped_out=skipped,
+    )
 
-    names = [name for name, _ in new_pour_nets]
+    skipped_nets = {err.failing_net for err in skipped}
+    names = [name for name, _ in new_pour_nets if name not in skipped_nets]
     if not quiet and count > 0:
         print(f"Auto-pour: created {count} zone(s) for {', '.join(sorted(names))}")
+    if not quiet:
+        for err in skipped:
+            covering = ", ".join(err.covering_nets) if err.covering_nets else "(none)"
+            print(
+                f"Auto-pour: WARNING skipped pour for '{err.failing_net}' on "
+                f"{err.layer} -- its pad region is fully covered by "
+                f"higher-priority zone(s) ({covering}), so the zone would "
+                f"receive zero copper; routing this net as traces instead"
+            )
 
     # ------------------------------------------------------------------
     # 6. Issue #3092: dual-side ground for forced pour nets on 2L boards.
@@ -636,7 +667,9 @@ def auto_pour_if_missing(
     # ------------------------------------------------------------------
     extra_count, extra_names = _add_dual_side_ground_for_forced(
         pcb_path,
-        new_pour_nets,
+        # Issue #5864: a net whose primary pour was skipped owns no zone
+        # at all, so there is nothing to mirror onto the opposite side.
+        [(name, cls) for name, cls in new_pour_nets if name not in skipped_nets],
         forced,
         edge_clearance=edge_clearance,
         quiet=quiet,

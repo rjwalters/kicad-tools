@@ -1597,6 +1597,7 @@ def _compute_pour_outlines(
     board_outline: list[tuple[float, float]],
     margin_mm: float = DEFAULT_POUR_BBOX_MARGIN_MM,
     occupied_layers: Collection[str] | None = None,
+    skipped_out: list[ZonePartitionError] | None = None,
 ) -> dict[str, list[tuple[float, float]] | None]:
     """Compute per-net pour outlines for the given layer assignments.
 
@@ -1653,9 +1654,20 @@ def _compute_pour_outlines(
         occupied_layers: Layers that already host pre-existing zones
             (Issue #5590).  Each such layer is treated as shared even
             when only one new zone lands on it.
+        skipped_out: Opt-in degrade-gracefully collector (Issue #5864).
+            When a list is supplied, a net whose outline cannot be made
+            disjoint is **skipped** instead of aborting the whole
+            allocation: the :class:`ZonePartitionError` that would have
+            been raised is appended here and the net is left out of the
+            returned mapping entirely (so the caller can tell it apart
+            from a ``None`` "use the full board outline" entry).  When
+            ``None`` (the default) the error is raised, preserving the
+            actionable hard-failure contract ``kct zones`` / ``kct build``
+            rely on.
 
     Returns:
         Dict mapping ``net_name`` -> polygon (or ``None`` for default).
+        Nets recorded in *skipped_out* are absent from the mapping.
     """
     # Count zones per layer so we know which assignments share a layer.
     # Incumbent-occupied layers (#5590) count as already hosting a zone.
@@ -1864,7 +1876,7 @@ def _compute_pour_outlines(
                 # pad-safe bbox, this is redundant but cheap).
                 pad_safe = pad_safe_bboxes.get(net_name)
                 if pad_safe is None:
-                    raise ZonePartitionError(
+                    unsatisfiable = ZonePartitionError(
                         failing_net=net_name,
                         layer=layer,
                         covering_nets=list(winners_so_far),
@@ -1874,6 +1886,15 @@ def _compute_pour_outlines(
                             f"add the pads it needs."
                         ),
                     )
+                    if skipped_out is None:
+                        raise unsatisfiable
+                    # Issue #5864: degrade instead of aborting -- record the
+                    # skip and move on so the remaining nets on this layer
+                    # still receive their carved outlines.  The net is left
+                    # out of ``outlines`` and out of ``winners_union`` (it
+                    # gets no zone, so it claims no copper).
+                    skipped_out.append(unsatisfiable)
+                    continue
 
                 if winners_union is None:
                     outlines[net_name] = pad_safe
@@ -1890,11 +1911,16 @@ def _compute_pour_outlines(
                         if non_overlap_area > 1e-6:
                             outlines[net_name] = pad_safe
                         else:
-                            raise ZonePartitionError(
+                            unsatisfiable = ZonePartitionError(
                                 failing_net=net_name,
                                 layer=layer,
                                 covering_nets=list(winners_so_far),
                             )
+                            if skipped_out is None:
+                                raise unsatisfiable
+                            # Issue #5864: see the no-pads branch above.
+                            skipped_out.append(unsatisfiable)
+                            continue
 
             # Use the EFFECTIVE subtrahend (raw or pad-safe) for the
             # winners union, so lower-priority siblings can claim the
@@ -2180,6 +2206,7 @@ def auto_create_zones_for_pour_nets(
     pour_nets: list[tuple[str, NetClass]],
     edge_clearance: float | None = None,
     replace_existing: bool = False,
+    skipped_out: list[ZonePartitionError] | None = None,
 ) -> int:
     """Create zones for power and ground nets on a PCB.
 
@@ -2300,14 +2327,26 @@ def auto_create_zones_for_pour_nets(
             of re-routes (the board-07 match-group CI flake).  Default
             ``False`` preserves the historical additive behaviour for every
             other caller.
+        skipped_out: Opt-in degrade-gracefully collector (Issue #5864).
+            When a list is supplied, a pour net the outline allocator
+            cannot satisfy is **skipped** (no zone created for it) and
+            the :class:`ZonePartitionError` describing it is appended
+            here, instead of aborting the whole call.  The remaining
+            pour nets still get their zones.  ``kct route``'s internal
+            auto-pour passes a list so one unsatisfiable net degrades to
+            a warning rather than killing the route; ``kct zones`` /
+            ``kct build`` leave it ``None`` and keep the hard error.
 
     Returns:
-        Number of zones created
+        Number of zones created (excluding any net recorded in
+        *skipped_out*).
 
     Raises:
         ZonePartitionError: When the outline allocator cannot produce
             disjoint per-net outlines and at least one zone would
-            receive zero copper (issue #3240).
+            receive zero copper (issue #3240) -- unless *skipped_out*
+            was supplied, in which case the failing net is skipped and
+            recorded there instead (issue #5864).
     """
     pcb_path = Path(pcb_path)
 
@@ -2339,15 +2378,30 @@ def auto_create_zones_for_pour_nets(
     # the full ``board_outline`` and keeps the return-path plane continuous.
     # Incumbent-occupied layers (#5590) count as shared, so a new zone on
     # such a layer gets its carved pad-bbox outline instead.
+    skipped_before = len(skipped_out) if skipped_out is not None else 0
     pour_outlines = _compute_pour_outlines(
         gen.pcb,
         assignments,
         gen.board_outline,
         occupied_layers=existing_by_layer.keys() if existing_by_layer else None,
+        skipped_out=skipped_out,
+    )
+
+    # Issue #5864: nets the allocator could not satisfy are absent from
+    # ``pour_outlines`` entirely.  They must NOT fall through to
+    # ``add_zone(boundary=None)`` -- that would hand the net the full
+    # board outline, which is exactly the silent zero-copper overlap the
+    # allocator refused to emit.  Skip them instead.
+    unsatisfiable_nets = (
+        {err.failing_net for err in skipped_out[skipped_before:]}
+        if skipped_out is not None
+        else set()
     )
 
     count = 0
     for net_name, layer, priority in assignments:
+        if net_name in unsatisfiable_nets:
+            continue
         gen.add_zone(
             net=net_name,
             layer=layer,
