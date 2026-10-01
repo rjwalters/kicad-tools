@@ -845,6 +845,22 @@ uv run ruff format .
    already immune (it runs `--no-incremental`); see
    [`docs/contributing/development.md`](docs/contributing/development.md#the-stale-mypy_cache-trap).
 
+4. **Initialize KiCad's global library tables before trusting native ERC/DRC
+   results.** `kct check`'s native ERC leg (and the board 03/04 reviewed
+   paid-drill gates, which run `kct check` with `--strict`) shell out to
+   `kicad-cli`, which reads the host's `fp-lib-table`/`sym-lib-table` under
+   `~/.config/kicad/<version>/` (GUI-provisioned on first launch — a fresh
+   worktree or CI container has neither). Without them, kicad-cli raises
+   ordinary `lib_symbol_issues`/`footprint_link_issues` strict-mode ERC
+   warnings that read identically to a genuine footprint/symbol-link defect
+   in the schematic (issue #5860). CI always runs this first, so the
+   committed `boards/*/output/check-report.json` files are unaffected; run
+   it yourself once per host before relying on `kct check` locally:
+
+   ```bash
+   uv run python scripts/ci/init_kicad_libraries.py
+   ```
+
 The build's `nanobind` dependency is composed into the default dev
 dependency-group, so a plain `uv sync` keeps it resolved and a later
 `uv sync` (e.g. adding `--extra placement`) will not prune it. If you

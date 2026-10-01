@@ -928,6 +928,14 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # switched without referencing the kernel (same shape as
         # ``pathfinder``'s fixed-copper delegation in Phase 3f).
         "router/optimizer/collision.py",
+        # Epic #5509 Phase 4b (#5855), consumer group 16: match-group
+        # length/phase tuning's post-insertion DRC self-check.
+        # ``_post_insertion_clearance_detail_group`` /
+        # ``_post_insertion_clearance_detail_pair_group`` reach the kernel
+        # through ``clearance_shapes.py`` (already listed above) and are
+        # added here because their own docstrings cite the kernel by name,
+        # same as ``diffpair_routing.py``.
+        "router/match_group_tuning.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

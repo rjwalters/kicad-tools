@@ -185,15 +185,18 @@ get_ci_status() {
     # forge_get_workflow_runs's doc comment and issue #5495.
     local workflow_runs
     workflow_runs=$(forge_get_workflow_runs "$REPO_NWO" "$commit") || {
-        # Not critical if this fails - check runs are the primary signal
-        workflow_runs='{"workflow_runs": []}'
+        # Fail closed (#9879): an unreadable CI feed is PENDING, never "no
+        # runs" — empty previously read as a false green through
+        # analyze_status. The state marker forces the verdict to pending
+        # unless a definitive failure exists.
+        workflow_runs='{"workflow_runs": [], "workflow_runs_state": "unknown"}'
     }
 
     # Merge results
     echo "$check_runs" | jq \
         --argjson status "$combined_status" \
         --argjson wf "$workflow_runs" \
-        '. + {combined_status: $status, workflow_runs: ($wf.workflow_runs // [])}'
+        '. + {combined_status: $status, workflow_runs: ($wf.workflow_runs // []), workflow_runs_state: ($wf.workflow_runs_state // "ok")}'
 }
 
 analyze_status() {
@@ -210,6 +213,8 @@ analyze_status() {
 
     local combined_state
     combined_state=$(echo "$data" | jq -r '.combined_status.state // "unknown"')
+
+    local workflow_runs_state; workflow_runs_state=$(echo "$data" | jq -r '.workflow_runs_state // "ok"')
 
     # Count by status
     local completed=0
@@ -278,12 +283,20 @@ analyze_status() {
         overall_status="unknown"
     fi
 
+    # Fail closed (#9879): an unreadable workflow-runs feed is PENDING, never
+    # resolved. A definitive failure still dominates — "some CI failed" plus
+    # "the rest is unreadable" must not soften to pending. (Statement-level
+    # `&&` for the shell-budget ratchet: safe mid-function — a failing LEFT
+    # side of `&&` is exempt from `set -e` (line 68), and the jq -n that
+    # follows consumes the status anyway.)
+    [[ "$workflow_runs_state" == "unknown" && "$overall_status" != "failure" ]] && overall_status="pending"
+
     # Output JSON results
     jq -n \
         --arg commit "$COMMIT" \
         --arg short_sha "$SHORT_SHA" \
         --arg status "$overall_status" \
-        --arg combined_state "$combined_state" \
+        --arg combined_state "$combined_state" --arg wf_state "$workflow_runs_state" \
         --argjson total "$total_count" \
         --argjson completed "$completed" \
         --argjson success "$success" \
@@ -296,7 +309,7 @@ analyze_status() {
             commit: $commit,
             short_sha: $short_sha,
             status: $status,
-            combined_state: $combined_state,
+            combined_state: $combined_state, workflow_runs_state: $wf_state,
             counts: {
                 total: $total,
                 completed: $completed,

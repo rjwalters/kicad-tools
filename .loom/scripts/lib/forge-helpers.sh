@@ -740,18 +740,21 @@ forge_get_workflow_runs() {
 
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     forge_split_nwo "$nwo"
-    local tasks_json
-    tasks_json=$(gitea_api GET "repos/$FORGE_OWNER/$FORGE_REPO/actions/tasks" 2>/dev/null) || {
-      echo '{"workflow_runs": []}'
-      return 0
-    }
-    echo "$tasks_json" | jq --arg sha "$commit" '{
-      workflow_runs: [(.workflow_runs // [])[] | select(.head_sha == $sha) | {
-        name: (.name // .display_title // "workflow"),
-        status: .status,
-        conclusion: (.conclusion // null)
-      }]
-    }' 2>/dev/null || echo '{"workflow_runs": []}'
+    # Full pagination + fail closed (#9879): a CI feed that errors or trips
+    # the page cap must read as "unknown", never as an empty success — a
+    # merge gate reads empty as "no runs", which is a false green. The
+    # optional page-shape arg: this endpoint wraps its array in an object
+    # (default `length` counts keys and stops after page 1).
+    local runs_lines
+    [[ "$commit" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "forge_get_workflow_runs: not a commit SHA: $commit" >&2; return 1; }
+    runs_lines=$(_forge_gitea_paginate \
+        "repos/$FORGE_OWNER/$FORGE_REPO/actions/tasks" \
+        '.workflow_runs[]? | select(.head_sha == "'"$commit"'") | {name: (.name // .display_title // "workflow"), status: .status, conclusion: (.conclusion // null)}' \
+        '.workflow_runs | length') \
+        || { echo "forge_get_workflow_runs: Gitea CI feed unreadable — failing closed, not empty (#9879)" >&2; return 1; }
+    # No matching runs on any page: runs_lines is empty and jq -s reads no
+    # documents -> {"workflow_runs": []} — the honest empty success.
+    printf '%s\n' "$runs_lines" | jq -s '{workflow_runs: .}' || return 1
   else
     local runs_json
     runs_json=$(gh api "repos/$nwo/actions/runs?head_sha=$commit&per_page=100" \
@@ -879,10 +882,14 @@ forge_pr_close_targets() {
     nwo=$(forge_get_repo_nwo "$gh_cmd") || return 0
     local body
     body=$(forge_get_pr_body "$nwo" "$pr_number")
-    # Word-boundary, case-insensitive match on canonical closing keywords only.
-    # `Updates`, `See`, `References` are deliberately excluded.
+    # Fenced code blocks and blockquoted lines are prose, not intent (#9879):
+    # a `Closes #N` inside a ``` / ~~~ fence or after `>` must not count as a
+    # landing closer. Negation (`Refs #N`, "not closing") stays with the
+    # daemon's has-unnegated-closing-ref cross-check — the GitHub branch's
+    # closingIssuesReferences is API-computed with this same fence-awareness.
     # `|| true` neutralizes grep's exit-1 (no match) under `set -e`.
-    { echo "$body" \
+    { printf '%s\n' "$body" \
+        | awk '/^[[:space:]]*(```|~~~)/ { infence = !infence; next } infence { next } /^[[:space:]]*>/ { next } { print }' \
         | grep -Eoi '\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b[[:space:]]+#[0-9]+' \
         | grep -Eo '[0-9]+' \
         | sort -un; } || true
@@ -1877,11 +1884,17 @@ forge_get_pr_review_threads() {
 }
 
 # Page a Gitea list endpoint to exhaustion, applying JQ_FILTER to each page.
-# Usage: _forge_gitea_paginate PATH JQ_FILTER
+# Usage: _forge_gitea_paginate PATH JQ_FILTER [PAGE_LEN_JQ]
 # Exit: 0 on a complete read, non-zero on any page failure or page-cap trip.
+# PAGE_LEN_JQ computes one page's item count for the not-full-page stop rule;
+# the default `length` fits a bare-array page. Endpoints that wrap the array
+# in an object pass their own — e.g. the Actions-tasks page is an object
+# whose `workflow_runs` holds the items, so `length` would count the object's
+# keys (1) and end pagination after page 1 (#9879).
 _forge_gitea_paginate() {
   local path="$1"
   local jq_filter="$2"
+  local page_len_jq="${3:-length}"
   local limit=50 page=0 batch count sep
 
   while :; do
@@ -1893,7 +1906,7 @@ _forge_gitea_paginate() {
     sep="?"
     [[ "$path" == *"?"* ]] && sep="&"
     batch=$(gitea_api GET "${path}${sep}limit=${limit}&page=${page}") || return 1
-    count=$(printf '%s' "$batch" | jq 'length') || return 1
+    count=$(printf '%s' "$batch" | jq "$page_len_jq") || return 1
     [[ "$count" =~ ^[0-9]+$ ]] || return 1
     if [[ "$count" -gt 0 ]]; then
       printf '%s' "$batch" | jq -r "$jq_filter" || return 1

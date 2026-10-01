@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from kicad_tools.core import geometry
+from kicad_tools.router import clearance_shapes
 from kicad_tools.router import match_group_tuning as tuning
 from kicad_tools.router.layers import Layer
 from kicad_tools.router.primitives import Route, Segment
@@ -101,12 +101,18 @@ def test_exact_diagnostic_equivalence(pass_name):
 
 @pytest.mark.parametrize("pass_name", ["intra", "inter", "partner", "paired"])
 def test_far_geometry_skipped_and_boundary_checked(pass_name):
+    # Epic #5509 Phase 4b: the exact distance now comes from the shared
+    # clearance kernel (``clearance_shapes.copper_gap``), not
+    # ``core.geometry.segment_clearance`` -- wrap the kernel entry point the
+    # two functions actually call via their local ``from .clearance_shapes
+    # import copper_gap`` so this test still observes the real exact-distance
+    # call, not a function the implementation no longer reaches.
     candidate = Segment(0, 0, 5, 0, 0.2, Layer.F_CU, net=1)
     far = Segment(100, 100, 105, 100, 0.2, Layer.F_CU, net=2)
-    with patch.object(geometry, "segment_clearance", wraps=geometry.segment_clearance) as exact:
+    with patch.object(clearance_shapes, "copper_gap", wraps=clearance_shapes.copper_gap) as exact:
         assert check(pass_name, candidate, [far]) is None
         assert exact.call_count == 0
     near = Segment(0, 0.4, 5, 0.4, 0.2, Layer.F_CU, net=2)
-    with patch.object(geometry, "segment_clearance", wraps=geometry.segment_clearance) as exact:
+    with patch.object(clearance_shapes, "copper_gap", wraps=clearance_shapes.copper_gap) as exact:
         assert check(pass_name, candidate, [near]) is None
         assert exact.call_count >= 1

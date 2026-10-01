@@ -306,7 +306,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15})
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -342,6 +342,10 @@ Migrated so far:
 * **15** -- the post-route trace optimizer's collision checkers
   (``router/optimizer/collision.py``, reached through
   ``optimizer/trace.py``'s ``_path_is_clear``), Phase 4a.
+* **16** -- match-group length/phase tuning's post-insertion DRC
+  self-check (``router/match_group_tuning.py``
+  ``_post_insertion_clearance_detail_group`` /
+  ``_post_insertion_clearance_detail_pair_group``), Phase 4b.
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
@@ -355,6 +359,7 @@ _MIGRATION_PHASE: dict[int, str] = {
     9: "3d",
     10: "3e",
     15: "4a",
+    16: "4b",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
 
