@@ -298,6 +298,32 @@ class ClearanceViolation:
     component_inherent: bool = False  # True if both pads are on the same component
     layer: Layer | None = None  # Copper layer where the violation occurs
 
+    @property
+    def is_short(self) -> bool:
+        """True when the two copper shapes physically overlap or touch.
+
+        Issue #5862: ``distance`` is an EDGE-TO-EDGE gap, so a value at or
+        below zero means the two nets' copper occupies the same space --
+        a hard short, the class KiCad DRC reports as ``shorting_items``.
+        That is categorically different from a positive but sub-clearance
+        gap (a manufacturability near-miss): a short is never excusable,
+        never "component-inherent", and must never leave the router
+        reporting a clean board.
+        """
+        return self.distance <= 0.0
+
+
+def count_shorting_violations(violations: list[ClearanceViolation]) -> int:
+    """Count violations whose copper physically overlaps (Issue #5862).
+
+    Component-inherent entries are excluded for symmetry with the rest of
+    the reporting path, but :meth:`ClearanceViolation.is_short` entries are
+    no longer classified as component-inherent in the first place (overlap
+    is never forced by component geometry), so in practice every overlap
+    detected by :func:`validate_routes` is counted here.
+    """
+    return sum(1 for v in violations if v.is_short and not v.component_inherent)
+
 
 def parse_pcb_design_rules(pcb_text: str) -> PCBDesignRules:
     """Parse design rules from a KiCad PCB file's setup section.
@@ -2615,6 +2641,51 @@ def validate_routes(
         _via_obstacles_by_net[route_net] = entries
         return entries
 
+    # Issue #5862: pre-existing (preserved) trace copper as a
+    # segment obstacle universe.  Every other quadrant of this
+    # validator already widens its obstacle set with
+    # ``router.existing_routes`` -- segment-to-via ("Include
+    # pre-existing routes so new segments are checked against old
+    # vias"), via-to-pad and via-to-via all do -- but the
+    # segment-to-segment quadrant walked ``router.routes`` against
+    # itself only.  A newly routed trace laid straight across a
+    # foreign-net trace preserved by ``--preserve-existing`` /
+    # ``--nets`` therefore produced NO violation at all: the board
+    # saved with a short while the self-check reported a clean
+    # seg-seg count.  Built once per distinct route net, in
+    # ``existing_routes`` order, with the same precomputed geometry
+    # the in-loop circle rejection consumes (Issue #5240 shape).
+    _existing_seg_obstacles_by_net: dict[
+        int, list[tuple[int, Segment, Layer, float, float, float, float]]
+    ] = {}
+
+    def _existing_segment_obstacles(
+        route_net: int,
+    ) -> list[tuple[int, Segment, Layer, float, float, float, float]]:
+        """Foreign-net preserved segments as ``(net, seg, layer, half_width,
+        mid_x, mid_y, half_length)`` tuples."""
+        cached = _existing_seg_obstacles_by_net.get(route_net)
+        if cached is not None:
+            return cached
+        entries: list[tuple[int, Segment, Layer, float, float, float, float]] = []
+        for other_route in getattr(router, "existing_routes", []):
+            if other_route.net == route_net:
+                continue
+            for other_seg in other_route.segments:
+                entries.append(
+                    (
+                        other_route.net,
+                        other_seg,
+                        other_seg.layer,
+                        other_seg.width / 2,
+                        (other_seg.x1 + other_seg.x2) / 2.0,
+                        (other_seg.y1 + other_seg.y2) / 2.0,
+                        math.hypot(other_seg.x2 - other_seg.x1, other_seg.y2 - other_seg.y1) / 2.0,
+                    )
+                )
+        _existing_seg_obstacles_by_net[route_net] = entries
+        return entries
+
     # Check each route segment against pads of different nets
     for route_idx, route in enumerate(router.routes):
         route_net = route.net
@@ -2623,6 +2694,7 @@ def validate_routes(
         route_component_refs = _component_refs(route_net)
         pad_obstacles = _pad_obstacles(route_net)
         via_obstacles = _via_obstacles(route_net)
+        existing_seg_obstacles = _existing_segment_obstacles(route_net)
 
         for seg_idx, seg_geom in enumerate(_route_seg_geom[route_idx]):
             (
@@ -2697,9 +2769,21 @@ def validate_routes(
                     # clearance relaxation for the component (fine-pitch
                     # #1764 or relaxed corridor #2452); otherwise the
                     # violation is actionable for the nudge pass.
+                    # Issue #5862: a relaxation can only excuse a POSITIVE
+                    # but sub-clearance gap.  Copper that physically
+                    # overlaps the foreign pad is a short -- no component
+                    # geometry forces a trace to run through a neighbouring
+                    # pin's metal, and the trace can always be re-routed.
+                    # ``RoutingGrid._same_component_carveout_mode`` has
+                    # enforced exactly this ``clearance >= 0`` boundary
+                    # since #5166; this validator silently did not, so
+                    # ``kct route`` excused 13 of the 14 Arduino Nano
+                    # track-over-U3-pad shorts that ``kicad-cli pcb drc``
+                    # reports as ``shorting_items``.
                     is_component_inherent = (
                         ref in route_component_refs
                         and not (pad.net == 0 and pad.net_name)
+                        and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
                     )
 
@@ -2810,6 +2894,69 @@ def validate_routes(
                             )
                         )
 
+            # --- Segment-to-existing-segment checks (Issue #5862) ---
+            # Pre-existing trace copper preserved by --preserve-existing /
+            # --nets is immutable, so only the NEW segment is reported as
+            # the offender -- but the pair is still a DRC violation (and,
+            # at a non-positive gap, a short) that the saved board ships.
+            for (
+                other_net,
+                other_seg,
+                other_layer,
+                other_half_width,
+                other_mid_x,
+                other_mid_y,
+                other_half_len,
+            ) in existing_seg_obstacles:
+                if other_layer != seg_layer:
+                    continue
+
+                pair_clear = _pair_clearance(route_net, other_net)
+
+                # Same guaranteed circle lower bound the routes-vs-routes
+                # sweep above uses: skip the exact distance call only when
+                # it provably cannot register a violation.
+                center_dist = math.hypot(other_mid_x - seg_mid_x, other_mid_y - seg_mid_y)
+                gap_lower_bound = (
+                    center_dist - seg_half_len - other_half_len - seg_half_width - other_half_width
+                )
+                if gap_lower_bound >= pair_clear - _CLEARANCE_EPSILON_MM:
+                    continue
+
+                dist = _segment_to_segment_distance(
+                    segment.x1,
+                    segment.y1,
+                    segment.x2,
+                    segment.y2,
+                    other_seg.x1,
+                    other_seg.y1,
+                    other_seg.x2,
+                    other_seg.y2,
+                )
+                effective_dist = dist - seg_half_width - other_half_width
+
+                if effective_dist < pair_clear - _CLEARANCE_EPSILON_MM:
+                    loc_x = (segment.x1 + segment.x2 + other_seg.x1 + other_seg.x2) / 4
+                    loc_y = (segment.y1 + segment.y2 + other_seg.y1 + other_seg.y2) / 4
+                    violations.append(
+                        ClearanceViolation(
+                            segment_index=seg_idx,
+                            x1=segment.x1,
+                            y1=segment.y1,
+                            x2=segment.x2,
+                            y2=segment.y2,
+                            net=route_net,
+                            obstacle_type="segment",
+                            obstacle_net=other_net,
+                            distance=effective_dist,
+                            required=pair_clear,
+                            net_name=_resolve_net_name(route_net),
+                            obstacle_net_name=_resolve_net_name(other_net),
+                            location=(loc_x, loc_y),
+                            layer=segment.layer,
+                        )
+                    )
+
             # --- Segment-to-via checks ---
             # Include pre-existing routes so new segments are checked
             # against old vias.  Issue #5240: the obstacle list depends
@@ -2890,9 +3037,14 @@ def validate_routes(
                     # clearance relaxation for the component (fine-pitch
                     # #1764 or relaxed corridor #2452); otherwise the
                     # violation is actionable for the nudge pass.
+                    # Issue #5862: overlapping copper is a short, never
+                    # component-inherent -- mirrors the segment-vs-pad
+                    # quadrant above and ``RoutingGrid``'s own
+                    # ``clearance >= 0`` carve-out boundary (#5166).
                     is_component_inherent = (
                         ref in route_component_refs
                         and not (pad.net == 0 and pad.net_name)
+                        and effective_dist >= 0.0
                         and _same_component_relaxation_active(ref)
                     )
 
@@ -3168,6 +3320,18 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
         for obs_type, count in sorted(by_type.items()):
             lines.append(f"  {obs_type}: {count}")
 
+        # Issue #5862: call out physical copper overlap separately.  A
+        # sub-clearance near-miss and a short are both "clearance
+        # violations" here, but only one of them makes the board
+        # electrically wrong, and that distinction was invisible in a
+        # list sorted by obstacle type.
+        short_count = sum(1 for v in routing_violations if v.is_short)
+        if short_count:
+            lines.append(
+                f"  SHORTS (copper of different nets overlapping): {short_count} "
+                f"-- these are KiCad `shorting_items`, not near-misses"
+            )
+
         # Show individual violations (limit to first 20 to avoid flooding output)
         max_detail = 20
         for i, v in enumerate(routing_violations[:max_detail]):
@@ -3177,8 +3341,10 @@ def format_clearance_violations(violations: list[ClearanceViolation]) -> str:
             if v.location:
                 loc_str = f" at ({v.location[0]:.2f}, {v.location[1]:.2f})"
             layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
+            short_str = " SHORT" if v.is_short else ""
             lines.append(
-                f"  [{v.obstacle_type}] {net_label} vs {obs_label}{loc_str}{layer_str}: "
+                f"  [{v.obstacle_type}]{short_str} {net_label} vs {obs_label}"
+                f"{loc_str}{layer_str}: "
                 f"{v.distance:.3f}mm (required {v.required:.3f}mm)"
             )
 

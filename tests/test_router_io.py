@@ -1336,15 +1336,22 @@ class TestValidateRoutes:
             ],
         )
 
-        # Route a segment to pad 1 that runs INTO pad 2's rectangle.
-        # Issue #3592: pad 2 is a 0.4 x 1.2 mm rect centred at (10.65, 10)
-        # so its left edge is at x = 10.45.  The segment runs along y = 10
-        # to x = 10.5, crossing the rect's left edge -> a genuine
-        # clearance violation that exercises the component_inherent
-        # classification.  (Before the rectangular-pad fix the segment
-        # only had to reach x = 10 because the circular model inflated
-        # the pad to a 0.6 mm radius disc.)
-        segment = Segment(x1=5, y1=10, x2=10.5, y2=10, layer=Layer.F_CU, width=0.2)
+        # Route a segment to pad 1 that stops short of pad 2's rectangle but
+        # inside its required clearance.  Pad 2 is a 0.4 x 1.2 mm rect
+        # centred at (10.65, 10) so its left edge is at x = 10.45; a segment
+        # ending at x = 10.3 leaves a 0.05 mm edge-to-edge gap -- POSITIVE,
+        # but below the 0.15 mm ``trace_clearance`` -- the near-miss the
+        # legacy pitch-only opt-in is about, not a short.
+        #
+        # Issue #5862: an actual overlap (segment running INTO the pad
+        # rectangle, a negative gap) is never component-inherent, legacy
+        # opt-in or not -- see
+        # ``test_legacy_carveout_never_excuses_an_actual_overlap`` below.
+        # This fixture used to reach x = 10.5 (overlap) and still expected
+        # ``component_inherent is True`` under the legacy opt-in; that
+        # was the same "overlap excused as inherent" defect #5862 fixed
+        # everywhere else, just not yet caught here.
+        segment = Segment(x1=5, y1=10, x2=10.3, y2=10, layer=Layer.F_CU, width=0.2)
         route = Route(net=1, net_name="SPI_SCK", segments=[segment], vias=[])
         router.routes.append(route)
 
@@ -1354,7 +1361,47 @@ class TestValidateRoutes:
         pad_violations = [v for v in violations if v.obstacle_type == "pad"]
         assert len(pad_violations) >= 1
         for v in pad_violations:
+            assert v.distance > 0.0, "fixture must model a near-miss, not an overlap"
             assert v.component_inherent is legacy_carveout
+
+    def test_legacy_carveout_never_excuses_an_actual_overlap(self):
+        """Issue #5862: the legacy pitch-only opt-in never excuses a SHORT.
+
+        ``legacy_fine_pitch_carveout`` restores the pre-#5004 "any
+        fine-pitch foreign-net pad violation is inherent" classification,
+        but that was always meant to cover a sub-clearance *gap*, not
+        copper that physically overlaps a neighbouring pin's metal. A
+        short is never excusable, with or without the opt-in.
+        """
+        rules = DesignRules(
+            trace_width=0.2,
+            trace_clearance=0.15,
+            grid_resolution=0.1,
+            legacy_fine_pitch_carveout=True,
+        )
+        router = Autorouter(width=50, height=50, rules=rules)
+        router.add_component(
+            "U1",
+            [
+                {"number": "1", "x": 10, "y": 10, "width": 0.4, "height": 1.2, "net": 1},
+                {"number": "2", "x": 10.65, "y": 10, "width": 0.4, "height": 1.2, "net": 2},
+            ],
+        )
+        # Pad 2's left edge is at x = 10.45; ending the segment at x = 10.5
+        # runs it INTO the pad rectangle -- a genuine overlap.
+        segment = Segment(x1=5, y1=10, x2=10.5, y2=10, layer=Layer.F_CU, width=0.2)
+        route = Route(net=1, net_name="SPI_SCK", segments=[segment], vias=[])
+        router.routes.append(route)
+
+        pad_violations = [v for v in validate_routes(router) if v.obstacle_type == "pad"]
+
+        assert len(pad_violations) >= 1
+        for v in pad_violations:
+            assert v.distance < 0.0, "fixture must model an overlap, not a near-miss"
+            assert v.is_short is True
+            assert v.component_inherent is False, (
+                "legacy_fine_pitch_carveout must not excuse a physical overlap"
+            )
 
     def test_cross_component_pad_not_marked_component_inherent(self):
         """Test that pad violations between different components are NOT component_inherent."""

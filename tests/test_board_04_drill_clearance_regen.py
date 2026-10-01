@@ -89,8 +89,11 @@ _PAID_DRILL_RULE_FLOORS = {
     "dimension_annular_ring": "min_annular_ring_mm",
 }
 
-# ``kct check`` compares with this slack (validate.rules.dimensions.DRC_TOLERANCE),
-# so a finding may sit a hair under the reviewed floor without being a regression.
+# The same slack board 04's reviewed validator applies to these three floors
+# (``manufacturing_process.validate_process``), so a finding may sit a hair under
+# the reviewed floor without being a regression.  Deliberately 100x tighter than
+# ``kct check``'s own dead band (validate.rules.dimensions.DRC_TOLERANCE = 1e-4):
+# this assertion fails closed, so do not loosen it to match that constant.
 _FLOOR_TOLERANCE_MM = 1e-6
 
 
