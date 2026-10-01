@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -64,6 +65,35 @@ class BaselineStats:
         return asdict(self)
 
 
+def _strip_copper_arcs(sexp) -> int:
+    """Remove top-level ``(arc ...)`` copper tracks from a parsed board tree."""
+    arcs = [c for c in sexp.children if not c.is_atom and c.name == "arc"]
+    for arc in arcs:
+        sexp.remove(arc)
+    return len(arcs)
+
+
+def _load_pcb(path: Path) -> PCB:
+    """``PCB.load`` that tolerates malformed human copper arcs.
+
+    ``PCB`` validates every copper ``(arc ...)`` strictly and raises on a
+    degenerate (collinear) one, which one real board
+    (``job_oculink_expansion``) contains (Issue #5848). Normalization
+    discards all copper anyway, so on that specific failure the arcs are
+    stripped from the tree before the board object is built.
+    """
+    try:
+        return PCB.load(path)
+    except ValueError as exc:
+        if "Copper arc" not in str(exc):
+            raise
+        from kicad_tools.core.sexp_file import load_pcb
+
+        tree = load_pcb(str(path))
+        _strip_copper_arcs(tree)
+        return PCB(tree, path)
+
+
 def load_with_upgrade(path: Path, *, kicad_cli: Path | None = None) -> PCB:
     """Load a ``.kicad_pcb``, upgrading via ``kicad-cli`` if the direct parse fails.
 
@@ -79,7 +109,7 @@ def load_with_upgrade(path: Path, *, kicad_cli: Path | None = None) -> PCB:
             retried load still fails.
     """
     try:
-        return PCB.load(path)
+        return _load_pcb(path)
     except Exception as first_error:
         cli = kicad_cli
         if cli is None:
@@ -114,7 +144,7 @@ def load_with_upgrade(path: Path, *, kicad_cli: Path | None = None) -> PCB:
             ) from first_error
 
         try:
-            return PCB.load(path)
+            return _load_pcb(path)
         except Exception as second_error:
             raise NormalizeError(
                 f"{path}: still failed to parse after 'kicad-cli pcb upgrade' "
@@ -142,11 +172,16 @@ def rip_up(pcb: PCB) -> dict[str, int]:
     removed, via :meth:`PCB.remove_segments` / :meth:`PCB.remove_vias`.
 
     Returns:
-        ``{"segments": n_removed, "vias": n_removed}``.
+        ``{"segments": n, "vias": n, "arcs": n}``.
     """
     removed_segments = pcb.remove_segments(list(pcb.segments))
     removed_vias = pcb.remove_vias(list(pcb.vias))
-    return {"segments": removed_segments, "vias": removed_vias}
+    # Copper arcs are tracks too; ``remove_segments`` does not touch them, so
+    # they used to survive normalization on every board that has any
+    # (Issue #5848: 7 of the 16 dataset-srj18 boards).
+    removed_arcs = _strip_copper_arcs(pcb._sexp)
+    pcb._arcs = []
+    return {"segments": removed_segments, "vias": removed_vias, "arcs": removed_arcs}
 
 
 def normalize_board(
@@ -173,6 +208,12 @@ def normalize_board(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pcb.save(output_path)
+
+    # Carry the netclass-bearing project file next to the normalized board so
+    # kct route / kicad-cli see the source board's netclasses (Issue #5848).
+    source_pro = Path(source_path).with_suffix(".kicad_pro")
+    if source_pro.exists():
+        shutil.copyfile(source_pro, output_path.with_suffix(".kicad_pro"))
 
     if baseline_path is None:
         baseline_path = output_path.with_name(output_path.stem + ".baseline.json")

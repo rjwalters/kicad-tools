@@ -30,7 +30,17 @@ from kicad_tools.schema.pcb import PCB
 VIA_DIAMETER = 0.3
 VIA_DRILL = 0.15
 
-LAYER = {"top": "F.Cu", "bottom": "B.Cu"}
+
+class _Layers(dict):
+    """SRJ layer names -> KiCad copper layers (``inner1`` -> ``In1.Cu``)."""
+
+    def __missing__(self, key):
+        if key.startswith("inner") and key[5:].isdigit():
+            return f"In{key[5:]}.Cu"
+        raise KeyError(key)
+
+
+LAYER = _Layers({"top": "F.Cu", "bottom": "B.Cu"})
 
 
 def fit_offset(pads, obstacles):
