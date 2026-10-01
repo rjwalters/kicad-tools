@@ -106,6 +106,24 @@ class KctCheckAdapter:
     group = 18
     pair_kinds = KCT_CHECK_PAIR_KINDS
 
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same reading as :meth:`verdicts` -- there is no other axis.
+
+        Epic #5509 Phase 4d (#5857), the gated reading.  Unlike the
+        routing-side adapters (groups 1/2/4-10), this consumer has no second
+        rule value to pin: :meth:`verdicts` already resolves
+        ``design_rules.min_clearance_mm`` straight from
+        ``case.rules.project_clearance`` via
+        :func:`tests.conformance.board.manufacturer_rules` (one scalar, the
+        same note the published table's group-18 row already carries -- "it
+        cannot reproduce groups 12/13's order asymmetry" is the same fact
+        read the other way: there is no ``trace_clearance``-vs-``Default``
+        gap here for this method to close). So this is a plain alias, not a
+        re-derivation -- any disagreement the gate finds is a geometry bug,
+        full stop.
+        """
+        return self.verdicts(case)
+
     def available(self) -> bool:
         # The zone rules read *filled* polygons, and only kicad-cli can fill
         # them.  Reporting a row measured without the fill would be a

@@ -11,6 +11,18 @@ in pad-to-pad clearance computation by using:
 - Struct-of-arrays memory layout for contiguous access
 - Single trig computation per footprint
 - No Python interpreter overhead per iteration
+
+Epic #5509 Phase 4d / issue #5857 scope note: this is consumer group 19 of
+the epic's clearance-kernel inventory and is deliberately EXEMPTED from the
+switch to ``router.clearance_kernel`` -- see
+``drc/cpp/src/drc_clearance.cpp``'s module docstring and
+https://github.com/rjwalters/kicad-tools/issues/5509#issuecomment-5930182050
+for the rationale (a real-time placement screen outside ``kct check``'s
+whole-board gate, with no kicad-cli oracle to gate a switch against).
+:func:`_extract_pad_arrays`'s ``max(w, h) / 2`` disc is that exemption's
+load-bearing property: it over-approximates every pad (tight only along its
+own long axis), so this backend can only ever over-reject, never miss a
+genuine clearance problem.
 """
 
 from __future__ import annotations
