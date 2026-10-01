@@ -122,3 +122,125 @@ def test_component_dictionary_entry_points_preserve_jumper_policy(monkeypatch, p
     assert len(router.all_pads) == 2
     assert len(router.nets[1]) == (1 if policy else 2)
     assert {pad.pin for pad in router.all_pads} == {"SH"}
+
+
+def no_connect_mount_board(*, policy=None, second_net="unconnected-(J5-PadMP)_1"):
+    """Mirror srj18_dual_gmsl_serializer_adapter's J5: two "MP" lands (#5873)."""
+    jumper = "" if policy is None else f"(duplicate_pad_numbers_are_jumpers {policy})"
+    return f"""(kicad_pcb (version 20240108) (generator "test")
+      (general (thickness 1.6)) (paper "A4")
+      (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+      (net 0 "") (net 1 "SIGNAL") (net 2 "unconnected-(J5-PadMP)")
+      (net 3 "{second_net}")
+      (footprint "Test:Connector" (layer "F.Cu") (at 10 10)
+        (property "Reference" "J5" (at 0 -2) (layer "F.SilkS")
+          (effects (font (size 1 1) (thickness 0.15))))
+        {jumper}
+        (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIGNAL"))
+        (pad "MP" smd roundrect (at -2.8 -1.755 180) (size 1.2 1.8)
+          (layers "F.Cu") (roundrect_rratio 0.25)
+          (net 2 "unconnected-(J5-PadMP)") (pintype "passive+no_connect"))
+        (pad "MP" smd roundrect (at 2.8 -1.755 180) (size 1.2 1.8)
+          (layers "F.Cu") (roundrect_rratio 0.25)
+          (net 3 "{second_net}") (pintype "passive+no_connect")))
+      (footprint "Test:Terminal" (layer "F.Cu") (at 20 15)
+        (property "Reference" "U1" (at 0 -2) (layer "F.SilkS")
+          (effects (font (size 1 1) (thickness 0.15))))
+        (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net 1 "SIGNAL")))
+      (gr_rect (start 0 0) (end 30 25) (stroke (width 0.05) (type solid))
+        (fill none) (layer "Edge.Cuts")))"""
+
+
+@pytest.mark.parametrize("policy", [None, "no"])
+def test_loader_accepts_same_number_lands_with_distinct_no_connect_nets(tmp_path, policy):
+    path = tmp_path / "no_connect_mp.kicad_pcb"
+    path.write_text(no_connect_mount_board(policy=policy))
+    router, nets = load_pcb_for_routing(str(path), force_python=True)
+    lands = [pad for pad in router.all_pads if pad.ref == "J5" and pad.pin == "MP"]
+    assert len(lands) == 2
+    # Two independent terminals: distinct keys, each keeping its own net.
+    assert len({pad.key for pad in lands}) == 2
+    assert {pad.net_name for pad in lands} == {
+        "unconnected-(J5-PadMP)",
+        "unconnected-(J5-PadMP)_1",
+    }
+    assert len({pad.net for pad in lands}) == 2
+    for pad in lands:
+        assert router.pads[pad.key] is pad
+    # The signal net on the same footprint is unaffected.
+    assert len(router.nets[nets["SIGNAL"]]) == 2
+
+
+def test_loader_still_rejects_jumpered_lands_with_distinct_no_connect_nets(tmp_path):
+    path = tmp_path / "jumpered_no_connect_mp.kicad_pcb"
+    path.write_text(no_connect_mount_board(policy="yes"))
+    with pytest.raises(ValueError, match=r"J5\.MP has conflicting nets"):
+        load_pcb_for_routing(str(path), force_python=True)
+
+
+def test_loader_still_rejects_no_connect_land_colliding_with_signal_net(tmp_path):
+    path = tmp_path / "mixed_mp.kicad_pcb"
+    path.write_text(no_connect_mount_board(second_net="SHIELD"))
+    with pytest.raises(ValueError, match=r"J5\.MP has conflicting nets"):
+        load_pcb_for_routing(str(path), force_python=True)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("SIG_A", "SIG_B"),
+        ("unconnected-(J1-PadMP)", "SIG_B"),
+        ("SIG_A", "unconnected-(J1-PadMP)"),
+        ("", "unconnected-(J1-PadMP)"),
+    ],
+)
+@pytest.mark.parametrize("jumpers", [False, True])
+def test_add_component_rejects_genuine_same_number_net_conflicts(names, jumpers):
+    from kicad_tools.router.core import Autorouter
+
+    router = Autorouter(20, 20, force_python=True, physics_enabled=False)
+    pads = [
+        {"number": "MP", "x": x, "y": 5, "net": net, "net_name": name}
+        for x, net, name in ((3, 1, names[0]), (9, 2, names[1]))
+    ]
+    with pytest.raises(ValueError, match=r"J1\.MP has conflicting nets"):
+        router.add_component("J1", pads, duplicate_pad_numbers_are_jumpers=jumpers)
+
+
+@pytest.mark.parametrize("mode", ["basic", "negotiated", "evolutionary"])
+def test_split_no_connect_lands_survive_worker_reconstruction(monkeypatch, mode):
+    """The worker-side key guard sees distinct terminal ids, not a conflict."""
+    import pickle
+
+    from kicad_tools.router.algorithms.evolutionary import _run_evolutionary_trial
+    from kicad_tools.router.core import Autorouter, _run_monte_carlo_trial
+
+    parent = Autorouter(20, 20, force_python=True, physics_enabled=False)
+    parent.add_component(
+        "J5",
+        [
+            {"number": "MP", "x": 3, "y": 5, "net": 1, "net_name": "unconnected-(J5-PadMP)"},
+            {"number": "MP", "x": 9, "y": 5, "net": 2, "net_name": "unconnected-(J5-PadMP)_1"},
+        ],
+    )
+    config = pickle.loads(pickle.dumps(parent._serialize_for_parallel()))
+    config.update(
+        trial_num=0, chrom_idx=0, seed=0, base_order=[], net_order=[], use_negotiated=False
+    )
+    seen = []
+
+    def observe(router, *_args, **_kwargs):
+        seen.append(router)
+        return []
+
+    monkeypatch.setattr(Autorouter, "route_all", observe)
+    monkeypatch.setattr(Autorouter, "route_all_negotiated", observe)
+    monkeypatch.setattr(Autorouter, "_evaluate_solution", lambda self, routes: 0)
+    if mode == "evolutionary":
+        _run_evolutionary_trial(config)
+    else:
+        config["use_negotiated"] = mode == "negotiated"
+        _run_monte_carlo_trial(config)
+    (worker,) = seen
+    assert {pad.net for pad in worker.all_pads} == {1, 2}
+    assert len(worker.pads) == 2
