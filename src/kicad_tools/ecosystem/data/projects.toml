@@ -259,27 +259,44 @@ repo_url = "https://github.com/tscircuit/tscircuit"
 vcs = "github"
 category = "design-as-code"
 relation = "upstream"
-verdict = "complementary"
+verdict = "evaluated-not-adopted"
 license = "MIT"
 license_compat = "mit-clean"
 language = "TypeScript"
 stars = 2776
 last_push = "2026-09-30"
-last_verified = "2026-09-30"
+last_verified = "2026-10-01"
+# circuit-json-to-kicad@0.0.228 (tscircuit/circuit-json-to-kicad), the converter
+# actually measured by the interop gate. Rendered alongside
+# @tscircuit/core@0.0.2031 = 80ba2c4b07b88113d1e1d9724ffd66ae1d3aaa5e and
+# @tscircuit/footprinter@0.0.429 = d9a981fffab5741178d49b7a070c3b8bd2110398 in
+# the evaluation note's pinned-versions table.
+pinned_commit = "88d363d023a29ac719ef7caf12f3c99efe9adb0a"
 research_docs = ["docs/research/tscircuit-evaluation.md"]
 summary = """
 "React for Electronics" -- circuits described in TypeScript/React and \
 compiled to its own Circuit JSON. Its `circuit-json-to-kicad` converter \
-now emits `.kicad_sch`, `.kicad_pcb` (with traces, vias and pours) and \
+emits `.kicad_sch`, `.kicad_pcb` (with traces, vias and pours) and \
 `.kicad_pro`, and `kicad-to-circuit-json` reads them back, so it is an \
 upstream producer of the files we consume, like atopile and SKiDL. \
-Whether its KiCad output passes our checks has not been measured yet.\
+**Gated and not yet usable as a front end**: five representative designs \
+were run through `kct check --mfr`, LVS and `kicad-cli pcb drc \
+--refill-zones`, before and after re-routing with `kct route`, and all \
+five failed. The blocking defect is that its schematic and PCB \
+converters name the same net differently, so no emitted project can pass \
+LVS at all; vias, netclass and silkscreen defaults also sit below every \
+mainstream fab floor. Our parser reads the files without complaint, and \
+`kct route` produced opens where tscircuit's own autorouter produced \
+shorts. Six upstream defects recorded with reproducers; the relation \
+stays upstream/complementary and all six look fixable.\
 """
 reeval_trigger = """
-Re-evaluate once its emitted KiCad projects have been run through \
-`kct check`, LVS and `kicad-cli` DRC -- a clean pass would make \
-tscircuit a supported front end, and systematic failures are bugs to \
-report upstream.\
+Re-run `benchmarks/interop/tscircuit/run_gate.py` once the \
+schematic-vs-PCB net-name divergence is fixed upstream (defect 2 in the \
+note) -- it is the one that makes every other number hard to read, and a \
+clean LVS pass is what would make tscircuit a supported front end. \
+Upstream filing is tracked in #5878; the kct-side gaps the gate exposed \
+are #5875 and #5876.\
 """
 
 [projects.component-importer]

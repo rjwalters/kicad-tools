@@ -6,12 +6,13 @@ workflow under `.github/workflows/` invokes anything here. These are scripts a
 human runs deliberately when a design question needs numbers, and the committed
 results are the record of the run that answered it.
 
-There are currently two suites:
+There are currently three suites:
 
 | Suite | Question it answers | Issue |
 |---|---|---|
 | [`hierarchical/`](hierarchical/) | Does bottom-up hierarchical placement get most of the way there without a cascaded GA? | #2721 |
 | [`external/`](external/) | Fetch + normalize the third-party KiCad boards DeepPCB publishes benchmark numbers for, as inputs to a later routing comparison. | #4932, #4933 |
+| [`interop/tscircuit/`](interop/tscircuit/) | Do tscircuit-emitted KiCad projects meet our manufacturability bar (`kct check --mfr`, LVS, `kicad-cli pcb drc`), as emitted and after `kct route`? | #5847 |
 
 ## `hierarchical/` — bottom-up baseline vs. spacing-proxy GA
 
@@ -116,3 +117,14 @@ then rips up their existing copper (preserving placement/nets/netclasses/
 zones/outline) to produce route-ready input for a later routing comparison
 against DeepPCB's published numbers (Epic #4932). Full details, the pinned
 manifest, and the fetch/normalize commands: [`external/README.md`](external/README.md).
+
+## `interop/tscircuit/` — do tscircuit's KiCad exports pass our bar?
+
+Also run-time-generated rather than committed: it installs pinned npm packages
+(`@tscircuit/core`, `circuit-json-to-kicad`), renders five designs of our own
+authorship into KiCad projects, and gates each one twice — on tscircuit's own
+autorouted copper, and again with the copper ripped up and re-routed by
+`kct route`. Measured verdict, pinned SHAs and the six upstream defects it
+found: [`docs/research/tscircuit-evaluation.md`](../docs/research/tscircuit-evaluation.md)
+§ "Interop gate". Harness details and the macOS `kicad-cli` gotcha it works
+around: [`interop/tscircuit/README.md`](interop/tscircuit/README.md).
