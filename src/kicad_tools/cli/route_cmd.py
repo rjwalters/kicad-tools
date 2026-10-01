@@ -80,6 +80,7 @@ if TYPE_CHECKING:
     from kicad_tools.router import Autorouter, LayerStack
     from kicad_tools.router.clearance_resolver import DeclaredClearanceRules
     from kicad_tools.router.current_paths import CurrentPathSpec
+    from kicad_tools.router.io import ClearanceViolation
     from kicad_tools.router.layer_intent import LayerIntentViolation
     from kicad_tools.router.net_names import NetClassMapResolution
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
@@ -5956,6 +5957,110 @@ def _audit_pairwise_for_escalation(final_result, args) -> "list[PairwiseViolatio
     )
 
 
+def _short_escalation_exit(rc: int, shorts: "Sequence[ClearanceViolation]") -> int:
+    """Map an escalation wrapper's exit code through the #5862 short gate.
+
+    Mirrors :func:`_pairwise_escalation_exit` exactly: ``0`` (met the
+    completion threshold) becomes ``3`` and ``2`` (below threshold)
+    becomes ``4`` -- the established "routing succeeded but the copper is
+    dirty" contract.  Any other code already carries a more specific
+    diagnosis and passes through untouched.
+    """
+    if not shorts:
+        return rc
+    if rc == 0:
+        return 3
+    if rc == 2:
+        return 4
+    return rc
+
+
+def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceViolation]":
+    """Find cross-net copper overlap in the committed copper (Issue #5862).
+
+    A SHORT is a ``ClearanceViolation`` whose edge-to-edge ``distance`` is
+    at or below zero -- the two nets' copper occupies the same space, which
+    KiCad DRC reports as ``shorting_items``.  It is categorically different
+    from the positive-but-sub-clearance near-misses that share the
+    violation type, and it must never leave ``kct route`` claiming a clean
+    board.
+
+    Like the #4588 pairwise gate next to it, this exists as a separate
+    helper because the escalation wrappers are *terminal* paths that
+    ``main()``'s inline pre-save validation never reaches -- and since
+    ``--auto-layers`` defaults to **True**, ``route_with_layer_escalation``
+    is the DEFAULT ``kct route`` path and the one the issue-#5862 Arduino
+    Nano run actually exercised.  Gating only the inline block would have
+    left the fix dead exactly where the defect was observed.
+
+    Safe to call after ``_release_routing_engine_state``: that helper frees
+    the grid's dense arrays but preserves the grid object, ``router.routes``
+    and ``router.pads``, which is all :func:`validate_routes` reads here.
+    """
+    from kicad_tools.router.io import validate_routes
+
+    router = getattr(final_result, "router", None)
+    if router is None or not getattr(router, "routes", None):
+        return []
+    try:
+        violations = validate_routes(router)
+    except Exception:  # pragma: no cover - never let the audit break a save
+        return []
+    shorts = [v for v in violations if v.is_short and not v.component_inherent]
+    if shorts and not quiet:
+        _print_short_findings(shorts)
+    return shorts
+
+
+def _print_short_findings(shorts: "Sequence[ClearanceViolation]") -> None:
+    """Report cross-net copper overlap explicitly (Issue #5862)."""
+    print("\n--- Post-route Short Check ---")
+    print(
+        f"  ERROR: {len(shorts)} short(s) -- copper of different nets physically "
+        f"overlaps in the routed output (KiCad DRC reports this class as "
+        f"`shorting_items`)"
+    )
+    for v in shorts[:20]:
+        loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
+        layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
+        print(
+            f"    SHORT [{v.obstacle_type}] "
+            f"{v.net_name or f'Net {v.net}'} vs "
+            f"{v.obstacle_net_name or f'Net {v.obstacle_net}'}"
+            f"{loc}{layer_str}: overlap {-v.distance:.3f}mm"
+        )
+    if len(shorts) > 20:
+        print(f"    ... and {len(shorts) - 20} more short(s)")
+
+
+def _print_short_failure_banner(shorts: "Sequence[ClearanceViolation]", output_path) -> None:
+    """Replace the SUCCESS banner when the written copper shorts nets (#5862).
+
+    Mirrors :func:`_print_pairwise_failure_banner`: a run that commits
+    copper of two different nets into the same space has not succeeded,
+    whatever its completion percentage, so the success banner must be
+    unreachable rather than merely accompanied by a warning.
+    """
+    print("ROUTING FAILED: cross-net copper shorts in the routed output")
+    print("=" * 60)
+    print()
+    print(f"Shorts ({len(shorts)} item(s)):")
+    for v in shorts[:10]:
+        loc = f" at ({v.location[0]:.3f}, {v.location[1]:.3f})" if v.location else ""
+        layer_str = f" on {v.layer.kicad_name}" if v.layer is not None else ""
+        print(
+            f"  [{v.obstacle_type}] {v.net_name or f'Net {v.net}'} vs "
+            f"{v.obstacle_net_name or f'Net {v.obstacle_net}'}"
+            f"{loc}{layer_str}: overlap {-v.distance:.3f}mm"
+        )
+    if len(shorts) > 10:
+        print(f"  ... and {len(shorts) - 10} more")
+    print()
+    print("Copper of different nets physically overlaps. KiCad DRC reports this")
+    print("class as `shorting_items`; this board is NOT manufacturable as written.")
+    print(f"Board written to {output_path} for inspection.")
+
+
 def _print_pairwise_failure_banner(
     violations: "Sequence[PairwiseViolation]", args, output_path
 ) -> None:
@@ -8447,6 +8552,9 @@ def route_with_layer_escalation(
     # Issue #4588: board-level HV pairwise clearance gate.  A no-op without
     # --voltage-map; otherwise it audits the copper this engine committed.
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #5862: cross-net copper overlap gate.  Terminal escalation
+    # path -- main()'s inline pre-save validation never runs here.
+    _shorts = _audit_shorts_for_escalation(final_result, quiet=quiet)
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
@@ -8468,6 +8576,10 @@ def route_with_layer_escalation(
             # Issue #4588: this run would have printed a SUCCESS banner while
             # its own copper violates the --voltage-map creepage requirement.
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif final_result.success and _shorts:
+            # Issue #5862: SUCCESS must be unreachable while the written
+            # board shorts two nets together.
+            _print_short_failure_banner(_shorts, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -8528,10 +8640,16 @@ def route_with_layer_escalation(
         # detected") already covers this case semantically.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
+        return _layer_intent_escalation_exit(
+            _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+            _layer_intent,
+        )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
+        return _layer_intent_escalation_exit(
+            _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+            _layer_intent,
+        )
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -9335,6 +9453,9 @@ def route_with_rule_relaxation(
     # Issue #4588: board-level HV pairwise clearance gate (see the
     # layer-escalation wrapper above for why each terminal path needs it).
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #5862: cross-net copper overlap gate.  Terminal escalation
+    # path -- main()'s inline pre-save validation never runs here.
+    _shorts = _audit_shorts_for_escalation(final_result, quiet=quiet)
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
@@ -9354,6 +9475,10 @@ def route_with_rule_relaxation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif final_result.success and _shorts:
+            # Issue #5862: SUCCESS must be unreachable while the written
+            # board shorts two nets together.
+            _print_short_failure_banner(_shorts, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -9400,10 +9525,16 @@ def route_with_rule_relaxation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
+        return _layer_intent_escalation_exit(
+            _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+            _layer_intent,
+        )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
+        return _layer_intent_escalation_exit(
+            _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+            _layer_intent,
+        )
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -11727,6 +11858,9 @@ def route_with_combined_escalation(
     # Issue #4588: board-level HV pairwise clearance gate (see the
     # layer-escalation wrapper above for why each terminal path needs it).
     _pairwise = _audit_pairwise_for_escalation(final_result, args)
+    # Issue #5862: cross-net copper overlap gate.  Terminal escalation
+    # path -- main()'s inline pre-save validation never runs here.
+    _shorts = _audit_shorts_for_escalation(final_result, quiet=quiet)
     # Issue #4979: board-level HARD layer-intent gate (same reason this
     # terminal path needs its own copy of the #4588 gate above).
     _layer_intent = _audit_layer_intent_for_escalation(final_result, args)
@@ -11746,6 +11880,10 @@ def route_with_combined_escalation(
                 _print_pairwise_addendum(_pairwise)
         elif final_result.success and _pairwise:
             _print_pairwise_failure_banner(_pairwise, args, output_path)
+        elif final_result.success and _shorts:
+            # Issue #5862: SUCCESS must be unreachable while the written
+            # board shorts two nets together.
+            _print_short_failure_banner(_shorts, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -11794,10 +11932,16 @@ def route_with_combined_escalation(
         # detect a silent rollback on an otherwise-clean routing run.
         if fix_result == 3:
             return 3
-        return _layer_intent_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _layer_intent)
+        return _layer_intent_escalation_exit(
+            _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+            _layer_intent,
+        )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
-        return _layer_intent_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _layer_intent)
+        return _layer_intent_escalation_exit(
+            _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+            _layer_intent,
+        )
     # Nothing was routed — treat as fatal failure
     return 1
 
@@ -18142,7 +18286,16 @@ def _run_main_impl(args, parser, argv) -> int:
     # Pre-save clearance validation
     # Issue #1666: Segment-to-segment violations now cause a non-zero exit
     # code so that CI pipelines and DRC workflows can detect the failure.
+    # Issue #5862: a SHORT -- copper of two different nets physically
+    # overlapping, what KiCad DRC reports as ``shorting_items`` -- gates
+    # the exit code regardless of which obstacle class produced it.  The
+    # gate above counts only ``obstacle_type == "segment"``, so a trace
+    # laid straight through a foreign PAD (every one of the 14 shorts on
+    # the normalized Arduino Nano) was printed at most as an informational
+    # line and left the run reporting a clean clearance check.
     seg_seg_violation_count = 0
+    short_violation_count = 0
+    short_violations: list[ClearanceViolation] = []
     if stats["nets_routed"] > 0 and not args.dry_run:
         from kicad_tools.router.io import format_clearance_violations, validate_routes
 
@@ -18153,7 +18306,13 @@ def _run_main_impl(args, parser, argv) -> int:
                 for v in clearance_violations
                 if v.obstacle_type == "segment" and not v.component_inherent
             )
+            short_violations = [
+                v for v in clearance_violations if v.is_short and not v.component_inherent
+            ]
+            short_violation_count = len(short_violations)
             if not quiet:
+                if short_violation_count > 0:
+                    _print_short_findings(short_violations)
                 print("\n--- Pre-save Clearance Validation ---")
                 if seg_seg_violation_count > 0:
                     print(
@@ -18448,6 +18607,10 @@ def _run_main_impl(args, parser, argv) -> int:
             # pass, so the pairwise failure banner replaces it outright --
             # SUCCESS must be unreachable while non-exempt violations exist.
             _print_pairwise_failure_banner(pairwise_violations, args, output_path)
+        elif short_violation_count > 0:
+            # Issue #5862: this run would otherwise have printed a SUCCESS
+            # banner while its own copper shorts two nets together.
+            _print_short_failure_banner(short_violations, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -18623,6 +18786,12 @@ def _run_main_impl(args, parser, argv) -> int:
     #     pairwise-clearance audit (--voltage-map) finds violations the
     #     engine's search let through — semantically a clearance failure, so
     #     it shares the "routing succeeded but the copper is dirty" contract.
+    #     Issue #5862: also returned when the pre-save validation finds a
+    #     SHORT — copper of two different nets physically overlapping, in
+    #     any obstacle class (pad, via, segment, fixed/zone copper), the
+    #     class KiCad DRC reports as ``shorting_items``.  Previously only
+    #     the segment-vs-segment class gated, so a trace routed straight
+    #     through a foreign pad shipped under exit 0/2.
     #     KNOWN GAP (issue #4607): build_cmd.py / pipeline_cmd.py treat exit 3
     #     as a non-fatal warning (and label it a DRC failure).  Neither
     #     forwards --voltage-map today, so the HV meaning cannot reach them;
@@ -18725,17 +18894,24 @@ def _run_main_impl(args, parser, argv) -> int:
         meets_threshold
         and drc_passed
         and seg_seg_violation_count == 0
+        and short_violation_count == 0
         and pairwise_violation_count == 0
     ):
         return 0
     elif meets_threshold and (
-        not drc_passed or seg_seg_violation_count > 0 or pairwise_violation_count > 0
+        not drc_passed
+        or seg_seg_violation_count > 0
+        or short_violation_count > 0
+        or pairwise_violation_count > 0
     ):
         # Meets completion threshold but has DRC or clearance violations
-        # (including issue #4588 board-level HV pairwise creepage violations)
+        # (including issue #4588 board-level HV pairwise creepage violations
+        # and issue #5862 cross-net copper overlap -- "shorting_items")
         return 3
-    elif not meets_threshold and (seg_seg_violation_count > 0 or pairwise_violation_count > 0):
-        # Below threshold AND has seg-seg or HV pairwise clearance violations
+    elif not meets_threshold and (
+        seg_seg_violation_count > 0 or short_violation_count > 0 or pairwise_violation_count > 0
+    ):
+        # Below threshold AND has seg-seg, short or HV pairwise violations
         return 4
     else:
         # Partial routing: some nets routed but below threshold
