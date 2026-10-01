@@ -23,27 +23,42 @@ under this harness's via-first order.
 **No diff-pair partner.**  ``diff_pair_partners`` /
 ``intra_pair_clearance_mm`` stay ``None``, which is the non-diff-pair path.
 The paired sibling ``_post_insertion_clearance_detail_pair_group``
-(``:2404``) needs a *pair* of mirrored candidate segments with declared P/N
+(``:2349``) needs a *pair* of mirrored candidate segments with declared P/N
 net ids -- a diff-pair candidate the generator does not place -- so it is
 recorded as a ``not measured`` sub-note on this row.  Note that group 8's
 ``diffpair`` adapter does **not** close it either: that row drives the coupled
 *constructor's* gates over ordinary corpus pairs, and the missing ingredient
 here is a declared P/N candidate in the **generator**, not a live
 ``DiffPairRouter``.
+
+**Gated reading (Epic #5509 Phase 4b, #5855).**  Since the self-check moved
+onto the shared clearance kernel (``clearance_shapes.py``), this group is in
+``report.MIGRATED_GROUPS`` and :meth:`MatchGroupAdapter.verdicts_at_project_rules`
+drives the same unmodified check with ``intra_group_clearance_mm`` /
+``via_clearance_mm`` / ``pad_clearance_mm`` moved onto
+``case.rules.project_clearance`` (:func:`~tests.conformance.adapters._support.project_rules`),
+so the merge gate is a **geometry** statement and not a restatement of the
+#5398 / #5654 rule-resolution gap.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     net_ids,
     pair_contexts,
+    project_rules,
     router_pad,
     router_rules,
     router_segment,
     single_object_route,
 )
 from tests.conformance.generator import CopperCase, PadSpec, PairKind, SegmentSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = ["MatchGroupAdapter"]
 
@@ -63,12 +78,25 @@ class MatchGroupAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same self-check, at the clearance kicad-cli itself applies.
+
+        The **gated** reading (Epic #5509 Phase 4b, #5855).  Only the two
+        copper clearances (``trace_clearance`` / ``via_clearance``) move onto
+        ``case.rules.project_clearance`` via :func:`project_rules` -- the
+        self-check's rule-resolution logic (which threshold feeds which pass)
+        is unchanged, because that is Phase 2's axis, not this migration's.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
         from kicad_tools.router.match_group_tuning import (
             _post_insertion_clearance_detail_group,
         )
 
         nets = net_ids(case)
-        rules = router_rules(case)
         found: set[Verdict] = set()
 
         for context in pair_contexts(case):

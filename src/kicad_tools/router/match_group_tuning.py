@@ -1686,8 +1686,11 @@ def _post_insertion_clearance_detail_group(
        check did not consider pads -- only segments and (since
        Issue #3317 follow-up) vias.
 
-    Reuses :func:`segment_clearance` and the ``clearance + 1e-9 <
-    threshold`` epsilon byte-for-byte from
+    Measures every pass through the shared clearance kernel's
+    :func:`~kicad_tools.router.clearance_kernel.copper_gap`, reached via
+    :mod:`kicad_tools.router.clearance_shapes` (Epic #5509 Phase 4b),
+    rather than private seg/via/pad arithmetic, reusing the ``clearance
+    + 1e-9 < threshold`` epsilon byte-for-byte from
     :func:`~kicad_tools.router.diffpair_length_tuning._post_insertion_clearance_ok`
     (do NOT inline alternate geometry).
 
@@ -1740,10 +1743,7 @@ def _post_insertion_clearance_detail_group(
         description of the first violation found (the caller must roll
         back).
     """
-    from kicad_tools.core.geometry import (
-        point_to_segment_distance,
-        segment_clearance,
-    )
+    from .clearance_shapes import copper_gap, pad_shape, segment_shape, via_shape
 
     # Pass 1: intra-group.  Every other group member.
     for other_id in group_net_ids:
@@ -1763,18 +1763,7 @@ def _post_insertion_clearance_detail_group(
                     intra_group_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
                 ):
                     continue
-                clearance = segment_clearance(
-                    new_seg.x1,
-                    new_seg.y1,
-                    new_seg.x2,
-                    new_seg.y2,
-                    new_seg.width,
-                    pseg.x1,
-                    pseg.y1,
-                    pseg.x2,
-                    pseg.y2,
-                    pseg.width,
-                )
+                clearance = copper_gap(segment_shape(new_seg), segment_shape(pseg))
                 if clearance + 1e-9 < intra_group_clearance_mm:
                     return (
                         f"intra-group clearance vs group member "
@@ -1799,18 +1788,7 @@ def _post_insertion_clearance_detail_group(
                     intra_group_clearance_mm + new_seg.width / 2 + oseg.width / 2 + 1e-9,
                 ):
                     continue
-                clearance = segment_clearance(
-                    new_seg.x1,
-                    new_seg.y1,
-                    new_seg.x2,
-                    new_seg.y2,
-                    new_seg.width,
-                    oseg.x1,
-                    oseg.y1,
-                    oseg.x2,
-                    oseg.y2,
-                    oseg.width,
-                )
+                clearance = copper_gap(segment_shape(new_seg), segment_shape(oseg))
                 if clearance + 1e-9 < intra_group_clearance_mm:
                     return (
                         f"inter-net clearance vs neighbor net "
@@ -1833,19 +1811,11 @@ def _post_insertion_clearance_detail_group(
                 # explicit microvias are limited to their declared span, which
                 # includes intermediate layers as well as both endpoints.
                 first_layer, last_layer = sorted(layer.value for layer in via.layers)
-                via_radius = via.diameter / 2.0
+                via_shape_ = via_shape(via)
                 for new_seg in new_segments:
                     if via.is_micro and not first_layer <= new_seg.layer.value <= last_layer:
                         continue
-                    center_dist = point_to_segment_distance(
-                        via.x,
-                        via.y,
-                        new_seg.x1,
-                        new_seg.y1,
-                        new_seg.x2,
-                        new_seg.y2,
-                    )
-                    edge_clearance = center_dist - via_radius - new_seg.width / 2.0
+                    edge_clearance = copper_gap(segment_shape(new_seg), via_shape_)
                     if edge_clearance + 1e-9 < via_clearance_mm:
                         return (
                             f"segment-vs-via clearance vs net "
@@ -1875,18 +1845,7 @@ def _post_insertion_clearance_detail_group(
                             intra_pair_clearance_mm + new_seg.width / 2 + pseg.width / 2 + 1e-9,
                         ):
                             continue
-                        clearance = segment_clearance(
-                            new_seg.x1,
-                            new_seg.y1,
-                            new_seg.x2,
-                            new_seg.y2,
-                            new_seg.width,
-                            pseg.x1,
-                            pseg.y1,
-                            pseg.x2,
-                            pseg.y2,
-                            pseg.width,
-                        )
+                        clearance = copper_gap(segment_shape(new_seg), segment_shape(pseg))
                         if clearance + 1e-9 < intra_pair_clearance_mm:
                             return (
                                 f"diff-pair intra-pair clearance vs partner "
@@ -1897,36 +1856,22 @@ def _post_insertion_clearance_detail_group(
 
     # Pass 5 (Issue #3317 follow-up): segment-vs-pad clearance.  Reject
     # inserts whose new segments land within ``pad_clearance_mm`` of any
-    # foreign-net pad.  Bounding-box approximation: treat each pad as
-    # an axis-aligned rectangle (x +/- width/2, y +/- height/2) and use
-    # the smallest distance from the segment to any side of the box.
-    # For circular SMD pads (width == height) this collapses to a
-    # center-to-segment distance minus the radius.  The caller is
-    # responsible for supplying only NON-candidate-net pads in
-    # ``foreign_pads``.
+    # foreign-net pad.  Epic #5509 Phase 4b: measured with the shared
+    # clearance kernel's exact pad geometry (roundrect/rotation/custom
+    # shape honored) rather than the legacy bounding-circle approximation.
+    # The caller is responsible for supplying only NON-candidate-net pads
+    # in ``foreign_pads``.
     if foreign_pads and pad_clearance_mm is not None:
         for pad in foreign_pads:
             # PTH pads block both outer layers; treat them as present
             # on every new segment's layer.  SMD pads are layer-
             # specific.
             pad_through_hole = getattr(pad, "through_hole", False)
+            pad_shape_ = pad_shape(pad)
             for new_seg in new_segments:
                 if not pad_through_hole and pad.layer != new_seg.layer:
                     continue
-                # Conservative bounding-circle: radius = half the
-                # longer dimension.  Matches the legacy escape
-                # router's pad-keepout policy (segment-to-pad clearance
-                # uses the inscribed-circle approximation).
-                pad_radius = max(pad.width, pad.height) / 2.0
-                center_dist = point_to_segment_distance(
-                    pad.x,
-                    pad.y,
-                    new_seg.x1,
-                    new_seg.y1,
-                    new_seg.x2,
-                    new_seg.y2,
-                )
-                edge_clearance = center_dist - pad_radius - new_seg.width / 2.0
+                edge_clearance = copper_gap(segment_shape(new_seg), pad_shape_)
                 if edge_clearance + 1e-9 < pad_clearance_mm:
                     return (
                         f"segment-vs-pad clearance vs foreign pad at "
@@ -2440,9 +2385,12 @@ def _post_insertion_clearance_detail_pair_group(
        supplied floors; retained partner segments use the intra-pair floor.
        Candidate routes must include unchanged copper alongside the inserts.
 
-    Reuses :func:`segment_clearance` and the ``clearance + 1e-9 <
-    threshold`` epsilon byte-for-byte from the scalar Phase 2E helper.
-    On rejection BOTH halves must roll back atomically.
+    Measures the within-pair pass through the shared clearance kernel
+    (:mod:`kicad_tools.router.clearance_shapes`, Epic #5509 Phase 4b),
+    reusing the ``clearance + 1e-9 < threshold`` epsilon byte-for-byte
+    from the scalar Phase 2E helper (passes 2-4 delegate to
+    :func:`_post_insertion_clearance_detail_group`, which is migrated
+    the same way).  On rejection BOTH halves must roll back atomically.
 
     Args:
         new_p_segments: P-side new serpentine segments.
@@ -2462,7 +2410,7 @@ def _post_insertion_clearance_detail_pair_group(
         description of the first violation found (the caller must roll
         back BOTH halves).
     """
-    from kicad_tools.core.geometry import segment_clearance
+    from .clearance_shapes import copper_gap, segment_shape
 
     # Pass 1: within-pair coupling.  P new vs N new.
     for new_p in new_p_segments:
@@ -2474,18 +2422,7 @@ def _post_insertion_clearance_detail_pair_group(
                 new_p, new_n, intra_pair_clearance_mm + new_p.width / 2 + new_n.width / 2 + 1e-9
             ):
                 continue
-            clearance = segment_clearance(
-                new_p.x1,
-                new_p.y1,
-                new_p.x2,
-                new_p.y2,
-                new_p.width,
-                new_n.x1,
-                new_n.y1,
-                new_n.x2,
-                new_n.y2,
-                new_n.width,
-            )
+            clearance = copper_gap(segment_shape(new_p), segment_shape(new_n))
             if clearance + 1e-9 < intra_pair_clearance_mm:
                 return (
                     f"within-pair coupling clearance (P vs N mirrored "
