@@ -38,6 +38,7 @@ import logging
 import math
 import re
 import warnings
+from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,7 +55,7 @@ if TYPE_CHECKING:
     from .stub_terminals import StubTerminal
 
 from .core import Autorouter
-from .fixed_copper import FixedPadCopper, custom_pad_copper
+from .fixed_copper import FixedPadCopper, custom_pad_copper, degraded_pad_copper
 from .geometry import (
     point_to_segment_distance as _geom_point_to_seg_dist,
 )
@@ -3743,11 +3744,33 @@ def _routing_pad_shape(shape: str, *, ref: str, pin: str, has_padstack: bool = F
     return shape
 
 
+def _is_rectangular_trapezoid(pad_block: str) -> bool:
+    """Is this ``trapezoid`` pad's copper exactly its nominal rectangle?
+
+    KiCad's trapezoid is the nominal rectangle with each corner shifted by
+    half the ``rect_delta`` of the other axis (``pad.cpp``,
+    ``PAD_SHAPE::TRAPEZOID``), so a zero -- or absent -- ``rect_delta`` leaves
+    a plain rectangle. Real boards carry plenty of these (every trapezoid pad
+    on the pinned dataset-srj18 OCULINK / USB-C boards, issue #5863), and
+    reducing them to ``rect`` is exact, not an approximation.
+    """
+    match = re.search(r"\(rect_delta\s+([^\s()]+)\s+([^\s()]+)\s*\)", pad_block)
+    if match is None:
+        return True
+    try:
+        return float(match.group(1)) == 0.0 and float(match.group(2)) == 0.0
+    except ValueError:
+        return False
+
+
 def _pad_shape_from_block(pad_block: str, ref: str, pin: str) -> str:
     """Read the physical shape token, including empty or unquoted pad numbers."""
     match = re.match(r'\(pad\s+(?:"[^\"]*"|[^\s()]+)\s+\w+\s+([^\s()]+)', pad_block)
+    shape = match.group(1) if match else ""
+    if shape == "trapezoid" and _is_rectangular_trapezoid(pad_block):
+        shape = "rect"
     return _routing_pad_shape(
-        match.group(1) if match else "",
+        shape,
         ref=ref,
         pin=pin,
         has_padstack=re.search(r"\(padstack(?:\s|\))", pad_block) is not None,
@@ -4198,6 +4221,10 @@ def load_pcb_for_routing(
     # Actual copper of placement-excluded pads the router cannot carry as a
     # Pad (issue #5357). Converted to physical obstacles once the grid exists.
     placement_fixed_pads: list[FixedPadCopper] = []
+    # Pads on routable nets whose geometry the router cannot represent, and
+    # the nets that therefore lose routing coverage (issue #5863).
+    unsupported_geometry_pads: list[tuple[str, str, str]] = []
+    unsupported_geometry_nets: set[str] = set()
 
     # Split by footprint for easier parsing
     from kicad_tools.schema.pcb import PCB as IdentityPCB
@@ -4344,15 +4371,34 @@ def load_pcb_for_routing(
             pad_rot = float(pad_rot_match.group(1)) if pad_rot_match else 0.0
 
             if pad_shape_error is not None:
-                # Issue #5357: only a pad whose EFFECTIVE net is placement-
-                # invalid may bypass the routable-geometry guard, and only as
-                # physical copper: it becomes no Pad, no target and no pour
-                # intent. Unsupported primitives still refuse here rather than
-                # degrade to the nominal box, which would drop real copper.
-                if net_name not in placement_invalid:
-                    raise pad_shape_error
-                placement_fixed_pads.append(
-                    custom_pad_copper(
+                # Issue #5357: a pad whose EFFECTIVE net is placement-invalid
+                # bypasses the routable-geometry guard as physical copper
+                # only: it becomes no Pad, no target and no pour intent, and
+                # unsupported primitives still refuse rather than degrade to
+                # the nominal box, which would drop real copper.
+                if net_name in placement_invalid:
+                    placement_fixed_pads.append(
+                        custom_pad_copper(
+                            pad_block,
+                            reference=ref,
+                            pad_number=pad_num,
+                            x=abs_x,
+                            y=abs_y,
+                            rotation=pad_rot,
+                            source_net=authored_net_name,
+                            source_net_id=authored_net_num,
+                        )
+                    )
+                    continue
+                # Issue #5863: on an otherwise ROUTABLE net the same pad used
+                # to refuse the whole board -- six of the sixteen pinned
+                # dataset-srj18 boards never reached the router over a single
+                # pad. Degrade the pad instead: keep (at least) its copper as
+                # an obstacle and exclude its net from routing, so the loss is
+                # one net wide and announced, never silent and never a target
+                # the router could claim it connected.
+                try:
+                    degraded = degraded_pad_copper(
                         pad_block,
                         reference=ref,
                         pad_number=pad_num,
@@ -4362,7 +4408,23 @@ def load_pcb_for_routing(
                         source_net=authored_net_name,
                         source_net_id=authored_net_num,
                     )
-                )
+                except ValueError as exc:
+                    # Copper we cannot even BOUND conservatively (a per-layer
+                    # padstack) still refuses: over-blocking is a degradation,
+                    # under-estimating real metal is a DRC violation. Keep the
+                    # geometry diagnosis as the surfaced error and carry the
+                    # reason the degrade failed as its cause.
+                    raise pad_shape_error from exc
+                if degraded is None:
+                    # No copper layer at all (a paste-/mask-only pad, e.g. the
+                    # QFN thermal-paste patterns on H3/H4/MP4): not a target,
+                    # and not an obstacle either -- there is no metal here.
+                    unsupported_geometry_pads.append((f"{ref}.{pad_num}", net_name, "no copper"))
+                    continue
+                placement_fixed_pads.append(degraded)
+                unsupported_geometry_pads.append((f"{ref}.{pad_num}", net_name, "fixed copper"))
+                if net_name:
+                    unsupported_geometry_nets.add(net_name)
                 continue
 
             # Rotate pad dimensions to PCB space. The pad's angle is stored
@@ -4403,6 +4465,36 @@ def load_pcb_for_routing(
                     "duplicate_pad_numbers_are_jumpers": duplicate_pad_numbers_are_jumpers,
                 }
             )
+
+    # Issue #5863: a net that owns a pad the router cannot represent is not
+    # routable -- its remaining pads stay on the grid as neutral obstacles
+    # (net 0, exactly as skip_nets and placement-invalid nets do) so the
+    # router can never report the net connected while that pad hangs off it.
+    if unsupported_geometry_nets:
+        for comp in components:
+            for pad in comp["pads"]:
+                if pad["net_name"] in unsupported_geometry_nets:
+                    pad["net"] = 0
+    # One line per distinct pad identity: a footprint's unnumbered mechanical
+    # pads repeat the same (ref, net, disposition) several times over, and 24
+    # identical warnings would bury the single interesting one.
+    for (pad_id, pad_net, disposition), count in Counter(unsupported_geometry_pads).items():
+        logger.warning(
+            "Pad %s (net %r)%s has routing geometry this router cannot represent; "
+            "kept as %s instead of refusing the board%s",
+            pad_id,
+            pad_net or "<none>",
+            f" x{count}" if count > 1 else "",
+            disposition,
+            " (net excluded from routing)" if pad_net in unsupported_geometry_nets else "",
+        )
+    if unsupported_geometry_pads:
+        excluded = ", ".join(sorted(unsupported_geometry_nets))
+        print(
+            f"  Unsupported pad geometry: {len(unsupported_geometry_pads)} pad(s) degraded, "
+            f"{len(unsupported_geometry_nets)} net(s) excluded from routing"
+            + (f": {excluded}" if excluded else "")
+        )
 
     # Create router with provided rules, PCB rules, or defaults
     if rules is None:
@@ -4566,6 +4658,10 @@ def load_pcb_for_routing(
     )
 
     router.placement_disposition = placement_disposition
+    # Issue #5863: what this board lost to pad geometry the router cannot
+    # represent, for reports and callers that need to say so out loud.
+    router.unsupported_geometry_nets = frozenset(unsupported_geometry_nets)
+    router.unsupported_geometry_pads = tuple(unsupported_geometry_pads)
 
     # Issue #4506: retain the source path so the voltage-map activation helper
     # can build attach regions from the canonical board model.  Do not parse it

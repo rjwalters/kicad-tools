@@ -6,6 +6,7 @@ would leave the direct path open; an enclosing-box substitution would seal
 the slot. Only the true geometry routes the way these tests assert.
 """
 
+import logging
 import math
 from pathlib import Path
 
@@ -347,15 +348,108 @@ def test_nonzero_or_nonfinite_primitive_stroke_is_refused(tmp_path, width):
     assert path.read_bytes() == original
 
 
-def test_routable_custom_pad_and_missing_disposition_stay_strict(tmp_path):
+def test_routable_custom_pad_degrades_instead_of_refusing_the_board(tmp_path, caplog):
+    """Issue #5863: one custom pad costs its own net, not the whole board.
+
+    Six of the sixteen pinned real boards never reached the router because a
+    single custom pad on a routable net raised. The pad now keeps its ACTUAL
+    copper as an obstacle (the slot stays open, the walls still block) and its
+    net -- and only its net -- loses routing coverage, out loud.
+    """
+    path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")'))
+    original = path.read_bytes()
+    with caplog.at_level(logging.WARNING, logger="kicad_tools.router.io"):
+        router, nets = load_board(path)
+    assert ("U6", "9") not in router.pads
+    assert nets["SIG"] not in router.nets
+    assert router.unsupported_geometry_nets == frozenset({"SIG"})
+    assert router.unsupported_geometry_pads == (("U6.9", "SIG", "fixed copper"),)
+    assert "U6.9" in caplog.text and "SIG" in caplog.text
+    fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert len(fills) == 1
+    assert fills[0].source_net == "SIG"
+    assert fills[0].source_net_id == nets["SIG"]
+    assert fills[0].geometry.symmetric_difference(oracle_copper()).area < 1e-9
+    assert not router.grid.fixed_fills.segment_clear((107, 103), (109, 103), 0, 0.1, 0.2)
+    assert router.grid.fixed_fills.segment_clear((107, 104.8), (109, 104.8), 0, 0.1, 0.2)
+    assert path.read_bytes() == original
+
+
+def test_missing_disposition_degrades_too(tmp_path):
+    """No placement disposition is not a reason to refuse the board (#5863)."""
     from kicad_tools.router.io import load_pcb_for_routing
 
-    routable = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")'))
-    with pytest.raises(ValueError, match="Unsupported routing geometry 'custom'"):
-        load_board(routable)
     path = write_board(tmp_path)
-    with pytest.raises(ValueError, match="Unsupported routing geometry 'custom'"):
-        load_pcb_for_routing(str(path), force_python=True)
+    router, nets = load_pcb_for_routing(str(path), force_python=True)
+    assert ("U6", "9") not in router.pads
+    assert router.unsupported_geometry_nets == frozenset({"GND"})
+    fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert len(fills) == 1
+    assert fills[0].geometry.symmetric_difference(oracle_copper()).area < 1e-9
+
+
+def test_paste_only_custom_pad_is_dropped_rather_than_refused(tmp_path):
+    """A paste-only pad has no copper, so it is no target AND no obstacle.
+
+    This is the first offending pad on half the affected pinned boards
+    (H4/H3/MP4 thermal-paste patterns, issue #5863): refusing a board over
+    copper that does not exist blocked routing for nothing.
+    """
+    pad = custom_pad(net="", layers='"F.Paste" "F.Mask"')
+    router, nets = load_board(write_board(tmp_path, pad=pad))
+    assert ("U6", "9") not in router.pads
+    assert not [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert router.unsupported_geometry_nets == frozenset()
+    assert router.unsupported_geometry_pads == (("U6.9", "", "no copper"),)
+    # Nothing is excluded: SIG still routes, straight through where the paste
+    # pattern lives, because there is no metal there.
+    assert nets["SIG"] in router.nets
+    assert router.grid.fixed_fills.segment_clear((107, 103), (109, 103), 0, 0.1, 0.2)
+    assert router.route_net(nets["SIG"])
+
+
+def test_unrepresentable_copper_falls_back_to_a_conservative_bound(tmp_path):
+    """A primitive we cannot reproduce exactly is BOUNDED, never shrunk (#5863).
+
+    A stroked ``gr_poly`` is real copper ``width / 2`` outside its outline.
+    The fallback bound must contain all of it -- an under-estimate would let
+    the router lay a trace where the board already has metal.
+    """
+    stroked = poly((-0.2, -3.0, 0.2, -1.5), width=0.3)
+    path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")', primitives=(stroked,)))
+    router, nets = load_board(path)
+    assert ("U6", "9") not in router.pads
+    assert nets["SIG"] not in router.nets
+    assert router.unsupported_geometry_nets == frozenset({"SIG"})
+    fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert len(fills) == 1
+    # True copper: the stroked wall plus the 0.4x0.4 rect anchor.
+    true_copper = unary_union(
+        [box(107.8, 105.0, 108.2, 106.5).buffer(0.15), box(107.8, 107.8, 108.2, 108.2)]
+    )
+    assert fills[0].geometry.buffer(1e-9).covers(true_copper)
+    # One box per primitive, not a single box swallowing the gap between the
+    # wall and the anchor: conservative does not have to mean coarse.
+    expected = unary_union([box(107.65, 104.85, 108.35, 106.65), box(107.8, 107.8, 108.2, 108.2)])
+    assert fills[0].geometry.geom_type == "MultiPolygon"
+    assert fills[0].geometry.symmetric_difference(expected).area < 1e-9
+    assert not router.grid.fixed_fills.segment_clear((107, 105.7), (109, 105.7), 0, 0.1, 0.2)
+    assert router.grid.fixed_fills.segment_clear((107, 107.2), (109, 107.2), 0, 0.1, 0.2)
+
+
+def test_degraded_copper_outside_the_routing_stack_is_skipped(tmp_path):
+    """A layer nothing routes on cannot host a conflict (#5863).
+
+    ``pad_fixed_fills`` refuses an out-of-stack layer for a placement-excluded
+    pad (#5357) so real copper is never dropped silently. For a degraded pad
+    the same refusal would restore the whole-board abort, so the layer is
+    skipped with a warning instead -- its net is excluded either way.
+    """
+    pad = custom_pad(net='(net 2 "SIG")', layers='"In1.Cu"')
+    router, nets = load_board(write_board(tmp_path, pad=pad), single_layer=False)
+    assert ("U6", "9") not in router.pads
+    assert router.unsupported_geometry_nets == frozenset({"SIG"})
+    assert not [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
 
 
 def test_standalone_helpers_keep_rejecting_custom_pads():
