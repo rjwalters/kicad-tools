@@ -5997,16 +5997,18 @@ def _audit_shorts_for_escalation(final_result, quiet: bool) -> "list[ClearanceVi
     the grid's dense arrays but preserves the grid object, ``router.routes``
     and ``router.pads``, which is all :func:`validate_routes` reads here.
     """
-    from kicad_tools.router.io import validate_routes
+    from kicad_tools.router.io import shorting_violations, validate_routes
 
     router = getattr(final_result, "router", None)
     if router is None or not getattr(router, "routes", None):
         return []
     try:
         violations = validate_routes(router)
-    except Exception:  # pragma: no cover - never let the audit break a save
+    except Exception as exc:  # never let the audit break a save, but say so
+        if not quiet:
+            print(f"WARNING: post-route short audit failed to run ({exc}); shorts were NOT checked")
         return []
-    shorts = [v for v in violations if v.is_short and not v.component_inherent]
+    shorts = shorting_violations(violations)
     if shorts and not quiet:
         _print_short_findings(shorts)
     return shorts
@@ -18297,7 +18299,11 @@ def _run_main_impl(args, parser, argv) -> int:
     short_violation_count = 0
     short_violations: list[ClearanceViolation] = []
     if stats["nets_routed"] > 0 and not args.dry_run:
-        from kicad_tools.router.io import format_clearance_violations, validate_routes
+        from kicad_tools.router.io import (
+            format_clearance_violations,
+            shorting_violations,
+            validate_routes,
+        )
 
         clearance_violations = validate_routes(router)
         if clearance_violations:
@@ -18306,9 +18312,7 @@ def _run_main_impl(args, parser, argv) -> int:
                 for v in clearance_violations
                 if v.obstacle_type == "segment" and not v.component_inherent
             )
-            short_violations = [
-                v for v in clearance_violations if v.is_short and not v.component_inherent
-            ]
+            short_violations = shorting_violations(clearance_violations)
             short_violation_count = len(short_violations)
             if not quiet:
                 if short_violation_count > 0:
