@@ -419,6 +419,147 @@ run_ccs --commit "$SHA" --job "$JOB"
 assert_contains "$OUT" "NOT FOUND" "(m) Human-readable output reports NOT FOUND for an absent job"
 assert_contains "$OUT" "$JOB" "(m) Human-readable output names the requested job"
 
+# --- (n)-(p) workflow-runs feed failure is PENDING, never a false green
+# (#9879): the helper's failure used to be coerced to an empty success, so a
+# commit whose CI feed was unreadable read as resolved. Exercised in GITEA
+# mode (a git checkout + curl shim, the test-forge-helpers.sh pattern): the
+# GitHub stub's gh shim serves the helper directly, so a helper failure
+# can't be simulated there without faking gh's exit — and the Gitea branch
+# is the path #9879 actually changed. --quiet prints only the overall
+# status; exit 2 = pending, 0 = success. ---
+echo ""
+echo "Testing check-ci-status.sh fail-closed workflow-runs feed (#9879)..."
+
+G_DIR="$(mktemp -d)"
+mkdir -p "$G_DIR/shim"
+git -C "$G_DIR" init -q
+git -C "$G_DIR" remote add origin https://gitea.example.com/owner/repo.git
+git -C "$G_DIR" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+
+# curl shim: the check/status endpoints answer green; the actions/tasks
+# endpoint fails when $G_FAIL_FILE exists (the unreadable feed), else short.
+cat > "$G_DIR/shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+path=""
+for a in "$@"; do
+  case "$a" in
+    http*) path="$a" ;;
+  esac
+done
+case "$path" in
+  *"/actions/tasks"*)
+    # ENV marker (cwd-independent): check-ci-status.sh cd's to its own
+    # WORKSPACE_ROOT before calling the helper, so a cwd-placed marker
+    # never fires (measured — the first draft of (n) read 'success').
+    if [[ -n "${G_FAIL_FILE:-}" && -f "$G_FAIL_FILE" && "$G_FAIL_FILE" != */no-marker ]]; then
+      printf 'server error\n500\n'; exit 0
+    fi
+    printf '{"workflow_runs": []}\n200\n'
+    ;;
+  *"/commits/"*"/statuses"*) printf '[]\n200\n' ;;
+  *"/status"*)
+    printf '{"state": "success", "statuses": []}\n200\n'
+    ;;
+  *)
+    printf '{"total_count": 0, "check_runs": []}\n200\n'
+    ;;
+esac
+SHIM
+chmod +x "$G_DIR/shim/curl"
+
+run_gitea_ccs() {  # run_gitea_ccs <args...> — sets OUT, RC
+    # Real exported env, NOT command-prefix assignments: a prefix assignment
+    # to a command does not survive into re-detection the script does later
+    # (bash restores function-prefix assignments after the call — the same
+    # lesson test-forge-helpers.sh encodes). FORGE_TYPE="" clears the
+    # detection cache; LOOM_FORGE_TYPE steers it to the gitea branch.
+    OUT="$(cd "$G_DIR" \
+        && export FORGE_TYPE="" LOOM_FORGE_TYPE="gitea" \
+        GITEA_URL="https://gitea.example.com" GITEA_TOKEN="tok" \
+        G_FAIL_FILE="${G_FAIL_FILE:-$G_DIR/no-marker}" \
+        PATH="$G_DIR/shim:$PATH" \
+        && "$CCS" --commit "$SHA" "$@" 2>/dev/null)"
+    RC=$?
+}
+
+# (n) Green checks/status + unreadable workflow-runs feed: must be PENDING,
+# not "success" — the pre-#9879 behavior coerced the failure to "no runs"
+# and every-green read as resolved.
+touch "$G_DIR/feed-fails"
+export G_FAIL_FILE="$G_DIR/feed-fails"   # env marker: cwd never fires (see shim note)
+run_gitea_ccs --quiet
+assert_eq "pending" "$OUT" "(n) Unreadable Gitea CI feed + green checks -> 'pending', not 'success'"
+assert_eq "2" "$RC" "(n) Exit code 2 (pending)"
+
+# (o) A definitive failure still dominates the unknown feed: "some CI
+# failed" + "the rest is unreadable" must NOT soften to pending.
+cat > "$G_DIR/shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+path=""
+for a in "$@"; do
+  case "$a" in
+    http*) path="$a" ;;
+  esac
+done
+case "$path" in
+  *"/actions/tasks"*)
+    # ENV marker (cwd-independent): check-ci-status.sh cd's to its own
+    # WORKSPACE_ROOT before calling the helper, so a cwd-placed marker
+    # never fires (measured — the first draft of (n) read 'success').
+    if [[ -n "${G_FAIL_FILE:-}" && -f "$G_FAIL_FILE" && "$G_FAIL_FILE" != */no-marker ]]; then
+      printf 'server error\n500\n'; exit 0
+    fi
+    printf '{"workflow_runs": []}\n200\n'
+    ;;
+  *"/commits/"*"/statuses"*)
+    printf '[{"context": "ci", "status": "failure", "target_url": ""}]\n200\n'
+    ;;
+  *"/status"*)
+    printf '{"state": "failure", "statuses": []}\n200\n'
+    ;;
+esac
+SHIM
+run_gitea_ccs --quiet
+assert_eq "failure" "$OUT" "(o) Definitive failure + unreadable feed stays 'failure' (no softening)"
+assert_eq "1" "$RC" "(o) Exit code 1 (failure)"
+
+# (p) The state marker rides the JSON output (non-quiet) for consumers.
+cat > "$G_DIR/shim/curl" <<'SHIM'
+#!/usr/bin/env bash
+path=""
+for a in "$@"; do
+  case "$a" in
+    http*) path="$a" ;;
+  esac
+done
+case "$path" in
+  *"/actions/tasks"*)
+    # ENV marker (cwd-independent): check-ci-status.sh cd's to its own
+    # WORKSPACE_ROOT before calling the helper, so a cwd-placed marker
+    # never fires (measured — the first draft of (n) read 'success').
+    if [[ -n "${G_FAIL_FILE:-}" && -f "$G_FAIL_FILE" && "$G_FAIL_FILE" != */no-marker ]]; then
+      printf 'server error\n500\n'; exit 0
+    fi
+    printf '{"workflow_runs": []}\n200\n'
+    ;;
+  *"/commits/"*"/statuses"*) printf '[]\n200\n' ;;
+  *"/status"*)
+    printf '{"state": "success", "statuses": []}\n200\n'
+    ;;
+  *)
+    printf '{"total_count": 0, "check_runs": []}\n200\n'
+    ;;
+esac
+SHIM
+export G_FAIL_FILE="$G_DIR/feed-fails"
+run_gitea_ccs --json
+assert_contains "$OUT" '"workflow_runs_state": "unknown"' "(p) JSON output carries workflow_runs_state=unknown on feed failure"
+rm -f "$G_DIR/feed-fails"
+export G_FAIL_FILE="$G_DIR/no-marker"
+run_gitea_ccs --json
+assert_contains "$OUT" '"workflow_runs_state": "ok"' "(p) JSON output carries workflow_runs_state=ok when the feed read fine"
+rm -rf "$G_DIR"
+
 echo ""
 echo "=== Test Summary ==="
 echo "Total:  $TESTS_RUN"
