@@ -60,6 +60,19 @@ LEGAL = (55, 56)
 ILLEGAL_VIA = (56, 56)
 LAYER = 2
 
+#: Issue #5660 (Epic #5509 Phase 3a) made the route halo the clearance kernel's
+#: exact disc.  ``LEGAL`` sits ``(-5, -4)`` cells -- ``sqrt(41) = 6.40`` -- from
+#: the via, which the Chebyshev square covered at its corner and the
+#: rule-derived disc (``int((0.3 + 0.2 + 0.1) / 0.127) + 1 = 5`` cells) does
+#: not; a legal via drop needs ~6.3 cells here, so no cell inside that disc is
+#: legal for every predicate these tests drive.  The fixture route is therefore
+#: marked with ``max_trace_width`` -- the production knob that widens only the
+#: *marking* (#1692) -- giving ``int((0.3 + 0.2 + 0.3) / 0.127) + 1 = 7`` cells,
+#: which contains ``LEGAL`` again.  Every predicate under test reads rule
+#: values, never the marking radius, so no physical verdict moves.  Unmarking
+#: that route must pass the same width.
+HALO_MAX_TRACE_WIDTH_MM = 0.6
+
 #: A window straddling the stored via, so the sweeps see BOTH verdicts.
 _SWEEP = [(gx, gy) for gx in range(54, 68) for gy in range(54, 68)]
 
@@ -100,7 +113,7 @@ def _context(
     x, y = grid.grid_to_world(60, 60)
     route = Route(net=2, net_name="N2")
     route.vias.append(Via(x, y, 0.3, 0.6, (Layer.F_CU, Layer.B_CU), 2, "N2"))
-    grid.mark_route(route)
+    grid.mark_route(route, max_trace_width=HALO_MAX_TRACE_WIDTH_MM)
     pathfinder = CoupledPathfinder(grid, rules, target_spacing_cells=3, net_class_map=net_class_map)
     if armed:
         pathfinder.set_net_name_to_id({"N1": 1, "N2": 2})

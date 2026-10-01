@@ -3,6 +3,7 @@
 import pytest
 
 from kicad_tools.router.cpp_backend import is_cpp_available
+from kicad_tools.router.grid import halo_offsets
 
 pytestmark = pytest.mark.skipif(not is_cpp_available(), reason="native router required")
 
@@ -21,9 +22,17 @@ def test_repeated_ripup_restores_cost_and_preserves_history(grid, kind):
     unmark = getattr(grid, f"unmark_{kind}")
     grid.at(4, 3, 0).history_cost = 2.5
     grid.at(4, 3, 0).usage_count = 3
+    # The cells one radius-1 mark claims, out of the 8x8 congestion bucket.
+    # Issue #5660 made the halo the clearance kernel's exact disc, so a
+    # radius-1 stamp is the 5-cell plus ``halo_offsets(1)`` rather than the
+    # 3x3 Chebyshev square: 5 cells for the via (was 9), and 11 for the
+    # (3, 3)-(5, 3) segment's union of discs (was the 3x5 box, 15).
+    centres = [(3, 3), (4, 3), (5, 3)] if kind == "segment" else [(4, 3)]
+    claimed = {(cx + dx, cy + dy) for cx, cy in centres for dx, dy in halo_offsets(1)}
+    assert len(claimed) == (11 if kind == "segment" else 5)
+    expected = len(claimed) / 64
     for _ in range(4):
         mark(*args)
-        expected = 15 / 64 if kind == "segment" else 9 / 64
         assert grid.get_congestion(4, 3, 0) == expected
         unmark(*args)
         assert grid.get_congestion(4, 3, 0) == 0
