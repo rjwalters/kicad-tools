@@ -1,0 +1,11 @@
+import fs from 'fs';
+import { AutoroutingPipelineSolver } from '@tscircuit/capacity-autorouter';
+const [,, inp, out] = process.argv;
+const srj = JSON.parse(fs.readFileSync(inp,'utf8'));
+const t0 = Date.now();
+const solver = new AutoroutingPipelineSolver(srj);
+solver.solve();
+const ms = Date.now()-t0;
+const traces = solver.getOutputSimpleRouteJson().traces ?? [];
+fs.writeFileSync(out, JSON.stringify({ms, solved: solver.solved, failed: solver.failed, error: solver.error, traces}));
+console.log(inp, 'solved', solver.solved, 'failed', solver.failed, 'ms', ms, 'traces', traces.length, String(solver.error||'').slice(0,200));

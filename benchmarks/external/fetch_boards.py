@@ -65,6 +65,8 @@ class BoardSpec:
     license: str
     gitlab_project_id: int | None = None
     deep_pcb_reference: dict[str, Any] = field(default_factory=dict)
+    opt_in: bool = False
+    """True = only used when named explicitly (``--board SLUG``); skipped by 'all boards'."""
 
 
 def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[str, BoardSpec]:
@@ -86,8 +88,14 @@ def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> dict[str, BoardSpec]:
             license=entry["license"],
             gitlab_project_id=entry.get("gitlab_project_id"),
             deep_pcb_reference=dict(entry.get("deep_pcb_reference", {})),
+            opt_in=bool(entry.get("opt_in", False)),
         )
     return boards
+
+
+def default_boards(boards: dict[str, BoardSpec]) -> dict[str, BoardSpec]:
+    """The boards an unqualified 'all boards' run covers (drops ``opt_in`` entries)."""
+    return {slug: spec for slug, spec in boards.items() if not spec.opt_in}
 
 
 def resolve_cache_dir(cache_dir: Path | None = None) -> Path:
@@ -215,6 +223,8 @@ def fetch_all(
         if missing:
             raise FetchError(f"unknown board slug(s): {sorted(missing)}")
         boards = {slug: boards[slug] for slug in slugs}
+    else:
+        boards = default_boards(boards)
 
     return {slug: fetch_board(spec, cache_dir, opener=opener) for slug, spec in boards.items()}
 

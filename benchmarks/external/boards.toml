@@ -71,3 +71,156 @@ license = "CC-BY-4.0"
 
 [beagleconnect_freedom.deep_pcb_reference]
 airwires = 414
+
+# --- tscircuit dataset-srj18 source boards (Issue #5848) ---
+# The dataset repo has no LICENSE, so we pin the *source* boards it was derived
+# from. Licenses read from each repo's LICENSE file via the GitHub license API
+# on 2026-09-30: sabogalc/KiCad-Arduino-Boards is WTFPL, every antmicro/* repo
+# is Apache-2.0. All permissive; none are committed here (fetched at run time).
+# `opt_in = true`: a bare `fetch_boards.py` / `normalize.py` / `kct bench external`
+# does NOT cover these; name them with `--board srj18_<slug>`.
+# Pinned to the HEAD of `main` on 2026-09-30 (the dataset itself tracks `main`).
+
+[srj18_arduino_leonardo]
+name = "Arduino Leonardo (dataset-srj18 sample001)"
+repo_url = "https://github.com/sabogalc/KiCad-Arduino-Boards"
+vcs = "github"
+commit = "0a25ca25953efb3fb045616e7c676a554ceaabc1"
+board_path = "KiCad Projects/Arduino Leonardo/Arduino Leonardo.kicad_pcb"
+license = "WTFPL"
+opt_in = true
+
+[srj18_arduino_mega_2560]
+name = "Arduino Mega 2560 (dataset-srj18 sample002)"
+repo_url = "https://github.com/sabogalc/KiCad-Arduino-Boards"
+vcs = "github"
+commit = "0a25ca25953efb3fb045616e7c676a554ceaabc1"
+board_path = "KiCad Projects/Arduino Mega 2560/Arduino Mega 2560.kicad_pcb"
+license = "WTFPL"
+opt_in = true
+
+[srj18_arduino_micro]
+name = "Arduino Micro (dataset-srj18 sample003)"
+repo_url = "https://github.com/sabogalc/KiCad-Arduino-Boards"
+vcs = "github"
+commit = "0a25ca25953efb3fb045616e7c676a554ceaabc1"
+board_path = "KiCad Projects/Arduino Micro/Arduino Micro.kicad_pcb"
+license = "WTFPL"
+opt_in = true
+
+[srj18_arduino_nano]
+name = "Arduino Nano (dataset-srj18 sample004)"
+repo_url = "https://github.com/sabogalc/KiCad-Arduino-Boards"
+vcs = "github"
+commit = "0a25ca25953efb3fb045616e7c676a554ceaabc1"
+board_path = "KiCad Projects/Arduino Nano/Arduino Nano.kicad_pcb"
+license = "WTFPL"
+opt_in = true
+
+[srj18_arduino_uno]
+name = "Arduino Uno (dataset-srj18 sample005)"
+repo_url = "https://github.com/sabogalc/KiCad-Arduino-Boards"
+vcs = "github"
+commit = "0a25ca25953efb3fb045616e7c676a554ceaabc1"
+board_path = "KiCad Projects/Uno/Arduino Uno/Arduino UNO.kicad_pcb"
+license = "WTFPL"
+opt_in = true
+
+[srj18_ddr5_testbed]
+name = "DDR5_TESTBED (dataset-srj18 sample006)"
+repo_url = "https://github.com/antmicro/ddr5-testbed"
+vcs = "github"
+commit = "5db9286b45b5ad9b44f2d82230609038476f95b9"
+board_path = "ddr5-testbed.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_dual_gmsl_serializer_adapter]
+name = "DUAL_GMSL_SERIALIZER_ADAPTER (dataset-srj18 sample007)"
+repo_url = "https://github.com/antmicro/dual-gmsl-serializer-adapter"
+vcs = "github"
+commit = "2ef65e727ef532cffeaf47ea1d502d565ce9dbd1"
+board_path = "dual-camera-to-gmsl-serializer-csi-adapter.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_ftdi_toolkit]
+name = "FTDI_TOOLKIT (dataset-srj18 sample008)"
+repo_url = "https://github.com/antmicro/ftdi-toolkit"
+vcs = "github"
+commit = "6e39ebff19d7230bfa5b8266008d1ca5334f2021"
+board_path = "debug-toolkit.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_gmsl_serializer]
+name = "GMSL_SERIALIZER (dataset-srj18 sample009)"
+repo_url = "https://github.com/antmicro/gmsl-serializer"
+vcs = "github"
+commit = "58641df7b331050bbb4456cb4cb73e3975ae9de9"
+board_path = "gmsl-serializer.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_hdmi_edid_debug_board]
+name = "HDMI_EDID_DEBUG_BOARD (dataset-srj18 sample010)"
+repo_url = "https://github.com/antmicro/hdmi-edid-debug-board"
+vcs = "github"
+commit = "615be304c1d2a9ef7a1195692e9f67fb8a41cab3"
+board_path = "hdmi-edid-debug-board.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_job_oculink_expansion]
+name = "JOB_OCULINK_EXPANSION (dataset-srj18 sample011)"
+repo_url = "https://github.com/antmicro/job-oculink-expansion"
+vcs = "github"
+commit = "367bbb2853242606ed56ed2dfc244c4322228de8"
+board_path = "jetson-orin-baseboard-oculink-expansion.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_oculink_pcie_adapter]
+name = "OCULINK_PCIE_ADAPTER (dataset-srj18 sample012)"
+repo_url = "https://github.com/antmicro/oculink-pcie-adapter"
+vcs = "github"
+commit = "6dbb2afa5311c425ac2d3057646f83c626d0f8a2"
+board_path = "oculink-to-pcie-adapter.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_ov5640_dual_camera_board]
+name = "OV5640_DUAL_CAMERA_BOARD (dataset-srj18 sample013)"
+repo_url = "https://github.com/antmicro/ov5640-dual-camera-board"
+vcs = "github"
+commit = "055001427fade37ac5752579b36f8737d5baf7dd"
+board_path = "OV5640-dual-camera-board.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_ov9281_camera_board]
+name = "OV9281_CAMERA_BOARD (dataset-srj18 sample014)"
+repo_url = "https://github.com/antmicro/ov9281-camera-board"
+vcs = "github"
+commit = "ea69666fa06f66a0691e50eebff9356cc2a08e32"
+board_path = "ov9281-dual-camera-board.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_sdi_fiber_adapter]
+name = "SDI_FIBER_ADAPTER (dataset-srj18 sample015)"
+repo_url = "https://github.com/antmicro/sdi-fiber-adapter"
+vcs = "github"
+commit = "e496cd34dfe9626a09184513fb3891cd92e85ed7"
+board_path = "sdi-fiber-adapter.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true
+
+[srj18_usb_c_power_adapter]
+name = "USB_C_POWER_ADAPTER (dataset-srj18 sample016)"
+repo_url = "https://github.com/antmicro/usb-c-power-adapter"
+vcs = "github"
+commit = "4d3e9e289a294f7953bf48dde6c96af8327a0611"
+board_path = "usb-c-power-adapter.kicad_pcb"
+license = "Apache-2.0"
+opt_in = true

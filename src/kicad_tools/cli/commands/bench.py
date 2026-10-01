@@ -178,6 +178,8 @@ def _run_bench_external(args) -> int:
         if missing:
             return _fail(json_mode, f"unknown board slug(s): {sorted(missing)}")
         boards = {slug: boards[slug] for slug in requested}
+    else:
+        boards = fetch_boards.default_boards(boards)
 
     cache_dir = fetch_boards.resolve_cache_dir(
         Path(args.cache_dir) if getattr(args, "cache_dir", None) else None

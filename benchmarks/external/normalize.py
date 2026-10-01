@@ -240,6 +240,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: unknown board slug(s): {sorted(missing)}", file=sys.stderr)
             return 1
         boards = {slug: boards[slug] for slug in args.boards}
+    else:
+        boards = fetch_boards.default_boards(boards)
 
     exit_code = 0
     for slug, spec in boards.items():
