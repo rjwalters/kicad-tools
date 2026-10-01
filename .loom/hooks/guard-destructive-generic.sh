@@ -5050,16 +5050,32 @@ resolve_stash_cwd() {
 # heredoc in this one provably-inert shape, and only when ALL of these hold:
 #   1. the opener is the complete tail of its line, immediately preceded by a
 #      recognized text-carrying flag, its opening quote, and `$(cat`;
-#   2. the heredoc delimiter is QUOTED (single- or double-quoted, `<<-` allowed)
-#      — a quoted delimiter is what guarantees the outer shell performs NO
-#      expansion on the body, so a `$(…)` sitting IN the body is inert text
-#      rather than live code (an UNQUOTED delimiter is rejected outright);
+#   2. the heredoc delimiter is either QUOTED (single- or double-quoted,
+#      `<<-` allowed) or UNQUOTED — see condition 5 below for why an
+#      unquoted delimiter needs an extra gate that a quoted one does not;
 #   3. the block is CLOSED in this same buffer (mirrors #5087's "never mask
 #      speculatively" rule for mask_heredoc_bodies);
 #   4. the very next line after the delimiter line is `)` + that same opening
 #      quote — i.e. the substitution ends immediately, with nothing chained
-#      after the heredoc inside it.
-# Condition 4 is what keeps a `--body "$(cat <<QUOTED_DELIM … QUOTED_DELIM`
+#      after the heredoc inside it;
+#   5. (UNQUOTED delimiter only, #9860) every line of the body independently
+#      has NO live backtick/`$(` of its own (`has_live_subst()`, the same
+#      escape-aware check `strip_literal_text()` runs on quoted flag values
+#      above). A QUOTED delimiter guarantees the outer shell performs NO
+#      expansion on the body at all, so a `$(…)` sitting IN the body is
+#      inert text regardless — no condition-5 gate is needed there. An
+#      UNQUOTED delimiter is different: the outer shell DOES run parameter/
+#      command/arithmetic expansion on the body as it feeds `cat`, so a live
+#      `$(rm -rf /)` or backtick INSIDE an unquoted-delimiter body genuinely
+#      executes. Condition 5 is what keeps that case denying while still
+#      allowing the common case this repo's own role prompts prescribe — a
+#      `cat <<EOF … EOF` body of plain advisory prose with no substitution
+#      markers of its own, which has nothing for the outer shell to expand.
+#      A body that passes condition 5 can still substitute an EXISTING shell
+#      variable (bare `$NAME`/`${NAME}`, not flagged by `has_live_subst()`),
+#      which is the same risk class the rest of this file already accepts for
+#      a plain variable read — never a NEW attacker-supplied command.
+# Condition 4 is what keeps a `--body "$(cat <<DELIM … DELIM`
 # <newline> `rm -rf /` <newline> `)"` command denying: bash ends the heredoc at
 # the delimiter line and then genuinely RUNS the following line inside the
 # substitution, so nothing is masked there. Condition 1 is what keeps an
@@ -5086,20 +5102,30 @@ strip_literal_text() {
     # load-bearing. Body bytes are replaced 1:1 with "X" so the buffer keeps
     # its byte offsets and line count; the opener line, the delimiter line and
     # everything outside the body are left untouched.
-    function mask_flag_cat_heredocs(s,   lines, nl, i, j, line, pre, oq, delim, dq, closeat, trimmed, body, dashform) {
+    function mask_flag_cat_heredocs(s,   lines, nl, i, j, line, pre, oq, delim, dq, closeat, trimmed, body, dashform, quoted, live) {
         if (index(s, "<<") == 0) return s
         nl = split(s, lines, "\n")
         for (i = 1; i <= nl; i++) {
             line = lines[i]
-            # (2) opener must END the line and carry a QUOTED delimiter.
-            if (match(line, /<<-?["'"'"'][A-Za-z0-9_]+["'"'"'][ \t]*$/) == 0) continue
+            # (2) opener must END the line and carry a delimiter that is EITHER
+            #     quoted OR unquoted (#9860 — see quoted/live gating below).
+            if (match(line, /<<-?["'"'"']?[A-Za-z0-9_]+["'"'"']?[ \t]*$/) == 0) continue
             dashform = (substr(line, RSTART + 2, 1) == "-")
             delim = substr(line, RSTART, RLENGTH)
             sub(/^<<-?/, "", delim)
             sub(/[ \t]*$/, "", delim)
             dq = substr(delim, 1, 1)
-            if (substr(delim, length(delim), 1) != dq) continue   # quotes must match
-            delim = substr(delim, 2, length(delim) - 2)
+            quoted = (dq == DQ || dq == SQ)
+            if (quoted) {
+                if (substr(delim, length(delim), 1) != dq) continue   # quotes must match
+                delim = substr(delim, 2, length(delim) - 2)
+            } else {
+                dq = ""
+                # reject a stray/mismatched quote char that the optional
+                # quote classes above let through on only one side (e.g. a
+                # literal `<<EOF` followed directly by a stray double quote).
+                if (delim !~ /^[A-Za-z0-9_]+$/) continue
+            }
             if (delim == "") continue
             # (1) …immediately preceded by <flag> <openquote>$(cat.
             pre = substr(line, 1, RSTART - 1)
@@ -5122,6 +5148,28 @@ strip_literal_text() {
             #     after the heredoc inside `$( … )` is masked away.
             if (closeat == nl) continue
             if (substr(lines[closeat + 1], 1, 2) != ")" oq) continue
+            # (5) UNQUOTED delimiter only (#9860): an unquoted delimiter means
+            #     the outer shell DOES perform expansion on the heredoc body
+            #     (parameter/command/arithmetic), unlike the quoted-delimiter
+            #     case above where the body is categorically inert. So before
+            #     masking an unquoted-delimiter body, every one of its lines
+            #     must independently fail has_live_subst() — i.e. contain no
+            #     unescaped backtick or `$(` of its own. A body that passes
+            #     this check still only ever substitutes an EXISTING shell
+            #     variable (bare `$NAME`/`${NAME}`, not flagged by
+            #     has_live_subst()), never runs a NEW attacker-supplied
+            #     command, so it carries the same risk class the rest of this
+            #     file already accepts for plain variable reads. A body that
+            #     fails it (contains a live backtick/`$(`) is left completely
+            #     unmasked and keeps denying exactly as before — this never
+            #     reopens the #3679/#5216 anti-smuggling floor.
+            if (!quoted) {
+                live = 0
+                for (j = i + 1; j < closeat; j++) {
+                    if (has_live_subst(lines[j])) { live = 1; break }
+                }
+                if (live) continue
+            }
             for (j = i + 1; j < closeat; j++) {
                 body = lines[j]
                 gsub(/./, "X", body)

@@ -2172,7 +2172,7 @@ Masking applies **only** when all of these hold, so a heredoc that is genuinely 
 | Condition | Rejected example (still denies) |
 |-----------|--------------------------------|
 | Opener is the complete tail of a recognized text-carrying flag's quoted value, immediately after `$(cat` | `--body "$(bash <<'EOF' … EOF)"`, `cat <<'EOF' … EOF \| sh`, `sh -s <<'EOF' … EOF` — the body is live code to an inner interpreter |
-| Heredoc delimiter is **quoted** (`<<'EOF'` / `<<"EOF"`, `<<-` allowed) | `--body "$(cat <<EOF … EOF)"` — an unquoted delimiter lets the outer shell expand the body |
+| Heredoc delimiter is **quoted** (`<<'EOF'` / `<<"EOF"`, `<<-` allowed), **or** it is unquoted and the body is substitution-free (#9860, below) | `--body "$(cat <<EOF … $(rm -rf /) … EOF)"` — an unquoted delimiter lets the outer shell expand the body, and this one actually carries a live `$(…)` so it still denies |
 | Block is **closed** in the same command buffer | an unterminated opener masks nothing (mirrors #5087) |
 | The line after the delimiter line is `)` + the same opening quote | `--body "$(cat <<'EOF' … EOF` ⏎ `rm -rf /` ⏎ `)"` — bash ends the heredoc and really runs the next line |
 
@@ -2196,6 +2196,31 @@ because a prior verdict with more standing than this table already settled
 them. Nothing left the denial floor, and the two promotions did not join it.
 Full table and the rule that produced it: "Ask-Tier Composition (#7795)" near
 the top of this document.
+
+**Seventh refinement pass (#9860), CATASTROPHIC TIER CATCHES UP:** the Fourth pass
+(#6056) above deliberately left "delimiter must be quoted" exactly as written for
+the catastrophic deny floor and fixed only the ask tier, so the SAME
+`--body "$(cat <<EOF … EOF)"` idiom (unquoted delimiter) still hard-denied on the
+catastrophic tier whenever the comment prose quoted a catastrophic-tier phrase as
+advice to a human (e.g. a Judge/Doctor telling a reviewer to
+`git push --force-with-lease origin main`) — an unanswerable stall, since the
+catastrophic tier has no ask-tier fallback at all. `mask_flag_cat_heredocs()`
+(called from `strip_literal_text()`, the catastrophic-tier masker) now masks an
+UNQUOTED-delimiter body too, but only when every physical line of it
+independently passes `has_live_subst()` — the same escape-aware backtick/`$(`
+check that function's own quoted-span redaction a few lines below already uses,
+and behaviourally the same proof `_heredoc_body_expansion_free()` established for
+the ask-tier `mask_unquoted_cat_heredoc_bodies()` pass. A body containing even one
+live (unescaped) backtick or `$(` is left completely unmasked and keeps denying —
+this narrows #6056's catastrophic-tier abstention, it does not touch the
+#3679/#5216 anti-smuggling floor (`git commit -m "$(git push --force origin
+main)"`, with no heredoc at all, still denies unconditionally) or the
+#5216-era four conditions in the table above (still required for BOTH delimiter
+spellings). Deliberately scoped to the flag-capture shape only — the `-m`/`--body`/
+etc. flags `mask_flag_cat_heredocs()` already recognized — and not extended to
+`mask_unquoted_cat_heredoc_bodies()`'s sibling `NAME=$(cat <<EOF … EOF)`
+variable-assignment capture, which needs its own re-parse read check (#7970) that
+a flag value never does.
 
 ### When a Legitimate Operation Is Pattern-Blocked
 
