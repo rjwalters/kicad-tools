@@ -3,9 +3,9 @@
 ``router/drc_nudge.py`` translates already-routed copper by up to
 ``max_displacement`` to repair a DRC finding, and every proposal must pass a
 destination gate before it is committed.
-``_post_nudge_introduces_foreign_via_violation`` (``:342``) is the clearance
+``_post_nudge_introduces_foreign_via_violation`` (``:370``) is the clearance
 half of that gate: it walks every via in ``router.routes``, skips same-net
-ones, and applies ``segment_clears_foreign_via`` at
+ones, and asks the shared clearance kernel about the rest at
 ``router.rules.trace_clearance``.  It reads nothing else off the router, so
 the duck-typed stand-in below carries exactly ``routes`` and ``rules`` -- the
 same shape ``tests/test_drc_nudge_foreign_via_gate.py:43``'s
@@ -15,13 +15,13 @@ same shape ``tests/test_drc_nudge_foreign_via_gate.py:43``'s
 rather than faked.**  The epic's group-17 inventory names three functions;
 only one of them answers a clearance question this oracle can score:
 
-* ``_via_drill_overlaps_bbox`` (``:1173``) is an *overlap* detector, not a
+* ``_via_drill_overlaps_bbox`` (``:1204``) is an *overlap* detector, not a
   clearance predicate -- it asks whether a drill circle intersects a pad
   land, with no clearance term at all (its threshold is the via-in-pad DRC
   rule, ``validate/rules/via_pad_geometry.via_inside_pad``).  Every pair in
   this corpus is placed at a positive copper gap, so it would answer "no
   overlap" on all of them: a guaranteed zero that means nothing.
-* ``_via_edge_sweep_clear`` (``:2204``) is a *displacement certificate*
+* ``_via_edge_sweep_clear`` (``:2243``) is a *displacement certificate*
   against the board outline: it proves a proposed move introduces no new edge
   violation anywhere along the swept path, comparing the swept minimum to the
   pre-move minimum. It needs a before/after position pair and a board-edge
@@ -31,22 +31,41 @@ only one of them answers a clearance question this oracle can score:
 
 Both are ``not measured`` sub-notes on this row.  Scoring them would have
 required inventing a production configuration, and this phase measures
-consumers as they are.
+consumers as they are.  Epic #5509 Phase 4c switched them onto the kernel
+alongside the gate this row drives, and their verdict-for-verdict equivalence
+with the pre-migration arithmetic is pinned directly instead, by
+``tests/router/test_drc_nudge_kernel_5856.py``.
+
+**Gated reading (Epic #5509 Phase 4c, #5856).**  Since the destination gate
+moved onto the shared clearance kernel, this group is in
+``report.MIGRATED_GROUPS`` and :meth:`DrcNudgeAdapter.verdicts_at_project_rules`
+drives the same unmodified gate with ``trace_clearance`` moved onto
+``case.rules.project_clearance``
+(:func:`~tests.conformance.adapters._support.project_rules`), so the merge gate
+is a **geometry** statement rather than a restatement of the #5398 / #5654
+rule-resolution gap -- which is exactly what this row's published
+under-rejection cell is: the gate is driven at the router's own 0.15 mm
+``trace_clearance`` there, below the project's 0.20 mm ``Default`` netclass.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     net_ids,
     pair_contexts,
+    project_rules,
     router_rules,
     router_segment,
     single_object_route,
 )
 from tests.conformance.generator import CopperCase, PairKind, SegmentSpec, ViaSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = ["DrcNudgeAdapter"]
 
@@ -79,12 +98,25 @@ class DrcNudgeAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, router_rules(case))
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same unmodified gate, at the clearance kicad-cli applies.
+
+        The **gated** reading (Epic #5509 Phase 4c, #5856), required of every
+        group in ``report.MIGRATED_GROUPS``.  Only the copper clearance moves
+        onto ``case.rules.project_clearance``; which rule the gate resolves for
+        a trace-vs-via pair is unchanged, because that is Phase 2's axis and
+        not this migration's.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules) -> set[Verdict]:
         from kicad_tools.router.drc_nudge import (
             _post_nudge_introduces_foreign_via_violation,
         )
 
         nets = net_ids(case)
-        rules = router_rules(case)
         found: set[Verdict] = set()
 
         for context in pair_contexts(case):

@@ -936,6 +936,18 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # added here because their own docstrings cite the kernel by name,
         # same as ``diffpair_routing.py``.
         "router/match_group_tuning.py",
+        # Epic #5509 Phase 4c (#5856), consumer group 17: the post-route
+        # DRC-nudge repair pass's destination gates.
+        # ``_post_nudge_introduces_foreign_via_violation`` asks
+        # ``shapes_clear``; ``_via_drill_overlaps_bbox`` asks ``hole_gap``
+        # (drill-to-copper) against the land as ``bbox_shape`` copper; and
+        # ``_via_edge_sweep_clear`` asks ``copper_gap`` for the pre-move barrel
+        # and for the swept capsule against each outline chord, which retired
+        # this module's two private ``router/geometry.py`` distance wrappers.
+        # Reached through ``clearance_shapes.py`` (already listed above); listed
+        # here because its docstrings cite the kernel by name, same as
+        # ``diffpair_routing.py`` and ``match_group_tuning.py``.
+        "router/drc_nudge.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

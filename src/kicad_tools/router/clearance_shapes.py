@@ -36,12 +36,14 @@ from kicad_tools.router.clearance_kernel import (
     ALL_LAYERS,
     CLEARANCE_EPSILON_MM,
     NO_INTERACTION,
+    KEdge,
     KPad,
     KSegment,
     KShape,
     KVia,
     clear,
     copper_gap,
+    hole_gap,
     make_pad,
 )
 from kicad_tools.router.layers import Layer
@@ -51,13 +53,16 @@ __all__ = [
     "ALL_LAYERS",
     "CLEARANCE_EPSILON_MM",
     "NO_INTERACTION",
+    "KEdge",
     "KPad",
     "KSegment",
     "KShape",
     "KVia",
+    "bbox_shape",
     "clear",
     "copper_gap",
     "gap_deficit",
+    "hole_gap",
     "overlaps",
     "pad_shape",
     "segment_shape",
@@ -120,6 +125,52 @@ def pad_shape(pad: Pad) -> KPad:
         pad.y,
         ALL_LAYERS if pad.through_hole else _layer_value(pad.layer),
         pad.drill if pad.through_hole else 0.0,
+    )
+
+
+def bbox_shape(
+    bbox: tuple[float, float, float, float],
+    *,
+    layer: int = ALL_LAYERS,
+    drill: float = 0.0,
+) -> KPad:
+    """An axis-aligned copper rectangle as kernel copper (Epic #5509 Phase 4c).
+
+    Some consumers hold a pad's *enclosing axis-aligned box* rather than the
+    pad object itself -- the DRC-nudge repair pass's via-in-pad detector takes
+    ``(min_x, min_y, max_x, max_y)`` from
+    :func:`~kicad_tools.router.drc_nudge._router_pad_bbox`.  A rectangle is a
+    :class:`KPad` whose Minkowski core is its four corners and whose dilation
+    radius is zero, so this is a translation and not a second pad model: the
+    same ``rect`` branch of :func:`~clearance_kernel.make_pad` the exact pad
+    model uses.
+
+    The *footprint* a caller chooses to measure (a real pad outline vs. its
+    enclosing box) stays the caller's own decision -- this helper only moves
+    the arithmetic onto the kernel.
+
+    Args:
+        bbox: ``(min_x, min_y, max_x, max_y)`` in mm, board frame.
+        layer: Copper layer id, :data:`ALL_LAYERS` when the box applies to
+            every layer (a through-hole land, or a caller that has already
+            gated on layer itself).
+        drill: Hole diameter at the box centre, 0 for no hole.
+
+    Returns:
+        The rectangle as a :class:`KPad`; an empty core for a degenerate box,
+        which the kernel reads as :data:`NO_INTERACTION`.
+    """
+    min_x, min_y, max_x, max_y = bbox
+    return make_pad(
+        "rect",
+        max_x - min_x,
+        max_y - min_y,
+        DEFAULT_ROUNDRECT_RRATIO,  # unused by the ``rect`` branch
+        0.0,
+        (min_x + max_x) / 2.0,
+        (min_y + max_y) / 2.0,
+        layer,
+        drill,
     )
 
 
