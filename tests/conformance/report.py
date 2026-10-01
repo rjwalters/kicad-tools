@@ -306,7 +306,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 6, 7, 8, 9, 10})
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -327,6 +327,11 @@ Migrated so far:
 * **1** -- the Python grid's halo marking (``router/grid.py``), Phase 3a.
 * **2** -- the C++ grid's halo marking (``Grid3D::mark_segment`` /
   ``mark_via``), Phase 3a.
+* **4** -- the Python search-time route-halo refinement
+  (``RouteHaloGeometry.clear``), Phase 3b.
+* **5** -- the C++ search-time route-halo refinement
+  (``Grid3D::route_trace_geometry_clear`` / ``route_via_geometry_clear`` /
+  ``trace_stored_vias_clear``), Phase 3b.
 * **6** -- the fixed-copper predicate (``router/fixed_copper.py`` and
   ``grid.cpp``'s ``fixed_fill_clear``), Phase 3f.
 * **7** -- the C++ coupled rail gate (``CoupledPathfinder::rail_clear``), Phase 3c.
@@ -339,6 +344,8 @@ Migrated so far:
 _MIGRATION_PHASE: dict[int, str] = {
     1: "3a",
     2: "3a",
+    4: "3b",
+    5: "3b",
     6: "3f",
     7: "3c",
     8: "3c",
@@ -363,10 +370,7 @@ names a group outside this set.
 """
 
 
-REFINEMENT_GATED_GROUPS: dict[int, str] = {
-    4: "#5410",
-    5: "#5410",
-}
+REFINEMENT_GATED_GROUPS: dict[int, str] = {}
 """Groups that are a merge gate **without** having been migrated, and by whose issue.
 
 :data:`MIGRATED_GROUPS` answers *"which consumers are on the shared kernel"*.
@@ -376,18 +380,22 @@ consumer that already agrees with ground truth, whose agreement someone paid
 for, and which no later epic phase is scheduled to re-verify.
 
 Groups 4 and 5 -- the search-time route-halo refinement, Python and native --
-are exactly that.  #5410 drove their over-rejection (a *legal* candidate
-refused because a conservative halo swallowed it, the defect that exhausted
-A*'s expansion budget on Board 07's DQ3) to zero, and driven at kicad-cli's
-own clearance they now agree in both directions.  They still carry their own
-arithmetic, so they are **not** migrated -- the switch onto the Phase 1b
-kernel is Epic #5509 Phase 3b (#5661) -- but leaving them auto-``xfail``\\ ed
-until that phase lands means a regression of the repair would be recorded as
-a number in this table and reddened nothing.
+used to be exactly that: #5410 drove their over-rejection (a *legal*
+candidate refused because a conservative halo swallowed it, the defect that
+exhausted A*'s expansion budget on Board 07's DQ3) to zero, and driven at
+kicad-cli's own clearance they agreed in both directions, but they still
+carried their own arithmetic rather than the Phase 1b kernel.
+``tests/conformance/test_route_halo_refinement_gate.py`` held that agreement
+as a hard gate in the meantime, deliberately short of
+:data:`MIGRATED_GROUPS` so as not to misreport the epic's progress.
 
-``tests/conformance/test_route_halo_refinement_gate.py`` is where that gate
-lives; it deliberately does not add these groups to :data:`MIGRATED_GROUPS`,
-which would misreport the epic's progress and collide with #5661's diff.
+Epic #5509 Phase 3b (#5661) did the actual switch, so groups 4 and 5 moved
+into :data:`MIGRATED_GROUPS` and that dedicated gate module was retired --
+``test_corpus.py``'s own migrated-group gate (``assert_migrated_group_agrees``)
+now covers exactly the same property, so keeping both would have run one
+assertion twice.  This registry stays (now empty) as the mechanism for the
+*next* consumer that reaches "agrees with ground truth" before its own
+kernel-switch phase lands.
 """
 
 
@@ -431,33 +439,42 @@ NOTES: dict[int, str] = {
         "`is_via_blocked`."
     ),
     4: (
-        "Raises the requirement to `max(required, via_clearance)` for "
-        "trace-vs-via. **Gated, though not migrated** (#5410): the "
-        "over-rejection cell is this row's whole point -- it is the "
-        "legal-candidate refusal that exhausted A*'s budget -- and it is 0.0%, "
-        "held there by `tests/conformance/test_route_halo_refinement_gate.py` "
-        "rather than left to a later phase. The under-rejection cell is a "
-        "**rule** reading, not a geometry one, and that attribution is "
-        "asserted pair-by-pair rather than claimed: every under-rejected pair "
-        "is a `seg-seg` one whose gap sits in the 0.15-0.20 mm band the "
-        "router's own `trace_clearance` does not require and the project's "
-        "`Default` netclass does -- the #5398 / #5654 defect this row may not "
-        "close. Driven instead at the clearance kicad-cli itself applies, the "
-        "same unmodified consumer agrees in **both** directions; the switch "
-        "onto the Phase 1b kernel is still outstanding as Phase 3b (#5661)."
+        "Issue #5661 (Epic #5509 Phase 3b): builds a `KSegment`/`KVia` for "
+        "the candidate and for each surviving neighbour and asks "
+        "`clearance_kernel.clear` for the verdict, in place of the retired "
+        "`max(required, via_clearance)` widening for trace-vs-via pairs that "
+        "made this search-time predicate stricter than the commit-time "
+        "validator for the identical pair (#5410's asymmetry). Migrated: "
+        "0.0% over-rejection is a hard gate (the legal-candidate refusal that "
+        "exhausted A*'s budget on Board 07's DQ3), via `report.MIGRATED_GROUPS` "
+        "rather than the retired `tests/conformance/test_route_halo_refinement_gate.py`. "
+        "The under-rejection cell is a **rule** reading, not a geometry one, "
+        "and that attribution is asserted pair-by-pair rather than claimed: "
+        "every under-rejected pair (`seg-seg` and, since the widening above "
+        "retired, `seg-via` too) sits in the 0.15-0.20 mm band the router's "
+        "own `trace_clearance` does not require and the project's `Default` "
+        "netclass does -- the #5398 / #5654 defect this row may not close. "
+        "Driven at the clearance kicad-cli itself applies, the consumer "
+        "agrees in **both** directions."
     ),
     5: (
-        "Measures the `Grid3D` predicate; the `Pathfinder` wrappers "
-        "(`trace_halo_cell_clear`, `via_route_geometry_clear`) are unbound and "
-        "add only cell-to-world conversion, per-net `search_fill_*` overrides "
-        "and a `route_cell_has_geometry` pre-check -- no arithmetic. **Gated, "
-        "though not migrated** (#5410), on the same two readings as group 4 "
-        "and by the same module: 0.0% over-rejection is a hard failure, and "
-        "the under-rejection cell is asserted to be entirely the 0.15-0.20 mm "
+        "Issue #5661 (Epic #5509 Phase 3b): the two copper checks (via-vs-"
+        "segment, via-vs-via and seg-vs-segment, seg-vs-via) ask the shared "
+        "kernel for the verdict instead of composing their own "
+        "`centre_distance - half_a - half_b`; `route_trace_geometry_clear`'s "
+        "seg-via branch no longer widens the requirement to "
+        "`max(via_clearance, required(...))`, which fixed the same asymmetry "
+        "as group 4. Measures the `Grid3D` predicate; the `Pathfinder` "
+        "wrappers (`trace_halo_cell_clear`, `via_route_geometry_clear`) are "
+        "unbound and add only cell-to-world conversion, per-net "
+        "`search_fill_*` overrides and a `route_cell_has_geometry` pre-check "
+        "-- no arithmetic of their own. Migrated, on the same two readings as "
+        "group 4: 0.0% over-rejection is a hard gate, and the under-rejection "
+        "cell (`seg-seg` and `seg-via`, since the widening above retired) is "
+        "asserted to be entirely the 0.15-0.20 mm "
         "`trace_clearance`-versus-`Default`-netclass band (#5398 / #5654) "
         "rather than geometry. At kicad-cli's own clearance this consumer "
-        "agrees in both directions. Both halves of the refinement move onto "
-        "the shared kernel in Phase 3b (#5661)."
+        "agrees in both directions."
     ),
     6: (
         "Both halves driven (Python `FixedFillObstacles` + native "
@@ -1143,8 +1160,11 @@ def render_document(
         "covered it at its corner); this row still rejects because the "
         "adapter grows DQ3's halo too and the two discs touch (#5410) |",
         "| `search-vs-commit-seg-via-max` | clean (project `Default` class "
-        "0.15 mm) | route-halo geometry **rejects** via "
-        "`max(required, via_clearance)`; commit gates **accept** |",
+        "0.15 mm) | route-halo geometry used to **reject** via "
+        "`max(required, via_clearance)` while the commit gates **accept**; "
+        "since Phase 3b (#5661) both resolve the same 0.15 mm through the "
+        "shared kernel and **accept**, and this fixture is the guard that a "
+        "consumer does not re-derive its own `max(...)` |",
         "| `roundrect-corner-gap` | clean (0.22 mm to the exact outline) | "
         "the router's rectangle-bounded pad model **rejects** (0.1164 mm to "
         "the bounding rectangle); `kct check`'s polygon model **accepts** |",

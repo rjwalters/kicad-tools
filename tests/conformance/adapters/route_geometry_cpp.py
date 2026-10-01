@@ -33,13 +33,17 @@ in this phase" guard), so the delta this row does not see is:
 * the ``route_cell_has_geometry`` gate, which can only make the wrapper
   *stricter* (an unknown cell is refused outright), never more permissive.
 
-**Expected disagreement: the ``max(via_clearance, ...)`` widening.**  For a
-*trace* candidate against a stored via, ``route_trace_geometry_clear``
-compares the gap against ``max(via_clearance, required)`` -- the via rule, not
-the trace rule -- which is the same search-side widening group 4's row
-carries and which the ``search-vs-commit-seg-via-max`` fixture reproduces.
-The commit gates (groups 12 / 13) use ``trace_clearance`` for the same pair,
-so the two stages disagree about identical copper.
+**Before Epic #5509 Phase 3b (#5661): the ``max(via_clearance, ...)``
+widening.**  For a *trace* candidate against a stored via,
+``route_trace_geometry_clear`` used to compare the gap against
+``max(via_clearance, required)`` -- the via rule, not the trace rule -- which
+was the same search-side widening group 4's row carried and which the
+``search-vs-commit-seg-via-max`` fixture reproduces.  The commit gates
+(groups 12 / 13) use ``trace_clearance`` for the same pair, so the two stages
+used to disagree about identical copper.  #5661 switched all three
+``Grid3D`` predicates below onto the shared clearance kernel and retired that
+widening, so this row now agrees with ground truth; see
+``report.MIGRATED_GROUPS`` and ``report.NOTES[5]``.
 
 **Pair kinds: routed copper only.**  Neither ``route_*_geometry_clear``
 consults ``pads_`` -- they walk ``stored_segments_`` and ``stored_vias_`` and
@@ -110,11 +114,13 @@ class RouteGeometryCppAdapter:
         case's own, because they feed a requirement kicad-cli scores under a
         different verdict kind and ``project_clearance`` says nothing about.
 
-        With the rule axis pinned, the ``max(via_clearance, required)``
-        widening this row's docstring describes becomes inert -- both terms are
-        the same number -- so what remains measurable is the refinement's
-        geometry, which is exactly what #5410 repaired and what
-        ``tests/conformance/test_route_halo_refinement_gate.py`` gates.
+        Before #5661 the (now-retired) ``max(via_clearance, required)``
+        widening this row's docstring describes became inert once the rule
+        axis was pinned -- both terms were the same number -- so what remained
+        measurable was the refinement's geometry, which is exactly what #5410
+        repaired. That is still true now that the widening itself is gone:
+        this reading is what ``test_corpus.py`` hard-gates now that this group
+        is in ``report.MIGRATED_GROUPS`` (Epic #5509 Phase 3b, #5661).
         """
         return self._verdicts(case, project_rules(case))
 

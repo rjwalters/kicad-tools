@@ -172,7 +172,14 @@ def test_bounds_prune_matches_exhaustive_scan(seed, pairwise, monkeypatch):
 
 
 def test_bounds_prune_keeps_cross_bin_via_clearance(monkeypatch):
-    """The #5240 prune must not undo the cross-bin lookup pinned by #5425."""
+    """The #5240 prune must not undo the cross-bin lookup pinned by #5425.
+
+    Issue #5661: driven with ``trace_clearance`` rather than ``via_clearance``
+    -- the kernel switch retired the ``max(required, via_clearance)`` widening
+    for trace-vs-via pairs, so only the pair's own resolved requirement
+    (``trace_clearance`` here) can push the verdict past "clear" once the via
+    is found across the 2 mm bin boundary.
+    """
     rules = DesignRules(
         trace_width=0.2,
         trace_clearance=0.15,
@@ -191,7 +198,7 @@ def test_bounds_prune_keeps_cross_bin_via_clearance(monkeypatch):
     grid.mark_route(route)
     router = Router(grid, rules)
     router.set_net_name_to_id({"N1": 1, "N2": 2})
-    router.rules.via_clearance = 2.0
+    router.rules.trace_clearance = 2.0
     segment = Segment(5.5, y, 5.5, y + 0.1, 0.2, Layer.F_CU, 1)
     assert not grid._route_halo.clear(segment, router)
     monkeypatch.setattr(route_halo_geometry, "_PRUNE_BY_BOUNDS", False)

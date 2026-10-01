@@ -291,6 +291,17 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # candidate segment against ``trace_clearance`` (0.15) and accept it -- and
     # so does every other consumer whose threshold is the trace rule.  The
     # kernel, resolving the project's own 0.20 mm, agrees with kicad-cli.
+    #
+    # Epic #5509 Phase 3b (#5661) flipped ``route_halo`` / ``route_geometry_cpp``
+    # from REJECT to ACCEPT here, and that flip is the whole point of the phase:
+    # the search-time refinement used to widen a trace-vs-via requirement to
+    # ``max(required, via_clearance)`` = 0.20 and so rejected a pair its own
+    # commit gates accept at 0.15.  On the kernel it resolves the same 0.15 the
+    # commit gates do, so search and commit now give one answer.  Against
+    # kicad-cli that answer is an UNDER-rejection at the consumer's own rule
+    # values -- the #5398/#5654 rule-resolution gap no Phase 3 PR may close --
+    # and ``test_named_fixture_adapter_agrees_with_kicad_cli`` drives these two
+    # migrated rows at the project's own 0.20 mm, where they reject and agree.
     "issue5398-seg-via-0p18-order": (
         ("clearance_kernel", True),
         ("diffpair", True),
@@ -303,8 +314,8 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("occupancy", True),
         ("grid_cpp_marking", True),
         ("cpp_blocked_kernel", True),
-        ("route_halo", True),
-        ("route_geometry_cpp", True),
+        ("route_halo", False),
+        ("route_geometry_cpp", False),
         ("optimizer_collision", True),
         ("match_group", True),
         ("kct_check", True),
@@ -320,8 +331,11 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # now stamps, where the Chebyshev square covered it at a corner (pinned in
     # `tests/router/test_halo_kernel_geometry.py`).  This adapter still says
     # REJECT because its rule dilates the *candidate* as well, and two
-    # six-cell discs 6.40 cells apart still intersect.  Flipping this to
-    # ACCEPT is Phase 3b's refinement work (groups 4/5), not halo geometry.
+    # six-cell discs 6.40 cells apart still intersect.  What rescues the
+    # candidate in production is the refinement pass (groups 4/5), which
+    # accepts it here and does so through the shared kernel since Phase 3b
+    # (#5661) -- not a finer halo, so these cell-set rows stay REJECT and stay
+    # pinned in ``FIXTURE_QUANTISATION_LEDGER``.
     "issue5410-dqs-n-halo-vs-legal-via": (
         ("clearance_kernel", False),
         ("diffpair", False),
@@ -337,15 +351,21 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("kct_check", False),
     ),
     # kicad-cli finds this CLEAN (project Default class is 0.15 mm here).
-    # Search-time refinement raises the bar to max(required, via_clearance) --
-    # group 4's Python path and group 5's C++ path both do it -- while the
-    # commit gates accept.
+    # Search-time refinement USED TO raise the bar to
+    # max(required, via_clearance) -- group 4's Python path and group 5's C++
+    # path both did -- while the commit gates accepted.  That is the asymmetry
+    # this fixture was captured for, and Epic #5509 Phase 3b (#5661) removed
+    # it: both now ask the shared kernel for the same 0.15 mm verdict the
+    # commit gates resolve, so both ACCEPT and agree with kicad-cli.  The
+    # prediction is kept (rather than the fixture deleted) because it is the
+    # regression guard: a future consumer that re-derives its own ``max(...)``
+    # would turn these two rows back to REJECT and redden here.
     "search-vs-commit-seg-via-max": (
         ("clearance_kernel", False),
         ("diffpair", True),
         ("lattice", False),
-        ("route_halo", True),
-        ("route_geometry_cpp", True),
+        ("route_halo", False),
+        ("route_geometry_cpp", False),
         ("grid_py", False),
         ("grid_cpp", False),
         ("via_clearance", False),

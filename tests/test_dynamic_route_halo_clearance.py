@@ -275,7 +275,12 @@ def test_trace_refinement_checks_swept_step_not_only_endpoints():
     native._impl.add_stored_via(vx, vy, 0.3, 0.6, 2)
     native._impl.mark_via(gx, gy, 2, 6)
     pathfinder._impl.set_search_pair_widths(0.075, 0.3)
-    pathfinder._impl.set_search_fill_clearances(0.1, 0.2)
+    # Issue #5661: both clearances set to 0.2 (not 0.1/0.2) so the swept-vs-
+    # point distinction under test is driven by the pair's own resolved
+    # requirement rather than the retired ``max(required, via_clearance)``
+    # widening -- the real geometric gap is ~0.2025 mm from either endpoint
+    # alone but ~0.199 mm from the swept segment between them.
+    pathfinder._impl.set_search_fill_clearances(0.2, 0.2)
     # Both endpoints clear the 0.575 mm centerline limit. The interior doesn't.
     assert not pathfinder._impl.is_trace_blocked(55, 56, 2, 1, False, 2)
     assert not pathfinder._impl.is_trace_blocked(56, 56, 2, 1, False, 2)
@@ -441,17 +446,38 @@ def test_stored_geometry_uses_the_python_mark_coordinates_at_half_cells(kind):
 
 
 @pytest.mark.parametrize("sharing", [False, True])
-def test_trace_halo_preserves_larger_via_clearance(sharing):
-    # 0.168 mm copper gap clears the trace rule (0.15), but not the via
-    # rule (0.20). Board02 produced this class of segment-to-via violation.
+def test_trace_halo_ignores_via_clearance_for_seg_via_pairs(sharing):
+    """Issue #5661: a trace-vs-via requirement tracks ``trace_clearance`` only.
+
+    0.168 mm copper gap clears the trace rule (0.15) but not the (retired)
+    via-clearance override (0.20) that board02's class of segment-to-via
+    violation used to be measured against. Before this phase
+    ``route_trace_geometry_clear`` separately widened a trace candidate's
+    seg-via requirement to ``max(required, via_clearance)`` -- stricter than
+    the commit-time validator for the identical pair, which applies the
+    resolved ``clearance`` and never ``via_clearance`` here. Switching onto
+    the shared kernel means ``via_clearance`` alone can no longer move this
+    verdict.
+    """
     _, _, pathfinder = _context()
     pathfinder._impl.set_search_fill_clearances(0.15, 0.15)
     assert not pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
     pathfinder._impl.set_search_fill_clearances(0.15, 0.2)
-    assert pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
+    assert not pathfinder._impl.is_trace_blocked(58, 56, 2, 1, sharing, 2)
 
 
-def test_trace_via_clearance_expands_geometry_lookup_across_bins():
+def test_trace_clearance_expands_geometry_lookup_across_bins():
+    """The bins-based search margin still reaches a cross-bin via (#5425).
+
+    Issue #5661: the margin's own ``max(clearance, via_clearance, ...)``
+    still includes ``via_clearance`` (a conservative widening of the
+    *search*, never of the *verdict*), but the verdict a found via is held to
+    is now purely the trace's own resolved ``clearance`` -- not a
+    via-specific override. Driving the gap past that requirement with
+    ``clearance`` itself (rather than ``via_clearance``, as before #5661)
+    keeps this test's property: a via only reachable across a 2 mm bin
+    boundary is still found and still measured exactly.
+    """
     from kicad_tools.router import router_cpp
 
     grid, native, _ = _context()
@@ -460,4 +486,4 @@ def test_trace_via_clearance_expands_geometry_lookup_across_bins():
     segment.x1 = segment.x2 = 5.5
     segment.y1, segment.y2 = y, y + 0.1
     segment.width, segment.layer, segment.net = 0.2, 2, 1
-    assert not native._impl.route_trace_geometry_clear(segment, 0.15, -1, -1, 2.0)
+    assert not native._impl.route_trace_geometry_clear(segment, 2.0, -1, -1, 0.15)
