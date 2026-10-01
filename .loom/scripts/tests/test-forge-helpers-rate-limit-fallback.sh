@@ -133,6 +133,13 @@ echo ""
 echo "Testing forge_gh_*_rl_safe REST-fallback wrappers..."
 
 STUB_DIR=$(mktemp -d)
+# #9548: every wrapper vets its repo through the write scope first. The suite
+# runs from a checkout registered as owner/repo (origin, .loom/, push reported
+# to the permission probe), so the real decision admits it.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
 ARGV_LOG="$STUB_DIR/argv.log"
 GH_MODE_FILE="$STUB_DIR/mode.txt"
 # Captures the JSON body a `gh api ... --input -` call reads from stdin, so
@@ -330,16 +337,19 @@ rest_call_count="$(grep -c "^api " "$ARGV_LOG" || true)"
 assert_eq "1" "$rest_call_count" \
     "forge_gh_create_issue_rl_safe REST fallback is a SINGLE call (no create-then-label)"
 
-# Empty NWO -> gh's literal {owner}/{repo} placeholder, which gh expands from
-# the git remote with zero API calls (never `gh repo view`, itself GraphQL).
+# Empty NWO -> the repo `loom_write_repo` vetted, named explicitly (#9548).
+# The old `{owner}/{repo}` placeholder is exactly what #9548 removed from write
+# paths: gh expands it from an `upstream` remote in preference to `origin`.
+# (Production vetting resolves the target from git config and probes over REST,
+# so this path still makes no GraphQL call.)
 _run_stubbed ratelimited forge_gh_create_issue_rl_safe "" "T" "B" >/dev/null 2>&1
 TESTS_RUN=$((TESTS_RUN + 1))
-if grep -qF "api --method POST repos/{owner}/{repo}/issues" "$ARGV_LOG"; then
+if grep -qF "api --method POST repos/owner/repo/issues" "$ARGV_LOG" && ! grep -qF "{owner}" "$ARGV_LOG"; then
     TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe uses the zero-API-call {owner}/{repo} placeholder when NWO is empty"
+    echo -e "  ${GREEN}PASS${NC}: forge_gh_create_issue_rl_safe names the vetted repo (never {owner}/{repo}) when NWO is empty"
 else
     TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe must use the {owner}/{repo} placeholder when NWO is empty"
+    echo -e "  ${RED}FAIL${NC}: forge_gh_create_issue_rl_safe must name the vetted repo, not {owner}/{repo}, when NWO is empty"
 fi
 assert_eq "[]" "$(jq -c '.labels' "$API_STDIN_LOG")" \
     "forge_gh_create_issue_rl_safe REST payload uses an empty labels array when no labels are given"

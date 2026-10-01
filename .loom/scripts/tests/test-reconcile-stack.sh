@@ -50,6 +50,13 @@ RECONCILE="$SCRIPTS_DIR/reconcile-stack.sh"
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "reconcile-stack"
+# #9548: this suite's subject vets its write target (`forge may-write`)
+# first; that decision is not what this suite tests (test-write-scope.sh does),
+# and without this the outcome would depend on the host's loom-daemon.
+WS_STUB_DIR="$(mktemp -d)"
+# shellcheck source=lib/write-scope-stub.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-stub.sh"
+write_scope_allow_all "$WS_STUB_DIR"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -302,7 +309,7 @@ assert_not_contains "$RUN_OUT" "still exists" \
   "A: no false 'origin/<parent> still exists' warning on a stale local ref"
 
 # The base retarget was attempted via gh.
-assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --base main" \
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
   "A: child PR base retargeted to the default branch"
 
 teardown_sandbox
@@ -411,7 +418,7 @@ assert_eq "$LOCAL_CHILD_SHA" "$REMOTE_CHILD_SHA" \
   "C: origin/$CHILD_BR actually equals the local child tip after the 'rejected' push"
 
 # The base retarget still ran (script proceeded past the false rejection).
-assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --base main" \
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
   "C: child PR base still retargeted after the race was detected"
 
 teardown_sandbox
@@ -543,7 +550,7 @@ assert_eq "C-own-commit" "$CHILD_LOG_G" "G: child branch carries ONLY its own co
 FULL_LOG_G="$(git_q -C "$MAIN" log --format=%s)"
 assert_not_contains "$FULL_LOG_G" "P-original" "G: parent's pre-squash commit was stripped by the rebase"
 assert_contains "$FULL_LOG_G" "P-squash" "G: child now sits on main's squashed parent commit"
-assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --base main" \
+assert_contains "$(cat "$GH_EDIT_LOG")" "pr edit $CHILD_PR --repo owner/repo --base main" \
   "G: child PR base retargeted to the default branch via the pinned-ref fallback"
 
 teardown_sandbox

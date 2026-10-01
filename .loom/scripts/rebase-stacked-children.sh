@@ -120,6 +120,10 @@ source "$SCRIPT_DIR/lib/push-lease-verify.sh"
 source "$SCRIPT_DIR/lib/default-branch.sh"
 
 REPO_NWO="$(forge_get_repo_nwo "gh" 2>/dev/null || true)"
+# #9548: a real run pushes child branches and comments on child PRs, so it acts
+# only on a repo this installation manages and can write. forge_get_repo_nwo is
+# `gh repo view`, which prefers an `upstream` remote; the vetted repo replaces it.
+[[ "$DRY_RUN" == "true" ]] || REPO_NWO="$(loom_write_repo "${LOOM_REPO:-}")" || { err "Refusing: loom-daemon forge may-write refused this checkout's repo (#9548)."; exit 1; }
 
 # ---- core reconciliation functions (extracted by tests) ----
 # Execute a mutating command, or (under --dry-run) print what would run without

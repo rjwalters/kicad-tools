@@ -346,7 +346,8 @@ source "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-merge-method.sh"
 # message "head out of date".
 forge_merge_pr() {
   local nwo="$1" pr_number="$2"
-  local expected_head_sha="${3:-}" merge_method="${4:-merge}"
+  # #9548: refuse (and name the vetted repo) unless this installation may write there.
+  local expected_head_sha="${3:-}" merge_method="${4:-merge}"; nwo="$(loom_write_repo "$nwo")" || return 1
 
   if [[ "$FORGE_TYPE" == "gitea" ]]; then
     forge_split_nwo "$nwo"
@@ -1120,6 +1121,24 @@ _forge_nwo_from_remote() {
   printf '%s' "$nwo"
 }
 
+# loom_write_repo [OWNER/REPO] -> Loom writes only to repos it manages (#9548).
+# Prints the OWNER/REPO a comment, label edit, merge or lease write may name
+# (callers pass it as --repo / repos/OWNER/REPO), or the reason on stderr and
+# returns 1. With no argument the target is what gh resolves from this
+# checkout, which must be its origin: gh prefers an `upstream` remote, so a fork
+# checkout would otherwise write to the upstream project. The decision is
+# `loom-daemon forge may-write` (loom-daemon/src/write_scope.rs: managed repo +
+# the credential has WRITE). See .loom/docs/comment-trust.md.
+# requires-daemon: forge optional   With no binary, or one predating `may-write` (any exit but 0/1, or 0 without OWNER/REPO on stdout), the fallback allows a write only when the checkout's ONLY remote is origin, only to origin, and GH_REPO is unset or origin: it cannot check permission, but it cannot reach any repository but the one this Loom checkout was cloned from.
+# Five dense body lines on purpose: this file is frozen by the file-size ratchet.
+loom_write_repo() {
+  local want="${1:-}" out rc=0 err origin; err="$(mktemp)"; origin="$(_forge_nwo_from_remote)" || origin=""
+  if [[ -n "$want" ]]; then out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge may-write --repo "$want" 2>"$err")" || rc=$?; else out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge may-write 2>"$err")" || rc=$?; fi
+  [[ $rc -ne 1 ]] || { echo "write-scope: refusing the write: $(cat "$err")" >&2; rm -f "$err"; return 1; }; rm -f "$err"; [[ $rc -ne 0 || "$out" != */* ]] || { printf '%s\n' "$out"; return 0; }
+  if [[ -n "$origin" && "$(git remote 2>/dev/null)" == "origin" && ( -z "$want" || "$want" == "$origin" ) && ( -z "${GH_REPO:-}" || "$GH_REPO" == "$origin" ) ]]; then printf '%s\n' "$origin"; return 0; fi
+  echo "write-scope: refusing the write${want:+ to $want}: loom-daemon forge may-write is unavailable, and without it only a checkout whose one remote is origin may write, and only to origin${origin:+ ($origin)}" >&2; return 1
+}
+
 # _forge_gh_app_fresh_token <owner/repo> -> echoes a FRESHLY minted
 # installation token (cache bypassed), or returns 1 when no GitHub App is
 # configured on this host / the mint failed. Returning 1 is the common,
@@ -1428,7 +1447,7 @@ forge_gh_repo_safe() {
 # Returns 0 on success (either path), 1 on failure (message on stderr).
 forge_gh_comment_rl_safe() {
   local nwo="$1" number="$2" body="$3"
-  local out
+  local out; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
   if out=$(forge_gh_perm_safe issue comment "$number" --repo "$nwo" --body "$body" 2>&1); then
     return 0
   fi
@@ -1448,7 +1467,7 @@ forge_gh_comment_rl_safe() {
 # Usage: forge_gh_reopen_issue_rl_safe NWO ISSUE_NUMBER
 forge_gh_reopen_issue_rl_safe() {
   local nwo="$1" issue_num="$2"
-  local out
+  local out; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
   if out=$(gh issue reopen "$issue_num" --repo "$nwo" 2>&1); then
     return 0
   fi
@@ -1471,7 +1490,7 @@ forge_gh_reopen_issue_rl_safe() {
 # Usage: forge_gh_swap_label_rl_safe NWO ISSUE_NUMBER REMOVE_LABEL ADD_LABEL
 forge_gh_swap_label_rl_safe() {
   local nwo="$1" issue_num="$2" remove_label="$3" add_label="$4"
-  local out
+  local out; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
   if out=$(forge_gh_perm_safe issue edit "$issue_num" --repo "$nwo" \
       --remove-label "$remove_label" --add-label "$add_label" 2>&1); then
     return 0
@@ -1503,7 +1522,7 @@ forge_gh_swap_label_rl_safe() {
 # Usage: forge_gh_remove_label_rl_safe NWO ISSUE_NUMBER LABEL
 forge_gh_remove_label_rl_safe() {
   local nwo="$1" issue_num="$2" label="$3"
-  local out
+  local out; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
   if out=$(forge_gh_perm_safe issue edit "$issue_num" --repo "$nwo" \
       --remove-label "$label" 2>&1); then
     return 0
@@ -1538,11 +1557,14 @@ forge_gh_remove_label_rl_safe() {
 # half-fail, leaving an unlabelled issue that no role's queue query finds.
 #
 # NWO may be the empty string, meaning "the repo of the current working
-# directory". That is the preferred form: the REST path then uses `gh api`'s
-# literal `{owner}/{repo}` placeholder, which gh expands from the git remote
-# with ZERO API calls -- unlike `gh repo view --json nameWithOwner`, which is
-# itself GraphQL-backed and so fails first under the very exhaustion this
-# fallback exists for (#4659).
+# directory". Since #9548 that is resolved by `loom_write_repo` before anything
+# is filed: to the checkout's origin, and only when gh resolves there too, the
+# repo is managed here, and the credential can write it. Both paths then name
+# that repo explicitly. The `{owner}/{repo}` placeholder this used to prefer is
+# expanded by gh from an `upstream` remote ahead of `origin`, so it is no
+# longer reached. The resolution itself makes no GraphQL call (git config plus
+# a cached REST probe), which keeps #4659's reason for avoiding
+# `gh repo view --json nameWithOwner` intact.
 #
 # This is the single-sourced recipe referenced by the role prompts that file
 # issues (architect.md, auditor.md, builder-complexity.md, builder-pr.md,
@@ -1576,7 +1598,7 @@ forge_gh_remove_label_rl_safe() {
 # belongs at the point of failure, not in a sibling module the one caller
 # would have to remember to route through.
 forge_gh_create_issue_rl_safe() {
-  local nwo="$1" title="$2" body="$3"
+  local nwo="$1" title="$2" body="$3"; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
   shift 3
   local labels=("$@")
 
@@ -1619,7 +1641,8 @@ forge_gh_create_issue_rl_safe() {
     if [[ -n "$nwo" ]]; then
       rest_path="repos/$nwo/issues"
     else
-      # Literal placeholder — gh expands it from the git remote, no API call.
+      # Unreachable since #9548 (loom_write_repo always yields a repo); kept
+      # only because this frozen file cannot restructure the branch for free.
       rest_path='repos/{owner}/{repo}/issues'
     fi
     if out=$(printf '%s' "$payload" \

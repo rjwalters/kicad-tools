@@ -249,6 +249,11 @@ if [[ "$APPLY" -eq 0 ]]; then
   exit 11
 fi
 
+# #9548: --apply writes Champion markers and labels. Vet the repo first
+# (forge-helpers.sh in a subshell: it sets -e) and name it on every write; a
+# refusal leaves this a report-only MISMATCH.
+WRITE_REPO="$(source "$(dirname "${BASH_SOURCE[0]}")/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}" 2>"$GH_STDERR")" || { emit "MISMATCH" "$REASON; --apply refused: loom-daemon forge may-write: $(tr '\n' ' ' <"$GH_STDERR")"; exit 11; }
+
 # Recover the tier from the "**Goal Alignment**: [Tier N] ..." line Step 3b's
 # template writes into the verdict comment. Heuristic on purpose — this is
 # reading prose an earlier Champion pass wrote, not a machine-parseable
@@ -279,7 +284,7 @@ if [[ -z "$TIER" ]]; then
     exit 0
   fi
 
-  gh issue comment "$ISSUE" --body "<!-- champion:promotion-landed-mismatch -->
+  gh issue comment "$ISSUE" --repo "$WRITE_REPO" --body "<!-- champion:promotion-landed-mismatch -->
 **Champion: Promotion write did not land — escalating**
 
 This issue carries a \`Champion Review: APPROVED\` verdict comment, but \`loom:issue\` was never applied — the label write that was supposed to accompany that verdict silently did not land (#6862). This reconciliation pass could not recover which tier (\`tier:goal-advancing\` / \`tier:goal-supporting\` / \`tier:maintenance\`) the original verdict assigned from its own comment text, so it is routing to an operator to complete the promotion manually rather than guessing.
@@ -290,7 +295,7 @@ This issue carries a \`Champion Review: APPROVED\` verdict comment, but \`loom:i
     emit "ESCALATED" "$REASON; tier unrecoverable and the escalation comment FAILED to post"
     exit 1
   }
-  gh issue edit "$ISSUE" --add-label "loom:operator-only,loom:operator-mechanical" >/dev/null 2>"$GH_STDERR" || {
+  gh issue edit "$ISSUE" --repo "$WRITE_REPO" --add-label "loom:operator-only,loom:operator-mechanical" >/dev/null 2>"$GH_STDERR" || {
     echo "ERROR: failed to add loom:operator-only to #$ISSUE: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   }
   emit "ESCALATED" "$REASON; tier unrecoverable from verdict comment text — routed to loom:operator-only,loom:operator-mechanical"
@@ -298,7 +303,7 @@ This issue carries a \`Champion Review: APPROVED\` verdict comment, but \`loom:i
 fi
 
 # Complete the promotion: add loom:issue + the recovered tier.
-if ! gh issue edit "$ISSUE" --add-label "loom:issue" --add-label "$TIER" >/dev/null 2>"$GH_STDERR"; then
+if ! gh issue edit "$ISSUE" --repo "$WRITE_REPO" --add-label "loom:issue" --add-label "$TIER" >/dev/null 2>"$GH_STDERR"; then
   echo "ERROR: failed to add loom:issue/$TIER to #$ISSUE: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   emit "ESCALATED" "$REASON; the completing label edit FAILED" "$TIER"
   exit 13
@@ -306,7 +311,7 @@ fi
 
 # Verify the write actually landed — the whole point of this script. Never
 # trust the edit's own exit code alone (#6862's root cause).
-VERIFY_JSON="$(gh issue view "$ISSUE" --json labels 2>"$GH_STDERR")" || {
+VERIFY_JSON="$(gh issue view "$ISSUE" --repo "$WRITE_REPO" --json labels 2>"$GH_STDERR")" || {
   echo "ERROR: read-back after completing promotion on #$ISSUE failed: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   emit "ESCALATED" "$REASON; completed the edit but the read-back verification itself failed" "$TIER"
   exit 13
@@ -317,7 +322,7 @@ if ! jq -e '.labels[] | select(.name=="loom:issue")' <<<"$VERIFY_JSON" >/dev/nul
   exit 13
 fi
 
-gh issue comment "$ISSUE" --body "<!-- champion:promotion-landed-completed -->
+gh issue comment "$ISSUE" --repo "$WRITE_REPO" --body "<!-- champion:promotion-landed-completed -->
 **Champion: Promotion completed — reconciled a missing label write**
 
 This issue carried a \`Champion Review: APPROVED\` verdict comment, but \`loom:issue\` had never been applied — the label write that was supposed to accompany that verdict silently did not land (#6862). This reconciliation pass recovered \`$TIER\` from the original verdict's \"Goal Alignment\" line, applied \`loom:issue\` + \`$TIER\`, and confirmed both are present via a read-back.

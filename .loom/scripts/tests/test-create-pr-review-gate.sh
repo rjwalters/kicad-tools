@@ -97,6 +97,12 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
   exit 0
 fi
 
+if [[ "$1" == "api" && "$2" == "repos/owner/repo" ]]; then
+  # The #9548 write-scope permission probe for the registered fixture repo.
+  echo '{"push":true}'
+  exit 0
+fi
+
 if [[ "$1" == "pr" && "$2" == "create" ]]; then
   echo "CREATED" >> "$STUB_DIR_FROM_ENV/created.log"
   echo "https://github.com/owner/repo/pull/9999"
@@ -151,6 +157,21 @@ export LOOM_FORGE_TYPE=github
 export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-check-ok.sh"
 export LOOM_DAEMON_SELF_BIN="$STUB_DIR/daemon"
 
+# create-pr.sh vets its target through the #9548 write scope (loom_write_repo
+# -> `loom-daemon forge may-write`) before it opens anything. The fixture is
+# registered as a repository this installation may write to, so the real
+# decision admits it: a Loom-installed checkout (.loom/) whose only remote,
+# origin, is owner/repo, with the stub gh above answering the permission probe
+# with push. Without a daemon, the shell fallback admits it for the same
+# reason (origin is the only remote). The probe cache stays in the fixture.
+FIXTURE_REPO="$STUB_DIR/repo"
+git init -q "$FIXTURE_REPO"
+git -C "$FIXTURE_REPO" remote add origin https://github.com/owner/repo.git
+mkdir -p "$FIXTURE_REPO/.loom"
+export LOOM_GH_BIN="$STUB_DIR/gh"
+export LOOM_WRITE_SCOPE_CACHE_DIR="$STUB_DIR/write-scope-cache"
+unset GH_REPO LOOM_REPO
+
 reset_fixtures() {
   : > "$STUB_DIR/gh-calls.log"
   : > "$STUB_DIR/daemon-forge-calls.log"
@@ -160,7 +181,7 @@ reset_fixtures() {
 
 run_create_pr() {
   set +e
-  OUTPUT=$("$CREATE_PR" "$@" 2>&1)
+  OUTPUT=$(cd "$FIXTURE_REPO" && "$CREATE_PR" "$@" 2>&1)
   EXIT_CODE=$?
   set -e
 }

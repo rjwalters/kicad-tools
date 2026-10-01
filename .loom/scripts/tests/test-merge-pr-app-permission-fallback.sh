@@ -34,6 +34,8 @@
 #   ./.loom/scripts/tests/test-merge-pr-app-permission-fallback.sh
 
 set -euo pipefail
+# shellcheck source=lib/write-scope-fixture.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -100,8 +102,13 @@ export ATTEMPT_LOG MINT_LOG MODE_FILE MINT_MODE_FILE
 #   other-error   - an unrelated failure (no escalation allowed).
 #   declined      - exit 3, the Gitea "not handled natively" decline.
 #   head-mismatch - exit 4, EX_FORGE_HEAD_MISMATCH.
-cat > "$STUB_DIR/loom-daemon" <<'STUB'
-#!/usr/bin/env bash
+echo '#!/usr/bin/env bash' > "$STUB_DIR/loom-daemon"
+# #9548: the write-scope vetting (`forge may-write`) is NOT logged as an
+# attempt: it goes to a real daemon when WRITE_SCOPE_DAEMON names one
+# (lib/write-scope-fixture.sh), else answers as a pre-verb binary, so the
+# registered fixture repo below is admitted by a real decision either way.
+write_scope_stub_verb_snippet >> "$STUB_DIR/loom-daemon"
+cat >> "$STUB_DIR/loom-daemon" <<'STUB'
 mode="$(cat "$MODE_FILE" 2>/dev/null || echo ok)"
 cred="ambient"
 [[ -n "${GH_TOKEN:-}" ]] && cred="token:${GH_TOKEN}"
@@ -197,6 +204,10 @@ FAKE_REPO="$STUB_DIR/repo"
 mkdir -p "$FAKE_REPO"
 git -C "$FAKE_REPO" init -q
 git -C "$FAKE_REPO" remote add origin "https://github.com/owner/repo.git"
+# #9548: every write here is vetted through the write scope first. The fake
+# repo is registered as owner/repo (origin, .loom/, push reported to the
+# permission probe), so the real decision admits it.
+write_scope_register "$FAKE_REPO" owner/repo
 
 # Runs a ladder invocation inside the fake repo with the stubs on PATH.
 # Usage: _run <mode> <mint-mode> [env-prefix…] <command…>

@@ -331,6 +331,12 @@ else
     error "Could not determine repository from git remote"
   fi
 fi
+# #9548: creating, editing and deleting labels writes to the repo, so a real
+# sync targets only one this installation manages and can write. Without
+# --repo the target must be this checkout's origin (forge_get_repo_nwo above is
+# `gh repo view`, which prefers an `upstream` remote); with --repo it must be a
+# registered workspace's origin. --dry-run and --check only read.
+[[ "$DRY_RUN" -eq 1 || "$CHECK_MODE" -eq 1 ]] || REPO="$(loom_write_repo "$REPO_OVERRIDE")" || error "not syncing labels: loom-daemon forge may-write refused the repo (#9548); to manage it from here, register its checkout as a daemon workspace"
 # Populate FORGE_OWNER / FORGE_REPO for the Gitea API paths.
 forge_split_nwo "$REPO"
 

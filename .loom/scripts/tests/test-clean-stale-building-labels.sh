@@ -16,6 +16,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 TESTS_DIR="$SCRIPT_DIR"
 HELPERS_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 TARGET_SCRIPT="$HELPERS_DIR/clean-stale-building-labels.sh"
@@ -114,6 +116,12 @@ export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
 # forge_detect() short-circuits when FORGE_TYPE is already non-empty.
 export FORGE_TYPE="github"
+
+# #9548: the script vets --repo through the write scope before it writes. It
+# runs from a checkout registered as owner/repo (origin, .loom/, push reported
+# to the permission probe), so the real decision admits it.
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
 
 reset() {
   : > "$STUB_DIR/gh-calls.log"

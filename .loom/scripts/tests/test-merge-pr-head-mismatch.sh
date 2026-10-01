@@ -115,6 +115,13 @@ source "$FORGE_HELPERS_SRC"
 
 STUB_DIR="$(mktemp -d)"
 GH_ARGS_FILE="$(mktemp)"
+# #9548: forge_merge_pr vets its repo through the write scope first. The suite
+# runs from a checkout registered as owner/repo (origin, .loom/, push reported
+# to the permission probe), so the real decision admits it.
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
 trap 'rm -rf "$STUB_DIR"; rm -f "$GH_ARGS_FILE"' EXIT
 
 cat > "$STUB_DIR/gh" <<'STUB'

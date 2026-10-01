@@ -89,6 +89,8 @@
 #   ./.loom/scripts/tests/test-sweep-lease-renew.sh
 
 set -uo pipefail
+# shellcheck source=lib/write-scope-fixture.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
@@ -286,6 +288,11 @@ export PATH="$STUB_DIR:$PATH"
 # shellcheck source=lib/trust-stub.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/trust-stub.sh"
 loom_trust_stub "$STUB_DIR"
+# #9548: The lease write vets its write target through the write scope before it
+# writes. It runs from a checkout registered as acme/widget (origin, .loom/, push
+# reported to the permission probe), so the real decision admits it.
+write_scope_register "$STUB_DIR/checkout" acme/widget
+cd "$STUB_DIR/checkout" || exit 1
 export LOOM_GITHUB_APP_SCRIPT="$STUB_DIR/github-app-token.sh"
 
 reset_state() {

@@ -31,6 +31,8 @@
 #   ./.loom/scripts/tests/test-review-feedback-reconciliation.sh
 
 set -uo pipefail
+# shellcheck source=lib/write-scope-fixture.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
@@ -220,6 +222,11 @@ chmod +x "$STUB_DIR/gh"
 export LOOM_TEST_FIXTURE_DIR="$FIX_DIR"
 export LOOM_FORGE_TYPE="github"
 export PATH="$STUB_DIR:$PATH"
+# #9548: post-verdict.sh vets its write target through the write scope before it
+# writes. It runs from a checkout registered as owner/repo (origin, .loom/, push
+# reported to the permission probe), so the real decision admits it.
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
 
 printf '{"head":{"sha":"%s"}}\n' "$HEAD_SHA" > "$FIX_DIR/pr.json"
 
@@ -481,6 +488,9 @@ reset_fixtures
 ISOLATED="$WORK_DIR/isolated"
 mkdir -p "$ISOLATED"
 cp "$POST_VERDICT" "$ISOLATED/post-verdict.sh"
+# lib/ ships with every install; only the gate script is what is missing here.
+# post-verdict.sh needs lib/forge-helpers.sh to vet its write target (#9548).
+cp -R "$(dirname "$POST_VERDICT")/lib" "$ISOLATED/lib"
 set +e
 PV_OUT=$("$ISOLATED/post-verdict.sh" 5369 approved "$HEAD_SHA" --body "Approved." 2>&1)
 PV_RC=$?

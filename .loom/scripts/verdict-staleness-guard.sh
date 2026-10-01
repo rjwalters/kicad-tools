@@ -284,6 +284,16 @@ for bin in gh jq; do
   command -v "$bin" >/dev/null 2>&1 || { echo "ERROR: '$bin' not found on PATH" >&2; exit 1; }
 done
 
+# Loom writes only to repos it manages (#9548). --clear/--anchor are vetted
+# once, up front: a refusal turns them into a report-only run (the REASON says
+# why) and every write below names the vetted repo explicitly, so gh's
+# preference for an `upstream` remote can never redirect one.
+# The helper prints only the repo on success and only the reason on failure,
+# so one capture serves both. forge-helpers.sh is sourced in the subshell
+# because it turns on `set -e`, which this script does not run under.
+WRITE_REPO="" WRITE_BLOCK=""
+if [[ "$CLEAR" -eq 1 || "$ANCHOR" -eq 1 ]] && ! WRITE_REPO="$(source "$(dirname "${BASH_SOURCE[0]:-$0}")/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}" 2>&1)"; then WRITE_BLOCK="loom-daemon forge may-write: $(printf '%s' "$WRITE_REPO" | tr '\n' ' ')"; WRITE_REPO=""; CLEAR=0; ANCHOR=0; fi
+
 # The two terminal verdict labels and the marker `verdict=` token each one is
 # recorded under. Kept as parallel lookups rather than one map so this stays
 # POSIX-ish bash 3.2 compatible (macOS ships bash 3.2 — no associative arrays).
@@ -299,7 +309,7 @@ emit() {
   local decision="$1" reason="$2" head_sha="$3" verdict_label="$4" marker_sha="$5" cleared="$6"
   local anchored="${7:-0}"
   echo "DECISION=$decision"
-  echo "REASON=$reason"
+  echo "REASON=$reason${WRITE_BLOCK:+; --clear/--anchor suppressed, $WRITE_BLOCK}"
   echo "HEAD_SHA=$head_sha"
   echo "VERDICT_LABEL=$verdict_label"
   echo "MARKER_SHA=$marker_sha"
@@ -484,7 +494,7 @@ if [[ -z "$MARKER_SHA" ]]; then
       exit 11
     fi
 
-    gh pr comment "$PR" --body "<!-- loom:verdict-sha sha=$HEAD_SHA verdict=$VERDICT_TOKEN -->
+    gh pr comment "$PR" --repo "$WRITE_REPO" --body "<!-- loom:verdict-sha sha=$HEAD_SHA verdict=$VERDICT_TOKEN -->
 **Verdict anchored to the current head — no marker had been recorded**
 
 This PR carries \`$VERDICT_LABEL\`, but no verdict-SHA marker was ever written for that verdict, so it was **unverifiable**: nothing could tell whether it still described the tree in front of it, and it would have survived a force-push undetected — the exact pre-#5686 hazard.
@@ -585,7 +595,7 @@ if [[ "$CLEAR" -eq 1 ]]; then
       <<<"$COMMENTS_JSON" 2>/dev/null || echo 0)"
 
     if [[ "${ALREADY_ANNOUNCED:-0}" -eq 0 ]]; then
-      gh pr comment "$PR" --body "$STALE_MARKER
+      gh pr comment "$PR" --repo "$WRITE_REPO" --body "$STALE_MARKER
 **Stale review verdict cleared — head SHA moved**
 
 This PR's \`$VERDICT_LABEL\` verdict was rendered against \`$MARKER_SHA\`, but the current head is \`$HEAD_SHA\`. A review verdict is a statement about a specific tree, so it does not survive a rebase, a force-push, or new commits.
@@ -629,7 +639,7 @@ Judge will re-evaluate the tree that is actually here now. No judgment about the
         EDIT_ARGS+=(--remove-label "$companion")
       fi
     done
-    if gh pr edit "$PR" "${EDIT_ARGS[@]}" >/dev/null 2>"$GH_STDERR"; then
+    if gh pr edit "$PR" --repo "$WRITE_REPO" "${EDIT_ARGS[@]}" >/dev/null 2>"$GH_STDERR"; then
       CLEARED=1
       REASON="$REASON; cleared and re-queued as loom:review-requested"
     else

@@ -42,6 +42,14 @@ echo "Testing _extract_host..."
 
 # Need to source the library
 source "$HELPERS_DIR/lib/forge-helpers.sh"
+# #9548: the write wrappers vet their repo through the write scope first. The
+# suite runs from a checkout registered as owner/repo (origin, .loom/, push
+# reported to the permission probe), so the real decision admits it.
+WS_FIXTURE_DIR="$(mktemp -d)"
+# shellcheck source=lib/write-scope-fixture.sh
+source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
+write_scope_register "$WS_FIXTURE_DIR" owner/repo
+cd "$WS_FIXTURE_DIR"
 
 # Reset state for testing
 FORGE_TYPE=""

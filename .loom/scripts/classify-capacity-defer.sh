@@ -279,7 +279,12 @@ _patch_streak() {
         return 0
     fi
 
-    if gh api --method PATCH "repos/{owner}/{repo}/issues/comments/$comment_id" -f body="$new_body" >/dev/null 2>&1; then
+    # #9548: PATCH only a repo this installation manages and can write, by
+    # name (never `{owner}/{repo}`, which gh expands from `upstream` first);
+    # forge-helpers.sh in a subshell because it sets -e.
+    local write_repo
+    write_repo="$(source "$(dirname "${BASH_SOURCE[0]}")/lib/forge-helpers.sh" && loom_write_repo "${REPO_NWO:-}")" || { warn "not PATCHing the capacity-deferral comment on $REPO_NWO#$ISSUE: loom-daemon forge may-write refused the repo (#9548)"; return 1; }
+    if gh api --method PATCH "repos/$write_repo/issues/comments/$comment_id" -f body="$new_body" >/dev/null 2>&1; then
         echo "PATCHED: $REPO_NWO#$ISSUE"
         return 0
     fi

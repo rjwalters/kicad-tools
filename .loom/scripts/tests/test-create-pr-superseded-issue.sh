@@ -23,6 +23,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/write-scope-fixture.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/write-scope-fixture.sh"
 CREATE_PR="$(cd "$SCRIPT_DIR/.." && pwd)/create-pr.sh"
 
 # Colors
@@ -140,6 +142,12 @@ exit 0
 STUB
 chmod +x "$STUB_DIR/version-check-ok.sh"
 export LOOM_VERSION_CHECK_SCRIPT="$STUB_DIR/version-check-ok.sh"
+
+# #9548: create-pr.sh vets its write target through the write scope before it
+# writes. It runs from a checkout registered as owner/repo (origin, .loom/, push
+# reported to the permission probe), so the real decision admits it.
+write_scope_register "$STUB_DIR/checkout" owner/repo
+cd "$STUB_DIR/checkout"
 
 reset_fixtures() {
   : > "$STUB_DIR/gh-calls.log"

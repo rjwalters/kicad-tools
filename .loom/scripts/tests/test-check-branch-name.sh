@@ -491,6 +491,7 @@ cat > "$MP/bin/gh" <<EOF
 case "\$*" in
   *"repo view"*)   echo '{"nameWithOwner":"loom/test","defaultBranchRef":{"name":"main"}}' ;;
   *"auth status"*) exit 0 ;;
+  "api repos/loom/test --jq"*) echo '{"push":true}' ;;
   *"pr merge"*|*"-X PUT"*|*"--method PUT"*)
                    echo "MERGE-ATTEMPTED \$*" >> "$MP/gh-calls.log"; echo '{}' ;;
   *)               echo '{"state":"open","merged":false,"mergeable":true,"title":"t","number":1,"labels":[{"name":"loom:pr"}],"head":{"ref":"$MP_EVIL","sha":"deadbeef"},"base":{"ref":"main"}}' ;;
@@ -498,7 +499,18 @@ esac
 EOF
 chmod +x "$MP/bin/gh"
 
+# merge-pr.sh vets its target through the real #9548 write scope before it
+# reaches the ref check, so the fixture is registered as a repository this
+# installation may write to rather than stubbed past the check: its origin
+# names loom/test (the repo the stub gh resolves), it is a Loom-installed
+# checkout (.loom/ above), and the stub gh answers the permission probe with
+# push. With a loom-daemon on PATH the real `forge may-write` decides; without
+# one, the shell fallback admits it because origin is the only remote. Setup
+# pushed to the local bare repo above; nothing after this point fetches.
+git -C "$MP/repo" remote set-url origin https://github.com/loom/test.git
 MP_OUT="$(cd "$MP/repo" && PATH="$MP/bin:$PATH" GH_TOKEN=x \
+    LOOM_GH_BIN="$MP/bin/gh" LOOM_WRITE_SCOPE_CACHE_DIR="$MP/write-scope-cache" \
+    env -u GH_REPO -u LOOM_REPO \
     bash .loom/scripts/merge-pr.sh 1 2>&1)"
 MP_RC=$?
 

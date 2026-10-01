@@ -84,6 +84,8 @@
 #   1 - the `gh pr comment` call failed
 #   2 - invalid arguments (bad PR number, verdict token, or SHA; missing body)
 #   3 - approval refused by the formal-review reconciliation gate (#7647)
+#   4 - refused: the PR's repo is not one this installation may write to
+#       (loom_write_repo, lib/forge-helpers.sh, #9548); nothing was posted
 #
 # NOTE: GitHub-specific (uses `gh pr comment`), like create-pr.sh /
 # merge-pr.sh. On a Gitea forge, post the equivalent comment via that forge's
@@ -92,7 +94,7 @@
 set -uo pipefail
 
 usage() {
-  sed -n '2,86p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
+  sed -n '2,88p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \{0,1\}//'
 }
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -343,4 +345,9 @@ FULL_BODY="$FULL_BODY
 
 <!-- loom:verdict-sha sha=$SHA verdict=$VERDICT -->"
 
-gh pr comment "$PR" --body "$FULL_BODY"
+# Loom writes only to repos it manages (#9548): vet the target, then name it
+# explicitly, so gh's preference for an `upstream` remote cannot redirect the
+# verdict onto another project's PR with the same number. forge-helpers.sh is
+# sourced inside the command substitution because it turns on `set -e`.
+REPO="$(source "$SCRIPT_DIR/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}")" || { echo "post-verdict.sh: not posting the verdict on PR #$PR: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 4; }
+gh pr comment "$PR" --repo "$REPO" --body "$FULL_BODY"

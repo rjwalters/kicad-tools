@@ -168,6 +168,11 @@ fi
 #    own commits onto the pinned commit. Exit 1 = a prerequisite refused and
 #    nothing was mutated; exit 2 = the rebase itself failed.
 # requires-daemon: reconcile-stack >= 0.19.271   #8583 — the reconciliation planner/executor. Declared at this repo's VERSION because the subcommand lands WITH this marker; the first release actually carrying it is the post-merge bump. A binary predating it refuses with clap's "unrecognized subcommand", which this script reports as a precondition failure rather than proceeding
+# #9548: a real run pushes the child and retargets its PR, so it acts only on a
+# repo this installation manages and can write, named on the PR edit.
+# forge-helpers.sh is sourced in the subshell because it sets -e.
+WRITE_REPO=""
+[[ "$DRY_RUN" == "true" ]] || WRITE_REPO="$(source "$SCRIPT_DIR/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}")" || { err "Refusing to reconcile: loom-daemon forge may-write refused this checkout's repo (#9548). Nothing was mutated."; exit 1; }
 RECONCILE_ARGS=(--child-branch "$CHILD_BRANCH" --parent-branch "$PARENT_BRANCH" --default-branch "$DEFAULT_BRANCH" --repo-dir "$PWD")
 [[ "$DRY_RUN" == "true" ]] || RECONCILE_ARGS+=(--rebase)
 # Refuse a too-old binary with the floor and the roll command (#8385) rather
@@ -241,7 +246,7 @@ fi
 # 3. Retarget the child PR's base to the default branch NAME (not the commit —
 #    a PR base is a branch).
 info "Step 3/3: gh pr edit $CHILD_PR --base $DEFAULT_BRANCH"
-if ! run gh pr edit "$CHILD_PR" --base "$DEFAULT_BRANCH"; then
+if ! run gh pr edit "$CHILD_PR" ${WRITE_REPO:+--repo "$WRITE_REPO"} --base "$DEFAULT_BRANCH"; then
     err "Failed to retarget PR #$CHILD_PR base to $DEFAULT_BRANCH. Retarget it manually."
     exit 2
 fi

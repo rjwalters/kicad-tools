@@ -129,3 +129,67 @@ unavailable:
 Role prompts that read forge text carry either the full untrusted-content
 block or a one-line pointer to this page; see
 [`untrusted-external-content.md`](untrusted-external-content.md).
+
+## Loom writes only to repos it manages
+
+The same principle, in the other direction: an installation that can work on
+any public repository must never act as a control plane on one it does not
+manage. GitHub lets any account comment on any public issue, so a write aimed
+at the wrong repository does not fail. Its label edits are refused, but its
+comments, markers included, land.
+
+The wrong repository comes from `gh`, not from any explicit choice. Without
+`--repo`, and for `{owner}/{repo}` and `gh repo view`, `gh` resolves the base
+repository from `GH_REPO`, then a `gh repo set-default` pin, then the remotes
+ranked **`upstream` > `github` > `origin`**. A fork checkout therefore reads
+and writes the upstream project.
+
+A comment, label edit, merge or lease write to `OWNER/REPO` is allowed only
+when all three hold:
+
+1. **Resolved from the checkout, the target is its `origin`.** A checkout
+   that `gh` resolves elsewhere is refused, not redirected, because its reads
+   go there too. If `origin` is the repository Loom manages, pin it:
+   `gh repo set-default OWNER/REPO`.
+2. **The repository is managed:** the `origin` of a workspace in this
+   daemon's registry, or of the Loom-installed checkout the call runs in.
+3. **The credential has WRITE.** A user token needs `push`, `maintain` or
+   `admin`; an App installation token needs the repository in its
+   installation. Probed once per repository per hour
+   (`LOOM_WRITE_SCOPE_TTL_SECS`); when a re-probe cannot answer, a WRITE
+   verified in the last 24 hours still counts, and a definitive "no" never
+   does. On Gitea only rules 1 and 2 apply.
+
+Anything unverifiable is a refusal. Reads are never gated.
+
+- **Daemon:** `loom-daemon/src/write_scope.rs`. Claim reconciliation,
+  quarantine reconciliation, star liveness, sweep dispatch and every
+  scheduled role tick skip a refused workspace, logging the reason once. The
+  `forge issue|pr` write passthroughs and `forge auto-merge` /
+  `disable-auto-merge` vet their target first. The roster heartbeat checks its
+  configured repository; `notify-cleared-blockers` and the stale-check redate
+  take the repository `merge-pr.sh` already vetted; dependency classification
+  resolves `origin` (never gh's preference) or takes its caller's explicit
+  `--repo`. The structural test
+  `write_scope::tests::daemon_write_paths_are_scoped` fails when a new daemon
+  file writes to the forge without being reviewed into its list.
+- **Shell:** `loom-daemon forge may-write [--repo OWNER/REPO]` prints the
+  repository to name on the write (exit 0) or the reason (exit 1).
+  `loom_write_repo` in `lib/forge-helpers.sh` wraps it. Every script that
+  writes uses it and then passes `--repo` or `repos/OWNER/REPO` explicitly:
+  `post-verdict.sh`, `verdict-staleness-guard.sh --clear/--anchor`,
+  `merge-pr.sh`, `create-pr.sh`, `check-promotion-landed.sh --apply`,
+  `check-main-clean.sh`, `claim-staleness.sh`, `classify-capacity-defer.sh`,
+  `clean-stale-building-labels.sh`, `rebase-stacked-children.sh`,
+  `reconcile-stack.sh`, `sync-labels.sh`, the lease publish/renew scripts,
+  and the `forge-helpers.sh` comment, label, reopen, create and merge
+  wrappers. `write_scope::tests::shell_write_paths_are_vetted` fails when a
+  script under `defaults/scripts` writes without it.
+- **Cross-repo writes** (`create-issue.sh --repo X`, `sync-labels.sh --repo
+  X`) now need X to be the origin of a registered workspace. To manage X
+  from here, register its checkout: `loom-daemon workspace add <path>`.
+- **Without the verb** (no `loom-daemon`, or an older one), the permission
+  check cannot run. The fallback allows a write only from a checkout whose
+  one remote is `origin`, only to `origin`, and only with `GH_REPO` unset or
+  equal, so it can never reach another project. A fork checkout therefore
+  cannot write at all until the daemon is rolled.

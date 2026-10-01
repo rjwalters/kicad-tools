@@ -712,10 +712,13 @@ cmd_renew_once() {
     # a retry after the first rung's 403 would see empty stdin and PATCH the
     # lease comment's body to empty. A file survives every rung. `-F` (not
     # `-f`) is still required to expand the `@<path>` reference (#6357).
-    local patch_body_file
+    # #9548: PATCH only a repo this installation manages and can write,
+    # named explicitly rather than through the `{owner}/{repo}` placeholder.
+    local patch_body_file write_repo
+    write_repo="$(loom_write_repo "${LOOM_REPO:-}")" || { echo "ERROR: not renewing lease comment ${candidate_id} on issue #${issue}: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 1; }
     patch_body_file="$(mktemp)"
     printf '%s' "$new_body" > "$patch_body_file"
-    if ! forge_gh_perm_safe api --method PATCH "repos/${repo_path}/issues/comments/${candidate_id}" \
+    if ! forge_gh_perm_safe api --method PATCH "repos/${write_repo}/issues/comments/${candidate_id}" \
         -F "body=@${patch_body_file}" \
         > /dev/null; then
         rm -f "$patch_body_file"

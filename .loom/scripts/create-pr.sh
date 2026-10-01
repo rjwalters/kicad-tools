@@ -375,6 +375,9 @@ fi
 
 # --- Create -----------------------------------------------------------------
 
+# #9548: open the PR only on a repo this installation manages and can write,
+# and name it: with no --repo, gh would pick an `upstream` remote over origin.
+REPO_NWO="$(loom_write_repo "${REPO_NWO:-${LOOM_REPO:-}}")" || { echo "create-pr.sh: not opening a PR for $HEAD_BRANCH: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 1; }
 CREATE_ARGS=(pr create --head "$HEAD_BRANCH" --title "$TITLE" --body "$BODY")
 if [[ -n "$BASE_BRANCH" ]]; then
   CREATE_ARGS+=(--base "$BASE_BRANCH")

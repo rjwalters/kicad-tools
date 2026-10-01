@@ -718,7 +718,14 @@ EOF
 
     local comment_ts comment_err rc=0
     comment_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-    comment_err=$(gh issue comment "$issue_num" --body "$body" 2>&1) || rc=$?
+    # #9548: vet the repo (forge-helpers.sh in a subshell: it sets -e), and
+    # name it; a refusal is logged as a failed breadcrumb like any other.
+    local comment_repo=""
+    if comment_repo="$(source "$(dirname "${BASH_SOURCE[0]}")/lib/forge-helpers.sh" && loom_write_repo "${LOOM_REPO:-}" 2>&1)"; then
+        comment_err=$(gh issue comment "$issue_num" --repo "$comment_repo" --body "$body" 2>&1) || rc=$?
+    else
+        rc=1; comment_err="loom-daemon forge may-write refused the repo (#9548): $comment_repo"
+    fi
     if [[ "$rc" -eq 0 ]]; then
         emit_quarantine_log "{\"event\":\"main-clean.quarantine-comment\",\"ts\":\"$comment_ts\",\"result\":\"posted\",\"issue\":\"$(json_escape "$issue_num")\",\"host\":\"$(json_escape "$host")\",\"stash_commit\":\"$stash_sha\"}"
     else

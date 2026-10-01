@@ -490,7 +490,8 @@ vocabulary (`loom.queue.disposition`'s wire values):
 
 A `workspace_halted` row names its cause on `loom.queue.halt_cause` (#9673):
 the closed-vocabulary `work_finder::halt_cause` token (#9017) — `main_red`,
-`gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `breaker` — so
+`gate_pending`, `token_pool`, `preflight_advisory`, `drain`, `breaker`,
+`write_scope` (#9548) — so
 "which hold is this repo under" is filterable straight from the span, no
 join needed. The attribute is absent on a cause-less legacy row (a
 pre-#9017 caller); the `loom.dispatch.tick`-span join

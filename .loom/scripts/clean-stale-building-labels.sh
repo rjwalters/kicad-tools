@@ -89,6 +89,10 @@ if [[ -z "$REPO_NWO" ]]; then
   echo "ERROR: could not resolve a repo (pass --repo OWNER/NAME)" >&2
   exit 1
 fi
+# #9548: a real run strips labels, so it targets only a repo this installation
+# manages and can write. forge_get_repo_nwo above is `gh repo view`, which
+# prefers an `upstream` remote; the vetted repo replaces it. --dry-run only reads.
+[[ "$DRY_RUN" == "true" ]] || REPO_NWO="$(loom_write_repo "$REPO_NWO_ARG")" || { echo "ERROR: not cleaning labels: loom-daemon forge may-write refused the repo (#9548)" >&2; exit 1; }
 
 if [[ "$FORGE_TYPE" != "github" ]]; then
   echo "ERROR: clean-stale-building-labels.sh only supports GitHub today (FORGE_TYPE=$FORGE_TYPE)" >&2

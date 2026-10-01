@@ -46,6 +46,14 @@ if [[ "${1:-} ${2:-}" == "forge check-branch" ]]; then
     fi
     exit "$rc"
 fi
+# #9548: `forge may-write` goes to a real daemon when WRITE_SCOPE_DAEMON names
+# one (see write-scope-fixture.sh), else answers as a binary predating the
+# verb, which sends loom_write_repo to its shell fallback.
+if [[ "${1:-} ${2:-}" == "forge may-write" ]]; then
+    [[ -n "${WRITE_SCOPE_DAEMON:-}" ]] && exec "$WRITE_SCOPE_DAEMON" "$@"
+    echo "error: unrecognized subcommand 'may-write'" >&2
+    exit 2
+fi
 echo "trust stub: unexpected loom-daemon $*" >&2
 exit 64
 STUB

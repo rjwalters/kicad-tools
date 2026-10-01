@@ -253,6 +253,19 @@ if [[ "$1" == "forge" && "$2" == "trusted-comments" ]]; then
       ((.author_association // "") | ascii_upcase | IN("OWNER","MEMBER","COLLABORATOR"))
       or ((.user.login // "") | test("^loom-fleet-dispatch(-[0-9]+)?\\[bot\\]$")))]'
 fi
+# #9548: --clear/--anchor vet the repo with `forge may-write` before writing.
+# Answered as allowed and logged to scope-calls.log, not daemon-writes.log, for
+# the same reason as trusted-comments above; test-write-scope.sh covers the
+# refusal side.
+if [[ "$1" == "forge" && "$2" == "may-write" ]]; then
+  printf 'SCOPE %s\n' "$*" >> "$STUB_DIR_FROM_ENV/scope-calls.log"
+  if [[ -f "$STUB_DIR_FROM_ENV/scope-deny" ]]; then
+    echo "acme/widgets is not a repository this installation manages" >&2
+    exit 1
+  fi
+  echo "owner/repo"
+  exit 0
+fi
 printf 'DAEMON %s\n' "$*" >> "$STUB_DIR_FROM_ENV/daemon-writes.log"
 if [[ "$1" == "forge" && "$2" == "disable-auto-merge" ]]; then
   if [[ -f "$STUB_DIR_FROM_ENV/daemon-declined" ]]; then
@@ -380,6 +393,7 @@ reset_state() {
     rm -f "$STUB_DIR"/daemon-writes.log "$STUB_DIR"/armed-*
     rm -f "$STUB_DIR"/disarm-fail "$STUB_DIR"/daemon-declined
     rm -f "$STUB_DIR"/trust-calls.log "$STUB_DIR"/trust-verb-missing
+    rm -f "$STUB_DIR"/scope-calls.log "$STUB_DIR"/scope-deny
     rm -f "$STUB_DIR"/tree-calls.log "$STUB_DIR"/tree-identical
     rm -f "$STUB_DIR"/tree-compare-fail "$STUB_DIR"/tree-verb-missing
 }
@@ -1179,6 +1193,29 @@ assert_eq "UNVERIFIABLE" "$(get_field "$OUT" DECISION)" "(t5) DECISION=UNVERIFIA
 assert_eq "" "$COMMENTS_POSTED" "(t5) --anchor suppressed"
 assert_contains "$OUT" "--anchor is suppressed" "(t5) REASON names the suppression"
 
+# (w1) #9548: --clear on a repo this installation may not write to is a
+#      report-only run. The verdict is still judged STALE, but nothing is
+#      written (no label edit, no comment, no disarm) and REASON says why.
+reset_state
+pr_json_armed 265 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-29T01:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-265.json"
+: > "$STUB_DIR/scope-deny"
+run_guard 265 --clear
+assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(w1) Refused write scope: still judged STALE"
+assert_eq "0" "$(get_field "$OUT" CLEARED)" "(w1) CLEARED=0"
+assert_eq "" "$WRITES" "(w1) No label writes"
+assert_eq "" "$COMMENTS_POSTED" "(w1) No comment posted"
+assert_eq "" "$DAEMON" "(w1) No disarm attempted"
+assert_contains "$OUT" "--clear/--anchor suppressed" "(w1) REASON names the suppression"
+assert_contains "$OUT" "not a repository this installation manages" "(w1) ...and the refusal"
+
+# (w2) Allowed: every write names the vetted repo explicitly.
+reset_state
+pr_json 266 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-29T01:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-266.json"
+run_guard 266 --clear
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(w2) Allowed: cleared"
+assert_contains "$WRITES" "--repo owner/repo" "(w2) The label edit names the vetted repo"
 # --- #9576: a tree-identical head move is not a stale verdict ---------------
 #
 # THE #9576 INCIDENT: PR #9541's approval was anchored at 490fb81a8; the #8248

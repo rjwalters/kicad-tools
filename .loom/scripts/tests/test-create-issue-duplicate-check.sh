@@ -57,6 +57,13 @@ SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 # shellcheck source=lib/require-daemon-bin.sh
 source "$TEST_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$SCRIPTS_DIR" "duplicate-scan"
+# #9548: filing vets its repo first (`forge may-write`); that decision is not
+# what this suite tests (test-write-scope.sh does), so the fixture repos are
+# allowed and every other verb still reaches the pinned binary.
+WS_STUB_DIR="$(mktemp -d)"
+# shellcheck source=lib/write-scope-stub.sh
+source "$TEST_DIR/lib/write-scope-stub.sh"
+write_scope_allow_all "$WS_STUB_DIR"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
