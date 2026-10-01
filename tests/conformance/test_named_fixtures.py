@@ -389,6 +389,15 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
     # approximation.  The flip went unnoticed while these rows were
     # auto-xfailed for everyone; since #5660 a migrated group's named-fixture
     # rows are gated like its corpus rows, so the prediction has to be true.
+    #
+    # ``optimizer_collision`` (group 15, Phase 4a / #5854) is the third such
+    # flip, and the only one on a *post-route* consumer.  Both of its checkers
+    # judged pad copper off the raster -- the pad's metal grown by its own
+    # clearance halo, with the candidate grown again by ``width / 2 +
+    # trace_clearance`` -- so it rejected a track 0.22 mm from the true
+    # roundrect outline.  It now measures the pad through the same exact pad
+    # model and ACCEPTS, which is why this row moved from REJECT to ACCEPT in
+    # that phase rather than in a later one.
     "roundrect-corner-gap": (
         ("clearance_kernel", False),
         ("diffpair", False),
@@ -396,7 +405,7 @@ _PREDICTIONS: dict[str, tuple[tuple[str, bool], ...]] = {
         ("grid_cpp", True),
         ("grid_py", True),
         ("occupancy", True),
-        ("optimizer_collision", True),
+        ("optimizer_collision", False),
         ("fixed_copper", False),
         ("match_group", False),
         ("pairwise", False),

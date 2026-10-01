@@ -1,17 +1,47 @@
-"""Collision checking for trace optimization."""
+"""Collision checking for trace optimization.
+
+Epic #5509 Phase 4a (#5854): consumer group 15 -- the post-route trace
+optimizer's two ``CollisionChecker`` implementations -- asks the shared
+exact-geometry clearance kernel
+(:mod:`kicad_tools.router.clearance_kernel`, through the one shared
+primitive-to-shape translation in
+:mod:`kicad_tools.router.clearance_shapes`) for every clearance verdict it
+reaches.  Before this phase the module carried its own
+``distance - half_a - half_b >= required`` arithmetic for routed copper and
+judged *pad* copper straight off the raster, so a shortcut the search and the
+commit gates would both accept could still be refused -- or, in the raster's
+own conservative direction, a legal shortened path was rejected because the
+candidate's clearance envelope touched a pad's clearance envelope, roughly
+twice the real requirement.
+
+What did **not** change (deliberately, per the epic's scope guards):
+
+* **No rule value moves.**  Every requirement handed to the kernel is the one
+  this module already resolved -- ``rules.trace_clearance`` for copper,
+  ``max(trace_clearance, via_clearance)`` for a via.  *Which* value a pair
+  resolves to is Phase 2's axis, not this phase's.
+* **The raster stays the broad phase.**  Bresenham-plus-buffer still selects
+  the cells worth looking at; it no longer gets to pronounce a verdict on a
+  cell whose occupancy can be re-measured from registered geometry
+  (``grid.routes`` for route copper since #5625, ``grid.pads`` for pad copper
+  since this phase).  A cell blocked by something that registers no geometry
+  at all -- a keepout, an obstacle, a region bound, the board-edge band, all
+  reported by :meth:`RoutingGrid.raster_only_blocked_cell` -- keeps its
+  conservative reject, because there is nothing to re-measure it from.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ..geometry import point_to_segment_distance, segment_to_segment_distance
+from ..clearance_shapes import KSegment, pad_shape, segment_shape, shapes_clear, via_shape
 from ..layers import Layer
 from ..primitives import Segment
 
 if TYPE_CHECKING:
     from ..grid import RoutingGrid
-    from ..primitives import Via
+    from ..primitives import Pad, Via
 
 
 def _iter_dilated_line_cells(
@@ -102,45 +132,67 @@ def _iter_dilated_line_cells(
                 yield (gx + cx, lead_y)
 
 
-def _path_clear_of_segment(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    half_width: float,
-    other: Segment,
-    min_clearance: float,
-) -> bool:
+def _candidate_shape(x1: float, y1: float, x2: float, y2: float, width: float) -> KSegment:
+    """The path the optimizer is proposing, as kernel copper.
+
+    Built once per ``path_is_clear`` call and reused for every surviving
+    candidate, the way Phase 3b's ``RouteHaloGeometry.clear`` builds its own
+    (issue #5661).
+
+    The shape carries no layer on purpose.  Every caller in this module has
+    *already* established that the counterpart shares the candidate's layer --
+    the R-tree is indexed per layer, ``_routed_copper_clear`` compares
+    ``seg.layer.value``, ``_pad_copper_clear`` compares the pad's layer index,
+    and vias span every layer -- so leaving the candidate on
+    ``ALL_LAYERS`` lets the kernel's layer gate pass unconditionally rather
+    than re-deciding a filter the caller owns.
+    """
+    return KSegment(x1=x1, y1=y1, x2=x2, y2=y2, width=width)
+
+
+def _path_clear_of_segment(candidate: KSegment, other: Segment, min_clearance: float) -> bool:
     """Exact edge-to-edge clearance between a candidate path and one segment.
 
     Issue #5625: the single narrow phase both checkers in this module use, so
     ``VectorCollisionChecker``'s "drop-in, ~10x faster replacement" claim is
-    true by construction -- the two classes now differ only in how they find
+    true by construction -- the two classes differ only in how they find
     candidates (R-tree query vs. raster walk), never in the arithmetic that
-    decides them.  Transcribed unchanged from the vector checker's own
-    pre-#5625 inline math (``dist - half_width - other.width / 2 <
-    min_clearance`` rejects), so the migration is a refactor on that side.
+    decides them.
+
+    Epic #5509 Phase 4a (#5854): that arithmetic is now the shared clearance
+    kernel's.  The pre-#5854 body subtracted both half widths from a private
+    ``segment_to_segment_distance`` and compared with a bare ``>=``; the
+    kernel subtracts the same two half widths and compares under its own
+    ``CLEARANCE_EPSILON_MM``, so search-time, commit-time and this post-route
+    pass can no longer disagree about the same pair by a rounding epsilon.
     """
-    dist = segment_to_segment_distance(x1, y1, x2, y2, other.x1, other.y1, other.x2, other.y2)
-    return dist - half_width - other.width / 2 >= min_clearance
+    return shapes_clear(candidate, segment_shape(other), min_clearance)
 
 
-def _path_clear_of_via(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    half_width: float,
-    via: Via,
-    via_clearance: float,
-) -> bool:
+def _path_clear_of_via(candidate: KSegment, via: Via, via_clearance: float) -> bool:
     """Exact edge-to-edge clearance between a candidate path and one via.
 
-    The via half of :func:`_path_clear_of_segment`'s contract, with the same
-    arithmetic the vector checker applied inline before issue #5625.
+    The via half of :func:`_path_clear_of_segment`'s contract, on the same
+    kernel.  ``via_clearance`` is whatever the caller resolved -- this phase
+    moves the *geometry* onto the kernel and leaves rule selection alone.
     """
-    dist = point_to_segment_distance(via.x, via.y, x1, y1, x2, y2)
-    return dist - half_width - via.diameter / 2 >= via_clearance
+    return shapes_clear(candidate, via_shape(via), via_clearance)
+
+
+def _path_clear_of_pad(candidate: KSegment, pad: Pad, min_clearance: float) -> bool:
+    """Exact edge-to-edge clearance between a candidate path and one pad.
+
+    New in Epic #5509 Phase 4a (#5854).  There was no pad narrow phase before:
+    both checkers decided pad copper off the raster, where a pad's blocked
+    footprint is its metal grown by the pad's own clearance halo and the
+    candidate is grown again by ``width / 2 + trace_clearance`` -- about twice
+    the requirement, quantised outwards.  :func:`~..clearance_shapes.pad_shape`
+    is the same exact pad model (the Minkowski core port of
+    ``validate/rules/clearance.py``'s ``_pad_polygon``) the migrated diff-pair
+    and mesh consumers measure a foreign pad with, so a roundrect's corner gap
+    is measured rather than approximated by a bounding box.
+    """
+    return shapes_clear(candidate, pad_shape(pad), min_clearance)
 
 
 def _via_spans_layer(grid: RoutingGrid, via: Any, layer_idx: int) -> bool:
@@ -212,15 +264,118 @@ def _soft_cell_is_accountable_route_copper(
     return halo.cell_known(gx, gy, layer_idx) is True
 
 
+def _obstacle_cell_is_accountable_pad_copper(
+    grid: RoutingGrid, gx: int, gy: int, layer_idx: int
+) -> bool:
+    """May this hard-blocked cell be re-decided from exact pad copper?
+
+    Epic #5509 Phase 4a (#5854), and the pad-side twin of
+    :func:`_soft_cell_is_accountable_route_copper`.  ``_add_pad_unsafe``
+    paints a pad's metal *and* its clearance halo into the ``is_obstacle`` /
+    ``pad_blocked`` planes, so a candidate path touching such a cell does not
+    mean the path is within clearance of pad metal -- it means the path's own
+    clearance envelope reached the pad's, roughly twice the real requirement.
+    The raster is a broad phase there too, and the verdict belongs to
+    :func:`_pad_copper_clear`'s exact measurement.
+
+    A cell may only be re-decided when its blockage is fully accounted for by
+    copper that is *registered* and can therefore be re-measured.  Two
+    conditions, together:
+
+    1. :meth:`RoutingGrid.raster_only_blocked_cell` (#5662) says ``False`` --
+       no obstacle, keepout, region bound or board-edge band touched this
+       cell.  None of those register geometry anywhere, so for them the raster
+       mark is the only record and the conservative verdict has to stand.
+       Ruling them out leaves the pad registry as the only production writer
+       of these two planes: ``_add_pad_unsafe`` and the pad-derived
+       ``_mark_isolated_pad_halo`` / ``_apply_narrow_channel_halo``.
+    2. ``grid.pads`` is a **non-empty** tuple.  An empty registry accounts for
+       nothing, so a hard-blocked cell on a grid that has registered no pads
+       at all -- hand-painted fixture state, a grid whose arrays were released
+       -- keeps its pre-#5854 reject rather than being laundered into "clear"
+       by a walk over zero pads.
+
+    Note what this is **not**: a per-cell attribution of the mark to a
+    *particular* pad (the way :meth:`RouteHaloGeometry.cell_known` attributes a
+    soft mark to a particular route halo).  Condition 1 is what rules out every
+    registry-less source; condition 2 is registry-level.  Keeping the
+    distinction visible matters, because it is the one place this predicate is
+    weaker than its route-copper twin.
+
+    Written to fail closed.  ``raster_only_blocked_cell`` is compared with
+    ``is not False`` rather than truth-tested, and ``grid.pads`` must be a real
+    tuple, so a grid that cannot answer either question -- a ``MagicMock`` test
+    double, an older grid object without the plane -- keeps its pre-#5854
+    reject instead of authorising a refinement against a geometry registry that
+    is not there.
+    """
+    raster_only = getattr(grid, "raster_only_blocked_cell", None)
+    if raster_only is None:
+        return False
+    if raster_only(gx, gy, layer_idx) is not False:
+        return False
+    pads = getattr(grid, "pads", None)
+    return isinstance(pads, tuple) and bool(pads)
+
+
+def _pad_copper_clear(
+    grid: RoutingGrid,
+    candidate: KSegment,
+    layer_idx: int,
+    exclude_net: int,
+) -> bool:
+    """Exact clearance of a candidate path against every registered pad.
+
+    Epic #5509 Phase 4a (#5854): the pad narrow phase both checkers in this
+    module reach once the raster has flagged a pad-accountable cell.
+    ``grid.pads`` is the read-only snapshot Phase 3c (#5662) added for exactly
+    this -- migrated consumers need the pad registry to shape it, and reaching
+    into ``grid._pads`` is how two consumers end up holding a mutable list.
+
+    Two filters, both transcriptions of what the raster branch already did
+    rather than new policy:
+
+    * **Own-net pads are skipped**, matching the ``cell.net == exclude_net``
+      carve-out that keeps a route's own destination pad passable.  The filter
+      is applied per PAD, the way :func:`_routed_copper_clear` applies its own
+      per object.  A pad on a skipped pour net keeps ``net == 0`` (issue
+      #2757's rewrite in ``load_pcb_for_routing``) and is therefore foreign to
+      every real net, so it still gates -- which is the whole point of that
+      issue.
+    * **An SMD pad on another layer is skipped**; a through-hole pad is copper
+      on every layer and is not.  Same rule ``_add_pad_unsafe`` marks with.
+
+    The requirement is ``rules.trace_clearance`` -- the same scalar this
+    module already applies to every other foreign object, and the same one the
+    pad halo was built from (``trace_clearance + trace_width / 2``, blocking
+    the trace *centre*; measuring the candidate's own half width exactly is
+    that model without the quantisation and without the second dilation).
+    Per-component and fine-pitch overrides select a *different* value for the
+    halo; which value a pair resolves to is Phase 2's axis and this phase may
+    not move it (scope guard #1).
+    """
+    min_clearance = grid.rules.trace_clearance
+    for pad in grid.pads:
+        if pad.net == exclude_net:
+            continue
+        if not pad.through_hole:
+            try:
+                if grid.layer_to_index(pad.layer.value) != layer_idx:
+                    continue
+            except Exception:
+                # Unresolvable layer: keep the conservative "assume it
+                # blocks" reading ``_via_spans_layer`` already documents.
+                pass
+        if not _path_clear_of_pad(candidate, pad, min_clearance):
+            return False
+    return True
+
+
 def _routed_copper_clear(
     grid: RoutingGrid,
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
+    candidate: KSegment,
     layer: Layer,
     layer_idx: int,
-    width: float,
     exclude_net: int,
 ) -> bool:
     """Exact clearance of a candidate path against every committed route.
@@ -231,7 +386,6 @@ def _routed_copper_clear(
     selected precisely when no R-tree is available, so candidates come from a
     linear walk of ``grid.routes`` instead.
     """
-    half_width = width / 2
     min_clearance = grid.rules.trace_clearance
     via_clearance = max(min_clearance, grid.rules.via_clearance)
     layer_value = layer.value
@@ -244,14 +398,14 @@ def _routed_copper_clear(
         for seg in route.segments:
             if seg.net == exclude_net or seg.layer.value != layer_value:
                 continue
-            if not _path_clear_of_segment(x1, y1, x2, y2, half_width, seg, min_clearance):
+            if not _path_clear_of_segment(candidate, seg, min_clearance):
                 return False
         for via in route.vias:
             if via.net == exclude_net:
                 continue
             if not _via_spans_layer(grid, via, layer_idx):
                 continue
-            if not _path_clear_of_via(x1, y1, x2, y2, half_width, via, via_clearance):
+            if not _path_clear_of_via(candidate, via, via_clearance):
                 return False
     return True
 
@@ -371,6 +525,13 @@ class GridCollisionChecker:
         # meeting is about twice the real requirement) -- the exact narrow
         # phase below decides it, exactly as ``VectorCollisionChecker`` does.
         needs_exact_route_check = False
+        # Epic #5509 Phase 4a (#5854): the same deferral for a cell whose
+        # HARD blockage is accountable to a registered pad.  A pad's raster
+        # footprint is its metal plus its own clearance halo, so the branches
+        # below used to reject a candidate whose copper was a comfortable
+        # distance from the metal; ``_pad_copper_clear`` measures it instead.
+        needs_exact_pad_check = False
+        candidate = _candidate_shape(x1, y1, x2, y2, width)
 
         for gx, gy in cells_to_check:
             if not (0 <= gx < self.grid.cols and 0 <= gy < self.grid.rows):
@@ -389,6 +550,14 @@ class GridCollisionChecker:
                 # passable for the route's own net.  Foreign-net
                 # obstacles still hard-reject.
                 if cell.is_obstacle and cell.net != exclude_net:
+                    # Epic #5509 Phase 4a (#5854): a pad's halo lands in this
+                    # plane too, so defer to the exact pad measurement when
+                    # the cell's blockage is accountable to a registered pad.
+                    # A keepout / obstacle / region bound / board-edge cell
+                    # registers no geometry and keeps the reject below.
+                    if _obstacle_cell_is_accountable_pad_copper(self.grid, gx, gy, layer_idx):
+                        needs_exact_pad_check = True
+                        continue
                     return False  # Hard obstacle (pad, keepout) -- always block
 
                 # Issue #2757: A pad on a skipped pour net (e.g. GND, +3V3)
@@ -405,6 +574,13 @@ class GridCollisionChecker:
                 # (e.g. the route's destination pad) -- closes that hole
                 # without affecting normal own-net pad anchoring.
                 if cell.pad_blocked and cell.net != exclude_net:
+                    # Epic #5509 Phase 4a (#5854): same deferral as the
+                    # ``is_obstacle`` branch above -- this plane IS the pad
+                    # registry's raster shadow, so when the grid can name the
+                    # pads the exact measurement decides it.
+                    if _obstacle_cell_is_accountable_pad_copper(self.grid, gx, gy, layer_idx):
+                        needs_exact_pad_check = True
+                        continue
                     return False
 
                 # Cell is occupied by another net's route (soft block).
@@ -446,7 +622,12 @@ class GridCollisionChecker:
                     return False  # Blocked by another net
 
         if needs_exact_route_check and not _routed_copper_clear(
-            self.grid, x1, y1, x2, y2, layer, layer_idx, width, exclude_net
+            self.grid, candidate, layer, layer_idx, exclude_net
+        ):
+            return False
+
+        if needs_exact_pad_check and not _pad_copper_clear(
+            self.grid, candidate, layer_idx, exclude_net
         ):
             return False
 
@@ -566,6 +747,9 @@ class VectorCollisionChecker:
         min_clearance = self.grid.rules.trace_clearance
         half_width = width / 2
         search_radius = half_width + min_clearance
+        # Epic #5509 Phase 4a (#5854): one kernel shape for the candidate,
+        # built once and reused by every narrow-phase query below.
+        candidate = _candidate_shape(x1, y1, x2, y2, width)
 
         # Broad phase: query R-tree with expanded envelope
         query_envelope = (
@@ -590,8 +774,9 @@ class VectorCollisionChecker:
             # Exact edge-to-edge clearance.  Issue #5625: the arithmetic moved
             # to a module-level helper the grid checker's own exact pass calls
             # too, so the two implementations of this protocol can no longer
-            # drift apart on the number they compare.
-            if not _path_clear_of_segment(x1, y1, x2, y2, half_width, other_seg, min_clearance):
+            # drift apart on the number they compare.  Epic #5509 Phase 4a
+            # (#5854): that helper now asks the shared clearance kernel.
+            if not _path_clear_of_segment(candidate, other_seg, min_clearance):
                 return False
 
         # Issue #2955 / #2960: Check against foreign-net vias.
@@ -660,7 +845,7 @@ class VectorCollisionChecker:
                 # Layer filter mirrors the linear-scan version.
                 if not self._via_on_layer(via, layer_idx):
                     continue
-                if not _path_clear_of_via(x1, y1, x2, y2, half_width, via, via_clearance):
+                if not _path_clear_of_via(candidate, via, via_clearance):
                     return False
         else:
             # Fallback: index not built (e.g. mock grids in unit tests,
@@ -672,7 +857,7 @@ class VectorCollisionChecker:
                 for via in route.vias:
                     if not self._via_on_layer(via, layer_idx):
                         continue
-                    if not _path_clear_of_via(x1, y1, x2, y2, half_width, via, via_clearance):
+                    if not _path_clear_of_via(candidate, via, via_clearance):
                         return False
 
         # Also check hard obstacles (pads, keepouts) via the grid
@@ -719,6 +904,19 @@ class VectorCollisionChecker:
         Samples the path at grid resolution and checks each cell for hard
         obstacles.  This is lighter than a full Bresenham sweep because we
         only check obstacle status, not soft net occupation.
+
+        Epic #5509 Phase 4a (#5854): that sample is now a **broad phase** for
+        pad copper.  A cell whose blockage is accountable to a registered pad
+        (:func:`_obstacle_cell_is_accountable_pad_copper`) no longer pronounces
+        a verdict -- it schedules :func:`_pad_copper_clear`, which measures the
+        candidate against the pad's exact outline through the shared clearance
+        kernel.  This is where group 15's ``pad-seg`` over-rejection came from:
+        the raster carries the pad's own clearance halo *and* dilates the
+        candidate by ``width / 2 + trace_clearance`` on top of it, so a path a
+        comfortable 0.247 mm from pad metal was refused against a 0.20 mm
+        requirement.  A cell that registers no geometry (keepout, obstacle,
+        region bound, board-edge band) keeps its conservative reject, exactly
+        as the #5625 route-copper deferral does.
 
         Args:
             x1, y1: Start point coordinates (world).
@@ -788,6 +986,11 @@ class VectorCollisionChecker:
         cols = self.grid.cols
         rows = self.grid.rows
 
+        # Epic #5509 Phase 4a (#5854): set when the walk meets a hard-blocked
+        # cell the pad registry can account for -- the exact narrow phase
+        # below decides it.
+        needs_exact_pad_check = False
+
         for check_x, check_y in _iter_dilated_line_cells(gx1, gy1, gx2, gy2, clearance_cells):
             if not (0 <= check_x < cols and 0 <= check_y < rows):
                 continue
@@ -808,6 +1011,14 @@ class VectorCollisionChecker:
                     continue  # Own-net pad is OK
                 if pad_blocked and cell_net == exclude_net:
                     continue  # Own-net pad-metal cell (net match)
+                if _obstacle_cell_is_accountable_pad_copper(self.grid, check_x, check_y, layer_idx):
+                    needs_exact_pad_check = True
+                    continue
+                return False
+
+        if needs_exact_pad_check:
+            candidate = _candidate_shape(x1, y1, x2, y2, width)
+            if not _pad_copper_clear(self.grid, candidate, layer_idx, exclude_net):
                 return False
 
         return True

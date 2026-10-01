@@ -917,6 +917,17 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # the model but composes no gap of its own, so it is switched without
         # referencing the kernel.
         "router/mesh/kernel_adapter.py",
+        # Epic #5509 Phase 4a (#5854), consumer group 15: the post-route trace
+        # optimizer's two ``CollisionChecker`` implementations.  Both narrow
+        # phases (segment, via) ask the kernel through ``clearance_shapes``,
+        # and the pad gate -- which used to be the raster alone -- becomes an
+        # exact ``copper_gap`` against the registered pad.  The first consumer
+        # whose migration is about a *post-route* pass rather than search:
+        # ``optimizer/trace.py``'s ``_path_is_clear`` reaches the model only
+        # through this module and composes no gap of its own, so it is
+        # switched without referencing the kernel (same shape as
+        # ``pathfinder``'s fixed-copper delegation in Phase 3f).
+        "router/optimizer/collision.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

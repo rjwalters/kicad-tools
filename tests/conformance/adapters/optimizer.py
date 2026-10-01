@@ -32,21 +32,37 @@ scope is ``seg-seg``, ``seg-via`` and ``pad-seg``.
 fragmenting routes through overused cells.  These cases have no negotiated
 history, so the default ``False`` is the honest setting -- and it is the
 stricter one, so the row is not flattered by the choice.
+
+Epic #5509 Phase 4a (#5854) switched this consumer onto the shared clearance
+kernel, so the row is now a **merge gate** (``report.MIGRATED_GROUPS``) rather
+than report-only.  What that phase moved is visible precisely in the
+``pad-seg`` cases: both checkers used to judge pad copper off the raster, where
+a pad's blocked footprint is its metal grown by the pad's own clearance halo
+*and* the candidate is grown again by ``width / 2 + trace_clearance``, so a
+path a comfortable 0.247 mm from pad metal was refused against a 0.20 mm
+requirement.  The pad is now measured through the kernel's exact pad model, the
+same one the migrated diff-pair and mesh consumers use.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from tests.conformance.adapters import KIND_CLEARANCE, Verdict
 from tests.conformance.adapters._support import (
     layer_of,
     net_ids,
     pair_contexts,
+    project_rules,
     router_grid,
     router_pad,
     router_segment,
     single_object_route,
 )
 from tests.conformance.generator import CopperCase, PadSpec, PairKind, SegmentSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kicad_tools.router.rules import DesignRules
 
 __all__ = ["OptimizerCollisionAdapter"]
 
@@ -66,6 +82,26 @@ class OptimizerCollisionAdapter:
         return True
 
     def verdicts(self, case: CopperCase) -> set[Verdict]:
+        return self._verdicts(case, None)
+
+    def verdicts_at_project_rules(self, case: CopperCase) -> set[Verdict]:
+        """The same unmodified consumer, driven at the clearance kicad-cli applies.
+
+        The **gated** reading (:func:`~tests.conformance.adapters._support.project_rules`),
+        required of every group in ``report.MIGRATED_GROUPS``.  This row's
+        published percentages keep the router's own ``trace_clearance`` /
+        ``via_clearance``, and both of its cells are partly that choice: the
+        0.2 mm ``via_clearance`` default widens a ``seg-via`` requirement to
+        ``max(trace_clearance, via_clearance)``, and the 0.15 mm
+        ``trace_clearance`` sits below the project's 0.20 mm ``Default``
+        netclass (#5398 / #5654).  Pinning the rule axis to ground truth's own
+        number leaves **geometry** as the only thing a disagreement can be --
+        which is what ``test_corpus.py`` hard-gates now that Epic #5509
+        Phase 4a (#5854) has switched this consumer onto the kernel.
+        """
+        return self._verdicts(case, project_rules(case))
+
+    def _verdicts(self, case: CopperCase, rules: DesignRules | None) -> set[Verdict]:
         from kicad_tools.router.optimizer.collision import VectorCollisionChecker
 
         nets = net_ids(case)
@@ -75,7 +111,7 @@ class OptimizerCollisionAdapter:
             if context.kind not in self.pair_kinds:
                 continue
 
-            grid = router_grid(case)
+            grid = router_grid(case, rules)
             existing = context.existing
             if isinstance(existing, PadSpec):
                 grid.add_pad(router_pad(existing, nets))
