@@ -135,13 +135,15 @@ VERDICT_RC=$?
 
 ### C2. Merge (per PR)
 
-Use the dedicated merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
+Use the merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
 
 ```bash
-./.loom/scripts/merge-pr.sh P --auto
+LOOM_AUTO_MERGE_TIMEOUT=420 ./.loom/scripts/merge-pr.sh P --auto
 ```
 
-The script merges via the forge API and cleans up the worktree. `--auto` waits (bounded by `LOOM_AUTO_MERGE_TIMEOUT`, default 600s) for every check-run on the PR's head to settle, re-validates `loom:pr` and the head SHA against fresh state, then merges **in this process** — it never arms GitHub's server-side auto-merge queue, which is gated only by the ruleset's REQUIRED checks and re-reads neither the label nor the non-required test suites once armed (#8410). An already-settled head merges immediately, so `--auto` is safe to pass uniformly on every repo regardless of its `allow_auto_merge` setting (#3820) — and on a repo with **no GitHub Actions workflows configured** (so the Checks API 404s for every SHA) the wait distinguishes that persistent-404 shape from a transient blip and proceeds straight to the merge instead of polling to the timeout (#6389). A PR whose CI outlasts the timeout exits non-zero rather than queueing; that is a retry-next-pass, not a failed merge.
+**Give that call a 600000 ms Bash-tool timeout (#9395)**: the 420s pin must stay strictly under its caller's, or the tool kills the script and no exit code reaches the branches below. Raise neither alone. Why the pin but no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
+
+It merges via the forge API and cleans up the worktree. `--auto` waits for the head's check-runs to settle, re-validates `loom:pr` and the head SHA against fresh state, then merges **in this process** — never via the server-side queue, which is gated on REQUIRED checks alone and re-reads neither label nor non-required suites once armed (#8410). An already-settled head merges at once, so `--auto` is always safe to pass (#3820); a repo with no workflows (Checks API 404s everywhere) merges straight off, not polling out (#6389). CI outlasting the wait exits non-zero rather than queueing — retry next pass, not a failure.
 
 **On successful merge** (script returns 0):
 - If a closing-issue checkpoint is in scope, delete it:

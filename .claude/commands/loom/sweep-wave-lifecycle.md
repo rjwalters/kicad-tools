@@ -627,26 +627,28 @@ Before calling `merge-pr.sh` for PR `#X`:
    - **Clean, but the branch was updated** → the update pulled the sibling's changes into `#X`'s branch, so **re-run the Judge phase (step 5) against the integrated branch** before merging. Judge checks out the PR and runs its build/tests, which is what catches a *same-file* semantic break the pre-wave Judge could not. If the integrated build/tests fail → route to Doctor (or, if `#X`'s Doctor-cycle budget is already spent, mark `#X` `loom:blocked`, surface it, and do **not** merge a known-red change).
    - **A real break Doctor cannot clear in one cycle** → mark `#X` `loom:blocked`, log the reason, skip its merge, and continue with the rest of the wave (do not block the whole wave on it). Consistent with the step 6 cap.
 
-Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PRs keep the parallel fast path. Under `--dry-run` nothing here runs — the plan may simply note that overlapping PRs in a wave will be serialized-with-revalidation.
+Overlapping PRs in a wave are thus **serialized-with-revalidation**; disjoint PRs keep the parallel fast path. Under `--dry-run` nothing here runs — the plan may simply note that overlapping PRs will be serialized-with-revalidation.
 
-Use the dedicated merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
+Use the merge script (CLAUDE.md "Merging PRs" mandate — never `gh pr merge`):
 
 ```bash
-./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
+LOOM_AUTO_MERGE_TIMEOUT=420 ./.loom/scripts/merge-pr.sh <PR_NUMBER> --auto
 ```
 
-The script merges via the forge API and cleans up the worktree. `--auto` waits (`LOOM_AUTO_MERGE_TIMEOUT`, default 600s) for every check-run on the head to settle, re-validates `loom:pr` and the head SHA, then merges **in this process** — never via the server-side queue, which is gated on REQUIRED checks alone and re-reads neither once armed (#8410). An already-settled head merges immediately, so `--auto` is safe to pass uniformly whatever the repo's `allow_auto_merge` says (#3820) — but budget for a call that can block for minutes, and for CI outlasting the timeout exiting non-zero (retry next pass, not a failed merge).
+**Give that call a 600000 ms Bash-tool timeout (#9395)**: the 420s pin must stay strictly under its caller's, or the tool kills the script and no exit code reaches the branches below. Raise neither alone. Why the pin but no `CHAMPION-MERGE-OUTCOME` sentinel (#9096): [exit codes](../../../.loom/docs/merge-pr-exit-code-exceptions.md).
 
-**If a previous Merge attempt for this PR died mid-flight without deleting the checkpoint** (rate limit, crash between `merge-pr.sh` success and the delete call), re-verify forge state first: if the PR is already **merged**, just delete the stale checkpoint — do **not** re-run the merge. See "Mid-phase-death recovery" above. (The step 1 stale-checkpoint cleanup is the belt-and-suspenders backstop for this.)
+It merges via the forge API and cleans the worktree. `--auto` waits for the head's check-runs to settle, re-validates `loom:pr` and the head SHA, then merges **in this process** — never via the server-side queue, gated on REQUIRED checks alone and re-reading neither once armed (#8410). An already-settled head merges at once, so `--auto` is always safe to pass (#3820); CI outlasting the wait exits non-zero (retry next pass, not a failure).
+
+**If a previous Merge attempt for this PR died mid-flight without deleting the checkpoint** (rate limit, crash between `merge-pr.sh` success and the delete call), re-verify forge state first: if the PR is already **merged**, just delete the stale checkpoint — do **not** re-run the merge. See "Mid-phase-death recovery" above.
 
 **On successful merge** (script returns 0), add `#X`'s changed-file paths to `WAVE_MERGED_FILES` (so the next PR's overlap probe sees them), then delete the issue's sweep checkpoint:
 ```bash
 ./.loom/scripts/sweep-checkpoint.sh delete N
 ```
 
-This is the terminal state. The checkpoint must be removed so a future `/loom:sweep` invocation that references the same issue number (e.g., as part of a wider candidate set) doesn't take a `merge-done` short-circuit on the stale state. The stale-checkpoint cleanup in step 1 is the belt-and-suspenders defense if this delete is missed (e.g., sweep killed between `merge-pr.sh` success and the delete call); on the next sweep run that touches the issue, step 1 detects the closed-issue + checkpoint mismatch and removes it.
+This is the terminal state. The checkpoint must go, so a later `/loom:sweep` referencing the same issue number (e.g. in a wider candidate set) cannot take a `merge-done` short-circuit on stale state. Step 1's stale-checkpoint cleanup is the belt-and-suspenders backstop if this delete is missed (sweep killed between `merge-pr.sh` success and the delete call): on the next sweep touching the issue it detects the closed-issue + checkpoint mismatch and removes it.
 
-If `merge-pr.sh` fails (e.g., a required check failed, or `--auto`'s bounded wait timed out before CI settled), do **not** delete the checkpoint — leave it at `judge-done` so the next sweep retries the merge from a clean state. **Before logging why it failed, classify the failure text through "Forge write failure diagnosis (#6425)"** (Mode B, above) — a forge 5xx/outage signature or an unconfirmed permission-scope 403 must be logged as forge-transient / "will retry", never as a "needs operator attention" credential diagnosis without the positive-evidence check.
+If `merge-pr.sh` fails (e.g. a required check failed, or the bounded wait expired before CI settled), do **not** delete the checkpoint — leave it at `judge-done` so the next sweep retries the merge from a clean state. **Before logging why it failed, classify the failure text through "Forge write failure diagnosis (#6425)"** (Mode B, above) — a forge 5xx/outage signature or an unconfirmed permission-scope 403 must be logged as forge-transient / "will retry", never as a "needs operator attention" credential diagnosis without the positive-evidence check.
 
 ### 8. Wave settled → post-wave integration gate → advance to next wave
 

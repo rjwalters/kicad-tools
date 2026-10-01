@@ -412,6 +412,59 @@ only if it recurs on the same PR. Re-reading the PR first keeps it honest —
 a killed call can still have merged and lost only its report, in which case
 there is nothing to announce and Step 4 proceeds normally.
 
+### Sweep's own merge callsites take the pin, not the notice (#9395)
+
+`/loom:sweep` reaches this script from two more prompts —
+`sweep-wave-lifecycle.md` step 7 and `sweep-mode-c-lifecycle.md` C2 — and #9096
+was scoped to Champion, so both were left running the 600s default. They sit in
+the same shape, and slightly worse: a Bash tool call's timeout *maxes* at
+600000 ms but **defaults to 120000 ms**, so an unpinned sweep merge does not
+merely tie its caller's ceiling, it can be killed at two minutes against a wait
+it believes is bounded at ten.
+
+**Fix 1 (the pin) applies verbatim**, and both callsites now carry it:
+`LOOM_AUTO_MERGE_TIMEOUT=420` plus an explicit instruction to run the call under
+a 600000 ms tool timeout. Including the part about *how* it is assigned — a bare
+`=420`, never `${LOOM_AUTO_MERGE_TIMEOUT:-420}`. An ambient value above the tool
+timeout is not a longer wait, it is this failure mode, so honouring one would
+let a repo re-arm #9096 by config; a sweep on a repo whose CI genuinely outruns
+420s is *supposed* to exit 5 and retry next pass. The pin is what makes that
+exit code **observable**, and observing it is all the sweep needs: both prompts'
+non-zero branch already prescribes exactly the right response to exit 5 (name it
+in the log, leave the checkpoint at `judge-done`, advance — no label change, no
+PR comment, nothing the PR carries into the next pass). `sweep-wave-lifecycle.md`
+step 7 even names the bounded-wait expiry as one of the failures it covers, so
+the pin reaches a path that was already written for it — it just could not be
+reached while the tool was killing the call first.
+
+**Fix 2 (the sentinel and the "Merge Outcome Unknown" notice) deliberately does
+not apply there**, for two reasons that are specific to the sweep and absent for
+Champion:
+
+1. **Nothing is on the forge to be left dangling.** The notice's whole purpose
+   is that Champion has *already announced* "Proceeding with merge…" (Step 2's
+   ordering invariant), so its silence reads as "announced a merge and
+   vanished." A sweep's Merge phase posts nothing before merging, so a killed
+   call leaves the PR exactly as Judge left it: `loom:pr`, approved, untouched.
+   Silent, but not misleading — and a comment would be the sweep's *only* forge
+   write in that phase, invented solely to describe its own crash.
+2. **The sweep has durable local state Champion does not.** Its checkpoint is
+   written only after a phase completes, so a killed merge leaves
+   `judge-done` on disk, and the next pass's **"Mid-phase-death recovery"**
+   (`sweep-wave-lifecycle.md`, #3683) re-verifies real forge state and completes
+   only the missing steps — including the "already merged, just delete the stale
+   checkpoint" case. Champion is a stateless per-tick pass with nowhere to
+   record "I was mid-merge on #N"; the notice is its substitute for the
+   checkpoint, not an independent requirement.
+
+**What would reverse this.** The reasoning is conditional, not a standing
+exemption: if a sweep's Merge phase ever posts a pre-merge comment, or ever
+deletes the checkpoint before `merge-pr.sh` returns, reason 1 or 2 respectively
+stops holding and the sentinel becomes required there too. Until then,
+duplicating it would buy a second recovery mechanism for a case the first one
+already covers, in two files the markdown-token ratchet has frozen at their
+current size.
+
 ## Merge-ancestry detection trap (applies to all three)
 
 If you need to verify by hand whether a re-queued PR's commits actually landed
