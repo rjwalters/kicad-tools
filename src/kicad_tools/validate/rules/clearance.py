@@ -27,6 +27,20 @@ from kicad_tools.core.geometry import (
 )
 from kicad_tools.core.layers import via_spans_layer as _via_spans_layer
 
+from ..clearance_shapes import (
+    KSegment,
+    KShape,
+    KVia,
+)
+from ..clearance_shapes import (
+    copper_gap as _kernel_copper_gap,
+)
+from ..clearance_shapes import (
+    make_pad as _kernel_make_pad,
+)
+from ..clearance_shapes import (
+    pad_shape as _kernel_pad_shape,
+)
 from ..spatial import candidate_pairs
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
@@ -139,6 +153,11 @@ class CopperElement:
     # prints elements can observe the cache.
     _seg_geom_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
     _pad_geom_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
+    # Epic #5509 Phase 4d: the element's shared-clearance-kernel shape, memoised
+    # for exactly the reason the two caches above are -- a sweep asks the same
+    # element for it once per candidate pair it takes part in, and it is a pure
+    # function of fields that are assigned once at construction.
+    _kernel_shape_cache: object = field(default=_GEOM_UNSET, compare=False, repr=False)
 
     @classmethod
     def from_segment(cls, seg: Segment) -> CopperElement:
@@ -215,6 +234,74 @@ class CopperElement:
                 max(bounds[3], py2),
             )
         return bounds
+
+    def kernel_shape(self) -> KShape:
+        """This element as a shared-clearance-kernel shape (Epic #5509 Phase 4d).
+
+        The single translation ``kct check``'s pair-distance predicates go
+        through, so every one of them measures the same copper.  Memoised on the
+        element (see ``_kernel_shape_cache``).
+
+        Every shape is emitted on
+        :data:`~kicad_tools.router.clearance_kernel.ALL_LAYERS`: the caller
+        (:meth:`ClearanceRule._check_layer`) has already resolved layer
+        interaction by scanning one copper layer at a time, so a second layer
+        test inside the kernel could only ever be a second opinion about a
+        question that is already answered.
+
+        A **pad** is built from its ``source_pad`` / ``source_footprint`` -- the
+        board-file objects -- so it gets the exact Minkowski pad model Phase 1b
+        ported *from* this module's :func:`_pad_polygon`, local size and
+        absolute rotation included.  An element synthesised without those (a
+        hand-built fixture, which is how several regression tests drive these
+        predicates) falls back to its axis-aligned ``geometry`` with no
+        rotation: for an unrotated pad that AABB *is* the pad's own box, so the
+        fallback is exact there and merely inherits the fixture's own
+        approximation otherwise.
+        """
+        cached = self._kernel_shape_cache
+        if cached is not _GEOM_UNSET:
+            return cached  # type: ignore[return-value]
+        shape = self._build_kernel_shape()
+        self._kernel_shape_cache = shape
+        return shape
+
+    def _build_kernel_shape(self) -> KShape:
+        """Build the kernel shape without consulting the memo."""
+        if self.element_type == "segment":
+            x1, y1, x2, y2, width = self.geometry
+            return KSegment(x1=x1, y1=y1, x2=x2, y2=y2, width=width)
+        cx, cy, width, height = self.geometry
+        if self.element_type == "via":
+            # ``from_via`` records ``(size, size)``, so either dimension is the
+            # copper diameter.  The barrel's drill is not carried on the element
+            # (no hole predicate in this rule family reads it from here), so the
+            # copper-only via is the right model.
+            return KVia(x=cx, y=cy, diameter=max(width, height), drill=0.0)
+        if self.source_pad is not None and self.source_footprint is not None:
+            return _kernel_pad_shape(self.source_pad, self.source_footprint)
+        if self.polygon is None:
+            # A pad element with neither board-file provenance nor a
+            # precomputed outline has no shape information beyond its AABB, and
+            # this module has always resolved that the same conservative way:
+            # :meth:`bounds` widens such a pad to ``max(w, h)`` on both axes and
+            # :func:`_build_pad_copper_geom` hands the exact predicates the disc
+            # of radius ``max(w, h) / 2``.  Modelling it as the AABB *rectangle*
+            # here instead would make the kernel verdict narrower than the
+            # broad-phase bounds that gate it -- an under-rejection the
+            # broad/narrow parity check in ``test_boundary_violation_fields``
+            # exists to catch.  Keep the disc, so one model answers both phases.
+            diameter = max(width, height)
+            return _kernel_make_pad("circle", diameter, diameter, 0.25, 0.0, cx, cy)
+        return _kernel_make_pad(
+            self.pad_shape or "rect",
+            width,
+            height,
+            0.25,
+            0.0,
+            cx,
+            cy,
+        )
 
     def on_layer(self, layer: str) -> bool:
         """Check if this element is on the specified layer."""
@@ -582,30 +669,226 @@ def _build_diff_pair_set(
 
 
 def _calculate_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float, float]:
-    """Calculate the clearance between two copper elements.
+    """Edge-to-edge clearance between two copper elements, from the shared kernel.
+
+    Epic #5509 Phase 4d: the *verdict* -- the signed gap ``_check_layer``
+    compares against the requirement -- is
+    :func:`kicad_tools.router.clearance_kernel.copper_gap` on the two elements'
+    :meth:`CopperElement.kernel_shape` values, for every one of the four pair
+    kinds.  ``kct check`` is the consumer the kernel's exact polygon pad model
+    was ported *from* (Phase 1b ported :func:`_pad_polygon`), so for the pairs
+    this module already measured exactly -- pad-vs-pad, pad-vs-via and
+    segment-vs-roundrect/oval pad -- the kernel is the same model and the answer
+    is unchanged.  It replaces three *approximations* this dispatch used to keep
+    for the remaining branches, all of which disagreed with ``kicad-cli``:
+
+    * a **rotated** ``rect`` pad against a segment was measured against its
+      axis-aligned bounding box, which over-reports copper at the corners the
+      pad does not occupy -- an over-rejection (the ``roundrect-corner-gap``
+      failure mode, measured on three of twenty-three conformance seeds);
+    * a **square** ``rect`` pad against a segment was modelled as the disc of
+      radius ``max(w, h) / 2``, which is the *inscribed* circle and therefore
+      under-reports copper at the pad's four corners -- an under-rejection;
+    * the analytic AABB fallbacks for pad-vs-pad / pad-vs-via, reachable when an
+      element carries no shapely polygon.
+
+    Two things the kernel deliberately does not answer stay here, because they
+    are *reporting*, not predicates:
+
+    **Location.**  Where to point the operator is unchanged per pair kind (see
+    :func:`_report_location`); the kernel answers distances, not witnesses.
+
+    **Overlap magnitude.**  ``copper_gap`` is a Minkowski distance, so for
+    copper that already overlaps it saturates at ``-(corner_radius + half
+    width)`` rather than reporting how deeply the two shapes interpenetrate --
+    and for two sharp-cornered rectangles it saturates at exactly ``0.0``.  The
+    verdict is the same either way (``<= 0`` is below any positive
+    requirement), but ``0.0`` would lose the ``SHORT: ...`` promotion
+    :meth:`ClearanceRule._create_violation` keys off a negative value (#3909).
+    So on the pair kinds whose pre-kernel dispatch reported interpenetration
+    rather than a saturated distance -- and *only* those, see
+    :func:`_overlap_depth_applies` -- the reported magnitude is refined by
+    :func:`_overlap_depth`, this module's existing intersection-bounding-box
+    convention.  Every other pair kind's kernel gap already equals, saturation
+    included, the number the retired dispatch produced, so refining it would be
+    a behaviour change rather than a preserved one (#5881).
 
     Returns:
-        Tuple of (clearance_mm, location_x, location_y)
-        The location is the midpoint between the closest points.
+        Tuple of (clearance_mm, location_x, location_y).
+    """
+    gap = _kernel_copper_gap(elem1.kernel_shape(), elem2.kernel_shape())
+
+    if gap <= 0.0 and _overlap_depth_applies(elem1, elem2):
+        depth = _overlap_depth(elem1, elem2)
+        if depth is not None:
+            gap = depth
+
+    loc_x, loc_y = _report_location(elem1, elem2)
+    return gap, loc_x, loc_y
+
+
+def _report_location(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float]:
+    """Where a violation between these two elements is reported.
+
+    Unchanged from the pre-kernel dispatch, pair kind by pair kind, so switching
+    the *distance* to the kernel cannot move a violation's reported position:
+
+    * segment-vs-segment: the mean of the four endpoints.
+    * segment-vs-pad/via: the pad or via centre.
+    * pad/via-vs-pad/via: the midpoint of the two closest points when exact
+      shapely geometry is available for both (what :func:`_polygon_pair_clearance`
+      reported), else the midpoint of the two centres.
     """
     t1, t2 = elem1.element_type, elem2.element_type
 
     if t1 == "segment" and t2 == "segment":
-        return _segment_segment_clearance(elem1, elem2)
-    elif t1 == "segment" and t2 in ("pad", "via"):
-        return _segment_circle_clearance(elem1, elem2)
-    elif t1 in ("pad", "via") and t2 == "segment":
-        clearance, x, y = _segment_circle_clearance(elem2, elem1)
-        return clearance, x, y
+        x1, y1, x2, y2, _ = elem1.geometry
+        x3, y3, x4, y4, _ = elem2.geometry
+        return (x1 + x2 + x3 + x4) / 4, (y1 + y2 + y3 + y4) / 4
+
+    if t1 == "segment":
+        cx, cy = elem2.geometry[0], elem2.geometry[1]
+        return cx, cy
+    if t2 == "segment":
+        cx, cy = elem1.geometry[0], elem1.geometry[1]
+        return cx, cy
+
+    if elem1.polygon is not None or elem2.polygon is not None:
+        witness = _polygon_pair_witness(elem1, elem2)
+        if witness is not None:
+            return witness
+
+    x1, y1 = elem1.geometry[0], elem1.geometry[1]
+    x2, y2 = elem2.geometry[0], elem2.geometry[1]
+    return (x1 + x2) / 2, (y1 + y2) / 2
+
+
+def _overlap_depth_applies(elem1: CopperElement, elem2: CopperElement) -> bool:
+    """Whether this pair kind reports interpenetration rather than distance.
+
+    The pre-kernel dispatch used the intersection-bounding-box convention
+    (:func:`_overlap_depth`) on exactly two pair kinds, and an analytic signed
+    distance everywhere else:
+
+    * **segment vs pad** -- only when the pad carried a true outline whose shape
+      diverges from its AABB (``_segment_circle_clearance``'s guard:
+      ``polygon is not None and pad_shape in _POLYGON_DIVERGENT_SHAPES``).  A
+      plain ``rect``/``circle``/square pad went to the analytic branch, whose
+      answer for a centreline that crosses the pad boundary is ``-half_width``
+      -- precisely what ``copper_gap`` saturates to, so refining it would
+      *replace* a preserved value with a different one (#5881: a hand-computed
+      ``-0.01`` became ``-0.02``).
+    * **pad/via vs pad/via** -- whenever either element carried a polygon
+      (``_circle_circle_clearance``'s ``_polygon_pair_clearance`` path).  Real
+      board pads always do, so this is the branch that keeps the ``SHORT:``
+      promotion alive for two overlapping sharp-cornered rectangles, whose
+      Minkowski gap saturates at exactly ``0.0``.
+
+    Segment-vs-segment and via-vs-via pairs never used it: their kernel gap is a
+    true signed distance already.
+    """
+    t1, t2 = elem1.element_type, elem2.element_type
+    if t1 == "segment" or t2 == "segment":
+        if t1 == t2:
+            return False
+        other = elem2 if t1 == "segment" else elem1
+        return other.polygon is not None and other.pad_shape in _POLYGON_DIVERGENT_SHAPES
+    return elem1.polygon is not None or elem2.polygon is not None
+
+
+def _overlap_depth(elem1: CopperElement, elem2: CopperElement) -> float | None:
+    """Negative interpenetration magnitude for overlapping copper, or ``None``.
+
+    This module's long-standing convention (``_polygon_pair_clearance``,
+    ``_segment_polygon_clearance``): approximate the penetration by the largest
+    dimension of the intersection's bounding box -- monotonic in overlap and
+    always ``< 0``, which is all the DRC gate and the ``SHORT:`` promotion need.
+
+    ``None`` when the two coppers do not actually overlap by positive area (a
+    grazing touch, whose correct clearance is the ``0.0`` the kernel reported)
+    or when no shapely geometry could be built for one of them.
+    """
+    if not has_shapely():
+        return None
+    geom1 = _copper_geom_for_overlap(elem1)
+    geom2 = _copper_geom_for_overlap(elem2)
+    if geom1 is None or geom2 is None:
+        return None
+    inter = geom1.intersection(geom2)
+    if inter.is_empty or inter.area <= 0:
+        return None
+    minx, miny, maxx, maxy = inter.bounds
+    return -float(max(maxx - minx, maxy - miny))
+
+
+def _copper_geom_for_overlap(elem: CopperElement):
+    """A shapely footprint of this element's copper, for the overlap refinement.
+
+    Segments buffer their centreline; pads and vias use the memoised pad/via
+    geometry.  A pad synthesised without a precomputed ``polygon`` falls back to
+    dilating the kernel shape's own Minkowski ``core`` by its ``corner_radius``
+    (the same ``KPad`` the pair-distance verdict already used -- not a second,
+    independently-tessellated outline), so the refinement is available for
+    every pad rather than only the ones built from a board file.  ``core`` is
+    always a valid 1-, 2- or 4-vertex ring when non-empty (see
+    :func:`kicad_tools.router.clearance_kernel.make_pad`'s construction), and a
+    ``corner_radius`` of exactly 0 only ever pairs with the 4-vertex case, so
+    the un-dilated ``base`` returned there is already a proper polygon.
+    """
+    if elem.element_type == "segment":
+        return _segment_copper_geom(elem)
+    geom = _element_to_shapely_geom(elem)
+    if geom is not None:
+        return geom
+    from shapely.geometry import LineString, Point, Polygon
+
+    from ..clearance_shapes import KPad as _KPad
+
+    shape = elem.kernel_shape()
+    if not isinstance(shape, _KPad) or not shape.core:
+        return None
+    core = shape.core
+    if len(core) == 1:
+        base = Point(core[0])
+    elif len(core) == 2:
+        base = LineString(core)
     else:
-        # Both are pad or via (circles)
-        return _circle_circle_clearance(elem1, elem2)
+        base = Polygon(core)
+    if shape.corner_radius > 0:
+        return base.buffer(shape.corner_radius, quad_segs=64)
+    return base
+
+
+def _polygon_pair_witness(elem1: CopperElement, elem2: CopperElement) -> tuple[float, float] | None:
+    """Midpoint of the closest points of two pad/via copper shapes, if available."""
+    if not has_shapely():
+        return None
+    geom1 = _element_to_shapely_geom(elem1)
+    geom2 = _element_to_shapely_geom(elem2)
+    if geom1 is None or geom2 is None:
+        return None
+    inter = geom1.intersection(geom2)
+    if not inter.is_empty and inter.area > 0:
+        minx, miny, maxx, maxy = inter.bounds
+        return (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    from shapely.ops import nearest_points
+
+    p1, p2 = nearest_points(geom1, geom2)
+    return (p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0
 
 
 def _segment_segment_clearance(
     seg1: CopperElement, seg2: CopperElement
 ) -> tuple[float, float, float]:
-    """Calculate clearance between two trace segments."""
+    """Calculate clearance between two trace segments.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
+    """
     x1, y1, x2, y2, w1 = seg1.geometry
     x3, y3, x4, y4, w2 = seg2.geometry
 
@@ -660,6 +943,13 @@ def _segment_circle_clearance(
     precomputed true-geometry polygon (``CopperElement.polygon``, built
     by ``_pad_polygon``), route the clearance calculation through that
     polygon instead of the AABB rectangle.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     x1, y1, x2, y2, seg_width = seg.geometry
     cx, cy, w, h = circle.geometry
@@ -739,6 +1029,13 @@ def _segment_polygon_clearance(seg: CopperElement, circle: CopperElement) -> flo
 
     Returns ``None`` when the pad has no polygon, so the caller falls
     back to the analytic AABB-rectangle path.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     pad_poly = circle.polygon
     if pad_poly is None:
@@ -799,6 +1096,13 @@ def _rect_segment_centerline_distance(
 
     Returns:
         Signed centerline-to-rectangle distance in millimetres.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     half_w = w / 2
     half_h = h / 2
@@ -933,6 +1237,13 @@ def _polygon_pair_clearance(
     ``(clearance_mm, loc_x, loc_y)`` with the standard sign convention
     (negative when the shapes overlap), or ``None`` if a geometry could
     not be built (caller falls back to the analytic path).
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     require_shapely("pad-pad clearance geometry")
     g1 = _element_to_shapely_geom(c1)
@@ -979,6 +1290,13 @@ def _circle_circle_clearance(c1: CopperElement, c2: CopperElement) -> tuple[floa
     For vias (circular), uses circle-to-circle distance.
     For rectangular pads, uses axis-aligned rectangle-to-rectangle distance.
     For mixed (rect pad to via), uses rect-to-circle distance.
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     x1, y1, w1, h1 = c1.geometry
     x2, y2, w2, h2 = c2.geometry
@@ -1041,6 +1359,13 @@ def _rect_rect_clearance(
 
     Returns:
         Edge-to-edge clearance (negative if overlapping)
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     # Gap in each axis (distance between edges)
     gap_x = abs(cx2 - cx1) - (w1 + w2) / 2
@@ -1079,6 +1404,13 @@ def _rect_circle_clearance(
 
     Returns:
         Edge-to-edge clearance (negative if overlapping)
+
+    .. note::
+       **Retired by Epic #5509 Phase 4d (#5857)** -- no production path calls
+       this any more; :func:`_calculate_clearance` asks the shared clearance
+       kernel instead.  Kept (with its regression tests, which pin what it
+       used to answer) so the epic's Phase 4e hermit pass (#5858) deletes it
+       deliberately rather than by inference.
     """
     # Find the closest point on the rectangle to the circle center
     half_w = w / 2
@@ -1705,6 +2037,23 @@ class SegmentZoneClearanceRule(DRCRule):
     intersects its inflated bbox, and all distance math is exact
     shapely C geometry (no centerline sampling), so the rule is safe
     to run inside CI gates on large boards.
+
+    Epic #5509 Phase 4d scope note: this rule (and its sibling
+    :class:`ViaZoneClearanceRule`) is named in issue #5857's group-18 file
+    list but is **not** switched to call
+    :func:`kicad_tools.router.clearance_kernel.copper_gap` with a whole
+    :class:`~kicad_tools.router.clearance_kernel.KZonePoly`.  That call
+    exists (:func:`kicad_tools.validate.clearance_shapes.zone_shape` builds
+    exactly this shape), but the kernel's own module docstring is explicit
+    that handing a whole pour to ``copper_gap`` walks every edge of every
+    ring in pure Python -- the reason group 6 (the fixed-copper predicate)
+    needed its own indexed ``copper_gap_ring_edge`` primitive instead of a
+    plain kernel call.  This rule already gets the identical *exact*
+    geometry from GEOS's own distance algorithm, behind a per-layer
+    ``STRtree`` of whole fill polygons -- faster than an indexed Python
+    per-edge walk would be, not just simpler.  Routing it through the kernel
+    would trade a working fast path for a slow one with no accuracy gain, so
+    it stays on shapely.
     """
 
     rule_id = "clearance_segment_zone"

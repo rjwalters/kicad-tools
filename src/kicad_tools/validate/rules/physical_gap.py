@@ -2,6 +2,27 @@
 
 Electrical net membership never excludes a candidate. Joining primitive edges
 are removed by union before measuring air between facing boundary edges.
+
+Epic #5509 Phase 4d scope note
+-------------------------------
+This module is named in issue #5857's group-18 file list, but
+:func:`check_physical_copper_gap` is not switched onto Epic #5509's shared
+exact-geometry kernel (the one ``router/clearance_shapes.py`` and
+``validate/clearance_shapes.py`` both translate into).  The kernel answers
+one question -- the gap between two *named* shapes (a segment, a via, a pad,
+a zone fill, the board edge) -- and this check asks a different one: scan the
+boundary of the whole per-layer copper **union** (every object on that layer
+merged into one shapely geometry, regardless of net) for any two facing
+boundary edges closer than the slit threshold, with no electrical-pair
+identity at all.  There is no kernel call this rewrites, since the predicate
+itself (facing-edge screening over an arbitrary merged polygon's boundary) has
+no (shape, shape) counterpart in the kernel's fifteen pair kinds.  The pad
+model it imports (:func:`~kicad_tools.validate.rules.clearance._pad_polygon`
+via :func:`~kicad_tools.validate.rules.clearance._pad_on_layer` /
+:func:`~kicad_tools.validate.rules.clearance._repair_fill_polygon`) is
+already the canonical reference model the kernel's own ``KPad`` was ported
+*from* (Phase 1b), so this module stays in lock-step with the dedup even
+though it never calls the kernel module directly.
 """
 
 from __future__ import annotations

@@ -6,6 +6,19 @@
  * 2. Inner loop uses squared-distance to avoid sqrt until the end
  * 3. Struct-of-arrays layout for contiguous memory access
  * 4. No Python interpreter overhead per iteration
+ *
+ * Epic #5509 (one clearance kernel) Phase 4d / issue #5857 scope note:
+ * this is consumer group 19 of the epic's implementation inventory, and
+ * was EXEMPTED from the switch onto the epic's shared exact-geometry
+ * kernel module, not migrated. Every pad here is
+ * modelled as a disc of radius max(w, h) / 2 -- a deliberate, conservative
+ * (over-reject-only, never under-reject) approximation used only by
+ * drc/incremental.py's real-time placement feedback loop (full_check() /
+ * check_move() / apply_move(), reached from optim/session.py), which sits
+ * OUTSIDE kct check's whole-board gate (validate/rules/clearance.py,
+ * group 18) entirely. Full rationale, including why there is no kicad-cli
+ * oracle for this consumer to gate against:
+ * https://github.com/rjwalters/kicad-tools/issues/5509#issuecomment-5930182050
  */
 
 #include "drc_clearance.hpp"

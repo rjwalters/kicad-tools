@@ -6,11 +6,12 @@ for traces, vias, and annular rings against manufacturer design rules.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 from kicad_tools.core.geometry import rotate_pad_offset
 
+from ..clearance_shapes import KVia as _KVia
+from ..clearance_shapes import hole_gap as _kernel_hole_gap
 from ..violations import DRCResults, DRCViolation
 from .base import DRC_TOLERANCE, DRCRule
 
@@ -244,17 +245,18 @@ class DimensionRules(DRCRule):
                         )
                     )
 
-        # Check all pairs for clearance
-        # Edge-to-edge distance = center-to-center - (r1 + r2)
+        # Check all pairs for clearance.  Epic #5509 Phase 4d: the edge-to-edge
+        # distance is the shared clearance kernel's ``hole_gap`` between two
+        # drill-only ``KVia`` shapes (``diameter=0`` -- these are holes, not
+        # copper barrels) -- identical arithmetic to the retired
+        # ``center_distance - drill1/2 - drill2/2`` (two circular holes, so
+        # there was no approximation here to fix), kept on the kernel for the
+        # dedup.
         for i, (pos1, drill1, item1, fp_ref1, net1) in enumerate(drills):
+            hole1 = _KVia(x=pos1[0], y=pos1[1], diameter=0.0, drill=drill1)
             for pos2, drill2, item2, fp_ref2, net2 in drills[i + 1 :]:
-                # Calculate center-to-center distance
-                dx = pos2[0] - pos1[0]
-                dy = pos2[1] - pos1[1]
-                center_distance = math.sqrt(dx * dx + dy * dy)
-
-                # Edge-to-edge distance
-                edge_distance = center_distance - (drill1 / 2) - (drill2 / 2)
+                hole2 = _KVia(x=pos2[0], y=pos2[1], diameter=0.0, drill=drill2)
+                edge_distance = _kernel_hole_gap(hole1, hole2)
 
                 if edge_distance + DRC_TOLERANCE < min_clearance:
                     # Downgrade to warning when both holes belong to the

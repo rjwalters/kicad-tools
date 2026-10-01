@@ -948,6 +948,20 @@ MIGRATED_KERNEL_CALLERS: frozenset[str] = frozenset(
         # here because its docstrings cite the kernel by name, same as
         # ``diffpair_routing.py`` and ``match_group_tuning.py``.
         "router/drc_nudge.py",
+        # Epic #5509 Phase 4d (#5857), consumer group 18: ``kct check``'s
+        # clearance family.  ``validate/clearance_shapes.py`` is this side's
+        # one board-file-primitive -> kernel-shape translation (the sibling of
+        # ``router/clearance_shapes.py`` above, ported from this very
+        # consumer's own ``_pad_polygon`` reference model in Phase 1b, so the
+        # dedup is pure -- no pad model changed hands).  ``validate/rules/
+        # clearance.py`` (``_calculate_clearance``) is a production call site
+        # and cites the kernel by name in its own docstrings, so it is listed
+        # too.  ``validate/rules/edge.py`` (``EdgeClearanceRule``) also calls
+        # through this adapter, but -- like ``router/lattice/pathfinder.py``
+        # and ``router/mesh/pathfinder.py`` above -- composes no gap of its
+        # own and never names the kernel directly, so it needs no entry here.
+        "validate/clearance_shapes.py",
+        "validate/rules/clearance.py",
     }
 )
 """Python modules allowed to reference the kernel, one entry per migration.

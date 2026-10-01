@@ -306,7 +306,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17})
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17, 18})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -349,6 +349,9 @@ Migrated so far:
 * **17** -- the post-route DRC-nudge repair pass's destination gates
   (``router/drc_nudge.py`` ``_post_nudge_introduces_foreign_via_violation``,
   ``_via_drill_overlaps_bbox``, ``_via_edge_sweep_clear``), Phase 4c.
+* **18** -- ``kct check``'s clearance family (``validate/rules/clearance.py``'s
+  ``ClearanceRule`` / ``SegmentZoneClearanceRule`` / ``ViaZoneClearanceRule``
+  and ``validate/rules/edge.py``'s ``EdgeClearanceRule``), Phase 4d.
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
@@ -364,6 +367,7 @@ _MIGRATION_PHASE: dict[int, str] = {
     15: "4a",
     16: "4b",
     17: "4c",
+    18: "4d",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
 
@@ -656,18 +660,40 @@ NOTES: dict[int, str] = {
         "`tests/router/test_drc_nudge_kernel_5856.py` instead of by this row."
     ),
     18: (
-        "Exact polygon pad model -- the other half of `roundrect-corner-gap`. "
-        "One scalar `min_clearance_mm` for every pair, so it cannot reproduce "
-        "groups 12/13's order asymmetry. Five entry points driven as "
-        "`validate/checker.py` registers them: `ClearanceRule`, "
-        "`EdgeClearanceRule` (on `copper-edge` pairs), "
-        "`SegmentZoneClearanceRule` / `ViaZoneClearanceRule` and "
-        "`physical_gap.py`'s `check_physical_copper_gap` (on `seg-zone` / "
-        "`via-zone` pairs) -- the last three read committed `filled_polygon` "
+        "Issue #5857: "
+        "`ClearanceRule._calculate_clearance` and `EdgeClearanceRule` now ask "
+        "`clearance_kernel.copper_gap` for the pair-distance verdict (via the "
+        "`validate/clearance_shapes.py` translation), in place of the retired "
+        "per-pair-kind dispatch (`_segment_circle_clearance` / "
+        "`_circle_circle_clearance` and friends) that measured a rotated or "
+        "non-square `rect` pad against its axis-aligned bounding box -- an "
+        "over-rejection, the `roundrect-corner-gap` failure mode, on three of "
+        "the twenty-three seeds that first surfaced it. The merge gate "
+        "(`test_corpus.test_adapter_agrees_with_kicad_cli`) covers `seg-seg`, "
+        "`seg-via`, `via-via`, `pad-seg`, `pad-via` and `copper-edge` -- every "
+        "pair kind this row claims except the two zone kinds, which "
+        "`pair.kind in PairKind.ZONE` excludes from that gate for the same "
+        "reason the table scores them only on a refilled run (see below) -- "
+        "and it already agreed on every `CI_SEEDS` item before this phase "
+        "started measuring it, so the switch is a pure dedup here, not a "
+        "fix with a before/after delta. One scalar `min_clearance_mm` for "
+        "every pair, so it cannot reproduce groups 12/13's order asymmetry -- "
+        "`KctCheckAdapter.verdicts_at_project_rules` is a plain alias of "
+        "`verdicts`, because there is no separate rule-value axis for this "
+        "consumer to pin. Five entry points driven as `validate/checker.py` "
+        "registers them: `ClearanceRule`, `EdgeClearanceRule` (on "
+        "`copper-edge` pairs), `SegmentZoneClearanceRule` / "
+        "`ViaZoneClearanceRule` and `physical_gap.py`'s "
+        "`check_physical_copper_gap` (on `seg-zone` / `via-zone` pairs, "
+        "**not** switched to the kernel -- see that module's own Phase 4d "
+        "scope note) -- the last three read committed `filled_polygon` "
         "copper, so this row **refills the board** (`kicad-cli pcb drc "
-        "--refill-zones`) on every case that carries a pour and its zone cells "
-        "are scored on the refilled run only (#5644). A fresh fill is backed "
-        "off from foreign copper by the applied clearance, so a zone pair can "
+        "--refill-zones`) on every case that carries a pour and its zone "
+        "cells are scored on the refilled run only (#5644), report-only "
+        "regardless of this migration "
+        "(`test_corpus.test_zone_pairs_are_measured_on_a_refilled_run` is "
+        "never attributable to a single group). A fresh fill is backed off "
+        "from foreign copper by the applied clearance, so a zone pair can "
         "only be placed above the threshold: those pairs can show "
         "over-rejection and cannot show under-rejection."
     ),
