@@ -280,6 +280,19 @@ class CopperElement:
             return KVia(x=cx, y=cy, diameter=max(width, height), drill=0.0)
         if self.source_pad is not None and self.source_footprint is not None:
             return _kernel_pad_shape(self.source_pad, self.source_footprint)
+        if self.polygon is None:
+            # A pad element with neither board-file provenance nor a
+            # precomputed outline has no shape information beyond its AABB, and
+            # this module has always resolved that the same conservative way:
+            # :meth:`bounds` widens such a pad to ``max(w, h)`` on both axes and
+            # :func:`_build_pad_copper_geom` hands the exact predicates the disc
+            # of radius ``max(w, h) / 2``.  Modelling it as the AABB *rectangle*
+            # here instead would make the kernel verdict narrower than the
+            # broad-phase bounds that gate it -- an under-rejection the
+            # broad/narrow parity check in ``test_boundary_violation_fields``
+            # exists to catch.  Keep the disc, so one model answers both phases.
+            diameter = max(width, height)
+            return _kernel_make_pad("circle", diameter, diameter, 0.25, 0.0, cx, cy)
         return _kernel_make_pad(
             self.pad_shape or "rect",
             width,
@@ -692,18 +705,20 @@ def _calculate_clearance(elem1: CopperElement, elem2: CopperElement) -> tuple[fl
     verdict is the same either way (``<= 0`` is below any positive
     requirement), but ``0.0`` would lose the ``SHORT: ...`` promotion
     :meth:`ClearanceRule._create_violation` keys off a negative value (#3909).
-    So when the kernel reports overlapping or touching copper on a pair
-    involving a pad, the reported magnitude is refined by
+    So on the pair kinds whose pre-kernel dispatch reported interpenetration
+    rather than a saturated distance -- and *only* those, see
+    :func:`_overlap_depth_applies` -- the reported magnitude is refined by
     :func:`_overlap_depth`, this module's existing intersection-bounding-box
-    convention.  Segment/via-only pairs need no refinement: their kernel gap is
-    already a true signed distance.
+    convention.  Every other pair kind's kernel gap already equals, saturation
+    included, the number the retired dispatch produced, so refining it would be
+    a behaviour change rather than a preserved one (#5881).
 
     Returns:
         Tuple of (clearance_mm, location_x, location_y).
     """
     gap = _kernel_copper_gap(elem1.kernel_shape(), elem2.kernel_shape())
 
-    if gap <= 0.0 and "pad" in (elem1.element_type, elem2.element_type):
+    if gap <= 0.0 and _overlap_depth_applies(elem1, elem2):
         depth = _overlap_depth(elem1, elem2)
         if depth is not None:
             gap = depth
@@ -746,6 +761,39 @@ def _report_location(elem1: CopperElement, elem2: CopperElement) -> tuple[float,
     x1, y1 = elem1.geometry[0], elem1.geometry[1]
     x2, y2 = elem2.geometry[0], elem2.geometry[1]
     return (x1 + x2) / 2, (y1 + y2) / 2
+
+
+def _overlap_depth_applies(elem1: CopperElement, elem2: CopperElement) -> bool:
+    """Whether this pair kind reports interpenetration rather than distance.
+
+    The pre-kernel dispatch used the intersection-bounding-box convention
+    (:func:`_overlap_depth`) on exactly two pair kinds, and an analytic signed
+    distance everywhere else:
+
+    * **segment vs pad** -- only when the pad carried a true outline whose shape
+      diverges from its AABB (``_segment_circle_clearance``'s guard:
+      ``polygon is not None and pad_shape in _POLYGON_DIVERGENT_SHAPES``).  A
+      plain ``rect``/``circle``/square pad went to the analytic branch, whose
+      answer for a centreline that crosses the pad boundary is ``-half_width``
+      -- precisely what ``copper_gap`` saturates to, so refining it would
+      *replace* a preserved value with a different one (#5881: a hand-computed
+      ``-0.01`` became ``-0.02``).
+    * **pad/via vs pad/via** -- whenever either element carried a polygon
+      (``_circle_circle_clearance``'s ``_polygon_pair_clearance`` path).  Real
+      board pads always do, so this is the branch that keeps the ``SHORT:``
+      promotion alive for two overlapping sharp-cornered rectangles, whose
+      Minkowski gap saturates at exactly ``0.0``.
+
+    Segment-vs-segment and via-vs-via pairs never used it: their kernel gap is a
+    true signed distance already.
+    """
+    t1, t2 = elem1.element_type, elem2.element_type
+    if t1 == "segment" or t2 == "segment":
+        if t1 == t2:
+            return False
+        other = elem2 if t1 == "segment" else elem1
+        return other.polygon is not None and other.pad_shape in _POLYGON_DIVERGENT_SHAPES
+    return elem1.polygon is not None or elem2.polygon is not None
 
 
 def _overlap_depth(elem1: CopperElement, elem2: CopperElement) -> float | None:
