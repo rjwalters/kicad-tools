@@ -127,7 +127,7 @@ if grep -q "comment" "$GH_LOG"; then fail "the wrapper made no comment call" "$(
 OUT="$(cd "$FORK" && LOOM_DAEMON_BIN="$STUB/daemon-allow" bash "$SCRIPTS_DIR/post-verdict.sh" 7 changes-requested \
   0123456789abcdef0123456789abcdef01234567 --body "needs work" 2>&1)"; RC=$?
 check "an allowed post-verdict.sh succeeds" 0 "$RC"
-contains "and names the vetted repo on the write" "$(cat "$GH_LOG")" "pr comment 7 --repo me/widgets"
+contains "and names the vetted repo on the write" "$(cat "$GH_LOG")" "issue comment 7 --repo me/widgets"
 
 # Scripts vetted since the first review: a real run from the fork is refused
 # before any write, and only the read that resolves the repo is made.

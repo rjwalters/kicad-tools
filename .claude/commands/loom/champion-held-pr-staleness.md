@@ -142,10 +142,10 @@ if [ -n "$ROT_CLASS" ]; then
   if [ "$("$GH_READ" pr view "$PR_NUM" --json comments --jq "[.comments[].body] | any(startswith(\"$STALENESS_MARKER\"))")" = "true" ]; then
     echo "Base-staleness notice already posted for #$PR_NUM — skipping"
   else
-    gh pr comment "$PR_NUM" --body "$STALENESS_MARKER
+    ./.loom/scripts/post-comment.sh "$PR_NUM" --pr --body "$STALENESS_MARKER
 **Champion: Held PR Has Gone Stale Against \`main\`**
 
-This PR is on an operator hold and \`main\` has moved underneath it: \`mergeStateStatus\` is \`DIRTY\` against merge base \`${MERGE_BASE:0:8}\`, with **$OVERLAP_N** of this PR's files also changed on \`main\` since it diverged.
+On an operator hold and \`main\` has moved: \`mergeStateStatus\` is \`DIRTY\` against \`${MERGE_BASE:0:8}\`, with **$OVERLAP_N** of this PR's files also changed on \`main\` since it diverged.
 
 **Rot class: $ROT_CLASS.**
 

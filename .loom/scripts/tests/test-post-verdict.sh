@@ -113,6 +113,28 @@ if [[ "$1" == "repo" && "$2" == "view" ]]; then
   exit 0
 fi
 
+if [[ "$1" == "issue" && "$2" == "comment" ]]; then
+  # #9774: post-verdict.sh posts through forge_gh_comment_rl_safe, which is
+  # `gh issue comment` shaped (a PR IS an issue for comments) — same capture
+  # contract as the `pr comment` case below.
+  pr_num="$3"
+  body=""
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [[ "${args[i]}" == "--body" ]]; then
+      body="${args[i + 1]}"
+    fi
+  done
+  if [[ -f "$STUB_DIR_FROM_ENV/comment-fail-$pr_num" ]]; then
+    echo "stub gh: issue comment failed" >&2
+    exit 1
+  fi
+  printf '%s\n' "$pr_num" > "$STUB_DIR_FROM_ENV/last-pr.txt"
+  printf '%s' "$body" > "$STUB_DIR_FROM_ENV/last-body.txt"
+  echo "https://github.com/owner/repo/issues/$pr_num#issuecomment-1"
+  exit 0
+fi
+
 if [[ "$1" == "pr" && "$2" == "comment" ]]; then
   pr_num="$3"
   body=""
@@ -138,6 +160,17 @@ chmod +x "$STUB_DIR/gh"
 
 export LOOM_TEST_STUB_DIR="$STUB_DIR"
 export PATH="$STUB_DIR:$PATH"
+# #9774: the transport tries the daemon chokepoint first. This suite's subject
+# is the verdict semantics over the GH ladder, so pin the SELF daemon to a
+# mock that refuses (the pre-#9818 shape) — the gh stub above stays the path
+# under test, deterministically, whatever binary the host happens to have.
+cat > "$STUB_DIR/loom-daemon" <<'MOCK'
+#!/usr/bin/env bash
+echo "mock loom-daemon: forge comment not under test here" >&2
+exit 127
+MOCK
+chmod +x "$STUB_DIR/loom-daemon"
+export LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon"
 # #9548: post-verdict.sh vets its write target through the write scope before it
 # writes. It runs from a checkout registered as owner/repo (origin, .loom/, push
 # reported to the permission probe), so the real decision admits it.

@@ -97,7 +97,7 @@ assert_not_contains() {
 }
 
 WORK="$(mktemp -d)"
-cleanup() { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf "$WORK"; }
+cleanup() { [[ -n "${LOOM_KEEP_WORK:-}" ]] || { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf "$WORK"; }; }
 trap cleanup EXIT
 
 # --- Fixture: a copy of create-issue.sh with stubbed siblings ----------------
@@ -194,12 +194,22 @@ chmod +x "$FAKE_BIN/gh"
 # lookup — same fixture rationale as test-check-duplicate.sh.
 cat > "$FAKE_BIN/loom-daemon" << 'STUB'
 #!/usr/bin/env bash
+# #9774: the post-create footer step (create-issue.sh) calls
+# `forge comment --patch-created <url>`; record it and succeed so the
+# best-effort note stays quiet. Every other invocation stays the deliberate
+# exit-1 stub this fixture has always been (the check-duplicate gh fallback
+# in the end-to-end case).
+if [[ "${1:-}" == "forge" && "${2:-}" == "comment" && "${3:-}" == "--patch-created" ]]; then
+    printf '%s\n' "$*" >> "${STUB_DAEMON_ARGS:-/dev/null}"
+    exit 0
+fi
 exit 1
 STUB
 chmod +x "$FAKE_BIN/loom-daemon"
 
 DUP_CALLS="$WORK/dup-calls.log"
 GH_CREATES="$WORK/gh-creates.log"
+DAEMON_ARGS="$WORK/daemon-args.log"
 
 # run_create [env assignments handled by caller] <args...>
 # Always: github forge forced, filing lock disabled (covered by
@@ -207,6 +217,7 @@ GH_CREATES="$WORK/gh-creates.log"
 run_create() {
     : > "$DUP_CALLS"
     : > "$GH_CREATES"
+    : > "$DAEMON_ARGS"
     OUT="$(
         PATH="$FAKE_BIN:$PATH" \
         LOOM_FORGE_TYPE=github \
@@ -214,6 +225,7 @@ run_create() {
         STUB_DUP_MODE="${STUB_DUP_MODE:-clean}" \
         STUB_DUP_CALLS="$DUP_CALLS" \
         STUB_GH_CREATES="$GH_CREATES" \
+        STUB_DAEMON_ARGS="$DAEMON_ARGS" \
         STUB_GH_MODE="${STUB_GH_MODE:-ok}" \
         STUB_ISSUE_LIST="${STUB_ISSUE_LIST:-}" \
         LOOM_SKIP_DUPLICATE_CHECK="${LOOM_SKIP_DUPLICATE_CHECK:-}" \
@@ -245,6 +257,12 @@ assert_contains "$OUT" "https://github.com/example/repo/issues/9999" "issue URL 
 assert_eq "$(wc -l < "$GH_CREATES" | tr -d ' ')" "1" "exactly one create"
 assert_contains "$(cat "$GH_CREATES")" "loom:triage" "label rode along with the create"
 assert_eq "$(wc -l < "$DUP_CALLS" | tr -d ' ')" "1" "the duplicate check ran"
+# #9774: right after the create, the script hands the URL to the daemon's
+# --patch-created (fetch, footer, PATCH). The stub daemon records the call.
+assert_contains "$(cat "$DAEMON_ARGS")" "--patch-created" \
+  "the post-create footer step calls forge comment --patch-created"
+assert_contains "$(cat "$DAEMON_ARGS")" "https://github.com/example/repo/issues/9999" \
+  "the footer step passes the created issue's URL"
 
 echo
 

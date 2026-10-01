@@ -90,7 +90,7 @@ When the user explicitly instructs you to work on a specific issue by number:
 # Issue has: any labels or no labels
 
 # ✅ Proceed immediately — a comment (not a label) records the manual triage
-gh issue comment 342 --body "Assessing priority per user request"
+./.loom/scripts/post-comment.sh 342 --body "Assessing priority per user request"
 
 # Assess priority
 # ... analyze impact, urgency, blockers ...
@@ -312,9 +312,9 @@ fi
    closed item reads as cleared and gets auto-unblocked; see `curator.md` → "Adding
    Dependencies", #9102):
    ```bash
-   gh issue comment <number> --body "⚠️ **Potential overlap with merged PR**
+   ./.loom/scripts/post-comment.sh <number> --body "⚠️ **Potential overlap with merged PR**
 
-   This issue may overlap with recently merged work. No open numbered blocker: needs human review to confirm.
+   May overlap recently merged work. No open blocker: needs human review.
 
    Run \`check-duplicate.sh --include-merged-prs\` for details."
    gh issue edit <number> --add-label "loom:blocked"
@@ -322,7 +322,7 @@ fi
 
 2. **Overlaps with closed issue**: Work was already completed or intentionally closed:
    ```bash
-   gh issue comment <number> --body "⚠️ **Potential overlap with closed issue** - needs human review to determine if this is distinct work."
+   ./.loom/scripts/post-comment.sh <number> --body "⚠️ **Potential overlap with closed issue** - needs human review to confirm."
    ```
 
 3. **Overlaps with open issue**, or sibling micro-issues: leave for Curator (duplicate handling / consolidation gate, `curator.md` → "Backlog Rightsizing"). Do not split or re-file them yourself.
@@ -753,11 +753,11 @@ check_and_unblock() {
       # it re-enter the curation/approval flow.
       if [ "$(was_previously_approved "$number")" = "true" ]; then
         gh issue edit "$number" --remove-label "loom:blocked" --add-label "loom:issue"
-        gh issue comment "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). Restored \`loom:issue\` (previously approved). Ready for implementation."
+        ./.loom/scripts/post-comment.sh "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). Restored \`loom:issue\` (previously approved). Ready for implementation."
         echo "Unblocked #$number (restored loom:issue): $title"
       else
         gh issue edit "$number" --remove-label "loom:blocked"
-        gh issue comment "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). This issue was blocked before approval, so it re-enters the curation/approval flow (no \`loom:issue\` added — that requires human/Champion approval)."
+        ./.loom/scripts/post-comment.sh "$number" --body "🔓 **Unblocked**: Dependencies resolved ($resolved_deps). Blocked before approval, so it re-enters curation/approval (\`loom:issue\` needs human/Champion approval)."
         echo "Unblocked #$number (back to curation, not approved): $title"
       fi
     fi
@@ -799,11 +799,11 @@ was_previously_approved 963
 
 # 5a. Previously approved → RESTORE loom:issue
 gh issue edit 963 --remove-label "loom:blocked" --add-label "loom:issue"
-gh issue comment 963 --body "🔓 **Unblocked**: Dependencies resolved (#962). Restored \`loom:issue\` (previously approved). Ready for implementation."
+./.loom/scripts/post-comment.sh 963 --body "🔓 **Unblocked**: Dependencies resolved (#962). Restored \`loom:issue\` (previously approved). Ready for implementation."
 
 # 5b. If it was NEVER approved (blocked pre-curation) → clear loom:blocked only
 # gh issue edit 963 --remove-label "loom:blocked"
-# gh issue comment 963 --body "🔓 **Unblocked**: Dependencies resolved (#962). Re-enters the curation/approval flow (no loom:issue added)."
+# ./.loom/scripts/post-comment.sh 963 --body "🔓 **Unblocked**: Dependencies resolved (#962). Re-enters the curation/approval flow (no loom:issue added)."
 
 # Counter-example (#4492's exact sequence): body dependency #4491 is CLOSED,
 # but has_superseding_block finds linked PR #4519 still OPEN with

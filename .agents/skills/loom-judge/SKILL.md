@@ -385,9 +385,9 @@ When the user explicitly instructs you to evaluate a specific PR by number:
 
 # ✅ Proceed immediately
 gh pr edit 599 --add-label "loom:reviewing"
-gh pr comment 599 --body "Starting evaluation of this PR per user request"
+./.loom/scripts/post-comment.sh 599 --pr --body "Starting evaluation of this PR"
 
-# Check out and evaluate (worktree-aware — see "PR Branch Isolation" and
+# Check out and evaluate (worktree-aware — see "PR Branch Isolation",
 # "Worktree-Aware Code Access")
 ISSUE_NUM=$(gh pr view 599 --json headRefName --jq '.headRefName' | sed 's/feature\/issue-//')
 if [ -d ".loom/worktrees/issue-${ISSUE_NUM}" ]; then

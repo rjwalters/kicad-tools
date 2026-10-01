@@ -251,7 +251,7 @@ up or wait idly; retry the same mutation over REST:
 REST equivalents for the mutations you actually need mid-fix:
 
 ```bash
-# gh pr comment <n> --body "..."   ->
+# ./.loom/scripts/post-comment.sh <n> --pr --body "..."   ->
 gh api "repos/{owner}/{repo}/issues/<n>/comments" -F body="..."
 
 # gh pr edit <n> --add-label "loom:review-requested"   ->
@@ -501,7 +501,7 @@ operator-hold exclusion above and every other filter keyed on it are unaffected:
 | `loom:operator-objective` | The fix is determined once the operator states an objective — name the candidate objectives and the answer under each (#5826) |
 
 ```bash
-gh pr comment <number> --body "Routing to the operator: <what a human must do>."
+./.loom/scripts/post-comment.sh <number> --pr --body "Routing to the operator: <what a human must do>."
 gh pr edit <number> --add-label "loom:operator-only,loom:operator-mechanical"
 ```
 
@@ -632,7 +632,7 @@ if [ "$PRIORITY_1" -eq 0 ] && [ "$PRIORITY_2" -eq 0 ]; then
       git push --force-with-lease
 
       # Comment but don't add labels
-      gh pr comment $UNLABELED_PR --body "🔧 Fixed merge conflicts with main branch."
+      ./.loom/scripts/post-comment.sh $UNLABELED_PR --pr --body "🔧 Fixed merge conflicts with main branch."
     fi
   else
     echo "No work available - all queues empty"
@@ -660,11 +660,11 @@ When the user explicitly instructs you to work on a specific PR by number:
 ```
 
 **Behavior**:
-1. **Proceed immediately** - Don't check for required labels
-2. **Interpret as approval** - User instruction = implicit approval to work on PR
-3. **Apply working label** - Add `loom:treating` to track work
-4. **Document override** - Note in comments: "Addressing issues on this PR per user request"
-5. **Follow normal completion** - Apply end-state labels when done (`loom:review-requested`)
+1. **Proceed immediately** — skip the required-label check
+2. **Interpret as approval** — the instruction is implicit approval to work the PR
+3. **Apply working label** — add `loom:treating` to track it
+4. **Document override** — comment "Addressing issues on this PR"
+5. **Follow normal completion** — end-state labels when done (`loom:review-requested`)
 
 **Example**:
 ```bash
@@ -674,7 +674,7 @@ When the user explicitly instructs you to work on a specific PR by number:
 # ✅ Proceed immediately (still run the stale-claim check if loom:treating is present)
 gh pr edit 588 --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view 588 --json headRefOid --jq '.headRefOid')
-gh pr comment 588 --body "Addressing issues on this PR per user request"
+./.loom/scripts/post-comment.sh 588 --pr --body "Addressing issues on this PR per user request"
 
 # Check out and fix — always inside a dedicated worktree (see "PR Branch Isolation")
 PR_BRANCH=$(gh pr view 588 --json headRefName --jq '.headRefName')
@@ -695,20 +695,20 @@ fi
 
 # Complete normally
 git push
-gh pr comment 588 --body "Addressed all feedback, ready for re-review"
+./.loom/scripts/post-comment.sh 588 --pr --body "Addressed all feedback, ready for re-review"
 gh pr edit 588 --remove-label "loom:treating" --add-label "loom:review-requested"
 ```
 
 **Why This Matters**:
-- Users may want to prioritize specific PR fixes
-- Users may want to test treating workflows with specific PRs
-- Users may want to expedite merge-blocking conflicts
-- Flexibility is important for manual orchestration mode
+- Prioritize specific fixes
+- Test treating workflows on specific PRs
+- Expedite merge-blocking conflicts
+- Flexibility matters in manual orchestration mode
 
 **When NOT to Override**:
-- When user says "find PRs" or "look for work" → Use label-based workflow
-- When running autonomously → Always use label-based workflow
-- When user doesn't specify a PR number → Use label-based workflow
+- "find PRs" / "look for work" → label-based workflow
+- Running autonomously → label-based workflow
+- No PR number specified → label-based workflow
 
 ## Work Process
 
@@ -815,7 +815,7 @@ that marker whenever you cross a long step. The script prints the marker for the
 live claim, so you never hand-assemble it:
 
 ```bash
-gh pr comment $N --body "Doctor: fix pushed, waiting on CI to re-run — still treating.
+./.loom/scripts/post-comment.sh $N --pr --body "Doctor: fix pushed, waiting on CI to re-run — still treating.
 $(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:treating)"
 ```
 
@@ -874,7 +874,7 @@ claim forever. Use this reclaim comment:
 
 ```bash
 gh pr edit $N --remove-label "loom:treating"
-gh pr comment $N --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_TREATING_MINUTES:-60}m) with no actual fix progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+./.loom/scripts/post-comment.sh $N --pr --body "Reclaiming loom:treating claim: $STANDDOWN_COUNT stand-down passes, no fix progress for ${LOOM_STALE_TREATING_MINUTES:-60}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
@@ -884,7 +884,7 @@ CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 
 ```bash
 gh pr edit $N --remove-label "loom:treating"
-gh pr comment $N --body "Reclaiming stale loom:treating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_TREATING_MINUTES:-60}m with no claimant activity) — a prior Doctor's process likely died mid-fix."
+./.loom/scripts/post-comment.sh $N --pr --body "Reclaiming stale loom:treating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_TREATING_MINUTES:-60}m, no claimant activity) — the prior process likely died mid-fix."
 gh pr edit $N --add-label "loom:treating"
 CLAIM_HEAD_SHA=$(gh pr view $N --json headRefOid --jq '.headRefOid')
 # Continue to step 3 (Check PR details) and fix normally
@@ -989,7 +989,7 @@ rather than hand-bumping — a hand-rolled bump is what produced `bef3e07a` (#73
 **Standing down** (a concurrent fix already landed):
 
 ```bash
-gh pr comment $N --body "🩺 Doctor standing down: PR head moved from \`$CLAIM_HEAD_SHA\` to \`$CURRENT_HEAD_SHA\` while I was working, and the blocker I was dispatched for is already addressed by the concurrent push. Discarding my duplicate fix — no push made."
+./.loom/scripts/post-comment.sh $N --pr --body "🩺 Doctor standing down: PR head moved to \`$CURRENT_HEAD_SHA\` while I worked; the blocker I was dispatched for is already addressed by that push. Discarding my duplicate fix — no push made."
 gh pr edit $N --remove-label "loom:treating"
 ```
 
@@ -1421,7 +1421,7 @@ CURRENT_LABELS=$(gh pr view 42 --json labels --jq '[.labels[].name] | join(",")'
 
 # Signal completion and unclaim (amber → green, remove in-progress)
 gh pr edit 42 --remove-label "loom:changes-requested" --remove-label "loom:treating" --add-label "loom:review-requested"
-gh pr comment 42 --body "✅ Review feedback addressed:
+./.loom/scripts/post-comment.sh 42 --pr --body "✅ Review feedback addressed:
 - Fixed null handling in foo.ts:15
 - Added test case for error condition
 - Updated README with new API docs
@@ -1525,7 +1525,7 @@ When you **only** resolve merge conflicts without making substantive code change
 
 ```bash
 # After resolving ONLY merge conflicts (no other changes):
-gh pr comment 42 --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh 42 --pr --body "$(cat <<'EOF'
 🔧 Resolved merge conflicts with main branch.
 
 <!-- loom:conflict-only -->
@@ -1570,7 +1570,7 @@ git push
 ### Can't Understand Feedback
 ```bash
 # Ask for clarification
-gh pr comment 42 --body "@reviewer Could you clarify what you mean by 'refactor the auth logic'? Do you want me to:
+./.loom/scripts/post-comment.sh 42 --pr --body "@reviewer Could you clarify what you mean by 'refactor the auth logic'? Do you want me to:
 1. Extract it to a separate function?
 2. Move it to a different file?
 3. Change the authentication approach entirely?

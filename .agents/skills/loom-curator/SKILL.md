@@ -168,14 +168,14 @@ When the user explicitly instructs you to work on a specific issue by number:
 
 # ✅ Proceed immediately
 gh issue edit 342 --add-label "loom:curating"
-gh issue comment 342 --body "Enhancing this issue per user request"
+./.loom/scripts/post-comment.sh 342 --body "Enhancing this issue per request"
 
 # Add comprehensive enhancement
 # ... research codebase, add context, create test plan ...
 
 # Complete normally
 gh issue edit 342 --remove-label "loom:curating" --remove-label "loom:triage" --add-label "loom:curated"
-gh issue comment 342 --body "✅ Curation complete. Added implementation guidance, acceptance criteria, and test plan."
+./.loom/scripts/post-comment.sh 342 --body "✅ Curation complete: implementation guidance, acceptance criteria, test plan."
 ```
 
 **When NOT to Override**:
@@ -494,7 +494,7 @@ the marker for the live claim, so append it to any mid-curation progress note
 when a pass runs long (e.g. heavy use of the reproduction playbook above):
 
 ```bash
-gh issue comment $N --body "Curator: still researching the codebase for this enhancement.
+./.loom/scripts/post-comment.sh $N --body "Curator: still researching the codebase for this enhancement.
 $(./.loom/scripts/claim-staleness.sh marker --number "$N" --label loom:curating)"
 ```
 
@@ -539,7 +539,7 @@ this reclaim comment:
 
 ```bash
 gh issue edit $N --remove-label "loom:curating"
-gh issue comment $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT consecutive stand-down passes have accumulated against claim $CLAIMED_AT (age ≥ ${LOOM_STALE_CURATING_MINUTES:-30}m) with no actual curation progress (bounded fallback, LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming loom:curating claim: $STANDDOWN_COUNT stand-down passes, no curation progress for ${LOOM_STALE_CURATING_MINUTES:-30}m (bounded by LOOM_MAX_STANDDOWN_STREAK=${LOOM_MAX_STANDDOWN_STREAK:-3}) — breaking the livelock."
 gh issue edit $N --add-label "loom:curating"
 # Continue with normal curation
 ```
@@ -548,7 +548,7 @@ gh issue edit $N --add-label "loom:curating"
 
 ```bash
 gh issue edit $N --remove-label "loom:curating"
-gh issue comment $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-30}m with no claimant activity) — a prior Curator's parent sweep likely died mid-enhancement."
+./.loom/scripts/post-comment.sh $N --body "Reclaiming stale loom:curating claim (idle ${IDLE_MINUTES}m > ${LOOM_STALE_CURATING_MINUTES:-30}m, no claimant activity) — the prior sweep likely died mid-enhancement."
 gh issue edit $N --add-label "loom:curating"
 # Continue with normal curation
 ```
@@ -775,7 +775,7 @@ them into the one you are curating. Never absorb a sibling that has:
 > This will block the Builder, which dispatches into a fresh worktree off \`origin/main\`. Either:
 > - Commit + push these files first, then remove the \`loom:blocked\` label, OR
 > - Adjust the Affected Files section to scope down to committed-only changes."
->   gh issue comment "$N" --body "$COMMENT"
+>   ./.loom/scripts/post-comment.sh "$N" --body "$COMMENT"
 >   gh issue edit "$N" --add-label "loom:blocked"
 >   # Exit without further state changes — the next curator tick will re-evaluate.
 >   exit 0
@@ -926,7 +926,7 @@ Treat a filed issue as a **suggestion, not a mandate**. In autonomous mode the f
 
 ```bash
 # 1. Rationale comment FIRST (the audit trail), then close as not planned:
-gh issue comment <number> --body "Closing as not planned: <specific rationale>. <evidence: superseded by #<n> / merged in <sha> / covered by #<canonical>>."
+./.loom/scripts/post-comment.sh <number> --body "Closing as not planned: <rationale>. <evidence: superseded by #<n> / merged in <sha> / covered by #<canonical>>."
 gh issue close <number> --reason "not planned"
 ```
 
@@ -972,7 +972,7 @@ Priority-2 query above) behaves exactly as before:
 
 ```bash
 # Curator routing an issue that encodes a still-pending human decision:
-gh issue comment <number> --body "Routing to the operator: <why a human must decide>."
+./.loom/scripts/post-comment.sh <number> --body "Routing to the operator: <why a human must decide>."
 gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
 ```
 
@@ -1038,29 +1038,29 @@ fi
 
 1. **Clearly duplicate** (high confidence the canonical issue fully covers this one): comment the rationale, then close as not planned:
    ```bash
-   gh issue comment <number> --body "Closing as not planned: duplicate of #<canonical>, which fully covers this scope. See #<canonical> for the original discussion."
+   ./.loom/scripts/post-comment.sh <number> --body "Closing as not planned: duplicate of #<canonical>, which covers this scope. See it for the original discussion."
    gh issue close <number> --reason "not planned"
    ```
    If confidence is only *moderate*, treat it as "Unclear" (case 3) and route for review instead of closing.
 
 2. **Related but distinct**: Add cross-reference in enhancement:
    ```bash
-   gh issue comment <number> --body "Related: #<related> (similar but different scope)"
+   ./.loom/scripts/post-comment.sh <number> --body "Related: #<related> (similar but different scope)"
    ```
 
 3. **Unclear**: Flag for human review:
    ```bash
-   gh issue comment <number> --body "⚠️ Potential duplicate of #<similar>. Needs human review to determine if distinct."
+   ./.loom/scripts/post-comment.sh <number> --body "⚠️ Potential duplicate of #<similar>. Needs human review to determine if distinct."
    ```
 
 4. **Appears already fixed**: if you can **verify** it is resolved (the referenced PR merged and the condition no longer reproduces), comment the rationale and close as not planned. If you cannot verify, flag for human verification instead of closing:
    ```bash
    # Verified resolved → close with rationale:
-   gh issue comment <number> --body "Closing as not planned: resolved by PR #<pr_number> (merged <sha>); the condition no longer reproduces."
+   ./.loom/scripts/post-comment.sh <number> --body "Closing as not planned: resolved by PR #<pr_number> (merged <sha>); no longer reproduces."
    gh issue close <number> --reason "not planned"
 
    # Cannot verify → flag, do not close. Comment FIRST; never cite the merged PR as a blocker:
-   gh issue comment <number> --body "⚠️ **May Already Be Fixed** — possibly addressed by PR #<pr_number> or commit <sha>. No open numbered blocker: needs verification — please test and close if no longer reproducible."
+   ./.loom/scripts/post-comment.sh <number> --body "⚠️ **May Already Be Fixed** — possibly addressed by PR #<pr_number> or commit <sha>. No open blocker: please test and close if no longer reproducible."
    gh issue edit <number> --add-label "loom:blocked"
    ```
 
@@ -1107,11 +1107,11 @@ failure modes to avoid:
 
 # Novel sibling: curate normally, no operator routing, despite duplicate
 # findings elsewhere in the same batch.
-gh issue comment 718 --body "Duplicate audit: no MoM/parasitic-extraction command exists today; this scope is novel, unlike the P&R/synth/signoff siblings filed alongside it. Curating as fresh implementation work."
+./.loom/scripts/post-comment.sh 718 --body "Duplicate audit: no MoM/parasitic-extraction command exists; this scope is novel vs the P&R/synth/signoff siblings. Curating as fresh work."
 gh issue edit 718 --add-label "loom:curated"
 
 # Confirmed duplicate of shipped work: close with the pointer, not operator-decision.
-gh issue comment 716 --body "Closing as not planned: duplicates \`klt place-and-route\`, already shipped on main (PR #<pr_number>)."
+./.loom/scripts/post-comment.sh 716 --body "Closing as not planned: duplicates \`klt place-and-route\`, shipped on main (PR #<pr_number>)."
 gh issue close 716 --reason "not planned"
 ```
 
@@ -1133,9 +1133,9 @@ PR #90: Implement alternate approach (open PR, cross-references #42)
 - **Disregarded** — you read it and it does not apply (wrong scope, superseded, already resolved). State the reason, not just "not applicable."
 
 ```bash
-gh issue comment <number> --body "Related open work: #87 argues the retry policy should be event-driven rather than polling. Absorbed — updated the AC to require an event-driven retry, see revised Acceptance Criteria above."
+./.loom/scripts/post-comment.sh <number> --body "Related: #87 argues the retry policy should be event-driven, not polling. Absorbed — the AC now requires an event-driven retry, see revised Acceptance Criteria above."
 # or:
-gh issue comment <number> --body "Related open work: #87 discusses a different subsystem (auth, not this issue's caching layer) — disregarded as out of scope for this issue."
+./.loom/scripts/post-comment.sh <number> --body "Related: #87 is a different subsystem (auth, not this caching layer) — out of scope, disregarded."
 ```
 
 A `RELATED_OPEN_WORK` hit is **not** grounds for closing or auto-rescoping on its own — it is a signal to actively reconcile the spec (or explicitly reject the reconciliation) before marking `loom:curated`, since the whole point is preventing a Builder from shipping against a spec another open issue has already argued is wrong. GitHub-specific: on a non-GitHub forge (or an API failure) the probe degrades gracefully (stderr warning, empty result) rather than failing the duplicate check.
@@ -1216,7 +1216,7 @@ Use comments when the issue is already clear and you're adding supplementary inf
 gh issue view 100 --comments
 
 # 2. Add your enhancement as a comment
-gh issue comment 100 --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh 100 --body "$(cat <<'EOF'
 ## Implementation Guidance
 
 [Your detailed implementation options here...]
@@ -1289,7 +1289,7 @@ behavior with no inferred mechanism attached.]
 gh issue edit 310 --body "$ENHANCED"
 
 # 4. Add comment noting the amendment
-gh issue comment 310 --body "📝 **Curator**: Enhanced issue description with implementation details. Original issue preserved above."
+./.loom/scripts/post-comment.sh 310 --body "📝 **Curator**: Enhanced description with implementation details. Original preserved above."
 ```
 
 **Important:**
@@ -1366,7 +1366,7 @@ if [ -n "$HOLD" ]; then
       --issue "$ISSUE_NUMBER" --pr "$HOLD_PR" --head-sha "$HOLD_SHA" >/dev/null 2>&1
     if [ "$?" -eq 11 ]; then   # SATISFIED: an ac-verified marker names this tree.
       gh issue edit "$ISSUE_NUMBER" --add-label "loom:curating"
-      gh issue comment "$ISSUE_NUMBER" --body "**Champion's out-of-band AC hold now has a \`loom:ac-verified\` marker** for \`$HOLD_SHA\` — needs a human to close this issue (Curator does not). $NOTICE_MARKER"
+      ./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body "**Champion's out-of-band AC hold now has a \`loom:ac-verified\` marker** for \`$HOLD_SHA\` — needs a human to close this issue (Curator does not). $NOTICE_MARKER"
       gh issue edit "$ISSUE_NUMBER" --remove-label "loom:curating"
     fi
     # Any other exit (12/13 unverified/stale, 0/10 no AC left, 1 error):
@@ -1767,7 +1767,7 @@ gh issue view <number> --json labels --jq '.labels[].name' | grep -q '^loom:oper
     # $CLAIM=true here (escalation is a changed-hash "comment" row) — claim
     # immediately before mutating, per "Claim discipline (#7617)" above.
     gh issue edit <number> --add-label "loom:curating"
-    gh issue comment <number> --body "<!-- curator:dep-recheck:$CONCLUSION_HASH -->
+    ./.loom/scripts/post-comment.sh <number> --body "<!-- curator:dep-recheck:$CONCLUSION_HASH -->
 <!-- curator:orthogonal-block:$ORTHOGONAL -->
 **Curator: tracked blocker is stale — the real block is elsewhere**
 
@@ -1907,7 +1907,7 @@ exactly as "Claim discipline" above describes:
 
 ```bash
 gh issue edit "$ISSUE_NUMBER" --add-label "loom:curating"
-gh issue comment "$ISSUE_NUMBER" --body "**Operator-parked, premise possibly stale**: the reference this issue is parked on, #<ref>, is now **closed**. Worth an operator taking another look — not auto-releasing; \`loom:operator-only\` and its sub-kind label are left untouched. <!-- curator:operator-premise-recheck:$CONCLUSION_HASH -->"
+./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body "**Operator-parked, premise possibly stale**: the parked reference #<ref> is now **closed**. Worth an operator look — not auto-releasing; \`loom:operator-only\` and its sub-kind label stay. <!-- curator:operator-premise-recheck:$CONCLUSION_HASH -->"
 gh issue edit "$ISSUE_NUMBER" --remove-label "loom:curating"
 ```
 
@@ -2220,7 +2220,7 @@ rg "relevant_pattern" --type py --files-with-matches
 rg "function_name" --type ts -l
 
 # 3. Add enhancement with required sections
-gh issue comment 100 --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh 100 --body "$(cat <<'EOF'
 ## Implementation Guidance
 
 [Your technical analysis...]

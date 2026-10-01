@@ -425,6 +425,17 @@ fi
 # Release on every exit path, including a failed create or an interrupt.
 trap 'loom_filing_lock_release' EXIT INT TERM
 
-if ! forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}"; then
-  exit 1
+ISSUE_URL="$(forge_gh_create_issue_rl_safe "$REPO_NWO" "$TITLE" "$BODY" "${LABELS[@]+"${LABELS[@]}"}")" || exit 1
+echo "$ISSUE_URL"
+
+# --- #9774: the filed body ends with the dashboard footer -------------------
+# Best-effort, via the daemon's --patch-created (fetch, footer, PATCH — the
+# number exists only inside the URL after the create). A daemon that cannot
+# (absent, or pre-#9818) leaves the body unfootered; it never un-files.
+# requires-daemon: forge optional   absent or pre-#9818 binary → the footer is skipped with a stderr note; the filing itself is already done (#9774)
+self_bin="$(command -v loom-daemon 2>/dev/null || true)"
+if [[ -n "$self_bin" ]]; then
+  if ! "$self_bin" forge comment --patch-created "$ISSUE_URL" >/dev/null 2>&1; then
+    echo "create-issue.sh: note: could not append the dashboard footer to the filed body (best-effort; the issue itself is filed)" >&2
+  fi
 fi

@@ -190,11 +190,11 @@ MERGEABLE=$(gh pr view "$PR_NUMBER" --json mergeable --jq '.mergeable')
 if [ "$MERGEABLE" != "MERGEABLE" ]; then
   echo "FAIL: Merge conflicts detected"
   # Add comment explaining conflict
-  gh pr comment "$PR_NUMBER" --body "Cannot auto-merge: merge conflicts with base branch"
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "Cannot auto-merge: merge conflicts with base branch"
 fi
 ```
 
-**Decision**: **Skip and comment** - do not merge, notify via comment.
+**Decision**: skip and comment — notify only.
 
 **Rationale**: Conflicts require human/Builder resolution. Champion should not attempt to resolve conflicts.
 

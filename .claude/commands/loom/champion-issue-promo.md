@@ -332,19 +332,19 @@ gh issue list --label "loom:evaluating" --state open --limit 200 \
     # only repeat the same crash-and-orphan loop. Route to a human instead of
     # looping forever (mirrors Step 4's escalation shape for a repeatedly
     # unrevised proposal, generalized here to a claim that keeps going stale).
-    gh issue comment "$N" --body "<!-- champion:evaluating-stale-escalated -->
+    ./.loom/scripts/post-comment.sh "$N" --body "<!-- champion:evaluating-stale-escalated -->
 **Champion: Escalating to Operator — Repeated Stale \`loom:evaluating\` Claim**
 
-This issue's \`loom:evaluating\` claim has gone stale and been reclaimed $PRIOR_RECLAIMS time(s) already (most recently ${AGE_MIN}m old, threshold ${LOOM_STALE_EVALUATING_MINUTES:-15}m). A Champion evaluation keeps starting on this issue and dying before writing a verdict — reclaiming again would only repeat the same loop. Something is stopping evaluation from completing on this specific issue (a crash, a timeout, an environment problem), which needs a human to investigate rather than another automated retry.
+This issue's \`loom:evaluating\` claim has gone stale and been reclaimed $PRIOR_RECLAIMS time(s) (most recently ${AGE_MIN}m old). A Champion evaluation keeps starting and dying before writing a verdict — reclaiming again would repeat the loop. Something stops evaluation from completing here (a crash, a timeout, an environment problem) and needs a human, not another automated retry.
 
 ---
 *Automated by Champion role*" \
       && gh issue edit "$N" --remove-label "loom:evaluating" --add-label "loom:operator-only,loom:operator-mechanical"
   else
-    gh issue comment "$N" --body "$RECLAIM_MARKER
+    ./.loom/scripts/post-comment.sh "$N" --body "$RECLAIM_MARKER
 **Champion: Reclaiming stale \`loom:evaluating\` claim**
 
-This issue's \`loom:evaluating\` claim is ${AGE_MIN}m old (>= the ${LOOM_STALE_EVALUATING_MINUTES:-15}m threshold) — a prior Champion evaluation likely died mid-pass without writing a verdict. Releasing the claim so the issue re-enters the normal promotion queue; a later pass evaluates it from scratch.
+This issue's \`loom:evaluating\` claim is ${AGE_MIN}m old (>= the ${LOOM_STALE_EVALUATING_MINUTES:-15}m threshold) — a prior evaluation likely died mid-pass without a verdict. Releasing the claim so the issue re-enters the promotion queue; a later pass evaluates from scratch.
 
 ---
 *Automated by Champion role*" \
@@ -1151,7 +1151,7 @@ if [ "$LOOM_ISSUE_LANDED" != "true" ]; then
   # HARD STOP for this issue: no verdict comment, no further promotion steps.
 else
   # loom:issue is CONFIRMED present — only now post the promotion comment.
-  gh issue comment "$ISSUE_NUMBER" --body "**Champion Review: APPROVED**
+  ./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body "**Champion Review: APPROVED**
 
 This issue has been evaluated and promoted to \`loom:issue\` status. All quality criteria passed:
 
@@ -1220,7 +1220,7 @@ recurrence, seeded the same way the reject path seeds
 `champion:unrevised-skips:...:0`:
 
 ```bash
-gh issue comment "$ISSUE_NUMBER" --body "<!-- champion:capacity-defer:tier:maintenance:$FINGERPRINT -->
+./.loom/scripts/post-comment.sh "$ISSUE_NUMBER" --body "<!-- champion:capacity-defer:tier:maintenance:$FINGERPRINT -->
 <!-- champion:capacity-defer-seen:$FINGERPRINT:1 -->
 **Champion Review: Tier 3 backlog cap reached — deferring promotion**
 
@@ -1375,7 +1375,7 @@ fi
 ```bash
 MAIN_SHA=$(git rev-parse origin/main 2>/dev/null || git rev-parse main)
 CLOSE_MARKER="<!-- champion:premise-false-closed:$MAIN_SHA -->"
-gh issue comment <number> --body "$CLOSE_MARKER
+./.loom/scripts/post-comment.sh <number> --body "$CLOSE_MARKER
 **Champion: Closing — Premise Verified False**
 
 [One-paragraph rationale: name the finding(s), the exact mechanical check(s)
@@ -1402,7 +1402,7 @@ ESCALATE_MARKER="<!-- champion:proposal-escalated -->"
 # dependency (name it below with "Blocked by #N"); otherwise
 # "loom:operator-decision" (the safe default).
 SUB_KIND="loom:operator-decision"
-gh issue comment <number> --body "$ESCALATE_MARKER
+./.loom/scripts/post-comment.sh <number> --body "$ESCALATE_MARKER
 **Champion: Escalating to Operator — Repeated Rejection Without Revision**
 
 This proposal has been evaluated $UNREVISED_EVALS+ times with converging feedback ($PRIOR_REJECTIONS posted rejection(s) plus $SKIP_STREAK silent skip(s) of an unchanged proposal), but has not been revised to address it. Re-running an identical evaluation each cycle changes nothing, and skipping it silently forever would leave it invisible; escalating is the only move that makes progress.
@@ -1425,7 +1425,7 @@ A human needs to decide whether to revise this proposal, close it, or accept it 
 # Both markers are load-bearing: $VERDICT_MARKER makes the next cycle skip
 # silently; the skip tally (seeded at 0) is what that silent skip increments, so
 # the proposal still escalates on schedule while staying quiet (#4967).
-gh issue comment <number> --body "$VERDICT_MARKER
+./.loom/scripts/post-comment.sh <number> --body "$VERDICT_MARKER
 <!-- champion:unrevised-skips:$BODY_HASH:0 -->
 **Champion Review: NEEDS REVISION**
 

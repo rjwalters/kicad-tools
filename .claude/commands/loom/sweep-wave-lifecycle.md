@@ -407,10 +407,10 @@ If the builder failed (no PR opened), do NOT write a checkpoint — leave the ch
   2. **Release the claim** back to `loom:issue` — do NOT close the issue (the marker records "nothing to do this pass," not "this issue is resolved"):
      ```bash
      gh issue edit N --remove-label "loom:building" --add-label "loom:issue"
-     gh issue comment N --body "Builder found no actionable changes this pass: $(head -c 200 .loom/worktrees/issue-N/.no-changes-needed). Releasing the claim; a self-reported no-op cooldown was recorded so this issue is not immediately re-offered (#6670)."
+     ./.loom/scripts/post-comment.sh N --body "Builder found no actionable changes this pass: $(head -c 200 .loom/worktrees/issue-N/.no-changes-needed). Releasing the claim; a self-reported no-op cooldown was recorded so this issue is not immediately re-offered (#6670)."
      ```
   3. **Do NOT write a `builder-done` checkpoint** — leave it at the previous phase, exactly like the failure path. The marker is untracked and never committed, so nothing about this outcome is durable on the branch itself; the checkpoint staying at `curator-done` is what lets a future sweep pass re-evaluate the issue fresh (the noop-cooldown window from step 1, not the checkpoint, is what actually suppresses the immediate re-dispatch).
-  4. Record it as `no-op (no changes needed)` in the wave summary — distinct from `blocked (builder failed)` — so an operator scanning the summary does not mistake a deliberate conclusion for an error.
+  4. Record it as `no-op (no changes needed)` in the wave summary — distinct from `blocked (builder failed)` — so an operator does not mistake a deliberate conclusion for an error.
 
 **Per-builder failure isolation.** If builder for issue `#A` fails to open a PR (build error, test failure, unrecoverable conflict, etc.), log it and **continue** with the other builders' PRs in this wave. The failed issue is recorded as `blocked (builder failed)` in the summary. Do NOT abort the wave. Do NOT skip Judge for the other PRs.
 

@@ -140,6 +140,17 @@ STUB_DIR=$(mktemp -d)
 source "$SCRIPT_DIR/lib/write-scope-fixture.sh"
 write_scope_register "$STUB_DIR/checkout" owner/repo
 cd "$STUB_DIR/checkout"
+
+# #9774: forge_gh_comment_rl_safe tries the daemon chokepoint before the gh
+# ladder. This suite's subject is the ladder, so pin the SELF daemon to a
+# mock that refuses — the gh stub stays the path under test, deterministically.
+cat > "$STUB_DIR/loom-daemon" <<'MOCK'
+#!/usr/bin/env bash
+echo "mock loom-daemon: forge comment not under test here" >&2
+exit 127
+MOCK
+chmod +x "$STUB_DIR/loom-daemon"
+export LOOM_DAEMON_SELF_BIN="$STUB_DIR/loom-daemon"
 ARGV_LOG="$STUB_DIR/argv.log"
 GH_MODE_FILE="$STUB_DIR/mode.txt"
 # Captures the JSON body a `gh api ... --input -` call reads from stdin, so

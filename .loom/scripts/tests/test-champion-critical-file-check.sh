@@ -54,6 +54,11 @@
 #      repeated FAIL against an unchanged file set is idempotent (no
 #      duplicate label/comment); and a later PASS (diff no longer touches a
 #      critical file) clears the label and posts a one-time cleared notice.
+#   5. (#9357) The bare ".sql" pattern is gone: reference/analytics query SQL
+#      that nothing executes (this repo's `defaults/observability/**/*.sql`
+#      SigNoz/ClickStack queries, SQL test fixtures) no longer arms the hold,
+#      while every real schema surface — which in this repo always lives under
+#      a `migrations/` directory — is still caught by "migrations/".
 #
 # Usage:
 #   ./.loom/scripts/tests/test-champion-critical-file-check.sh
@@ -134,13 +139,14 @@ assert_doc_lacks() {
 # verbatim (pattern list + matching loop) from defaults/.claude/commands/
 # loom/champion-pr-merge.md.
 # =====================================================================
+# NOTE: no bare ".sql" entry — dropped in #9357 (see the "bare .sql" section
+# below for the false positive it caused on reference query SQL).
 CRITICAL_PATTERNS=(
     "Cargo.toml"
     "loom-daemon/Cargo.toml"
     "loom-api/Cargo.toml"
     "package.json"
     ".github/workflows/"
-    ".sql"
     "migrations/"
     "_migration.py"
 )
@@ -309,6 +315,49 @@ fixture="docs/migration-notes.md"
 out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
 assert_eq "PASS" "$out" \
     "docs/migration-notes.md (bare 'migration' substring, no directory/suffix convention) passes"
+
+echo
+echo "--- champion_critical_file_check: bare '.sql' pattern false-positived on reference query SQL (#9357) ---"
+
+# defaults/observability/**/*.sql is this repo's own reference/analytics query
+# surface: SigNoz/ClickStack queries documented for an operator to run by hand,
+# never executed by build, release or migration machinery. The bare ".sql"
+# pattern matched every one of them, arming the durable critical-file hold on
+# every head (observed on #9348's ci-queries.sql and again on #9775's
+# cycle-time-extract.sql) for a diff with no schema surface at all.
+fixture=$'defaults/docs/ci-observability.md\ndefaults/observability/signoz/ci-queries.sql'
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
+assert_eq "PASS" "$out" \
+    "reference query SQL under defaults/observability/ passes (it is not a schema surface)"
+
+fixture=$'defaults/observability/clickstack/cycle-time-extract.sql\nloom-daemon/tests/fixtures/signoz_usage/fixture.sql'
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
+assert_eq "PASS" "$out" \
+    "query SQL and SQL test fixtures pass (neither is executed by build/release/migration machinery)"
+
+# ...while every real schema surface in this repo lives under a migrations/
+# directory, so "migrations/" alone still catches it — which is exactly why
+# dropping the bare extension costs zero coverage (Option 1 in #9357).
+fixture=$'dashboard/src/lib.rs\ndashboard/migrations/0003_ephemeral_compute.sql'
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
+assert_eq "FAIL: dashboard/migrations/0003_ephemeral_compute.sql" "$out" \
+    "this repo's real schema SQL (dashboard/migrations/*.sql) is still caught by the migrations/ pattern"
+
+fixture=$'quickstarts/api/main.py\nquickstarts/api/migrations/0001_initial.sql'
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
+assert_eq "FAIL: quickstarts/api/migrations/0001_initial.sql" "$out" \
+    "a quickstart's migrations/*.sql is still caught by the migrations/ pattern"
+
+# Edge case from #9357's test plan: ".sql" as a substring of a directory or
+# identifier name rather than a file extension. `src/sql_utils/` has no dot so
+# it passed under the old pattern too; `not_a.sqlite_thing.rs` contains a
+# literal `.sql` and used to FAIL — a second false positive the narrowing
+# fixes, and the reason a bare extension substring was never a safe proxy for
+# "this is a schema file".
+fixture=$'src/sql_utils/foo.py\nsrc/not_a.sqlite_thing.rs'
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
+assert_eq "PASS" "$out" \
+    "paths with 'sql'/'.sql' inside a directory or identifier name (no schema file) pass"
 
 echo
 echo "--- version_only_diff_from_patch: real PR #6118 version-bump diff shapes carve out cleanly (#6147) ---"
@@ -481,6 +530,24 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     "#5723" \
     "champion-pr-merge.md documents the #5723 docs/migration/ false-positive fix"
+
+echo
+echo "--- Doc pins: shipped markdown no longer carries the bare '.sql' extension pattern (#9357) ---"
+
+# Two leading spaces anchor this to the CRITICAL_PATTERNS array entry itself,
+# so prose that merely mentions `.sql` (including the explanatory comment the
+# fix adds) does not satisfy or defeat the pin.
+assert_doc_lacks "$CHAMPION_MD" \
+    '  ".sql"' \
+    "CRITICAL_PATTERNS array no longer contains the bare .sql extension pattern"
+
+assert_doc_lacks "$CHAMPION_MD" \
+    '- `*.sql` - database schema changes' \
+    "prose critical-file-patterns bullet list no longer advertises a bare *.sql pattern"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "#9357" \
+    "champion-pr-merge.md documents the #9357 bare-.sql false-positive fix in the pattern list"
 
 echo
 echo "--- Doc pins: shipped markdown ships the version-only diff carve-out (#6147) ---"

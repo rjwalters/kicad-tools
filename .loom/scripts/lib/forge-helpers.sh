@@ -44,6 +44,8 @@ set -euo pipefail
 _LOOM_FORGE_HELPERS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 # shellcheck source=./config-resolver.sh
 source "$_LOOM_FORGE_HELPERS_LIB_DIR/config-resolver.sh"
+# shellcheck source=./locate-daemon-bin.sh
+source "$_LOOM_FORGE_HELPERS_LIB_DIR/locate-daemon-bin.sh"
 
 # --- Forge Detection ---
 
@@ -1446,8 +1448,23 @@ forge_gh_repo_safe() {
 # Usage: forge_gh_comment_rl_safe NWO NUMBER BODY
 # Returns 0 on success (either path), 1 on failure (message on stderr).
 forge_gh_comment_rl_safe() {
-  local nwo="$1" number="$2" body="$3"
+  local nwo="$1" number="$2" body="$3" is_pr="${4:-0}"
   local out; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
+  # #9774: the daemon's comment chokepoint (forge comment, #9818) is the
+  # poster whenever a binary resolves — one posting path, dashboard footer
+  # included. The gh paths below are the binary-absent fallback (an
+  # unfootered comment on a host with no loom-daemon at all; the fleet
+  # premise is that every host has one).
+  local self_bin="${LOOM_DAEMON_SELF_BIN:-$(loom_resolve_self_daemon_bin "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" 2>/dev/null || true)}"
+  if [[ -n "$self_bin" ]]; then
+    local daemon_args=(forge comment "$number" --repo "$nwo" --body "$body")
+    [[ "$is_pr" == "1" ]] && daemon_args+=(--pr)
+    if "$self_bin" "${daemon_args[@]}" >/dev/null 2>&1; then
+      return 0
+    fi
+    # The daemon could not post (absent verb, stale binary, forge refusal):
+    # fall through to the gh ladder rather than swallowing the comment.
+  fi
   if out=$(forge_gh_perm_safe issue comment "$number" --repo "$nwo" --body "$body" 2>&1); then
     return 0
   fi

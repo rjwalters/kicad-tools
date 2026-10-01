@@ -310,13 +310,13 @@ Phase 1 issues get `loom:architect` + `loom:epic-phase` labels. This means:
 After creating all Phase 1 issues, update the epic:
 
 ```bash
-gh issue comment "$EPIC_NUMBER" --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh "$EPIC_NUMBER" --body "$(cat <<'EOF'
 **Phase 1 issues created:**
 
 - #[issue-1]: [title]
 - #[issue-2]: [title]
 
-These issues have `loom:architect` label and await Champion approval before Builders can claim them.
+These carry `loom:architect` and await Champion approval before Builders claim them.
 
 Phase 2 issues will be created by Champion when all Phase 1 issues are complete.
 

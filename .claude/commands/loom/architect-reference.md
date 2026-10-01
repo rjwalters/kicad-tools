@@ -101,12 +101,12 @@ Per user request to analyze terminal state management architecture...
 EOF
 )"
 
-gh issue comment <number> --body "Created per user request to analyze terminal state management"
+./.loom/scripts/post-comment.sh <number> --body "Created per user request to analyze terminal state management"
 ```
 
-### Why This Matters
+### Why this matters
 
-- Users may want proposals for specific areas immediately
+- want proposals for specific areas now
 - Users may want to test architectural workflows
 - Users may have insights about areas needing attention
 - Flexibility is important for manual orchestration mode

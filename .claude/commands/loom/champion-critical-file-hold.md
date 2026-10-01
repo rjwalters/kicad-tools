@@ -156,7 +156,7 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
       else
         CF_REARM_NOTE=""
       fi
-      gh pr comment "$PR_NUMBER" --body "$HOLD_MARKER
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
 <!-- champion:hold-state head=$HEAD_SHA -->
 **Champion: Holding for Human Merge — Critical File**
 
@@ -194,14 +194,12 @@ the queue, re-checked each tick against both release conditions above.
       # never re-posted, never edited. This comment is the durable record that
       # the release was seen, and its head-state line is what keeps a later
       # push from being read as part of it.
-      gh pr comment "$PR_NUMBER" --body "$RELEASED_MARKER
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$RELEASED_MARKER
 <!-- champion:hold-state head=$HEAD_SHA -->
-**Champion: Critical-File Hold Released by the Operator (#9016)**
+**Champion: Critical-File Hold Released by Operator (#9016)**
 
-\`loom:operator\` was removed by hand while this critical-file hold was
-standing, and this PR's head is still \`$HEAD_SHA\` — the head the hold was
-written against. That is your release: Champion is **not** putting the label
-back at this head.
+\`loom:operator\` was removed by hand while this hold stood, and the head is still \`$HEAD_SHA\` — the one the hold was
+written against. That is your release: Champion is **not** re-adding the label at this head.
 
 The verdict itself has not changed (this PR still touches a critical file, so
 Champion still will not merge it), so the merge is yours to run:
@@ -218,10 +216,10 @@ elif [ "$CF_STATE" = held ] || [ "$CF_STATE" = released ]; then
   # already removed it), post a one-time reversal notice, and fall through to
   # the rest of the criteria as an ordinary PASS.
   gh pr edit "$PR_NUMBER" --remove-label "loom:operator" 2>/dev/null || true
-  gh pr comment "$PR_NUMBER" --body "$CLEARED_MARKER
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$CLEARED_MARKER
 **Champion: Critical-File Hold Cleared**
 
-A later push narrowed this PR so it no longer touches any critical-file pattern. Re-evaluating normally on this and subsequent ticks.
+A later push narrowed this PR off every critical-file pattern. Re-evaluating normally going forward.
 
 ---
 *Automated by Champion role*"

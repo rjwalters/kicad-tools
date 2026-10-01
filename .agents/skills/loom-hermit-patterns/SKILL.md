@@ -1014,11 +1014,11 @@ EOF
 ### Comment Template (for existing issues)
 
 ````bash
-gh issue comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh <number> --body "$(cat <<'EOF'
 <!-- HERMIT-SUGGESTION -->
 ## Simplification Opportunity
 
-While reviewing this issue, I identified potential bloat that could simplify the implementation:
+Reviewing this issue I found bloat to simplify the implementation:
 
 ### What Could Be Removed/Simplified
 
@@ -1063,11 +1063,11 @@ EOF
 ### Example Comment
 
 ````bash
-gh issue comment 42 --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh 42 --body "$(cat <<'EOF'
 <!-- HERMIT-SUGGESTION -->
 ## Simplification Opportunity
 
-While reviewing issue #42 (Add user profile editor), I identified potential bloat that could simplify the implementation:
+While reviewing issue #42 (profile editor) I found bloat to simplify the implementation:
 
 ### What Could Be Removed/Simplified
 
@@ -1178,7 +1178,7 @@ $ rg "LDAP|ldap" --type ts
 
 # LDAP is mentioned in the plan but not used anywhere
 # This is a simplification opportunity - comment on the issue
-$ gh issue comment 42 --body "<!-- HERMIT-SUGGESTION --> ..."
+$ ./.loom/scripts/post-comment.sh 42 --body "<!-- HERMIT-SUGGESTION --> ..."
 
 # Result:
 # - Created 3 standalone issues (unused deps, dead code, commented code)
@@ -1231,7 +1231,7 @@ gh issue view <number> --comments
 "$GH_READ" issue list --search "authentication" --state=open
 
 # Add simplification comment to issue
-gh issue comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh <number> --body "$(cat <<'EOF'
 <!-- HERMIT-SUGGESTION -->
 ...
 EOF

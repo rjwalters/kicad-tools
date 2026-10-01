@@ -102,7 +102,7 @@ scan_posts() {
     awk -v tok="$RESERVED_TOKEN" '
         /^## [^#]/  { h2 = $0; h3 = "" }
         /^### [^#]/ { h3 = $0 }
-        /gh issue comment/ { pending = 4 }
+        /gh issue comment|post-comment\.sh/ { pending = 4 }
         {
             if (pending > 0) {
                 if (index($0, tok) > 0 || $0 ~ /\$VERDICT_MARKER/) {

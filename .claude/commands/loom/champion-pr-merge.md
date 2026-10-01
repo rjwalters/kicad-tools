@@ -91,7 +91,7 @@ merge), drop the cache instead so a later marker grep cannot return pre-write
 state:
 
 ```bash
-gh pr comment "$PR_NUMBER" --body "…"
+./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "…"
 "$GH_READ" --clear-cache   # local /tmp sweep — zero API cost
 ```
 
@@ -163,10 +163,10 @@ if [ -n "$OTHER_VERDICT_LABEL" ]; then
   if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$JANITOR_MARKER\"))")" = "true" ]; then
     echo "Verdict-janitor notice already posted for #$PR_NUMBER — skipping (still not eligible to merge)"
   else
-    gh pr comment "$PR_NUMBER" --body "$JANITOR_MARKER
+    ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$JANITOR_MARKER
 **Champion: Verdict-State Janitor**
 
-This PR carries both \`loom:pr\` and \`$OTHER_VERDICT_LABEL\` simultaneously — a contradictory verdict state that should never coexist (see the mutual-exclusion invariant in \`.github/labels.yml\`). This usually means either two Judges reviewed the PR concurrently and their verdicts raced, or \`loom:pr\` is stray debris a label-transition step failed to strip (#7018).
+This PR carries both \`loom:pr\` and \`$OTHER_VERDICT_LABEL\` — a contradictory verdict state (mutual-exclusion invariant, \`.github/labels.yml\`). Usually two Judges' verdicts raced, or \`loom:pr\` is stray debris a label transition failed to strip (#7018).
 
 Resolving fail-safe: \`$OTHER_VERDICT_LABEL\` wins. Removing \`loom:pr\` so this PR is not auto-merged. $( [ "$OTHER_VERDICT_LABEL" = "loom:changes-requested" ] && echo "Doctor will address the outstanding rejection; re-request Judge review once addressed." || echo "Judge will pick this PR back up from the review queue." )
 
@@ -888,7 +888,7 @@ if [ "$SKIP_REAPPLY" = true ]; then
   if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$RESPECT_MARKER\"))")" = "true" ]; then
     echo "Manual release already acknowledged at this head for #$PR_NUMBER — no comment"
   else
-    gh pr comment "$PR_NUMBER" --body "$RESPECT_MARKER
+    ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$RESPECT_MARKER
 **Champion: Respecting a Manual Release (#7048)**
 
 \`loom:operator\` was removed by hand since the merge-risk hold posted at
@@ -926,12 +926,12 @@ else
   if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$HOLD_MARKER\"))")" = "true" ]; then
     echo "Merge-risk hold already posted for #$PR_NUMBER — hold stands, no comment"
   else
-    gh pr comment "$PR_NUMBER" --body "$HOLD_MARKER
+    ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$HOLD_MARKER
 <!-- champion:hold-state head=$HEAD_SHA -->
 **Champion: Holding for Human Merge**
 
-This PR is Judge-approved and passes the mechanical safety criteria, but I am not
-merging it automatically:
+Judge-approved and passing the mechanical safety criteria, but not
+auto-merging:
 
 $CONCERN_BULLET
 
@@ -1010,22 +1010,17 @@ its critical-file caveat, or its role as sticky-hold release path (a).
 - `loom-api/Cargo.toml` - api dependency changes
 - `package.json` - npm dependency changes
 - `.github/workflows/*` - CI/CD pipeline changes
-- `*.sql` - database schema changes
-- `*migrations/*` - database migration directories (e.g. Django/Alembic/Rails-style `migrations/` folders, including a root-level `migrations/` dir such as Alembic/Flask-Migrate's default `migrations/versions/*.py` layout — the pattern has no leading `/`, so it matches both root-level and nested directories) — **not** a bare `migration` substring, which false-positived on the intentional `docs/migration/` documentation directory (#5723)
+- `*migrations/*` - database migration directories (Django/Alembic/Rails-style `migrations/` folders; the pattern has no leading `/`, so root-level layouts like Alembic/Flask-Migrate's `migrations/versions/*.py` match too) — **not** a bare `migration` substring, which false-positived on the intentional `docs/migration/` documentation directory (#5723)
 - `*_migration.py` - single-file suffix-style migration scripts
+- **Not** a bare `.sql` extension (#9357) — see the `CRITICAL_PATTERNS` comment below
 
 **Verification command**:
 ```bash
 # Get ALL changed files via the paginated REST endpoint, NOT `gh pr view
-# --json files`. The latter silently truncates at 100 files with no error or
-# warning (confirmed empirically: a 117-changed-file PR returns exactly 100
-# entries from `gh pr view --json files`, dropping the rest) — on a PR with
-# more than 100 changed files this can drop a critical file straight out of
-# FILES with no signal that anything was skipped. This was the confirmed
-# false-negative mechanism on PR #4611 (#4613): a removed
-# `.github/workflows/gitea-integration.yml` was skipped in one Champion
-# instance's evaluation over a 117-file PR. `--paginate` walks every page of
-# the REST response regardless of file count.
+# --json files` — the latter silently truncates at 100 files with no error,
+# which is the confirmed false-negative mechanism on PR #4611 (see the #4613
+# regression note below for the full incident). `--paginate` walks every page
+# of the REST response regardless of file count.
 #
 # Plain `gh` — NOT "$GH_READ". #4613's lesson is that this criterion must be
 # asserted from a list fetched in THIS pass; a cached answer is the same class
@@ -1040,7 +1035,11 @@ CRITICAL_PATTERNS=(
   "loom-api/Cargo.toml"
   "package.json"
   ".github/workflows/"
-  ".sql"
+  # Deliberately NO bare ".sql" (#9357) — "why doesn't my .sql file hold?":
+  # schema-bearing SQL already matches "migrations/" below, while reference
+  # query SQL nothing executes (defaults/observability/**/*.sql, test
+  # fixtures) matched the bare extension and re-armed this hold on every head
+  # for nothing. Scope future SQL patterns to a schema path, never bare.
   "migrations/"
   "_migration.py"
 )
@@ -1418,7 +1417,7 @@ if [ "$MERGEABLE" = "CONFLICTING" ] && [ "${MERGE_BLOCKED_BY_HOLD:-false}" = tru
   if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$CONFLICT_MARKER\"))")" = "true" ]; then
     echo "Held-PR conflict notice already posted for #$PR_NUMBER — skipping"
   else
-    gh pr comment "$PR_NUMBER" --body "$CONFLICT_MARKER
+    ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$CONFLICT_MARKER
 **Champion: Held PR Has Drifted Into Conflict**
 
 This PR is on a merge-risk hold (see the \`champion:merge-risk-hold\` notice above) **and** \`main\` has since moved: \`mergeable\` now reads \`CONFLICTING\`.
@@ -1848,7 +1847,7 @@ human one, and `merge-pr.sh` is shared, identity-agnostic infrastructure that
 posts nothing naming an actor. The one durable signal is this comment. Therefore:
 
 - **Never call `merge-pr.sh` in a pass where this comment did not post
-  successfully.** If `gh pr comment` fails, skip the PR and retry next tick — an
+  successfully.** If `post-comment.sh` fails, skip the PR and retry next tick — an
   un-narrated merge is worse than a late one.
 - **A merged PR with no `*Automated by Champion role*` pre-merge comment was not
   merged by Champion.** That inference is only sound if this step is
@@ -1911,7 +1910,7 @@ fi
 # #2's sticky-hold precheck: empty string on the never-held path (so this
 # comment is exactly what it always was), mandatory content when this merge
 # reverses a prior hold (#4742).
-gh pr comment "$PR_NUMBER" --body "$(cat <<EOF
+./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$(cat <<EOF
 **Champion Auto-Merge**
 
 This PR meets all safety criteria for automatic merging:
@@ -2219,7 +2218,7 @@ hold_issue_on_unverified_ac() {
     esac
     # Quote each unmet criterion VERBATIM so a human sees which is outstanding.
     quoted=$(printf '%s\n' "$report" | awk -F'\t' 'NF{printf "> - [ ] %s\n>\n>   _(matched: `%s`)_\n", $2, $1}')
-    gh issue comment "$issue" --body "$marker
+    ./.loom/scripts/post-comment.sh "$issue" --body "$marker
 **Champion is holding this issue open.** PR #$pr merged, but this issue's own
 acceptance criteria include a step that CI structurally cannot perform, and
 $reason.
@@ -2401,7 +2400,7 @@ for blocked in $BLOCKED_ISSUES; do
   if [ "$ALL_RESOLVED" = true ]; then
     echo "  All dependencies resolved - unblocking #$blocked"
     gh issue edit "$blocked" --remove-label "loom:blocked" --add-label "loom:issue"
-    gh issue comment "$blocked" --body "**Unblocked** by merge of PR #$PR_NUMBER (resolved #$CLOSED_ISSUE)
+    ./.loom/scripts/post-comment.sh "$blocked" --body "**Unblocked** by PR #$PR_NUMBER (resolved #$CLOSED_ISSUE)
 
 All dependencies are now resolved. This issue is ready for implementation.
 
@@ -2690,7 +2689,7 @@ if [ -n "$NEW_ISSUE" ]; then
   echo "Created follow-on issue #$NEW_ISSUE with label $ISSUE_LABEL"
 
   # Add comment to original PR linking to the follow-on issue
-  gh pr comment "$PR_NUMBER" --body "**Champion: Follow-on Issue Created**
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "**Champion: Follow-on Issue Created**
 
 Identified follow-on work during merge:
 - **TODOs**: $TOTAL_TODOS ($CRITICAL_COUNT critical)
@@ -2797,10 +2796,10 @@ LAST_MARKER=$(gh pr view "$PR_NUMBER" --json comments --jq '.comments' \
 if [ "$LAST_MARKER" = "$REJECT_MARKER" ]; then
   echo "Rejection identity for $CRITERION_KEY unchanged since last comment on #$PR_NUMBER — skipping duplicate comment"
 else
-  gh pr comment "$PR_NUMBER" --body "$REJECT_MARKER
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$REJECT_MARKER
 **Champion: Cannot Auto-Merge**
 
-This PR cannot be automatically merged due to the following:
+Cannot auto-merge:
 
 - <CRITERION_NAME>: $REASON
 
@@ -2894,10 +2893,10 @@ fi
 if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$STALE_MARKER\"))")" = "true" ]; then
   echo "Stale-PR notice already posted for #$PR_NUMBER for this episode (last activity $LAST_ACTIVITY) — skipping"
 else
-  gh pr comment "$PR_NUMBER" --body "$STALE_MARKER
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$STALE_MARKER
 **Champion: PR Is Stale**
 
-This PR has not been updated within the recency window (24h), so it has been routed out of the auto-merge queue for a rebase/refresh.
+Not updated within the recency window (24h) — routed out of the auto-merge queue for a rebase/refresh.
 
 **Next steps:**
 - Rebase onto the latest \`main\` and resolve any drift
@@ -2967,7 +2966,7 @@ SUSPEND_MARKER="<!-- champion:held-stale-suspended -->"
 if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$SUSPEND_MARKER\"))")" = "true" ]; then
   echo "Hold-only stale suspension notice already posted for #$PR_NUMBER — skipping"
 else
-  gh pr comment "$PR_NUMBER" --body "$SUSPEND_MARKER
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$SUSPEND_MARKER
 **Champion: Held PR Is Stale, But the Rebase Cycle Is Suspended**
 
 This PR is on a merge-risk hold and \`main\` has moved past the recency window (24h) — but this PR carries no other blocker: CI is passing (or has no checks configured) and no other safety criterion is red. Its only outstanding blocker is the standing hold itself.
@@ -3079,10 +3078,10 @@ PR_NUMBER=<number>
 GRANT_MARKER="<!-- champion:capped-pr-grant -->"
 # PRIOR_GRANTS from Step 2 (0 on a first-time decision).
 
-gh pr comment "$PR_NUMBER" --body "$GRANT_MARKER
+./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$GRANT_MARKER
 **Champion: Extra Doctor Cycle Granted**
 
-This PR was parked at the Doctor-cycle cap. Reviewing its full rejection history, the latest rejection shows forward progress, so it is being returned to the Doctor→Judge flow for one more bounded cycle.
+Parked at the Doctor-cycle cap; the latest rejection shows forward progress, so it is returned to the Doctor→Judge flow for one more bounded cycle.
 
 - **Previous rejection**: <DEFECTS_NAMED_IN_PRIOR_REJECTION>
 - **Latest rejection**: <DEFECTS_NAMED_IN_LATEST_REJECTION>
@@ -3125,10 +3124,10 @@ PARK_MARKER="<!-- champion:capped-pr-parked:$LATEST_REJECTION_ID -->"
 if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$PARK_MARKER\"))")" = "true" ]; then
   echo "Keep-parked verdict already posted for #$PR_NUMBER on this rejection — skipping"
 else
-  gh pr comment "$PR_NUMBER" --body "$PARK_MARKER
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$PARK_MARKER
 **Champion: Keeping This PR Parked**
 
-Reviewed the full rejection history against the forward-progress test; this PR does not qualify for another Doctor cycle.
+Reviewed the rejection history against the forward-progress test; no qualifying Doctor cycle.
 
 - **Reason**: <SAME_DEFECT_RE_LITIGATED | AMBIGUOUS_COMPARISON | ONLY_ONE_REJECTION | CHAIN_NOT_CONVERGING | APPROACH_DISAGREEMENT | NOT_CAP_PARKED | HUMAN_HOLD>
 - **Specifics**: <WHICH_DEFECT_REPEATS_ACROSS_REJECTIONS_OR_WHAT_IS_UNCLEAR>
@@ -3157,10 +3156,10 @@ CLOSE_MARKER="<!-- champion:capped-pr-close-recommended -->"
 if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$CLOSE_MARKER\"))")" = "true" ]; then
   echo "Close recommendation already posted for #$PR_NUMBER — skipping"
 else
-  gh pr comment "$PR_NUMBER" --body "$CLOSE_MARKER
+  ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$CLOSE_MARKER
 **Champion: Recommending Closure — Operator Decision Required**
 
-This PR has been parked at the Doctor-cycle cap, and its rejection history indicates the approach is not viable rather than merely unfinished. Champion does not close PRs; routing this to the operator instead.
+Parked at the Doctor-cycle cap; the rejection history indicates the approach is not viable, not merely unfinished. Champion does not close PRs; routing this to the operator instead.
 
 - **Rejection history**: <SHORT_SUMMARY_OF_THE_ROUNDS>
 - **Why more Doctor cycles will not help**: <WHY_THE_APPROACH_NOT_THE_IMPLEMENTATION_IS_THE_PROBLEM>
@@ -3221,9 +3220,9 @@ If the merge fails for any reason:
 Example error comment:
 
 ```bash
-gh pr comment <number> --body "**Champion: Merge Failed**
+./.loom/scripts/post-comment.sh <number> --pr --body "**Champion: Merge Failed**
 
-Attempted to auto-merge this PR but encountered an error:
+Auto-merge failed:
 
 \`\`\`
 <ERROR_MESSAGE>

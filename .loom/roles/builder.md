@@ -428,7 +428,7 @@ When the user explicitly instructs you to work on a specific issue or PR by numb
 
 # Proceed immediately
 gh issue edit 592 --add-label "loom:building"
-gh issue comment 592 --body "Starting work on this issue per user request"
+./.loom/scripts/post-comment.sh 592 --body "Starting work on this issue per user request"
 
 # Create worktree and implement
 ./.loom/scripts/worktree.sh 592
@@ -946,17 +946,16 @@ auditing it for conflicts with rules already in force — see
 1. **Comment on the issue** with what you investigated and what blocked you:
 
 ```bash
-gh issue comment <number> --body "$(cat <<'EOF'
+./.loom/scripts/post-comment.sh <number> --body-file - <<'EOF'
 **Builder note**: Investigated this issue but could not determine the required changes.
 
 - [List what you looked at — files, functions, patterns]
 - [What you tried or considered]
 - [What specifically blocked you or was unclear]
-- No open numbered blocker (if there is one, park-record it in the body first — Label Discipline)
+- No open numbered blocker (if one exists, park-record it first — Label Discipline)
 
 <!-- loom:builder-note -->
 EOF
-)"
 ```
 
 2. **Then mark as blocked** (normal workflow):
@@ -966,12 +965,12 @@ gh issue edit <number> --remove-label "loom:building" --add-label "loom:blocked"
 
 ### Why This Matters
 
-Without a comment, the next attempt starts from scratch with zero context. The comment serves as a breadcrumb so future builders (or humans) know what was already explored and can try a different approach.
+Without a comment, the next attempt starts from scratch with zero context. The comment is the breadcrumb: future builders (or humans) know what was explored and can try a different approach.
 
 ### What NOT to Do
 
 - Don't silently exit with no changes and no comment
-- Don't leave a vague comment like "couldn't figure it out" — be specific about what you investigated
+- Don't leave a vague comment — be specific about what you investigated
 - Don't skip the `loom:blocked` label — the comment is supplemental, not a replacement
 
 ### Issues Are Suggestions — Close or Rescope With Rationale (Role Autonomy)
@@ -986,7 +985,7 @@ Treat the issue you claimed as a **suggestion, not a mandate**. The normal, over
 
 ```bash
 # Rationale comment FIRST (the breadcrumb), then close, then release the claim:
-gh issue comment <number> --body "Closing as not planned: <specific rationale>. <evidence: already delivered by #<n> / condition gone as of <sha> / …>."
+./.loom/scripts/post-comment.sh <number> --body "Closing as not planned: <specific rationale>. <evidence: already delivered by #<n> / condition gone as of <sha> / …>."
 gh issue close <number> --reason "not planned"
 gh issue edit <number> --remove-label "loom:building"
 ```
@@ -1020,7 +1019,7 @@ Curator's and Doctor's queue exclusions) behaves exactly as before:
 
 ```bash
 # Builder parking a claimed issue that turns out to need a human:
-gh issue comment <number> --body "Routing to the operator: <why a human must act>."
+./.loom/scripts/post-comment.sh <number> --body "Routing to the operator: <why a human must act>."
 gh issue edit <number> --remove-label "loom:building" --add-label "loom:operator-only,loom:operator-decision"
 ```
 

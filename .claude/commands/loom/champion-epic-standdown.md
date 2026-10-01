@@ -63,12 +63,12 @@ if [ "$IS_TRACKING_UMBRELLA" = "yes" ]; then
        '.comments[] | select(.body | contains($m))' >/dev/null; then
     echo "#$EPIC_NUMBER is a tracking umbrella already noted at body revision $BODY_HASH — standing down silently (no comment, no tally, no label change)"
   else
-    gh issue comment "$EPIC_NUMBER" --body "$UMBRELLA_MARKER
+    ./.loom/scripts/post-comment.sh "$EPIC_NUMBER" --body "$UMBRELLA_MARKER
 **Champion: Epic Already Decomposed — Tracking Only**
 
 This epic's children already exist ($EPIC_CHILD_STRONG_OPEN open / $EPIC_CHILD_STRONG_CLOSED closed, discovered via: $EPIC_CHILD_SOURCES) but were not created by Champion's own phase-issue flow, so it is a **tracking umbrella**, not an epic awaiting decomposition. Champion is not creating phase issues for it and is not re-running the pre-decomposition structural criteria against it.
 
-Nothing is required of anyone. The epic stays open and keeps \`loom:epic\`; Champion re-checks it for completion on every pass and will close it automatically once its last child is closed and every deliverable it names is present on \`${DEFAULT_BRANCH:-main}\`.
+Nothing is required of anyone. The epic stays open and keeps \`loom:epic\`; Champion re-checks it every pass and will close it automatically once its last child is closed and every named deliverable is present on \`${DEFAULT_BRANCH:-main}\`.
 
 ---
 *Automated by Champion role*"
