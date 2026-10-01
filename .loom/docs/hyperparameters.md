@@ -68,9 +68,11 @@ loop can tune a whole run with one env export.
 
 Notes:
 
-- The work-finder trio, idle exit, and the backoff pair re-read config every
-  tick — a committed-block edit hot-applies. The lease TTL is
-  startup-captured (like the admission cap, #4234): edit + restart to apply.
+- Every tranche-1 field **hot-applies** (#9768): the work-finder trio, idle
+  exit, and the backoff pair re-read config every tick, and the lease TTL
+  re-resolves from the layer on every lease check — a committed-block edit
+  lands without a daemon restart. (The single-knob env vars are process
+  environment: fixed at launch, as always.)
 - A legacy key and a block key may coexist; the block wins per field, the
   legacy key fills fields the block omits.
 
@@ -109,16 +111,25 @@ The digest covers the whole resolved vector including inherited defaults —
 two runs with identical digests ran identical tunables, even if they got
 there by different tiers.
 
-## Inspecting: `loom-daemon hyperparams`
+## Inspecting & validating: `loom-daemon hyperparams`
 
 ```
-$ loom-daemon hyperparams            # human-readable table + digest
-$ loom-daemon hyperparams --json     # {"params":…, "sources":…, "digest":…}
+$ loom-daemon hyperparams              # human-readable table + digest
+$ loom-daemon hyperparams --json       # {"params":…, "sources":…, "digest":…}
+$ loom-daemon hyperparams --validate   # run the startup gate without a daemon
 ```
 
 `sources` reports, per field, which tier supplied it
 (`env-vector | config | legacy | default`) — the first thing to check when
 an injected vector "didn't take".
+
+`--validate` runs the same strict gate daemon startup enforces (unknown
+keys, types, ranges, crossed backoff pair, unparseable vector) against a
+workspace **without booting one** — a config lint for a proposed
+`.loom/config.json` edit or `$LOOM_HYPERPARAMS` vector. Exit 0 and
+`hyperparams: OK` when valid; non-zero naming every offending path
+otherwise. Combine with `--json` for a machine-readable violations array
+(#9768).
 
 ## Optimizer recipe (CMA-ES)
 

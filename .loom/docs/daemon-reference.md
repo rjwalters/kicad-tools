@@ -2869,6 +2869,7 @@ rules with `git check-ignore`.
 | `autonomous.eta.enabled` | `LOOM_ETA_ENABLED` | `true` |
 | `autonomous.eta.dryRun` | `LOOM_ETA_DRY_RUN` | `false` (log `eta: would emit …`, enqueue nothing) |
 | `autonomous.eta.refreshSecs` | `LOOM_ETA_REFRESH_SECS` | `300` |
+| `autonomous.eta.historyScope` | `LOOM_ETA_HISTORY_SCOPE` | `augment` — `local` (this host's journals), `augment` (plus the cached fleet snapshot) or `fleet` (the snapshot alone). A no-op until `loom-daemon eta fleet backfill` caches one (#9343) |
 | `autonomous.eta.current.{finish,land}` | none | `finish-v1` / `land-v1` |
 
 Model, heuristics, explanation schema, scoring and queries:
@@ -4930,6 +4931,14 @@ the raw daemon process, and a documented end-to-end acceptance playbook.
 Autonomous mode can be enabled and tuned entirely from committed config — no env
 vars required — so a repo can declare "this workspace runs autonomous mode with
 concurrency ceiling 5" and share it with the team:
+
+> **Operational tunables have their own surface (#9683/#9768).** The knobs that
+> govern *how fast and how much* the engine runs — tick cadence, concurrency,
+> admission ramps, lease TTL, review-debt backoff — live in the validated
+> [`hyperparameters`](hyperparameters.md) block (with the `$LOOM_HYPERPARAMS`
+> optimizer vector and the `loom.hyperparams.digest` run-provenance stamp), not
+> in the `autonomous` feature block below. The two compose: the
+> `hyperparameters` layer wins per-field where both set the same knob.
 
 ```json
 {

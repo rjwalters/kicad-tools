@@ -43,7 +43,19 @@ HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
+
+# A source-text assertion that cannot survive a port to loom-daemon, recorded
+# per defaults/docs/verification-recipes.md §6 rather than silently deleted
+# (same convention as test-merge-pr-check-runs-404-fallback.sh).
+retired() { # <what> <property> <why-structural> <successor>
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "  ${YELLOW}RETIRED${NC}: $1"
+    echo "      property:   $2"
+    echo "      structural: $3"
+    echo "      successor:  $4"
+}
 
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -70,6 +82,14 @@ source "$HELPERS_DIR/lib/forge-helpers.sh"
 
 # Reset detected state for tests
 FORGE_TYPE=""
+
+# The pending-vs-failing classification below (#3664) drives the REAL
+# `loom-daemon merge-pr check-runs-rollup` (#8191 slice) — the shell no longer
+# has jq filters to mirror. Pin the working-tree build and FAIL (never SKIP)
+# without one; the suite runs in the "Native Port Suites" CI job.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr check-runs-rollup"
 
 # --- Test forge_get_required_status_check_contexts (GitHub path) ---
 echo "Testing forge_get_required_status_check_contexts (GitHub stub)..."
@@ -670,24 +690,31 @@ fi
 # The UNSTABLE-fallback poll in merge-pr.sh derives two sets from the head-SHA
 # check-runs rollup: FAILING (terminal non-success conclusions) and PENDING
 # (status != "completed", i.e. queued/in_progress → conclusion still null).
-# These mirror the two jq filters used inside the poll body so the script stays
-# in lockstep with the test. The #3664 bug was that a rollup that is UNSTABLE
+# Since the #8191 check-runs-rollup slice both sets come from
+# `loom-daemon merge-pr check-runs-rollup`, which the helpers below call exactly
+# as the poll body does (fields 1 and 2 of its NUL-framed output), so these
+# assertions exercise the shipped classifier, not a copy. The #3664 bug was that a rollup that is UNSTABLE
 # *solely* because required checks are still running has an empty FAILING set,
 # so the pre-#3664 code hit the "unknown gap" hard-error instead of waiting.
 echo ""
 echo "Testing pending-vs-failing check-run classification (#3664)..."
 
-# Mirror merge-pr.sh's _UNSTABLE_FAILING filter.
-_failing_names() {
-    echo "$1" | jq -r '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled" or .conclusion == "action_required") | .name] | unique | .[]' 2>/dev/null || true
+# Field <n> (1 = FAILING, 2 = PENDING) of the real rollup read. A missing
+# sentinel prints UNCLASSIFIED so no assertion can pass on an empty read. The
+# fixtures carry `total_count`, as forge_get_check_runs' contract always does;
+# the verb refuses a payload without it.
+_rollup_field() {
+    local failing="" pending="" sentinel=""
+    { IFS= read -r -d '' failing; IFS= read -r -d '' pending; IFS= read -r -d '' _; IFS= read -r -d '' sentinel; } \
+        < <(printf '%s' "$1" | "$LOOM_DAEMON_SELF_BIN" merge-pr check-runs-rollup 2>/dev/null) || true
+    [[ "$sentinel" == "LOOM-CHECK-RUNS-ROLLUP" ]] || { echo "UNCLASSIFIED"; return 0; }
+    if [[ "$2" == 1 ]]; then printf '%s\n' "$failing"; else printf '%s\n' "$pending"; fi
 }
-# Mirror merge-pr.sh's _UNSTABLE_PENDING filter.
-_pending_names() {
-    echo "$1" | jq -r '[.check_runs[] | select(.status != "completed") | .name] | unique | .[]' 2>/dev/null || true
-}
+_failing_names() { _rollup_field "$1" 1; }
+_pending_names() { _rollup_field "$1" 2; }
 
 # A rollup that is UNSTABLE only because a required check is still running.
-runs_pending='{"check_runs":[
+runs_pending='{"total_count":2,"check_runs":[
   {"name":"Required Build","status":"in_progress","conclusion":null},
   {"name":"Lint","status":"completed","conclusion":"success"}
 ]}'
@@ -695,22 +722,22 @@ assert_eq "" "$(_failing_names "$runs_pending")" "#3664: still-running rollup ha
 assert_eq "Required Build" "$(_pending_names "$runs_pending")" "#3664: still-running rollup surfaces the in_progress check in PENDING"
 
 # A queued check is also pending.
-runs_queued='{"check_runs":[{"name":"Deploy Preview","status":"queued","conclusion":null}]}'
+runs_queued='{"total_count":1,"check_runs":[{"name":"Deploy Preview","status":"queued","conclusion":null}]}'
 assert_eq "" "$(_failing_names "$runs_queued")" "#3664: queued rollup has no failing checks"
 assert_eq "Deploy Preview" "$(_pending_names "$runs_queued")" "#3664: queued check appears in PENDING"
 
 # An all-green rollup has neither failing nor pending checks.
-runs_green='{"check_runs":[{"name":"Required Build","status":"completed","conclusion":"success"}]}'
+runs_green='{"total_count":1,"check_runs":[{"name":"Required Build","status":"completed","conclusion":"success"}]}'
 assert_eq "" "$(_failing_names "$runs_green")" "#3664: all-green rollup has no failing checks"
 assert_eq "" "$(_pending_names "$runs_green")" "#3664: all-green rollup has no pending checks"
 
 # A failed check is FAILING but not PENDING.
-runs_failed='{"check_runs":[{"name":"Required Build","status":"completed","conclusion":"failure"}]}'
+runs_failed='{"total_count":1,"check_runs":[{"name":"Required Build","status":"completed","conclusion":"failure"}]}'
 assert_eq "Required Build" "$(_failing_names "$runs_failed")" "#3664: failed check appears in FAILING"
 assert_eq "" "$(_pending_names "$runs_failed")" "#3664: failed (completed) check is NOT pending"
 
 # Mixed: one check failed, another still running → both sets populated.
-runs_mixed='{"check_runs":[
+runs_mixed='{"total_count":2,"check_runs":[
   {"name":"Flaky Job","status":"completed","conclusion":"failure"},
   {"name":"Required Build","status":"in_progress","conclusion":null}
 ]}'
@@ -775,7 +802,7 @@ result=$(_unstable_decision "$runs_mixed" "Required Build" "false")
 assert_eq "wait" "$result" "#3664: informational failure + pending required -> wait (do not merge yet)"
 
 # (c) #3486 preserved: informational failure, nothing pending -> immediate merge.
-runs_info_failed='{"check_runs":[{"name":"Informational Soak","status":"completed","conclusion":"failure"}]}'
+runs_info_failed='{"total_count":1,"check_runs":[{"name":"Informational Soak","status":"completed","conclusion":"failure"}]}'
 result=$(_unstable_decision "$runs_info_failed" "Required Build" "false")
 assert_eq "merge" "$result" "#3486 preserved: informational failure, nothing pending -> immediate merge"
 
@@ -861,12 +888,16 @@ unset LOOM_AUTO_MERGE_POLL_INTERVAL LOOM_AUTO_MERGE_TIMEOUT 2>/dev/null || true
 # Assert the merge-pr.sh source actually contains the pending-set filter and the
 # poll-window env vars, so a refactor that drops them fails this test.
 MERGE_PR_SRC="$HELPERS_DIR/merge-pr.sh"
-if grep -q 'select(.status != "completed")' "$MERGE_PR_SRC"; then
+retired "merge-pr.sh computes the PENDING set (status != completed)" \
+    "the settle-wait derives a PENDING set of every check-run whose status is not 'completed', so a still-running check keeps the wait going" \
+    "#8191 slice: the three jq filters (failing / pending / total_count) moved to loom-daemon/src/merge_pr/check_runs_rollup.rs — merge-pr.sh now reads them from 'loom-daemon merge-pr check-runs-rollup', so there is no select(.status != \"completed\") left in the shell to grep for" \
+    "loom-daemon/tests/merge_pr_check_runs_rollup_differential.rs (the frozen retired filters, tests/fixtures/merge-pr-check-runs-rollup-retired.sh, vs. the real CLI on a grammar-enumerated corpus, byte for byte), merge_pr::check_runs_rollup::tests::missing_or_non_string_status_is_pending_like_jq_inequality, and the delegation assertion below"
+if grep -q '"$_crr_bin" merge-pr check-runs-rollup' "$MERGE_PR_SRC"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: merge-pr.sh computes the PENDING set (status != completed)"
+    echo -e "  ${GREEN}PASS${NC}: merge-pr.sh derives the FAILING/PENDING sets via 'loom-daemon merge-pr check-runs-rollup'"
 else
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: merge-pr.sh missing the PENDING-set filter"
+    echo -e "  ${RED}FAIL${NC}: merge-pr.sh missing the check-runs-rollup delegation"
 fi
 if grep -q 'LOOM_AUTO_MERGE_TIMEOUT' "$MERGE_PR_SRC" && grep -q 'LOOM_AUTO_MERGE_POLL_INTERVAL' "$MERGE_PR_SRC"; then
     TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1))

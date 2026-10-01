@@ -327,6 +327,17 @@ assert_eq "" "$HELPER_OUT" "(2e) gh exits 0 with empty stdout: nothing emitted o
 # =============================================================================
 # Extracted and sourced the same way test-merge-pr-wait-for-checks-empty-settle.sh
 # does it, with `sleep`/`date` stubbed so the bounded wait runs instantly.
+#
+# --- Pin the REAL loom-daemon for the check-runs rollup read ---
+# The extracted function's every poll now reads failing/pending/total_count via
+# `loom-daemon merge-pr check-runs-rollup` (#8191 slice), resolved
+# LOOM_DAEMON_SELF_BIN-first. --self-only pins only that variable, leaving
+# LOOM_DAEMON_BIN free in case a later part of this suite gives it its own
+# meaning.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$HELPERS_DIR" "merge-pr check-runs-rollup"
+
 echo ""
 echo "Testing _wait_for_checks_then_sync_merge on a truncated read (#8895)..."
 

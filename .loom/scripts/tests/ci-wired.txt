@@ -91,7 +91,6 @@ test-epic-label-preserved-on-escalation.sh
 test-extract-capability-markers.sh
 test-filing-lock.sh
 test-fleet-check.sh
-test-forge-check-runs-pagination.sh
 test-forge-helpers.sh
 test-forge-helpers-rate-limit-fallback.sh
 test-forge-transient-classification.sh
@@ -151,8 +150,6 @@ test-merge-pr-daemon-version-floor.sh
 test-merge-pr-help.sh
 test-merge-pr-merge-method.sh
 test-merge-pr-rate-limit-fallback.sh
-test-merge-pr-unstable-fallback.sh
-test-merge-pr-wait-for-checks-empty-settle.sh
 test-nextest-daemon-guard.sh
 test-operator-only-subkind.sh
 test-post-verdict.sh

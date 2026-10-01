@@ -112,6 +112,16 @@ info()    { INFO_LOG+="$*"$'\n'; }
 warning() { WARN_LOG+="$*"$'\n'; }
 error()   { echo "ERROR: $*" >&2; exit 1; }
 
+# --- Pin the REAL loom-daemon for the check-runs rollup read ---
+# Every poll's failing/pending/total_count read is `loom-daemon merge-pr
+# check-runs-rollup` (#8191 slice), resolved LOOM_DAEMON_SELF_BIN-first.
+# --self-only pins only that variable, so LOOM_DAEMON_BIN stays free for the
+# zero-checks-settle mocks below -- scenario (h)'s unusable binaries keep
+# meaning "the bounded settle is unavailable", not "nothing can be read".
+# shellcheck source=lib/require-daemon-bin.sh
+source "$TEST_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only "$HELPERS_DIR" "merge-pr check-runs-rollup"
+
 # --- Extract the function under test from merge-pr.sh and source it ---
 FUNCS_FILE="$(mktemp)"
 STATE_DIR="$(mktemp -d)"
@@ -453,6 +463,24 @@ _wait_for_checks_then_sync_merge
 rc=$?
 assert_eq "0" "$rc" "(i) Function returns 0 for the ordinary pending-then-settled path"
 assert_eq "0" "$(zcs_call_count)" "(i) The subcommand is never consulted when the rollup is non-empty"
+
+# (j) #8191 slice: when the rollup itself cannot be read -- no loom-daemon at
+# all, so neither SELF_BIN nor LOOM_DAEMON_BIN answers -- the poll is treated
+# as STILL PENDING. The retired jq read an unreadable payload as "nothing
+# failing, nothing pending"; here even a rollup whose only check FAILED must
+# not settle: the wait ends at the deadline with exit 5 (not merged, re-queue).
+reset_test_state
+LOOM_AUTO_MERGE_TIMEOUT=3
+LOOM_AUTO_MERGE_POLL_INTERVAL=1
+queue_fgcr_response '{"total_count":1,"check_runs":[{"name":"build","status":"completed","conclusion":"failure"}]}'
+out="$( (LOOM_DAEMON_SELF_BIN="$STATE_DIR/does-not-exist"; LOOM_DAEMON_BIN="$STATE_DIR/does-not-exist"
+         _wait_for_checks_then_sync_merge; echo "RETURNED rc=$?"; printf '%s' "$WARN_LOG") 2>&1)"
+rc=$?
+assert_eq "5" "$rc" "(j) An unreadable rollup never settles: the wait exits 5 at the deadline"
+assert_eq "false" "$([[ "$out" == *RETURNED* ]] && echo true || echo false)" \
+  "(j) ...and never returns 0 to the synchronous-merge path"
+assert_eq "true" "$([[ $(fgcr_call_count) -gt 1 ]] && echo true || echo false)" \
+  "(j) ...after re-polling rather than giving up on the first unreadable read"
 
 echo ""
 echo "=== Test Summary ==="
