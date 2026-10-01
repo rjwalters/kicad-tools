@@ -306,7 +306,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 16})
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -339,6 +339,9 @@ Migrated so far:
 * **9** -- the lattice engine (``router/lattice/``), Phase 3d.
 * **10** -- the mesh engine's per-leg consult
   (``router/mesh/obstacles.py``), Phase 3e.
+* **15** -- the post-route trace optimizer's collision checkers
+  (``router/optimizer/collision.py``, reached through
+  ``optimizer/trace.py``'s ``_path_is_clear``), Phase 4a.
 * **16** -- match-group length/phase tuning's post-insertion DRC
   self-check (``router/match_group_tuning.py``
   ``_post_insertion_clearance_detail_group`` /
@@ -355,6 +358,7 @@ _MIGRATION_PHASE: dict[int, str] = {
     8: "3c",
     9: "3d",
     10: "3e",
+    15: "4a",
     16: "4b",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
@@ -594,12 +598,25 @@ NOTES: dict[int, str] = {
         "`VectorCollisionChecker`, which delegates to `GridCollisionChecker` "
         "when the per-layer R-tree is unpopulated, so both citations are "
         "exercised by this row. `ignore_overflow` left at its stricter default. "
-        "Since #5625 the delegation no longer changes the answer for routed "
-        "copper: the two checkers apply one shared exact narrow phase, and the "
-        "grid checker's Bresenham-plus-buffer walk is only its broad phase (a "
-        "raster cell whose occupancy is not accountable to registered copper "
-        "still rejects outright, and a pad's halo is still the gate for "
-        "`pad-seg`). The percentages in this row were measured before that fix."
+        "Issue #5854 (Epic #5509 Phase 4a): every verdict this consumer "
+        "reaches now comes from the shared clearance kernel -- segment, via "
+        "and, new in that phase, **pad** copper, which both checkers used to "
+        "judge off the raster (a pad's blocked footprint is its metal plus its "
+        "own clearance halo, and the candidate was dilated by `width / 2 + "
+        "trace_clearance` on top, so a path 0.247 mm from pad metal was "
+        "refused against a 0.20 mm requirement). The raster stays the broad "
+        "phase: a cell whose blockage registers no geometry to re-measure -- a "
+        "keepout, an obstacle, a region bound, the board-edge band, all "
+        "reported by `raster_only_blocked_cell` -- still rejects outright. "
+        "Migrated, so the row is a hard gate; driven at the clearance "
+        "kicad-cli itself applies, the consumer agrees in **both** directions. "
+        "Both published cells keep the consumer's own rule values and are "
+        "rule readings rather than geometry ones: the 0.2 mm `via_clearance` "
+        "default widens a `seg-via` requirement to `max(trace_clearance, "
+        "via_clearance)` (over-rejection) and the 0.15 mm `trace_clearance` "
+        "sits below the project's 0.20 mm `Default` netclass "
+        "(under-rejection) -- the #5398 / #5654 defect no migration phase may "
+        "close."
     ),
     16: (
         "**Not measured**: `_post_insertion_clearance_detail_pair_group` "

@@ -450,6 +450,23 @@ class TraceOptimizer:
     def _path_is_clear(self, seg: Segment) -> bool:
         """Check if a segment's path is clear using the collision checker.
 
+        Every optimization pass in this module (``merge_collinear``,
+        ``eliminate_zigzags``, ``compress_staircase``, ``convert_45_corners``,
+        ``pull_tight``) reaches the clearance model through here and nowhere
+        else, and this method composes **no gap of its own** -- it forwards the
+        candidate's geometry to the injected
+        :class:`~.collision.CollisionChecker`.
+
+        Epic #5509 Phase 4a (#5854) is therefore the phase that switched this
+        gate onto the shared exact-geometry clearance kernel: both
+        implementations of that protocol -- ``GridCollisionChecker`` and
+        ``VectorCollisionChecker`` -- now ask the kernel for every verdict
+        (routed copper, vias and, new in this phase, pad copper), so the
+        post-route optimizer applies the same clearance model as search-time
+        and commit-time validation.  Nothing is resolved twice here, which is
+        why this file is not a kernel caller in its own right; see
+        ``optimizer/collision.py``'s module docstring for what moved.
+
         Args:
             seg: The segment to check.
 
