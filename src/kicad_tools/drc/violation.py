@@ -105,6 +105,14 @@ def _init_type_category_map() -> None:
             ViolationType.MIN_PAD_SIZE: ViolationCategory.MANUFACTURING,
             ViolationType.PTH_ANNULAR_RING: ViolationCategory.MANUFACTURING,
             ViolationType.IMPEDANCE: ViolationCategory.MANUFACTURING,
+            # Netclass defaults below the fab floor (Issue #5875) -- a
+            # manufacturer-capability question, same as the DIMENSION_*
+            # findings they pre-empt.
+            ViolationType.NETCLASS_TRACK_WIDTH: ViolationCategory.MANUFACTURING,
+            ViolationType.NETCLASS_CLEARANCE: ViolationCategory.MANUFACTURING,
+            ViolationType.NETCLASS_VIA_DIAMETER: ViolationCategory.MANUFACTURING,
+            ViolationType.NETCLASS_VIA_DRILL: ViolationCategory.MANUFACTURING,
+            ViolationType.NETCLASS_ANNULAR_RING: ViolationCategory.MANUFACTURING,
             # Connectivity: netlist issues
             ViolationType.UNCONNECTED_ITEMS: ViolationCategory.CONNECTIVITY,
             ViolationType.SHORTING_ITEMS: ViolationCategory.CONNECTIVITY,
@@ -259,6 +267,21 @@ class ViolationType(Enum):
 
     # Impedance
     IMPEDANCE = "impedance"
+
+    # Netclass declaration vs manufacturer floor (Issue #5875).  These are
+    # the pre-routing counterparts of the DIMENSION_* members above: the
+    # offending value is declared in ``.kicad_pro`` -> ``net_settings.
+    # classes``, not measured off placed copper.  The direct enum-value
+    # match at the top of ``from_string`` resolves each id before the fuzzy
+    # fallbacks -- which matters, because ``netclass_clearance`` would
+    # otherwise land on the generic CLEARANCE member and
+    # ``netclass_track_width`` on TRACK_WIDTH, both of which imply a
+    # geometry defect that does not exist yet.
+    NETCLASS_TRACK_WIDTH = "netclass_track_width"
+    NETCLASS_CLEARANCE = "netclass_clearance"
+    NETCLASS_VIA_DIAMETER = "netclass_via_diameter"
+    NETCLASS_VIA_DRILL = "netclass_via_drill"
+    NETCLASS_ANNULAR_RING = "netclass_annular_ring"
 
     # Placement
     FOOTPRINT_OUTSIDE_BOARD = "footprint_outside_board"

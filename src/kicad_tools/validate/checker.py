@@ -518,6 +518,17 @@ class DRCChecker:
         "dimension_via_diameter": CATEGORY_MANUFACTURING,
         "dimension_via_drill": CATEGORY_MANUFACTURING,
         "dimension_annular_ring": CATEGORY_MANUFACTURING,
+        # Issue #5875: the same fab-blocking failures as the four
+        # ``dimension_*`` ids above, caught from the ``.kicad_pro``
+        # netclass *declaration* before any copper exists.  Explicit
+        # entries REQUIRED -- ``category_for_rule``'s unknown-id default
+        # happens to be Manufacturing too, but the three ``netclass_*``
+        # via ids would otherwise rely on that default silently.
+        "netclass_track_width": CATEGORY_MANUFACTURING,
+        "netclass_clearance": CATEGORY_MANUFACTURING,
+        "netclass_via_diameter": CATEGORY_MANUFACTURING,
+        "netclass_via_drill": CATEGORY_MANUFACTURING,
+        "netclass_annular_ring": CATEGORY_MANUFACTURING,
         "footprint_outside_board": CATEGORY_MANUFACTURING,
         "single_pad_net": CATEGORY_MANUFACTURING,
         "net_undeclared": CATEGORY_MANUFACTURING,

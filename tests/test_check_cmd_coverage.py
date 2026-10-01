@@ -179,7 +179,12 @@ class TestCategoryListMatchesDispatcher:
     #   *path*, and the bare call here leaves ``pcb_path=None``, making
     #   the closure a silent no-op.  Same rationale: not a checker
     #   method, not in ``CHECK_ALL_METHODS``.
-    NON_CHECKER_CATEGORIES = frozenset({"sch_fields", "doc_drift"})
+    # * ``netclass_floor`` (Issue #5875): ``.kicad_pro`` netclass defaults
+    #   vs the active ``--mfr`` floors.  It runs on the sibling project
+    #   file located from the PCB *path*, and the bare call here leaves
+    #   ``pcb_path=None``, making the closure a silent no-op.  Same
+    #   rationale: not a checker method, not in ``CHECK_ALL_METHODS``.
+    NON_CHECKER_CATEGORIES = frozenset({"sch_fields", "doc_drift", "netclass_floor"})
 
     def test_categories_list_equals_dispatcher_keys(self) -> None:
         checker = _build_minimal_checker()
