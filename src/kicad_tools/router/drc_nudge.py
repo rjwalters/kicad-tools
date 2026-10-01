@@ -15,6 +15,16 @@ Repair strategies
 The pass is iterative (up to ``max_passes`` rounds, default 3) and stops
 early when no violations remain or no progress is made.
 
+Clearance arithmetic
+--------------------
+Epic #5509 Phase 4c (issue #5856): every clearance/overlap question this
+repair pass asks is answered by the shared clearance kernel
+(:mod:`kicad_tools.router.clearance_kernel`, reached through
+:mod:`kicad_tools.router.clearance_shapes`), so the destination gates that
+accept a nudge agree with search, commit and ``kct check`` about what counts
+as clear.  Rule *resolution* is unchanged and stays here -- the kernel is
+handed the requirement this module already resolved (scope guard #1).
+
 Usage::
 
     from kicad_tools.router.drc_nudge import drc_verify_and_nudge
@@ -38,11 +48,15 @@ if TYPE_CHECKING:
 
     from .core import Autorouter
 
-from .geometry import (
-    point_to_segment_distance as _geom_point_to_seg_dist,
-)
-from .geometry import (
-    segment_to_segment_distance as _geom_seg_to_seg_dist,
+from .clearance_shapes import (
+    KEdge,
+    KSegment,
+    bbox_shape,
+    copper_gap,
+    hole_gap,
+    segment_shape,
+    shapes_clear,
+    via_shape,
 )
 from .io import ClearanceViolation, validate_routes
 from .layers import Layer
@@ -57,7 +71,6 @@ from .primitives import Pad, Route, Segment, Via
 from .via_clearance import (
     DEFAULT_MIN_HOLE_TO_HOLE,
     drill_hole_to_hole_clear,
-    segment_clears_foreign_via,
     via_clears_foreign_segment,
 )
 from .via_in_pad_eligibility import (
@@ -339,6 +352,21 @@ def _nudge_segment_with_chain(
     return True
 
 
+def _via_spans_segment_layer(via: Via, seg: Segment) -> bool:
+    """Whether ``via``'s barrel reaches the copper layer ``seg`` sits on.
+
+    A *scope* question, not a clearance one: the kernel's :class:`KVia` is
+    copper on every layer by construction, so a caller holding a blind/buried
+    barrel must gate on ``via.layers`` itself before asking for a gap (the
+    contract :func:`~kicad_tools.router.clearance_shapes.via_shape` documents,
+    and the same gate ``Grid3D::trace_stored_vias_clear`` and the coupled
+    search's ``rail_clear`` apply).
+    """
+    v_lo = min(via.layers[0].value, via.layers[1].value)
+    v_hi = max(via.layers[0].value, via.layers[1].value)
+    return v_lo <= seg.layer.value <= v_hi
+
+
 def _post_nudge_introduces_foreign_via_violation(
     seg: Segment,
     router: Autorouter,
@@ -346,17 +374,30 @@ def _post_nudge_introduces_foreign_via_violation(
     """Return True if ``seg`` at its current position clips a foreign-net via.
 
     Issue #3028 (Part A): destination gate for :func:`_nudge_segment_with_chain`.
-    Walk every via in ``router.routes`` and apply
-    :func:`segment_clears_foreign_via` (the same predicate used by the
-    in-loop 4-quadrant matrix at PRs #2999 / #3006 / #3019 / #3027) to the
-    current segment position.  Same-net vias are skipped — moving the
-    segment closer to one of its own vias would be a chain-snap or a
-    layer-transition concern, NOT a clearance violation.
+    Walk every via in ``router.routes`` and ask the shared clearance kernel
+    whether the candidate segment clears it, at the current segment position.
+    Same-net vias are skipped — moving the segment closer to one of its own
+    vias would be a chain-snap or a layer-transition concern, NOT a clearance
+    violation.
+
+    Epic #5509 Phase 4c (issue #5856): the verdict comes from
+    :func:`~kicad_tools.router.clearance_shapes.shapes_clear` -- i.e. from
+    ``clearance_kernel.clear`` on a ``KSegment``/``KVia`` pair -- rather than
+    from :func:`~kicad_tools.router.via_clearance.segment_clears_foreign_via`'s
+    own ``distance - via_radius - half_width`` arithmetic, so this post-route
+    destination gate and the search/commit gates can no longer disagree about
+    the same two objects.  The geometry of a round barrel against a trace is
+    the same reading in both; what the switch removes is a *second* place that
+    reading is written down, and it brings the comparison under the kernel's
+    own :data:`~clearance_kernel.CLEARANCE_EPSILON_MM` (1e-4 mm, KiCad's
+    integer-nanometre band) in place of a private 1e-9.  Layer-span gating
+    stays here, in :func:`_via_spans_segment_layer`, because a ``KVia`` is
+    implicitly all-layer copper.
 
     The trace_clearance defaults to ``router.rules.trace_clearance`` when
     available; otherwise we fall back to ``DesignRules`` default (0.2 mm)
     so the test fixtures that omit ``rules`` still exercise a meaningful
-    threshold.
+    threshold.  No rule value changed with the migration (scope guard #1).
 
     Args:
         seg: The candidate segment in its proposed post-nudge position.
@@ -364,22 +405,25 @@ def _post_nudge_introduces_foreign_via_violation(
 
     Returns:
         True if ANY foreign-net via on ``seg``'s layer would be too close
-        to ``seg`` (i.e. the predicate returns False); False when every
+        to ``seg`` (i.e. the kernel refuses the pair); False when every
         foreign via clears.
     """
     rules = getattr(router, "rules", None)
     trace_clearance = getattr(rules, "trace_clearance", 0.2) if rules else 0.2
 
     routes = getattr(router, "routes", None) or []
+    candidate = segment_shape(seg)
     for route in routes:
         # Caller-side own-net filter: a segment moving closer to one of
         # its own vias is not a DRC violation -- that's a chain
-        # adjacency.  Mirror the same-net filtering convention used by
-        # the in-loop matrix (see ``segment_clears_foreign_via`` docs).
+        # adjacency.  Mirror the same-net filtering convention the
+        # in-loop matrix uses (PRs #2999 / #3006 / #3019 / #3027).
         if route.net == seg.net:
             continue
         for via in route.vias:
-            if not segment_clears_foreign_via(seg, via, trace_clearance):
+            if not _via_spans_segment_layer(via, seg):
+                continue
+            if not shapes_clear(candidate, via_shape(via), trace_clearance):
                 return True
     return False
 
@@ -496,25 +540,12 @@ def _segment_endpoints_anchored_to_net_vias(
     return False
 
 
-def _point_to_segment_distance(
-    px: float, py: float, x1: float, y1: float, x2: float, y2: float
-) -> float:
-    """Minimum distance from point (px, py) to segment (x1,y1)-(x2,y2)."""
-    return _geom_point_to_seg_dist(px, py, x1, y1, x2, y2)
-
-
-def _segment_to_segment_distance(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    x3: float,
-    y3: float,
-    x4: float,
-    y4: float,
-) -> float:
-    """Minimum distance between two line segments."""
-    return _geom_seg_to_seg_dist(x1, y1, x2, y2, x3, y3, x4, y4)
+# Epic #5509 Phase 4c (issue #5856): the module's two private distance
+# wrappers (``_point_to_segment_distance`` / ``_segment_to_segment_distance``,
+# thin re-exports of ``router/geometry.py``) are retired.  Their only consumer
+# was :func:`_via_edge_sweep_clear`, which now asks the shared clearance kernel
+# for a *copper* gap against the board outline instead of composing a centre
+# distance and subtracting the via radius itself.
 
 
 # ---------------------------------------------------------------------------
@@ -1202,14 +1233,22 @@ def _via_drill_overlaps_bbox(
 
     Tangency within ``tol`` is excluded, matching the DRC rule's
     ``distance >= radius - DRC_TOLERANCE`` early-out.
+
+    Epic #5509 Phase 4c (issue #5856): the measurement is the shared clearance
+    kernel's :func:`~clearance_kernel.hole_gap` -- the drill-to-copper reading
+    -- against the land as kernel copper
+    (:func:`~kicad_tools.router.clearance_shapes.bbox_shape`), in place of this
+    module's own point-to-box ``hypot``.  The *footprint* is unchanged and is
+    still the caller's enclosing box (``_router_pad_bbox``), because widening
+    this detector to the pad's exact outline would change which findings the
+    sweep repairs -- a heuristic change scope guard #2 forbids here.  What
+    moves is only who does the arithmetic: a negative hole gap deeper than
+    ``tol`` is exactly ``point-to-box distance < radius - tol``.
     """
-    min_x, min_y, max_x, max_y = pad_bbox
     radius = via.drill / 2.0
     if radius <= tol:
         return False
-    dx = max(min_x - via.x, 0.0, via.x - max_x)
-    dy = max(min_y - via.y, 0.0, via.y - max_y)
-    return math.hypot(dx, dy) < radius - tol
+    return hole_gap(bbox_shape(pad_bbox), via_shape(via)) < -tol
 
 
 def _snap_chain_endpoints(
@@ -2210,6 +2249,25 @@ def _via_edge_sweep_clear(old_x: float, old_y: float, via: Via, router: Autorout
     The swept lower bound must clear the old upper bound (capped at the
     required clearance). Uncertain near-boundary moves are refused; subtracting
     the error from both sides would incorrectly cancel that uncertainty.
+
+    Epic #5509 Phase 4c (issue #5856): both readings now come from the shared
+    clearance kernel, as **copper** gaps against the board outline rather than
+    centre distances the caller then corrects by the via radius:
+
+    * the pre-move via is a :class:`~clearance_kernel.KVia`;
+    * the swept barrel is the Minkowski sum of that disc with the displacement
+      vector -- exactly a capsule, i.e. a :class:`~clearance_kernel.KSegment`
+      of ``width = via.diameter`` from the old centre to the new one;
+    * each outline chord is a two-vertex :class:`~clearance_kernel.KEdge`, the
+      same model ``validate/rules/edge.py`` consumes.
+
+    The requirement therefore drops to the resolved edge clearance itself (the
+    via radius is in the geometry now, not in the threshold), and the
+    certificate's floor is ``-via.diameter / 2``, which is the exact lower
+    bound of a via-to-edge copper gap because a centre distance cannot be
+    negative.  Every comparison is the same statement as before -- all three
+    terms shifted by one radius -- so no threshold, heuristic or rule value
+    changed (scope guards #1 / #2).
     """
     clearance: float | None = getattr(router, "_edge_clearance", None)
     edges = getattr(router, "_edge_segments", None)
@@ -2218,18 +2276,30 @@ def _via_edge_sweep_clear(old_x: float, old_y: float, via: Via, router: Autorout
     error: float = getattr(edges, "max_error_mm", 0.0)
     if not math.isfinite(error) or error < 0:
         return False
-    required = via.diameter / 2 + clearance
+    pre_move = via_shape(dataclasses.replace(via, x=old_x, y=old_y))
+    swept = KSegment(
+        x1=old_x,
+        y1=old_y,
+        x2=via.x,
+        y2=via.y,
+        width=via.diameter,
+    )
+    # A copper gap cannot fall below minus the barrel radius: the centre
+    # distance it is measured from is non-negative.  This is the clamp the
+    # pre-#5856 form wrote as ``max(0.0, ...)`` on that centre distance.
+    floor = -via.diameter / 2.0
     old_min = swept_min = math.inf
     for (x1, y1), (x2, y2) in edges:
-        old_gap = _point_to_segment_distance(old_x, old_y, x1, y1, x2, y2)
-        swept_gap = _segment_to_segment_distance(old_x, old_y, via.x, via.y, x1, y1, x2, y2)
-        if swept_gap < min(required, old_gap) - 1e-6:
+        chord = KEdge(points=((x1, y1), (x2, y2)))
+        old_gap = copper_gap(pre_move, chord)
+        swept_gap = copper_gap(swept, chord)
+        if swept_gap < min(clearance, old_gap) - 1e-6:
             return False
         old_min = min(old_min, old_gap)
         swept_min = min(swept_min, swept_gap)
     if error == 0:
         return True
-    return max(0.0, swept_min - error) >= min(required, old_min + error) - 1e-6
+    return max(floor, swept_min - error) >= min(clearance, old_min + error) - 1e-6
 
 
 def _try_nudge_via_pad_transaction(

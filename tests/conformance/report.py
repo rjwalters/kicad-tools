@@ -306,7 +306,7 @@ ADAPTERS: tuple[ConsumerAdapter, ...] = (
 )
 
 
-MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16})
+MIGRATED_GROUPS: frozenset[int] = frozenset({1, 2, 4, 5, 6, 7, 8, 9, 10, 15, 16, 17})
 """Consumer groups already switched onto the shared clearance kernel.
 
 The single registry behind Epic #5509's scope guard #5 (*report-only until
@@ -346,6 +346,9 @@ Migrated so far:
   self-check (``router/match_group_tuning.py``
   ``_post_insertion_clearance_detail_group`` /
   ``_post_insertion_clearance_detail_pair_group``), Phase 4b.
+* **17** -- the post-route DRC-nudge repair pass's destination gates
+  (``router/drc_nudge.py`` ``_post_nudge_introduces_foreign_via_violation``,
+  ``_via_drill_overlaps_bbox``, ``_via_edge_sweep_clear``), Phase 4c.
 """
 
 _MIGRATION_PHASE: dict[int, str] = {
@@ -360,6 +363,7 @@ _MIGRATION_PHASE: dict[int, str] = {
     10: "3e",
     15: "4a",
     16: "4b",
+    17: "4c",
 }
 """Which epic phase switched each migrated group, for the table's notes."""
 
@@ -627,12 +631,29 @@ NOTES: dict[int, str] = {
         "kind, not a live `DiffPairRouter`."
     ),
     17: (
-        "The destination gate's foreign-via clearance check. **Not measured**: "
-        "`_via_drill_overlaps_bbox` is an overlap detector with no "
-        "clearance term (every corpus pair has a positive gap, so it would be "
-        "a meaningless zero), and `_via_edge_sweep_clear` is a "
-        "displacement certificate against the board outline needing a "
-        "before/after position pair and a copper-to-edge pair kind."
+        "The destination gate's foreign-via clearance check. Issue #5856 (Epic "
+        "#5509 Phase 4c): `_post_nudge_introduces_foreign_via_violation` takes "
+        "its verdict from `clearance_shapes.shapes_clear` instead of "
+        "`via_clearance.segment_clears_foreign_via`'s own `distance - "
+        "via_radius - half_width`, so this post-route gate and the search / "
+        "commit gates can no longer disagree about one pair; the geometry of a "
+        "round barrel against a trace is the same reading either way, and what "
+        "the switch removes is the second place it was written down (plus a "
+        "private 1e-9 epsilon, now the kernel's `CLEARANCE_EPSILON_MM`). The "
+        "under-rejection cell is a **rule** reading, not a geometry one: this "
+        "row drives the gate at the router's own `trace_clearance` (0.15 mm) "
+        "while kicad-cli applies the project's `Default` netclass (0.20 mm) -- "
+        "the #5398 / #5654 defect, which this phase does not touch. Driven at "
+        "the clearance kicad-cli itself applies, the consumer agrees in "
+        "**both** directions. **Not measured**: `_via_drill_overlaps_bbox` is "
+        "an overlap detector with no clearance term (every corpus pair has a "
+        "positive gap, so it would be a meaningless zero), and "
+        "`_via_edge_sweep_clear` is a displacement certificate against the "
+        "board outline needing a before/after position pair and a "
+        "copper-to-edge pair kind -- both moved onto the kernel's `hole_gap` / "
+        "`copper_gap` in the same phase, with their verdict-for-verdict "
+        "equivalence pinned by "
+        "`tests/router/test_drc_nudge_kernel_5856.py` instead of by this row."
     ),
     18: (
         "Exact polygon pad model -- the other half of `roundrect-corner-gap`. "
