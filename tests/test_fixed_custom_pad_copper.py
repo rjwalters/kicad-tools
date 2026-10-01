@@ -11,7 +11,7 @@ import math
 from pathlib import Path
 
 import pytest
-from shapely.geometry import LineString, Polygon, box
+from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 
 from kicad_tools.router.cpp_backend import is_cpp_available
@@ -435,6 +435,152 @@ def test_unrepresentable_copper_falls_back_to_a_conservative_bound(tmp_path):
     assert fills[0].geometry.symmetric_difference(expected).area < 1e-9
     assert not router.grid.fixed_fills.segment_clear((107, 105.7), (109, 105.7), 0, 0.1, 0.2)
     assert router.grid.fixed_fills.segment_clear((107, 107.2), (109, 107.2), 0, 0.1, 0.2)
+
+
+# The 0.4x0.4 rect anchor of the fixture pad, in board coordinates. Every
+# bounded custom pad keeps it alongside its per-primitive boxes.
+ANCHOR_COPPER = box(107.8, 107.8, 108.2, 108.2)
+
+# Arc primitives placed in the pad's local frame around centre (0, -3) with
+# radius 1, i.e. board centre (108, 105): the pad sits at (108, 108) with no
+# rotation. Each case is (primitive, board-frame arc bound, sweep in degrees
+# measured in the same frame, probe segment, probe is blocked).
+ARC_CASES = {
+    # A 270 deg counter-clockwise sweep. The arc bulges OUTSIDE the hull of
+    # its own three authored points on both axes -- it reaches local x -1 and
+    # y -2 while start/mid/end only reach x -0.6 and y -2.2 -- so a bound
+    # built from the authored points alone would leave real copper exposed.
+    "ccw_270": (
+        "(gr_arc (start 1 -3) (mid -0.6 -2.2) (end 0 -4) (stroke (width 0.2) (type default)))",
+        box(106.9, 103.9, 109.1, 106.1),
+        (0.0, 270.0),
+        ((106.6, 105.0), (107.2, 105.0)),
+        True,
+    ),
+    # The complementary 90 deg clockwise sweep between the SAME endpoints --
+    # only `mid` says which of the two arcs KiCad drew. Its bound must stay
+    # the quarter's box: mistaking the direction would inflate it to the
+    # ccw_270 box above (and block the probe segment that must stay open).
+    "cw_90": (
+        "(gr_arc (start 1 -3) (mid 0.8 -3.6) (end 0 -4) (stroke (width 0.2) (type default)))",
+        box(107.9, 103.9, 109.1, 105.1),
+        (360.0, 270.0),
+        ((106.6, 105.0), (107.2, 105.0)),
+        False,
+    ),
+    # Collinear start/mid/end describe a straight segment, not an arc: there
+    # is no circumcircle to sweep, and the authored points already bound it.
+    "collinear": (
+        "(gr_arc (start -1 -3) (mid 0 -3) (end 1 -3) (stroke (width 0.2) (type default)))",
+        box(106.9, 104.9, 109.1, 105.1),
+        None,
+        ((106.6, 105.0), (107.2, 105.0)),
+        True,
+    ),
+}
+
+
+def arc_copper_oracle(centre, radius, start_deg, end_deg, half_width, *, steps=720):
+    """Board-frame copper of a stroked arc, sampled from the analytic circle.
+
+    Built without the production parser, and strictly inside the true stroked
+    arc (the samples sit exactly on the arc and shapely's buffer inscribes),
+    so ``covers`` on it is a sound containment check.
+    """
+    cx, cy = centre
+    span = end_deg - start_deg
+    points = [
+        (
+            cx + radius * math.cos(math.radians(start_deg + span * i / steps)),
+            cy + radius * math.sin(math.radians(start_deg + span * i / steps)),
+        )
+        for i in range(steps + 1)
+    ]
+    return LineString(points).buffer(half_width)
+
+
+@pytest.mark.parametrize("case", list(ARC_CASES), ids=list(ARC_CASES))
+def test_arc_primitive_bound_contains_the_whole_swept_arc(tmp_path, case):
+    """A degraded ``gr_arc`` is bounded by the arc it actually sweeps (#5863).
+
+    The three authored points do NOT bound an arc -- it bulges outside their
+    hull -- so the bound has to add the axis extremes of the circumscribed
+    circle that the swept angle reaches, and only those: the sweep direction
+    (which `mid` alone reveals) decides which of the four it reaches.
+    """
+    primitive, arc_bound, sweep, probe, probe_blocked = ARC_CASES[case]
+    path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")', primitives=(primitive,)))
+    router, nets = load_board(path)
+    assert ("U6", "9") not in router.pads
+    assert nets["SIG"] not in router.nets
+    assert router.unsupported_geometry_nets == frozenset({"SIG"})
+    fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert len(fills) == 1
+    geometry = fills[0].geometry
+    # Containment: every bit of real copper is inside the bound.
+    true_arc = (
+        LineString([(107.0, 105.0), (109.0, 105.0)]).buffer(0.1)
+        if sweep is None
+        else arc_copper_oracle((108.0, 105.0), 1.0, sweep[0], sweep[1], 0.1)
+    )
+    assert geometry.buffer(1e-9).covers(unary_union([true_arc, ANCHOR_COPPER]))
+    # Tightness: the arc's own axis-aligned bound, not the whole circle's, and
+    # one box per primitive rather than one box swallowing the anchor gap.
+    expected = unary_union([arc_bound, ANCHOR_COPPER])
+    assert geometry.geom_type == "MultiPolygon"
+    assert geometry.symmetric_difference(expected).area < 1e-9
+    # The same distinction, seen by the router: the probe crosses where the
+    # ccw_270 arc has metal and the cw_90 arc does not.
+    clear = router.grid.fixed_fills.segment_clear(probe[0], probe[1], 0, 0.1, 0.2)
+    assert bool(clear) == (not probe_blocked)
+    assert router.grid.fixed_fills.segment_clear((107, 107.2), (109, 107.2), 0, 0.1, 0.2)
+
+
+def test_circle_primitive_bound_contains_the_whole_disc(tmp_path):
+    """A degraded ``gr_circle`` is bounded by its radius, not by its points.
+
+    ``center``/``end`` are two points on a disc that reaches ``radius`` in
+    every direction; bounding their hull would expose three quarters of the
+    copper. The bound is the disc's exact box, grown by half the stroke.
+    """
+    primitive = (
+        "(gr_circle (center -0.5 -3) (end 0.5 -3) (stroke (width 0.2) (type default)) (fill yes))"
+    )
+    path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")', primitives=(primitive,)))
+    router, nets = load_board(path)
+    assert ("U6", "9") not in router.pads
+    assert nets["SIG"] not in router.nets
+    assert router.unsupported_geometry_nets == frozenset({"SIG"})
+    fills = [f for f in router.grid.fixed_fills.fills if f.source_kind == "pad"]
+    assert len(fills) == 1
+    geometry = fills[0].geometry
+    # True copper: the filled 1.0 disc at board (107.5, 105), stroked by 0.1.
+    true_copper = unary_union([Point(107.5, 105.0).buffer(1.1, quad_segs=256), ANCHOR_COPPER])
+    assert geometry.buffer(1e-9).covers(true_copper)
+    expected = unary_union([box(106.4, 103.9, 108.6, 106.1), ANCHOR_COPPER])
+    assert geometry.geom_type == "MultiPolygon"
+    assert geometry.symmetric_difference(expected).area < 1e-9
+    # The disc's far side is metal even though no authored point sits there.
+    assert not router.grid.fixed_fills.segment_clear((106.0, 105.0), (106.6, 105.0), 0, 0.1, 0.2)
+    assert router.grid.fixed_fills.segment_clear((107, 107.2), (109, 107.2), 0, 0.1, 0.2)
+
+
+def test_arc_primitive_without_three_points_is_refused(tmp_path):
+    """An arc missing ``mid`` has no derivable sweep, so it cannot be bounded.
+
+    Without ``mid`` the swept direction is unknowable, so no box can be shown
+    to contain the copper -- and an unbounded pad refuses the board rather
+    than degrading, exactly like a per-layer padstack.
+    """
+    primitive = "(gr_arc (start 1 -3) (end 0 -4) (stroke (width 0.2) (type default)))"
+    path = write_board(tmp_path, pad=custom_pad(net='(net 2 "SIG")', primitives=(primitive,)))
+    original = path.read_bytes()
+    with pytest.raises(ValueError, match="Unsupported routing geometry 'custom'") as excinfo:
+        load_board(path)
+    # The surfaced error stays the geometry diagnosis; the bound failure is
+    # chained as its cause (io.py `raise pad_shape_error from exc`).
+    assert "gr_arc needs start, mid and end" in str(excinfo.value.__cause__)
+    assert path.read_bytes() == original
 
 
 def test_degraded_copper_outside_the_routing_stack_is_skipped(tmp_path):
