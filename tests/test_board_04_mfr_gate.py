@@ -10,6 +10,7 @@ No generic manufacturer profile or error allowance is relaxed by these tests.
 from __future__ import annotations
 
 import json
+import os
 import runpy
 import shutil
 import subprocess
@@ -54,6 +55,50 @@ def test_board_04_reviewed_process_is_strictly_clean(board_04_mfr_check: dict) -
     assert report["fabrication_overrides"]["via_type"] == "through"
     assert report["fabrication_overrides"]["via_in_pad"] is False
     assert not [v for v in report["violations"] if v["rule_id"] == "connectivity"]
+
+
+def test_board_04_mfr_gate_flags_uninitialized_kicad_libraries(tmp_path: Path) -> None:
+    """Issue #5860: a host with no KiCad global library tables must get a
+    loud, distinct diagnostic -- not a bare "N warnings (strict)" failure
+    that reads identically to a genuine footprint/symbol-link defect.
+
+    Points ``KICAD_CONFIG_HOME`` at an empty directory (the same technique
+    ``_configured_model_variables()`` in ``runner.py`` uses for a related
+    lookup) so kicad-cli's ERC run has no ``fp-lib-table``/``sym-lib-table``
+    to consult, reproducing the exact condition a fresh worktree or
+    uninitialized dev host hits before ``scripts/ci/init_kicad_libraries.py``
+    has run.
+    """
+    report = tmp_path / "check.json"
+    empty_kicad_config_home = tmp_path / "kicad-config-home"
+    empty_kicad_config_home.mkdir()
+    env = {**os.environ, "KICAD_CONFIG_HOME": str(empty_kicad_config_home)}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(BOARD_DIR / "check_manufacturing.py"),
+            str(BOARD_04_ROUTED_PCB),
+            str(report),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    # check_manufacturing.py exits 2 when meta_checks.overall != PASSED --
+    # an uninitialized host genuinely cannot produce a trustworthy ERC
+    # result, so the gate still fails; what must change is *how* it fails.
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    data = json.loads(report.read_text())
+    erc = data["meta_checks"]["erc"]
+    assert erc["status"] == "FAILED"
+    assert data["meta_checks"]["overall"] == "FAILED"
+    assert "KiCad global library tables not initialized" in erc["detail"]
+    assert "scripts/ci/init_kicad_libraries.py" in erc["detail"]
+    # The old, indistinguishable-from-a-real-defect message must not be the
+    # whole story any more.
+    assert erc["detail"] != "0 error(s), 30 warning(s) (strict)"
 
 
 def test_board_04_no_release_error_allowance() -> None:

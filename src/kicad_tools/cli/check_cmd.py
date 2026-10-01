@@ -24,11 +24,12 @@ Difference from `kct drc`:
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from kicad_tools.analysis.routing_quality import (
     FRAGMENT_LENGTH_MM,
@@ -57,10 +58,26 @@ from kicad_tools.sync.discover import resolve_target_fab_for_pcb
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
+if TYPE_CHECKING:
+    from kicad_tools.erc import ERCReport
+    from kicad_tools.erc.violation import ERCViolation
+
 # Issue #3750: meta-check status set.  ``NOT RUN`` is rendered with a space
 # in human output and ``"NOT RUN"`` in JSON; we treat it as a single token
 # so callers can compare against the literal.
 SubCheckStatus = Literal["PASSED", "FAILED", "NOT RUN"]
+
+# Issue #5860: kicad-cli's ``lib_symbol_issues`` / ``footprint_link_issues``
+# ERC warnings fire identically for two very different root causes -- a
+# genuine footprint/symbol-link defect in the schematic, or this *host*
+# never having initialized its global KiCad library tables
+# (``fp-lib-table`` / ``sym-lib-table`` under KiCad's config dir -- see
+# ``scripts/ci/init_kicad_libraries.py``). Both produce the same strict-mode
+# "N warnings (strict)" failure, so a missing host setup is indistinguishable
+# from a real defect. This pattern matches kicad-cli's own wording for the
+# "host never configured this library" case so ``_erc_subcheck`` can call it
+# out with a distinct, actionable diagnostic instead.
+_LIBRARY_TABLE_UNINITIALIZED_RE = re.compile(r"does not include the (?:symbol|footprint) library")
 
 # Issue #3924 AC1: the sidecar-gated length-skew / continuity rules that
 # carry a measured ``actual_value`` (skew mm or coupled fraction) on every
@@ -670,6 +687,28 @@ def run_netlist_sync_gate(
     return 0
 
 
+def _uninitialized_library_table_warnings(report: "ERCReport") -> list["ERCViolation"]:
+    """Return ERC warnings that look like missing host library-table entries.
+
+    kicad-cli emits ``lib_symbol_issues`` / ``footprint_link_issues`` with
+    the *exact same* wording for two different root causes: a genuine
+    footprint/symbol-link defect in the schematic, or this host's global
+    KiCad library tables (``fp-lib-table`` / ``sym-lib-table`` under
+    ``~/.config/kicad/<version>/``) never having been initialized (issue
+    #5860; see ``scripts/ci/init_kicad_libraries.py``). The ERC JSON alone
+    cannot disambiguate the two -- this only flags warnings matching
+    kicad-cli's wording for the condition, so ``_erc_subcheck`` can surface
+    a loud, actionable diagnostic instead of silently folding them into the
+    ordinary strict-mode warning count.
+    """
+    return [
+        v
+        for v in report.warnings
+        if v.type_str in ("lib_symbol_issues", "footprint_link_issues")
+        and _LIBRARY_TABLE_UNINITIALIZED_RE.search(v.description)
+    ]
+
+
 def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
     """Run kicad-cli ERC against the discovered schematic (issue #3750).
 
@@ -713,6 +752,23 @@ def _erc_subcheck(sch_path: Path | None, strict: bool) -> SubCheckResult:
     if err_count > 0:
         return SubCheckResult(status="FAILED", detail=detail)
     if strict and warn_count > 0:
+        uninitialized = _uninitialized_library_table_warnings(report)
+        if uninitialized:
+            lib_name_re = re.compile(r"library '([^']+)'")
+            libs = sorted(
+                {m.group(1) for v in uninitialized if (m := lib_name_re.search(v.description))}
+            )
+            libs_str = ", ".join(repr(lib) for lib in libs) if libs else "unnamed library"
+            return SubCheckResult(
+                status="FAILED",
+                detail=(
+                    f"{detail} (strict) -- KiCad global library tables not initialized: "
+                    f"{len(uninitialized)} of these warning(s) reference library table "
+                    f"entries missing from this host ({libs_str}), not necessarily a real "
+                    "schematic defect. Run `scripts/ci/init_kicad_libraries.py` once per "
+                    "host, then re-run this check (see README 'Fresh worktree checklist')."
+                ),
+            )
         return SubCheckResult(status="FAILED", detail=detail + " (strict)")
     return SubCheckResult(status="PASSED", detail=detail)
 
