@@ -45,6 +45,8 @@ from kicad_tools.router.optimizer.collision import (
     GridCollisionChecker,
     VectorCollisionChecker,
     _obstacle_cell_is_accountable_pad_copper,
+    _pad_required_clearance,
+    _stitch_via_reservation,
 )
 from kicad_tools.router.primitives import Pad, Route, Segment, Via
 from kicad_tools.router.rules import DesignRules
@@ -85,6 +87,7 @@ def _pad(
     size: tuple[float, float] = (1.0, 1.0),
     rotation: float = 0.0,
     layer: Layer = Layer.F_CU,
+    ref: str = "P1",
 ) -> Pad:
     return Pad(
         x=x,
@@ -92,9 +95,9 @@ def _pad(
         width=size[0],
         height=size[1],
         net=net,
-        net_name=f"N{net}",
+        net_name=f"N{net}" if net else "GND",
         layer=layer,
-        ref="P1",
+        ref=ref,
         pin="1",
         through_hole=False,
         rotation=rotation,
@@ -261,8 +264,155 @@ def test_smd_pad_on_another_layer_does_not_gate() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The requirement the pad gate measures against (PR #5874 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("gap", [0.3, 0.5])
+def test_per_component_override_is_not_dropped_by_the_exact_gate(strict: bool, gap: float) -> None:
+    """A ``component_clearances`` override still gates, exactly as the raster did.
+
+    PR #5874 review, blocking finding 1.  Both in-repo authorities on
+    segment-vs-pad clearance resolve the requirement per pad --
+    ``RoutingGrid.worst_segment_pad_deficit`` (the #3545 backstop) and
+    ``DiffPairRouter._kernel_pad_deficit`` (Phase 3c) both call
+    ``rules.get_clearance_for_component(pad.ref, pin_pitch)`` -- and so does
+    the halo this narrow phase refines, via
+    ``RoutingGrid._clearance_for_pin_pitch`` under ``strict_pad_clearance``.
+    A flat ``rules.trace_clearance`` here would accept a 0.3 mm and a 0.5 mm
+    gap against U1's 0.6 mm override, with nothing left to catch it: the #3545
+    backstop runs *before* the optimizer.
+
+    Parametrised over ``strict_pad_clearance`` because that flag is live usage
+    (boards 07/09) and is what makes the raster halo itself carry the override.
+    """
+    rules = DesignRules(
+        grid_resolution=0.05,
+        trace_width=TRACE_WIDTH,
+        trace_clearance=TRACE_CLEARANCE,
+        via_clearance=VIA_CLEARANCE,
+        component_clearances={"U1": 0.6},
+        strict_pad_clearance=strict,
+    )
+    grid = RoutingGrid(BOARD_W, BOARD_H, rules)
+    pad = _pad(7.0, 7.0, ref="U1")
+    grid.add_pad(pad)
+
+    assert _pad_required_clearance(grid, pad) == pytest.approx(0.6)
+
+    # The gap clears ``trace_clearance`` -- so a flat-scalar gate accepts it --
+    # and is short of the override.
+    assert gap > TRACE_CLEARANCE
+    probe_y = pad.y + pad.height / 2 + gap + TRACE_WIDTH / 2
+    assert clear(
+        KSegment(3.0, probe_y, 11.0, probe_y, TRACE_WIDTH),
+        make_pad("rect", pad.width, pad.height, cx=pad.x, cy=pad.y),
+        TRACE_CLEARANCE,
+    )
+
+    for checker in _both_checkers(grid):
+        assert _probe(checker, probe_y) is False, type(checker).__name__
+
+    # Above the override it is clear again, so the gate is the override's
+    # value and not a blanket refusal.
+    wide_y = pad.y + pad.height / 2 + 0.65 + TRACE_WIDTH / 2
+    for checker in _both_checkers(grid):
+        assert _probe(checker, wide_y) is True, type(checker).__name__
+
+
+def test_plane_pad_keeps_its_stitch_via_reservation() -> None:
+    """The #2842 reservation is a floor on the exact pad gate.
+
+    PR #5874 review, blocking finding 2.  ``kct stitch`` drops a via on every
+    plane-net pad's centre, so foreign copper has to stay
+    ``rules.stitch_via_halo_radius()`` from that centre -- 0.425 mm here, i.e.
+    0.275 mm from a 0.3 mm pad's metal edge.  Measuring the pad's metal against
+    ``trace_clearance`` alone would hand that space back (the raster refuses the
+    0.25 mm probe below on ``main``), and the symptom would land in ``kct
+    stitch`` rather than in this module.
+    """
+    grid = _grid()
+    pad = _pad(7.0, 7.0, net=0, size=(0.3, 0.3))
+    grid.add_pad(pad)
+
+    reservation = grid.rules.stitch_via_halo_radius() - pad.height / 2
+    assert reservation == pytest.approx(0.275)
+    assert _stitch_via_reservation(grid, pad) == pytest.approx(reservation)
+    assert _pad_required_clearance(grid, pad) == pytest.approx(reservation)
+    assert reservation > TRACE_CLEARANCE  # otherwise the floor is vacuous
+
+    short_y = pad.y + pad.height / 2 + 0.25 + TRACE_WIDTH / 2
+    # The kernel calls this gap clear against ``trace_clearance`` -- the
+    # reservation, not the geometry, is what refuses it.
+    assert clear(
+        KSegment(3.0, short_y, 11.0, short_y, TRACE_WIDTH),
+        make_pad("rect", pad.width, pad.height, cx=pad.x, cy=pad.y),
+        TRACE_CLEARANCE,
+    )
+    for checker in _both_checkers(grid):
+        assert _probe(checker, short_y) is False, type(checker).__name__
+
+    clear_y = pad.y + pad.height / 2 + 0.30 + TRACE_WIDTH / 2
+    for checker in _both_checkers(grid):
+        assert _probe(checker, clear_y) is True, type(checker).__name__
+
+
+def test_signal_pad_of_the_same_size_takes_no_stitch_floor() -> None:
+    """The floor is scoped to the pads ``kct stitch`` will bond.
+
+    ``_add_pad_unsafe`` applies the halo only for ``pad.net == 0``; the same
+    0.3 mm pad on a real net keeps the ordinary requirement, so the probe the
+    test above refuses is accepted here.  Without this control the floor could
+    be a blanket re-inflation of the pad gate Phase 4a exists to de-quantise.
+    """
+    grid = _grid()
+    pad = _pad(7.0, 7.0, size=(0.3, 0.3))
+    grid.add_pad(pad)
+
+    assert _stitch_via_reservation(grid, pad) == 0.0
+    assert _pad_required_clearance(grid, pad) == pytest.approx(TRACE_CLEARANCE)
+
+    probe_y = pad.y + pad.height / 2 + 0.25 + TRACE_WIDTH / 2
+    for checker in _both_checkers(grid):
+        assert _probe(checker, probe_y) is True, type(checker).__name__
+
+
+# ---------------------------------------------------------------------------
 # What the raster still owns
 # ---------------------------------------------------------------------------
+
+
+def test_hard_blocked_cell_outside_every_pad_rectangle_is_not_refined() -> None:
+    """Attribution is per CELL, not merely "some pad is registered".
+
+    PR #5874 review, blocking finding 2's authorisation half.  A non-empty pad
+    registry plus ``raster_only_blocked_cell() is False`` does not establish
+    that a *pad's* marking pass wrote this cell: ``_apply_stitch_via_halo``
+    (#2842) and ``_apply_narrow_channel_halo`` (#2878) both write
+    ``_is_obstacle`` for reasons pad metal cannot be re-measured from.
+    :meth:`RoutingGrid.pad_marked_cell` -- the same exclusive attribution
+    ``DiffPairRouter._pad_attributable_cell`` uses (#5662, hardened by the PR
+    #5676 review) -- reproduces only ``_add_pad_unsafe``'s own halo rectangle,
+    so a cell no pad marked keeps its conservative reject.
+    """
+    grid = _grid()
+    far_pad = _pad(2.0, 2.0)
+    grid.add_pad(far_pad)
+
+    gx, gy = grid.world_to_grid(7.0, 7.0)
+    cell = grid.cell_at(0, gy, gx)
+    cell.blocked = True
+    cell.is_obstacle = True
+    cell.net = PAD_NET
+
+    assert grid.pads == (far_pad,)
+    assert grid.raster_only_blocked_cell(gx, gy, 0) is False
+    assert grid.pad_marked_cell(gx, gy, 0) is False
+    assert _obstacle_cell_is_accountable_pad_copper(grid, gx, gy, 0) is False
+
+    for checker in _both_checkers(grid):
+        assert _probe(checker, 7.0) is False, type(checker).__name__
 
 
 def test_board_edge_keepout_keeps_its_conservative_reject() -> None:
