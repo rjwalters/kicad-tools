@@ -24,7 +24,17 @@ has fired:
   ours, and publishes a benchmark derived from real KiCad boards. Registered
   as **peer / watch** until we measure it.
 
-Nothing has been measured yet. The two follow-ups below do the measuring.
+**Both halves have now been measured.** The autorouter sweep is Issue #5848
+("Benchmark results" below); the interop gate on its KiCad output is Issue #5847
+("Interop gate" below, measured 2026-10-01).
+
+Interop gate in one paragraph: tscircuit emits KiCad files our parser reads
+without complaint, and that is the good news. **No export is manufacturable,
+and none is even self-consistent** — the `.kicad_sch` and the `.kicad_pcb` name
+the same net differently, so every one of five boards fails LVS. The
+`[projects.tscircuit]` verdict therefore moves from an unmeasured
+`complementary` to **`evaluated-not-adopted`**, with the relation left at
+upstream/complementary because all six upstream defects found look fixable.
 
 ## What tscircuit is now
 
@@ -49,10 +59,12 @@ format.
   so we need no format bridge. Given our mission (agent-driven PCB creation),
   a TypeScript front end that emits KiCad expands who can reach `kct route`
   and `kct check`.
-- The quality of that output is **unknown**. Nobody has run a generated
-  project through `kct check`, LVS and `kicad-cli pcb drc --refill-zones`,
-  our two-engine bar for "manufacturable". Until someone does, treat
-  tscircuit as a candidate front end, not a supported one.
+- The quality of that output is now **measured, and it does not pass**. Five
+  representative designs were run through `kct check --mfr`, LVS and
+  `kicad-cli pcb drc --refill-zones`, before and after re-routing with
+  `kct route`. All five fail. Treat tscircuit as a candidate front end, not a
+  supported one — see "Interop gate" for the per-example table and the six
+  upstream defects it found.
 - `kicadts` is the closest analogue to our file-handling layer in another
   language. Its round-trip fixtures are a cheap source of edge cases, and
   because it is MIT, ideas and test cases may move with attribution.
@@ -360,13 +372,271 @@ uv run python benchmarks/external/tscircuit/srj_to_kicad.py \
 uv run python benchmarks/external/tscircuit/referee.py nano_tsc.kicad_pcb
 ```
 
+## Interop gate (Issue #5847, measured 2026-10-01)
+
+### What was run
+
+Harness: [`benchmarks/interop/tscircuit/`](../../benchmarks/interop/tscircuit/README.md).
+Five designs of our own authorship (`examples.mjs`) are rendered by
+`@tscircuit/core`, converted by `circuit-json-to-kicad` into
+`.kicad_pcb` / `.kicad_sch` / `.kicad_pro`, and then gated twice: once on
+tscircuit's own autorouted copper, and once with every track and via ripped up
+and re-routed by `kct route --strategy negotiated`. Nothing generated is
+committed — the npm workspace and the exports live in the gitignored
+`.cache/kct-benchmarks/tscircuit/`, the same run-time-fetch convention as
+`benchmarks/external/`.
+
+**Pinned versions** (resolved `gitHead` of each published package, verified
+against the upstream repos):
+
+| Package | Version | Repo | Commit |
+|---|---|---|---|
+| `@tscircuit/core` | 0.0.2031 | `tscircuit/core` | `80ba2c4b07b88113d1e1d9724ffd66ae1d3aaa5e` |
+| `circuit-json-to-kicad` | 0.0.228 | `tscircuit/circuit-json-to-kicad` | `88d363d023a29ac719ef7caf12f3c99efe9adb0a` |
+| `@tscircuit/footprinter` | 0.0.429 | `tscircuit/footprinter` | `d9a981fffab5741178d49b7a070c3b8bd2110398` |
+
+Node 26.9.0; `kct check --mfr jlcpcb`; `kicad-cli` 10.0 run from
+`kicad/kicad:10.0` under Docker (`--platform linux/amd64`), **not** the host
+binary — the native `kicad-cli` on this host hangs forever in
+`LIBRARY_MANAGER::LoadGlobalTables` on a TCC-blocked `~/Documents` scan
+(Issue #5877).
+
+The `tsci` CLI's `generate-kicad-project` step was *not* used: `tsci` requires
+Bun, which this host does not have. The harness calls the same converter
+classes the CLI calls (`CircuitJsonToKicadPcbConverter`,
+`…SchConverter`, `…ProConverter`), so the artifact under test is the same; only
+the driver differs.
+
+### Results
+
+`kct check --mfr` carries DRC, ERC and LVS in one run, so its columns are
+reported separately below. "LVS" is split into **copper** (real shorts/opens)
+and **label** (schematic/PCB net-name disagreement) mismatches, because those
+have very different causes.
+
+| Example | Copper | kct check err/warn | kct DRC | ERC | LVS copper | LVS label | `kicad-cli` DRC err/warn |
+|---|---|---:|---|---|---|---|---|
+| `rc_lowpass` (RC + 3-pin header) | tscircuit | 7 / 12 | FAILED | PASSED | 0 | **7** | 0 / 9 |
+| | kct-routed | 4 / 12 | FAILED | PASSED | 0 | **7** | 0 / 19 † |
+| `led_indicator` (R + LED + header) | tscircuit | 4 / 10 | FAILED | PASSED | 0 | **8** | 0 / 8 |
+| | kct-routed | 4 / 10 | FAILED | PASSED | 0 | **8** | 0 / 17 † |
+| `qfn_mcu` (QFN-32, 4 decouplers, header) | tscircuit | **66** / 41 | FAILED | **FAILED** (26) | **2 shorts** | **19** | 0 / 16 |
+| | kct-routed | 2 / 42 | FAILED | **FAILED** (26) | **5 opens** | **19** | 0 / 29 † |
+| `poured_planes` (2 pours + keepout) | tscircuit | **26** / 11 | FAILED | PASSED | 0 | **6** | 0 / 6 |
+| | kct-routed | 8 / 13 | FAILED | PASSED | 0 | **6** | 0 / 14 † |
+| `soic_opamp` (SOIC-8 + feedback) | tscircuit | **23** / 25 | FAILED | **FAILED** (4) | 0 | **12** | 0 / 10 |
+| | kct-routed | 16 / 26 | FAILED | **FAILED** (4) | **1 open** | **12** | 0 / 30 † |
+
+† `kct route` writes a sibling `<board>.kicad_dru`, which KiCad's DRC picks up
+automatically, so the kct-routed rows enforce **our** rules on top of the
+project's own. Their `kicad-cli` counts are therefore not directly comparable
+with the as-emitted rows; `results.json` records `kicad_dru_present` per pass so
+this is visible rather than folded into a number. The jump is mostly
+`silk_over_copper` and `text_thickness`, i.e. our silk floors now being
+enforced, not new copper faults.
+
+Routing deltas (`kct route --strategy negotiated`, C++ backend present):
+
+| Example | tscircuit copper | kct copper | Notes |
+|---|---|---|---|
+| `rc_lowpass` | 13 seg / 1 via | 29 seg / 3 vias | complete |
+| `led_indicator` | 5 seg / 0 vias | 1 seg / 0 vias + 2 auto-pour zones | power nets carried by zones, LVS copper clean |
+| `qfn_mcu` | 130 seg / 17 vias | 17 seg / 4 vias | **`kct route` exited 2**; 5 LVS opens remain |
+| `poured_planes` | 6 seg / 0 vias | 1 seg / 0 vias + auto-pour | LVS copper clean |
+| `soic_opamp` | 23 seg / 2 vias | 25 seg / 2 vias | 1 LVS open remains |
+
+### Reading of the results
+
+- **`kicad-cli` reports zero DRC *errors* on every board, and that is
+  misleading.** Its findings are all warnings, dominated by
+  `lib_footprint_issues` (the footprints name a `tscircuit` library that is not
+  shipped) and `text_height`. The fab-blocking facts — annular rings of
+  0.05 mm, 0.10 mm tracks, unclipped zones — sit under rules KiCad's *default*
+  project settings do not enforce, because the emitted `.kicad_pro` declares
+  those loose values as the board's own rules. **A clean `kicad-cli` run on a
+  project that also supplies its own rules is not evidence of
+  manufacturability.** This is a sharper version of the "two-engine honesty"
+  point: both engines must be fed the *manufacturer's* floors, not the
+  project's.
+- **Nothing here is manufacturable**, by this repo's bar (100% nets routed,
+  0 DRC errors, 0 sync drift). The closest is `rc_lowpass` re-routed by `kct`,
+  and it still carries 4 silk errors and 7 LVS label mismatches.
+- **`kct route` does strictly better than tscircuit's autorouter on copper
+  correctness**: tscircuit's `qfn_mcu` copper contains two literal shorts
+  (`short C1.1/U1.1`, `short U1.2/C1.2`) plus 14 clearance errors, where
+  `kct route` on the same placement produces opens, not shorts. It does not
+  finish `qfn_mcu` (exit 2, 17 nets attempted) — but that board is
+  unmanufacturable at source anyway (0.05 mm annular ring), so no router issue
+  was filed against it.
+- **`kct check`'s LVS is what makes this gate worth having.** `kicad-cli` is
+  blind to the net-name divergence (it is a parity check it was not asked to
+  run, and `--schematic-parity` needs the schematic in the same project); our
+  LVS flags it on all five boards.
+
+### Failure classification
+
+Every distinct failure, classified per the issue's taxonomy:
+
+| Finding | Class | Disposition |
+|---|---|---|
+| `circuit-json-to-kicad` publishes zero runtime `dependencies` but imports `polygon-clipping` | (a) emitter | upstream #1 below |
+| `.kicad_sch` and `.kicad_pcb` name the same net differently (6-19 LVS label mismatches, all boards) | (a) emitter | upstream #2 below |
+| A `<net>` element becomes a schematic symbol with no PCB footprint | (a) emitter | upstream #3 below |
+| Vias / the single `Default` netclass are below every mainstream fab floor; zones unfilled and unclipped | (a) emitter | upstream #4 below |
+| `<copperpour layer="bottom">` silently dropped | (a) emitter | upstream #5 below |
+| footprinter's `qfnNN_wW_hH_pP` form overlaps corner pads at 0 mm | (a) emitter | upstream #6 below |
+| Silkscreen line width 0.10 mm, text 0.50-0.70 mm, 4-16 `silk_pad_clearance` errors per board | (a) emitter | folded into upstream #4 |
+| `kct check --mfr` ignores `.kicad_pro` netclass defaults until copper exists | (b) kct gap | **#5875** |
+| `kct route --nets <pour net>` blames "a loader bug" for the pour-net auto-skip | (b) kct gap | **#5876** |
+| Host `kicad-cli` hangs forever (TCC-blocked `~/Documents`), silently disabling the second engine | (b) kct / host gap | **#5877** |
+| tscircuit cannot express more than one netclass at all (no netclass prop exists in `@tscircuit/props`) | (c) design limitation | recorded here; not a defect, a missing feature |
+| `kct route` leaves `routing_status()['unrouted_pads'] > 0` on zone-carried power nets | (c) not a defect | trace-only connectivity does not credit zone fills; LVS copper confirms the nets are connected |
+
+### Upstream defect reports (ready to file)
+
+**No agent in this fleet can file these.** The available forge credential is a
+GitHub App installation token scoped to 13 `rjwalters/*` repositories
+(`gh api repos/tscircuit/footprinter --jq .permissions` → all `false`), so
+posting to `tscircuit/*` needs a credential this session does not have. Tracked
+as **#5878** (`loom:operator-only`, `loom:operator-mechanical`). The six reports
+below are written to be filed as-is.
+
+#### 1. `tscircuit/circuit-json-to-kicad` — published package cannot be imported
+
+`package.json` declares `"dependencies": {}`, but `dist/index.js` imports
+`polygon-clipping`, which appears only under `devDependencies`
+(`^0.15.7`). A clean install therefore cannot load the package:
+
+```
+$ npm i circuit-json-to-kicad@0.0.228
+$ node -e "require('circuit-json-to-kicad')"
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'polygon-clipping' imported from
+  …/node_modules/circuit-json-to-kicad/dist/index.js
+```
+
+Fix: move `polygon-clipping` to `dependencies` (or bundle it). Installing it
+explicitly is a working workaround and is what our harness pins.
+
+#### 2. `tscircuit/circuit-json-to-kicad` — the schematic and the PCB name the same net differently
+
+The `.kicad_sch` converter assigns KiCad-style auto names (`Net-(C1-1)`) while
+the `.kicad_pcb` converter assigns names derived from the Circuit JSON trace
+(`.R1 > .pin2 to .C1 > .pin1`) or the `<net>` name (`VCC`). Nothing reconciles
+them, so **no emitted project is schematic↔PCB consistent** and any
+layout-vs-schematic check fails. Measured on all five of our boards (6, 7, 8,
+12 and 19 mismatched pads).
+
+```
+C1.1  schematic 'Net-(C1-1)'  pcb '.R1 > .pin2 to .C1 > .pin1'
+J1.1  schematic 'Net-(J1-1)'  pcb 'VCC'
+```
+
+Fix: derive both file's net names from one pass over the Circuit JSON
+`source_trace` / `source_net` graph, and emit the same string in both.
+Secondary: `.R1 > .pin2 to .C1 > .pin1` contains spaces and `>` — legal in
+KiCad but awkward; a `Net-(R1-Pad2)` style name would be friendlier.
+
+#### 3. `tscircuit/circuit-json-to-kicad` — a `<net>` becomes a schematic symbol with no footprint
+
+A declared `<net name="GND" />` is emitted into the `.kicad_sch` as a component
+with reference `GND` and one pad, which has no counterpart in the `.kicad_pcb`:
+
+```
+GND.1  schematic 'Net-(GND-1)'  pcb None
+```
+
+Reproduced on `led_indicator` and `soic_opamp` (both declare `<net>` children).
+A net should become a power symbol / label, never a placeable component.
+
+#### 4. `tscircuit/circuit-json-to-kicad` — emitted projects are below every mainstream fab floor
+
+The `.kicad_pro` carries exactly one netclass and no patterns:
+
+```json
+"net_settings": { "last_net_id": …, "classes": [
+  { "name": "Default", "track_width": 0.1, "via_diameter": 0.3,
+    "via_drill": 0.2, "clearance": 0.1 } ] },
+"net_class_patterns": null
+```
+
+Against JLCPCB's published floors that is three simultaneous failures: implied
+annular ring `(0.30-0.20)/2 = 0.05 mm` vs 0.13 mm minimum, and `track_width`
+and `clearance` both 0.10 mm vs 0.127 mm. The emitted vias use those numbers,
+so `kct check --mfr jlcpcb` raises `dimension_annular_ring`,
+`dimension_via_diameter` and `dimension_via_drill` 17 times each on a QFN-32
+board and twice each on a SOIC-8 board.
+
+Also fab-blocking on the same boards:
+
+- **Silkscreen below floor everywhere**: line width 0.10 mm (0.15 mm minimum),
+  text height 0.50-0.70 mm (1.0 mm minimum), and 4-16 `silk_pad_clearance`
+  errors per board — silk printed onto pads.
+- **Zones are emitted unfilled and unclipped to the board outline**: a
+  26 × 20 mm board with one pour produced **22** `edge_clearance_zone` errors.
+- **Footprints reference a `tscircuit` library that is not shipped**, so
+  `kicad-cli` raises `lib_footprint_issues` on every board (3-6 each).
+
+Fix suggestions: default the netclass to a conservative, widely-manufacturable
+set (e.g. 0.2 mm track / 0.2 mm clearance / 0.6 mm via / 0.3 mm drill), let the
+caller override it, clip pour outlines to the board edge with a margin, and
+raise the silk defaults to 0.15 mm / 1.0 mm.
+
+#### 5. `tscircuit/tscircuit` (`@tscircuit/core`) — `<copperpour layer="bottom">` is silently dropped
+
+Only `layer="top"` copper pours reach Circuit JSON. Declaring one of each
+yields exactly one `pcb_copper_pour` (the top one), regardless of declaration
+order or whether the pours are named. On a two-layer board this loses the
+single most common pour there is — a bottom ground plane — with no warning.
+
+```
+case                declared  emitted  layers
+bottom only         1         0        []
+top only            1         1        [top]
+bottom then top     2         1        [top]
+top then bottom     2         1        [top]
+two named           2         1        [top]
+```
+
+(Each case: a 26 × 20 mm `<board>` with `<net name="GND"/>`,
+`<net name="V3P3"/>`, an 0603 resistor, an 0603 capacitor, three traces, and
+the pours above; `await circuit.renderUntilSettled()` then count
+`pcb_copper_pour` elements.)
+
+#### 6. `tscircuit/footprinter` — the explicit-dimension QFN form overlaps corner pads
+
+`qfn32_w5_h5_p0.5mm` and `qfn16_w3_h3_p0.5mm` place the pad rows 0.963 mm from
+the centre, so the last pad of one side and the first pad of the next side
+**intersect**. tscircuit's own DRC catches it and then skips autorouting
+entirely; the overlapping pads are still written to the `.kicad_pcb`. The bare
+`qfn32` / `qfn16` forms use 1.462 mm and are correct.
+
+```
+footprint              pads  errors
+qfn32_w5_h5_p0.5mm     32    4   pcb_pad_pad_clearance_error (clearance 0mm)
+qfn32                  32    0
+qfn16_w3_h3_p0.5mm     16    4   pcb_pad_pad_clearance_error (clearance 0mm)
+qfn16                  16    0
+tqfp32 / qfp32         32    0
+```
+
+For `qfn16_w3_h3_p0.5mm`, pad 4 spans x ∈ [-1.4005, -0.5255], y ∈ [-0.875,
+-0.625] and pad 5 spans x ∈ [-0.875, -0.625], y ∈ [-1.4005, -0.5255] — they
+share the square [-0.875, -0.625]². The row offset appears to be computed from
+the body dimension without accounting for pad length.
+
+### Reproducing
+
+```bash
+uv run python benchmarks/interop/tscircuit/run_gate.py
+# results: .cache/kct-benchmarks/tscircuit/results/{results.json,results.md}
+```
+
 ## Follow-ups
 
-1. **Interop gate on tscircuit-emitted KiCad projects** (Issue #5847). Build a few
-   representative tscircuit examples to KiCad and run them through
-   `kct check --mfr`, LVS and `kicad-cli pcb drc --refill-zones`. Then
-   try `kct route` on an unrouted export. Report systematic defects
-   upstream and record the result here.
+1. ~~**Interop gate on tscircuit-emitted KiCad projects** (Issue #5847)~~ —
+   done, 2026-10-01; results above. Its own follow-ups: **#5875** and
+   **#5876** (kct gaps), **#5877** (host `kicad-cli` hang), **#5878** (file the
+   six upstream defects once a credential exists).
 2. **Benchmark the tscircuit autorouter on the dataset-srj18 source
    boards** (Issue #5848) -- *done, see "Benchmark results": 16 boards
    pinned, audited and swept under a 600 s cap. Open follow-up: rerun with
@@ -374,3 +644,8 @@ uv run python benchmarks/external/tscircuit/referee.py nano_tsc.kicad_pcb
    equal terms.*  Original task: Add license-checked boards to `benchmarks/external/boards.toml`,
    rip up their copper, and route each one with both routers under the shared
    `kicad-cli` referee, as was done for KiCadRoutingTools.
+3. **Re-run this gate** once upstream defect #2 (net-name divergence) lands —
+   it is the one that makes every other result hard to interpret, because a
+   board that cannot pass LVS cannot be called manufacturable whatever its DRC
+   count. The harness is parameterless: bump the pins in
+   `benchmarks/interop/tscircuit/run_gate.py` and re-run.
