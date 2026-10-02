@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.pairwise_clearance import AttachZone, PadGeometry, PairwiseViolation
     from kicad_tools.router.primitives import Route
     from kicad_tools.router.reporting import RouteAttemptResult
-    from kicad_tools.router.routing_plan import RoutingPlan
+    from kicad_tools.router.routing_plan import OverflowReport, RoutingPlan
 
 # Issue #3035: ``_auto_skip_pour_nets`` was promoted to a public helper at
 # ``kicad_tools.router.auto_pour.auto_skip_pour_nets`` so in-process router
@@ -3972,6 +3972,71 @@ def _delta_probe_timeout(args, *, quiet: bool = True) -> float | None:
     return timeout
 
 
+def _plan_infeasibility(router) -> "OverflowReport | None":
+    """The routing plan's own infeasibility verdict, or ``None`` when it has none.
+
+    Issue #5890 (Epic #5511 Phase 3).  The Epic #5510 plan stage runs by
+    default (``Autorouter._run_routing_plan_stage`` on the negotiated path,
+    ``TwoPhaseRouter.route_all``'s Phase 1 on the dense one) and leaves its
+    report on ``router.routing_plan``.  Its ``overflow_report`` is the ONE
+    computed statement this pipeline makes about whether the board's corridors
+    can hold their demand -- the thing #5890 gates the placement-delta loop on,
+    rather than re-deriving a congestion guess.
+
+    Returns the report only when it exists AND says the plan is **infeasible**;
+    ``None`` otherwise (no plan built, ``--no-routing-plan``, a cache hit that
+    skipped routing entirely, or a feasible plan).  "No verdict" and "feasible"
+    deliberately collapse to the same answer: the default path only changes
+    where the plan positively proves overflow.
+    """
+    plan = getattr(router, "routing_plan", None)
+    report = getattr(plan, "overflow_report", None) if plan is not None else None
+    if report is None or report.feasible:
+        return None
+    return report
+
+
+def _should_run_placement_delta_feedback(router, args, *, quiet: bool = False) -> bool:
+    """Decide whether the placement-delta feedback loop runs (Issue #5890).
+
+    Tri-state resolution of ``--placement-delta-feedback`` /
+    ``--no-placement-delta-feedback``:
+
+    * ``True`` (explicit ``--placement-delta-feedback``) -- run, as before
+      #5890, whatever the plan says;
+    * ``False`` (explicit ``--no-placement-delta-feedback``) -- never run;
+    * ``None`` (**the default**) -- AUTO: run only when the routing plan
+      reports the board infeasible (:func:`_plan_infeasibility`).
+
+    The auto arm is what makes Epic #5511's Phase 3 promise true -- "on by
+    default **only when the plan is infeasible**".  Every path where the plan is
+    feasible (or produced no verdict at all) resolves to ``False``, so those
+    runs are byte-identical to the pre-#5890 default, matching the #4053/#4051
+    precedent the epic cites.
+
+    Callers must still apply the pre-existing preconditions (routes exist and
+    nets remain unrouted); this answers only the flag question.
+    """
+    choice = getattr(args, "placement_delta_feedback", None)
+    if choice is False:
+        return False
+    if choice is True:
+        return True
+    report = _plan_infeasibility(router)
+    if report is None:
+        return False
+    if not quiet:
+        from kicad_tools.cli.progress import flush_print
+
+        flush_print(
+            "\n--- Routing plan reports an INFEASIBLE board "
+            f"(overflow {report.total_overflow} on {report.overflowed_edges} edge(s)) ---\n"
+            "  Enabling classifier-driven placement-delta feedback by default "
+            "(issue #5890); pass --no-placement-delta-feedback to opt out."
+        )
+    return True
+
+
 def _placement_delta_path(args, pcb_path: Path) -> Path:
     """Resolve the path of the ``<output>_placement_delta.json`` artifact."""
     if getattr(args, "output", None):
@@ -4271,6 +4336,97 @@ def _maybe_run_placement_feedback_escalation(
             f"{final_result.nets_to_route} "
             f"({final_result.completion * 100:.0f}%)"
         )
+
+
+def _maybe_run_placement_delta_feedback_escalation(
+    final_result,
+    successful_result,
+    pcb_path: Path,
+    output_path: Path,
+    args,
+    quiet: bool,
+    *,
+    stall_label: str,
+) -> Path:
+    """Engage classifier-driven placement-DELTA feedback at an escalation tail.
+
+    Issue #5890 (Epic #5511 Phase 3).  ``--auto-layers`` is ON by default, so
+    the **default** ``kct route`` invocation does not reach ``_main_impl``'s
+    inline routing block at all -- it dispatches to
+    :func:`route_with_layer_escalation` (or, with ``--adaptive-rules``, to
+    :func:`route_with_rule_relaxation` / :func:`route_with_combined_escalation`).
+    Those three tails hooked only the *geometry* loop
+    (:func:`_maybe_run_placement_feedback_escalation`, #4151), so the
+    classifier-driven delta loop was unreachable on the path almost every real
+    board takes.  Wiring it here is what makes "on the default path" true,
+    rather than "on the non-default single-pass path".
+
+    Same preconditions as the geometry sibling -- escalation did not already
+    succeed, routes exist, nets remain unrouted -- plus the #5890 gate itself
+    (:func:`_should_run_placement_delta_feedback`): an explicit
+    ``--placement-delta-feedback`` / ``--no-placement-delta-feedback``, or the
+    AUTO default, which fires only on a plan the Epic #5510 stage reports
+    INFEASIBLE.  Every other case returns ``pcb_path`` untouched and runs
+    nothing, so a feasible board's escalation tail is byte-identical.
+
+    Args:
+        final_result: The chosen result object (its completion stats are
+            refreshed in place when the loop runs).
+        successful_result: The fully-successful result, or ``None``.
+        pcb_path: The staged input PCB the routing pass read.
+        output_path: Final routed-output path; also the staging target for a
+            moved placement.
+        args: Parsed CLI args.
+        quiet: Suppress output when True.
+        stall_label: Human-readable escalation-strategy name for the banner.
+
+    Returns:
+        The path the caller must use as its **placement source** for
+        ``_finalize_routes`` / ``_write_routed_pcb`` -- ``output_path`` when a
+        delta was kept and persisted there, otherwise ``pcb_path`` unchanged.
+        Returning it (rather than mutating a caller local) is what keeps the
+        "copper to nowhere" failure the main path already guards against from
+        reappearing here.
+    """
+    if successful_result is not None:
+        return pcb_path
+    router = getattr(final_result, "router", None)
+    if router is None or router.routes is None or not router.get_failed_nets():
+        return pcb_path
+    if not _should_run_placement_delta_feedback(router, args, quiet=quiet):
+        return pcb_path
+
+    if not quiet:
+        print(
+            f"\n--- Engaging classifier-driven placement-delta feedback "
+            f"({stall_label} stalled at {final_result.completion * 100:.0f}%) ---"
+        )
+    moved = _run_placement_delta_feedback(
+        router=router,
+        pcb_path=pcb_path,
+        output_path=output_path,
+        args=args,
+        quiet=quiet,
+    )
+    # Refresh completion stats from the post-feedback router state so
+    # optimize/save/summary all see the correct numbers (mirrors the geometry
+    # sibling's refresh).
+    _refreshed_multi_pad_ids = {n for n, p in router.nets.items() if n > 0 and len(p) >= 2}
+    _refreshed = router.get_statistics(nets_to_route_ids=_refreshed_multi_pad_ids)
+    final_result.nets_routed = _refreshed["nets_routed"]
+    final_result.completion = (
+        final_result.nets_routed / final_result.nets_to_route
+        if final_result.nets_to_route > 0
+        else 1.0
+    )
+    final_result.success = final_result.completion >= args.min_completion
+    if not quiet:
+        print(
+            f"  Post-delta-feedback: {final_result.nets_routed}/"
+            f"{final_result.nets_to_route} "
+            f"({final_result.completion * 100:.0f}%)"
+        )
+    return moved if moved is not None else pcb_path
 
 
 def _fill_zones_after_route(
@@ -8318,6 +8474,22 @@ def route_with_layer_escalation(
         stall_label="layer escalation",
     )
 
+    # Issue #5890 (Epic #5511 Phase 3): the classifier-driven placement-DELTA
+    # loop at the same tail.  Default-off unless the Epic #5510 plan stage
+    # reports this board INFEASIBLE (or the flag was passed explicitly), so a
+    # feasible board's escalation tail is byte-identical.  Rebinds the
+    # placement source when a delta was kept -- the copper below was computed
+    # against the MOVED footprints.
+    pcb_path = _maybe_run_placement_delta_feedback_escalation(
+        final_result,
+        successful_result,
+        pcb_path,
+        output_path,
+        args,
+        quiet,
+        stall_label="layer escalation",
+    )
+
     # Issue #4732: opt-in per-stage routing-quality instrumentation.
     # Read-only -- it measures the copper each stage hands to the next
     # so the surviving fragment/staircase artifacts can be attributed
@@ -9209,6 +9381,22 @@ def route_with_rule_relaxation(
         final_result,
         successful_result,
         pcb_path,
+        args,
+        quiet,
+        stall_label="rule relaxation",
+    )
+
+    # Issue #5890 (Epic #5511 Phase 3): the classifier-driven placement-DELTA
+    # loop at the same tail.  Default-off unless the Epic #5510 plan stage
+    # reports this board INFEASIBLE (or the flag was passed explicitly), so a
+    # feasible board's escalation tail is byte-identical.  Rebinds the
+    # placement source when a delta was kept -- the copper below was computed
+    # against the MOVED footprints.
+    pcb_path = _maybe_run_placement_delta_feedback_escalation(
+        final_result,
+        successful_result,
+        pcb_path,
+        output_path,
         args,
         quiet,
         stall_label="rule relaxation",
@@ -11615,6 +11803,22 @@ def route_with_combined_escalation(
         final_result,
         successful_result,
         pcb_path,
+        args,
+        quiet,
+        stall_label="combined escalation",
+    )
+
+    # Issue #5890 (Epic #5511 Phase 3): the classifier-driven placement-DELTA
+    # loop at the same tail.  Default-off unless the Epic #5510 plan stage
+    # reports this board INFEASIBLE (or the flag was passed explicitly), so a
+    # feasible board's escalation tail is byte-identical.  Rebinds the
+    # placement source when a delta was kept -- the copper below was computed
+    # against the MOVED footprints.
+    pcb_path = _maybe_run_placement_delta_feedback_escalation(
+        final_result,
+        successful_result,
+        pcb_path,
+        output_path,
         args,
         quiet,
         stall_label="combined escalation",
@@ -15010,18 +15214,23 @@ def _route_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--placement-delta-feedback",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help=(
             "After the initial routing pass, if any nets remain unrouted, run "
             "the classifier-driven placement-DELTA feedback loop: classify the "
             "routed board, translate each PLACEMENT_BOUND / CONGESTION_SATURATED "
-            "diagnosis into a concrete placement delta (translate or 180-degree "
-            "rotation), apply the top applyable one, re-route, and keep it only "
-            "on a strict routed-net increase (default: disabled).  Connectors "
-            "(refs starting with 'J' or 'P') and locked footprints are never "
-            "moved; --placement-feedback-anchor / --placement-feedback-no-anchor "
-            "and --placement-feedback-max-movement apply to this loop too.  "
-            "Writes <output>_placement_delta.json.  Issue #4468."
+            "diagnosis into a concrete placement delta (translate, rotation, "
+            "mirror or a declared swap group's pin permutation), apply the top "
+            "applyable one, re-route, and keep it only on a strict routed-net "
+            "increase with no clearance, pairwise-creepage or keepout "
+            "regression.  Connectors (refs starting with 'J' or 'P') and "
+            "locked footprints are never moved; --placement-feedback-anchor / "
+            "--placement-feedback-no-anchor and "
+            "--placement-feedback-max-movement apply to this loop too.  Writes "
+            "<output>_placement_delta.json.  DEFAULT (neither form given) is "
+            "AUTO: the loop runs only when the routing plan reports the board "
+            "INFEASIBLE (overflow_report.feasible false); a feasible plan is "
+            "left byte-identical.  Issues #4468, #5890."
         ),
     )
     parser.add_argument(
@@ -17182,7 +17391,16 @@ def _run_main_impl(args, parser, argv) -> int:
     # which a later hit would restore as copper to nowhere.  Requesting the
     # loop therefore disables the cache for this run rather than risking a
     # geometrically invalid board.
-    if use_cache and getattr(args, "placement_delta_feedback", False):
+    #
+    # Issue #5890: only an EXPLICIT ``--placement-delta-feedback`` disables the
+    # cache up front.  The new auto default cannot be resolved here -- its
+    # answer is the routing plan's feasibility verdict, which does not exist
+    # until the plan stage has run inside the route itself.  A cache HIT skips
+    # routing (and therefore the plan) altogether, so the auto arm correctly
+    # never fires on a hit; on a MISS the loop may still run, and the cache
+    # WRITE below is suppressed when it actually moved something, which is what
+    # keeps a post-move/pre-move entry from ever being stored.
+    if use_cache and getattr(args, "placement_delta_feedback", None) is True:
         use_cache = False
         if not quiet:
             flush_print(
@@ -17837,10 +18055,16 @@ def _run_main_impl(args, parser, argv) -> int:
         # placement to ``output_path`` and returns it, so the terminal
         # ``_write_routed_pcb`` reads its footprints from the board the routes
         # were actually computed against.
+        #
+        # Issue #5890 (Epic #5511 Phase 3): the toggle is tri-state and its
+        # DEFAULT is auto -- the loop turns itself on exactly when the Epic
+        # #5510 plan stage reports the board infeasible.  See
+        # ``_should_run_placement_delta_feedback``.
+        _moved_placement_path: Path | None = None
         if (
-            getattr(args, "placement_delta_feedback", False)
-            and router.routes is not None
+            router.routes is not None
             and router.get_failed_nets()
+            and _should_run_placement_delta_feedback(router, args, quiet=quiet)
         ):
             _moved_placement_path = _run_placement_delta_feedback(
                 router=router,
@@ -17858,7 +18082,23 @@ def _run_main_impl(args, parser, argv) -> int:
         # discarded search geometry in indexes or pathfinder caches.
         router.restore_route_snapshot(router.routes)
 
-        # Cache the routing result (if caching enabled and routing succeeded)
+        # Cache the routing result (if caching enabled and routing succeeded).
+        #
+        # Issue #5890: never store an entry for a run whose placement-delta
+        # loop actually moved a footprint.  The cache stores ROUTES ONLY, so
+        # such an entry pairs post-move copper with the pre-move placement a
+        # later hit would restore -- copper to nowhere.  Explicit
+        # ``--placement-delta-feedback`` already disables the cache up front
+        # (above); this covers the auto arm, which cannot know in advance that
+        # it will fire.
+        if use_cache and _moved_placement_path is not None:
+            use_cache = False
+            if not quiet:
+                flush_print(
+                    "  Not caching this result: placement-delta feedback moved a "
+                    "component and the cache stores routes without placement "
+                    "(issues #4468, #5890)"
+                )
         if use_cache and cache_key is not None and router.routes:
             import time
 

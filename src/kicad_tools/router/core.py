@@ -18319,6 +18319,8 @@ class Autorouter:
         excluded_nets: frozenset[str] | set[str] | list[str] | None = None,
         reuse_existing_routes: bool = False,
         require_no_clearance_regression: bool = True,
+        require_no_creepage_regression: bool = True,
+        require_no_keepout_intrusion: bool = True,
         net_class_map: Any = None,
     ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
         """Close the router<->placement loop with classifier-driven deltas (#4467).
@@ -18365,6 +18367,14 @@ class Autorouter:
                 does not increase the router's clearance-violation count
                 (issue #4468) -- reach alone is the wrong acceptance test for
                 a placement change.
+            require_no_creepage_regression: Keep a delta only when it also does
+                not increase the PLACEMENT's pad-vs-pad pairwise (creepage)
+                violation count (Issue #5890, Epic #5511 Phase 3).  Dormant on
+                a board with no pairwise requirement table.
+            require_no_keepout_intrusion: Keep a delta only when it does not
+                move more of the target's pads into a track-blocking keepout
+                rule area (Issue #5890).  Dormant on a board that declares
+                none.
             min_confidence / stagnation_patience / outer_timeout: Forwarded to
                 the legacy loop only when the toggle is off.
             net_class_map: Optional ``{net_name: NetClassRouting}`` sidecar
@@ -18411,6 +18421,8 @@ class Autorouter:
             per_net_timeout=per_net_timeout,
             reuse_existing_routes=reuse_existing_routes,
             require_no_clearance_regression=require_no_clearance_regression,
+            require_no_creepage_regression=require_no_creepage_regression,
+            require_no_keepout_intrusion=require_no_keepout_intrusion,
         )
         if delta_output_path is not None:
             write_placement_delta_json(

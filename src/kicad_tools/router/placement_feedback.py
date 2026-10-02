@@ -1989,6 +1989,99 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         except Exception:
             return None
 
+    # --- HV / creepage and keepout awareness (Issue #5890, Epic #5511 P3) ----
+
+    def _pairwise_table(self) -> Any | None:
+        """The router's installed pairwise (HV / signal-spacing) requirement table.
+
+        ``None`` -- the overwhelmingly common case, no ``--voltage-map`` and no
+        signal-spacing table -- is the dormant signal that keeps both guards
+        below byte-identical to the pre-#5890 loop at zero cost.
+        """
+        return getattr(getattr(self.router, "rules", None), "pairwise_clearance", None)
+
+    def _creepage_violation_count(self) -> int | None:
+        """Pad-vs-pad pairwise (creepage) violation count of the CURRENT placement.
+
+        Issue #5890.  The clearance guard above
+        (:meth:`_clearance_violation_count`) and the router's own in-loop
+        pairwise gate both score *copper the router produced*, so neither can
+        see the one failure a placement move introduces directly: two
+        cross-domain **pads** pushed inside each other's creepage requirement.
+        A move that is legal by board bounds, keeps every net routable and
+        still destroys declared isolation would otherwise be KEPT.
+
+        Measured on ``self.pcb`` -- the board the applicator mutates -- with
+        :func:`~kicad_tools.router.pairwise_clearance.pad_pairwise_violations`,
+        and exempted by the same #4506 attach zones the routing-time gate uses,
+        so a deliberately domain-bridging package is not scored as a fail.
+
+        Returns ``None`` when there is nothing to measure (no pairwise table,
+        no PCB) or the scan cannot run, which disables the guard rather than
+        failing the loop -- matching :meth:`_clearance_violation_count`.
+        """
+        table = self._pairwise_table()
+        if table is None or self.pcb is None:
+            return None
+        try:
+            from kicad_tools.router.pairwise_clearance import (
+                pad_pairwise_violations,
+                pcb_pad_geometry,
+            )
+
+            zones = getattr(self.router, "_pairwise_attach_zones_cache", None) or ()
+            return len(
+                pad_pairwise_violations(
+                    pcb_pad_geometry(self.pcb),
+                    table,
+                    attach_zones=zones,
+                )
+            )
+        except Exception:
+            return None
+
+    def _keepout_intrusion_count(self, ref: str) -> int | None:
+        """Pads of ``ref`` whose centre sits inside a track-blocking keepout area.
+
+        Issue #5890.  A ``(zone ... (keepout (tracks not_allowed)))`` rule area
+        is an authored "no copper here" region -- the surface #4605 taught the
+        router to respect while *routing*.  Nothing stopped a placement move
+        from parking a footprint's pads inside one, which is unrouteable by
+        construction and a design defect even where the re-route happens to
+        find reach elsewhere.
+
+        Deliberately **layer-agnostic and conservative**: a pad centre inside
+        any track-blocking area counts, whatever layer the area names.  A
+        component body in a declared keepout is wrong regardless of which
+        copper layer the author scoped the area to, and over-counting only ever
+        *rejects* a candidate move -- it can never admit one.
+
+        Returns ``None`` when the board declares no such areas (the dormant
+        case) or the probe cannot run, which disables the guard.
+        """
+        try:
+            areas = self.router._keepout_rule_area_polygons()
+        except Exception:
+            return None
+        blocking = [area for area in areas if area.blocks_tracks]
+        if not blocking:
+            return None
+        from kicad_tools.router.mesh.geometry import point_in_polygon
+
+        count = 0
+        for pad in self._router_pads():
+            if getattr(pad, "ref", "") != ref:
+                continue
+            x, y = float(pad.x), float(pad.y)
+            for area in blocking:
+                min_x, min_y, max_x, max_y = area.bbox
+                if not (min_x <= x <= max_x and min_y <= y <= max_y):
+                    continue
+                if point_in_polygon((x, y), list(area.polygon)):
+                    count += 1
+                    break
+        return count
+
     def _apply_delta_to_router_pads(self, delta: PlacementDelta) -> None:
         """Mutate the router's flat pad coordinates to match an applied delta.
 
@@ -2109,6 +2202,8 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
         per_net_timeout: float | None = None,
         reuse_existing_routes: bool = False,
         require_no_clearance_regression: bool = True,
+        require_no_creepage_regression: bool = True,
+        require_no_keepout_intrusion: bool = True,
     ) -> PlacementDeltaFeedbackResult:
         """Run the classifier-driven placement-delta feedback loop.
 
@@ -2139,6 +2234,20 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 CI runs measured the same probe as routed 25 -> 25 (no
                 reach gain), so this guard never fired there (issue #4561).
                 Set False to restore the reach-only Phase-2 criterion.
+            require_no_creepage_regression: Keep a delta only if it ALSO does
+                not increase the **pad-vs-pad** pairwise (creepage) violation
+                count of the placement (Issue #5890, Epic #5511 Phase 3).
+                This is the HV guard the reach and routed-clearance tests
+                structurally cannot provide: both score copper the router
+                produced, so a move that pushes two cross-domain *pads* inside
+                each other's declared creepage requirement passes them both.
+                Dormant (no cost, no behaviour change) on a board with no
+                ``--voltage-map`` / signal-spacing table -- see
+                :meth:`_creepage_violation_count`.
+            require_no_keepout_intrusion: Keep a delta only if it does not move
+                MORE of the target's pads into a track-blocking
+                ``(zone ... (keepout ...))`` rule area (Issue #5890).  Dormant
+                on a board that declares no such areas.
 
         Returns:
             A :class:`PlacementDeltaFeedbackResult`.  The returned routes/placement
@@ -2236,6 +2345,20 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
             pre_routes = copy.deepcopy(list(self.router.routes))
             pre_count = _routed_count()
             pre_violations = self._clearance_violation_count()
+            # Issue #5890 (Epic #5511 Phase 3): the HV / keepout half of the
+            # accept test.  Both are dormant (``None``) unless the board
+            # actually declares the constraint -- a pairwise requirement table
+            # (``--voltage-map`` / signal spacing) and a track-blocking rule
+            # area respectively -- so a board with neither is measured, and
+            # behaves, exactly as before.
+            pre_creepage = (
+                self._creepage_violation_count() if require_no_creepage_regression else None
+            )
+            pre_keepout = (
+                self._keepout_intrusion_count(delta.target_key)
+                if require_no_keepout_intrusion
+                else None
+            )
             # Issue #4968: a rotation swings power/mounting pads that are
             # carried by copper pour rather than by routed traces, so the
             # reach count cannot see them break.  Measured only for the
@@ -2285,8 +2408,26 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 and post_zone_pads is not None
                 and post_zone_pads < pre_zone_pads
             )
+            post_creepage = self._creepage_violation_count() if pre_creepage is not None else None
+            regressed_creepage = (
+                pre_creepage is not None
+                and post_creepage is not None
+                and post_creepage > pre_creepage
+            )
+            post_keepout = (
+                self._keepout_intrusion_count(delta.target_key) if pre_keepout is not None else None
+            )
+            regressed_keepout = (
+                pre_keepout is not None and post_keepout is not None and post_keepout > pre_keepout
+            )
 
-            if new_count > pre_count and not regressed_drc and not regressed_zone_pads:
+            if (
+                new_count > pre_count
+                and not regressed_drc
+                and not regressed_zone_pads
+                and not regressed_creepage
+                and not regressed_keepout
+            ):
                 applied.append(delta)
                 if self.verbose:
                     print(f"  Kept: routed {pre_count} -> {new_count} (strict improvement)")
@@ -2331,6 +2472,16 @@ class PlacementDeltaFeedbackLoop(PlacementFeedbackLoop):
                 self._rebuild_grid_for_routes(pre_routes)
                 if regressed_drc:
                     reason = f"clearance violations {pre_violations} -> {post_violations}"
+                elif regressed_creepage:
+                    reason = (
+                        f"pairwise creepage fails {pre_creepage} -> {post_creepage} "
+                        f"(pad-vs-pad, HV/signal-spacing table)"
+                    )
+                elif regressed_keepout:
+                    reason = (
+                        f"pads of {delta.target_ref} inside a track-blocking keepout rule "
+                        f"area {pre_keepout} -> {post_keepout}"
+                    )
                 elif regressed_zone_pads:
                     reason = (
                         f"zone-carried pad connectivity {pre_zone_pads} -> {post_zone_pads} "
