@@ -428,7 +428,7 @@ for veto in router.pad_access_vetoes:
     # COMP refused at initial[0]: committing it would strand U3.1 (ISENSE_A+)
     # -- last access was 1 stub(s) / 1 via site(s), closed by COMP
 
-gate = router.pad_access_invariant        # None when never consulted
+gate = router.pad_access_invariant  # None when never consulted
 print(gate.summary_line())
 ```
 
