@@ -3990,7 +3990,9 @@ def _plan_infeasibility(router) -> "OverflowReport | None":
     where the plan positively proves overflow.
     """
     plan = getattr(router, "routing_plan", None)
-    report = getattr(plan, "overflow_report", None) if plan is not None else None
+    report: OverflowReport | None = (
+        getattr(plan, "overflow_report", None) if plan is not None else None
+    )
     if report is None or report.feasible:
         return None
     return report

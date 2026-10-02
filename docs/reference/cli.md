@@ -1079,18 +1079,32 @@ kct route board.kicad_pcb --complete \
 
 #### Placement-delta feedback
 
-`--placement-delta-feedback` (default **off**) closes the loop between routing
-and placement. After the initial routing pass, if any nets remain unrouted, it
-classifies the routed board, translates each `PLACEMENT_BOUND` /
-`CONGESTION_SATURATED` diagnosis into a concrete placement delta (a translate or
-a 180° rotation), applies the top applyable one, re-routes, and keeps the change
-**only** on a strict routed-net increase. Connectors (`J*`, `P*`) and locked
-footprints are auto-anchored, and the applied deltas are written to
-`<output>_placement_delta.json`.
+`--placement-delta-feedback` closes the loop between routing and placement.
+After the initial routing pass, if any nets remain unrouted, it classifies the
+routed board, translates each `PLACEMENT_BOUND` / `CONGESTION_SATURATED`
+diagnosis into a concrete placement delta (a translate, a rotation, a `mirror`
+layer flip, or a declared swap group's pin permutation), applies the top
+applyable one, re-routes, and keeps the change **only** on a strict routed-net
+increase **with no clearance, pairwise-creepage or keepout regression**.
+Connectors (`J*`, `P*`) and locked footprints are auto-anchored, every move is
+capped by `--placement-feedback-max-movement`, and the applied deltas are
+written to `<output>_placement_delta.json`.
+
+**Default: auto (Issue #5890, Epic #5511 Phase 3).** With neither flag given,
+the loop runs only when the report-only routing plan (Epic #5510) says the board
+is **infeasible** — `overflow_report.feasible: false` — *and* nets remain
+unrouted. A feasible plan, or no plan verdict at all (`--no-routing-plan`, a
+routing-cache hit), leaves the run exactly as it was before #5890. Pass
+`--no-placement-delta-feedback` to opt out of the auto arm entirely, or
+`--placement-delta-feedback` to force the loop on whatever the plan says.
+
+Because the routing cache stores routes **without** placement, a run whose loop
+actually moved a footprint is never cached (an entry would pair post-move copper
+with the pre-move placement).
 
 | Option | Description |
 |--------|-------------|
-| `--placement-delta-feedback` / `--no-placement-delta-feedback` | Enable / explicitly disable the loop (default: disabled) |
+| `--placement-delta-feedback` / `--no-placement-delta-feedback` | Force the loop on / off. Default (neither): **auto** — on only for an infeasible routing plan with unrouted nets. |
 | `--placement-delta-feedback-budget N` | Maximum apply/keep-or-revert iterations (default: 3) |
 | `--placement-delta-feedback-timeout SECONDS` | Per-iteration wall-clock budget for the loop's re-routes. Independent of the per-stage `--search-timeout` (an exhausted initial search stage no longer starves the probes), but clamped to — never an escape from — the hard total `--timeout`. Default: share whatever remains of `--timeout`. |
 

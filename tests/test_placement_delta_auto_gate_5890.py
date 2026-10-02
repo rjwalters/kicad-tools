@@ -131,9 +131,56 @@ class TestAutoGate:
     def test_no_loop_when_every_net_routed_even_if_plan_is_infeasible(
         self, routing_test_pcb, tmp_path, infeasible_plan, delta_loop_spy
     ):
-        """The reach precondition is unchanged: nothing to fix, nothing to move."""
+        """The reach precondition is unchanged: nothing to fix, nothing to move.
+
+        This is the state the in-repo acceptance board, board-05, is in.
+        Re-measured 2026-10-02 on ``boards/05-bldc-motor-controller/output``:
+
+        * ``kct route output/bldc_controller.kicad_pcb --plan-gate --skip-drc``
+          -> ``Routing plan: overflow 10 on 8 edge(s) -- NOT feasible``, with
+          every overflowed corridor naming U2 and a ``move U2 +/-2.0mm`` relief;
+        * ``kct net-status output/bldc_controller_routed.kicad_pcb`` ->
+          ``All nets are fully connected!`` (the ISENSE Kelvin cluster included).
+
+        So board-05's access witness says no move is required, and the gate must
+        agree: an infeasible plan alone is never enough to start moving parts on
+        a board that already closed.
+        """
         route_cmd.main(_argv(routing_test_pcb, tmp_path / "out.kicad_pcb"))
         assert delta_loop_spy == []
+
+
+class TestRecordedDeltaArtifact:
+    """The real loop -- not a spy -- runs and records when the gate fires.
+
+    Without this, every assertion above would be satisfied by a gate that
+    enables a loop which then never writes the reviewable delta Epic #5511
+    Phase 3 requires ("never a silent artifact edit").
+    """
+
+    def test_auto_run_writes_the_placement_delta_json(
+        self, routing_test_pcb, tmp_path, infeasible_plan, always_failed_nets
+    ):
+        out = tmp_path / "out.kicad_pcb"
+        route_cmd.main(_argv(routing_test_pcb, out))
+        delta_json = out.with_name(out.stem + "_placement_delta.json")
+        assert delta_json.exists(), (
+            "an auto-enabled run must leave the reviewable delta artifact behind, "
+            "whether or not any delta survived the keep-if-improves guard"
+        )
+        import json
+
+        payload = json.loads(delta_json.read_text())
+        # The artifact is a record, not a diff of the board: it names what was
+        # applied and what was only proposed.
+        assert "applied" in payload and "proposed" in payload
+
+    def test_no_artifact_when_the_plan_is_feasible(
+        self, routing_test_pcb, tmp_path, always_failed_nets
+    ):
+        out = tmp_path / "out.kicad_pcb"
+        route_cmd.main(_argv(routing_test_pcb, out))
+        assert not out.with_name(out.stem + "_placement_delta.json").exists()
 
 
 class TestTriStateFlag:
