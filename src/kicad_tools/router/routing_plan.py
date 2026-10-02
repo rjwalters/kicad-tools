@@ -992,6 +992,16 @@ def select_plan_nets(
     # ``None`` unless ``--order-method`` was passed, so the default selection
     # (and therefore the plan stage) stays byte-identical.  The filters and
     # fairness passes below still apply, as on the negotiated path.
+    #
+    # Scope note: this branch is **not** restricted to ``--order-method
+    # crossing``.  Only the *escalation*-path hook
+    # (``route_cmd._apply_crossing_order_escalation``) is narrowed to
+    # ``crossing``; ``_run_main_impl``'s single-attempt tail installs
+    # ``_forced_net_order`` for *any* ``--order-method`` value, so wherever
+    # that tail is reached the plan stage honours ``greedy`` /
+    # ``critical_first`` / ``congestion`` / ``hybrid`` too.  That is
+    # intentional -- the plan must describe the order the route will actually
+    # use -- but do not read this as crossing-only.
     forced = getattr(router, "_forced_net_order", None)
     if forced is not None:
         ranked = {net: rank for rank, net in enumerate(forced)}

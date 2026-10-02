@@ -141,6 +141,10 @@ def segments_cross(a: Segment, b: Segment) -> bool:
     * **Collinear overlap.** Two skeletons running along the same line are
       parallel contention, not a forced crossing; the degree counter would
       otherwise double-count a bus.
+    * **T-touches.** One segment's endpoint landing *on* the other's interior
+      is a touch, not a crossing.  Grid-aligned pad centres make this common,
+      so the exclusion is symmetric in ``a``/``b``: swapping the arguments
+      never changes the answer.
 
     Args:
         a: First segment.
@@ -162,8 +166,20 @@ def segments_cross(a: Segment, b: Segment) -> bool:
     d4 = _orientation(b0, b1, a1)
     # Strict sign change on both segments == single interior intersection.
     # Any zero means an endpoint lies on the other segment (touch) or the pair
-    # is collinear; both are excluded above.
-    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0)) and d1 != 0 and d2 != 0
+    # is collinear; both are excluded.  All FOUR determinants need the
+    # zero-guard, not just d1/d2: guarding only one pair made the predicate
+    # asymmetric at a T-touch, where one segment's endpoint lies on the other's
+    # interior (the zero lands in d3/d4 when the arguments are swapped).  Since
+    # :func:`crossing_profiles` always passes the lower net id first, that made
+    # a net's crossing degree depend on its net id rather than on geometry.
+    return (
+        ((d1 > 0) != (d2 > 0))
+        and ((d3 > 0) != (d4 > 0))
+        and d1 != 0
+        and d2 != 0
+        and d3 != 0
+        and d4 != 0
+    )
 
 
 def crossing_profiles(net_skeletons: dict[int, list[Segment]]) -> dict[int, CrossingProfile]:

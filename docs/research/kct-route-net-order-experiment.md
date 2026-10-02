@@ -8,9 +8,12 @@ KRT baseline this epic is chasing).
 
 **Verdict: `--order-method crossing` is NOT proposed as a default.** It ships as
 an opt-in flag. On the two target boards it leaves completion unchanged and
-makes vias *worse* (02: 37 → 38; 03: 46 → 52). It helps board 01 (vias 5 → 3,
-wirelength −6%, segments 68 → 26) and is exactly inert on 00 and 06a. Runtime
-could not be measured on this host at all — see "Timing is unusable here".
+makes vias *worse* (02: 37 → 38; 03: 46 → 52 — but see the T-touch caveat
+under "Results": 03's row predates a geometry fix that changes 03's order, so
+it is stale and unmeasured rather than favourable). It helps board 01
+(vias 5 → 3, wirelength −6%, segments 68 → 26) and is exactly inert on 00 and
+06a. Runtime could not be measured on this host at all — see "Timing is
+unusable here".
 
 Tool: `scripts/research/net_order_experiment.py` (`order-check` and `route`
 sub-commands). Implementation under test:
@@ -149,6 +152,35 @@ Two further observations worth keeping:
   contending, 11 displaced nets still produce byte-identical copper — ordering
   only matters where corridors are actually contested.
 
+### Caveat: the table predates the `segments_cross` T-touch fix
+
+Review of this PR found `segments_cross` asymmetric at a **T-touch** (one
+segment's endpoint lying exactly on the other's interior): the zero-guard
+covered only two of the four orientation determinants, so the same pair of
+skeletons answered `True` or `False` depending on which net held the lower id.
+Grid-aligned pad centres make that configuration common, so it was not
+measure-zero. It is fixed, and the fix *lowers* some crossing degrees — a
+T-touch is now consistently not a crossing:
+
+| Board | Nets whose degree changed | Resulting `crossing` order |
+|---|---|---|
+| 02 | 4 of 12 (e.g. 6→2, 5→2, 2→0) | **unchanged** |
+| 03 | 10 of 27 (e.g. 50→47, 33→26, 17→15) | **changed** |
+
+So the **02 rows above still describe the current code**, but the **03
+`crossing` row (vias 46 → 52) was measured with the pre-fix predicate and has
+not been re-measured** — the order the fixed predicate produces on 03 is
+different, so that row's copper metrics are not guaranteed to reproduce. It was
+not re-run here because the host had no C++20 compiler available, and the
+pure-Python A\* makes a 4-layer re-route impractical (see CLAUDE.md).
+
+This does not change the verdict. The criterion needed an *improvement* on 02
+or 03; 02 is unchanged and still slightly worse, 03 is now unmeasured rather
+than favourable, and the recommendation was already "not a default". But a
+re-run of the 03 `crossing` arm on a host with the native backend is the
+honest way to restore that row — tracked as part of the quiet-host re-run
+below, which 03 needs anyway.
+
 ## Timing is unusable here
 
 The same configuration, re-run, differed by up to 3.4x:
@@ -173,6 +205,8 @@ and the copper metrics — which is what the harness now prints first.
 
 - Quiet-host timings. This is the single biggest gap; the runtime half of
   step 2 is unanswered, not answered negatively.
+- Board 03's `crossing` arm **after** the `segments_cross` T-touch fix — the
+  fix changes 03's net order, so that row is stale (see the caveat above).
 - `greedy` / `critical_first` / `congestion` / `hybrid` as defaults: still
   no-ops on the escalation paths (#5908), so they were not benchmarked.
 - Boards 04, 05, 07: outside #5787's named set.

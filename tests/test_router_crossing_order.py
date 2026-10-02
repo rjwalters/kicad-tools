@@ -58,6 +58,34 @@ def test_segments_cross_rejects_t_touch():
     assert not segments_cross(((0.0, 0.0), (10.0, 0.0)), ((5.0, 0.0), (5.0, 10.0)))
 
 
+def test_segments_cross_rejects_t_touch_in_both_argument_orders():
+    """The T-touch rejection must not depend on the argument order.
+
+    The zero determinant lands in a different pair depending on which segment
+    is passed first, so guarding only ``d1``/``d2`` made the predicate answer
+    ``False`` one way and ``True`` the other for identical geometry.  Since
+    :func:`crossing_profiles` always passes the lower net id's segment first,
+    that leaked net ids into the crossing degree.  Grid-aligned pad centres
+    make a flight line through another net's pad centre common, not
+    measure-zero -- ``test_segments_cross_is_symmetric`` below uses a proper
+    X-crossing, where both directions agree even with the bug present.
+    """
+    h = ((0.0, 0.0), (10.0, 0.0))
+    v = ((5.0, 0.0), (5.0, 10.0))  # v's endpoint lies on h's interior
+    assert not segments_cross(h, v)
+    assert not segments_cross(v, h)
+
+
+def test_crossing_profiles_degree_is_independent_of_net_ids_at_a_t_touch():
+    """The same two skeletons must score the same degree either way round."""
+    h = ((0.0, 0.0), (10.0, 0.0))
+    v = ((5.0, 0.0), (5.0, 10.0))
+    h_first = {net: p.crossings for net, p in crossing_profiles({1: [h], 2: [v]}).items()}
+    v_first = {net: p.crossings for net, p in crossing_profiles({1: [v], 2: [h]}).items()}
+    assert h_first == {1: 0, 2: 0}
+    assert v_first == {1: 0, 2: 0}
+
+
 def test_segments_cross_rejects_disjoint_segments():
     assert not segments_cross(((0.0, 0.0), (1.0, 1.0)), ((20.0, 20.0), (21.0, 21.0)))
 
