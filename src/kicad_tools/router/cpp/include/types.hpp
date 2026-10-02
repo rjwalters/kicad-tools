@@ -271,7 +271,12 @@ namespace router {
 // the coupled halo refinement applies the same diff-pair intra-pair waiver
 // ``RouteHaloRefiner.trace_clear`` applies.  A v44 .so silently drops the
 // waiver (over-blocking), so it must be rejected rather than used.
-constexpr int ROUTER_CPP_BUILD_VERSION = 45;
+// v46 (Issue #5786, Epic #5784 Phase 2): ``CoupledPathfinder::route_centerline``
+// / ``rail_segment_clear`` / ``centerline_step_clear``, the ``CenterlinePose``
+// / ``CenterlineEndpoint`` / ``CenterlineRouteResult`` types and the
+// ``dubins_path_length`` functions.  A v45 .so lacks them and the pose rescue
+// would raise ``AttributeError``, so it must be rejected.
+constexpr int ROUTER_CPP_BUILD_VERSION = 46;
 
 
 // Issue #4071: fixed-capacity owner-set size for per-cell corridor

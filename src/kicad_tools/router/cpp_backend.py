@@ -60,7 +60,10 @@ logger = logging.getLogger(__name__)
 # gained ``partner_net`` / ``partner_clearance`` so the coupled halo refinement
 # applies the same diff-pair intra-pair waiver ``RouteHaloRefiner.trace_clear``
 # applies.  A v44 .so silently drops the waiver, so it must be rejected.
-_REQUIRED_CPP_BUILD_VERSION = 45
+# v46 (Issue #5786): the pose-based centerline search
+# (``CoupledPathfinder.route_centerline`` and friends) and the
+# ``dubins_path_length`` bindings.  A v45 .so lacks them.
+_REQUIRED_CPP_BUILD_VERSION = 46
 
 
 # Issue #5599: human-readable names for the ``ValidationResult::violation_type``
@@ -4906,3 +4909,130 @@ class CppCoupledPathfinder:
             (n.p_x, n.p_y, n.p_layer, n.n_x, n.n_y, n.n_layer, n.via_from_parent) for n in res.path
         ]
         return path, diagnostics
+
+    def rail_clear_world(
+        self,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+        layer: int,
+        net: int,
+        partner_net: int = -1,
+        rail_half: float = -1.0,
+        rail_gap: float = -1.0,
+        is_via: bool = False,
+    ) -> bool:
+        """The Epic #5509 rail clearance gate in world millimetres (Issue #5786)."""
+        return bool(
+            self._impl.rail_clear_world(
+                float(ax),
+                float(ay),
+                float(bx),
+                float(by),
+                int(layer),
+                int(net),
+                int(partner_net),
+                float(rail_half),
+                float(rail_gap),
+                bool(is_via),
+            )
+        )
+
+    def rail_segment_clear(
+        self,
+        sx: float,
+        sy: float,
+        ex: float,
+        ey: float,
+        layer: int,
+        net: int,
+        partner_net: int,
+        half: float,
+        gap: float,
+    ) -> bool:
+        """Raster + kernel verdict for one rail segment (Issue #5786)."""
+        return bool(
+            self._impl.rail_segment_clear(
+                float(sx),
+                float(sy),
+                float(ex),
+                float(ey),
+                int(layer),
+                int(net),
+                int(partner_net),
+                float(half),
+                float(gap),
+            )
+        )
+
+    def route_centerline(
+        self,
+        *,
+        starts: list[tuple[int, int, int, int, float]],
+        goals: list[tuple[int, int, int, int, float]],
+        p_net: int,
+        n_net: int,
+        half_pitch: float,
+        p_side: int,
+        p_half: float,
+        p_gap: float,
+        n_half: float,
+        n_gap: float,
+        min_radius_cells: float = 1.0,
+        turn_penalty: float = 2.0,
+        heuristic_weight: float = 1.0,
+        max_iterations_budget: int = 0,
+        timeout_seconds: float = 0.0,
+    ) -> tuple[list[tuple[int, int, int, int]] | None, dict]:
+        """Pose-based centerline search with a Dubins heuristic (Issue #5786).
+
+        ``starts`` / ``goals`` are ``(x, y, heading, layer, cost)`` tuples in
+        GRID coordinates; ``heading`` is in 45-degree steps (0 = +x,
+        counter-clockwise in grid space).  A goal pose's heading is the
+        direction of travel on ARRIVAL.  Returns ``(path, diagnostics)`` with
+        ``path`` a list of ``(x, y, heading, layer)`` poses, or ``None`` when
+        the search failed.  C++-only: there is no pure-Python implementation
+        of this search (the Python fallback skips the rescue).
+        """
+
+        def _endpoints(items):
+            out = []
+            for x, y, h, layer, cost in items:
+                out.append(
+                    router_cpp.CenterlineEndpoint(
+                        router_cpp.CenterlinePose(int(x), int(y), int(h), int(layer)),
+                        float(cost),
+                    )
+                )
+            return out
+
+        res = self._impl.route_centerline(
+            _endpoints(starts),
+            _endpoints(goals),
+            int(p_net),
+            int(n_net),
+            float(half_pitch),
+            int(p_side),
+            float(p_half),
+            float(p_gap),
+            float(n_half),
+            float(n_gap),
+            float(min_radius_cells),
+            float(turn_penalty),
+            float(heuristic_weight),
+            int(max_iterations_budget),
+            float(timeout_seconds),
+        )
+        diagnostics = {
+            "iterations": int(res.iterations),
+            "best_progress": float(res.best_progress),
+            "timeout_exceeded": bool(res.timeout_exceeded),
+            "iteration_limited": bool(res.iteration_limited),
+            "start_index": int(res.start_index),
+            "goal_index": int(res.goal_index),
+            "rejections": {str(k): int(v) for k, v in dict(res.rejections).items()},
+        }
+        if not res.success:
+            return None, diagnostics
+        return [(p.x, p.y, p.heading, p.layer) for p in res.path], diagnostics

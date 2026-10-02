@@ -554,6 +554,36 @@ fabricate. kct's output has none.
 produces coupled pairs: 88.9% vs 0%. kct's coupled search plateaued on all 4
 pairs and fell back to independent legs.
 
+**Opt-in fix after this benchmark ran (Issue #5786).** With
+`KCT_POSE_CENTERLINE=1`, a pair the joint-state search cannot couple is retried
+as one centerline over (x, y, heading) poses with a Dubins-length heuristic (a
+C++ port of KRT's `dubins.rs`, MIT, attributed). P and N are derived as
+miter-compensated offsets, and the single-ended end legs are chosen by a
+setback scan. Before it is committed, the finished pair must pass the exact
+foreign-pad gate (partner pads included) and the intra-pair clearance audit.
+Re-measured with the same recipe (`krt_compare.py --boards 06b,06a`, Apple M3
+Ultra, single run each). These rows are not regenerated into the table above:
+
+| Board | kct build | Nets | Connections | DRC errors (shared) | Signal on plane mm | Pair coupling % (LVDS1-4) | Runtime s |
+|---|---|---|---|---|---|---|---|
+| 06b | default (pose search off) | 18/18 | 90/90 | 0 | 0.0 | 0.0 / 0.0 / 0.0 / 0.0 | 130.43 |
+| 06b | `KCT_POSE_CENTERLINE=1` | 18/18 | 90/90 | 0 | 0.0 | 87.0 / 87.0 / 87.0 / 87.0 | 84.58 |
+| 06a | `KCT_POSE_CENTERLINE=1` | 18/18 | 90/90 | 0 | 0.0 | 87.1 / 87.1 / 87.1 / 87.1 | 54.49 |
+
+With the search on, 06b's minimum coupling goes from 0% to 87.0% (KRT 88.9%,
+committed reference 87.1%). `kicad-cli pcb drc --refill-zones` on the 06b
+output also reports 0 errors and 0 unconnected items. 06a never reaches the new
+path: since #5788 it keeps the pre-routed pairs, so it scores the reference's
+87.1%.
+
+**Why it is off by default.** Board 06's `Diff-Pair Routing Regression` job
+(seed 42) fails with the search on. Pose-coupling MIPI_D0 seals MIPI_RST's
+corridor, so reach drops from 21/21 to 20/21. The job's error count stays
+within its allowlist (18 vs 17). The first version also had two other defects,
+now fixed: end legs that grazed the partner's pad, and a stub-failed net that
+the main pass never got back. The search is single-layer, so a pair whose ends
+need a via between them still falls back to independent legs.
+
 In 06a, kct also discarded the generator's pre-routed, coupled LVDS copper,
 even with `--preserve-existing`. That flag only preserves nets outside the
 route set, which is why board 06's own README passes `--nets IN1,…,OUT4`. The
@@ -774,6 +804,11 @@ board.
      is small and self-contained, so it can be **ported to C++ with
      attribution**. Our Grid3D and clearance kernel differ, so the pose A\*
      itself should be reimplemented in `coupled_pathfinder.cpp`.
+   - **Status (Issue #5786):** shipped opt-in (`KCT_POSE_CENTERLINE=1`) for
+     single-layer pairs. With it on, 06b minimum coupling goes from 0% to
+     87.0%, with 18/18 nets and 0 shared-referee errors. It stays off by
+     default until board 06's Diff-Pair job passes with it on. See "Opt-in fix
+     after this benchmark ran (Issue #5786)" above.
 
 3. **Crossing-aware default ordering plus frontier-attributed N+1 rip-up.**
    - **Target:** boards 02 and 03. Metrics: completion (12/12, 27/27), vias

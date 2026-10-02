@@ -883,4 +883,274 @@ CoupledRouteResult CoupledPathfinder::route(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Issue #5786 (Epic #5784 Phase 2): pose-based centerline search
+// ---------------------------------------------------------------------------
+//
+// Design follows KiCadRoutingTools' documented approach (one centerline over
+// (x, y, theta, layer), 45-degree headings, Dubins-length heuristic; P and N
+// derived as offsets) -- see docs/research/kicad-routing-tools-comparison.md,
+// section 3.  The search itself is a reimplementation over OUR grid and OUR
+// clearance kernel, not a port; only ``dubins.hpp`` is ported code.
+namespace {
+
+constexpr int kHeadingDx[8] = {1, 1, 0, -1, -1, -1, 0, 1};
+constexpr int kHeadingDy[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+constexpr double kPoseInvSqrt2 = 0.70710678118654752440;
+constexpr double kPosePi = 3.14159265358979323846;
+
+inline uint64_t pose_key(int x, int y, int heading, int layer) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 36) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(y)) << 8) |
+           (static_cast<uint64_t>(layer & 0x1F) << 3) |
+           static_cast<uint64_t>(heading & 7);
+}
+
+struct PoseNode {
+    int x, y, heading, layer;
+    float g;
+    float f;
+    int parent;
+    int start_index;
+    bool terminal;
+    uint64_t seq;
+};
+
+struct PoseNodeGreater {
+    bool operator()(const PoseNode& a, const PoseNode& b) const {
+        if (a.f != b.f) return a.f > b.f;
+        return a.seq < b.seq;  // LIFO on ties, as the joint-state loop does.
+    }
+};
+
+}  // namespace
+
+// One rail segment: raster gate on the cells it crosses (pads, keepouts,
+// static halos) plus the exact-geometry kernel.  A rail is offset off-lattice
+// (half a 5-cell pair pitch is 2.5 cells, i.e. every rail point sits on a
+// cell-rounding TIE), so the cells it crosses are not the cells the
+// centerline visits, and which side of a tie a point falls on must not depend
+// on float noise.  Cells are therefore taken with a small upward tolerance, and
+// the search and the finished-copper verification share this one function so
+// they cannot disagree.
+bool CoupledPathfinder::rail_segment_clear(double sx, double sy, double ex, double ey,
+                                           int layer, int net, int partner_net,
+                                           double half, double gap) const {
+    const auto [ox_f, oy_f] = grid_.grid_to_world(0, 0);
+    const double ox = ox_f, oy = oy_f;
+    const double res = static_cast<double>(grid_.resolution());
+    auto cell_of = [&](double x, double y) {
+        const int cx = static_cast<int>(std::floor((x - ox) / res + 0.5 + 1e-4));
+        const int cy = static_cast<int>(std::floor((y - oy) / res + 0.5 + 1e-4));
+        return std::pair<int, int>{std::clamp(cx, 0, cols_ - 1), std::clamp(cy, 0, rows_ - 1)};
+    };
+    const double len_cells = std::hypot(ex - sx, ey - sy) / res;
+    const int samples = std::max(1, static_cast<int>(std::ceil(len_cells * 4.0)));
+    auto [prev_cx, prev_cy] = cell_of(sx, sy);
+    for (int k = 1; k <= samples; ++k) {
+        const double f = static_cast<double>(k) / samples;
+        const auto [cx, cy] = cell_of(sx + (ex - sx) * f, sy + (ey - sy) * f);
+        if (cx == prev_cx && cy == prev_cy) continue;
+        if (is_trace_blocked(cx, cy, layer, net, prev_cx, prev_cy)) return false;
+        prev_cx = cx; prev_cy = cy;
+    }
+    return rail_clear_world(sx, sy, ex, ey, layer, net, partner_net, half, gap, false);
+}
+
+bool CoupledPathfinder::centerline_step_clear(
+    int ax, int ay, int prev_heading, int bx, int by, int heading, int layer,
+    int p_net, int n_net, double half_pitch, int p_side,
+    double p_half, double p_gap, double n_half, double n_gap) const {
+    const auto [wax, way] = grid_.grid_to_world(ax, ay);
+    const auto [wbx, wby] = grid_.grid_to_world(bx, by);
+    auto normal = [](int h) {
+        const double dx = kHeadingDx[h & 7], dy = kHeadingDy[h & 7];
+        const double len = std::sqrt(dx * dx + dy * dy);
+        return std::pair<double, double>{-dy / len, dx / len};
+    };
+    const auto [nx, ny] = normal(heading);
+
+    for (int rail = 0; rail < 2; ++rail) {
+        const bool is_p = (rail == 0);
+        const double off = (is_p ? p_side : -p_side) * half_pitch;
+        const int net = is_p ? p_net : n_net;
+        const int partner = is_p ? n_net : p_net;
+        const double half = is_p ? p_half : n_half;
+        const double gap = is_p ? p_gap : n_gap;
+
+        const double rax = wax + off * nx, ray = way + off * ny;
+        const double rbx = wbx + off * nx, rby = wby + off * ny;
+
+        auto seg_ok = [&](double sx, double sy, double ex, double ey) {
+            return rail_segment_clear(sx, sy, ex, ey, layer, net, partner, half, gap);
+        };
+
+        if (!seg_ok(rax, ray, rbx, rby)) return false;
+
+        if (prev_heading >= 0 && prev_heading != heading) {
+            // The derived rail turns through the MITER point, not through
+            // the two plain offset points, so check the corner as built:
+            // previous-heading offset point -> miter point -> new-heading
+            // offset point.
+            const auto [pnx, pny] = normal(prev_heading);
+            const double dot = pnx * nx + pny * ny;
+            const double k = (1.0 + dot) > 1e-6 ? off / (1.0 + dot) : off;
+            const double mx = wax + k * (pnx + nx), my = way + k * (pny + ny);
+            if (!seg_ok(wax + off * pnx, way + off * pny, mx, my)) return false;
+            if (!seg_ok(mx, my, rax, ray)) return false;
+        }
+    }
+    return true;
+}
+
+CenterlineRouteResult CoupledPathfinder::route_centerline(
+    const std::vector<CenterlineEndpoint>& starts,
+    const std::vector<CenterlineEndpoint>& goals,
+    int p_net, int n_net, double half_pitch, int p_side,
+    double p_half, double p_gap, double n_half, double n_gap,
+    double min_radius_cells, double turn_penalty, double heuristic_weight,
+    int max_iterations_budget, double timeout_seconds) const {
+    CenterlineRouteResult result;
+    std::unordered_map<std::string, int64_t> rejections;
+    auto rej = [&rejections](const char* k) { ++rejections[k]; };
+
+    if (starts.empty() || goals.empty()) {
+        result.rejections = std::move(rejections);
+        return result;
+    }
+
+    const DubinsCalculator dubins(min_radius_cells);
+    std::unordered_map<uint64_t, int> goal_index;
+    for (size_t i = 0; i < goals.size(); ++i) {
+        const auto& g = goals[i].pose;
+        goal_index.emplace(pose_key(g.x, g.y, g.heading, g.layer), static_cast<int>(i));
+    }
+
+    auto heuristic = [&](int x, int y, int heading) {
+        double best = std::numeric_limits<double>::max();
+        for (const auto& g : goals) {
+            const double d = dubins.path_length_f(
+                x, y, heading * kPosePi / 4.0,
+                g.pose.x, g.pose.y, g.pose.heading * kPosePi / 4.0) + g.cost;
+            best = std::min(best, d);
+        }
+        return best;
+    };
+
+    std::vector<PoseNode> pool;
+    pool.reserve(4096);
+    std::priority_queue<PoseNode, std::vector<PoseNode>, PoseNodeGreater> open;
+    std::unordered_map<uint64_t, float> g_scores;
+    uint64_t seq = 0;
+    double best_h = std::numeric_limits<double>::max();
+
+    for (size_t i = 0; i < starts.size(); ++i) {
+        const auto& s = starts[i];
+        const uint64_t key = pose_key(s.pose.x, s.pose.y, s.pose.heading, s.pose.layer);
+        const float g = static_cast<float>(s.cost);
+        auto it = g_scores.find(key);
+        if (it != g_scores.end() && it->second <= g) continue;
+        g_scores[key] = g;
+        PoseNode n{s.pose.x, s.pose.y, s.pose.heading, s.pose.layer, g,
+                   g + static_cast<float>(heuristic_weight * heuristic(s.pose.x, s.pose.y, s.pose.heading)),
+                   -1, static_cast<int>(i), false, seq++};
+        open.push(n);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const int64_t hard_cap = static_cast<int64_t>(cols_) * rows_ * 8;
+    int64_t iterations = 0;
+
+    while (!open.empty()) {
+        PoseNode cur = open.top();
+        open.pop();
+
+        pool.push_back(cur);
+        const int cur_idx = static_cast<int>(pool.size()) - 1;
+
+        if (cur.terminal) {
+            result.success = true;
+            std::vector<CenterlinePose> rev;
+            for (int idx = pool[cur_idx].parent; idx >= 0; idx = pool[idx].parent) {
+                rev.push_back({pool[idx].x, pool[idx].y, pool[idx].heading, pool[idx].layer});
+            }
+            result.path.assign(rev.rbegin(), rev.rend());
+            result.start_index = cur.start_index;
+            const auto& last = result.path.back();
+            auto it = goal_index.find(pose_key(last.x, last.y, last.heading, last.layer));
+            result.goal_index = it == goal_index.end() ? -1 : it->second;
+            result.iterations = static_cast<int>(iterations);
+            result.best_progress = best_h;
+            result.rejections = std::move(rejections);
+            return result;
+        }
+
+        const uint64_t ckey = pose_key(cur.x, cur.y, cur.heading, cur.layer);
+        auto gcur = g_scores.find(ckey);
+        if (gcur != g_scores.end() && cur.g > gcur->second) continue;  // stale
+
+        ++iterations;
+        if (iterations > hard_cap) { result.iteration_limited = true; break; }
+        if (max_iterations_budget > 0 && iterations >= max_iterations_budget) {
+            result.timeout_exceeded = true;
+            result.iteration_limited = true;
+            break;
+        }
+        if (timeout_seconds > 0.0 && (iterations & 0x3FF) == 0) {
+            const double el = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (el > timeout_seconds) { result.timeout_exceeded = true; break; }
+        }
+
+        const double h_here = heuristic(cur.x, cur.y, cur.heading);
+        best_h = std::min(best_h, h_here);
+
+        // Goal: reaching a goal pose ends the search (after paying its exit cost).
+        auto gi = goal_index.find(ckey);
+        if (gi != goal_index.end()) {
+            PoseNode t = cur;
+            t.g = cur.g + static_cast<float>(goals[gi->second].cost);
+            t.f = t.g;
+            t.parent = cur_idx;
+            t.terminal = true;
+            t.seq = seq++;
+            open.push(t);
+            continue;
+        }
+
+        // A start pose is where the end legs hand over to the trunk, so its
+        // first step must keep the pose's own heading: the legs were built
+        // against that heading's rail offsets, and a turn on the very first
+        // step would kink the join.
+        const bool is_start = cur.parent < 0;
+        for (int dth = is_start ? 0 : -1; dth <= (is_start ? 0 : 1); ++dth) {
+            const int nh = (cur.heading + dth + 8) & 7;
+            const int dx = kHeadingDx[nh], dy = kHeadingDy[nh];
+            const int nx = cur.x + dx, ny = cur.y + dy;
+            if (nx < 0 || nx >= cols_ || ny < 0 || ny >= rows_) { rej("bounds"); continue; }
+            if (!centerline_step_clear(cur.x, cur.y, dth == 0 ? -1 : cur.heading,
+                                       nx, ny, nh, cur.layer, p_net, n_net,
+                                       half_pitch, p_side, p_half, p_gap, n_half, n_gap)) {
+                rej("rail_clear");
+                continue;
+            }
+            const double step = (dx != 0 && dy != 0) ? 1.0 / kPoseInvSqrt2 : 1.0;
+            const float ng = cur.g + static_cast<float>(step + (dth != 0 ? turn_penalty : 0.0));
+            const uint64_t nkey = pose_key(nx, ny, nh, cur.layer);
+            auto it = g_scores.find(nkey);
+            if (it != g_scores.end() && it->second <= ng) continue;
+            g_scores[nkey] = ng;
+            PoseNode n{nx, ny, nh, cur.layer, ng,
+                       ng + static_cast<float>(heuristic_weight * heuristic(nx, ny, nh)),
+                       cur_idx, cur.start_index, false, seq++};
+            open.push(n);
+        }
+    }
+
+    result.iterations = static_cast<int>(iterations);
+    result.best_progress = best_h == std::numeric_limits<double>::max() ? -1.0 : best_h;
+    result.rejections = std::move(rejections);
+    return result;
+}
+
 }  // namespace router

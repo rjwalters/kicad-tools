@@ -78,8 +78,15 @@ class TwoPhaseRouter:
         journal_stage: Callable[[str, int], None] | None = None,
         keepout_rule_area_polygons: Callable[[], list[Any]] | None = None,
         existing_routes: list[Route] | None = None,
+        get_claimed_nets: Callable[[], set[int]] | None = None,
     ):
         self.grid = grid
+        # Issue #5786: nets whose copper an earlier pre-pass committed and
+        # that this pass must NOT re-route (the pose-based coupled trunk).
+        # Without it ``route_net_with_corridor`` re-routes the pair's nets as
+        # independent legs on top of the coupled copper.  ``None`` (unit
+        # tests constructing the router directly) claims nothing.
+        self._get_claimed_nets = get_claimed_nets
         self.router = router
         self.rules = rules
         self.net_class_map = net_class_map
@@ -379,6 +386,16 @@ class TwoPhaseRouter:
         net_order = selection.net_order
         pour_nets = selection.pour_nets
         single_pad_nets = selection.single_pad_nets
+
+        claimed_nets = self._get_claimed_nets() if self._get_claimed_nets else set()
+        if claimed_nets:
+            skipped_claimed = [n for n in net_order if n in claimed_nets]
+            if skipped_claimed:
+                flush_print(
+                    f"  Skipping {len(skipped_claimed)} net(s) already committed by the "
+                    "coupled diff-pair pre-pass (issue #5786)"
+                )
+                net_order = [n for n in net_order if n not in claimed_nets]
 
         total_nets = len(net_order)
 
