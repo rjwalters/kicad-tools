@@ -121,6 +121,15 @@ def _kelvin_fixture(comp_x: tuple[float, float] = (3.0, 7.0)) -> Autorouter:
         _add_pad(router, "U9", pin, x, y, 3, "FOREIGN")
     _add_pad(router, "R20", "1", comp_x[0], COMP_Y, 2, "COMP")
     _add_pad(router, "R21", "1", comp_x[1], COMP_Y, 2, "COMP")
+    # Issue #5891 (Epic #5508 Phase 2): Phase 2's commit-time invariant REFUSES
+    # exactly the commit this module exists to witness, so with it on (the new
+    # default) U3 is no longer stranded and there is nothing for the offline
+    # replay to attribute.  Phase 1b is the read-only witness of the *pre-rule*
+    # behaviour, so the fixture pins the rule off -- that is what keeps these
+    # assertions meaningful rather than vacuous.  The counterpart assertion,
+    # that the rule removes the stranding on this very fixture, lives in
+    # ``tests/router/test_pad_access_invariant_5891.py``.
+    router.enable_pad_access_invariant = False
     return router
 
 

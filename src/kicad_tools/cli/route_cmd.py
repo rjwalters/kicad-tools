@@ -5288,6 +5288,21 @@ def _apply_escape_corridor_reservation(router: "Autorouter", args) -> None:
         router.enable_escape_corridor_reservation = True
 
 
+def _apply_pad_access_invariant(router: "Autorouter", args) -> None:
+    """Disable the commit-time pad-access invariant when asked (Issue #5891).
+
+    Epic #5508 Phase 2 is the phase that makes the invariant load-bearing, so
+    it is ON by default (the inverse of the ``enable_escape_corridor_reservation``
+    precedent, whose soft corridor it supersedes).  ``--no-pad-access-invariant``
+    clears ``Autorouter.enable_pad_access_invariant``, which is the only thing
+    that reads it: with the flag off the gate is never constructed and
+    ``_mark_route`` takes exactly its pre-#5891 path, so a disabled run is
+    byte-identical to pre-#5891 main.  A no-op when the flag is absent.
+    """
+    if getattr(args, "no_pad_access_invariant", False):
+        router.enable_pad_access_invariant = False
+
+
 def _targeted_ripup_budget(args) -> int:
     """Resolve ``--max-ripups-per-net`` for the negotiated targeted path.
 
@@ -8028,6 +8043,7 @@ def route_with_layer_escalation(
         _apply_cross_package_pair_corridor(router, args)
         _apply_slack_corridor_widening(router, args)
         _apply_escape_corridor_reservation(router, args)
+        _apply_pad_access_invariant(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -9164,6 +9180,7 @@ def route_with_rule_relaxation(
         _apply_cross_package_pair_corridor(router, args)
         _apply_slack_corridor_widening(router, args)
         _apply_escape_corridor_reservation(router, args)
+        _apply_pad_access_invariant(router, args)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -11545,6 +11562,7 @@ def route_with_combined_escalation(
             _apply_cross_package_pair_corridor(router, args)
             _apply_slack_corridor_widening(router, args)
             _apply_escape_corridor_reservation(router, args)
+            _apply_pad_access_invariant(router, args)
 
             # Issue #3171: inject boosted analog routing class for --analog-nets
             # / --auto-analog selected nets (pour/ground nets left untouched).
@@ -14365,6 +14383,23 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-pad-access-invariant",
+        action="store_true",
+        help=(
+            "Disable the commit-time pad-access invariant (Issue #5891, epic "
+            "#5508 Phase 2).  The invariant is ON by default for the grid "
+            "engine: a negotiated candidate route is REFUSED when committing "
+            "it would reduce another unrouted pad's access set (its legal exit "
+            "stubs plus reachable via sites) to empty -- the failure mode "
+            "behind board-05 ISENSE_A-, board-06 U2.B1 and board-07 U4.C2, "
+            "where a pad that was reachable at escape-prephase end is enclosed "
+            "by copper committed for other nets.  A refused connection is "
+            "handled exactly like a failed search, so the existing targeted "
+            "rip-up retries it.  Pass this flag to restore pre-#5891 "
+            "behaviour byte-for-byte."
+        ),
+    )
+    parser.add_argument(
         "--max-ripups-per-net",
         type=int,
         default=None,
@@ -16993,6 +17028,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_cross_package_pair_corridor(router, args)
     _apply_slack_corridor_widening(router, args)
     _apply_escape_corridor_reservation(router, args)
+    _apply_pad_access_invariant(router, args)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).

@@ -83,6 +83,7 @@ __all__ = [
     "compute_access_set",
     "direction_name",
     "route_envelope",
+    "via_candidate_geometry",
 ]
 
 #: Floating-point slack shared by every comparison in this module.  Matches the
@@ -880,6 +881,35 @@ def _dedupe(items: Iterable[ClosingCopper]) -> tuple[ClosingCopper, ...]:
 # ---------------------------------------------------------------------------
 
 
+def via_candidate_geometry(rules: DesignRules) -> tuple[MfrLimits | None, float, float]:
+    """Fab tier plus the ``(drill, diameter)`` every via candidate is sized at.
+
+    Factored out of :func:`compute_access_set` so a caller that needs to bound
+    the via candidates *without* enumerating them -- Phase 2's conservative
+    access bbox
+    (:func:`~kicad_tools.router.pad_access_invariant.conservative_access_bbox`) --
+    derives the same numbers from the same place instead of re-deriving the
+    annular-ring arithmetic and silently drifting from it.
+
+    A manufacturer whose limits cannot be resolved falls back to the rules'
+    own via geometry, exactly as before: an unknown fab tier must not inflate
+    (or shrink) a via candidate.
+    """
+    mfr: MfrLimits | None = None
+    if rules.manufacturer:
+        try:
+            mfr = get_mfr_limits(rules.manufacturer)
+        except Exception:
+            mfr = None
+    drill = rules.via_drill if mfr is None else max(rules.via_drill, mfr.min_via_drill)
+    diameter = (
+        rules.via_diameter
+        if mfr is None
+        else max(rules.via_diameter, drill + 2 * mfr.min_via_annular)
+    )
+    return mfr, drill, diameter
+
+
 def compute_access_set(
     pad: Pad,
     grid: object,
@@ -972,18 +1002,7 @@ def compute_access_set(
             rejected_stub_segments.append(seg)
 
     # -- via sites --------------------------------------------------------
-    mfr: MfrLimits | None = None
-    if rules.manufacturer:
-        try:
-            mfr = get_mfr_limits(rules.manufacturer)
-        except Exception:
-            mfr = None
-    drill = rules.via_drill if mfr is None else max(rules.via_drill, mfr.min_via_drill)
-    diameter = (
-        rules.via_diameter
-        if mfr is None
-        else max(rules.via_diameter, drill + 2 * mfr.min_via_annular)
-    )
+    mfr, drill, diameter = via_candidate_geometry(rules)
     other_layers = _other_copper_layers(grid, origin_layer)
 
     via_candidates: list[tuple[float, float, bool, int | None]] = []
