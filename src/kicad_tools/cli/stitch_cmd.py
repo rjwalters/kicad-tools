@@ -501,6 +501,26 @@ def resolve_net_num(net_node: SExp | None, name_to_num: dict[str, int]) -> int |
     return None
 
 
+def _obstacle_pad_net_num(pad: SExp, name_to_num: dict[str, int]) -> int | None:
+    """Net number of a footprint pad for the OBSTACLE registries.
+
+    Issue #5785: a copper pad with no ``(net ...)`` node at all (an unused
+    IC pin, e.g. board 03's ``U1.1``) is still copper.  The obstacle
+    collectors used to ``continue`` past it, so a stitch via could land on
+    top of it -- kicad-cli then reported ``shorting_items`` between the
+    stitch copper and ``Pad 1 [<no net>] of U1``.  Such a pad is reported
+    as net ``0`` (KiCad's "no net") so it blocks every stitch net.  Pads
+    that carry no copper (``np_thru_hole`` mounting holes, connect/aperture
+    pads) keep the old behaviour and are skipped.
+    """
+    net_node = pad.find_child("net")
+    if net_node:
+        return resolve_net_num(net_node, name_to_num)
+    if pad.get_string(1) in ("smd", "thru_hole"):
+        return 0
+    return None
+
+
 def get_net_number(sexp: SExp, net_name: str) -> int | None:
     """Get the net number for a given net name."""
     for num, name in get_net_map(sexp).items():
@@ -1027,10 +1047,8 @@ def find_all_pad_bboxes(
         sin_r = math.sin(rad)
 
         for pad in fp.find_children("pad"):
-            net_node = pad.find_child("net")
-            if not net_node:
-                continue
-            net_num = resolve_net_num(net_node, name_to_num)
+            # Issue #5785: a net-less copper pad is still an obstacle.
+            net_num = _obstacle_pad_net_num(pad, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
 
@@ -1105,6 +1123,27 @@ def _segment_to_rect_distance(
         segment_to_segment_distance(x1, y1, x2, y2, max_x, max_y, min_x, max_y),
         segment_to_segment_distance(x1, y1, x2, y2, min_x, max_y, min_x, min_y),
     )
+
+
+def _via_drill_overlaps_pad_bbox(
+    via_x: float,
+    via_y: float,
+    drill: float,
+    bbox: tuple[float, float, float, float],
+    tolerance: float = 1e-3,
+) -> bool:
+    """Return True iff the via's drill circle overlaps ``bbox`` at all.
+
+    Issue #5785: the via-in-pad DRC rule now flags any hole that overlaps SMT
+    copper, including holes whose centre lies outside the land, so the
+    "fully inside" test above under-filters (a dog-leg via 0.05 mm off the
+    pad edge passed the filter and then failed ``kct check``).  Tangency
+    within ``tolerance`` is not an overlap.
+    """
+    min_x, min_y, max_x, max_y = bbox
+    dx = max(min_x - via_x, 0.0, via_x - max_x)
+    dy = max(min_y - via_y, 0.0, via_y - max_y)
+    return math.hypot(dx, dy) < drill / 2.0 - tolerance
 
 
 def _via_drill_inside_pad_bbox(
@@ -1319,10 +1358,8 @@ def find_all_pads(
 
         # Extract each pad
         for pad in fp.find_children("pad"):
-            net_node = pad.find_child("net")
-            if not net_node:
-                continue
-            net_num = resolve_net_num(net_node, name_to_num)
+            # Issue #5785: a net-less copper pad is still an obstacle.
+            net_num = _obstacle_pad_net_num(pad, name_to_num)
             if net_num is None or net_num in exclude_nets:
                 continue
 
@@ -1444,10 +1481,8 @@ def find_all_drills(
             # Only plated through-hole pads have a copper-plated drill.
             if pad_type != "thru_hole":
                 continue
-            net_node = pad.find_child("net")
-            if not net_node:
-                continue
-            net_num = resolve_net_num(net_node, name_to_num)
+            # Issue #5785: a net-less plated hole is still a drill.
+            net_num = _obstacle_pad_net_num(pad, name_to_num)
             if net_num is None or net_num in pad_exclude_nets:
                 continue
             drill_node = pad.find_child("drill")
@@ -5024,6 +5059,10 @@ def run_stitch(
     micro_via_size: float = 0.3,
     micro_via_drill: float = 0.15,
     avoid_pad_overlap: bool = False,
+    only_pads: frozenset[str] | None = None,
+    force_pads: frozenset[str] = frozenset(),
+    foreign_fills_yield: bool = False,
+    strict_drill_overlap: bool = False,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -5053,6 +5092,26 @@ def run_stitch(
             manufacturability failure.  Dropped pads are recorded in
             ``StitchResult.pads_skipped`` with a ``via_in_pad`` reason and
             counted in ``StitchResult.via_in_pad_filtered``.
+        strict_drill_overlap: Issue #5785 -- with ``avoid_pad_overlap``, also
+            drop a via whose drill merely OVERLAPS a same-net SMD pad (the
+            current ``via_in_pad`` DRC rule), not only one fully inside it.
+        only_pads: Issue #5785 -- when given, restrict the work list to these
+            ``"REF.PAD"`` keys (the pads a KiCad ``unconnected_items`` report
+            named), so the oracle completion loop welds exactly the links
+            KiCad reported instead of every pad our own connectivity model
+            disagrees about.  ``None`` (default) keeps every pad on
+            ``net_names``.
+        force_pads: Issue #5785 -- ``"REF.PAD"`` keys that skip the "already
+            connected" shortcut.  KiCad is the authority in the oracle loop:
+            when it names a pad as stranded but our proximity/strict model
+            thinks it is connected, the pad is stitched anyway.
+        foreign_fills_yield: Issue #5785 -- treat OTHER nets' existing zone
+            fills as copper that will retreat, not as obstacles.  Only valid
+            when the caller refills the zones afterwards (KiCad always clears
+            a pour around a foreign via/track); without a refill the stitch
+            copper would sit inside the stale fill.  On a 4-layer board whose
+            GND pours cover every layer this is the difference between "no
+            via site anywhere" and a via the refill simply clears around.
 
     Returns:
         StitchResult with details of what was done
@@ -5094,6 +5153,8 @@ def run_stitch(
     # Find pads on target nets
     net_name_set = set(net_names)
     pads = find_pads_on_nets(sexp, net_name_set)
+    if only_pads is not None:
+        pads = [p for p in pads if f"{p.reference}.{p.pad_number}" in only_pads]
     result.pads_found = len(pads)
 
     if not pads:
@@ -5139,7 +5200,10 @@ def run_stitch(
     other_net_tracks = find_all_track_segments(sexp, exclude_nets=net_numbers)
     other_net_vias = find_all_board_vias(sexp, exclude_nets=net_numbers)
     other_net_pads = find_all_pads(sexp, exclude_nets=net_numbers)
-    other_net_filled_polys = find_all_filled_polygons(sexp, exclude_nets=net_numbers)
+    # Issue #5785: a caller that refills afterwards lets foreign fills yield.
+    other_net_filled_polys = (
+        [] if foreign_fills_yield else find_all_filled_polygons(sexp, exclude_nets=net_numbers)
+    )
     # Issue #3433: rect-aware pad geometry for the straight pad-to-via
     # trace check (see calculate_via_position / find_all_pad_bboxes).
     other_net_pad_bboxes = find_all_pad_bboxes(sexp, exclude_nets=net_numbers)
@@ -5452,6 +5516,8 @@ def run_stitch(
             and pad.net_name in nets_with_fill
             and f"{pad.reference}.{pad.pad_number}" in strict_sets[0].get(pad.net_name, set())
         ):
+            connected = False
+        if connected and f"{pad.reference}.{pad.pad_number}" in force_pads:
             connected = False
         if connected:
             result.already_connected += 1
@@ -5786,6 +5852,12 @@ def run_stitch(
             candidate_bboxes = bboxes_by_net.get(placement.pad.net_number, [])
             in_pad = any(
                 _via_drill_inside_pad_bbox(placement.via_x, placement.via_y, placement.drill, bbox)
+                or (
+                    strict_drill_overlap
+                    and _via_drill_overlaps_pad_bbox(
+                        placement.via_x, placement.via_y, placement.drill, bbox
+                    )
+                )
                 for bbox in candidate_bboxes
             )
             if in_pad:

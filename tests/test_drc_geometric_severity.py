@@ -26,7 +26,7 @@ def test_run_geometric_drc_preserves_error_gate_and_counts_warnings(monkeypatch,
     monkeypatch.setattr(
         drc_package.DRCReport,
         "load",
-        lambda _path: SimpleNamespace(violations=[warning, error]),
+        lambda _path: SimpleNamespace(violations=[warning, error], unconnected_items=[]),
     )
 
     result = run_geometric_drc(

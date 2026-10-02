@@ -24,6 +24,10 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kicad_tools.drc.violation import DRCViolation
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,17 @@ class GeometricDRCResult:
             distinguishing "kicad-cli not found" from "kicad-cli timed
             out" from "kicad-cli crashed" so ``kct route --strict-drc``
             can emit an actionable failure message (Issue #4178).
+        unconnected_items: kicad-cli's ``unconnected_items`` array (the
+            ratsnest links KiCad's own connectivity, after the zone refill,
+            still reports missing), parsed into
+            :class:`~kicad_tools.drc.violation.DRCViolation` records.  Kept
+            out of ``error_count`` / ``by_type`` on purpose (issue #4498:
+            those stay a geometric-only verdict).  Issue #5785 reads it as
+            the completion oracle for pour nets.  Empty when ``ran`` is
+            ``False``.
+        error_violations: The error-severity violations behind
+            ``error_count``, so a caller can locate a regression (Issue
+            #5785 attributes one to the copper that caused it).
     """
 
     ran: bool = False
@@ -72,6 +87,13 @@ class GeometricDRCResult:
     all_by_type: dict[str, int] = field(default_factory=dict)
     note: str | None = None
     reason: str = REASON_OK
+    unconnected_items: list[DRCViolation] = field(default_factory=list)
+    error_violations: list[DRCViolation] = field(default_factory=list)
+
+    @property
+    def unconnected_count(self) -> int:
+        """Number of kicad-cli ``unconnected_items`` (0 when ``ran`` is False)."""
+        return len(self.unconnected_items)
 
     @property
     def has_errors(self) -> bool:
@@ -192,6 +214,8 @@ def run_geometric_drc(
             all_by_type=all_by_type,
             note=None,
             reason=REASON_OK,
+            unconnected_items=list(report.unconnected_items),
+            error_violations=cli_errors,
         )
     except subprocess.TimeoutExpired:
         return GeometricDRCResult(

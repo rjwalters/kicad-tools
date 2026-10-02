@@ -6158,6 +6158,157 @@ def _audit_pairwise_for_escalation(final_result, args) -> "list[PairwiseViolatio
     )
 
 
+def _stranded_pour_escalation_exit(rc: int, args) -> int:
+    """Map an escalation wrapper's exit code through the #5785 stranded-pour gate."""
+    from kicad_tools.router.completion_verdict import stranded_pour_exit
+
+    return stranded_pour_exit(
+        rc,
+        int(getattr(args, "_stranded_pour_links", 0) or 0),
+        bool(getattr(args, "_allow_stranded_pour_pads", False)),
+    )
+
+
+def _make_pour_oracle(args):
+    """kicad-cli oracle for the pour completion loop (Issue #5785).
+
+    Runs ``kicad-cli pcb drc --refill-zones`` against the routed board under
+    the project kct emitted next to it (the board's deliverable), and -- when
+    the source board carries a different ``.kicad_pro`` -- once more under
+    that source project, because the zone fill (and so which pour islands
+    float) depends on the project's clearances.  A link is "unconnected" if
+    EITHER project's fill leaves it so; the DRC *error* count stays the
+    emitted project's.
+    """
+    import shutil
+    import tempfile
+
+    from kicad_tools.drc import run_geometric_drc
+
+    src_pro = None
+    if getattr(args, "pcb", None):
+        cand = Path(args.pcb).with_suffix(".kicad_pro")
+        if cand.is_file():
+            src_pro = cand
+
+    def key(v) -> tuple:
+        return (
+            tuple(v.items),
+            tuple((round(loc.x_mm, 3), round(loc.y_mm, 3)) for loc in v.locations),
+        )
+
+    def oracle(path: Path):
+        geo = run_geometric_drc(path)
+        if not geo.ran or src_pro is None:
+            return geo
+        out_pro = path.with_suffix(".kicad_pro")
+        try:
+            if out_pro.is_file() and out_pro.read_bytes() == src_pro.read_bytes():
+                return geo
+            with tempfile.TemporaryDirectory(prefix="kct-oracle-") as td:
+                tmp = Path(td) / "board.kicad_pcb"
+                shutil.copy(path, tmp)
+                shutil.copy(src_pro, tmp.with_suffix(".kicad_pro"))
+                alt = run_geometric_drc(tmp)
+        except OSError:
+            return geo
+        if alt.ran:
+            seen = {key(v) for v in geo.unconnected_items}
+            geo.unconnected_items.extend(v for v in alt.unconnected_items if key(v) not in seen)
+        return geo
+
+    return oracle
+
+
+def _complete_pour_nets_with_oracle(output_path: Path, *, args, quiet: bool = False) -> int:
+    """Run the KiCad-oracle completion loop on the pour nets (Issue #5785).
+
+    Called right after the zone fill.  Asks ``kicad-cli pcb drc
+    --refill-zones`` which pads are still stranded on a pour and closes
+    exactly those links (see :mod:`kicad_tools.router.oracle_completion`).
+    Stashes the stranded-link count on ``args._stranded_pour_links`` (read by
+    the exit-code gate) and returns it.  Never raises: a missing kicad-cli, a
+    placement-preserving run or any internal failure leaves the board
+    untouched and the count at 0 (the strict-DRC machinery already reports a
+    kicad-cli that did not run).
+    """
+    from kicad_tools.router.completion_verdict import allow_stranded_pour_pads, oracle_rounds
+    from kicad_tools.router.oracle_completion import DEFAULT_ORACLE_ROUNDS
+
+    args._stranded_pour_links = 0
+    args._allow_stranded_pour_pads = allow_stranded_pour_pads(
+        bool(getattr(args, "allow_stranded_pour_pads", False))
+    )
+    rounds = oracle_rounds(getattr(args, "oracle_rounds", None), DEFAULT_ORACLE_ROUNDS)
+    if rounds <= 0 or getattr(args, "dry_run", False):
+        return 0
+    disposition = getattr(args, "_placement_disposition", None)
+    if disposition is not None and getattr(disposition, "preserve_copper_nets", None):
+        return 0
+    try:
+        from kicad_tools.cli.runner import find_kicad_cli, run_fill_zones
+        from kicad_tools.cli.stitch_cmd import find_all_plane_nets
+        from kicad_tools.core.sexp_file import load_pcb
+        from kicad_tools.router.oracle_completion import PourLinkCloser, run_oracle_completion
+
+        if find_kicad_cli() is None:
+            return 0
+        pour_nets = set(find_all_plane_nets(load_pcb(output_path)))
+        if not pour_nets:
+            return 0
+
+        def refill(path: Path) -> object:
+            return run_fill_zones(path, kicad_cli=find_kicad_cli())
+
+        closer = PourLinkCloser(
+            via_size=float(getattr(args, "via_diameter", 0.6)),
+            via_drill=float(getattr(args, "via_drill", 0.3)),
+            clearance=float(getattr(args, "clearance", 0.2)),
+            trace_width=float(getattr(args, "trace_width", 0.2)),
+            refill=refill,
+        )
+        if not quiet:
+            print("\n--- KiCad Oracle Completion (pour nets) ---")
+        result = run_oracle_completion(
+            output_path,
+            oracle=_make_pour_oracle(args),
+            closer=closer,
+            nets=pour_nets,
+            max_rounds=rounds,
+            log=None if quiet else print,
+        )
+    except Exception as exc:  # advisory machinery must never fail a route
+        logger.warning("Oracle completion skipped: %s", exc)
+        return 0
+    if not result.ran:
+        if not quiet:
+            print(f"  skipped: {result.note or 'kicad-cli DRC did not run'}")
+        return 0
+    args._stranded_pour_links = result.final_links
+    args._oracle_completion = result
+    if not quiet:
+        print(
+            f"  {result.initial_links} -> {result.final_links} unconnected pour link(s) "
+            f"({result.stop_reason})"
+        )
+        for lk in result.final_link_details[:5]:
+            print(f"    still unconnected: {lk.describe()}")
+    return result.final_links
+
+
+def _print_stranded_pour_failure_banner(args, output_path) -> None:
+    """Replace the SUCCESS banner while pads stay stranded on a pour (#5785)."""
+    n = int(getattr(args, "_stranded_pour_links", 0) or 0)
+    print("ROUTING FAILED: pour pads left unconnected (kicad-cli unconnected_items)")
+    print("=" * 60)
+    print()
+    print(f"{n} pour link(s) remain that KiCad's own connectivity reports unconnected.")
+    print("These pads sit on a pour that does not reach them; the board is not")
+    print("electrically complete as written.")
+    print(f"Board written to {output_path} for inspection.")
+    print("To treat this as advisory, re-run with --allow-stranded-pour-pads.")
+
+
 def _short_escalation_exit(rc: int, shorts: "Sequence[ClearanceViolation]") -> int:
     """Map an escalation wrapper's exit code through the #5862 short gate.
 
@@ -8710,6 +8861,7 @@ def route_with_layer_escalation(
     # unfilled polygons.
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -8799,6 +8951,10 @@ def route_with_layer_escalation(
             # Issue #5862: SUCCESS must be unreachable while the written
             # board shorts two nets together.
             _print_short_failure_banner(_shorts, output_path)
+        elif final_result.success and _stranded_pour_escalation_exit(0, args) != 0:
+            # Issue #5785: SUCCESS must be unreachable while pads stay
+            # stranded on a pour that kicad-cli reports as unconnected.
+            _print_stranded_pour_failure_banner(args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -8860,13 +9016,19 @@ def route_with_layer_escalation(
         if fix_result == 3:
             return 3
         return _layer_intent_escalation_exit(
-            _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+            _stranded_pour_escalation_exit(
+                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                args,
+            ),
             _layer_intent,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
         return _layer_intent_escalation_exit(
-            _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+            _stranded_pour_escalation_exit(
+                _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+                args,
+            ),
             _layer_intent,
         )
     # Nothing was routed — treat as fatal failure
@@ -9627,6 +9789,7 @@ def route_with_rule_relaxation(
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -9714,6 +9877,10 @@ def route_with_rule_relaxation(
             # Issue #5862: SUCCESS must be unreachable while the written
             # board shorts two nets together.
             _print_short_failure_banner(_shorts, output_path)
+        elif final_result.success and _stranded_pour_escalation_exit(0, args) != 0:
+            # Issue #5785: SUCCESS must be unreachable while pads stay
+            # stranded on a pour that kicad-cli reports as unconnected.
+            _print_stranded_pour_failure_banner(args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -9761,13 +9928,19 @@ def route_with_rule_relaxation(
         if fix_result == 3:
             return 3
         return _layer_intent_escalation_exit(
-            _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+            _stranded_pour_escalation_exit(
+                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                args,
+            ),
             _layer_intent,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
         return _layer_intent_escalation_exit(
-            _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+            _stranded_pour_escalation_exit(
+                _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+                args,
+            ),
             _layer_intent,
         )
     # Nothing was routed — treat as fatal failure
@@ -12048,6 +12221,7 @@ def route_with_combined_escalation(
     # Fill copper-pour zones now that traces exist (issue #2516).
     if final_result.nets_routed > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=final_result.router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
 
     # Run DRC validation unless skipped
     fix_result: int | None = None
@@ -12135,6 +12309,10 @@ def route_with_combined_escalation(
             # Issue #5862: SUCCESS must be unreachable while the written
             # board shorts two nets together.
             _print_short_failure_banner(_shorts, output_path)
+        elif final_result.success and _stranded_pour_escalation_exit(0, args) != 0:
+            # Issue #5785: SUCCESS must be unreachable while pads stay
+            # stranded on a pour that kicad-cli reports as unconnected.
+            _print_stranded_pour_failure_banner(args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -12184,13 +12362,19 @@ def route_with_combined_escalation(
         if fix_result == 3:
             return 3
         return _layer_intent_escalation_exit(
-            _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+            _stranded_pour_escalation_exit(
+                _short_escalation_exit(_pairwise_escalation_exit(0, _pairwise), _shorts),
+                args,
+            ),
             _layer_intent,
         )
     # Partial routing: some nets were routed but not all — pipeline should continue
     if final_result.nets_routed > 0:
         return _layer_intent_escalation_exit(
-            _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+            _stranded_pour_escalation_exit(
+                _short_escalation_exit(_pairwise_escalation_exit(2, _pairwise), _shorts),
+                args,
+            ),
             _layer_intent,
         )
     # Nothing was routed — treat as fatal failure
@@ -14080,6 +14264,30 @@ def _route_parser() -> argparse.ArgumentParser:
             "Preserves manually-routed nets, skipped nets' geometry, and "
             "standalone stitch vias across a route pass. Default off (full "
             "re-route, existing copper is replaced by freshly routed nets)."
+        ),
+    )
+    parser.add_argument(
+        "--oracle-rounds",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
+            "the zone fill, route exactly the links kicad-cli reports as "
+            "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
+            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "loop and the stranded-pad verdict."
+        ),
+    )
+    parser.add_argument(
+        "--allow-stranded-pour-pads",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat pads still stranded on a pour after the oracle completion "
+            "loop as advisory (exit code unchanged). By default they are a "
+            "completion failure (exit 3, or 4 below --min-completion), "
+            "matching kicad-cli (Issue #5785). Also KCT_ALLOW_STRANDED_POUR_PADS=1."
         ),
     )
     parser.add_argument(
@@ -18749,6 +18957,7 @@ def _run_main_impl(args, parser, argv) -> int:
     # filled zones rather than bare zone outlines.
     if not args.dry_run and stats["nets_routed"] > 0:
         _fill_zones_after_route(output_path, quiet=quiet, router=router, args=args)
+        _complete_pour_nets_with_oracle(output_path, args=args, quiet=quiet)
 
     _rss.mark("post-fill-zones")
 
@@ -18853,6 +19062,12 @@ def _run_main_impl(args, parser, argv) -> int:
         _audit_plane_layer_reservation(router, layer_stack)
 
     # Summary
+    from kicad_tools.router.completion_verdict import stranded_pour_blocks
+
+    stranded_pour_blocking = stranded_pour_blocks(
+        int(getattr(args, "_stranded_pour_links", 0) or 0),
+        bool(getattr(args, "_allow_stranded_pour_pads", False)),
+    )
     all_nets_routed = stats["nets_routed"] == nets_to_route
     drc_passed = drc_errors <= 0  # -1 means DRC failed to run, treat as passed
     completion_ratio = stats["nets_routed"] / nets_to_route if nets_to_route > 0 else 1.0
@@ -18900,6 +19115,9 @@ def _run_main_impl(args, parser, argv) -> int:
             # Issue #5862: this run would otherwise have printed a SUCCESS
             # banner while its own copper shorts two nets together.
             _print_short_failure_banner(short_violations, output_path)
+        elif stranded_pour_blocking and (all_nets_routed or meets_threshold):
+            # Issue #5785: kicad-cli reports pads stranded on a pour.
+            _print_stranded_pour_failure_banner(args, output_path)
         elif getattr(args, "_placement_fill_error", None):
             print("PARTIAL: zone fill failed; saved routing copper retained")
         elif getattr(args, "_placement_repair_error", None):
@@ -19185,6 +19403,7 @@ def _run_main_impl(args, parser, argv) -> int:
         and seg_seg_violation_count == 0
         and short_violation_count == 0
         and pairwise_violation_count == 0
+        and not stranded_pour_blocking
     ):
         return 0
     elif meets_threshold and (
@@ -19192,13 +19411,17 @@ def _run_main_impl(args, parser, argv) -> int:
         or seg_seg_violation_count > 0
         or short_violation_count > 0
         or pairwise_violation_count > 0
+        or stranded_pour_blocking
     ):
         # Meets completion threshold but has DRC or clearance violations
         # (including issue #4588 board-level HV pairwise creepage violations
         # and issue #5862 cross-net copper overlap -- "shorting_items")
         return 3
     elif not meets_threshold and (
-        seg_seg_violation_count > 0 or short_violation_count > 0 or pairwise_violation_count > 0
+        seg_seg_violation_count > 0
+        or short_violation_count > 0
+        or pairwise_violation_count > 0
+        or stranded_pour_blocking
     ):
         # Below threshold AND has seg-seg, short or HV pairwise violations
         return 4
