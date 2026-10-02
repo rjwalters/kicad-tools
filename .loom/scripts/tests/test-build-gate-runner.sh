@@ -83,6 +83,21 @@ mkdir -p "$SCRATCH_REPO" && git -C "$SCRATCH_REPO" init -q
 
 CARGO_LOG="$STUB_DIR/cargo-calls.log"
 
+# A SECOND scratch repo that DOES carry a scripts/check-structural.sh -- a
+# recording stub, not the real 31-gate aggregate -- so Section 0 below can pin
+# stage 0's wiring without re-entering the hermeticity problem the comment above
+# describes. It records into $CARGO_LOG so the ORDER of stage 0 against the cargo
+# steps is readable from one log, and honours LOOM_TEST_STRUCTURAL_RC so the
+# "a red stage 0 stops the gate" case can be exercised too.
+STAGE0_REPO="$STUB_DIR/stage0-repo"
+mkdir -p "$STAGE0_REPO/scripts" && git -C "$STAGE0_REPO" init -q
+cat > "$STAGE0_REPO/scripts/check-structural.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "STRUCTURAL-STUB" >> "$CARGO_LOG"
+exit "\${LOOM_TEST_STRUCTURAL_RC:-0}"
+EOF
+chmod +x "$STAGE0_REPO/scripts/check-structural.sh"
+
 # A recording `cargo` stub: appends its own argv to $CARGO_LOG and exits 0,
 # except when its argv matches $LOOM_TEST_CARGO_FAIL_ON (used to abort the gate
 # deliberately once the steps under test have been recorded).
@@ -123,6 +138,94 @@ run_gate_full_tier() {
         ${@+"$@"} \
         bash "$BUILD_GATE" 2>&1
 }
+
+# ---------------------------------------------------------------------------
+# Section 0: stage 0 (the structural phase) is actually wired in (#9494)
+# ---------------------------------------------------------------------------
+#
+# WHY THIS SECTION EXISTS. #9140 added a structural phase to build-gate.sh as two
+# lines ABOVE the tier switch, and nothing pinned either fact. `check-structural
+# .sh --self-test` covers the derivation in isolation; it says nothing about
+# whether build-gate.sh calls it. Deleting both lines -- or relocating them below
+# the `LOOM_BUILD_GATE_TIER` switch, which would silently exempt the fast tier --
+# left every test and every CI job green. That is the same class of bug #9140 was
+# filed for, one level up.
+#
+# WHY BEHAVIOURAL RATHER THAN A grep/LINE-NUMBER ASSERTION (which #9494 suggested
+# as the cheap option). A line-number comparison pins the TEXT's layout, so it
+# passes for any refactor that keeps the call textually early while making it
+# unreachable -- wrapped in a false conditional, placed after an `exit`, guarded
+# by a variable that is never set. Running the gate against a recording STUB
+# check-structural.sh pins the property the issue actually cares about (stage 0
+# runs, in BOTH tiers, before the expensive phases) at the same cost: the stub
+# cargo makes the fast tier a sub-second run, and the stub structural gate means
+# no real aggregate ever executes here.
+run_gate_fast_tier() {
+    local path_value="$1"; shift
+    env \
+        -u LOOM_SWEEP_CLAIM_OWNED \
+        -u LOOM_DAEMON_BIN \
+        -u LOOM_DAEMON_BIN_DIR \
+        -u LOOM_PREFER_REPO_BUILD \
+        -u LOOM_SWEEP_SELF_REAP \
+        -u LOOM_BUILD_SLOT_HELD \
+        -u LOOM_BUILD_GATE_NICED \
+        PATH="$path_value" \
+        LOOM_FORCE_PORTABLE_TIMEOUT=1 \
+        LOOM_BUILD_GATE_NICE=0 \
+        LOOM_BUILD_SLOTS=0 \
+        LOOM_BUILD_GATE_TIER=fast \
+        ${@+"$@"} \
+        bash "$BUILD_GATE" 2>&1
+}
+
+# The FAST tier is the load-bearing case: it is the one a relocation below the
+# tier switch would silently exempt, because the fast branch ends in `exit 0`.
+: > "$CARGO_LOG"
+stage0_fast_rc=0
+stage0_fast_output="$(cd "$STAGE0_REPO" && run_gate_fast_tier "$STUB_DIR:$MIN_PATH")" \
+    || stage0_fast_rc=$?
+
+if grep -Fxq "STRUCTURAL-STUB" "$CARGO_LOG"; then
+    pass "stage 0 runs scripts/check-structural.sh in the FAST tier (#9140 wiring, #9494)"
+else
+    fail "FAST tier did not invoke scripts/check-structural.sh — stage 0 is missing, or it moved below the LOOM_BUILD_GATE_TIER switch. Calls were: $(cat "$CARGO_LOG")"
+fi
+
+if [[ "$stage0_fast_rc" -eq 0 ]]; then
+    pass "a green stage 0 does not disturb the fast tier's own verdict"
+else
+    fail "expected the fast tier to exit 0 with a green stage 0, got $stage0_fast_rc: $stage0_fast_output"
+fi
+
+# The FULL tier, and the ordering claim build-gate.sh's own comment makes: stage 0
+# runs FIRST, so its ~30s of grep/wc returns before the ~700s cargo phases.
+: > "$CARGO_LOG"
+stage0_full_output="$(cd "$STAGE0_REPO" && run_gate_full_tier "$STUB_DIR:$MIN_PATH")" || true
+
+if [[ "$(head -n 1 "$CARGO_LOG")" == "STRUCTURAL-STUB" ]]; then
+    pass "stage 0 runs in the FULL tier too, and runs FIRST (before any cargo step)"
+else
+    fail "expected STRUCTURAL-STUB as the first recorded call in the full tier, calls were: $(cat "$CARGO_LOG"); gate output: $stage0_full_output"
+fi
+
+# And it is a GATE, not a report: a red stage 0 must stop the gate before cargo.
+: > "$CARGO_LOG"
+stage0_red_rc=0
+stage0_red_output="$(cd "$STAGE0_REPO" \
+    && run_gate_full_tier "$STUB_DIR:$MIN_PATH" LOOM_TEST_STRUCTURAL_RC=1)" || stage0_red_rc=$?
+
+if [[ "$stage0_red_rc" -ne 0 ]]; then
+    pass "a failing stage 0 fails the whole gate (set -e), rather than being reported and ignored"
+else
+    fail "expected a non-zero gate exit when stage 0 fails, got 0: $stage0_red_output"
+fi
+
+if grep -q "^build\|^nextest\|^test " "$CARGO_LOG"; then
+    fail "gate ran cargo steps after stage 0 failed, calls were: $(cat "$CARGO_LOG")"
+else
+    pass "a failing stage 0 aborts before the expensive cargo phases"
+fi
 
 # ---------------------------------------------------------------------------
 # Section 1: cargo-nextest present -> nextest is preferred (AC1)
