@@ -586,6 +586,35 @@ assert_eq "blocked" "$(field "$out_mixed" VERDICT)" \
     "T15k: the still-OPEN cross-repo half blocks even though the same-numbered local issue is CLOSED (#8502)"
 rm -f "$STUB_DIR/issue-532.json" "$STUB_DIR/issue-8257.json" "$STUB_DIR/rjwalters__loom-issue-8257.json"
 
+# T15l (#9925 THE REGRESSION): an ANNOTATED `### Dependencies` heading - the
+# dating suffix a Curator re-check pass naturally writes - is still the
+# Dependencies section. The reported issue carried
+# `### Dependencies (added 2026-09-24, Curator re-check)` while the #151 its
+# checklist named was genuinely OPEN, and the heading matcher's exact-match
+# end-anchor made the whole section INVISIBLE: empty DEPS and a false
+# VERDICT=clear, the same silent-false-clear shape as T15d/T15e. An
+# unrecognized annotation now means "active", not "absent".
+jq -n '{body: "### Dependencies (added 2026-09-24, Curator re-check)\n\n- [ ] #151: prerequisite, still open\n"}' \
+    >"$STUB_DIR/issue-135.json"
+jq -n '{state: "OPEN"}' >"$STUB_DIR/issue-151.json"
+out_annotated="$("$TARGET_SCRIPT" named-dependency --number 135 --repo owner/repo)"
+assert_eq "blocked" "$(field "$out_annotated" VERDICT)" \
+    "T15l: an annotated '### Dependencies (added ..., Curator re-check)' heading is still the Dependencies section, reporting VERDICT=blocked instead of a false clear (#9925)"
+assert_eq "151:OPEN" "$(eval_var "$out_annotated" DEPS)" \
+    "T15l: DEPS names the still-OPEN dependency the annotated section declares (#9925)"
+
+# T15m (#9925): `(deferred)` - and only that vocabulary - still suppresses the
+# section, so a Curator keeps a way to mark one deliberately inactive. Only the
+# heading differs from T15l, so the flip cannot have come from anything else.
+jq -n '{body: "### Dependencies (deferred)\n\n- [ ] #151: prerequisite, still open\n"}' \
+    >"$STUB_DIR/issue-135.json"
+out_deferred="$("$TARGET_SCRIPT" named-dependency --number 135 --repo owner/repo)"
+assert_eq "clear" "$(field "$out_deferred" VERDICT)" \
+    "T15m: a '(deferred)' heading annotation still suppresses the section, reporting VERDICT=clear (#9925)"
+assert_eq "" "$(eval_var "$out_deferred" DEPS)" \
+    "T15m: a deferred section contributes no DEPS entries (#9925)"
+rm -f "$STUB_DIR/issue-135.json" "$STUB_DIR/issue-151.json"
+
 # --- T16: dep-recheck - narrowed label fingerprint (#7362): a pure label flip
 # among loom:pr/loom:review-requested/loom:reviewing/loom:operator/loom:treating
 # — none of them a superseding-block label — with no merge-state change must

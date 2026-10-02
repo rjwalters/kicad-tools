@@ -1072,7 +1072,13 @@ All five are absent (never 0) whenever the worktree's numstat could not be
 read — the same contract `lines_added`/`lines_deleted` keep. The
 `landed_size`/LSI rollup over these fields lives in
 `defaults/observability/sweep-facts/` (#9446/#9466), beside its definitions
-doc.
+doc, and is **fitted** since `v1-2026-10-02` (#9934): the component
+means/SDs and per-model token factors in `landed-size.sql` were fit by
+`fit-landed-size.mjs` on the emitters' first four days (379 landings, 111
+with `hw_*`, 374 with a clean token reading), and the token component scores
+only clean `tokens_status` verdicts. The window is young — the refit is part
+of the artifact: rerun the script over a longer window once `hw_*` coverage
+matures, paste its `params` block, bump `params_version`.
 
 ### `role_tick.outcome`
 

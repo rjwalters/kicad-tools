@@ -1540,6 +1540,33 @@ The fix reuses the peer-claim channel exactly as #6352 and #6714 did — two mor
   their own `enabled` flag, and both return the local set unchanged when no
   peer-claim view is attached (`safehouse.enabled` false) — a single-host
   deployment is byte-for-byte the pre-#7477 behavior.
+- **…and at the dispatch-path guard, as of #9928.** The work-finder pre-filter
+  is only one of the seams that must skip a live window. It is also *advisory*:
+  it runs a tick before the dispatch, and it is the only reader #7477 made
+  fleet-aware. The enforcing seam every dispatch route actually funnels
+  through — the work finder itself, the IPC/CLI `{"Issue": <N>}` RPC behind
+  `loom-daemon dispatch <N>` / `mcp__loom__dispatch_sweep`, the epic
+  supervisor, all three watchdogs, and the reaper's runtime-handoff
+  re-dispatch — is `begin_issue_dispatch`'s step 2.75 guard (#6917), and that
+  read the HOST-LOCAL `noop_cooldown_remaining`. So a window armed by host A
+  suppressed A's own work finder *and* (via the unioned pre-filter) every
+  peer's work finder, but nothing on a peer that reached
+  `begin_issue_dispatch` by any other route, and nothing on a peer whose
+  pre-filter had already selected the candidate before A's ad arrived. Hosts
+  B/C/D re-claimed the issue inside A's window, which is the round-robin this
+  section exists to stop (reported from a downstream consumer repo as loom
+  #9928: four hosts, one unchanged tracker issue, ~10 minutes, two passes
+  landing *after* a self-reported no-op release). That guard now reads
+  `noop_cooldown_dispatch_block` — the longer of the local and peer-armed
+  windows, same `enabled` flag, and identical to the old local-only read when
+  no peer view is attached — so the enforcing seam is now at least as
+  fleet-aware as the advisory one, for every route at once.
+  Two deliberate non-changes: the sibling 2.8 dispatch-backoff guard still
+  reads its local `dispatch_backoff_remaining` (its window is an order of
+  magnitude shorter — ≤`maxSecs`, default 900s — and nothing has been observed
+  on it, so it was left alone rather than changed speculatively), and the
+  **insta-crash quarantine is not on this channel at all** — see the note
+  below.
 - **The lease-reclaim path is untouched.** `claim_reconciliation` does not read
   these maps (or any peer-claim state — see Epic #6165 Phase 4 / #6317, which
   deliberately removed its last peer-claim dependency), so a genuinely orphaned
@@ -1549,6 +1576,27 @@ The fix reuses the peer-claim channel exactly as #6352 and #6714 did — two mor
   time-bounded (dispatch backoff caps at `maxSecs`, default 900s; the no-op
   cooldown defaults to one hour) — well inside the 15-minute lease TTL's own
   reclaim cadence for the backoff lane.
+
+#### The insta-crash quarantine is still host-local (#9928)
+
+#9928's second reported symptom — a `#3939` auto-quarantine comment at 12:47:44
+that did not stop dispatches an hour later — is **not** the gap #9928 fixed, and
+is not a defect in the quarantine itself. Two independent reasons, both by
+design today:
+
+1. `DEFAULT_QUARANTINE_TTL_SECS` is 3600s, so on the arming host the window had
+   lapsed before the 13:49-13:58 burst. An expired quarantine releasing the
+   issue is the mechanism working.
+2. `sweep_registry/quarantine.rs` has **no** publish or consume path on the
+   peer-claim channel: `ClaimKind` carries `NoopCooldownArmed` and
+   `DispatchBackoffArmed` only (#7477 covered those two brakes, not the third).
+   A quarantine armed on host A is therefore invisible to B/C/D for its whole
+   TTL, whichever route they dispatch by.
+
+Extending `ClaimKind` to a third brake lane is a strictly larger change than
+#9928's one-line read swap (new variant, publish site, `PeerClaimView` map,
+unioned read, `safehouse` surface) and is tracked separately (#9936) rather
+than smuggled in here.
 
 #### "Fleet-wide" has two preconditions, and both fail silently (#8912)
 
