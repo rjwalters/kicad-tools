@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator
 
+from kicad_tools.core.arcs import arc_sweep
 from kicad_tools.core.outline_tessellation import (
     DEFAULT_MAX_ERROR_MM,
     tessellate_arc,
@@ -114,29 +115,18 @@ def _point(node: SExp, tag: str) -> Point:
 
 
 def _arc_points(start: Point, mid: Point, end: Point) -> list[Point]:
-    # Translate first to avoid cancellation for boards far from sheet origin.
-    bx, by = mid[0] - start[0], mid[1] - start[1]
-    cx, cy = end[0] - start[0], end[1] - start[1]
-    det = 2 * (bx * cy - by * cx)
-    if abs(det) < 1e-12:
+    """Points whose bounding box contains the whole start/mid/end arc.
+
+    The three authored points do not bound an arc on their own -- it bulges
+    outside their hull -- so the axis extremes of its circle that the swept
+    angle actually reaches are added. Outline policy on a collinear arc is to
+    refuse: a straight ``gr_arc`` on Edge.Cuts is a malformed outline here,
+    not something to silently reinterpret as a segment.
+    """
+    sweep = arc_sweep(start, mid, end)
+    if sweep is None:
         raise ValueError("Malformed Edge.Cuts gr_arc: collinear arc points")
-    b2, c2 = bx * bx + by * by, cx * cx + cy * cy
-    ox = start[0] + (cy * b2 - by * c2) / det
-    oy = start[1] + (bx * c2 - cx * b2) / det
-    radius = math.hypot(start[0] - ox, start[1] - oy)
-    a, m, b = (math.atan2(y - oy, x - ox) for x, y in (start, mid, end))
-    span = (b - a) % math.tau
-    ccw = (m - a) % math.tau <= span
-    points = [start, mid, end]
-    for angle in (0, math.pi / 2, math.pi, 3 * math.pi / 2):
-        on_arc = (
-            ((angle - a) % math.tau <= span + 1e-12)
-            if ccw
-            else ((a - angle) % math.tau <= (a - b) % math.tau + 1e-12)
-        )
-        if on_arc:
-            points.append((ox + radius * math.cos(angle), oy + radius * math.sin(angle)))
-    return points
+    return [start, mid, end, *sweep.axis_extreme_points()]
 
 
 def is_degenerate_closed_curve(points: list[Point]) -> bool:
