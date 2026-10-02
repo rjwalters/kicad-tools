@@ -139,6 +139,7 @@ __all__ = [
     "candidate_boxes",
     "conservative_access_bbox",
     "format_veto_report",
+    "net_class_trace_width",
 ]
 
 #: Ceiling on :func:`~kicad_tools.router.pad_access.compute_access_set` calls
@@ -292,6 +293,30 @@ def candidate_boxes(
         radius = via.diameter / 2 + dilation
         boxes.append((via.x - radius, via.y - radius, via.x + radius, via.y + radius))
     return tuple(boxes)
+
+
+def net_class_trace_width(router: Any, pad: Pad) -> float | None:
+    """Net-class trace width for ``pad``'s net, or ``None`` for the default.
+
+    An access set's stub width has to be the width the search would actually
+    use, or a caller would be reasoning about a corridor nobody routes through.
+    ``Autorouter.net_class_map`` is the router's own ``dict[str,
+    NetClassRouting]`` -- the same lookup the negotiated per-net width
+    resolution does.
+
+    Shared with :mod:`kicad_tools.router.access_ripup` (Epic #5508 Phase 3a) so
+    the commit gate and the rip-up targeting cannot disagree about the width
+    they are asking Phase 1a about.
+    """
+    net_class_map = getattr(router, "net_class_map", None)
+    if not net_class_map:
+        return None
+    net_name = str(getattr(pad, "net_name", ""))
+    if not net_name:
+        return None
+    net_class = net_class_map.get(net_name)
+    width = getattr(net_class, "trace_width", None) if net_class is not None else None
+    return float(width) if width else None
 
 
 def _round_up_to_cells(value: float, resolution: float) -> float:
@@ -722,21 +747,10 @@ class PadAccessInvariant:
     def _trace_width(self, pad: Pad, rules: DesignRules) -> float | None:
         """Net-class trace width for ``pad``'s net, or ``None`` for the default.
 
-        The access set's stub width has to be the width the search would
-        actually use, or the gate would protect a corridor nobody routes
-        through.  ``Autorouter.net_class_map`` is the router's own
-        ``dict[str, NetClassRouting]`` -- the same lookup the negotiated per-net
-        width resolution does.
+        Delegates to the module-level :func:`net_class_trace_width`, which Phase
+        3a's rip-up targeting shares, so the two cannot drift apart.
         """
-        net_class_map = getattr(self.router, "net_class_map", None)
-        if not net_class_map:
-            return None
-        net_name = str(getattr(pad, "net_name", ""))
-        if not net_name:
-            return None
-        net_class = net_class_map.get(net_name)
-        width = getattr(net_class, "trace_width", None) if net_class is not None else None
-        return float(width) if width else None
+        return net_class_trace_width(self.router, pad)
 
     def _pass_name(self) -> str:
         journal = getattr(self.router, "commit_journal", None)
