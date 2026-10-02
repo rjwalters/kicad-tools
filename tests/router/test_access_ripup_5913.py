@@ -533,3 +533,86 @@ def test_negotiated_run_recovers_a_strand_the_commit_gate_could_not_refuse():
     assert witnesses, "the sealed ISENSE net should have produced a witness"
     assert COMP_NET in {net for w in witnesses for net in w.blocking_nets}
     assert ("U3", "1") in {pad for w in witnesses for pad in w.stranded_pads}
+
+
+def _boxed_in_router():
+    """A pad surrounded by a four-pad ring whose own net also routes through it.
+
+    Lifted verbatim from ``tests/router/test_placement_delta_feedback.py``'s
+    ``_ROTATED_PAD_BOARD``, which built it as a *reliably unroutable* fixture:
+    ``N1`` runs A(2,10) -> B(10,10), and ``B.1`` sits at the dead centre of
+    ``BOX``'s plus-shaped ring (``BX.1``..``BX.4`` at (10,10) +/- 1.5).  Once
+    ``BOX``'s own intra-ring copper lands, ``B.1`` has no legal first move left
+    and ``N1`` cannot be connected -- which is precisely the access-loss shape,
+    found independently of this epic.
+    """
+    # Same construction as the placement-delta fixture: stock rules, and a
+    # per-net node cap so a hopeless net gives up deterministically instead of
+    # falling back to the slow pure-Python A* (issue #3881).
+    router = Autorouter(width=20, height=20, per_net_iterations=20_000)
+    _add_pad(router, "A", "1", 2.0, 10.0, 1, "N1", width=0.5, height=0.5)
+    _add_pad(router, "B", "1", 10.0, 10.0, 1, "N1", width=0.5, height=0.5)
+    ring = {"1": (10.0, 8.5), "2": (10.0, 11.5), "3": (8.5, 10.0), "4": (11.5, 10.0)}
+    for pin, (x, y) in ring.items():
+        _add_pad(router, "BX", pin, x, y, 2, "BOX", width=1.4, height=1.4)
+    return router
+
+
+@pytest.mark.slow
+def test_boxed_in_pad_is_freed_by_ripping_the_sealing_net():
+    """The witness names the sealing net on a board nothing else could attribute.
+
+    Pre-#5913 this board has no way to name ``BOX`` as ``N1``'s blocker: the
+    sealing copper is legal and unshared, so it emits no overflow for
+    overuse-based rip-up to find, and ``B.1``'s enclosure does not sit on the
+    A->B direct line in a way the Bresenham scan attributes to ``BOX``.  With
+    Phase 3a on, the witness reports ``B.1`` sealed, names the four ring pads and
+    ``BOX``'s intra-ring copper as the closing copper, and hands ``BOX`` to the
+    existing ``targeted_ripup`` as a target.
+
+    This is the fixture that turned up
+    ``test_composed_rotate_preserves_pad_angle_consistency``'s stale
+    precondition -- recorded here as the positive assertion, so the behaviour
+    change is pinned rather than only opted out of over there.  Whether the loop
+    ultimately *keeps* the rescued state is the best-metric early-stop policy's
+    decision (#3101), not this phase's, so it is deliberately not asserted; the
+    end-to-end "both nets land, 0 clearance violations" outcome is the one the
+    placement-delta fixture reaches with the invariant left on.
+    """
+    router = _boxed_in_router()
+    router.route_all_negotiated(
+        max_iterations=4,
+        timeout=120,
+        per_net_timeout=15,
+        use_targeted_ripup=True,
+    )
+
+    witnesses = router.access_loss_witnesses
+    assert witnesses, "B.1 should have been reported as sealed in"
+    assert ("B", "1") in {pad for w in witnesses for pad in w.stranded_pads}
+    # BOX is route copper of a net the loop owns -> a legitimate target.
+    assert 2 in {net for w in witnesses for net in w.blocking_nets}
+    # The witness saw the real enclosure, not an incidental passing trace: all
+    # four ring pads are in the closing copper it attributed the seal to.
+    refs = {ref for w in witnesses for ref in w.closing_refs}
+    assert {"BX.1", "BX.2", "BX.3", "BX.4"} <= refs, refs
+
+
+def test_boxed_in_pad_stays_stranded_with_the_invariant_off():
+    """The same board, opt-out on: pre-#5913 behaviour, verbatim.
+
+    ``--no-pad-access-invariant`` has to restore the old targeting exactly --
+    this is the control for the test above and for
+    ``test_composed_rotate_preserves_pad_angle_consistency``'s opt-out.
+    """
+    router = _boxed_in_router()
+    router.enable_pad_access_invariant = False
+    router.route_all_negotiated(
+        max_iterations=4,
+        timeout=120,
+        per_net_timeout=15,
+        use_targeted_ripup=True,
+    )
+
+    assert router.access_loss_targeter is None
+    assert router.access_loss_witnesses == []

@@ -1270,6 +1270,21 @@ class TestComposedDeltaFeedbackIntegration:
         pcb = _rotated_pad_board(tmp_path)
         router = self._build_router(pcb)
 
+        # Issue #5913 (Epic #5508 Phase 3a): this fixture's non-convergence
+        # precondition below is "a pad is boxed in and the loop cannot free it",
+        # which is exactly the strand access-loss rip-up targeting now RESCUES --
+        # the witness names ``BOX``'s copper as sealing ``B.1`` (net ``N1``) in,
+        # rips it, and the loop reaches 2/2 connected with 0 clearance
+        # violations, so ``route_with_placement_delta_feedback`` exits
+        # ``pd_converged`` and never reaches the apply branch this test is about.
+        # The subject here is the composed rotate applicator's pad-angle
+        # consistency (#4518/#4560), not access-loss recovery, so pin the
+        # pre-#5913 routing behaviour with the documented opt-out rather than
+        # re-tuning the shared fixture's geometry.  The rescue itself is asserted
+        # positively in ``tests/router/test_access_ripup_5913.py`` ->
+        # ``test_boxed_in_pad_is_freed_by_ripping_the_sealing_net``.
+        router.enable_pad_access_invariant = False
+
         ub = next(fp for fp in pcb.footprints if fp.reference == "UB")
         fp_before = ub.rotation
         pad_before = [pad.rotation for pad in ub.pads]
