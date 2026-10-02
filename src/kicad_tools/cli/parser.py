@@ -4709,6 +4709,32 @@ def _add_route_parser(subparsers) -> None:
         ),
     )
     route_parser.add_argument(
+        "--ripup-strategy",
+        choices=["negotiated", "sequential-n1"],
+        default="negotiated",
+        help=(
+            "Outer rip-up strategy for the main routing loop (Issue #5894, "
+            "epic #5784 Phase 3 step 3). 'negotiated' (the default) is the "
+            "historical whole-set PathFinder-style loop: every net is "
+            "re-negotiated together across escalating congestion-cost "
+            "iterations. 'sequential-n1' is a KRT-style prototype: nets are "
+            "routed one at a time in order, and a failing net attributes its "
+            "blockers via relaxed-A* frontier analysis, escalating from "
+            "ripping its single top blocker to N+1 already-routed blockers "
+            "(never an unplaced net -- the 'slot-0 guard') with a soft "
+            "congestion cost on the vacated corridor for the rerouted "
+            "siblings, inside a per-attempt transaction that rolls back on "
+            "any sibling degradation. A whole-pass improvement gate compares "
+            "the result against a no-rip-up baseline pass and reverts to the "
+            "baseline if the rip-up pass is not at least as good (same or "
+            "more connections, no more vias). Prototype: default is "
+            "'negotiated' and stays so until 'sequential-n1' demonstrably "
+            "beats it on the board fleet -- see "
+            "docs/research/kct-route-ripup-experiment.md. "
+            "src/kicad_tools/router/sequential_ripup.py."
+        ),
+    )
+    route_parser.add_argument(
         "--no-auto-build-native",
         action="store_true",
         help=(

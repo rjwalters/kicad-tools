@@ -1796,6 +1796,21 @@ class Autorouter:
         # default) preserves the legacy priority-based ordering byte-for-byte.
         self._forced_net_order: list[int] | None = None
 
+        # Issue #5894 (Epic #5784 Phase 3, step 3): outer rip-up strategy
+        # for :meth:`route_all_negotiated`.  ``"negotiated"`` (the default)
+        # is the historical whole-set PathFinder-style loop below, untouched.
+        # ``"sequential-n1"`` dispatches to the KRT-style sequential N+1
+        # rip-up prototype in :mod:`kicad_tools.router.sequential_ripup`
+        # instead -- see that module's docstring.  Set via
+        # ``kct route --ripup-strategy sequential-n1``; CLI plumbing mirrors
+        # the ``_forced_net_order`` attribute-on-router pattern above (not a
+        # kwarg threaded through every ``route_all_negotiated(...)`` call
+        # site) precisely so every path that reaches ``route_all_negotiated``
+        # -- auto-layers, layer-escalation, the single-attempt tail --
+        # honours it by construction, instead of repeating the
+        # ``--order-method`` silent-no-op mistake from #5787 step 2 (#5908).
+        self._ripup_strategy: str = "negotiated"
+
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
         # routing so the SubGridRouter uses fine grid resolution for pads
@@ -10154,6 +10169,25 @@ class Autorouter:
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         self._run_subgrid_prepass()
 
+        # Issue #5894: ``--ripup-strategy sequential-n1`` replaces the whole
+        # negotiated loop below with the KRT-style sequential N+1 rip-up
+        # prototype.  Dispatched here (AFTER the three setup passes above,
+        # so escape/diff-pair/stub pre-passes still run identically either
+        # way) rather than per call site, so every one of the many internal
+        # callers of ``route_all_negotiated`` picks it up uniformly.  Default
+        # ``"negotiated"`` falls through to the unmodified loop below.
+        if getattr(self, "_ripup_strategy", "negotiated") == "sequential-n1":
+            from .sequential_ripup import route_all_sequential_ripup
+
+            return route_all_sequential_ripup(
+                self,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                seed=seed,
+                progress_callback=progress_callback,
+                checkpoint_callback=checkpoint_callback,
+            )
+
         flush_print("\n=== Negotiated Congestion Routing ===")
         flush_print(f"  Max iterations: {max_iterations}")
         if adaptive:
@@ -14451,6 +14485,7 @@ class Autorouter:
         present_cost_factor: float,
         per_net_timeout: float | None = None,
         reverse_search: bool = False,
+        failure_callback: Callable[[Pad, Pad], None] | None = None,
     ) -> list[Route]:
         """Route a single net in negotiated mode.
 
@@ -14461,6 +14496,20 @@ class Autorouter:
                 A* search within this net (Issue #1605)
             reverse_search: Reverse a two-terminal connection's search
                 direction, without adding a search or changing its budget.
+            failure_callback: Optional ``(source_pad, target_pad)`` callback
+                forwarded to :meth:`NegotiatedRouter.route_net_negotiated`
+                (Issue #2425), which fires it for every RSMT edge whose search
+                failed, was refused by the commit-time pad-access invariant,
+                or was short-circuited by the cumulative-timeout abort.
+                ``None`` (every pre-#5894 caller) is byte-identical to the
+                previous behaviour: the negotiated loop reads its failures from
+                overflow and its own rip-up bookkeeping instead.  The
+                ``sequential-n1`` prototype (#5894) passes one because the
+                route-COUNT proxy ``len(routes) >= len(pads) - 1`` is too loose
+                to serve as a per-net success test -- intra-IC and
+                block-internal routes count toward it, so a net with failed
+                inter-pad edges can still clear the bar and never trigger the
+                rip-up escalation that is the whole point of that strategy.
         """
         # Issue #4170 (Phase 2b-1): bare boundary stub terminals are additive
         # per-net targets on the negotiated per-net chokepoint too.
@@ -14548,6 +14597,7 @@ class Autorouter:
             present_cost_factor,
             mark_route,
             per_net_timeout=per_net_timeout,
+            failure_callback=failure_callback,
         )
         routes.extend(new_routes)
         return routes
@@ -15762,6 +15812,45 @@ class Autorouter:
         # Issue #2587 / Epic #2556 Phase 1C-cont: Activate diff-pair partner
         # threading before two-phase routing begins.
         self._prepare_routing()
+
+        # Issue #5894: ``--ripup-strategy sequential-n1`` must reach THIS path
+        # too, not only ``route_all_negotiated``.  ``kct route`` sends every
+        # escape-routed board here (``route_with_escape`` ->
+        # ``route_all_two_phase`` -> ``TwoPhaseRouter._detailed_negotiated``),
+        # which is a SEPARATE detailed-routing loop that never calls
+        # ``route_all_negotiated`` -- so dispatching only there left the flag a
+        # silent no-op on every dense/4-layer board.  That is exactly the
+        # #5908 shape step 2's ``--order-method`` hit (and the same reason
+        # ``TwoPhaseRouter`` has to be handed ``forced_net_order`` explicitly:
+        # it never sees the ``Autorouter``).  The first #5894 fleet run
+        # measured it on board 03: the banner never printed and both arms
+        # produced identical A* call counts.
+        #
+        # The prototype replaces the global-corridor Phase 1 as well as the
+        # detailed Phase 2 -- a KRT-style sequential router has no notion of
+        # reserved corridors -- so the measured delta on a two-phase board is
+        # "sequential N+1 rip-up, no global corridors" vs. "negotiated with
+        # global corridors".  That confound is deliberate and is recorded in
+        # ``docs/research/kct-route-ripup-experiment.md``; the alternative
+        # (threading the strategy into ``TwoPhaseRouter`` as yet another
+        # callable hook) would measure a hybrid neither tool actually runs.
+        if getattr(self, "_ripup_strategy", "negotiated") == "sequential-n1":
+            from .sequential_ripup import route_all_sequential_ripup
+
+            flush_print(
+                "  Two-phase path: --ripup-strategy sequential-n1 bypasses the "
+                "global-corridor phase (issue #5894)"
+            )
+            result = route_all_sequential_ripup(
+                self,
+                timeout=timeout,
+                per_net_timeout=per_net_timeout,
+                progress_callback=progress_callback,
+                checkpoint_callback=checkpoint_callback,
+            )
+            self._commit_journal.set_context(PASS_POST, 0)
+            self._finalize_routing()
+            return result
 
         # Issue #4730: this path reaches a relief rescue too -- the #3471
         # stall-relief hook wired in ``_create_two_phase_router`` calls

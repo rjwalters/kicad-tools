@@ -909,6 +909,14 @@ def run_route_command(args) -> int:
     # so only forward an explicitly-provided value (matches the --seed pattern).
     if getattr(args, "order_method", None) is not None:
         sub_argv.extend(["--order-method", str(args.order_method)])
+    # Issue #5894: forward --ripup-strategy to the inner parser.  Default is
+    # "negotiated" (existing whole-set loop, unchanged), so only forward an
+    # explicitly-provided non-default value (matches the --order-method
+    # pattern above -- this outer->inner forwarding list is the THIRD site
+    # (besides parser.py and route_cmd.py's _route_parser) that must know
+    # about a new route flag, per tests/test_cli_parser_drift.py).
+    if getattr(args, "ripup_strategy", "negotiated") != "negotiated":
+        sub_argv.extend(["--ripup-strategy", str(args.ripup_strategy)])
     # Issue #3054 (Phase 2 of #3045): forward --region-parallel and partition
     # tuning flags to the inner parser.  All four flags are opt-in and only
     # forwarded when set to non-default values, so existing scripts using
