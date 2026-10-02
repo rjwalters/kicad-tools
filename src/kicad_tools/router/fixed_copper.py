@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Any
 
+from ..core.arcs import arc_sweep
 from .fixed_copper_kernel import KernelFill, fixed_fill_clear, kernel_fill, polygon_rings
 
 logger = logging.getLogger(__name__)
@@ -303,38 +304,15 @@ def _arc_extremes(points: list[tuple[float, float]]) -> list[tuple[float, float]
     The three authored points alone do NOT bound an arc (it bulges outside
     their hull), so this adds the axis extremes of the circumscribed circle
     that the swept angle actually reaches. Collinear (degenerate) points
-    describe a straight segment, which the authored points do bound.
+    describe a straight segment, which the authored points do bound -- so a
+    degenerate arc degrades to them here rather than refusing the board the
+    way the Edge.Cuts outline reader does (#5863).
     """
-    (x1, y1), (x2, y2), (x3, y3) = points
-    det = 2.0 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
-    if abs(det) < 1e-12:
+    start, mid, end = points
+    sweep = arc_sweep(start, mid, end)
+    if sweep is None:
         return points
-    s1, s2, s3 = x1 * x1 + y1 * y1, x2 * x2 + y2 * y2, x3 * x3 + y3 * y3
-    cx = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / det
-    cy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / det
-    radius = math.hypot(x1 - cx, y1 - cy)
-    if not math.isfinite(radius):
-        return points
-
-    def sweep(angle: float) -> float:
-        return angle % (2.0 * math.pi)
-
-    a_start = math.atan2(y1 - cy, x1 - cx)
-    a_mid = sweep(math.atan2(y2 - cy, x2 - cx) - a_start)
-    a_end = sweep(math.atan2(y3 - cy, x3 - cx) - a_start)
-    # KiCad stores the arc through its midpoint, so the swept direction is
-    # whichever one reaches ``mid`` before ``end``.
-    counter_clockwise = a_mid <= a_end
-    if a_end == 0.0:
-        counter_clockwise, a_end = True, 2.0 * math.pi
-    extremes = list(points)
-    for quadrant in range(4):
-        angle = quadrant * math.pi / 2.0
-        offset = sweep(angle - a_start) if counter_clockwise else sweep(a_start - angle)
-        limit = a_end if counter_clockwise else 2.0 * math.pi - a_end
-        if offset <= limit:
-            extremes.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
-    return extremes
+    return [*points, *sweep.axis_extreme_points()]
 
 
 def _primitive_bound(node, reference: str, pad_number: str):
