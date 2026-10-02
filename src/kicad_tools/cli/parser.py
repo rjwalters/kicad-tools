@@ -4514,23 +4514,33 @@ def _add_route_parser(subparsers) -> None:
     route_parser.add_argument(
         "--placement-delta-feedback",
         action="store_true",
-        default=False,
+        default=None,
         help=(
-            "After the initial routing pass, if any nets remain unrouted, run "
-            "the classifier-driven placement-DELTA feedback loop: classify the "
-            "routed board, translate each PLACEMENT_BOUND / CONGESTION_SATURATED "
-            "diagnosis into a concrete placement delta (translate or 180-degree "
-            "rotation), apply the top applyable one, re-route, and keep it only "
-            "on a strict routed-net increase. Connectors (J*, P*) and locked "
-            "footprints are auto-anchored. Writes "
-            "<output>_placement_delta.json. Issue #4468."
+            "Force the classifier-driven placement-DELTA feedback loop on, "
+            "whatever the routing plan says: classify the routed board, "
+            "translate each PLACEMENT_BOUND / CONGESTION_SATURATED diagnosis "
+            "into a concrete placement delta (translate, rotation, mirror or a "
+            "declared swap group's pin permutation), apply the top applyable "
+            "one, re-route, and keep it only on a strict routed-net increase "
+            "with no clearance, pairwise-creepage or keepout regression. "
+            "Connectors (J*, P*) and locked footprints are auto-anchored; "
+            "moves are capped by --placement-feedback-max-movement. Writes "
+            "<output>_placement_delta.json. DEFAULT (neither flag given) is "
+            "AUTO: the loop runs only when the routing plan reports the board "
+            "INFEASIBLE (overflow_report.feasible false) and nets remain "
+            "unrouted -- a feasible plan is left byte-identical. Issues #4468, "
+            "#5890."
         ),
     )
     route_parser.add_argument(
         "--no-placement-delta-feedback",
         dest="placement_delta_feedback",
         action="store_false",
-        help="Explicitly disable classifier-driven placement-delta feedback (default).",
+        help=(
+            "Never run classifier-driven placement-delta feedback, even when "
+            "the routing plan reports the board infeasible (opts out of the "
+            "#5890 auto default)."
+        ),
     )
     route_parser.add_argument(
         "--placement-delta-feedback-budget",

@@ -1953,15 +1953,18 @@ def board_trace_routes(board_path: str | Path) -> list[Route]:
     ]
 
 
-def board_pad_geometry(board_path: str | Path) -> tuple[PadGeometry, ...]:
-    """Every connected pad's true copper polygon, sheet-absolute (issue #4507).
+def pcb_pad_geometry(pcb: Any) -> tuple[PadGeometry, ...]:
+    """Every connected pad's true copper polygon of an **in-memory** board.
 
-    ``PCB.load`` reports footprint (and therefore pad) positions
-    **board-relative** (see :func:`board_attach_zones`'s docstring for the
-    full frame explanation); this shifts every pad polygon by the same
-    ``board_origin`` :func:`board_attach_zones` already applies, so it lines
-    up with :func:`board_trace_routes`' segments/vias in the same file's own
-    sheet-absolute frame.
+    Factored out of :func:`board_pad_geometry` (Issue #5890) so a caller that
+    already holds a mutated :class:`~kicad_tools.schema.pcb.PCB` -- the
+    placement-delta feedback loop, whose whole job is to move footprints
+    in memory -- scores creepage with the identical geometry and frame the
+    on-disk audit uses, instead of saving a scratch board to re-read it.
+
+    Pads are shifted board-relative -> sheet-absolute by ``pcb.board_origin``,
+    exactly as :func:`board_attach_zones` / :func:`board_trace_routes` do, so
+    every consumer in this module shares one frame.
 
     Unconnected (net-less) pads are skipped -- they cannot participate in a
     net-pair requirement.  A degenerate (non-positive-size) pad is skipped by
@@ -1969,10 +1972,8 @@ def board_pad_geometry(board_path: str | Path) -> tuple[PadGeometry, ...]:
     """
     from shapely.affinity import translate  # type: ignore[import-untyped]
 
-    from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.rules.clearance import _pad_polygon
 
-    pcb = PCB.load(str(board_path))
     ox, oy = pcb.board_origin
     out: list[PadGeometry] = []
     for footprint in pcb.footprints:
@@ -1990,6 +1991,121 @@ def board_pad_geometry(board_path: str | Path) -> tuple[PadGeometry, ...]:
                 )
             )
     return tuple(out)
+
+
+def board_pad_geometry(board_path: str | Path) -> tuple[PadGeometry, ...]:
+    """Every connected pad's true copper polygon, sheet-absolute (issue #4507).
+
+    ``PCB.load`` reports footprint (and therefore pad) positions
+    **board-relative** (see :func:`board_attach_zones`'s docstring for the
+    full frame explanation); this shifts every pad polygon by the same
+    ``board_origin`` :func:`board_attach_zones` already applies, so it lines
+    up with :func:`board_trace_routes`' segments/vias in the same file's own
+    sheet-absolute frame.
+
+    The file-reading wrapper around :func:`pcb_pad_geometry`; the two cannot
+    disagree about pad geometry or frame by construction.
+    """
+    from kicad_tools.schema.pcb import PCB
+
+    return pcb_pad_geometry(PCB.load(str(board_path)))
+
+
+def _shared_pad_layer(pad_a: PadGeometry, pad_b: PadGeometry) -> tuple[bool, str | None]:
+    """Layer to probe a #4506 exemption at for a pad-vs-pad pair (Issue #5890).
+
+    Returns ``(applicable, layer)``.  ``applicable`` is ``False`` when the two
+    pads provably share **no** copper layer (the pair cannot conflict and must
+    be skipped).  Otherwise ``layer`` is ``None`` for a layer-agnostic pair
+    (either side is through-hole / layer-unknown, or they share more than one
+    layer) -- the same convention :func:`_pad_probe_layer` and
+    :func:`_copper_pair_violation` already use -- or the shared layer name.
+    """
+    a_any = not pad_a.layers or ALL_COPPER_LAYERS in pad_a.layers
+    b_any = not pad_b.layers or ALL_COPPER_LAYERS in pad_b.layers
+    if a_any or b_any:
+        return True, None
+    shared = {_norm_layer_key(name) for name in pad_a.layers} & {
+        _norm_layer_key(name) for name in pad_b.layers
+    }
+    if not shared:
+        return False, None
+    if len(shared) != 1:
+        return True, None
+    return True, next(iter(shared))
+
+
+def pad_pairwise_violations(
+    pads: Sequence[PadGeometry],
+    table: PairwiseClearanceTable | None,
+    *,
+    dru: float | None = None,
+    attach_zones: Sequence[AttachZone] = (),
+    tolerance: float = _PASS_TOLERANCE,
+) -> list[PairwiseViolation]:
+    """Pad-vs-pad pairwise (creepage) shortfalls of a **placement** (Issue #5890).
+
+    The one pairwise check no routing-time gate can make: every other consumer
+    in this module scores *copper the router produced*, so it is blind to two
+    cross-domain **pads** that a placement change pushed inside each other's
+    creepage requirement.  That is exactly the failure mode a bounded placement
+    move can introduce -- the move is legal by board bounds, keeps every net
+    routable, and still destroys the isolation the voltage map declares.
+
+    Dormant by construction: ``table is None`` (no ``--voltage-map`` installed)
+    returns ``[]``, and a pair whose requirement does not exceed the scalar
+    floor is skipped before any geometry is touched -- so a board with no HV /
+    signal-spacing table pays nothing and behaves byte-identically.
+
+    Args:
+        pads: Pad copper to scan, from :func:`pcb_pad_geometry` /
+            :func:`board_pad_geometry` (both sheet-absolute).
+        table: The pairwise requirement table, or ``None``.
+        dru: Scalar clearance floor (mm); defaults to ``table.dru``.
+        attach_zones: #4506 rated-footprint exemption regions, so a deliberately
+            domain-bridging package (tap resistor, optocoupler, TO-220) is not
+            reported as a fail.
+        tolerance: Sub-micron pass tolerance, as elsewhere in this module.
+
+    Returns:
+        Every pad-vs-pad shortfall, deterministically ordered (input order).
+    """
+    if table is None:
+        return []
+    materialised = list(pads)
+    if len(materialised) < 2:
+        return []
+    floor = table.dru if dru is None else dru
+    bounds = [pad.polygon.bounds for pad in materialised]
+    out: list[PairwiseViolation] = []
+    for i in range(len(materialised)):
+        pad_a = materialised[i]
+        for j in range(i + 1, len(materialised)):
+            pad_b = materialised[j]
+            if _norm_net_key(pad_a.net_name) == _norm_net_key(pad_b.net_name):
+                continue
+            required = table.required_clearance(pad_a.net_name, pad_b.net_name)
+            if required <= floor + tolerance:
+                continue
+            if _aabb_gap(bounds[i], bounds[j]) >= required:
+                continue
+            applicable, layer = _shared_pad_layer(pad_a, pad_b)
+            if not applicable:
+                continue
+            violation = _copper_pair_violation(
+                pad_a.polygon,
+                pad_a.net_name,
+                pad_b.polygon,
+                pad_b.net_name,
+                layer,
+                table,
+                floor=floor,
+                attach_zones=attach_zones,
+                tolerance=tolerance,
+            )
+            if violation is not None:
+                out.append(violation)
+    return out
 
 
 def board_pairwise_violations(

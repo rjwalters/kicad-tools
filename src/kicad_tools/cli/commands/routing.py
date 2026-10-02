@@ -846,8 +846,16 @@ def run_route_command(args) -> int:
     # Issue #4468: forward the classifier-driven placement-DELTA feedback
     # flags.  Budget is forwarded only when non-default so a run that never
     # asked for the loop stays byte-identical to the pre-#4468 sub-invocation.
-    if getattr(args, "placement_delta_feedback", False):
+    #
+    # Issue #5890: the toggle is now TRI-state -- ``None`` means "auto, decided
+    # by the routing plan's feasibility".  Forward only an EXPLICIT choice, in
+    # whichever direction it was made; ``None`` forwards nothing so the
+    # sub-invocation reaches the same auto default this one did.
+    _delta_feedback_choice = getattr(args, "placement_delta_feedback", None)
+    if _delta_feedback_choice is True:
         sub_argv.append("--placement-delta-feedback")
+    elif _delta_feedback_choice is False:
+        sub_argv.append("--no-placement-delta-feedback")
     if getattr(args, "placement_delta_feedback_budget", 3) != 3:
         sub_argv.extend(
             [

@@ -538,7 +538,11 @@ class TestCliPlacementDeltaWiring:
 
         parser = create_parser()
         args = parser.parse_args(["route", "b.kicad_pcb", "--placement-delta-feedback-budget", "2"])
-        assert args.placement_delta_feedback is False  # opt-in
+        # Issue #5890 (Epic #5511 Phase 3): the toggle is tri-state and the
+        # default is the AUTO sentinel ``None`` -- "decide from the routing
+        # plan's feasibility verdict" -- not a hard-coded opt-in ``False``.
+        # ``tests/test_placement_delta_auto_gate_5890.py`` owns the gate itself.
+        assert args.placement_delta_feedback is None
         args = parser.parse_args(["route", "b.kicad_pcb", "--placement-delta-feedback"])
         assert args.placement_delta_feedback is True
         assert args.placement_delta_feedback_budget == 3
