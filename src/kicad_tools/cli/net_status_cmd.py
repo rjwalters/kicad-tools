@@ -119,6 +119,17 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--allow-stranded-pour-pads",
+        action="store_true",
+        dest="allow_stranded_pour_pads",
+        help=(
+            "Treat nets that are incomplete ONLY as pour/plane residuals as "
+            "advisory for the exit code (Issue #5785). By default a pad "
+            "stranded on a pour is a completion failure (exit 2), matching "
+            "kicad-cli and `kct route`. Also KCT_ALLOW_STRANDED_POUR_PADS=1."
+        ),
+    )
+    parser.add_argument(
         "--why",
         action="store_true",
         help=(
@@ -211,7 +222,24 @@ def main(argv: list[str] | None = None) -> int:
     # Exit code. Deliberately BOARD-WIDE even under --net (issue #4682 kept
     # this unchanged to avoid breaking script consumers; documented in the
     # --net help text).
-    if result.incomplete_count > 0 or result.unrouted_count > 0:
+    return exit_code_for(result, getattr(args, "allow_stranded_pour_pads", False))
+
+
+def exit_code_for(result: NetStatusResult, allow_stranded_pour_pads: bool = False) -> int:
+    """Board-wide exit code (Issue #5785: one verdict with kicad-cli/`kct route`).
+
+    A pad stranded on a pour fails (2), exactly as kicad-cli reports it as an
+    unconnected item, unless the user explicitly opts in to treating
+    pour-only residuals as advisory.
+    """
+    from kicad_tools.router.completion_verdict import allow_stranded_pour_pads as _allowed
+
+    incomplete = (
+        result.blocking_incomplete_count
+        if _allowed(allow_stranded_pour_pads)
+        else result.incomplete_count
+    )
+    if incomplete > 0 or result.unrouted_count > 0:
         return 2
     return 0
 
