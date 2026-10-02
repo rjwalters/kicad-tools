@@ -573,3 +573,36 @@ def test_aggregate_only_deferral_is_not_a_collapse():
         "the collapse skip; the #3270 promotion still runs. Strategy saw "
         f"_budget_exit_diff_nets={promotion_at_strategy['nets']}"
     )
+
+
+def test_pose_search_honours_a_spent_wall_clock_budget(monkeypatch):
+    """Issue #5895: a wall-clock budget-exit must not pay for a pose search.
+
+    The #3089 contract is that a pair whose ``per_pair_timeout`` fired
+    defers promptly to the main strategy.  With the pose-centerline search
+    on (the default since #5895) the search gets only what is left of that
+    budget -- here nothing -- so it is skipped and the collapse path above
+    is unchanged.
+    """
+    import kicad_tools.router.diffpair_pose as diffpair_pose
+
+    calls: list[object] = []
+
+    def _record(*args: object, **kwargs: object) -> None:
+        calls.append(kwargs.get("timeout_seconds"))
+        return None
+
+    monkeypatch.setattr(diffpair_pose, "route_centerline_pose", _record)
+    router = _hard_single_pair_router()
+    router._diffpair.enable_pose_centerline = True
+    config = DifferentialPairConfig(enabled=True, spacing=0.8)
+
+    router._diffpair.route_all_with_diffpairs(
+        config,
+        coupled_only=True,
+        per_pair_timeout=0.001,
+        non_diffpair_strategy=lambda: [],
+    )
+
+    assert calls == [], f"pose search ran on a spent wall-clock budget: {calls}"
+    assert router._diffpair._last_budget_exit_pair_names == ["DP"]
