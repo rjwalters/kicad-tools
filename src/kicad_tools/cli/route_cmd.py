@@ -5278,6 +5278,32 @@ def _apply_cross_package_pair_corridor(router: "Autorouter", args) -> None:
         router.enable_cross_package_pair_corridor = True
 
 
+def _apply_ripup_strategy(router: "Autorouter", args) -> None:
+    """Select the outer rip-up strategy for ``route_all_negotiated`` (Issue #5894).
+
+    Default ``"negotiated"`` leaves ``router._ripup_strategy`` at its
+    constructor default -- byte-identical to pre-#5894 main.  When
+    ``--ripup-strategy sequential-n1`` is passed, stashes the choice on
+    ``router._ripup_strategy``, which ``Autorouter.route_all_negotiated``
+    reads at the top of its body (mirroring the ``_forced_net_order``
+    attribute-on-router pattern ``_apply_order_method`` above uses).
+
+    This function is called from every attempt helper that loads a router
+    before routing begins -- the auto-layers attempt, the rule-relaxation
+    attempt, the combined attempt, and the single-attempt tail -- exactly
+    the same four call sites ``_apply_bundle_river_planner`` /
+    ``_apply_monotone_certificate_order`` already use.  Setting the
+    attribute once, read unconditionally inside ``route_all_negotiated``
+    itself, means every one of that method's many internal callers honours
+    the flag by construction: there is no second code path (auto-layers'
+    own net-order application point, say) that could silently skip it the
+    way ``--order-method`` first did on the escalation paths (#5908).
+    """
+    strategy = getattr(args, "ripup_strategy", "negotiated")
+    if strategy and strategy != "negotiated":
+        router._ripup_strategy = strategy
+
+
 def _apply_slack_corridor_widening(router: "Autorouter", args) -> None:
     """Enable slack-corridor widening when requested (Issue #4092).
 
@@ -8311,6 +8337,7 @@ def route_with_layer_escalation(
         _apply_slack_corridor_widening(router, args)
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
+        _apply_ripup_strategy(router, args)
         # Issue #5787: --order-method crossing (the single-attempt tail's
         # _apply_order_method is unreachable under the default --auto-layers).
         _apply_crossing_order_escalation(router, args, quiet=quiet)
@@ -9462,6 +9489,7 @@ def route_with_rule_relaxation(
         _apply_slack_corridor_widening(router, args)
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
+        _apply_ripup_strategy(router, args)
         # Issue #5787: --order-method crossing (see the layer-escalation path).
         _apply_crossing_order_escalation(router, args, quiet=quiet)
 
@@ -11857,6 +11885,7 @@ def route_with_combined_escalation(
             _apply_slack_corridor_widening(router, args)
             _apply_escape_corridor_reservation(router, args)
             _apply_pad_access_invariant(router, args)
+            _apply_ripup_strategy(router, args)
             # Issue #5787: --order-method crossing (see layer-escalation path).
             _apply_crossing_order_escalation(router, args, quiet=quiet)
 
@@ -14915,6 +14944,21 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ripup-strategy",
+        choices=["negotiated", "sequential-n1"],
+        default="negotiated",
+        help=(
+            "Outer rip-up strategy for the main routing loop (Issue #5894, "
+            "epic #5784 Phase 3 step 3). 'negotiated' (the default) is the "
+            "historical whole-set PathFinder-style loop. 'sequential-n1' is "
+            "a KRT-style prototype dispatched via "
+            "``Autorouter._ripup_strategy`` (see "
+            "src/kicad_tools/router/sequential_ripup.py). Mirror of the "
+            "outer ``parser.py`` flag; both sites must stay in sync per "
+            "the --order-method precedent above."
+        ),
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -17363,6 +17407,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_slack_corridor_widening(router, args)
     _apply_escape_corridor_reservation(router, args)
     _apply_pad_access_invariant(router, args)
+    _apply_ripup_strategy(router, args)
 
     # Issue #3171: inject boosted analog routing class for --analog-nets /
     # --auto-analog selected nets (pour/ground nets are left untouched).
