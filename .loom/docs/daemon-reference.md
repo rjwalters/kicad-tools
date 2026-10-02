@@ -3198,31 +3198,56 @@ old→new-SHA comment, then swaps the verdict label (plus the per-tree companion
 | Head SHA unreadable | `Keep(NoHeadSha)` — fail safe. |
 | `loom:blocked` / `loom:operator` / `loom:operator-only` | `Keep(Held)` — still stale, but clearing would silently un-park a PR an operator (or Champion's capped-PR recovery pass) deliberately held. |
 | Force-push vs. new commits | Not distinguished, deliberately. Any head move invalidates the verdict; an appended commit is as much "not the tree that was reviewed" as a rebase. |
-| Head moved but the **tree** did not | `handle_invalidate` re-anchors instead of clearing (#9124) — see below. |
+| Head moved but the **change did not** | `handle_invalidate` re-anchors instead of clearing (#9124, #9416) — see below. |
 
-#### The tree-identical head move is not a stale verdict (#9124, #9576)
+#### An equivalent head move is not a stale verdict (#9124, #9576, #9416)
 
 `decide_verdict` stays a pure function: any head move off the marker SHA is
 `Invalidate`, with no inference from commit message, author or ref-update shape.
-The one carve-out sits strictly *downstream* of that answer and runs on
-**evidence**: `forge_tree_unchanged::tree_unchanged` asks GitHub's own
-`compare/{marker}...{head}`, and `files: []` **together with** `status`
-`identical` or `ahead` proves the two commits' trees are byte-for-byte identical.
-`files: []` alone does not: the three-dot compare diffs the merge-base, so a head
-force-pushed *back* to an ancestor reads `behind` with no files although the trees
-differ, and `diverged` has the same hole — both invalidate (PR #9581 review). When
-equality is proven the reviewed code *is* what is at the new head, so
-clearing the verdict buys a full extra Judge cycle and nothing else. The measured
-cause on this repo is the `#8248` required-check-freshness guard's automated
-`chore: re-date required checks …` commit (#8508).
+The carve-out sits strictly *downstream* of that answer and runs on **evidence**.
+A review verdict is a statement about **the change the PR makes**, not about a
+commit id, so `verdict_equivalence::detect` re-derives — from git objects and the
+forge's own compare endpoint, never from a comment or marker — whether the
+reviewed change is still the change in front of it. Three kinds, tried in this
+order:
+
+| Kind | Carried when | Computed by |
+|------|--------------|-------------|
+| `tree` (#9124, #9576) | the two heads' trees are byte-identical | `forge_tree_unchanged::tree_unchanged` — `compare/{marker}...{head}` reporting `files: []` **together with** `status` `identical`/`ahead` |
+| `clean-merge` (#9416) | the head is a two-parent merge whose **first** parent is the reviewed head, whose second parent is a commit on the PR's base branch, and whose tree equals `git merge-tree --write-tree <reviewed> <base-parent>` — so no hand edits and no conflict resolution | `verdict_equivalence::clean_merge`, local git (never fetches; an absent object is no answer) |
+| `rebase-patch-identical` (#9416) | the PR's own merge-base-relative patch is byte-identical before and after the move — same file set, statuses, resulting blob ids and patch text | `verdict_equivalence::patch_identity`, comparing `compare/{base}...{reviewed}` with `compare/{base}...{head}` |
+
+`files: []` alone proves nothing for the `tree` kind: the three-dot compare diffs
+the merge-base, so a head force-pushed *back* to an ancestor reads `behind` with
+no files although the trees differ, and `diverged` has the same hole — both
+invalidate (PR #9581 review). The `rebase-patch-identical` kind has the matching
+hole and the matching refusal: two **empty** merge-base-relative diffs only say
+"each head equals its own merge base", and those bases can differ, so that answers
+*no* rather than *yes*; so does any changed file whose `patch` the endpoint omitted
+(binary content, or a diff too large to serialize — no byte evidence either way),
+and so does a `files` array at the endpoint's 300-entry cap, which may be
+truncated.
+
+When any kind proves equivalence, the reviewed change *is* the change at the new
+head, so clearing the verdict buys a full extra Judge cycle and nothing else. The
+measured cause on this repo is the `#8248` required-check-freshness guard's
+automated `chore: re-date required checks …` commit (#8508); an audit of 16 merged
+PRs whose heads moved after approval found six moved heads — four clean fleet
+merges of `main`, two rebases — all six with byte-identical patches.
 
 | Property | Behavior |
 |----------|----------|
-| Kill switch | `LOOM_VERDICT_TREE_CARVEOUT` (`0`/`false`/`no`/`off` disables) — honoured by **both** paths, since it is read inside the shared module: the daemon pass (where it is nested inside `LOOM_VERDICT_STALENESS_RECONCILE`) and `forge tree-unchanged`, which with the switch off makes no compare call and exits 1 with no answer, so the shell guard invalidates too. Defaults **ON** — it can only ever *reduce* exposure, since it fires only on a positive proof of equality. |
-| Daemon pass | `reanchor_tree_unchanged_verdict` posts a marker for the new head and leaves the verdict label untouched. Nothing is disarmed: an armed auto-merge would land the reviewed tree. Counter: `VerdictReconcileStats::tree_identical_reanchors`. |
-| Shell guard | Reports `FRESH` (exit 0) with the reason naming the byte-identical trees, and writes nothing. It does **not** re-anchor — the marker write stays in the daemon — so it pays one compare call per pass until the periodic pass re-anchors. |
-| Comparison unavailable | `None` / no `TREE_UNCHANGED=1` line ⇒ **invalidate as before**. A `gh` failure, an unparsable response or one missing `status`/`files`, a ref the repo does not carry, an argument that is not a bare hex SHA, a non-GitHub forge, an absent `loom-daemon`, or one predating the verb all land here. Fail closed, in both paths. |
-| One implementation | `loom-daemon/src/forge_tree_unchanged.rs`. The daemon pass calls it in-process; the shell guard reaches it through `loom-daemon forge tree-unchanged <base> <head>` (prints `TREE_UNCHANGED=1|0`, exit 0; exit 1 = no answer). There is deliberately no copy of the comparison in shell — #9576 was caused by the shell guard having *no* tree comparison while the daemon had one, so PRs #9541/#9483 lost verdicts the daemon pass would have kept. |
+| CI is never exempted | Only the **review** carries over. Every required check re-runs against the new head, whichever kind applied — the base really did move, which is the point of the re-date remedy. Nothing in `verdict_equivalence` touches a check, a status, or an auto-merge arm. |
+| Kill switches | `LOOM_VERDICT_TREE_CARVEOUT` (`0`/`false`/`no`/`off`) disables **all three** kinds; `LOOM_VERDICT_EQUIVALENCE` is nested inside it and disables only #9416's `clean-merge` and `rebase-patch-identical`, leaving the `tree` kind in place. Both are read inside the shared module, so both paths honour them: the daemon pass (itself nested inside `LOOM_VERDICT_STALENESS_RECONCILE`) and `forge verdict-equivalent`, which with a switch off asks nothing and exits 1 with no answer, so the shell guard invalidates too. Default **ON** — each kind fires only on a positive proof and fails closed otherwise, so it can only ever *reduce* exposure. |
+| Daemon pass | `reanchor_equivalent_verdict` posts a `<!-- loom:verdict-sha … -->` marker for the new head plus a `<!-- loom:verdict-equivalence kind=… from=… to=… -->` audit line naming the kind, and leaves the verdict label untouched. Nothing is disarmed: an armed auto-merge would land the reviewed change. Counter: `VerdictReconcileStats::tree_identical_reanchors`. The equivalence marker is an audit record **only** — no code path reads it back as evidence, because a marker is prose anyone can write (#9548). |
+| Shell guard | Reports `FRESH` (exit 0) with the reason naming the kind, and writes nothing. It does **not** re-anchor — the marker write stays in the daemon — so it pays the comparison per pass until the periodic pass re-anchors. |
+| Comparison unavailable | `Indeterminate` / no `EQUIVALENCE_KIND=` line ⇒ **invalidate as before**. A `gh` failure, an unparsable/truncated/`files`-less compare, an unresolvable base ref, a missing git object, a shallow clone, a git predating `merge-tree --write-tree`, a `merge-tree` conflict, a cwd that is not a git repository, an argument that is not a bare hex SHA, a non-GitHub forge, an absent `loom-daemon`, or one predating the verb all land here. Fail closed, in both paths and for every kind. |
+| One implementation | `loom-daemon/src/verdict_equivalence/` (which calls `forge_tree_unchanged.rs` for kind 1 rather than copying it). The daemon pass calls `detect` in-process; the shell guard reaches it through `loom-daemon forge verdict-equivalent <pr> <reviewed> <head>` (prints `VERDICT_EQUIVALENT=1` + `EQUIVALENCE_KIND=<kind>`, or `VERDICT_EQUIVALENT=0`, exit 0 for both; exit 1 = no answer). There is deliberately no copy of any comparison in shell — #9576 was caused by the shell guard having *no* tree comparison while the daemon had one, so PRs #9541/#9483 lost verdicts the daemon pass would have kept. |
+| Champion's critical-file hold | The same verb makes the `#9016` operator release durable across an equivalent head move, instead of re-arming the hold on a diff the operator already signed off (`champion-critical-file-hold.md`; rationale in `critical-file-hold.md`). |
+
+`forge tree-unchanged <base> <head>` remains, unchanged, as the narrow
+tree-identical verb (`TREE_UNCHANGED=1|0`, exit 0; exit 1 = no answer);
+`forge verdict-equivalent` is its superset and is what the shell guard now calls.
 
 #### Attributing re-dates: commit trailers and `merge-pr redate-report` (#9746)
 
@@ -3302,8 +3327,8 @@ run through `.loom/scripts/verdict-staleness-guard.sh`, which takes `--clear` /
 decision, **not** the code this pass runs — they are two mechanisms that must be
 kept agreeing, and the two places they share an implementation are the ones that
 were too costly to duplicate: the #8900 auto-merge disarm (`loom-daemon forge
-disable-auto-merge`) and the #9124 tree-identical test (`loom-daemon forge
-tree-unchanged`, #9576). Callers:
+disable-auto-merge`) and the #9124/#9576 equivalence test (`loom-daemon forge
+verdict-equivalent`, #9416). Callers:
 judge.md's "Stale-Verdict Sweep" (step 0 of every pass),
 doctor.md's "Stale-Verdict Check" (before claiming from either priority queue),
 champion-pr-merge.md's "Verdict-State Janitor → Part 2" (before the 6 safety

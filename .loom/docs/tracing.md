@@ -169,6 +169,19 @@ The terminal checkpoint helper journals after its atomic write succeeds. It does
 not infer an earlier start or a missing verdict. A caller that bypasses that
 helper can provide only the phases that the daemon actually observes.
 
+`loom.attempt.worked` (#9420) is the companion a **duration** query needs:
+`"true"` when the span's interval measures an attempt that ran its stage's
+work, `"false"` when it provably does not (a role-runner tick that never
+launched a child session — `RoleTickResult::spawned()` is false — or a
+synthetic zero-duration completion, the two `loom.timing_source` values in
+`SYNTHETIC_TIMING_SOURCES`), and **absent** when undetermined. Absent is not
+`false`: an `exit_unobserved` close and a transcript-window carrier span say
+nothing either way, and guessing would publish a measurement that was never
+taken. Any percentile/dwell aggregate over `loom.role_attempt` must filter
+`loom.attempt.worked = "true"` — unconditioned, the `false` population
+dominates and the median collapses to milliseconds (see
+[`eta.md`](eta.md) § "Role-attempt stages: which percentile to read").
+
 `loom.role_attempt` spans have distinct IDs for retries. Explicit checkpoint
 attempt numbers are retained. Unknown usage remains absent; measured zero stays
 zero. Each attempt's token usage is a set of per-model `loom.runtime.usage`
@@ -212,9 +225,10 @@ span id is derived from the story root, `loom.role_tick`, the tick's execution
 id (`loom.sweep_id`) and the target (`pr:<M>` / `issue:<N>`), so a re-emit
 yields the same id. It carries `loom.role`, `loom.issue`, `loom.pr_number`
 (PR targets), `loom.story`, `loom.story.key_version`, `loom.repo`,
-`loom.result`, `loom.runtime`/`loom.model` when known, and
+`loom.result`, `loom.runtime`/`loom.model` when known,
 `loom.timing_source=tick` — its start and end are the whole tick's, not the
-individual action's — plus a link to the tick's own root. The spans are
+individual action's — and `loom.attempt.worked` derived from the tick's result
+label (#9420), plus a link to the tick's own root. The spans are
 appended to the tick's trace journal and drained like every lifecycle span.
 Its token usage is journalled as per-model `loom.runtime.usage` spans:
 `scope=execution` under the tick's own root, and `scope=attempt` under the

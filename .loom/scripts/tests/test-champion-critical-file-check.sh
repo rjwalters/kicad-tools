@@ -667,12 +667,23 @@ label_set() {
 # champion-critical-file-hold.md, mirroring its FAIL action table and its PASS
 # branch verbatim. Reads a newline-separated file list on stdin (same input
 # shape as champion_critical_file_check); $3 is the PR's current head SHA
-# (default "sha-A"), which is what the #9016 release is scoped to. Emits one
-# ACTION line per observable forge effect (comment posted, label added/removed)
-# so a test can assert on them without a live PR.
+# (default "sha-A"), which is what the #9016 release is recorded against.
+#
+# $4 stands in for `loom-daemon forge verdict-equivalent <pr> <recorded> <head>`
+# (#9416): the equivalence kind the verb would print for (state_head -> head_sha),
+# or EMPTY for "no answer / provably a different change", which is the fail-closed
+# arm the real tick keys on (it reads only an `EQUIVALENCE_KIND=` line, so an
+# absent binary, a `gh` outage, a merge-tree conflict and a kill switch all look
+# the same to it — empty). The comparison itself is deliberately NOT reimplemented
+# here, for the same reason the prompt does not reimplement it: one evidence
+# implementation, in loom-daemon/src/verdict_equivalence/, covered by its own
+# Rust tests.
+#
+# Emits one ACTION line per observable forge effect (comment posted, label
+# added/removed) so a test can assert on them without a live PR.
 champion_critical_file_hold_tick() {
-    local hold_state_file="$1" label_file="$2" head_sha="${3:-sha-A}"
-    local result state state_head label_now action
+    local hold_state_file="$1" label_file="$2" head_sha="${3:-sha-A}" equiv_kind="${4:-}"
+    local result state state_head label_now action cf_equiv_kind=""
 
     result="$(champion_critical_file_check)"
     state="$(hold_state_get "$hold_state_file")"
@@ -682,16 +693,21 @@ champion_critical_file_hold_tick() {
     if [[ "$result" == FAIL:* ]]; then
         if [[ "$state" == "released" && "$state_head" == "$head_sha" ]]; then
             action=none      # already released at this head, already acked
-        elif [[ "$state" == "released" ]]; then
-            action=rearm     # a push landed past the released head
-        elif [[ "$state" == "held" && "$label_now" == "1" ]]; then
+        elif [[ "$label_now" == "1" && "$state" != "none" ]]; then
+            # The label is back on: a human re-asserted the hold, so there is no
+            # live release to carry, whatever the equivalence evidence says.
             action=stands
         elif [[ "$state" == "held" && -n "$state_head" && "$state_head" == "$head_sha" ]]; then
             action=respect   # operator removed the label at the held head
-        elif [[ "$state" == "held" ]]; then
-            action=rearm     # head moved since the hold, or a legacy hold
-        else
+        elif [[ "$state" != "held" && "$state" != "released" ]]; then
             action=hold      # fresh episode
+        elif [[ -n "$state_head" && -n "$equiv_kind" ]]; then
+            # The head moved, but the change this PR makes provably did not
+            # (#9416). Respect the release and RE-ANCHOR it at the new head.
+            cf_equiv_kind="$equiv_kind"
+            action=respect
+        else
+            action=rearm     # a genuinely different diff, or a legacy hold
         fi
 
         case "$action" in
@@ -713,6 +729,7 @@ champion_critical_file_hold_tick() {
             respect)
                 # The whole point of #9016: NO LABEL_ADD on this path.
                 echo "COMMENT:champion:critical-file-release-respected"
+                echo "EQUIVALENCE:${cf_equiv_kind:-same-head}"
                 hold_state_set "$hold_state_file" "released" "$head_sha"
                 ;;
         esac
@@ -823,10 +840,74 @@ assert_eq "0" "$(label_get "$LF")" \
     "loom:operator is still OFF after repeated ticks at the released head"
 
 echo
+echo "--- critical-file hold: the release survives an EQUIVALENT head move (#9416) ---"
+
+# THE #9416 TAX: the #8248 freshness remedy pushes a tree-identical re-date
+# commit (#8508), so the head moves while the diff the operator released is
+# byte-for-byte the same one. Pre-#9416 that re-armed the hold and demanded a
+# second human removal; #9348 paid that four times to land one PR.
+for kind in tree clean-merge rebase-patch-identical; do
+    hold_state_set "$HS" "released" "sha-A"
+    label_set "$LF" "0"
+    eq="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "$kind")"
+    assert_lacks "$eq" "LABEL_ADD:loom:operator" \
+        "an equivalent head move ($kind) does NOT re-arm the hold (#9416)"
+    assert_lacks "$eq" "COMMENT:champion:critical-file-hold" \
+        "an equivalent head move ($kind) posts no new hold notice"
+    assert_contains "$eq" "EQUIVALENCE:$kind" \
+        "the re-acknowledgement records WHICH equivalence carried the release ($kind) — audit trail (#9416)"
+    assert_eq "sha-B" "$(hold_head_get "$HS")" \
+        "the release is re-anchored at the new head, so the next tick needs no comparison ($kind)"
+    assert_eq "0" "$(label_get "$LF")" \
+        "loom:operator stays OFF across an equivalent head move ($kind)"
+done
+
+# ...and the re-anchored release is then honored at the new head with no
+# further evidence needed: the cheap same-head arm, no binary, no API call.
+again="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B")"
+assert_eq "RELEASED:no-rehold:sha-B" "$again" \
+    "the re-anchored release is a complete no-op on the next tick, with no equivalence answer at all"
+
+# FAIL CLOSED: the verb could not answer (absent binary, daemon predating the
+# verb, gh outage, shallow clone, merge-tree conflict, kill switch) or answered
+# "provably a different change". Both look like an empty kind, and both re-arm.
+hold_state_set "$HS" "released" "sha-A"
+label_set "$LF" "0"
+noans="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "")"
+assert_contains "$noans" "REARM:sha-A->sha-B" \
+    "no equivalence answer re-arms the hold — fail closed, the pre-#9416 behavior (#9416)"
+assert_contains "$noans" "LABEL_ADD:loom:operator" \
+    "the fail-closed arm re-applies loom:operator, so nothing merges unlooked-at"
+
+# A legacy hold (no recorded head) is never carried by equivalence either: there
+# is no recorded head to compare against, so there is nothing to prove.
+hold_state_set "$HS" "held" ""
+label_set "$LF" "0"
+legacy_eq="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "tree")"
+assert_contains "$legacy_eq" "LABEL_ADD:loom:operator" \
+    "a legacy hold with no recorded head re-arms even when an equivalence kind is offered (#9416)"
+
+# THE RESISTING CASE for #9416: a released episode whose `loom:operator` is BACK
+# ON. Proven equivalence must NOT be read as a live release — somebody put the
+# label back, which is a re-assertion of the hold, and the operator-release
+# inference (#9016) only ever meant "the label is absent". The hold stands.
+hold_state_set "$HS" "released" "sha-A"
+label_set "$LF" "1"
+relabeled="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "tree")"
+assert_contains "$relabeled" "HOLD:stands" \
+    "a re-added loom:operator overrides a proven equivalence — the hold stands (#9416)"
+assert_lacks "$relabeled" "champion:critical-file-release-respected" \
+    "no release is acknowledged while loom:operator is applied"
+assert_eq "1" "$(label_get "$LF")" \
+    "loom:operator stays ON when a human re-asserted the hold"
+
+echo
 echo "--- critical-file hold: a new push re-arms the hold after a release (#9016) ---"
 
-# The release is a decision about a diff, so it is scoped to that head. A push
-# produces a diff the operator never saw.
+# The release is a decision about a diff, so it is scoped to that diff. A push
+# that CHANGES it produces one the operator never saw.
+hold_state_set "$HS" "released" "sha-A"
+label_set "$LF" "0"
 rearm="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B")"
 assert_contains "$rearm" "REARM:sha-A->sha-B" \
     "a FAIL at a new head after a release re-arms the hold"
@@ -934,12 +1015,45 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
 # One line, not a two-line needle: `grep -F` splits a needle on newlines and
 # ORs the parts, so a multi-line pin silently degrades to "either line".
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'not have to beat a Champion tick to it.' \
+    'no need to beat a Champion tick to it.' \
     "the hold notice states that the release is durable, i.e. the procedure is not a race (#9016)"
 
 assert_doc_lacks "$CRITICAL_HOLD_MD" \
     '**Next steps** — this hold stays in force until one of these happens:' \
     "the pre-#9016 hold wording (which described a merge path the #8112 guard refused) is gone"
+
+echo
+echo "--- Doc pins: the release survives an equivalent head move (#9416) ---"
+
+assert_doc_contains "$CRITICAL_HOLD_MD" \
+    'forge verdict-equivalent \' \
+    "the tick asks loom-daemon for the equivalence rather than deriving a second comparison in shell (#9416)"
+
+assert_doc_contains "$CRITICAL_HOLD_MD" \
+    "sed -n 's/^EQUIVALENCE_KIND=//p'" \
+    "the tick keys on the EQUIVALENCE_KIND= stdout line, never on an exit status — so every failure mode is the same fail-closed arm"
+
+assert_doc_contains "$CRITICAL_HOLD_MD" \
+    '<!-- champion:hold-equivalence kind=$CF_EQUIV_KIND from=$STATE_HEAD to=$HEAD_SHA -->' \
+    "the respected-release notice records WHICH equivalence carried the hold, keeping history auditable (#9416)"
+
+assert_doc_contains "$CRITICAL_HOLD_MD" \
+    'FAIL CLOSED' \
+    "the prompt states the fail-closed rule for the equivalence check (#9416)"
+
+assert_doc_contains "$CRITICAL_HOLD_MD" \
+    'CI is never exempted' \
+    "the prompt states that only the hold is ever exempted, never a required check (#9416)"
+
+# The old head-literal promise has to be gone: it is the sentence that taught
+# the operator a re-date push would cost them a second removal.
+assert_doc_lacks "$CRITICAL_HOLD_MD" \
+    'while this PR'"'"'s\nhead is \`$HEAD_SHA\` Champion will **not** put it back' \
+    "the pre-#9416 head-literal durability promise is gone from the hold notice"
+
+assert_doc_lacks "$CRITICAL_HOLD_MD" \
+    'A new push re-arms the hold.' \
+    "the blanket 'a new push re-arms' claim is gone — a tree-identical re-date push does not (#9416)"
 
 assert_doc_lacks "$CHAMPION_MD" \
     'CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"' \

@@ -166,13 +166,19 @@ gh pr edit <N> --remove-label "loom:operator"
 ./.loom/scripts/merge-pr.sh <N>
 ```
 
-- **Critical-file hold** (criterion #3): the release is scoped to the head the
-  hold was written against, recorded in the hold notice's
-  `<!-- champion:hold-state head=<sha> -->` line. Champion acknowledges it once,
-  behind a `champion:critical-file-release-respected` marker, and does not
-  re-apply the label at that head. **A new push re-arms the hold** — the release
-  was a decision about a diff that no longer exists. See
-  `champion-critical-file-hold.md`.
+- **Critical-file hold** (criterion #3): the release is scoped to the **diff**,
+  not to a commit id (#9416). The hold notice records the head it was written
+  against in its `<!-- champion:hold-state head=<sha> -->` line; Champion
+  acknowledges the release once, behind a
+  `champion:critical-file-release-respected` marker, and does not re-apply the
+  label. **A push that changes the diff re-arms the hold** — that release was a
+  decision about a diff that no longer exists — but a head move across which the
+  PR's own change is *provably* unchanged does not: `loom-daemon forge
+  verdict-equivalent` re-derives that from the repository (kinds `tree`,
+  `clean-merge`, `rebase-patch-identical`), the acknowledgement is re-recorded at
+  the new head naming the kind, and anything short of a positive proof — including
+  a re-added `loom:operator`, which is a human re-asserting the hold — re-arms.
+  See `champion-critical-file-hold.md` and `critical-file-hold.md`.
 - **Merge-risk hold** (criterion #2): the release is scoped to the *concern* — the
   label is not re-asserted while the freshly-derived concern reads byte-identical
   to the one already on record (#7048). A genuinely new concern re-holds and says

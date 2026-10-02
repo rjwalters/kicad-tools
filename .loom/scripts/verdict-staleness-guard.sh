@@ -76,16 +76,28 @@
 # and the extra machinery would not change a single answer (#5686 explicitly
 # scopes it out).
 #
-# ONE exception, and it is evidence rather than a heuristic (#9124/#9576): a head
-# move whose TREE is byte-identical to the marker's. `loom-daemon forge
-# tree-unchanged <marker> <head>` asks GitHub's own `compare/{base}...{head}`,
-# and `files: []` proves the reviewed code is still exactly what is at the new
-# head — so the verdict does describe it and clearing buys a full extra Judge
-# cycle and nothing else. The measured cause on this repo is the #8248
-# required-check-freshness guard's automated `chore: re-date required checks …`
-# commit (#8508), whose whole purpose is to change nothing in the tree. This is
-# NOT a shape inference: nothing is read from the commit message, the author, or
-# the ref-update shape.
+# ONE exception, and it is evidence rather than a heuristic (#9124/#9576/#9416):
+# a head move across which THE CHANGE THIS PR MAKES is unchanged. `loom-daemon
+# forge verdict-equivalent <pr> <marker> <head>` re-derives that from the
+# repository and answers with the equivalence kind that proved it:
+#
+#   tree                    the two heads' trees are byte-identical — the #8248
+#                           required-check-freshness guard's automated `chore:
+#                           re-date required checks …` commit (#8508), whose
+#                           whole purpose is to change nothing (#9124/#9576)
+#   clean-merge             the head is exactly the clean automatic merge of
+#                           this PR's base into the reviewed head (#9416)
+#   rebase-patch-identical  the PR's own merge-base-relative patch is
+#                           byte-identical before and after the move (#9416)
+#
+# In all three the verdict still describes the change in front of it, so clearing
+# buys a full extra Judge cycle and nothing else. This is NOT a shape inference:
+# nothing is read from the commit message, the author, the ref-update shape, or
+# any marker — a marker is prose anyone can write (#9548).
+#
+# CI IS NOT EXEMPTED by any of them. Only the *review* carries over; every
+# required check still re-runs against the new head, because the base really did
+# move. This guard touches no check and no auto-merge arm on the FRESH path.
 #
 # THE COMPARISON IS NOT IMPLEMENTED HERE, for the same reason the #8900 disarm
 # below is not: it already existed in loom-daemon (#9124 taught the daemon's
@@ -95,11 +107,13 @@
 # while the daemon did, so PRs #9541 and #9483 lost `loom:pr` here to a re-date
 # commit the daemon pass would have kept, on a host already running #9124.
 #
-# FAIL CLOSED: only a literal `TREE_UNCHANGED=1` suppresses the invalidation.
-# An absent binary, one predating the verb (clap exits non-zero with nothing on
-# stdout), a `gh` outage, a non-GitHub forge, or an unparsable compare all leave
-# the answer empty and the verdict reads STALE exactly as it did before #9576 —
-# the same fail-open-into-invalidation arm as the daemon's own `None`.
+# FAIL CLOSED: only a literal `EQUIVALENCE_KIND=<kind>` line suppresses the
+# invalidation. An absent binary, one predating the verb (clap exits non-zero
+# with nothing on stdout), a `gh` outage, a non-GitHub forge, a shallow clone, a
+# missing git object, a `merge-tree` conflict, an unparsable compare, or either
+# kill switch all leave the answer empty and the verdict reads STALE exactly as
+# it did before #9576 — the same fail-open-into-invalidation arm as the daemon's
+# own `Indeterminate`.
 #
 # This guard does NOT re-anchor the marker to the new head when it takes that
 # exemption (the daemon's carve-out does, in-process). Anchoring is a comment
@@ -529,21 +543,27 @@ fi
 # and no forge, so a host that cannot resolve loom-daemon still reads FRESH
 # normally and only loses the #9576 exemption.
 #
-# The second arm delegates whole to `loom-daemon forge tree-unchanged`
-# (loom-daemon/src/forge_tree_unchanged.rs) — the SAME function the daemon's
+# The second arm delegates whole to `loom-daemon forge verdict-equivalent`
+# (loom-daemon/src/verdict_equivalence/) — the SAME function the daemon's
 # periodic pass calls in-process, so the two can no longer disagree. It prints
-# TREE_UNCHANGED=1|0 and exits 0 for both; anything else (exit 1, an absent
-# binary, a daemon predating the verb, LOOM_VERDICT_TREE_CARVEOUT switched off —
-# the verb evaluates the kill switch itself) leaves this empty, which is not "1"
-# and therefore falls through to STALE. "1" requires compare `status`
-# identical/ahead, never `files: []` alone (a rewound head reads `behind`, no
-# files). See the header for why that is fail-closed.
-# requires-daemon: forge optional   Without the `tree-unchanged` verb (an absent binary, or one predating #9576: clap exits non-zero with nothing on stdout) a tree-identical head move reads STALE — the pre-#9576 behavior, which only ever costs a redundant Judge cycle. No version floor on purpose: the degraded answer is the fail-safe one.
+# VERDICT_EQUIVALENT=1 plus EQUIVALENCE_KIND=<kind> and exits 0 when the verdict
+# carries, VERDICT_EQUIVALENT=0 and exits 0 when it provably does not; anything
+# else (exit 1, an absent binary, a daemon predating the verb,
+# LOOM_VERDICT_TREE_CARVEOUT or LOOM_VERDICT_EQUIVALENCE switched off — the verb
+# evaluates both kill switches itself) leaves EQUIVALENCE_KIND empty, which falls
+# through to STALE. The verb supersedes `forge tree-unchanged` here: it asks that
+# same tree-identical test FIRST and then the two #9416 kinds, so this arm can
+# never be less permissive than it was before #9416. See the header for why every
+# non-affirmative answer is fail-closed.
+# requires-daemon: forge optional   Without the `verdict-equivalent` verb (an absent binary, or one predating #9416: clap exits non-zero with nothing on stdout) an equivalent head move reads STALE — the pre-#9576 behavior, which only ever costs a redundant Judge cycle. No version floor on purpose: the degraded answer is the fail-safe one.
 FRESH_REASON=""
 if [[ "${HEAD_SHA:0:${#MARKER_SHA}}" == "$MARKER_SHA" ]]; then
   FRESH_REASON="verdict $VERDICT_LABEL was rendered against the current head SHA"
-elif [[ "$("${LOOM_DAEMON_BIN:-loom-daemon}" forge tree-unchanged "$MARKER_SHA" "$HEAD_SHA" 2>/dev/null | sed -n 's/^TREE_UNCHANGED=//p')" == "1" ]]; then
-  FRESH_REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA and head is now $HEAD_SHA, but the two trees are byte-identical (compare reports zero file differences) — the reviewed code is unchanged, so the verdict still describes it (#9576)"
+else
+  EQUIV_KIND="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-equivalent "$PR" "$MARKER_SHA" "$HEAD_SHA" 2>/dev/null | sed -n 's/^EQUIVALENCE_KIND=//p')"
+  if [[ -n "$EQUIV_KIND" ]]; then
+    FRESH_REASON="verdict $VERDICT_LABEL was rendered against $MARKER_SHA and head is now $HEAD_SHA, but the change this PR makes is unchanged across the move (equivalence kind: $EQUIV_KIND) — so the verdict still describes it (#9576, #9416). CI still re-runs against $HEAD_SHA; only the review carries over."
+  fi
 fi
 
 if [[ -n "$FRESH_REASON" ]]; then

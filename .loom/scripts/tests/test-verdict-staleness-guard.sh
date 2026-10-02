@@ -210,36 +210,45 @@ chmod +x "$STUB_DIR/gh"
 # #8900 assertions about daemon WRITES are unaffected. $STUB_DIR/trust-verb-
 # missing simulates a binary predating the verb (clap: exit 2, empty stdout).
 #
-# #9576: `loom-daemon forge tree-unchanged <base> <head>` answers whether the
-# two commits' trees are byte-identical. It is a READ, so it logs to
-# tree-calls.log — also NOT daemon-writes.log, for the same reason: (q5)/(q6)/
-# (q10) assert the guard makes no daemon WRITES on those paths, and a read that
-# every STALE path now performs must not falsify them.
-#   -> default: TREE_UNCHANGED=0, exit 0 — the trees differ, i.e. every
+# #9576/#9416: `loom-daemon forge verdict-equivalent <pr> <reviewed> <head>`
+# answers whether the change the PR makes is unchanged across a head move, and
+# by which equivalence kind. It is a READ, so it logs to tree-calls.log — also
+# NOT daemon-writes.log, for the same reason: (q5)/(q6)/(q10) assert the guard
+# makes no daemon WRITES on those paths, and a read that every STALE path now
+# performs must not falsify them.
+#   -> default: VERDICT_EQUIVALENT=0, exit 0 — a real change, i.e. every
 #      pre-#9576 fixture keeps its existing STALE expectations untouched
-#   -> $STUB_DIR/tree-identical: TREE_UNCHANGED=1, exit 0 — the #9541/#9483
+#   -> $STUB_DIR/tree-identical: EQUIVALENCE_KIND=tree — the #9541/#9483
 #      re-date shape the exemption exists for
+#   -> $STUB_DIR/equiv-clean-merge: EQUIVALENCE_KIND=clean-merge (#9416 row 2)
+#   -> $STUB_DIR/equiv-rebase: EQUIVALENCE_KIND=rebase-patch-identical (row 3)
 #   -> $STUB_DIR/tree-compare-fail: exit 1, nothing on stdout — the `gh api
-#      compare` failure / unparsable-response shape, which must FAIL CLOSED
+#      compare` failure / unparsable-response / merge-tree-conflict / shallow-
+#      clone shape, all of which must FAIL CLOSED
 #   -> $STUB_DIR/tree-verb-missing: exit 2, nothing on stdout — a binary
 #      predating the verb (clap), which must fail closed identically
 cat > "$STUB_DIR/loom-daemon" <<'STUB'
 #!/usr/bin/env bash
 STUB_DIR_FROM_ENV="${LOOM_TEST_STUB_DIR:?stub loom-daemon: LOOM_TEST_STUB_DIR not set}"
-if [[ "$1" == "forge" && "$2" == "tree-unchanged" ]]; then
+if [[ "$1" == "forge" && "$2" == "verdict-equivalent" ]]; then
   printf 'TREE %s\n' "$*" >> "$STUB_DIR_FROM_ENV/tree-calls.log"
   if [[ -f "$STUB_DIR_FROM_ENV/tree-verb-missing" ]]; then
-    echo "error: unrecognized subcommand 'tree-unchanged'" >&2
+    echo "error: unrecognized subcommand 'verdict-equivalent'" >&2
     exit 2
   fi
   if [[ -f "$STUB_DIR_FROM_ENV/tree-compare-fail" ]]; then
-    echo "stub loom-daemon: could not compare $3...$4" >&2
+    echo "stub loom-daemon: could not decide $4 -> $5" >&2
     exit 1
   fi
-  if [[ -f "$STUB_DIR_FROM_ENV/tree-identical" ]]; then
-    echo "TREE_UNCHANGED=1"
+  EQ_KIND=""
+  [[ -f "$STUB_DIR_FROM_ENV/tree-identical" ]] && EQ_KIND=tree
+  [[ -f "$STUB_DIR_FROM_ENV/equiv-clean-merge" ]] && EQ_KIND=clean-merge
+  [[ -f "$STUB_DIR_FROM_ENV/equiv-rebase" ]] && EQ_KIND=rebase-patch-identical
+  if [[ -n "$EQ_KIND" ]]; then
+    echo "VERDICT_EQUIVALENT=1"
+    echo "EQUIVALENCE_KIND=$EQ_KIND"
   else
-    echo "TREE_UNCHANGED=0"
+    echo "VERDICT_EQUIVALENT=0"
   fi
   exit 0
 fi
@@ -396,6 +405,7 @@ reset_state() {
     rm -f "$STUB_DIR"/scope-calls.log "$STUB_DIR"/scope-deny
     rm -f "$STUB_DIR"/tree-calls.log "$STUB_DIR"/tree-identical
     rm -f "$STUB_DIR"/tree-compare-fail "$STUB_DIR"/tree-verb-missing
+    rm -f "$STUB_DIR"/equiv-clean-merge "$STUB_DIR"/equiv-rebase
 }
 
 run_guard() {
@@ -1216,7 +1226,7 @@ pr_json 266 "$SHA_B" "loom:pr"
 run_guard 266 --clear
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(w2) Allowed: cleared"
 assert_contains "$WRITES" "--repo owner/repo" "(w2) The label edit names the vetted repo"
-# --- #9576: a tree-identical head move is not a stale verdict ---------------
+# --- #9576/#9416: an EQUIVALENT head move is not a stale verdict ------------
 #
 # THE #9576 INCIDENT: PR #9541's approval was anchored at 490fb81a8; the #8248
 # required-check-freshness guard's automated `chore: re-date required checks`
@@ -1224,8 +1234,10 @@ assert_contains "$WRITES" "--repo owner/repo" "(w2) The label edit names the vet
 # (`compare/490fb81a8...42ea7263a` → `files=0`). The daemon's own pass has
 # skipped that since #9124, but this guard had no tree comparison at all, so it
 # stripped `loom:pr` anyway and forced a full Judge re-cycle. #9483 lost its
-# verdict the same way. The guard now asks `loom-daemon forge tree-unchanged`,
-# the SAME implementation the daemon pass calls in-process.
+# verdict the same way. The guard now asks `loom-daemon forge verdict-equivalent`
+# (#9416's superset of `forge tree-unchanged`, which asks the tree-identical test
+# first and then the clean-merge / rebase-patch-identical kinds), the SAME
+# implementation the daemon pass calls in-process.
 
 # (u1) The incident itself: head moved, trees byte-identical -> FRESH, and with
 #      --clear NOTHING is written (no label flip, no comment, no disarm).
@@ -1241,8 +1253,9 @@ assert_eq "$SHA_B" "$(get_field "$OUT" HEAD_SHA)" "(u1) HEAD_SHA is the moved he
 assert_eq "" "$WRITES" "(u1) loom:pr is NOT removed on a tree-identical move"
 assert_eq "" "$COMMENTS_POSTED" "(u1) No stale-verdict comment posted"
 assert_eq "" "$DAEMON" "(u1) No auto-merge disarm — the reviewed tree IS what is at the head"
-assert_contains "$TREE_CALLS" "forge tree-unchanged $SHA_A $SHA_B" "(u1) The comparison is asked marker...head, in that order"
-assert_contains "$OUT" "byte-identical" "(u1) REASON says why the verdict survived"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent 270 $SHA_A $SHA_B" "(u1) The comparison is asked pr, marker, head, in that order"
+assert_contains "$OUT" "equivalence kind: tree" "(u1) REASON names the equivalence kind that carried the verdict"
+assert_contains "$OUT" "CI still re-runs" "(u1) REASON states that CI is not exempted (#9416 AC5)"
 
 # (u2) The other half of AC1: a head move that DOES change the tree still
 #      invalidates, exactly as before #9576.
@@ -1254,7 +1267,7 @@ assert_eq "12" "$RC" "(u2) Tree-changed head move -> still exit 12"
 assert_eq "STALE" "$(get_field "$OUT" DECISION)" "(u2) DECISION=STALE"
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u2) CLEARED=1"
 assert_contains "$WRITES" "--remove-label loom:pr" "(u2) The approval is still cleared on a real change"
-assert_contains "$TREE_CALLS" "forge tree-unchanged" "(u2) The comparison was consulted"
+assert_contains "$TREE_CALLS" "forge verdict-equivalent" "(u2) The comparison was consulted"
 
 # (u3) FAIL CLOSED (AC2): the comparison itself failed (`gh api compare` error,
 #      unparsable response). The verdict must still be invalidated — matching
@@ -1276,7 +1289,7 @@ pr_json 273 "$SHA_B" "loom:changes-requested"
 { echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "changes-requested"; echo "]"; } > "$STUB_DIR/comments-273.json"
 : > "$STUB_DIR/tree-verb-missing"
 run_guard 273 --clear
-assert_eq "12" "$RC" "(u4) Daemon predating tree-unchanged -> exit 12"
+assert_eq "12" "$RC" "(u4) Daemon predating verdict-equivalent -> exit 12"
 assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u4) CLEARED=1"
 
 # (u5) The common FRESH path costs NO comparison: when the marker already names
@@ -1315,6 +1328,44 @@ assert_eq "0" "$RC" "(u7) Armed + tree-identical -> exit 0"
 assert_eq "0" "$(get_field "$OUT" AUTO_MERGE_DISARMED)" "(u7) AUTO_MERGE_DISARMED=0"
 assert_eq "" "$DAEMON" "(u7) The disarm subcommand is not invoked at all"
 assert_eq "" "$GRAPHQL" "(u7) And no inline mutation either"
+
+# (u8) #9416 row 2 — the head is the clean automatic merge of the PR's base into
+#      the reviewed head (four of the six moved heads in #9416's 16-PR audit).
+#      The verdict carries, nothing is written, and the REASON names the kind.
+reset_state
+pr_json 277 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-277.json"
+: > "$STUB_DIR/equiv-clean-merge"
+run_guard 277 --clear
+assert_eq "0" "$RC" "(u8) Clean merge of the base -> exit 0"
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u8) DECISION=FRESH"
+assert_eq "" "$WRITES" "(u8) loom:pr is NOT removed"
+assert_eq "" "$COMMENTS_POSTED" "(u8) No stale-verdict comment posted"
+assert_contains "$OUT" "equivalence kind: clean-merge" "(u8) REASON names the clean-merge kind (#9416 AC6)"
+
+# (u9) #9416 row 3 — a rebase onto a newer base whose own patch is byte-identical
+#      (the other two of the six moved heads in the audit).
+reset_state
+pr_json 278 "$SHA_C" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-278.json"
+: > "$STUB_DIR/equiv-rebase"
+run_guard 278 --clear
+assert_eq "0" "$RC" "(u9) Rebase with a byte-identical patch -> exit 0"
+assert_eq "FRESH" "$(get_field "$OUT" DECISION)" "(u9) DECISION=FRESH"
+assert_eq "" "$WRITES" "(u9) loom:pr is NOT removed"
+assert_contains "$OUT" "equivalence kind: rebase-patch-identical" "(u9) REASON names the rebase kind (#9416 AC6)"
+
+# (u10) The verb says "provably a different change" (VERDICT_EQUIVALENT=0 with no
+#       EQUIVALENCE_KIND line, exit 0). An exit code of 0 must NOT be mistaken for
+#       an affirmative answer: the guard keys on the KIND line, never on the exit
+#       status, so this invalidates exactly like the indeterminate arms (u3)/(u4).
+reset_state
+pr_json 279 "$SHA_B" "loom:pr"
+{ echo "["; verdict_comment "2026-09-30T00:00:00Z" "$SHA_A" "approved"; echo "]"; } > "$STUB_DIR/comments-279.json"
+run_guard 279 --clear
+assert_eq "12" "$RC" "(u10) VERDICT_EQUIVALENT=0 at exit 0 -> still exit 12"
+assert_eq "1" "$(get_field "$OUT" CLEARED)" "(u10) CLEARED=1 — exit 0 alone never keeps a verdict"
+assert_contains "$WRITES" "--remove-label loom:pr" "(u10) The approval is cleared"
 
 # --- Summary -------------------------------------------------------------
 echo ""

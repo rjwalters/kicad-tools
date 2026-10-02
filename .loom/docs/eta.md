@@ -249,6 +249,64 @@ drops `features`, then the stage grids, then the stage marks, then every
 remaining list (`detail`), stopping as soon as it fits, and names each drop
 in `truncated`.
 
+### Role-attempt stages: which percentile to read (#9420)
+
+**Read `stages[].distribution.p50` directly.** Every percentile in an
+`eta-explanation/v1` distribution is already **conditioned on attempts that
+did the stage's work**; there is no second, unconditioned pair to choose
+between, and nothing a consumer has to filter.
+
+That matters because the obvious *other* source for the same question is not
+conditioned. A percentile query over the `loom.role_attempt` **spans** —
+SigNoz, a dashboard, the 30-day `stage-durations` aggregate — reads a
+population dominated by attempts that did nothing, and its median is
+milliseconds:
+
+| population | measured | p50 |
+|---|---|---|
+| all `loom.role_attempt` spans | SigNoz, 30 d, 2026-09-28 (#9420) | builder **0 ms**, judge ≈36 ms, doctor ≈31 ms, curator ≈32 ms |
+| all role-runner ticks | this host's `role_tick.outcome` journals, every workspace root, 2026-09-18…10-02, n=130,657 | champion / curator / doctor / judge **0 s** (80.4% of ticks never launched a session; 92,869 are `skipped_pool_exhausted`) |
+| ticks that launched a session | same journals, n=25,668 | champion 88 s, curator 84 s, doctor 27 s, judge 32 s |
+| `sweep.outcome` phase durations (what the estimator reads) | same host and window, n=2,810 phase samples | builder 1334 s, curator 104 s, judge 419 s, doctor 870 s — only 2 rows (both `curator`) are 0 s |
+
+Two things make the all-attempts median an artefact rather than a fast
+median: a role-runner tick that **never launched a child session** (on this
+host overwhelmingly `skipped_pool_exhausted` — it closes in well under a
+second), and a **synthetic** completion span, which Loom emits at the instant
+it observes a checkpoint whose start it never watched, with
+`started_at == ended_at` and therefore a duration of exactly zero. That
+second shape is the builder `0/0/0/0` row: not a fast distribution, no
+distribution at all.
+
+So, by surface:
+
+- **`eta-explanation/v1`** — `p50` is the conditioned value. The estimator
+  reads `sweep.outcome` phase durations and forge label timelines, which are
+  worked-only by construction (a phase duration exists because the phase
+  ran) apart from the rare zero-second role phase — a phase marked complete
+  without having run — and `StageSamples::select` **refuses** every sample
+  marked `worked = false`, those included. If the refusal leaves a stage
+  under the sample floor the answer is `no_estimate_reason:
+  insufficient_samples` — explicitly unmeasured, never a value scraped from a
+  handful of no-ops.
+- **A `loom.role_attempt` span query** — you **must** add
+  `loom.attempt.worked = "true"`. The attribute is `"true"` when the span's
+  interval measures an attempt that ran the stage's work, `"false"` when it
+  provably does not (no session launched; a synthetic zero-duration
+  completion), and **absent** when undetermined — the same "unknown is not
+  zero" rule every measured span attribute follows, so `!= "false"` and
+  `= "true"` are different questions. Without the filter the p50 is the
+  millisecond artefact above, and the p95 is the only percentile carrying
+  real work.
+
+`story.*` spans (`story.queue_dwell`, `story.review_wait`, …) do **not** have
+this shape and need no such filter: Loom emits none of them — it only derives
+and accepts their ids, the 2am storyline reconciler emits them — and each
+exists because its transition happened. The 2026-09-28 `story.review_wait`
+figures (≈14 min p50 against ≈8.9 h p95) are a genuine long tail in real
+waits, a different phenomenon with a different remedy, not a no-op
+population.
+
 ## No-estimate reasons
 
 | reason | when |
