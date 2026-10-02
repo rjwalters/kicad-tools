@@ -419,6 +419,78 @@ class TestRejectLostRouteOnlyBindings:
         assert rc is not None
         assert rc != 0
 
+    def test_zero_denominator_fully_explained_by_auto_skip_is_not_a_loader_bug(self, capsys):
+        """Issue #5876: when every requested net was deliberately removed by
+        the pour-net/manual auto-skip, the guard must report the conflict
+        explicitly and must NOT claim a loader bug."""
+        args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["GND", "VCC"],
+                "_route_only_nets_under_two": set(),
+                "_auto_skipped_net_names": ["GND", "VCC"],
+            },
+        )()
+        rc = _reject_lost_route_only_bindings(args, 0)
+        assert rc is not None
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "GND" in err
+        assert "VCC" in err
+        assert "loader bug" not in err
+        assert "conflict" in err.lower()
+
+    def test_zero_denominator_partially_explained_by_auto_skip_is_still_loader_bug(self, capsys):
+        """When only SOME of the requested (2+ pad) nets were auto-skipped,
+        the remaining net(s) still lack any explanation for ending up at
+        zero -- the genuine #4983 loader-bug wording must be kept."""
+        args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["GND", "SIGNAL"],
+                "_route_only_nets_under_two": set(),
+                "_auto_skipped_net_names": ["GND"],  # SIGNAL is unexplained
+            },
+        )()
+        rc = _reject_lost_route_only_bindings(args, 0)
+        assert rc is not None
+        assert rc != 0
+        err = capsys.readouterr().err
+        assert "loader bug" in err
+
+    def test_auto_skip_conflict_distinct_from_loader_bug_message(self, capsys):
+        """The two failure modes must produce textually distinct messages
+        (Issue #5876 acceptance criterion)."""
+        skip_args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["GND"],
+                "_route_only_nets_under_two": set(),
+                "_auto_skipped_net_names": ["GND"],
+            },
+        )()
+        _reject_lost_route_only_bindings(skip_args, 0)
+        skip_err = capsys.readouterr().err
+
+        bug_args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["SIGNAL"],
+                "_route_only_nets_under_two": set(),
+                "_auto_skipped_net_names": [],
+            },
+        )()
+        _reject_lost_route_only_bindings(bug_args, 0)
+        bug_err = capsys.readouterr().err
+
+        assert skip_err != bug_err
+        assert "loader bug" not in skip_err
+        assert "loader bug" in bug_err
+
 
 class TestBareNetReferences:
     def test_mixed_ids_escaping_and_nonreference_text(self):

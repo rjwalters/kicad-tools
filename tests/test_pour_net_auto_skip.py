@@ -1357,3 +1357,154 @@ class TestAutoSkipRouteViaManual:
 
         assert "GND" in auto_skipped
         assert "GND" in skip_nets
+
+
+# ===========================================================================
+# Issue #5876: --nets naming ONLY auto-skipped pour nets must report the
+# auto-skip conflict, not the #4983 "loader bug" message.
+# ===========================================================================
+
+# Exact minimal repro from issue #5876: a 2-layer, 3-net, 6-pad board where
+# VCC and GND are real pour nets (2+ pads each, zones present) and net3 is a
+# plain signal net (R1.pin2 -> LED1.anode).  ``--nets VCC,GND`` asks the
+# router to route exactly the two nets this run always treats as
+# zone-filled, so 0 nets remain -- a user-intent conflict with the pour-net
+# auto-skip, not a lost pad binding.
+VCC_GND_POUR_NET_PCB = """\
+(kicad_pcb
+  (version 20240108)
+  (generator "test")
+  (general (thickness 1.6))
+  (layers
+    (0 "F.Cu" signal)
+    (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user)
+  )
+  (setup
+    (pad_to_mask_clearance 0.05)
+    (pcbplotparams (layerselection 0x0) (plot_on_all_layers_selection 0x0))
+  )
+  (net 0 "")
+  (net 1 "VCC")
+  (net 2 "GND")
+  (net 3 "net3")
+
+  (gr_line (start 0 0) (end 50 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 0) (end 50 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 50 40) (end 0 40) (layer "Edge.Cuts") (stroke (width 0.1)))
+  (gr_line (start 0 40) (end 0 0) (layer "Edge.Cuts") (stroke (width 0.1)))
+
+  (footprint "R_0603"
+    (layer "F.Cu")
+    (at 10 10)
+    (attr smd)
+    (property "Reference" "R1")
+    (property "Value" "10k")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "net3"))
+  )
+
+  (footprint "LED_0603"
+    (layer "F.Cu")
+    (at 30 10)
+    (attr smd)
+    (property "Reference" "LED1")
+    (property "Value" "red")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 3 "net3"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (footprint "C_0603"
+    (layer "F.Cu")
+    (at 20 25)
+    (attr smd)
+    (property "Reference" "C1")
+    (property "Value" "100nF")
+    (pad "1" smd rect (at -0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 1 "VCC"))
+    (pad "2" smd rect (at 0.5 0) (size 0.6 0.6) (layers "F.Cu") (net 2 "GND"))
+  )
+
+  (zone (net "VCC") (layer "F.Cu") (tstamp "00000000-0000-0000-0000-000000000004"))
+  (zone (net "GND") (layer "B.Cu") (tstamp "00000000-0000-0000-0000-000000000005"))
+)
+"""
+
+
+@pytest.fixture
+def pcb_vcc_gnd_pour(tmp_path: Path) -> Path:
+    """Write the issue #5876 repro board: real VCC/GND pour nets + net3 signal."""
+    p = tmp_path / "board_vcc_gnd.kicad_pcb"
+    p.write_text(VCC_GND_POUR_NET_PCB)
+    return p
+
+
+class TestNetsFlagConflictsWithPourAutoSkip:
+    """``--nets VCC,GND`` where both nets are auto-skipped pour nets must
+    report the conflict explicitly and must NOT claim a loader bug."""
+
+    @staticmethod
+    def _route_argv(pcb_path: Path, out_path: Path, nets: str) -> list[str]:
+        return [
+            str(pcb_path),
+            "--nets",
+            nets,
+            "--layers",
+            "2",
+            "--grid",
+            ".1",
+            "--backend",
+            "python",
+            "--no-placement-feedback",
+            "--no-cache",
+            "--timeout",
+            "30",
+            "--no-optimize",
+            "-o",
+            str(out_path),
+        ]
+
+    def test_all_requested_nets_auto_skipped_reports_conflict_not_loader_bug(
+        self, pcb_vcc_gnd_pour: Path, capfd
+    ) -> None:
+        from kicad_tools.cli.route_cmd import main as route_main
+
+        out_path = pcb_vcc_gnd_pour.parent / "out.kicad_pcb"
+        rc = route_main(self._route_argv(pcb_vcc_gnd_pour, out_path, "VCC,GND"))
+
+        assert rc != 0
+        captured = capfd.readouterr()
+        combined = captured.out + captured.err
+
+        # The pour-net auto-skip ran and caught exactly the requested nets.
+        assert "Auto-skip:" in combined
+        assert "GND" in combined
+        assert "VCC" in combined
+
+        # Issue #5876: must point at the auto-skip conflict, never claim a
+        # loader bug (there is none -- the loader behaved correctly).
+        assert "loader bug" not in combined
+        assert "conflict" in combined.lower()
+
+    def test_genuinely_routable_net_request_still_detects_lost_binding(self, capfd) -> None:
+        """Contrast case: when the requested net was NOT auto-skipped but the
+        denominator is still zero, the guard must keep the original
+        "loader bug" wording -- that case is a real defense-in-depth bug
+        report, not a user-intent conflict."""
+        from kicad_tools.cli.route_cmd import _reject_lost_route_only_bindings
+
+        args = type(
+            "Args",
+            (),
+            {
+                "_route_only_nets": ["SIGNAL"],
+                "_route_only_nets_under_two": set(),
+                "_auto_skipped_net_names": [],  # nothing was deliberately skipped
+            },
+        )()
+        rc = _reject_lost_route_only_bindings(args, 0)
+
+        assert rc is not None
+        assert rc != 0
+        err = capfd.readouterr().err
+        assert "loader bug" in err
+        assert "conflict" not in err.lower()
