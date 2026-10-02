@@ -379,7 +379,7 @@ NetClassRouting(
     name="DDR_DATA_BYTE_0",
     length_critical=True,
     length_match_group="DDR_DATA_BYTE_0",  # these nets must length-match...
-    swap_group="DDR_BYTE0",                # ...and these nets' PINS may swap
+    swap_group="DDR_BYTE0",  # ...and these nets' PINS may swap
 )
 ```
 
@@ -448,8 +448,8 @@ from kicad_tools.router.placement_delta import (
 )
 
 deltas = load_placement_deltas("regression-fixture/placement_delta.json")
-pad_overrides = pad_map_overrides(deltas)   # {target_key: {pad: net_name}}
-report = format_pad_map_report(deltas)      # human-readable change report
+pad_overrides = pad_map_overrides(deltas)  # {target_key: {pad: net_name}}
+report = format_pad_map_report(deltas)  # human-readable change report
 ```
 
 - `load_placement_deltas` reads the `applied` section by default (never
