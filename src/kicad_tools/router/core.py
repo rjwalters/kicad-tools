@@ -107,6 +107,7 @@ from .length import LengthTracker, LengthViolation
 from .match_group_length import MatchGroup, MatchGroupTracker
 from .net_class import NetClass, classify_from_name
 from .output import format_failed_nets_summary
+from .pad_access_invariant import AccessVeto, PadAccessInvariant
 from .parallel import (
     ParallelRouter,
     RegionBasedNegotiatedRouter,
@@ -1655,6 +1656,20 @@ class Autorouter:
         # scope guard forbids a knob for it.
         self._commit_journal = CommitJournal()
 
+        # Issue #5891 (Epic #5508 Phase 2): commit-time pad-access invariant.
+        # Turns Phase 1's read-only access-set computation into a hard rule --
+        # a candidate route for net N is refused if committing it would reduce
+        # another unrouted pad's access set to empty.  Default ON for the grid
+        # engine (this is the phase that makes the invariant load-bearing);
+        # ``--no-pad-access-invariant`` restores pre-#5891 behaviour
+        # byte-for-byte, because the only consumer of the flag is the single
+        # ``enforce_pad_access=True`` branch in :meth:`_mark_route`.
+        self.enable_pad_access_invariant = True
+        # Constructed lazily in :meth:`_pad_access_gate` so a router that never
+        # reaches a guarded commit (the lattice / mesh strategies, a cache
+        # replay, a plan-only run) pays nothing at all for it.
+        self._pad_access_invariant: PadAccessInvariant | None = None
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
@@ -2311,7 +2326,45 @@ class Autorouter:
         self.grid.update_history_costs(amount)
         return len(overused)
 
-    def _mark_route(self, route: Route) -> None:
+    # ------------------------------------------------------------------
+    # Commit-time pad-access invariant (Epic #5508 Phase 2, issue #5891)
+    # ------------------------------------------------------------------
+
+    @property
+    def pad_access_invariant(self) -> PadAccessInvariant | None:
+        """The commit-time pad-access gate, or ``None`` if never consulted.
+
+        See :mod:`kicad_tools.router.pad_access_invariant`.  Present only after
+        the first guarded commit, so a run that never reached one (lattice /
+        mesh strategy, cache replay) reports ``None`` rather than an
+        empty-but-armed gate a reader could mistake for "nothing was refused".
+        """
+        return self._pad_access_invariant
+
+    @property
+    def pad_access_vetoes(self) -> list[AccessVeto]:
+        """Commits the pad-access invariant refused during this run, in order."""
+        gate = self._pad_access_invariant
+        return list(gate.vetoes) if gate is not None else []
+
+    def _pad_access_gate(self) -> PadAccessInvariant | None:
+        """Lazily build the gate, or ``None`` when the invariant is disabled.
+
+        Armed on construction (which is the first guarded commit), at which
+        point the grid holds exactly the fixed input copper plus the escape
+        pre-phase stubs -- Epic #5508's "access at escape-prephase end"
+        baseline.
+        """
+        if not self.enable_pad_access_invariant:
+            return None
+        gate = self._pad_access_invariant
+        if gate is None:
+            gate = PadAccessInvariant(self)
+            self._pad_access_invariant = gate
+            gate.arm()
+        return gate
+
+    def _mark_route(self, route: Route, *, enforce_pad_access: bool = False) -> bool:
         """Mark a route on both Python and C++ grids.
 
         This is the unified method that should be used instead of calling
@@ -2322,7 +2375,37 @@ class Autorouter:
 
         Issue #2275: Refreshes the pathfinder's cached layer fill ratios
         so subsequent A* searches see updated utilization.
+
+        Issue #5891 (Epic #5508 Phase 2): when ``enforce_pad_access`` is set
+        *and* ``enable_pad_access_invariant`` is on, the commit-time pad-access
+        invariant is consulted FIRST.  If committing ``route`` would reduce
+        another unrouted pad's access set to empty, nothing is marked and this
+        returns ``False`` -- the caller must treat the commit as refused.
+
+        Args:
+            route: The copper to commit.
+            enforce_pad_access: Opt in to the commit-time invariant.  Defaults
+                to ``False``, which is byte-identical to the pre-#5891 method:
+                the gate is not even constructed.  The single production opt-in
+                is the per-connection ``mark_route`` closure in
+                :meth:`_route_net_negotiated` -- the sole producer of new,
+                search-derived grid-engine copper.  Rip-up *re-land* paths
+                deliberately do not opt in: re-marking a victim restores copper
+                that was already committed, and refusing it would strand the
+                very net the rescue is for.
+
+        Returns:
+            ``True`` when the copper was marked (always, unless the invariant
+            refused it).  Callers that do not opt in may ignore the return.
         """
+        if enforce_pad_access:
+            gate = self._pad_access_gate()
+            if gate is not None:
+                veto = gate.veto_for(route)
+                if veto is not None:
+                    gate.record(veto)
+                    return False
+
         self.grid.mark_route(route)
         self._mark_route_on_cpp_grid(route)
 
@@ -2333,6 +2416,7 @@ class Autorouter:
         # Issue #2275: Update layer fill ratios for utilization-aware routing
         if hasattr(self.router, "update_layer_fill_ratios"):
             self.router.update_layer_fill_ratios()
+        return True
 
     def restore_route_snapshot(
         self, routes: list[Route], *, replaced_routes: list[Route] | None = None
@@ -14445,8 +14529,19 @@ class Autorouter:
             congestion_estimator=self._ensure_congestion_estimator(),
         )
 
-        def mark_route(route: Route):
-            self._mark_route(route)
+        def mark_route(route: Route) -> bool:
+            # Issue #5891 (Epic #5508 Phase 2): this is the ONE commit path
+            # that turns a negotiated A* result into new grid copper -- the
+            # initial pass, the grace pass, every rip-up iteration, the relief
+            # probe and the region-parallel path all reach the grid through it.
+            # Opting in here (and nowhere else) makes the pad-access invariant
+            # cover every new search-derived route without also vetoing the
+            # rip-up re-land paths, which restore already-committed copper.
+            # ``route_net_negotiated`` treats a ``False`` return as a failed
+            # connection and fires its ``failure_callback``, so a refusal feeds
+            # the existing targeted rip-up machinery rather than silently
+            # dropping copper.
+            return self._mark_route(route, enforce_pad_access=True)
 
         new_routes = neg_router.route_net_negotiated(
             pad_objs,

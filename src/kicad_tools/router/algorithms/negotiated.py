@@ -1088,7 +1088,17 @@ class NegotiatedRouter:
         Args:
             pad_objs: List of Pad objects to connect
             present_cost_factor: Multiplier for present sharing cost
-            mark_route_callback: Callback to mark a route on the grid
+            mark_route_callback: Callback to mark a route on the grid.  May
+                return ``False`` to REFUSE the commit (Issue #5891, Epic
+                #5508 Phase 2: the commit-time pad-access invariant refuses a
+                candidate whose copper would strand another unrouted pad).  A
+                refusal is handled exactly like a failed search: the route is
+                not added to this net's result list and ``failure_callback``
+                fires, so the negotiated loop's existing targeted rip-up gets
+                the connection as a target.  Any other return value -- notably
+                ``None``, which every pre-#5891 callback returns -- counts as a
+                successful commit, so an unchanged callback behaves exactly as
+                before.
             per_net_timeout: Optional wall-clock timeout in seconds that
                 brackets THIS WHOLE NET (Issue #1605, fixed in Issue #2769).
                 For multi-pin nets the budget is shared across all RSMT
@@ -1290,16 +1300,24 @@ class NegotiatedRouter:
                 # this branch still records the failure and fires
                 # ``failure_callback`` rather than silently dropping a
                 # missing-connectivity sub-route into the result list.
-                if route and (route.segments or route.vias):
-                    mark_route_callback(route)
-                    routes.append(route)
+                # Issue #5891: ``mark_route_callback`` may REFUSE the commit
+                # (pad-access invariant).  A refusal is a failed connection,
+                # not a silent drop -- fall through to the failure branch so
+                # ``failure_callback`` fires and the copper is never counted as
+                # committed.
+                committed: Route | None = None
+                if route is not None and (route.segments or route.vias):
+                    if mark_route_callback(route) is not False:
+                        committed = route
+                if committed is not None:
+                    routes.append(committed)
                     # Collect grid cells from the routed segments so later
                     # edges can terminate early upon reaching this tree.
                     joined_cells = tree_cells.setdefault(target_root, set())
                     if source_root != target_root:
                         joined_cells.update(tree_cells.pop(source_root, set()))
                         tree_parent[source_root] = target_root
-                    self._collect_route_cells(route, joined_cells)
+                    self._collect_route_cells(committed, joined_cells)
                 else:
                     # Issue #2476: Capture structured via-blocked failure
                     # diagnostics from the cpp pathfinder so the negotiated
@@ -1327,9 +1345,14 @@ class NegotiatedRouter:
             )
             # Issue #2934: Defensive check for empty Routes; see comment on
             # the multi-edge RSMT path above for the rationale.
-            if route and (route.segments or route.vias):
-                mark_route_callback(route)
-                routes.append(route)
+            # Issue #5891: a ``False`` from the callback is a refused commit
+            # (pad-access invariant) and takes the same path as a failed search.
+            accepted: Route | None = None
+            if route is not None and (route.segments or route.vias):
+                if mark_route_callback(route) is not False:
+                    accepted = route
+            if accepted is not None:
+                routes.append(accepted)
             else:
                 import os as _os
 

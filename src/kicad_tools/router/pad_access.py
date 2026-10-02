@@ -82,7 +82,9 @@ __all__ = [
     "affected_pads",
     "compute_access_set",
     "direction_name",
+    "has_access",
     "route_envelope",
+    "via_candidate_geometry",
 ]
 
 #: Floating-point slack shared by every comparison in this module.  Matches the
@@ -880,6 +882,164 @@ def _dedupe(items: Iterable[ClosingCopper]) -> tuple[ClosingCopper, ...]:
 # ---------------------------------------------------------------------------
 
 
+def via_candidate_geometry(rules: DesignRules) -> tuple[MfrLimits | None, float, float]:
+    """Fab tier plus the ``(drill, diameter)`` every via candidate is sized at.
+
+    Factored out of :func:`compute_access_set` so a caller that needs to bound
+    the via candidates *without* enumerating them -- Phase 2's conservative
+    access bbox
+    (:func:`~kicad_tools.router.pad_access_invariant.conservative_access_bbox`) --
+    derives the same numbers from the same place instead of re-deriving the
+    annular-ring arithmetic and silently drifting from it.
+
+    A manufacturer whose limits cannot be resolved falls back to the rules'
+    own via geometry, exactly as before: an unknown fab tier must not inflate
+    (or shrink) a via candidate.
+    """
+    mfr: MfrLimits | None = None
+    if rules.manufacturer:
+        try:
+            mfr = get_mfr_limits(rules.manufacturer)
+        except Exception:
+            mfr = None
+    drill = rules.via_drill if mfr is None else max(rules.via_drill, mfr.min_via_drill)
+    diameter = (
+        rules.via_diameter
+        if mfr is None
+        else max(rules.via_diameter, drill + 2 * mfr.min_via_annular)
+    )
+    return mfr, drill, diameter
+
+
+def _stub_candidates(
+    pad: Pad,
+    *,
+    width: float,
+    stub_length: float,
+    bounds: tuple[float, float, float, float],
+) -> tuple[list[tuple[tuple[int, int], Segment]], bool]:
+    """The eight candidate exit stubs of ``pad``, before any legality test.
+
+    Shared by :func:`compute_access_set` and :func:`has_access` so the cheap
+    existence question and the full enumeration can never disagree about *which
+    candidates exist* -- only about how many of them they bother to evaluate.
+
+    Returns the in-bounds candidates in :data:`DIRECTIONS` order, paired with
+    their direction, plus a flag saying whether any candidate was dropped for
+    leaving the board (the witness reports that as a ``board_edge`` closer).
+    """
+    candidates: list[tuple[tuple[int, int], Segment]] = []
+    out_of_bounds = False
+    for direction in DIRECTIONS:
+        dx, dy = direction
+        norm = math.hypot(dx, dy)
+        ux, uy = dx / norm, dy / norm
+        start = _ray_exit_extent(pad, ux, uy)
+        x0 = round(pad.x + start * ux, 6)
+        y0 = round(pad.y + start * uy, 6)
+        x1 = round(pad.x + (start + stub_length) * ux, 6)
+        y1 = round(pad.y + (start + stub_length) * uy, 6)
+        if not _inside(bounds, x1, y1) or not _inside(bounds, x0, y0):
+            out_of_bounds = True
+            continue
+        candidates.append(
+            (
+                direction,
+                Segment(
+                    x1=x0,
+                    y1=y0,
+                    x2=x1,
+                    y2=y1,
+                    width=width,
+                    layer=pad.layer,
+                    net=pad.net,
+                    net_name=pad.net_name,
+                ),
+            )
+        )
+    return candidates, out_of_bounds
+
+
+def _in_pad_via_allowed(pad: Pad, mfr: MfrLimits | None) -> bool:
+    """Whether a via may be placed inside ``pad`` itself (the via-in-pad site).
+
+    The *only* access candidate that does not sit at the far end of a legal
+    exit stub, which is what makes it the second half of :func:`has_access`'
+    early-exit test: with every stub rejected, an in-pad via is the one
+    remaining way out.
+    """
+    return mfr is not None and bool(mfr.via_in_pad_supported) and not pad.through_hole
+
+
+def has_access(
+    pad: Pad,
+    grid: object,
+    rules: DesignRules,
+    *,
+    legality: AccessLegality | None = None,
+    trace_width: float | None = None,
+    hard_same_net: Sequence[Route | Pad] = (),
+) -> bool:
+    """``not compute_access_set(...).is_empty()``, with early exit.
+
+    Phase 2's commit-time gate (:mod:`kicad_tools.router.pad_access_invariant`)
+    asks only whether a terminal still has *some* way out, once per protected
+    terminal per candidate commit -- never what that way out is, unless the
+    answer is "none" and a veto has to describe itself.  Enumerating the whole
+    access set to answer that is wasteful: the common case is a pad with
+    several legal exits, where the *first* stub tested already settles it.
+
+    The saving is structural, not a heuristic: every via site except the
+    via-in-pad one sits at the far end of a **legal** exit stub (see
+    :func:`compute_access_set`), so
+
+        access set non-empty  <=>  some stub is legal  OR  an in-pad via is legal
+
+    and the right-hand side short-circuits.  Arguments and semantics are
+    otherwise identical to :func:`compute_access_set`; both share
+    :func:`_stub_candidates` so the candidates they test cannot drift apart.
+    """
+    width = rules.trace_width if trace_width is None else trace_width
+    resolution = float(getattr(grid, "resolution", rules.grid_resolution))
+    stub_length = _round_up_to_cells(width + 2 * rules.trace_clearance, resolution)
+    adapter: AccessLegality = (
+        DefaultAccessLegality(grid, rules, hard_same_net=hard_same_net)
+        if legality is None
+        else legality
+    )
+    bounds = _grid_world_bounds(grid)
+    net = pad.net
+
+    candidates, _out_of_bounds = _stub_candidates(
+        pad, width=width, stub_length=stub_length, bounds=bounds
+    )
+    for _direction, seg in candidates:
+        is_legal, _loc = adapter.stub_legal(seg, net)
+        if is_legal:
+            return True
+
+    # Every stub was rejected, so the only candidate left is a via inside the
+    # pad itself -- the one access candidate that does not depend on a stub.
+    mfr, drill, diameter = via_candidate_geometry(rules)
+    if not _in_pad_via_allowed(pad, mfr):
+        return False
+    for other_layer in _other_copper_layers(grid, pad.layer):
+        candidate = Via(
+            x=pad.x,
+            y=pad.y,
+            drill=drill,
+            diameter=diameter,
+            layers=(pad.layer, other_layer),
+            net=net,
+            net_name=pad.net_name,
+            in_pad=True,
+        )
+        is_legal, _loc = adapter.via_legal(candidate, net)
+        if is_legal:
+            return True
+    return False
+
+
 def compute_access_set(
     pad: Pad,
     grid: object,
@@ -929,41 +1089,22 @@ def compute_access_set(
 
     rejected_stub_segments: list[Segment] = []
     rejected_via_candidates: list[Via] = []
-    out_of_bounds = False
 
     # -- exit stubs -------------------------------------------------------
     stubs: list[ExitStub] = []
-    for direction in DIRECTIONS:
-        dx, dy = direction
-        norm = math.hypot(dx, dy)
-        ux, uy = dx / norm, dy / norm
-        start = _ray_exit_extent(pad, ux, uy)
-        x0 = round(pad.x + start * ux, 6)
-        y0 = round(pad.y + start * uy, 6)
-        x1 = round(pad.x + (start + stub_length) * ux, 6)
-        y1 = round(pad.y + (start + stub_length) * uy, 6)
-        if not _inside(bounds, x1, y1) or not _inside(bounds, x0, y0):
-            out_of_bounds = True
-            continue
-        seg = Segment(
-            x1=x0,
-            y1=y0,
-            x2=x1,
-            y2=y1,
-            width=width,
-            layer=origin_layer,
-            net=net,
-            net_name=pad.net_name,
-        )
+    candidates, out_of_bounds = _stub_candidates(
+        pad, width=width, stub_length=stub_length, bounds=bounds
+    )
+    for direction, seg in candidates:
         is_legal, _loc = adapter.stub_legal(seg, net)
         if is_legal:
             stubs.append(
                 ExitStub(
                     layer=origin_layer,
-                    x0=x0,
-                    y0=y0,
-                    x1=x1,
-                    y1=y1,
+                    x0=seg.x1,
+                    y0=seg.y1,
+                    x1=seg.x2,
+                    y1=seg.y2,
                     width=width,
                     direction=direction,
                 )
@@ -972,22 +1113,11 @@ def compute_access_set(
             rejected_stub_segments.append(seg)
 
     # -- via sites --------------------------------------------------------
-    mfr: MfrLimits | None = None
-    if rules.manufacturer:
-        try:
-            mfr = get_mfr_limits(rules.manufacturer)
-        except Exception:
-            mfr = None
-    drill = rules.via_drill if mfr is None else max(rules.via_drill, mfr.min_via_drill)
-    diameter = (
-        rules.via_diameter
-        if mfr is None
-        else max(rules.via_diameter, drill + 2 * mfr.min_via_annular)
-    )
+    mfr, drill, diameter = via_candidate_geometry(rules)
     other_layers = _other_copper_layers(grid, origin_layer)
 
     via_candidates: list[tuple[float, float, bool, int | None]] = []
-    if mfr is not None and mfr.via_in_pad_supported and not pad.through_hole:
+    if _in_pad_via_allowed(pad, mfr):
         via_candidates.append((pad.x, pad.y, True, None))
     for index, stub in enumerate(stubs):
         via_candidates.append((stub.x1, stub.y1, False, index))

@@ -16,6 +16,15 @@ near it, and it has no notion of *when* anything happened. The witness is
 derived from the order copper actually landed in, so it can name a pass, an
 iteration and a journal record.
 
+> **Since #5891 (Phase 2), most runs have nothing to witness.** The
+> [pad-access invariant](../guides/routing.md#pad-access-invariant) now *refuses*
+> the commit that would strand a pad, so the stranding this witness describes
+> largely stops happening on the grid engine. The witness remains the record of
+> what the rule could not prevent — a pad already stranded at escape-prephase
+> end (placement, not a commit), a path outside the rule's scope (escape stubs,
+> lattice / mesh), or a run that exhausted the rule's evaluation budget. The
+> live, at-commit counterpart is `Autorouter.pad_access_vetoes`.
+
 ## Where it lives
 
 Inside the `<stem>.access_witness.json` sidecar `kct route` writes next to the

@@ -3860,6 +3860,21 @@ def _add_route_parser(subparsers) -> None:
             "(byte-identical when absent)."
         ),
     )
+    route_parser.add_argument(
+        "--no-pad-access-invariant",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the commit-time pad-access invariant (Issue #5891, epic "
+            "#5508 Phase 2).  ON by default for the grid engine: a negotiated "
+            "candidate route is REFUSED when committing it would reduce "
+            "another unrouted pad's access set (legal exit stubs plus "
+            "reachable via sites) to empty.  A refused connection is treated "
+            "like a failed search, so the existing targeted rip-up retries "
+            "it.  Pass this flag to restore pre-#5891 behaviour "
+            "byte-for-byte."
+        ),
+    )
     # Issue #3054 (Phase 2 of #3045): wire region-based parallelism through to
     # ``route_all_negotiated``.  Opt-in (default off) so existing scripts and
     # CI runs see byte-identical routes; when set, the negotiated loop

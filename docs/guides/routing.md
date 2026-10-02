@@ -539,6 +539,83 @@ router.enable_blind_vias(top_layer="F.Cu", bottom_layer="In1.Cu")
 
 ---
 
+## Pad-Access Invariant
+
+*Epic #5508 Phase 2, issue #5891. On by default for the grid engine.*
+
+A pad's **access set** is everything still legal as a *first move* out of it:
+the exit stubs on its own layer, plus the via sites reachable from them. A pad
+whose access set is empty cannot be routed, whatever the search does afterwards
+— and the usual way a reachable pad gets there is that copper committed for
+*other* nets encloses it before its own net's turn. PathFinder negotiation
+cannot repair that: the enclosing copper is legal and unshared, so it never
+appears in `find_overused_cells` and rip-up has nothing to target.
+
+The invariant makes that a **hard commit-time rule**: a negotiated candidate
+route is refused when committing it would reduce another unrouted pad's access
+set to empty. A refusal is handled exactly like a failed search, so the
+existing targeted rip-up retries the connection — usually on a path that does
+not close anybody in.
+
+```bash
+# On by default -- nothing to pass.
+kct route board.kicad_pcb -o routed.kicad_pcb
+
+# Opt out (byte-identical to pre-#5891 behaviour).
+kct route board.kicad_pcb -o routed.kicad_pcb --no-pad-access-invariant
+kct route-auto board.kicad_pcb --no-pad-access-invariant
+```
+
+Each refusal is retained as a witness, so a run can say *which* pad it
+protected from *which* net:
+
+```python
+router.route_all_negotiated(max_iterations=5)
+
+for veto in router.pad_access_vetoes:
+    print(veto.one_line())
+    # COMP refused at initial[0]: committing it would strand U3.1 (ISENSE_A+)
+    # -- last access was 1 stub(s) / 1 via site(s), closed by COMP
+
+gate = router.pad_access_invariant  # None when never consulted
+print(gate.summary_line())
+```
+
+**Scope.** The rule is consulted from the one commit path that turns a
+negotiated A* result into new grid copper, which covers the initial pass, the
+grace pass, every rip-up iteration, the relief probe and the region-parallel
+path. Three things are deliberately outside it: the escape pre-phase (its stubs
+are the baseline access is measured *against*), rip-up **re-land** paths
+(re-marking a victim restores copper that was already committed, and refusing
+it would strand the net the rescue is for), and the lattice / mesh strategies
+(Phase 4). It is bounded by an evaluation budget and a protected-pad cap, both
+of which fail *open* and are reported through
+`PadAccessInvariant.truncated` rather than silently narrowing the rule.
+
+**Cost.** The rule runs before every guarded commit, so it reports what it
+spends: `PadAccessInvariant.seconds` is the wall-clock time the gate itself
+consumed, alongside the candidates it was asked about, the terminals each
+prefilter stage kept, and the access evaluations it paid for.
+
+```python
+print(router.pad_access_invariant.to_dict())
+# {'enabled': True, 'protected_pads': 44, 'checks': 124, 'coarse_hits': 512,
+#  'fine_hits': 503, 'evaluations': 220, 'seconds': 1.037, ...}
+```
+
+Those are board 06's real numbers: **1.0 s of an ~870 s route**, for 44
+protected terminals. Three things keep it there — a two-stage bbox prefilter
+(whole-route envelope, then the candidate's per-primitive boxes), an
+early-exit "has this terminal *any* way out?" test instead of enumerating the
+whole access set, and a cached "before" verdict that only the copper landing
+inside a terminal's own box invalidates.
+
+The offline counterpart — *which commit stranded a pad, after the fact* — is the
+[access witness](../diagnostics/access-witness.md), built from the
+[commit journal](../reference/commit-journal.md).
+
+---
+
 ## Routing Quality
 
 ### Optimization

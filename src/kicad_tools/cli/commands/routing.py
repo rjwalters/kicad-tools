@@ -628,6 +628,12 @@ def run_route_command(args) -> int:
     # when the user set it (byte-identical when absent).
     if getattr(args, "escape_corridor_reservation", False):
         sub_argv.append("--escape-corridor-reservation")
+    # Issue #5891 (epic #5508 Phase 2): forward --no-pad-access-invariant.  Both
+    # parsers declare it as store_true defaulting to False (the invariant itself
+    # is ON by default), so only forward the OPT-OUT when the user set it --
+    # argv is byte-identical for a run that did not pass it.
+    if getattr(args, "no_pad_access_invariant", False):
+        sub_argv.append("--no-pad-access-invariant")
     max_ripups_val = getattr(args, "max_ripups_per_net", None)
     if max_ripups_val is not None:
         sub_argv.extend(["--max-ripups-per-net", str(max_ripups_val)])
