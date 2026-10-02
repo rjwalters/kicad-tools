@@ -2872,6 +2872,7 @@ def _write_access_witness_sidecar(
         JOURNAL_SCHEMA_VERSION,
         witness_for_router,
     )
+    from kicad_tools.router.pad_access_invariant import format_veto_report
 
     journal = getattr(router, "commit_journal", None)
     if journal is None or not len(journal):
@@ -2924,6 +2925,16 @@ def _write_access_witness_sidecar(
         print(f"  {journal.summary_line()}")
         if witness:
             print(f"  {witness.summary_line()}")
+        # Issue #5891 (epic #5508 Phase 2): the witness says what the rule could
+        # not prevent; this says what it DID prevent, and what it cost.  Printed
+        # beside the witness because the two answer the same question from
+        # opposite ends, and a default-on gate that reports neither leaves a
+        # reader unable to tell "nothing to refuse" from "never consulted".
+        gate = getattr(router, "pad_access_invariant", None)
+        if gate is not None:
+            print(f"  {gate.summary_line()}")
+            for line in format_veto_report(gate.vetoes):
+                print(f"    {line}")
     return sidecar_path
 
 

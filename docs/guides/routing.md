@@ -443,6 +443,24 @@ it would strand the net the rescue is for), and the lattice / mesh strategies
 of which fail *open* and are reported through
 `PadAccessInvariant.truncated` rather than silently narrowing the rule.
 
+**Cost.** The rule runs before every guarded commit, so it reports what it
+spends: `PadAccessInvariant.seconds` is the wall-clock time the gate itself
+consumed, alongside the candidates it was asked about, the terminals each
+prefilter stage kept, and the access evaluations it paid for.
+
+```python
+print(router.pad_access_invariant.to_dict())
+# {'enabled': True, 'protected_pads': 44, 'checks': 124, 'coarse_hits': 512,
+#  'fine_hits': 503, 'evaluations': 220, 'seconds': 1.037, ...}
+```
+
+Those are board 06's real numbers: **1.0 s of an ~870 s route**, for 44
+protected terminals. Three things keep it there — a two-stage bbox prefilter
+(whole-route envelope, then the candidate's per-primitive boxes), an
+early-exit "has this terminal *any* way out?" test instead of enumerating the
+whole access set, and a cached "before" verdict that only the copper landing
+inside a terminal's own box invalidates.
+
 The offline counterpart — *which commit stranded a pad, after the fact* — is the
 [access witness](../diagnostics/access-witness.md), built from the
 [commit journal](../reference/commit-journal.md).

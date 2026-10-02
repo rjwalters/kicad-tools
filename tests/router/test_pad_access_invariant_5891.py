@@ -18,7 +18,7 @@ import pytest
 from kicad_tools.router.access_witness import PASS_INITIAL
 from kicad_tools.router.core import Autorouter
 from kicad_tools.router.layers import Layer
-from kicad_tools.router.pad_access import compute_access_set
+from kicad_tools.router.pad_access import compute_access_set, has_access
 from kicad_tools.router.pad_access_invariant import (
     AccessVeto,
     PadAccessInvariant,
@@ -379,6 +379,144 @@ def test_before_set_is_cached_against_the_grids_own_mutation_counter():
     assert gate.evaluations < after_first * 2
 
 
+def test_distant_copper_does_not_invalidate_a_cached_before_verdict():
+    """The cache is invalidated by geometry, not by the journal's length.
+
+    A commit on the far side of the board appends a journal record, which a
+    counter-keyed cache would read as "everything is stale".  Only the
+    terminals that commit's copper could actually have touched may be dropped.
+    """
+    router = _kelvin_cluster()
+    gate = router._pad_access_gate()
+    assert gate is not None
+
+    candidate = _comp_route()
+    gate.veto_for(candidate)
+    cached_keys = set(gate._before)
+    assert cached_keys, "the first check should have cached at least one verdict"
+
+    far = Route(
+        net=FOREIGN_NET,
+        net_name="FAR",
+        segments=[
+            Segment(
+                x1=18.0,
+                y1=1.0,
+                x2=19.0,
+                y2=1.0,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=FOREIGN_NET,
+                net_name="FAR",
+            )
+        ],
+    )
+    router._mark_route(far)
+    before_second = gate.evaluations
+    gate.veto_for(candidate)
+
+    # Every cached verdict survived the distant commit, so the second check
+    # paid only for its speculative "after" evaluations -- at most one per
+    # terminal it reached, never two.
+    assert cached_keys <= set(gate._before)
+    assert gate.evaluations - before_second <= len(cached_keys)
+
+
+def test_nearby_copper_does_invalidate_the_cached_before_verdict():
+    """The counterpart: copper inside a terminal's box must drop its verdict."""
+    router = _kelvin_cluster()
+    gate = router._pad_access_gate()
+    assert gate is not None
+
+    gate.veto_for(_comp_route())
+    assert ("U3", "1") in gate._before
+
+    near = Route(
+        net=FOREIGN_NET,
+        net_name="NEAR",
+        segments=[
+            Segment(
+                x1=4.0,
+                y1=COMP_Y,
+                x2=6.0,
+                y2=COMP_Y,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=FOREIGN_NET,
+                net_name="NEAR",
+            )
+        ],
+    )
+    router._mark_route(near)
+    gate._sync_cache()
+    assert ("U3", "1") not in gate._before
+
+
+def test_truncated_journal_disables_the_cache_rather_than_serving_it_stale():
+    """A journal at its record cap stops appending, so it stops being a feed."""
+    router = _kelvin_cluster()
+    gate = router._pad_access_gate()
+    assert gate is not None
+
+    gate.veto_for(_comp_route())
+    assert gate._before
+
+    router._commit_journal.truncated = True
+    gate._sync_cache()
+
+    assert gate._before == {}
+    assert gate._cache_disabled is True
+
+    # And nothing is cached from here on -- every verdict is recomputed.
+    gate.veto_for(_comp_route())
+    assert gate._before == {}
+
+
+def test_fine_prefilter_skips_terminals_the_envelope_only_flew_past():
+    """A long L-shaped route's envelope over-selects; its copper must not.
+
+    The whole-route bbox of an L covers the empty quadrant inside it.  A
+    terminal sitting there is reachable only by the envelope, never by the
+    copper, so the second prefilter stage has to drop it -- that is the
+    difference between one access evaluation and none.
+    """
+    router = _kelvin_cluster()
+    gate = router._pad_access_gate()
+    assert gate is not None
+
+    # An L hugging the board's west and south edges.  U3 (5, 15) sits inside
+    # its bbox but far from both arms.
+    elbow = Route(
+        net=COMP_NET,
+        net_name="COMP",
+        segments=[
+            Segment(
+                x1=0.5,
+                y1=0.5,
+                x2=0.5,
+                y2=19.5,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=COMP_NET,
+                net_name="COMP",
+            ),
+            Segment(
+                x1=0.5,
+                y1=19.5,
+                x2=19.5,
+                y2=19.5,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=COMP_NET,
+                net_name="COMP",
+            ),
+        ],
+    )
+    assert gate.veto_for(elbow) is None
+    assert gate.coarse_hits > gate.fine_hits, "the envelope must over-select here"
+    assert gate.evaluations <= gate.fine_hits * 2
+
+
 def test_exhausted_evaluation_budget_fails_open_and_says_so():
     router = _kelvin_cluster()
     gate = PadAccessInvariant(router, max_evaluations=0)
@@ -396,6 +534,45 @@ def test_protected_pad_cap_is_deterministic_and_flagged():
     assert gate.truncated is True
     # Sorted (ref, pin) order, so the truncation is reproducible.
     assert sorted(gate.protected) == [("Q1", "1"), ("R10", "1")]
+
+
+# ---------------------------------------------------------------------------
+# Soundness of the early-exit existence test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("comp_x2", [0.5, 3.0, 5.0, 6.5, 9.0])
+def test_has_access_agrees_with_the_full_access_set(comp_x2):
+    """``has_access`` is the hot path; it must never disagree with Phase 1a.
+
+    Walks a competing track across the cluster so the sweep covers both
+    verdicts for several terminals -- including the x2 that strands U3.1,
+    which is exactly where a cheap test disagreeing with the expensive one
+    would turn into a wrong veto.
+    """
+    router = _kelvin_cluster()
+    track = Route(
+        net=COMP_NET,
+        net_name="COMP",
+        segments=[
+            Segment(
+                x1=COMP_X1,
+                y1=COMP_Y,
+                x2=comp_x2,
+                y2=COMP_Y,
+                width=0.2,
+                layer=Layer.F_CU,
+                net=COMP_NET,
+                net_name="COMP",
+            )
+        ],
+    )
+    router._mark_route(track)
+
+    for key, pad in sorted(router.pads.items()):
+        full = compute_access_set(pad, router.grid, router.rules)
+        cheap = has_access(pad, router.grid, router.rules)
+        assert cheap is (not full.is_empty()), f"{key} disagreed at x2={comp_x2}"
 
 
 # ---------------------------------------------------------------------------

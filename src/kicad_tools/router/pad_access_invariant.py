@@ -28,7 +28,7 @@ what the caller does with a veto -- the caller
 (:meth:`kicad_tools.router.core.Autorouter._mark_route`) refuses the commit, and
 the negotiated loop's existing per-connection failure path takes over.
 
-Three properties make it affordable inside the commit path, where Phase 1b's
+Four properties make it affordable inside the commit path, where Phase 1b's
 "zero cost inside the A* loop" exemption no longer applies:
 
 1. **The pad prefilter needs no legality evaluation.**  Arming computes only a
@@ -42,15 +42,36 @@ Three properties make it affordable inside the commit path, where Phase 1b's
    carries over: a terminal the prefilter rejects cannot have been changed by
    the candidate.  Arming is therefore O(pads) arithmetic, not O(pads) geometric
    sweeps.
-2. **The "before" access set is cached against the grid's own mutation
+
+   The prefilter runs in **two stages**, because a long route's whole-route
+   envelope can cover a quarter of the board while its copper is a thin line
+   through it: the cheap stage is one box test per protected terminal against
+   :func:`~kicad_tools.router.pad_access.route_envelope`, and only the terminals
+   that survive it are re-tested against the candidate's *per-primitive* boxes
+   (:func:`candidate_boxes`).  The union of those boxes is exactly the copper
+   ``mark_route`` would block, so the second stage is as sound as the first and
+   strictly tighter.  On board 06 it is the difference between evaluating every
+   terminal a diff-pair trace flies past and evaluating the handful it actually
+   runs alongside.
+2. **The hot question is "any way out?", not "which ways out?".**
+   :func:`~kicad_tools.router.pad_access.has_access` answers the gate's actual
+   question -- *is the access set non-empty* -- with early exit, because every
+   via site except the via-in-pad one sits at the far end of a **legal** exit
+   stub.  A pad with several legal exits is settled by the first stub tested,
+   instead of enumerating eight stubs times the layer stack's via sites.  The
+   full :func:`~kicad_tools.router.pad_access.compute_access_set` is still run
+   on the veto path, where the refusal has to describe itself.
+3. **The "before" verdict is cached and invalidated by geometry, not by a
    counter.**  Every copper mutation on the routing grid already appends a
    record to Phase 1b's :class:`~kicad_tools.router.access_witness.CommitJournal`
-   (including the rip-up and resync paths that bypass ``_mark_route``), so
-   ``len(journal)`` is an exact, monotonic copper version.  A cached "before"
-   set is reused only while that version is unchanged, which makes the common
-   case one access-set evaluation per affected terminal per commit instead of
-   two, with no staleness window.
-3. **Only a genuine non-empty -> empty transition vetoes.**  A terminal that was
+   (including the rip-up and resync paths that bypass ``_mark_route``), and each
+   record carries the geometry it added or removed.  The gate replays the
+   records appended since it last looked and drops only the cached verdicts
+   whose terminal box those records touched, so copper landing on the far side
+   of the board costs a cached terminal nothing.  A journal that has hit its own
+   record cap (``truncated``) stops being a reliable change feed, so the cache
+   is disabled outright from that point rather than served stale.
+4. **Only a genuine non-empty -> empty transition vetoes.**  A terminal that was
    *already* stranded when the candidate arrived is not stranded *by* it (the
    #5639 rule Phase 1b's replay settled on), and a terminal belonging to the
    candidate's own net, or to a net that already has committed copper, is not
@@ -91,7 +112,9 @@ Scope and bounds (stated here because they are the honest limits of Phase 2)
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -99,6 +122,7 @@ from .pad_access import (
     EPS,
     AccessSet,
     compute_access_set,
+    has_access,
     route_envelope,
     via_candidate_geometry,
 )
@@ -112,6 +136,7 @@ __all__ = [
     "MAX_PROTECTED_PADS",
     "AccessVeto",
     "PadAccessInvariant",
+    "candidate_boxes",
     "conservative_access_bbox",
     "format_veto_report",
 ]
@@ -233,6 +258,42 @@ def conservative_access_bbox(
     )
 
 
+def candidate_boxes(
+    route: Route, rules: DesignRules
+) -> tuple[tuple[float, float, float, float], ...]:
+    """One dilated box per primitive of ``route`` -- the fine prefilter stage.
+
+    :func:`~kicad_tools.router.pad_access.route_envelope` is the bbox of the
+    whole route, which is the right *coarse* test and a poor *fine* one: a
+    single L-shaped trace across a board has an envelope covering everything
+    inside the L, almost none of which its copper touches.  These boxes are the
+    same dilation applied per segment and per via, so their **union is exactly
+    the copper ``mark_route`` would block** -- a terminal that misses every one
+    of them provably cannot have an access candidate flipped by this route, the
+    same guarantee :func:`~kicad_tools.router.pad_access.affected_pads` gives
+    for the envelope.
+    """
+    dilation = max(
+        rules.trace_clearance + rules.trace_width / 2,
+        rules.via_clearance + rules.via_diameter / 2,
+    )
+    boxes: list[tuple[float, float, float, float]] = []
+    for seg in route.segments:
+        half = seg.width / 2 + dilation
+        boxes.append(
+            (
+                min(seg.x1, seg.x2) - half,
+                min(seg.y1, seg.y2) - half,
+                max(seg.x1, seg.x2) + half,
+                max(seg.y1, seg.y2) + half,
+            )
+        )
+    for via in route.vias:
+        radius = via.diameter / 2 + dilation
+        boxes.append((via.x - radius, via.y - radius, via.x + radius, via.y + radius))
+    return tuple(boxes)
+
+
 def _round_up_to_cells(value: float, resolution: float) -> float:
     """Smallest whole number of grid cells that is at least ``value``.
 
@@ -281,12 +342,28 @@ class PadAccessInvariant:
     checks: int = 0
     """Candidate routes the gate was asked about (including cheap misses)."""
 
+    coarse_hits: int = 0
+    """Terminals the whole-route envelope selected, before the fine stage."""
+
+    fine_hits: int = 0
+    """Terminals the per-primitive boxes kept -- the ones actually evaluated."""
+
+    seconds: float = 0.0
+    """Wall-clock seconds spent inside :meth:`veto_for` over the whole run."""
+
     vetoes: list[AccessVeto] = field(default_factory=list)
 
     max_protected_pads: int = MAX_PROTECTED_PADS
     max_evaluations: int = MAX_INVARIANT_EVALUATIONS
 
-    _before: dict[tuple[str, str], tuple[int, AccessSet]] = field(default_factory=dict, repr=False)
+    #: Cached "this terminal still has a way out" verdicts, invalidated by the
+    #: journal geometry replayed in :meth:`_sync_cache`.
+    _before: dict[tuple[str, str], bool] = field(default_factory=dict, repr=False)
+    #: Journal records already folded into ``_before``'s validity.
+    _synced: int = field(default=0, repr=False)
+    #: Set when the journal stopped being a reliable change feed (it hit its own
+    #: record cap, or the router has none), which disables the cache entirely.
+    _cache_disabled: bool = field(default=False, repr=False)
 
     # -- arming ----------------------------------------------------------
 
@@ -355,7 +432,18 @@ class PadAccessInvariant:
         disabled, when ``route`` carries no copper, when it is escape copper
         (the baseline, not a candidate against it), or when the evaluation
         budget is exhausted.
+
+        Wall-clock time spent here accumulates into :attr:`seconds`, so a run
+        can report what the invariant cost it rather than leaving a reader to
+        infer it from a whole-route wall clock that a loaded host dominates.
         """
+        start = time.perf_counter()
+        try:
+            return self._veto_for(route)
+        finally:
+            self.seconds += time.perf_counter() - start
+
+    def _veto_for(self, route: Route) -> AccessVeto | None:
         if not self.enabled:
             return None
         if route is None or not (route.segments or route.vias):
@@ -377,10 +465,24 @@ class PadAccessInvariant:
             return None
 
         self.checks += 1
+        # Coarse stage: one box test per protected terminal against the whole
+        # route.  Cheap, and it answers the overwhelming majority of commits.
         envelope = route_envelope(route, rules)
-        hits = [key for key, box in self.protected.items() if _boxes_overlap(box, envelope)]
+        coarse = [key for key, box in self.protected.items() if _boxes_overlap(box, envelope)]
+        if not coarse:
+            return None
+        self.coarse_hits += len(coarse)
+        # Fine stage: re-test the survivors against the copper this route would
+        # actually block, primitive by primitive.  A long trace's envelope
+        # covers far more board than its copper does, and every terminal the
+        # envelope over-selects would otherwise cost a full access evaluation.
+        boxes = candidate_boxes(route, rules)
+        hits = [
+            key for key in coarse if any(_boxes_overlap(self.protected[key], box) for box in boxes)
+        ]
         if not hits:
             return None
+        self.fine_hits += len(hits)
         hits.sort()
 
         # Resolved lazily: the prefilter above misses on the overwhelming
@@ -406,31 +508,55 @@ class PadAccessInvariant:
             # veto the ordinary mid-net commits that connect them.
             if pad_net in committed_nets:
                 continue
-            before = self._access_before(key, pad, grid, rules)
+            before = self._had_access_before(key, pad, grid, rules)
             if before is None:
                 return None  # budget exhausted mid-scan; fail open, already flagged
-            if before.is_empty():
+            if not before:
                 # Already stranded when the candidate arrived -- the candidate
                 # did not do it (the #5639 transition rule).
                 continue
-            after = self._access_with_candidate(key, pad, grid, rules, route)
+            after = self._has_access_with_candidate(pad, grid, rules, route)
             if after is None:
                 return None
-            if after.is_empty():
-                return AccessVeto(
-                    pad_key=key,
-                    pad_net=pad_net,
-                    pad_net_name=str(getattr(pad, "net_name", "")),
-                    candidate_net=candidate_net,
-                    candidate_net_name=str(getattr(route, "net_name", "")),
-                    pass_name=self._pass_name(),
-                    iteration=self._iteration(),
-                    stubs_before=len(before.stubs),
-                    via_sites_before=len(before.via_sites),
-                    closing_refs=after.closing_refs(),
-                    closing_kinds=tuple(sorted({item.kind for item in after.closing_copper})),
-                )
+            if not after:
+                return self._describe_veto(key, pad, pad_net, grid, rules, route, candidate_net)
         return None
+
+    def _describe_veto(
+        self,
+        key: tuple[str, str],
+        pad: Pad,
+        pad_net: int,
+        grid: Any,
+        rules: DesignRules,
+        route: Route,
+        candidate_net: int,
+    ) -> AccessVeto:
+        """Build the witness for a refusal the cheap test already decided.
+
+        The hot path only ever asks "any way out?"
+        (:func:`~kicad_tools.router.pad_access.has_access`); a veto has to say
+        *what* was lost and *what closed it*, which is the full
+        :func:`~kicad_tools.router.pad_access.compute_access_set`.  Running it
+        here, on the rare path, is what keeps it off the common one -- and the
+        two agree by construction, because ``has_access`` is defined as
+        ``not compute_access_set(...).is_empty()`` over the same candidates.
+        """
+        before = self._full_access(pad, grid, rules)
+        after = self._full_access(pad, grid, rules, candidate=route)
+        return AccessVeto(
+            pad_key=key,
+            pad_net=pad_net,
+            pad_net_name=str(getattr(pad, "net_name", "")),
+            candidate_net=candidate_net,
+            candidate_net_name=str(getattr(route, "net_name", "")),
+            pass_name=self._pass_name(),
+            iteration=self._iteration(),
+            stubs_before=len(before.stubs),
+            via_sites_before=len(before.via_sites),
+            closing_refs=after.closing_refs(),
+            closing_kinds=tuple(sorted({item.kind for item in after.closing_copper})),
+        )
 
     def record(self, veto: AccessVeto) -> None:
         """Retain ``veto`` for the run's diagnostics."""
@@ -446,7 +572,8 @@ class PadAccessInvariant:
         return (
             f"Pad-access invariant: {len(self.vetoes)} commit(s) refused over "
             f"{self.checks} candidate(s), {self.evaluations} access-set "
-            f"evaluation(s), {len(self.protected)} terminal(s) protected{suffix}"
+            f"evaluation(s), {len(self.protected)} terminal(s) protected, "
+            f"{self.seconds:.1f}s{suffix}"
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -454,8 +581,12 @@ class PadAccessInvariant:
             "enabled": self.enabled,
             "protected_pads": len(self.protected),
             "checks": self.checks,
+            "coarse_hits": self.coarse_hits,
+            "fine_hits": self.fine_hits,
             "evaluations": self.evaluations,
+            "seconds": round(self.seconds, 3),
             "truncated": self.truncated,
+            "cache_disabled": self._cache_disabled,
             "vetoes": [veto.to_dict() for veto in self.vetoes],
         }
 
@@ -465,47 +596,82 @@ class PadAccessInvariant:
 
     # -- internals -------------------------------------------------------
 
-    def _copper_version(self) -> int:
-        """Exact, monotonic copper version: Phase 1b's journal record count.
+    def _sync_cache(self) -> None:
+        """Invalidate cached verdicts the journal says are out of date.
 
-        Every physical copper mutation on the routing grid appends a record --
-        ``mark_route`` / ``unmark_route`` / ``resync_route_occupancy``, which
-        covers the escape pre-phase and the rip-up paths that bypass
-        ``_mark_route`` -- so a cache entry tagged with this number is stale the
-        moment anything changes.  Falls back to ``-1`` (never cacheable) when a
-        router has no journal, rather than reusing a possibly-stale set.
+        Phase 1b's journal is the one feed that sees *every* physical copper
+        mutation on the grid -- ``mark_route`` / ``unmark_route`` /
+        ``resync_route_occupancy``, including the escape pre-phase and the
+        rip-up paths that bypass ``_mark_route`` -- and each record carries the
+        geometry it added or removed.  Replaying only the records appended since
+        the last sync, and dropping only the terminals whose box those records
+        touch, keeps a far-away commit from invalidating the whole cache.
+
+        Two cases disable the cache outright instead of risking a stale
+        verdict: a router with no journal, and a journal that hit its own
+        ``MAX_JOURNAL_RECORDS`` cap (``truncated``), after which it stops
+        appending and its length no longer tracks the copper.
         """
+        if self._cache_disabled:
+            return
         journal = getattr(self.router, "commit_journal", None)
-        if journal is None:
-            return -1
-        try:
-            return len(journal)
-        except TypeError:  # pragma: no cover - defensive; journal is a list wrapper
-            return -1
+        records = getattr(journal, "records", None) if journal is not None else None
+        if records is None or getattr(journal, "truncated", False):
+            self._before.clear()
+            self._cache_disabled = True
+            return
+        count = len(records)
+        if count == self._synced:
+            return
+        if count < self._synced:  # journal replaced or reset underneath us
+            self._before.clear()
+            self._synced = count
+            return
+        rules = getattr(self.router, "rules", None)
+        if rules is None:  # cannot dilate geometry -- be conservative
+            self._before.clear()
+            self._synced = count
+            return
+        for record in records[self._synced : count]:
+            if not self._before:
+                break
+            for box in candidate_boxes(record.route, rules):
+                if not self._before:
+                    break
+                stale = [
+                    key
+                    for key, _verdict in self._before.items()
+                    # A cached key with no protected box is not something this
+                    # gate put there; drop it rather than reason about it.
+                    if key not in self.protected or _boxes_overlap(self.protected[key], box)
+                ]
+                for key in stale:
+                    del self._before[key]
+        self._synced = count
 
-    def _access_before(
+    def _had_access_before(
         self, key: tuple[str, str], pad: Pad, grid: Any, rules: DesignRules
-    ) -> AccessSet | None:
-        version = self._copper_version()
-        cached = self._before.get(key)
-        if cached is not None and version >= 0 and cached[0] == version:
-            return cached[1]
-        access = self._evaluate(pad, grid, rules)
-        if access is None:
-            return None
-        if version >= 0:
-            self._before[key] = (version, access)
-        return access
+    ) -> bool | None:
+        """Did ``pad`` still have a way out *before* the candidate arrived?
 
-    def _access_with_candidate(
-        self,
-        key: tuple[str, str],
-        pad: Pad,
-        grid: Any,
-        rules: DesignRules,
-        route: Route,
-    ) -> AccessSet | None:
-        """Access set of ``pad`` **as if** ``route`` were already committed.
+        ``None`` means the evaluation budget ran out mid-scan (the gate fails
+        open and has already flagged itself ``truncated``).
+        """
+        self._sync_cache()
+        cached = self._before.get(key)
+        if cached is not None:
+            return cached
+        verdict = self._evaluate(pad, grid, rules)
+        if verdict is None:
+            return None
+        if not self._cache_disabled:
+            self._before[key] = verdict
+        return verdict
+
+    def _has_access_with_candidate(
+        self, pad: Pad, grid: Any, rules: DesignRules, route: Route
+    ) -> bool | None:
+        """Would ``pad`` still have a way out **if** ``route`` were committed?
 
         Phase 1a's predicates read committed copper from ``grid.routes`` and
         nothing else, so a speculative apply is appending the candidate to that
@@ -514,12 +680,19 @@ class PadAccessInvariant:
         ``marking`` labels, never a legality decision (Phase 1a's design note
         1), so leaving it alone keeps this read-only and cheap.
         """
+        with self._speculative(grid, route):
+            return self._evaluate(pad, grid, rules)
+
+    @contextmanager
+    def _speculative(self, grid: Any, route: Route) -> Iterator[None]:
+        """Hold ``route`` in ``grid.routes`` for the body, then take it back out."""
         routes = getattr(grid, "routes", None)
         if routes is None:
-            return self._evaluate(pad, grid, rules)
+            yield
+            return
         routes.append(route)
         try:
-            return self._evaluate(pad, grid, rules)
+            yield
         finally:
             # Remove by identity, and only our own entry: an evaluation cannot
             # mutate the list, but restoring defensively keeps a future change
@@ -529,12 +702,22 @@ class PadAccessInvariant:
                     del routes[index]
                     break
 
-    def _evaluate(self, pad: Pad, grid: Any, rules: DesignRules) -> AccessSet | None:
+    def _evaluate(self, pad: Pad, grid: Any, rules: DesignRules) -> bool | None:
+        """One budgeted "has this terminal any way out?" evaluation."""
         if self.evaluations >= self.max_evaluations:
             self.truncated = True
             return None
         self.evaluations += 1
-        return compute_access_set(pad, grid, rules, trace_width=self._trace_width(pad, rules))
+        return has_access(pad, grid, rules, trace_width=self._trace_width(pad, rules))
+
+    def _full_access(
+        self, pad: Pad, grid: Any, rules: DesignRules, *, candidate: Route | None = None
+    ) -> AccessSet:
+        """The complete access set, for the veto witness (never the hot path)."""
+        if candidate is None:
+            return compute_access_set(pad, grid, rules, trace_width=self._trace_width(pad, rules))
+        with self._speculative(grid, candidate):
+            return compute_access_set(pad, grid, rules, trace_width=self._trace_width(pad, rules))
 
     def _trace_width(self, pad: Pad, rules: DesignRules) -> float | None:
         """Net-class trace width for ``pad``'s net, or ``None`` for the default.
