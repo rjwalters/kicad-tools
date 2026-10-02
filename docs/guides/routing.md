@@ -358,6 +358,155 @@ Engage from the CLI with `kct route --length-match-diffpairs --length-match-grou
 
 ---
 
+## Swap Groups and Recorded Deltas (Netlist Degrees of Freedom)
+
+Epic #5511. A **swap group** declares that a subset of a bundle's nets may
+have their pad bindings on one facing component re-assigned among
+themselves — the exact opposite default of a match group (which says
+"these nets must arrive length-matched", not "these nets' pins may move").
+This is for the case a match group alone cannot fix: a facing bundle (e.g.
+a DDR data byte between two parts) measured **reversed**, where re-ordering
+pins on the secondary component removes facing-row crossings that no amount
+of length tuning touches.
+
+### Declaring a swap group
+
+Swap-group membership is **declared only** — never inferred from net names,
+pin functions, or footprints:
+
+```python
+NetClassRouting(
+    name="DDR_DATA_BYTE_0",
+    length_critical=True,
+    length_match_group="DDR_DATA_BYTE_0",  # these nets must length-match...
+    swap_group="DDR_BYTE0",  # ...and these nets' PINS may swap
+)
+```
+
+`length_match_group` and `swap_group` are separate, narrower channels: a
+match group may include nets whose pin binding stays fixed (e.g. a DQS
+strobe), so a net can belong to the match group without opting into
+swapping. At least two nets must share the same `swap_group` value for a
+proposal to exist (`MIN_SWAP_GROUP_NETS` in
+[`router/swap_groups.py`](../../src/kicad_tools/router/swap_groups.py)); a
+net with no `swap_group` key is fixed by omission, full stop.
+
+### How the proposal is computed
+
+When the stuck-net classifier (`kct net-status --why`, or the placement-delta
+feedback loop below) measures a declared swap group's bundle as
+`ORIENT_REVERSED`, `swap_groups.propose_swap_assignment` computes a
+**sort-and-pair, crossing-minimising** pad re-binding: each row is sorted by
+its own projection along the facing edge and re-bound rank-for-rank, reusing
+the same crossing counter as the length-match detector
+(`compute_facing_row_inversions`). The result is pure data — a
+`net_rebinding` map plus `crossings_before` / `crossings_after` counts — and
+mutates nothing on its own. An already co-oriented (planar) subset degrades
+to the identity permutation, which is the proposer's own no-op guard.
+
+This surfaces as a `kind="reorder_pins"` `PlacementDelta`
+(`router/placement_delta.py`) carrying a `pad_map` (`{pad_number:
+new_net_name}`) and the crossing counts, alongside whatever the classifier's
+top-ranked fix (`mirror`, `translate`, ...) was for the same diagnosis — see
+`deltas_from_result`.
+
+### Netlist write-back (the applicator)
+
+`kct route --placement-delta-feedback` runs the classifier-driven feedback
+loop after the initial routing pass. **Default: auto (Issue #5890)** — with
+neither `--placement-delta-feedback` nor `--no-placement-delta-feedback`
+given, the loop runs only when the report-only routing plan (Epic #5510)
+says the board is infeasible and nets remain unrouted; pass
+`--no-placement-delta-feedback` to opt out, or `--placement-delta-feedback`
+to force it. See [`docs/reference/cli.md`](../reference/cli.md)'s
+"Placement-delta feedback" section for the full flag reference.
+
+When a `reorder_pins` delta carrying a `pad_map` is kept (strict routed-net
+improvement, no clearance / pairwise-creepage / keepout regression), the
+pads are re-bound on **both** the PCB and the router's own pad list — never
+a net rename, so `diffpair_partner`, `length_match_reference` and every
+other net-name-keyed field stay valid. Every decision — `applied`,
+`proposed` (considered but not kept) and `reverted` (kept briefly, then
+undone) — is written to `<output>_placement_delta.json`
+(`write_placement_delta_json`), so a swap is never a silent artifact edit:
+it is always visible in that sidecar, whether or not it was kept.
+
+### Replaying a committed delta as a reviewable recipe input
+
+`<output>_placement_delta.json` is a **run artifact**, not a recipe input —
+regenerating the board from source does not reproduce it. To make an
+applied delta a **committed, diffable recipe input** instead of a side
+artifact, promote the deltas you want to keep from that artifact's
+`proposed` (or `applied`) list into a small, hand-reviewed JSON file
+committed next to the recipe, and have the recipe replay it explicitly:
+
+```python
+from kicad_tools.router.placement_delta import (
+    format_pad_map_report,
+    load_placement_deltas,
+    pad_map_overrides,
+)
+
+deltas = load_placement_deltas("regression-fixture/placement_delta.json")
+pad_overrides = pad_map_overrides(deltas)  # {target_key: {pad: net_name}}
+report = format_pad_map_report(deltas)  # human-readable change report
+```
+
+- `load_placement_deltas` reads the `applied` section by default (never
+  `proposed` — resurrecting a refused candidate must be an explicit choice,
+  passed via `section="proposed"`), and raises loudly on a path that is not
+  a delta artifact at all rather than silently routing as though nothing
+  were declared.
+- `pad_map_overrides` merges every delta's `pad_map` into one
+  `{target: {pad: net}}` table (raising `ValueError` on a genuine
+  contradiction — two deltas binding the same pad to different nets) that a
+  recipe's schematic/PCB generators can thread through net assignment.
+  Deltas with no `pad_map` (every geometry-only kind, and a rationale-only
+  `reorder_pins` with no declared swap group) contribute nothing — a delta
+  artifact without a `pad_map` must not move a single pin.
+- `format_pad_map_report` turns the same deltas into an auditable report
+  (target, source action, `crossings_before` -> `crossings_after`, and every
+  `pad -> net` binding) a recipe can print and write alongside its other
+  generated output.
+
+**Promotion into the committed file is the human review step** — a recipe
+must never replay `proposed` entries automatically. Committing the small
+JSON file (instead of hand-editing generated schematic/PCB files) is what
+keeps the change a reviewable `git diff` of recipe *input*, not a diff of
+generated bytes nobody can audit pin-by-pin.
+
+**Reference implementation: board 07.**
+[`boards/07-matchgroup-test/generate_design.py`](../../boards/07-matchgroup-test/generate_design.py)
+wires this with an explicit, opt-in `--placement-delta PATH` flag (never
+auto-discovered) that replays the committed, reviewed
+[`regression-fixture/placement_delta.json`](../../boards/07-matchgroup-test/regression-fixture/placement_delta.json)
+into both the generated schematic and PCB before routing, so the swap
+survives a full regeneration and the two views still agree pad-for-pad:
+
+```sh
+uv run python boards/07-matchgroup-test/generate_design.py /tmp/board07-swap \
+  --placement-delta boards/07-matchgroup-test/regression-fixture/placement_delta.json
+```
+
+With the flag omitted, the recipe's output is unchanged — committing the
+delta file does not alter the board's default shipped artifacts; replaying
+it is a deliberate, separately-reviewed choice (promoting a swapped board to
+the *default* shipped fixture is its own decision, re-measured on its own
+merits). See `regression-fixture/README.md`'s "Netlist write-back from a
+committed delta" section for the full worked trace, including why `DM0` /
+`DQS_P` / `DQS_N` (declared match-group members, not declared swappable)
+stay fixed while `DQ0`-`DQ7` re-bind.
+
+Not every recipe has a swap group to carry: a board whose nets are placed
+via reviewed, fingerprinted reference copper rather than `NetClassRouting`
+declarations and the router's own classifier (board 05's `design.py`, see
+[`redesign/routing.py`](../../boards/05-bldc-motor-controller/redesign/routing.py))
+never runs the classifier loop above at all, so there is no delta to
+promote — the mechanism applies to any recipe built on `NetClassRouting`
++ `kct route`, not to a hand-placed, hash-pinned board by construction.
+
+---
+
 ## Zone Awareness
 
 Handle copper pour zones:
@@ -977,6 +1126,7 @@ downstream).
 ## See Also
 
 - [Region routing: trunk-first, then tile-refine](#region-routing-trunk-first-then-tile-refine) — large-board tiling with `--region`
+- [Swap Groups and Recorded Deltas](#swap-groups-and-recorded-deltas-netlist-degrees-of-freedom) — declaring a swap group, and replaying a committed delta as a recipe input
 - [Placement Optimization Guide](placement-optimization.md)
 - [DRC & Validation Guide](drc-and-validation.md)
 - [Example: Autorouter](https://github.com/rjwalters/kicad-tools/tree/main/examples/04-autorouter)
