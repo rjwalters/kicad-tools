@@ -4226,17 +4226,23 @@ class DiffPairRouter:
         # the shadow constructor both fail, try the pose-based centerline
         # trunk (Dubins heuristic, C++-only) before the uncoupled fallback.
         #
-        # Issue #5895: ON by default; ``KCT_POSE_CENTERLINE=0`` (or setting
-        # this attribute) opts out.  Measured 2026-10-01, seed 42 (#5786):
+        # OFF by default; ``KCT_POSE_CENTERLINE=1`` (or setting this
+        # attribute) opts in.  Measured 2026-10-01, seed 42:
         #   board 06b (krt_compare): min pair coupling 0.0 % -> 87.0 %,
         #     18/18 nets, 0 shared-referee DRC errors either way.
         #   board 06 (Diff-Pair Routing Regression job): reach 21/21 ->
-        #     20/21 -- the pose-coupled MIPI_D0 trunk sealed MIPI_RST's
-        #     corridor.  #5895 made pose trunks corridor-yield candidates
-        #     (``_corridor_yield_candidates``), which restores 21/21.
-        self.enable_pose_centerline: bool = (
-            os.environ.get("KCT_POSE_CENTERLINE", "1").strip() != "0"
-        )
+        #     20/21 -- the pose-coupled MIPI_D0 pair seals MIPI_RST's
+        #     corridor -- so the job FAILS with it on.
+        # Issue #5895 made pose trunks corridor-yield candidates, but the
+        # yield cannot recover board 06 yet (measured 2026-10-02, seed 42):
+        # with the re-run's phantom negotiated usage cleared, the re-run
+        # still strands MIPI_RST (J4.RST sealed by the re-routed MIPI_CLK /
+        # MIPI_D0 legs) and the yield is reverted -> 20/21.  The CI run
+        # that showed 21/21 only got there through that phantom usage
+        # (overflow 4424 -> 188, 300 s cap hit) and its copper split the
+        # +3V3 pour (POST-LEGALIZE GATE FAIL).
+        # Do not flip the default until that job passes with it on.
+        self.enable_pose_centerline: bool = os.environ.get("KCT_POSE_CENTERLINE") == "1"
 
     def _collect_existing_drills(self) -> list[tuple[float, float, float]]:
         """Assemble a board-wide drill registry for the hole-to-hole guard.
@@ -12534,7 +12540,8 @@ class DiffPairRouter:
         are: they are the one other source of committed coupled copper that
         the negotiated loop treats as non-rippable, and on board 06 the
         pose-coupled MIPI_D0 trunk seals the corridor MIPI_RST needs (reach
-        21/21 -> 20/21).  Joint-state pairs on a shadow-OFF run keep the
+        21/21 -> 20/21; the yield does not yet win it back, see
+        ``enable_pose_centerline``).  Joint-state pairs on a shadow-OFF run keep the
         pre-#5895 behaviour (never yielded), so a board that commits no pose
         trunk runs the exact pre-#5895 pipeline.
         """
@@ -12752,6 +12759,8 @@ class DiffPairRouter:
         # back with "blocked only by non-rippable copper of MIPI_CLK-".  Lift
         # them with the yielded pairs so the negotiated loop arranges the whole
         # contested corridor together, as it does with the pose search off.
+        # (Not sufficient on its own for board 06: see the
+        # ``enable_pose_centerline`` note in ``__init__``.)
         if also_release_nets:
             yielded_ids = {id(r) for r in yielded_routes}
             for r in list(autorouter.routes):
