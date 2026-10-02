@@ -1,14 +1,18 @@
 """`scripts/research/route_phase_profile.py` accounting (Issue #5787).
 
-The profile published in ``docs/research/kct-route-runtime-profile.md`` is only
-as good as the harness's arithmetic, so these tests pin the three properties
-the doc relies on without routing anything:
+The profile published in ``docs/research/kct-route-phase-profile.md`` is only
+as good as the harness's arithmetic, so these tests pin the properties the doc
+relies on without routing anything:
 
 * exclusive phase times sum to the wall total (nothing double-counted,
   nothing lost), including under recursion;
 * every phase entry point in ``PHASES`` still resolves, and instrumentation
   is fully reverted afterwards;
-* the log-derived iteration and stage splits are computed correctly.
+* the log-derived iteration and stage splits are computed correctly;
+* ``--repeat``'s median/min/max aggregation across runs, including a phase
+  that appears in only some runs and older JSON with no ``kicad_cli`` block;
+* the ``kicad-cli`` subprocess tally counts only KiCad children, groups them
+  by subcommand ignoring flags and board paths, and reverts its patch.
 
 The script lives under ``scripts/`` (not ``src/``), so it is loaded by path.
 """
