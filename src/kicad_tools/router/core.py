@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 import contextlib
 
 from . import via_conflict as _via_conflict_module
+from .access_ripup import AccessLossTargeter, AccessLossWitness
 from .access_witness import (
     PASS_ESCAPE,
     PASS_FIXED,
@@ -1670,6 +1671,18 @@ class Autorouter:
         # replay, a plan-only run) pays nothing at all for it.
         self._pad_access_invariant: PadAccessInvariant | None = None
 
+        # Issue #5913 (Epic #5508 Phase 3a): access-loss rip-up targeting.  The
+        # rip-up half of the same witness -- when a failed net's own pad has no
+        # legal first move left, the committed nets the witness names become
+        # ``targeted_ripup`` targets, which overuse-based rip-up cannot derive
+        # (the enclosing copper is legal and unshared, so it emits no overflow)
+        # and the Bresenham blocker scan cannot see (a sealing trace need not
+        # touch the direct pad-to-pad line).  Gated on the SAME
+        # ``enable_pad_access_invariant`` switch: it consumes Phase 1's witness
+        # through Phase 2's opt-out, so ``--no-pad-access-invariant`` restores
+        # the pre-#5913 rip-up targeting too.  Constructed lazily.
+        self._access_loss_targeter: AccessLossTargeter | None = None
+
         # Initialize grid and routers using shared helper
         # Issue #972: Helper includes adaptive grid resolution for large boards
         self.grid, self.router, self.zone_manager = self._create_grid_and_routers(
@@ -2363,6 +2376,92 @@ class Autorouter:
             self._pad_access_invariant = gate
             gate.arm()
         return gate
+
+    # ------------------------------------------------------------------
+    # Access-loss rip-up targeting (Epic #5508 Phase 3a, issue #5913)
+    # ------------------------------------------------------------------
+
+    @property
+    def access_loss_targeter(self) -> AccessLossTargeter | None:
+        """The access-loss rip-up targeter, or ``None`` if never consulted.
+
+        See :mod:`kicad_tools.router.access_ripup`.  Present only after the
+        first failed-net query, so a run with nothing to rescue reports ``None``
+        rather than an empty targeter a reader could mistake for "it looked and
+        found nothing".
+        """
+        return self._access_loss_targeter
+
+    @property
+    def access_loss_witnesses(self) -> list[AccessLossWitness]:
+        """Nets whose own pads lost their access during this run, in order."""
+        targeter = self._access_loss_targeter
+        return list(targeter.witnesses) if targeter is not None else []
+
+    def _access_loss_gate(self) -> AccessLossTargeter | None:
+        """Lazily build the targeter, or ``None`` when the invariant is off."""
+        if not self.enable_pad_access_invariant:
+            return None
+        targeter = self._access_loss_targeter
+        if targeter is None:
+            targeter = AccessLossTargeter(self)
+            self._access_loss_targeter = targeter
+        return targeter
+
+    def _access_loss_blockers(
+        self,
+        failed_net: int,
+        net_routes: dict[int, list[Route]],
+        log: Callable[[str], None] | None = None,
+    ) -> set[int]:
+        """Committed nets the access witness names as sealing ``failed_net`` in.
+
+        Issue #5913 (Epic #5508 Phase 3a).  The negotiated loop assembles
+        ``targeted_ripup``'s ``blocking_nets`` from a Bresenham direct-line scan
+        (``find_blocking_nets_for_connection``), a relaxed-A* scan
+        (``find_blocking_nets_relaxed``) and the C++ via-blocked diagnostic.
+        None of those can name copper that **seals a pad's last exit** without
+        sitting on the direct line and without producing any overflow -- the
+        access-loss shape Epic #5508 is about.  This asks Phase 1a's access set
+        for the failed net's own terminals instead, and returns the committed
+        nets its witness names.
+
+        Only nets with live routes in ``net_routes`` are eligible, which is the
+        same ``net_routes.get(v)`` rippability test :meth:`_relief_rescue_txn`
+        uses: escape stubs, ``--preserve-existing`` copper and coupled
+        diff-pair bodies are not in ``net_routes`` and so are never named (the
+        epic's binding scope guard).  The returned nets go into the existing
+        transaction untouched -- ``ripup_history`` / ``max_ripups_per_net``
+        still bound them and a non-converging reroute still rolls back
+        verbatim.
+
+        Returns an empty set whenever the invariant is disabled, nothing is
+        rippable, no terminal has lost its access, or the targeting budget is
+        exhausted.  A diagnostic must never fail a route, so an unexpected
+        error here is logged and treated as "named nothing".
+        """
+        targeter = self._access_loss_gate()
+        if targeter is None:
+            return set()
+        rippable = {
+            net for net, routes in net_routes.items() if routes and net != failed_net and net
+        }
+        if not rippable:
+            return set()
+        try:
+            witness = targeter.blockers_for(failed_net, rippable)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "ACCESS_LOSS_TARGETING: witness evaluation failed for net %s: %s (issue #5913)",
+                failed_net,
+                exc,
+            )
+            return set()
+        if witness is None:
+            return set()
+        if log is not None:
+            log(f"      + access-loss witness: {witness.one_line()}")
+        return set(witness.blocking_nets)
 
     def _mark_route(self, route: Route, *, enforce_pad_access: bool = False) -> bool:
         """Mark a route on both Python and C++ grids.
@@ -12218,6 +12317,16 @@ class Autorouter:
                                     )
                                 blocking_nets |= sibling_blockers
 
+                            # Issue #5913 (Epic #5508 Phase 3a): augment with
+                            # the nets Phase 1's access witness names as
+                            # sealing this net's own pads in.  Neither the
+                            # Bresenham scan above nor overuse-based rip-up can
+                            # see that copper -- it is legal, unshared and need
+                            # not touch the direct pad-to-pad line.
+                            blocking_nets |= self._access_loss_blockers(
+                                failed_net, net_routes, flush_print
+                            )
+
                             if blocking_nets:
                                 # Use targeted rip-up to displace only blocking nets
                                 def mark_route(route: Route) -> None:
@@ -12790,6 +12899,15 @@ class Autorouter:
                                 )
                                 blocking_nets |= sibling_blockers
 
+                                # Issue #5913 (Epic #5508 Phase 3a): the
+                                # access-loss witness names the committed nets
+                                # that sealed this net's own pads -- the shape
+                                # the direct-line scan above structurally
+                                # cannot find.
+                                blocking_nets |= self._access_loss_blockers(
+                                    failed_net, net_routes, flush_print
+                                )
+
                                 # Issue #2475/#2530: only invoke targeted_ripup
                                 # when we have blockers to displace; otherwise it
                                 # would skip and we'd permanently lose the partial
@@ -12945,6 +13063,13 @@ class Autorouter:
                                             pads_for_net[j], pads_for_net[j + 1]
                                         )
                                         blocking_nets.update(blockers)
+                                    # Issue #5913 (Epic #5508 Phase 3a): an
+                                    # overflow-silent hard failure is the
+                                    # access-loss shape's natural home -- a
+                                    # sealed pad emits no overflow at all.
+                                    blocking_nets |= self._access_loss_blockers(
+                                        failed_net, net_routes, flush_print
+                                    )
                                     if blocking_nets:
 
                                         def _mark_route_silent(route: Route) -> None:

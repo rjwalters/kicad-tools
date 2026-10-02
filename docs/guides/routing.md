@@ -614,6 +614,40 @@ The offline counterpart — *which commit stranded a pad, after the fact* — is
 [access witness](../diagnostics/access-witness.md), built from the
 [commit journal](../reference/commit-journal.md).
 
+### Access-loss rip-up targeting
+
+*Epic #5508 Phase 3a, issue #5913. On by default, same switch as the invariant.*
+
+The rule above refuses a commit it is *asked* about. It does not cover every
+way a pad gets sealed in: it fails open past its evaluation budget, it does not
+protect a pad whose net already landed copper, and it judges one candidate at a
+time — so a seal built out of several individually admissible commits still
+happens.
+
+When that leaves a net the loop cannot route, the same witness becomes a
+**rip-up target list**. Phase 1a is asked for the failed net's *own* terminals;
+the committed nets its `closing_copper` names are added to the existing
+`targeted_ripup(blocking_nets=…)` set, beside the Bresenham direct-line scan
+and the same-tier destination siblings. Nothing else about the rip-up changes —
+`ripup_history` / `max_ripups_per_net` still bound it, and a reroute that does
+not converge still rolls the whole transaction back verbatim.
+
+Only copper the negotiated loop owns is a target (`net_routes`), so escape
+stubs, `--preserve-existing` copper and coupled diff-pair bodies are never
+named; and only route copper is, so a foreign pad, a fill, a keepout, a hard
+reservation, the board edge and a Kelvin sibling's isolated branch are reported
+as *held* rather than ripped:
+
+```python
+for witness in router.access_loss_witnesses:
+    print(witness.one_line())
+    # ISENSE_A+ sealed in at iteration[1]: U3.1 has no legal exit,
+    # closed by COMP, FOREIGN -- ripping COMP
+
+targeter = router.access_loss_targeter  # None when never consulted
+print(targeter.summary_line())
+```
+
 ---
 
 ## Routing Quality

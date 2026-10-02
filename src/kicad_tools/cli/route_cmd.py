@@ -2867,6 +2867,7 @@ def _write_access_witness_sidecar(
     """
     import json
 
+    from kicad_tools.router.access_ripup import format_access_loss_report
     from kicad_tools.router.access_witness import (
         ACCESS_WITNESS_SIDECAR_SUFFIX,
         JOURNAL_SCHEMA_VERSION,
@@ -2934,6 +2935,14 @@ def _write_access_witness_sidecar(
         if gate is not None:
             print(f"  {gate.summary_line()}")
             for line in format_veto_report(gate.vetoes):
+                print(f"    {line}")
+        # Issue #5913 (epic #5508 Phase 3a): and this says what the rule could
+        # not prevent but the rip-up recovered -- which committed nets sealed a
+        # failed net's own pads in, and which of them were ripped for it.
+        targeter = getattr(router, "access_loss_targeter", None)
+        if targeter is not None:
+            print(f"  {targeter.summary_line()}")
+            for line in format_access_loss_report(targeter.witnesses):
                 print(f"    {line}")
     return sidecar_path
 
