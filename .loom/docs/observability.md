@@ -128,7 +128,7 @@ exporter trait + HTTPS implementation, retry-drain loop).
 definition (every host's key lives at a different, unshareable path). It
 defaults to `$HOME/.loom/observability/ingest.key`, so the common case needs
 no config value at all: install each host's key at that conventional path
-(`dashboard/docs/deploy-runbook.md` step 9a) and leave `ingestKeyFile` unset
+(`2AMLogic/loom-ui:docs/deploy-runbook.md` step 9a) and leave `ingestKeyFile` unset
 everywhere. A host that genuinely needs a non-default path (e.g. a system
 path for a service account) sets it in the gitignored, per-host
 `.loom-local/local.json` override tier (`config_resolver.rs`, highest
@@ -560,7 +560,7 @@ Durable Object for live "what's running now" state, an hourly retention
 cron) that also serves the dashboard UI as static assets. Full deploy
 runbook — Wrangler setup, D1 migrations, admin token, per-host ingest key
 provisioning, verifying telemetry lands — is
-[`dashboard/docs/deploy-runbook.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/deploy-runbook.md).
+`2AMLogic/loom-ui` `docs/deploy-runbook.md`.
 This is **your own infrastructure**; nothing in Loom points at a shared
 backend by default.
 
@@ -578,11 +578,11 @@ dead-end login wall for an anonymous visitor.
 
 - Gating setup (custom domain requirement, route map, Access application
   config, the single-URL fallback mechanics):
-  [`dashboard/docs/cloudflare-access.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/cloudflare-access.md)
+  `2AMLogic/loom-ui` `docs/cloudflare-access.md`
 - Query API + live event tail, request/response shapes, pagination:
-  [`dashboard/docs/query-api.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/query-api.md)
+  `2AMLogic/loom-ui` `docs/query-api.md`
 - Token/cost analytics (burn curves, forecasting, per-repo attribution, and
-  why that surface is authenticated-only): `dashboard/docs/token-analytics.md`
+  why that surface is authenticated-only): `loom-ui:docs/token-analytics.md`
 
 ## 5b. Doc-maintenance throughput (Guide, local-only, issue #6136)
 
@@ -594,7 +594,7 @@ tracks a sweep's checkpoint file and phase transitions, which is what
 Curator, and Guide — run as role **prompts**
 (`defaults/.claude/commands/loom/<role>.md`), not as tracked sweeps, so none
 of them ever emit `sweep.*` records; their token spend falls into
-`dashboard/docs/token-analytics.md`'s "unattributed" bucket, reported as a
+`loom-ui:docs/token-analytics.md`'s "unattributed" bucket, reported as a
 single undifferentiated total with no per-role breakdown.
 
 Guide's Document Maintenance phase (the WORK_LOG.md/WORK_PLAN.md/README.md
@@ -704,7 +704,7 @@ fleet** (e.g. `2am-elastic`), provisioned via the ordinary `POST
 /admin/hosts` flow — not a binding to any single real machine. Full
 rationale (why not the orchestrating controller's own hostname, why this
 needs no `handleIngest` change) is in
-[`dashboard/docs/deploy-runbook.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/deploy-runbook.md)
+`2AMLogic/loom-ui` `docs/deploy-runbook.md`
 §"Provisioning a non-daemon emitter". In short: `handleIngest` always stamps
 every row with the authenticated key's own bound identity, never a
 client-supplied value, so "hostless ingest" is a provisioning decision, not
@@ -713,7 +713,7 @@ a schema one — exactly the same one-key-per-reporting-process model every
 real hostname so it survives the controller itself being replaced.
 
 `ephemeral_compute` rows land in the same `records` table as every other
-kind (`dashboard/migrations/0003_ephemeral_compute.sql`) — no dedicated
+kind (`loom-ui:migrations/0003_ephemeral_compute.sql`) — no dedicated
 per-kind table, see that migration's own header comment for the schema
 rationale — and carry no `repo`/`issue`. Redaction: **no field survives to
 `/public/*`** for this kind — job/instance/region/cost detail is private
@@ -733,7 +733,7 @@ over a `since`/`until` window and bucketed by UTC day, against the standing
 daily spot ceiling. `/public/spend` answers `{ "withheld": true }` rather than
 a zeroed summary, since no field of this kind survives redaction and a `$0.00`
 would read as a real idle window. See
-[`dashboard/docs/query-api.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/query-api.md).
+`2AMLogic/loom-ui` `docs/query-api.md`.
 
 **Attributing a job to the sweep that submitted it (#8835).** An
 `ephemeral_compute` record may carry one more field: `sweep_id`, the sweep
@@ -768,7 +768,7 @@ backend (not a shared Loom service — every fleet deploys its own). Its
 specific account/database IDs, Access application layout, credential file
 locations, and cutover history now live in that operator's own
 infrastructure repo (example-org/fleet-repo#305), not in this repo — this repo's
-[`dashboard/docs/reference-deployment.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/reference-deployment.md)
+`2AMLogic/loom-ui` `docs/reference-deployment.md`
 only records the *shape* such a document should take (which values to
 capture, and why) so you can produce the equivalent for your own instance.
 
@@ -781,14 +781,14 @@ capture, and why) so you can produce the equivalent for your own instance.
 | [`.loom/docs/ci-observability.md`](ci-observability.md) | Standing policy: every `2amlogic` GitHub Actions run/job/duration/outcome/log captured in SigNoz — poller (#8824; phase-1 reference: config, exactly-once ledger contract, local journal schema, `loom.ci.*` allowlist), completed-job log capture (#8825; phase-2 reference: `ci.job.log` chunking contract, per-job cap + truncation marker, independent `logs_done` idempotency, and why the **gateway** is the redaction boundary), retro surfaces + retention (#8826) |
 | [`.loom/docs/telemetry-overhead.md`](telemetry-overhead.md) | What lifecycle instrumentation costs on a representative run, realised attribute/event bounds, and what the measurement excludes |
 | [`.loom/docs/session-output.md`](session-output.md) | Live agent output (`session.output`, #9764): the opt-in live producer contract — schema, content boundary (why a prompt cannot leak and why this cannot enable a managed-cloud export), ordering/de-duplication, gap + truncation signalling, the p95 ≤ 10 s latency budget and why a historical timestamp is not a latency, consumer queries, supported runtimes, rollout |
-| `dashboard/docs/deploy-runbook.md` | Deploy your own Cloudflare backend end to end |
-| `dashboard/docs/cloudflare-access.md` | Gating the authenticated view behind SSO; single-URL fallback |
-| `dashboard/docs/query-api.md` | `/api/*` vs `/public/*` routes, redaction policy, live tail |
+| `loom-ui:docs/deploy-runbook.md` | Deploy your own Cloudflare backend end to end |
+| `loom-ui:docs/cloudflare-access.md` | Gating the authenticated view behind SSO; single-URL fallback |
+| `loom-ui:docs/query-api.md` | `/api/*` vs `/public/*` routes, redaction policy, live tail |
 | `defaults/observability/cycle-time-questions.md` | Cycle-time analytics on the OTLP sinks: the canonical question set (CT1–CT8), the rollup-vs-raw-TTL retention decision, and what it deliberately cannot answer |
-| `dashboard/docs/token-analytics.md` | Burn curves, forecasting, per-repo attribution |
+| `loom-ui:docs/token-analytics.md` | Burn curves, forecasting, per-repo attribution |
 | `defaults/scripts/guide-docs-telemetry.sh` | Local doc-maintenance throughput telemetry (§5b) — record + report, no daemon/Cloudflare involvement |
 | `defaults/scripts/merge-admission-telemetry.sh` | Local merge-admission-recheck outcome telemetry (§5c) — record + report, no daemon/Cloudflare involvement |
-| `dashboard/migrations/0003_ephemeral_compute.sql` | `ephemeral_compute` schema decision + hostless-ingest provisioning rationale (§5d) |
-| `dashboard/docs/reference-deployment.md` | Generic guidance/template for recording your own instance's deployment identity in your own infrastructure repo — carries no operator identity here |
+| `loom-ui:migrations/0003_ephemeral_compute.sql` | `ephemeral_compute` schema decision + hostless-ingest provisioning rationale (§5d) |
+| `loom-ui:docs/reference-deployment.md` | Generic guidance/template for recording your own instance's deployment identity in your own infrastructure repo — carries no operator identity here |
 | `loom-daemon/src/observability/mod.rs` | Config resolution, collector/queue/exporter/sender source of truth |
 | `loom-daemon/src/observability/ops.rs` | Shared `metric.points` / ops-span emission path for daemon loops (§3c) |

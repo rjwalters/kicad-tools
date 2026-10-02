@@ -6612,9 +6612,9 @@ host is the declared captain. Collapsing "not applicable" into `false` would
 make the dashboard's "no host reports `is_captain: true`" check fire on every
 ordinary repo that has never opted in — the same "unknown != zero" contract
 every other optional field on that struct already follows. The dashboard
-(`dashboard/src/redaction.ts`'s `host.health` allowlist,
-`dashboard/web/src/fleet.ts`'s `singletonsArmedOnNonCaptain`/
-`noCaptainReporting`, rendered in `dashboard/web/src/views/fleetOverview.ts`)
+(`2AMLogic/loom-ui:src/redaction.ts`'s `host.health` allowlist,
+`loom-ui:web/src/fleet.ts`'s `singletonsArmedOnNonCaptain`/
+`noCaptainReporting`, rendered in `loom-ui:web/src/views/fleetOverview.ts`)
 flags (a) a singleton reported armed on a non-captain host, and (b) a fleet
 that has opted in (some host reports `is_captain` at all) but none of them is
 currently `true` — a typo'd or decommissioned captain id, or one that has
@@ -11037,9 +11037,9 @@ setup, migrations, ingest-key generation and rotation, and pointing the
 `observability` block below at the result, with a companion guide for gating
 the authenticated view behind Cloudflare Access. Both live beside the backend
 in the upstream Loom repo (not shipped to consumer installs):
-[`dashboard/docs/deploy-runbook.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/deploy-runbook.md)
+`2AMLogic/loom-ui` `docs/deploy-runbook.md`
 and
-[`dashboard/docs/cloudflare-access.md`](https://github.com/rjwalters/loom/blob/main/dashboard/docs/cloudflare-access.md).
+`2AMLogic/loom-ui` `docs/cloudflare-access.md`.
 
 ### Config surface (`.loom/config.json → observability`)
 

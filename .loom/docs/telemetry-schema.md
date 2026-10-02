@@ -112,7 +112,7 @@ against the identity the daemon resolved for itself (`$LOOM_HOST_ID`, else
 daemon lifetime** and reports an `observability DEGRADED` section in
 `loom-daemon health`. Nothing about the export changes: the batch stays acked
 and the backend keeps filing under the key's binding, which remains
-authoritative. See `dashboard/docs/deploy-runbook.md` §8.
+authoritative. See `2AMLogic/loom-ui:docs/deploy-runbook.md` §8.
 
 **Compatibility.** The field is purely additive — no `schema_version` rev is
 involved (that integer versions the *record* envelope, not this response).
@@ -409,7 +409,7 @@ This field is purely additive — a `schema_version` bump is unnecessary (see
 "`schema_version` semantics" above). Like `pr_number`/`tokens_in`/
 `tokens_out`, it is workload detail about a private repo and is not added to
 the public (unauthenticated, private-repo) redaction allowlist
-(`dashboard/src/redaction.ts`) by this change.
+(`loom-ui:src/redaction.ts`) by this change.
 
 ### `sweep.outcome`
 
@@ -546,7 +546,7 @@ either, both, or neither.
 Neither pair is added to the public (unauthenticated, private-repo) redaction
 allowlist — like `pr_number`, they are workload detail about a private repo
 and stay behind the same authenticated-only boundary (see
-`dashboard/src/redaction.ts`).
+`loom-ui:src/redaction.ts`).
 
 #### Per-phase token attribution (Issue #9443)
 
@@ -617,7 +617,7 @@ record still reports its usage.
 **Redaction.** The nested usage is workload detail about a private repo, exactly
 like the record-level `tokens_in`/`tokens_out` above, so `phase_durations`
 reaches a public, unauthenticated response only through
-`redactPhaseDurations` in `dashboard/src/redaction.ts` — which keeps
+`redactPhaseDurations` in `loom-ui:src/redaction.ts` — which keeps
 `phase`/`duration_sec`/`attempt` and drops every usage key.
 `tokens_unattributed` is not in the public allowlist at all, being a remainder
 of the same withheld totals.
@@ -1816,10 +1816,10 @@ A star made in loom-ui for a repo this host does not manage appears here as
 not manage the repo, so the fleet view should treat the ask as real when
 **every** reporting host carries it. Additive, so there is no
 `schema_version` bump. The fleet Worker in this repo
-(`dashboard/src/queueState.ts`) whitelists row fields and does not store it
+(`loom-ui:src/queueState.ts`) whitelists row fields and does not store it
 yet.
 
-Redaction (phase 3, `dashboard/src/queueState.ts`): the Worker redacts per
+Redaction (phase 3, `loom-ui:src/queueState.ts`): the Worker redacts per
 row on `visibility`. On `/public/*` a private row keeps only `rank`,
 `visibility`, `urgent`, `operator_priority`, `disposition`, `state` and
 `reason` (plus the #9288 `position`, `plan_state` and `gate`); its `repo`,
@@ -2031,7 +2031,7 @@ know: it is always "when this account's constraint lifts". It is also one of onl
 two per-account fields here that survive public redaction — aggregated across the
 pool into `next_limit_window_reset_at` (the earliest reset, naming no account),
 and, with `provider`, into the per-provider `providers[]` slices the public view
-carries instead of `accounts` (see `dashboard/docs/query-api.md`). A row
+carries instead of `accounts` (see `loom-ui:docs/query-api.md`). A row
 whose reset is absent or unparseable reports no reset at all rather than a
 fabricated instant, so consumers must treat `null`/absent as *unknown* — never as
 "resets now".
@@ -2084,7 +2084,7 @@ neither is an error.
 This field is purely additive — a `schema_version` bump is unnecessary (see
 "`schema_version` semantics" above: only a **breaking** wire change requires one),
 and passes through public redaction unchanged for the same reason
-`worktree_root_free_gb` does (`dashboard/src/redaction.ts`): total disk capacity
+`worktree_root_free_gb` does (`loom-ui:src/redaction.ts`): total disk capacity
 describes the machine, not any repo, issue, branch, or operator. It is a mild
 fingerprinting signal for a named host — reviewed and deliberately allowed
 through, since free-GB is already public and this is only the denominator that
@@ -2117,7 +2117,7 @@ the telemetry and the CLI can never disagree.
 
 Both fields are additive and pass through public redaction unchanged (they
 describe the released binary, not any repo or operator — see
-`dashboard/src/redaction.ts`), so an older consumer that ignores unknown keys is
+`loom-ui:src/redaction.ts`), so an older consumer that ignores unknown keys is
 unaffected.
 
 **Watchdog/crash-protection state (`protection`, #5352).** An optional object
@@ -2209,7 +2209,7 @@ pass through public redaction unchanged: the scalars do, but
 executable basenames is *workload* detail — `ngspice ×25` says the host runs
 analog EDA simulation — the category `sweep.outcome`'s `tokens_in`/`models_used`
 are held back for. See `redactAdmissionBrakeRow` in
-`dashboard/src/redaction.ts`. The authenticated `/api/*` surface returns it
+`loom-ui:src/redaction.ts`. The authenticated `/api/*` surface returns it
 unchanged, which is where an operator diagnosing their own fleet reads it.
 
 `top_cpu_consumers` is therefore the **sole** carrier of process attribution.
@@ -2252,7 +2252,7 @@ in `daemon-reference.md` for the full design:
   the public redaction allowlist, so the public view drops it.
 
 `is_captain` and `armed_singleton_jobs` are additive (no `schema_version` bump) and pass through public
-redaction unchanged (`dashboard/src/redaction.ts`): `is_captain` describes
+redaction unchanged (`loom-ui:src/redaction.ts`): `is_captain` describes
 this host's own role in an operator-assigned fleet-wide designation, and a
 singleton job name is an allowlisted identifier a repo declares — the same
 footing as a role name — neither names a repo, issue, branch, or operator.
@@ -2347,7 +2347,7 @@ the file exceeds 5 MiB or its oldest line is more than 30 days old.
 **Exactly one path writes each `sweep.outcome` (Issue #9477).** Two paths used
 to. The backend ingests `sweep.completed`/`sweep.outcome` with `INSERT OR
 IGNORE` against a partial `UNIQUE(kind, sweep_id)` index
-(`dashboard/migrations/0002_idempotent_terminal_records.sql`), so for a given
+(`loom-ui:migrations/0002_idempotent_terminal_records.sql`), so for a given
 `sweep_id` the **first** writer wins and every later one is silently absorbed —
 and the live event-bus collector (`observability::collector`) was always first,
 because the journal above is only drained onto the export queue by a periodic

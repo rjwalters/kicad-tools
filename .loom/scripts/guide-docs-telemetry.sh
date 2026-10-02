@@ -3,7 +3,7 @@
 #
 # Problem this closes
 # --------------------
-# `dashboard/docs/token-analytics.md` documents the fleet's per-repo token
+# `loom-ui:docs/token-analytics.md` documents the fleet's per-repo token
 # attribution model: usage is joined against `sweep.*` telemetry, which only
 # Builder sweeps emit. Support-role crons (Judge, Champion, Curator, and by
 # the same logic Guide) never emit `sweep.*` records, so all of their token

@@ -44,7 +44,7 @@
 #   2 - resolved path is not a readable file — missing, a directory, or
 #       permission-denied (FAIL)
 #
-# This single script serves two roles in dashboard/docs/deploy-runbook.md:
+# This single script serves two roles in loom-ui:docs/deploy-runbook.md:
 #   - step 9c's provisioning-time readability gate (run right after writing a
 #     host's key, before declaring that step done), and
 #   - the fleet-wide regression check (run unmodified on every fleet host to

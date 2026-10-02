@@ -13,7 +13,7 @@
 # clear it (the #5455 livelock).
 #
 # That is not hypothetical: #7474, #7473, #7396, #7395, #7138, #7137 and #6890
-# (bumps inside `/mcp-loom` and `/dashboard/web`) all sat open and unreviewed
+# (bumps inside `/mcp-loom` and the former `/dashboard/web`) all sat open and unreviewed
 # for weeks because the root `directory: "/"` entry does not cover nested
 # manifests. This check is the structural tie that stops it recurring the next
 # time a package is added somewhere in the tree.

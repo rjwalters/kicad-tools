@@ -111,17 +111,17 @@ it:
 - `loom-daemon/src/work_finder/dispatch_plan_merge.rs` — `merge_plans`, over
   the `HostPlan` / `FleetPlan` types in
   `loom-daemon/src/types/fleet_plan.rs`.
-- `dashboard/web/src/workQueue.ts` — `mergeFleetQueue`, over the per-host
+- `2AMLogic/loom-ui:web/src/workQueue.ts` — `mergeFleetQueue`, over the per-host
   `queue.snapshot` records the fleet backend stores.
 
 They are pinned to the same JSON fixture,
-`dashboard/test/fixtures/dispatch-plan-merge.json`, which
+`loom-daemon/tests/fixtures/dispatch-plan-merge.json`, which
 `loom-daemon/src/work_finder/dispatch_plan_merge_tests.rs` reads with
-`include_str!` and `dashboard/web/test/workQueue.test.ts` imports. Neither
+`include_str!` and `loom-ui:web/test/workQueue.test.ts` pins a copy of. Neither
 side owns the fixture: a change to the rule has to change the fixture, and
 that fails the *other* language's test until it is ported too. (The same
 cross-language fixture pattern as
-`dashboard/test/fixtures/sweep-identity.json`.)
+`loom-daemon/tests/fixtures/sweep-identity.json`.)
 
 **To change the rule**: edit the fixture case that pins the behaviour, then
 make both implementations agree with it, then update this document. Do not

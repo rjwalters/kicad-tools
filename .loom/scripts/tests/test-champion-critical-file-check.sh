@@ -341,7 +341,7 @@ assert_eq "PASS" "$out" \
 fixture=$'dashboard/src/lib.rs\ndashboard/migrations/0003_ephemeral_compute.sql'
 out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"
 assert_eq "FAIL: dashboard/migrations/0003_ephemeral_compute.sql" "$out" \
-    "this repo's real schema SQL (dashboard/migrations/*.sql) is still caught by the migrations/ pattern"
+    "a real schema SQL path (dashboard/migrations/*.sql) is still caught by the migrations/ pattern"
 
 fixture=$'quickstarts/api/main.py\nquickstarts/api/migrations/0001_initial.sql'
 out="$(printf '%s\n' "$fixture" | champion_critical_file_check)"

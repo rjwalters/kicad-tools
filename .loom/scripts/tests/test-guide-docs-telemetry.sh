@@ -4,7 +4,7 @@
 # Fleet observability gap: there was no per-role/per-category breakdown of
 # fleet token spend — support-role crons (Judge/Champion/Curator/Guide) never
 # emit `sweep.*` telemetry and fall into an undifferentiated "unattributed"
-# bucket (dashboard/docs/token-analytics.md). This suite covers the new,
+# bucket (loom-ui:docs/token-analytics.md). This suite covers the new,
 # deliberately decoupled local telemetry surface that closes one narrow slice
 # of that gap: Guide's Document Maintenance phase (doc-maintenance PRs).
 #

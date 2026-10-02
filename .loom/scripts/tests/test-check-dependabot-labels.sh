@@ -8,7 +8,7 @@
 # they never carry `loom:review-requested` and land in the Judge's unlabeled
 # fallback queue — which applies no labels and therefore cannot clear them
 # (#5455). That is what stranded #7474/#7473/#7396/#7395/#7138/#7137/#6890
-# inside /mcp-loom and /dashboard/web for weeks.
+# inside /mcp-loom and the former /dashboard/web for weeks.
 #
 # Verified behavior:
 #   - a fully covered fixture exits 0
