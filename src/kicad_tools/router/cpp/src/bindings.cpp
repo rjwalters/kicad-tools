@@ -665,6 +665,50 @@ NB_MODULE(router_cpp, m) {
     // features (allow_swap_via, manhattan_sum heuristic).  Issue #4459 wired
     // the string-keyed rejection histogram out of the C++ search (previously
     // Python-only), surfaced on ``CoupledRouteResult::rejections``.
+    nb::class_<CenterlinePose>(m, "CenterlinePose")
+        .def(nb::init<>())
+        .def("__init__", [](CenterlinePose* self, int x, int y, int heading, int layer) {
+            new (self) CenterlinePose{x, y, heading, layer};
+        }, "x"_a, "y"_a, "heading"_a, "layer"_a)
+        .def_rw("x", &CenterlinePose::x)
+        .def_rw("y", &CenterlinePose::y)
+        .def_rw("heading", &CenterlinePose::heading)
+        .def_rw("layer", &CenterlinePose::layer);
+    nb::class_<CenterlineEndpoint>(m, "CenterlineEndpoint")
+        .def(nb::init<>())
+        .def("__init__", [](CenterlineEndpoint* self, CenterlinePose pose, double cost) {
+            new (self) CenterlineEndpoint{pose, cost};
+        }, "pose"_a, "cost"_a = 0.0)
+        .def_rw("pose", &CenterlineEndpoint::pose)
+        .def_rw("cost", &CenterlineEndpoint::cost);
+    nb::class_<CenterlineRouteResult>(m, "CenterlineRouteResult")
+        .def_ro("path", &CenterlineRouteResult::path)
+        .def_ro("success", &CenterlineRouteResult::success)
+        .def_ro("start_index", &CenterlineRouteResult::start_index)
+        .def_ro("goal_index", &CenterlineRouteResult::goal_index)
+        .def_ro("iterations", &CenterlineRouteResult::iterations)
+        .def_ro("best_progress", &CenterlineRouteResult::best_progress)
+        .def_ro("timeout_exceeded", &CenterlineRouteResult::timeout_exceeded)
+        .def_ro("iteration_limited", &CenterlineRouteResult::iteration_limited)
+        .def_ro("rejections", &CenterlineRouteResult::rejections);
+
+    // Issue #5786: Dubins path length (port of KiCadRoutingTools'
+    // DubinsCalculator, MIT -- see dubins.hpp and THIRD_PARTY_NOTICES.md).
+    m.def("dubins_path_length",
+          [](double x1, double y1, double t1, double x2, double y2, double t2,
+             double min_radius) {
+              return DubinsCalculator(min_radius).path_length_f(x1, y1, t1, x2, y2, t2);
+          },
+          "x1"_a, "y1"_a, "theta1"_a, "x2"_a, "y2"_a, "theta2"_a, "min_radius"_a,
+          "Shortest Dubins path length between two poses (unscaled).");
+    m.def("dubins_path_length_scaled",
+          [](double x1, double y1, double t1, double x2, double y2, double t2,
+             double min_radius) {
+              return DubinsCalculator(min_radius).path_length(x1, y1, t1, x2, y2, t2);
+          },
+          "x1"_a, "y1"_a, "theta1"_a, "x2"_a, "y2"_a, "theta2"_a, "min_radius"_a,
+          "KRT-compatible: length * 1000 truncated to int.");
+
     nb::class_<CoupledPathfinder>(m, "CoupledPathfinder")
         .def("set_fill_rail_dimensions", &CoupledPathfinder::set_fill_rail_dimensions)
         // Issue #5410 (B1): the net-class dimensions the dynamic route-halo
@@ -703,6 +747,19 @@ NB_MODULE(router_cpp, m) {
              "effective_departure_radius"_a,
              "routable_layers"_a, "corridor_bitset"_a,
              "max_iterations_budget"_a, "timeout_seconds"_a)
+        .def("route_centerline", &CoupledPathfinder::route_centerline,
+             "starts"_a, "goals"_a, "p_net"_a, "n_net"_a, "half_pitch"_a,
+             "p_side"_a, "p_half"_a, "p_gap"_a, "n_half"_a, "n_gap"_a,
+             "min_radius_cells"_a, "turn_penalty"_a, "heuristic_weight"_a,
+             "max_iterations_budget"_a, "timeout_seconds"_a,
+             "Issue #5786: pose-based centerline search (Dubins heuristic)")
+        .def("rail_segment_clear", &CoupledPathfinder::rail_segment_clear,
+             "sx"_a, "sy"_a, "ex"_a, "ey"_a, "layer"_a, "net"_a, "partner_net"_a,
+             "half"_a, "gap"_a)
+        .def("centerline_step_clear", &CoupledPathfinder::centerline_step_clear,
+             "ax"_a, "ay"_a, "prev_heading"_a, "bx"_a, "by"_a, "heading"_a,
+             "layer"_a, "p_net"_a, "n_net"_a, "half_pitch"_a, "p_side"_a,
+             "p_half"_a, "p_gap"_a, "n_half"_a, "n_gap"_a)
         .def("trace_blocked", &CoupledPathfinder::trace_blocked,
              "gx"_a, "gy"_a, "layer"_a, "net"_a, "from_x"_a = -1, "from_y"_a = -1,
              "Issue #5410: probe the coupled trace predicate, including the "

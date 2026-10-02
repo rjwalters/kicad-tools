@@ -1752,6 +1752,8 @@ class CoupledPathfinder:
         # (serpentine / Phase 3I tuner), and the corridor mask already
         # bounds how far from the guide path the route can wander.
         self.heuristic_weight = max(1.0, float(heuristic_weight))
+        # Issue #5786: outcome of the last ``route_centerline_pose`` attempt.
+        self.last_pose_report: dict = {}
         # Issue #3089: set when the most-recent ``route_coupled`` call
         # exited early due to ``timeout_seconds`` being exceeded.
         # Callers (``route_differential_pair_coupled``) read this to
@@ -4076,6 +4078,21 @@ def match_pair_lengths(
         )
 
 
+def _snap_route_ends_to_pads(route: Route, start: Pad, end: Pad, tol: float = 0.005) -> None:
+    """Move a route's first/last end points onto the exact pad centres.
+
+    Only moves an end that is already within *tol* mm of its pad, so a route
+    that deliberately stops short of the pad (an escape stub) is untouched.
+    """
+    if not route.segments:
+        return
+    first, last = route.segments[0], route.segments[-1]
+    if math.hypot(first.x1 - start.x, first.y1 - start.y) <= tol:
+        first.x1, first.y1 = start.x, start.y
+    if math.hypot(last.x2 - end.x, last.y2 - end.y) <= tol:
+        last.x2, last.y2 = end.x, end.y
+
+
 class DiffPairRouter:
     """Differential pair routing coordinator for the autorouter.
 
@@ -4198,6 +4215,19 @@ class DiffPairRouter:
         # 0 shadow-OFF and 2 shadow-ON).  The dated A/B table lives with the
         # config field; do not flip this without re-running it.
         self.enable_shadow_construction: bool = False
+        # Issue #5786 (Epic #5784 Phase 2): when the joint-state search and
+        # the shadow constructor both fail, try the pose-based centerline
+        # trunk (Dubins heuristic, C++-only) before the uncoupled fallback.
+        #
+        # OFF by default; ``KCT_POSE_CENTERLINE=1`` (or setting this
+        # attribute) opts in.  Measured 2026-10-01, seed 42:
+        #   board 06b (krt_compare): min pair coupling 0.0 % -> 87.0 %,
+        #     18/18 nets, 0 shared-referee DRC errors either way.
+        #   board 06 (Diff-Pair Routing Regression job): reach 21/21 ->
+        #     20/21 -- the pose-coupled MIPI_D0 pair seals MIPI_RST's
+        #     corridor -- so the job FAILS with it on.
+        # Do not flip the default until that job passes with it on.
+        self.enable_pose_centerline: bool = os.environ.get("KCT_POSE_CENTERLINE") == "1"
 
     def _collect_existing_drills(self) -> list[tuple[float, float, float]]:
         """Assemble a board-wide drill registry for the hole-to-hole guard.
@@ -4765,6 +4795,16 @@ class DiffPairRouter:
                 )
                 continue
 
+            # Issue #5786: the C++ pathfinder returns float32 coordinates, so
+            # a stub's end points land a few nano-metres off the pad centres
+            # they were routed to.  Connectivity checks that snap endpoints
+            # to a 0.01 mm lattice (``validate_net_connectivity``) then split
+            # the stub from the coupled copper whenever a pad coordinate sits
+            # on a snap tie (x.xx5 mm -- board 06's termination resistors),
+            # reporting a physically connected net as 2/3 pads.  Snap the
+            # ends onto the exact pad centres.
+            _snap_route_ends_to_pads(route, stub.start, stub.end)
+
             # Use the autorouter's unified marking helper so both the
             # Python and C++ grids stay synchronized.
             self.autorouter._mark_route(route)
@@ -5257,6 +5297,55 @@ class DiffPairRouter:
             if deficit > worst:
                 worst, worst_loc = deficit, loc
         return worst, worst_loc
+
+    def _pose_claims(self) -> set[int]:
+        """The autorouter's set of nets a pose-coupled pair committed (#5786).
+
+        The two-phase main pass skips these.  Created on first use so a
+        test double standing in for the autorouter needs no extra field.
+        """
+        claims = getattr(self.autorouter, "_pose_coupled_nets", None)
+        if not isinstance(claims, set):
+            claims = set()
+            self.autorouter._pose_coupled_nets = claims
+        return claims
+
+    def _pose_copper_rejection(
+        self,
+        p_route: Route,
+        n_route: Route,
+        intra_clearance: float,
+        pair_name: str,
+    ) -> str | None:
+        """Why a pose-centerline pair must not be committed, or ``None`` (#5786).
+
+        The pose search judges its rails through the shared kernel with the
+        partner-net waiver, so a P end leg could graze an N **pad**, and the
+        legs are only raster-checked against foreign pads.  Before the pair is
+        committed it gets the exact gates every other constructor's copper
+        gets: the #4571 foreign-pad gate (partner pads included -- only the
+        route's own net is skipped) and the intra-pair clearance audit at the
+        pair's own threshold, with no "mild violation" allowance.  Board 06
+        measured both failure modes (``clearance_pad_segment`` against the
+        partner pad, ``diffpair_clearance_intra`` at the pad end).
+        """
+        for route in (p_route, n_route):
+            deficit, loc = self._route_pad_violation(route)
+            if deficit > _SHADOW_PAD_DEFICIT_EPS:
+                logger.debug(
+                    "pose pair %s rejected: %s pad deficit %.4f mm at %s",
+                    pair_name,
+                    route.net_name,
+                    deficit,
+                    loc,
+                )
+                return "pad-clearance"
+        violation = find_intra_pair_clearance_violations(
+            p_route, n_route, threshold_mm=intra_clearance, pair_name=pair_name
+        )
+        if violation is not None:
+            return "intra-clearance"
+        return None
 
     # ------------------------------------------------------------------
     # Issue #4575: exact foreign-VIA clearance gate for constructed copper
@@ -10901,6 +10990,51 @@ class DiffPairRouter:
                             f"{pathfinder.last_best_progress} cells)"
                         )
 
+            # Issue #5786 (Epic #5784 Phase 2): last coupled attempt.  The
+            # joint-state search (and, when enabled, the shadow constructor)
+            # could not couple this pair -- on board 06b every LVDS pair
+            # plateaued here and fell back to independent legs, 0 % coupled.
+            # Route ONE centerline over (x, y, heading) poses with a
+            # Dubins-length heuristic and derive P/N as offsets, with
+            # single-ended end legs (hybrid).  C++-only: with the backend
+            # absent this returns ``None`` and behaviour is unchanged.
+            if result is None and self.enable_pose_centerline and not spec.polarity_swap:
+                from .diffpair_pose import route_centerline_pose
+
+                pose_t0 = time.monotonic()
+                pose_result = route_centerline_pose(
+                    pathfinder,
+                    spec.p_start,
+                    spec.p_end,
+                    spec.n_start,
+                    spec.n_end,
+                    timeout_seconds=30.0,
+                    span_check=self._span_pad_clear,
+                )
+                if pose_result is not None:
+                    reject = self._pose_copper_rejection(
+                        pose_result[0], pose_result[1], pair_intra_clearance, pair.name
+                    )
+                    if reject is not None:
+                        pathfinder.last_pose_report = {"applied": False, "reason": reject}
+                        pose_result = None
+                report_pose = pathfinder.last_pose_report
+                if pose_result is not None:
+                    result = pose_result
+                    coupled_phase += "+pose"
+                    print(
+                        "    [coupled-pose] pair constructed as a centerline trunk "
+                        f"({report_pose.get('centerline_poses')} poses, "
+                        f"{report_pose.get('iterations')} iters, "
+                        f"{time.monotonic() - pose_t0:.2f}s)"
+                    )
+                else:
+                    print(
+                        "    [coupled-pose] declined: "
+                        f"{report_pose.get('reason', 'n/a')} "
+                        f"({time.monotonic() - pose_t0:.2f}s)"
+                    )
+
             if result is None:
                 # Issue #3089: ``None`` may indicate (a) no path found,
                 # (b) max-iterations exhausted, or (c) the new per-pair
@@ -11111,6 +11245,11 @@ class DiffPairRouter:
             self.autorouter._mark_route(n_route)
             self.autorouter.routes.append(p_route)
             self.autorouter.routes.append(n_route)
+            if coupled_phase.endswith("+pose"):
+                # Issue #5786: tell the two-phase main pass this pair is
+                # already committed (it would otherwise re-route both nets as
+                # independent legs on top of the coupled trunk).
+                self._pose_claims().update((p_route.net, n_route.net))
 
             p_routes.append(p_route)
             n_routes.append(n_route)
@@ -12146,6 +12285,7 @@ class DiffPairRouter:
         all_routes: list[Route] = []
         warnings: list[LengthMismatchWarning] = []
         routed_net_ids: set[int] = set()
+        self.autorouter._pose_coupled_nets = set()  # Issue #5786: reset per run
 
         for pair in diff_pairs:
             p_id, n_id = pair.get_net_ids()
@@ -12182,6 +12322,7 @@ class DiffPairRouter:
                     # main strategy.
                     for incomplete in getattr(self, "_last_stub_failed_nets", set()) & {p_id, n_id}:
                         routed_net_ids.discard(incomplete)
+                        self._pose_claims().discard(incomplete)  # Issue #5786
 
             all_routes.extend(pair_routes)
             if warning:
@@ -12736,6 +12877,7 @@ class DiffPairRouter:
         # Track diff-pair nets that we successfully routed so the
         # caller can decide which nets to leave for the main strategy.
         coupled_routed_nets: set[int] = set()
+        self.autorouter._pose_coupled_nets = set()  # Issue #5786: reset per run
         # Issue #4463: (pair, routes) for every pair whose copper this
         # pre-phase committed -- the yield candidates for the
         # corridor-yield recovery that runs after the main strategy.
@@ -12851,6 +12993,11 @@ class DiffPairRouter:
                     stub_failed = getattr(self, "_last_stub_failed_nets", set())
                     for incomplete in stub_failed & {p_id, n_id}:
                         coupled_routed_nets.discard(incomplete)
+                        # Issue #5786: a pose-coupled net with an unrouted
+                        # stub edge must reach the main strategy too, or the
+                        # two-phase pass skips it and the stub pad stays
+                        # stranded (board 06 USB2_D-: reach 21/21 -> 20/21).
+                        self._pose_claims().discard(incomplete)
                         print(
                             f"    [diffpair-stub] net {incomplete} has an "
                             f"unrouted stub edge; returning it to the main "

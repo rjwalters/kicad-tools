@@ -28,10 +28,12 @@
 
 #include "types.hpp"
 #include "grid.hpp"
+#include "dubins.hpp"
 #include <vector>
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
+#include <string>
 
 namespace router {
 
@@ -89,8 +91,80 @@ struct CoupledNodeGreater {
     }
 };
 
+// Issue #5786 (Epic #5784 Phase 2): one pose on the pose-based centerline
+// search.  ``heading`` is in 45-degree steps, 0 = +x, counter-clockwise in
+// GRID space (so 2 = +y).
+struct CenterlinePose {
+    int x = 0;
+    int y = 0;
+    int heading = 0;
+    int layer = 0;
+};
+
+// A candidate trunk endpoint: a pose plus the cost already paid to reach it
+// (start poses) or to leave it (goal poses), in grid-cell units.
+struct CenterlineEndpoint {
+    CenterlinePose pose;
+    double cost = 0.0;
+};
+
+struct CenterlineRouteResult {
+    std::vector<CenterlinePose> path;  // start pose -> goal pose; empty on failure.
+    bool success = false;
+    int start_index = -1;              // index into the ``starts`` argument
+    int goal_index = -1;               // index into the ``goals`` argument
+    int iterations = 0;
+    double best_progress = -1.0;       // smallest Dubins h seen (cells)
+    bool timeout_exceeded = false;
+    bool iteration_limited = false;
+    std::unordered_map<std::string, int64_t> rejections;
+};
+
 class CoupledPathfinder {
 public:
+    // Issue #5786: pose-based centerline search with a Dubins-length
+    // heuristic.  Searches ONE centerline over (x, y, heading, layer) and
+    // judges every step by offsetting it into the P and N rails and asking
+    // the shared clearance kernel (``rail_clear_world``) about each rail, so
+    // the coupled trunk obeys exactly the clearance model the joint-state
+    // search does.  Single-layer: starts and goals must share a layer; a pair
+    // that needs a via between its ends is left to the joint-state search.
+    //
+    // ``half_pitch`` is half the centre-to-centre rail distance in mm;
+    // ``p_side`` is +1 when P rides on the LEFT of the direction of travel
+    // (the normal is the heading rotated +90 degrees), -1 when on the right.
+    // ``min_radius_cells`` is the Dubins turning radius used by the
+    // heuristic.  The path is returned as grid poses; the caller derives the
+    // rail polylines (miter-compensated offsets) from it.
+    CenterlineRouteResult route_centerline(
+        const std::vector<CenterlineEndpoint>& starts,
+        const std::vector<CenterlineEndpoint>& goals,
+        int p_net, int n_net,
+        double half_pitch, int p_side,
+        double p_half, double p_gap,
+        double n_half, double n_gap,
+        double min_radius_cells,
+        double turn_penalty,
+        double heuristic_weight,
+        int max_iterations_budget,
+        double timeout_seconds) const;
+
+    // Raster + kernel verdict for one rail segment in WORLD mm; the same
+    // function the pose search uses, exposed so finished copper can be
+    // re-verified with it (no second, differently-rounded implementation).
+    bool rail_segment_clear(double sx, double sy, double ex, double ey,
+                            int layer, int net, int partner_net,
+                            double half, double gap) const;
+
+    // Whether one centerline step keeps both rails clear (public so a unit
+    // test can probe the gate without running a whole search).
+    bool centerline_step_clear(int ax, int ay, int prev_heading,
+                               int bx, int by, int heading, int layer,
+                               int p_net, int n_net,
+                               double half_pitch, int p_side,
+                               double p_half, double p_gap,
+                               double n_half, double n_gap) const;
+
     void set_fill_rail_dimensions(double ph, double pg, double nh, double ng) {
         p_fill_half_ = ph; p_fill_gap_ = pg; n_fill_half_ = nh; n_fill_gap_ = ng;
     }

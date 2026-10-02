@@ -1879,6 +1879,9 @@ class Autorouter:
         # detection (see ``diffpair_routing.py`` ``budget_exit_diff_nets``)
         # and cleared at the end of the main strategy.
         self._budget_exit_diff_nets: set[int] = set()
+        # Issue #5786: nets a pose-coupled diff pair already committed; the
+        # two-phase main pass must not re-route them.
+        self._pose_coupled_nets: set[int] = set()
 
         # Issue #4463: set by ``route_all_with_diffpairs`` for the duration of
         # a shadow-ON main strategy.  Tells ``route_all_negotiated`` that the
@@ -15600,6 +15603,7 @@ class Autorouter:
             # the same attribute names on either router.
             keepout_rule_area_polygons=self._keepout_rule_area_polygons,
             existing_routes=self.existing_routes,
+            get_claimed_nets=lambda: self._pose_coupled_nets,
             # Issue #5517 (Epic #5508 Phase 1b): let the detailed-routing
             # loop tag the commit journal with its own stage boundaries.
             # ``kct route`` sends every escape-routed board here, so without
