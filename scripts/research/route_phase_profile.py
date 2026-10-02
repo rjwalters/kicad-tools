@@ -30,6 +30,14 @@ Optionally (``--cprofile FILE``) the whole run is also recorded with
 ``cProfile`` for drill-down. That inflates Python-heavy phases, so the
 function-phase table should be read from a run *without* it.
 
+``--repeat N`` runs the whole profile ``N`` times and reports the **median**
+of each phase together with its min/max across runs, plus the wall-time
+spread factor (max/min) and the load average observed during each run. A
+single run carries no variance estimate at all, which is exactly what made
+the first published profile unusable for absolute seconds on a loaded host;
+every repeat is a **fresh subprocess**, so no module-level cache, grid, or
+instrumentation state from one run can leak into the next.
+
 Research-only: not wired into CI. It routes a *copy* of the input (the input is
 never modified); the output lands wherever ``-o`` points -- keep it outside
 ``boards/``.
@@ -39,7 +47,8 @@ Usage (from a worktree with the C++ backend built)::
     uv run kct build-native --check
     uv run python scripts/research/route_phase_profile.py \\
         boards/02-charlieplex-led/output/charlieplex_3x3.kicad_pcb \\
-        --work-dir /tmp/route-profile/02 --json /tmp/route-profile/02.json
+        --work-dir /tmp/route-profile/02 --json /tmp/route-profile/02.json \\
+        --repeat 3
 """
 
 from __future__ import annotations
@@ -54,6 +63,7 @@ import os
 import re
 import resource
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -75,6 +85,23 @@ PHASES: tuple[tuple[str, str, str], ...] = (
         "layer-escalation driver (grid build, per-attempt setup)",
         "kicad_tools.cli.route_cmd",
         "route_with_layer_escalation",
+    ),
+    (
+        "pre-route auto-pour (kicad-cli zone fill of missing pours)",
+        "kicad_tools.router.auto_pour",
+        "auto_pour_if_missing",
+    ),
+    ("routing grid construction", "kicad_tools.router.grid", "RoutingGrid.__init__"),
+    ("plan-gate preflight", "kicad_tools.cli.route_cmd", "_plan_gate_preflight"),
+    (
+        "attempt preserved-copper capture",
+        "kicad_tools.cli.route_cmd",
+        "_capture_attempt_preserved_copper",
+    ),
+    (
+        "connectivity-invariant enforcement",
+        "kicad_tools.cli.route_cmd",
+        "_enforce_connectivity_invariant_or_exit",
     ),
     (
         "negotiated loop: bookkeeping between searches",
@@ -114,6 +141,16 @@ PHASES: tuple[tuple[str, str, str], ...] = (
         "grid resync_route_occupancy",
         "kicad_tools.router.grid",
         "RoutingGrid.resync_route_occupancy",
+    ),
+    (
+        "pad-access invariant: arm (Epic #5508 Phase 2)",
+        "kicad_tools.router.pad_access_invariant",
+        "PadAccessInvariant.arm",
+    ),
+    (
+        "pad-access invariant: per-commit veto check",
+        "kicad_tools.router.pad_access_invariant",
+        "PadAccessInvariant.veto_for",
     ),
     (
         "negotiated: find nets through overused cells",
@@ -174,6 +211,11 @@ PHASES: tuple[tuple[str, str, str], ...] = (
     ),
     ("zone fill after route (kicad-cli)", "kicad_tools.cli.route_cmd", "_fill_zones_after_route"),
     (
+        "pour-net oracle completion loop (kicad-cli DRC rounds)",
+        "kicad_tools.cli.route_cmd",
+        "_complete_pour_nets_with_oracle",
+    ),
+    (
         "DRC-constraint sidecars (.kicad_pro/.kicad_dru)",
         "kicad_tools.cli.route_cmd",
         "_write_drc_constraint_sidecars",
@@ -185,6 +227,90 @@ PHASES: tuple[tuple[str, str, str], ...] = (
 
 ASTAR_PHASE = "A* search (CppPathfinder.route)"
 UNATTRIBUTED = "(unattributed: imports, glue, untimed passes)"
+
+
+@dataclass
+class SubprocessTally:
+    """Every ``kicad-cli`` child process the run launched, with its wall time.
+
+    Each invocation pays a fixed process-startup tax before doing any work
+    (~6 s on the macOS host this was first measured on, where even
+    ``kicad-cli --help`` takes that long), so the *count* of invocations is a
+    first-class cost driver and not a detail. The phase table cannot show it:
+    a phase that shells out twice looks the same as one that shells out once.
+    """
+
+    calls: list[dict] = field(default_factory=list)
+
+    @property
+    def total_s(self) -> float:
+        return sum(c["seconds"] for c in self.calls)
+
+    @staticmethod
+    def _subcommand(argv: list[str]) -> str:
+        """``kicad-cli pcb drc --refill-zones board.kicad_pcb`` -> ``pcb drc``.
+
+        Flags and file arguments are dropped so that two invocations of the
+        same subcommand on different boards group together -- otherwise every
+        call looks unique and the count-per-subcommand is useless.
+        """
+        words = [
+            a
+            for a in argv[1:]
+            if not a.startswith("-") and "/" not in a and not Path(a).suffix.startswith(".kicad")
+        ]
+        return " ".join(words[:2])
+
+    def record(self, argv: list[str], seconds: float) -> None:
+        exe = Path(argv[0]).name if argv else "?"
+        self.calls.append(
+            {
+                "exe": exe,
+                "subcommand": self._subcommand(argv),
+                "seconds": round(seconds, 3),
+            }
+        )
+
+    def summary(self) -> dict:
+        by_sub: dict[str, dict] = {}
+        for c in self.calls:
+            row = by_sub.setdefault(
+                c["subcommand"], {"subcommand": c["subcommand"], "calls": 0, "seconds": 0.0}
+            )
+            row["calls"] += 1
+            row["seconds"] = round(row["seconds"] + c["seconds"], 3)
+        return {
+            "invocations": len(self.calls),
+            "total_s": round(self.total_s, 3),
+            "by_subcommand": sorted(by_sub.values(), key=lambda r: -r["seconds"]),
+        }
+
+
+def _count_kicad_cli_subprocesses(tally: SubprocessTally):
+    """Patch ``subprocess.run`` to tally ``kicad-cli`` children; returns an undo.
+
+    Every ``kicad_tools`` caller does ``import subprocess`` and looks ``run``
+    up on the module at call time, so one patch covers them all.
+    """
+    original = subprocess.run
+
+    @functools.wraps(original)
+    def counting_run(*args, **kwargs):
+        argv = args[0] if args else kwargs.get("args")
+        is_kicad = False
+        with contextlib.suppress(Exception):
+            if isinstance(argv, (list, tuple)) and argv:
+                is_kicad = "kicad-cli" in Path(str(argv[0])).name
+        if not is_kicad:
+            return original(*args, **kwargs)
+        t0 = time.perf_counter()
+        try:
+            return original(*args, **kwargs)
+        finally:
+            tally.record([str(a) for a in argv], time.perf_counter() - t0)
+
+    subprocess.run = counting_run  # type: ignore[assignment]
+    return lambda: setattr(subprocess, "run", original)
 
 
 @dataclass
@@ -433,6 +559,8 @@ def profile_route(
     host = _host_info()
     timer = PhaseTimer()
     undo = instrument(timer)
+    tally = SubprocessTally()
+    undo_tally = _count_kicad_cli_subprocesses(tally)
 
     transitions: list[tuple[float, str]] = []
     original_record_stage = route_deadline.record_stage
@@ -485,6 +613,7 @@ def profile_route(
         else:
             os.environ[route_deadline.CONTROL_ENV] = previous_control
         control_dir.cleanup()
+        undo_tally()
         uninstrument(undo)
         if prof is not None and cprofile is not None:
             prof.dump_stats(str(cprofile))
@@ -514,6 +643,7 @@ def profile_route(
         "cpu_children_s": round((rc1.ru_utime - rc0.ru_utime) + (rc1.ru_stime - rc0.ru_stime), 3),
         "host": host,
         "phases": phases,
+        "kicad_cli": tally.summary(),
         "offthread_calls": timer.offthread_calls,
         "stages": stage_split(transitions, total),
         "iterations": iteration_split(tee.lines),
@@ -535,6 +665,19 @@ def render_markdown(result: dict) -> str:
             f"| {r['phase']} | {r['calls']} | {r['exclusive_s']:.2f} | "
             f"{r['exclusive_pct']:.1f} | {r['inclusive_s']:.2f} |"
         )
+    cli = result.get("kicad_cli")
+    if cli:
+        lines += [
+            "",
+            f"kicad-cli: {cli['invocations']} invocations, {cli['total_s']:.1f} s total",
+            "",
+            "| kicad-cli subcommand | Calls | Seconds |",
+            "|---|---|---|",
+        ]
+        for r in cli["by_subcommand"]:
+            lines.append(
+                f"| {r['subcommand'] or '(no subcommand)'} | {r['calls']} | {r['seconds']:.2f} |"
+            )
     lines += ["", "| Stage marker | Entries | Seconds |", "|---|---|---|"]
     for r in result["stages"]:
         lines.append(f"| {r['stage']} | {r['entries']} | {r['seconds']:.2f} |")
@@ -544,6 +687,172 @@ def render_markdown(result: dict) -> str:
             astar_s = f"{r['astar_s']:.2f}" if "astar_s" in r else "--"
             lines.append(f"| {r['attempt']} | {r['iteration']} | {r['seconds']:.2f} | {astar_s} |")
     return "\n".join(lines)
+
+
+def aggregate_runs(results: list[dict]) -> dict:
+    """Median / min / max across repeated profile runs of the same board.
+
+    ``results`` is a list of ``profile_route`` payloads for the *same* board
+    and argv. Per phase the median exclusive time is the headline number and
+    min/max bracket it; a phase that did not appear in every run reports the
+    ``runs`` it did appear in, so a sometimes-skipped phase cannot masquerade
+    as a cheap one. ``wall_spread`` (max/min wall) is the honesty check on
+    absolute seconds: a spread far above 1.0 means the host was not quiet and
+    the seconds should not be quoted.
+    """
+    if not results:
+        raise ValueError("aggregate_runs() needs at least one run")
+    walls = [r["wall_s"] for r in results]
+    n = len(results)
+
+    labels: list[str] = []
+    for r in results:
+        for row in r["phases"]:
+            if row["phase"] not in labels:
+                labels.append(row["phase"])
+
+    phases = []
+    for label in labels:
+        rows = [row for r in results for row in r["phases"] if row["phase"] == label]
+        excl = [row["exclusive_s"] for row in rows]
+        phases.append(
+            {
+                "phase": label,
+                "runs": len(rows),
+                "calls_median": round(statistics.median([row["calls"] for row in rows]), 1),
+                "exclusive_median_s": round(statistics.median(excl), 3),
+                "exclusive_min_s": round(min(excl), 3),
+                "exclusive_max_s": round(max(excl), 3),
+                "exclusive_median_pct": round(
+                    100.0 * statistics.median(excl) / statistics.median(walls), 1
+                ),
+            }
+        )
+    phases.sort(key=lambda r: -r["exclusive_median_s"])
+
+    stage_labels: list[str] = []
+    for r in results:
+        for row in r["stages"]:
+            if row["stage"] not in stage_labels:
+                stage_labels.append(row["stage"])
+    stages = []
+    for label in stage_labels:
+        secs = [row["seconds"] for r in results for row in r["stages"] if row["stage"] == label]
+        stages.append(
+            {
+                "stage": label,
+                "runs": len(secs),
+                "median_s": round(statistics.median(secs), 3),
+                "min_s": round(min(secs), 3),
+                "max_s": round(max(secs), 3),
+            }
+        )
+
+    cli_runs = [r["kicad_cli"] for r in results if r.get("kicad_cli")]
+    kicad_cli = None
+    if cli_runs:
+        counts = [c["invocations"] for c in cli_runs]
+        secs = [c["total_s"] for c in cli_runs]
+        kicad_cli = {
+            "invocations_median": statistics.median(counts),
+            "invocations_all": counts,
+            "total_median_s": round(statistics.median(secs), 3),
+            "total_min_s": round(min(secs), 3),
+            "total_max_s": round(max(secs), 3),
+            "median_pct_of_wall": round(
+                100.0 * statistics.median(secs) / statistics.median(walls), 1
+            ),
+        }
+
+    return {
+        "board": results[0]["board"],
+        "argv": results[0]["argv"],
+        "runs": n,
+        "kicad_cli": kicad_cli,
+        "exit_codes": [r["exit_code"] for r in results],
+        "wall_median_s": round(statistics.median(walls), 3),
+        "wall_min_s": round(min(walls), 3),
+        "wall_max_s": round(max(walls), 3),
+        "wall_spread": round(max(walls) / min(walls), 2) if min(walls) else None,
+        "wall_all_s": [round(w, 3) for w in walls],
+        "loadavg_per_run": [
+            {
+                "start": r.get("host", {}).get("loadavg_start"),
+                "end": r.get("host", {}).get("loadavg_end"),
+            }
+            for r in results
+        ],
+        "host": results[0].get("host", {}),
+        "phases": phases,
+        "stages": stages,
+    }
+
+
+def render_aggregate_markdown(agg: dict) -> str:
+    lines = [
+        f"**{agg['board']}** -- {agg['runs']} runs, wall median {agg['wall_median_s']:.1f} s "
+        f"(min {agg['wall_min_s']:.1f}, max {agg['wall_max_s']:.1f}, "
+        f"spread {agg['wall_spread']}x), exit codes {agg['exit_codes']}",
+        "",
+        "| Phase (exclusive) | Runs | Calls | Median s | Min s | Max s | % of median wall |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for r in agg["phases"]:
+        lines.append(
+            f"| {r['phase']} | {r['runs']} | {r['calls_median']:g} | "
+            f"{r['exclusive_median_s']:.2f} | {r['exclusive_min_s']:.2f} | "
+            f"{r['exclusive_max_s']:.2f} | {r['exclusive_median_pct']:.1f} |"
+        )
+    cli = agg.get("kicad_cli")
+    if cli:
+        lines += [
+            "",
+            f"kicad-cli: {cli['invocations_median']:g} invocations (median), "
+            f"{cli['total_median_s']:.1f} s total "
+            f"(min {cli['total_min_s']:.1f}, max {cli['total_max_s']:.1f}) "
+            f"= {cli['median_pct_of_wall']:.1f}% of median wall",
+        ]
+    lines += ["", "| Stage marker | Runs | Median s | Min s | Max s |", "|---|---|---|---|---|"]
+    for r in agg["stages"]:
+        lines.append(
+            f"| {r['stage']} | {r['runs']} | {r['median_s']:.2f} | "
+            f"{r['min_s']:.2f} | {r['max_s']:.2f} |"
+        )
+    lines += ["", "| Run | wall s | loadavg start | loadavg end |", "|---|---|---|---|"]
+    for i, (wall, load) in enumerate(zip(agg["wall_all_s"], agg["loadavg_per_run"], strict=True)):
+        lines.append(f"| {i} | {wall:.1f} | {load['start']} | {load['end']} |")
+    return "\n".join(lines)
+
+
+def run_repeats(args, repeat: int) -> list[dict]:
+    """Run the profile ``repeat`` times, each in a fresh subprocess.
+
+    A cold process per run is the point: the in-process harness patches
+    ``kicad_tools`` modules and the router keeps module-level caches, so
+    back-to-back in-process runs would not be independent samples.
+    """
+    results: list[dict] = []
+    for i in range(repeat):
+        run_json = args.work_dir / f"run-{i}.json"
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            str(args.pcb),
+            "--work-dir",
+            str(args.work_dir / f"run-{i}"),
+            "--json",
+            str(run_json),
+        ]
+        if args.extra:
+            cmd += ["--extra", args.extra]
+        print(f"route_phase_profile: run {i + 1}/{repeat} ...", file=sys.stderr, flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 or not run_json.exists():
+            sys.stderr.write(proc.stdout[-4000:])
+            sys.stderr.write(proc.stderr[-4000:])
+            raise SystemExit(f"route_phase_profile: run {i} failed (rc={proc.returncode})")
+        results.append(json.loads(run_json.read_text()))
+    return results
 
 
 def main() -> int:
@@ -558,9 +867,29 @@ def main() -> int:
         default="",
         help="extra kct route arguments, one string (e.g. '--monotone-certificate-order')",
     )
+    ap.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        metavar="N",
+        help="run N times in fresh subprocesses and report median/min/max per phase "
+        "plus the wall-time spread (default 1: single run, no variance estimate)",
+    )
     args = ap.parse_args()
     if not args.pcb.exists():
         ap.error(f"{args.pcb} does not exist")
+    if args.repeat < 1:
+        ap.error("--repeat must be >= 1")
+    if args.repeat > 1:
+        if args.cprofile:
+            ap.error("--cprofile profiles one run only; use --repeat 1")
+        args.work_dir.mkdir(parents=True, exist_ok=True)
+        agg = aggregate_runs(run_repeats(args, args.repeat))
+        if args.json:
+            args.json.parent.mkdir(parents=True, exist_ok=True)
+            args.json.write_text(json.dumps(agg, indent=2) + "\n")
+        print(render_aggregate_markdown(agg))
+        return 0
     result = profile_route(
         args.pcb, args.work_dir, args.extra.split(), echo=args.echo, cprofile=args.cprofile
     )
