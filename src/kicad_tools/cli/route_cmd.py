@@ -7484,6 +7484,49 @@ def _apply_analog_net_class(router: "Autorouter", args, quiet: bool = False) -> 
             )
 
 
+def _crossing_aware_net_order(router: "Autorouter") -> list[int]:
+    """Net order from flight-line crossing degree (Issue #5787 step 2).
+
+    Bridges the router's loaded pad geometry to
+    :func:`kicad_tools.router.crossing_order.crossing_aware_order`: each net's
+    pad centres become a minimum-spanning flight-line skeleton, nets are ranked
+    by how many *other* nets' skeletons they cross, and the ranking is applied
+    within each net-class priority band (never across one).
+
+    Unlike ``--order-method greedy|critical_first|congestion|hybrid``, this does
+    not run ``RoutingOptimizer.optimize_net_order`` and therefore does not spend
+    an evaluation route; the cost is a few dozen segment-intersection tests.
+
+    Pour nets are kept in the returned order (callers run
+    ``_filter_pour_nets`` afterwards) but are pinned to the end by their class
+    band, matching ``_get_net_priority``'s priority-99 treatment.
+
+    Args:
+        router: A loaded router (``nets``/``pads`` populated).
+
+    Returns:
+        A permutation of ``router.nets``' keys, suitable for
+        ``router._forced_net_order``.
+    """
+    from kicad_tools.router.crossing_order import crossing_aware_order, minimum_spanning_skeleton
+
+    skeletons: dict[int, list[tuple[tuple[float, float], tuple[float, float]]]] = {}
+    priority_key: dict[int, tuple] = {}
+    class_band: dict[int, int] = {}
+    for net_id in router.nets:
+        points: list[tuple[float, float]] = []
+        for pad_key in router.nets.get(net_id, []):
+            pad = router.pads.get(pad_key)
+            if pad is not None:
+                points.append((pad.x, pad.y))
+        skeletons[net_id] = minimum_spanning_skeleton(points)
+        key = router._get_net_priority(net_id)
+        priority_key[net_id] = key
+        class_band[net_id] = key[0]
+
+    return crossing_aware_order(skeletons, priority_key, class_band)
+
+
 def _apply_order_method(
     router: "Autorouter",
     args,
@@ -7525,6 +7568,17 @@ def _apply_order_method(
         return
 
     from kicad_tools.cli.progress import flush_print
+
+    if method == "crossing":
+        order = _crossing_aware_net_order(router)
+        router._forced_net_order = order
+        if not quiet:
+            flush_print(
+                f"  Net order: --order-method crossing "
+                f"(flight-line conflict degree, {len(order)} nets)"
+            )
+        return
+
     from kicad_tools.optim.routing import RoutingOptimizer
 
     congestion_map = None
@@ -7560,6 +7614,48 @@ def _apply_order_method(
             f"(overrides default priority sort; {len(order)} nets)"
             + (f" [fell back to {effective_method}]" if effective_method != method else "")
         )
+
+
+def _apply_crossing_order_escalation(
+    router: "Autorouter",
+    args,
+    quiet: bool = False,
+) -> bool:
+    """Apply ``--order-method crossing`` on the escalation routing paths (#5787).
+
+    ``_apply_order_method`` above is called from exactly one place:
+    :func:`_run_main_impl`'s single-attempt tail.  That tail is **unreachable
+    on the default recipe** -- ``kct route`` defaults to ``--auto-layers``, and
+    ``_run_main_impl`` returns into
+    :func:`route_with_layer_escalation` (or the rule-relaxation / combined
+    variants) long before it.  So every ``--order-method`` value was a silent
+    no-op for ``kct route IN -o OUT``, which is how a step-2 A/B first measured
+    byte-identical output in both arms (see
+    ``docs/research/kct-route-net-order-experiment.md``).
+
+    This helper is the escalation-path counterpart, deliberately narrowed to
+    the ``crossing`` method: it is pure geometry on the already-loaded router
+    (:func:`_crossing_aware_net_order`), so it is safe to run inside an attempt
+    loop.  The four pre-existing methods (``greedy``, ``critical_first``,
+    ``congestion``, ``hybrid``) are **not** wired up here, because
+    :meth:`RoutingOptimizer.optimize_net_order` evaluates its candidate with a
+    throw-away *full route* and needs a fresh-router factory the attempt loop
+    does not build; running it against the live ``router`` would pollute the
+    attempt.  Wiring those four is tracked separately -- they remain no-ops on
+    this path, exactly as before this change.
+
+    Args:
+        router: The attempt's loaded router.
+        args: Parsed CLI namespace (reads ``args.order_method``).
+        quiet: Suppress the informational log line when True.
+
+    Returns:
+        True when an order was installed on ``router._forced_net_order``.
+    """
+    if getattr(args, "order_method", None) != "crossing":
+        return False
+    _apply_order_method(router, args, quiet=quiet)
+    return True
 
 
 def _log_fine_pitch_escape_regions(
@@ -8206,6 +8302,9 @@ def route_with_layer_escalation(
         _apply_slack_corridor_widening(router, args)
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
+        # Issue #5787: --order-method crossing (the single-attempt tail's
+        # _apply_order_method is unreachable under the default --auto-layers).
+        _apply_crossing_order_escalation(router, args, quiet=quiet)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -9354,6 +9453,8 @@ def route_with_rule_relaxation(
         _apply_slack_corridor_widening(router, args)
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
+        # Issue #5787: --order-method crossing (see the layer-escalation path).
+        _apply_crossing_order_escalation(router, args, quiet=quiet)
 
         # Issue #3171: inject boosted analog routing class for --analog-nets /
         # --auto-analog selected nets (pour/ground nets are left untouched).
@@ -11747,6 +11848,8 @@ def route_with_combined_escalation(
             _apply_slack_corridor_widening(router, args)
             _apply_escape_corridor_reservation(router, args)
             _apply_pad_access_invariant(router, args)
+            # Issue #5787: --order-method crossing (see layer-escalation path).
+            _apply_crossing_order_escalation(router, args, quiet=quiet)
 
             # Issue #3171: inject boosted analog routing class for --analog-nets
             # / --auto-analog selected nets (pour/ground nets left untouched).
@@ -14786,7 +14889,7 @@ def _route_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--order-method",
-        choices=["greedy", "critical_first", "congestion", "hybrid"],
+        choices=["greedy", "critical_first", "congestion", "hybrid", "crossing"],
         default=None,
         help=(
             "Compute the net routing order with a named heuristic (Issue #3897) "
@@ -14795,7 +14898,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "'critical_first' (power/clock nets first), 'congestion' (most "
             "congested nets first), 'hybrid' (critical_first + congestion). "
             "'congestion' and 'hybrid' require a congestion map; if one cannot "
-            "be obtained the command warns and falls back to 'greedy'. When "
+            "be obtained the command warns and falls back to 'greedy'. "
+            "'crossing' (Issue #5787) ranks nets by flight-line crossing "
+            "degree -- most-contended first -- within each net-class priority "
+            "band, without spending an evaluation route. When "
             "omitted, ordering is byte-identical to the default behaviour."
         ),
     )

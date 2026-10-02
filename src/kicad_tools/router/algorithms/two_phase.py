@@ -79,6 +79,7 @@ class TwoPhaseRouter:
         keepout_rule_area_polygons: Callable[[], list[Any]] | None = None,
         existing_routes: list[Route] | None = None,
         get_claimed_nets: Callable[[], set[int]] | None = None,
+        forced_net_order: list[int] | None = None,
     ):
         self.grid = grid
         # Issue #5786: nets whose copper an earlier pre-pass committed and
@@ -114,6 +115,16 @@ class TwoPhaseRouter:
         # When ``None`` (e.g. unit tests that construct TwoPhaseRouter
         # directly) the byte-lane reorder is skipped.
         self._apply_byte_lane_inner_priority = apply_byte_lane_inner_priority
+        # Issue #5787 (Epic #5784, Phase 3): the CLI-computed explicit net
+        # order (``kct route --order-method``).  ``TwoPhaseRouter`` never sees
+        # the ``Autorouter``, so -- like ``emit_routing_plan`` (#5519) and the
+        # capacity-model hooks (#5575) -- it must be forwarded explicitly, or
+        # ``routing_plan.select_plan_nets`` below falls back to the priority
+        # sort and the ordering flag is silently discarded on every board that
+        # routes two-phase (i.e. every 4-layer board).  ``None`` (the default,
+        # and what a directly-constructed test router gets) keeps the
+        # selection byte-identical to the pre-#5787 behaviour.
+        self._forced_net_order = forced_net_order
         # Issue #2527: Optional hooks that let the detailed-routing stall path
         # invoke ``Autorouter._attempt_blocked_component_ripup_negotiated``.
         # When the initial pass leaves overflow=0 with unrouted/partial nets
