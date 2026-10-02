@@ -12712,6 +12712,7 @@ class DiffPairRouter:
         to_yield: list[tuple[DifferentialPair, list[Route]]],
         candidate_nets: list[int],
         non_diffpair_strategy: object,
+        also_release_nets: set[int] | None = None,
     ) -> tuple[bool, set[int], list[Route], list[Route]]:
         """Rip the planned pairs, re-run the main strategy, keep only if it paid.
 
@@ -12742,13 +12743,28 @@ class DiffPairRouter:
         snapshot_ids = {id(r) for r in autorouter.routes}
         yielded_routes = [r for _p, routes in to_yield for r in routes]
         released_nets: set[int] = set()
-        for pair, routes in to_yield:
+        # Issue #5895: single-ended legs of budget-exited pairs that the first
+        # main pass routed are frozen (non-rippable) in a re-run that only
+        # routes unconnected nets; on board 06 the relief rescue then rolls
+        # back with "blocked only by non-rippable copper of MIPI_CLK-".  Lift
+        # them with the yielded pairs so the negotiated loop arranges the whole
+        # contested corridor together, as it does with the pose search off.
+        if also_release_nets:
+            yielded_ids = {id(r) for r in yielded_routes}
+            for r in list(autorouter.routes):
+                if r.net in also_release_nets and id(r) not in yielded_ids:
+                    yielded_routes.append(r)
+                    yielded_ids.add(id(r))
+        for pair, _routes in to_yield:
             released_nets.update(pair.get_net_ids())
-            for route in routes:
-                with contextlib.suppress(Exception):
-                    autorouter.grid.unmark_route(route)
-                if route in autorouter.routes:
-                    autorouter.routes.remove(route)
+        for route in yielded_routes:
+            with contextlib.suppress(Exception):
+                autorouter.grid.unmark_route(route)
+            if route in autorouter.routes:
+                autorouter.routes.remove(route)
+        if also_release_nets:
+            # Keep the #3270 priority promotion the first pass ran with.
+            autorouter._budget_exit_diff_nets = set(also_release_nets)
         # Issue #5895: a yielded pose trunk's nets must be routable by the
         # re-run.  The two-phase main pass skips claimed nets
         # (``get_claimed_nets``), so drop the claim now and restore it if the
@@ -13280,7 +13296,12 @@ class DiffPairRouter:
             candidate_nets = list(dict.fromkeys([*non_diff_nets, *sorted(diff_net_ids)]))
             to_yield, _stranded = self._plan_corridor_yields(candidate_nets, yield_candidates)
             kept, released_nets, removed_routes, added_routes = self._apply_corridor_yields(
-                to_yield, candidate_nets, non_diffpair_strategy
+                to_yield,
+                candidate_nets,
+                non_diffpair_strategy,
+                also_release_nets=(
+                    set() if self.enable_shadow_construction else set(budget_exit_diff_nets)
+                ),
             )
             if kept:
                 diff_net_ids = diff_net_ids - released_nets
