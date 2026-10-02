@@ -684,15 +684,29 @@ def _reject_lost_route_only_bindings(args, nets_to_route: int) -> int | None:
     handles both KiCad net-reference dialects -- that every requested net
     name exists on the board with 2+ pads before routing starts. If the
     routing denominator built from ``router.nets`` (after
-    ``load_pcb_for_routing``) is STILL zero at this point, the loader lost
-    every requested net's pad-to-net binding while parsing the PCB file
-    (the exact #4983 failure mode -- a numeric-plus-name-only regex
-    mismatch silently collapsed bound pads to ``net_num=0``, an
-    unroutable obstacle id -- or any future regression with the same
-    shape). That is a bug, not a legitimate "nothing to route" outcome,
-    so this aborts with a clear error and non-zero exit instead of
-    letting the caller fall through to a "SUCCESS: All signal nets
-    routed! (0/0)" banner.
+    ``load_pcb_for_routing``) is STILL zero at this point, there are two
+    distinct possible causes, and the caller must not conflate them
+    (Issue #5876):
+
+    1. **Deliberate exclusion**: the pour-net auto-skip (or
+       ``route_via="manual"``) removed every requested net from the route
+       set *before* routing started -- see ``args._auto_skipped_net_names``,
+       stamped by :func:`kicad_tools.router.auto_pour.auto_skip_pour_nets`
+       right after ``load_pcb_for_routing``. This is a user-intent
+       conflict ("you asked to route a net this run always treats as
+       zone-filled/manual"), not a bug -- the fix is ``--no-auto-pour`` or
+       simply not naming a pour net.
+    2. **Genuine loader bug**: the loader lost every requested net's
+       pad-to-net binding while parsing the PCB file (the exact #4983
+       failure mode -- a numeric-plus-name-only regex mismatch silently
+       collapsed bound pads to ``net_num=0``, an unroutable obstacle id --
+       or any future regression with the same shape).
+
+    Case 2 aborts with a clear error and non-zero exit instead of letting
+    the caller fall through to a "SUCCESS: All signal nets routed! (0/0)"
+    banner. Case 1 aborts just as loudly, but with wording that sends the
+    operator to the auto-skip override instead of hunting for a parser
+    bug that does not exist.
 
     This is NOT triggered when every requested net was already reported
     by preflight (:func:`_resolve_route_only_nets`) as having fewer than
@@ -708,10 +722,39 @@ def _reject_lost_route_only_bindings(args, nets_to_route: int) -> int | None:
     if not requested or nets_to_route != 0:
         return None
     under_two = getattr(args, "_route_only_nets_under_two", None) or set()
-    if set(requested) <= under_two:
+    requested_set = set(requested)
+    if requested_set <= under_two:
         # Preflight already warned every requested net has <2 pads -- a
         # zero routable count is expected here, not a loader bug.
         return None
+
+    # Requested nets preflight confirmed were routable (2+ pads) -- these
+    # are the only ones that need an explanation for ending up at zero.
+    unexplained_by_pad_count = requested_set - under_two
+    auto_skipped = set(getattr(args, "_auto_skipped_net_names", None) or [])
+    still_unexplained = unexplained_by_pad_count - auto_skipped
+
+    if not still_unexplained:
+        # Every net left unexplained by <2-pads is explained by the
+        # pour-net/manual auto-skip instead: this run was always going to
+        # exclude them, so --nets conflicts with that exclusion rather than
+        # exposing a loader bug.
+        conflicting = sorted(unexplained_by_pad_count & auto_skipped)
+        print(
+            "Error: --nets requested "
+            f"{', '.join(requested)}, but {', '.join(conflicting)} "
+            "conflict with the pour-net/manual auto-skip (see the "
+            "'Auto-skip:'/'Manual:' line above) -- this run always excludes "
+            f"{'that net' if len(conflicting) == 1 else 'those nets'} from "
+            "routing, so 0 routable net(s) remained. This is a --nets vs. "
+            "auto-skip conflict, not a parser defect: either drop the "
+            "conflicting net(s) from --nets, pass --no-auto-pour, or note "
+            "that these nets are already carried by a filled zone. "
+            "Aborting instead of reporting a vacuous success.",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         "Error: --nets requested "
         f"{', '.join(requested)}, but 0 routable net(s) remained after "
