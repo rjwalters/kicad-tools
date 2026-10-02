@@ -176,7 +176,12 @@ arm on all five boards and never had to revert. Two distinct reasons:
   topological blocker (pad access, layer availability, clearance), not
   congestion. N+1 rip-up has no purchase on that failure mode by construction;
   it is what the existing `escape_local_minimum` / relief-rescue machinery in
-  `negotiated.py` exists for.
+  `negotiated.py` exists for. The same run's #5891 commit-time pad-access gate
+  corroborates this directly: it logs `6 commit(s) refused`, all of them
+  `USB_D+` / `USB_D-` at `routing[0]` (two identical triples, once per pass) —
+  the very two nets the counters report as unrouted, refused because committing
+  them would strand a `J1` differential-pair pad. The `negotiated` arm refused
+  nothing, and no restored net appears in the veto report.
 
 The counters are logged per pass (`[rip-up] …` / `[no-rip-up baseline] …`)
 precisely so this distinction is readable from a log instead of inferred from a
@@ -185,8 +190,15 @@ metrics tie: "the two passes tied" means something completely different when
 
 Cost of the gate: it doubles the per-net routing work, and on this fleet bought
 nothing. `enable_improvement_gate=False` (module-level, not a CLI flag) skips
-the baseline pass; the pass-level seconds in the table above
-(e.g. board 03: 25.7 s rip-up + 23.0 s baseline) show roughly what that saves.
+the baseline pass; the per-pass seconds in the `Rip-up pass: … (Xs)` /
+`No-rip-up baseline: … (Xs)` log lines show roughly what that saves — and they
+must be summed over *every* invocation of the strategy in a run, not just the
+first. Board 03 invokes it **twice** inside the `layer-escalation` stage
+(25.7 s + 23.0 s, then 67.2 s + 52.6 s), i.e. ≈168 s of its 180.33 s
+routing-loop total, about half of which is the baseline pass. Quoting only the
+first invocation understates the gate's cost by ~2.3x. The conclusion is
+unaffected: the second invocation's counters are identical (0 escalations, 2
+"no eligible blocker").
 
 ### The board-02 pour-oracle regression
 

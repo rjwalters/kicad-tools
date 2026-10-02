@@ -371,10 +371,22 @@ def _restore(
     """Re-commit a previously-undone net's EXACT Route objects (a rollback).
 
     Mirrors ``NegotiatedRouter.targeted_ripup``'s ``_rollback_to_snapshot``.
+
+    ``_mark_route`` is called **without** ``enforce_pad_access``, matching
+    every other re-land/rollback path (``core.py``'s ``mark_route`` closures at
+    8901/12257/12438/12532/13214, which is what ``_rollback_to_snapshot``
+    marks through).  Issue #5891's own contract reserves the commit-time
+    pad-access gate for the single search-commit path and says rip-up re-land
+    paths deliberately do not opt in: refusing restored copper that was
+    already committed would strand the very net the rescue is for.  Not
+    opting in is also what makes the discarded ``bool`` return safe here --
+    it is unconditionally ``True`` unless the gate vetoes, so the three
+    ledgers written below (blocking, congestion, ``router.routes``) cannot
+    desync.
     """
     net_routes[net] = list(routes)
     for route in routes:
-        router._mark_route(route, enforce_pad_access=True)
+        router._mark_route(route)
         router.grid.mark_route_usage(route)
         router.routes.append(route)
 

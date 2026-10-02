@@ -401,6 +401,70 @@ def test_a_sibling_that_cannot_reland_rolls_the_whole_attempt_back(monkeypatch):
     assert not net_routes.get(3)
 
 
+class _PadAccessVetoRouter(_ScriptRouter):
+    """A router whose commit-time pad-access gate (#5891) refuses every commit.
+
+    Mirrors the real ``Autorouter._mark_route``: when a caller opts in with
+    ``enforce_pad_access=True`` and the gate vetoes, *nothing* is marked and
+    ``False`` is returned; without the kwarg the gate is not even constructed
+    and the copper is always marked.
+    """
+
+    def _mark_route(self, route: _FakeRoute, *, enforce_pad_access: bool = False) -> bool:
+        if enforce_pad_access:
+            return False
+        return self.grid.mark_route(route)
+
+
+def test_restore_does_not_opt_into_the_pad_access_invariant():
+    """A rip-up re-land must not consult the #5891 commit-time gate.
+
+    ``_mark_route``'s own contract (``core.py``) reserves ``enforce_pad_access``
+    for the single search-derived commit path and says rip-up *re-land* paths
+    deliberately do not opt in -- refusing copper that was already committed
+    would strand the very net the rescue is for.  Every other rollback path in
+    ``core.py`` (8901/12257/12438/12532/13214) calls ``self._mark_route(route)``
+    with no kwarg, and ``_restore`` must match them.
+    """
+    router = _ScriptRouter({1: {"a"}})
+    seen_kwargs: list[dict] = []
+    marked = router.grid.mark_route
+
+    def recording(route: _FakeRoute, **kwargs) -> bool:
+        seen_kwargs.append(dict(kwargs))
+        return marked(route)
+
+    router._mark_route = recording  # type: ignore[method-assign]
+    route = _FakeRoute(1, {"a"})
+    sr._restore(router, 1, [route], {})
+
+    assert seen_kwargs == [{}]
+
+
+def test_a_vetoing_pad_access_gate_cannot_desync_the_restore_ledgers():
+    """``_restore`` must leave all three ledgers consistent, veto or not.
+
+    The bug this pins: opting the re-land into the gate while discarding
+    ``_mark_route``'s ``bool`` meant a veto marked no cells yet still ran
+    ``mark_route_usage`` and ``routes.append`` -- the route counted as placed
+    in the congestion ledger and in ``router.routes`` but absent from the
+    blocking ledger, so a later search could lay copper straight over it and a
+    later ``_undo`` would ``unmark_route`` cells it never marked.  Because
+    ``_restore`` no longer opts in, a gate that would veto is never consulted
+    and the three ledgers agree.
+    """
+    router = _PadAccessVetoRouter({1: {"a", "b"}})
+    route = _FakeRoute(1, {"a", "b"})
+    net_routes: dict[int, list] = {}
+
+    sr._restore(router, 1, [route], net_routes)
+
+    assert router.grid.marked == {"a": 1, "b": 1}
+    assert router.grid.usage == {"a": 1, "b": 1}
+    assert router.routes == [route]
+    assert net_routes[1] == [route]
+
+
 def test_a_partial_result_is_discarded_without_touching_the_usage_ledger(monkeypatch):
     """A below-``expected`` result never reached ``_commit``, so usage must be 0.
 

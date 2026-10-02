@@ -150,12 +150,18 @@ def _strategy_applied(profile: dict, variant: str) -> bool:
     return any("Sequential N+1 Rip-up Routing" in line for line in _log_lines(profile))
 
 
-def _ripup_pass_line(profile: dict, prefix: str) -> str | None:
-    for line in _log_lines(profile):
-        stripped = line.strip()
-        if stripped.startswith(prefix):
-            return stripped
-    return None
+def _ripup_pass_lines(profile: dict, prefix: str) -> list[str]:
+    """Every log line starting with ``prefix``, in order -- not just the first.
+
+    A run can invoke the strategy more than once: board 03 enters the
+    ``layer-escalation`` stage and routes twice, so each of these prefixes
+    appears twice with different seconds and counters.  Returning only the
+    first match silently dropped the later invocations, which is harmless when
+    they agree (they did on this fleet) and a misreport when they do not.
+    """
+    return [
+        stripped for line in _log_lines(profile) if (stripped := line.strip()).startswith(prefix)
+    ]
 
 
 def _improvement_gate_kept(profile: dict) -> bool | None:
@@ -254,15 +260,17 @@ def run_one(board: Board, variant: str, work_dir: Path, seed: int, timeout: floa
             "routing_loop_s": _routing_loop_seconds(profile),
             "astar_calls": _astar_calls(profile),
             "strategy_applied": _strategy_applied(profile, variant),
-            "rip_up_pass_line": _ripup_pass_line(profile, "Rip-up pass:"),
-            "no_ripup_baseline_line": _ripup_pass_line(profile, "No-rip-up baseline:"),
+            # Plural: one entry per invocation of the strategy in this run (a
+            # board that escalates layers routes more than once).
+            "rip_up_pass_lines": _ripup_pass_lines(profile, "Rip-up pass:"),
+            "no_ripup_baseline_lines": _ripup_pass_lines(profile, "No-rip-up baseline:"),
             # Issue #5894: the gate can only say WHETHER two passes tied, not
             # why.  These two lines (``_PassStats.summary``) say how many
             # escalations fired and how many committed, which is what
             # distinguishes "no net ever failed its direct attempt" from
             # "every escalation was rolled back" when the metrics tie.
-            "ripup_stats_line": _ripup_pass_line(profile, "[rip-up]"),
-            "baseline_stats_line": _ripup_pass_line(profile, "[no-rip-up baseline]"),
+            "ripup_stats_lines": _ripup_pass_lines(profile, "[rip-up]"),
+            "baseline_stats_lines": _ripup_pass_lines(profile, "[no-rip-up baseline]"),
             "improvement_gate_kept": _improvement_gate_kept(profile),
             "loadavg_start": profile["host"].get("loadavg"),
             "loadavg_end": profile["host"].get("loadavg_end"),
