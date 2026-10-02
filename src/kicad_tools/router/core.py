@@ -13755,11 +13755,12 @@ class Autorouter:
 
         setter(True)
         try:
+            reverse_kwargs: dict[str, Any] = {"reverse_search": True} if reverse_search else {}
             probe_routes = self._route_net_negotiated(
                 net,
                 present_cost_factor,
                 per_net_timeout=per_net_timeout,
-                **({"reverse_search": True} if reverse_search else {}),
+                **reverse_kwargs,
             )
         finally:
             setter(False)
@@ -14299,7 +14300,9 @@ class Autorouter:
             # A bounded A* can exhaust its frontier budget approaching a
             # tight terminal while escaping that terminal succeeds. This
             # changes search order, not the number or size of the budgets.
-            direction = {"reverse_search": True} if round_idx == max_rounds - 1 else {}
+            direction: dict[str, Any] = (
+                {"reverse_search": True} if round_idx == max_rounds - 1 else {}
+            )
             probe_routes, victims = self._relief_probe(
                 failed_net, present_factor, per_net_timeout=probe_timeout, **direction
             )
