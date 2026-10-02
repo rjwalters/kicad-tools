@@ -28,9 +28,11 @@ implementation of the pose search; when the C++ backend is unavailable
 :func:`route_centerline_pose` returns ``None`` and the caller keeps its
 existing fallback (independent legs), exactly as before this module existed.
 
-Selection: off by default.  ``DiffPairRouter.enable_pose_centerline`` (set from
-``KCT_POSE_CENTERLINE=1``) opts in, and the rescue runs only after the
-joint-state search (and the shadow constructor, if it is on) have failed.
+Selection: on by default since Issue #5895.  ``DiffPairRouter.enable_pose_centerline``
+(``KCT_POSE_CENTERLINE=0`` opts out) gates it, and the rescue runs only after the
+joint-state search (and the shadow constructor, if it is on) have failed.  A
+committed pose trunk is a corridor-yield candidate (#4463/#5895): if it seals a
+net the main strategy then strands, it yields and is re-routed single-ended.
 Before the pair is committed, the router also applies its exact foreign-pad gate
 and the intra-pair clearance audit to it (``DiffPairRouter._pose_copper_rejection``).
 

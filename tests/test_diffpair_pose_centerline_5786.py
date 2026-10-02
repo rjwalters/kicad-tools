@@ -355,7 +355,8 @@ def test_claimed_nets_are_skipped_by_the_two_phase_main_pass():
     )
 
 
-def test_pose_rescue_flag_defaults_off_and_has_an_env_opt_in(monkeypatch):
+def test_pose_rescue_flag_defaults_on_and_has_an_env_opt_out(monkeypatch):
+    """Issue #5895 flipped the default ON; ``KCT_POSE_CENTERLINE=0`` opts out."""
     from kicad_tools.router.diffpair_routing import DiffPairRouter
 
     class _StubAutorouter:
@@ -366,6 +367,8 @@ def test_pose_rescue_flag_defaults_off_and_has_an_env_opt_in(monkeypatch):
 
     monkeypatch.delenv("KCT_POSE_CENTERLINE", raising=False)
     try:
+        assert DiffPairRouter(_StubAutorouter()).enable_pose_centerline is True
+        monkeypatch.setenv("KCT_POSE_CENTERLINE", "0")
         assert DiffPairRouter(_StubAutorouter()).enable_pose_centerline is False
         monkeypatch.setenv("KCT_POSE_CENTERLINE", "1")
         assert DiffPairRouter(_StubAutorouter()).enable_pose_centerline is True
