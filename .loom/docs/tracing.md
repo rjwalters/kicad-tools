@@ -182,6 +182,17 @@ taken. Any percentile/dwell aggregate over `loom.role_attempt` must filter
 dominates and the median collapses to milliseconds (see
 [`eta.md`](eta.md) § "Role-attempt stages: which percentile to read").
 
+Since #9438 the role runner removes most of that population at the source: a
+role-runner tick opens its `loom.role_attempt` root only at the launch (the
+moment its child command is built, immediately before spawn), started at the
+tick's own instant. A tick that returns before launching — every `skipped_*`
+outcome except `skipped_load` (a session that ran to the ceiling),
+`runtime_rejected`, and a `failure` raised before the launch — journals no
+span, no trace context and no join entry, and its `role_tick.outcome` record
+(still written for every tick) carries no envelope `trace_context`. The filter
+above stays required: synthetic completions, and pre-#9438 data, are still
+`false`.
+
 `loom.role_attempt` spans have distinct IDs for retries. Explicit checkpoint
 attempt numbers are retained. Unknown usage remains absent; measured zero stays
 zero. Each attempt's token usage is a set of per-model `loom.runtime.usage`
@@ -199,7 +210,8 @@ configuration blobs, prompts and account contents are not exported.
 ## Role-runner ticks join stories after the fact (#9168)
 
 A role-runner tick (Judge, Curator, Champion, Doctor, …) is spawned without a
-target, so its `loom.role_attempt` root is its own trace. Once the tick ends,
+target, so its `loom.role_attempt` root — present only when the tick launched
+(#9438) — is its own trace. Once the tick ends,
 the same transcript pass that tallies `role_tick.outcome` `actions` also
 collects the issues and PRs the tick **wrote** to: `gh issue|pr
 comment/edit/close/reopen/…`, `gh pr merge|review|ready`, `merge-pr.sh <N>`
