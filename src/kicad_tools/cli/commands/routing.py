@@ -643,6 +643,15 @@ def run_route_command(args) -> int:
     per_net_timeout_val = getattr(args, "per_net_timeout", 30.0)
     if per_net_timeout_val != 30.0:
         sub_argv.extend(["--per-net-timeout", str(per_net_timeout_val)])
+    # Issue #5785: forward the oracle completion-loop controls.  Both parsers
+    # default --oracle-rounds to None (= env var / built-in default 3) and
+    # --allow-stranded-pour-pads to False, so only forward explicit values;
+    # an unset run stays byte-identical to the pre-#5785 sub-invocation.
+    oracle_rounds_val = getattr(args, "oracle_rounds", None)
+    if oracle_rounds_val is not None:
+        sub_argv.extend(["--oracle-rounds", str(oracle_rounds_val)])
+    if getattr(args, "allow_stranded_pour_pads", False):
+        sub_argv.append("--allow-stranded-pour-pads")
     # Issue #2817: forward --checkpoint-interval to the inner parser.  The
     # inner default also lives at 30.0, so only forward when the user passed
     # a non-default value (matches the per-net-timeout pattern above).

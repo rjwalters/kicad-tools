@@ -77,10 +77,17 @@ class _FakeCliViolation:
 
 
 class _FakeCliReport:
-    """Minimal stand-in for drc.DRCReport with only ``violations``."""
+    """Minimal stand-in for drc.DRCReport.
 
-    def __init__(self, violations):
+    Mirrors the real report's shape for every attribute
+    ``run_geometric_drc`` reads: ``violations`` and ``unconnected_items``
+    (the latter is a defaulted dataclass field on the real ``DRCReport``,
+    so it is always present in production -- issue #5785).
+    """
+
+    def __init__(self, violations, unconnected_items=None):
         self.violations = violations
+        self.unconnected_items = list(unconnected_items or [])
 
 
 class TestMergeGeometricDrc:

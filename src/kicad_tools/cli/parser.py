@@ -3940,6 +3940,35 @@ def _add_route_parser(subparsers) -> None:
         help="Wall-clock timeout in seconds for each per-net A* search (default: 30). "
         "Prevents individual nets from monopolizing the router. Use 0 to disable.",
     )
+    # Issue #5785: KiCad-oracle completion loop controls.  The inner parser at
+    # route_cmd.py declares both (``--oracle-rounds`` defaults to None so the
+    # KCT_ORACLE_COMPLETION env var and the built-in default of 3 still apply
+    # when unset); both sites must stay in sync, enforced by
+    # ``tests/test_cli_parser_drift.py``.
+    route_parser.add_argument(
+        "--oracle-rounds",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "KiCad-oracle completion rounds for pour nets (Issue #5785). After "
+            "the zone fill, route exactly the links kicad-cli reports as "
+            "unconnected_items on GND/VCC-style pours, up to N rounds, stopping "
+            "at zero or when the count stops falling. Default 3; 0 disables the "
+            "loop and the stranded-pad verdict."
+        ),
+    )
+    route_parser.add_argument(
+        "--allow-stranded-pour-pads",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat pads still stranded on a pour after the oracle completion "
+            "loop as advisory (exit code unchanged). By default they are a "
+            "completion failure (exit 3, or 4 below --min-completion), "
+            "matching kicad-cli (Issue #5785). Also KCT_ALLOW_STRANDED_POUR_PADS=1."
+        ),
+    )
     # Issue #2817: forward --checkpoint-interval through the outer parser so
     # users can disable (``0``) or tune the best-so-far checkpoint cadence
     # introduced by #2812.  The inner parser at route_cmd.py also declares
