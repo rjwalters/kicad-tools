@@ -12715,6 +12715,7 @@ class DiffPairRouter:
         candidate_nets: list[int],
         non_diffpair_strategy: object,
         also_release_nets: set[int] | None = None,
+        promote_nets: set[int] | None = None,
     ) -> tuple[bool, set[int], list[Route], list[Route]]:
         """Rip the planned pairs, re-run the main strategy, keep only if it paid.
 
@@ -12764,9 +12765,25 @@ class DiffPairRouter:
                 autorouter.grid.unmark_route(route)
             if route in autorouter.routes:
                 autorouter.routes.remove(route)
-        if also_release_nets:
-            # Keep the #3270 priority promotion the first pass ran with.
-            autorouter._budget_exit_diff_nets = set(also_release_nets)
+        if promote_nets is None:
+            promote_nets = set(also_release_nets or ())
+        if promote_nets:
+            # The #3270 priority promotion for the re-run.  The caller drops
+            # it on the #4107 collapse signature (no coupled pair left after
+            # the yield), exactly as the first pass would have.
+            autorouter._budget_exit_diff_nets = set(promote_nets)
+        # Issue #5895: negotiated USAGE counts are not touched by
+        # ``unmark_route`` and ``route_all_negotiated`` never resets them, so
+        # the lifted copper's usage survived into the re-run as phantom
+        # congestion.  Board 06 (seed 42, CI): the re-run's iteration 0
+        # reported overflow 4424 (the first pass: 2), ripped all 19 nets
+        # every iteration, timed out at the 300 s cap with overflow 188, and
+        # the contorted copper split the +3V3 pour (POST-LEGALIZE GATE FAIL).
+        # Start the re-run from the clean slate a fresh negotiated pass sees.
+        grid = autorouter.grid
+        usage_reset = hasattr(grid, "reset_route_usage")
+        if usage_reset:
+            grid.reset_route_usage()
         # Issue #5895: a yielded pose trunk's nets must be routable by the
         # re-run.  The two-phase main pass skips claimed nets
         # (``get_claimed_nets``), so drop the claim now and restore it if the
@@ -12816,6 +12833,11 @@ class DiffPairRouter:
             autorouter._mark_route(route)
             if route not in autorouter.routes:
                 autorouter.routes.append(route)
+        if usage_reset and hasattr(grid, "mark_route_usage"):
+            # Leave usage consistent with the restored copper.
+            grid.reset_route_usage()
+            for route in autorouter.routes:
+                grid.mark_route_usage(route)
         pose_claims.update(released_pose_claims)
         print(
             f"  [corridor-yield] reach {reach_before} -> {reach_after} of "
@@ -13297,13 +13319,24 @@ class DiffPairRouter:
             # not in ``non_diff_nets`` precisely because the claim removed it.
             candidate_nets = list(dict.fromkeys([*non_diff_nets, *sorted(diff_net_ids)]))
             to_yield, _stranded = self._plan_corridor_yields(candidate_nets, yield_candidates)
+            # Issue #5895: on a shadow-OFF run the yielded pose pairs become
+            # budget-exit pairs.  Re-apply the #4107 collapse rule to the
+            # post-yield picture: when no coupled pair is left, the re-run
+            # gets NO #3270 promotion -- the same default ordering a run with
+            # the pose search off uses (board 06: all 9 pairs budget-exit).
+            rerun_release: set[int] = set()
+            rerun_promote: set[int] = set()
+            if not self.enable_shadow_construction:
+                yielded_nets = {n for p, _r in to_yield for n in p.get_net_ids()}
+                rerun_release = set(budget_exit_diff_nets)
+                if coupled_routed_nets - yielded_nets:
+                    rerun_promote = rerun_release | yielded_nets
             kept, released_nets, removed_routes, added_routes = self._apply_corridor_yields(
                 to_yield,
                 candidate_nets,
                 non_diffpair_strategy,
-                also_release_nets=(
-                    set() if self.enable_shadow_construction else set(budget_exit_diff_nets)
-                ),
+                also_release_nets=rerun_release,
+                promote_nets=rerun_promote,
             )
             if kept:
                 diff_net_ids = diff_net_ids - released_nets

@@ -454,3 +454,42 @@ def test_recovery_does_not_run_without_a_pose_trunk_when_shadow_is_off():
 
     assert calls == []
     assert getattr(router, "_coupled_prephase_stall_exit", False) is False
+
+
+def test_yield_rerun_starts_without_phantom_negotiated_usage():
+    """The re-run must not inherit the lifted copper's usage counts (#5895).
+
+    ``unmark_route`` clears occupancy but not negotiated usage, and
+    ``route_all_negotiated`` never resets it.  Board 06 (seed 42, CI): the
+    lifted legs' leftover usage showed up as overflow 4424 in the re-run's
+    iteration 0 (first pass: 2), the loop ripped all 19 nets every
+    iteration until the 300 s cap, and the contorted copper split the
+    +3V3 pour.  A reverted yield leaves usage consistent with the restored
+    copper.
+    """
+    router = _channel_router()
+    dp = router._diffpair
+    wall = _wall_routes(router)
+    _commit(router, wall)
+    for route in wall:
+        router.grid.mark_route_usage(route)
+    assert int(router.grid._usage_count.sum()) > 0
+
+    to_yield, _stranded = dp._plan_corridor_yields([3], [(_pair(), wall)])
+    usage_during: list[int] = []
+
+    def _strategy() -> list[Route]:
+        usage_during.append(int(router.grid._usage_count.sum()))
+        return []
+
+    kept, _released, _removed, _added = dp._apply_corridor_yields(to_yield, [3], _strategy)
+
+    assert usage_during == [0], "the re-run must start from zero negotiated usage"
+    assert kept is False
+    expected = 0
+    for route in router.routes:
+        expected += len(
+            {c for s in route.segments for c in router.grid._get_segment_cells(s)}
+            | {c for v in route.vias for c in router.grid._get_via_cells(v)}
+        )
+    assert int(router.grid._usage_count.sum()) == expected
