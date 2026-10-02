@@ -196,6 +196,8 @@ sources and are `clickhouse-client`-only).
 | 13 | **Which suites should move between shards?** (#9089) Per run attempt and leg, the summed suite time that leg carried and its slowest suite. Section 10 says *whether* the legs are imbalanced; this says what to **move** | `loom.ci.suite` spans (7 days) |
 | 14 | **What set a run's floor — one slow job, queueing, or a `needs:` chain?** (#9089) Per run attempt, the job with the largest dependency + queue + running sum (`critical_job`), each of those three segments kept separate, the run's own queue segment, and the `unexplained_s` residual. Section 6 could only say queueing *or* a chain dominated; the three per-job segments separate them | `ci.run` + `ci.job` records (7 days) |
 | 15 | **Is this job family gated or capacity-starved?** (#9089) P50/P90/max `loom.ci.dependency_wait_ms` per repo + workflow + job beside the same family's p90 runner-queue wait and p90 running time, with a `gated_jobs` count that excludes sub-2s job-creation lag. Alert when `p90_dep_s` exceeds `p90_queue_s`: that family is gated by `needs:`, and adding runner capacity will not move it | `ci.job` records (7 days) |
+| 16 | **Which Rust tests are the slow ones?** (#9456) P50/P90/max/total `loom.ci.test` span duration per repo + workflow + binary + test, ranked by total time, with the flake count (`<flakyFailure>`: failed then passed, the #7789 signal) and the failure count beside it — the per-test half of section 12's question, for the `nextest-partition` legs that emit no suite spans. **Only each leg's slow tail is emitted** (see [Per-test spans](#per-test-spans-9456)), so `runs` is "how many runs this test was slow in", and absence is never evidence a test did not run | `loom.ci.test` spans (7 days) |
+| 17 | **Which tests should move between partitions?** (#9456) Per run attempt and nextest leg, the summed slow-tail test time that leg carried and its slowest named test. The nextest counterpart to section 13; `job` is in the group-by because both nextest families shard `1..3` and comparing across them compares unrelated partitions | `loom.ci.test` spans (7 days) |
 
 Section 7's join key is the **issue** number, not a PR number: `ci.run`/
 `ci.job` **log** records carry no PR/issue attribute of their own (only
@@ -850,6 +852,135 @@ What is deliberately **not** emitted, and what a failure costs:
 `ci-queries.sql` sections 12 (slowest suites, with retry and failure counts)
 and 13 (per-leg suite time and slowest suite, the "what to move" counterpart to
 section 10's "whether it is imbalanced") consume these.
+
+### Per-test spans (#9456)
+
+The suite spans above only exist for the `LOOM_CI_SHARD` **shell** legs. The
+`nextest-partition` legs — `Rust Unit Tests (k/3)` and `Rust OTLP Feature Tests
+(k/3)` — had nothing below step granularity, so "~110s of this leg's 250s was
+the test step" was answerable but *which tests* spent it was not, and
+rebalancing `--partition count:k/N` stayed guesswork (the same Unit partition's
+test step has ranged 50s–139s between runs, #9089). Each selected test now
+becomes one `loom.ci.test` span, a **child of that leg's job span** (a sibling
+of its step spans, for the same reason a suite span is). This is also the
+per-test outcome/duration data #7789's flake tracking wants for the Rust suite
+— the Rust counterpart of the #7791 shell-suite retry count section 12 already
+reports.
+
+**Why an artifact, and why JUnit.** Per-test durations exist only inside the
+runner; nextest's console output is log text, and nothing may be derived from
+log text (see [Why there is no `step`
+attribute](#why-there-is-no-step-attribute)). nextest can write the same data
+as JUnit XML, so `.config/nextest.toml`'s `ci` profile does and `ci.yml`
+uploads it. `junit` is a scalar profile setting rather than an override, so it
+sits on `[profile.ci.junit]` **only** — the file's "keep the two profiles'
+overrides identical" rule does not reach it, and a local `cargo nextest run`
+(the `default` profile) has no artifact upload, no poller and no reason to pay
+for the file.
+
+| Property | Value |
+|---|---|
+| Producer | `.config/nextest.toml`'s `[profile.ci.junit] path = "junit.xml"` → `target/nextest/ci/junit.xml`, written by every `cargo nextest run --profile ci` |
+| Wire format | nextest's JUnit XML: `<testcase name= classname= timestamp= time=>` plus, for a non-pass, one `<failure>` / `<error>` / `<skipped>` / `<flakyFailure>` / `<rerunFailure>` child. `classname` is the **binary id** (`loom-daemon` for the lib tests, `loom-daemon::<target>` for an integration binary), `name` the test path inside it — a test path is only unique within its binary, so both halves are part of the identity |
+| Artifact | `ci-test-timings-<family>-<k>-<N>`, uploaded `if: always()` with `if-no-files-found: ignore`. **The name is the entire pairing key** — JUnit XML carries no run id, no shard and no job name, so unlike a suite-timings record there is nothing inside the file to pair on. `<family>` is the leg's display name with its `(k/N)` suffix stripped and slugified (`Rust Unit Tests (1/3)` → `rust-unit-tests`), which is load-bearing rather than cosmetic: `ci.yml` has **two** nextest-partition families both sharding `1..3`, so `(kind, k, N)` alone matches two jobs. Renaming the artifact — or renaming the job without renaming the artifact — silently stops test spans, which `ci_telemetry::tests::test_spans` asserts against `ci.yml` itself |
+| Transport | the same `gh run download` path as a suite-timings artifact, and the same single artifacts listing: one listing serves both families, so a run with both pays one request, not two |
+| Cost gate | **Zero requests** unless the run has at least one *not-yet-emitted* `nextest-partition` job. The gate is **per family**: a run with only nextest legs never downloads a suite-timings artifact, and vice versa |
+| Pairing | the unique `nextest-partition` job of that run with the same family and `(index, total)`. Zero matches or several is `NoUniqueJob` — never guessed, the same rule [suite spans](#suite-spans-9089) and [story stitching](#story-stitching-9088) follow |
+| Span id | derived from `(repo, job_id, sanitized binary id, sanitized test name)`. The **stable name** is the identity, never the ordinal, and for a sharper version of the suite-span reason: `--partition count:k/N` is a hash over the test list, so adding ONE test reshuffles which leg runs many of the others, and an ordinal-derived id would fork on every suite edit — making "this test's duration over the last week" unanswerable, which is the whole point. `classname` is part of the key because a test path is only unique within its binary |
+| Window | the test's own `timestamp` + `time`, **clamped inside the job's** GitHub-reported window, for the same reason a suite span's is |
+| Status | the **test's** own outcome (`pass`/`flaky` → Ok, `fail`/`error` → Error, `skip` → Unset), never its job's conclusion. A `flaky` test ultimately *passed*, so its span is Ok and only `loom.ci.test.outcome` distinguishes it from a clean pass |
+| Attributes | `loom.ci.test` (the test path), `loom.ci.test.binary` (`classname`), `loom.ci.test.outcome`, plus its job's identity and the shard trio. Two keys rather than one concatenated id because "which binary is slow" is its own group-by |
+| Caps | `MAX_JUNIT_BYTES` = 8 MiB per file (~9x a real leg's ~845 KB all-green document), `MAX_TESTCASES_PARSED` = 50,000 elements (~12x a real leg's 4,242), `MAX_ARTIFACTS_PER_RUN` = 8, `MAX_TEST_SPANS_PER_JOB` = 512, `MIN_TEST_DURATION_MS` = 250 — each justified against the measured run below; test and binary names control-stripped and truncated to 200 chars. The outcome vocabulary is closed **by construction** — it is a Rust enum the parser maps into, so unlike a suite outcome there is no path for a fork's text to reach the attribute at all |
+
+**Volume is the one risk the suite work did not face, and the emission is a
+deliberate tail sample.** A nextest leg runs **4,242 tests** against a shell
+leg's ~118 suites, so one span per test would be ~25,400 spans per CI run
+across the six nextest legs — two orders of magnitude more trace volume than
+every other CI span combined. Both questions these spans exist for ("what
+should move between partitions", "which test regressed or flakes") live
+entirely in the slow tail: a 3 ms test is not a rebalancing candidate at any
+partition size, and cannot be told apart from nextest's per-test process-spawn
+overhead. So only tests **at or above `MIN_TEST_DURATION_MS` (250 ms)**,
+slowest first, capped at **`MAX_TEST_SPANS_PER_JOB` (512)**, are emitted.
+
+Both numbers are sized against one real recorded leg, not rounded for comfort —
+`cargo nextest run --workspace --profile ci --partition count:1/3` on `main`,
+2026-10-02 (12,659 workspace tests over three partitions; this leg 4,242 tests,
+873s of summed test time):
+
+| Floor | Tests at or above it | Share of the leg's total test time they carry |
+|---|---|---|
+| 50 ms | 913 (21.5%) | — |
+| 100 ms | 464 (10.9%) | — |
+| **250 ms** (chosen) | **306 (7.2%)** | **89%** |
+| 500 ms | 176 (4.2%) | — |
+| 1 s | 107 (2.5%) | — |
+
+So **the floor, not the cap, is what makes this affordable**: it discards 93% of
+the records for 11% of the signal, and 250 ms is where that trade is available
+(~0.1% of the leg's ~250s wall time). The cap is a **backstop** above the
+measured above-floor population — 512 is ~1.7x the observed 306, so an ordinary
+slow-test wave does not silently truncate the ranking, while a pathological or
+forged document still cannot emit more. It is the same number
+`MAX_SUITE_SPANS_PER_JOB` uses, deliberately: two per-leg span families, one
+reviewable bound.
+
+**The ingest cost, stated:** ~1,840 test spans per CI run across the six nextest
+legs in steady state, at most 3,072 in the worst case, against the ~300 CI spans
+a run emits today. **Consequence for every reader:** a test absent from these
+results is below the floor or outside the cap, *never* evidence that it did not
+run. These are not a test inventory.
+
+**Why a hand parser and not an XML dependency.** The daemon has no XML
+dependency and a deliberately small dependency surface, and what this module
+consumes is four attributes of one element type plus *the presence* of one of
+five child element names — a few hundred bytes of grammar. Deciding it this way
+is also what makes the redaction rule enforceable: a
+`<failure>`/`<rerunFailure>` element's text and `message=` attribute carry the
+test's panic output **verbatim** (captured stdout and stderr), which is log
+text, and an attribute derived from log text rides straight past the gateway's
+body scrub (see [Why there is no `step`
+attribute](#why-there-is-no-step-attribute)). The parser reads element *names*
+and four start-tag attributes and **structurally cannot** read a failure
+message; a DOM-based reader would make that a reviewer's discipline instead of
+a property of the code. The fixture document embeds a complete escaped decoy
+`<testcase …/>` inside its failure text to hold that line.
+
+**Every value in that document is untrusted input.** A fork's `pull_request`
+runs the **fork's** `ci.yml` and `.config/nextest.toml`, so the artifact name,
+the XML and every test name, timestamp and duration in it are
+attacker-controlled text — hence the byte cap before parsing, the element cap
+while parsing, the span cap, the sanitization (`bounded_attributes` *drops* a
+value over 256 chars or containing a control character, which would silently
+lose the one attribute naming the test), the enum-closed outcome vocabulary,
+and the clamp. A record failing any check is skipped **and counted**, never
+repaired into something plausible.
+
+What is deliberately **not** emitted, and what a failure costs:
+
+- **A test that did not run is absent.** nextest omits a filtered-out test from
+  the document entirely; a `<skipped/>` case and a case with no `timestamp` (no
+  anchor to place it at) are dropped. A zero-length span at the job's start
+  would read as "ran instantly" — the opposite of "was skipped", and against
+  [ci-principles](ci-principles.md) rule 6.
+- **No `ci.test` log record and no per-test metric series**, for the same
+  reasons as step and suite spans, only more so: the metric label allowlist
+  admits no test dimension, and a per-test histogram would multiply the 30-day
+  series count by every leg's test count (12,659 workspace tests today).
+  Trace-horizon signal only.
+- **A failure here costs this run's test spans and nothing else.** Resolved
+  *before* the run's units are committed, so the spans ride in their job's own
+  unit and stay exactly-once; in exchange a failed download, an over-cap or
+  non-JUnit file, or an unpairable artifact name degrades to no test spans for
+  that run, counted in the cycle's `test_artifact_failures` and logged, and is
+  never retried. Only a rate limit or a rejected credential escapes and aborts
+  the cycle.
+- **Test spans never reach a story trace**, for the same reason suite spans do
+  not: a per-issue story trace must not be swamped by one leg's slow tail.
+
+`ci-queries.sql` sections 16 (slowest tests, with flake and failure counts) and
+17 (per-leg slow-tail time and slowest named test, the nextest counterpart to
+section 13) consume these.
 
 ### Critical path per run (#9089)
 

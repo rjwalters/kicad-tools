@@ -35,16 +35,66 @@ print_warning() {
     echo -e "${YELLOW}⚠ $1${NC}"
 }
 
-# Function to check if we're in a worktree
+# --------------------------------------------------------------------------
+# In-worktree detection
+# --------------------------------------------------------------------------
+#
+# Delegated to `loom-daemon worktree-check` (#9425), the verb #8195 slice 11
+# (PR #9424) added when it retired this script's predicate from
+# `defaults/scripts/worktree.sh`. This file carried a verbatim copy of it:
+#
+#   git_dir=$(git rev-parse --git-common-dir)
+#   work_dir=$(git rev-parse --show-toplevel)
+#   [[ "$git_dir" != "$work_dir/.git" ]]        # => "in a worktree"
+#
+# `--show-toplevel` is always ABSOLUTE; `--git-common-dir` is RELATIVE to the
+# current directory whenever it can be (`.git` at the repo root, `../.git` one
+# level down). So in the primary clone the comparison read `.git` !=
+# `/repo/.git` — true — and it answered "in a worktree" there, in every
+# subdirectory of it, and inside a real linked worktree alike. It had no
+# reachable false branch from anywhere a caller can stand, so the "Not
+# currently in a worktree" arm below was dead code — in the one script that
+# tells operators to run `pnpm worktree --check`, which slice 11 had just made
+# answer correctly. The two disagreed about what a worktree is.
+#
+# The verb compares canonicalized `--git-dir` against canonicalized
+# `--git-common-dir` — git's own definition of a linked worktree, and correct
+# through a symlinked repo path and for a `--separate-git-dir` checkout (where
+# `.git` is a FILE, defeating the tempting `[[ -f .git ]]` shortcut) alike.
+#
+# This is the hard delegation `worktree.sh --check` took, NOT the physical
+# fallback its create path kept: that fallback exists because a silent "not in
+# a worktree" there would let `git worktree add` nest a worktree inside
+# another. Nothing here is irreversible — the worst a wrong answer does is
+# refuse to `cd` — so a daemonless host gets the refusal rather than a second
+# spelling of the predicate that could drift from the verb again.
+#
+# LOOM_SCRIPT_HELPER_MISSING_RC=2 — argued, not defaulted: 0 and 1 are the
+# verb's two ANSWERS ("inside a linked worktree" / "the main working
+# directory") and the call site branches on them, so an unresolvable binary
+# must not be readable as either. 2 is the code every epic-#7810 stub reserves
+# for "could not run at all".
+# requires-daemon: worktree-check >= 0.19.492  #9425 — the in-worktree predicate; without it this script exits 2 rather than guessing
 check_if_in_worktree() {
-    local git_dir=$(git rev-parse --git-common-dir 2>/dev/null)
-    local work_dir=$(git rev-parse --show-toplevel 2>/dev/null)
-
-    if [[ "$git_dir" != "$work_dir/.git" ]]; then
-        return 0  # In a worktree
-    else
-        return 1  # In main working directory
+    local helper
+    helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/script-helper.sh"
+    if [[ ! -f "$helper" ]]; then
+        print_error "lib/script-helper.sh is missing — cannot tell whether this is a worktree."
+        echo "This install is incomplete; re-run the Loom installer or resync .loom/." >&2
+        exit 2
     fi
+    # shellcheck source=lib/script-helper.sh
+    source "$helper"
+    # A SUBSHELL, because `loom_exec_script_helper` execs and never returns: in
+    # `( … )` the exec replaces the subshell, so the verb's exit code arrives
+    # here as `$?` instead of replacing this script mid-flight. stdout is
+    # dropped (the verb's report text is not this script's output, and `--json`
+    # callers parse one document); stderr is kept so the missing-daemon
+    # message, which names the provisioning path, still reaches the operator.
+    (
+        LOOM_SCRIPT_HELPER_MISSING_RC=2 \
+            loom_exec_script_helper worktree-check >/dev/null
+    )
 }
 
 # Function to show help
@@ -108,8 +158,17 @@ if [[ "$1" == "--check" ]]; then
     CHECK_ONLY=true
 fi
 
-# Verify we're in a worktree
-if ! check_if_in_worktree; then
+# Verify we're in a worktree.
+#
+# `|| IN_WORKTREE_RC=$?` rather than a bare call: `set -e` is in force at the
+# top of this file, and a function whose last command exits non-zero outside a
+# condition context would abort the script before the arms below could run. The
+# three codes are the verb's contract — 0 "inside a linked worktree", 1 "the
+# main working directory", 2 "could not run at all".
+IN_WORKTREE_RC=0
+check_if_in_worktree || IN_WORKTREE_RC=$?
+
+if [[ "$IN_WORKTREE_RC" == "1" ]]; then
     if [[ "$JSON_OUTPUT" == "true" ]]; then
         echo '{"error": "Not in a worktree", "inWorktree": false}'
     else
@@ -120,6 +179,17 @@ if ! check_if_in_worktree; then
         echo "  pnpm worktree --check"
     fi
     exit 1
+elif [[ "$IN_WORKTREE_RC" != "0" ]]; then
+    # Deliberately distinct from both answers: this is "I could not look",
+    # not "I looked and you are in the main working directory". The resolver
+    # has already printed the actionable provisioning message to stderr.
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        echo '{"error": "Could not determine whether this is a worktree", "inWorktree": null}'
+    else
+        print_error "Could not determine whether this is a worktree"
+        print_info "\`loom-daemon worktree-check\` could not be run — see the message above"
+    fi
+    exit 2
 fi
 
 # Get current worktree path
