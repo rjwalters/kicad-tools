@@ -983,7 +983,26 @@ def select_plan_nets(
         if report is not None:
             report(message)
 
-    net_order = sorted(nets.keys(), key=lambda n: router._get_net_priority(n))
+    # Issue #5787 (Epic #5784, Phase 3): honour a CLI-computed explicit
+    # ordering (``kct route --order-method``) as the base order, exactly as
+    # ``Autorouter.route_all_negotiated`` does.  Without this the two-phase
+    # path -- which every 4-layer board takes -- silently discarded the
+    # ordering, so a net-order A/B measured byte-identical copper and an
+    # identical A* call count on boards 03 and 06a.  ``_forced_net_order`` is
+    # ``None`` unless ``--order-method`` was passed, so the default selection
+    # (and therefore the plan stage) stays byte-identical.  The filters and
+    # fairness passes below still apply, as on the negotiated path.
+    forced = getattr(router, "_forced_net_order", None)
+    if forced is not None:
+        ranked = {net: rank for rank, net in enumerate(forced)}
+        net_order = sorted(
+            nets.keys(),
+            # Nets missing from the forced order (none in practice -- it is a
+            # permutation of ``router.nets``) keep priority order at the end.
+            key=lambda n: (ranked.get(n, len(ranked)), router._get_net_priority(n)),
+        )
+    else:
+        net_order = sorted(nets.keys(), key=lambda n: router._get_net_priority(n))
     net_order = [n for n in net_order if n != 0]
 
     # Issue #1295: pour nets are connected via zone fills.

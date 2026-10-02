@@ -15653,6 +15653,14 @@ class Autorouter:
             # the DQ1/DQ6 inner-position bump in `kct route` (which goes
             # through ``route_with_escape``).
             apply_byte_lane_inner_priority=self._apply_byte_lane_inner_priority,
+            # Issue #5787 (Epic #5784, Phase 3): forward the CLI-computed
+            # explicit net order (``kct route --order-method``).  Without it
+            # ``select_plan_nets`` on the two-phase path falls back to the
+            # priority sort and the flag is a silent no-op on every board that
+            # routes two-phase -- which is how a net-order A/B first measured
+            # byte-identical copper and an identical A* call count on boards
+            # 03 and 06a.  ``None`` unless ``--order-method`` was passed.
+            forced_net_order=self._forced_net_order,
             # Issue #3470: CLI-configurable stall-recovery rip-up budget
             # (``--max-ripups-per-net``).  None preserves the historical
             # default of 3.

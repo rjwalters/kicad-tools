@@ -4692,7 +4692,7 @@ def _add_route_parser(subparsers) -> None:
     )
     route_parser.add_argument(
         "--order-method",
-        choices=["greedy", "critical_first", "congestion", "hybrid"],
+        choices=["greedy", "critical_first", "congestion", "hybrid", "crossing"],
         default=None,
         help=(
             "Compute the net routing order with a named heuristic (Issue #3897) "
@@ -4701,7 +4701,10 @@ def _add_route_parser(subparsers) -> None:
             "'critical_first' (power/clock nets first), 'congestion' (most "
             "congested nets first), 'hybrid' (critical_first + congestion). "
             "'congestion' and 'hybrid' require a congestion map; if one cannot "
-            "be obtained the command warns and falls back to 'greedy'. When "
+            "be obtained the command warns and falls back to 'greedy'. "
+            "'crossing' (Issue #5787) ranks nets by flight-line crossing "
+            "degree -- most-contended first -- within each net-class priority "
+            "band, without spending an evaluation route. When "
             "omitted, ordering is byte-identical to the default behaviour."
         ),
     )
