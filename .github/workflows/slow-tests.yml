@@ -2,9 +2,28 @@ name: Slow Tests
 
 on:
   schedule:
-    # Run nightly at 03:00 UTC
+    # Issue #5743: twice daily (was nightly only). This job is the only one
+    # in the repo that has recently found real breakage (2 failures in 3 runs,
+    # 41-min median), so it runs more often -- but never on pull requests and
+    # never as a PR check, so it stays non-blocking for merges.
     - cron: "0 3 * * *"
+    - cron: "0 15 * * *"
+  # Also on main pushes that touch code the benchmarks exercise. Docs-only
+  # merges do not trigger it. Runs are serialised (see `concurrency`) so a
+  # burst of merges collapses to one running + one pending run.
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/slow-tests.yml"
   workflow_dispatch: {}
+
+concurrency:
+  group: slow-tests-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
