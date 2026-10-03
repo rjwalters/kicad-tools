@@ -1004,11 +1004,10 @@ gh issue edit <number> --remove-label "loom:building"
 
 #### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
 
-**Never apply `loom:operator-only` on its own.** Choose exactly one sub-kind and
-apply both labels in the **same** command. This is purely additive — the base
-label is never removed or replaced, so every filter/skip keyed on it (sweep
-pre-flight, `warn-operator-gated.sh`, Champion's promotion-queue exclusions,
-Curator's and Doctor's queue exclusions) behaves exactly as before:
+**Park only for a PO-level decision or a human-hands step (#10001)** — a
+failed attempt or a hard bug is not one; full rule: `curator.md` → "Applying
+`loom:operator-only`". **Never apply `loom:operator-only` on its own**: apply
+exactly one sub-kind in the **same** command (additive; filters unchanged):
 
 | Sub-kind | Apply when |
 |---|---|

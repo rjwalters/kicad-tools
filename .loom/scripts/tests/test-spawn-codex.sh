@@ -1127,7 +1127,7 @@ READY_PROFILE="$(mk_hook_profile ready)"
 # copy also exists (see #4787), spuriously reporting hooks=not-ready.
 bash "$PROVISION_SCRIPT" install --codex-home "$READY_PROFILE" \
     --workspace "$LOOM_WORKSPACE" >/dev/null 2>&1
-printf 'hooks.state."loom".trusted_hash = "deadbeef"\n' > "$READY_PROFILE/config.toml"
+printf '[hooks.state."%s/hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "deadbeef"\n' "$(cd -P "$READY_PROFILE" && pwd -P)" > "$READY_PROFILE/config.toml"
 
 BARE_PROFILE="$(mk_hook_profile bare)"
 
@@ -1158,7 +1158,7 @@ run_preflight 78 "builder + installed-but-untrusted profile -> exit 78" \
 STALE_PROFILE="$(mk_hook_profile stale)"
 bash "$PROVISION_SCRIPT" install --codex-home "$STALE_PROFILE" \
     --workspace "$LOOM_WORKSPACE" --bridge "$BRIDGE_SCRIPT" >/dev/null 2>&1
-printf 'hooks.state."loom".trusted_hash = "deadbeef"\n' > "$STALE_PROFILE/config.toml"
+printf '[hooks.state."%s/hooks.json:pre_tool_use:0:0"]\ntrusted_hash = "deadbeef"\n' "$(cd -P "$STALE_PROFILE" && pwd -P)" > "$STALE_PROFILE/config.toml"
 jq '(.hooks.PreToolUse[].hooks[] | select(.command | contains("guard-codex-bridge.sh")) | .command) |= (. + " --tampered")' \
     "$STALE_PROFILE/hooks.json" > "$STALE_PROFILE/hooks.tmp" \
     && mv "$STALE_PROFILE/hooks.tmp" "$STALE_PROFILE/hooks.json"
@@ -1182,8 +1182,8 @@ run_preflight 78 "sweep-lifecycle (daemon sweep-child alias) -> exit 78" \
     LOOM_ROLE=sweep-lifecycle CODEX_HOME="$BARE_PROFILE"
 
 # (6) Read-only roles keep the conservative fallback, with an explicit warning.
-run_preflight 0 "judge + unprovisioned profile -> proceeds (read-only role)" \
-    LOOM_ROLE=judge CODEX_HOME="$BARE_PROFILE"
+run_preflight 0 "curator + unprovisioned profile -> proceeds (read-only role)" \
+    LOOM_ROLE=curator CODEX_HOME="$BARE_PROFILE"
 out="$PREFLIGHT_OUT"
 assert_contains "hook parity unavailable" "$out" \
     "a read-only role is told, explicitly, that hook parity is unavailable"
@@ -1199,7 +1199,7 @@ assert_contains "role=unset" "$out" "the audit line reports an unset role"
 # (7) Ambient auth (no CODEX_HOME) is reported as unavailable, not ready.
 out="$(env -u CODEX_HOME -u LOOM_CODEX_HOME -u LOOM_CODEX_PROFILE \
     LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_SPAWN_NO_EXPORT=1 \
-    LOOM_ROLE=judge bash "$SPAWN_CODEX" -p "hi" 2>&1)" || true
+    LOOM_ROLE=curator bash "$SPAWN_CODEX" -p "hi" 2>&1)" || true
 assert_contains "hooks=unavailable" "$out" \
     "ambient Codex login state reports hooks=unavailable"
 

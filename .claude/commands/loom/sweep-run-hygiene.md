@@ -45,12 +45,12 @@ Long sweeps run for many minutes — sometimes hours overnight — and the host 
 ./.loom/scripts/check-host-sleep.sh
 ```
 
-Advisory-only: always exits `0`, **must not block** the sweep. It prints a platform-aware warning to stderr when the host is configured in a way that allows it to sleep:
+Advisory-only: always exits `0`, **must not block** the sweep. It warns on stderr when the host can sleep:
 
-- **macOS:** even with a user-idle sleep assertion (Amphetamine, `caffeinate -dimsu`, etc.), macOS Maintenance Sleep can still fire and tear down sockets. The reliable defenses are `sudo pmset -c sleep 0` or flipping your sleep manager's "allow system sleep when display is off" toggle to OFF.
+- **macOS:** even with a user-idle sleep assertion (Amphetamine, `caffeinate -dimsu`), Maintenance Sleep can still tear down sockets. Fix: `sudo pmset -c sleep 0`, or turn OFF your sleep manager's "allow system sleep when display is off".
 - **systemd Linux:** wrap the session in `systemd-inhibit --what=idle:sleep --who=loom --why=sweep -- <cmd>`, which IS reliable.
 
-If the user is running an overnight sweep, they should heed the warning before walking away.
+Heed it before an overnight sweep. Also run `loom-daemon forge egress assert` (#9984; silent 0 with no policy); on non-zero, quote its codes + fixes in the summary (advisory; dispatch/spawn enforce).
 
 ## Main Branch Freshness (#3770)
 

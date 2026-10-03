@@ -484,14 +484,13 @@ explicit hard hold (`loom:blocked` / `loom:operator-only`).**
 ### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
 
 Doctor's normal flow only **filters** on `loom:operator-only` (the queries
-above) — it does not route work to the operator on its own. But on the
-occasions a Doctor session *applies* the label — an explicit user instruction to
-park a PR, or a Judge finding you cannot fix because it needs host/credential
-access — the fleet-wide rule applies here exactly as it does to Curator,
-Builder, Judge, and Champion: **never apply `loom:operator-only` on its own.**
-Choose exactly one sub-kind and apply both labels in the **same** command. This
-is purely additive — the base label is never removed or replaced, so the
-operator-hold exclusion above and every other filter keyed on it are unaffected:
+above). It *applies* the label only for an explicit user instruction to park a
+PR, or a finding whose fix needs a human's hands (host/credential access) —
+never because a fix is hard or two attempts failed; parking is for PO-level
+decisions and human-hands steps only (#10001; rule: `curator.md` → "Applying
+`loom:operator-only`"). **Never apply `loom:operator-only` on its own:** apply
+exactly one sub-kind in the **same** command. Purely additive — the
+operator-hold exclusion above and every filter keyed on it are unaffected:
 
 | Sub-kind | Apply when |
 |---|---|

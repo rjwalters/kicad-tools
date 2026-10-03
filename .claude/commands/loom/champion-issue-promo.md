@@ -1394,13 +1394,13 @@ Implemented per #7657.]
 
 **Otherwise (`CLOSE_PREMISE_FALSE=no`), escalate.** Re-run the verdict-time recheck first:
 
-**Choose the sub-kind before posting (#5671, see `.loom/docs/label-state-machine.md` "operator-only sub-kinds")**: if every recurring finding cites a still-open dependency/blocker (nothing else is wrong with the proposal) — use `loom:operator-blocked` and include a `Blocked by #N` line so the blocker is machine-readable. Otherwise — a genuine feasibility, scope, or policy question — use `loom:operator-decision`, the safe default when the findings are mixed or the cause isn't purely a live dependency.
+**Choose the sub-kind before posting (#5671, see `.loom/docs/label-state-machine.md` "operator-only sub-kinds")**: if every recurring finding cites a still-open dependency/blocker (nothing else is wrong with the proposal) — use `loom:operator-blocked` and include a `Blocked by #N` line so the blocker is machine-readable. Otherwise use `loom:operator-decision` — the PO-level call is revise / close / accept-as-is, so the comment ranks those options, each with a why (#10001; not a "when unsure" default).
 
 ```bash
 ESCALATE_MARKER="<!-- champion:proposal-escalated -->"
 # SUB_KIND: "loom:operator-blocked" if every recurring finding is a still-open
 # dependency (name it below with "Blocked by #N"); otherwise
-# "loom:operator-decision" (the safe default).
+# "loom:operator-decision" (rank the options).
 SUB_KIND="loom:operator-decision"
 ./.loom/scripts/post-comment.sh <number> --body "$ESCALATE_MARKER
 **Champion: Escalating to Operator — Repeated Rejection Without Revision**
@@ -1410,7 +1410,7 @@ This proposal has been evaluated $UNREVISED_EVALS+ times with converging feedbac
 **Recurring findings:**
 - [Criterion that failed, repeated across rejections]: [Specific reason]
 
-A human needs to decide whether to revise this proposal, close it, or accept it as-is.
+**Options (ranked, each with a why):** <revise / close / accept-as-is>
 
 ---
 *Automated by Champion role*" \

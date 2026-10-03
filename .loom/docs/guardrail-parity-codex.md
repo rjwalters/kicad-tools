@@ -351,8 +351,13 @@ it explicitly when sizing a multi-account Codex pool):
 # 1. install the managed hook into every pooled profile (idempotent, credential-free)
 .loom/scripts/provision-codex-hooks.sh install --all-profiles --workspace "$PWD"
 
-# 2. accept Codex's hook-trust prompt once per profile (interactive — see above)
-CODEX_HOME=~/.loom/codex-profiles/alice codex
+# 2. accept Codex's hook-trust prompt once per profile (interactive — see above),
+#    WHERE THE PROFILE RUNS. Codex keys trust by the hooks.json path under the
+#    CODEX_HOME it runs with, so for a session-managed profile accept it inside
+#    the account's session container (CODEX_HOME=/home/loom/.codex-profile),
+#    from any Loom checkout; trust accepted on the host does not count there.
+docker exec -it -w "$PWD" loom-codex-session-alice codex      # session-managed
+CODEX_HOME=~/.loom/codex-profiles/alice codex                 # bare-metal only
 
 # 3. gate the pool: exit 0 only when EVERY profile is ready
 .loom/scripts/provision-codex-hooks.sh verify --all-profiles --workspace "$PWD" --json
@@ -369,16 +374,22 @@ section, which greps both `spawn-codex.sh` and `provision-codex-hooks.sh` for
 `--dangerously-bypass-hook-trust` and the `bypass_hook_trust` config-key
 equivalent.
 
-Repeat step 1 after any `loom update` that changes the bridge — a changed
-managed entry reads as STALE and every mutable-role spawn fails closed until it
-is reinstalled and re-trusted.
+Since #9390 the managed entry is ONE workspace-independent command (managed
+version 2): it runs the bridge of whichever checkout the session is in, so one
+trust decision per profile covers every workspace on the host, and running step
+1 from another workspace is a byte-identical no-op. Repeat steps 1-2 only when
+the managed entry itself changes (a new managed-hook version): a changed entry
+reads as STALE and every guarded spawn fails closed until it is reinstalled and
+re-trusted. `verify` counts only trust recorded under the key Codex looks Loom's
+entry up under (`<runtime CODEX_HOME>/hooks.json:pre_tool_use:<group>:<handler>`)
+and reports `trustSignal: "wrong-location"` for trust taken anywhere else.
 
 ### Role-aware spawn preflight
 
 `spawn-codex.sh` emits one audit line per spawn:
 
 ```text
-spawn-codex: hooks=<ready|not-ready|unavailable> role=<name> mutable=<bool> trust-bypass=never reason="…"
+spawn-codex: hooks=<ready|not-ready|unavailable|verified-in-private-session> role=<name> mutable=<bool> guarded=<bool> trust-bypass=never reason="…"
 ```
 
 - **Mutable roles (`builder`, `doctor`, and their aliases)** exit **78 before the
@@ -392,6 +403,16 @@ spawn-codex: hooks=<ready|not-ready|unavailable> role=<name> mutable=<bool> trus
   `loom-daemon private-workspace execute`, against the image-owned bridge and
   the read-only-bound profile controls. `--dangerously-bypass-hook-trust` is
   still passed nowhere.
+- **Merging roles (`champion`, `judge`)** do not write the repository and keep
+  the read-only sandbox, but they merge or issue the verdict a merge relies on,
+  which is what `guard-loom-workflow.sh` and `guard-destructive.sh` police. They
+  exit **78** unless `hooks=ready` (or `verified-in-private-session`, where
+  `private-workspace execute` re-proves the registration and trust in-container
+  for them as for a mutable role). This is the backstop: the daemon's runtime
+  preference (`runtime_preference::codex_guard`) already treats Codex as
+  *unavailable* to these roles while any enabled shared profile fails `verify`
+  for the workspace, so the walk falls through to the next tap (Claude) instead
+  of selecting Codex and failing the tick (#9390).
 - **Read-only roles** keep the conservative sandbox fallback but are told
   explicitly that hook parity was unavailable, and are never reported as
   Builder-capable.

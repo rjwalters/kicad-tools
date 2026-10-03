@@ -248,12 +248,13 @@ Your review authority extends past the PR to its **underlying issue**: an issue 
 
 ### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
 
-**Never apply `loom:operator-only` on its own** — on an issue *or* a PR (an
-unanswerable review question you are not entitled to settle routes the same
-way). Choose exactly one sub-kind and apply both labels in the **same** command.
-This is purely additive — the base label is never removed or replaced, so every
-filter/skip keyed on it (sweep pre-flight, `warn-operator-gated.sh`, Doctor's
-operator-hold exclusion, Champion's queue exclusions) behaves exactly as before:
+Park only a PO-level question you are not entitled to settle, or a
+human-hands step — not a hard or uncertain review (#10001; rule: `curator.md`
+→ "Applying `loom:operator-only`"). **Never apply `loom:operator-only` on its
+own** — on an issue *or* a PR: apply exactly one sub-kind in the **same**
+command. Purely additive — every filter/skip keyed on the base label (sweep
+pre-flight, `warn-operator-gated.sh`, Doctor's and Champion's exclusions) is
+unchanged:
 
 | Sub-kind | Apply when |
 |---|---|

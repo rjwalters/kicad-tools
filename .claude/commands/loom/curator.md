@@ -930,62 +930,58 @@ gh issue close <number> --reason "not planned"
 
 #### Applying `loom:operator-only`: a sub-kind label is REQUIRED (#5819)
 
-**First, confirm this is genuinely operator-by-right, not unbuilt capability.**
-If curation surfaces an issue — new or already carrying `loom:operator-only` —
-whose block is really "automation could do this once a specific tool/agent
-capability exists" rather than a ruling only a human can make, the correct
-label is `loom:needs-capability`, not `loom:operator-only`. If the issue
-**already** carries `loom:operator-only` and you determine on re-curation that
-it is actually this shape, relabel it per `.loom/docs/label-state-machine.md`
-→ "Bidirectional routing: `loom:operator-only` ↔ `loom:needs-capability`"
-(#5818) — relabel, file/reuse a capability-request issue against the owning
-tool repo, and cross-link both issues in both directions, all in the same
-pass.
+**Parking for a human is for PO-level decisions only (#10001).** No operator
+label (`loom:operator-only` + sub-kind, or bare `loom:operator`) is a default
+for "hard", "uncertain" or "I'd rather not": if an agent could do or decide
+it, do it, or leave it in the normal queue. Park only for (a) a PO-level
+design/authority call agents cannot make: `loom:operator-decision`, the
+comment ranking 2-4 options, each with a why; or (b) a step needing a human's
+hands (credential, host access, hardware): `loom:operator-mechanical`, the
+comment naming the exact step (mail it per #10000 once that lane ships).
+`loom:operator-blocked` is a self-clearing wait, not a human ask. Before
+applying any operator label, the comment states what an agent tried or why it
+structurally cannot. This is the fleet's one statement of the rule; other
+roles point here. It governs who applies labels, not what labels do.
 
-**Never apply `loom:operator-only` on its own.** Choose exactly one sub-kind and
-apply both labels in the **same** command. This is purely additive — the base
-label is never removed or replaced, so every filter/skip keyed on it (sweep
-pre-flight, `warn-operator-gated.sh`, Champion's promotion-queue exclusions, the
-Priority-2 query above) behaves exactly as before:
+**Unbuilt capability is not operator-by-right.** A block that is really
+"automation could do this once a tool/agent capability exists" is
+`loom:needs-capability`; relabel an existing `loom:operator-only` item of that
+shape per `.loom/docs/label-state-machine.md` → "Bidirectional routing:
+`loom:operator-only` ↔ `loom:needs-capability`" (#5818), filing/reusing a
+capability-request issue and cross-linking both ways in the same pass.
+
+**Never apply `loom:operator-only` on its own.** Apply exactly one sub-kind
+in the **same** command. Purely additive — the base label is never removed,
+so every filter keyed on it (sweep pre-flight, `warn-operator-gated.sh`,
+Champion's exclusions, the Priority-2 query above) is unchanged:
 
 | Sub-kind | Apply when |
 |---|---|
 | `loom:operator-blocked` | Waiting on a **named** issue/PR/piece of infrastructure that does not exist yet — self-clearing once that lands |
-| `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required |
+| `loom:operator-mechanical` | Needs a human's hands: host or admin access, a credential, hardware — no judgement required |
 | `loom:operator-decision` | The act requires authority an agent structurally cannot hold — a preference call or an authority act (binds the entity, irreversible disclosure, spending, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) |
-| `loom:operator-objective` | The issue is determined once the operator states an objective — name the candidate objectives and the answer under each (#5826) |
+| `loom:operator-objective` | Determined once the operator states an objective — list the candidate objectives and the answer under each (#5826); a missing objective is this, not `-decision` |
 
 ```bash
-# Curator routing an issue that encodes a still-pending human decision:
-./.loom/scripts/post-comment.sh <number> --body "Routing to the operator: <why a human must decide>."
+# Curator routing a genuine PO-level decision:
+./.loom/scripts/post-comment.sh <number> --body "Routing to the operator: <ranked options, each with a why>."
 gh issue edit <number> --add-label "loom:operator-only,loom:operator-decision"
 ```
 
-**Being unsure which sub-kind applies means curation is incomplete, not that
-the bare label is safe to reach for (#5826).** `loom:operator-decision` is
-**not** a safe default when the kind is not obvious — before applying it, run
-the falsifiability test from `.loom/docs/label-state-machine.md`: name the axis
-two well-informed people would still disagree on, and show it is a preference,
-not a fact. If you can't name that axis, finish the analysis — the item is
-determined, not a decision. If the only gap is a missing objective, that's
-`loom:operator-objective`, not `loom:operator-decision`.
+**Unsure which sub-kind applies means curation is incomplete, not that a
+label is safe to reach for (#5826).** `loom:operator-decision` is **not** a
+safe default: run the falsifiability test from
+`.loom/docs/label-state-machine.md` — name the axis two well-informed people
+would still disagree on, and show it is a preference, not a fact. If you
+can't, the item is determined: finish it, don't park it.
 
-**If you chose `loom:operator-blocked`**, the same comment MUST name the blocker
-in machine-readable form: a literal `Blocked by #N` / `Depends on #N` /
-`Requires #N` line (the exact phrasings `detect-dependency-cycle.sh` and
-`warn-operator-gated.sh` parse by regex). A backtick-quoted reference in prose
-does not satisfy this — the phrase itself must be present so a later automated
-pass can tell when the blocker clears.
-
-**If you chose `loom:operator-decision`**, the same comment MUST name the
-disagreement axis and state why it is a preference rather than a fact — "needs
-judgement" alone does not satisfy this.
-
-**If you chose `loom:operator-objective`**, the same comment MUST list the
-candidate objectives and the answer under each, not just "needs an
-objective."
-
-Full taxonomy and rationale: `.loom/docs/label-state-machine.md` →
+**Comment requirements, same comment as the label:** `loom:operator-blocked`
+— a literal `Blocked by #N` / `Depends on #N` / `Requires #N` line (the
+phrasings `detect-dependency-cycle.sh` and `warn-operator-gated.sh` parse; a
+backtick-quoted reference does not count). `loom:operator-decision` — name
+the disagreement axis and why it is a preference, not a fact.
+`loom:operator-objective` — the candidate objectives and the answer under
+each. Full taxonomy: `.loom/docs/label-state-machine.md` →
 "`loom:operator-only` sub-kinds".
 
 **Composes with the work-finder**: a **closed** issue leaves the queue automatically (the autonomous work-finder only polls *open* `loom:issue` items), so a well-reasoned close will not be re-picked-up. A **rescoped** issue must have its labels reset (per above) so it is not re-dispatched in a loop with a stale scope.

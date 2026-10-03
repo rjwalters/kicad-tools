@@ -550,7 +550,7 @@ Both are derived from the same rows as `loom-daemon queue`. See
 **Phase 3** renders the record on the fleet dashboard: per-host backlog /
 running / ready / blocked counts with a freshness badge (`idle` = recent tick,
 empty queue; `stale` = no new tick for 15 minutes; `no queue data` = the host
-never sent one), and a `#/queue` page listing every issue across the fleet
+never sent one), and a fleet-wide work queue listing every issue
 with its host, phase, waiting time, blocking reason and issue / PR links.
 
 ## 4. The backend: deploy your own Cloudflare Worker

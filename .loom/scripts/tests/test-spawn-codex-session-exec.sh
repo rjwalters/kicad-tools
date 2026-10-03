@@ -92,10 +92,10 @@ assert_not_contains "PATH=" "$line" \
 out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
     LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
     LOOM_CODEX_HOME="$PROFILE" \
-    LOOM_ROLE=judge LOOM_SWEEP_ID=sweep-1 ANTHROPIC_API_KEY=never-forward-me \
+    LOOM_ROLE=curator LOOM_SWEEP_ID=sweep-1 ANTHROPIC_API_KEY=never-forward-me \
     bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
 line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
-assert_contains "--env LOOM_ROLE=judge" "$line" "LOOM_ROLE is forwarded into the container"
+assert_contains "--env LOOM_ROLE=curator" "$line" "LOOM_ROLE is forwarded into the container"
 assert_contains "--env LOOM_SWEEP_ID=sweep-1" "$line" "LOOM_SWEEP_ID is forwarded into the container"
 assert_not_contains "never-forward-me" "$line" \
     "an ambient provider credential in the host env is never forwarded"
@@ -110,6 +110,13 @@ out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
     bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
 assert_contains "would-exec: codex exec" "$out" "a non-session-managed profile still dispatches bare-metal"
 assert_not_contains "--workdir" "$out" "bare-metal dispatch has no docker --workdir"
+
+# Hook trust is keyed by the CODEX_HOME Codex runs with, so the readiness
+# check must be told where THIS launch runs (container mount vs bare metal),
+# never left to re-derive it from the adoption marker (#9390): with
+# LOOM_CODEX_SESSION_EXEC=0/1 overriding the marker, the derivation is wrong.
+assert_contains '--runtime-codex-home "$_hook_runtime_home"' "$(cat "$SPAWN_CODEX")" \
+    "spawn-codex names the runtime CODEX_HOME to the hook readiness check"
 
 echo ""
 echo "Tests run: $TESTS_RUN, passed: $TESTS_PASSED, failed: $TESTS_FAILED"

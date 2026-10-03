@@ -58,6 +58,27 @@ chmod 600 "$KEY_PATH"
 # Isolate the token cache from the real $HOME for the whole test run.
 export LOOM_GITHUB_APP_CACHE_DIR="$WORK_DIR/cache"
 
+# Isolate the proxied-host gate (#9988) from the host: pin the daemon that
+# answers `forge egress policy` to a stub reporting "unconfigured", so a
+# fleet host with a real machine policy cannot gate the mint tests below.
+# The gate section near the end swaps this stub for policy-bearing ones.
+STUB_DAEMON_DIR="$WORK_DIR/stub-daemon"
+mkdir -p "$STUB_DAEMON_DIR"
+cat > "$STUB_DAEMON_DIR/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+# Stub `loom-daemon forge egress policy`: the real command's JSON shape,
+# reading the document named by $LOOM_FORGE_EGRESS_POLICY (if any).
+[[ "$*" == "forge egress policy" ]] || exit 2
+if [[ -n "${LOOM_FORGE_EGRESS_POLICY:-}" ]]; then
+    jq -c --arg p "$LOOM_FORGE_EGRESS_POLICY" '{origin:"env", path:$p, ignored:[], policy:.}' "$LOOM_FORGE_EGRESS_POLICY"
+else
+    echo '{"origin":"unconfigured","path":null}'
+fi
+STUB
+chmod +x "$STUB_DAEMON_DIR/loom-daemon"
+export LOOM_DAEMON_SELF_BIN="$STUB_DAEMON_DIR/loom-daemon"
+unset LOOM_FORGE_EGRESS_POLICY 2>/dev/null || true
+
 # Source the library under test.
 # shellcheck source=../lib/github-app-token.sh
 source "$LIB_DIR/github-app-token.sh"
@@ -485,6 +506,138 @@ fi
 
 unset -f curl github_app_jwt
 unset LOOM_GITHUB_APP_ID LOOM_GITHUB_APP_KEY_PATH STUB_INSTALL_BODY STUB_INSTALL_CODE
+
+# ============================================================================
+# Proxied-host gate (#9988, C5 of #9983): when the resolved forge egress
+# policy names `principal.credentialRef`, minting is gateway-owned --
+# `get-token` exits non-zero with the "gateway-owned" message and makes NO
+# request. Without one, behaviour is unchanged. `curl` here is a recording
+# stub first on PATH (a real executable, not a shell function), so any
+# request the script makes -- however it spells the call -- is counted.
+# ============================================================================
+echo "Testing proxied-host gate (#9988)..."
+
+STUB_BIN="$WORK_DIR/stub-bin"
+CURL_LOG="$WORK_DIR/curl-calls.log"
+mkdir -p "$STUB_BIN"
+cat > "$STUB_BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do url="$a"; done
+echo "$url" >> "$CURL_LOG"
+case "$url" in
+    */installation) printf '%s\n%s' '{"id": 77}' '200' ;;
+    */access_tokens) printf '%s\n%s' '{"token":"ghs_gatevalue","expires_at":"2099-01-01T00:00:00Z"}' '200' ;;
+    *) printf '%s\n%s' '{}' '404' ;;
+esac
+STUB
+chmod +x "$STUB_BIN/curl"
+export CURL_LOG
+
+POLICY_PROXIED="$WORK_DIR/policy-proxied.json"
+POLICY_NO_REF="$WORK_DIR/policy-no-ref.json"
+jq -n '{schemaVersion:1, principal:{profile:"fleet-automation", credentialRef:"keychain:loom-fleet-proxy"}}' > "$POLICY_PROXIED"
+jq -n '{schemaVersion:1, principal:{profile:"fleet-automation"}}' > "$POLICY_NO_REF"
+
+# run_gate_case <policy-or-empty> <cache-dir> -> runs `get-token` as a child
+# process exactly as loom-daemon does; sets GATE_OUT / GATE_ERR / GATE_RC /
+# GATE_CALLS.
+run_gate_case() {
+    local policy="$1" cache="$2"
+    : > "$CURL_LOG"
+    GATE_RC=0
+    GATE_OUT=$(PATH="$STUB_BIN:$PATH" LOOM_GITHUB_APP_ID="515151" LOOM_GITHUB_APP_KEY_PATH="$KEY_PATH" \
+        LOOM_GITHUB_APP_CACHE_DIR="$cache" LOOM_FORGE_EGRESS_POLICY="$policy" \
+        bash "$LIB_DIR/github-app-token.sh" get-token gateowner/repo 2>"$WORK_DIR/gate.err") || GATE_RC=$?
+    GATE_ERR=$(cat "$WORK_DIR/gate.err")
+    GATE_CALLS=$(wc -l < "$CURL_LOG" | tr -d ' ')
+}
+
+# Proxied: credentialRef set -> non-zero, gateway-owned message, zero calls.
+run_gate_case "$POLICY_PROXIED" "$WORK_DIR/gate-cache-proxied"
+if [[ "$GATE_RC" -ne 0 && "$GATE_CALLS" == "0" \
+      && "$GATE_ERR" == *"gateway-owned"* \
+      && "$(echo "$GATE_OUT" | jq -r '.status')" == "error" \
+      && "$(echo "$GATE_OUT" | jq -r '.message')" == *"proxied host: App minting is gateway-owned"* ]]; then
+    pass "proxied host (credentialRef set): get-token exits $GATE_RC with the gateway-owned message and makes zero requests"
+else
+    fail "proxied host must refuse to mint without any request" "rc=$GATE_RC calls=$GATE_CALLS out=$GATE_OUT err=$GATE_ERR"
+fi
+
+# Proxied, with a still-valid cached installation token on disk: a cache hit
+# is no exception -- the gate runs before the cache is consulted.
+mkdir -p "$WORK_DIR/gate-cache-warm"
+chmod 700 "$WORK_DIR/gate-cache-warm"
+printf '%s' "77" > "$WORK_DIR/gate-cache-warm/owner-gateowner-app-515151.installation"
+jq -cn '{token:"ghs_cachedvalue", expires_at:"2099-01-01T00:00:00Z", installation_id:"77"}' \
+    > "$WORK_DIR/gate-cache-warm/installation-77.json"
+run_gate_case "$POLICY_PROXIED" "$WORK_DIR/gate-cache-warm"
+if [[ "$GATE_RC" -ne 0 && "$GATE_CALLS" == "0" && "$GATE_OUT" != *"ghs_cachedvalue"* ]]; then
+    pass "proxied host: a warm token cache is not served either"
+else
+    fail "proxied host must not hand out a cached direct-minted token" "rc=$GATE_RC out=$GATE_OUT"
+fi
+
+# Sourced callers: both network functions refuse before curl.
+if (
+    export PATH="$STUB_BIN:$PATH" LOOM_FORGE_EGRESS_POLICY="$POLICY_PROXIED"
+    export LOOM_GITHUB_APP_ID="515151" LOOM_GITHUB_APP_KEY_PATH="$KEY_PATH"
+    : > "$CURL_LOG"
+    _GH_APP_EGRESS_GATE=""
+    _github_app_api_get_installation "gateowner/repo" >/dev/null 2>&1 && exit 1
+    [[ "$_GH_APP_LAST_ERROR" == *"gateway-owned"* ]] || exit 1
+    _github_app_api_mint_token "77" >/dev/null 2>&1 && exit 1
+    [[ "$_GH_APP_LAST_ERROR" == *"gateway-owned"* ]] || exit 1
+    [[ ! -s "$CURL_LOG" ]]
+); then
+    pass "proxied host: _github_app_api_get_installation / _github_app_api_mint_token refuse with zero requests"
+else
+    fail "sourced network functions must refuse on a proxied host" "curl log: $(cat "$CURL_LOG")"
+fi
+
+# Unchanged: no policy at all, and a policy without credentialRef.
+for gate_case in "" "$POLICY_NO_REF"; do
+    gate_label="${gate_case:+policy without credentialRef}"
+    gate_label="${gate_label:-no policy}"
+    run_gate_case "$gate_case" "$WORK_DIR/gate-cache-open-${#gate_case}"
+    if [[ "$GATE_RC" -eq 0 && "$GATE_CALLS" == "2" \
+          && "$(echo "$GATE_OUT" | jq -r '.status')" == "ok" \
+          && "$(echo "$GATE_OUT" | jq -r '.token')" == "ghs_gatevalue" ]]; then
+        pass "$gate_label: get-token unchanged (exit 0, both requests made, token minted)"
+    else
+        fail "$gate_label: get-token behaviour must be unchanged" "rc=$GATE_RC calls=$GATE_CALLS out=$GATE_OUT err=$GATE_ERR"
+    fi
+done
+
+# A daemon that cannot answer (older build without `forge egress`, or none
+# resolvable) is "no policy": unchanged, never a refusal.
+cat > "$STUB_DAEMON_DIR/old-loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+echo "error: unrecognized subcommand 'egress'" >&2
+exit 2
+STUB
+chmod +x "$STUB_DAEMON_DIR/old-loom-daemon"
+LOOM_DAEMON_SELF_BIN="$STUB_DAEMON_DIR/old-loom-daemon" run_gate_case "$POLICY_PROXIED" "$WORK_DIR/gate-cache-old"
+if [[ "$GATE_RC" -eq 0 && "$GATE_CALLS" == "2" && "$(echo "$GATE_OUT" | jq -r '.status')" == "ok" ]]; then
+    pass "daemon without \`forge egress\`: treated as no policy, get-token unchanged"
+else
+    fail "an older daemon must not turn into a refusal" "rc=$GATE_RC calls=$GATE_CALLS out=$GATE_OUT"
+fi
+
+# Contract leg: the REAL `forge egress policy` output shape, when this host
+# has a daemon build that supports it (skipped otherwise -- the stub above
+# mirrors that shape for hermetic CI).
+REAL_DAEMON="$(LOOM_DAEMON_SELF_BIN="" loom_resolve_self_daemon_bin 2>/dev/null || true)"
+if [[ -n "$REAL_DAEMON" ]] && LOOM_FORGE_EGRESS_POLICY="$POLICY_PROXIED" "$REAL_DAEMON" forge egress policy >/dev/null 2>&1; then
+    LOOM_DAEMON_SELF_BIN="$REAL_DAEMON" run_gate_case "$POLICY_PROXIED" "$WORK_DIR/gate-cache-real"
+    if [[ "$GATE_RC" -ne 0 && "$GATE_CALLS" == "0" && "$GATE_ERR" == *"gateway-owned"* ]]; then
+        pass "real \`loom-daemon forge egress policy\` ($REAL_DAEMON): proxied policy gates minting with zero requests"
+    else
+        fail "real daemon's policy output must drive the gate" "rc=$GATE_RC calls=$GATE_CALLS out=$GATE_OUT err=$GATE_ERR"
+    fi
+else
+    echo "  SKIP: no loom-daemon build with \`forge egress policy\` -- real-binary contract leg not run"
+fi
 
 # --- Summary ---
 echo ""

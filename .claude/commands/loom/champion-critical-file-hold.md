@@ -6,7 +6,7 @@ whatever the verdict: FAIL opens/maintains the hold, PASS alone closes an open
 episode. It owns one label (`loom:operator`) and three comment markers on one PR;
 it never merges and never removes `loom:pr`.
 
-Rationale and history: `.loom/docs/critical-file-hold.md`.
+Rationale: `.loom/docs/critical-file-hold.md`.
 
 ## The rules
 
@@ -25,7 +25,6 @@ Rationale and history: `.loom/docs/critical-file-hold.md`.
   removed it (as #7048 infers for criterion #2).
 - The release is scoped to a **diff, not a commit id** (#9416): this verdict is a
   pure function of the file list, so the operator decided about that change.
-- `loom:pr` stays on throughout: Judge did approve.
 
 ## The state machine
 
@@ -45,7 +44,7 @@ records and `merge-pr.sh` reads back at merge time (#7419).
 On **PASS** the state alone decides: `held`/`released` closes the episode (cleared
 notice + remove `loom:operator`); `none` is an ordinary pass. On **FAIL**:
 
-First matching row wins; the tick evaluates them in this order.
+First matching row wins.
 
 | State | Action on FAIL |
 |---|---|
@@ -76,6 +75,11 @@ PR_NUMBER=<number>
 HOLD_MARKER="<!-- champion:critical-file-hold -->"
 CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"
 RELEASED_MARKER="<!-- champion:critical-file-release-respected -->"
+# Mail (#10000): `.loom/docs/inbox-mail.md`.
+_im=$(awk '/^```bash inbox-mail/{f=1;next} /^```/{f=0} f' .loom/docs/inbox-mail.md 2>/dev/null)
+[ -n "$_im" ] && eval "$_im"
+type inbox_mail >/dev/null 2>&1 || inbox_mail() { [ "$1" != on ]; }
+CF_MAIL_KEY=$(inbox_mail key crithold-pr "$PR_NUMBER")
 
 # Plain `gh` — NOT "$GH_READ": a cached label set misses a human's decision.
 # Markers count from TRUSTED authors only (#9548). Unauthenticated -> the raw
@@ -99,9 +103,8 @@ esac
 STATE_HEAD=$(printf '%s' "$LAST_STATE" \
   | sed -n 's/.*champion:hold-state head=\([0-9a-f]*\).*/\1/p' | head -1)
 
-# Did the PR's own change survive a head move? Delegated whole to the verdict
-# machine's own verb; sets CF_EQUIV_KIND. Empty => false => re-arm.
-# requires-daemon: forge optional   Without `forge verdict-equivalent` (absent binary, or one predating #9416) an equivalent head move re-arms — the pre-#9416 behavior: one extra operator removal, never an unreviewed merge.
+# Did the PR's own change survive a head move? Sets CF_EQUIV_KIND; empty => re-arm.
+# requires-daemon: forge optional   Without `forge verdict-equivalent` an equivalent head move re-arms (pre-#9416 behavior: one extra removal, never an unreviewed merge).
 cf_change_unmoved() {
   CF_EQUIV_KIND=""
   [ -n "$STATE_HEAD" ] || return 1
@@ -111,9 +114,8 @@ cf_change_unmoved() {
 }
 
 if [ "$CRITERION3_RESULT" = "FAIL" ]; then
-  # Decide once (table above), then act once. The same-head arms come first: no
-  # binary, no network, no forge, so a host without loom-daemon honors a release
-  # at the recorded head as before.
+  # Decide once (table above), then act once. Same-head arms come first: they
+  # need no binary or network.
   CF_EQUIV_KIND=""
   if [ "$CF_STATE" = released ] && [ "$STATE_HEAD" = "$HEAD_SHA" ]; then
     CF_ACTION=none          # released at this head, already acknowledged
@@ -128,6 +130,11 @@ if [ "$CRITERION3_RESULT" = "FAIL" ]; then
   else
     CF_ACTION=rearm         # a genuinely different diff, or a legacy hold
   fi
+
+  # Mail (#10000) once otherwise mergeable; a human merge: `resolve-merged`.
+  case "$CF_ACTION" in hold|rearm|stands) inbox_mail on &&
+    [ "$(gh pr view "$PR_NUMBER" --json mergeStateStatus -q .mergeStateStatus 2>/dev/null)" = CLEAN ] &&
+      inbox_mail send "$CF_MAIL_KEY" "PR #$PR_NUMBER changes a critical file and needs a human merge: $(gh pr view "$PR_NUMBER" --json url -q .url)" ;; esac
 
   case "$CF_ACTION" in
     none)
@@ -161,28 +168,20 @@ gh pr edit $PR_NUMBER --remove-label \"loom:operator\"
 ./.loom/scripts/merge-pr.sh $PR_NUMBER
 \`\`\`
 
-Removing \`loom:operator\` is your release, and it is durable: Champion will
-**not** put it back (#9016) while the change this PR makes is the one this notice
-describes, so \`merge-pr.sh\` sees no contradictory verdict state (#8112) and
-merges — no need to beat a Champion tick to it. A re-date push or a clean merge
-of \`main\` does **not** re-arm the hold (#9416); a push that changes the diff
-does. (Check *freshness* is a different guard, #8248: \`--redate-stale-checks\`.)
-
-Or: a later push that narrows the diff off every critical-file pattern clears
-this hold automatically on the next tick.
-
-Keeping \`loom:pr\` — Judge's approval stands and this PR stays in the queue,
-re-checked each tick against both release conditions above.
+Removing \`loom:operator\` is your release, and it is durable (#9016): Champion
+will **not** put it back while this PR's change is the one this notice describes,
+so \`merge-pr.sh\` sees no contradictory state (#8112): no need to beat a Champion tick to it. A re-date push or clean
+merge of \`main\` does not re-arm the hold (#9416); a push that changes the diff
+does. A later push that narrows the diff off every critical-file pattern clears
+the hold on the next tick. \`loom:pr\` stays: Judge's approval stands.
 
 ---
 *Automated by Champion role*"
       gh pr edit "$PR_NUMBER" --add-label "loom:operator" 2>/dev/null || true
       ;;
     respect)
-      # Do NOT re-add `loom:operator`. The ORIGINAL hold notice stays untouched.
-      # This comment is the durable record that the release was seen; its
-      # hold-state line RE-ANCHORS it at the current head (so the next tick takes
-      # the cheap same-head arm) and its equivalence line records what carried it.
+      # Do NOT re-add `loom:operator`; the original notice stays. This comment
+      # records the release and re-anchors it at the current head.
       if [ -n "$CF_EQUIV_KIND" ]; then
         CF_EQUIV_LINE="<!-- champion:hold-equivalence kind=$CF_EQUIV_KIND from=$STATE_HEAD to=$HEAD_SHA -->"
         CF_EQUIV_NOTE=" — carried from \`$STATE_HEAD\` by equivalence \`$CF_EQUIV_KIND\`, re-derived from the repository (#9416)"
@@ -197,11 +196,11 @@ $CF_EQUIV_LINE
 
 \`loom:operator\` was removed by hand while this hold stood, and the change this PR makes is still the one the hold was written against${CF_EQUIV_NOTE}. That is your release: Champion is **not** re-adding the label.
 
-The verdict has not changed (this PR still touches a critical file), so the merge
-is yours: \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`. A push that changes the diff re-arms the hold.
+The merge is yours: \`./.loom/scripts/merge-pr.sh $PR_NUMBER\`. A push that changes the diff re-arms the hold.
 
 ---
 *Automated by Champion role*"
+      inbox_mail resolve "$CF_MAIL_KEY"   # the human acted
       echo "Critical-file release respected for #$PR_NUMBER at $HEAD_SHA (${CF_EQUIV_KIND:-same-head}) — not reapplying loom:operator (#9016)"
       ;;
   esac
@@ -217,6 +216,7 @@ A later push narrowed this PR off every critical-file pattern. Re-evaluating nor
 
 ---
 *Automated by Champion role*"
+  inbox_mail resolve "$CF_MAIL_KEY"
   echo "Critical-file hold cleared for #$PR_NUMBER — re-evaluating normally"
 fi
 ```

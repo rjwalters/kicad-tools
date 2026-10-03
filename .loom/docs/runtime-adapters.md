@@ -385,6 +385,7 @@ set:
 | `MODEL_REFUSAL` | safety classifier refused the turn | drop one ladder rung, no Doctor cycle consumed |
 | `RECOVERABLE` | rate limit / 5xx / network | retry with backoff |
 | `FATAL` | non-recoverable **configuration** fault — retrying the identical invocation cannot succeed | fail fast; do not retry, do not rotate |
+| `SANDBOX_UNAVAILABLE` | exit 0, but the runtime's own sandbox refused every tool call so nothing ran (Codex only; written by the adapter, not this file — see below) | role tick fails; the preference walk passes the runtime over for a short host-wide hold; account health untouched |
 
 This file is now a **shared classification engine plus per-provider pattern
 tables** (the structure #4190 extracted, seeded by the fork's PR #6): the engine
@@ -428,6 +429,28 @@ adapter:
 
 `FATAL` is no longer purely reserved: the `codex` table is its first producer.
 No `claude` input returns `FATAL`, so every pre-existing caller is unaffected.
+
+**`SANDBOX_UNAVAILABLE` (#10003) is adapter-produced, not a table entry.** The
+shared engine is exit-code-first, so a session that exited 0 is `SUCCESS` to
+it whatever it printed. Codex is the one runtime where that is provably wrong
+in a detectable way. When its bubblewrap sandbox cannot start (#9979), every
+shell command fails with `bwrap: …` as its only output, and `codex exec` still
+exits 0. On an exit-0 session, `spawn-codex.sh` hands the full captured
+stderr to `loom-daemon codex-sandbox-noop` (the rule lives in
+`loom-daemon/src/codex_sandbox_noop.rs`, which the role runner also uses
+in-process for a tick whose installed adapter predates it). If no exec result
+succeeded and every failed one's first output line is `bwrap:` (or there were
+no exec results at all and Codex printed its own "needs access to create user
+namespaces" startup warning outside `danger-full-access`), the adapter writes
+`# LOOM_RUNTIME_NOOP runtime=codex reason=sandbox-unavailable shape=… execs=…
+denied=… succeeded=0` and records the terminal category as
+`SANDBOX_UNAVAILABLE`. The exit code still passes through unchanged. The
+detector reads Codex's own exec framing only. Agent prose that quotes the
+error never matches, so a tick that ran even one command stays `SUCCESS`.
+The daemon then fails the role tick, arms a host-wide sandbox hold so the
+`rolePreference` walk falls through to the next tap
+(`LOOM_RUNTIME_SANDBOX_HOLD_SECS`, default 1800; `0` disables), and leaves
+account health untouched.
 Callers such as `claude-wrapper.sh` source this file rather than duplicating the
 patterns, so the category set must stay stable across runtimes.
 

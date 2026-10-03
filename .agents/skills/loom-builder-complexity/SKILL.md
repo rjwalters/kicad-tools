@@ -97,10 +97,10 @@ gh issue edit 812 --remove-label "loom:building" --add-label "loom:blocked"
 > **`loom:blocked` is the terminal state for a decomposition — not
 > `loom:operator-only` (#5819).** Size is not a routing signal: "this is too
 > big for one PR" is a `loom:blocked` parent with children filed, and the
-> pipeline picks it up again on its own. Reserve `loom:operator-only` for work
-> a *human* must act on (an authority a human alone holds, host or credential
-> access — not "requires judgement"). On the rare occasion you do apply it,
-> **never apply it alone** — add exactly one sub-kind in the same command
+> pipeline picks it up again on its own. Reserve `loom:operator-only` for a
+> PO-level decision or a human-hands step (#10001; rule: `curator.md` →
+> "Applying `loom:operator-only`"), never "requires judgement". When you do
+> apply it, **never apply it alone** — add exactly one sub-kind in that command
 > (`loom:operator-blocked` / `loom:operator-mechanical` /
 > `loom:operator-decision` / `loom:operator-objective`), e.g.
 > `gh issue edit 812 --remove-label "loom:building" --add-label "loom:operator-only,loom:operator-decision"`.

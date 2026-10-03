@@ -77,13 +77,12 @@ for it, #4966):
 > the only actor that could notice the blocker closed is the one this exclusion
 > tells to ignore it.
 >
-> **Separately, if a `loom:operator-only` proposal you happen to read is
-> actually blocked on missing capability rather than a genuine operator
-> ruling**, relabel it to `loom:needs-capability` per
-> `.loom/docs/label-state-machine.md` → "Bidirectional routing:
-> `loom:operator-only` ↔ `loom:needs-capability`" (#5818) — this is an
-> opportunistic per-occurrence judgment call, not a scheduled scan like Pass 0
-> above.
+> **A `loom:operator-only` proposal you read that is really blocked on
+> missing capability** is relabeled `loom:needs-capability` per
+> `.loom/docs/label-state-machine.md` → "Bidirectional routing" (#5818), an
+> opportunistic per-occurrence call. **Any operator label you apply** is for a
+> PO-level decision (ranked options) or a human-hands step only (#10001):
+> `curator.md` → "Applying `loom:operator-only`".
 
 > **`loom:evaluating` is excluded here too, but not unexamined (#6828).**
 > `champion-issue-promo.md` → "Pass 0b: Stale `loom:evaluating` Claim Re-Scan"

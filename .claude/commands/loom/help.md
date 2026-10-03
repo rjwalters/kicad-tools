@@ -62,6 +62,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | `/loom:epic <goal>` | Break a large goal into a phased epic with implementation issues. |
 | `/loom:bump <level>` | Bump the version + tag for a generic (non-Loom) project. |
 | `/loom:mail-send` | Send one blocking ask to the operator via loom-ui inbox + Matrix; reports each leg. |
+| `/loom:star <what needs doing>` | File one starred issue; checks for related issues first. |
 | `/loom:help [command]` | This command — describe the Loom command surface. |
 
 After the tables, close with a short **where to start**:
@@ -69,7 +70,7 @@ After the tables, close with a short **where to start**:
 - **Just want work done on an issue?** `/loom:sweep <issue>` runs the whole lifecycle for you.
 - **Prefer hands-on control?** Drive individual roles: `/loom:builder`, then `/loom:judge`, then merge.
 - **Want details on one command?** `/loom:help <command>` (e.g. `/loom:help sweep`).
-- **Update Loom itself:** re-run the installer from the Loom source repo (`./install.sh /path/to/this/repo`); see `CLAUDE.md` for the current version and release notes.
+- **Update Loom itself:** re-run `./install.sh /path/to/this/repo` from the Loom source repo.
 
 ### Drift cross-check (runtime)
 
@@ -78,7 +79,7 @@ After printing the overview, do a lightweight accuracy check against what is act
 1. List the installed command files: `ls .claude/commands/loom/*.md` (read-only). If that path is missing, try `ls defaults/.claude/commands/loom/*.md` (the loom source repo's canonical copy).
 2. Reduce each result to its base name without `.md`.
 3. **Exclude** the known reference sub-docs and deprecated stubs:
-   - anything ending in `-patterns` or `-reference` (e.g. `architect-patterns`, `architect-reference`, `champion-reference`, `hermit-patterns`, `loom-reference`)
+   - anything ending in `-patterns` or `-reference` (e.g. `architect-patterns`, `loom-reference`)
    - the builder sub-docs: `builder-pr`, `builder-worktree`, `builder-complexity`
    - the champion helper docs: `champion-common`, `champion-epic`, `champion-issue-promo`, `champion-pr-merge` (any `champion-*` other than `champion` itself)
    - `sweep-*` sub-docs, plus `cargo-target-isolation`, `comment-body-literal-path`, `probe-protocol`

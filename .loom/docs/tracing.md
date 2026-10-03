@@ -105,8 +105,8 @@ after the fact (below). Rust worker launches
 record preflight and runtime spans; a rejected preflight does not create a runtime
 span. Pi and OpenCode receive the validated context through their environment,
 and the shared native read/write/edit/bash bridge records tool name and outcome.
-Loom itself emits no spans for model HTTP requests or hidden third-party CLI
-operations; a worker's own harness can, under the opt-in below.
+Each daemon `gh` call through the facade is one `invoke github` span (#9985);
+Loom spans no model HTTP request — a worker's own harness can, opt-in below.
 Resolved provider/model identity is distinct from a configured model alias.
 
 ## Worker-native sub-spans (opt-in, #9215)
