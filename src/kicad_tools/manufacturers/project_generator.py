@@ -103,6 +103,34 @@ _MICRO_VIA_FLOOR_DIAMETER_MM = 0.2
 _MICRO_VIA_FLOOR_ANNULAR_MM = 0.05
 _MICRO_VIA_FLOOR_HOLE_MM = 0.1
 
+# Value emitted for the project key ``board.design_settings.rules.
+# min_silk_clearance`` (Issues #5059, #5704).
+#
+# This is a fixed legacy value. It is NOT the manufacturer's silkscreen floor,
+# and it is deliberately not derived from any ``DesignRules`` field:
+#
+# * KiCad ignores this key for silk-to-pad gaps today. It was measured on
+#   kicad-cli 10.0.1, 10.0.5 and 10.0.6 (the CI-pinned image): a 0.085 mm
+#   silk-to-pad gap produced no finding with the key at 0.15 mm or at 2.0 mm,
+#   while a positive control showed the same project ``rules`` block was
+#   loaded. The factory floor (``DesignRules.min_silk_to_pad_clearance_mm``,
+#   0.15 mm for JLCPCB) reaches native DRC through the explicit
+#   ``Silk to Pad`` rule in the ``.kicad_dru``. See
+#   ``tests/test_effective_silk_clearance_5059.py``.
+# * Until #5704 the key was fed from ``min_solder_mask_clearance_mm``. That
+#   was a name/source mismatch: a mask clearance was used as a silk clearance.
+#   Every profile sets that field to 0.05 mm, so the value is kept at 0.05 mm.
+#   Keeping it leaves the ~24 committed ``.kicad_pro`` artifacts under
+#   ``boards/`` and ``tests/fixtures/`` byte-identical. This was an operator
+#   ruling on #5704.
+#
+# If a future KiCad starts gating silk-to-pad gaps on this key, 0.05 mm
+# becomes too lax a floor. Re-point the key to
+# ``min_silk_to_pad_clearance_mm`` at that point. Four of the six profiles
+# declare no silk floor (``None``), so that change needs an explicit fallback
+# for them.
+PROJECT_MIN_SILK_CLEARANCE_MM = 0.05
+
 
 def build_default_netclass(rules: DesignRules) -> dict:
     """Build the ``Default`` netclass entry for ``net_settings.classes``.
@@ -180,15 +208,11 @@ def build_project_rules(rules: DesignRules) -> dict[str, float]:
         "min_microvia_drill": _MICRO_VIA_FLOOR_HOLE_MM,
         "min_hole_to_hole": rules.min_hole_to_hole_mm,
         "min_copper_edge_clearance": rules.min_copper_to_edge_mm,
-        # NOTE (#5059): this key is fed from the solder-mask clearance, NOT
-        # from ``min_silk_to_pad_clearance_mm`` (0.05 mm vs 0.15 mm for
-        # JLCPCB).  The mapping predates #5059 (#3720) and is reproduced in
-        # committed board/fixture ``.kicad_pro`` artifacts.  It was measured
-        # to have no effect on a sub-floor silk-to-pad gap in either
-        # direction, so the factory silkscreen floor is carried by the
-        # explicit ``Silk to Pad`` rule in the ``.kicad_dru`` instead -- see
-        # ``tests/test_effective_silk_clearance_5059.py``.
-        "min_silk_clearance": rules.min_solder_mask_clearance_mm,
+        # Fixed legacy value, deliberately NOT derived from ``rules`` -- see
+        # ``PROJECT_MIN_SILK_CLEARANCE_MM`` above (#5059, #5704).  KiCad
+        # ignores this key for silk-to-pad gaps today; the factory floor is
+        # carried by the ``Silk to Pad`` rule in the ``.kicad_dru``.
+        "min_silk_clearance": PROJECT_MIN_SILK_CLEARANCE_MM,
         "min_text_thickness": rules.min_silkscreen_width_mm,
         "min_text_height": rules.min_silkscreen_height_mm,
     }
