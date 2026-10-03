@@ -24,6 +24,13 @@ Environment:
     GH_CACHE_MAX_SIZE  Max cached entries (default: 256)
     GH_CACHE_DISABLE   Set to "1" to disable caching entirely
     GH_CACHE_DEBUG     Set to "1" for debug logging to stderr
+    LOOM_GH_BIN        The `gh` binary to execute (default: `gh` from PATH),
+                        for parity with loom-daemon's own LOOM_GH_BIN.
+    GH_CACHE_OUTCOME_LOG  Optional path; each invocation appends one JSON
+                        record carrying `x-loom-cache: hit|miss|revalidated|
+                        bypass` so downstream views can tell client-cache
+                        hits from real gateway requests. The last outcome is
+                        also kept as `last_outcome` in `_stats.json`.
     GH_CACHE_REPO_ID   Override the resolved repo identity used to scope
                         GH_CACHE_DIR (default: `git rev-parse
                         --show-toplevel`). Mainly for tests and non-git
@@ -169,6 +176,24 @@ def increment_stat(stat_name: str) -> None:
     stats = read_stats()
     stats[stat_name] = stats.get(stat_name, 0) + 1
     write_stats(stats)
+
+
+def record_outcome(outcome: str, args: list[str]) -> None:
+    """Record the `x-loom-cache` outcome (hit|miss|revalidated|bypass).
+
+    A client-side cache in front of the egress gateway is fine; invisible
+    stacking is not (loom#9953) — this keeps cache hits distinguishable.
+    """
+    stats = read_stats()
+    stats["last_outcome"] = outcome
+    write_stats(stats)
+    log_path = os.environ.get("GH_CACHE_OUTCOME_LOG")
+    if log_path:
+        try:
+            with open(log_path, "a") as f:
+                f.write(json.dumps({"x-loom-cache": outcome, "args": args}) + "\n")
+        except OSError:
+            pass
 
 
 def cache_get(key: str) -> tuple[str | None, int | None]:
@@ -388,7 +413,7 @@ def parse_gh_args(args: list[str]) -> dict:
 def run_gh(args: list[str]) -> tuple[str, str, int]:
     """Execute the real gh command and return (stdout, stderr, returncode)."""
     proc = subprocess.run(
-        ["gh"] + args,
+        [os.environ.get("LOOM_GH_BIN") or "gh"] + args,
         capture_output=True,
         text=True,
     )
@@ -538,6 +563,7 @@ def main() -> int:
         sys.stderr.write(stderr)
         if no_cache:
             increment_stat("bypasses")
+        record_outcome("bypass", args)
         return rc
 
     parsed = parse_gh_args(args)
@@ -561,6 +587,7 @@ def main() -> int:
                 invalidate_etag_views(parsed["resource_id"])
 
         increment_stat("bypasses")
+        record_outcome("bypass", args)
         return rc
 
     # ETag/REST cached listing (#5056): `issue list` / `pr list` can be served
@@ -574,6 +601,7 @@ def main() -> int:
             etag_stdout, etag_rc = etag_result
             sys.stdout.write(etag_stdout)
             increment_stat("etag")
+            record_outcome("revalidated", args)
             return etag_rc
 
     # Conditional single-object read (#9254): `issue view` / `pr view` are
@@ -585,6 +613,7 @@ def main() -> int:
             etag_stdout, etag_rc = etag_result
             sys.stdout.write(etag_stdout)
             increment_stat("etag")
+            record_outcome("revalidated", args)
             return etag_rc
 
     # Read-only: check cache
@@ -595,6 +624,7 @@ def main() -> int:
         debug(f"HIT key={key}")
         sys.stdout.write(cached_stdout)
         increment_stat("hits")
+        record_outcome("hit", args)
         return cached_rc
 
     # Cache miss: run real command
@@ -608,6 +638,7 @@ def main() -> int:
         cache_put(key, stdout, rc, parsed["ttl"], args=args)
 
     increment_stat("misses")
+    record_outcome("miss", args)
     return rc
 
 

@@ -481,6 +481,31 @@ else
     echo "SKIP: git not available — skipping real-git-toplevel isolation test"
 fi
 
+# --- LOOM_GH_BIN + x-loom-cache outcome field (#9988) -----------------------
+echo ""
+echo "Testing LOOM_GH_BIN and the x-loom-cache outcome record (#9988)..."
+reset_cache
+OUTCOME_LOG="$TMP_ROOT/outcomes.jsonl"
+: > "$OUTCOME_LOG"
+ALT_BIN="$TMP_ROOT/alt-gh"
+cat > "$ALT_BIN" <<'ALT'
+#!/usr/bin/env bash
+echo "ALT-GH-RAN $*"
+ALT
+chmod +x "$ALT_BIN"
+alt_out="$(LOOM_GH_BIN="$ALT_BIN" GH_CACHE_OUTCOME_LOG="$OUTCOME_LOG" ghc pr view 7 --json labels)"
+case "$alt_out" in
+  *ALT-GH-RAN*) alt_ran="yes" ;;
+  *) alt_ran="no" ;;
+esac
+assert_eq "yes" "$alt_ran" "LOOM_GH_BIN runs the named binary instead of gh from PATH"
+assert_eq "0" "$(call_count)" "…and the PATH stub gh is never called"
+LOOM_GH_BIN="$ALT_BIN" GH_CACHE_OUTCOME_LOG="$OUTCOME_LOG" ghc pr view 7 --json labels >/dev/null
+LOOM_GH_BIN="$ALT_BIN" GH_CACHE_OUTCOME_LOG="$OUTCOME_LOG" ghc --no-cache pr view 7 --json labels >/dev/null
+outcomes="$(python3 -c 'import json,sys; print(",".join(json.loads(l)["x-loom-cache"] for l in open(sys.argv[1])))' "$OUTCOME_LOG")"
+assert_eq "miss,hit,bypass" "$outcomes" "records carry x-loom-cache: miss, then hit, then bypass"
+reset_cache
+
 # --- Summary ---------------------------------------------------------------
 echo ""
 echo "────────────────────────────────"

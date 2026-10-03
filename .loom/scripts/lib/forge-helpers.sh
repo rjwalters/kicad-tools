@@ -1201,6 +1201,7 @@ _forge_cmd_attempt() {
       # credential in-process. GH_TOKEN/GITHUB_TOKEN are dropped so they
       # cannot outrank the directory's own stored credential the same way
       # personal-token/personal-ambient already drop them for their swaps.
+      # loom:egress-allowlisted (#9988): per-token credential dir, selects a credential not a host.
       env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$token" gh "$@" >"$out_file" 2>"$err_file" || rc=$?
       ;;
   esac

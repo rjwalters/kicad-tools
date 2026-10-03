@@ -134,6 +134,16 @@ unconditional. `LOOM_ETAG_VIEW_DISABLE=1` turns off just this path.
 > wrapper) uses the ETag/REST cache. Never reach for the bare passthrough
 > expecting caching.
 
+### `LOOM_GH_BIN` and the `x-loom-cache` outcome (#9988)
+
+`gh-cached` executes `$LOOM_GH_BIN` when set (same variable the daemon honours),
+else `gh` from `PATH`. Every invocation records its cache outcome as
+`x-loom-cache: hit|miss|revalidated|bypass`: always as `last_outcome` in
+`_stats.json`, and as one JSON line per call when `GH_CACHE_OUTCOME_LOG=<path>`
+is set. A client cache in front of the egress gateway is fine; invisible
+stacking is not, so views can use this field to separate cache hits from real
+gateway requests. Covered by `defaults/scripts/tests/test-gh-cached.sh`.
+
 ### Mutation-triggered invalidation — and why writes still use plain `gh`
 
 On a successful mutation issued *through the wrapper*, it deletes every cached

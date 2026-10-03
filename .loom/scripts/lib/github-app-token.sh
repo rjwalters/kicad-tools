@@ -321,7 +321,7 @@ _github_app_api_get_installation() {
     -H "Authorization: Bearer $jwt" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/repos/${nwo}/installation" 2>/dev/null) || {
+    "https://api.github.com/repos/${nwo}/installation" 2>/dev/null) || { # loom:egress-exception=github-app-bootstrap
     _GH_APP_LAST_ERROR="could not reach the GitHub API to resolve the installation for ${nwo}"
     return 1
   }
@@ -354,7 +354,7 @@ _github_app_api_mint_token() {
     -H "Authorization: Bearer $jwt" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: 2022-11-28" \
-    "https://api.github.com/app/installations/${installation_id}/access_tokens" 2>/dev/null) || {
+    "https://api.github.com/app/installations/${installation_id}/access_tokens" 2>/dev/null) || { # loom:egress-exception=github-app-bootstrap
     _GH_APP_LAST_ERROR="could not reach the GitHub API to mint an installation token for installation ${installation_id}"
     return 1
   }

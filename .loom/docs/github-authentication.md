@@ -6,6 +6,7 @@ Loom uses the `gh` CLI for all GitHub interactions — label management, PR crea
 **Contents**
 
 - [Quick Start](#quick-start)
+- [Credential modes and `gh` routing (#9988, #9983 C5)](#credential-modes-and-gh-routing-9988-9983-c5)
 - [Required Token Permissions](#required-token-permissions)
 - [Creating a Fine-Grained PAT](#creating-a-fine-grained-pat)
 - [Using the Token](#using-the-token)
@@ -28,6 +29,33 @@ export GH_TOKEN=github_pat_xxx
 # 3. Verify
 gh auth status
 ```
+
+## Credential modes and `gh` routing (#9988, #9983 C5)
+
+Two credential modes exist:
+
+- **App minting (unproxied host).** `defaults/scripts/lib/github-app-token.sh`
+  mints installation tokens itself. Its two GitHub REST API calls (installation
+  lookup, `access_tokens` mint) are the **only** direct REST-host egress
+  in Loom, the inventoried bootstrap exception; each carries the
+  `loom:egress-exception=github-app-bootstrap` marker.
+- **Proxied (gateway-owned).** Once the egress policy lands (#9984/#9986), the
+  gateway mints and the script's direct path is skipped. The `credentialRef`
+  gate in `github-app-token.sh` is deferred until a policy reader exists.
+
+`gh` resolution order: the managed shim first on `PATH` (#9987), then the
+system `gh`; `LOOM_GH_BIN` overrides the binary for the daemon, `gh-cached`
+and test stubs. **Prompts need no change to be routed** -- plain `gh ...` is
+covered by construction. Do not assign `GH_HOST` or `GH_CONFIG_DIR`, pass the hostname flag, set the
+`gh` API-host config key, wrap `gh` in an environment-clearing `env`, call `gh` by absolute path, or
+`curl` the REST API host directly in prompts or scripts; use `gh api`. The
+`forge_egress_surface_lint` test enforces this over `defaults/**` and
+`.github/workflows/**` (ratchet allowlist:
+`loom-daemon/tests/fixtures/forge-egress-surface-allowlist.txt`). Maintainer
+tooling under `scripts/` is marked `loom:egress-uncovered=dev-tooling`, and the
+hosted-runner workflow SDK path (`hosted-build-gate.yml`, one
+`actions/github-script` site, read-only permissions) stays `uncovered:
+hosted-runner`.
 
 ## Required Token Permissions
 
