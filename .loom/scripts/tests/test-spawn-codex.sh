@@ -1397,11 +1397,10 @@ echo ""
 echo "Testing spawn-codex.sh session-exec mode (#6926)..."
 
 # A profile adopted by a prior `loom-daemon accounts session start` —
-# marked with the exact sentinel session_lifecycle::mark_session_managed
-# writes.
+# marked with the exact sentinel session_lifecycle::mark_session_managed writes.
 SESSION_PROFILE="$TMPROOT/profiles/session-acct"
 mkdir -p "$SESSION_PROFILE"
-printf '{"token":"stub"}\n' > "$SESSION_PROFILE/auth.json"
+printf '{"token":"stub"}\n' > "$SESSION_PROFILE/auth.json"; printf '{}\n' | tee "$SESSION_PROFILE/hooks.json" "$SESSION_PROFILE/loom-codex-hooks.json" > "$SESSION_PROFILE/config.toml"  # + profile controls (#9979)
 printf '{"schema_version":1,"container_name":"loom-codex-session-session-acct","adopted_at_unix":0}\n' \
     > "$SESSION_PROFILE/.session-managed.json"
 
@@ -1555,7 +1554,12 @@ cat > "$SESSION_DOCKER_BIN/docker" <<DOCKERSHIM
 # the same fake codex shim Section 8 uses via a plain \`exec\`, so stdin/
 # stdout/stderr and the exit code all flow through exactly as they would for
 # a real container.
-case "\$1" in inspect) echo true; exit 0;; exec) shift;; *) exit 1;; esac
+# The #9979 posture probe (loom-daemon session-exec posture) runs
+# docker inspect --type container <c>; answer as a hardened host-mode
+# container would (unprivileged, bridge, CapDrop ALL, no-new-privileges, RO
+# profile controls), and \`exec <c> sha256sum\` with the host profile's hashes.
+[[ "\$1" == exec && "\$3" == sha256sum ]] && { for p in "\${@:5}"; do printf '%s  %s\n' "\$(shasum -a 256 < "\$CODEX_HOME/\${p##*/}" | cut -d' ' -f1)" "\$p"; done; exit 0; }
+case "\$1" in inspect) [[ "\$*" == *"--type container"* ]] && echo '[{"State":{"Running":true},"Config":{"Labels":{"loom.session-posture":"container-boundary-v1"}},"HostConfig":{"Privileged":false,"NetworkMode":"bridge","CapDrop":["ALL"],"SecurityOpt":["no-new-privileges"]},"Mounts":[{"Type":"bind","Destination":"/home/loom/.codex-profile/hooks.json","RW":false},{"Type":"bind","Destination":"/home/loom/.codex-profile/config.toml","RW":false},{"Type":"bind","Destination":"/home/loom/.codex-profile/loom-codex-hooks.json","RW":false}]}]' || echo true; exit 0;; exec) shift;; *) exit 1;; esac
 while [[ "\$1" == -* ]]; do
     case "\$1" in -i) shift;; --workdir) cd "\$2"; shift 2;; *) export "\$2"; shift 2;; esac
 done
