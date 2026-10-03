@@ -18,18 +18,54 @@ from pathlib import Path
 
 from kicad_tools.schema.pcb import FOOTPRINT_TAGS, _is_footprint_tag
 
+#: Seconds to wait for ``kicad-cli version`` before declaring a candidate wedged.
+KICAD_CLI_PROBE_TIMEOUT = 5
 
+#: Opt-in env var enabling the container fallback (``docker run kicad/kicad``).
+KICAD_DOCKER_ENV = "KCT_KICAD_DOCKER"
+KICAD_DOCKER_IMAGE_ENV = "KCT_KICAD_DOCKER_IMAGE"
+DEFAULT_KICAD_DOCKER_IMAGE = "kicad/kicad:10.0"
+
+
+def _probe_kicad_cli(path: Path) -> bool:
+    """Return True if ``<path> version`` answers promptly with exit code 0."""
+    try:
+        result = subprocess.run(
+            [str(path), "version"],
+            capture_output=True,
+            text=True,
+            timeout=KICAD_CLI_PROBE_TIMEOUT,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    return result.returncode == 0
+
+
+@lru_cache(maxsize=1)
 def find_kicad_cli() -> Path | None:
-    """Find kicad-cli executable.
+    """Find a *working* kicad-cli executable.
 
-    Searches common installation locations for KiCad 8+.
+    Searches PATH and common installation locations for KiCad 8+. Each
+    candidate is probed with ``kicad-cli version`` under a short timeout; a
+    candidate that hangs or fails is treated as not found. The result is
+    memoized for the process lifetime (use ``find_kicad_cli.cache_clear()``
+    to re-probe).
 
     Returns:
-        Path to kicad-cli if found, None otherwise
+        Path to kicad-cli if found and responsive, None otherwise
     """
+    for candidate in _kicad_cli_candidates():
+        if _probe_kicad_cli(candidate):
+            return candidate
+    return None
+
+
+def _kicad_cli_candidates() -> list[Path]:
+    """Return candidate kicad-cli paths in priority order (PATH first)."""
+    found: list[Path] = []
     # Check PATH first
-    if path := shutil.which("kicad-cli"):
-        return Path(path)
+    if which_path := shutil.which("kicad-cli"):
+        found.append(Path(which_path))
 
     # Common installation locations
     locations = [
@@ -49,10 +85,40 @@ def find_kicad_cli() -> Path | None:
 
     for loc in locations:
         path = Path(loc)
-        if path.exists():
-            return path
+        if path.exists() and path not in found:
+            found.append(path)
 
-    return None
+    return found
+
+
+def docker_fallback_enabled() -> bool:
+    """True when the user opted into the container fallback via ``KCT_KICAD_DOCKER``."""
+    return os.environ.get(KICAD_DOCKER_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def build_docker_kicad_cmd(args: list[str], workdir: Path) -> list[str]:
+    """Build a ``docker run`` command invoking kicad-cli with ``args`` in ``workdir``.
+
+    Modeled on ``benchmarks/interop/tscircuit/run_gate.py``'s ``KicadCli``.
+    Any path in ``args`` must be relative to (or under ``/work``, the mount of)
+    ``workdir``.
+    """
+    image = os.environ.get(KICAD_DOCKER_IMAGE_ENV) or DEFAULT_KICAD_DOCKER_IMAGE
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/amd64",
+        "-v",
+        f"{workdir}:/work",
+        "-w",
+        "/work",
+        "--entrypoint",
+        "kicad-cli",
+        image,
+        *args,
+    ]
 
 
 @dataclass
@@ -1727,13 +1793,29 @@ def run_pcb_export_svg(
     Returns:
         KiCadCLIResult with success status and output path.
     """
+    docker_workdir: Path | None = None
     if kicad_cli is None:
         kicad_cli = find_kicad_cli()
         if kicad_cli is None:
-            return KiCadCLIResult(
-                success=False,
-                stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
-            )
+            if docker_fallback_enabled() and shutil.which("docker"):
+                # Opt-in container fallback: mount the common parent of the
+                # input and output so both resolve inside the container.
+                docker_workdir = Path(
+                    os.path.commonpath(
+                        [str(pcb_path.resolve().parent), str(output_path.resolve().parent)]
+                    )
+                )
+            else:
+                return KiCadCLIResult(
+                    success=False,
+                    stderr="kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/"
+                    f" (or set {KICAD_DOCKER_ENV}=1 to use a container).",
+                )
+
+    def _arg(p: Path) -> str:
+        if docker_workdir is None:
+            return str(p)
+        return "/work/" + p.resolve().relative_to(docker_workdir).as_posix()
 
     cmd = [
         str(kicad_cli),
@@ -1742,7 +1824,7 @@ def run_pcb_export_svg(
         "svg",
         "--mode-single",
         "--output",
-        str(output_path),
+        _arg(output_path),
         "--layers",
         ",".join(layers),
         "--page-size-mode",
@@ -1755,7 +1837,9 @@ def run_pcb_export_svg(
     if theme:
         cmd.extend(["--theme", theme])
 
-    cmd.append(str(pcb_path))
+    cmd.append(_arg(pcb_path))
+    if docker_workdir is not None:
+        cmd = build_docker_kicad_cmd(cmd[1:], docker_workdir)
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
