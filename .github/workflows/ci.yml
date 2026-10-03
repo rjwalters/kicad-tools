@@ -167,7 +167,6 @@ jobs:
               - '!boards/07-matchgroup-test/**'
 
   lint:
-    if: github.event_name != 'schedule'
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
