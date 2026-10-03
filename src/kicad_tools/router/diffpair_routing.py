@@ -169,6 +169,29 @@ _SHADOW_PER_PAIR_BUDGET_S: float = float(os.environ.get("KCT_SHADOW_PER_PAIR_BUD
 _POSE_CENTERLINE_TIMEOUT_S: float = 30.0
 _POSE_CENTERLINE_MIN_BUDGET_S: float = 0.25
 
+# Issue #5895: the pose-trunk corridor guard
+# (``DiffPairRouter._pose_corridor_guard``).  Before a pose-centerline trunk is
+# committed, the still-unrouted signal nets with a pad within
+# ``_POSE_CORRIDOR_RADIUS_MM`` of the pair's four end pads (the pin fields the
+# trunk's end legs cross) are probe-routed with and without the trunk.  A net
+# that is routable without the trunk and not with it is a corridor the trunk
+# would seal: the search is re-run once with that net's probe path reserved,
+# and the trunk is declined if it still seals one.  Board 06 (seed 42): the
+# pose-coupled MIPI_D0 trunk sealed J4.RST (MIPI_RST), whose pad sits 1.5 mm
+# above the gap between the CLK and D0 pins.
+#
+#   * ``_POSE_CORRIDOR_MAX_NETS`` caps the nets probed per pair (nearest first),
+#     so a pair landing on a large MCU does not probe every pin of it.
+#   * ``_POSE_CORRIDOR_GUARD_BUDGET_S`` bounds the guard's wall clock per pair.
+#     Past it the guard stops probing and lets the trunk through, which is the
+#     behaviour from before the guard existed.
+#   * ``KCT_POSE_CORRIDOR_GUARD=0`` switches the guard off.
+_POSE_CORRIDOR_RADIUS_MM: float = 2.5
+_POSE_CORRIDOR_MAX_NETS: int = 6
+_POSE_CORRIDOR_GUARD_BUDGET_S: float = float(
+    os.environ.get("KCT_POSE_CORRIDOR_GUARD_BUDGET_S", "30.0")
+)
+
 # Issue #4463: budgets for the corridor-yield recovery
 # (``DiffPairRouter._plan_corridor_yields`` / ``_apply_corridor_yields``),
 # which runs after the main strategy when shadow construction is ON.  On
@@ -4243,6 +4266,13 @@ class DiffPairRouter:
         # +3V3 pour (POST-LEGALIZE GATE FAIL).
         # Do not flip the default until that job passes with it on.
         self.enable_pose_centerline: bool = os.environ.get("KCT_POSE_CENTERLINE") == "1"
+        # Issue #5895: probe the nets next to a pose trunk's end pads before
+        # committing it, and re-route or decline a trunk that would seal one
+        # in (see ``_pose_corridor_guard``).  Only consulted when a pose trunk
+        # was actually found.  ``KCT_POSE_CORRIDOR_GUARD=0`` switches it off.
+        self.enable_pose_corridor_guard: bool = (
+            os.environ.get("KCT_POSE_CORRIDOR_GUARD", "1").strip() != "0"
+        )
 
     def _collect_existing_drills(self) -> list[tuple[float, float, float]]:
         """Assemble a board-wide drill registry for the hole-to-hole guard.
@@ -5361,6 +5391,280 @@ class DiffPairRouter:
         if violation is not None:
             return "intra-clearance"
         return None
+
+    # ------------------------------------------------------------------
+    # Issue #5895: pose-trunk corridor guard
+    # ------------------------------------------------------------------
+
+    def _pose_corridor_neighbours(self, pair: DifferentialPair, anchors: list[Pad]) -> list[int]:
+        """Unrouted signal nets with a pad near a pose trunk's end pads (#5895).
+
+        These are the nets whose escape a pose trunk's end legs and first
+        poses can close: the pins that share the pair's pin fields.  Board 06:
+        MIPI_RST's J4 pad sits 1.5 mm above the gap between MIPI_CLK- and
+        MIPI_D0+, and its U4 pin is the D0- pin's neighbour.
+
+        Excluded: the pair's own nets, nets that already have copper (a net
+        with copper is not "sealed in" by a newcomer -- its own copper is the
+        way out), pour nets (connected by the plane, not by a trace), and nets
+        with fewer than two pads.  Nearest first, at most
+        ``_POSE_CORRIDOR_MAX_NETS``.
+        """
+        autorouter = self.autorouter
+        pair_nets = set(pair.get_net_ids())
+        has_copper = {r.net for r in autorouter.routes if not getattr(r, "is_escape", False)}
+        is_pour = getattr(autorouter, "_is_pour_net", None)
+        pads_by_key = getattr(autorouter, "pads", {}) or {}
+        nearest: dict[int, float] = {}
+        for net_id, pad_keys in (getattr(autorouter, "nets", {}) or {}).items():
+            if not net_id or net_id in pair_nets or net_id in has_copper:
+                continue
+            pads = [pads_by_key[k] for k in pad_keys if k in pads_by_key]
+            if len(pads) < 2:
+                continue
+            if callable(is_pour) and is_pour(net_id):
+                continue
+            dist = min(math.hypot(p.x - a.x, p.y - a.y) for p in pads for a in anchors)
+            if dist <= _POSE_CORRIDOR_RADIUS_MM:
+                nearest[net_id] = dist
+        ranked = sorted(nearest.items(), key=lambda kv: (kv[1], kv[0]))
+        return [net_id for net_id, _d in ranked[:_POSE_CORRIDOR_MAX_NETS]]
+
+    @contextlib.contextmanager
+    def _temporarily_marked(self, routes: list[Route]) -> Iterator[None]:
+        """Mark ``routes`` on the routing grids for the duration of the block.
+
+        Issue #5895.  Used only for copper of nets that have NO other copper
+        on the board (a pose trunk before it is committed, a probe path of an
+        unrouted net), which is what makes the unmark exact: ``mark_route``
+        claims only unblocked cells, and ``unmark_route`` frees only cells
+        owned by the route's own net.  The paired single-ended C++ grid is
+        mirrored both ways (``_mark_route_on_cpp_grid`` /
+        ``unmark_route``'s #3438 mirror) so a probe sees the same obstacles on
+        either backend.
+        """
+        autorouter = self.autorouter
+        grid = autorouter.grid
+        mirror = getattr(autorouter, "_mark_route_on_cpp_grid", None)
+        marked: list[Route] = []
+        try:
+            for route in routes:
+                grid.mark_route(route)
+                marked.append(route)
+                if callable(mirror):
+                    mirror(route)
+            yield
+        finally:
+            for route in marked:
+                with contextlib.suppress(Exception):
+                    grid.unmark_route(route)
+
+    def _probe_nets_jointly(
+        self, net_ids: list[int], deadline: float
+    ) -> dict[int, list[Route] | None]:
+        """Probe-route ``net_ids`` in order, each on top of the previous ones.
+
+        Issue #5895.  The joint form of :meth:`_probe_net_routable`: a net's
+        probe copper stays on the board while the next net is probed, the way
+        the main strategy's first pass lands them, and everything is rolled
+        back at the end (copper, the #3923 resume memo and the failure log).
+        A net sealed in by two neighbours TOGETHER is what this catches that a
+        one-net probe cannot -- on board 06 the MIPI_D0 trunk alone leaves
+        MIPI_RST a way out, and the MIPI_CLK legs routed next close it.
+
+        Returns:
+            ``{net: routes}`` for every net probed: the net's probe routes when
+            every pad of it ended up connected, else ``None``.  Nets left when
+            ``deadline`` passes are absent (not probed).
+        """
+        autorouter = self.autorouter
+        before = len(autorouter.routes)
+        failures_before = len(getattr(autorouter, "routing_failures", []))
+        backend = getattr(autorouter, "router", None)
+        resume_memo = getattr(backend, "_resume_clearance_exhaustions", None)
+        saved_memo = dict(resume_memo) if isinstance(resume_memo, dict) else None
+        results: dict[int, list[Route] | None] = {}
+        returned: list[Route] = []
+        try:
+            for net_id in net_ids:
+                if time.monotonic() > deadline:
+                    logger.warning(
+                        "DIFFPAIR_POSE_CORRIDOR_GUARD_BUDGET: pose corridor guard "
+                        "hit its %.0fs budget; remaining nets not probed (issue #5895)",
+                        _POSE_CORRIDOR_GUARD_BUDGET_S,
+                    )
+                    break
+                try:
+                    routes = autorouter.route_net(net_id, per_net_timeout=_CORRIDOR_GUARD_PROBE_S)
+                except Exception:  # pragma: no cover - defensive: a probe must never raise
+                    logger.debug("[pose-guard] probe raised for net %s", net_id, exc_info=True)
+                    routes = []
+                returned.extend(routes or [])
+                connected = bool(routes)
+                if connected:
+                    pad_keys = autorouter.nets.get(net_id, [])
+                    net_pads = [autorouter.pads[k] for k in pad_keys if k in autorouter.pads]
+                    if len(net_pads) >= 2:
+                        conn = validate_net_connectivity(routes, {net_id: net_pads})
+                        connected = bool(conn.get(net_id, {}).get("connected", False))
+                results[net_id] = list(routes) if connected else None
+        finally:
+            if saved_memo is not None and isinstance(resume_memo, dict):
+                resume_memo.clear()
+                resume_memo.update(saved_memo)
+            failures = getattr(autorouter, "routing_failures", None)
+            if isinstance(failures, list) and len(failures) > failures_before:
+                del failures[failures_before:]
+            committed = list(autorouter.routes[before:])
+            del autorouter.routes[before:]
+            seen_ids = {id(r) for r in committed}
+            for route in returned:
+                if id(route) not in seen_ids:
+                    committed.append(route)
+                    seen_ids.add(id(route))
+            for route in reversed(committed):
+                with contextlib.suppress(Exception):
+                    autorouter.grid.unmark_route(route)
+        return results
+
+    def _pose_corridor_guard(
+        self,
+        pathfinder: CoupledPathfinder,
+        spec: CoupledSegmentSpec,
+        pair: DifferentialPair,
+        trunk: tuple[Route, Route],
+        intra_clearance: float,
+        timeout: float | None,
+    ) -> tuple[Route, Route] | None:
+        """Keep a pose trunk from sealing a neighbouring net in (Issue #5895).
+
+        A pose-coupled pair is committed by the pre-phase, before any
+        single-ended net, and its copper is non-rippable in the main
+        strategy.  On board 06 (seed 42) the MIPI_D0 trunk left MIPI_RST's
+        J4 pad with no legal exit; the main pass stranded MIPI_RST, and the
+        board only got back to 21/21 through the #4463 corridor yield, which
+        lifts the trunk again (so the pair ends up uncoupled anyway) at the
+        cost of a second full negotiated pass.
+
+        The guard asks the question before the commit instead:
+
+        1. probe the nearby unrouted nets (:meth:`_pose_corridor_neighbours`)
+           JOINTLY, in main-strategy priority order, on the current board
+           (:meth:`_probe_nets_jointly`) -- nets that are already unroutable
+           are not the trunk's doing and are ignored;
+        2. probe them again, same order, with the trunk marked;
+        3. if a net routable in step 1 is not in step 2, re-run the pose search
+           ONCE with that net's step-1 probe path reserved as an obstacle (the
+           corridor the net needs), and re-check the new trunk with the exact
+           copper gates and step 2;
+        4. decline the pair (``reason=seals-corridor``) if it still seals one.
+           The caller then takes its ordinary no-coupled-result path, which is
+           the pipeline from before #5786 for this pair.
+
+        Probes are real single-ended A* runs that roll themselves back,
+        bounded per net by ``_CORRIDOR_GUARD_PROBE_S`` and per pair by
+        ``_POSE_CORRIDOR_GUARD_BUDGET_S`` (past which the guard fails open).
+
+        Returns:
+            The trunk to commit (the original or the re-routed one), or
+            ``None`` to decline the pair.
+        """
+        anchors = [spec.p_start, spec.p_end, spec.n_start, spec.n_end]
+        neighbours = self._pose_corridor_neighbours(pair, anchors)
+        if not neighbours:
+            return trunk
+        autorouter = self.autorouter
+        priority = getattr(autorouter, "_get_net_priority", None)
+        if callable(priority):
+            with contextlib.suppress(Exception):
+                neighbours = sorted(neighbours, key=lambda n: (priority(n), n))
+        names = getattr(autorouter, "net_names", {}) or {}
+
+        def _label(nets: list[int]) -> str:
+            return ", ".join(str(names.get(n, f"Net_{n}")) for n in nets)
+
+        t0 = time.monotonic()
+        deadline = t0 + _POSE_CORRIDOR_GUARD_BUDGET_S
+        baseline = self._probe_nets_jointly(neighbours, deadline)
+        guides = {n: routes for n, routes in baseline.items() if routes is not None}
+        if not guides:
+            return trunk
+
+        def _sealed_by(candidate: tuple[Route, Route]) -> list[int]:
+            with self._temporarily_marked(list(candidate)):
+                after = self._probe_nets_jointly(neighbours, deadline)
+            return [n for n in guides if n in after and after[n] is None]
+
+        sealed = _sealed_by(trunk)
+        if not sealed:
+            print(
+                f"    [coupled-pose] corridor guard: trunk keeps {len(guides)} "
+                f"neighbouring net(s) routable ({_label(list(guides))}; "
+                f"{time.monotonic() - t0:.2f}s)"
+            )
+            return trunk
+
+        print(
+            f"    [coupled-pose] corridor guard: trunk seals {_label(sealed)}; "
+            "re-routing it with that corridor reserved"
+        )
+        retry: tuple[Route, Route] | None = None
+        retry_report: dict = {}
+        remaining = None if timeout is None else timeout - (time.monotonic() - t0)
+        if remaining is None or remaining >= _POSE_CENTERLINE_MIN_BUDGET_S:
+            from .diffpair_pose import route_centerline_pose
+
+            reserved = [r for net_id in sealed for r in guides[net_id]]
+            with self._temporarily_marked(reserved):
+                # The C++ coupled search works on a snapshot of the grid taken
+                # when it was built; rebuild it so it sees the reservation, and
+                # again afterwards so nothing later sees the reservation.
+                if hasattr(pathfinder, "_cpp_coupled_impl"):
+                    pathfinder._cpp_coupled_impl = None
+                retry = route_centerline_pose(
+                    pathfinder,
+                    spec.p_start,
+                    spec.p_end,
+                    spec.n_start,
+                    spec.n_end,
+                    timeout_seconds=remaining,
+                    span_check=self._span_pad_clear,
+                )
+            if hasattr(pathfinder, "_cpp_coupled_impl"):
+                pathfinder._cpp_coupled_impl = None
+            retry_report = dict(getattr(pathfinder, "last_pose_report", {}) or {})
+        if retry is not None and (
+            self._pose_copper_rejection(retry[0], retry[1], intra_clearance, pair.name) is not None
+        ):
+            retry = None
+        still_sealed = sealed
+        if retry is not None:
+            still_sealed = _sealed_by(retry)
+            if still_sealed:
+                retry = None
+        if retry is None:
+            pathfinder.last_pose_report = {
+                "applied": False,
+                "reason": "seals-corridor",
+                "sealed": _label(still_sealed),
+            }
+            logger.info(
+                "pose trunk for pair %s declined: it seals %s (issue #5895)",
+                pair.name,
+                _label(still_sealed),
+            )
+            print(
+                f"    [coupled-pose] corridor guard: no trunk keeps {_label(still_sealed)} "
+                f"routable ({time.monotonic() - t0:.2f}s)"
+            )
+            return None
+        pathfinder.last_pose_report = retry_report
+        pathfinder.last_pose_report["corridor_rerouted"] = _label(sealed)
+        print(
+            f"    [coupled-pose] corridor guard: re-routed trunk keeps "
+            f"{_label(sealed)} routable ({time.monotonic() - t0:.2f}s)"
+        )
+        return retry
 
     # ------------------------------------------------------------------
     # Issue #4575: exact foreign-VIA clearance gate for constructed copper
@@ -11063,6 +11367,19 @@ class DiffPairRouter:
                     if reject is not None:
                         pathfinder.last_pose_report = {"applied": False, "reason": reject}
                         pose_result = None
+                if pose_result is not None and self.enable_pose_corridor_guard:
+                    # Issue #5895: do not commit a trunk that seals a
+                    # neighbouring net in (board 06: MIPI_D0 vs MIPI_RST).
+                    pose_result = self._pose_corridor_guard(
+                        pathfinder,
+                        spec,
+                        pair,
+                        pose_result,
+                        pair_intra_clearance,
+                        None
+                        if pose_timeout is None
+                        else pose_timeout - (time.monotonic() - pose_t0),
+                    )
                 report_pose = pathfinder.last_pose_report
                 if pose_result is not None:
                     result = pose_result
